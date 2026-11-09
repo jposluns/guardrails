@@ -1744,8 +1744,8 @@ def _self_test():
 
         def test_h22_payload_reader(self):
             # an earlier review: each payload in bad was allowed silently; each now gets the cannot-evaluate note, in
-            # process and through the hook as launched, while the same call as UTF-8 JSON is evaluated. QA round
-            # 6: a payload with a key twice in one object was judged on the last value (allowed silently or
+            # process and through the hook as launched, while the same call as UTF-8 JSON is evaluated. Earlier,
+            # a payload with a key twice in one object was judged on the last value (allowed silently or
             # denied); it now gets the same note, whichever value comes last
             def call(content):
                 return {"tool_name": "Write", "tool_input": {"file_path": self.at("docs/qa-probe.md"),

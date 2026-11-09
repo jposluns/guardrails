@@ -1910,7 +1910,7 @@ def _self_test():
                               "rerun was started (a later command, || true, a background &, a ! or an if or while "
                               "condition can hide the exit status of a refused call, with or without pipefail set", out)
                 self.assertEqual(self.stop("CI is green.")["decision"], "block", c)
-            # The exit statuses above are what bash gives with stub gh and tail (gemini: a missing bash is a
+            # The exit statuses above are what bash gives with stub gh and tail (a missing bash is a
             # skip, never a silent pass).
             bash, stubs, log = "/usr/bin/bash", os.path.join(self.tmp, "bin"), os.path.join(self.tmp, "log")
             if not os.access(bash, os.X_OK):

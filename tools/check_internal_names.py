@@ -96,13 +96,17 @@ SWEPT-PATH ZERO-TOLERANCE LAYER (scan_swept_labels). A tracked file under a SWEP
 area already swept clean of review-round labels) tolerates NO match of the SWEPT_LABELS rows: a
 reviewer family next to a grade or one-letter grade id, a QA round number with a family after it, a
 bare QA round number (with or without the round word), a family next to a round number, a family next
-to a mutation, mutant or flip word, and a bare round number, each case-insensitive. A hit is a finding
-(exit 1), never a ratcheted count, there is no baseline, no allowlist and no line marker, and the rows
-are deliberately wider than the four ratchet shapes (so prose such as a product name next to a version
-digit stays legal only OUTSIDE a swept path). Unswept areas are untouched by this layer and stay under
-the ratchet above. DISCLOSED LIMITS: a label written outside these shapes (a family name alone, a bare
-grade word, a label split across lines or encoded) is not matched, and SWEPT_PREFIXES is hand-grown,
-so an area is covered only once a sweep adds it.
+to a mutation, mutant or flip word, a bare round number, a model identifier (a family or vendor prefix,
+a hyphen and a version digit) and a family used as an attribution (before a colon, a slash or a
+possessive), each case-insensitive. Each line is also read joined to the next one (the break, the next
+line's indentation and comment or quote leader collapsed to one space), so a label wrapped across a
+line break is a hit on the line where it starts. A hit is a finding (exit 1), never a ratcheted count,
+there is no baseline, no allowlist and no line marker, and the rows are deliberately wider than the
+four ratchet shapes (so prose such as a product name next to a version digit stays legal only OUTSIDE
+a swept path). Unswept areas are untouched by this layer and stay under the ratchet above. DISCLOSED
+LIMITS: a label written outside these shapes (a family name alone, a bare grade word, a label split
+across more than one line break, inside a word or with other punctuation at the break, or encoded) is
+not matched, and SWEPT_PREFIXES is hand-grown, so an area is covered only once a sweep adds it.
 
 DISCLOSED SCOPE LIMITS. SCOPE_RELPATHS is a HAND-MAINTAINED allowlist with no drift-guard: a new QA-suite
 surface must be ADDED HERE BY HAND to be covered, and a surface not yet listed is out of this gate's reach
@@ -429,21 +433,45 @@ SWEPT_LABELS = (
     # a bare round number ("n" after the round word with one space or hyphen)
     (re.compile(r"\b" + _SWEPT_ROUND + r"[ -][0-9]+\b", re.IGNORECASE),
      "a bare review-round number"),
+    # a model identifier: a family or vendor model prefix, a hyphen, an optional tier word and a
+    # version digit (a dotted path segment such as a settings directory is not one)
+    (re.compile(r"(?<![\w.])(?:" + _SWEPT_FAM[3:-1] + r"|g" + r"pt)-(?:[a-z]+-)?[0-9]",
+                re.IGNORECASE),
+     "a model identifier"),
+    # a reviewer family used as an attribution: directly before a colon, a slash or a possessive
+    (re.compile(r"(?<![\w.$])" + _SWEPT_FAM + r"(?::|/|'s\b)", re.IGNORECASE),
+     "a reviewer family used as an attribution"),
 )
 # The per-row keys of _swept_hits, positionally parallel to SWEPT_LABELS.
 SWEPT_ROW_KEYS = ("family-grade", "qa-then-family", "bare-qa-round", "family-round",
-                  "family-mutation", "bare-round")
+                  "family-mutation", "bare-round", "model-id", "family-attribution")
+# A label wrapped onto the next line is still a label: each line is also read joined to the next
+# one, with the line break, the next line's indentation and comment or quote leader and this line's
+# closing quote collapsed to one space, and a match that starts on this line and ends on the next is
+# a hit on this line (a match wholly on either line is counted by that line's own read).
+_SWEPT_SEAM_TAIL = re.compile(r"(?:\s|\\n|[\"'])*$")
+_SWEPT_SEAM_LEAD = re.compile(r"^\s*(?:#+|//+|\*+|>+|[rRbBuUfF]{0,2}[\"']+)?\s*")
 
 
-def _swept_hits(text, rows=None):
+def _swept_hits(text, rows=None, seams=True):
     """Per-row 1-based line numbers of every swept-label match in `text`, keyed by SWEPT_ROW_KEYS.
     No internal-allow exemption, no allowlist and no ratchet: a swept path tolerates zero. `rows`
-    lets the self-test show each pattern row is load-bearing."""
+    lets the self-test show each pattern row is load-bearing, and `seams=False` shows the read
+    across a line break is."""
     rows = SWEPT_LABELS if rows is None else rows
     hits = {key: [] for key in SWEPT_ROW_KEYS}
-    for number, line in enumerate(text.splitlines(), 1):
+    lines = text.splitlines()
+    for number, line in enumerate(lines, 1):
         for key, (pattern, _label) in zip(SWEPT_ROW_KEYS, rows):
             hits[key] += [number for _ in pattern.finditer(line)]
+        if not seams or number == len(lines):
+            continue
+        left = _SWEPT_SEAM_TAIL.sub("", line)
+        following = lines[number]
+        seam = left + " " + following[_SWEPT_SEAM_LEAD.match(following).end():]
+        for key, (pattern, _label) in zip(SWEPT_ROW_KEYS, rows):
+            hits[key] += [number for match in pattern.finditer(seam)
+                          if match.start() < len(left) < match.end() - 1]
     return hits
 
 
@@ -2581,8 +2609,41 @@ def _self_test(caller_env=None):
             intact = _swept_hits("a {} b\n".format(vector))[key]
             dropped = _swept_hits("a {} b\n".format(vector), swept_without(row))[key]
             check(check_id, len(intact) >= 1 and not dropped, (vector, intact, dropped))
+        # The model-identifier and attribution rows: with the row disabled, NO row may flag the vector
+        # (every row is read, not only the disabled one, so the dropped half can fail).
+        for row, check_id, vector in (
+                (6, "swept/row-model-id", "claude" + "-opus-5-5"),
+                (6, "swept/row-model-id-tier", "claude" + "-fable-5 x"),
+                (6, "swept/row-model-id-vendor", "g" + "pt-6-astra"),
+                (7, "swept/row-family-colon", "(gem" + "ini: a missing"),
+                (7, "swept/row-family-slash", "claude" + "/an earlier review"),
+                (7, "swept/row-family-possessive", "codex" + "'s exact")):
+            key = SWEPT_ROW_KEYS[row]
+            intact = _swept_hits("a {} b\n".format(vector))[key]
+            dropped_hits = _swept_hits("a {} b\n".format(vector), swept_without(row))
+            dropped = [k for k in SWEPT_ROW_KEYS if dropped_hits[k]]
+            check(check_id, len(intact) >= 1 and not dropped, (vector, intact, dropped))
+        # A label wrapped across one line break (in a comment, and in adjacent string literals) is a
+        # hit on the line where it starts and is missed with the joined read disabled; a label wholly
+        # on one line is counted once, on its own line, never again through a join.
+        for check_id, text, key, want in (
+                ("swept/split-comment-caught", "# a QA rou" + "nd\n# 6 b\n", "bare-qa-round", [1]),
+                ("swept/split-docstring-caught", "    a miss until rou" + "nd\n    30 b\n", "bare-round",
+                 [1]),
+                ("swept/split-string-literal-caught", "x = (\"a rou" + "nd \"\n     \"30 b\")\n",
+                 "bare-round", [1]),
+                ("swept/seam-next-line-hit-stays", "# by codex\n# g" + "pt-6-astra x\n", "model-id",
+                 [2])):
+            joined = _swept_hits(text)[key]
+            unjoined = _swept_hits(text, seams=False)[key]
+            unjoined_want = want if check_id == "swept/seam-next-line-hit-stays" else []
+            check(check_id, joined == want and unjoined == unjoined_want, (text, joined, unjoined))
+        once = _swept_hits("rou" + "nd 4 x\n# y\nz\nrou" + "nd 5\n")["bare-round"]
+        check("swept/seam-counts-once", once == [1, 4], once)
         swept_clean = ("rou" + "nd-trip", "rou" + "nding to 2 places", "Claude 5", "QA", "codex",
-                       "a fable retold", "gemini", "the final rou" + "nd", "quality assurance")
+                       "a fable retold", "gemini", "the final rou" + "nd", "quality assurance",
+                       "~/.claude/rules/x.md", "$CLAUDE" + "_PROJECT_DIR/records", "Claude Code's Edit",
+                       "Claude 3 Opus", "the final rou" + "nd\n# of checks")
         swept_flagged = [v for v in swept_clean
                         if any(_swept_hits("a {} b\n".format(v))[key] for key in SWEPT_ROW_KEYS)]
         check("swept/clean-controls-unflagged", not swept_flagged, swept_flagged)
@@ -3512,7 +3573,12 @@ def _self_test(caller_env=None):
           "comparison the gate makes) while one more label above the "
           "regenerated baseline still fails, and fails closed loud on a missing shipped manifest, "
           "an absent listed path, a non-UTF-8 listed text file and a baseline entry for a non-shipped "
-          "path; and the PNG rule passes a clean minimal tracked .png, refuses (exit 2) a bad signature, "
+          "path; and the swept-path zero-tolerance layer catches each row's vector, a model-identifier "
+          "or attribution vector is flagged by no row once its own row is disabled, a label wrapped "
+          "across one line break in a comment, a docstring and adjacent string literals is caught (and "
+          "missed with the joined read disabled) while a one-line label counts once on its own line, "
+          "the clean controls stay unflagged and only files under a swept prefix are read; and the PNG "
+          "rule passes a clean minimal tracked .png, refuses (exit 2) a bad signature, "
           "a bad CRC, a truncated chunk, a missing IEND, bytes after IEND, IHDR out of place or of the wrong "
           "length, IEND carrying data, a chunk type that is not four letters, a tEXt with no NUL "
           "separator, a zTXt inflating past its "

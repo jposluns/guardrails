@@ -2612,8 +2612,8 @@ def _self_test():
                     real_os.close(fd)
 
         def wait_for_time_left(self, mutant=None, reader=None):
-            """The deterministic check, and the only verdict on the timeouts, the time each wait is given (QA rounds
-            6 to 11): the reader on fixed injected schedules (scheduled), where the timeout each wait is given is
+            """The deterministic check, and the only verdict on the timeouts, the time each wait is given (an earlier
+            finding): the reader on fixed injected schedules (scheduled), where the timeout each wait is given is
             known. mutant, when given, wraps the injected select (the reader as a mutant changes it); reader, when
             given, replaces _read_complete. Fails the test
             when, on one of the schedules below, a wait is given a timeout other than the time left by the clock,

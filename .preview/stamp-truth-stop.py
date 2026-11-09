@@ -194,8 +194,8 @@ entry unexcused; a transcript-read final within the count is excused; every matc
 count is checked, so a repeat beyond the recorded refusals is never excused), and an arrival
 appended between reads is either consumed AND covered by the saved boundary or neither (an earlier fix
 reconciled against a SECOND scan while the FIRST scan and its boundary were kept, so a record BEFORE the
-recovered boundary could consume a hash and a mid-fault arrival was consumed yet re-reported; the round
-43 follow-up before it merged the recovered hashes back after the consumption scan and resurrected
+recovered boundary could consume a hash and a mid-fault arrival was consumed yet re-reported; the later
+follow-up before it merged the recovered hashes back after the consumption scan and resurrected
 consumed or invalidated entries), all under the MAX_PENDING (8) eviction every save applies, the oldest
 hash evicted when a ninth is stored. When the reconciliation cannot be performed the stored pair that
 read back is kept EXACTLY as it was, never saved as an empty list: an unreadable or RESET rescan keeps
@@ -204,8 +204,8 @@ cost that such a faulting Stop records no NEW late hash of its own (its blocked 
 once: at its late arrival, or, already in the transcript, when the next readable Stop re-reads it past
 the held unmoved boundary); a state still unreadable at that re-read keeps the empty loaded list, so
 EVERY stored pending entry can be lost and each late-arriving already-reported message those entries
-excused can be re-reported once, the disclosed readable-branch residual (see RESIDUAL COVERAGE). Round
-43: the marker FAILS CLOSED, exactly like the recorded reset: while either stands, no
+excused can be re-reported once, the disclosed readable-branch residual (see RESIDUAL COVERAGE). Now
+the marker FAILS CLOSED, exactly like the recorded reset: while either stands, no
 transcript-derived user message is a new turn, at ANY offset, and ONLY an explicit-false Stop clears them
 (an earlier version cleared the marker at a genuinely new user message past a held NON-trivial boundary, reasoning
 that bytes past a boundary that held were appended after the repair; but the repair cannot see a truncation
@@ -363,8 +363,8 @@ differs from the stdout text, as diagnostic logging only (on exit 0 the host sen
 see MESSAGES for the shapes and caps. Fail-OPEN silently on unparseable hook input or any internal error outside the per-claim
 isolation, including an argument, stdin, or JSON error before the payload is evaluated: a DISCIPLINE guard,
 not a security boundary. The payload is read as BYTES and parsed by json.loads, so its decoding does not
-depend on the process locale. An error writing the output (a closed or full stdout) also fails open (round
-24): it is swallowed and the hook exits 0; if the stream cannot even be pointed at /dev/null, the hook ends
+depend on the process locale. An error writing the output (a closed or full stdout) also fails open, as
+follows: it is swallowed and the hook exits 0; if the stream cannot even be pointed at /dev/null, the hook ends
 at once with os._exit(0), so no exit-time flush can fail it. Skipped entirely: a subordinate worker process,
 detected as env AIQT_HOOKS_WORKER=1 (legacy spellings are also accepted, see _is_worker), and a payload
 carrying agent_id (a subagent's stop). The worker skip writes one warning line to stderr (never to
@@ -1569,8 +1569,8 @@ def load_state(sdir, tp, extra=None, dfd=None):
     recorded unknown-history marker (each False in a state written before its round), and an absent state
     also sets extra["absent"] (under stop_hook_active the caller reads
     absence as an unknown count, not 0). with `dfd` (the evaluation's locked state-dir descriptor) the file is
-    opened RELATIVE to it, never through `sdir`; without it the dir is opened and checked for this call. Round
-    30: `dfd` is the transcript's own state SUBDIRECTORY (see state_subdir), holding the file STATE_FILE; without
+    opened RELATIVE to it, never through `sdir`; without it the dir is opened and checked for this call. Now
+    `dfd` is the transcript's own state SUBDIRECTORY (see state_subdir), holding the file STATE_FILE; without
     it, a missing subdirectory is an ABSENT state (it is not created by a read)."""
     unavailable = (0, None, [], False)
     own = dfd is None
@@ -1904,8 +1904,8 @@ def _deliver(reason, emit, owed):
 def _evaluate(payload, now, start, notes, dfd, persist, report=None, diag=None, owed=None):
     """Return a block reason string, or None to pass. `now` and `start` are aware datetimes (start may be None).
     When the block cap turns a block into an allow, the warning is appended to `notes` (a list) if given.
-    Called by evaluate() with the lock held. `dfd` is the locked state-dir descriptor (round
-    30: the transcript's own state subdirectory) and
+    Called by evaluate() with the lock held. `dfd` is the locked state-dir descriptor (now
+    the transcript's own state subdirectory) and
     every state read and write is made relative to it (None: no usable private state dir, so the state is
     UNAVAILABLE); `persist` False (the lock could not be taken: locking unavailable, or no usable private state
     dir) means no state is written by this call. `report` and `diag`: see evaluate(). `owed` (a list, or None
@@ -2166,8 +2166,8 @@ def _evaluate(payload, now, start, notes, dfd, persist, report=None, diag=None, 
     # removing the subdirectory or the root (rm -r) makes A's save fail (nothing can be created in a removed
     # directory); and renaming the subdirectory or the root away and recreating it lands A's save in the
     # ORPHANED directory, harmlessly, while B, in the new directory, finds the state ABSENT: under an
-    # explicit true an unknown count that fails open and records BLOCK_CAP and the unknown marker (round
-    # 42); where the field is absent, an
+    # explicit true an unknown count that fails open and records BLOCK_CAP and the unknown marker (a
+    # later fix); where the field is absent, an
     # ESTABLISHED 0 that can restart the count, and the recorded reset history with it, exactly as for any
     # external deletion (the disclosed deletion residual; see the BOUND below).
     # PRUNING: prune_state() removes a subdirectory only while IT holds that subdirectory's lock (a
@@ -2206,8 +2206,8 @@ def _evaluate(payload, now, start, notes, dfd, persist, report=None, diag=None, 
     # two runs without blocking, its block failing open as unrecorded below; a run of
     # explicit trues is an earlier version's special case). The state file is written only by save_state(), called
     # through save() below with
-    # `new_blocks` (or, an earlier version, the higher stored value), and never deleted by this hook while in use (round
-    # 30: prune_state() deletes only a subdirectory it has locked and that has gone unwritten for PRUNE_AGE_NS,
+    # `new_blocks` (or, an earlier version, the higher stored value), and never deleted by this hook while in use (now
+    # prune_state() deletes only a subdirectory it has locked and that has gone unwritten for PRUNE_AGE_NS,
     # which this argument treats exactly as an external deletion); every write is an
     # atomic rename of a complete v2 file. Let
     # c be the counter a Stop LOADS (None when unreadable, or when ABSENT under an explicit true; an ABSENT
@@ -2348,8 +2348,8 @@ def _evaluate(payload, now, start, notes, dfd, persist, report=None, diag=None, 
     # `new_turn` joins the final save condition: on a clean explicit-false Stop with BOTH the
     # state and the transcript unreadable, none of will_block, had_state (the failed read hid the
     # recorded reset) or cap == "open" held, so the one signal that clears the flags wrote nothing and a
-    # recorded reset survived two transient faults, capping later genuine turns (found in an earlier version). Round
-    # 43: unreadable-state discovery joins BOTH predicates, as reset_unknown (the unreadable read
+    # recorded reset survived two transient faults, capping later genuine turns (found in an earlier version). Now
+    # unreadable-state discovery joins BOTH predicates, as reset_unknown (the unreadable read
     # itself, or the absent state met under an explicit true), so a CLEAN Stop that discovered either,
     # with the transcript unreadable and the field omitted or explicitly true, still persists the
     # unknown marker and the capped counter (before, only absent_unknown joined: a clean Stop whose
@@ -2993,7 +2993,7 @@ def _self_test():
             self.assertIsNone(self.final("x\n**Session elapsed:** 03:28"))
 
         def test_footer_quoted_mid_message_passes(self):
-            # findings (claude/an earlier review): a worker's footer, or the corrected wrong value, re-blocked
+            # findings (an earlier review): a worker's footer, or the corrected wrong value, re-blocked
             txt = (f"{lstamp(self.now)} Worker done:\nSession elapsed 05:12\nCorrection: I wrote Session elapsed "
                    "08:07 earlier.\nSession elapsed 03:27")
             self.assertIsNone(self.final(txt))
@@ -3394,7 +3394,7 @@ def _self_test():
             # an earlier review [UNVERIFIABLE] overcounts: both now count lower and do NOT cap
             final = "[2099-01-01T00:00Z] complete"
             sysrec = {"type": "system", "content": BLOCK_PREFIX + ": x"}
-            # case 1: two cycles, then an isMeta assistant entry and a duplicate feedback record: codex's exact
+            # case 1: two cycles, then an isMeta assistant entry and a duplicate feedback record: a review's exact
             # system-record form, and a user-feedback duplicate separated from its original only by the isMeta
             for ents0 in (self.cycles(2) + [self.asst("meta", isMeta=True), sysrec],
                           self.cycles(2)[:-1] + [self.asst("meta", isMeta=True), self.block_entry()]):
@@ -4262,7 +4262,7 @@ def _self_test():
                       "could not establish", "own recovery-state counter"):
                 self.assertIn(s, doc)
 
-        # -- an earlier version (claude-fable-5 expensive QA of an earlier version) --
+        # -- earlier review regressions --
         def test_r25_item1_deletion_residual_closed(self):
             # finding 1 (LOW) disclosed an externally deleted state file as leaving the cap unreachable;
             # an earlier version closes it (an absent state under stop_hook_active is an unknown count and fails open)
@@ -4284,7 +4284,7 @@ def _self_test():
                                        self.now, self.start, self.sdir, notes))
             self.assertIn("block count unknown", notes[0])
 
-        # -- an earlier version (codex gpt-6-astra high QA of an earlier version) --
+        # -- earlier review regressions --
         def loop7(self, cond, sdir=None):
             """Seven violating Stops (one outside the corrective loop, then six under stop_hook_active) with
             `cond` applied before each corrective Stop; returns the outcome kinds. The hook never writes the
@@ -4367,7 +4367,7 @@ def _self_test():
                 self.assertNotIn(s, self.rep())
             self.assertNotIn("UNVERIFIABLE and blocks", " ".join(__doc__.split()))
 
-        # -- an earlier version (codex gpt-6-astra high QA of an earlier version) --
+        # -- earlier review regressions --
         def other_hook_feedback(self):
             # ANOTHER Stop hook's block feedback: a user-role Stop-feedback record without this hook's prefix
             return self.user("Stop hook feedback:\nstatus-header hook: your final message lacks a status header")
@@ -4503,7 +4503,7 @@ def _self_test():
                 worst = max(worst, blocks)
             self.assertEqual(worst, BLOCK_CAP)  # the bound is reached, so the runs exercise it
 
-        # -- an earlier version (codex gpt-6-astra high QA of an earlier version) --
+        # -- earlier review regressions --
         def test_r28_concurrent_stops_cannot_rearm_counter(self):
             # finding: the bound assumed serialized Stops; two concurrent evaluations for one transcript
             # (a clean Stop A loads 1 and pauses before saving; a violating Stop B loads 1, saves 2, and blocks; A
@@ -4718,7 +4718,7 @@ def _self_test():
             for s in ("CONCURRENCY", "DISCHARGED by the lock", "never writes a value lower"):
                 self.assertIn(s, " ".join(src.split()))
 
-        # -- an earlier version (codex gpt-6-astra high QA of an earlier version) --
+        # -- earlier review regressions --
         def overlap_disturbed(self, mode, n=8, serial=8):
             """The an earlier review regression: an initial block records 1; then `n` times a clean Stop A
             (stop_hook_active) takes the lock, loads and RE-READS the counter, and parks at a barrier just before
@@ -4806,8 +4806,8 @@ def _self_test():
             # finding: deleting ONLY an earlier version's `.lock` file while A was parked after its final
             # counter re-read let B lock a new inode, record 2, and block; A then saved 1; repeated, eight blocks in
             # one run (counter 1, 2, 1, ...). an earlier version locks the state DIRECTORY and does every state read and
-            # write through that one locked descriptor, so no single-file unlink replaces the lock identity (round
-            # 30: the locked directory is the transcript's own state subdirectory, disturbed here too)
+            # write through that one locked descriptor, so no single-file unlink replaces the lock identity (now
+            # the locked directory is the transcript's own state subdirectory, disturbed here too)
             for mode in ("unlink-lock", "rename-dir", "delete-state", "rename-subdir", "rmtree-subdir"):
                 b_kinds, s_kinds, counters, active_blocks = self.overlap_disturbed(mode)
                 trace = (mode, b_kinds, s_kinds, counters)
@@ -4926,7 +4926,7 @@ def _self_test():
                 self.assertIn(s, src)
             self.assertNotIn('".lock"', inspect.getsource(lock_state))
 
-        # -- an earlier version (claude-fable-5 QA of an earlier version) --
+        # -- earlier review regressions --
         def test_r30_other_transcripts_are_not_serialized(self):
             # finding: an earlier version's lock was the per-USER state directory, held for a whole evaluation
             # (about 1.2 s on a 49 MiB transcript), so every OTHER session's Stop overlapping it was allowed
@@ -5072,7 +5072,7 @@ def _self_test():
                 self.assertIn(s, src)
             self.assertEqual((PRUNE_AGE_NS, PRUNE_SCAN, PRUNE_BATCH), (7 * 86400 * 10 ** 9, 4096, 32))
 
-        # -- an earlier version (codex gpt-6-astra high QA of an earlier version) --
+        # -- earlier review regressions --
         def test_r31_prune_cursor_reaches_every_subdirectory(self):
             # finding: every prune examined the same first PRUNE_SCAN entries in directory order, so an
             # eligible stale subdirectory listed beyond them was never removed; a persisted cursor over the sorted
@@ -5127,7 +5127,7 @@ def _self_test():
                 self.assertIn(s, doc)
             self.assertNotIn("which each later new transcript continues to remove", doc)
 
-        # -- an earlier version (codex gpt-6-astra high QA of an earlier version) --
+        # -- earlier review regressions --
         def test_r33_messages_one_line_within_cap(self):
             # ONE stdout line per Stop; the reason keeps BLOCK_PREFIX and the first violation verbatim in
             # a code span (whole, never shortened), then extras that fit; stderr gets ONE different line
@@ -5175,7 +5175,7 @@ def _self_test():
             self.assertNotIn("\r", diag[0])
             self.assertNotIn(notes[0], diag[0])
 
-        # -- an earlier version (codex gpt-6-astra and claude-opus-5-5 QA of an earlier version) --
+        # -- earlier review regressions --
         def test_r34_final_message_violation_shown_first(self):
             # an earlier review 1: an older message's timestamp was shown ahead of the final message's footer, so the
             # reason pointed at history and hid the error that blocks the next response, its true value included
@@ -5262,7 +5262,7 @@ def _self_test():
                 self.assertTrue(r.startswith(BLOCK_PREFIX + ": `"), r)
                 self.assertLessEqual(len(r), MSG_CAP)
 
-        # -- an earlier version (codex gpt-6-astra and claude-opus-5-5 an earlier review of an earlier version) --
+        # -- earlier review regressions --
         def test_r35_long_timestamp_whole_with_count(self):
             # an earlier review 1 / an earlier review 3: a long, supported literal was cut in the middle to fit 100 characters
             lit = "2099-01-01T00:00:00.123456789+05:30"
@@ -5316,7 +5316,7 @@ def _self_test():
             self.assertEqual(_fit("x" * 150, [HINT], MSG_CAP), "x" * 150 + HINT[1])
             self.assertEqual(_fit("x" * 170, [HINT], MSG_CAP), "x" * 170)
 
-        # -- an earlier version (claude-opus-5-5 an earlier review of an earlier version) --
+        # -- earlier review regressions --
         def test_r36_hidden_footer_gets_true_elapsed(self):
             # an earlier review F1: a timestamp shown first hid a wrong footer behind "+1 more" with no true elapsed, so
             # the footer could be corrected only after a later block

@@ -406,8 +406,8 @@ placed after perl's first operand (a file name to perl,
 not the in-place switch) still arms in-place detection; rephrase or split the
 command. MISSES: a write whose target reaches a store file by a spelling neither the store path token rule
 nor the earlier directory resolution follows (a relative path after a cd the model cannot follow, a
-symlink, a variable, a glob); an earlier version resolves `cd <store dir> && echo <future> > state.md`, a miss until round
-30; a write whose
+symlink, a variable, a glob); an earlier version resolves `cd <store dir> && echo <future> > state.md`, a miss until a later
+fix; a write whose
 option parsing differs from the modeled getopt subset: an option's separate argument the model does not list
 is read as an operand (an earlier version closes the abbreviated-long-option case, `cp src <store file> --suf .bak`,
 which an earlier version disclosed as a miss: `--suf` now resolves to `--suffix` and `.bak` is consumed; a long option
@@ -1535,8 +1535,8 @@ def bash_store_write(cmd, cwd=None):
     write by itself (an attached `cp -t<store dir>` spelling included, which the raw command text does not show
     as a standalone store path token); only a command that cannot be parsed, or a write whose target is unknown
     (a redirection with no operand, a `$` target, an xargs-run write), falls back to the raw test and counts as
-    a store write when the command text names a store path anywhere (the fail-toward-writing direction). Round
-    31: a relative target is resolved against `cwd` and any cd before it, and a literal shell -c string's writes
+    a store write when the command text names a store path anywhere (the fail-toward-writing direction). Also,
+    a relative target is resolved against `cwd` and any cd before it, and a literal shell -c string's writes
     count (see _analyze); a command that spends BASH_WORK_BUDGET is reported as no store write (fail open)."""
     start = frozenset((os.path.normpath(cwd) if isinstance(cwd, str) and os.path.isabs(cwd) else None,))
     try:
@@ -1562,8 +1562,8 @@ def bash_store_write(cmd, cwd=None):
 # consumed; "stop", option parsing ends at the FIRST operand, as the real tool does, so every later
 # word is an operand; "all", the letters and long options under which EVERY operand (and every
 # target-directory argument) is written: mv's --exchange swaps each source with its destination, and install's
-# -d or --directory creates every operand as a directory (an existing one has its mode set); "optsep" (round
-# 30), long options whose optional argument one implementation takes only attached (`--opt=value`: GNU
+# -d or --directory creates every operand as a directory (an existing one has its mode set); "optsep" (added
+# later), long options whose optional argument one implementation takes only attached (`--opt=value`: GNU
 # install's --context) and another also takes as the SEPARATE next word when that word is `-` or does not
 # start with `-` (uutils install 0.8.0, this host's install), so that word is kept as an operand AND the
 # destination is also computed without it (the union of both readings); "exit", long options on
@@ -3063,8 +3063,8 @@ def _analyze(cmd, cwds, ctx, budget, depth=0):
 
 def bash_future(cmd, now_us, cwd=None):
     """Future observed-time literals that are DATA of a Bash command's store write (else []; see _analyze).
-    `cwd` is the payload's working directory, against which relative write targets resolve. Round
-    31: the analysis runs under BASH_WORK_BUDGET; a command that spends it is allowed (fail open)."""
+    `cwd` is the payload's working directory, against which relative write targets resolve. Also,
+    the analysis runs under BASH_WORK_BUDGET; a command that spends it is allowed (fail open)."""
     if _STAMP_RE.search(cmd) is None:
         return []  # no literal at all: nothing to deny, and the tokenizer need not run
     start = frozenset((os.path.normpath(cwd) if isinstance(cwd, str) and os.path.isabs(cwd) else None,))
@@ -4255,7 +4255,7 @@ def _self_test():
             small, large = run_timed(code, HANG_TIMEOUT)
             self.assertLess(large / max(small, 1e-3), LINEAR_LIMIT, (small, large))
 
-        # -- an earlier version (an earlier review findings) --
+        # -- earlier review regressions --
         def test_r7_dq_substitution_write_seen(self):
             # finding 1 (HIGH): a write inside a double-quoted command substitution was hidden
             for cmd in (f"result=\"$(printf '%s\\n' 'heartbeat: 2099-01-01T00:00Z' | tee {PROJ}/private/s.md)\"",
@@ -4360,7 +4360,7 @@ def _self_test():
             small, large = run_timed(code, HANG_TIMEOUT)
             self.assertLess(large / max(small, 1e-3), LINEAR_LIMIT, (small, large))
 
-        # -- an earlier version (an earlier review findings) --
+        # -- earlier review regressions --
         def test_r8_new_block_ends_table(self):
             # finding 1 (HIGH): a list item, heading, blockquote, or fence after a Due table inherited its context
             hdr = ("| Item | Due |", "|---|---|", "| a | 2026-09-01T00:00Z |")
@@ -6132,7 +6132,7 @@ def _self_test():
             self.assertTrue(_analyze(few, frozenset((self.tmp,)), _StoreCtx(), b).store)
             self.assertGreater(BASH_WORK_BUDGET - b.left, 50 * cost * cap)
             self.assertEqual(self.ev("Bash", cwd=self.tmp, command=few), [F])  # still judged
-            # the codex construct: 400 directories, 800 `(cd .);`, a future store write, padded to 65,536 bytes:
+            # the reported construct: 400 directories, 800 `(cd .);`, a future store write, padded to 65,536 bytes:
             # analysed in-process well under the latency bound, or the budget is spent (best of 5 in a child). The
             # bound is a PEER check: at most PEER_LIMIT times an ordinary 64 KiB command judged in full on the same
             # host (an earlier version's uncharged directory work took about 200 ms), not a wall-clock ceiling
@@ -6352,7 +6352,7 @@ def _self_test():
                 c = build(w, 3 * w)
                 self.assertEqual(self.ev("Bash", cwd=self.tmp, command=c), [F])
                 self.assertGreaterEqual(spend(c), 4 * 4 * w)
-            # in a child under the hang ceiling: the codex construction in-process against an ordinary 64 KiB
+            # in a child under the hang ceiling: the reported construction in-process against an ordinary 64 KiB
             # command judged in full (a PEER check, about 1.2 on the development host; an earlier version took about 107 ms),
             # and the growth from 37 to GROWTH * 37 wrappers (interleaved, best of 5; an earlier version's per-wrapper
             # rescan grew it by about 3.2 times per doubling)
