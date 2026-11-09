@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "f40449e2613e81df4e2aa7c551651260ffb593473a8e06107bf18cfa606bde04"
+tree-sha256 = "ed4d7cf4028be52f47bfe35a6b91685cbf2dcd04182cecfd05e52c6d133f1e56"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -2306,8 +2306,8 @@ sha256 = "9e0e365fb1e2813246c724267ec062310de3be1c5ca4ad9cba37fa0ce5691af4"
 
 [[sources]]
 path = ".gitattributes"
-bytes = 53714
-sha256 = "21fde9319bf20547792d6aa11a8d14c6cd93eb26b686ec0ea03035802ec0278a"
+bytes = 53750
+sha256 = "6dc730b5a5ccd5033f787b7e370d2a738f32289ae4e05a3c102a6a50f95a08fd"
 
 [[sources]]
 path = ".github/copilot-instructions.md"
@@ -4075,6 +4075,11 @@ bytes = 200804
 sha256 = "e0c35587f4c6f13238f36a2ae33889ac5f179e84769f9b016061c63969a48503"
 
 [[sources]]
+path = "tools/_pin_changeset.py"
+bytes = 9739
+sha256 = "f0764a9e1a0b24146aa8ed4439e35414992930a81b3e39e3373a3f77edf7c26a"
+
+[[sources]]
 path = "tools/_qa_adapter.py"
 bytes = 199939
 sha256 = "221a387a4812762e1f5e58f84fbfcdbc0ac2d36296079e8d3e9220e1ac0c04fd"
@@ -4141,8 +4146,8 @@ sha256 = "9ec3224a7e8f517b357ab6738f82a4ce41a9bca6fcba66c3194b3a9157ff9ce0"
 
 [[sources]]
 path = "tools/check_brief_capability.py"
-bytes = 472809
-sha256 = "d08823d2cc9ed3a0c5a28d73358be42ae3d8f483512aef8b8ae5642f963adc8d"
+bytes = 580908
+sha256 = "f8e27ad5f6a1d521d88ecefd08d6d34642314d1bdc7dc19fab7fda108e649df2"
 
 [[sources]]
 path = "tools/check_byte_canon.py"
@@ -4656,8 +4661,8 @@ sha256 = "edb3c19204301fc55fe73dac90dadc79315dbac235b41e9d23da0e1218384194"
 
 [[sources]]
 path = "tools/selftest_checks.toml"
-bytes = 220303
-sha256 = "713d1e7990664be9a75c57e8a5597fabcc547a3435d3ca03cd87841d57d71bbb"
+bytes = 223810
+sha256 = "b83e189e69313313a4d23ad39153e69299b4e3c2f049b21b1973d1e25086e84c"
 
 [[sources]]
 path = "tools/selftest_ci_status.py"

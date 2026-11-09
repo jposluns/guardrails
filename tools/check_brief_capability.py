@@ -287,6 +287,106 @@ PREFLIGHT (the input paths a brief names; read over the whole brief, line by lin
                        conformance is exactly Marko
                        2.2.4's, so rare edge inputs are read exactly where Marko diverges from a strict
                        CommonMark reading (a no-break space accepted after a closing fence, for one).
+  P7 stated changed set HARD, for every family, in a REVIEW brief only: a brief with at least one TASK: line
+                       in its prose (plain, emphasised, a heading, or a list item after up to three markers,
+                       each -, +, *, or one to nine digits closed by . or ), then an optional task-list
+                       checkbox [ ], [x] or [X]; never one in a fence, an indented code line, or a line
+                       opening with > or <!--; a line indented four or more columns is read only as a nested
+                       list item: it opens an item, and the lines directly above it, with no blank line
+                       between, are list items or their text leaving an item open whose text starts at most
+                       three columns left of its marker, as in "1. Steps:" then "    - TASK: ..."), every
+                       one of whose text begins with the word review (any case). A fix or draft brief, or a
+                       brief with no TASK: line, is never judged by P7: its pin is the commit the work
+                       starts from, so a description of work still to be done is never compared with it. In
+                       a review brief, a prose sentence that states the WHOLE set of files the change
+                       touches is compared with the set the brief's pinned commit (the P3 pin lines' value)
+                       changed against its FIRST parent, or against the empty tree for a root commit, and a
+                       difference refuses (exit 1). P7 is the first rule that reads free prose and refuses
+                       HARD; its defence is that recognition is a CLOSED grammar, read word by word without
+                       a pattern, and anything outside the shape never fires (under-reporting, never
+                       over-reporting). RECOGNIZED (the closed list): a subject from the/this change, diff,
+                       patch, commit or revision (never fix) with a totalizing verb (touches, touched,
+                       changes, changed, modifies, modified, edits, edited, or is limited/confined to) and a
+                       PURE path list after the verb (and an optional count): every item a path, which is
+                       exactly a plain item holding a `/` or a code span (plain or emphasised, a leading `.`
+                       always kept and a leading ./ dropped; an item without a `..` component is compared as
+                       posixpath.normpath gives it, so src/./a.py and src//a.py name src/a.py). A claim with
+                       any other item, such as a bare root name (README.md, .gitattributes, Makefile) or an
+                       abbreviation (e.g., Node.js), is out of P7's scope and QUIET, never compared (a
+                       disclosed residual); write a root file as a code span to have it judged. Nothing but
+                       list connectives may stand between the items (commas with or without Oxford style, a
+                       final and, soft line wraps), and the list runs to the end of the sentence; a first
+                       plain-word item ("the docs"), a plain word among the paths, or a colon and a
+                       description after the list leaves the sentence QUIET; the same with only or exactly
+                       or with a stated count ("exactly two files: ..."), the count also checked against the
+                       distinct declared paths; "The only files changed are ..."; "The complete set of
+                       changed files is ..."; the label lines Changed files:, Files changed:, Touched files:
+                       and Changed set:; "... touches no files." (the empty-set claim); and an additive verb
+                       (adds, deletes, renames) only under only or exactly. A bare "The change touches
+                       <list>." with no qualifier IS read as exhaustive: a documented convention, not proven
+                       semantics. REFUSED as a claim (the closed list; not recognized, nothing compared): a
+                       sentence holding a hedge (including, such as, for example, among others, also,
+                       mainly, at least, etc.), a negation (does not touch; read as whole plain words, so a
+                       path like tools/no.py never negates), a modal or future form (should, must, will,
+                       needs to), a conditional or question, a subject naming another revision or round
+                       (previous, prior, earlier, base, parent, planned, proposed; such a word is not a
+                       recognized subject), any subject outside the closed list, imperatives, review-scope
+                       and context mentions, and bare additive verbs; a sentence or TASK: line in a fence,
+                       on an indented code line, or on a line opening with > or <!-- is never read (a TASK:
+                       line that is a nested list item, as above, is read, but a claim there is not; a later
+                       line of a multi-line HTML comment or a lazy blockquote continuation is). A totalizing
+                       claim about a PR, branch, series or train is ADVISORY, never compared: a first-parent
+                       diff of one commit cannot cover a series. In a review brief whose scope may be wider
+                       than the pinned commit, every whole-set claim is still checked and compared like any
+                       other (each CANNOT_EVALUATE case below still exits 2), and only then is a difference
+                       lowered from HARD to ADVISORY: the wider-scope test never turns exit 2 into exit 0,
+                       and an accurate claim there has no finding. The scope is wider when the brief holds a
+                       BRIEF-BASE label line anywhere (a fence included): after markup, the token BRIEF-BASE
+                       in any case as a whole word at the start of the line, whatever separator follows
+                       (BRIEF-BASE: <id>, BRIEF-BASE <id>, BRIEF-BASE = <id> and a bare BRIEF-BASE line all
+                       count, while Brief-based, BRIEF-BASELINE and BRIEF-BASE-X do not), or when a TASK:
+                       line holds, as a whole word wherever it stands, one of pr, prs, pull, mr, branch,
+                       branches, range, base, against, between, since, onto and series (so ordinary prose
+                       lowers the claim too: "review the pinned commit against its first parent", "since it
+                       is small"); a word holding `..` beside something other than dots, markup and
+                       punctuation (brackets, braces, angle brackets and a leading hyphen included; a path
+                       component `..` followed by `/` is a path), so a closed range, an open <base>.. or
+                       ..<head> and a word ending in an ellipsis after letters (carefully...) count, while
+                       the words [...], <...>, {...}, -... and ../notes.md do not; a PR number such as #9,
+                       pr9, pr#9 or pr-9; or two words of 7 to 64 hexadecimal letters neither of which is a
+                       prefix of the other (a short and a full id of one commit are one commit, while
+                       English words such as defaced and effaced count as ids). NOT recognized, so the claim
+                       is still compared with the pinned commit alone and a difference refuses: PR's, merge
+                       request, pull-request, !9, a TASK: line soft-wrapped onto the next line (only the
+                       TASK: line's own text is read), "the last two commits", and a range written outside a
+                       TASK: line ("Compared with <base> ..."). Sentences are compared INDEPENDENTLY, never
+                       unioned, so an accurate sentence cannot conceal a stale one, and the finding names
+                       both differences (changed-but-undeclared and declared-but-unchanged), the resolved
+                       base and head ids and the full actual set, so the author can paste it. The git reads
+                       live in tools/_pin_changeset.py, hardened like check_release_cut.py's: inherited GIT_
+                       variables dropped, replace refs disabled on both the environment and the command
+                       line, the commit graph, fsmonitor and automatic maintenance disabled on the command
+                       line only, GIT_CEILING_DIRECTORIES set to the parent of the directory read (a
+                       directory that is not itself a repository fails instead of walking up),
+                       GIT_GRAFT_FILE pinned to os.devnull (defence in depth: parents are read from the raw
+                       commit bytes with cat-file, never a revision walk, which a grafts entry does not
+                       alter; no fixture demonstrates a graft biting these reads), system and global config
+                       pinned, HOME and XDG_CONFIG_HOME an empty directory. The changed set is diff-tree -r
+                       -z --name-only --no-renames over resolved immutable ids, never the working tree or
+                       the index: additions, deletions, type changes and gitlink changes are included, and a
+                       rename contributes BOTH its old and its new path (the --no-renames convention).
+                       CANNOT_EVALUATE (exit 2), never a pass and never an empty set: a recognized claim
+                       with a path-like or code-span item that cannot be placed as one exact
+                       repository-relative path (a glob, a `..` component, a placeholder, a directory (a
+                       trailing / or . component) or an unclosed span: an unplaceable item inside an
+                       otherwise path-only list); a recognized claim with no pin line or no repository; an
+                       unresolved pin; more than one pin value of any kind (BRIEF-PIN, REVIEWED HEAD, or a
+                       look-alike pin line), with or without a BRIEF-PIN line, that do not all resolve to
+                       one full commit id (every value is resolved, never one chosen); malformed raw commit
+                       bytes; an absent commit tree; a named parent whose object is absent (a shallow or
+                       partial clone is never read as a root commit); any other failed git read, a launch
+                       failure, timeout or ownership refusal; malformed -z output. No failed read falls back
+                       to a guess. An empty diff is a valid empty set.
 
 What the preflight cannot know: whether the worker's uid can read a path (permissions, ACLs, a mount, a
 sandbox); that is the dispatcher's check, made where the worker runs, and the hard readability check belongs
@@ -479,11 +579,12 @@ not one, so "do not run, build or install" stays negated.
 Outcomes, printed one finding per line (HARD, INFO, or ADVISORY) and then one summary line:
 
   exit 0  OK               no HARD hit (INFO and ADVISORY findings may be printed).
-  exit 1  REFUSE           at least one HARD hit (S1, S2, S3, P2, P5 or P6). Rewrite the brief, or send the item
+  exit 1  REFUSE           at least one HARD hit (S1, S2, S3, P2, P5, P6 or P7). Rewrite the brief, or send the item
                            to a family that can execute (S1 to S3), name paths it can read (P2) or, after the reach,
                            add the cure line the hit gives (git -C <dir> checkout --detach <pin>^{commit}) or reach
-                           the pin by a dispatch ref (P5), or provide each missing declared input or correct its
-                           INPUT line (P6).
+                           the pin by a dispatch ref (P5), provide each missing declared input or correct its
+                           INPUT line (P6), or correct a stated changed-file set to the actual set the P7 line
+                           prints, or drop the claim (P7).
                            When a hit is a command line (S2 or S3), the REFUSE line
                            says how to rewrite: name the function, row or entry instead of embedding the
                            command (quote the def line of X, not the line that runs git push).
@@ -491,7 +592,10 @@ Outcomes, printed one finding per line (HARD, INFO, or ADVISORY) and then one su
                            blank; a scope range runs backwards; a pinned revision does not resolve or
                            cannot be read (P3); an INPUT line P6 cannot check, a look-alike input label, a
                            brief the shared reading's vendored parser cannot read, or a
-                           declared input that exists but cannot be confirmed readable (P6); the family is not
+                           declared input that exists but cannot be confirmed readable (P6); a recognized
+                           changed-files claim in a review brief whose pins do not name one commit, whose
+                           pinned commit cannot be read (any failed git read), or that holds an item that
+                           cannot be placed as one repository-relative path (P7); the family is not
                            in the table; the
                            table is missing, unreadable, or malformed (format-version must be the
                            integer 1); or the arguments are wrong (a repeated --family or --table
@@ -541,8 +645,35 @@ outside the numbered items (S3) and is not dropped with its item; a family addre
 ("Claude: run ...") is linted as if addressed to the linted family; and an operative marker for another family
 hides that family's text up to the next marker or address, so an instruction for the linted family placed there
 without an address is hidden. The lint reads only the bytes it is given: run it on the final per-family bytes that
-are sent, since a brief composed after the lint runs is not covered. Run alone, it is advisory; it blocks
-only where the sender refuses to send on exit 1 or 2.
+are sent, since a brief composed after the lint runs is not covered. P7's residuals: a fix, draft or other
+non-review brief (no TASK: line beginning with review) is never judged, nor is a review brief whose TASK: line
+opens with another word ("TASK: adversarial review of PR 9."); a TASK: line or a claim on a later line of a
+multi-line HTML comment or a lazy blockquote continuation is read; a TASK: line indented four or more columns is
+read only as a nested list item under list lines, so one after a blank line inside a loose list item is not read (a
+fix line there leaves a review brief judged), and a nested item numbered other than 1 is read although CommonMark
+joins it to the paragraph above; in a review brief whose TASK: line names a PR, branch, range or base, or that
+holds a BRIEF-BASE label line (any separator after the whole word), a difference is ADVISORY, never HARD (every
+claim is still checked first, so an exit 2 stays exit 2), and that test reads whole words wherever they stand on a
+TASK: line, so "against" or "since" in ordinary prose ("against its first parent", "since it is small") lowers a
+claim too, as do two English words of 7 or more hexadecimal letters (defaced, effaced), while PR's, merge request,
+pull-request, !9, a TASK: line soft-wrapped onto the next line, "the last two commits" and a range written outside
+a TASK: line are not recognized, so the claim is compared with the pinned commit alone; a path is normalised only
+when it has no `..` component; a claim holding a bare root name (README.md, Makefile) or any other item without a
+`/` outside a code span is never judged, whether or not that name is right; a path omitted from BOTH the commit and
+the declaration leaves equality nothing to surface; P7 cannot prove the pin is the authoritative task revision (the
+dispatcher binds that independently); submodule internals behind a changed gitlink, and content a checkout filter
+materializes, are not inspected; an exhaustive claim phrased outside the closed grammar passes silently
+(under-reporting, never over-reporting), and recognition is NARROWED to pure path lists: a claim whose first item
+is a plain word ("the docs"), whose paths are mixed with plain words or trailing prose, or whose list a colon and a
+description follow ("tools/x.py: it refuses ...") is quiet, never compared and never CANNOT_EVALUATE, so an
+exhaustive claim written in such a shape also passes unread; claims in list continuations indented like code are
+skipped with the indented-code exclusion, and the bare "touches <list>" convention is documented, not proven
+semantics; the first-parent diff covers the pinned commit only, never a PR or branch series (those subjects are
+ADVISORY, and so is a difference in a wider-scope review brief); a rename counts as both its paths by the
+--no-renames convention; a true mismatch on generated mirrors (plugin copies, regenerated site pages) is a correct
+finding an author may find surprising, so the finding prints the full actual set; and the GIT_GRAFT_FILE pin is
+untested hardening (no fixture shows a grafts entry changing the raw-byte reads). Run alone, it is advisory; it
+blocks only where the sender refuses to send on exit 1 or 2.
 
 TIME. Linearity rests on two kinds of evidence, not on a proof: a regex audit and measured shapes. No regular
 expression reads a run of arguments, options or markup: such runs are walked token by token in Python.
@@ -661,6 +792,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _selftest_exit_report  # noqa: E402
 import _git_fixture_env  # noqa: E402
 import _input_declarations  # noqa: E402
+import _pin_changeset  # noqa: E402
 
 # the one reading of INPUT declarations, shared with check_verifier_delivery (C1) so the two cannot
 # disagree; bound here so the self-test can patch each seam out
@@ -3040,12 +3172,664 @@ def rule_p6(names, row, repo):
     return findings
 
 
+# ---------- P7: whole-changed-set claims, a closed grammar read word by word without a pattern ----------
+P7_DETERMINERS = frozenset(("the", "this"))
+# `fix` is not a subject: "The fix changes X" describes work still to be done, which the pinned
+# commit's own diff can never match (P7 also reads review briefs only, p7_review_brief)
+P7_SUBJECTS = frozenset(("change", "diff", "patch", "commit", "revision"))
+# a totalizing claim about these is printed, never checked: a first-parent diff of one commit cannot cover them
+P7_SERIES_SUBJECTS = frozenset(("pr", "branch", "series", "train"))
+P7_TOTAL_VERBS = frozenset(("touches", "touched", "changes", "changed", "modifies", "modified", "edits", "edited"))
+P7_LIMIT_VERBS = frozenset(("limited", "confined"))
+# an additive verb is partial by nature: it claims the whole set only under `only` or `exactly`
+P7_ADDITIVE_VERBS = frozenset(("adds", "added", "deletes", "deleted", "renames", "renamed"))
+P7_QUALIFIERS = frozenset(("only", "exactly"))
+P7_HEDGES = frozenset(("including", "includes", "include", "included", "such", "example", "examples", "among",
+                       "others", "also", "mainly", "mostly", "least", "etc", "notably", "primarily"))
+P7_NEGATIONS = frozenset(("not", "never", "nothing", "nor"))
+P7_MODALS = frozenset(("should", "must", "will", "would", "shall", "may", "might", "can", "could", "needs"))
+P7_CONDITIONALS = frozenset(("if", "when", "unless", "once", "whenever", "until"))
+# a review TASK: line naming one of these reviews more than one commit's first-parent diff can answer
+P7_SCOPE_WORDS = frozenset(("pr", "prs", "pull", "mr", "branch", "branches", "range", "base", "against",
+                            "between", "since", "onto", "series"))
+P7_LABELS = ("changed files:", "files changed:", "touched files:", "changed set:")
+P7_LEADS = ("the only files changed are", "the complete set of changed files is")
+P7_COUNTS = dict(one=1, two=2, three=3, four=4, five=5, six=6, seven=7, eight=8, nine=9, ten=10,
+                 eleven=11, twelve=12)
+P7_STRIP = "*_\"'().,;:!?"   # markup and sentence punctuation stripped around a keyword
+# around a path item: markup openers before it (never a `.`, so .github/x, ./tools/a.py and .gitattributes
+# keep it), markup and sentence punctuation after it; an `_` only as a matched pair (_a.py_), so a name
+# that starts with one (_pin_changeset.py, __init__.py) keeps it
+P7_LEAD_STRIP = "*\"'("
+P7_TRAIL_STRIP = "*\"').,;:!?"
+# around a range word (p7_range_word): dots, markup and punctuation, brackets, braces and angle brackets
+# included, so [...], <...> and {...} are punctuation; a hyphen counts only at the word's start (-...)
+P7_RANGE_MARKS = P7_STRIP + "`[]{}<>"
+P7_RANGE_LEAD = "-"
+
+
+def p7_tokens(sentence):
+    """The sentence as [(word, atomic)]: each code span (code_spans) one atomic word with its backticks
+    stripped, the text between them split on whitespace. Atomic words are path items and are never read
+    as keywords, so a path such as `tools/no.py` cannot be read as a negation."""
+    spans = code_spans(sentence)
+    tokens, position = [], 0
+    for start, end in spans:
+        tokens.extend((word, False) for word in sentence[position:start].split())
+        tokens.append((sentence[start:end].strip("`").strip(), True))
+        position = end
+    tokens.extend((word, False) for word in sentence[position:].split())
+    return tokens
+
+
+def p7_question(sentence):
+    """A question is never a claim."""
+    return sentence.rstrip().endswith("?")
+
+
+def p7_negated(tokens):
+    """A negation as a whole plain word, outside code spans; a path word holding `no` or `not` as a
+    substring (tools/no.py) is one word and never matches."""
+    return any(not atomic and word.lower().strip(P7_STRIP) in P7_NEGATIONS for word, atomic in tokens)
+
+
+def p7_refused(tokens):
+    """Whether a hedge, modal or conditional word stands anywhere in the sentence as a plain word, or a
+    negation does (p7_negated): such a sentence is outside the closed grammar and claims nothing."""
+    if p7_negated(tokens):
+        return True
+    for word, atomic in tokens:
+        if atomic:
+            continue
+        plain = word.lower().strip(P7_STRIP)
+        if plain in P7_HEDGES or plain in P7_MODALS or plain in P7_CONDITIONALS:
+            return True
+    return False
+
+
+def p7_marker(word):
+    """Whether a leading word is a list or heading marker (1., 2), -, *, #), skipped before the grammar."""
+    return bool(word) and all(character in "-*+#0123456789.)" for character in word)
+
+
+def p7_label_rest(sentence):
+    """The list text after a whole-set label (P7_LABELS: Changed files: ...) or lead (P7_LEADS: The only
+    files changed are ...), an optional list marker skipped first, or None."""
+    text = sentence.strip()
+    first, _, rest = text.partition(" ")
+    if p7_marker(first):
+        text = rest.strip()
+    lower = text.lower()
+    for label in P7_LABELS:
+        if lower.startswith(label):
+            return text[len(label):]
+    for lead in P7_LEADS:
+        if lower.startswith(lead + " "):
+            return text[len(lead):]
+    return None
+
+
+def p7_list_marker(word):
+    """Whether a word is one list-item marker: a bullet (-, + or *) or a number of one to nine digits
+    closed by `.` or `)` (1., 2))."""
+    if word in ("-", "+", "*"):
+        return True
+    return 2 <= len(word) <= 10 and word[-1] in ".)" and word[:-1].isdecimal()
+
+
+def p7_checkbox(text):
+    """A list item's text with a leading task-list checkbox ([ ], [x] or [X], then whitespace) removed,
+    so - [ ] TASK: ... reads like - TASK: ...; any other text is returned unchanged."""
+    if text[:3] in ("[ ]", "[x]", "[X]") and text[3:4].isspace():
+        return text[3:].lstrip()
+    return text
+
+
+def p7_unmarked(line):
+    """A line with its leading whitespace, up to three leading list-item markers (p7_list_marker) and,
+    after at least one marker, a task-list checkbox (p7_checkbox) removed, so a list item, nested ones
+    and task-list ones included (- 1. TASK: ..., - [ ] TASK: ...), reads like a plain line. The cap keeps
+    the reading linear in the line's length."""
+    text, marked = line.strip(), False
+    for _ in range(3):
+        parts = text.split(None, 1)
+        if len(parts) != 2 or not p7_list_marker(parts[0]):
+            break
+        text, marked = parts[1], True
+    return p7_checkbox(text) if marked else text
+
+
+def p7_item_columns(raw):
+    """[content column] of each list-item marker (p7_list_marker, up to three) that opens the line,
+    outermost first, or [] when it opens none: the column where that item's text starts, read the
+    CommonMark way (a tab advances to the next multiple of four; one to four spaces after a marker, or
+    one column when five or more follow, which ends the reading). A marker with no text after it opens
+    nothing here."""
+    line = raw.expandtabs(4)
+    columns, position = [], 0
+    for _ in range(3):
+        stripped = line[position:].lstrip(" ")
+        word = stripped.split(" ", 1)[0]
+        if not p7_list_marker(word):
+            break
+        after = len(line) - len(stripped) + len(word)
+        rest = line[after:]
+        gap = len(rest) - len(rest.lstrip(" "))
+        if gap == 0 or not rest.strip():
+            break
+        columns.append(after + (gap if gap <= 4 else 1))
+        if gap > 4:
+            break
+        position = columns[-1]
+    return columns
+
+
+def p7_atx_heading(raw):
+    """Whether a line, leading whitespace removed, opens a CommonMark ATX heading: one to six `#`, then a
+    space, a tab or the end of the line (# Notes, ##); #9 work: and ####### x are text."""
+    text = raw.lstrip()
+    hashes = len(text) - len(text.lstrip("#"))
+    return 1 <= hashes <= 6 and (len(text) == hashes or text[hashes] in " \t")
+
+
+def p7_list_heading(raw, stack):
+    """Whether a line ends the open list as a heading: an ATX heading (p7_atx_heading) indented at most
+    three columns past the text column of the innermost open item it reaches (stack: the open items'
+    content columns; the margin when none is reached). A `#` line four or more columns past that column
+    is continuation text in CommonMark (- Steps for, then six spaces and # x), so the list stays open."""
+    expanded = raw.expandtabs(4)
+    indent = len(expanded) - len(expanded.lstrip(" "))
+    column = max((open_column for open_column in stack if open_column <= indent), default=0)
+    return indent - column <= 3 and p7_atx_heading(raw)
+
+
+def p7_nested_items(text, blocks):
+    """{line number} of each prose line indented four or more columns that is read as a nested list item,
+    not as indented code: the line opens a list item (p7_item_columns), and the lines directly above it,
+    with no blank, fence, heading (p7_list_heading), blockquote or HTML-comment line between, are list
+    items and their continuation text (a line such as #9 work:, or a # line four or more columns past an
+    open item's text, included) that leave an item open whose content column is at most three columns
+    left of the line's marker (1. Steps: then four spaces and - TASK: ...). Indented code cannot
+    interrupt a paragraph, so such a line is never code. This departs from CommonMark in both directions.
+    A nested item numbered other than 1 directly under a paragraph line (1. Steps: then four spaces and
+    2. TASK: ...) is read here, while CommonMark joins it to that paragraph, since an ordered list may
+    interrupt a paragraph only when it starts at 1. And a line CommonMark may read as a nested item is
+    not read this way after a blank line (a reading of the enclosing items across the blank is not made),
+    under a line of markers alone (* * *, or a setext underline such as ---) or after a heading line; a
+    line indented four or more columns past every open item is continuation text in both readings."""
+    prose = set()
+    for block in blocks:
+        if block.kind == "prose":
+            prose.update(number for number, _ in block.lines)
+    nested, stack = set(), []
+    for number, raw in enumerate(text.split("\n"), 1):
+        if number not in prose or raw.lstrip().startswith((">", "<!--")) or p7_list_heading(raw, stack) \
+                or not p7_unmarked(raw).strip(" *-_"):
+            stack = []
+            continue
+        columns = p7_item_columns(raw)
+        if not columns:
+            continue    # continuation text: the open items stay open
+        expanded = raw.expandtabs(4)
+        indent = len(expanded) - len(expanded.lstrip(" "))
+        while stack and stack[-1] > indent:
+            stack.pop()
+        if indent - (stack[-1] if stack else 0) > 3:
+            continue    # continuation text of the item above, never a new item
+        if indent > 3:
+            nested.add(number)
+        stack.extend(columns)
+    return nested
+
+
+def p7_task_text(line):
+    """The text after a TASK: line's label, or None when the line is not a TASK: line (the label in
+    capitals, plain or in emphasis, then a colon, written plainly, as a heading or as a list item)."""
+    text = p7_unmarked(line).lstrip(" *_#")
+    if not text.startswith("TASK"):
+        return None
+    text = text[4:].lstrip("*_")
+    if not text.startswith(":"):
+        return None
+    return text[1:]
+
+
+def p7_task_word(line):
+    """The first word of a TASK: line's text (p7_task_text), lower-cased with markup and punctuation
+    stripped, or None when the line is not a TASK: line."""
+    text = p7_task_text(line)
+    if text is None:
+        return None
+    words = text.lstrip("*_` \t").split()
+    return words[0].lower().strip(P7_STRIP + "`") if words else ""
+
+
+def p7_unread_line(raw):
+    """Whether a prose line is never read by P7: indented like code, blockquoted, or opening an HTML
+    comment (a reader may hide or frame that text)."""
+    return raw.startswith(("    ", "\t")) or raw.lstrip().startswith((">", "<!--"))
+
+
+def p7_task_lines(names):
+    """[raw line] of every TASK: line in the brief's prose, a line P7 never reads (p7_unread_line) and
+    any line in a fence excepted; an indented line that is a nested list item (p7_nested_items) is read."""
+    lines = []
+    blocks = parse_blocks(names.text)
+    nested = p7_nested_items(names.text, blocks)
+    for block in blocks:
+        if block.kind != "prose":
+            continue
+        for number, raw in block.lines:
+            if (number in nested or not p7_unread_line(raw)) and p7_task_word(raw) is not None:
+                lines.append(raw)
+    return lines
+
+
+def p7_review_brief(names):
+    """Whether the brief is a review brief, the only kind P7 judges: its prose holds at least one TASK:
+    line (p7_task_lines, a list item included) and every one's text begins with the word review. A fix or
+    draft brief pins the commit the work starts from, so its description of work still to be done is
+    never compared with that pin."""
+    words = [p7_task_word(raw) for raw in p7_task_lines(names)]
+    return bool(words) and all(word == "review" for word in words)
+
+
+def p7_commit_word(word):
+    """Whether a TASK: line word reads as a commit id: 7 to 64 hexadecimal characters."""
+    return 7 <= len(word) <= 64 and all(character in "0123456789abcdef" for character in word)
+
+
+def p7_pr_number(plain):
+    """Whether a lower-cased TASK: line word is a PR number: #9, pr9, pr#9 or pr-9."""
+    for lead in ("pr#", "pr-", "pr", "#"):
+        if plain.startswith(lead):
+            return plain[len(lead):].isdecimal()
+    return False
+
+
+def p7_brief_base_line(raw):
+    """Whether a line is a BRIEF-BASE label line: after up to three list markers (p7_unmarked) and any
+    spaces, `*`, `_`, `#`, backticks and `>`, the label BRIEF-BASE in any case as a whole word, so any
+    closing `*`, `_` or backticks, then the end of the line or any character but a letter, a digit or
+    `-`. Whatever separator follows counts (BRIEF-BASE: <id>, BRIEF-BASE <id>, BRIEF-BASE = <id>), while
+    a word that only begins with those letters (Brief-based, BRIEF-BASELINE, BRIEF-BASE-X) is not it."""
+    text = p7_unmarked(raw).lstrip(" *_#`>")
+    if text[:10].upper() != "BRIEF-BASE":
+        return False
+    rest = text[10:].lstrip("*_`")
+    return not rest or not (rest[0].isalnum() or rest[0] == "-")
+
+
+def p7_path_dots(piece, first):
+    """Whether one `/`-separated piece of a word, followed by a `/`, is the path component `..` (the
+    first piece after any leading markup, punctuation and hyphens, so (../notes.md) holds one)."""
+    return (piece.lstrip(P7_RANGE_MARKS.replace(".", "") + P7_RANGE_LEAD) if first else piece) == ".."
+
+
+def p7_range_word(word):
+    """Whether a TASK: line word is a range: it holds `..` (<base>..<head>, an open <base>.. or ..<head>,
+    the three-dot form included) beside something other than dots, markup and punctuation, that is, some
+    text is left once dots, markup and punctuation (P7_RANGE_MARKS: brackets, braces and angle brackets
+    included) are stripped from both ends and hyphens from its start (P7_RANGE_LEAD). The `..` is looked
+    for in the word as written, never after punctuation is stripped, which would cut an open range's dots
+    away, but a path component `..` followed by `/` (p7_path_dots: ../notes.md, src/../a.py) is a path,
+    not a range. So a closed or open range, and a word ending in an ellipsis after letters
+    (carefully...), are ranges, while dots alone or inside only those marks ([...], <...>, {...}, -...)
+    and a word whose every `..` is a component followed by `/` (../notes.md) are not. Dots inside any
+    other punctuation (|...|, ~...~, #...) and a `..` with no `/` after it (src/.., ../..) are ranges."""
+    pieces = word.split("/")
+    if not any(".." in piece and not (index + 1 < len(pieces) and p7_path_dots(piece, index == 0))
+               for index, piece in enumerate(pieces)):
+        return False
+    return word.lstrip(P7_RANGE_MARKS + P7_RANGE_LEAD).rstrip(P7_RANGE_MARKS) != ""
+
+
+def p7_distinct_commits(words):
+    """The commit-id words that name different commits: a word that is a prefix of another (a short and
+    a full id of one commit) is dropped. In sorted order every word that starts with a given word follows
+    it directly, so one comparison with the next word decides, and the reading stays O(n log n)."""
+    ordered = sorted(set(words))
+    return [word for index, word in enumerate(ordered)
+            if index + 1 == len(ordered) or not ordered[index + 1].startswith(word)]
+
+
+def p7_wider_scope(names):
+    """Why the review may cover more than the pinned commit's first-parent diff, or None: a BRIEF-BASE
+    label line anywhere in the brief (p7_brief_base_line, a fence included), or a TASK: line holding a
+    scope word (P7_SCOPE_WORDS, read as whole words wherever they stand, so "against" and "since" in
+    ordinary prose count: "review the pinned commit against its first parent"), a range word
+    (p7_range_word), a PR number (#9, pr9, pr#9 or pr-9), or two words of 7 to 64 hexadecimal letters
+    of which neither is a prefix of the other (p7_distinct_commits; an English word such as "defaced"
+    or "effaced" counts as such a word). Not recognized, so the claim is still compared with the pinned
+    commit: PR's, merge request, pull-request, !9, a TASK: line soft-wrapped onto the next line (only
+    the TASK: line itself is read), "the last two commits", and a range written outside a TASK: line.
+    rule_p7 calls this only after every claim's cannot-evaluate checks and the git read, and only to
+    lower a comparison's HARD finding to ADVISORY, so a match never turns exit 2 into exit 0 and never
+    adds a finding to an accurate claim."""
+    for raw in names.text.split("\n"):
+        if p7_brief_base_line(raw):
+            return "the brief has a BRIEF-BASE line"
+    for raw in p7_task_lines(names):
+        commits = []
+        for word in p7_task_text(raw).split():
+            plain = word.lower().strip(P7_STRIP + "`")
+            if plain in P7_SCOPE_WORDS or p7_range_word(word) or p7_pr_number(plain):
+                return "its TASK: line names a PR, branch, range or base"
+            if p7_commit_word(plain):
+                commits.append(plain)
+        if len(p7_distinct_commits(commits)) > 1:
+            return "its TASK: line names more than one commit"
+    return None
+
+
+def p7_dot_slash(item):
+    """`item` with every leading `./` removed, so ./tools/a.py names tools/a.py."""
+    while item.startswith("./"):
+        item = item[2:]
+    return item
+
+
+def p7_item_strip(piece):
+    """A plain list item with its markup and sentence punctuation removed: markup openers before it
+    (P7_LEAD_STRIP, never a `.`), markup and punctuation after it (P7_TRAIL_STRIP), `_` emphasis only
+    when it closes what it opens, then any leading `./`; so .github/x, ./tools/a.py (read as
+    tools/a.py) and .gitattributes keep their leading dot, and _pin_changeset.py its underscore."""
+    body = piece.lstrip(P7_LEAD_STRIP).rstrip(P7_TRAIL_STRIP)
+    if body.startswith("_") and body.endswith("_"):
+        body = body.strip("_")
+    return p7_dot_slash(body)
+
+
+def p7_pathlike(item):
+    """Whether a plain list item counts as one repository path: exactly when it holds a `/`. A bare root
+    name (README.md, Makefile, _pin_changeset.py) and an abbreviation (e.g., Node.js) are plain words,
+    so a claim holding one is out of P7's scope (quiet, a disclosed residual); no git read decides it. A
+    code span is a path by form and never reaches this test. Path-like is a recognition shape only: a
+    path-like item can still be unplaceable (a glob, a `..`, a directory), and inside a recognized claim
+    that stays CANNOT_EVALUATE (p7_unplaceable)."""
+    return "/" in item
+
+
+def p7_item_words(tokens):
+    """The declared path items of a claim's list tokens, as [(item, atomic)], or None when the tokens are
+    not a pure path list, which claims nothing (quiet). A list is pure when every plain item is path-like
+    (p7_pathlike: it holds a `/`; a code span counts by form), nothing but list connectives (commas, a
+    connecting `and`, Oxford or not) separates the items, and the list runs to the end of the sentence: a
+    first plain-word item ("the docs"), a bare root name, a plain word between or after the paths, and a
+    list followed by a colon and a description ("tools/x.py: it refuses ...") are all outside the shape.
+    Code spans are kept verbatim but for a leading `./` (the quoted form for a path with spaces); a plain
+    item is read through p7_item_strip."""
+    items = []
+    for word, atomic in tokens:
+        if atomic:
+            items.append((p7_dot_slash(word), True))
+            continue
+        if word.rstrip("*_\"')").endswith(":"):   # a list followed by a colon and a description
+            return None
+        for piece in word.split(","):
+            piece = p7_item_strip(piece.strip())
+            if not piece or piece.lower() == "and":
+                continue
+            if not p7_pathlike(piece):
+                return None
+            items.append((piece, False))
+    return items
+
+
+def p7_unplaceable(item, atomic):
+    """Why a declared item cannot be placed as one exact repository-relative path, or None: inside a
+    recognized claim such an item is CANNOT_EVALUATE, the file's fail-closed convention, never a pass.
+    Whitespace is allowed only in a code-span item (`atomic`), the quoted form for a path with spaces."""
+    if not item:
+        return "an empty item"
+    if "`" in item:
+        return "an unclosed code span"
+    if not atomic and any(character.isspace() for character in item):
+        return "a phrase, not one path"
+    if any(character in "*?[]{}" for character in item):
+        return "a glob or brace character"
+    if any(character in "<>$~" for character in item):
+        return "a placeholder, variable or home character"
+    if item.startswith("/"):
+        return "an absolute path, not a repository-relative one"
+    if ".." in item.split("/"):
+        return "a `..` component"
+    if item.endswith("/") or item == "." or item.endswith("/."):
+        return "a directory, not one file path"
+    return None
+
+
+def p7_normal(item):
+    """A placeable item as the one path it names: posixpath.normpath, so src/./a.py and src//a.py are
+    compared as src/a.py; an item with a `..` component is left as it is (p7_unplaceable refuses it)."""
+    return item if ".." in item.split("/") else posixpath.normpath(item)
+
+
+def p7_claim(sentence):
+    """The whole-change claim a sentence makes, or None when it is outside the closed grammar:
+    ("advisory", None, None) for a totalizing claim about a PR, branch, series or train (printed, never
+    checked), or ("claim", items, count) where items may be empty (the `touches no files` claim) and
+    count is a stated file count or None. Anything outside the shape, a question, and any sentence
+    holding a hedge, negation, modal or conditional word (p7_refused) claims nothing; neither does a
+    sentence whose list after the verb (and an optional count) is not a pure path list (p7_item_words:
+    a first plain-word item, a plain word among the paths, or a colon and a description after the list
+    all leave the sentence quiet)."""
+    if p7_question(sentence):
+        return None
+    rest = p7_label_rest(sentence)
+    if rest is not None:
+        tokens = p7_tokens(rest)
+        if not tokens or p7_refused(tokens):
+            return None
+        items = p7_item_words(tokens)
+        return ("claim", items, None) if items else None
+    tokens = p7_tokens(sentence)
+    if tokens and not tokens[0][1] and p7_marker(tokens[0][0]):
+        tokens = tokens[1:]
+    if len(tokens) < 3 or tokens[0][1] or tokens[1][1] or tokens[2][1]:
+        return None
+    if tokens[0][0].lower().strip(P7_STRIP) not in P7_DETERMINERS:
+        return None
+    subject = tokens[1][0].lower().strip(P7_STRIP)
+    series = subject in P7_SERIES_SUBJECTS
+    if not series and subject not in P7_SUBJECTS:
+        return None
+    verb = tokens[2][0].lower().strip(P7_STRIP)
+    index, qualified = 3, False
+    if verb == "is":
+        if (len(tokens) < 5 or tokens[3][1] or tokens[4][1]
+                or tokens[3][0].lower().strip(P7_STRIP) not in P7_LIMIT_VERBS
+                or tokens[4][0].lower().strip(P7_STRIP) != "to"):
+            return None
+        index, qualified = 5, True
+    elif verb in P7_QUALIFIERS:
+        if len(tokens) < 4 or tokens[3][1]:
+            return None
+        verb = tokens[3][0].lower().strip(P7_STRIP)
+        if verb not in P7_TOTAL_VERBS and verb not in P7_ADDITIVE_VERBS:
+            return None
+        index, qualified = 4, True
+    elif verb in P7_TOTAL_VERBS or verb in P7_ADDITIVE_VERBS:
+        if (index < len(tokens) and not tokens[index][1]
+                and tokens[index][0].lower().strip(P7_STRIP) in P7_QUALIFIERS):
+            index, qualified = index + 1, True
+    else:
+        return None
+    if verb in P7_ADDITIVE_VERBS and not qualified:
+        return None
+    if p7_refused(tokens):
+        return None
+    if series:
+        return ("advisory", None, None)
+    if (index + 2 == len(tokens) and not tokens[index][1] and not tokens[index + 1][1]
+            and tokens[index][0].lower().strip(P7_STRIP) == "no"
+            and tokens[index + 1][0].lower().strip(P7_STRIP) in ("file", "files")):
+        return ("claim", [], None)
+    count = None
+    if index + 1 < len(tokens) and not tokens[index][1] and not tokens[index + 1][1]:
+        word = tokens[index][0].lower().strip(P7_STRIP)
+        unit = tokens[index + 1][0].lower().strip(P7_STRIP)
+        if unit in ("file", "files") and (word in P7_COUNTS or (word.isdecimal() and len(word) <= 4)):
+            count = P7_COUNTS[word] if word in P7_COUNTS else int(word)
+            index += 2
+    items = p7_item_words(tokens[index:])
+    return ("claim", items, count) if items else None
+
+
+def p7_sentences(names):
+    """[(line, sentence)] of the brief's prose, the reading rule_p7 judges: prose blocks only (never a
+    fence), cut into sentences like P4's reading; a sentence whose physical line is blockquoted, opens
+    an HTML comment, or is indented like code is skipped (a reader may hide or frame that text)."""
+    out = []
+    for block in parse_blocks(names.text):
+        if block.kind != "prose":
+            continue
+        line_starts, offset = [], 0
+        for _, line in block.lines:
+            line_starts.append(offset)
+            offset += len(line) + 1
+        raw_lines = dict(block.lines)
+        for start, sentence in sentences(block.text().replace("\n", " ")):
+            number = block.lines[bisect.bisect_right(line_starts, start) - 1][0]
+            if p7_unread_line(raw_lines[number]):
+                continue
+            out.append((number, sentence))
+    return out
+
+
+def p7_mismatch(declared, actual):
+    """(changed but not declared, declared but unchanged), each sorted; both empty when the sets agree."""
+    return sorted(actual - declared), sorted(declared - actual)
+
+
+def p7_count_mismatch(count, declared):
+    """Whether a stated file count disagrees with the number of distinct declared paths."""
+    return count != len(declared)
+
+
+def p7_compare(claims, actual, base, head):
+    """The P7 findings for the recognized claims against the actual changed set: each claim is compared
+    independently, never unioned, so one accurate sentence cannot conceal a stale one; the finding names
+    both differences, the resolved ids and the full actual set, so the author can paste it."""
+    findings = []
+    for line, declared, count, sentence in claims:
+        missing, extra = p7_mismatch(declared, actual)
+        miscount = count is not None and p7_count_mismatch(count, declared)
+        if not missing and not extra and not miscount:
+            continue
+        parts = []
+        if missing:
+            parts.append("changed but not declared: " + ", ".join(missing))
+        if extra:
+            parts.append("declared but unchanged: " + ", ".join(extra))
+        if miscount:
+            parts.append("the stated count {} is not the {} distinct declared path(s)".format(
+                count, len(declared)))
+        findings.append(("P7", "HARD", line, "the stated changed-file set is not what the pinned commit "
+                         "{} changed against its first-parent base {} ({}); the actual changed set is: {}".format(
+                             head[:12], base[:12], "; ".join(parts),
+                             ", ".join(sorted(actual)) if actual else "(no files)"), _excerpt(sentence)))
+    return findings
+
+
+def p7_lowered(findings, wider):
+    """The comparison findings, each HARD one lowered to ADVISORY when the brief's scope may be wider than
+    the pinned commit (`wider`, p7_wider_scope's reason, not None): the claim may describe the whole
+    reviewed scope, which one commit's first-parent diff cannot answer, so the difference is printed, not
+    refused. With `wider` None they are returned unchanged."""
+    if wider is None:
+        return findings
+    return [(rule, "ADVISORY" if severity == "HARD" else severity, line,
+             "a whole-change claim in a review brief whose scope may be wider than the pinned commit ({}), "
+             "so the difference is printed, not refused: {}".format(wider, message), excerpt)
+            for rule, severity, line, message, excerpt in findings]
+
+
+def p7_pin_values(names):
+    """[(line, value)] for every pin value the brief carries, of any kind: the BRIEF-PIN and REVIEWED
+    HEAD lines (names.pins) and the look-alike pin lines (names.near_pins), whether or not a BRIEF-PIN
+    line exists."""
+    return list(names.pins) + list(names.near_pins)
+
+
+def p7_pin(names, repo):
+    """The one pin P7 reads: a brief whose pin values (p7_pin_values) are a single value gives that value
+    (changed_set resolves it); when they hold more than one value, every one is resolved, and unless all
+    resolve to one full commit id the outcome is CannotEvaluate, never a choice between them; that id is
+    returned."""
+    values = _first_seen(p7_pin_values(names))
+    if len(set(value for _, value in values)) == 1:
+        return values[0][1]
+    heads = []
+    for line, value in values:
+        try:
+            heads.append((line, value, _pin_changeset.resolve(repo, value)))
+        except _pin_changeset.ChangesetError as exc:
+            raise CannotEvaluate("line {}: the pin {} cannot be resolved: {}".format(line, value, exc))
+    if len(set(head for _, _, head in heads)) != 1:
+        named = ", ".join("line {}: {} = {}".format(line, value, head[:12]) for line, value, head in heads)
+        raise CannotEvaluate("the pin lines name different commits ({}): a changed-files claim is "
+                             "compared with one commit only".format(named))
+    return heads[0][2]
+
+
+def rule_p7(names, row, repo):
+    """P7 HARD, for every family, in a review brief only (p7_review_brief; a fix or draft brief is never
+    judged): a prose sentence stating the WHOLE set of changed files (p7_claim's closed grammar) whose set
+    is not what the brief's pinned commit changed against its first parent (the empty tree for a root
+    commit), read through tools/_pin_changeset.py's hardened git reads. A totalizing claim about a PR,
+    branch, series or train is ADVISORY and never compared: one commit's first-parent diff cannot check it.
+    An item counts as a path only when it holds a `/` or is a code span (p7_pathlike), so a claim holding a
+    bare root name is out of scope and quiet; a compared item is normalised (p7_normal). A recognized claim
+    with an item that cannot be placed as one repository-relative path, with no pin line or no repository,
+    whose pin values (p7_pin_values, look-alike pin lines included) do not all name one commit, or whose
+    pinned commit cannot be read (any failed git read: an unresolved pin, malformed commit bytes, an absent
+    tree or first parent) is CannotEvaluate, never a pass, never an empty set and never a fallback guess,
+    in every review brief. Only after those checks and the comparison, in a brief whose scope may be wider
+    than the pinned commit (p7_wider_scope), is each HARD comparison finding lowered to ADVISORY
+    (p7_lowered); an accurate claim there has no finding."""
+    if not p7_review_brief(names):
+        return []
+    claims, findings = [], []
+    for line, sentence in p7_sentences(names):
+        read = p7_claim(sentence)
+        if read is None:
+            continue
+        kind, items, count = read
+        if kind == "advisory":
+            findings.append(("P7", "ADVISORY", line, "a whole-change claim about a PR, branch, series or "
+                             "train: the pinned commit's first-parent diff cannot check it, so it is "
+                             "printed, not compared", _excerpt(sentence)))
+            continue
+        for item, atomic in items:
+            reason = p7_unplaceable(item, atomic)
+            if reason is not None:
+                raise CannotEvaluate("line {}: a changed-files claim holds an item that cannot be placed "
+                                     "as one repository-relative path ({}): {}".format(
+                                         line, reason, _excerpt(item)))
+        claims.append((line, frozenset(p7_normal(item) for item, _ in items), count, sentence))
+    if not claims:
+        return findings
+    if not names.pins:
+        raise CannotEvaluate("line {}: a changed-files claim but no REVIEWED HEAD or BRIEF-PIN line to "
+                             "check it against".format(claims[0][0]))
+    if repo is None:
+        raise CannotEvaluate("the brief states its changed files but no repository was given to read the "
+                             "pinned commit from")
+    pin = p7_pin(names, repo)
+    try:
+        base, head, actual = _pin_changeset.changed_set(repo, pin)
+    except _pin_changeset.ChangesetError as exc:
+        raise CannotEvaluate("the pinned commit's changed files cannot be read: {}".format(exc))
+    return findings + p7_lowered(p7_compare(claims, actual, base, head), p7_wider_scope(names))
+
+
 def preflight(text, row, repo, raw):
-    """The preflight findings (P1 to P6) for a brief's text and its family's row; they apply to every family. `raw`
+    """The preflight findings (P1 to P7) for a brief's text and its family's row; they apply to every family. `raw`
     is the text before decode_brief removed format characters, which the P5 cure reads."""
     names = PreflightText(text, raw)
     return rule_p1(names, row, repo) + rule_p2(names, row, repo) + rule_p3(names, row, repo) + rule_p4(
-        names, row, repo) + rule_p5(names, row, repo) + rule_p6(names, row, repo)
+        names, row, repo) + rule_p5(names, row, repo) + rule_p6(names, row, repo) + rule_p7(names, row, repo)
 
 
 def can_execute(row):
@@ -3108,7 +3892,7 @@ COMMAND_LINE_HINT = ("to ask about a command line, name the function, row or ent
                      "embedding the command (for example: quote the def line of X, not the line that runs git push)")
 
 
-PREFLIGHT_RULES = frozenset(("P1", "P2", "P3", "P4", "P5", "P6"))
+PREFLIGHT_RULES = frozenset(("P1", "P2", "P3", "P4", "P5", "P6", "P7"))
 # added to a REFUSE line when a P6 hit is among the hard hits
 INPUT_HINT = "; provide each missing declared input, or correct its INPUT line, before sending"
 
@@ -3139,6 +3923,12 @@ def run(brief_path, family, table_path, scoped=True, repo=None):
     elif code == EXIT_REFUSE and set(hard) == {"P6"}:
         print("REFUSE: family {}: the brief declares an input that does not exist on this host ({} hard hit(s): "
               "P6 x{}){}".format(family, len(hard), len(hard), INPUT_HINT))
+    elif code == EXIT_REFUSE and "P7" in hard:
+        print("REFUSE: family {}: the brief states a whole changed-file set that is not what its pinned commit "
+              "changed against its first parent ({} hard hit(s): {}); correct the sentence to the actual set "
+              "each P7 line prints, or drop the claim{}".format(
+                  family, len(hard), ", ".join("{} x{}".format(r, hard.count(r)) for r in sorted(set(hard))),
+                  missing_input))
     elif code == EXIT_REFUSE:
         print("REFUSE: family {}: the brief names an input the family cannot read ({} hard hit(s): {}); name "
               "paths under the declared workdir, or state a path the worker must not use as a prohibition{}".format(
@@ -4129,6 +4919,834 @@ def _child_commit(repo, commit):
                            "maintenance.auto=false", "commit-tree", commit + "^{tree}", "-p", commit, "-m", "child"],
                           check=True, capture_output=True, timeout=60, env=env)
     return made.stdout.decode("ascii").strip()
+
+
+def _p7_repo(base):
+    """(repo, ids) of a fixture repository exercising every P7 git shape: a root commit (c1: src/a.py,
+    docs/b.md), a child changing src/a.py and adding tools/c.py (c2), a rename of docs/b.md to
+    docs/renamed.md (c3), an empty child (c4), a child adding tools/no.py (c5), a side child of the
+    root adding side.md (side), a merge of c5 and side whose tree adds side.md (merge), a child of c5
+    adding `sp ace.md` and naive.md (c6), a chain of children of c5 adding .github/x (dotdir), then
+    tools/a.py (dotslash), then .gitattributes (dotfile), a fabricated commit whose named parent is
+    absent (absent), and a replace ref mapping c1 to an empty root (emptyroot), which only an
+    unhardened read honours; the working tree is left dirty (src/a.py modified, x.md untracked) so an
+    object-store read and a working-tree read can be told apart."""
+    repo = base / "repo"
+    os.makedirs(repo / "docs")
+    env = _git_fixture_env.git_fixture_env(
+        GIT_AUTHOR_NAME="fixture", GIT_AUTHOR_EMAIL="fixture@example.invalid",
+        GIT_COMMITTER_NAME="fixture", GIT_COMMITTER_EMAIL="fixture@example.invalid")
+
+    def fixture_git(*args, stdin=None):
+        done = subprocess.run(["git", "-C", str(repo), "-c", "gc.auto=0", "-c", "gc.autoDetach=false",
+                               "-c", "maintenance.auto=false", *args],
+                              check=True, capture_output=True, timeout=60, env=env, input=stdin)
+        return done.stdout.decode("utf-8", "replace").strip()
+
+    def write(path, text):
+        os.makedirs((repo / path).parent, exist_ok=True)
+        with open(repo / path, "w", encoding="utf-8") as handle:
+            handle.write(text)
+
+    subprocess.run(["git", "-c", "gc.auto=0", "-c", "gc.autoDetach=false", "-c", "maintenance.auto=false",
+                    "init", "-q", str(repo)], check=True, capture_output=True, timeout=60, env=env)
+    write("src/a.py", "one\n")
+    write("docs/b.md", "bee\n")
+    fixture_git("add", "-A")
+    fixture_git("commit", "-q", "-m", "c1")
+    ids = dict(c1=fixture_git("rev-parse", "HEAD"))
+    write("side.md", "side\n")
+    fixture_git("add", "side.md")
+    fixture_git("commit", "-q", "-m", "side")
+    ids["side"] = fixture_git("rev-parse", "HEAD")
+    fixture_git("reset", "-q", "--hard", ids["c1"])
+    write("src/a.py", "two\n")
+    write("tools/c.py", "cee\n")
+    fixture_git("add", "-A")
+    fixture_git("commit", "-q", "-m", "c2")
+    ids["c2"] = fixture_git("rev-parse", "HEAD")
+    fixture_git("mv", "docs/b.md", "docs/renamed.md")
+    fixture_git("commit", "-q", "-m", "c3")
+    ids["c3"] = fixture_git("rev-parse", "HEAD")
+    ids["c4"] = fixture_git("commit-tree", ids["c3"] + "^{tree}", "-p", ids["c3"], "-m", "c4")
+    fixture_git("reset", "-q", "--hard", ids["c4"])
+    write("tools/no.py", "quiet\n")
+    fixture_git("add", "tools/no.py")
+    fixture_git("commit", "-q", "-m", "c5")
+    ids["c5"] = fixture_git("rev-parse", "HEAD")
+    write("side.md", "side\n")
+    fixture_git("add", "side.md")
+    ids["merge"] = fixture_git("commit-tree", fixture_git("write-tree"), "-p", ids["c5"], "-p", ids["side"],
+                               "-m", "merge")
+    fixture_git("reset", "-q", ids["c5"])
+    write("sp ace.md", "space\n")
+    write("naive.md", "plain\n")
+    fixture_git("add", "sp ace.md", "naive.md")
+    ids["c6"] = fixture_git("commit-tree", fixture_git("write-tree"), "-p", ids["c5"], "-m", "c6")
+    fixture_git("reset", "-q", "--hard", ids["c5"])
+    parent = ids["c5"]
+    for name, path in (("dotdir", ".github/x"), ("dotslash", "tools/a.py"), ("dotfile", ".gitattributes")):
+        write(path, name + "\n")
+        fixture_git("add", path)
+        ids[name] = parent = fixture_git("commit-tree", fixture_git("write-tree"), "-p", parent, "-m", name)
+    fixture_git("reset", "-q", "--hard", ids["c5"])
+    empty = fixture_git("hash-object", "-t", "tree", "--stdin", stdin=b"")
+    fabricated = ("tree {}\nparent {}\nauthor fixture <fixture@example.invalid> 1 +0000\n"
+                  "committer fixture <fixture@example.invalid> 1 +0000\n\nabsent parent\n".format(
+                      empty, "a" * 40)).encode("ascii")
+    ids["absent"] = fixture_git("hash-object", "-t", "commit", "-w", "--stdin", "--literally",
+                                stdin=fabricated)
+    no_tree = ("tree {}\nparent {}\nauthor fixture <fixture@example.invalid> 1 +0000\n"
+               "committer fixture <fixture@example.invalid> 1 +0000\n\nabsent tree\n".format(
+                   "b" * 40, ids["c1"])).encode("ascii")
+    ids["notree"] = fixture_git("hash-object", "-t", "commit", "-w", "--stdin", "--literally", stdin=no_tree)
+    ids["emptyroot"] = fixture_git("commit-tree", empty, "-m", "empty root")
+    fixture_git("update-ref", "refs/replace/" + ids["c1"], ids["emptyroot"])
+    write("src/a.py", "dirty\n")
+    write("x.md", "untracked\n")
+    return repo, ids
+
+
+def _p7_selftest(flip, flip_record):
+    """The P7 rows: the closed grammar, the refused list, the comparison outcomes, the hardened git reads
+    and their revert flips, run by the self-test with its flip helper and the module-level check (a direct
+    call at every row, which the execution checker's static layer resolves); flip_record records each
+    helper-module flip so revert/every-flip-ran counts it."""
+    def changeset_flip(cases, want_patched, **replacements):
+        """flip over the hardened read helper: each named attribute of tools/_pin_changeset.py is
+        replaced for the patched run, then restored."""
+        before = [outcome() for outcome in cases]
+        saved = dict((name, getattr(_pin_changeset, name)) for name in replacements)
+        try:
+            for name, value in replacements.items():
+                setattr(_pin_changeset, name, value)
+            after = [outcome() for outcome in cases]
+        finally:
+            for name, value in saved.items():
+                setattr(_pin_changeset, name, value)
+        flip_record(sorted(replacements))
+        if before == want_patched:   # a fixture the guard never changed proves nothing
+            FAILURES.append("revert of %s: the unpatched outcome already equals the patched one"
+                            % ", ".join(sorted(replacements)))
+        return (before, after), (before, want_patched)
+
+    base = Path(tempfile.mkdtemp(prefix="aiqt-brief-p7-"))
+    try:
+        repo, ids = _p7_repo(base)
+        table = parse_table(TABLE_FIXTURE.encode("utf-8"))
+
+        review = "TASK: review the pinned commit.\n"   # P7 judges review briefs only
+
+        def p7(text, rev, family="alpha", scoped=True, task=review):
+            return _outcome("BRIEF-PIN {}\n{}\n{}\n".format(rev, task, text), family, scoped, repo)
+
+        def p7_lines(text, rev):
+            """(exit code, [(rule, severity, line)] of the P7 findings) for a brief body at a pin."""
+            code, findings = evaluate("BRIEF-PIN {}\n{}\n{}\n".format(rev, review, text).encode("utf-8"),
+                                      "alpha", table, True, repo)
+            return code, [(rule, severity, line) for rule, severity, line, _, _ in findings
+                          if rule == "P7"]
+
+        def p7_messages(text, rev):
+            """(exit code, the P7 finding messages) for a brief body at a pin."""
+            code, findings = evaluate("BRIEF-PIN {}\n{}\n{}\n".format(rev, review, text).encode("utf-8"),
+                                      "alpha", table, True, repo)
+            return code, [message for rule, _, _, message, _ in findings if rule == "P7"]
+
+        # every accepted form, exact (reordered, duplicated, code-span, emphasised, labelled, counted,
+        # limited): no finding
+        check("preflight/p7-exact-quiet", [p7(text, ids["c2"]) for text in (
+            "The change touches src/a.py and tools/c.py.",
+            "This commit modifies tools/c.py, src/a.py.",
+            "The change touches src/a.py, src/a.py, and tools/c.py.",
+            "The change touches only `src/a.py` and `tools/c.py`.",
+            "The diff is limited to *src/a.py* and *tools/c.py*.",
+            "Changed files: src/a.py, tools/c.py.",
+            "Files changed: src/a.py and tools/c.py.",
+            "The only files changed are src/a.py and tools/c.py.",
+            "The complete set of changed files is src/a.py and tools/c.py.",
+            "The change touches exactly two files: src/a.py and tools/c.py.",
+            "The change touches 2 files: src/a.py and tools/c.py.")], [(0, [])] * 11)
+        # each accepted form with one changed path omitted: HARD
+        omitted = [lambda text=text: p7(text, ids["c2"]) for text in (
+            "The change touches src/a.py.",
+            "The change touches only src/a.py.",
+            "Changed files: src/a.py.",
+            "The only files changed are src/a.py.",
+            "The change touches exactly one file: src/a.py.",
+            "The patch is limited to src/a.py.",
+            "The change adds only src/a.py.")]
+        check("preflight/p7-omission-hard", [case() for case in omitted], [(1, [("P7", "HARD")])] * 7)
+        # a declared path present at the pin but unchanged by it: HARD
+        unchanged = lambda: p7("The change touches src/a.py, tools/c.py and docs/b.md.", ids["c2"])  # noqa: E731
+        check("preflight/p7-unchanged-declared-hard", unchanged(), (1, [("P7", "HARD")]))
+        # the finding names both differences and prints the full actual set
+        code, messages = p7_messages("The change touches src/a.py and docs/b.md.", ids["c2"])
+        check("preflight/p7-both-differences-reported",
+              (code, len(messages), "changed but not declared: tools/c.py" in messages[0],
+               "declared but unchanged: docs/b.md" in messages[0], "src/a.py, tools/c.py" in messages[0]),
+              (1, 1, True, True, True))
+        # sentences are compared independently: the stale one is identified, the accurate one is quiet
+        check("preflight/p7-stale-sentence-identified",
+              p7_lines("The change touches src/a.py and tools/c.py.\n\nThe change touches src/a.py.", ids["c2"]),
+              (1, [("P7", "HARD", 6)]))
+        # a stated count just below, at and above the two distinct declared paths (set itself accurate)
+        check("preflight/p7-count-boundary", [p7(
+            "The change touches exactly {} files: src/a.py and tools/c.py.".format(count), ids["c2"])
+            for count in ("one", "two", "three")],
+            [(1, [("P7", "HARD")]), (0, []), (1, [("P7", "HARD")])])
+        # the empty-set claim: quiet on an empty diff, HARD on a nonempty one
+        check("preflight/p7-empty-claim", [p7("The change touches no files.", ids["c4"]),
+                                           p7("The change touches no files.", ids["c2"])],
+              [(0, []), (1, [("P7", "HARD")])])
+        # every refused form of the closed list: no claim, no finding, no git requirement
+        refused = [lambda text=text: p7(text, ids["c2"]) for text in (
+            "The change touches files including src/a.py.",
+            "The change does not touch src/a.py.",
+            "The change touches src/a.py, not tools/c.py.",
+            "The change touches only src/a.py and will touch tools/c.py later.",
+            "The change touches src/a.py and tools/c.py if the rebase lands.",
+            "Did the change touch src/a.py?",
+            "The change touches src/a.py?",
+            "The previous commit touched src/a.py.",
+            "The tests touch src/a.py.",
+            "Review src/a.py and tools/c.py.",
+            "Read docs/b.md for context.",
+            "The fix adds src/a.py.",
+            "Among the changed files are src/a.py.",
+            "The change should touch only src/a.py.")]
+        check("preflight/p7-refused-quiet", [case() for case in refused], [(0, [])] * 14)
+        # a path holding `no` is one word and never a negation (the prototype defect)
+        no_path_stale = lambda: p7("The change touches tools/no.py and src/a.py.", ids["c5"])  # noqa: E731
+        check("preflight/p7-path-word-claim", [p7("The change touches tools/no.py.", ids["c5"]),
+                                               no_path_stale()],
+              [(0, []), (1, [("P7", "HARD")])])
+        # a `;` ends the sentence, so the claim does not leak into the next clause; a soft wrap joins
+        check("preflight/p7-sentence-bounds",
+              [p7("The change touches src/a.py; tools/c.py is new.", ids["c2"]),
+               p7("The change touches src/a.py\nand tools/c.py.", ids["c2"])],
+              [(1, [("P7", "HARD")]), (0, [])])
+        # a claim inside a fence, a blockquote, an HTML comment or an indented code line is never read
+        fenced = lambda: p7("```\nThe change touches src/a.py.\n```", ids["c2"])  # noqa: E731
+        check("preflight/p7-quoted-ignored", [fenced(),
+                                              p7("> The change touches src/a.py.", ids["c2"]),
+                                              p7("<!-- The change touches src/a.py. -->", ids["c2"]),
+                                              p7("    The change touches src/a.py.", ids["c2"])],
+              [(0, [])] * 4)
+        # an unplaceable item inside an otherwise path-only list: exit 2, never a pass
+        glob_claim = lambda: p7("The change touches docs/*.md and src/a.py.", ids["c2"])  # noqa: E731
+        check("preflight/p7-unplaceable-cannot-evaluate",
+              [glob_claim()] + [p7(text, ids["c2"]) for text in (
+                  "The change touches `a?.py`.",
+                  "The change touches `<path>`.",
+                  "The change touches docs/.")],
+              ["CannotEvaluate"] * 4)
+        # a list that is not a pure path list claims nothing: a first plain-word item, a plain word
+        # among the paths, or a colon and a description after the list are all quiet
+        docs_claim = lambda: p7("The change touches the docs.", ids["c2"])  # noqa: E731
+        colon_claim = lambda: p7("The commit changes tools/gen_draft_site.py: it refuses x.", ids["c2"])  # noqa: E731
+        check("preflight/p7-plain-list-quiet",
+              [docs_claim(), colon_claim(),
+               p7("The change touches src/a.py and the docs.", ids["c2"]),
+               p7("The diff touches 8 files: the tool, the gates manifest and 6 generated files.",
+                  ids["c2"]),
+               p7("This revision changed src/a.py against its parent.", ids["c2"])],
+              # the colon fixture names a path absent at the fixture pin, which P3 prints as advisory
+              [(0, []), (0, [("P3", "ADVISORY")]), (0, []), (0, []), (0, [])])
+        # a totalizing claim about a PR or branch: ADVISORY, never compared, never HARD
+        series = lambda: p7("The PR touches src/a.py.", ids["c2"])  # noqa: E731
+        check("preflight/p7-series-advisory", [series(),
+                                               p7("The branch touches src/a.py and tools/c.py.", ids["c2"])],
+              [(0, [("P7", "ADVISORY")])] * 2)
+        # a recognized claim with no pin line: exit 2; no claim and no pin: no new requirement
+        no_pin = lambda: _outcome(review + "\nThe change touches src/a.py.\n", "alpha", True, repo)  # noqa: E731
+        check("preflight/p7-no-pin-cannot-evaluate",
+              [no_pin(), _outcome("Nothing is stated here.\n", "alpha", True, repo)],
+              ["CannotEvaluate", (0, [])])
+        # P7 runs for every family, scoped and unscoped
+        check("preflight/p7-families", [p7("The change touches src/a.py.", ids["c2"], family)
+                                        for family in ("alpha", "beta", "gamma")]
+              + [p7("The change touches src/a.py.", ids["c2"], "gamma", False)],
+              [(1, [("P7", "HARD")])] * 4)
+        # run() prints a P7-specific REFUSE summary for a P7 failure
+        with open(base / "table.toml", "w", encoding="utf-8") as handle:
+            handle.write(TABLE_FIXTURE)
+        with open(base / "stale.md", "w", encoding="utf-8") as handle:
+            handle.write("BRIEF-PIN {}\n{}\nThe change touches src/a.py.\n".format(ids["c2"], review))
+        printed = io.StringIO()
+        with contextlib.redirect_stdout(printed):
+            run_code = run(str(base / "stale.md"), "gamma", str(base / "table.toml"), True, repo)
+        check("preflight/p7-run-refuse-line",
+              (run_code, "REFUSE: family gamma: the brief states a whole changed-file set"
+               in printed.getvalue()), (1, True))
+        # a merge commit diffs against its FIRST parent only
+        merged = lambda: p7("The change touches `side.md`.", ids["merge"])  # noqa: E731
+        check("preflight/p7-first-parent-merge", merged(), (0, []))
+        # a root commit diffs against the empty tree; P3's own softer read honours the planted replace
+        # ref at c1 and prints src/a.py and docs/b.md as missing there, which also shows the two readings
+        # are separate
+        root_exact = lambda: p7("The change touches src/a.py and docs/b.md.", ids["c1"])  # noqa: E731
+        check("preflight/p7-root-empty-tree", [root_exact(), p7("The change touches src/a.py.", ids["c1"])],
+              [(0, [("P3", "ADVISORY")]), (1, [("P3", "ADVISORY"), ("P7", "HARD")])])
+        # a named parent whose object is absent is never read as a root commit
+        absent = lambda: p7("The change touches no files.", ids["absent"])  # noqa: E731
+        check("preflight/p7-absent-parent-cannot-evaluate", absent(), "CannotEvaluate")
+        # a planted replace ref does not change the hardened reads
+        replaced = lambda: p7("The change touches src/a.py and tools/c.py.", ids["c2"])  # noqa: E731
+        check("preflight/p7-replace-immune", replaced(), (0, []))
+        # a rename contributes both its paths (--no-renames); P3 prints the renamed-away path as advisory
+        rename_exact = lambda: p7("The change touches docs/b.md and docs/renamed.md.", ids["c3"])  # noqa: E731
+        check("preflight/p7-rename-both-paths", [rename_exact(),
+                                                 p7("The change touches docs/renamed.md.", ids["c3"])],
+              [(0, [("P3", "ADVISORY")]), (1, [("P7", "HARD")])])
+        # a path with a space and a bare root name, each a code span: exact -z membership
+        check("preflight/p7-exotic-paths", [p7("The change touches `sp ace.md` and `naive.md`.", ids["c6"]),
+                                            p7("The change touches `sp ace.md`.", ids["c6"])],
+              [(0, []), (1, [("P7", "HARD")])])
+        # the dirty working tree and untracked files are never read: the committed comparison answers
+        check("preflight/p7-working-tree-ignored", p7("The change touches src/a.py and tools/c.py.", ids["c2"]),
+              (0, []))
+        # a caller's GIT_DIR cannot point the read at another repository
+        def foreign_dir():
+            with _environ(GIT_DIR=str(base / "elsewhere"), GIT_OBJECT_DIRECTORY=str(base / "elsewhere")):
+                return p7("The change touches src/a.py and tools/c.py.", ids["c2"])
+        check("preflight/p7-foreign-git-env", foreign_dir(), (0, []))
+        # a leading dot is never stripped from an item: each form, accurate (quiet) and inaccurate (HARD)
+        dot_cases = dict((form, [lambda text=text, rev=rev: p7(text, ids[rev]) for text in (
+            "The change touches {}.".format(item), "The change touches {} and src/a.py.".format(item))])
+            for form, item, rev in (("dir", ".github/x", "dotdir"), ("slash", "./tools/a.py", "dotslash")))
+        check("preflight/p7-leading-dot-items",
+              [[case() for case in dot_cases[form]] for form in ("dir", "slash")],
+              [[(0, []), (1, [("P7", "HARD")])]] * 2)
+        # sentences that are not claims about the pinned commit: a fix-subject sentence, a bare basename
+        # absent at the root, an abbreviation; all quiet (P3 prints the paths absent at c2)
+        fix_sentence = lambda: p7("The fix changes tools/a.py. It refuses x.", ids["c2"])  # noqa: E731
+        basename = lambda: p7("The commit only adds _pin_changeset.py.", ids["c2"])  # noqa: E731
+        abbreviation = lambda: p7("The fix only adds e.g. tools/_pin_changeset.py.", ids["c2"])  # noqa: E731
+        node = lambda: p7("The change touches only Node.js.", ids["c2"])  # noqa: E731
+        check("preflight/p7-not-a-claim-quiet", [fix_sentence(), basename(), abbreviation(), node()],
+              [(0, [("P3", "ADVISORY")]), (0, []), (0, [("P3", "ADVISORY")]), (0, [])])
+        # P7 judges review briefs only: the same inaccurate claim is HARD under a TASK: line that begins
+        # with review (any case, emphasis allowed) and quiet under a fix or draft TASK: line, under no
+        # TASK: line, under a review TASK: line only inside a fence, and when a second TASK: line is not
+        # a review one; a fix brief's whole-set wording about work still to be done is quiet
+        stale_claim = "The change touches src/a.py."
+        task_cases = [lambda task=task, text=text: p7(text, ids["c2"], task=task) for task, text in (
+            (review, stale_claim),
+            ("**TASK:** Review the pinned commit.\n", stale_claim),
+            ("TASK: fix the pinned commit.\n", stale_claim),
+            ("TASK: draft a new rule.\n", stale_claim),
+            ("", stale_claim),
+            ("```\nTASK: review the pinned commit.\n```\n", stale_claim),
+            (review + "TASK: fix the pinned commit.\n", stale_claim),
+            ("TASK: fix the pinned commit.\n", "The change touches only tools/a.py."),
+            ("TASK: fix the pinned commit.\n", "Changed files: tools/a.py"))]
+        check("preflight/p7-review-brief-only", [case() for case in task_cases],
+              [(1, [("P7", "HARD")])] * 2 + [(0, [])] * 5 + [(0, [("P3", "ADVISORY")])] * 2)
+        # a TASK: line written as a list item (-, +, *, 1., 2)) is read like a plain one, for both tests:
+        # a review list item makes the brief judged, and a fix list item beside a review line leaves it
+        # unjudged, so the fix brief's accurate whole-set sentence is quiet (P3 prints tools/a.py, absent
+        # at c2)
+        fix_claim = "The change touches only tools/a.py."
+        list_cases = [lambda task=task, text=text: p7(text, ids["c2"], task=task) for task, text in (
+            ("- TASK: review the pinned commit.\n", stale_claim),
+            ("+ TASK: review the pinned commit.\n", stale_claim),
+            ("1. TASK: review the pinned commit.\n", stale_claim),
+            ("2) TASK: review the pinned commit.\n", stale_claim),
+            (review + "- TASK: fix the pinned commit.\n", fix_claim),
+            (review + "1. TASK: fix the pinned commit.\n", fix_claim))]
+        # (the marker cap: two and three markers are skipped, a fourth leaves the line unread)
+        check("preflight/p7-list-item-task-line", [case() for case in list_cases] + [
+            p7(stale_claim, ids["c2"], task=marks + "TASK: review the pinned commit.\n")
+            for marks in ("* ", "- 1. ", "- 1. + ", "- 1. + - ")],
+            [(1, [("P7", "HARD")])] * 4 + [(0, [("P3", "ADVISORY")])] * 2 + [(1, [("P7", "HARD")])] * 3
+            + [(0, [])])
+        # a TASK: line nested as a list item four or more columns in (1. Steps: then four spaces and
+        # - TASK: ...) is a list item, not indented code, so it is read: a nested fix line leaves the
+        # brief unjudged and a nested review line makes it judged. The item's text column bounds it:
+        # under "- " (text at column 2) five spaces (three past it) are an item, six (four past it) are
+        # continuation text and stay unread, as does a line after a blank line or under no list line
+        nested_cases = [lambda task=task, text=text: p7(text, ids["c2"], task=task) for task, text in (
+            (review + "1. Steps:\n    - TASK: fix the pinned commit.\n", fix_claim),
+            (review + "- Steps:\n     - TASK: fix the pinned commit.\n", fix_claim),
+            (review + "- Steps:\n  - More:\n      - TASK: fix the pinned commit.\n", fix_claim),
+            ("1. Steps:\n    - TASK: review the pinned commit.\n", stale_claim),
+            (review + "1. Steps:\n\tTASK: fix the pinned commit.\n", stale_claim))]
+        check("preflight/p7-nested-task-line", [case() for case in nested_cases] + [
+            p7(stale_claim, ids["c2"], task=review + task) for task in (
+                "- Steps:\n      - TASK: fix the pinned commit.\n",
+                "1. Steps:\n\n    - TASK: fix the pinned commit.\n",
+                "Steps:\n    - TASK: fix the pinned commit.\n",
+                "-    Steps:\n    - TASK: fix the pinned commit.\n")],
+            [(0, [("P3", "ADVISORY")])] * 3 + [(1, [("P7", "HARD")])] * 2 + [(1, [("P7", "HARD")])] * 4)
+        # a continuation line opening with `#` ends the open list only when it is a CommonMark ATX heading
+        # (one to six `#`, then a space, a tab or the end of the line) at most three columns past the open
+        # item's text: under #9 work:, seven `#`, or a # line four columns past the text (six spaces or
+        # two tabs under "- ", eight spaces under a nested "  - ") the nested fix line is read; under
+        # # Notes, #<tab>Notes, a bare # or six `#` at the text column, or # Notes two or three columns
+        # past it (seven spaces under the nested item), it is not
+        hash_line = "- Steps for\n{}\n    - TASK: fix the pinned commit.\n"
+        nested_hash = "- Steps:\n  - More:\n{}\n      - TASK: fix the pinned commit.\n"
+        hash_cases = [lambda text=text: p7(fix_claim, ids["c2"], task=review + hash_line.format(text))
+                      for text in ("  #9 work:", "  ####### x")]
+        deep_hash_cases = [lambda task=task: p7(fix_claim, ids["c2"], task=review + task) for task in (
+            hash_line.format("      # x"), hash_line.format("\t\t# x"), nested_hash.format("        # x"))]
+        check("preflight/p7-nested-hash-line", [case() for case in hash_cases + deep_hash_cases] + [
+            p7(stale_claim, ids["c2"], task=review + task) for task in [hash_line.format(text) for text in (
+                "  # Notes", "  #", "  ###### x", "  #\tNotes", "    # Notes", "     # Notes")]
+            + [nested_hash.format("       # x")]],
+            [(0, [("P3", "ADVISORY")])] * 5 + [(1, [("P7", "HARD")])] * 7)
+        # a task-list item (- [ ], - [x], 1. [X]) is a list item: its checkbox is skipped before the label;
+        # a bracket that is not a checkbox, or a checkbox with no space after it, leaves the line unread
+        box_cases = [lambda task=task, text=text: p7(text, ids["c2"], task=task) for task, text in (
+            (review + "- [ ] TASK: fix the pinned commit.\n", fix_claim),
+            (review + "1. [X] TASK: fix the pinned commit.\n", fix_claim),
+            ("- [x] TASK: review the pinned commit.\n", stale_claim))]
+        check("preflight/p7-checkbox-task-line", [case() for case in box_cases] + [
+            p7(stale_claim, ids["c2"], task=review + task) for task in (
+                "- [y] TASK: fix the pinned commit.\n", "- [ ]TASK: fix the pinned commit.\n",
+                "[ ] TASK: fix the pinned commit.\n")],
+            [(0, [("P3", "ADVISORY")])] * 2 + [(1, [("P7", "HARD")])] * 4)
+        # a review whose TASK: line names a PR, branch, range or base, or a brief with a BRIEF-BASE line:
+        # one commit's first-parent diff cannot answer a whole-set claim there, so it is ADVISORY, never
+        # HARD (the accurate claim for c1..c3 included; P3 prints docs/b.md, renamed away at c3); one
+        # commit id, the same id twice, or two 6-character hex words still leave the claim judged
+        span_claim = "The change touches src/a.py, tools/c.py, docs/b.md and docs/renamed.md."
+        pr_task = "TASK: review PR 9 at {} against main {}.\n".format(ids["c3"][:12], ids["c1"][:12])
+        wide_cases = [lambda task=task, text=text, rev=rev: p7(text, ids[rev], task=task)
+                      for task, text, rev in (
+                          (pr_task, span_claim, "c3"),
+                          ("BRIEF-BASE: {}\n{}".format(ids["c1"], pr_task), span_claim, "c3"),
+                          ("BRIEF-BASE: {}\n{}".format(ids["c1"], review), stale_claim, "c2"),
+                          ("**TASK:** Review PR 9.\n", stale_claim, "c2"),
+                          ("TASK: review #9.\n", stale_claim, "c2"),
+                          ("TASK: review the branch.\n", stale_claim, "c2"),
+                          ("TASK: review {}..{}.\n".format(ids["c1"][:7], ids["c2"][:7]), stale_claim, "c2"),
+                          ("TASK: review {} to {}.\n".format(ids["c1"][:7], ids["c2"][:7]), stale_claim, "c2"))]
+        check("preflight/p7-wider-scope-advisory", [case() for case in wide_cases] + [
+            p7(stale_claim, ids["c2"], task="TASK: review {}.\n".format(ids["c2"])),
+            p7(stale_claim, ids["c2"], task="TASK: review {} and {}.\n".format(ids["c2"], ids["c2"])),
+            p7(stale_claim, ids["c2"], task="TASK: review {} to {}.\n".format(ids["c1"][:6], ids["c2"][:6]))],
+            [(0, [("P3", "ADVISORY"), ("P7", "ADVISORY")])] * 2 + [(0, [("P7", "ADVISORY")])] * 6
+            + [(1, [("P7", "HARD")])] * 3)
+        # the wider-scope test only lowers a comparison's HARD finding: in a wider brief a claim with no
+        # pin line, a glob item or a pin whose parent is absent still exits 2, and an accurate claim has
+        # no finding at all
+        wide_task = "TASK: review PR 9.\n"
+        checked_cases = [
+            lambda: _outcome(wide_task + "\nThe change touches src/a.py.\n", "alpha", True, repo),
+            lambda: p7("The change touches docs/*.md and src/a.py.", ids["c2"], task=wide_task),
+            lambda: p7("The change touches no files.", ids["absent"], task=wide_task),
+            lambda: p7("The change touches src/a.py and tools/c.py.", ids["c2"], task=wide_task)]
+        check("preflight/p7-wider-scope-checks-first", [case() for case in checked_cases],
+              ["CannotEvaluate"] * 3 + [(0, [])])
+        # only a BRIEF-BASE label followed by a colon widens the scope; a word that begins with the same
+        # letters leaves the stale claim HARD
+        base_cases = [lambda task=task: p7(stale_claim, ids["c2"], task=task + review) for task in (
+            "Brief-based checks follow.\n",
+            "BRIEF-BASELINE: notes\n",
+            "BRIEF-BASE: {}\n".format(ids["c1"]),
+            "- **BRIEF-BASE:** {}\n".format(ids["c1"]))]
+        check("preflight/p7-brief-base-label", [case() for case in base_cases],
+              [(1, [("P7", "HARD")])] * 2 + [(0, [("P7", "ADVISORY")])] * 2)
+        # the label is a whole word, whatever separator follows it (none, a space, `=`, ` : `, a bare
+        # line), so a correct range review written BRIEF-BASE <id> is not refused; a longer word made
+        # with `-` or `_` is not the label
+        base_sep_cases = [lambda task=task: p7(stale_claim, ids["c2"], task=task + review) for task in (
+            "BRIEF-BASE {}\n".format(ids["c1"]),
+            "BRIEF-BASE = {}\n".format(ids["c1"]),
+            "BRIEF-BASE : {}\n".format(ids["c1"]),
+            "**BRIEF-BASE** {}\n".format(ids["c1"]),
+            "BRIEF-BASE\n")] + [
+            lambda: p7(span_claim, ids["c3"], task="BRIEF-BASE {}\n{}".format(ids["c1"], review))]
+        check("preflight/p7-brief-base-separator", [case() for case in base_sep_cases] + [
+            p7(stale_claim, ids["c2"], task=task + review) for task in (
+                "BRIEF-BASE-X: notes\n", "BRIEF-BASE_X: notes\n", "BRIEF-BASE2 notes\n")],
+            [(0, [("P7", "ADVISORY")])] * 5 + [(0, [("P3", "ADVISORY"), ("P7", "ADVISORY")])]
+            + [(1, [("P7", "HARD")])] * 3)
+        # an open or closed range keeps its `..` through the punctuation strip; a word of dots alone (an
+        # ellipsis) is not a range
+        range_cases = [lambda task=task: p7(stale_claim, ids["c2"], task=task) for task in (
+            "TASK: review {}..\n".format(ids["c1"][:7]),
+            "TASK: review ..{}.\n".format(ids["c2"][:7]),
+            "- TASK: review `{}..`.\n".format(ids["c1"][:7]),
+            "TASK: review {}..{}.\n".format(ids["c1"][:7], ids["c2"][:7]),
+            "TASK: review the pinned commit ...\n")]
+        check("preflight/p7-open-range-scope", [case() for case in range_cases],
+              [(0, [("P7", "ADVISORY")])] * 4 + [(1, [("P7", "HARD")])])
+        # brackets, braces, angle brackets and a leading hyphen are punctuation, so dots inside them are
+        # no range, and a path component `..` followed by `/` is a path: the stale claim stays HARD; a
+        # word ending in an ellipsis after letters is still a range, and so is ..notes (an open range);
+        # the src/../a.py line also draws a P3 advisory
+        mark_cases = [lambda task=task: p7(stale_claim, ids["c2"], task=task) for task in (
+            "TASK: review the pinned commit [...].\n",
+            "TASK: review the pinned commit <...>.\n",
+            "TASK: review the pinned commit {...}.\n")]
+        hyphen_cases = [lambda: p7(stale_claim, ids["c2"], task="TASK: review the pinned commit -...\n")]
+        path_cases = [lambda task=task: p7(stale_claim, ids["c2"], task=task) for task in (
+            "TASK: review the pinned commit (notes in ../notes.md).\n",
+            "TASK: review the pinned commit (../notes.md).\n",
+            "TASK: review the pinned commit and src/../a.py.\n")]
+        ellipsis_cases = [lambda: p7(stale_claim, ids["c2"],
+                                     task="TASK: review the pinned commit carefully...\n")]
+        check("preflight/p7-range-punctuation-path",
+              [case() for case in mark_cases + hyphen_cases + path_cases + ellipsis_cases] + [
+                  p7(stale_claim, ids["c2"], task="TASK: review the pinned commit (notes in ..notes).\n")],
+              [(1, [("P7", "HARD")])] * 6 + [(1, [("P3", "ADVISORY"), ("P7", "HARD")])]
+              + [(0, [("P7", "ADVISORY")])] * 2)
+        # one commit written as a short and a full id is one commit, so the claim is still judged; two
+        # ids where neither is a prefix of the other are two commits
+        commit_cases = [lambda task=task: p7(stale_claim, ids["c2"], task=task) for task in (
+            "TASK: review commit {} ({}).\n".format(ids["c2"][:12], ids["c2"]),
+            "TASK: review {} and {}.\n".format(ids["c2"][:7], ids["c2"][:12]),
+            "TASK: review {} and {}.\n".format(ids["c1"][:7], ids["c2"][:7]))]
+        check("preflight/p7-one-commit-two-forms", [case() for case in commit_cases],
+              [(1, [("P7", "HARD")])] * 2 + [(0, [("P7", "ADVISORY")])])
+        # a claimed path is normalised before the comparison (src/./a.py and src//a.py name src/a.py);
+        # a `..` component and a trailing `.` component stay unplaceable
+        normal_cases = [lambda text=text: p7(text, ids["c2"]) for text in (
+            "The change touches src/./a.py and tools/c.py.",
+            "The change touches src//a.py and tools/c.py.",
+            "The change touches `src//a.py` and `tools/./c.py`.")]
+        # (a plain src/. loses its `.` as sentence punctuation; the code span keeps it)
+        dot_component = lambda: p7("The change touches `src/.` and tools/c.py.", ids["c2"])  # noqa: E731
+        check("preflight/p7-normalised-path", [case() for case in normal_cases] + [
+            p7("The change touches src/./a.py.", ids["c2"]),
+            p7("The change touches src/../src/a.py and tools/c.py.", ids["c2"]), dot_component()],
+            [(0, [])] * 3 + [(1, [("P7", "HARD")]), "CannotEvaluate", "CannotEvaluate"])
+        # a TASK: line in an indented code line, a blockquote or an HTML comment is never read, so a
+        # hidden fix line leaves a review brief judged
+        hidden_cases = [lambda task=task: p7(stale_claim, ids["c2"], task=review + task) for task in (
+            "    TASK: fix the pinned commit.\n",
+            "> TASK: fix the pinned commit.\n",
+            "<!-- TASK: fix the pinned commit. -->\n")]
+        check("preflight/p7-task-line-hidden", [case() for case in hidden_cases], [(1, [("P7", "HARD")])] * 3)
+        # an item counts as a path only with a `/` or as a code span: a claim holding a bare root name,
+        # right or wrong, is out of scope and quiet; the same name as a code span is judged
+        bare_cases = [lambda text=text, rev=rev: p7(text, ids[rev]) for text, rev in (
+            ("The change touches CHANGELOG.md and tools/c.py.", "c2"),
+            ("The change touches README.md and src/a.py.", "c2"),
+            ("The change touches Makefile and src/a.py.", "c2"),
+            ("The commit only adds .gitattributes.", "dotfile"),
+            ("The commit only adds .gitattributes.", "c2"))]
+        check("preflight/p7-bare-root-name-quiet", [case() for case in bare_cases], [(0, [])] * 5)
+        span_cases = [lambda text=text, rev=rev: p7(text, ids[rev]) for text, rev in (
+            ("The commit only adds `.gitattributes`.", "dotfile"),
+            ("The commit only adds `.gitattributes`.", "c2"),
+            ("The change touches `Makefile` and src/a.py.", "c2"))]
+        check("preflight/p7-code-span-root-name-judged", [case() for case in span_cases],
+              [(0, []), (1, [("P7", "HARD")]), (1, [("P7", "HARD")])])
+        # several pin values: every one is resolved; two commits exit 2, two forms of one commit agree
+        def two_heads(first, second, claim="src/a.py and tools/c.py"):
+            """The outcome of a claim under two REVIEWED HEAD lines and no BRIEF-PIN line."""
+            return _outcome("REVIEWED HEAD: {}\nREVIEWED HEAD: {}\n{}\nThe change touches {}.\n".format(
+                first, second, review, claim), "alpha", True, repo)
+
+        def look_alike(first, second):
+            """The outcome of a claim under a REVIEWED HEAD line and a look-alike pin line, no BRIEF-PIN line."""
+            return _outcome("REVIEWED HEAD: {}\nReviewed Head: {}\n{}\nThe change touches src/a.py and "
+                            "tools/c.py.\n".format(first, second, review), "alpha", True, repo)
+        look_alike_other = lambda: look_alike(ids["c2"], ids["c5"])  # noqa: E731
+        check("preflight/p7-look-alike-pin-cannot-evaluate",
+              [look_alike_other(), look_alike(ids["c5"], ids["c2"]), look_alike(ids["c2"], ids["c2"][:9])],
+              ["CannotEvaluate", "CannotEvaluate", (0, [])])
+        abbreviated_other = lambda: two_heads(ids["c5"][:7], ids["c2"])  # noqa: E731
+        full_other = lambda: two_heads(ids["c2"], ids["c5"])  # noqa: E731
+        check("preflight/p7-differing-pins-cannot-evaluate", [abbreviated_other(), full_other()],
+              ["CannotEvaluate"] * 2)
+        check("preflight/p7-same-commit-pin-forms",
+              [two_heads(ids["c2"][:7], ids["c2"]), two_heads(ids["c2"][:7], ids["c2"], "src/a.py")],
+              [(0, []), (1, [("P7", "HARD")])])
+        # a -C on a directory that is not itself a repository fails instead of walking up to the fixture
+        nested = repo / "nested" / "deep"
+        os.makedirs(nested)
+
+        def nested_read():
+            try:
+                return sorted(_pin_changeset.changed_set(nested, ids["c2"])[2])
+            except _pin_changeset.ChangesetError:
+                return "ChangesetError"
+        check("preflight/p7-ceiling-no-walk-up", nested_read(), "ChangesetError")
+
+        # ---------- the revert flips: each guard patched out turns its fixture ----------
+        check("revert/p7-red", *flip([no_path_stale, no_pin], [(0, []), (0, [])],
+                                     rule_p7=lambda names, row, repo_: []))
+        check("revert/p7-missing-red", *flip([omitted[0]], [(0, [])],
+                                             p7_mismatch=lambda declared, actual: ([], sorted(declared - actual))))
+        check("revert/p7-extra-red", *flip([unchanged], [(0, [])],
+                                           p7_mismatch=lambda declared, actual: (sorted(actual - declared), [])))
+        original_compare = p7_compare
+
+        def union_compare(claims, actual, head_base, head):
+            merged_set = frozenset().union(*[declared for _, declared, _, _ in claims])
+            return original_compare([(claims[0][0], merged_set, None, claims[0][3])], actual,
+                                    head_base, head)
+        two_partial = lambda: p7("The change touches src/a.py.\n\nThe change touches tools/c.py.", ids["c2"])  # noqa: E731
+        check("revert/p7-union-red", *flip([two_partial], [(0, [])], p7_compare=union_compare))
+        wrong_count = lambda: p7("The change touches exactly three files: src/a.py and tools/c.py.", ids["c2"])  # noqa: E731
+        check("revert/p7-count-red", *flip([wrong_count], [(0, [])],
+                                           p7_count_mismatch=lambda count, declared: False))
+        statement_question = lambda: p7("The change touches src/a.py?", ids["c2"])  # noqa: E731
+        check("revert/p7-question-red", *flip([statement_question], [(1, [("P7", "HARD")])],
+                                              p7_question=lambda sentence: False))
+        # the narrowed path-list reading also quiets a hedge, negation, modal or conditional word that
+        # stands in or after the list (it is never path-like), so each word-set guard is flipped at the
+        # p7_refused seam, where that set alone decides; end to end these sentences stay quiet either way
+        hedged = lambda: p7_refused(p7_tokens("The change touches mainly src/a.py."))  # noqa: E731
+        check("revert/p7-hedge-red", *flip([hedged], [False], P7_HEDGES=frozenset()))
+        negated = lambda: p7_refused(p7_tokens("The change touches src/a.py, not tools/c.py."))  # noqa: E731
+        check("revert/p7-negation-red", *flip([negated], [False], P7_NEGATIONS=frozenset()))
+        check("revert/p7-negation-word-red", *flip(
+            [no_path_stale], [(0, [])],
+            p7_negated=lambda tokens: any("no" in word.lower() for word, _ in tokens)))
+        modal_tail = lambda: p7_refused(  # noqa: E731
+            p7_tokens("The change touches only src/a.py and will touch tools/c.py later."))
+        check("revert/p7-modal-red", *flip([modal_tail], [False], P7_MODALS=frozenset()))
+        conditional = lambda: p7_refused(  # noqa: E731
+            p7_tokens("The change touches src/a.py and tools/c.py if the rebase lands."))
+        check("revert/p7-conditional-red", *flip([conditional], [False], P7_CONDITIONALS=frozenset()))
+
+        def raw_sentences(names):
+            return [(number, sentence) for number, line in enumerate(names.text.split("\n"), 1)
+                    for _, sentence in sentences(line)]
+        check("revert/p7-fence-red", *flip([fenced], [(1, [("P7", "HARD")])], p7_sentences=raw_sentences))
+        check("revert/p7-unplaceable-red", *flip([glob_claim], [(1, [("P7", "HARD")])],
+                                                 p7_unplaceable=lambda item, atomic: None))
+
+        def legacy_item_words(tokens, tracked=None):
+            """the old reading: every stripped word an item, no path-list shape required"""
+            items = []
+            for word, atomic in tokens:
+                if atomic:
+                    items.append((word, True))
+                    continue
+                for piece in word.split(","):
+                    piece = piece.strip().strip(P7_STRIP)
+                    if piece and piece.lower() != "and":
+                        items.append((piece, False))
+            return items
+        # a plain bare word is no longer unplaceable on its own, so the old reading compares it and refuses
+        check("revert/p7-list-grammar-red", *flip([docs_claim, colon_claim],
+                                                  [(1, [("P7", "HARD")]), (1, [("P3", "ADVISORY"), ("P7", "HARD")])],
+                                                  p7_item_words=legacy_item_words))
+        check("revert/p7-advisory-red", *flip([series], [(0, [])], P7_SERIES_SUBJECTS=frozenset()))
+        # stripping a leading `.` again: each leading-dot form turns, one way or the other
+        both_ends = lambda piece: piece.strip(P7_STRIP)  # noqa: E731
+        check("revert/p7-leading-dot-dir-red", *flip(dot_cases["dir"], [(1, [("P7", "HARD")])] * 2,
+                                                     p7_item_strip=both_ends))
+        check("revert/p7-dot-slash-red", *flip(dot_cases["slash"], ["CannotEvaluate"] * 2,
+                                               p7_item_strip=both_ends))
+
+        def form_pathlike(item):
+            """an older recognition: a `/` or a `.` extension"""
+            stem, dot, suffix = item.rpartition(".")
+            return "/" in item or bool(dot and stem and suffix)
+        with_fix = P7_SUBJECTS | frozenset(("fix",))
+        check("revert/p7-fix-subject-red", *flip([fix_sentence], [(1, [("P3", "ADVISORY"), ("P7", "HARD")])],
+                                                 P7_SUBJECTS=with_fix))
+        # every plain word a path again: each bare root name and basename is compared and refuses
+        check("revert/p7-slash-path-red", *flip(bare_cases[:3] + [bare_cases[4], basename, node],
+                                                [(1, [("P7", "HARD")])] * 6, p7_pathlike=lambda item: True))
+        check("revert/p7-abbreviation-red", *flip([abbreviation], [(1, [("P3", "ADVISORY"), ("P7", "HARD")])],
+                                                  P7_SUBJECTS=with_fix, p7_pathlike=form_pathlike))
+        original_unplaceable = p7_unplaceable
+
+        def bare_span_unplaceable(item, atomic):
+            """the older reading: a code-span bare name without a `.` cannot be placed"""
+            if atomic and "/" not in item and "." not in item:
+                return "a bare name that cannot be placed"
+            return original_unplaceable(item, atomic)
+        check("revert/p7-code-span-root-red", *flip([span_cases[2]], ["CannotEvaluate"],
+                                                    p7_unplaceable=bare_span_unplaceable))
+        # every brief judged again: a fix, draft or unlabelled brief's claim is compared with its pin
+        check("revert/p7-review-brief-red", *flip(
+            task_cases[2:], [(1, [("P7", "HARD")])] * 5 + [(1, [("P3", "ADVISORY"), ("P7", "HARD")])] * 2,
+            p7_review_brief=lambda names: True))
+        # list markers no longer skipped: a review list item is not seen (quiet), and a fix list item no
+        # longer stops the review line, so the fix sentence is compared and refuses
+        check("revert/p7-list-item-task-red", *flip(
+            list_cases, [(0, [])] * 4 + [(1, [("P3", "ADVISORY"), ("P7", "HARD")])] * 2,
+            p7_list_marker=lambda word: False))
+        # the wider-scope test removed: every claim there is compared with the one pinned commit again
+        check("revert/p7-wider-scope-red", *flip(
+            wide_cases, [(1, [("P3", "ADVISORY"), ("P7", "HARD")])] * 2 + [(1, [("P7", "HARD")])] * 6,
+            p7_wider_scope=lambda names: None))
+        original_rule_p7 = rule_p7
+
+        def early_continue_p7(names, row_, repo_):
+            """the earlier order: a wider brief's claims printed as ADVISORY before the unplaceable-item,
+            pin-line and git-read checks, so each of those cannot-evaluate conditions passed"""
+            if p7_review_brief(names) and p7_wider_scope(names) is not None:
+                return [("P7", "ADVISORY", line, "printed, not compared", _excerpt(sentence))
+                        for line, sentence in p7_sentences(names) if p7_claim(sentence) is not None]
+            return original_rule_p7(names, row_, repo_)
+        check("revert/p7-wider-scope-order-red", *flip(
+            checked_cases, [(0, [("P7", "ADVISORY")])] * 4, rule_p7=early_continue_p7))
+        # the BRIEF-BASE test read as a bare prefix again: a word beginning with those letters widens
+        check("revert/p7-brief-base-label-red", *flip(
+            base_cases, [(0, [("P7", "ADVISORY")])] * 4,
+            p7_brief_base_line=lambda raw: p7_unmarked(raw).lstrip(" *_#`>").upper().startswith("BRIEF-BASE")))
+
+        def colon_base_line(raw):
+            """the earlier reading: the label, any closing markup, then a colon"""
+            text = p7_unmarked(raw).lstrip(" *_#`>")
+            return text[:10].upper() == "BRIEF-BASE" and text[10:].lstrip("*_`").startswith(":")
+        # a colon required after the label again: every other separator, and the correct range review
+        # written BRIEF-BASE <id>, is refused HARD
+        check("revert/p7-brief-base-separator-red", *flip(
+            base_sep_cases, [(1, [("P7", "HARD")])] * 5 + [(1, [("P3", "ADVISORY"), ("P7", "HARD")])],
+            p7_brief_base_line=colon_base_line))
+        # nested list items no longer read: each nested fix line is hidden again, so the review brief is
+        # judged and its fix-brief sentence refuses, and a nested review line leaves the brief unjudged
+        check("revert/p7-nested-task-line-red", *flip(
+            nested_cases[:4], [(1, [("P3", "ADVISORY"), ("P7", "HARD")])] * 3 + [(0, [])],
+            p7_nested_items=lambda text, blocks: set()))
+        # the task-list checkbox no longer skipped: a checkbox fix line is not a TASK: line, and a
+        # checkbox review line leaves the brief with no TASK: line at all
+        check("revert/p7-checkbox-task-line-red", *flip(
+            box_cases, [(1, [("P3", "ADVISORY"), ("P7", "HARD")])] * 2 + [(0, [])],
+            p7_checkbox=lambda text: text))
+        # the range test made after the punctuation strip again: an open range loses its `..`
+        check("revert/p7-open-range-red", *flip(
+            range_cases, [(1, [("P7", "HARD")])] * 3 + [(0, [("P7", "ADVISORY")]), (1, [("P7", "HARD")])],
+            p7_range_word=lambda word: ".." in word.lower().strip(P7_STRIP + "`")))
+        # brackets, braces and angle brackets no longer punctuation: dots inside them read as a range
+        check("revert/p7-range-brackets-red", *flip(
+            mark_cases, [(0, [("P7", "ADVISORY")])] * 3, P7_RANGE_MARKS=P7_STRIP + "`"))
+        # a leading hyphen no longer punctuation: -... reads as a range
+        check("revert/p7-range-hyphen-red", *flip(
+            hyphen_cases, [(0, [("P7", "ADVISORY")])], P7_RANGE_LEAD=""))
+        # a path component `..` no longer told from a range: a relative path reads as one
+        check("revert/p7-range-path-red", *flip(
+            path_cases, [(0, [("P7", "ADVISORY")])] * 2 + [(0, [("P3", "ADVISORY"), ("P7", "ADVISORY")])],
+            p7_path_dots=lambda piece, first: False))
+        original_range_word = p7_range_word
+        # a narrower reading that takes a word ending in an ellipsis for prose: carefully... no longer
+        # lowers the claim, so the row pins that such a word stays a range
+        check("revert/p7-range-ellipsis-red", *flip(
+            ellipsis_cases, [(1, [("P7", "HARD")])],
+            p7_range_word=lambda word: original_range_word(word) and not word.endswith("...")))
+        # every `#` line taken for a heading again: a #9 work: or ####### x continuation line ends the
+        # open list, so the nested fix line is hidden and the review brief's fix sentence refuses
+        check("revert/p7-nested-hash-line-red", *flip(
+            hash_cases, [(1, [("P3", "ADVISORY"), ("P7", "HARD")])] * 2,
+            p7_atx_heading=lambda raw: raw.lstrip().startswith("#")))
+        # the indent bound on a heading removed: a # line four or more columns past the open item's text
+        # ends the open list again, so the nested fix line is hidden and the fix sentence refuses
+        check("revert/p7-nested-hash-indent-red", *flip(
+            deep_hash_cases, [(1, [("P3", "ADVISORY"), ("P7", "HARD")])] * 3,
+            p7_list_heading=lambda raw, stack: p7_atx_heading(raw)))
+        # every different commit-id word counted again: a short and a full id are two commits
+        check("revert/p7-commit-prefix-red", *flip(
+            commit_cases, [(0, [("P7", "ADVISORY")])] * 3, p7_distinct_commits=lambda words: set(words)))
+        check("revert/p7-normpath-red", *flip(normal_cases, [(1, [("P7", "HARD")])] * 3,
+                                              p7_normal=lambda item: item))
+        original_unplaceable_dot = p7_unplaceable
+
+        def dot_component_placeable(item, atomic):
+            """the reading before a trailing `.` component was refused: src/. normalises to src"""
+            if item == "." or item.endswith("/."):
+                return None
+            return original_unplaceable_dot(item, atomic)
+        check("revert/p7-dot-component-red", *flip([dot_component], [(1, [("P7", "HARD")])],
+                                                   p7_unplaceable=dot_component_placeable))
+        # the hidden-line guard removed: the indented fix line is read, so the review brief is no
+        # longer judged; a blockquoted or comment-opening line is also not a TASK: line by its label
+        # (p7_task_text), so a second flip widens the label reading to those openers as well and shows
+        # the guard is what still hides them
+        check("revert/p7-task-line-guard-red", *flip(hidden_cases[:1], [(0, [])],
+                                                     p7_unread_line=lambda raw: False))
+        original_unmarked = p7_unmarked
+
+        def quote_unmarked(line):
+            """a label reading that also skips a leading `>` or `<!--`"""
+            text = line.strip().lstrip(">")
+            return original_unmarked(text[4:] if text.startswith("<!--") else text)
+        check("revert/p7-task-line-quote-guard-red", *flip(
+            hidden_cases[1:], [(0, [])] * 2, p7_unread_line=lambda raw: False, p7_unmarked=quote_unmarked))
+        check("revert/p7-pin-agreement-red", *flip(
+            [abbreviated_other, full_other], [(0, [])] * 2,
+            p7_pin=lambda names, repo_: max((value for _, value in names.pins), key=len)))
+        # a look-alike pin line ignored again: the claim is compared with the REVIEWED HEAD line alone
+        check("revert/p7-look-alike-pin-red", *flip([look_alike_other], [(0, [])],
+                                                    p7_pin_values=lambda names: list(names.pins)))
+        check("revert/p7-first-parent-red", *changeset_flip(
+            [merged], [(1, [("P7", "HARD")])],
+            base_oid=lambda root, parents: parents[-1] if parents else _pin_changeset.empty_tree(root)))
+        check("revert/p7-empty-tree-red", *changeset_flip(
+            [root_exact], [(1, [("P3", "ADVISORY"), ("P7", "HARD")])], empty_tree=lambda root: ids["c2"]))
+        original_header = _pin_changeset.commit_header
+
+        def lenient_header(root, revision):
+            raw = _pin_changeset.git(root, "cat-file", "commit", revision)
+            return raw.split(b"\n\n", 1)[0].splitlines()[0][5:].decode("ascii"), []
+        check("revert/p7-absent-parent-red", *changeset_flip([absent], [(0, [])],
+                                                             commit_header=lenient_header))
+        original_env = _pin_changeset.git_environment
+
+        def unhardened_env(root=None):
+            env = original_env(root)
+            env.pop("GIT_NO_REPLACE_OBJECTS", None)
+            return env
+        check("revert/p7-replace-red", *changeset_flip(
+            [replaced], [(1, [("P7", "HARD")])],
+            HARDEN_FLAGS=("-c", "core.commitGraph=false", "-c", "core.fsmonitor=false"),
+            git_environment=unhardened_env))
+        check("revert/p7-renames-red", *changeset_flip(
+            [rename_exact], [(1, [("P3", "ADVISORY"), ("P7", "HARD")])],
+            DIFF_FLAGS=("diff-tree", "-r", "-z", "--name-only", "-M")))
+
+        def keeps_git_env(root=None):
+            env = original_env(root)
+            env.update((key, value) for key, value in os.environ.items() if key.startswith("GIT_"))
+            return env
+        check("revert/p7-git-env-red", *changeset_flip([foreign_dir], ["CannotEvaluate"],
+                                                       git_environment=keeps_git_env))
+
+        def no_ceiling_env(root=None):
+            return original_env(None)
+        check("revert/p7-ceiling-red", *changeset_flip([nested_read], [["src/a.py", "tools/c.py"]],
+                                                       git_environment=no_ceiling_env))
+        original_changed_set = _pin_changeset.changed_set
+
+        def swallowing_changed_set(root, pin):
+            try:
+                return original_changed_set(root, pin)
+            except _pin_changeset.ChangesetError:
+                return None, None, frozenset()
+        names7 = PreflightText("BRIEF-PIN {}\n{}\nThe change touches no files.\n".format(ids["c2"], review))
+        missing_repo = base / "not-a-repo"
+        os.makedirs(missing_repo)
+        # a commit whose tree object is absent: the failed read is exit 2, never a guess
+        names_notree = PreflightText("BRIEF-PIN {}\n{}\nThe change touches no files.\n".format(
+            ids["notree"], review))
+        notree = lambda: _git_outcome(rule_p7, names_notree, table["gamma"], repo)  # noqa: E731
+        check("preflight/p7-missing-tree-cannot-evaluate", notree(), "CannotEvaluate")
+        check("revert/p7-failed-diff-red", *changeset_flip(
+            [lambda: _git_outcome(rule_p7, names7, table["gamma"], missing_repo), notree], [[], []],
+            changed_set=swallowing_changed_set))
+
+        # git's error lines lead a failed read's message, its hint: lines (the grafts deprecation hint
+        # GIT_GRAFT_FILE triggers) follow them
+        def failed_read_lead():
+            try:
+                _pin_changeset.git(repo, *_pin_changeset.DIFF_FLAGS, ids["c2"], "f" * 40)
+            except _pin_changeset.ChangesetError as exc:
+                return str(exc).split(": ", 1)[1].startswith("hint:")
+            return "no error"
+        check("preflight/p7-hint-not-leading",
+              (failed_read_lead(), _pin_changeset.error_text(b"hint: one\nfatal: two\nhint: three\n")),
+              (False, "fatal: two\nhint: one\nhint: three"))
+        check("revert/p7-hint-lead-red", *changeset_flip(
+            [failed_read_lead], [True],
+            error_text=lambda stderr: stderr.decode("utf-8", "replace").strip()))
+        # the lenient-header flip must not have leaked
+        check("preflight/p7-helper-restored",
+              (original_header is _pin_changeset.commit_header,
+               original_changed_set is _pin_changeset.changed_set,
+               original_env is _pin_changeset.git_environment), (True, True, True))
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
 # The child caps its address space at 1 GiB, then times evaluate() on 8 KiB and 64 KiB briefs (the
 # larger exactly at the shared reading's text ceiling), each a lead that forces the parsed-document path
 # (it holds "nput", so the ASCII fast path never answers it), a prefix, one unit repeated, and a suffix.
@@ -5018,7 +6636,9 @@ def self_test(report_path=None):
              "git -C w checkout --detach 1234567abc`\n"),
             ("perf/p5-line-join-linear", "git -C w \\\n", "Confirm HEAD is 1234567abc.\n", "checkout main\n"),
             ("perf/p5-git-word-join-linear", "Run git\n", "Confirm HEAD is 1234567abc.\n", "clone x\n"),
-            ("perf/p5-quoted-option-linear", "git -C \"a b\" checkout x && ", "Confirm HEAD is 1234567abc.\n", "")):
+            ("perf/p5-quoted-option-linear", "git -C \"a b\" checkout x && ", "Confirm HEAD is 1234567abc.\n", ""),
+            # the P7 claim grammar: many whole-change claims, each read word by word
+            ("perf/p7-claim-linear", "The change touches a.py, b.py. ", "", "")):
         check(check_id, _linear(unit, prefix, suffix), True)
     # ---------- the advisory rules: printed, never refusing ----------
     check("r1/run-prose-advisory", _outcome(RUN_PROSE), (0, [("R1", "ADVISORY")]))
@@ -6906,7 +8526,8 @@ def self_test(report_path=None):
         if os.path.lexists(locked):
             os.chmod(locked, 0o700)
         shutil.rmtree(inputs, ignore_errors=True)
-    check("revert/every-flip-ran", len(flipped), 218)
+    _p7_selftest(flip, flipped.append)
+    check("revert/every-flip-ran", len(flipped), 270)
 
     for check_id in sorted(expected - _EXECUTED_SET):
         FAILURES.append("execution-set/missing: {}".format(check_id))
@@ -6963,12 +8584,17 @@ def self_test(report_path=None):
           "exits 2 on an INPUT line it cannot check, a look-alike label opening a rendered paragraph line, "
           "heading or table cell (folded through the bounded confusable table), a brief holding a non-LF line "
           "separator or a format character outside code, a brief the vendored parser cannot read, a FIFO or "
-          "device, or an input this uid "
-          "cannot read (P6), and "
-          "each preflight rule and guard patched out flips its fixture; "
+          "device, or an input this uid cannot read (P6), refuses a prose sentence in a review brief (every TASK: "
+          "line, a list item included, opening with review) stating a whole changed-file set (a closed grammar "
+          "read word by word, each path normalised) that is not what the pinned commit changed against its first "
+          "parent (the empty tree for a root), read hermetically from raw commit bytes and diff-tree over resolved "
+          "ids (P7; an unplaceable item, an absent parent or a failed read exits 2, in a wider-scope review "
+          "brief too; a PR or branch claim is ADVISORY, and so is a difference in a review brief whose TASK: "
+          "line names a PR, branch, range or base or that holds a BRIEF-BASE label line), and each preflight "
+          "rule and guard patched out flips its fixture; "
           "the regex audit reads the module-level patterns and COMMAND_FORMS (and, without claiming completeness, "
           "container and class globals and the production source's re calls), flags no pattern, "
-          "detects the previous revisions' and loses its canary with each guard patched out; 37 repeated shapes "
+          "detects the previous revisions' and loses its canary with each guard patched out; 38 repeated shapes "
           "each evaluate within the linear growth bound at 64 KiB, through the parsed-document reading "
           "with its size, whitespace-run and nesting bounds and its killed-at-the-deadline parse child, "
           "in a capped child that must exit 0; the parse child's process group is killed after a normal "
