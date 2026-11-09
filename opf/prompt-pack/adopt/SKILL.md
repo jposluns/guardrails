@@ -278,7 +278,7 @@ revision = "<git rev-parse HEAD of the product repository>"
 skip_policy = "no-skip"
 
 [bindings.release]
-version = "<reference tooling release version>"
+version = "<pack release version: the release-version the release manifest records>"
 manifest_sha256 = "<release manifest digest>"
 anchor = "<where you checked it, for example release-tag>"
 anchor_sha256 = "<digest the anchor shows>"
@@ -499,6 +499,10 @@ How to fill it:
 - `bindings` carries exactly `revision`, `release`, `prompt_pack`, `enforcement` and
   `skip_policy`. `anchor_sha256` must equal `manifest_sha256`. `skip_policy` is `no-skip` or
   `attributed-skip`.
+- `release.version` is still the pack release version: the `release-version` the release manifest
+  records, taken from the root `VERSION` of the reference repository, not OPF's own version in
+  `opf/VERSION`. The apply gate checks the plan against the manifest's `release-version`; moving
+  that binding to OPF's own version is a later step of the version split.
 - `prompt_pack` takes the `version` and `digest` lines of the pack manifest, `pack.toml`. It
   sits at the root of this pack, one directory above this member, not beside it. If your
   deployed copy of this member came without it, read `opf/prompt-pack/pack.toml` in the

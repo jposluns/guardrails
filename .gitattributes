@@ -498,6 +498,7 @@ disclosure.toml text eol=lf
 docs/_shell.html text eol=lf
 docs/development.md text eol=lf
 docs/evidence.md text eol=lf
+opf/VERSION text eol=lf
 opf/enforcement/ci/github-actions.yml text eol=lf
 opf/enforcement/ci/opf-ci.sh text eol=lf
 opf/enforcement/claude/pretooluse_deny.py text eol=lf
