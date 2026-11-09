@@ -32,12 +32,15 @@ its exact value, written in plain decimal (-0 becomes 0). A number with a fracti
 as a binary float and written in Python's shortest form for that float (1e5 becomes 100000.0, 1.10 becomes
 1.1); one whose written form would be a different value is refused, whether too large for a float (1e400,
 -1e400), too small (1e-400) or more precise than a float holds (9007199254740993.0, 1.00000000000000000001).
-Strings, booleans and null are kept.
+A number whose exponent is past what the decimal module can hold (1e-999999999999999999999,
+0e999999999999999999999) is refused too, since its exact value cannot be checked. Strings, booleans and
+null are kept.
 
 Order of steps:
   1. validate the arguments and the record;
   2. open the file with O_APPEND, O_NOFOLLOW and O_NONBLOCK, and require a regular file; an absent file is
-     created only with --create, and a run that creates it and then refuses removes it again;
+     created only with --create, and a run that creates it and then refuses removes it again only when
+     cleanup can proceed safely (see Exit status), otherwise the refusal line says the file was left;
   3. take an exclusive flock, waiting less than 5 seconds (a wait that reaches 5 seconds is refused);
   4. refuse a non-empty file whose last byte is not LF, and read the last stamp the helper wrote;
   5. read the clock;
@@ -60,9 +63,13 @@ Exit status: 0 written (the stamp, or the unknown marker, on stdout); 2 refused 
 line on stderr. That line ends `nothing was written` only when the file holds what it held before the run.
 When bytes of the record may remain (a write or the fsync failed and the truncation back failed too, or
 closing the file failed after the record was written and synced), it ends instead `the file may hold part
-or all of the record, so check it before retrying`. When a file --create made could not be removed, it
-says the empty file was left in place and why. An interpreter older than Python 3.14 that can start the
-file gets one line beginning `error: stamp-append.py requires Python 3.14 or newer` on stderr and exit 2.
+or all of the record, so check it before retrying`; a file --create made is then left in place with those
+bytes. Otherwise a file --create made is removed only when cleanup can proceed safely (the run takes its
+lock, the path still names it, it is still empty and the removal succeeds); when it is not removed, the
+line says the empty file was left in place and why. A control character in a path or message (LF, CR,
+and the like) is written escaped (\\n, \\r, \\xNN), so the refusal stays one line. An interpreter older
+than Python 3.14 that can start the file gets one line beginning `error: stamp-append.py requires Python
+3.14 or newer` on stderr and exit 2.
 
 RESIDUAL COVERAGE. The helper protects only the writes made through it: Write and Edit tool writes,
 interpreter writes, scripts and `bash -c` strings are not routed to it, and record-remove-check.py's append
@@ -78,9 +85,10 @@ the last 64 KiB and, in text mode, the last line holding a stamp-form token, whi
 rather than the last heading: an earlier body stamp there weakens the check, and a later one refuses. A
 file --create made is removed on a refusal only while the run holds its lock and the path still names it
 empty; between that check and the removal another process could replace the path, and a writer that opened
-the file before the removal goes on writing to an unlinked file.
+the file before the removal goes on writing to an unlinked file. A backslash in a path is not escaped in a
+refusal line, so a name holding a backslash then n reads the same there as a name holding LF.
 
-Self-test: python3 -I -S -B stamp-append.py --self-test (T1 to T18, in a temporary directory; no child
+Self-test: python3 -I -S -B stamp-append.py --self-test (T1 to T19, in a temporary directory; no child
 process is started, and no live clock decides a passing result: T6 waits on a worker thread with a 30-second
 live hang guard that can only fail it).
 """
@@ -158,14 +166,32 @@ class Refusal(Exception):
         self.left = None
 
 
+# Characters that could end or garble the one stderr line: C0 and C1 controls (LF and CR among them), DEL,
+# and the Unicode line and paragraph separators.
+_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f\N{LINE SEPARATOR}\N{PARAGRAPH SEPARATOR}]")
+_CONTROL_NAMES = {"\n": "\\n", "\r": "\\r", "\t": "\\t"}
+
+
+def _one_line(text):
+    """Text with every control character escaped (LF as \\n, CR as \\r, others as \\xNN or \\uNNNN)."""
+    def escape(match):
+        char = match.group()
+        if char in _CONTROL_NAMES:
+            return _CONTROL_NAMES[char]
+        return "\\x{:02x}".format(ord(char)) if ord(char) < 0x100 else "\\u{:04x}".format(ord(char))
+    return _CONTROL_RE.sub(escape, str(text))
+
+
 def _refusal_line(exc):
+    # A path or an OS message can hold LF or CR; escaping them keeps the refusal on one stderr line.
     if exc.changed:
         tail = "the file may hold part or all of the record, so check it before retrying"
     elif exc.left is not None:
-        tail = "no record was written, but the empty file --create made was left in place ({})".format(exc.left)
+        tail = "no record was written, but the empty file --create made was left in place ({})".format(
+            _one_line(exc.left))
     else:
         tail = "nothing was written"
-    return "stamp-append: refused: {}; {}\n".format(exc.message, tail)
+    return "stamp-append: refused: {}; {}\n".format(_one_line(exc.message), tail)
 
 
 def _parse_args(argv):
@@ -256,13 +282,27 @@ def _no_constant(name):
 
 def _exact_float(token):
     """Parse a JSON number with a fraction or exponent; refuse one the float written for it would change."""
-    value = float(token)
+    # A conversion that fails is a refusal, never a traceback: decimal raises InvalidOperation for an
+    # exponent past its limits (1e-999999999999999999999, 0e999999999999999999999).
+    try:
+        value = float(token)
+    except (ArithmeticError, ValueError, MemoryError) as exc:
+        raise _unreadable_number(token, exc)
     if not math.isfinite(value):
         raise Refusal("the JSON record holds the number {}, which is too large for a float".format(token[:40]))
-    if decimal.Decimal(repr(value)) != decimal.Decimal(token):
+    try:
+        same = decimal.Decimal(repr(value)) == decimal.Decimal(token)
+    except (ArithmeticError, ValueError, MemoryError) as exc:
+        raise _unreadable_number(token, exc)
+    if not same:
         raise Refusal("the JSON record holds the number {}, which would be written as {}, a different "
                       "value".format(token[:40], repr(value)))
     return value
+
+
+def _unreadable_number(token, exc):
+    return Refusal("the JSON record holds the number {}, whose exact value cannot be checked ({})".format(
+        token[:40], type(exc).__name__))
 
 
 def _holds_placeholder(value):
@@ -309,6 +349,8 @@ def _jsonl_template(text, field):
             out = {field: slot}
             out.update(obj)
         try:
+            # The parse already refuses NaN, Infinity and a number too large for a float, so no such value
+            # reaches this point; allow_nan=False stays as a second guard.
             line = json.dumps(out, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
             return (line + "\n").encode("utf-8")
         except (ValueError, RecursionError, UnicodeEncodeError) as exc:
@@ -495,7 +537,7 @@ def _append_open(fd, opts, render):
         if opts["on_clock_failure"] != "unknown":
             raise Refusal(failure)
         stamp = UNKNOWN_MARK
-        warning = "stamp-append: warning: {}; the time was recorded as unknown\n".format(failure)
+        warning = "stamp-append: warning: {}; the time was recorded as unknown\n".format(_one_line(failure))
     _write_all(fd, render(stamp), size)
     return stamp, warning
 
@@ -748,6 +790,23 @@ def t10(work):
                  b'"f":9007199254740992.0,"g":9007199254740994.0,"h":1.7976931348623157e+308,"i":5e-324}\n')
     _expect(code == 0 and _read(path) == expected, "numbers: exit {} ({}), wrote {!r}".format(
         code, err.strip(), _read(path)))
+    # The decimal module's exponent limits: a zero with an exponent up to MAX_EMAX is kept as 0.0, and
+    # 1 times ten to the power MIN_ETINY parses but is not the float 0.0 it would become. One past either
+    # limit makes decimal raise; that and the far larger exponents are refused, never a traceback.
+    emax, etiny = decimal.MAX_EMAX, decimal.MIN_ETINY
+    zeros = '{{"a":0e{},"b":0e{}}}'.format(emax - 1, emax).encode()
+    with _Seams(clock=_fixed(T0)):
+        code, _, err = append(["--file", path, "--format", "jsonl"], zeros)
+    expected += b'{"ts":"2026-11-01T12:00:00Z","a":0.0,"b":0.0}\n'
+    _expect(code == 0 and _read(path) == expected, "zeros at the exponent limit: exit {} ({}), wrote {!r}".format(
+        code, err.strip(), _read(path)))
+    limits = (('{{"n":1e{}}}'.format(etiny + 1).encode(), "a different value"),
+              ('{{"n":1e{}}}'.format(etiny).encode(), "a different value"),
+              ('{{"n":1e{}}}'.format(etiny - 1).encode(), "exact value cannot be checked"),
+              (b'{"n":1e-999999999999999999999}', "exact value cannot be checked (InvalidOperation)"),
+              ('{{"n":0e{}}}'.format(emax + 1).encode(), "exact value cannot be checked"),
+              (b'{"n":0e999999999999999999999}', "exact value cannot be checked (InvalidOperation)"),
+              (b'{"a":[{"n":-0E+999999999999999999999}]}', "exact value cannot be checked"))
     bad = ((b'{"ts":"2026-11-01T11:59:00Z"}', "supplies"),
            (b'{"n":1e400}', "too large for a float"),
            (b'{"n":-1e400}', "too large for a float"),
@@ -766,7 +825,7 @@ def t10(work):
            (b'{"x":["@@NOW_UTC@@"]}', "outside"),
            (b'[1,2]', "not a JSON object"),
            (b'{"a":1}{"b":2}', "not one JSON object"))
-    for record, needle in bad:
+    for record, needle in limits + bad:
         with _Seams(clock=_fixed(T0)):
             code, _, err = append(["--file", path, "--format", "jsonl"], record)
         _refused(code, err, expected, path, needle)
@@ -801,7 +860,8 @@ def t12(work):
 
 
 def t16(work):
-    # A run that --create made the file for, then refused, removes the file it made.
+    # A run that --create made the file for, then refused, removes the file it made when cleanup can proceed
+    # safely; when it cannot, the refusal line says the file was left (below).
     for label, clock in (("unset clock", _fixed(0)), ("raising clock", _raise)):
         path = os.path.join(work, "t16-" + label.replace(" ", "-"))
         with _Seams(clock=clock):
@@ -863,6 +923,39 @@ def t18(work):
     _expect(code == 2 and out.getvalue() == "", "exit {}, stdout {!r}".format(code, out.getvalue()))
     _expect(err.getvalue() == "stamp-append: refused: --self-test takes no other argument; nothing was written\n",
             "stderr {!r} is not one refusal line".format(err.getvalue()))
+
+
+def t19(work):
+    # A path or message holding LF, CR or another control character still gives one refusal line.
+    def one_line(code, err, needle, label):
+        _expect(code == 2, "{}: expected exit 2, got {} ({!r})".format(label, code, err))
+        _expect(needle in err, "{}: the refusal lacks {!r}: {!r}".format(label, needle, err))
+        _expect(err.endswith("\n") and len(err.splitlines()) == 1 and not _CONTROL_RE.search(err[:-1]),
+                "{}: the refusal is not one line: {!r}".format(label, err))
+
+    path = os.path.join(work, "t19-a\nb")
+    with _Seams(clock=_fixed(T0)):
+        code, _, err = append(["--file", path], b"## @@NOW_UTC@@ x\n")
+    one_line(code, err, "t19-a\\nb does not exist", "an LF in the file name")
+    _expect(err.endswith("; nothing was written\n"), "an LF in the file name: {!r}".format(err))
+    _expect(not os.path.lexists(path), "an LF in the file name: a file was made")
+    path = os.path.join(work, "t19-c\rd\x1be\N{LINE SEPARATOR}f\x85g")
+    with _Seams(clock=_fixed(T0)):
+        code, _, err = append(["--file", path], b"## @@NOW_UTC@@ x\n")
+    one_line(code, err, "t19-c\\rd\\x1be\\u2028f\\x85g", "CR and other controls in the file name")
+    # The reason a file --create made was left is escaped as well.
+    path = os.path.join(work, "t19-left\nname")
+
+    def no_unlink(_path):
+        raise OSError(errno.EACCES, "seeded\r\nsecond line")
+
+    with _Seams(clock=_fixed(0), unlink=no_unlink):
+        code, _, err = append(["--file", path, "--create"], b"## @@NOW_UTC@@ x\n")
+    one_line(code, err, "(it cannot be removed: seeded\\r\\nsecond line)", "an LF in the reason a file was left")
+    _expect(_read(path) == b"", "the file left in place is not empty")
+    every = "".join(chr(c) for c in range(0x20)) + "\x7f\x80\x9f\N{LINE SEPARATOR}\N{PARAGRAPH SEPARATOR}"
+    err = _refusal_line(Refusal(every))
+    one_line(2, err, "\\x00", "every control character")
 
 
 def t13(work):
@@ -970,9 +1063,11 @@ TESTS = (("T1", "a date-time literal in the heading is refused", t1),
          ("T13", "the lock wait bound", t13),
          ("T14", "the unknown mode writes the marker, never a time", t14),
          ("T15", "a failed write is truncated back, or the refusal says bytes may remain", t15),
-         ("T16", "a refusal removes the file --create made, and a missing directory is named", t16),
+         ("T16", "a refusal removes the file --create made when it safely can, else says it was left, "
+                 "and a missing directory is named", t16),
          ("T17", "a deeply nested JSONL record is written or refused, never a traceback", t17),
-         ("T18", "--self-test with another argument refuses on one stderr line", t18))
+         ("T18", "--self-test with another argument refuses on one stderr line", t18),
+         ("T19", "a control character in a path or message is escaped, so a refusal stays one line", t19))
 
 
 def self_test():
@@ -1020,7 +1115,7 @@ def main():
         data = sys.stdin.buffer.read(MAX_RECORD + 1)
     except (OSError, AttributeError, ValueError) as exc:
         sys.stderr.write("stamp-append: refused: cannot read the record from stdin ({}); nothing was "
-                         "written\n".format(exc))
+                         "written\n".format(_one_line(exc)))
         return 2
     code, out, err = append(argv, data)
     if out:

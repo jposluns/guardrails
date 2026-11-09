@@ -194,7 +194,7 @@ files are served from this repository's main branch; for a raw download, use
 | `pattern-self-match.py` | `b70287e2aab2b08b0cd240c6c9150feb65141f2e3612adad63e402221dfcbb2f` | [pattern-self-match.py](pattern-self-match.py) |
 | `record-remove-check.py` | `0ec9642ea95bac4ea13c71ec31ff5239ab01c0ceff94f9922a42de1458f0757f` | [record-remove-check.py](record-remove-check.py) |
 | `rerun-pass-check.py` | `ab5fe8567f34444474d5e58acd61fde9490254e86d38578dae4b5ade7a21da86` | [rerun-pass-check.py](rerun-pass-check.py) |
-| `stamp-append.py` | `ffd327bd76efaffeddab5ea4c6746dc4da9aeb3203dbd9d703c8ffe62b8cdaa7` | [stamp-append.py](stamp-append.py) |
+| `stamp-append.py` | `7d838af484d421e04e4067a3e6c6a722b59f41ce292e731ab02f7e246961765b` | [stamp-append.py](stamp-append.py) |
 | `stamp-truth-stop.py` | `5d3b5d716cdbe6255c750aec4bb44f17a583f167c055cdb26a17a27d5ccfc715` | [stamp-truth-stop.py](stamp-truth-stop.py) |
 | `unbounded-wait.py` | `9d2a8f9c26693cc87d058284427d40554e5ff0c3f2eca3df46f4369669a43859` | [unbounded-wait.py](unbounded-wait.py) |
 | `ungated-record.py` | `35c65369b1609683e09b784681a23fab80a05e047c5f36abe5311f100b4f9394` | [ungated-record.py](ungated-record.py) |
@@ -488,7 +488,9 @@ unset, so "unset" below means both spellings are unset. The worker skip likewise
   `ts` field (or the field `--field` names) is absent or `@@NOW_UTC@@`. It refuses, with exit 2 and the
   file unchanged, a time supplied by the caller, a clock read that fails, a reading before 2026 (an unset
   clock), and a reading earlier than the file's last stamp; with `--on-clock-failure unknown` a clock
-  failure writes `unknown (clock unavailable)` in the slot instead. For example:
+  failure writes `unknown (clock unavailable)` in the slot instead. A file that `--create` made for a run
+  that then refuses is removed only when cleanup can proceed safely; otherwise the empty file is left in
+  place and the one-line refusal says so and why. For example:
 
   ```sh
   printf '## @@NOW_UTC@@ deploy finished\nChecked against the run started 2026-11-09 09:50 UTC.\n' | python3 -I -S -B /ABSOLUTE/PATH/TO/stamp-append.py --file /ABSOLUTE/PATH/TO/records/log.md
