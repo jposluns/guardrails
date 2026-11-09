@@ -2,11 +2,15 @@
 
 A private helper for tools/check_brief_capability.py (preflight rule P7), modelled on
 tools/check_release_cut.py's git_environment, git and commit_header. Every inherited GIT_
-variable is dropped, replace refs and the commit graph are disabled on both the environment
-and the command line, the system and global configuration are pinned to os.devnull and HOME
-and XDG_CONFIG_HOME name an empty directory, so caller environment and host configuration
-cannot steer a read; the repository's own config is still read, and a malformed one fails
-the read. Parents are taken from the raw commit bytes (cat-file commit), never from a
+variable is dropped. Replace refs are the one defence set in both places (the environment's
+GIT_NO_REPLACE_OBJECTS and the --no-replace-objects flag); the commit graph, fsmonitor and
+automatic maintenance (core.commitGraph, core.fsmonitor, gc.auto, gc.autoDetach and
+maintenance.auto) are set only on the command line. The environment alone pins the system and
+global configuration to os.devnull, names an empty directory as HOME and XDG_CONFIG_HOME,
+disables lazy fetch and grafts, and sets GIT_CEILING_DIRECTORIES to the parent of the directory
+read, so a -C on a directory that is not itself a repository fails instead of walking up into an
+enclosing one. Caller environment and host configuration therefore cannot steer a read; the
+repository's own config is still read, and a malformed one fails the read. Parents are taken from the raw commit bytes (cat-file commit), never from a
 revision walk, and the changed set from diff-tree over resolved object ids, never from the
 working tree or the index. Every failure raises ChangesetError, which the caller maps to
 its own cannot-evaluate outcome, never to an empty set; an empty diff is a valid empty set.
@@ -23,8 +27,9 @@ import tempfile
 
 GIT_TIMEOUT = 60
 HEX_DIGITS = "0123456789abcdef"
-# the hardening every invocation carries on the command line (the environment carries the same
-# defences, so dropping one alone does not weaken a read); the gc.auto, gc.autoDetach and
+# the hardening every invocation carries on the command line; only --no-replace-objects is also
+# set in the environment (GIT_NO_REPLACE_OBJECTS), and every -c pin here is set on the command line
+# alone, so dropping one of them does weaken a read; the gc.auto, gc.autoDetach and
 # maintenance.auto pins keep a read from ever spawning a detached maintenance child
 HARDEN_FLAGS = ("--no-replace-objects", "-c", "core.commitGraph=false", "-c", "core.fsmonitor=false",
                 "-c", "gc.auto=0", "-c", "gc.autoDetach=false", "-c", "maintenance.auto=false")
@@ -50,12 +55,16 @@ def _empty_home():
     return _HOME
 
 
-def git_environment():
+def git_environment(root=None):
     """The caller's environment with every GIT_-prefixed variable dropped, then made hermetic and
     hardened: no replace objects, no lazy fetch, no grafts file, system and global config pinned to
-    os.devnull, HOME and XDG_CONFIG_HOME an empty directory, no prompt, no optional locks, C locale."""
+    os.devnull, HOME and XDG_CONFIG_HOME an empty directory, no prompt, no optional locks, C locale.
+    For a `root`, GIT_CEILING_DIRECTORIES names its resolved parent, so discovery examines `root`
+    itself and never walks up into an enclosing repository."""
     env = dict((key, value) for key, value in os.environ.items() if not key.startswith("GIT_"))
     home = _empty_home()
+    if root is not None:
+        env["GIT_CEILING_DIRECTORIES"] = os.path.dirname(os.path.realpath(str(root)))
     env.update({
         "HOME": home, "XDG_CONFIG_HOME": home,
         "GIT_NO_REPLACE_OBJECTS": "1", "GIT_NO_LAZY_FETCH": "1",
@@ -71,7 +80,7 @@ def git(root, *args, stdin=b""):
     try:
         result = subprocess.run(
             ["git", *HARDEN_FLAGS, "-C", str(root), *args],
-            capture_output=True, env=git_environment(), timeout=GIT_TIMEOUT, input=stdin,
+            capture_output=True, env=git_environment(root), timeout=GIT_TIMEOUT, input=stdin,
         )
     except (OSError, subprocess.SubprocessError) as exc:
         raise ChangesetError("git invocation: " + str(exc)) from exc
@@ -148,6 +157,30 @@ def base_oid(root, parents):
     return parents[0] if parents else empty_tree(root)
 
 
+def _nul_paths(raw, label):
+    """The paths of NUL-terminated -z output; malformed output is ChangesetError, never an empty set."""
+    if not raw:
+        return frozenset()
+    if not raw.endswith(b"\0"):
+        raise ChangesetError(label + ": missing NUL terminator")
+    names = []
+    for record in raw[:-1].split(b"\0"):
+        if not record:
+            raise ChangesetError(label + ": empty path record")
+        try:
+            names.append(record.decode("utf-8"))
+        except UnicodeError as exc:
+            raise ChangesetError(label + ": non-UTF-8 path") from exc
+    return frozenset(names)
+
+
+def tracked_files(root, pin):
+    """The frozenset of paths tracked in the pinned commit's tree (ls-tree -r over the resolved id,
+    never the working tree or the index); any failure is ChangesetError."""
+    head = resolve(root, pin)
+    return _nul_paths(git(root, "ls-tree", "-r", "-z", "--name-only", "--full-tree", head), "ls-tree")
+
+
 def changed_set(root, pin):
     """(base, head, frozenset of paths) the pinned commit changed against its first parent (the empty
     tree for a root commit), read with diff-tree over resolved ids: additions, deletions, type changes
@@ -156,17 +189,4 @@ def changed_set(root, pin):
     head = resolve(root, pin)
     _, parents = commit_header(root, head)
     base = base_oid(root, parents)
-    raw = git(root, *DIFF_FLAGS, base, head)
-    if not raw:
-        return base, head, frozenset()
-    if not raw.endswith(b"\0"):
-        raise ChangesetError("diff-tree: missing NUL terminator")
-    names = []
-    for record in raw[:-1].split(b"\0"):
-        if not record:
-            raise ChangesetError("diff-tree: empty path record")
-        try:
-            names.append(record.decode("utf-8"))
-        except UnicodeError as exc:
-            raise ChangesetError("diff-tree: non-UTF-8 path") from exc
-    return base, head, frozenset(names)
+    return base, head, _nul_paths(git(root, *DIFF_FLAGS, base, head), "diff-tree")

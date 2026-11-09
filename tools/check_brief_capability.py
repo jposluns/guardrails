@@ -294,10 +294,13 @@ PREFLIGHT (the input paths a brief names; read over the whole brief, line by lin
                        refuses HARD; its defence is that recognition is a CLOSED grammar, read word by word
                        without a pattern, and anything outside the shape never fires (under-reporting, never
                        over-reporting). RECOGNIZED (the closed list): a subject from the/this change, diff,
-                       patch, commit, fix or revision with a totalizing verb (touches, touched, changes,
-                       changed, modifies, modified, edits, edited, or is limited/confined to) and a PURE
-                       path list after the verb (and an optional count): every item path-like (a `/`, a `.`
-                       extension, or a code span; plain, code-span or emphasised), nothing but list
+                       patch, commit or revision (never fix: a fix brief's pin is the commit the fix starts
+                       from) with a totalizing verb (touches, touched, changes, changed, modifies,
+                       modified, edits, edited, or is limited/confined to) and a PURE path list after the
+                       verb (and an optional count): every item a path (a plain item holding a `/` or naming
+                       a file tracked at the pinned commit, so a bare basename or an abbreviation such as
+                       e.g. or Node.js is a plain word; or a code span; plain, code-span or emphasised, a
+                       leading `.` always kept and a leading ./ dropped), nothing but list
                        connectives between the items (commas with or without Oxford style, a final and,
                        soft line wraps), the list running to the end of the sentence; a first plain-word
                        item ("the docs"), a plain word among the paths, or a colon and a description after
@@ -323,8 +326,11 @@ PREFLIGHT (the input paths a brief names; read over the whole brief, line by lin
                        differences (changed-but-undeclared and declared-but-unchanged), the resolved base
                        and head ids and the full actual set, so the author can paste it. The git reads live
                        in tools/_pin_changeset.py, hardened like check_release_cut.py's: inherited GIT_
-                       variables dropped, replace refs and the commit graph disabled on the environment and
-                       the command line, GIT_GRAFT_FILE pinned to os.devnull (defence in depth: parents are
+                       variables dropped, replace refs disabled on both the environment and the command
+                       line, the commit graph, fsmonitor and automatic maintenance disabled on the command
+                       line only, GIT_CEILING_DIRECTORIES set to the parent of the directory read (a
+                       directory that is not itself a repository fails instead of walking up),
+                       GIT_GRAFT_FILE pinned to os.devnull (defence in depth: parents are
                        read from the raw commit bytes with cat-file, never a revision walk, which a grafts
                        entry does not alter; no fixture demonstrates a graft biting these reads), system and
                        global config pinned, HOME and XDG_CONFIG_HOME an empty directory. The changed set is
@@ -336,7 +342,8 @@ PREFLIGHT (the input paths a brief names; read over the whole brief, line by lin
                        exact repository-relative path (a glob, a `..` component, a placeholder, a
                        directory, an unclosed span, a code-span bare name: an unplaceable item inside an
                        otherwise path-only list); a recognized claim with no pin line or no repository; an
-                       unresolved pin; malformed raw commit bytes; a named parent whose object is absent (a
+                       unresolved pin; pin lines carrying more than one value that do not all resolve to
+                       one full commit id; malformed raw commit bytes; a named parent whose object is absent (a
                        shallow or partial clone is never read as a root commit); a git launch failure,
                        timeout or ownership refusal; malformed -z output. An empty diff is a valid empty
                        set. Explicit-range declarations (BRIEF-BASE:, "Compared with <base> ...") are
@@ -3114,7 +3121,9 @@ def rule_p6(names, row, repo):
 
 # ---------- P7: whole-changed-set claims, a closed grammar read word by word without a pattern ----------
 P7_DETERMINERS = frozenset(("the", "this"))
-P7_SUBJECTS = frozenset(("change", "diff", "patch", "commit", "fix", "revision"))
+# `fix` is not a subject: in a fix brief the pin is the commit the fix starts from, so "The fix changes
+# X" describes work still to be done, which the pinned commit's own diff can never match
+P7_SUBJECTS = frozenset(("change", "diff", "patch", "commit", "revision"))
 # a totalizing claim about these is printed, never checked: a first-parent diff of one commit cannot cover them
 P7_SERIES_SUBJECTS = frozenset(("pr", "branch", "series", "train"))
 P7_TOTAL_VERBS = frozenset(("touches", "touched", "changes", "changed", "modifies", "modified", "edits", "edited"))
@@ -3131,7 +3140,12 @@ P7_LABELS = ("changed files:", "files changed:", "touched files:", "changed set:
 P7_LEADS = ("the only files changed are", "the complete set of changed files is")
 P7_COUNTS = dict(one=1, two=2, three=3, four=4, five=5, six=6, seven=7, eight=8, nine=9, ten=10,
                  eleven=11, twelve=12)
-P7_STRIP = "*_\"'().,;:!?"   # markup and sentence punctuation stripped around a word or a path item
+P7_STRIP = "*_\"'().,;:!?"   # markup and sentence punctuation stripped around a keyword
+# around a path item: markup openers before it (never a `.`, so .github/x, ./tools/a.py and .gitattributes
+# keep it), markup and sentence punctuation after it; an `_` only as a matched pair (_a.py_), so a name
+# that starts with one (_pin_changeset.py, __init__.py) keeps it
+P7_LEAD_STRIP = "*\"'("
+P7_TRAIL_STRIP = "*\"').,;:!?"
 
 
 def p7_tokens(sentence):
@@ -3195,38 +3209,67 @@ def p7_label_rest(sentence):
     return None
 
 
-def p7_pathlike(item):
-    """Whether a plain list item is shaped like one path: it holds a `/`, or a `.` extension (a nonempty
-    stem and a nonempty suffix); a code span is path-like by form and never reaches this test. Path-like
-    is a recognition shape only: a path-like item can still be unplaceable (a glob, a `..`, a directory),
-    and inside a recognized claim that stays CANNOT_EVALUATE (p7_unplaceable), never a pass."""
+def p7_no_tracked():
+    """The default tracked-file reading: no listing of the pinned commit is available."""
+    return None
+
+
+def p7_dot_slash(item):
+    """`item` with every leading `./` removed, so ./tools/a.py names tools/a.py."""
+    while item.startswith("./"):
+        item = item[2:]
+    return item
+
+
+def p7_item_strip(piece):
+    """A plain list item with its markup and sentence punctuation removed: markup openers before it
+    (P7_LEAD_STRIP, never a `.`), markup and punctuation after it (P7_TRAIL_STRIP), `_` emphasis only
+    when it closes what it opens, then any leading `./`; so .github/x, ./tools/a.py (read as
+    tools/a.py) and .gitattributes keep their leading dot, and _pin_changeset.py its underscore."""
+    body = piece.lstrip(P7_LEAD_STRIP).rstrip(P7_TRAIL_STRIP)
+    if body.startswith("_") and body.endswith("_"):
+        body = body.strip("_")
+    return p7_dot_slash(body)
+
+
+def p7_pathlike(item, tracked=p7_no_tracked):
+    """Whether a plain list item counts as one repository path: it holds a `/`, or it names a file
+    tracked at the pinned commit (`tracked()` returns that frozenset), so a bare basename absent at the
+    root (_pin_changeset.py) and an abbreviation (e.g., Node.js) are plain words, never paths. When no
+    listing is available (`tracked()` is None: no pin, no repository, or pins that cannot be read as one
+    commit) an item holding a `.` still counts, so the recognized claim reaches rule_p7's own
+    cannot-evaluate outcome instead of passing. A code span is path-like by form and never reaches this
+    test. Path-like is a recognition shape only: a path-like item can still be unplaceable (a glob, a
+    `..`, a directory), and inside a recognized claim that stays CANNOT_EVALUATE (p7_unplaceable)."""
     if "/" in item:
         return True
-    stem, dot, suffix = item.rpartition(".")
-    return bool(dot and stem and suffix)
+    files = tracked()
+    if files is None:
+        return "." in item
+    return item in files
 
 
-def p7_item_words(tokens):
+def p7_item_words(tokens, tracked=p7_no_tracked):
     """The declared path items of a claim's list tokens, as [(item, atomic)], or None when the tokens are
     not a pure path list, which claims nothing (quiet). A list is pure when every plain item is path-like
-    (p7_pathlike: a `/` or a `.` extension; a code span counts by form), nothing but list connectives
-    (commas, a connecting `and`, Oxford or not) separates the items, and the list runs to the end of the
-    sentence: a first plain-word item ("the docs"), a plain word between or after the paths, and a list
-    followed by a colon and a description ("tools/x.py: it refuses ...") are all outside the shape. Code
-    spans are kept verbatim (the quoted form for a path with spaces); markup and sentence punctuation are
-    stripped around a plain item (P7_STRIP)."""
+    (p7_pathlike: a `/` or a file tracked at the pin; a code span counts by form), nothing but list
+    connectives (commas, a connecting `and`, Oxford or not) separates the items, and the list runs to the
+    end of the sentence: a first plain-word item ("the docs"), a plain word between or after the paths,
+    and a list followed by a colon and a description ("tools/x.py: it refuses ...") are all outside the
+    shape. Code spans are kept verbatim but for a leading `./` (the quoted form for a path with spaces);
+    a plain item is read through p7_item_strip."""
     items = []
     for word, atomic in tokens:
         if atomic:
-            items.append((word, True))
+            items.append((p7_dot_slash(word), True))
             continue
         if word.rstrip("*_\"')").endswith(":"):   # a list followed by a colon and a description
             return None
         for piece in word.split(","):
-            piece = piece.strip().strip(P7_STRIP)
+            piece = p7_item_strip(piece.strip())
             if not piece or piece.lower() == "and":
                 continue
-            if not p7_pathlike(piece):
+            if not p7_pathlike(piece, tracked):
                 return None
             items.append((piece, False))
     return items
@@ -3252,13 +3295,14 @@ def p7_unplaceable(item, atomic):
         return "a `..` component"
     if item.endswith("/"):
         return "a directory, not one file path"
-    if "/" not in item and "." not in item:
+    if atomic and "/" not in item and "." not in item:   # a plain bare name counts only when tracked
         return "a bare name that cannot be placed"
     return None
 
 
-def p7_claim(sentence):
-    """The whole-change claim a sentence makes, or None when it is outside the closed grammar:
+def p7_claim(sentence, tracked=p7_no_tracked):
+    """The whole-change claim a sentence makes, or None when it is outside the closed grammar
+    (`tracked` is p7_pathlike's listing of the files tracked at the pinned commit):
     ("advisory", None, None) for a totalizing claim about a PR, branch, series or train (printed, never
     checked), or ("claim", items, count) where items may be empty (the `touches no files` claim) and
     count is a stated file count or None. Anything outside the shape, a question, and any sentence
@@ -3273,7 +3317,7 @@ def p7_claim(sentence):
         tokens = p7_tokens(rest)
         if not tokens or p7_refused(tokens):
             return None
-        items = p7_item_words(tokens)
+        items = p7_item_words(tokens, tracked)
         return ("claim", items, None) if items else None
     tokens = p7_tokens(sentence)
     if tokens and not tokens[0][1] and p7_marker(tokens[0][0]):
@@ -3324,7 +3368,7 @@ def p7_claim(sentence):
         if unit in ("file", "files") and (word in P7_COUNTS or (word.isdecimal() and len(word) <= 4)):
             count = P7_COUNTS[word] if word in P7_COUNTS else int(word)
             index += 2
-    items = p7_item_words(tokens[index:])
+    items = p7_item_words(tokens[index:], tracked)
     return ("claim", items, count) if items else None
 
 
@@ -3385,6 +3429,38 @@ def p7_compare(claims, actual, base, head):
     return findings
 
 
+def p7_pin(names, repo):
+    """The one pin P7 reads: a brief whose pin lines carry a single value gives that value (changed_set
+    resolves it); when they carry more than one value, every one is resolved, and unless all resolve to
+    one full commit id the outcome is CannotEvaluate, never a choice between them; that id is returned."""
+    values = _first_seen([(line, value) for line, value in names.pins])
+    if len(set(value for _, value in values)) == 1:
+        return values[0][1]
+    heads = []
+    for line, value in values:
+        try:
+            heads.append((line, value, _pin_changeset.resolve(repo, value)))
+        except _pin_changeset.ChangesetError as exc:
+            raise CannotEvaluate("line {}: the pin {} cannot be resolved: {}".format(line, value, exc))
+    if len(set(head for _, _, head in heads)) != 1:
+        named = ", ".join("line {}: {} = {}".format(line, value, head[:12]) for line, value, head in heads)
+        raise CannotEvaluate("the pin lines name different commits ({}): a changed-files claim is "
+                             "compared with one commit only".format(named))
+    return heads[0][2]
+
+
+def p7_tracked(names, repo):
+    """The frozenset of files tracked at the brief's one pinned commit (p7_pin), or None when there is no
+    pin or repository, or the pins cannot be read as one commit: p7_pathlike then falls back to its form
+    test, and the claim, if any, reaches rule_p7's own cannot-evaluate outcome."""
+    if not names.pins or repo is None:
+        return None
+    try:
+        return _pin_changeset.tracked_files(repo, p7_pin(names, repo))
+    except (CannotEvaluate, _pin_changeset.ChangesetError):
+        return None
+
+
 def rule_p7(names, row, repo):
     """P7 HARD, for every family: a prose sentence stating the WHOLE set of changed files (p7_claim's
     closed grammar) whose set is not what the brief's pinned commit changed against its first parent
@@ -3392,11 +3468,18 @@ def rule_p7(names, row, repo):
     A totalizing claim about a PR, branch, series or train is ADVISORY (one commit's first-parent diff
     cannot check it). A recognized claim with an item that cannot be placed as one repository-relative
     path, with no pin line or no repository, or whose pinned commit cannot be read (an unresolved pin,
-    malformed commit bytes, an absent first parent, a git failure) is CannotEvaluate, never a pass and
-    never an empty set."""
-    claims, findings = [], []
+    malformed commit bytes, an absent first parent, a git failure, pin lines naming different commits)
+    is CannotEvaluate, never a pass and never an empty set. A plain item without a `/` counts as a path
+    only when it is tracked at the pinned commit (p7_pathlike), read once, lazily, through
+    p7_tracked."""
+    claims, findings, listing = [], [], []
+
+    def tracked():
+        if not listing:
+            listing.append(p7_tracked(names, repo))
+        return listing[0]
     for line, sentence in p7_sentences(names):
-        read = p7_claim(sentence)
+        read = p7_claim(sentence, tracked)
         if read is None:
             continue
         kind, items, count = read
@@ -3420,7 +3503,7 @@ def rule_p7(names, row, repo):
     if repo is None:
         raise CannotEvaluate("the brief states its changed files but no repository was given to read the "
                              "pinned commit from")
-    pin = max((value for _, value in names.pins), key=len)
+    pin = p7_pin(names, repo)
     try:
         base, head, actual = _pin_changeset.changed_set(repo, pin)
     except _pin_changeset.ChangesetError as exc:
@@ -4530,10 +4613,11 @@ def _p7_repo(base):
     docs/b.md), a child changing a.py and adding tools/c.py (c2), a rename of docs/b.md to
     docs/renamed.md (c3), an empty child (c4), a child adding tools/no.py (c5), a side child of the
     root adding side.md (side), a merge of c5 and side whose tree adds side.md (merge), a child of c5
-    adding `sp ace.md` and naive.md (c6), a fabricated commit whose named parent is absent (absent),
-    and a replace ref mapping c1 to an empty root (emptyroot), which only an unhardened read honours;
-    the working tree is left dirty (a.py modified, x.md untracked) so an object-store read and a
-    working-tree read can be told apart."""
+    adding `sp ace.md` and naive.md (c6), a chain of children of c5 adding .github/x (dotdir), then
+    tools/a.py (dotslash), then .gitattributes (dotfile), a fabricated commit whose named parent is
+    absent (absent), and a replace ref mapping c1 to an empty root (emptyroot), which only an
+    unhardened read honours; the working tree is left dirty (a.py modified, x.md untracked) so an
+    object-store read and a working-tree read can be told apart."""
     repo = base / "repo"
     os.makedirs(repo / "docs")
     env = _git_fixture_env.git_fixture_env(
@@ -4586,6 +4670,12 @@ def _p7_repo(base):
     write("naive.md", "plain\n")
     fixture_git("add", "sp ace.md", "naive.md")
     ids["c6"] = fixture_git("commit-tree", fixture_git("write-tree"), "-p", ids["c5"], "-m", "c6")
+    fixture_git("reset", "-q", "--hard", ids["c5"])
+    parent = ids["c5"]
+    for name, path in (("dotdir", ".github/x"), ("dotslash", "tools/a.py"), ("dotfile", ".gitattributes")):
+        write(path, name + "\n")
+        fixture_git("add", path)
+        ids[name] = parent = fixture_git("commit-tree", fixture_git("write-tree"), "-p", parent, "-m", name)
     fixture_git("reset", "-q", "--hard", ids["c5"])
     empty = fixture_git("hash-object", "-t", "tree", "--stdin", stdin=b"")
     fabricated = ("tree {}\nparent {}\nauthor fixture <fixture@example.invalid> 1 +0000\n"
@@ -4801,6 +4891,44 @@ def _p7_selftest(flip, flip_record):
             with _environ(GIT_DIR=str(base / "elsewhere"), GIT_OBJECT_DIRECTORY=str(base / "elsewhere")):
                 return p7("The change touches a.py and tools/c.py.", ids["c2"])
         check("preflight/p7-foreign-git-env", foreign_dir(), (0, []))
+        # a leading dot is never stripped from an item: each form, accurate (quiet) and inaccurate (HARD)
+        dot_cases = dict((form, [lambda text=text, rev=rev: p7(text, ids[rev]) for text in (
+            "The change touches {}.".format(item), "The change touches {} and a.py.".format(item))])
+            for form, item, rev in (("dir", ".github/x", "dotdir"), ("slash", "./tools/a.py", "dotslash"),
+                                    ("file", ".gitattributes", "dotfile")))
+        check("preflight/p7-leading-dot-items",
+              [[case() for case in dot_cases[form]] for form in ("dir", "slash", "file")],
+              [[(0, []), (1, [("P7", "HARD")])]] * 3)
+        # sentences that are not claims about the pinned commit: a fix brief's work to be done, a bare
+        # basename absent at the root, an abbreviation; all quiet (P3 prints the paths absent at c2)
+        fix_sentence = lambda: p7("The fix changes tools/a.py. It refuses x.", ids["c2"])  # noqa: E731
+        basename = lambda: p7("The commit only adds _pin_changeset.py.", ids["c2"])  # noqa: E731
+        abbreviation = lambda: p7("The fix only adds e.g. tools/_pin_changeset.py.", ids["c2"])  # noqa: E731
+        node = lambda: p7("The change touches only Node.js.", ids["c2"])  # noqa: E731
+        check("preflight/p7-not-a-claim-quiet", [fix_sentence(), basename(), abbreviation(), node()],
+              [(0, [("P3", "ADVISORY")]), (0, []), (0, [("P3", "ADVISORY")]), (0, [])])
+        # several pin values: every one is resolved; two commits exit 2, two forms of one commit agree
+        def two_heads(first, second, claim="a.py and tools/c.py"):
+            """The outcome of a claim under two REVIEWED HEAD lines and no BRIEF-PIN line."""
+            return _outcome("REVIEWED HEAD: {}\nREVIEWED HEAD: {}\n\nThe change touches {}.\n".format(
+                first, second, claim), "alpha", True, repo)
+        abbreviated_other = lambda: two_heads(ids["c5"][:7], ids["c2"])  # noqa: E731
+        full_other = lambda: two_heads(ids["c2"], ids["c5"])  # noqa: E731
+        check("preflight/p7-differing-pins-cannot-evaluate", [abbreviated_other(), full_other()],
+              ["CannotEvaluate"] * 2)
+        check("preflight/p7-same-commit-pin-forms",
+              [two_heads(ids["c2"][:7], ids["c2"]), two_heads(ids["c2"][:7], ids["c2"], "a.py")],
+              [(0, []), (1, [("P7", "HARD")])])
+        # a -C on a directory that is not itself a repository fails instead of walking up to the fixture
+        nested = repo / "nested" / "deep"
+        os.makedirs(nested)
+
+        def nested_read():
+            try:
+                return sorted(_pin_changeset.changed_set(nested, ids["c2"])[2])
+            except _pin_changeset.ChangesetError:
+                return "ChangesetError"
+        check("preflight/p7-ceiling-no-walk-up", nested_read(), "ChangesetError")
 
         # ---------- the revert flips: each guard patched out turns its fixture ----------
         check("revert/p7-red", *flip([no_path_stale, no_pin], [(0, []), (0, [])],
@@ -4847,7 +4975,7 @@ def _p7_selftest(flip, flip_record):
         check("revert/p7-unplaceable-red", *flip([glob_claim], [(1, [("P7", "HARD")])],
                                                  p7_unplaceable=lambda item, atomic: None))
 
-        def legacy_item_words(tokens):
+        def legacy_item_words(tokens, tracked=None):
             """the old reading: every stripped word an item, no path-list shape required"""
             items = []
             for word, atomic in tokens:
@@ -4859,10 +4987,33 @@ def _p7_selftest(flip, flip_record):
                     if piece and piece.lower() != "and":
                         items.append((piece, False))
             return items
+        # a plain bare word is no longer unplaceable on its own, so the old reading compares it and refuses
         check("revert/p7-list-grammar-red", *flip([docs_claim, colon_claim],
-                                                  ["CannotEvaluate", "CannotEvaluate"],
+                                                  [(1, [("P7", "HARD")]), (1, [("P3", "ADVISORY"), ("P7", "HARD")])],
                                                   p7_item_words=legacy_item_words))
         check("revert/p7-advisory-red", *flip([series], [(0, [])], P7_SERIES_SUBJECTS=frozenset()))
+        # stripping a leading `.` again: each leading-dot form turns, one way or the other
+        both_ends = lambda piece: piece.strip(P7_STRIP)  # noqa: E731
+        check("revert/p7-leading-dot-dir-red", *flip(dot_cases["dir"], [(1, [("P7", "HARD")])] * 2,
+                                                     p7_item_strip=both_ends))
+        check("revert/p7-dot-slash-red", *flip(dot_cases["slash"], ["CannotEvaluate"] * 2,
+                                               p7_item_strip=both_ends))
+        check("revert/p7-dotfile-red", *flip(dot_cases["file"], [(0, [])] * 2, p7_item_strip=both_ends))
+
+        def form_pathlike(item, tracked=None):
+            """the old recognition: a `/` or a `.` extension, whether or not the file is tracked"""
+            stem, dot, suffix = item.rpartition(".")
+            return "/" in item or bool(dot and stem and suffix)
+        with_fix = P7_SUBJECTS | frozenset(("fix",))
+        check("revert/p7-fix-subject-red", *flip([fix_sentence], [(1, [("P3", "ADVISORY"), ("P7", "HARD")])],
+                                                 P7_SUBJECTS=with_fix))
+        check("revert/p7-tracked-path-red", *flip([basename, node], [(1, [("P7", "HARD")])] * 2,
+                                                  p7_pathlike=form_pathlike))
+        check("revert/p7-abbreviation-red", *flip([abbreviation], [(1, [("P3", "ADVISORY"), ("P7", "HARD")])],
+                                                  P7_SUBJECTS=with_fix, p7_pathlike=form_pathlike))
+        check("revert/p7-pin-agreement-red", *flip(
+            [abbreviated_other, full_other], [(0, [])] * 2,
+            p7_pin=lambda names, repo_: max((value for _, value in names.pins), key=len)))
         check("revert/p7-first-parent-red", *changeset_flip(
             [merged], [(1, [("P7", "HARD")])],
             base_oid=lambda root, parents: parents[-1] if parents else _pin_changeset.empty_tree(root)))
@@ -4877,8 +5028,8 @@ def _p7_selftest(flip, flip_record):
                                                              commit_header=lenient_header))
         original_env = _pin_changeset.git_environment
 
-        def unhardened_env():
-            env = original_env()
+        def unhardened_env(root=None):
+            env = original_env(root)
             env.pop("GIT_NO_REPLACE_OBJECTS", None)
             return env
         check("revert/p7-replace-red", *changeset_flip(
@@ -4889,12 +5040,17 @@ def _p7_selftest(flip, flip_record):
             [rename_exact], [(1, [("P3", "ADVISORY"), ("P7", "HARD")])],
             DIFF_FLAGS=("diff-tree", "-r", "-z", "--name-only", "-M")))
 
-        def keeps_git_env():
-            env = original_env()
+        def keeps_git_env(root=None):
+            env = original_env(root)
             env.update((key, value) for key, value in os.environ.items() if key.startswith("GIT_"))
             return env
         check("revert/p7-git-env-red", *changeset_flip([foreign_dir], ["CannotEvaluate"],
                                                        git_environment=keeps_git_env))
+
+        def no_ceiling_env(root=None):
+            return original_env(None)
+        check("revert/p7-ceiling-red", *changeset_flip([nested_read], [["a.py", "tools/c.py"]],
+                                                       git_environment=no_ceiling_env))
         original_changed_set = _pin_changeset.changed_set
 
         def swallowing_changed_set(root, pin):
@@ -7695,7 +7851,7 @@ def self_test(report_path=None):
             os.chmod(locked, 0o700)
         shutil.rmtree(inputs, ignore_errors=True)
     _p7_selftest(flip, flipped.append)
-    check("revert/every-flip-ran", len(flipped), 240)
+    check("revert/every-flip-ran", len(flipped), 248)
 
     for check_id in sorted(expected - _EXECUTED_SET):
         FAILURES.append("execution-set/missing: {}".format(check_id))
