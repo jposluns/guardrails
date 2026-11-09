@@ -2419,9 +2419,13 @@ _LOAD_SENSITIVE_VECTORS = ("resolver-vector/blocked-timing",)
 # Server.close() waits for the server thread. close() shuts the served
 # connection down first, so a blocked operation returns at once; the join
 # bound is derived from the socket timeout and kept above it, so even an
-# operation close() could not interrupt ends inside the join.
+# operation close() could not interrupt ends inside the join. The stop check
+# waits up to the reach bound for the server to block in recv before it
+# closes; a server that does not get there in time leaves the check unable
+# to evaluate, so the bound is generous and only delays that outcome.
 _TLS_FIXTURE_SOCKET_SECONDS = 2.0
 _TLS_FIXTURE_STOP_JOIN_SECONDS = 2 * _TLS_FIXTURE_SOCKET_SECONDS
+_TLS_FIXTURE_REACH_SECONDS = 10 * _TLS_FIXTURE_SOCKET_SECONDS
 
 
 def _runner_launch_entry(expected):
@@ -3440,7 +3444,7 @@ def self_test(vectors_only=False, steady_only=False):
     SELF_TEST_ROSTER = ()
     executed = []
     vector_results = []
-    fixture_failure = None
+    fixture_failures, fixture_unevaluated = [], []
     module = sys.modules[__name__]
     original_context = ssl.create_default_context
     original_fetch = _fetch
@@ -3539,6 +3543,9 @@ def self_test(vectors_only=False, steady_only=False):
             self.stop = threading.Event()
             self.guard = threading.Lock()
             self.connection = None
+            # Set just before each blocking recv of a request, so the stop
+            # check closes only once the server is waiting in it.
+            self.in_recv = threading.Event()
             self.listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.listener.bind(("127.0.0.1", 0))
             self.listener.listen(8)
@@ -3570,8 +3577,14 @@ def self_test(vectors_only=False, steady_only=False):
                     if not self.serving(secured):
                         continue
                     secured.do_handshake()
+                    if self.mode == "quiet":
+                        # Never reaches recv: the stop check's unmet
+                        # precondition.
+                        self.stop.wait(_TLS_FIXTURE_SOCKET_SECONDS)
+                        continue
                     request = bytearray()
                     while not request.endswith(b"\r\n\r\n"):
+                        self.in_recv.set()
                         block = secured.recv(4096)
                         if not block:
                             break
@@ -3625,7 +3638,7 @@ def self_test(vectors_only=False, steady_only=False):
                 self.connection = connection
                 return True
 
-        def close(self):
+        def halt(self):
             self.stop.set()
             with self.guard:
                 connection = self.connection
@@ -3637,49 +3650,153 @@ def self_test(vectors_only=False, steady_only=False):
                 except OSError:
                     pass
             self.listener.close()
+
+        def close(self):
+            self.halt()
             self.thread.join(timeout=_TLS_FIXTURE_STOP_JOIN_SECONDS)
             if self.thread.is_alive():
                 raise AssertionError("local TLS fixture did not stop")
 
-    def tls_fixture_stop_check(context, cadata):
+    class LingeringServer(Server):
+        # Its thread outlives a close() that returns without joining it: the
+        # stop check must fail a thread still alive after close().
+        def __init__(self, *args, **kwargs):
+            self.release = threading.Event()
+            Server.__init__(self, *args, **kwargs)
+
+        def serve(self):
+            Server.serve(self)
+            self.release.wait(_TLS_FIXTURE_REACH_SECONDS)
+
+        def close(self):
+            self.halt()
+
+    STOP_PASS, STOP_FAIL, STOP_UNEVALUATED = "pass", "fail", "cannot evaluate"
+
+    def tls_fixture_stop_check(context, cadata, server_class=None, mode="normal",
+                               clock=time.monotonic, pause=None,
+                               reach_seconds=_TLS_FIXTURE_REACH_SECONDS):
         # A served connection whose peer goes quiet leaves the server thread
         # blocked in recv for up to the socket timeout, longer than close()
-        # used to join it. close() must make that thread return at once:
-        # neither raise nor wait the timeout out.
-        identity = "self-test/tls-fixture-stop-while-served"
-        server = Server(context, b"", b"")
+        # used to join it. close() must make that thread return at once.
+        # Returns (outcome, reason, detail). A close() that raises, or a
+        # thread still alive after it, fails. A server that never reached
+        # its blocking recv within reach_seconds (or a client that could not
+        # get there) is a precondition this run did not establish: cannot
+        # evaluate. Only the close() call is timed, from clock(), so a delay
+        # before it (pause, the seam a test uses to stand for one) is never
+        # charged to it; a close() that still took the socket timeout is
+        # cannot evaluate too, since timing alone cannot tell one that
+        # waited the timeout out from a host that stalled it.
+        server = (server_class or Server)(context, b"", b"", mode=mode)
         closed = False
+        raised = None
         try:
             with socket.create_connection(("127.0.0.1", server.port),
-                                          timeout=_TLS_FIXTURE_SOCKET_SECONDS) as raw:
+                                          timeout=reach_seconds) as raw:
                 with original_context(cadata=cadata).wrap_socket(
                         raw, server_hostname="codeload.github.com"):
                     # The server finishes its handshake after this one, then
                     # waits in recv for a request this client never sends.
-                    began = time.monotonic()
-                    time.sleep(0.2)
+                    if not server.in_recv.wait(reach_seconds):
+                        return (STOP_UNEVALUATED, "precondition",
+                                "the server did not reach its blocking recv within "
+                                "{} s".format(reach_seconds))
+                    if pause is not None:
+                        pause()
                     closed = True
+                    began = clock()
                     try:
                         server.close()
                     except AssertionError as exc:
-                        raise AssertionError(identity + ": close() raised: "
-                                             + str(exc)) from None
-                    took = time.monotonic() - began
+                        raised = str(exc)
+                    took = clock() - began
+        except OSError as exc:
+            # ssl.SSLError is an OSError. One raised before close() is the
+            # client failing to establish the precondition.
+            if closed:
+                raise
+            return (STOP_UNEVALUATED, "precondition",
+                    "the client could not reach the server: {}: {}".format(
+                        type(exc).__name__, exc))
         finally:
             if not closed:
                 try:
                     server.close()
                 except AssertionError:
                     pass
-        if server.thread.is_alive() or took >= _TLS_FIXTURE_SOCKET_SECONDS:
-            raise AssertionError(
-                identity + ": close() took {:.2f} s, not under the {} s socket "
-                "timeout".format(took, _TLS_FIXTURE_SOCKET_SECONDS))
+        if raised is not None:
+            return STOP_FAIL, "raised", "close() raised: " + raised
+        if server.thread.is_alive():
+            return STOP_FAIL, "alive", "the server thread is alive after close() returned"
+        if took >= _TLS_FIXTURE_SOCKET_SECONDS:
+            return (STOP_UNEVALUATED, "slow-close",
+                    "close() took {:.2f} s, not under the {} s socket timeout".format(
+                        took, _TLS_FIXTURE_SOCKET_SECONDS))
+        return STOP_PASS, "prompt", "close() took {:.2f} s".format(took)
+
+    def tls_fixture_stop_rows(context, cadata):
+        # The stop check on the real fixture, then the rows that pin its
+        # outcomes. Returns (failures, unevaluated): FAIL lines for definite
+        # failures, and lines for checks that could not be evaluated.
+        failures, unevaluated = [], []
+
+        def judge(identity, result, wanted):
+            outcome, reason, detail = result
+            if (outcome, reason) == wanted:
+                print("PASS " + identity)
+            elif outcome == STOP_UNEVALUATED and reason == "precondition":
+                unevaluated.append("FAIL " + identity + ": cannot evaluate: " + detail)
+            else:
+                failures.append("FAIL {}: expected {} ({}), got {} ({}): {}".format(
+                    identity, wanted[0], wanted[1], outcome, reason, detail))
+
+        identity = "self-test/tls-fixture-stop-while-served"
+        outcome, reason, detail = tls_fixture_stop_check(context, cadata)
+        if outcome == STOP_PASS:
+            print("PASS " + identity)
+        elif outcome == STOP_UNEVALUATED:
+            unevaluated.append("FAIL " + identity + ": cannot evaluate: " + detail)
+        else:
+            failures.append("FAIL " + identity + ": " + detail)
         # An operation close() cannot interrupt still ends inside the join.
         if not _TLS_FIXTURE_STOP_JOIN_SECONDS > _TLS_FIXTURE_SOCKET_SECONDS:
-            raise AssertionError(identity + ": the stop join bound is not above the "
-                                 "socket timeout")
-        print("PASS " + identity)
+            failures.append("FAIL " + identity + ": the stop join bound is not above "
+                            "the socket timeout")
+
+        # A scheduling delay between reaching recv and close() is not
+        # close() time: a clock that jumps well past the socket timeout
+        # before close(), and not during it, still passes.
+        now = [0.0]
+
+        def delayed():
+            now[0] += 10 * _TLS_FIXTURE_SOCKET_SECONDS
+        judge("self-test/tls-fixture-stop-after-delay",
+              tls_fixture_stop_check(context, cadata, clock=lambda: now[0], pause=delayed),
+              (STOP_PASS, "prompt"))
+        # A server that never reaches its blocking recv cannot evaluate the
+        # stop: neither a pass nor a definite failure.
+        judge("self-test/tls-fixture-stop-never-in-recv",
+              tls_fixture_stop_check(context, cadata, mode="quiet", reach_seconds=0.5),
+              (STOP_UNEVALUATED, "precondition"))
+        # A server thread still alive after close() returned fails.
+        lingering = []
+
+        def lingering_server(*args, **kwargs):
+            lingering.append(LingeringServer(*args, **kwargs))
+            return lingering[-1]
+        try:
+            judge("self-test/tls-fixture-stop-thread-alive",
+                  tls_fixture_stop_check(context, cadata, server_class=lingering_server),
+                  (STOP_FAIL, "alive"))
+        finally:
+            for server in lingering:
+                server.release.set()
+                server.thread.join(_TLS_FIXTURE_STOP_JOIN_SECONDS)
+                if server.thread.is_alive():
+                    failures.append("FAIL self-test/tls-fixture-stop-thread-alive: the "
+                                    "lingering server thread outlived its release")
+        return failures, unevaluated
 
     def snapshot(root):
         result = {}
@@ -5137,11 +5254,14 @@ def self_test(vectors_only=False, steady_only=False):
                 context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
                 context.load_cert_chain(str(cert), str(key))
                 contexts.append(context)
-            # A failure here is a definite one, named after the roster.
-            try:
-                tls_fixture_stop_check(contexts[0], fixture_certificates)
-            except AssertionError as exc:
-                fixture_failure = "FAIL " + str(exc)
+            # Named after the roster: a close() that raised or left the server
+            # thread alive, or a stop row that missed its outcome, fails the
+            # run (exit 1); a stop check that could not be evaluated (the
+            # server never reached recv, or close() took the socket timeout,
+            # which timing alone cannot charge to close()) exits 2 unless
+            # something failed.
+            fixture_failures, fixture_unevaluated = tls_fixture_stop_rows(
+                contexts[0], fixture_certificates)
 
             git_commit, git_archive = _git_archive_fixture(base)
             add("positive/git-archive", VALID, "reject-git-comment",
@@ -5184,7 +5304,7 @@ def self_test(vectors_only=False, steady_only=False):
                 print(_report_line(executed))
                 _print_failures(_roster_failures(executed)
                                 + ["FAIL roster/rows: the run stopped after its positive control"]
-                                + ([fixture_failure] if fixture_failure else []))
+                                + fixture_failures + fixture_unevaluated)
                 return 1
 
             guard_rows = (_guard_self_test() + _ownership_self_test()
@@ -5203,7 +5323,7 @@ def self_test(vectors_only=False, steady_only=False):
         _print_failures(_roster_failures(executed)
                         + ["FAIL fixture/setup-or-teardown: {}: {}".format(
                             type(exc).__name__, exc)]
-                        + ([fixture_failure] if fixture_failure else []))
+                        + fixture_failures + fixture_unevaluated)
         return 2
 
     # Every exit-code departure from main; all concern resolver workers:
@@ -5265,21 +5385,29 @@ def self_test(vectors_only=False, steady_only=False):
         red_failure = "FAIL " + str(exc)
     rc = _judge_roster(executed, expected_ids, vector_results, tuple(
         name for name in VECTOR_NAMES if not (steady_only and name in _LOAD_SENSITIVE_VECTORS)))
-    if red_failure is not None or fixture_failure is not None:
-        _print_failures([line for line in (red_failure, fixture_failure) if line])
+    if red_failure is not None or fixture_failures:
+        _print_failures(([red_failure] if red_failure else []) + fixture_failures
+                        + fixture_unevaluated)
         return 1
     if rc:
+        _print_failures(fixture_unevaluated)
         return rc
     if not vectors_only:
         try:
             _runner_registration_test(expected_ids, VECTOR_NAMES)
         except AssertionError as exc:
-            _print_failures(["FAIL " + str(exc)])
+            _print_failures(["FAIL " + str(exc)] + fixture_unevaluated)
             return 1
         except Exception as exc:
             _print_failures(["FAIL runner/adopt-observe-registration: registration cannot "
-                             "evaluate: {}: {}".format(type(exc).__name__, exc)])
+                             "evaluate: {}: {}".format(type(exc).__name__, exc)]
+                            + fixture_unevaluated)
             return 2
+    # A stop check that could not be evaluated is neither a pass nor a
+    # definite failure.
+    if fixture_unevaluated:
+        _print_failures(fixture_unevaluated)
+        return 2
     return 0
 
 
