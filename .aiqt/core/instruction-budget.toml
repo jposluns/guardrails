@@ -94,21 +94,23 @@
 #                        files 117926 -> 118464; managed block 360 and file headers 16136 unchanged. This queued
 #                        seed fold measured 538 units against the 559-unit estimate. The ratchet rises by the
 #                        measured delta, 134991 + 538 = 135529, rather than drawing on the estimate.
-#                        Raised 135529 -> 136039 on 2026-11-08 under the maintainer's recorded decision of
-#                        2026-11-08, when stage-then-promote-on-green redefined the two settings in which a
-#                        tool's side effects are first observed in a change to a live system, one step or many,
-#                        the restore bar a canary step must meet, and that a change of a single step is observed
-#                        first on the isolated copy (stgprm.6 to stgprm.10): measured PACK 135159 at the PR base
-#                        189a280e -> 136039 (+880 units); rule files 118536 -> 119416; managed block and
-#                        headers unchanged. The base PACK sat 370 units under the ratchet 135529, so the
-#                        ratchet is set to exactly the new measured PACK and rises 510 units, under the
-#                        maintainer's standing decision to set the ratchet to the measured PACK (at most 148000).
+#                        Raised 135529 -> 136274 on 2026-11-08 under the maintainer's recorded decision of
+#                        2026-10-31 to raise the ratchet by exactly the measured delta, when
+#                        stage-then-promote-on-green redefined the two settings in which a tool's side
+#                        effects are first observed in a change to a live system, one step or many, stated
+#                        the canary step's restore bar by reference to the verified-restore-path rule
+#                        (secrst), and gave the single-step clause its own row (stgprm.6 to stgprm.10):
+#                        measured PACK 135159 at the PR base 189a280e -> 135904 (+745 units); rule files
+#                        118536 -> 119281; managed block 360 and file headers 16263 unchanged. The ratchet
+#                        rises by the measured delta, 135529 + 745 = 136274, keeping the 370 units of
+#                        deliberate headroom recorded in the 2026-10-29 entry, within the maintainer's
+#                        authorization of 2026-11-08 for raises up to 148000.
 #   ceiling              a reported PACK figure; not enforced, and PACK currently exceeds it. Its value
 #                        predates header counting, which added 16136 units to PACK at the 112222 ->
 #                        128358 ratchet raise; it was not raised with it.
 #   claude-code-version  the Claude Code build whose loading behaviour the gate models.
 #   binary-sha256        the SHA-256 of that build's binary.
-ratchet = 136039
+ratchet = 136274
 ceiling = 90000
 claude-code-version = "2.1.287"
 binary-sha256 = "3920489a5109cff5786a1a392c25277408ff22bc796d5edb9c16a60e5a1718f0"
