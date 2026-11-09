@@ -552,11 +552,11 @@ reaching a runtime, distribution, or live target, not integrating a change into 
 development; when a merge into that line itself deploys, this rule governs the deployment it triggers,
 not the merge. In a change to a live system, one step or many, each tool's side effects are recorded
 from observing it first, either on a copy that shares no state with and cannot reach the live system, or
-as one canary step that other steps of the change follow, run only after the verified-restore-path rule
-(secrst) is met for the state it changes, whether or not the step destroys anything; a change of a single
-step is observed first on that copy; any unrecorded effect, harmless or not, halts the change; it resumes
-only once every tool's effects are re-observed in one of the same two ways and recorded; no check the
-change must pass is relaxed.
+as one canary step that other steps of the change follow, run only after the state it changes meets the
+bar the verified-restore-path rule (secrst) sets for a destructive operation, as if the step destroyed
+that state; a change of a single step is observed first on that copy; any unrecorded effect, harmless or
+not, halts the change; it resumes only once every tool's effects are re-observed in one of the same two
+ways and recorded; no check the change must pass is relaxed.
 
 ## A launched task stays observable
 
