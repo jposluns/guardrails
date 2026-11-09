@@ -13386,12 +13386,14 @@ def _main_isolated(monitor):
         # in-process cases run with both limits replaced by a fixed test-only budget: each production
         # limit times the load-tolerance cap (_load_bound.MAX_LOAD_FACTOR, 16), so 112 s for one
         # evaluation and 32 s for one probe. That is the most a run-queue factor can stretch a probe
-        # before _load_bound stops counting it, so a case that asserts an allow is decided by
-        # classification, not by host speed. It is also the bound on a hung probe: one probe ends after
-        # at most 32 s and one evaluation after at most 112 s, as a named deadline denial of that case,
-        # and _commit_run kills the probe's whole process group on every exit, so no probe child
-        # outlives its case. That bound is per probe: one hung probe ends within 32 s as a named failure,
-        # but many hung probes together can still run past the suite runner's own time bound.
+        # before _load_bound stops counting it, so a case that asserts an allow is far less sensitive
+        # to host speed; it is still a wall-clock budget, and a host slowed past it can turn that allow
+        # into a deadline denial. The same budget limits a hung probe: _commit_run stops waiting on a
+        # probe once 32 s of its own or 112 s of the evaluation have passed, as checked at its next
+        # select or wait, raises the named deadline denial of that case, and kills the probe's whole
+        # process group on every exit. Scheduling delay and a short cleanup wait can add to those
+        # times, so they are configured limits, not completion guarantees. The limit is per probe, so
+        # many hung probes together can still run past the suite runner's own time bound.
         # (pl239-probe-timeout), where the deadline IS the property, restores the production limits
         # against a probe that sleeps far past them, (pl239-probe-closed-*) and
         # (pl239-remote-probe-timeout) run one substitute probe at the production probe limit, and
@@ -14248,6 +14250,27 @@ def _main_isolated(monitor):
             if len(reads) != 1:
                 failures.append("{}: substitute probe not reached exactly once: {!r}".format(label, reads))
 
+        def _pl239_check_protected_timeout_denial(label, got, reason, reads):
+            """A timeout after the check already found the protected branch must still deny, must say
+            the check ran out of time and name that branch, and must not claim that no verdict about
+            the branch was reached."""
+            if got != "deny":
+                failures.append("{}: expected deny, got {}".format(label, got))
+            for wanted in ("ran out of time on this host",
+                           "would commit on protected branch 'refs/heads/main'",
+                           "may still deny it"):
+                if wanted not in reason:
+                    failures.append("{}: expected {!r}, got {!r}".format(label, wanted, reason))
+            for wrong in ("not a finding that the commit is on a protected branch",
+                          "found no commit of this command on a protected branch",
+                          "commit probe failed", "Commit denied because no admitted proof",
+                          "remote absence could not be proved"):
+                if wrong in reason:
+                    failures.append("{}: a timeout after a protected verdict must not render {!r}, got {!r}"
+                                    .format(label, wrong, reason))
+            if len(reads) != 1:
+                failures.append("{}: substitute probe not reached exactly once: {!r}".format(label, reads))
+
         class _Pl239NoStreamSelector:
             """Observes no open stream, as after a probe closed both outputs: the read loop ends at once."""
 
@@ -14267,11 +14290,11 @@ def _main_isolated(monitor):
         # sees end of file, so the budget runs out in the bounded wait for the probe's exit, which
         # raises subprocess.TimeoutExpired. (pl239-probe-closed-output) is a real child that closes
         # its streams; (pl239-probe-closed-forced) stands in a selector that observes no open stream,
-        # so the bounded wait is reached whatever the host load. (pl239-probe-closed-output) stops
-        # discriminating when the child takes longer than the 2 s probe limit to start: the budget then
-        # runs out in the read loop before the child closes its outputs, a path that rendered the timeout
-        # denial even without the bounded-wait handling, so it passes against that code reverted;
-        # (pl239-probe-closed-forced) is the guard for that case.
+        # so the bounded wait is reached unless starting the probe alone uses up its 2 s limit.
+        # (pl239-probe-closed-output) stops discriminating when the child takes longer than the 2 s
+        # probe limit to start: the budget then runs out in the read loop before the child closes its
+        # outputs, a path that rendered the timeout denial even without the bounded-wait handling, so
+        # it passes against that code reverted; (pl239-probe-closed-forced) is the guard for that case.
         for _case, _script, _selectors in (
                 ("closed-output", "import os, time; os.close(1); os.close(2); time.sleep(30)",
                  _pl239_selectors),
@@ -14299,7 +14322,9 @@ def _main_isolated(monitor):
 
         # A lone commit on a protected branch, where the no-remote exemption is judged: the remote
         # probe stalls past the production probe limit, and that per-probe timeout must propagate as
-        # the timeout denial instead of reading as an unproved remote absence.
+        # a timeout denial instead of reading as an unproved remote absence. The remote probe runs
+        # only after the branch is found protected, so the denial must name that branch and must not
+        # say that no verdict about the branch was reached.
         _pl239_reads = []
 
         def _pl239_stalled_remote_git(repo, deadline, *args):
@@ -14314,10 +14339,53 @@ def _main_isolated(monitor):
             _pl239_got, _pl239_reason = _pl239_judge_commit(plr)
         finally:
             aiqt_hooks._commit_git = _pl239_original_git
-        _pl239_check_timeout_denial("(pl239-remote-probe-timeout)", _pl239_got, _pl239_reason,
-                                    _pl239_reads)
+        _pl239_check_protected_timeout_denial("(pl239-remote-probe-timeout)", _pl239_got, _pl239_reason,
+                                              _pl239_reads)
         pexpect("(pl239-remote-probe-restored)", "git commit", "deny", cwd=plr,
                 detail="would commit on protected branch")
+
+        # The protected verdict reached before time ran out is carried by the exception's type and
+        # the branch it names, with no probe timing involved: (pl239-remote-deadline-verdict) raises
+        # the deadline at the remote probe of a lone protected-branch commit, and
+        # (pl239-chain-deadline-verdict) raises it at the second commit's view probe, after the first
+        # commit of the chain was already found on the protected branch. Each must render the
+        # protected-branch timeout denial. (pl239-chain-deadline-control) raises it at the second
+        # commit's view probe after the first commit was proved on a feature branch: no protected
+        # branch was found, so it must keep the wording that no protected-branch finding was reached.
+        for _case, _cwd, _command, _probe, _protected in (
+                ("remote-deadline-verdict", plr, "git commit", ("remote",), True),
+                ("chain-deadline-verdict", plr, "git commit -m a && git -C " + plf + " commit -m b",
+                 _pl239_view_query, True),
+                ("chain-deadline-control", plf, "git commit -m a && git -C " + plr + " commit -m b",
+                 _pl239_view_query, False)):
+            _pl239_reads = []
+            _pl239_stall_repo = _cwd if _probe == ("remote",) else (plf if _protected else plr)
+
+            def _pl239_deadline_git(repo, deadline, *args):
+                if args == _probe and repo == _pl239_stall_repo:
+                    _pl239_reads.append(repo)
+                    raise aiqt_hooks._CommitDeadlineExhausted(aiqt_hooks._COMMIT_DEADLINE_DETAIL)
+                return _pl239_original_git(repo, deadline, *args)
+
+            aiqt_hooks._commit_git = _pl239_deadline_git
+            try:
+                _pl239_code, _pl239_obj, _pl239_stderr = plg(
+                    {"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                     "tool_input": {"command": _command}, "cwd": _cwd})
+            finally:
+                aiqt_hooks._commit_git = _pl239_original_git
+            _pl239_got = _reduce_result(_pl239_code, _pl239_obj)
+            _pl239_reason = (_pl239_obj.get("hookSpecificOutput", {}).get("permissionDecisionReason", "")
+                             if isinstance(_pl239_obj, dict) else "")
+            if _protected:
+                _pl239_check_protected_timeout_denial("(pl239-{})".format(_case), _pl239_got,
+                                                      _pl239_reason, _pl239_reads)
+            else:
+                _pl239_check_timeout_denial("(pl239-{})".format(_case), _pl239_got, _pl239_reason,
+                                            _pl239_reads)
+                if "found no commit of this command on a protected branch" not in _pl239_reason:
+                    failures.append("(pl239-{}): expected the no-finding wording, got {!r}"
+                                    .format(_case, _pl239_reason))
 
         # _repo_has_remote tells a timeout from any other probe failure by the exception's type, never by
         # its message: a plain _CommitCannotEvaluate whose text happens to equal the deadline detail is an
