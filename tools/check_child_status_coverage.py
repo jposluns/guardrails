@@ -222,6 +222,11 @@ import check_selftest_execution  # noqa: E402  (the registry schema)
 
 ROOT = Path(__file__).resolve().parents[1]
 CANONICAL_REL = "opf/tools/_child_status.py"
+# The pack's own copy of the canonical guard (origin and SHA-256 pinned in tools/pack-copies-pin.toml): the hook
+# dispatcher copies are AST-compared against it, and the live leg executes it, so no opf/ code is executed by
+# the pack's side. This gate still READS opf/tools/_child_status.py above as the canonical template while opf/
+# is in this repository.
+PACK_CANONICAL_REL = "tools/_pack_child_status.py"
 COVERAGE_REL = "tools/" + Path(__file__).name
 CANONICAL_NAMES = ("_CHILD_STATUS_PROBE_CODE", "_child_status_refusal", "_child_status_refusal_exit")
 HOOK_NAMES = CANONICAL_NAMES[:2]
@@ -250,8 +255,10 @@ HOOK_TARGET = "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/aiqt_hooks.py"
 HOOK_COMMAND = "python3"
 HOOK_ARGS = ["-I", HOOK_TARGET]
 # The entries that carry the pinned guard: the canonical file, this gate (leg 1 runs first in main), the CLI
-# copies, the _entry() copy, the --self-test-first copy and the two dispatcher copies.
-SELF_ENTRIES = frozenset((CANONICAL_REL, COVERAGE_REL)
+# copies, the _entry() copy, the --self-test-first copy and the two dispatcher copies. The pack's copy of the
+# canonical file is byte-identical to it apart from its floor-guard refusal naming its own file (its digest
+# checked by tools/check_byte_canon.py), so it carries the same child-status guard.
+SELF_ENTRIES = frozenset((CANONICAL_REL, PACK_CANONICAL_REL, COVERAGE_REL)
                          + tuple(rel for rel, _name in CLI_COPIES + ENTRY_COPIES + SELF_TEST_FIRST_COPIES)
                          + HOOK_COPIES)
 CLI_ENTRY = 'sys.exit(_child_status_refusal_exit("{}") or main())'
@@ -1441,10 +1448,11 @@ def evaluate(root, residual=None, direct_check=None):
         finding = self_test_first_finding(rel, tree, name)
         findings.extend([finding] if finding else [])
     hook_trees = []
+    pack_tmpl = template(_parse(_read(root, PACK_CANONICAL_REL), PACK_CANONICAL_REL))
     for rel in HOOK_COPIES:
         tree = _parse(_read(root, rel), rel)
         hook_trees.append(tree)
-        findings.extend(copy_findings(rel, tree, tmpl, HOOK_NAMES))
+        findings.extend(copy_findings(rel, tree, pack_tmpl, HOOK_NAMES))
         finding = hook_block_finding(rel, tree)
         findings.extend([finding] if finding else [])
 
@@ -1538,7 +1546,7 @@ def run(root):
 
 
 def _canonical_module(root=ROOT):
-    spec = importlib.util.spec_from_file_location("child_status_canonical", Path(root) / CANONICAL_REL)
+    spec = importlib.util.spec_from_file_location("child_status_canonical", Path(root) / PACK_CANONICAL_REL)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -3312,7 +3320,7 @@ def _live_refusal():
         canonical = _canonical_module()
     except (OSError, ImportError, SyntaxError, ValueError) as exc:
         print("error: cannot evaluate child-status coverage (cannot load {}: {}); fail-closed".format(
-            CANONICAL_REL, type(exc).__name__), file=sys.stderr)
+            PACK_CANONICAL_REL, type(exc).__name__), file=sys.stderr)
         return 2
     return canonical._child_status_refusal_exit(NAME)
 

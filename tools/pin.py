@@ -71,9 +71,8 @@ except ModuleNotFoundError as exc:  # not a version problem: every Python 3.14 s
     os._exit(2)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "opf" / "tools"))  # _journal relocated to opf/tools (OPF-SELF-CONTAIN)
-import _journal  # noqa: E402  the 9.3 engine: contained fd-bound helpers (open/read/lstat/apply/is_terminal)
-import _optlevel  # noqa: E402  level-0 source parse for the docstring check, shared with opf/tools
+import _pack_journal as _journal  # noqa: E402  the pack's own copy (pinned in tools/pack-copies-pin.toml): contained fd-bound helpers (open/read/lstat/apply/is_terminal)
+import _pack_optlevel as _optlevel  # noqa: E402  level-0 source parse for the docstring check (the pack's own copy)
 
 EXIT_OK = 0
 EXIT_FINDING = 1

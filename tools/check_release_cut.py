@@ -89,8 +89,8 @@ import tempfile
 import tomllib
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "opf" / "tools"))
-from _semver import _parse  # noqa: E402
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _pack_semver import _parse  # noqa: E402  the pack's own copy, pinned in tools/pack-copies-pin.toml
 
 CHANGELOG = "changelog.toml"
 DECLARATION = ".aiqt/release-cut.toml"
@@ -1870,7 +1870,7 @@ def _cs_class(rel, cls):
 
 def _close_sweep_source(rel, text):
     import ast
-    import _optlevel
+    import _pack_optlevel as _optlevel
     tree = _optlevel.parse(text, rel)
     rows = []
     for node in ast.walk(tree):
@@ -1907,6 +1907,8 @@ _CLOSE_SWEEP_DISPOSITIONS = (
      "part C: false positive, part C's _st_reclose_yielding, the deliberate RECLOSE body its T-p2 flip runs; the "
      "site exists only in part C (found by this sweep at 15f2f498, absent here)"),
     ("opf/tools/_journal.py", "body", "AFTER", "fd", "fd", 1,
+     "false positive: the harness's R flip (reclose), the deliberate pre-P1 body each R leg must turn red"),
+    ("tools/_pack_journal.py", "body", "AFTER", "fd", "fd", 1,
      "false positive: the harness's R flip (reclose), the deliberate pre-P1 body each R leg must turn red"),
     ("tools/_close_selftest.py", "body", "AFTER", "fd", "fd", 1,
      "false positive: the harness copy's R flip (reclose), byte-identical to _journal's"),
@@ -2065,6 +2067,10 @@ _CLOSE_SWEEP_DISPOSITIONS = (
     ("tools/gen_skill.py", "self_test_main", "AFTER", "race_fd", "race_fd", 1,
      _CS_FRESH.format("self-test legs", "leg's _open_root of the race fixture")),
     ("opf/tools/_journal.py", "_fake_close", "REBIND", "fd", "", 1,
+     "false positive: the harness's fault stub publishes the number it released to its reuser thread "
+     "(state[\"fd\"] = fd); the re-binding is that store into state, whose one element key rule 3 joins to fd, "
+     "and no try closes fd again"),
+    ("tools/_pack_journal.py", "_fake_close", "REBIND", "fd", "", 1,
      "false positive: the harness's fault stub publishes the number it released to its reuser thread "
      "(state[\"fd\"] = fd); the re-binding is that store into state, whose one element key rule 3 joins to fd, "
      "and no try closes fd again"),
@@ -2405,7 +2411,7 @@ def _cs_robustness_failures(sources):
     """Each (label, text) source the sweep raises on, named with the innermost statements that raise when each
     is swept on its own (as a function body, and as a class when it is one). Any exception is a failure."""
     import ast
-    import _optlevel
+    import _pack_optlevel as _optlevel
     import types
     failures = []
     for label, text in sources:
@@ -2539,7 +2545,10 @@ def _close_harness_checks(parent, script):
         print("FAIL " + failure, file=sys.stderr)
     check("close-vectors", not close_failures)
     print("PASS close-vectors runs=" + str(close_runs))
-    journal = (script.parents[1] / "opf" / "tools" / "_journal.py").read_text(encoding="utf-8")
+    # The harness is held against the pack's own journal copy (byte-identical to opf/tools/_journal.py apart from
+    # its floor-guard refusal naming its own file, its digest checked by check_byte_canon against
+    # tools/pack-copies-pin.toml), so this check runs without opf/.
+    journal = (script.parent / "_pack_journal.py").read_text(encoding="utf-8")
     copy = (script.parent / "_close_selftest.py").read_text(encoding="utf-8")
     check("close-harness-in-step", _close_harness_in_step(journal, copy))
     check("close-harness-census-eio", _close_census_eio(_close_selftest))
@@ -2843,15 +2852,14 @@ def _self_test_isolated(red_on_revert):
                  "require(isinstance(item[key], str) and bool(item[key]),",
                  "head-fix-space-id", 0),
             )
-            parser_bytes = (script.parents[1] / "opf" / "tools" / "_semver.py").read_bytes()
+            parser_bytes = (script.parent / "_pack_semver.py").read_bytes()
             for name, old, new, case_id, mutated_code in mutations:
                 require(production.count(old) == 1, name + ": mutation must match exactly once")
                 location = parent / ("mutation-" + name)
                 (location / "tools").mkdir(parents=True)
-                (location / "opf" / "tools").mkdir(parents=True)
                 mutant = location / "tools" / script.name
                 mutant.write_text(production.replace(old, new, 1) + marker + tests, encoding="utf-8")
-                (location / "opf" / "tools" / "_semver.py").write_bytes(parser_bytes)
+                (location / "tools" / "_pack_semver.py").write_bytes(parser_bytes)
                 report = observe(mutant, fixtures[case_id], cases[case_id][-1], env)
                 require(report["code"] == mutated_code,
                         name + ": mutation did not produce its designated behavioral result")

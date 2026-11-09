@@ -452,7 +452,10 @@ ACTION_FILES = ("action.yml", "action.yaml")
 # Not shipped (repo-only CI) or byte-exact vendored third-party code under a provenance manifest; .baseline/
 # is the shared site template's vendored tooling, pinned by SHA-256 and kept byte-identical to the template
 # package, so it cannot carry this repository's guard (the tree holds only its two pins and that tool).
-EXCLUDED_TREES = (".github/", "opf/tools/_vendor/", ".baseline/")
+# tools/_vendor/ is the pack's copy of the Marko package and its licence text from opf/tools/_vendor/, each
+# file pinned by origin and SHA-256 in tools/pack-copies-pin.toml and compared with its origin by
+# tools/check_byte_canon.py while opf/ is in this repository.
+EXCLUDED_TREES = (".github/", "opf/tools/_vendor/", "tools/_vendor/", ".baseline/")
 SKIPPED_DIR_NAMES = {".git", "__pycache__", ".venv", "venv", "node_modules"}
 # The git index mode of a gitlink (a submodule's commit), as git ls-files -s prints it.
 GITLINK_MODE = b"160000"

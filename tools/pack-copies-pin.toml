@@ -1,0 +1,142 @@
+# The pack's own copies of the opf/tools modules its tools import or load, so that the pack keeps working
+# when opf/ moves to its own repository. Each [files] row names the copy's path, then the origin's path
+# (a plain relative path under opf/) and the SHA-256 of that origin's bytes at copy time. A copy is
+# byte-identical to its origin, except that a copy which is a guarded surface (tools/_pack_child_status.py,
+# tools/_pack_journal.py) names its own file in its floor-guard refusal, as tools/check_python_floor.py
+# requires; that one refusal name is put back to the origin's file name before any hashing or comparison.
+# tools/_vendor/ holds the pack's copy of the vendored Marko parser and its MIT licence text (see NOTICE).
+# tools/check_byte_canon.py checks on every run that each copy still hashes to its row, and, while the
+# origin is present in this repository, that the copy still matches the origin's live bytes, so a change
+# to either side apart from the other fails until opf/ leaves. It also fails closed on a malformed origin
+# path, a copy or origin that is a symlink, and any file under tools/_pack_* or tools/_vendor/ that no
+# [files] row names; a file deliberately left unpinned there (for example a vendored manifest, provenance
+# or spec file) must be listed in an [[exclude]] row with a path and a reason.
+# Update a copy only together with its row here, and with its origin while opf/ is in this repository.
+
+[files."tools/_pack_semver.py"]
+origin = "opf/tools/_semver.py"
+sha256 = "eeaf84ff6f52265afaada78685614553c864d42cfb1ec5331fa0a89fbe159a8c"
+
+[files."tools/_pack_byte_canon.py"]
+origin = "opf/tools/_byte_canon.py"
+sha256 = "7e2a33aeb02898da84fbb3e9aa956f9618a676f21c10982e73475e400cb8fd37"
+
+[files."tools/_pack_containment.py"]
+origin = "opf/tools/_containment.py"
+sha256 = "6594419bc15c14e7e4844e2a34bc5ef24618b7fccf79e9a0787f4e88d0f976ab"
+
+[files."tools/_pack_journal.py"]
+origin = "opf/tools/_journal.py"
+sha256 = "fac1e26c0508f571b5a68835860628a6956e1a041585d02bb5c631635f3a90c1"
+
+[files."tools/_pack_optlevel.py"]
+origin = "opf/tools/_optlevel.py"
+sha256 = "4e27dc19980d9056a1154576c94ebb97a2541219cc868276bcd56e934eb95da3"
+
+[files."tools/_pack_child_status.py"]
+origin = "opf/tools/_child_status.py"
+sha256 = "c18de47d4f37e1fd507656b834f3e61b2bf8117a4ec559b55f9bcaaf1cd1558c"
+
+[files."tools/_vendor/licenses/marko-MIT.txt"]
+origin = "opf/tools/_vendor/licenses/marko-MIT.txt"
+sha256 = "1da058ed0440fea5df1765b19a1418800439b18fd6f1c13c7d429cb81e9c6d47"
+
+[files."tools/_vendor/marko/__init__.py"]
+origin = "opf/tools/_vendor/marko/__init__.py"
+sha256 = "49c0a229d20406ff13e3b2f5fab0d2ce7d4b3d0e0f92ab7cc754c040c181d15d"
+
+[files."tools/_vendor/marko/__main__.py"]
+origin = "opf/tools/_vendor/marko/__main__.py"
+sha256 = "735d875bce76d2b756ddc754ac2c46854f09ce85647ba05a666bbe3039f4a29b"
+
+[files."tools/_vendor/marko/ast_renderer.py"]
+origin = "opf/tools/_vendor/marko/ast_renderer.py"
+sha256 = "d4619934348f4fac0031c29e6a01cd8015d32949128919a7821b93f019774751"
+
+[files."tools/_vendor/marko/block.py"]
+origin = "opf/tools/_vendor/marko/block.py"
+sha256 = "8fe2ce5820353b12b4e6c231fa9b670de65695470d90cdd9bb92f759ff18a5bc"
+
+[files."tools/_vendor/marko/cli.py"]
+origin = "opf/tools/_vendor/marko/cli.py"
+sha256 = "08ea0718a1a561f8f3c88cfe7709103c48ff8488fdded58665b9275f6dd3efa5"
+
+[files."tools/_vendor/marko/element.py"]
+origin = "opf/tools/_vendor/marko/element.py"
+sha256 = "31b35ee787a882dad79d3cdbd6e08d62ce481763027113e4327a82d4bf33ca04"
+
+[files."tools/_vendor/marko/ext/__init__.py"]
+origin = "opf/tools/_vendor/marko/ext/__init__.py"
+sha256 = "da47585e9382233bbc7505bb55033485bde8c2e42930ed93c6a9cf476764850f"
+
+[files."tools/_vendor/marko/ext/codehilite.py"]
+origin = "opf/tools/_vendor/marko/ext/codehilite.py"
+sha256 = "ded37165d97a5522b1bb9bf234e89ec703fc99e2fd7c6012c44759064bf5aa0f"
+
+[files."tools/_vendor/marko/ext/footnote.py"]
+origin = "opf/tools/_vendor/marko/ext/footnote.py"
+sha256 = "0cbd5cc8f82bca0bc3c9283e5bf420e5389bb265c68635719212602e57e0ab2f"
+
+[files."tools/_vendor/marko/ext/gfm/__init__.py"]
+origin = "opf/tools/_vendor/marko/ext/gfm/__init__.py"
+sha256 = "5fe0faab137d01b548368b3c9d61cc1dae9f184c889a9a531d4b691d3ab614ee"
+
+[files."tools/_vendor/marko/ext/gfm/elements.py"]
+origin = "opf/tools/_vendor/marko/ext/gfm/elements.py"
+sha256 = "15fcb792feab1be80768363773065a3f50f971484bd047126336c99081c736a8"
+
+[files."tools/_vendor/marko/ext/gfm/renderer.py"]
+origin = "opf/tools/_vendor/marko/ext/gfm/renderer.py"
+sha256 = "e9de6628f1a0cbc345325e7e6f0daa1763d9f0fa6acbb3266f4cf3685dea63f7"
+
+[files."tools/_vendor/marko/ext/latex_renderer.py"]
+origin = "opf/tools/_vendor/marko/ext/latex_renderer.py"
+sha256 = "24f1a4dbf363e2ef1c8282d2e0815f2a45471e881a2cbba5a3fd6276107b91cb"
+
+[files."tools/_vendor/marko/ext/pangu.py"]
+origin = "opf/tools/_vendor/marko/ext/pangu.py"
+sha256 = "67f924144560a473b5364c604aaeb3b50274c2cd2b36711dc9fed4604746a2ba"
+
+[files."tools/_vendor/marko/ext/toc.py"]
+origin = "opf/tools/_vendor/marko/ext/toc.py"
+sha256 = "e9d61d1480d26ed745ad158ec72a6305aef4ee4b595112b72827623c0d70527c"
+
+[files."tools/_vendor/marko/helpers.py"]
+origin = "opf/tools/_vendor/marko/helpers.py"
+sha256 = "2639fb84d6549acca696e5c7daa222a8cc754add82ff4e539d024a925bf84f2f"
+
+[files."tools/_vendor/marko/html_renderer.py"]
+origin = "opf/tools/_vendor/marko/html_renderer.py"
+sha256 = "2ec1d195c75ed996a4eb4ca7d6f4c10c16209d2412fd248eb4d9b06169131a78"
+
+[files."tools/_vendor/marko/inline.py"]
+origin = "opf/tools/_vendor/marko/inline.py"
+sha256 = "488e23c67a095ad075c0b0f658c48af4b3101101dcf7ab6838ebf78ac880e853"
+
+[files."tools/_vendor/marko/inline_parser.py"]
+origin = "opf/tools/_vendor/marko/inline_parser.py"
+sha256 = "f4d765a593411eb308fdccc3e77e2cf350906c45d11b9535698b31b67af3a498"
+
+[files."tools/_vendor/marko/md_renderer.py"]
+origin = "opf/tools/_vendor/marko/md_renderer.py"
+sha256 = "9b146a8ae0010d935097db5aebf0c1bd30664828d8fae4b6da74332a50bc5589"
+
+[files."tools/_vendor/marko/parser.py"]
+origin = "opf/tools/_vendor/marko/parser.py"
+sha256 = "3f9d0afd82b8afa3fc396e780bc9adc3be4d15ae1c533c853a08222077dbbd03"
+
+[files."tools/_vendor/marko/patterns.py"]
+origin = "opf/tools/_vendor/marko/patterns.py"
+sha256 = "d7db00bd63fa1b8f84690fd589f67b412b10d25348055281127ca1d533a2178f"
+
+[files."tools/_vendor/marko/py.typed"]
+origin = "opf/tools/_vendor/marko/py.typed"
+sha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+
+[files."tools/_vendor/marko/renderer.py"]
+origin = "opf/tools/_vendor/marko/renderer.py"
+sha256 = "2c3253b86b12967bf69b9d3c6c5bd6f999431b2da4c3f82a4baa1c0426f2db7c"
+
+[files."tools/_vendor/marko/source.py"]
+origin = "opf/tools/_vendor/marko/source.py"
+sha256 = "363663005882dabe4f01b43e28926f4093bce4d718a4e67bfa13b7318a9a3247"

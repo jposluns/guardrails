@@ -4,8 +4,9 @@
 two can never disagree on what a brief declares.
 
 THE PARSED DOCUMENT. A brief is Markdown, and the worker reads it through a Markdown reader, so the
-declarations are judged on the document the vendored CommonMark parser builds (opf/tools/_vendor/marko,
-pinned 2.2.4 with its provenance file and byte manifest, loaded as opf/tools/_commonmark_headings.py
+declarations are judged on the document the vendored CommonMark parser builds (tools/_vendor/marko, the
+pack's own byte-identical copy of opf/tools/_vendor/marko pinned 2.2.4, each file's origin and SHA-256
+recorded in tools/pack-copies-pin.toml, loaded as opf/tools/_commonmark_headings.py
 loads it: the vendor directory derived from this file's own location, the version pinned, and the imported
 modules origin-checked against the vendored tree, never an ambient install; with ONE stated difference
 from that loader: importing the vendored GFM elements runs the gfm package's __init__, which builds a
@@ -249,10 +250,9 @@ LOOK_ALIKE_REASON = ("the line opens with a look-alike of the INPUT: label (anot
                      "table-cell label) and is never ignored; write INPUT: and one absolute path as its own "
                      "paragraph line, or quote the text in a code span or fence")
 
-# opf/tools/_vendor, derived from THIS file's own absolute location (never the CWD), the same anchoring
-# opf/tools/_commonmark_headings.py uses
-_VENDOR_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                           "opf", "tools", "_vendor")
+# tools/_vendor (the pack's own copy, so this module never loads code from opf/), derived from THIS file's
+# own absolute location (never the CWD), the same anchoring opf/tools/_commonmark_headings.py uses
+_VENDOR_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_vendor")
 _LOADED = None                    # (marko module, gfm elements module) after a successful pinned load
 # the parse child, a fixed path derived from THIS file's own absolute location (never the CWD): it reads
 # the text from stdin, parses it in its own process and session, and writes one JSON document to stdout
