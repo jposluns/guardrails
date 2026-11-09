@@ -289,13 +289,17 @@ PREFLIGHT (the input paths a brief names; read over the whole brief, line by lin
                        CommonMark reading (a no-break space accepted after a closing fence, for one).
   P7 stated changed set HARD, for every family, in a REVIEW brief only: a brief with at least one TASK: line
                        in its prose (plain, emphasised, a heading, or a list item after up to three markers,
-                       each -, +, *, or one to nine digits closed by . or ); never one in a fence, an
-                       indented code line, or a line opening with > or <!--), every one of whose text begins
-                       with the word review (any case). A fix or draft brief, or a brief with no TASK: line,
-                       is never judged by P7: its pin is the commit the work starts from, so a description
-                       of work still to be done is never compared with it. In a review brief, a prose
-                       sentence that states the WHOLE set of files the change touches is compared with the
-                       set the brief's pinned commit (the P3 pin lines' value) changed against its FIRST
+                       each -, +, *, or one to nine digits closed by . or ), then an optional task-list
+                       checkbox [ ], [x] or [X]; never one in a fence, an indented code line, or a line
+                       opening with > or <!--; a line indented four or more columns is read only as a nested
+                       list item: it opens an item, and the lines directly above it, with no blank line
+                       between, are list items or their text leaving an item open whose text starts at most
+                       three columns left of its marker, as in "1. Steps:" then "    - TASK: ..."), every one
+                       of whose text begins with the word review (any case). A fix or draft brief, or a brief
+                       with no TASK: line, is never judged by P7: its pin is the commit the work starts from,
+                       so a description of work still to be done is never compared with it. In a review brief,
+                       a prose sentence that states the WHOLE set of files the change touches is compared with
+                       the set the brief's pinned commit (the P3 pin lines' value) changed against its FIRST
                        parent, or against the empty tree for a root commit, and a difference refuses (exit
                        1). P7 is the first rule that reads free prose and refuses HARD; its defence is that
                        recognition is a CLOSED grammar, read word by word without a pattern, and anything
@@ -328,7 +332,8 @@ PREFLIGHT (the input paths a brief names; read over the whole brief, line by lin
                        (previous, prior, earlier, base, parent, planned, proposed; such a word is not a
                        recognized subject), any subject outside the closed list, imperatives, review-scope
                        and context mentions, and bare additive verbs; a sentence or TASK: line in a fence,
-                       on an indented code line, or on a line opening with > or <!-- is never read (a later
+                       on an indented code line, or on a line opening with > or <!-- is never read (a TASK:
+                       line that is a nested list item, as above, is read, while a claim there is not; a later
                        line of a multi-line HTML comment or a lazy blockquote continuation is). A totalizing
                        claim about a PR, branch, series or train is ADVISORY, never compared: a first-parent
                        diff of one commit cannot cover a series. In a review brief whose scope may be wider
@@ -336,9 +341,11 @@ PREFLIGHT (the input paths a brief names; read over the whole brief, line by lin
                        other (each CANNOT_EVALUATE case below still exits 2), and only then is a difference
                        lowered from HARD to ADVISORY: the wider-scope test never turns exit 2 into exit 0,
                        and an accurate claim there has no finding. The scope is wider when the brief holds a
-                       BRIEF-BASE label line anywhere (a fence included; the label in any case after markup,
-                       then a colon, so Brief-based or BRIEF-BASELINE: is not one), or when a TASK: line
-                       holds, as a whole word wherever it stands, one of pr, prs, pull, mr, branch,
+                       BRIEF-BASE label line anywhere (a fence included): after markup, the token BRIEF-BASE
+                       in any case as a whole word at the start of the line, whatever separator follows
+                       (BRIEF-BASE: <id>, BRIEF-BASE <id>, BRIEF-BASE = <id> and a bare BRIEF-BASE line all
+                       count, while Brief-based, BRIEF-BASELINE and BRIEF-BASE-X do not), or when a TASK:
+                       line holds, as a whole word wherever it stands, one of pr, prs, pull, mr, branch,
                        branches, range, base, against, between, since, onto and series (so ordinary prose
                        lowers the claim too: "review the pinned commit against its first parent", "since it
                        is small"); a word holding `..` and something other than dots (a closed range, an
@@ -638,11 +645,14 @@ without an address is hidden. The lint reads only the bytes it is given: run it 
 are sent, since a brief composed after the lint runs is not covered. P7's residuals: a fix, draft or other
 non-review brief (no TASK: line beginning with review) is never judged, nor is a review brief whose TASK: line
 opens with another word ("TASK: adversarial review of PR 9."); a TASK: line or a claim on a later line of a
-multi-line HTML comment or a lazy blockquote continuation is read; in a review brief whose TASK: line names a PR,
-branch, range or base, or that holds a BRIEF-BASE: label line, a difference is ADVISORY, never HARD (every claim is
-still checked first, so an exit 2 stays exit 2), and that test reads whole words wherever they stand on a TASK:
-line, so "against" or "since" in ordinary prose ("against its first parent", "since it is small") lowers a claim
-too, as do two English words of 7 or more hexadecimal letters (defaced, effaced), while PR's, merge request,
+multi-line HTML comment or a lazy blockquote continuation is read; a TASK: line indented four or more columns is
+read only as a nested list item under list lines, so one after a blank line inside a loose list item is not read (a
+fix line there leaves a review brief judged), and a nested item numbered other than 1 is read although CommonMark
+joins it to the paragraph above; in a review brief whose TASK: line names a PR, branch, range or base, or that
+holds a BRIEF-BASE label line (any separator after the whole word), a difference is ADVISORY, never HARD (every
+claim is still checked first, so an exit 2 stays exit 2), and that test reads whole words wherever they stand on a
+TASK: line, so "against" or "since" in ordinary prose ("against its first parent", "since it is small") lowers a
+claim too, as do two English words of 7 or more hexadecimal letters (defaced, effaced), while PR's, merge request,
 pull-request, !9, a TASK: line soft-wrapped onto the next line, "the last two commits" and a range written outside
 a TASK: line are not recognized, so the claim is compared with the pinned commit alone; a path is normalised only
 when it has no `..` component; a claim holding a bare root name (README.md, Makefile) or any other item without a
@@ -3260,17 +3270,85 @@ def p7_list_marker(word):
     return 2 <= len(word) <= 10 and word[-1] in ".)" and word[:-1].isdecimal()
 
 
+def p7_checkbox(text):
+    """A list item's text with a leading task-list checkbox ([ ], [x] or [X], then whitespace) removed,
+    so - [ ] TASK: ... reads like - TASK: ...; any other text is returned unchanged."""
+    if text[:3] in ("[ ]", "[x]", "[X]") and text[3:4].isspace():
+        return text[3:].lstrip()
+    return text
+
+
 def p7_unmarked(line):
-    """A line with its leading whitespace and up to three leading list-item markers (p7_list_marker)
-    removed, so a list item, nested ones included (- 1. TASK: ...), reads like a plain line. The cap keeps
+    """A line with its leading whitespace, up to three leading list-item markers (p7_list_marker) and,
+    after at least one marker, a task-list checkbox (p7_checkbox) removed, so a list item, nested ones
+    and task-list ones included (- 1. TASK: ..., - [ ] TASK: ...), reads like a plain line. The cap keeps
     the reading linear in the line's length."""
-    text = line.strip()
+    text, marked = line.strip(), False
     for _ in range(3):
         parts = text.split(None, 1)
         if len(parts) != 2 or not p7_list_marker(parts[0]):
             break
-        text = parts[1]
-    return text
+        text, marked = parts[1], True
+    return p7_checkbox(text) if marked else text
+
+
+def p7_item_columns(raw):
+    """[content column] of each list-item marker (p7_list_marker, up to three) that opens the line,
+    outermost first, or [] when it opens none: the column where that item's text starts, read the
+    CommonMark way (a tab advances to the next multiple of four; one to four spaces after a marker, or
+    one column when five or more follow, which ends the reading). A marker with no text after it opens
+    nothing here."""
+    line = raw.expandtabs(4)
+    columns, position = [], 0
+    for _ in range(3):
+        stripped = line[position:].lstrip(" ")
+        word = stripped.split(" ", 1)[0]
+        if not p7_list_marker(word):
+            break
+        after = len(line) - len(stripped) + len(word)
+        rest = line[after:]
+        gap = len(rest) - len(rest.lstrip(" "))
+        if gap == 0 or not rest.strip():
+            break
+        columns.append(after + (gap if gap <= 4 else 1))
+        if gap > 4:
+            break
+        position = columns[-1]
+    return columns
+
+
+def p7_nested_items(text, blocks):
+    """{line number} of each prose line indented four or more columns that CommonMark reads as a nested
+    list item, not as indented code: the line opens a list item (p7_item_columns), and the lines directly
+    above it, with no blank, fence, heading, blockquote or HTML-comment line between, are list items and
+    their continuation text that leave an item open whose content column is at most three columns left
+    of the line's marker (1. Steps: then four spaces and - TASK: ...). Indented code cannot interrupt a
+    paragraph, so such a line is never code. A line after a blank line is not read this way (a reading
+    of the enclosing items across the blank is not made), nor is a line indented four or more columns
+    past every open item (continuation text) or under a line of markers alone (* * *)."""
+    prose = set()
+    for block in blocks:
+        if block.kind == "prose":
+            prose.update(number for number, _ in block.lines)
+    nested, stack = set(), []
+    for number, raw in enumerate(text.split("\n"), 1):
+        if number not in prose or raw.lstrip().startswith((">", "<!--", "#")) \
+                or not p7_unmarked(raw).strip(" *-_"):
+            stack = []
+            continue
+        columns = p7_item_columns(raw)
+        if not columns:
+            continue    # continuation text: the open items stay open
+        expanded = raw.expandtabs(4)
+        indent = len(expanded) - len(expanded.lstrip(" "))
+        while stack and stack[-1] > indent:
+            stack.pop()
+        if indent - (stack[-1] if stack else 0) > 3:
+            continue    # continuation text of the item above, never a new item
+        if indent > 3:
+            nested.add(number)
+        stack.extend(columns)
+    return nested
 
 
 def p7_task_text(line):
@@ -3303,13 +3381,15 @@ def p7_unread_line(raw):
 
 def p7_task_lines(names):
     """[raw line] of every TASK: line in the brief's prose, a line P7 never reads (p7_unread_line) and
-    any line in a fence excepted."""
+    any line in a fence excepted; an indented line that is a nested list item (p7_nested_items) is read."""
     lines = []
-    for block in parse_blocks(names.text):
+    blocks = parse_blocks(names.text)
+    nested = p7_nested_items(names.text, blocks)
+    for block in blocks:
         if block.kind != "prose":
             continue
-        for _, raw in block.lines:
-            if not p7_unread_line(raw) and p7_task_word(raw) is not None:
+        for number, raw in block.lines:
+            if (number in nested or not p7_unread_line(raw)) and p7_task_word(raw) is not None:
                 lines.append(raw)
     return lines
 
@@ -3337,12 +3417,16 @@ def p7_pr_number(plain):
 
 
 def p7_brief_base_line(raw):
-    """Whether a line is a BRIEF-BASE: label line: after up to three list markers (p7_unmarked) and any
-    spaces, `*`, `_`, `#`, backticks and `>`, the label BRIEF-BASE in any case, then any closing `*`, `_`
-    or backticks, then a colon. A word that only begins with those letters (Brief-based, BRIEF-BASELINE)
-    is not the label."""
+    """Whether a line is a BRIEF-BASE label line: after up to three list markers (p7_unmarked) and any
+    spaces, `*`, `_`, `#`, backticks and `>`, the label BRIEF-BASE in any case as a whole word, so any
+    closing `*`, `_` or backticks, then the end of the line or any character but a letter, a digit or
+    `-`. Whatever separator follows counts (BRIEF-BASE: <id>, BRIEF-BASE <id>, BRIEF-BASE = <id>), while
+    a word that only begins with those letters (Brief-based, BRIEF-BASELINE, BRIEF-BASE-X) is not it."""
     text = p7_unmarked(raw).lstrip(" *_#`>")
-    return text[:10].upper() == "BRIEF-BASE" and text[10:].lstrip("*_`").startswith(":")
+    if text[:10].upper() != "BRIEF-BASE":
+        return False
+    rest = text[10:].lstrip("*_`")
+    return not rest or not (rest[0].isalnum() or rest[0] == "-")
 
 
 def p7_range_word(word):
@@ -3363,7 +3447,7 @@ def p7_distinct_commits(words):
 
 
 def p7_wider_scope(names):
-    """Why the review may cover more than the pinned commit's first-parent diff, or None: a BRIEF-BASE:
+    """Why the review may cover more than the pinned commit's first-parent diff, or None: a BRIEF-BASE
     label line anywhere in the brief (p7_brief_base_line, a fence included), or a TASK: line holding a
     scope word (P7_SCOPE_WORDS, read as whole words wherever they stand, so "against" and "since" in
     ordinary prose count: "review the pinned commit against its first parent"), a range word
@@ -5130,6 +5214,35 @@ def _p7_selftest(flip, flip_record):
             for marks in ("* ", "- 1. ", "- 1. + ", "- 1. + - ")],
             [(1, [("P7", "HARD")])] * 4 + [(0, [("P3", "ADVISORY")])] * 2 + [(1, [("P7", "HARD")])] * 3
             + [(0, [])])
+        # a TASK: line nested as a list item four or more columns in (1. Steps: then four spaces and
+        # - TASK: ...) is a list item, not indented code, so it is read: a nested fix line leaves the
+        # brief unjudged and a nested review line makes it judged. The item's text column bounds it:
+        # under "- " (text at column 2) five spaces (three past it) are an item, six (four past it) are
+        # continuation text and stay unread, as does a line after a blank line or under no list line
+        nested_cases = [lambda task=task, text=text: p7(text, ids["c2"], task=task) for task, text in (
+            (review + "1. Steps:\n    - TASK: fix the pinned commit.\n", fix_claim),
+            (review + "- Steps:\n     - TASK: fix the pinned commit.\n", fix_claim),
+            (review + "- Steps:\n  - More:\n      - TASK: fix the pinned commit.\n", fix_claim),
+            ("1. Steps:\n    - TASK: review the pinned commit.\n", stale_claim),
+            (review + "1. Steps:\n\tTASK: fix the pinned commit.\n", stale_claim))]
+        check("preflight/p7-nested-task-line", [case() for case in nested_cases] + [
+            p7(stale_claim, ids["c2"], task=review + task) for task in (
+                "- Steps:\n      - TASK: fix the pinned commit.\n",
+                "1. Steps:\n\n    - TASK: fix the pinned commit.\n",
+                "Steps:\n    - TASK: fix the pinned commit.\n",
+                "-    Steps:\n    - TASK: fix the pinned commit.\n")],
+            [(0, [("P3", "ADVISORY")])] * 3 + [(1, [("P7", "HARD")])] * 2 + [(1, [("P7", "HARD")])] * 4)
+        # a task-list item (- [ ], - [x], 1. [X]) is a list item: its checkbox is skipped before the label;
+        # a bracket that is not a checkbox, or a checkbox with no space after it, leaves the line unread
+        box_cases = [lambda task=task, text=text: p7(text, ids["c2"], task=task) for task, text in (
+            (review + "- [ ] TASK: fix the pinned commit.\n", fix_claim),
+            (review + "1. [X] TASK: fix the pinned commit.\n", fix_claim),
+            ("- [x] TASK: review the pinned commit.\n", stale_claim))]
+        check("preflight/p7-checkbox-task-line", [case() for case in box_cases] + [
+            p7(stale_claim, ids["c2"], task=review + task) for task in (
+                "- [y] TASK: fix the pinned commit.\n", "- [ ]TASK: fix the pinned commit.\n",
+                "[ ] TASK: fix the pinned commit.\n")],
+            [(0, [("P3", "ADVISORY")])] * 2 + [(1, [("P7", "HARD")])] * 4)
         # a review whose TASK: line names a PR, branch, range or base, or a brief with a BRIEF-BASE line:
         # one commit's first-parent diff cannot answer a whole-set claim there, so it is ADVISORY, never
         # HARD (the accurate claim for c1..c3 included; P3 prints docs/b.md, renamed away at c3); one
@@ -5172,6 +5285,21 @@ def _p7_selftest(flip, flip_record):
             "- **BRIEF-BASE:** {}\n".format(ids["c1"]))]
         check("preflight/p7-brief-base-label", [case() for case in base_cases],
               [(1, [("P7", "HARD")])] * 2 + [(0, [("P7", "ADVISORY")])] * 2)
+        # the label is a whole word, whatever separator follows it (none, a space, `=`, ` : `, a bare
+        # line), so a correct range review written BRIEF-BASE <id> is not refused; a longer word made
+        # with `-` or `_` is not the label
+        base_sep_cases = [lambda task=task: p7(stale_claim, ids["c2"], task=task + review) for task in (
+            "BRIEF-BASE {}\n".format(ids["c1"]),
+            "BRIEF-BASE = {}\n".format(ids["c1"]),
+            "BRIEF-BASE : {}\n".format(ids["c1"]),
+            "**BRIEF-BASE** {}\n".format(ids["c1"]),
+            "BRIEF-BASE\n")] + [
+            lambda: p7(span_claim, ids["c3"], task="BRIEF-BASE {}\n{}".format(ids["c1"], review))]
+        check("preflight/p7-brief-base-separator", [case() for case in base_sep_cases] + [
+            p7(stale_claim, ids["c2"], task=task + review) for task in (
+                "BRIEF-BASE-X: notes\n", "BRIEF-BASE_X: notes\n", "BRIEF-BASE2 notes\n")],
+            [(0, [("P7", "ADVISORY")])] * 5 + [(0, [("P3", "ADVISORY"), ("P7", "ADVISORY")])]
+            + [(1, [("P7", "HARD")])] * 3)
         # an open or closed range keeps its `..` through the punctuation strip; a word of dots alone (an
         # ellipsis) is not a range
         range_cases = [lambda task=task: p7(stale_claim, ids["c2"], task=task) for task in (
@@ -5374,6 +5502,26 @@ def _p7_selftest(flip, flip_record):
         check("revert/p7-brief-base-label-red", *flip(
             base_cases, [(0, [("P7", "ADVISORY")])] * 4,
             p7_brief_base_line=lambda raw: p7_unmarked(raw).lstrip(" *_#`>").upper().startswith("BRIEF-BASE")))
+
+        def colon_base_line(raw):
+            """the earlier reading: the label, any closing markup, then a colon"""
+            text = p7_unmarked(raw).lstrip(" *_#`>")
+            return text[:10].upper() == "BRIEF-BASE" and text[10:].lstrip("*_`").startswith(":")
+        # a colon required after the label again: every other separator, and the correct range review
+        # written BRIEF-BASE <id>, is refused HARD
+        check("revert/p7-brief-base-separator-red", *flip(
+            base_sep_cases, [(1, [("P7", "HARD")])] * 5 + [(1, [("P3", "ADVISORY"), ("P7", "HARD")])],
+            p7_brief_base_line=colon_base_line))
+        # nested list items no longer read: each nested fix line is hidden again, so the review brief is
+        # judged and its fix-brief sentence refuses, and a nested review line leaves the brief unjudged
+        check("revert/p7-nested-task-line-red", *flip(
+            nested_cases[:4], [(1, [("P3", "ADVISORY"), ("P7", "HARD")])] * 3 + [(0, [])],
+            p7_nested_items=lambda text, blocks: set()))
+        # the task-list checkbox no longer skipped: a checkbox fix line is not a TASK: line, and a
+        # checkbox review line leaves the brief with no TASK: line at all
+        check("revert/p7-checkbox-task-line-red", *flip(
+            box_cases, [(1, [("P3", "ADVISORY"), ("P7", "HARD")])] * 2 + [(0, [])],
+            p7_checkbox=lambda text: text))
         # the range test made after the punctuation strip again: an open range loses its `..`
         check("revert/p7-open-range-red", *flip(
             range_cases, [(1, [("P7", "HARD")])] * 3 + [(0, [("P7", "ADVISORY")]), (1, [("P7", "HARD")])],
@@ -8269,7 +8417,7 @@ def self_test(report_path=None):
             os.chmod(locked, 0o700)
         shutil.rmtree(inputs, ignore_errors=True)
     _p7_selftest(flip, flipped.append)
-    check("revert/every-flip-ran", len(flipped), 261)
+    check("revert/every-flip-ran", len(flipped), 264)
 
     for check_id in sorted(expected - _EXECUTED_SET):
         FAILURES.append("execution-set/missing: {}".format(check_id))
@@ -8332,7 +8480,7 @@ def self_test(report_path=None):
           "parent (the empty tree for a root), read hermetically from raw commit bytes and diff-tree over resolved "
           "ids (P7; an unplaceable item, an absent parent or a failed read exits 2, in a wider-scope review "
           "brief too; a PR or branch claim is ADVISORY, and so is a difference in a review brief whose TASK: "
-          "line names a PR, branch, range or base or that holds a BRIEF-BASE: label line), and each preflight "
+          "line names a PR, branch, range or base or that holds a BRIEF-BASE label line), and each preflight "
           "rule and guard patched out flips its fixture; "
           "the regex audit reads the module-level patterns and COMMAND_FORMS (and, without claiming completeness, "
           "container and class globals and the production source's re calls), flags no pattern, "
