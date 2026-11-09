@@ -5438,6 +5438,12 @@ _GW_TIMINGS = 3
 _GW_RUSAGE_FIELDS = ("ru_utime", "ru_stime", "ru_minflt", "ru_nivcsw")
 _GW_USAGE_LABELS = (("user CPU", "{:.3f}s"), ("system CPU", "{:.3f}s"), ("minor page faults", "{}"),
                     ("involuntary context switches", "{}"), ("cyclic collections", "{}"))
+# A timed call ran uncontended (_gw_quiet) when the scheduler preempted it at most _GW_QUIET_BASE times plus
+# _GW_QUIET_PER_S times per CPU second it used. Uncontended calls of 0.12 s to 0.96 s measured 0 to 2 here; the
+# CI call behind a 3.44x ratio on a linear row was preempted 76 times in 0.487 s.
+_GW_SWITCHES = _GW_RUSAGE_FIELDS.index("ru_nivcsw")
+_GW_QUIET_BASE = 2
+_GW_QUIET_PER_S = 20
 
 
 def _gw_usage():
@@ -5482,16 +5488,26 @@ def _gw_scan_once(cmd, scan):
     return t, decision, tuple(None if a is None or b is None else b - a for a, b in zip(u0, _gw_usage()))
 
 
-def _gw_scan_ratio(unit, prefix, suffix, scan, once=_gw_scan_once):
+def _gw_quiet(t, use):
+    """True when a timed call of t CPU seconds whose usage growth is use ran uncontended: its involuntary
+    context switch count was read and is at most _GW_QUIET_BASE + _GW_QUIET_PER_S * t. A count that could not
+    be read is not quiet, so a host that cannot report it never earns a definite super-linear verdict."""
+    switches = use[_GW_SWITCHES]
+    return switches is not None and switches <= _GW_QUIET_BASE + _GW_QUIET_PER_S * t
+
+
+def _gw_scan_ratio(unit, prefix, suffix, scan, once=_gw_scan_once, quiet=_gw_quiet):
     """Double n (from 4000, at most _GW_SIZES sizes) until t_n clears the _GW_FLOOR floor, then compare
     t_2n/t_n. While that ratio is over _GW_RATIO, both sizes are timed again (at most _GW_TIMINGS timings of
     each) and the least time of each is compared, so one call charged for stray work cannot fail a linear scan,
     while a scan that grows faster than its input in every timing still fails. Returns (ratio, t_n, t_2n,
-    length_2n, decisions, (usage_n, usage_2n), timings), the times and usages being those of the least timing
-    of each size and timings how many of each were taken, or (None, t_n, None, length, decisions, None, 1) when
-    the floor was never cleared in the bound, so the caller fails 'linearity not evaluated'; decisions lists
-    every timed scan's decision, in order. The input is a command string for the whole-command scan or a word
-    list for the dequoted-word scan; once times one scan (a check stands in scripted times through it)."""
+    length_2n, decisions, (usage_n, usage_2n), timings, quiet_2n), the times and usages being those of the
+    least timing of each size, timings how many of each were taken and quiet_2n whether quiet held for any
+    timing of the doubled input, or (None, t_n, None, length, decisions, None, 1, False) when the floor was
+    never cleared in the bound, so the caller fails 'linearity not evaluated'; decisions lists every timed
+    scan's decision, in order. The input is a command string for the whole-command scan or a word list for the
+    dequoted-word scan; once times one scan (a check stands in scripted times through it) and quiet judges
+    whether one timing ran uncontended (_gw_quiet)."""
     reps = 4000
     decisions = []
     for _ in range(_GW_SIZES):
@@ -5503,29 +5519,36 @@ def _gw_scan_ratio(unit, prefix, suffix, scan, once=_gw_scan_once):
             t_2n, decision, use_2n = once(cmd_2n, scan)
             decisions.append(decision)
             timings = 1
+            quiet_2n = quiet(t_2n, use_2n)
             while t_2n / t_n > _GW_RATIO and timings < _GW_TIMINGS:
                 timings += 1
                 again_n, decision, again_use_n = once(cmd_n, scan)
                 decisions.append(decision)
                 again_2n, decision, again_use_2n = once(cmd_2n, scan)
                 decisions.append(decision)
+                quiet_2n = quiet_2n or quiet(again_2n, again_use_2n)
                 if again_n < t_n:
                     t_n, use_n = again_n, again_use_n
                 if again_2n < t_2n:
                     t_2n, use_2n = again_2n, again_use_2n
-            return t_2n / t_n, t_n, t_2n, len(cmd_2n), decisions, (use_n, use_2n), timings
+            return t_2n / t_n, t_n, t_2n, len(cmd_2n), decisions, (use_n, use_2n), timings, quiet_2n
         reps *= 2
-    return None, t_n, None, len(prefix + unit * reps + suffix), decisions, None, 1
+    return None, t_n, None, len(prefix + unit * reps + suffix), decisions, None, 1, False
 
 
-def _gw_lin_failures(cases):
+def _gw_lin_failures(cases, once=_gw_scan_once, quiet=_gw_quiet):
     """What the gw-lin timing rows got wrong: cases are (label, unit, prefix, suffix, scan, want) rows, each
-    timed by _gw_scan_ratio, and a row fails on a decision other than want, on a t_n that never cleared the
-    floor, or on a ratio of the least timings over _GW_RATIO (reporting the usage of the two calls those
-    least timings came from)."""
+    timed by _gw_scan_ratio (once and quiet are handed to it), and a row fails on a decision other than want,
+    on a t_n that never cleared the floor, or on a ratio of the least timings over _GW_RATIO, reporting the
+    usage of the two calls those least timings came from. That ratio is a definite super-linear failure only
+    when some timing of the doubled input ran uncontended: contention only adds time, so such a timing is at
+    most the scan's cost at 2n, the least t_n is at least its cost at n, and its ratio is at least the one
+    reported. With no such timing the row fails 'linearity not evaluated' instead, since a contended runner
+    cannot be told from super-linear growth; it never passes."""
     out = []
     for label, unit, prefix, suffix, scan, want in cases:
-        ratio, t_n, t_2n, length_2n, got, use, timings = _gw_scan_ratio(unit, prefix, suffix, scan)
+        ratio, t_n, t_2n, length_2n, got, use, timings, quiet_2n = _gw_scan_ratio(unit, prefix, suffix, scan,
+                                                                                once, quiet)
         wrong = [decision for decision in got if decision != want]
         if wrong:
             out.append("({}) the timed scan decided {!r} on {} of its {} inputs, expected {!r}"
@@ -5533,9 +5556,14 @@ def _gw_lin_failures(cases):
         if ratio is None:
             out.append("({}) linearity not evaluated: t_n stayed under the {}s floor through "
                        "{} sizes (last {:.4f}s)".format(label, _GW_FLOOR, _GW_SIZES, t_n))
-        elif ratio > _GW_RATIO:
+        elif ratio > _GW_RATIO and quiet_2n:
             out.append("({}) doubling the input scaled the scan {:.2f}x (>3x, super-linear): "
                        "{:.3f}s then {:.3f}s, the least of {} timings of each, for an input of length {} ({})"
+                       .format(label, ratio, t_n, t_2n, timings, length_2n, _gw_usage_text(*use)))
+        elif ratio > _GW_RATIO:
+            out.append("({}) linearity not evaluated: doubling the input scaled the scan {:.2f}x (>3x) but no "
+                       "timing of the doubled input ran uncontended: {:.3f}s then {:.3f}s, the least of {} "
+                       "timings of each, for an input of length {} ({})"
                        .format(label, ratio, t_n, t_2n, timings, length_2n, _gw_usage_text(*use)))
     return out
 
@@ -5564,7 +5592,7 @@ def _gw_retime_failures():
             taken.append(len(cmd))
             return times[len(taken) - 1], None, (len(taken),) * len(_GW_USAGE_LABELS)
 
-        ratio, _t_n, _t_2n, length_2n, decisions, _use, timings = _gw_scan_ratio("x", "", "", None, once)
+        ratio, _t_n, _t_2n, length_2n, decisions, _use, timings, _quiet = _gw_scan_ratio("x", "", "", None, once)
         if (ratio is None or abs(ratio - want_ratio) > 1e-9 or timings != want_timings
                 or taken != [4000, 8000] * timings or len(decisions) != 2 * timings or length_2n != 8000):
             out.append("(gw-lin-retime-edge) {}: the scripted times {} gave ratio {!r} over {} timings of lengths "
@@ -5603,10 +5631,13 @@ def _gw_slow_once_scan(power):
 def _gw_retime_cpu_failures():
     """(gw-lin-retime-linear, gw-lin-retime-super) The retiming in CPU time: with one timing of the doubled input
     charged 0.2 s more (a first ratio of about 3.7 for a linear stand-in), the linear row still passes on its
-    least timings and the quadratic one still fails after _GW_TIMINGS timings of each."""
+    least timings and the quadratic one still fails after _GW_TIMINGS timings of each. Every timing is judged
+    uncontended here, so a busy host cannot turn the quadratic row's failure into 'linearity not evaluated'
+    (gw-lin-contended-* pins that judgement)."""
     out = []
     got = _gw_lin_failures((("gw-lin-retime-linear", "x", "", "", _gw_slow_once_scan(1), None),
-                            ("gw-lin-retime-super", "x", "", "", _gw_slow_once_scan(2), None)))
+                            ("gw-lin-retime-super", "x", "", "", _gw_slow_once_scan(2), None)),
+                           quiet=lambda _t, _use: True)
     if len(got) != 1 or not got[0].startswith("(gw-lin-retime-super) doubling the input scaled the scan ") \
             or ", the least of {} timings of each, ".format(_GW_TIMINGS) not in got[0]:
         out.append("(gw-lin-retime-linear/super) the rows gave {!r}, want only the quadratic row's failure after "
@@ -5637,10 +5668,16 @@ def _gw_lin_usage_failures():
     usage field for both timed calls. With no resource module, with a getrusage result missing a field and
     with collector statistics without 'collections' (each stood in through sys.modules), the rows still reach
     their verdict instead of raising: a linear row passes and a super-linear one fails reporting 'usage
-    unavailable' for each reading it lost and the readings it kept."""
+    unavailable' for each reading it lost and the readings it kept. Where the switch count is readable every
+    timing is judged uncontended, so a busy host cannot change the verdict; where it is lost (no resource
+    module, no ru_nivcsw) the real judgement runs and the super-linear row fails 'linearity not evaluated',
+    since no timing can be shown uncontended."""
     pair_s = r"\d+\.\d{3}s then \d+\.\d{3}s"
     pair = r"\d+ then \d+"
     lost = "usage unavailable"
+    definite = r"doubling the input scaled the scan \d+\.\d\dx \(>3x, super-linear\): "
+    unjudged = (r"linearity not evaluated: doubling the input scaled the scan \d+\.\d\dx \(>3x\) but no timing "
+                r"of the doubled input ran uncontended: ")
 
     def rusage_without_nivcsw(_who):
         return types.SimpleNamespace(ru_utime=time.process_time(), ru_stime=0.0, ru_minflt=0)
@@ -5648,28 +5685,28 @@ def _gw_lin_usage_failures():
     no_field = types.SimpleNamespace(RUSAGE_SELF=0, getrusage=rusage_without_nivcsw)
     no_collections = types.SimpleNamespace(get_stats=lambda: [{"collected": 0}])
     out = []
-    for label, module, stand_in, clause in (
-            ("gw-lin-usage-readable", None, None,
+    for label, module, stand_in, head, quiet, clause in (
+            ("gw-lin-usage-readable", None, None, definite, lambda _t, _use: True,
              "user CPU {0}, system CPU {0}, minor page faults {1}, involuntary context switches {1}, "
              "cyclic collections {1}".format(pair_s, pair)),
-            ("gw-lin-usage-no-resource", "resource", None,
+            ("gw-lin-usage-no-resource", "resource", None, unjudged, _gw_quiet,
              "user CPU {0}, system CPU {0}, minor page faults {0}, involuntary context switches {0}, "
              "cyclic collections {1}".format(lost, pair)),
-            ("gw-lin-usage-no-field", "resource", no_field,
+            ("gw-lin-usage-no-field", "resource", no_field, unjudged, _gw_quiet,
              "user CPU {0}, system CPU {0}, minor page faults {1}, involuntary context switches {2}, "
              "cyclic collections {1}".format(pair_s, pair, lost)),
-            ("gw-lin-usage-no-collections", "gc", no_collections,
+            ("gw-lin-usage-no-collections", "gc", no_collections, definite, lambda _t, _use: True,
              "user CPU {0}, system CPU {0}, minor page faults {1}, involuntary context switches {1}, "
              "cyclic collections {2}".format(pair_s, pair, lost))):
-        want = re.compile(r"\(" + re.escape(label + "-super") + r"\) doubling the input scaled the scan "
-                          r"\d+\.\d\dx \(>3x, super-linear\): \d+\.\d{3}s then \d+\.\d{3}s, the least of "
-                          + str(_GW_TIMINGS) + r" timings of each, for an input of length 8000 \(" + clause + r"\)\Z")
+        want = re.compile(r"\(" + re.escape(label + "-super") + r"\) " + head + r"\d+\.\d{3}s then "
+                          r"\d+\.\d{3}s, the least of " + str(_GW_TIMINGS) + r" timings of each, for an input of "
+                          r"length 8000 \(" + clause + r"\)\Z")
         rows = ((label + "-super", "x", "", "", _gw_spin_scan(2), None),)
         if module is not None:
             rows = ((label + "-linear", "x", "", "", _gw_spin_scan(1), None),) + rows
         try:
             with _gw_module_as(module, stand_in) if module is not None else contextlib.nullcontext():
-                got = _gw_lin_failures(rows)
+                got = _gw_lin_failures(rows, quiet=quiet)
         except Exception as exc:
             out.append("({}) the gw-lin rows raised {}: {} instead of reaching their verdict"
                        .format(label, type(exc).__name__, exc))
@@ -5677,6 +5714,49 @@ def _gw_lin_usage_failures():
         if len(got) != 1 or not want.match(got[0]):
             out.append("({}) the gw-lin rows gave {!r}, want only the super-linear row's failure matching {!r}"
                        .format(label, got, want.pattern))
+    return out
+
+
+def _gw_contended_failures():
+    """(gw-lin-contended-<name>) The verdict on a ratio over _GW_RATIO, over scripted timings (no scan runs):
+    each timing is (CPU seconds, involuntary context switches) for one call, n then 2n, and the first clears
+    the floor. The CI shape (0.142 s then 0.487 s in all three timings, 1 then 76 switches) and an unread
+    switch count fail 'linearity not evaluated', never 'super-linear'. With t_2n 0.5 s the quiet bound is 12
+    switches: 11 and 12 fail super-linear, 13 does not. One quiet timing of the doubled input among contended
+    ones makes the failure definite. A ratio at the bound passes however contended its timings were."""
+    out = []
+    definite = "doubling the input scaled the scan "
+    unjudged = "linearity not evaluated: doubling the input scaled the scan "
+    ci = [(0.142, 1), (0.487, 76), (0.150, 3), (0.49, 80), (0.145, 2), (0.50, 79)]
+    for name, timings, want in (
+            ("ci", ci, unjudged),
+            ("unread", [(0.125, None), (0.5, None)] * _GW_TIMINGS, unjudged),
+            ("under", [(0.125, 0), (0.5, 11)] * _GW_TIMINGS, definite),
+            ("at", [(0.125, 0), (0.5, 12)] * _GW_TIMINGS, definite),
+            ("over", [(0.125, 0), (0.5, 13)] * _GW_TIMINGS, unjudged),
+            ("one-quiet", [(0.125, 0), (0.5, 40), (0.125, 0), (0.52, 0), (0.125, 0), (0.55, 50)], definite),
+            ("ratio-at-bound", [(0.125, 0), (0.375, 76)], None)):
+        taken = []
+
+        def once(_cmd, _scan):
+            t, switches = timings[len(taken)]
+            taken.append(t)
+            return t, None, (t, 0.0, 0, switches, 0)
+
+        try:
+            got = _gw_lin_failures((("row", "x", "", "", None, None),), once=once)
+        except Exception as exc:
+            out.append("(gw-lin-contended-{}) the row raised {}: {}".format(name, type(exc).__name__, exc))
+            continue
+        if want is None:
+            ok = got == [] and len(taken) == 2
+        else:
+            ok = (len(got) == 1 and got[0].startswith("(row) " + want) and len(taken) == len(timings)
+                  and ", the least of {} timings of each, ".format(_GW_TIMINGS) in got[0])
+        if not ok:
+            out.append("(gw-lin-contended-{}) the scripted timings {} gave {!r} after {} calls, want {}".format(
+                name, timings, got, len(taken), "a pass after 2 calls" if want is None else
+                "one failure starting {!r} after {} calls".format(want, len(timings))))
     return out
 
 
@@ -22383,6 +22463,13 @@ def _main_isolated(monitor):
         # grows faster than its input fails on every timing. A passing first ratio is final, so a passing run
         # times what it did before. gw-lin-retime-edge pins the retiming over scripted times (each end of the
         # bound, a slow timing of either size, the timing cap) and gw-lin-retime-linear/super in CPU time.
+        # A CI runner then measured gw-lin-runtime-assembled at 3.44x as the least of 3 timings (0.142 s then
+        # 0.487 s, with 1 then 76 involuntary context switches) where a host at load about 37 gave 1.82 to
+        # 2.20x, so a contended runner can charge every timing of the doubled input. A ratio over 3 is now a
+        # definite super-linear failure only when some timing of the doubled input ran uncontended (_gw_quiet:
+        # its switch count was read and is small for its CPU time); otherwise the row fails 'linearity not
+        # evaluated', so contention is never reported as a regression and never passes. gw-lin-contended-* pins
+        # that verdict over scripted timings (the CI shape, an unread count, each end of the quiet bound).
         # A ROSTER-verb-dense line is still super-linear by design and relies on the deadline's fail-closed,
         # as the scan docstring states.
         # gw-dq-lin-sq / gw-dq-lin-dq: the two originals, linear before this change and here.
@@ -22455,6 +22542,7 @@ def _main_isolated(monitor):
         failures.extend(_gw_lin_usage_failures())
         failures.extend(_gw_retime_failures())
         failures.extend(_gw_retime_cpu_failures())
+        failures.extend(_gw_contended_failures())
 
         # A glob character can match a filename that becomes an option word (a file named -n makes
         # 'git commit *-n' hand git a bare -n), so a glob or a quote glued to one denies.
