@@ -136,7 +136,7 @@ DECISION
         Edit       new_string holds more c than old_string (with replace_all both counts scale alike);
         MultiEdit  any one edit's new_string holds more c than its old_string;
         Write      content holds more c than the existing file. An absent file counts 0, and so does an
-                   existing file that is not valid UTF-8 (the gate skips that file today, but would scan the
+                   existing file that is not valid UTF-8 (the gate exits 2 on that file, but would scan the
                    new UTF-8 content). The existing file is read only when it is a regular file of at most
                    4 MiB; otherwise the write is allowed with a note.
       Any added character: deny. The reason names each added character as U+XXXX with its policy name, the
@@ -603,7 +603,7 @@ def _decide(payload, env):
     try:
         old = raw.decode("utf-8")
     except UnicodeDecodeError:
-        old = ""  # the gate skips a file that is not UTF-8, but would scan this new content
+        old = ""  # the gate exits 2 on a file that is not UTF-8, but would scan this new content
     added = _added(chars, old, content)
     if added:
         line, column = _position(content, added)

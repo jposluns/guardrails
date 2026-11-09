@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "f40449e2613e81df4e2aa7c551651260ffb593473a8e06107bf18cfa606bde04"
+tree-sha256 = "27014fb891162a2645676b998f6f058fc53def5c8893bca234fb53e01d2237fe"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -71,8 +71,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 584824
-sha256 = "4035e0f915b34d490ccfb08bc5c72fa988e581a14984233e96b7d1e9ea163df9"
+bytes = 585383
+sha256 = "e10d83fd662ccc6925c6ba558ab5e50030373f34476faa0f6f23d5419bd186bf"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -2317,17 +2317,17 @@ sha256 = "691af95f3c9d4027588d596789171785f5946b2fec5bf8df820a4c2e2dba16b1"
 [[sources]]
 path = ".preview/README.md"
 bytes = 71319
-sha256 = "26a5c2b332f1b74fa5e5ae32f9cfdcf7b0029ff853fd2f11e2500fd557b09c8d"
+sha256 = "d34f3df0930e6693f3d992d0c7bd43c37b72a9e4ea1e3b2372c247bcc4a3a6ea"
 
 [[sources]]
 path = ".preview/SHA256SUMS"
 bytes = 984
-sha256 = "7bed926c3bdd78713371a667bfc9ec7c027e42a729acbc079df509aabb4649b8"
+sha256 = "baeb6a13b47ed8fecc656599afd17558690704d7eaefe7b0de38dbfae0665e59"
 
 [[sources]]
 path = ".preview/char-policy-write.py"
-bytes = 132910
-sha256 = "84a08059513f27c76e944d54c08e8ddae520f9e040ebe19296d139d49646b0f8"
+bytes = 132914
+sha256 = "c76ea0d9fdacf1771b11c32456874989bce4523c2529a9f309a7f6b62ff7b8f6"
 
 [[sources]]
 path = ".preview/clock-inject.py"
@@ -4276,8 +4276,8 @@ sha256 = "a9b028a2452a04f3a087bd505a3b459ef972b15734015d3c4e2172e38120d7d9"
 
 [[sources]]
 path = "tools/check_no_dashes.py"
-bytes = 40395
-sha256 = "70cfd07cbabd684ff0a8f009d81ba5582bcb2643f84fe1e8b6c739d455118e78"
+bytes = 52504
+sha256 = "828cb859316ce756439c5f24c17cefd7b87f47a35baf79095280cbe4e13078a1"
 
 [[sources]]
 path = "tools/check_opf_declaration.py"
