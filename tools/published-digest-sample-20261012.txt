@@ -1,0 +1,19 @@
+# posluns.dev - integrity anchors
+#
+# Independently published release hashes for projects that publish here, so an
+# adopter can confirm the files they downloaded are the ones the project
+# intended, through a channel separate from the project's own distribution.
+#
+# Each ROOT digest is the sha256 of that project's release manifest (see the
+# project's own documentation for what the manifest covers; for opfiles/AIQT it
+# is the sha256 of the raw .aiqt/manifest.toml bytes). To verify: fetch this
+# file and compare the digest below against the sha256 of the manifest in the
+# package you downloaded. They must match.
+#
+# note:    a "pre-release" digest tracks rolling main and WILL change; the
+#          authoritative value is the one published at the project's release
+#          freeze (tag).
+#
+# fields:  project   version   commit    status        digest
+
+opfiles   1.0.0   058abd9   pre-release   sha256:435cb9659316125701b1479a35da4be74ac4a6b62c6530cfaff1c5bb31e229dc
