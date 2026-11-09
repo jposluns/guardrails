@@ -60,7 +60,7 @@ mechanisms = []
 [[rule]]
 corpus-id = "brnrot"
 status = "partial"
-mechanisms = ["gate:branch-root", "hook:branch-root-guard"]
+mechanisms = ["gate:branch-root", "hook:branch-root-guard", "hook:git-discard"]
 
 [[rule]]
 corpus-id = "chgchk"
@@ -116,6 +116,11 @@ mechanisms = ["hook:orch-lease-heartbeat-post", "hook:orch-lease-heartbeat-stop"
 corpus-id = "cnsdif"
 status = "enforced"
 mechanisms = ["hook:diff-source", "hook:diff-wall-stop"]
+
+[[rule]]
+corpus-id = "cnsprd"
+status = "none"
+mechanisms = []
 
 [[rule]]
 corpus-id = "cnstpr"
@@ -200,7 +205,7 @@ mechanisms = ["gate:ci-parity", "gate:relied-exit-pipes", "hook:gate-weakening-g
 [[rule]]
 corpus-id = "gensrc"
 status = "enforced"
-mechanisms = ["gate:adapters-drift", "gate:agents-drift", "gate:changelog-drift", "gate:char-policy-drift", "gate:claude-drift", "gate:crosswalk-schema-drift", "gate:cursor-drift", "gate:disclosure-drift", "gate:enforceability-drift", "gate:enforcement-register-drift", "gate:first-pin-demo-drift", "gate:gensrc-failclose", "gate:gensrc-registry-drift", "gate:hooks-drift", "gate:install-drift", "gate:manifest-gen-drift", "gate:mappings-page-drift", "gate:notice-drift", "gate:reference-roster-drift", "gate:renderers-drift", "gate:roadmap-drift", "gate:rules-drift", "gate:secret-patterns-drift", "gate:skill-drift", "gate:worker-pack-drift", "hook:gensrc-edit-guard"]
+mechanisms = ["gate:adapters-drift", "gate:agents-drift", "gate:changelog-drift", "gate:char-policy-drift", "gate:claude-drift", "gate:crosswalk-schema-drift", "gate:cursor-drift", "gate:disclosure-drift", "gate:draft-site-drift", "gate:enforceability-drift", "gate:enforcement-register-drift", "gate:first-pin-demo-drift", "gate:gensrc-failclose", "gate:gensrc-registry-drift", "gate:hooks-drift", "gate:manifest-gen-drift", "gate:mappings-page-drift", "gate:notice-drift", "gate:reference-roster-drift", "gate:renderers-drift", "gate:roadmap-drift", "gate:rules-drift", "gate:secret-patterns-drift", "gate:skill-drift", "gate:worker-pack-drift", "hook:gensrc-edit-guard"]
 
 [[rule]]
 corpus-id = "goalfd"
@@ -255,7 +260,7 @@ mechanisms = []
 [[rule]]
 corpus-id = "nocncl"
 status = "enforced"
-mechanisms = ["hook:orch-truncation-guard"]
+mechanisms = ["hook:inline-errexit", "hook:orch-truncation-guard"]
 
 [[rule]]
 corpus-id = "nofabr"

@@ -178,6 +178,8 @@ DELIBERATE decision where the platform documents exit 2 as the block (the orches
 manufactured wind-down that way, doc-confirmed 2026-08-29, bounded by its own loop bound so it cannot wedge
 the chain). Outside that deliberate deny, only a PreToolUse handler fails closed via exit 2, and only a
 genuinely UNKNOWN mode (not in HANDLERS, an unidentifiable broken install) does so on a bad invocation.
+A note-only PreToolUse mode (NOTE_ONLY_PRETOOL_MODES), which never blocks a call, takes the Stop handlers'
+posture on every one of these error paths instead: a non-blocking systemMessage warning on exit 0.
 A handler result whose exit code is not 0 or 2, or whose stderr text is neither a str nor None, is a
 handler crash with that same posture, and an exception's text in a diagnostic is built so that its own
 str() raising cannot end main() early.
@@ -203,11 +205,12 @@ hooks.json timeout tools/gen_hooks.py renders, less 2), armed before the payload
 not decided by then is interrupted by _HookDeadline, a BaseException that no handler's except Exception
 branch catches, and the call fails CLOSED with exit 2 and a stderr line naming the handler, the budget and
 the input size and asking for smaller calls or long content moved into a file; the timer is cancelled
-before the decision is written to stdout. Any other exception out of the window (an error entering or
-leaving it, or an in-process caller's own alarm handler raising when its expiry is delivered) fails
-closed with exit 2 as well, and a fail-open mode warns on exit 0 instead, except for a stop (an exit
-or an interrupt) raised in a fail-open mode, which ends the hook as it would with no window, save that
-an exit whose status would be 2 ends it with status 1. The raw 'git ... <verb>'
+before the decision is written to stdout. A note-only mode (NOTE_ONLY_PRETOOL_MODES) runs inside the same
+window, and when its deadline passes it warns on exit 0 instead. Any other exception out of the window (an
+error entering or leaving it, or an in-process caller's own alarm handler raising when its expiry is
+delivered) fails closed with exit 2 as well, and a fail-open mode warns on exit 0 instead, except for a
+stop (an exit or an interrupt) raised in a fail-open mode, which ends the hook as it would with no window,
+save that an exit whose status would be 2 ends it with status 1. The raw 'git ... <verb>'
 fallback scans are _RawSequence probes of linear cost: the single regexes they replaced grew with the
 square or the cube of the command length, and five guards ran past the hook timeout on some shape at or
 below 64 KB. The push backstop's raw mirror-configuration scan is a _RawMirrorConfig probe of linear cost,
@@ -242,9 +245,10 @@ import sys
 
 # PYTHON-FLOOR guard (the hook form of tools/check_python_floor.py). It runs before HANDLER_EVENT exists, so
 # it carries its own literal of the fail-open modes, which selftest_aiqt_hooks.py holds equal to the
-# HANDLER_EVENT entries whose event is in FAIL_OPEN_EVENTS. On an older interpreter that can start this file
-# such a mode WARNS on exit 0 and never blocks (a Stop block here would re-fire with no cap); every other
-# mode, PreToolUse and an unknown mode alike, fails closed with exit 2, as main() does on its own error paths.
+# HANDLER_EVENT entries whose event is in FAIL_OPEN_EVENTS plus the NOTE_ONLY_PRETOOL_MODES. On an older
+# interpreter that can start this file such a mode WARNS on exit 0 and never blocks (a Stop block here would
+# re-fire with no cap); every other mode, any other PreToolUse mode and an unknown mode alike, fails closed
+# with exit 2, as main() does on its own error paths.
 # Both forms' exits hold under the output condition the module docstring states.
 # An older interpreter that cannot start this file never reaches the guard and fails with Python's own error
 # first, and that exit has the event's normal meaning: one that accepts -I but cannot compile this file
@@ -264,9 +268,9 @@ import sys
 # streams: with a sys.stderr whose write works but whose flush fails, `raise SystemExit` here ended
 # as the interpreter's own exit 120 instead of the refusal exit. Nothing runs before this guard, so
 # os._exit discards no other buffered output; the warning itself is flushed before the exit.
-FLOOR_FAIL_OPEN_MODES = ("diff_wall_stop", "orch_dispatch_ledger", "orch_lease_heartbeat_post",
-                         "orch_lease_heartbeat_stop", "orch_prompt_stamp", "orch_resume_audit",
-                         "orch_stop_guard", "orch_teammate_idle")
+FLOOR_FAIL_OPEN_MODES = ("diff_wall_stop", "inline_errexit", "orch_dispatch_ledger",
+                         "orch_lease_heartbeat_post", "orch_lease_heartbeat_stop", "orch_prompt_stamp",
+                         "orch_resume_audit", "orch_stop_guard", "orch_teammate_idle")
 
 if tuple(sys.version_info[:2]) < (3, 14):
     import os
@@ -298,6 +302,7 @@ import collections
 import datetime
 import errno
 import fnmatch
+import itertools
 import json
 import math
 import os
@@ -322,6 +327,11 @@ STOP_EVENTS = ("Stop", "SubagentStop")
 # cannot block at all; an errored UserPromptSubmit stamp must never block a human prompt; a
 # PostToolUse recorder error must surface as a warning, not a tool failure. Doc-confirmed 2026-08-29.
 FAIL_OPEN_EVENTS = STOP_EVENTS + ("SessionStart", "TeammateIdle", "UserPromptSubmit", "PostToolUse")
+# PreToolUse modes that never block a call: every result is an allow or an allow with a note, and only a
+# miswired event hard-blocks. main() gives each one the fail-open posture of a FAIL_OPEN_EVENTS mode on every
+# error path, and keeps its PreToolUse deadline, which then warns on exit 0 instead of failing closed.
+# tools/gen_hooks.py reads this tuple: such a mode's control must declare the manifest default "warn".
+NOTE_ONLY_PRETOOL_MODES = ("inline_errexit",)
 # The platform stops a hook command at the timeout tools/gen_hooks.py writes into hooks.json (its
 # TIMEOUT); HOOK_TIMEOUT_SECONDS mirrors that value, and gen_hooks refuses to render (exit 2) when the two
 # differ, so both numbers come from that one source. main() gives every PreToolUse mode that is not
@@ -363,15 +373,16 @@ PRETOOL_BUDGET_SECONDS = HOOK_TIMEOUT_SECONDS - 2.0
 # json.dumps, print or sys.stdout, for example) is outside it.
 NOTE_CONSTRUCTORS = (
     "_allow_note", "_context_note", "_stop_warn", "_dispatcher_fail_open_warn", "_diff_source_fallback",
-    "_discard_recovery_result", "_expbnd_breadth_ask", "_expbnd_fallback", "_expbnd_target_ask",
-    "_gate_weakening_fallback", "_gensrc_fail_ask", "_stash_drop_clear_outcome",
+    "_discard_recovery_result", "_errexit_unreadable", "_expbnd_breadth_ask", "_expbnd_fallback",
+    "_expbnd_target_ask", "_gate_weakening_fallback", "_gensrc_fail_ask", "_stash_drop_clear_outcome",
     "_orch_ask_attended", "_orch_oos_unreadable_input_note", "_orch_stop_family")
 DENY_CONSTRUCTORS = (
     "_deny", "_abspth_check_required", "_abspth_check_search_root", "_commit_denial",
     "_commit_identity_fallback", "_commit_msg_subst_fallback", "_deny_missing_tool_name", "_deny_relative",
     "_deny_with_recovery", "_discard_deny", "_expbnd_breadth_publish_deny", "_gate_alias_deny",
     "_gate_runtime_deny", "_git_discard_alias_deny", "_git_discard_fallback", "_hash_doubt_opaque_deny",
-    "_protected_line_fallback", "_raw_push_guard", "_reading_limit_deny", "_redirect_deny", "_wrtscp_deny")
+    "_protected_line_fallback", "_raw_push_guard", "_reading_limit_deny", "_redirect_deny",
+    "_reset_ancestry_deny", "_wrtscp_deny")
 
 def _allow():
     """A clean pass: no decision at all (never an explicit allow, which would bypass the user's own
@@ -693,63 +704,97 @@ class _LexStops:
 class _NestStack(list):
     """A comment-rule nesting stack (_nest_track) that counts its entries, so the tests the scanners make for
     a word or a backquote ("${" in nest, "`" in nest) take the same time however deep the stack is, where a
-    plain list's test reads every entry: a list of "(", "${" and "`" entries changed only through append,
-    extend, pop and clear."""
+    plain list's test reads every entry: a list of "(", "((", "=(", "@(", "$(", "[", "${" and "`" entries changed
+    only through append, extend, pop and clear. low is the fewest entries the stack has held since the shared
+    lexer last set it (at the first '<<' of a line, THE TEXT MARKS above _HEREDOC_TEXT_MARKS), so the entries from
+    index low on are those opened after that '<<' and still open; heredoc_bq is the index of the innermost
+    backquote entry a '<<' of that line was read inside (the highest such index, -1 for none), so one of those
+    backquotes has closed once low is at or below it. backquotes holds the index of each open backquote entry,
+    innermost last, so that index is read without walking the stack."""
 
     def __init__(self):
         super().__init__()
         # Each entry kind starts at zero, so a test for one never opened (the common "`" in nest) is a plain
         # dictionary read, not a call to Counter.__missing__.
-        self._open = collections.Counter(dict.fromkeys(("(", "${", "`"), 0))
+        self._open = collections.Counter(dict.fromkeys(("(", "((", "=(", "@(", "$(", "[", "${", "`"), 0))
+        self.low = 0
+        self.heredoc_bq = -1
+        self.backquotes = []
 
     def append(self, item):
+        if item == "`":
+            self.backquotes.append(len(self))
         super().append(item)
         self._open[item] += 1
 
     def extend(self, items):
         items = list(items)
+        for at, item in enumerate(items, len(self)):
+            if item == "`":
+                self.backquotes.append(at)
         super().extend(items)
         self._open.update(items)
 
     def pop(self):
         item = super().pop()
         self._open[item] -= 1
+        if item == "`":
+            self.backquotes.pop()
+        if len(self) < self.low:
+            self.low = len(self)
         return item
 
     def clear(self):
         super().clear()
         for item in self._open:
             self._open[item] = 0
+        self.low = 0
+        self.heredoc_bq = -1
+        del self.backquotes[:]
 
     def __contains__(self, item):
         return self._open[item] > 0
 
     def copy(self):
-        """A stack with the same entries and counts, changed independently of this one."""
+        """A stack with the same entries, counts, low, heredoc_bq and backquotes, changed independently of this
+        one."""
         out = _NestStack()
         list.extend(out, self)
         out._open.update(self._open)
+        out.low = self.low
+        out.heredoc_bq = self.heredoc_bq
+        out.backquotes = list(self.backquotes)
         return out
 
 
-def _nest_track(nest, c, after_dollar):
+# The nesting-stack entries a ')' closes: a "(" parenthesis, and the shared lexer's marked ones (paren in
+# _nest_track).
+_NEST_PARENS = ("(", "((", "=(", "@(", "$(")
+
+
+def _nest_track(nest, c, after_dollar, paren="("):
     """Record one UNQUOTED, unescaped character on a comment-rule nesting stack (a list, or a _NestStack). A
-    '(' opens a parenthesis and a ')' closes the innermost one when it is on top; a ')' with no parenthesis on
+    '(' opens a parenthesis, the entry paren names: "(" from every scanner but the shared lexer, which passes
+    "((" for its ARITHMETIC MARK (above _HEREDOC_ARITH_OPEN), "=(" or "@(" for its TEXT MARKS (above
+    _HEREDOC_TEXT_MARKS) and "$(" for a command substitution (_lex_paren_entry). A ')' closes the innermost
+    parenthesis of any kind when it is on top; a ')' with no parenthesis on
     top (an unmatched one, or one met while a '${' or backquote is innermost) pops nothing. A '{' directly
     after a '$' opens a '${' parameter expansion and a '}' closes it when it is on top (bash ends a '${...}'
     at its first unquoted '}'). A backquote closes the innermost open backquote substitution, with anything
     still open inside it, or else opens one; closing pops each entry it removes, so it costs time in the
-    entries removed, not in the stack's depth. Any other character leaves the stack unchanged. The stack only
-    has to tell whether ANYTHING is open: a case pattern's ')' inside an open parenthesis pops that
+    entries removed, not in the stack's depth. Any other character leaves the stack unchanged (the shared
+    lexer's word reader records the "[" entries itself, _read_word). The stack only
+    has to tell whether ANYTHING is open (and, for the shared lexer's here-document raises, whether a marked
+    entry is open anywhere on it): a case pattern's ')' inside an open parenthesis pops that
     parenthesis, which can hide only a subshell or substitution parenthesis (inside which bash reads a
     word-start '#' as a comment too), never an open '${' or backquote. That pop is safe for the '#'
     rule only: the out-of-scope note scan's here-document rule keeps its OWN count of open command and
     process substitutions (_orch_note_scan), because for that rule a substitution parenthesis popped
     at a case pattern's ')' is exactly the body misread the rule exists to note."""
     if c == "(":
-        nest.append("(")
+        nest.append(paren)
     elif c in ")}":
-        if nest and nest[-1] == ("(" if c == ")" else "${"):
+        if nest and nest[-1] in (_NEST_PARENS if c == ")" else ("${",)):
             nest.pop()
     elif c == "{" and after_dollar:
         nest.append("${")
@@ -1040,12 +1085,26 @@ class _SubstHeredocs:
         return out
 
 
+def _dollar_opener(command, i, n):
+    """(c, k) for the '$' at command[i]: c is the '(', '{' or '[' that opens a '$(', '${' or '$[' construct
+    with it, past any backslash-newlines between them (bash removes each pair first, inside double quotes too,
+    so bash 5.3.9 reads echo "$<backslash-newline>( " <<'EOF' " )" as one word), at index k; (None, i + 1)
+    where the '$' opens none of them."""
+    k = _skip_line_continuations(command, i + 1, n)
+    if k < n and command[k] in "({[":
+        return command[k], k
+    return None, i + 1
+
+
 def _skip_quoting(command, i, n, nest=None, hash_reading=None, heredoc=None):
     """Skip the quote or substitution opened at command[i]: a single or double quote, a backquote, or a
-    $( command substitution or ${ parameter expansion. Return the index just past the whole construct.
+    $( command substitution, ${ parameter expansion or $[ arithmetic expansion (its '$' and opener may be
+    apart by backslash-newlines, _dollar_opener). Return the index just past the whole construct.
     A substitution nested in a double-quoted string opens a FRESH quoting context whose own quotes nest, so
     an inner quote never closes an outer string and a << quoted at any depth stays data, never a heredoc
-    opener. Iterative (an explicit context stack), linear, stdlib-only. Raises ValueError on an unterminated
+    opener; a '$[' opens one too (bash 5.3.9 reads echo "$[ " <<'EOF' " ]" as one word and opens no
+    here-document), inside which '[' and ']' nest and every other character, a '#' included, is text.
+    Iterative (an explicit context stack), linear, stdlib-only. Raises ValueError on an unterminated
     context so the caller fails closed rather than mis-pairing a later quote.
 
     HERE-DOCUMENTS. With heredoc None (the raw push splitter, the poll-loop word scan) a '<<' inside a '$(...)'
@@ -1097,19 +1156,28 @@ def _skip_quoting(command, i, n, nest=None, hash_reading=None, heredoc=None):
     elif c == "`":
         stack = ["bq"]
         i += 1
-    elif c == "$" and i + 1 < n and command[i + 1] == "(":
-        # "subst" is a '$(...)' command substitution, where a here-document can open; "paren" is a '$((...))'
-        # (an arithmetic expansion, or a command substitution starting with a subshell) or a '(' group.
-        stack = ["paren" if command[i + 2:i + 3] == "(" else "subst"]
-        i += 2
-    elif c == "$" and i + 1 < n and command[i + 1] == "{":
-        stack = ["brace"]
-        i += 2
     else:
-        raise ValueError("not a quoting opener")
+        context, k = _dollar_context(command, i, n) if c == "$" else (None, i)
+        if context is None:
+            raise ValueError("not a quoting opener")
+        stack = [context]
+        i = k
     if heredoc is not None and stack[0] in ("bq", "paren", "subst"):
         heredoc.substitution()
     return _skip_quoting_walk(command, i, n, stack, nest, hash_reading, heredoc, opened)
+
+
+def _dollar_context(command, i, n):
+    """(context, k) for the '$' at command[i]: the walk context it opens (_dollar_opener) and the index just
+    past its opener, or (None, i + 1) where it opens none. "subst" is a '$(...)' command substitution, where a
+    here-document can open; "paren" is a '$((...))' (an arithmetic expansion, or a command substitution
+    starting with a subshell) or a '(' group; "brace" is a '${...}' and "bracket" a '$[...]'."""
+    c, k = _dollar_opener(command, i, n)
+    if c is None:
+        return None, k
+    if c == "(":
+        return "paren" if command[k + 1:k + 2] == "(" else "subst", k + 1
+    return "brace" if c == "{" else "bracket", k + 1
 
 
 def _skip_quoting_from(command, i, n, stack):
@@ -1188,23 +1256,21 @@ def _skip_quoting_walk(command, i, n, stack, nest, hash_reading, heredoc, opened
                 stack.append("bq")
                 i += 1
                 continue
-            if c == "$" and i + 1 < n and command[i + 1] == "(":
-                if heredoc is not None:
-                    heredoc.substitution()
-                stack.append("paren" if command[i + 2:i + 3] == "(" else "subst")
-                i += 2
-                prev = "paren"
-                continue
-            if c == "$" and i + 1 < n and command[i + 1] == "{":
-                stack.append("brace")
-                i += 2
-                prev = "word"
-                continue
+            if c == "$" and i + 1 < n and command[i + 1] in "({[\\":
+                context, k = _dollar_context(command, i, n)
+                if context is not None:
+                    if heredoc is not None and context in ("paren", "subst"):
+                        heredoc.substitution()
+                    stack.append(context)
+                    i = k
+                    prev = "paren" if context in ("paren", "subst") else "word"
+                    continue
             i += 1
             continue
-        if c == "#" and prev != "word" and hash_reading is not _MAIN_HASH_READING:
+        if c == "#" and prev != "word" and top != "bracket" and hash_reading is not _MAIN_HASH_READING:
             # The comment rule inside a command substitution or '${...}' expansion (see the docstring); main's
-            # skip read every '#' as plain text.
+            # skip read every '#' as plain text. Inside a '$[...]' a '#' is text to bash (bash 5.3.9 reads
+            # $[ 1 #[, a newline, ] ] as one expansion).
             if prev == "backquote":
                 raise _UncertainHashError("cannot evaluate a '#' right after a backquote", i, True)
             if i > eol:
@@ -1231,18 +1297,15 @@ def _skip_quoting_walk(command, i, n, stack, nest, hash_reading, heredoc, opened
             stack.append("bq")
             i += 1
             continue
-        if c == "$" and i + 1 < n and command[i + 1] == "(":
-            if heredoc is not None:
-                heredoc.substitution()
-            stack.append("paren" if command[i + 2:i + 3] == "(" else "subst")
-            i += 2
-            prev = "paren"
-            continue
-        if c == "$" and i + 1 < n and command[i + 1] == "{":
-            stack.append("brace")
-            i += 2
-            prev = "word"
-            continue
+        if c == "$" and i + 1 < n and command[i + 1] in "({[\\":
+            context, k = _dollar_context(command, i, n)
+            if context is not None:
+                if heredoc is not None and context in ("paren", "subst"):
+                    heredoc.substitution()
+                stack.append(context)
+                i = k
+                prev = "paren" if context in ("paren", "subst") else "word"
+                continue
         if c == "<" and top == "subst" and heredoc is not None and heredoc.on and command.startswith("<<", i):
             # The commit message form's here-document (HERE-DOCUMENTS above): jump past its body to the ')'.
             close = (_subst_heredoc_close(command, opened, i, n)
@@ -1263,6 +1326,13 @@ def _skip_quoting_walk(command, i, n, stack, nest, hash_reading, heredoc, opened
                 stack.pop()
             i += 1
             continue
+        if top == "bracket":
+            if c == "[":
+                stack.append("bracket")
+            elif c == "]":
+                stack.pop()
+            i += 1
+            continue
         if c == "{":
             stack.append("brace")
         elif c == "}":
@@ -1272,7 +1342,7 @@ def _skip_quoting_walk(command, i, n, stack, nest, hash_reading, heredoc, opened
 
 
 def _read_word(command, i, n, nest=None, glued=False, hash_reading=None, locale=False, heredoc=None,
-               spelling=None):
+               spelling=None, marks=False):
     """Read exactly ONE shell word starting at index i (which must be at a word character, never a space,
     newline, or metacharacter). Returns (text, opaque, started, all_digits, leading_tilde, new_i): text is
     the quote/escape decoded word, opaque is True if it carried an unquoted
@@ -1307,7 +1377,8 @@ def _read_word(command, i, n, nest=None, glued=False, hash_reading=None, locale=
     text with heredoc (the lexer's shared _SubstHeredocs; None reads none, see _skip_quoting), on which an
     unquoted backquote the word holds is counted as a command substitution too. spelling, when given, is a
     one-element list whose item the read sets to the word's _WordSpelling (how each part of it was spelled); the
-    tuple returned is the same either way."""
+    tuple returned is the same either way. marks True (the shared lexer, with nest) records the word's
+    unquoted '[' and ']' on nest as THE TEXT MARKS read them (above _HEREDOC_TEXT_MARKS)."""
     chars = []
     opaque = bool(glued) or (nest is not None and "${" in nest)
     # The decoded length where the first character not spelled as plain literal text begins (-1 while none has),
@@ -1332,6 +1403,7 @@ def _read_word(command, i, n, nest=None, glued=False, hash_reading=None, locale=
     # it: leading_tilde is cleared. An unquoted '/' CLOSES the prefix cleanly (leading_tilde stays set), so
     # material AFTER it - 'cd ~/$VAR' - never blocks the expansion.
     tilde_prefix_open = False
+    start = i
     while i < n:
         c = command[i]
         if c in " \t\n" or c in _METACHARS:
@@ -1417,9 +1489,11 @@ def _read_word(command, i, n, nest=None, glued=False, hash_reading=None, locale=
                     chars.append("\\")  # a backslash before any other char is literal inside "..."
                     i += 1
                     continue
-                if d == "`" or (d == "$" and i + 1 < n and command[i + 1] in "({"):
-                    # A substitution or expansion opens a fresh context: skip it whole, applying the comment
-                    # rule to a '#' inside it under this reading (_skip_quoting).
+                if d == "`" or (d == "$" and i + 1 < n and command[i + 1] in "({[\\"
+                                and _dollar_opener(command, i, n)[0] is not None):
+                    # A substitution or expansion (a '$[' included, and a '$' apart from its opener by
+                    # backslash-newlines, _dollar_opener) opens a fresh context: skip it whole, applying the
+                    # comment rule to a '#' inside it under this reading (_skip_quoting).
                     _sub_start = i
                     i = _skip_quoting(command, i, n, nest, hash_reading, heredoc)
                     if _LexPlaces.spans is not None:
@@ -1524,6 +1598,18 @@ def _read_word(command, i, n, nest=None, glued=False, hash_reading=None, locale=
                 _nest_track(nest, c, dollar_end == i)
         elif c == "$":
             dollar_end = i + 1
+        elif marks and c == "[":
+            # THE TEXT MARKS (above _HEREDOC_TEXT_MARKS): a '[' opens a "[" entry right after a '$' (a '$['), where
+            # the word so far is an unquoted identifier (a subscript; only a word's first '[' can follow one, so
+            # only that one is tested, and each word's test reads its text once), and while one is open, where
+            # bash counts it.
+            if (dollar_end == i or "[" in nest
+                    or (start >= 0 and _SUBSCRIPT_NAME_RE.fullmatch(command, start, i) is not None)):
+                nest.append("[")
+            start = -1
+        elif marks and c == "]":
+            if nest and nest[-1] == "[":
+                nest.pop()
         if not c.isdigit():
             all_digits = False
         chars.append(c)
@@ -1817,6 +1903,154 @@ def _skip_heredoc_bodies(command, i, n, heredocs):
     return i
 
 
+# What makes a here-document body UNTRUSTED when it appears anywhere before the body, quoted or not (the span
+# comment in _lex_pass): a '(' (a command, process or arithmetic substitution, a subshell or a group), a
+# backquote, or a '${' (a '${ cmd; }' or '${| cmd; }' substitution), backslash-newlines between its '$' and '{'
+# included.
+_HEREDOC_NESTING_RE = re.compile(r"[(`]|\$(?:\\\n)*\{")
+# The lexer's refusal of a here-document while a '${' is open on its nesting stack: a '<<' read there, or the
+# newline that would start the bodies of a line's here-documents read there (the raises in _lex_pass).
+_HEREDOC_DOLLAR_BRACE_OPEN = "uncertain here-document while a '${' is open"
+# THE ARITHMETIC MARK. Inside an arithmetic command '((...))' (a 'for ((...))' included) or an arithmetic
+# expansion '$((...))' bash reads '<<' as the shift operator and a newline as text, so it opens no
+# here-document there and starts no body: bash 5.3.9 runs the git in (( 1 <<'EOF' )), git commit -m x, EOF on
+# three lines, and in the same lines with echo $(( 1 <<'EOF' )) or x=$(( 1 <<'EOF' )) first, where a body
+# skipped from the '<<' hid it. Bash takes a '((' as arithmetic only where its two '(' are adjacent (a
+# backslash-newline between them aside, since bash removes it first; '( (' is two subshells), and then only by
+# how the text closes: a '((' whose inner ')' is not followed by a ')' is read again as nested subshells, and
+# a '$((' whose text does not close with '))' is a command substitution, read as text first and parsed only
+# when it expands (bash 5.3.9 runs the git after ((cat <<'EOF', git commit -m x, EOF, ') )' and after
+# echo $(( 1 ) <<'EOF' ), but reads a body after (( 1 ) <<'EOF' )). The nesting stack cannot place that close
+# before it reads it, so the lexer marks the frame instead of deciding it: a '(' whose next character, past any
+# backslash-newlines, is another '(' is pushed as an "((" entry (_nest_track), which covers '((' wherever it
+# sits and the '$(' of every '$((' up to the ')' that closes it, and a '<<', or the newline that would start
+# the bodies of a line's here-documents, read while such an entry is anywhere on the stack is UNCERTAIN (the
+# raises in _lex_pass): the lex fails and every guard takes its fail-closed fallback. That refuses a
+# here-document bash does read in such a frame (a disclosed over-refusal), never a reading either way.
+_HEREDOC_ARITH_OPEN = "uncertain here-document while a '((' is open"
+# THE TEXT MARKS. The set of frames where bash reads '<<' as no here-document operator, or a newline as
+# starting no here-document bodies, while the shared lexer reads an operator or a body start, beyond '${' and
+# '((' (above). In each row below bash 5.3.9 runs a git line placed after the '<<' (and after a line that is
+# exactly the delimiter), under bash -c and eval, where a body skipped from the '<<' hid it:
+#   "["   a '$[...]' arithmetic expansion (a '[' right after an unquoted '$', backslash-newlines between
+#         them aside), and the subscript of a word that is so far an unquoted identifier ('x[...]'): bash reads
+#         the text up to the ']' that closes it, counting '[' and ']', as part of one word, with no operator or
+#         comment in it (echo $[ 1 <<'EOF' ], and x[ 1 <<'EOF' ] as a command's first word). Bash reads a
+#         subscript this way only where an assignment may stand (the first word, after assignment words or a
+#         leading redirect, and after reserved words such as '!', 'time -p', 'then' and 'do'), and an
+#         argument's or a redirect target's 'x[' as two words (echo x[ 1 <<'EOF' ] opens a here-document); the
+#         mark goes on such a '[' in every word, so a here-document after an argument's unclosed '[' is refused
+#         too, as is one after a '$$[', which bash reads as '$$' and '[' (both disclosed over-refusals).
+#   "=("  an array assignment's '(' (a '(' right after an unquoted '='): bash reads the words up to its ')',
+#         reports a syntax error at a '<<' there and reads the next line (x=( 1 <<'EOF' ), x+=(, x[0]=(, and
+#         declare, local, typeset, readonly or export x=(; builtin declare x=( and env x=( are syntax errors at
+#         the '(', so they run nothing after it). At a newline inside it a '<<' read before it on its line
+#         gets its body, as the lexer reads it, but bash 5.3.9 then reads the lines after the ')' as a second
+#         body of that here-document, ended only by a line equal to the first body's text, which the lexer
+#         does not model; no measured row runs a line the lexer hides there, so the newline raise below is a
+#         disclosed over-refusal for this mark.
+#   "@("  a pattern's '(' (a '(' right after an unquoted '?', '*', '+', '@' or '!'): with extglob set, and in
+#         a '[[ ... == ... ]]' or '!=' pattern always, bash reads the pattern up to its ')' as one word
+#         ([[ a == @(a|<<'EOF' ) ]]). The hook cannot see whether extglob is set (a 'shopt -s extglob' line
+#         before it, or the user's shell setup), so the mark goes on every such '(', and a '!(' subshell
+#         holding a here-document is refused too (a disclosed over-refusal).
+# A '<<', or the newline that would start the bodies of a line's here-documents, read while any of these is
+# open anywhere on the stack is UNCERTAIN (the raises in _lex_pass, _heredoc_text_mark), as for '${' and '((':
+# the lex fails and every guard takes its fail-closed fallback, and a here-document bash does read in a
+# substitution such a frame holds is refused too (a disclosed over-refusal). A ')' pops "=(" and "@(" as any
+# parenthesis, and a ']' pops "[" when it is on top (_read_word); where the stack holds a frame open longer
+# than bash does it only refuses more. The newline rule has two more elements. A '$(...)' command substitution
+# (a '(' right after an unquoted '$', pushed as "$(") or a backquote substitution opened after the line's
+# first '<<' and still open at the newline defers the bodies past the line that closes it (bash 5.3.9 runs the
+# git in cat <<'EOF' $(true, git commit -m x, EOF, ')', EOF on five lines), while a subshell's or group's
+# newline starts them: the stack's low (_NestStack) marks the entries opened after that '<<', and such a
+# substitution among them makes the newline UNCERTAIN (_HEREDOC_SUBST_LATE). And a '<<' read inside a
+# backquote substitution that closes before the newline has no body there, since bash parses the backquote's
+# text alone (bash 5.3.9 runs the git after x=`cat <<'EOF' `): the stack's heredoc_bq marks the innermost
+# backquote such a '<<' sits in (the deepest one of the line's), and the close of that one or of any below it
+# before the newline makes the newline UNCERTAIN (_HEREDOC_BACKQUOTE_CLOSED).
+# Inside double quotes a '$[' and a '$' apart from its '(', '{' or '[' by backslash-newlines open a nested
+# context whose own quotes nest (_dollar_opener, _skip_quoting), so a quote inside one no longer ends the
+# string where bash reads on (bash 5.3.9 reads echo "$[ " <<'EOF' " ]" as one word).
+# Outside the set, by measurement: bash reports a syntax error and runs nothing after a '<<' in '[[ ]]'
+# (outside a pattern), in a case pattern or case word, in a for or select word list or name, and between a function
+# name and its body, so a body skipped there hides nothing bash runs; a 'let' or 'declare -i' operand, a
+# 'declare' subscript and a subshell's or group's newline leave '<<' an operator and the newline a body start,
+# as the lexer reads them; and a '$(...)' closed on the '<<' line reads the next lines as its body (bash 5.3.9
+# warns that the here-document is unterminated), as the lexer does too. Not covered: an alias that expands
+# to an open frame, shells and bash versions other than bash 5.3.9, and a frame inside text the lexer reads as
+# quoted that bash does not.
+_HEREDOC_BRACKET_OPEN = "uncertain here-document while a '$[' or subscript '[' is open"
+_HEREDOC_ARRAY_OPEN = "uncertain here-document while an array assignment's '(' is open"
+_HEREDOC_PATTERN_OPEN = "uncertain here-document while a pattern's '(' is open"
+_HEREDOC_TEXT_MARKS = (("[", _HEREDOC_BRACKET_OPEN), ("=(", _HEREDOC_ARRAY_OPEN), ("@(", _HEREDOC_PATTERN_OPEN))
+_HEREDOC_SUBST_LATE = "uncertain here-document while a substitution opened after it is open"
+_HEREDOC_BACKQUOTE_CLOSED = "uncertain here-document in a backquote substitution closed before its body"
+# The text before a subscript's '[' (THE TEXT MARKS): an identifier, backslash-newlines inside it aside.
+_SUBSCRIPT_NAME_RE = re.compile(r"(?:\\\n)*[A-Za-z_](?:[A-Za-z0-9_]|\\\n)*")
+
+
+def _heredoc_text_mark(nest):
+    """The refusal message of the first of THE TEXT MARKS (above _HEREDOC_TEXT_MARKS) open anywhere on nest, a
+    _NestStack, or None where none is."""
+    for entry, message in _HEREDOC_TEXT_MARKS:
+        if entry in nest:
+            return message
+    return None
+
+
+def _lex_paren_entry(command, i, n):
+    """The nesting-stack entry the shared lexer pushes for the unquoted '(' at command[i] (_nest_track): "(("
+    where its next character, past any backslash-newlines, is another '(' (THE ARITHMETIC MARK, above
+    _HEREDOC_ARITH_OPEN); else, by the character right before it past any backslash-newlines, "=(" after a
+    '=' and "@(" after a '?', '*', '+', '@' or '!' (THE TEXT MARKS, above _HEREDOC_TEXT_MARKS) and "$(" after a
+    '$' (a command substitution); "(" otherwise. A backslash-escaped one of those characters before a '(' is a
+    syntax error to bash, which then runs nothing after it, so it is marked as well."""
+    if command.startswith("(", _skip_line_continuations(command, i + 1, n)):
+        return "(("
+    k = i
+    while k >= 2 and command[k - 1] == "\n" and command[k - 2] == "\\":
+        k -= 2
+    if k == 0 or command[k - 1] not in "=?*+@!$":
+        return "("
+    return {"$": "$(", "=": "=("}.get(command[k - 1], "@(")
+
+
+def _heredoc_body_ends_early(command, body_at, body_end, heredocs, backquoted):
+    """True when the end of the bodies of the QUOTED here-documents in heredocs ((delimiter, strip_tabs), in the
+    order their '<<' operators appeared), read from command[body_at:body_end] as _skip_heredoc_bodies read them
+    (each to a line that is exactly its delimiter, leading tabs stripped for the <<- form), is UNCERTAIN for a
+    body read inside a substitution or group (the span comment in _lex_pass). The rule is bounded, not a list of
+    the lines bash ends a body at: (a) a body line STARTS with its delimiter and is not exactly it (the rule
+    _subst_heredoc_end applies to the commit message form); (b) a body runs to body_end with no line that is
+    exactly its delimiter; or (c) backquoted is True (a backquote substitution is open around the body) and the
+    bodies hold any backquote, an escaped one included. Bash 5.3 ends a body inside a '$(...)', '<(...)',
+    '${ cmd; }' or '${| cmd; }' at a line that starts with the delimiter and holds that construct's closer (')'
+    or '}') anywhere after it, and a backquote substitution at its first unescaped backquote, in a body too, and
+    runs the rest as commands (bash 5.3.9 runs the git in x=$(cat <<'EOF', EOF ); git commit -m x, EOF, ) on
+    four lines, and in x=`cat <<'EOF', foo`; git commit -m x; y=`, EOF, ` on four), where the exact-line read
+    takes it as body. (a) and (c) hold at every such line, whatever the closer and wherever it sits on the line;
+    (b) holds wherever bash ends a body that has no exact delimiter line after that point, since that read took
+    the rest of the command as body. The lexer cannot know which bash runs the command, so a caller that read
+    such a body treats it as UNCERTAIN and fails closed. Reads the region _skip_heredoc_bodies read once more,
+    so it stays linear."""
+    i = body_at
+    for delim, strip_tabs in heredocs:
+        while i < body_end:
+            nl = command.find("\n", i, body_end)
+            line = command[i:(nl if nl != -1 else body_end)]
+            if strip_tabs:
+                line = line.lstrip("\t")
+            i = body_end if nl == -1 else nl + 1
+            if line == delim:
+                break
+            if line.startswith(delim):
+                return True  # (a)
+        else:
+            return True  # (b)
+    return backquoted and command.find("`", body_at, body_end) != -1  # (c)
+
+
 def _subst_heredoc_end(command, i, n, heredocs):
     """The index just past the bodies of the quoted here-documents (delimiter, strip_tabs) opened on one line
     of a '$(...)' command substitution, read from index i (just past that line's newline) in the order their
@@ -1824,7 +2058,7 @@ def _subst_heredoc_end(command, i, n, heredocs):
     the <<- form). None where the substitution skip (_skip_quoting) does not read them as bodies: a body that
     does not end before the command does, or a body line that begins with its delimiter but is not exactly
     it. Bash 5.3 ends a body inside a command substitution at such a line when a ')' follows the delimiter
-    on it and reads the rest of that line as commands (bash prints RAN for
+    anywhere on it and reads the rest of that line as commands (bash prints RAN for
     x=$(cat <<'EOF'<newline>EOF); echo RAN), so such a body is read as the skip reads any other text."""
     for delim, strip_tabs in heredocs:
         while True:
@@ -2287,11 +2521,20 @@ def _empty_repeat(segments, sep):
 
 def _lex_command(command, partial=False, locale=False, skip_empty=False):
     """Lex the raw Bash command into ordered _Segment records. Raises ValueError on an unbalanced quote or
-    escape, a NUL, or an unsupported construct (an UNQUOTED heredoc, a here-string, a process substitution, a
-    '{fd}>' redirect, or a malformed redirect), so the caller falls back conservatively rather than acting on
-    a partially-cleaned command. A QUOTED heredoc (<<'EOF'/<<"EOF"/<<\\EOF) is NOT unsupported: its literal
-    body is EXCLUDED from analysis so a guard never fires on shell syntax quoted inside
-    heredoc prose. This quoting model is a best-effort reading of bash, not a guarantee (a
+    escape, a NUL, an unsupported construct (an UNQUOTED heredoc, a here-string, a process substitution, a
+    '{fd}>' redirect, or a malformed redirect), or a quoted here-document whose reading is uncertain (a '<<',
+    or the newline that would start its body, read while a '${' is open on the nesting stack, where bash may
+    read the '<<' as text, or while a '((' that may open an arithmetic command or expansion is open on it, where
+    bash may read the '<<' as a shift and the newline as text (THE ARITHMETIC MARK, above _HEREDOC_ARITH_OPEN),
+    or while a '$[', a subscript's '[', an array assignment's '(' or a pattern's '(' is open on it, where bash
+    reads the '<<' as text or a syntax error, and the newline as no body start or (in an array assignment) as a
+    body start followed by a second body the lexer does not model; the newline that would start its
+    body read while a command or backquote substitution opened after the '<<' is still open, or after a
+    backquote substitution the '<<' sits in has closed (THE TEXT MARKS, above _HEREDOC_TEXT_MARKS);
+    or a body read inside a substitution or group whose end _heredoc_body_ends_early
+    cannot place), so the caller falls back conservatively rather than acting on a partially-cleaned command.
+    A QUOTED heredoc (<<'EOF'/<<"EOF"/<<\\EOF) is NOT unsupported: its literal body is EXCLUDED from analysis
+    so a guard never fires on shell syntax quoted inside heredoc prose. This quoting model is a best-effort reading of bash, not a guarantee (a
     comment, heredoc body or nested substitution can read differently under bash), so the push
     guard never depends on it: _raw_push_guard rescans the raw text on every protected_line
     call. Linear, non-recursive, stdlib-only.
@@ -2370,12 +2613,21 @@ def _lex_resume_partial(command, exc, locale=False, skip_empty=False):
     in full (_gate_recovered_sink); exc must come from a lex of this same command with this locale and
     skip_empty, whose state the fork carries. Inside _CommandReading the command reading of the recovered
     segments follows them (_with_command_readings)."""
-    lexed, misread = _lex_reading(command, True, None, locale, skip_empty, exc.first)
-    readings = _with_command_readings(
-        _beside_main_reading(command, True, locale, [lexed], skip_empty) if misread else [lexed], True, locale,
-        skip_empty, "`" in command)
+    readings = _lex_resume_readings(command, exc, locale, skip_empty)
     return ([seg for segs, _complete, _open in readings for seg in segs],
             all(done for _segs, done, _open in readings), readings[-1][2])
+
+
+def _lex_resume_readings(command, exc, locale=False, skip_empty=False):
+    """The readings _lex_resume_partial returns in one list, each a (segments, complete, in_progress) entry as
+    _lex_readings gives one: the lex under no reading that resumes where exc stopped, then main's reading where
+    that lex read a body main's skip reads otherwise, then, inside _CommandReading, the command readings. A
+    caller whose answer depends on the order of the segments it reads, not only on each one, reads each entry on
+    its own (gensrc_guard's working-directory walk, _gensrc_lex)."""
+    lexed, misread = _lex_reading(command, True, None, locale, skip_empty, exc.first)
+    return _with_command_readings(
+        _beside_main_reading(command, True, locale, [lexed], skip_empty) if misread else [lexed], True, locale,
+        skip_empty, "`" in command)
 
 
 def _lex_readings(command, partial=False, locale=False, skip_empty=False):
@@ -2560,6 +2812,7 @@ def _lex_pass(command, partial, hash_reading, locale, subst_heredocs, skip_empty
     tails = {} if fork is None else fork.tails
     tail_key = None  # this resumed pass's state at the first newline it ends (_LexFork.tails), once reached
     tail_from = 0
+    nesting_at = None  # the index of the first _HEREDOC_NESTING_RE match (n for none), once a body needs it
 
     def remember(flags):
         # Record what this resumed pass built after its first newline, for a later reading that reaches the
@@ -2612,7 +2865,7 @@ def _lex_pass(command, partial, hash_reading, locale, subst_heredocs, skip_empty
             raise ValueError("malformed redirect: no target")
         target, t_opaque, started, _digits, t_ltilde, k2 = _read_word(command, k, n, nest,
                                                                       hash_reading=hash_reading, locale=locale,
-                                                                      heredoc=subst_heredocs)
+                                                                      heredoc=subst_heredocs, marks=True)
         if not started:
             raise ValueError("malformed redirect target")
         redirects.append(_classify_redirect(op, src_fd, target, t_opaque, t_ltilde))
@@ -2634,24 +2887,78 @@ def _lex_pass(command, partial, hash_reading, locale, subst_heredocs, skip_empty
                 if pending_heredocs:
                     # the bodies of any QUOTED heredocs opened on this line follow the newline; skip them as
                     # literal data, then resume lexing after the closing delimiter line(s).
+                    if "${" in nest:
+                        # A '${' opened after the '<<' on this line is still open at this newline. Inside a
+                        # '${...}' parameter expansion the newline is text to bash, which starts the bodies
+                        # only at the newline after the expansion closes, so a body skipped from here can
+                        # end where bash's has not begun and read bash's body as commands, where a quote in
+                        # it can hide a command bash runs; the stack's one "${" entry does not tell such an
+                        # expansion from a '${ cmd; }' substitution, whose newline is a line end. The reading
+                        # is UNCERTAIN, as at a '<<' read while a '${' is open (the raise at that operator
+                        # below): raise so the whole lex fails.
+                        raise ValueError(_HEREDOC_DOLLAR_BRACE_OPEN)
+                    if "((" in nest:
+                        # A '((' marked after the '<<' on this line is still open at this newline. Inside
+                        # arithmetic the newline is text to bash, which starts the bodies only at the newline
+                        # after the arithmetic closes (bash 5.3.9 runs the git in cat <<'EOF' $(( 1 +, then
+                        # $(git commit -m x) )), then EOF, where a body skipped from here hid it), while in
+                        # nested subshells it is a line end; the mark cannot tell which (THE ARITHMETIC MARK,
+                        # above _HEREDOC_ARITH_OPEN), so the reading is UNCERTAIN: raise so the whole lex fails.
+                        raise ValueError(_HEREDOC_ARITH_OPEN)
+                    # One of THE TEXT MARKS opened after the '<<' on this line, still open at this newline (bash
+                    # reads the newline as text there, or, in an array assignment, starts the body there and reads
+                    # a second one after its ')', which the lexer does not model); or a
+                    # command or backquote substitution opened after that '<<' and still open (bash starts the
+                    # bodies past the line that closes it); or a backquote substitution a '<<' was read in,
+                    # closed before this newline (bash reads that here-document no body here). Each makes the
+                    # reading UNCERTAIN (above _HEREDOC_TEXT_MARKS): raise so the whole lex fails.
+                    mark = _heredoc_text_mark(nest)
+                    if mark is not None:
+                        raise ValueError(mark)
+                    if "$(" in nest or "`" in nest:
+                        if any(entry in ("$(", "`") for entry in nest[nest.low:]):
+                            raise ValueError(_HEREDOC_SUBST_LATE)
+                    if 0 <= nest.heredoc_bq and nest.low <= nest.heredoc_bq:
+                        raise ValueError(_HEREDOC_BACKQUOTE_CLOSED)
                     body_at = i
                     i = _skip_heredoc_bodies(command, i, n, pending_heredocs)
+                    # The exact-delimiter-line skip above ends each body where bash ends it only
+                    # when the body is read outside every substitution and group: inside a command
+                    # or process substitution or a '${ cmd; }' or '${| cmd; }' one, bash 5.3 ends a
+                    # body at a line that starts with the delimiter and holds the closer (')' or
+                    # '}') anywhere after it, and inside backquotes at any unescaped backquote, and
+                    # runs the rest as commands (after x=$(cat <<'EOF' then the line EOF ); git ...
+                    # bash runs the git, while this skip reads it as body). The nesting stack alone
+                    # cannot prove such a construct closed (a bare case pattern's ')' pops its
+                    # parenthesis, and a '}' read as a word, as in x=${ echo }; cat <<'EOF', pops
+                    # its '${' while bash reads on inside it), so the body is TRUSTED (read exactly
+                    # as bash reads it) ONLY when nothing is open on the stack AND no '(', backquote
+                    # or '${' appears anywhere before the body, quoted or not (_HEREDOC_NESTING_RE,
+                    # searched once per pass, so the test stays linear however many bodies follow).
+                    # No body opened while a '${', a marked '((' or one of THE TEXT MARKS was still open on the
+                    # stack reaches here: the lex already failed at that '<<' (the uncertain operator raises
+                    # below).
+                    if nesting_at is None:
+                        nesting = _HEREDOC_NESTING_RE.search(command)
+                        nesting_at = n if nesting is None else nesting.start()
+                    trusted = not nest and nesting_at >= body_at
+                    if not trusted and _heredoc_body_ends_early(command, body_at, i, pending_heredocs,
+                                                                "`" in nest):
+                        # An untrusted body whose end is uncertain under the bounded rule of
+                        # _heredoc_body_ends_early: a line that starts with its delimiter and is not
+                        # exactly it, a body with no exact delimiter line, or a backquote in a body a
+                        # backquote substitution holds. Bash 5.3 can run what follows such a point as
+                        # commands, and a guard that reads this lex's segments would otherwise miss a
+                        # command bash runs (a 'git commit --no-verify' or a 'git push' the body hides). The
+                        # hook cannot know which bash runs the command, so the reading is UNCERTAIN: raise so
+                        # the whole lex fails and every guard takes its conservative, raw-text fallback (the
+                        # same fail-closed path an unquoted here-document already takes), as the
+                        # commit-message form already does (_subst_heredoc_end refuses such a body).
+                        raise ValueError("uncertain here-document body end in a substitution or group")
                     if _LexPlaces.spans is not None:
-                        # The exact-delimiter-line skip above ends each body where bash ends it only
-                        # when the body is read at the TOP LEVEL of the command: inside a command or
-                        # process substitution or backquotes, bash 5.3 ends a body at a line that
-                        # merely STARTS with the delimiter when a ')' or a backquote follows it on
-                        # that line (after x=$(cat <<'EOF' then body then the line EOF), bash runs
-                        # the text after that line as commands, while this skip reads it as body),
-                        # and an unterminated body here consumes text bash executes. The nesting
-                        # stack alone cannot prove such a group closed (a bare case pattern's ')'
-                        # pops its parenthesis), so the span is recorded as a here-document body
-                        # ONLY when nothing is open on the stack AND no '(' and no backquote appears
-                        # anywhere before the body, quoted or not; every other body records as
-                        # "body", which the bare-'&' narrowing never lifts (fail closed), while the
-                        # segments are unchanged for every other reader of this lex.
-                        trusted = (not nest and command.find("(", 0, body_at) == -1
-                                   and command.find("`", 0, body_at) == -1)
+                        # A trusted body records "heredoc"; every other body records "body", which the
+                        # bare-'&' narrowing never lifts (fail closed). The segments are unchanged for
+                        # every other reader of this lex.
                         _LexPlaces.spans.append((body_at, i, "heredoc" if trusted else "body"))
                     del pending_heredocs[:]
                     seg_start[0] = i
@@ -2693,7 +3000,12 @@ def _lex_pass(command, partial, hash_reading, locale, subst_heredocs, skip_empty
                 op, kind, oplen = _match_operator(command, i, n)
                 if kind == "sep":
                     if op in ("(", ")"):
-                        _nest_track(nest, op, False)
+                        # A '(' whose next character, past any backslash-newlines, is another '(' is marked: it
+                        # may open an arithmetic command or expansion (THE ARITHMETIC MARK, above
+                        # _HEREDOC_ARITH_OPEN). One right after a '=' or a pattern character is marked too (THE
+                        # TEXT MARKS, above _HEREDOC_TEXT_MARKS), and one right after a '$' is a "$("
+                        # (_lex_paren_entry).
+                        _nest_track(nest, op, False, _lex_paren_entry(command, i, n) if op == "(" else "(")
                         before = "paren"
                         if op == ")":
                             glued_at = i + 1
@@ -2716,10 +3028,14 @@ def _lex_pass(command, partial, hash_reading, locale, subst_heredocs, skip_empty
                             run += 1
                         count = run - i
                         if op == "(":
-                            nest.extend("(" * count)
+                            # Each '(' of the run but its last has a '(' right after it, so it is marked; the
+                            # last is marked where a '(' follows the run past backslash-newlines.
+                            nest.extend(["(("] * (count - 1))
+                            _nest_track(nest, op, False, "((" if command.startswith(
+                                "(", _skip_line_continuations(command, run, n)) else "(")
                         elif op == ")":
                             pops = count
-                            while pops and nest and nest[-1] == "(":
+                            while pops and nest and nest[-1] in _NEST_PARENS:
                                 nest.pop()
                                 pops -= 1
                             glued_at = run
@@ -2740,7 +3056,38 @@ def _lex_pass(command, partial, hash_reading, locale, subst_heredocs, skip_empty
                         i = run
                     continue
                 if kind == "cannot":
+                    if op == "<<" and "${" in nest:
+                        # A '<<' read while a '${' is open on the nesting stack. Inside a '${...}' parameter
+                        # expansion bash reads it as text and opens no here-document, so a body skipped here
+                        # would hide the lines after it, which bash runs (bash 5.3.9 runs the git in
+                        # echo ${x:-<<'EOF' }, git commit -m x, EOF on three lines, and with the '}' glued
+                        # to the delimiter and a last line EOF}). Inside a bash 5.3 '${ cmd; }' or
+                        # '${| cmd; }' substitution, or a '$(...)' that such an expansion holds, it IS an
+                        # operator. The stack keeps one "${" entry for both kinds and cannot always tell
+                        # which construct is innermost (a '(' that is text inside the expansion, as in
+                        # ${x:-(<<'EOF' }, opens one here), and reading the lines after the '<<' as
+                        # commands where bash reads a body could let a quote in that body hide a command
+                        # bash runs. Neither reading is exact wherever a '${' is open, so the reading is
+                        # UNCERTAIN: raise so the whole lex fails and every guard takes its fail-closed
+                        # fallback, as at the uncertain body end above (a disclosed over-refusal of a
+                        # here-document in such a substitution). The newline that would start a body
+                        # follows the same rule (the raise above, where the bodies are skipped).
+                        raise ValueError(_HEREDOC_DOLLAR_BRACE_OPEN)
+                    if op == "<<" and "((" in nest:
+                        # A '<<' read while a marked '((' is open anywhere on the stack: a shift to bash inside
+                        # arithmetic, where it opens no here-document, and an operator in nested subshells; the
+                        # mark cannot tell which (THE ARITHMETIC MARK, above _HEREDOC_ARITH_OPEN), so the
+                        # reading is UNCERTAIN: raise so the whole lex fails and every guard takes its
+                        # fail-closed fallback. The newline that would start a body follows the same rule.
+                        raise ValueError(_HEREDOC_ARITH_OPEN)
                     if op == "<<":
+                        # A '<<' read while one of THE TEXT MARKS is open anywhere on the stack: text to bash in
+                        # a '$[', a subscript or a pattern, and a syntax error in an array assignment, after
+                        # which bash reads the next line (above _HEREDOC_TEXT_MARKS); the reading is UNCERTAIN:
+                        # raise so the whole lex fails. The newline that would start a body follows the same rule.
+                        mark = _heredoc_text_mark(nest)
+                        if mark is not None:
+                            raise ValueError(mark)
                         parsed = _parse_heredoc_delim(command, i + oplen, n)
                         if parsed is not None and parsed[0]:
                             # a QUOTED heredoc: queue its delimiter; the literal body is skipped at the next
@@ -2748,6 +3095,13 @@ def _lex_pass(command, partial, hash_reading, locale, subst_heredocs, skip_empty
                             # remaining tokens (e.g. 'cat <<'EOF' > out') keep being lexed normally. An
                             # UNQUOTED heredoc (parsed[0] False) interpolates and stays the unsupported raise.
                             _quoted, _delim, _strip, _next_i = parsed
+                            if not pending_heredocs:
+                                # The line's first '<<': the stack's low and heredoc_bq start here (the newline
+                                # raises above, THE TEXT MARKS above _HEREDOC_TEXT_MARKS).
+                                nest.low = len(nest)
+                                nest.heredoc_bq = -1
+                            if nest.backquotes:
+                                nest.heredoc_bq = max(nest.heredoc_bq, nest.backquotes[-1])
                             pending_heredocs.append((_delim, _strip))
                             i = _next_i
                             continue
@@ -2756,7 +3110,8 @@ def _lex_pass(command, partial, hash_reading, locale, subst_heredocs, skip_empty
                 continue
             text, w_opaque, started, all_digits, w_leading_tilde, j = _read_word(command, i, n, nest,
                                                                                  i == glued_at, hash_reading,
-                                                                                 locale, subst_heredocs, spelled)
+                                                                                 locale, subst_heredocs, spelled,
+                                                                                 True)
             if j == i:
                 # Unreachable while this loop decides every '#' before it calls the word reader, which then
                 # consumes at least one character (a '#' this reading takes as word text included); kept so a
@@ -3942,7 +4297,7 @@ def _is_diff_producer(tokens):
         # show ARGS): a genuine suppression flag in a real option position, no patch-enabling option
         # (-p/-u/--patch*/-U/--unified/-c/--cc or a p/u short cluster), and no unknown option. A suppression
         # token after '--' (a pathspec) or consumed as a value-taking option's argument (git show -S -s) does
-        # NOT earn it, and any patch enabler re-enables the diff (git show -s -p). cleanlanguage adopter
+        # NOT earn it, and any patch enabler re-enables the diff (git show -s -p). Adopter
         # report 2026-09-12; position- and cluster-aware hardening 2026-09-12.
         if _show_no_patch_exempt(rest):
             return False
@@ -7187,8 +7542,16 @@ def _git_alias_spelled_segments(command):
             last_end = -1
         if words:
             segments.append(words)
+    # A word holding no '$', backquote or '{' is all literal, with no brace and no unquoted part: each of the three
+    # searches below finds nothing in it. Where the text holds none, every word is such a word, so each gets its
+    # record (the shared one the lexer gives it, _WORD_SPELLINGS) with no search.
+    marked = "$" in text or "`" in text or "{" in text
     spelled = []
     for seg in segments:
+        if not marked:
+            spelled.append(_SpelledWords(seg, [_WORD_SPELLINGS[4 * len(word)] if len(word) < 64
+                                               else _WordSpelling(len(word), False, False) for word in seg]))
+            continue
         spelling = []
         for word in seg:
             mark = _GIT_ALIAS_SPELLED_MARK_RE.search(word)
@@ -8455,6 +8818,553 @@ def git_stash_ref(data):
     return _allow()
 
 
+# --- inline-errexit (nocncl): errexit turned on inline before steps joined by ; or a newline ------------
+# How the errexit walker reads each separator the shared lexer reports. "and-or" (&&, ||) joins the
+# pipelines of one statement and "pipe" (|, |&) the commands of one pipeline; "list" (; and a newline, which
+# the lexer reports as "", as it does the end of the command) ends the statement, and the next statement runs
+# whatever its status; "background" (&) ends it without waiting on its status; "open" and "close" bound a
+# (...) subshell or a $(...) command substitution, or end a case pattern, which the walker tells apart.
+_ERREXIT_JOINS = {"&&": "and-or", "||": "and-or", "|": "pipe", "|&": "pipe", ";": "list", "": "list",
+                  "&": "background", "(": "open", ")": "close"}
+# Reserved words the walker reads at the start of a segment. bash ignores errexit in a condition (after if,
+# elif, while or until, up to the then or do that ends it) and in a pipeline negated by !, so no step there
+# stops the shell. then, do, else and { open a body whose first command follows them; else and elif open
+# another branch of an if, which the branch before it does not run on into. fi, done, esac and } only close
+# a construct and run nothing of their own. for and select open a header, up to its do, that runs no command
+# that can fail. case and function headers are read on their own (_errexit_hazard).
+_ERREXIT_CONDITION_WORDS = frozenset(("if", "elif", "while", "until"))
+_ERREXIT_CLOSER_WORDS = frozenset(("fi", "done", "esac", "}"))
+_ERREXIT_HEADER_WORDS = frozenset(("for", "select"))
+# Command words that give errexit nothing to stop at when one is the whole final pipeline of a statement:
+# true and : always succeed, exit ends the shell itself, and set and shopt only change options; a shopt
+# whose argument form queries instead of setting or unsetting is kept out of this exemption, since its
+# exit status reports an option's state (_errexit_shopt_queries).
+_ERREXIT_NEVER_FAILS = frozenset(("true", ":", "exit", "set", "shopt"))
+# An UNQUOTED heredoc operator and its plain delimiter word (<<EOF, <<-EOF, << END), never a <<< here-string.
+# The shared lexer refuses an unquoted heredoc, so on a command it cannot read in full the walker reads it
+# again with each such delimiter quoted, which makes the lexer skip the body as data: a best-effort reading.
+_ERREXIT_UNQUOTED_HEREDOC_RE = re.compile(r"(?<!<)<<(-?)([ \t]*)([A-Za-z0-9_][A-Za-z0-9_.-]*)")
+_ERREXIT_NOTE = (
+    "AIQT guardrail (rule nocncl): this command turns errexit on inline (set -e, set -o errexit or shopt -s "
+    "-o errexit) and then runs a later step after a ; or a newline, past a step whose failure errexit would "
+    "stop at. In this tool an inline set -e was seen not to stop a later step after an earlier one failed, on "
+    "one reported command shape; whether it stops this command was not observed, and this note does not say "
+    "that any step failed. Where a failure must stop the run, join the steps with && or end each such step "
+    "with || exit 1: neither relies on errexit.")
+_ERREXIT_PARTIAL_NOTE = " (The command could not be fully parsed; this is a best-effort reading.)"
+_ERREXIT_PIPEFAIL_NOTE = (
+    " (The step read as failing here is a pipeline whose last command does not fail on its own, and whether "
+    "pipefail is on at that point could not be read from the command text, so this hazard is possible, not "
+    "certain: without pipefail the pipeline takes its last command's status.)")
+# The note for a payload field inline_errexit cannot read (_errexit_unreadable): the field, then what it held.
+_ERREXIT_UNREADABLE_NOTE = (
+    "AIQT guardrail (rule nocncl): this call's {} was {}, so the inline errexit check did not run on it. This "
+    "guard never blocks a call, so it is allowed: the check was not run, not passed.")
+# What the rest of a command the lexer could not read in full (_errexit_unread) must mention for inline_errexit
+# to note that rest when the part it read shows no hazard and leaves errexit off where it stopped: set or shopt
+# as a word no letter, digit, _ or - touches, or the text errexit or pipefail, in the rest as written or with
+# its quoting removed (_errexit_unread_mentions). A rest without one allows silently, so a process substitution
+# or a here-string alone draws no note.
+_ERREXIT_UNREAD_RE = re.compile(r"(?<![\w-])(?:set|shopt)(?![\w-])|errexit|pipefail")
+# A line continuation (a backslash then a newline) and each backslash and quote character, removed from the
+# unread rest before it is searched again, so s\et, s''et and a set split by a line continuation are found: a
+# rough form of bash's quote removal, which can only add to what the search of the rest as written finds.
+_ERREXIT_UNREAD_QUOTING_RE = re.compile(r"\\\n|[\\'\"]")
+_ERREXIT_UNREAD_NOTE = (
+    "AIQT guardrail (rule nocncl): the inline errexit check stopped at a construct it cannot parse, so the rest "
+    "of this command was not read, and that rest mentions set, shopt, errexit or pipefail. This guard never "
+    "blocks a call, so it is allowed: the rest was not checked, not passed.")
+# The note for that rest when errexit is on where the lexer stopped (_errexit_hazard's second value), whatever
+# the rest mentions: a later step there, after one errexit would stop at, was not checked.
+_ERREXIT_UNREAD_ON_NOTE = (
+    "AIQT guardrail (rule nocncl): the inline errexit check stopped at a construct it cannot parse, so the rest "
+    "of this command was not read, and errexit was turned on inline before that point, so a later step in that "
+    "rest after one errexit would stop at was not checked. This guard never blocks a call, so it is allowed: "
+    "the rest was not checked, not passed.")
+
+
+def _errexit_set_effect(words):
+    """The (errexit, pipefail) effects of the simple command `words` (its command word first): for each
+    option, True when the command turns it on, False when it turns it off, and None when it leaves it alone.
+    set with e in an option cluster (-e, -eu, -Eeuo) or -o errexit turns errexit on, and +e or +o errexit
+    turns it off, the last such option winning; -o pipefail and +o pipefail do the same for pipefail;
+    options are read up to '--', a lone '-' or the first operand, since what follows them is positional
+    parameters (set -- -e). shopt -s -o errexit turns errexit on and shopt -u -o errexit turns it off, the
+    s, u and o letters in one cluster or several, and the same forms naming pipefail set pipefail."""
+    if words[0] == "shopt":
+        letters = ""
+        names = []
+        for arg in words[1:]:
+            if arg[:1] == "-" and len(arg) > 1 and not names:
+                letters += arg[1:]
+            else:
+                names.append(arg)
+        if "o" not in letters or ("errexit" not in names and "pipefail" not in names):
+            return None, None
+        if "s" in letters:
+            on = True
+        elif "u" in letters:
+            on = False  # shopt -u -o errexit turns errexit off
+        else:
+            return None, None
+        return on if "errexit" in names else None, on if "pipefail" in names else None
+    if words[0] != "set":
+        return None, None
+    effect = None
+    pipefail = None
+    args = words[1:]
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        i += 1
+        if arg in ("-", "--"):
+            break  # '--' or a lone '-' ends the options: what follows is positional parameters
+        if arg[:1] not in ("-", "+") or len(arg) < 2:
+            break  # so does the first operand
+        on = arg[0] == "-"
+        for letter in arg[1:]:
+            if letter == "e":
+                effect = on
+            elif letter == "o" and i < len(args):
+                if args[i] == "errexit":
+                    effect = on
+                elif args[i] == "pipefail":
+                    pipefail = on  # set -o pipefail turns pipefail on and set +o pipefail turns it off
+                i += 1  # -o and +o take their option name from the next word
+    return effect, pipefail
+
+
+def _errexit_shopt_queries(words):
+    """Whether the shopt command `words` takes a form whose own exit status can be non-zero: an option
+    letter shopt does not take (anything beyond q, s, u, o and p) is an error, giving -s and -u together is
+    an error, and option names given without -s or -u report in the exit status whether every name is set,
+    with or without -q, which only silences that report. Setting or unsetting (-s or -u, with -o for a
+    set -o option name) exits 0 even with -q beside it, and so do a bare listing and a bare -q or -p with
+    no names; whether each NAME is one shopt knows is not judged."""
+    letters = ""
+    names = []
+    for arg in words[1:]:
+        if arg[:1] == "-" and len(arg) > 1 and not names:
+            letters += arg[1:]
+        else:
+            names.append(arg)
+    if any(letter not in "qsuop" for letter in letters):
+        return True  # an option shopt refuses can fail
+    if "s" in letters and "u" in letters:
+        return True  # shopt refuses setting and unsetting at once
+    if "s" in letters or "u" in letters:
+        return False  # setting or unsetting exits 0: a -q beside them only silences output
+    return bool(names)  # names alone, queried or not, report their state in the exit status
+
+
+def _errexit_armed(current, new):
+    """The stronger of two armed readings: True (a step bash would certainly stop at) over "possible" (a
+    pipeline whose stopping depends on a pipefail state the walker could not read) over False."""
+    if current is True or new is True:
+        return True
+    return current or new
+
+
+def _errexit_unread(text, segments, complete, in_progress):
+    """The part of text, the command as _errexit_statements lexed it into segments, that the lex may not have
+    read: "" when it read the whole text (complete); else the rest of text from the start of the segment it
+    stopped inside (in_progress), whose unread words could change it, or else from the end of the last segment
+    whose raw text is not blank. That end is taken where its raw text first occurs in text, at or before where
+    the segment ends, so the part returned holds every character the lex did not reach, with any separator or
+    quoted heredoc body before them. Under several readings of an uncertain '#' each reading's segments follow
+    the one before's (_lex_command), so the segment found here is the last one some reading read, and that
+    reading read the text before it: a character one reading reached counts as read."""
+    if complete:
+        return ""  # the lex read it all
+    if in_progress:
+        return segments[-1].raw  # the segment the lex stopped inside, to the end of text
+    for seg, _run in itertools.groupby(reversed(segments)):  # a run of equal segments is judged once
+        if seg.raw.strip():
+            at = text.find(seg.raw)
+            # raw is a slice of text, so it is always found; a miss would read the whole text, never less
+            return text[at + len(seg.raw):] if at >= 0 else text
+    return text  # the lex stopped before any segment with text, so none of it counts as read
+
+
+def _errexit_unread_mentions(unread):
+    """Whether the unread rest of a command (_errexit_unread) mentions an option word (_ERREXIT_UNREAD_RE), as
+    written or with its quoting removed (_ERREXIT_UNREAD_QUOTING_RE). The rest as written is searched as well,
+    so a set that removing the quoting joins to a longer word ("$x"set) is still found."""
+    return bool(_ERREXIT_UNREAD_RE.search(unread) or
+                _ERREXIT_UNREAD_RE.search(_ERREXIT_UNREAD_QUOTING_RE.sub("", unread)))
+
+
+def _errexit_statements(command):
+    """(pairs, tail, exact, unread) for the errexit walker: pairs are the (argv, sep_after, redirected) of each
+    segment the shared lexer read in full, in order, redirected being whether the segment carries a
+    redirection (a statement of redirections only still runs them); tail is the argv of the segment it
+    stopped inside (_lex_command's in_progress segment: [] for one that holds only redirects so far, None
+    when there is none), whose unread words could change it; exact is False when the lexer could not read
+    the whole command; and unread is the rest of the command the lexer did not read (_errexit_unread), "" when
+    it read all of it. On such a command, one that holds an unquoted heredoc is read again with its
+    delimiters quoted (_ERREXIT_UNQUOTED_HEREDOC_RE), so the body is skipped as data and the statements
+    after it are read, and unread is taken from that reading.
+
+    Of each run of consecutive segments with no word and no redirect that end with ';' (a ';;;;' run, which
+    the lexer returns again for each reading of an uncertain '#'), only the first two are kept. _errexit_hazard
+    reads every later one after a ';' and after one of the run that it also read after a ';', which leaves it
+    nothing to change: a case pattern stays a pattern, an arm that ';;' ended has its next pattern pending, a
+    continued statement stays continued and an ended one stays ended. So each later one leaves the walker's
+    state as it found it, its decision is the same, and a long run costs one comparison per segment
+    (itertools.groupby over equal segments) instead of a walker step and a pair."""
+    segments, exact, in_progress = _lex_command(command, partial=True)
+    text, complete = command, exact
+    if not exact:
+        quoted = _ERREXIT_UNQUOTED_HEREDOC_RE.sub(r"<<\1\2'\3'", command)
+        if quoted != command:
+            segments, complete, in_progress = _lex_command(quoted, partial=True)
+            text = quoted
+    pairs = []
+    for seg, run in itertools.groupby(segments):
+        pair = (seg.argv, seg.sep_after, bool(seg.redirects))
+        if pair == ([], ";", False):
+            run = itertools.islice(run, 2)  # the rest of the run changes nothing the walker reads
+        pairs.extend(pair for _seg in run)
+    tail = pairs.pop()[0] if in_progress else None
+    return pairs, tail, exact, _errexit_unread(text, segments, complete, in_progress)
+
+
+def _errexit_stops(word, after_or, piped, in_function, pipefail):
+    """Whether bash, with errexit on, would stop at a failure of the statement just ended, read from its
+    final pipeline (bash ignores errexit for every pipeline of an && or || list but the last): `word` is the
+    command word of that pipeline's last command (None for a (...) subshell), `after_or` whether || comes
+    before the pipeline, `piped` whether it has more than one command, `in_function` whether the statement
+    is inside a function body, and `pipefail` the pipefail state (True, False, or None for unknown). A
+    pipeline after || is read as the handling the author wrote for the failure before it, so it counts only
+    when it cannot succeed: a lone false, or a return outside a function body, where return fails. A
+    pipeline of several commands counts when its last command can fail (without pipefail the pipeline takes
+    that command's status) or when pipefail is on (any stage's failure then fails the pipeline); each of its
+    commands runs in its own subshell, so an exit or return there only supplies that stage's status and can
+    fail the pipeline like any command; when its last command gives errexit nothing to stop at and the
+    pipefail state is unknown, it counts as "possible", not certain. Otherwise a lone _ERREXIT_NEVER_FAILS
+    word or a return inside a function body
+    (which ends the function) gives errexit nothing to stop at, and every other pipeline counts, whatever it
+    runs: the hook does not judge whether a command can fail."""
+    if piped and after_or:
+        return False  # a pipeline of several commands after || handles the failure before it
+    if piped:
+        # each pipeline command runs in its own subshell, so an exit or return there only supplies
+        # that stage's status to the pipeline: neither leaves the surrounding context
+        last_stops = word in ("exit", "return") or word not in _ERREXIT_NEVER_FAILS
+        if last_stops or pipefail:
+            return True  # the last command can fail alone, or pipefail lets any stage fail the pipeline
+        return "possible" if pipefail is None else False  # off: the last command decides; unknown: possible
+    if after_or:
+        cannot_succeed = word == "false"  # a || branch that cannot succeed handles nothing
+        if word == "return":
+            cannot_succeed = not in_function  # return fails outside a function body
+        return cannot_succeed
+    if word == "return":
+        return not in_function  # a lone return fails outside a function body, and ends the function inside one
+    return word not in _ERREXIT_NEVER_FAILS
+
+
+def _errexit_hazard(pairs, tail):
+    """(hazard, on): hazard is truthy when errexit is on at a statement whose failure bash would stop at under
+    errexit (_errexit_stops) and a later statement of the same scope follows it after a ; or a newline
+    (_ERREXIT_JOINS): the shape whose later steps an inline set -e was seen not to stop in this tool. It is
+    True for a certain such step, or "possible" when the only such step is a pipeline whose stopping depends
+    on a pipefail state the walker could not read. on is whether errexit is on where the walk ended, counting,
+    once every pair is read, each (...) subshell, $(...) substitution or function body still open there, since
+    the rest of the command returns to the state saved as it opened when it closes it (a { } group restores
+    nothing); inline_errexit reads it when the lexer stopped early and hazard is false. pairs and tail are
+    _errexit_statements' reading; the tail (None when there is none) counts only as a later statement, never
+    as a set or as a step that can fail, and a fully read statement of redirections only also counts as a
+    later statement (bash still runs its redirections, truncating a > target), whatever separator ends it; a
+    closing fi, done, esac or } that carries a redirection closes its construct and is no later statement.
+
+    Option changes are tracked in order (_errexit_set_effect), and only one that runs whenever its statement
+    runs counts: the first command of its && or || list, outside a pipeline and not sent to the background;
+    a pipefail change that is conditional there, or sits inside an if, case or loop body that may not run,
+    leaves the pipefail state unknown. A setting made inside a (...) subshell
+    ends with it, a setting made inside a function body takes effect when the function is called, never at
+    its definition, and a $(...) command substitution runs with errexit off, as bash runs it without
+    inherit_errexit. A statement is no step that can fail when errexit is off as its final pipeline's last
+    command starts, when that pipeline is negated by !, when the statement is part of a condition or a for
+    or select header (up to its then or do) or inside a subshell or { } group opened in one, when it ends
+    with &, or when _errexit_stops finds nothing in its final pipeline for errexit to stop at (a shopt that
+    only sets or unsets options is such a nothing; one that queries can fail). A newline after &&, || or a
+    pipe continues the statement.
+
+    Compound commands are read through their reserved words: each branch of an if and each arm of a case is
+    another branch, so a step of one arm does not make the next arm a later step, but a step that can fail in
+    any branch still counts after fi or esac; a case pattern, up to its ), runs nothing; and a function body
+    (name () { ... } or function name { ... }) is read where it is defined, as its own scope, with the
+    definition itself running nothing."""
+    on = False  # errexit starts off: only a set or shopt in the command turns it on
+    pipefail = False  # bash starts with pipefail off; None when a conditional change leaves it unknown
+    armed = False  # a statement that can fail unhandled under errexit has ended with ; or a newline
+    scopes = []  # the state outside each open (...) subshell or $(...) substitution
+    braces = []  # (a function body, and armed, ignored, on and pipefail outside it) for each open { group
+    frames = []  # [if or case, an earlier branch armed, a case pattern comes next] for each open if and case
+    functions = 0  # the open function bodies
+    loops = 0  # the open do ... done bodies, whose steps run only as the loop runs
+    fn_pending = False  # a function header was read, and its body has not opened yet
+    last = None  # (errexit on as it started, its command word or None) for the open pipeline's last command
+    exempt = False  # the open statement is part of a condition or a for or select header, up to then or do
+    ignored = False  # errexit is ignored in the whole subshell or { } group (opened in a condition or after !)
+    negated = False  # the open pipeline is negated by !
+    joiner = None  # the && or || before the open pipeline
+    piped = False  # the open pipeline has more than one command
+    continued = False  # the open statement's last segment ended with &&, || or a pipe
+    previous = None  # the separator after the segment before this one
+    count = len(pairs)
+    i = 0
+    while i < count:
+        argv, sep, redirected = pairs[i]
+        i += 1
+        before, previous = previous, sep
+        kind = _ERREXIT_JOINS.get(sep, "list")
+        words = argv[_command_word_index(argv):]
+        arms = frames[-1] if frames and frames[-1][0] == "case" else None
+        if arms is not None and arms[2] and words[:1] != ["esac"]:
+            if kind == "close":
+                arms[2] = False  # the pattern ends at its ), and the arm's body follows
+                last, negated, joiner, piped, continued = None, False, None, False, False  # the arm's first step
+            continue  # a case pattern runs nothing
+        if arms is not None and not argv and sep in (";", "&") and before in (";", ""):
+            arms[1] = _errexit_armed(arms[1], armed)  # a step of this arm can still fail before esac
+            armed = False  # ;; ends the arm: the next arm is another branch, not a later step
+            arms[2] = True  # and a pattern comes next
+            last, negated, joiner, piped, continued = None, False, None, False, False  # past the arm
+            continue
+        k = 0
+        while k < len(words):
+            word = words[k]
+            if word in ("else", "elif") and frames and frames[-1][0] == "if":
+                frames[-1][1] = _errexit_armed(frames[-1][1], armed)  # the branch before can fail before fi
+                armed = False  # else and elif open another branch, which the branch before does not run on into
+            if word in _ERREXIT_CONDITION_WORDS:
+                if word == "if":
+                    frames.append(["if", False, False])
+                exempt = True  # bash ignores errexit in a condition, up to its then or do
+            elif word == "!":
+                negated = True  # and in a pipeline negated by !
+            elif word in ("then", "do"):
+                if word == "do":
+                    loops += 1  # a do opens a loop or select body
+                exempt = False  # the condition or header ends, and a body follows
+            elif word == "{":
+                braces.append((fn_pending, armed, ignored, on, pipefail))
+                ignored = ignored or exempt or negated  # a { } group in a condition or after ! ignores errexit
+                if fn_pending:
+                    fn_pending = False
+                    functions += 1
+                    armed = False  # a function body runs when it is called, not where it is defined
+                    last, negated, joiner, piped, continued = None, False, None, False, False  # the body's start
+            elif word == "function" and k + 1 < len(words):
+                fn_pending = True  # function name, then () or its body: the header runs nothing
+                k += 1  # the name
+            elif word != "else":
+                break
+            k += 1
+        words = words[k:]
+        closer = False
+        if words and all(word in _ERREXIT_CLOSER_WORDS for word in words):
+            for word in words:
+                if word == "}" and braces:
+                    function_body, outside, ignored, outside_on, outside_pipefail = braces.pop()
+                    if function_body:
+                        functions -= 1
+                        armed = outside  # the definition itself runs nothing
+                        on = outside_on  # an option change in a body takes effect only when it is called
+                        pipefail = outside_pipefail  # pipefail likewise: the definition changes no option
+                elif word == "done" and loops:
+                    loops -= 1  # done closes the loop or select body its do opened
+                elif word in ("fi", "esac") and frames and frames[-1][0] == ("if" if word == "fi" else "case"):
+                    armed = _errexit_armed(frames.pop()[1], armed)  # any branch can have failed before fi/esac
+            words = []
+            closer = True  # even carrying a redirection, the closer is no later statement
+        if kind == "open" and i < count and pairs[i][:2] == ([], ")") and (
+                (fn_pending and not words) or (len(words) == 1 and not words[0].endswith("$"))):
+            fn_pending = True  # name () or function name (): a function header, whose () opens no subshell
+            i += 1
+            previous = ")"
+            continue
+        if not words and redirected and armed and not closer:
+            return armed, on  # a statement of redirections only is a later statement: bash still runs them
+        if words:
+            if armed:
+                return armed, on  # a later statement runs after one that failed with nothing to stop it
+            fn_pending = False
+            if words[0] == "case":
+                frames.append(["case", False, kind != "close"])  # the first pattern ends at its ), here or later
+                last, negated, joiner, piped, continued = None, False, None, False, False  # the header runs nothing
+                continue
+            if words[0] in _ERREXIT_HEADER_WORDS:
+                exempt = True  # a for or select header runs no command that can fail, up to its do
+            word = words[0]
+            if word == "shopt" and _errexit_shopt_queries(words):
+                word = "shopt?"  # a shopt form that can fail, kept apart from the exempt setting form
+            last = (on, word)  # errexit as the pipeline's last command starts
+            effect, pipefail_effect = _errexit_set_effect(words)
+            unconditional = joiner is None and not piped and kind not in ("pipe", "background")
+            if effect is not None and unconditional:
+                on = effect  # an option change that runs whenever its statement runs
+            if pipefail_effect is not None:
+                in_branch = bool(frames) or loops > 0  # an if, case or loop body may not run
+                pipefail = pipefail_effect if unconditional and not in_branch else None  # else: state unknown
+            continued = False
+        if kind == "and-or":
+            joiner = sep
+            negated = False  # ! negates one pipeline only
+            piped = False
+            continued = True
+        elif kind == "pipe":
+            piped = True
+            continued = True
+        elif kind == "open":
+            if armed:
+                return armed, on  # the subshell is a later statement
+            fn_pending = False
+            substitution = bool(argv) and argv[-1].endswith("$")
+            scopes.append((on, pipefail, armed, last, exempt, ignored, negated, joiner, piped, functions,
+                           loops, substitution, len(frames), len(braces)))
+            if substitution:
+                on = False  # bash runs a $(...) command substitution with errexit off
+            ignored = ignored or exempt or negated  # so does a subshell in a condition or after !
+            armed = False
+            last, negated, joiner, piped, continued = None, False, None, False, False  # inside the subshell
+            if not argv and not redirected:
+                # Each further equal '(' in a run (a bare subshell, read through the same rules) pushes the scope
+                # this state gives and leaves the state as it is: armed, fn_pending and the open pipeline are
+                # reset, ignored already holds exempt, and no case pattern is pending or the first would not
+                # have reached here. So the rest of the run is pushed at once, one entry object for all of it,
+                # and a long run costs one comparison per pair instead of a walker step.
+                run = i
+                while run < count and pairs[run] == pairs[i - 1]:
+                    run += 1
+                if run > i:
+                    scopes.extend(itertools.repeat((on, pipefail, armed, last, exempt, ignored, negated, joiner,
+                                                    piped, functions, loops, substitution, len(frames),
+                                                    len(braces)), run - i))
+                    i = run
+        elif kind == "close":
+            if scopes:
+                scope = scopes.pop()
+                (outside_on, outside_pipefail, outside_armed, outside_last, exempt, ignored, negated, joiner,
+                 piped, functions, loops, substitution, frame_depth, brace_depth) = scope
+                del frames[frame_depth:]  # a construct left open inside the subshell ends with it
+                del braces[brace_depth:]
+                on = outside_on  # an errexit setting made inside (...) ends with the subshell
+                pipefail = outside_pipefail  # and a pipefail setting made inside (...) ends with it too
+                armed = outside_armed  # and so does a step inside it: what follows the subshell runs either way
+                if not substitution:
+                    last = (on, None)  # the subshell is the open pipeline's last command
+                elif outside_last is not None:
+                    last = outside_last  # the command that holds the substitution
+                else:
+                    last = (on, None)  # a command of assignments only takes the substitution's status
+                if not argv and not redirected and not (frames and frames[-1][0] == "case" and frames[-1][2]):
+                    # Each further equal ')' that would pop this same entry (a run of '(' pushed one object)
+                    # restores the same state, and with no case pattern pending none of them ends a pattern, so
+                    # those closes are popped at once.
+                    run = i
+                    while run < count and len(scopes) > run - i and scopes[i - run - 1] is scope and (
+                            pairs[run] == pairs[i - 1]):
+                        run += 1
+                    del scopes[len(scopes) - (run - i):]
+                    i = run
+            else:
+                last = (on, None)
+            continued = False
+        elif kind == "list" and not words and continued:
+            continue  # a newline after &&, || or a pipe continues the statement
+        else:
+            if kind == "list" and last is not None and last[0] and not exempt and not ignored and not negated:
+                stops = _errexit_stops(last[1], joiner == "||", piped, functions > 0, pipefail)
+                armed = _errexit_armed(armed, stops)  # a later statement of this scope would run after this
+            last, negated, joiner, piped, continued = None, False, None, False, False  # a new statement
+    # errexit where the walk ended, or where closing a subshell, a substitution or a function body returns to
+    on = on or any(scope[0] for scope in scopes) or any(entry[3] for entry in braces if entry[0])
+    if tail is None:
+        return False, on  # the last statement never notes: nothing runs after it
+    return armed, on  # the tail counts only as a later statement, preserving a "possible" reading
+
+
+def _errexit_unreadable(field, present, value, kind):
+    """inline_errexit's outcome on a payload field it cannot read: a missing field, an empty string, or a value
+    that is not `kind`. This note-only guard never denies, so its fail-closed outcome is an allow with a note
+    naming the field and what it held, never a silent allow that would read as a checked call."""
+    if not present:
+        held = "missing"
+    elif value == "":
+        held = "empty"
+    else:
+        held = "{}, not {}".format(_orch_json_kind(value), kind)
+    return _allow_note(_ERREXIT_UNREADABLE_NOTE.format(field, held))
+
+
+def inline_errexit(data):
+    """nocncl (integ/no-concealed-failure), PreToolUse/Bash. NOTE-ONLY: it allows every Bash command, and
+    blocks only when wired to an event other than PreToolUse, a payload with no hook_event_name included (the
+    sibling hard-block convention); main() turns each of its error paths, its deadline included, into a
+    warning on exit 0 (NOTE_ONLY_PRETOOL_MODES). A Bash command that turns errexit on inline (set -e, set -o
+    errexit, shopt -s -o errexit) and then runs a later step after a ; or a newline, past a step whose
+    failure errexit would stop at (_errexit_hazard), ALLOWS with one informational note: in this tool an
+    inline set -e was seen not to stop such a later step, on one reported command shape. Steps joined by &&,
+    a step whose failure a || branch handles, and a chain inside bash -c '...' or a quoted heredoc (quoted
+    text and a quoted heredoc body are data to the shared lexer) do not fire.
+
+    HONEST RESIDUAL: it reads the command text only and cannot see how the tool evaluates it, so where an
+    inline set -e does stop at a failure the note is a false alarm, and the note never says a step failed.
+    errexit or pipefail turned on another way (bash -e, a sourced file, SHELLOPTS, an alias, a function,
+    eval, an earlier call) is not seen, and neither is a set reached through a wrapper (builtin set -e); a
+    pipefail change that may not run (after && or ||, in a pipeline, backgrounded, or inside an if, case or
+    loop body) leaves the pipefail state unknown, so a pipeline it could govern notes as possible rather
+    than as certain or silent. Apart from the few builtins _errexit_stops reads, it does not judge whether a
+    step can fail or whether a later step depends on it, and it reads a || branch as handling the failure
+    before it whether or not that branch can fail itself; a shopt is judged by its argument form only, never
+    by whether its option names exist, and a redirect-only statement counts as a later statement but never
+    as a step that can fail. A function body is read where it is defined, as if the function were called
+    plainly: bash
+    ignores errexit inside a function called in an && or || list, a condition or a ! pipeline, which is not
+    modelled. Compound commands are read only through their reserved words (_errexit_hazard). An unquoted
+    heredoc is read again with its delimiter quoted, a best-effort reading the note says it is; where the lexer
+    stops at any other construct it refuses, the rest of the command past the last segment it read in full is
+    not read (_errexit_unread). Where the part read shows no hazard, that rest allows with a note saying it was
+    not read when errexit is on where the lexer stopped (_errexit_hazard's second value), or else when that
+    rest mentions set or shopt as a word, errexit or pipefail (_errexit_unread_mentions), each with its own
+    note, and silently otherwise, so a later step there after an errexit turned on before the stop only by a
+    change that may not run (true || set -e), or only inside a function body the rest may call, is unseen.
+    Another tool silently allows. A tool_name that is missing, empty or not a string, a tool_input that is not
+    an object, and a command that is missing, empty or not a string each allow with a note naming that field
+    (_errexit_unreadable), never silently and never with a deny."""
+    if data.get("hook_event_name") != PRETOOL:
+        return _hard_block("aiqt_hooks: inline_errexit wired to unexpected event {!r}; failing "
+                           "closed".format(data.get("hook_event_name")))
+    tool = data.get("tool_name")
+    if not isinstance(tool, str) or not tool:
+        return _errexit_unreadable("tool_name", "tool_name" in data, tool, "a string")
+    if tool != "Bash":
+        return _allow()  # a present-but-different tool is out of scope (defensive; the matcher governs)
+    tool_input = data.get("tool_input")
+    if not isinstance(tool_input, dict):
+        return _errexit_unreadable("tool_input", "tool_input" in data, tool_input, "an object")
+    command = tool_input.get("command")
+    if not isinstance(command, str) or not command:
+        return _errexit_unreadable("command", "command" in tool_input, command, "a string")
+    pairs, tail, exact, unread = _errexit_statements(command)
+    hazard, on = _errexit_hazard(pairs, tail)
+    if not hazard:
+        if unread and on:
+            return _allow_note(_ERREXIT_UNREAD_ON_NOTE)  # a later step past errexit turned on was not read
+        if _errexit_unread_mentions(unread):
+            return _allow_note(_ERREXIT_UNREAD_NOTE)  # its unread rest mentions set, shopt, errexit or pipefail
+        return _allow()
+    note = _ERREXIT_NOTE
+    if hazard == "possible":
+        note += _ERREXIT_PIPEFAIL_NOTE  # pipefail unknown: the pipeline may take its last command's status
+    if not exact:
+        note += _ERREXIT_PARTIAL_NOTE
+    return _allow_note(note)
+
+
 def _has_short(tokens, ch):
     """True when a clustered short-flag token (a single '-' then letters, e.g. '-fd') carries the letter
     ch. Spots '-f' inside a cluster (checkout '-f', clean '-fd'), '-p', '-S'/'-W' (restore)."""
@@ -8800,6 +9710,152 @@ def _reset_role(args):
     if mode == "soft":
         return ("allow", None)  # HEAD-only: the index and worktree are untouched
     return ("scoped", "git reset (an index or worktree reset that can drop staged or unstaged changes)")
+
+
+# git reset modes, for the ancestry check below. A soft reset keeps the older tree in the index and a mixed
+# reset (also the default) keeps it in the worktree, where a later 'git add -A' stages it again, so the next
+# commit records that tree. --hard, --keep and --merge rewrite tracked content to the target's tree, so they
+# leave no older tree to commit and are not judged by the ancestry check.
+_RESET_MODES = ("soft", "mixed", "hard", "keep", "merge")
+_RESET_ANCESTRY_MODES = frozenset(("soft", "mixed"))
+
+
+def _reset_commit_operand(args):
+    """(mode, operand) when a git reset moves HEAD to ONE commit operand under --soft, --mixed or no mode
+    (mode is "soft" or "mixed"); None otherwise: no operand, more than one operand (a path reset), any path
+    after '--', a path-scoped form (-p/--patch, --pathspec-from-file), or an effective --hard, --keep or
+    --merge. The last mode given wins and a mode is matched by unambiguous prefix, as git does; the ambiguous
+    '--m' (mixed or merge) is read as mixed, so it is judged. Options may follow operands, as git accepts;
+    '--end-of-options' ends the option region and '--' starts the paths. A lone '-' is git's shorthand for the
+    previous branch and is read as '@{-1}'. Pure: it runs nothing."""
+    mode = "mixed"
+    operands = []
+    end_of_options = False
+    for idx, a in enumerate(args):
+        if a == "--":
+            if args[idx + 1:]:
+                return None  # 'git reset <tree-ish> -- <paths>' resets paths and leaves HEAD where it is
+            break
+        if end_of_options or not a.startswith("-"):
+            operands.append(a)
+            continue
+        if a == "--end-of-options":
+            end_of_options = True
+            continue
+        if a == "-":
+            operands.append("@{-1}")
+            continue
+        if not a.startswith("--"):
+            if "p" in a[1:]:
+                return None  # a clustered -p: interactive patch mode is path-scoped
+            continue
+        name = a[2:].split("=", 1)[0]
+        if not name:
+            continue
+        if "patch".startswith(name) or "pathspec-from-file".startswith(name):
+            return None  # a path-scoped reset
+        if "=" in a:
+            continue  # no mode takes a value
+        matches = [m for m in _RESET_MODES if m.startswith(name)]
+        if len(matches) == 1:
+            mode = matches[0]
+        elif matches and set(matches) <= {"mixed", "merge"}:
+            mode = "mixed"  # an ambiguous '--m': judged, the safe direction
+    if mode not in _RESET_ANCESTRY_MODES or len(operands) != 1:
+        return None
+    return (mode, operands[0])
+
+
+def _reset_ancestry(repo, operand):
+    """Ask git, read-only and offline, whether a reset target is an ancestor of HEAD in `repo`. Returns
+    ('ancestor'|'not-ancestor'|'not-a-commit'|'no-commit-object'|'unknown', detail), read only from unmasked
+    git exit statuses, with the scrubbed environment of _branch_root_git. The operand is resolved alone and
+    the object it names is then peeled to a commit: appending '^{commit}' to the operand itself would change
+    what some operands name (everything after ':/' is a commit-message pattern, so ':/<text>^{commit}'
+    searches for the suffix too). 'not-a-commit': the operand resolves to no object (git then reads a single
+    operand as a path). 'no-commit-object': the operand resolves to an object that peels to no commit (a tree
+    or a blob), which git does not read as a path. 'unknown': no repository directory is known, git cannot be
+    launched or does not finish, HEAD resolves to no commit (an unborn branch or an unreadable repository),
+    the ancestry walk exits with anything but 0 or 1, or a repository that is shallow (or whose shallowness
+    cannot be read) answers 'not an ancestor' over history it may not hold."""
+    if not isinstance(repo, str) or not repo:
+        return ("unknown", "no repository directory could be resolved for it")
+    found = _branch_root_git(repo, "rev-parse", "--verify", "--quiet", "--end-of-options", operand)
+    if found is None:
+        return ("unknown", "git rev-parse could not be launched or did not finish")
+    if found.returncode == 1 and not found.stdout.strip():
+        return ("not-a-commit", "{!r} resolves to no commit".format(operand))
+    if found.returncode != 0 or not found.stdout.strip():
+        return ("unknown", "git rev-parse exited {} resolving {!r}".format(found.returncode, operand))
+    found_sha = found.stdout.strip()
+    target = _branch_root_git(
+        repo, "rev-parse", "--verify", "--quiet", "--end-of-options", "{}^{{commit}}".format(found_sha))
+    if target is None:
+        return ("unknown", "git rev-parse could not be launched or did not finish")
+    if target.returncode == 1 and not target.stdout.strip():
+        return ("no-commit-object", found_sha)
+    if target.returncode != 0 or not target.stdout.strip():
+        return ("unknown", "git rev-parse exited {} peeling {} to a commit".format(target.returncode, found_sha))
+    target_sha = target.stdout.strip()
+    head = _branch_root_git(repo, "rev-parse", "--verify", "--quiet", "--end-of-options", "HEAD^{commit}")
+    if head is None or head.returncode != 0 or not head.stdout.strip():
+        return ("unknown", "HEAD resolves to no commit (an unborn branch or an unreadable repository)")
+    walk = _branch_root_git(repo, "merge-base", "--is-ancestor", target_sha, head.stdout.strip())
+    if walk is None:
+        return ("unknown", "git merge-base could not be launched or did not finish")
+    if walk.returncode == 0:
+        return ("ancestor", target_sha)
+    if walk.returncode != 1:
+        return ("unknown", "git merge-base --is-ancestor exited {}".format(walk.returncode))
+    shallow = _branch_root_git(repo, "rev-parse", "--is-shallow-repository")
+    if shallow is None or shallow.returncode != 0 or shallow.stdout.strip() != "false":
+        return ("unknown", "the repository is shallow, or its shallowness cannot be read, so a missing "
+                           "ancestry may only be missing history")
+    return ("not-ancestor", target_sha)
+
+
+def _reset_ancestry_refusal(args, repo, cannot):
+    """(mode, operand, what) for a git reset that moves HEAD to one commit (_reset_commit_operand) which is
+    not an ancestor of HEAD, or None when the reset is outside this check or its target is an ancestor. Such a
+    reset keeps the older tree in the index or worktree, so the next commit records it on top of the newer
+    history and reverts every change made since (a fold onto a newer main reverts that main). A probe that
+    cannot evaluate denies: `cannot` is a reason the repository the reset acts on cannot be established from
+    the command (the probe is then not run), and an 'unknown' probe denies as well. A soft reset whose operand
+    resolves to no object denies; a mixed reset whose single operand resolves to no object is a path reset,
+    and the caller's decision stands. An operand that resolves to an object that peels to no commit denies in
+    every mode. A target that equals HEAD or lies behind it is an ancestor and passes. The undo-amend
+    form 'HEAD@{1}' names the pre-amend commit, which is not an ancestor of the amended one, so it denies.
+    The caller returns _reset_ancestry_deny of a refusal."""
+    found = _reset_commit_operand(args)
+    if found is None:
+        return None
+    mode, operand = found
+    verdict, detail = ("unknown", cannot) if cannot is not None else _reset_ancestry(repo, operand)
+    if verdict == "ancestor" or (verdict == "not-a-commit" and mode == "mixed"):
+        return None
+    if verdict == "not-ancestor":
+        what = "moves HEAD to {}, which is not an ancestor of HEAD".format(detail)
+    elif verdict == "not-a-commit":
+        what = "names {!r}, which resolves to no commit".format(operand)
+    elif verdict == "no-commit-object":
+        what = "names {!r}, which resolves to {}, an object that is no commit".format(operand, detail)
+    else:
+        what = "could not be checked against HEAD's ancestry ({})".format(detail)
+    return (mode, operand, what)
+
+
+def _reset_ancestry_deny(refusal, alts):
+    """The deny for a refusal from _reset_ancestry_refusal; it gives the portable fold recipe and names no
+    repository-local tool."""
+    mode, operand, what = refusal
+    return _deny(
+        "AIQT rule brnrot (branch-rooted-on-live-main): this {} reset to {!r} {}. A reset that moves HEAD to a "
+        "commit that is not an ancestor of HEAD keeps the older tree in the index or worktree, so the next "
+        "commit records that tree on top of the newer history and reverts every change made there since; "
+        "denied rather than run. To fold a branch's commits onto its base, run git merge-base HEAD <ref> "
+        "and then git reset --soft <printed sha>, which this guard allows. {}".format(mode, operand, what, alts),
+        "AIQT guardrail: denied a git reset to a commit that is not an ancestor of HEAD (rule brnrot); "
+        "reset to the merge base instead.")
 
 
 # git clean options that CONSUME the following token (so its value must not be read as a flag): '-e'/
@@ -10928,6 +11984,20 @@ def _discard_cd_target(operands):
     return _discard_literal_abs_path(path)
 
 
+def _discard_grammar_git_target(words, eff):
+    """(directory, subcommand, args) of a git segment the grammar ACCEPTED (_discard_git_segment_grammar):
+    its only global options are '-C <absolute literal path>' pairs, the last of which names the directory;
+    otherwise the directory is `eff` (None when unprovable)."""
+    seg_dir = eff
+    i = 1
+    while i + 1 < len(words) and words[i][0] == "-C":
+        seg_dir = _discard_literal_abs_path(words[i + 1][0])
+        i += 2
+    if i >= len(words):
+        return (seg_dir, None, [])
+    return (seg_dir, words[i][0], [t for t, _q in words[i + 1:]])
+
+
 def _discard_git_segment_grammar(words, eff):
     """Validate ONE segment whose bare command word is 'git' against the positive grammar. `words` is
     the full (text, quoted) token list (words[0] is 'git'); `eff` is the tracked effective directory,
@@ -11054,8 +12124,11 @@ def _discard_positive_grammar(command, cwd):
       deny            - None, or (kind, what) naming the first grammar violation
       snapshot_bases  - the resolved repo dir of every accepted worktree-discard segment
       stash_ops       - (repo dir, op word) of every accepted stash drop/clear segment
-      subs            - the snapshottable subcommands seen (the recovery-ledger verb label)"""
-    out = {"deny": None, "snapshot_bases": [], "stash_ops": [], "subs": set()}
+      subs            - the snapshottable subcommands seen (the recovery-ledger verb label)
+      reset_checks    - (directory or None, args, moved) of every accepted git reset that moves HEAD to one
+                        commit (_reset_commit_operand); moved says an earlier segment is a recognized lossy
+                        verb, which may already have moved HEAD before the reset runs"""
+    out = {"deny": None, "snapshot_bases": [], "stash_ops": [], "subs": set(), "reset_checks": []}
     items, bad = _discard_grammar_lex(command)
     if bad is None:
         segments, bad = _discard_grammar_segments(items)
@@ -11095,6 +12168,9 @@ def _discard_positive_grammar(command, cwd):
                 out["deny"] = (res[1], res[2])
                 return out
             _act, _base, _label = res[1], res[2], res[3]
+            r_dir, r_sub, r_args = _discard_grammar_git_target(words, eff)
+            if r_sub == "reset" and _reset_commit_operand(r_args) is not None:
+                out["reset_checks"].append((r_dir, r_args, lossy_segs > 0))
             if _act is not None:
                 lossy_segs += 1  # every action but None marks a recognized-lossy-verb segment
             if _act == "snapshot":
@@ -11391,7 +12467,8 @@ def git_discard(data):
     non-pristine path and the unparseable fallback never read the name, so there the prefixed command gets
     exactly what FOO=<the same value> gets); the guarantee is bounded to
     working-tree content (ref-level moves such as reset --soft moving HEAD or a merged-branch delete are
-    reflog-recoverable) and is best-effort against the disclosed obfuscation/config residuals. Fail-open ALLOW is
+    reflog-recoverable; a reset that moves HEAD to one commit that is not an ancestor of HEAD, or whose
+    ancestry cannot be evaluated, DENIES under brnrot, see _reset_ancestry_refusal) and is best-effort against the disclosed obfuscation/config residuals. Fail-open ALLOW is
     reserved for the TRUE boundary (a present non-Bash tool, a non-git command, or no recognized lossy
     verb); a payload with NO tool_name is malformed, not another tool, and DENIES under the shared
     missing-tool_name contract, and a tool_input whose command is MISSING or NOT A STRING is a
@@ -11622,6 +12699,19 @@ def git_discard(data):
             g_kind, g_what = walk["deny"]
             g_reason, g_banner = _DISCARD_GRAMMAR_DENY_TEXTS[g_kind]
             return _deny(g_reason.format(g_what, _DISCARD_ALTS), g_banner)
+        # Every accepted reset that moves HEAD to one commit is judged against HEAD's ancestry in the
+        # directory the grammar resolved for it, before any preservation or snapshot. An earlier lossy
+        # segment may move HEAD before the reset runs, and an unprovable directory names no repository, so
+        # either cannot be evaluated here and denies.
+        for r_dir, r_args, r_moved in walk["reset_checks"]:
+            r_cannot = None
+            if r_moved:
+                r_cannot = "an earlier segment of this command may move HEAD before the reset runs"
+            elif r_dir is None:
+                r_cannot = "the directory it runs in cannot be established"
+            r_refusal = _reset_ancestry_refusal(r_args, r_dir, r_cannot)
+            if r_refusal is not None:
+                return _reset_ancestry_deny(r_refusal, _DISCARD_ALTS)
         np_verb = next(iter(sorted(walk["subs"])), "discard")
         # Preserve the stash of every RESOLVED stash drop/clear target repo first (fail closed on a repo
         # whose stash cannot be preserved), so a resolved stash removal never notes a recovery that omits
@@ -11717,6 +12807,26 @@ def git_discard(data):
     # non-redirecting case), but may NOT capture a redirected tree. With NO session cwd and no resolved -C
     # target a DESTRUCTIVE form DENIES below (fail closed): no base can be probed or snapshotted.
     ambient_override = _ambient_repo_view_override()
+    # A reset that moves HEAD to one commit is judged against HEAD's ancestry before any snapshot or role
+    # decision (_reset_ancestry_refusal); a reset with no commit operand is untouched. The probe reads the
+    # repository the reset acts on: the session directory, or the -C target. Under an ambient GIT_* override,
+    # a --git-dir/--work-tree/--bare redirect, a leading GIT_DIR/GIT_WORK_TREE assignment or an unresolvable
+    # -C, that repository cannot be established from the command, so the reset denies.
+    if sub == "reset":
+        r_cwd = data.get("cwd")
+        r_cwd = r_cwd if isinstance(r_cwd, str) and r_cwd else None
+        r_cannot = None
+        if ambient_override:
+            r_cannot = "a non-cosmetic ambient GIT_* variable shapes the repository it acts on"
+        elif _segment_has_path_redirect(pristine):
+            r_cannot = ("a --git-dir, --work-tree or --bare redirect, or a leading GIT_DIR or GIT_WORK_TREE "
+                        "assignment, shapes the repository it acts on")
+        r_repo = None if r_cannot is not None else _segment_repo_dir(pristine, r_cwd)
+        if r_repo == "opaque":
+            r_cannot = "its -C target cannot be resolved"
+        r_refusal = _reset_ancestry_refusal(args, r_cwd if r_repo is None else r_repo, r_cannot)
+        if r_refusal is not None:
+            return _reset_ancestry_deny(r_refusal, alts)
     if ambient_override or not _segment_dir_simple(pristine):
         ao_cwd = data.get("cwd")
         cwd_base = ao_cwd if isinstance(ao_cwd, str) and ao_cwd else None
@@ -15976,7 +17086,12 @@ def _gate_grammar_messages(kind, what, how, unparsed):
         "grammar (rule gatdis, fail-closed).".format(what[:40]))
 
 
-def _gate_weakening_fallback(command, heredoc_message=False, runtime=False):
+# The kind a caller of _gate_weakening_fallback passes when it has not read _gate_weakening_fallback_kind of the
+# command (whose own results include None), so the fallback reads it itself.
+_GATE_KIND_UNREAD = object()
+
+
+def _gate_weakening_fallback(command, heredoc_message=False, runtime=False, kind=_GATE_KIND_UNREAD):
     """FAIL-SAFE conservative scan when the shared tokenizer cannot parse the command (an unbalanced quote or an unsupported construct): an apparent
     git hook bypass (a no-verify verb plus a --no-ver spelling) DENIES; an apparent git commit/am with
     a short -n cluster DENIES fail-safe too (the raw string cannot bind the cluster to its subcommand,
@@ -15993,8 +17108,10 @@ def _gate_weakening_fallback(command, heredoc_message=False, runtime=False):
     text names (_gate_unread_bypass) or that only a de-quoted reading spells (_decoded_readings), before
     it calls this with runtime, which reads a git word built at run time (_gate_runtime_bypass) after the
     denies here and before the note, so a command these denies refuse keeps their message and one they would
-    only note or allow ($G commit -nv <<<x) denies."""
-    kind = _gate_weakening_fallback_kind(command)
+    only note or allow ($G commit -nv <<<x) denies. kind, when given, is _gate_weakening_fallback_kind(command)
+    as the caller has just read it, so the raw probes are not run over the command a second time."""
+    if kind is _GATE_KIND_UNREAD:
+        kind = _gate_weakening_fallback_kind(command)
     if kind == "no-verify":
         return _deny(
             "AIQT rule gatdis (gate-discipline): the command could not be parsed by the shell lexer "
@@ -16225,9 +17342,11 @@ def _gate_weakening_fallback_kind(command):
         return "no-verify"
     if _RAW_SHORT_NOVERIFY_VERB_RE.search(command) and _RAW_SHORT_N_RE.search(command):
         return "short-n"
-    if _RAW_CHECKER_RE.search(command) and (
-            _RAW_SWALLOW_RE.search(command) or _RAW_TRUNCATE_RE.search(command)
-            or (_RAW_FLOW_RE.search(command) and _RAW_SINK_WORD_RE.search(command))):
+    # The swallow and sink probes are read first: each is a short literal scan, where the checker keyword
+    # alternation tries every word start, so a command with no such spelling skips that scan.
+    if ((_RAW_SWALLOW_RE.search(command) or _RAW_TRUNCATE_RE.search(command)
+            or (_RAW_FLOW_RE.search(command) and _RAW_SINK_WORD_RE.search(command)))
+            and _RAW_CHECKER_RE.search(command)):
         return "swallow"
     return None
 
@@ -16336,6 +17455,8 @@ _GATE_BASH_ESCAPE_RE = re.compile(
     r"\\(?:([0-7]{1,3})|x\{([0-9A-Fa-f]*)\}?|x([0-9A-Fa-f]{1,2})|u([0-9A-Fa-f]{1,4})|U([0-9A-Fa-f]{1,8})"
     r"|c(\\\\|.)|(.))", re.S)
 _GATE_ANSI_C_BODY_RE = re.compile(r"(?:[^'\\]|\\.)*", re.S)
+# A run of characters _gate_shell_level keeps as they stand: none is a backslash, a quote or a '$'.
+_GATE_SHELL_LEVEL_PLAIN_RE = re.compile(r"[^\\'\"$]+")
 
 # Where the bash-model readings split words: bash's blanks (space, tab and newline, not the other characters
 # Python's str.split() treats as whitespace) and every shell operator character and opener (; & | ( ) < > and
@@ -16411,8 +17532,15 @@ def _gate_shell_level(text):
                 i += 1
             i += 1
         else:
-            out.append(c)
-            i += 1
+            # A run of characters none of which opens anything at this level is kept as it stands, in one copy
+            # rather than one step per character; a '$' before no quote is kept on its own.
+            run = _GATE_SHELL_LEVEL_PLAIN_RE.match(text, i)
+            if run is None:
+                out.append(c)
+                i += 1
+            else:
+                out.append(run.group())
+                i = run.end()
     return "".join(out)
 
 
@@ -16421,8 +17549,18 @@ def _gate_reading_words(text):
     stands, a '$' before a quote and every quote character and backslash left in text removed, the rest split at
     _GATE_WORD_BREAK_RE, and a 'git' word added after an option word whose attached value names git, as in
     _gate_dequoted_words."""
+    return _gate_plain_words(_gate_reading_plain(text))
+
+
+def _gate_reading_plain(text):
+    """The text _gate_reading_words splits into words: env -S's \\_ read as a blank, then a '$' before a quote and
+    every quote character and backslash removed."""
     plain = re.sub(r"\$(?=['\"])", "", text.replace("\\_", " "))
-    plain = plain.replace("'", "").replace('"', "").replace(chr(92), "")
+    return plain.replace("'", "").replace('"', "").replace(chr(92), "")
+
+
+def _gate_plain_words(plain):
+    """The words of _gate_reading_words for its text made plain (_gate_reading_plain)."""
     words = []
     for w in _GATE_WORD_BREAK_RE.split(plain):
         if not w:
@@ -16440,12 +17578,20 @@ def _gate_bash_readings(text):
     """The word lists of the bash-model readings of text, its line continuations joined first: the text at its
     own quoting level as bash reads it (_gate_shell_level), that result read once more as the shell it is handed
     to reads it (sh -c, eval or env -S, one level in), and the text with every ANSI-C $'...' quote the raw match
-    finds decoded as bash decodes it, at any depth (_gate_ansi_c_text). Each is split by _gate_reading_words."""
+    finds decoded as bash decodes it, at any depth (_gate_ansi_c_text). Each is split by _gate_reading_words.
+    Readings that are the same text once made plain (_gate_reading_plain) have the same words, so those words are
+    split once and the one list stands for each such reading; no reader of the lists changes one."""
     joined = _join_continuations(text)[0]
     outer = _gate_shell_level(joined)
     decoded = _GATE_ANSI_C_RE.sub(lambda m: _gate_ansi_c_text(m.group(1)), joined)
-    return (_gate_reading_words(outer), _gate_reading_words(_gate_shell_level(outer)),
-            _gate_reading_words(decoded))
+    split = {}
+    readings = []
+    for reading in (outer, _gate_shell_level(outer), decoded):
+        plain = _gate_reading_plain(reading)
+        if plain not in split:
+            split[plain] = _gate_plain_words(plain)
+        readings.append(split[plain])
+    return tuple(readings)
 
 
 def _gate_any_word_bypass(words, first=None):
@@ -16468,7 +17614,8 @@ def _gate_any_word_bypass(words, first=None):
                 found = (w, "a --no-verify spelling")
             elif short_at is not None and w in _NOVERIFY_SHORT_N_VERBS:
                 found = (w, "the short -n (--no-verify) in {!r}".format(words[short_at][:40]))
-        if _has_long_prefix((w,), "no-verify"):
+        # _has_long_prefix reads only a word starting with '--', so the test before it skips the call for any other.
+        if w[:2] == "--" and _has_long_prefix((w,), "no-verify"):
             long_at = p
         elif w[:1] == "-" and w[1:2] != "-" and "n" in w:
             short_at = p
@@ -16513,7 +17660,13 @@ def _gate_text_bypass(text, skip_own=False):
     readings."""
     if not _gate_text_may_name_git(text):
         return None
+    walked = []
     for words in (_gate_dequoted_words(text),) + _gate_bash_readings(text):
+        # The walk below reads nothing but the words, so a reading whose words equal those of one already walked
+        # (which gave None, or this would have returned) gives None again and is not walked a second time.
+        if words in walked:
+            continue
+        walked.append(words)
         if skip_own:
             k = next((k for k, w in enumerate(words) if _gate_word(w) == "git"), len(words))
             words = words[k + 1:]
@@ -17428,7 +18581,8 @@ def gate_weakening(data):
             # each ANSI-C quote's escapes decoded). Quoting alone is no ground to deny: a quoted argument that
             # spells no bypass (wc -l <<<"hello") keeps the raw probes' decision, and on a roster-verb git
             # segment (git commit -m "fix bug" <<<x) that decision is the closed grammar's deny.
-            if (_gate_weakening_fallback_kind(command) not in _GATE_FALLBACK_DENIES
+            raw_kind = _gate_weakening_fallback_kind(command)
+            if (raw_kind not in _GATE_FALLBACK_DENIES
                     and any(_gate_weakening_fallback_kind(text) in _GATE_FALLBACK_DENIES
                             for text in _decoded_readings(command))):
                 return _deny(
@@ -17445,7 +18599,7 @@ def gate_weakening(data):
             # A word built at run time that may be git ($G commit -nv <<<x) is read over the whole command as
             # on the parsed path (_gate_runtime_bypass), inside the fallback after its own denies, so each deny
             # above and each of the fallback's keeps its message.
-            return _gate_weakening_fallback(command, runtime=True)
+            return _gate_weakening_fallback(command, runtime=True, kind=raw_kind)
         # Behind a '#' the lexer could not judge under both readings, a command whose quoting the fallback
         # text does not decode may hide a hook bypass or a sink there, so it denies.
         if _hash_doubt_opaque(command):
@@ -17604,8 +18758,9 @@ def gate_weakening(data):
         if hit is not None:
             reason, banner = _verification_sink_message(hit)
             return _deny(reason, banner)
-        if _gate_weakening_fallback_kind(command) in _GATE_FALLBACK_DENIES:
-            return _gate_weakening_fallback(command, heredoc_message=True)
+        raw_kind = _gate_weakening_fallback_kind(command)
+        if raw_kind in _GATE_FALLBACK_DENIES:
+            return _gate_weakening_fallback(command, heredoc_message=True, kind=raw_kind)
     # A word bash builds at run time ($G, g$(true)it, $(echo git)) may be git, which no reading above sees: one
     # followed in the same command piece by a roster verb carrying a hook-skip spelling denies fail-closed
     # (_gate_runtime_bypass), read over the whole raw text, so a wrapper, an sh -c or eval script and a
@@ -18255,7 +19410,7 @@ _SECSEC_PREFIX_SOURCES = [
     ('https://hooks\\.slack\\.com/services/T[A-Z0-9]{8,}/B[A-Z0-9]{8,}/[A-Za-z0-9]{24,}', 'Slack webhook URL'),
 ]
 _SECSEC_ASSIGN_SOURCE = '(?ix)\n    (?:^|[^A-Za-z0-9])                       # start, or a non-alphanumeric\n    [A-Za-z0-9]*[_-]?                        # optional prefix such as aws_ or my-\n    (passwd|password|secret|token|api[_-]?key|access[_-]?key|\n       client[_-]?secret|auth[_-]?token|private[_-]?key|credential)\n    \\s*[:=]\\s*\n    (?:\n        (?P<q>[\'"])(?P<qvalue>(?:(?!(?P=q))[^\\n]){12,})(?P=q)  # quoted; qvalue excludes only the OPENING\n                                                     # delimiter (not both quotes), so a value that embeds\n                                                     # the other quote, e.g. "ab\'cd...", is not truncated\n      | (?P<value>[A-Za-z0-9+/=_.\\-]{16,})              # or unquoted; charset excludes {$<( so\n                                                     # templates and f-string holes cannot match\n    )\n    '
-_SECSEC_PLACEHOLDER_SOURCE = '(?i)^(x{3,}|\\.{3,}|\\*{3,}|<[^>]+>|\\$\\{[^}]+\\}|\\$[A-Z_]+|(your|my|the)[_-]?\\w*|change[_-]?me|placeholder|example|sample|dummy|redacted|fake|test|todo|none|null|n/?a|actual_password_here)$'
+_SECSEC_PLACEHOLDER_SOURCE = '(?ai)^(x{3,}|\\.{3,}|\\*{3,}|<[^>]+>|\\$\\{[^}]+\\}|\\$[A-Z_]+|(your|my|the)[_-]?\\w*|change[_-]?me|placeholder|example|sample|dummy|redacted|fake|test|todo|none|null|n/?a|actual_password_here)$'
 _SECSEC_ENTROPY_ASSIGN_SOURCE = '(?x)\n    (?:^|[^A-Za-z0-9])\n    (?P<name>[A-Za-z][A-Za-z0-9_.\\-]*)\n    \\s*[:=]\\s*\n    (?:\n        # QUOTED: the WHOLE inter-quote value must be alphabet (closing quote required), so a value that\n        # embeds a non-alphabet char (an email\'s @, a URL\'s :) does NOT partially match on its prefix; no\n        # upper cap here because the closing quote bounds it, so a >150-char quoted secret still fires.\n        (?P<q>[\'"])(?P<qvalue>[A-Za-z0-9_./+=\\-]{40,})(?P=q)\n        # UNQUOTED: a possessive run (no backtracking) of 40 OR MORE alphabet chars that is NOT followed by @ or\n        # : (which would make it a prefix of a larger structured value such as an email or a URL); a longer\n        # all-alphabet unquoted value still fires on its 150-char prefix (char 151 is alphabet, not @/:).\n      | (?P<value>[A-Za-z0-9_./+=\\-]{40,}+)(?![@:])\n    )\n    '
 _SECSEC_ENTROPY_MIN_LEN = 40
 _SECSEC_ENTROPY_MAX_LEN = 150
@@ -18682,41 +19837,65 @@ def _gensrc_within(candidate, parent):
     containment must not read as a match NOR as a silent no-match ALLOW, so the fault surfaces as "err" and
     the caller allows the edit with a warning systemMessage (_gensrc_fail_ask; there is no ask posture)."""
     try:
-        cand = os.path.realpath(candidate)
-        base = os.path.realpath(parent)
-        if cand == base or os.path.commonpath([cand, base]) == base:
+        return _gensrc_within_real(os.path.realpath(candidate), os.path.realpath(parent))
+    except (OSError, ValueError):
+        return "err"
+
+
+def _gensrc_within_real(candidate, parent):
+    """_gensrc_within for two ALREADY-CANONICAL (realpath) absolute paths: the same tri-state without
+    re-resolving either input, so a per-entry containment check costs string work, not filesystem walks."""
+    try:
+        if candidate == parent or os.path.commonpath([candidate, parent]) == parent:
             return "in"
         return "out"
     except (OSError, ValueError):
         return "err"
 
 
-def _gensrc_match(entries, target, root_c):
+def _gensrc_entry_real(entry_target, root_c, cache):
+    """The canonical absolute path of one registry entry target under root_c, or _GENSRC_MATCH_FAULT when
+    it cannot be resolved. cache (a per-root dict, or None) holds each entry's result so one decision
+    realpaths every registry entry at most once per root, however many effects are judged against it."""
+    if cache is not None:
+        hit = cache.get(entry_target)
+        if hit is not None:
+            return hit
+    try:
+        real = os.path.realpath(os.path.join(root_c, entry_target))
+    except (OSError, ValueError):
+        real = _GENSRC_MATCH_FAULT
+    if cache is not None:
+        cache[entry_target] = real
+    return real
+
+
+def _gensrc_match(entries, target, root_c, cache=None):
     """The first registry entry that `target` (an already-realpath'd absolute path) matches, as
     (entry_target, sources, regenerate, marker); None on a PROVEN no-match; or the _GENSRC_MATCH_FAULT
     sentinel when a resolution or containment fault means no-match cannot be proven (the handler turns the
     sentinel into an allow with a warning systemMessage via _gensrc_fail_ask, never a match and never a
     silent allow; there is no ask posture). A FILE entry matches on
     realpath EQUALITY; a TREE entry matches when `target` is the tree root or lies under it, by
-    component-boundary containment (_gensrc_within), never a raw string prefix, so gen-extra/ never
+    component-boundary containment (_gensrc_within_real), never a raw string prefix, so gen-extra/ never
     matches gen/ and GEN.md.bak never matches GEN.md. Each entry target is repo-root-relative, so it is
-    joined onto root_c and canonicalized under try/except: an unresolvable entry is a fault, not a
-    no-match. Block entries were dropped at load. A matching AUTHORING-scoped entry consults the marker
-    (_gensrc_authoring_marker, read at most once per call): an ABSENT marker (an adopter tree) skips the
-    entry SILENTLY and matching goes on with the next entry, so an adopter keeps its own
+    joined onto root_c and canonicalized (_gensrc_entry_real, through the per-root cache when one is
+    given, so a many-effect Bash decision realpaths each entry once): an unresolvable entry is a fault,
+    not a no-match. Block entries were dropped at load. A matching AUTHORING-scoped entry consults the
+    marker (_gensrc_authoring_marker, read at most once per call): an ABSENT marker (an adopter tree)
+    skips the entry SILENTLY and matching goes on with the next entry, so an adopter keeps its own
     .claude/settings.json; a present marker returns the match with marker ("authoring", None) or
     ("bad", detail), and the handler denies either way. An unscoped match returns marker None."""
     marker = None
     for kind, entry_target, sources, regenerate, scope in entries:
-        try:
-            entry_c = os.path.realpath(os.path.join(root_c, entry_target))
-        except (OSError, ValueError):
+        entry_c = _gensrc_entry_real(entry_target, root_c, cache)
+        if entry_c is _GENSRC_MATCH_FAULT:
             return _GENSRC_MATCH_FAULT
         if kind == "file":
             if entry_c != target:
                 continue
         else:  # tree
-            verdict = _gensrc_within(target, entry_c)
+            verdict = _gensrc_within_real(target, entry_c)
             if verdict == "err":
                 return _GENSRC_MATCH_FAULT
             if verdict != "in":
@@ -18731,56 +19910,1592 @@ def _gensrc_match(entries, target, root_c):
     return None
 
 
+# --- gensrc Bash write-sink detector -------------------------------------------------------------------
+# The Bash channel of gensrc_guard. It judges only the write SINKS a command spells literally (a redirect, or
+# an operand of a fixed set of writing programs), resolved against the session cwd carried through literal cd
+# and pushd operands whose effect is certain (past one that is not, the directory is unknown, and a relative
+# sink is also judged from each directory the guard can name that the change may reach), and never a read: a
+# command that lexes completely and spells no recognized sink is allowed before any registry is read or any
+# git process runs. That is the structural regeneration allowance: a generator (python3 tools/gen_x.py)
+# writes from inside its own process and spells no shell sink. An effect the detector cannot clear is
+# UNCLEARED, never resolved to a guessed path: the command DENIES when its text names a registered target of
+# any consulted readable registry (a deliberate disclosed over-denial) or when the session registry is present
+# but unreadable, and otherwise runs with a note saying its writes were not cleared. The open shell grammar
+# cannot be covered whole; the control residue lists what is not caught.
+_GENSRC_MAX_ROOTS = 4    # distinct repository roots judged per Bash command, in command order
+_GENSRC_MAX_DIRS = 32    # distinct sink directories resolved to a root per Bash command (one git rev-parse each)
+_GENSRC_MAX_PATHS = 512  # distinct sink or restore paths resolved per Bash command, in command order; a
+#                          path past the budget is an uncleared write, so per-entry registry matching stays
+#                          bounded whatever the operand count
+_GENSRC_MAX_CD = 8       # directories an uncertain cd or pushd is also judged from, and directories a stack
+#                          rotation may reach (_gensrc_cd); past it a directory is only unknown
+_GENSRC_MAX_HOME = 512   # words (argv words and redirects) of the segments holding a ~ that are also read under
+#                          each value of a HOME the command spells (_bash_write_effects), in command order, for
+#                          each reading of the command on its own; past it such a ~ is read under no value
+#                          (_GENSRC_HOME_PAST), so its sink is uncleared and its cd unknown
+_GENSRC_MAX_PY = 65536   # the longest python -c program parsed (ast.parse, never executed)
+# The longest target path resolved, in filesystem-encoded bytes after lexical normalization: a RESOLUTION
+# BUDGET, not a syscall impossibility (a short relative operand in a deep working directory writes past
+# any absolute-path limit, and the exact absolute cutoff differs by platform). A target over the budget is
+# never realpath'd or walked (each is super-linear in the path length): a Write/Edit target over it allows
+# with the unresolvable-target note, and a Bash sink over it is an uncleared effect (noted, or denied when
+# the command names a registered target), within the decision deadline.
+_GENSRC_MAX_TARGET = 4096
+# One write effect of a Bash command. kind is "sink" (path, an absolute lexically normalized path, is written),
+# "restore" (git restores path from the index or HEAD) or "uncleared" (word is the reason, path is None). word
+# describes the sink for the message; posture is "file" (the path itself), "rcopy" (a recursive copy: a
+# destination directory holding a registered target is uncleared) or "dirdeny" (a git path from another
+# revision: a registered target inside that directory denies too).
+_GensrcEffect = collections.namedtuple("_GensrcEffect", ("kind", "word", "path", "posture"))
+_GENSRC_REDIRECT_SINKS = frozenset((">", ">>", ">|", "&>", "&>>", "<>", ">&"))
+_GENSRC_BARE_WRAPPERS = frozenset(("command", "exec", "builtin", "sudo"))
+# The peeled wrappers that run their program as a child process (or in place of the shell): a cd under one
+# never moves the shell's directory (nor does one under a time word bash reads as the time program,
+# _gensrc_time_program, or one whose command word is spelled other than cd, _bash_write_effects).
+_GENSRC_CHILD_WRAPPERS = frozenset(("env", "nice", "timeout", "sudo", "exec"))
+_GENSRC_LEADING_RESERVED = frozenset(("{", "}", "!", "if", "then", "else", "elif", "do", "while", "until"))
+# sentinel: the reading of a ~ under a HOME the command sets to a value the guard cannot name (_gensrc_cd_context)
+_GENSRC_HOME_UNKNOWN = object()
+# sentinel: the reading of a ~ past the _GENSRC_MAX_HOME budget, where HOME may still hold a literal value
+_GENSRC_HOME_PAST = object()
+# A ~ right after = or : inside a word: bash expands it in an assignment-shaped word (dd of=~/x, x=a:~/b), an
+# argument or a redirection target alike, outside posix mode (_bash_write_effects reads it as a tilde)
+_GENSRC_INNER_TILDE_RE = re.compile(r"[=:]~")
+_GENSRC_PYTHON_RE = re.compile(r"python(?:3(?:\.[0-9]+)?)?\Z")
+# The programs _gensrc_program_effects reads a sink from, beside python (_GENSRC_PYTHON_RE); it reads nothing
+# from any other program, so a segment whose program is none of these adds an effect only through a redirect
+# or a wrapper (_gensrc_reach).
+_GENSRC_WRITERS = frozenset(("tee", "truncate", "sed", "gsed", "perl", "cp", "mv", "ln", "install", "rsync", "dd",
+                             "git"))
+# The fallback probe for a command whose '#' readings the lexer cannot judge (_gensrc_doubt_unread), read on the
+# lowercased _hash_doubt_scan text: a '>' (every output redirect spells one) or a word, on boundaries no command
+# word continues past, that lowercases to a sink program (_GENSRC_WRITERS, or one starting python) or a wrapper
+# _gensrc_peel reads (_GENSRC_BARE_WRAPPERS and _GATE_WRAPPER_GRAMMAR, whose options can fault or name a time
+# -o file). It over-matches (any such word in an argument or a comment matches too), the fallback's safe side.
+_GENSRC_DOUBT_RE = re.compile(r">|(?<![a-z0-9_])(?:python|(?:{})(?![a-z0-9_]))".format("|".join(
+    sorted(re.escape(word) for word in _GENSRC_WRITERS | _GENSRC_BARE_WRAPPERS | set(_GATE_WRAPPER_GRAMMAR)))))
+_GENSRC_OPAQUE_RE = re.compile(r"[$`*?\[{]")
+_GENSRC_GLOB_CHARS = frozenset("*?[")
+_GENSRC_HEREDOC_WORD_RE = re.compile(r"[A-Za-z0-9_.-]+\Z")
+_GENSRC_REMOTE_RE = re.compile(r"[^/]*:|rsync://")
+# The writer specs gensrc adds beside the review-dispatch-pin table (_RDP_WRITER_OPTIONS, whose cp, mv and ln
+# specs it reuses by reference), in that table grammar: GNU coreutils 9.7 install, tee and truncate. They are
+# kept apart so review_dispatch_pin, which refuses every program outside its own table, is unchanged.
+_GENSRC_EXTRA_WRITER_OPTIONS = dict((
+    ("install", ("b c C/compare d/directory D g:group m:mode o:owner p/preserve-timestamps s/strip S:suffix "
+                 "t:target-directory T/no-target-directory v Z",
+                 "backup= compare debug directory group: mode: owner: preserve-timestamps preserve-context "
+                 "strip strip-program: suffix: target-directory: no-target-directory verbose context= help "
+                 "version")),
+    ("tee", ("a/append i/ignore-interrupts p", "append ignore-interrupts output-error= help version")),
+    ("truncate", ("c/no-create o/io-blocks r:reference s:size",
+                  "no-create io-blocks reference: size: help version"))))
+# GNU sed 4.9 long options: "=" takes a value only after =, ":" a value after = or as the next word.
+_GENSRC_SED_LONG = dict((
+    ("in-place", "="), ("expression", ":"), ("file", ":"), ("line-length", ":"), ("quiet", ""), ("silent", ""),
+    ("regexp-extended", ""), ("separate", ""), ("unbuffered", ""), ("null-data", ""), ("zero-terminated", ""),
+    ("posix", ""), ("debug", ""), ("sandbox", ""), ("follow-symlinks", ""), ("binary", ""), ("help", ""),
+    ("version", "")))
+# The rsync 3.2 options the detector models; any other option leaves the command uncleared, and so does
+# --files-from. An option that writes a SIDE file whose path the operands do not spell (-b/--backup and
+# --suffix, which write a backup beside the destination under a caller-chosen name; --backup-dir,
+# --partial-dir and --temp-dir, which write under a caller-named directory) is deliberately NOT modelled,
+# so a command carrying one is uncleared rather than judged only on its spelled destination.
+_GENSRC_RSYNC_SHORT = frozenset("vqcarRulLkKHpEAXogDtOJUNiIWxCySnsz8mdFhP046")
+_GENSRC_RSYNC_SHORT_VALUES = frozenset("eBfTM")
+_GENSRC_RSYNC_FLAGS = frozenset((
+    "verbose", "quiet", "checksum", "archive", "recursive", "relative", "update", "inplace", "append",
+    "append-verify", "dirs", "mkpath", "links", "copy-links", "copy-unsafe-links", "safe-links", "munge-links",
+    "copy-dirlinks", "keep-dirlinks", "hard-links", "perms", "executability", "acls", "xattrs", "owner", "group",
+    "devices", "specials", "times", "atimes", "crtimes", "omit-dir-times", "omit-link-times", "super",
+    "fake-super", "sparse", "preallocate", "dry-run", "whole-file", "one-file-system", "existing",
+    "ignore-existing", "remove-source-files", "delete", "delete-before", "delete-during", "delete-delay",
+    "delete-after", "delete-excluded", "ignore-missing-args", "delete-missing-args", "ignore-errors", "force",
+    "partial", "delay-updates", "prune-empty-dirs", "numeric-ids", "ignore-times", "size-only", "fuzzy",
+    "compress", "cvs-exclude", "from0", "protect-args", "secluded-args", "trust-sender", "stats", "8-bit",
+    "human-readable", "progress", "itemize-changes", "list-only", "implied-dirs", "blocking-io", "ipv4", "ipv6",
+    "help", "version", "open-noatime", "fsync", "motd"))
+_GENSRC_RSYNC_VALUES = frozenset((
+    "rsh", "rsync-path", "filter", "exclude", "include", "exclude-from", "include-from",
+    "chmod", "chown", "usermap", "groupmap", "timeout", "contimeout",
+    "bwlimit", "max-size", "min-size", "max-delete", "max-alloc", "modify-window", "compare-dest", "copy-dest",
+    "link-dest", "out-format", "block-size", "compress-level", "compress-choice", "checksum-choice",
+    "checksum-seed", "skip-compress", "port", "sockopts", "password-file", "iconv", "info", "debug",
+    "stop-after", "stop-at", "copy-as", "remote-option", "outbuf", "address"))
+_GENSRC_GIT_GLOBAL_FLAGS = frozenset((
+    "-p", "-P", "--paginate", "--no-pager", "--bare", "--no-replace-objects", "--literal-pathspecs",
+    "--glob-pathspecs", "--noglob-pathspecs", "--icase-pathspecs", "--no-optional-locks", "--no-advice",
+    "--no-lazy-fetch", "--exec-path", "--html-path", "--man-path", "--info-path", "--version", "--help", "-v",
+    "-h"))
+_GENSRC_GIT_GLOBAL_VALUES = frozenset(("-c", "--namespace", "--config-env", "--attr-source", "--list-cmds"))
+_GENSRC_CHECKOUT_FLAGS = frozenset((
+    "-q", "--quiet", "-f", "--force", "-m", "--merge", "--ours", "--theirs", "-p", "--patch", "--overlay",
+    "--no-overlay", "--ignore-skip-worktree-bits", "--progress", "--no-progress", "--recurse-submodules",
+    "--no-recurse-submodules", "--pathspec-file-nul", "-l", "-d", "--detach", "--guess", "--no-guess", "-t",
+    "--track", "--no-track", "--ignore-other-worktrees"))
+_GENSRC_RESTORE_FLAGS = frozenset((
+    "-S", "--staged", "-W", "--worktree", "-q", "--quiet", "--ours", "--theirs", "-m", "--merge",
+    "--ignore-unmerged", "--ignore-skip-worktree-bits", "--overlay", "--no-overlay", "--progress",
+    "--no-progress", "-p", "--patch", "--recurse-submodules", "--no-recurse-submodules", "--pathspec-file-nul"))
+# Value options: a separate value is the next word, except for the =-only --conflict and --track.
+_GENSRC_CHECKOUT_VALUES = frozenset(("-b", "-B", "--orphan", "--conflict", "--track"))
+_GENSRC_RESTORE_VALUES = frozenset(("-s", "--source", "--conflict", "-U", "--unified", "--inter-hunk-context"))
+_GENSRC_EQ_ONLY = frozenset(("--conflict", "--track"))
+
+
+def _gensrc_writer_spec(name):
+    """The option spec _writer_options_parse reads for a sink writer: the gensrc install, tee and truncate
+    specs, or the review-dispatch-pin cp, mv and ln specs, looked up at call time because _RDP_WRITER_OPTIONS
+    is defined later in this module; None for any other program."""
+    if name in _GENSRC_EXTRA_WRITER_OPTIONS:
+        return _GENSRC_EXTRA_WRITER_OPTIONS[name]
+    if name in ("cp", "mv", "ln"):
+        return _RDP_WRITER_OPTIONS[name]
+    return None
+
+
+def _gensrc_lex(command, skip_empty=False):
+    """Lex command as the shared _lex_command does in partial mode, but keep its readings apart: (readings,
+    complete, doubt), readings a list of segment lists, one per reading of the command's uncertain '#'
+    characters (_lex_readings), since the working-directory walk (_bash_write_effects) depends on the order of
+    the segments it reads and so reads each reading on its own. Where those readings cannot be judged (more
+    than _HASH_READING_LIMIT uncertain '#', or one in or right after a backquote substitution), doubt is True
+    and readings holds what _lex_command recovers there (_lex_resume_readings), complete being False. When the
+    lex stops, it is retried ONCE with every unquoted heredoc delimiter (<<WORD or <<-WORD, WORD made of
+    letters, digits, _, . and -) rewritten to its quoted form, so the body is skipped as literal data and a
+    redirect on the opening line after the delimiter (cat <<EOF >> X) is still judged; the retry is used only
+    when it completes. A command or process substitution inside such a body is then not seen (a disclosed
+    residual). skip_empty is passed to every lex (_lex_command): it leaves out each segment with no word and
+    no redirect, and changes no other segment, their order or complete."""
+    readings, complete, doubt = _gensrc_readings(command, skip_empty)
+    if complete:
+        return readings, True, False
+    n = len(command)
+    out = []
+    i = 0
+    changed = False
+    while i < n:
+        at = command.find("<<", i)
+        if at < 0:
+            break
+        if command.startswith("<<<", at):
+            out.append(command[i:at + 3])
+            i = at + 3
+            continue
+        parsed = _parse_heredoc_delim(command, at + 2, n)
+        if parsed is None or parsed[0] or not _GENSRC_HEREDOC_WORD_RE.match(parsed[1]):
+            out.append(command[i:at + 2])
+            i = at + 2
+            continue
+        _quoted, delim, strip_tabs, next_i = parsed
+        out.append(command[i:at + 2] + ("-" if strip_tabs else "") + "\x27" + delim + "\x27")
+        i = next_i
+        changed = True
+    if not changed:
+        return readings, False, doubt
+    out.append(command[i:])
+    again, done, _doubt = _gensrc_readings("".join(out), skip_empty)
+    if done:
+        return again, True, False
+    return readings, False, doubt
+
+
+def _gensrc_readings(command, skip_empty):
+    """One partial lex of command under every reading of its uncertain '#' characters, as _lex_command makes
+    it, its readings kept apart: (readings, complete, doubt), as _gensrc_lex returns them."""
+    try:
+        lexed = _lex_readings(command, True, False, skip_empty)
+        doubt = False
+    except _UncertainHashError as exc:
+        if isinstance(exc, _ReadingLimitError):
+            raise
+        lexed = _lex_resume_readings(command, exc, False, skip_empty)
+        doubt = True
+    return [segs for segs, _done, _open in lexed], all(done for _segs, done, _open in lexed) and not doubt, doubt
+
+
+def _gensrc_reach(seg):
+    """What one lexed segment can do in _bash_write_effects, as (writes, moves). writes is True when it can add a
+    write effect under some working directory: an output redirect (_GENSRC_REDIRECT_SINKS), a wrapper option
+    outside its grammar or a time -o file (_gensrc_peel), or a literal program word that is a sink program
+    (_GENSRC_WRITERS or python); a segment with writes False adds no effect whatever directory reaches it.
+    moves is True for a literal cd, pushd or popd, the only segment that changes that directory itself; the
+    other change is the restore at a ) separator."""
+    writes = any(red.op in _GENSRC_REDIRECT_SINKS for red in seg.redirects)
+    argv = seg.argv
+    pi, _chdir, outputs, fault = _gensrc_peel(argv)
+    if fault is not None or outputs:
+        return True, False
+    if pi >= len(argv) or seg.argv_opaque[pi]:
+        return writes, False
+    prog = _gate_word(argv[pi])
+    return (writes or prog in _GENSRC_WRITERS or bool(_GENSRC_PYTHON_RE.match(prog)),
+            prog in ("cd", "pushd", "popd"))
+
+
+def _gensrc_doubt_unread(command):
+    """The fallback for a command whose '#' readings the shared lexer cannot judge (_UncertainHashError, the
+    FALLBACK paragraph of the comment above _nest_track): True when what the lexer did not read may hold a
+    write this guard judges, so the command stays an uncleared write: its quoting is one the fallback does not
+    decode (_hash_doubt_opaque), or its text as written or de-quoted (_hash_doubt_scan), lowercased as
+    _gate_word reads a program word, holds a '>' or a sink program or wrapper word (_GENSRC_DOUBT_RE). False
+    when neither holds: then no segment of any reading of the command can add an effect (_gensrc_reach),
+    so the command is judged on the segments the lexer recovered, as a complete lex is."""
+    return _hash_doubt_opaque(command) or bool(_GENSRC_DOUBT_RE.search(_hash_doubt_scan(command).lower()))
+
+
+def _gensrc_resolve(word, opaque, tilde, base):
+    """Resolve one sink word to an absolute, lexically normalized path: (path, None), or (None, reason) when
+    it cannot be judged. A word formed with an unquoted expansion, substitution, glob or brace (opaque) cannot,
+    except a clean leading tilde (~ or ~/x with nothing else opaque), which expands as tilde, the reading of
+    HOME the caller judges it under (_gensrc_cd_context), says: True with os.path.expanduser (the HOME of this
+    process), a string with that literal HOME value in place of the ~, and _GENSRC_HOME_UNKNOWN or
+    _GENSRC_HOME_PAST not at all. A word that is not opaque but carries a tilde reading holds a ~ after = or :
+    (_GENSRC_INNER_TILDE_RE: bash expands it outside posix mode and keeps it literal inside), so it cannot either,
+    and never resolves as a literal ~ path; a
+    .. component cannot (the shell resolves it logically, the filesystem physically); a relative word with no
+    known working directory cannot."""
+    if not word or any(ord(ch) < 0x20 or ord(ch) == 0x7f for ch in word):
+        return None, "a sink whose target is empty or carries a control character"
+    if tilde and not opaque:
+        return None, ("a sink word holding a ~ after = or :, which bash expands as a tilde in an assignment-shaped "
+                      "word (dd of=~/x) outside posix mode and keeps literal inside it")
+    if opaque:
+        if not (tilde and _LITERAL_TILDE_RE.match(word)) or _GENSRC_OPAQUE_RE.search(word):
+            return None, "a sink whose target is opaque (a variable, substitution, glob or brace)"
+        if tilde is _GENSRC_HOME_UNKNOWN:
+            return None, "a ~ sink in a command that spells HOME, which may give ~ a value the guard cannot name"
+        if tilde is _GENSRC_HOME_PAST:
+            return None, ("a ~ sink in a command that spells HOME, past the {}-word budget for reading ~ under each "
+                          "value HOME may hold (a budget that applies to each reading of the command's uncertain "
+                          "'#' on its own), so it was judged under none of them, though HOME may hold a literal "
+                          "value the command sets".format(_GENSRC_MAX_HOME))
+        word = os.path.expanduser(word) if tilde is True else tilde + word[1:]
+    if ".." in word.replace("\\", "/").split("/"):
+        return None, "a sink whose target has a .. component"
+    if os.path.isabs(word):
+        path = os.path.normpath(word)
+    elif base is None:
+        return None, "a relative sink after a working-directory change the guard cannot resolve"
+    else:
+        path = os.path.normpath(os.path.join(base, word))
+    if len(os.fsencode(path)) > _GENSRC_MAX_TARGET:
+        return None, ("a sink whose resolved target is over the {}-byte resolution budget"
+                      .format(_GENSRC_MAX_TARGET))
+    return path, None
+
+
+def _gensrc_add(effects, kind, what, word, opaque, tilde, base, posture="file"):
+    """Resolve one sink or restore word (_gensrc_resolve) and append its effect. An unresolvable SINK appends
+    an uncleared effect carrying the reason; an unresolvable restore is dropped (a restore is never denied).
+    A device path (/dev, /proc) is no file sink."""
+    path, why = _gensrc_resolve(word, opaque, tilde, base)
+    if path is None:
+        if kind == "sink":
+            effects.append(_GensrcEffect("uncleared", why, None, None))
+        return
+    if not _DEV_PROC_TARGET_RE.match(path):
+        effects.append(_GensrcEffect(kind, what, path, posture))
+
+
+def _gensrc_flag_index(args, aop, atl):
+    """One pass over args: a dict mapping each argv word to the OR of its argv_opaque and
+    argv_leading_tilde flags, so an operand word (always a whole argv word) is looked up in constant time
+    and a long operand run stays linear."""
+    index = {}
+    for k, tok in enumerate(args):
+        hit = index.get(tok)
+        if hit is None:
+            index[tok] = (aop[k], atl[k])
+        elif (aop[k] and not hit[0]) or (atl[k] and not hit[1]):
+            index[tok] = (hit[0] or aop[k], hit[1] or atl[k])
+    return index
+
+
+def _gensrc_flags(word, args, aop, atl):
+    """(opaque, tilde) for an option-value word of args that is not itself an argv word (a value glued to
+    its option, -tDIR), read by one scan from the flags of every argv word ending with it. Operand words
+    are read from the _gensrc_flag_index instead; this scan runs at most once per command (for a copy
+    destination taken from an option value). The tilde flag is returned as set, a reading of HOME included."""
+    hits = [k for k, tok in enumerate(args) if tok == word or (word and tok.endswith(word))]
+    return any(aop[k] for k in hits), next((atl[k] for k in hits if atl[k]), False)
+
+
+def _gensrc_peel(argv):
+    """Peel a segment argv down to the program it runs: (index, chdir, outputs, fault). index is the argv
+    position of the program word (len(argv) when none remains), past leading VAR=value words, leading
+    reserved words ({, !, if, then, ...), the env, nice, timeout and time wrappers with their
+    _GATE_WRAPPER_GRAMMAR option grammar (and the timeout duration operand), and the bare command, exec,
+    builtin and sudo words. chdir is True under env -C/--chdir (the working directory is then unknown);
+    outputs lists the (argv index, value) of each time -o/--output file, itself a sink; fault is a reason
+    when a wrapper carries an option outside that grammar (any option on a bare wrapper), else None."""
+    n = len(argv)
+    i = 0
+    chdir = False
+    outputs = []
+    while i < n:
+        if _ENV_ASSIGN_RE.match(argv[i]) or argv[i] in _GENSRC_LEADING_RESERVED:
+            i += 1
+            continue
+        word = _gate_word(argv[i])
+        if word in _GENSRC_BARE_WRAPPERS:
+            i += 1
+            if i < n and argv[i] == "--":
+                i += 1
+            elif i < n and argv[i].startswith("-"):
+                return i, chdir, outputs, "an option of {} the guard does not model".format(word)
+            continue
+        grammar = _GATE_WRAPPER_GRAMMAR.get(word)
+        if grammar is None:
+            return i, chdir, outputs, None
+        value_opts, flag_opts = grammar
+        i += 1
+        while i < n:
+            tok = argv[i]
+            if word == "env" and _ENV_ASSIGN_RE.match(tok):
+                i += 1
+                continue
+            if tok == "--":
+                i += 1
+                break
+            if not tok.startswith("-") or (tok == "-" and word != "env"):
+                break
+            name, eq, value = tok.partition("=")
+            at = i
+            if tok in value_opts:
+                if i + 1 >= n:
+                    return i, chdir, outputs, "an option of {} with no value".format(word)
+                name, value, at = tok, argv[i + 1], i + 1
+                i += 2
+            elif tok.startswith("--") and eq and name in value_opts:
+                i += 1
+            elif not tok.startswith("--") and len(tok) > 2 and tok[:2] in value_opts:
+                name, value = tok[:2], tok[2:]
+                i += 1
+            elif tok in flag_opts or (word == "nice" and tok[1:].isdigit()):
+                i += 1
+                continue
+            else:
+                return i, chdir, outputs, "an option of {} the guard does not model".format(word)
+            if name in ("-C", "--chdir"):
+                chdir = True
+            elif word == "time" and name in ("-o", "--output"):
+                outputs.append((at, value))
+        if word == "timeout":
+            i += 1
+    return i, chdir, outputs, None
+
+
+def _gensrc_time_program(seg, pi, posix):
+    """True when a time word the peel passed over (seg.argv before pi) runs the time PROGRAM rather than the
+    shell keyword, so a cd it runs is a child process. It is read from the raw segment, never from the decoded
+    word (the lexer decodes \\time, 'time' and "time" to time): bash reads time as its keyword only where the
+    word is spelled exactly time, with no quote, backslash or path in it (\\time, 'time', "time", t\\ime and
+    /usr/bin/time are the program), and nothing stands before it in the segment but blanks, bare leading
+    reserved words ({, !, if, then, ...) and an earlier keyword time with its -p (after a VAR=value word, a
+    redirection, or a command or builtin word, time is a plain word). A time word whose place in the raw
+    segment cannot be found (_gate_word_start) reads as the program too, which leaves the directory unknown.
+    posix is True when the command may run in posix mode (_gensrc_cd_context), where bash does not read time as
+    its keyword before a word starting with - (time -p, time --, time -o FILE), so such a time reads as the
+    program too, even where bash parsed it before the mode changed (a disclosed over-reading)."""
+    argv, raw = seg.argv, seg.raw
+    for k in range(pi):
+        if _gate_word(argv[k]) != "time":
+            continue
+        if posix and k + 1 < len(argv) and argv[k + 1].startswith("-"):
+            return True
+        at = _gate_word_start(raw, argv, k)
+        try:
+            end = None if at is None else _read_word(raw, at, len(raw))[5]
+        except ValueError:
+            end = None
+        if end is None or raw[at:end] != "time" or raw[:at].split() != argv[:k] or not all(
+                word in _GENSRC_LEADING_RESERVED or word == "time" or (word == "-p" and j and argv[j - 1] == "time")
+                for j, word in enumerate(argv[:k])):
+            return True
+    return False
+
+
+def _gensrc_cd_context(segments):
+    """What may steer the cd and pushd segments of one reading, and the ~ of its sinks, read from the words of
+    EVERY segment wherever it stands (an over-approximation: a word after the cd or inside a subshell counts
+    too): (lookup, entries, values, physical, homes, posix). lookup is True when a bare relative operand may be looked
+    up elsewhere: a word spells CDPATH or cdable_vars, or this process environment carries a non-empty CDPATH
+    (the one the shell is assumed to inherit). entries lists each CDPATH entry the guard can read: those of
+    each literal CDPATH=VALUE word, then those of the environment value. values maps NAME to each literal value
+    of a NAME=VALUE word (what cdable_vars may put in place of an operand NAME). physical is True when a set or
+    shopt segment may turn on physical mode (an option cluster holding P, or a physical word). homes lists the
+    readings of HOME a clean leading ~ is expanded under (_gensrc_resolve): (True,), the HOME of this process
+    (the one the shell is assumed to inherit), when no word spells HOME; otherwise _GENSRC_HOME_UNKNOWN (a value
+    set some other way: HOME+=, read HOME, a substitution), True (a HOME prefix on a command word is assigned
+    only after its words expand; with no command word, HOME=VALUE > ~/x, bash assigns it first, which the literal
+    value covers) and each literal value of a HOME=VALUE word, at most _GENSRC_MAX_CD
+    named readings (an empty value, one starting with ~ or one carrying a control character is only unknown).
+    posix is True when the command may run in posix mode (_gensrc_time_program): a word holds posix (set -o
+    posix in any form the lexer decodes) or POSIXLY_CORRECT (an assignment, export or any other word), or this
+    process environment carries POSIXLY_CORRECT (the one the shell is assumed to inherit)."""
+    lookup = False
+    physical = False
+    home = False
+    posix = "POSIXLY_CORRECT" in os.environ
+    entries = []
+    values = {}
+    for seg in segments:
+        argv, aop = seg.argv, seg.argv_opaque
+        for k, word in enumerate(argv):
+            if "CDPATH" in word or "cdable_vars" in word:
+                lookup = True
+            if "HOME" in word:
+                home = True
+            if "posix" in word or "POSIXLY_CORRECT" in word:
+                posix = True
+            if not aop[k] and _ENV_ASSIGN_RE.match(word):
+                name, _eq, value = word.partition("=")
+                if name == "CDPATH":
+                    entries.extend(value.split(":"))
+                values.setdefault(name, []).append(value)
+        pi = _gensrc_peel(argv)[0]
+        if pi < len(argv) and not aop[pi] and _gate_word(argv[pi]) in ("set", "shopt") and any(
+                word == "physical" or (word.startswith("-") and not word.startswith("--") and "P" in word)
+                for word in argv[pi + 1:]):
+            physical = True
+    inherited = os.environ.get("CDPATH")
+    if inherited:
+        lookup = True
+        entries.extend(inherited.split(":"))
+    homes = (True,)
+    if home:
+        named = [value for value in values.get("HOME", ()) if value and not value.startswith("~") and not any(
+            ord(ch) < 0x20 or ord(ch) == 0x7f for ch in value)]
+        homes = (_GENSRC_HOME_UNKNOWN, True) + tuple(dict.fromkeys(named))[:_GENSRC_MAX_CD - 1]
+    return lookup, entries, values, physical, homes, posix
+
+
+def _gensrc_cd(prog, argv, aop, atl, base, context, visited):
+    """The working directories a cd or pushd segment (argv starts at the command word) may leave, as a tuple:
+    (path,) when its effect is CERTAIN; (None,) when the guard can name no directory it reaches (popd, a bare
+    cd or pushd, cd -, more than one operand, an opaque operand other than a clean leading tilde, a relative
+    operand with no base); and (None, path, ...) when it is UNCERTAIN: the directory is unknown, and these are
+    directories it may reach, at most _GENSRC_MAX_CD. A literal operand resolves lexically (absolute, or joined
+    onto base and normalized) under the _GENSRC_MAX_TARGET length bound, and that reading is certain only when
+    nothing steers the change elsewhere. It is uncertain for: a pushd stack rotation (+N or -N), reaching any
+    directory in visited (the cwd and each directory the walk has reached); any pushd option, or a cd option
+    other than -L and -P, reaching the lexical reading and, for pushd, base (pushd -n moves only the stack);
+    physical mode (cd -P, or set -P in context) where the physical (realpath) reading differs from the lexical
+    one, reaching both; a .. component where the two readings name different directories (the shell resolves
+    .. lexically, but falls back to the physical path when the lexical one does not exist), reaching both; and
+    a bare relative operand (no leading /, ./ or ../, and not . or ..) when a CDPATH or cdable_vars lookup may
+    apply (context), reaching the lexical reading, the operand under each CDPATH entry and each literal value
+    of the variable the operand names. A clean leading ~ operand expands under the reading of HOME its atl flag
+    carries (_gensrc_resolve; under _GENSRC_HOME_UNKNOWN or _GENSRC_HOME_PAST it reaches no directory), and
+    _bash_write_effects gathers what each reading reaches; an operand holding a ~ after = or : (cd x=~/d, which
+    bash may expand) reaches no directory the guard names. The filesystem is read (realpath) only in physical
+    mode or for a .. component."""
+    if prog == "popd":
+        return (None,)
+    words = argv[1:]
+    if prog == "pushd" and any(_PUSHD_ROTATION_RE.match(word) for word in words):
+        return (None,) + tuple(visited)
+    operands = [k for k in range(1, len(argv)) if not argv[k].startswith("-")]
+    if len(operands) != 1:
+        return (None,)                                # no operand (HOME/rotate) or ambiguous
+    at = operands[0]
+    word = argv[at]
+    if not aop[at] and _GENSRC_INNER_TILDE_RE.search(word):
+        return (None,)                                # a ~ after = or : that bash may expand
+    if aop[at]:
+        joined, _why = _gensrc_resolve(word, True, atl[at], base)
+    elif not word or word == "-":
+        return (None,)                                # 'cd -' returns to an unknowable OLDPWD
+    elif os.path.isabs(word):
+        joined = word
+    elif base is None:
+        return (None,)                                # a relative cd with no cwd to anchor it
+    else:
+        joined = os.path.join(base, word)
+    if joined is None:
+        return (None,)
+    path = os.path.normpath(joined)
+    if len(os.fsencode(path)) > _GENSRC_MAX_TARGET:
+        return (None,)
+    lookup, entries, values, physical, _homes, _posix = context
+    flags = [tok[1:] for tok in words if tok.startswith("-") and tok != "--"]
+    certain = not any(prog != "cd" or flag.strip("LP") for flag in flags)
+    physical = physical or any("P" in flag for flag in flags)
+    reach = [path]
+    if physical or ".." in word.split("/"):
+        real = os.path.realpath(joined) if len(os.fsencode(joined)) <= _GENSRC_MAX_TARGET else None
+        reach.append(real)
+        certain = certain and real == (path if physical else os.path.realpath(path))
+    if lookup and not aop[at] and not os.path.isabs(word) and word not in (".", "..") and not word.startswith(
+            ("./", "../")):
+        # base is set here (a relative operand with none returned above); an absolute entry or value replaces
+        # it in the join, and an empty CDPATH entry is the working directory itself.
+        certain = False
+        reach.extend(os.path.join(base, entry, word) for entry in entries[:_GENSRC_MAX_CD])
+        reach.extend(os.path.join(base, value) for value in values.get(word, ())[:_GENSRC_MAX_CD])
+    if certain:
+        return (path,)
+    if prog == "pushd" and flags:
+        reach.append(base)
+    found = []
+    for spot in reach:
+        if spot is None or len(found) >= _GENSRC_MAX_CD:
+            continue
+        spot = os.path.normpath(spot)
+        if spot not in found and len(os.fsencode(spot)) <= _GENSRC_MAX_TARGET:
+            found.append(spot)
+    return (None,) + tuple(found)
+
+
+def _gensrc_sed(args):
+    """GNU sed options read in getopt order until --: (inplace, file indices, backup) or None for an option
+    it does not model. In place is -i, -iSUFFIX, a short cluster holding i (the rest of the cluster after i
+    is the suffix) or --in-place[=SUFFIX]; backup is True when a non-empty SUFFIX is given, because the
+    backup then lands beside each file under a name the operands do not spell (an uncleared side file);
+    -e, -f, -l and their long forms take a value; the files are the operands, minus the first (the script)
+    when no -e or -f is given. A long option may be a unique prefix."""
+    inplace = False
+    backup = False
+    script = False
+    operands = []
+    i = 0
+    ended = False
+    while i < len(args):
+        tok = args[i]
+        i += 1
+        if ended or tok == "-" or not tok.startswith("-"):
+            operands.append(i - 1)
+            continue
+        if tok == "--":
+            ended = True
+            continue
+        if tok.startswith("--"):
+            key, eq, value = tok[2:].partition("=")
+            names = [name for name in _GENSRC_SED_LONG if name == key] or [
+                name for name in _GENSRC_SED_LONG if name.startswith(key)]
+            if len(names) != 1 or (eq and not _GENSRC_SED_LONG[names[0]]):
+                return None
+            key = names[0]
+            if key == "in-place":
+                inplace = True
+                backup = backup or bool(value)
+            elif _GENSRC_SED_LONG[key] == ":":
+                if not eq:
+                    if i >= len(args):
+                        return None
+                    i += 1
+                script = script or key in ("expression", "file")
+            continue
+        body = tok[1:]
+        for k, ch in enumerate(body):
+            if ch == "i":
+                inplace = True
+                backup = backup or bool(body[k + 1:])
+                break
+            if ch in "efl":
+                if not body[k + 1:]:
+                    if i >= len(args):
+                        return None
+                    i += 1
+                script = script or ch in "ef"
+                break
+            if ch not in "nrEsuz":
+                return None
+    if not script:
+        operands = operands[1:]
+    return inplace, operands, backup
+
+
+def _gensrc_perl(args):
+    """perl switches read until the first operand or --: (inplace, file indices, backup) or None for a
+    switch it does not model. -i[EXT] anywhere in a switch cluster is in place; backup is True when a
+    non-empty EXT is given, because the backup then lands beside each file under a name the operands do not
+    spell (an uncleared side file); -e/-E take the rest of the cluster or the next word as the program, and
+    then every operand is a file; without them the first operand is the script and the rest are files.
+    -0, -l, -F, -x, -C, -d, -D, -I, -M and -m carry their own argument grammars (optional, attached or
+    separate, by switch), so a cluster holding one cannot be fully resolved (-lpi is -l -p -i to perl, not
+    -l with the argument pi) and is not modelled: None, an uncleared command."""
+    inplace = False
+    backup = False
+    has_e = False
+    i = 0
+    while i < len(args):
+        tok = args[i]
+        if tok == "--":
+            i += 1
+            break
+        if not tok.startswith("-") or tok == "-":
+            break
+        i += 1
+        body = tok[1:]
+        for k, ch in enumerate(body):
+            if ch == "i":
+                inplace = True
+                backup = backup or bool(body[k + 1:])
+                break
+            if ch in "eE":
+                has_e = True
+                if not body[k + 1:]:
+                    i += 1
+                break
+            if ch in "0lFxCdDIMm":
+                return None
+            if ch not in "anpsStTuUvwWXcg":
+                return None
+    files = list(range(i, len(args)))
+    return inplace, (files if has_e else files[1:]), backup
+
+
+def _gensrc_rsync(args):
+    """rsync options read until --: (operand indices, recursive, dry) or None for an option outside the
+    modelled set (_GENSRC_RSYNC_*), --files-from included. A no- prefix negates a modelled flag."""
+    operands = []
+    recursive = dry = ended = False
+    i = 0
+    while i < len(args):
+        tok = args[i]
+        i += 1
+        if ended or tok == "-" or not tok.startswith("-"):
+            operands.append(i - 1)
+            continue
+        if tok == "--":
+            ended = True
+            continue
+        if tok.startswith("--"):
+            key, eq, _value = tok[2:].partition("=")
+            bare = key[3:] if key.startswith("no-") else key
+            if key in _GENSRC_RSYNC_VALUES:
+                if not eq:
+                    i += 1
+            elif eq or bare not in _GENSRC_RSYNC_FLAGS:
+                return None
+            recursive = recursive or key in ("archive", "recursive")
+            dry = dry or key in ("dry-run", "list-only")
+            continue
+        body = tok[1:]
+        for k, ch in enumerate(body):
+            if ch in _GENSRC_RSYNC_SHORT_VALUES:
+                if not body[k + 1:]:
+                    i += 1
+                break
+            if ch not in _GENSRC_RSYNC_SHORT:
+                return None
+            recursive = recursive or ch in "ar"
+            dry = dry or ch == "n"
+    return operands, recursive, dry
+
+
+def _gensrc_dest(effects, what, dest, sources, into, no_target, parents, posture, flags, base):
+    """Append the paths a copy-like command writes: the destination itself under -T (no_target), or when it
+    is neither known to be a directory (into is True for -t and for ln with one operand) nor an existing one;
+    otherwise the destination joined to the last component of each source (x/. merges into the destination
+    itself), or to the whole source under cp --parents. flags(word) gives (opaque, tilde)."""
+    opaque, tilde = flags(dest)
+    dpath, why = _gensrc_resolve(dest, opaque, tilde, base)
+    if dpath is None:
+        effects.append(_GensrcEffect("uncleared", why, None, None))
+        return
+    if _DEV_PROC_TARGET_RE.match(dpath):
+        return
+    if no_target or not (into or os.path.isdir(dpath)):
+        effects.append(_GensrcEffect("sink", what, dpath, posture))
+        return
+    for src in sources:
+        if flags(src)[0]:
+            effects.append(_GensrcEffect("uncleared", "a copy into a directory from an opaque source", None,
+                                         None))
+            continue
+        tail = src.lstrip("/") if parents else (src.rstrip("/").rsplit("/", 1)[-1] or ".")
+        if ".." in tail.split("/"):
+            effects.append(_GensrcEffect("uncleared", "a sink whose target has a .. component", None, None))
+            continue
+        joined = os.path.normpath(os.path.join(dpath, tail))
+        if len(os.fsencode(joined)) > _GENSRC_MAX_TARGET:
+            effects.append(_GensrcEffect(
+                "uncleared", "a sink whose resolved target is over the {}-byte resolution budget"
+                .format(_GENSRC_MAX_TARGET), None, None))
+            continue
+        effects.append(_GensrcEffect("sink", what, joined, posture))
+
+
+def _gensrc_python_sinks(code):
+    """The constant write targets of a python -c program, parsed with ast.parse and NEVER executed: (sinks,
+    faults). sinks lists (destination, source or None) for open() and io.open() with a constant path (the
+    first argument or file=) and a constant mode holding w, a, x or +; Path(<constant>).write_text,
+    .write_bytes and .open(<write mode>); and shutil.copy, copy2, copyfile and move with a constant
+    destination (a constant source names the file a directory destination receives). faults lists a reason
+    for a program over _GENSRC_MAX_PY characters or one that does not parse, a computed path or mode in a
+    write-shaped open, a write_text, write_bytes or shutil copy whose path is computed, a shutil copy or
+    move from a computed source (a directory destination then receives a file of unknown name), and a
+    directory change (a chdir or fchdir call, however reached): after one, a relative constant write can
+    land anywhere, so every relative sink of the program is dropped as uncleared rather than resolved
+    against the shell working directory; absolute sinks stay judged."""
+    if len(code) > _GENSRC_MAX_PY:
+        return [], ["a python -c program over {} characters".format(_GENSRC_MAX_PY)]
+    try:
+        tree = ast.parse(code, mode="exec")
+    except (SyntaxError, ValueError, RecursionError, MemoryError):
+        return [], ["a python -c program that does not parse"]
+    sinks, faults = [], []
+    chdir = False
+
+    def const(node):
+        return node.value if isinstance(node, ast.Constant) and isinstance(node.value, str) else None
+
+    def arg(call, index, name):
+        for keyword in call.keywords:
+            if keyword.arg == name:
+                return keyword.value
+        return call.args[index] if len(call.args) > index else None
+
+    def judge_open(mode_node, target):
+        if mode_node is None:
+            return
+        mode = const(mode_node)
+        if mode is None:
+            faults.append("a python open with a computed mode")
+        elif any(ch in mode for ch in "wax+"):
+            if target is None:
+                faults.append("a python open for writing on a computed path")
+            else:
+                sinks.append((target, None))
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if (isinstance(func, ast.Name) and func.id in ("chdir", "fchdir")) or (
+                isinstance(func, ast.Attribute) and func.attr in ("chdir", "fchdir")):
+            chdir = True
+            continue
+        if (isinstance(func, ast.Name) and func.id == "open") or (
+                isinstance(func, ast.Attribute) and func.attr == "open" and isinstance(func.value, ast.Name)
+                and func.value.id == "io"):
+            target_node = arg(node, 0, "file")
+            judge_open(arg(node, 1, "mode"), None if target_node is None else const(target_node))
+            continue
+        if not isinstance(func, ast.Attribute):
+            continue
+        owner = func.value
+        is_path = isinstance(owner, ast.Call) and (
+            (isinstance(owner.func, ast.Name) and owner.func.id in ("Path", "PosixPath"))
+            or (isinstance(owner.func, ast.Attribute) and owner.func.attr in ("Path", "PosixPath")))
+        path_const = const(owner.args[0]) if is_path and len(owner.args) == 1 and not owner.keywords else None
+        if func.attr == "open" and is_path:
+            judge_open(arg(node, 0, "mode"), path_const)
+        elif func.attr in ("write_text", "write_bytes"):
+            if path_const is None:
+                faults.append("a python write_text or write_bytes on a computed path")
+            else:
+                sinks.append((path_const, None))
+        elif (func.attr in ("copy", "copy2", "copyfile", "move") and isinstance(owner, ast.Name)
+              and owner.id == "shutil"):
+            dst = arg(node, 1, "dst")
+            src = arg(node, 0, "src")
+            if dst is None or const(dst) is None:
+                faults.append("a python shutil copy or move to a computed path")
+            else:
+                if src is not None and const(src) is None:
+                    # A directory destination receives a file whose name the computed source decides.
+                    faults.append("a python shutil copy or move from a computed source")
+                sinks.append((const(dst), None if src is None else const(src)))
+    if chdir:
+        faults.append("a directory change inside a python -c program")
+        sinks = [pair for pair in sinks if os.path.isabs(pair[0])]
+    return sinks, faults
+
+
+def _gensrc_git_effects(argv, pi, aop, atl, base, effects):
+    """The working-tree paths of git checkout and git restore (decision b), git at argv[pi]. A global -C DIR
+    re-bases the paths; --git-dir, --work-tree, a leading GIT_DIR= or GIT_WORK_TREE= word and a global option
+    it does not model leave the command uncleared. A path restored from the index or HEAD is a restore; from
+    any other revision (git checkout REV -- P, git restore -s/--source REV P) a sink with posture dirdeny. git
+    checkout without -- naming any operand, pathspec magic, a glob, --pathspec-from-file and an unmodelled
+    option are uncleared; git restore --staged without -W/--worktree writes no working-tree file and is not
+    judged. Every other git subcommand is not judged here (git-discard governs whole-tree operations)."""
+    if any(tok.startswith(("GIT_DIR=", "GIT_WORK_TREE=")) for tok in argv[:pi]):
+        effects.append(_GensrcEffect("uncleared", "a git repository named through GIT_DIR or GIT_WORK_TREE",
+                                     None, None))
+        return
+    n = len(argv)
+    i = pi + 1
+    while i < n:
+        tok = argv[i]
+        name = tok.split("=", 1)[0]
+        if tok == "-C":
+            if i + 1 >= n:
+                return
+            base, _why = _gensrc_resolve(argv[i + 1], aop[i + 1], atl[i + 1], base)
+            i += 2
+            continue
+        if name in ("--git-dir", "--work-tree"):
+            effects.append(_GensrcEffect("uncleared", "a git --git-dir or --work-tree option", None, None))
+            return
+        if tok in _GENSRC_GIT_GLOBAL_VALUES:
+            i += 2
+            continue
+        if (("=" in tok and (name in _GENSRC_GIT_GLOBAL_VALUES or name == "--exec-path"))
+                or tok in _GENSRC_GIT_GLOBAL_FLAGS or (tok.startswith("-c") and len(tok) > 2)):
+            i += 1
+            continue
+        if tok.startswith("-"):
+            effects.append(_GensrcEffect("uncleared", "a git global option the guard does not model", None,
+                                         None))
+            return
+        break
+    if i >= n or argv[i] not in ("checkout", "restore"):
+        return
+    sub = argv[i]
+    flags = _GENSRC_CHECKOUT_FLAGS if sub == "checkout" else _GENSRC_RESTORE_FLAGS
+    values = _GENSRC_CHECKOUT_VALUES if sub == "checkout" else _GENSRC_RESTORE_VALUES
+    positional, paths, seen = [], [], set()
+    source = None
+    dashdash = False
+    i += 1
+    while i < n:
+        tok = argv[i]
+        i += 1
+        if dashdash:
+            paths.append(i - 1)
+            continue
+        if tok == "--":
+            dashdash = True
+            continue
+        if not tok.startswith("-") or tok == "-":
+            positional.append(i - 1)
+            continue
+        name, eq, value = tok.partition("=")
+        if name == "--pathspec-from-file":
+            effects.append(_GensrcEffect("uncleared", "git --pathspec-from-file", None, None))
+            return
+        if eq and name in values:
+            pass
+        elif tok in values and tok not in _GENSRC_EQ_ONLY:
+            if i >= n:
+                return
+            name, value = tok, argv[i]
+            i += 1
+        elif not tok.startswith("--") and len(tok) > 2 and tok[:2] in values:
+            name, value = tok[:2], tok[2:]
+        elif tok in flags:
+            seen.add(tok)
+            continue
+        elif not tok.startswith("--") and all("-" + ch in flags for ch in tok[1:]):
+            seen.update("-" + ch for ch in tok[1:])
+            continue
+        else:
+            effects.append(_GensrcEffect("uncleared", "an option of git {} the guard does not model".format(sub),
+                                         None, None))
+            return
+        if name in ("-s", "--source"):
+            source = value
+    if sub == "restore":
+        if seen & {"-S", "--staged"} and not seen & {"-W", "--worktree"}:
+            return
+        words = positional + paths
+        other = source is not None and source not in ("HEAD", "@")
+    else:
+        if not dashdash:
+            if positional:
+                effects.append(_GensrcEffect("uncleared", "a git checkout without -- that names an operand",
+                                             None, None))
+            return
+        if len(positional) > 1:
+            effects.append(_GensrcEffect("uncleared", "a git checkout with more than one revision", None, None))
+            return
+        words = paths
+        other = bool(positional) and argv[positional[0]] not in ("HEAD", "@")
+    what = "git {} from {}".format(sub, "another revision" if other else "the index or HEAD")
+    for k in words:
+        word = argv[k]
+        if word.startswith(":") or _GENSRC_GLOB_CHARS & set(word):
+            effects.append(_GensrcEffect("uncleared", "git pathspec magic or a glob", None, None))
+            continue
+        _gensrc_add(effects, "sink" if other else "restore", what, word, aop[k], atl[k], base, "dirdeny")
+
+
+def _gensrc_program_effects(prog, argv, pi, aop, atl, base, effects):
+    """Append the write effects of the program at argv[pi] (prog, its lowercased basename) by the sink list:
+    the operands of tee and truncate; the files of an in-place sed or perl; the destination of cp, mv, ln and
+    install (and each operand of install -d); the local destination of rsync; the of= value of dd; the
+    literal program of python or python3 -c (_gensrc_python_sinks), a stdin-fed interpreter being uncleared;
+    and git checkout or restore (_gensrc_git_effects). An option the guard does not model on one of these
+    programs is uncleared; so are a tee operand of - (stdout to one tee, a file named - to another), a
+    backup option of cp, mv, ln or install (-b, --backup, -S or --suffix write a side file beside the
+    destination under a caller-chosen name), an in-place sed or perl SUFFIX (the backup lands beside each
+    file under a name the operands do not spell), and a remote rsync source (the local file a transfer
+    writes is not the operand's spelling); every other program spells no sink here (_GENSRC_WRITERS, which
+    _gensrc_reach reads, names the programs above but python)."""
+    if prog not in _GENSRC_WRITERS and not _GENSRC_PYTHON_RE.match(prog):
+        return
+    args, oa, ta = argv[pi + 1:], aop[pi + 1:], atl[pi + 1:]
+    index = _gensrc_flag_index(args, oa, ta)
+
+    def flags(word):
+        hit = index.get(word)
+        return hit if hit is not None else _gensrc_flags(word, args, oa, ta)
+
+    def unclear(why):
+        effects.append(_GensrcEffect("uncleared", why, None, None))
+
+    if prog in ("tee", "truncate"):
+        parsed = _writer_options_parse(_gensrc_writer_spec(prog), args)
+        if parsed is None:
+            unclear("an option of {} the guard does not model".format(prog))
+            return
+        for word in parsed[1]:
+            if word == "-" and prog == "tee":
+                unclear("a tee operand of - (a literal file to GNU tee, stdout to others)")
+            else:
+                _gensrc_add(effects, "sink", "a {} operand".format(prog), word, *flags(word), base)
+    elif prog in ("sed", "gsed", "perl"):
+        parsed = _gensrc_perl(args) if prog == "perl" else _gensrc_sed(args)
+        if parsed is None:
+            unclear("an option of {} the guard does not model".format(prog))
+        elif parsed[0]:
+            if parsed[2]:
+                # The backup (FILE plus a caller-chosen suffix, beside each file) is a write the operands
+                # do not spell; each spelled in-place file below stays judged as well.
+                unclear("an in-place {} suffix that writes a backup side file".format(prog))
+            for k in parsed[1]:
+                _gensrc_add(effects, "sink", "an in-place {} file".format(prog), args[k], oa[k], ta[k], base)
+    elif prog in ("cp", "mv", "ln", "install"):
+        parsed = _writer_options_parse(_gensrc_writer_spec(prog), args)
+        if parsed is None:
+            unclear("an option of {} the guard does not model".format(prog))
+            return
+        options, operands, targets, values = parsed
+        if options & {"b", "backup"} or any(key == "suffix" for key, _value in values):
+            # The side file (DEST~, or DEST plus a caller-chosen suffix) is a write the operands do not
+            # spell; the spelled destination below stays judged as well.
+            unclear("a {} backup option that writes a side file".format(prog))
+        what = "the {} destination".format(prog)
+        if prog == "install" and "directory" in options:
+            for word in operands:
+                _gensrc_add(effects, "sink", "an install -d directory", word, *flags(word), base)
+            return
+        if targets:
+            dest, sources, into = targets[-1], operands, True
+        elif len(operands) >= 2:
+            dest, sources, into = operands[-1], operands[:-1], False
+        elif prog == "ln" and len(operands) == 1:
+            dest, sources, into = ".", operands, True
+        else:
+            return
+        posture = "rcopy" if prog == "cp" and options & {"recursive", "archive"} else "file"
+        _gensrc_dest(effects, what, dest, sources, into, "no-target-directory" in options,
+                     prog == "cp" and "parents" in options, posture, flags, base)
+    elif prog == "rsync":
+        parsed = _gensrc_rsync(args)
+        if parsed is None:
+            unclear("an option of rsync the guard does not model (or --files-from)")
+            return
+        operands, recursive, dry = parsed
+        if dry or len(operands) < 2 or _GENSRC_REMOTE_RE.match(args[operands[-1]]):
+            return
+        dest = args[operands[-1]]
+        posture = "rcopy" if recursive else "file"
+        merged, named = [], []
+        remote = False
+        for k in operands[:-1]:
+            src = args[k]
+            if _GENSRC_REMOTE_RE.match(src):
+                remote = True
+            elif src.endswith("/"):
+                merged.append(src)
+            else:
+                named.append(src)
+        if remote:
+            # host:GEN.md writes the LOCAL file GEN.md: the host prefix is no part of the destination
+            # name, so a basename derived from the operand's spelling would be a guessed path.
+            unclear("an rsync remote source (the local destination name is not the operand's spelling)")
+        if merged:
+            _gensrc_dest(effects, "the rsync destination", dest, [], True, True, False, posture, flags, base)
+        if named:
+            _gensrc_dest(effects, "the rsync destination", dest, named, False, False, False, posture, flags,
+                         base)
+    elif prog == "dd":
+        for k, tok in enumerate(args):
+            if tok.startswith("of="):
+                _gensrc_add(effects, "sink", "the dd of= file", tok[3:], oa[k], ta[k], base)
+                if ta[k] and not oa[k] and tok.startswith("of=~"):
+                    # dd reads of= itself, so the ~ bash expands in this assignment-shaped word leads the path:
+                    # beside the uncleared word above, it is judged as a leading ~ is, under the reading ta[k] holds.
+                    _gensrc_add(effects, "sink", "the dd of= file", tok[3:], True, ta[k], base)
+    elif prog == "git":
+        _gensrc_git_effects(argv, pi, aop, atl, base, effects)
+    elif _GENSRC_PYTHON_RE.match(prog):
+        code_at = None
+        k = 0
+        while k < len(args):
+            tok = args[k]
+            if tok in ("-V", "--version", "-h", "--help", "-m") or tok == "-" or not tok.startswith("-"):
+                if tok == "-" or not tok.startswith("-"):
+                    if tok == "-":
+                        unclear("a stdin-fed interpreter program")
+                    return
+                return
+            if tok in ("-W", "-X"):
+                k += 2
+                continue
+            body = tok[1:]
+            if body.startswith(("W", "X")):
+                k += 1
+                continue
+            cut = body.find("c")
+            if cut >= 0:
+                if not all(ch in "bBdEIOPqRsSuv" for ch in body[:cut]):
+                    unclear("an option of python the guard does not model")
+                    return
+                code_at = (k, body[cut + 1:]) if body[cut + 1:] else (k + 1, None)
+                break
+            if not all(ch in "bBdEIOPqRsSuv" for ch in body):
+                unclear("an option of python the guard does not model")
+                return
+            k += 1
+        if code_at is None:
+            unclear("a stdin-fed interpreter program")
+            return
+        at, code = code_at
+        if at >= len(args):
+            return
+        if oa[at]:
+            unclear("a python -c program formed with an expansion or substitution")
+            return
+        sinks, faults = _gensrc_python_sinks(args[at] if code is None else code)
+        for why in faults:
+            unclear(why)
+        for dst, src in sinks:
+            _gensrc_dest(effects, "a python -c write", dst, [] if src is None else [src], False,
+                         src is None, False, "file", lambda _word: (False, False), base)
+
+
+def _bash_write_effects(segments, cwd):
+    """The write effects (_GensrcEffect) of the lexed Bash segments of ONE reading of a command (_gensrc_lex), in
+    command order; the segment with no word and no redirect that a separator ends is read too, for its ( or ).
+    The working directory starts
+    at cwd (None when the session cwd is unknown) and follows a literal cd or pushd segment (_gensrc_cd) only
+    while its effect is CERTAIN for the segments that can see it: a cd in a pipeline element or a background
+    job changes nothing (a subshell); one reached through || may not run at all (the directory is then
+    unknown); after a tracked cd, only segments joined by && (or |, |&: a pipeline runs whole) are guaranteed
+    to run exactly when the cd succeeded, so at any other separator (;, &, a newline, ||) the directory
+    becomes unknown, because a skipped or FAILED cd leaves later segments in the original directory. A
+    segment ending in ( saves the directory and one ending in ) restores it (an unmatched ) leaves it
+    unknown), and popd, cd -, a bare cd or an opaque operand leave it unknown; an unknown directory makes
+    every later relative sink uncleared, never resolved to a guessed path. A change _gensrc_cd finds UNCERTAIN
+    (CDPATH, -P, a .. across a link, a pushd option or rotation, a ~ operand under a HOME the command spells),
+    and a cd run as a child process (under env, nice, timeout, sudo or exec, under a time word bash reads as
+    the time program, _gensrc_time_program, or as a command word spelled other than cd, pushd or popd, such as
+    /usr/bin/cd, which names a program), which never moves the shell, leave it unknown too, and each
+    later segment is also read from every directory the change may reach (named by _gensrc_cd; for a child cd,
+    the unchanged one), so a relative sink landing on a registered target from any of them is judged (and
+    denied) like any other sink; its word then names that directory. A segment holding a clean leading ~, or a
+    ~ after = or : in a word (_GENSRC_INNER_TILDE_RE), is read once under each reading of HOME
+    (_gensrc_cd_context): when a word of the command spells HOME, its ~
+    sinks are uncleared and also judged under each value HOME may hold that the guard can name, each such
+    effect naming the value, and its ~ cd reaches each of them (within the _GENSRC_MAX_HOME word budget, spent
+    on each reading of the command on its own; past it the ~ is read under no value, _GENSRC_HOME_PAST). A sink
+    word with a ~ after = or : is uncleared under every reading, and a dd of=~ value is also judged as a leading
+    ~ is. Each segment contributes every
+    output redirect (>, >>, >|, &>, &>>, <> and >& to a file, never only the last; a /dev or /proc target or
+    a descriptor is no sink, an opaque target is uncleared), the time -o output, and its peeled program
+    effects (_gensrc_program_effects); env -C makes that segment working directory unknown."""
+    effects = []
+    bases = (cwd,)   # the unknown directory (None) first, then each one an uncertain change may reach
+    visited = [] if cwd is None else [cwd]   # every directory reached so far, what a stack rotation may reach
+    context = None   # what steers a cd or a ~ (_gensrc_cd_context), read once at the first one
+    home_budget = _GENSRC_MAX_HOME   # words left to read under each value of a spelled HOME
+    anchored = True  # bases hold whatever earlier commands did; False after a cd whose success is assumed
+    stack = []
+    prev = ""
+    for seg in segments:
+        argv, aop, atl = seg.argv, seg.argv_opaque, seg.argv_leading_tilde
+        pi, chdir, outputs, fault = _gensrc_peel(argv)
+        prog = _gate_word(argv[pi]) if fault is None and pi < len(argv) and not aop[pi] else None
+        # A cd in a pipeline element or a background job changes nothing (a subshell).
+        moves = (prog in ("cd", "pushd", "popd") and prev not in ("|", "|&")
+                 and seg.sep_after not in ("|", "|&", "&"))
+        if moves and context is None:
+            context = _gensrc_cd_context(segments)
+        # A command word spelled other than cd, pushd or popd (/usr/bin/cd, ./cd, CD) names no builtin: bash runs
+        # a program for it, as it does under a child wrapper or the time program.
+        child = moves and (argv[pi] != prog or any(_gate_word(tok) in _GENSRC_CHILD_WRAPPERS for tok in argv[:pi])
+                           or _gensrc_time_program(seg, pi, context[5]))
+        # A word holding a ~ after = or : carries a tilde reading as a leading ~ does (_gensrc_resolve).
+        marks = atl
+        if any(_GENSRC_INNER_TILDE_RE.search(word) for word in argv):
+            marks = [flag or bool(_GENSRC_INNER_TILDE_RE.search(word)) for flag, word in zip(atl, argv)]
+        homes = (True,)
+        if any(marks) or any(red.target_leading_tilde for red in seg.redirects):
+            if context is None:
+                context = _gensrc_cd_context(segments)
+            homes = context[4]
+            if len(homes) > 1:
+                size = len(argv) + len(seg.redirects)
+                if size > home_budget:
+                    homes = (_GENSRC_HOME_PAST,)   # past _GENSRC_MAX_HOME: no value of HOME is read
+                else:
+                    home_budget -= size
+        reached = []
+        for base in bases:
+            seg_base = None if chdir else base
+            start = len(effects)
+            first = None
+            for home in homes:
+                mark = len(effects)
+                tl = marks if home is True else [home if flag else flag for flag in marks]
+                for red in seg.redirects:
+                    if red.op not in _GENSRC_REDIRECT_SINKS or red.target_class in ("descriptor", "file-dev"):
+                        continue
+                    if red.target_class == "opaque" and not red.target_leading_tilde:
+                        effects.append(_GensrcEffect(
+                            "uncleared", "a redirect whose target is opaque (a variable, substitution, glob, "
+                            "brace, .. component or relative dev or proc path)", None, None))
+                        continue
+                    _gensrc_add(effects, "sink", "a {} redirect".format(red.op), red.target,
+                                red.target_class == "opaque", (red.target_leading_tilde or bool(
+                                    _GENSRC_INNER_TILDE_RE.search(red.target))) and home, seg_base)
+                if fault is not None:
+                    effects.append(_GensrcEffect("uncleared", fault, None, None))
+                else:
+                    for at, value in outputs:
+                        _gensrc_add(effects, "sink", "the time -o output", value, aop[at], tl[at], seg_base)
+                    if moves and prev == "||":
+                        # A cd reached through || runs only when the previous command failed, so the directory
+                        # after it is one of two places: unknown, never a guessed one.
+                        reached.append(None)
+                    elif child:
+                        # An external cd (env cd, sudo cd, ...) runs as a child, or fails where none is
+                        # installed: the shell stays where it was, which an uncertain change also reaches.
+                        reached.extend((None, seg_base))
+                    elif moves:
+                        if context is None:
+                            context = _gensrc_cd_context(segments)
+                        reached.extend(_gensrc_cd(prog, argv[pi:], aop[pi:], tl[pi:], seg_base, context,
+                                                  visited))
+                    elif prog is not None and prog not in ("cd", "pushd", "popd"):
+                        _gensrc_program_effects(prog, argv, pi, aop, tl, seg_base, effects)
+                if first is None:
+                    # The first reading adds every effect; a later reading of HOME keeps only the effects its ~
+                    # changes, each naming that reading.
+                    first = set(effects[start:]) if len(homes) > 1 else set()
+                    continue
+                spelled = os.path.expanduser("~") if home is True else home
+                effects[mark:] = [effect if effect.kind == "uncleared" else effect._replace(
+                    word="{}, reading ~ as {}, a value HOME may hold".format(effect.word, spelled))
+                    for effect in effects[mark:] if effect not in first]
+            if base is not None and len(bases) > 1:
+                for k in range(start, len(effects)):
+                    if effects[k].kind != "uncleared":
+                        effects[k] = effects[k]._replace(word="{}, judged from {}, a directory an uncertain cd or "
+                                                         "pushd before it may reach".format(effects[k].word, base))
+        if moves:
+            bases = tuple(dict.fromkeys(sorted(reached, key=lambda spot: spot is not None)))
+            bases = bases[:_GENSRC_MAX_CD + 1] if None in bases else bases
+            for spot in bases:
+                if spot is not None and spot not in visited and len(visited) < _GENSRC_MAX_CD:
+                    visited.append(spot)
+            anchored = False
+        if seg.sep_after == "(":
+            stack.append((bases, anchored))
+        elif seg.sep_after == ")":
+            bases, anchored = stack.pop() if stack else ((None,), False)
+        elif seg.sep_after not in ("&&", "|", "|&") and not anchored:
+            # The && chain carrying the cd's success guarantee ends here (;, &, ||, a newline): a failed
+            # or skipped cd would leave the next segment in the ORIGINAL directory, so neither is known.
+            bases = (None,)
+        prev = seg.sep_after
+    return effects
+
+
+def _gensrc_target_root(target):
+    """The canonical (realpath) scrubbed git toplevel of an absolute, already-realpath target, found from
+    the target itself when it is an existing directory, else from its nearest existing ancestor directory
+    (_wrtscp_nearest_existing_dir, then _recovery_toplevel with every ambient GIT_* removed): the repository
+    whose registry governs the target. None when it sits outside every git work tree or cannot be resolved."""
+    try:
+        anchor = target if os.path.isdir(target) else _wrtscp_nearest_existing_dir(target)
+        if anchor is None:
+            return None
+        top = _recovery_toplevel(anchor)
+        return None if top is None else os.path.realpath(top)
+    except (OSError, ValueError):
+        return None
+
+
+def _gensrc_root_chain(root, session_c, limit):
+    """Every canonical repository toplevel whose registry governs a target whose INNERMOST toplevel
+    (_gensrc_target_root) is `root`, innermost first: root itself, then each ENCLOSING repository, found by
+    resolving the parent directory of the last toplevel, up to and including the session repository
+    session_c (or, when the walk never reaches it, up to the outermost enclosing repository). A repository
+    nested inside a registered tree (git init, clone or worktree add under it) must not shadow the
+    enclosing registry, so a target is judged against every registry on this chain. Returns (roots,
+    overflow): at most `limit` roots, overflow True when more enclose the target."""
+    roots = []
+    while root is not None:
+        if len(roots) >= limit:
+            return roots, True
+        roots.append(root)
+        if session_c is not None and root == session_c:
+            break
+        parent = os.path.dirname(root)
+        if parent == root:
+            break
+        root = _gensrc_target_root(parent)
+        if root in roots:
+            break
+    return roots, False
+
+
+def _gensrc_holds(entries, directory, root_c, cache=None):
+    """The first registry entry, shaped as _gensrc_match returns it, whose real path is the already-realpath
+    directory or lies inside it; None when none does; _GENSRC_MATCH_FAULT on a resolution or containment
+    fault. An authoring-scoped entry counts only where the authoring marker is present, as in _gensrc_match;
+    cache is the same per-root entry-realpath cache _gensrc_match takes."""
+    marker = None
+    for _kind, entry_target, sources, regenerate, scope in entries:
+        entry_c = _gensrc_entry_real(entry_target, root_c, cache)
+        if entry_c is _GENSRC_MATCH_FAULT:
+            return _GENSRC_MATCH_FAULT
+        verdict = _gensrc_within_real(entry_c, directory)
+        if verdict == "err":
+            return _GENSRC_MATCH_FAULT
+        if verdict != "in":
+            continue
+        if scope is None:
+            return (entry_target, sources, regenerate, None)
+        if marker is None:
+            marker = _gensrc_authoring_marker(root_c)
+        if marker[0] != "absent":
+            return (entry_target, sources, regenerate, marker)
+    return None
+
+
+def _gensrc_mentions(entries, command, root_c):
+    """The first registry entry the raw command text names, as (entry_target, sources, regenerate), or
+    None: each entry both by its basename and by its repository-relative path (a file or tree alike),
+    case-sensitively as this filesystem is, each bounded by characters that cannot continue a path word
+    (so GEN.md.bak and gen-extra name neither GEN.md nor gen/). An authoring-scoped entry counts only
+    where the authoring marker is present. An uncleared write DENIES on a mention (a deliberate
+    over-denial: naming a registered target in a command whose writes cannot be cleared is treated as
+    touching it) and notes otherwise."""
+    marker = None
+    for _kind, entry_target, sources, regenerate, scope in entries:
+        stripped = entry_target.rstrip("/")
+        names = {stripped, posixpath.basename(stripped)}
+        if not any(name and re.search(r"(?<![A-Za-z0-9_.-])" + re.escape(name) + r"(?![A-Za-z0-9_.-])",
+                                      command) for name in names):
+            continue
+        if scope is not None:
+            if marker is None:
+                marker = _gensrc_authoring_marker(root_c)
+            if marker[0] == "absent":
+                continue
+        return (entry_target, sources, regenerate)
+    return None
+
+
+def _gensrc_bash(data):
+    """The Bash channel verdict of gensrc_guard: ("allow",), ("note", message) or ("deny", reason, banner);
+    gensrc_guard turns it into the decision. A payload with no object tool_input or no readable command
+    string DENIES fail-closed (the detector cannot read it). The command is lexed under every reading of its
+    uncertain '#' characters (_gensrc_lex) and the write effects of each reading collected on its own
+    (_bash_write_effects), only where a segment can add one (_gensrc_reach); a complete lex with no effect
+    ALLOWS before any registry read or git call (reads are never judged). Where the lexer cannot judge those
+    readings, the shared uncertain-'#' fallback (the FALLBACK paragraph above _nest_track) decides
+    (_gensrc_doubt_unread): a command whose text spells no redirect, sink program or wrapper, in quoting the
+    fallback decodes, holds no write this guard judges past the '#', and is judged as a complete lex is; any
+    other is an incomplete lex. Each sink and restore path is canonicalized and judged against the
+    registry of EVERY repository on its root chain (_gensrc_root_chain: its own innermost toplevel and each
+    enclosing repository up to the session repository, so a repository nested inside a registered tree never
+    shadows the enclosing registry), the first _GENSRC_MAX_ROOTS distinct roots in command order, under at
+    most _GENSRC_MAX_DIRS distinct directories and _GENSRC_MAX_PATHS distinct paths (an effect past any
+    budget is an uncleared write); within one root, registry entries are realpath'd once and
+    duplicate effects judged once, so a long command stays linear. A present but unreadable registry DENIES
+    a sink into its repository (a restore is never denied, so the repair stays open); a sink onto a
+    registered target DENIES naming its sources and regenerate command (a present malformed authoring marker
+    on an authoring-scoped match DENIES naming the marker); a git path from another revision also DENIES a
+    registered target inside that directory; a restore of a registered target notes. Uncleared effects (and
+    an incomplete lex, and roots past the budget) DENY when the session repository registry is present but
+    unreadable, DENY when the command text names a registered target of any consulted readable registry
+    (_gensrc_mentions, a deliberate disclosed over-denial), and NOTE otherwise (the command runs, with a
+    note that its writes were not cleared). The first deny wins, then the joined notes. A fault inside the
+    detector (OSError, ValueError, RecursionError, MemoryError) DENIES fail-closed."""
+    tool_input = data.get("tool_input")
+    command = tool_input.get("command") if isinstance(tool_input, dict) else None
+    if not isinstance(command, str) or not command.strip():
+        return ("deny",
+                "AIQT rule gensrc (generated-artefact-source-only, fail-closed): the Bash payload carried no "
+                "readable command string, so the generated-artefact write-sink detector cannot read it and "
+                "denies the call.",
+                "AIQT guardrail: denied a Bash call with no readable command (rule gensrc, fail-closed).")
+    cwd = data.get("cwd")
+    if not isinstance(cwd, str) or not os.path.isabs(cwd) or any(ord(ch) < 0x20 for ch in cwd):
+        cwd = None
+    try:
+        # A lex with no record for a segment that has no word and no redirect (skip_empty) holds every segment
+        # that can add an effect (_gensrc_reach), and builds no record for a run of separators however many
+        # readings repeat it; skip_empty changes no other segment, their order or the flags. With no segment
+        # that can add one, no reading has an effect. Otherwise each reading is walked on its own from cwd. The
+        # walk reads a left-out segment only for its separator, which moves the directory only at a ) (a
+        # restore, or an unmatched one that makes it unknown) or after a cd, pushd or popd (the separators it
+        # is certain across); so the command is lexed again with those records only where its text holds a )
+        # or a segment is such a directory change, and the decision is the one the full lex alone gives.
+        readings, complete, doubt = _gensrc_lex(command, skip_empty=True)
+        reach = [_gensrc_reach(seg) for segs in readings for seg in segs]
+        effects = []
+        if any(writes for writes, _moves in reach):
+            if ")" in command or any(moves for _writes, moves in reach):
+                readings, complete, doubt = _gensrc_lex(command)
+            for segs in readings:
+                effects.extend(_bash_write_effects(segs, cwd))
+        # Text the lexer did not read: where it stopped at a '#' whose readings it cannot judge, the fallback
+        # decides whether that text may hold a judged write (_gensrc_doubt_unread); where it stopped at any
+        # other construct, it may.
+        unread = not complete and (not doubt or _gensrc_doubt_unread(command))
+        if not unread and not effects:
+            return ("allow",)
+        why = [eff.word for eff in effects if eff.kind == "uncleared"]
+        if unread and doubt:
+            why.append("a '#' whose comment reading depends on context that the shared lexer could not judge "
+                       "under both readings (more than four such '#', or one in or right after a backquote "
+                       "substitution), so it read nothing past that '#', in a command whose text spells a "
+                       "redirect, a sink program or a wrapper, or holds quoting the fallback does not decode")
+        elif unread:
+            why.append("a command the lexer cannot finish (a here-string, process substitution, fd-variable "
+                       "redirect or unbalanced quote stops it)")
+        session_c = None
+        if cwd is not None:
+            session = _recovery_toplevel(cwd)
+            if session is not None:
+                session_c = os.path.realpath(session)
+        anchors = {}
+        resolved = {}
+        chains = {}
+        roots = collections.OrderedDict()
+        overflow = False
+        for eff in effects:
+            if eff.kind == "uncleared":
+                continue
+            pair = resolved.get(eff.path)
+            if pair is None:
+                # One realpath and isdir per DISTINCT path, so a command repeating one target (a long run
+                # of redirects to the same file) resolves it once and stays linear; a path past the
+                # distinct-path budget is an uncleared write, never judged.
+                if len(resolved) >= _GENSRC_MAX_PATHS:
+                    overflow = overflow or eff.kind == "sink"
+                    continue
+                real = os.path.realpath(eff.path)
+                pair = (real, real if os.path.isdir(real) else os.path.dirname(real))
+                resolved[eff.path] = pair
+            real, key = pair
+            if key not in anchors:
+                if len(anchors) >= _GENSRC_MAX_DIRS:
+                    overflow = overflow or eff.kind == "sink"
+                    continue
+                inner = _gensrc_target_root(real)
+                if inner is None:
+                    anchors[key] = ((), False)
+                else:
+                    if inner not in chains:
+                        # One ancestor walk per distinct innermost root, however many sinks share it.
+                        chains[inner] = _gensrc_root_chain(inner, session_c, _GENSRC_MAX_ROOTS)
+                    anchors[key] = chains[inner]
+            chain, nested_over = anchors[key]
+            if nested_over:
+                overflow = overflow or eff.kind == "sink"
+            for root_c in chain:
+                if root_c not in roots:
+                    if len(roots) >= _GENSRC_MAX_ROOTS:
+                        overflow = overflow or eff.kind == "sink"
+                        continue
+                    roots[root_c] = ([], set())
+                items, seen = roots[root_c]
+                mark = (eff.kind, real, eff.posture)
+                if mark not in seen:
+                    seen.add(mark)
+                    items.append((eff, real))
+        if overflow:
+            why.append("sinks into more than {} distinct or nested repository roots, under more than {} "
+                       "distinct directories, or onto more than {} distinct paths in one command (only "
+                       "those are judged)".format(_GENSRC_MAX_ROOTS, _GENSRC_MAX_DIRS, _GENSRC_MAX_PATHS))
+        notes = []
+        loaded = collections.OrderedDict()
+        for root_c, (items, _seen) in roots.items():
+            status, payload = _load_gensrc_registry(root_c)
+            loaded[root_c] = (status, payload)
+            if status == "absent":
+                continue
+            if status == "bad":
+                sink = next((pair for pair in items if pair[0].kind == "sink"), None)
+                if sink is None:
+                    continue
+                return ("deny",
+                        "AIQT rule gensrc (generated-artefact-source-only): this Bash command writes {} ({}) in "
+                        "{}, whose .aiqt/gensrc.json registry is PRESENT but could not be read ({}), so this "
+                        "guard cannot tell whether the target is a generated artefact. It fails closed and "
+                        "denies the command rather than let a corrupted or unreadable registry silently disable "
+                        "the generated-artefact protection. Repair or regenerate the registry first: python3 "
+                        "tools/gen_gensrc.py and a git restore of .aiqt/gensrc.json spell no judged sink and "
+                        "stay allowed.".format(sink[1], sink[0].word, root_c, payload),
+                        "AIQT guardrail: denied a Bash write because {}/.aiqt/gensrc.json is present but "
+                        "unreadable/malformed, a fail-closed cannot-evaluate (rule gensrc); regenerate or repair "
+                        "the registry, then retry.".format(root_c))
+            cache = {}
+            for eff, real in items:
+                if _gensrc_within_real(real, root_c) != "in":
+                    if eff.kind == "sink":
+                        why.append("a sink whose real path leaves its own resolved toplevel")
+                    continue
+                match = _gensrc_match(payload, real, root_c, cache)
+                if match is None and eff.kind == "sink" and eff.posture != "file" and os.path.isdir(real):
+                    held = _gensrc_holds(payload, real, root_c, cache)
+                    if held is not None and held is not _GENSRC_MATCH_FAULT and eff.posture == "rcopy":
+                        why.append("a recursive copy into a directory that holds a registered target")
+                        continue
+                    match = held
+                if match is _GENSRC_MATCH_FAULT:
+                    if eff.kind == "sink":
+                        why.append("a registry entry that cannot be resolved for containment")
+                    continue
+                if match is None:
+                    continue
+                entry_target, sources, regenerate, marker = match
+                if eff.kind == "restore":
+                    notes.append("{} restores the committed bytes of the generated artefact {} ({}); regenerate "
+                                 "with {} and run its --check so source and derivative still agree."
+                                 .format(eff.word, entry_target, root_c, regenerate))
+                    continue
+                if marker is not None and marker[0] == "bad":
+                    return ("deny",
+                            "AIQT rule gensrc (generated-artefact-source-only): this Bash command writes {} ({}), "
+                            "the authoring-only generated artefact {} ({}/.aiqt/gensrc.json, scope authoring), "
+                            "and the authoring marker .aiqt/authoring.toml is PRESENT but malformed ({}), so this "
+                            "guard cannot tell the pack authoring tree from an adopter tree. It fails closed and "
+                            "denies the command. Repair .aiqt/authoring.toml (exactly format-version = 1 and role "
+                            "= pack-authoring-repository), or remove it if this is not the pack authoring "
+                            "repository, then retry.".format(real, eff.word, entry_target, root_c, marker[1]),
+                            "AIQT guardrail: denied a Bash write to the authoring-only artefact {} because "
+                            ".aiqt/authoring.toml is present but malformed, a fail-closed cannot-evaluate (rule "
+                            "gensrc); repair or remove the marker, then retry.".format(entry_target))
+                return ("deny",
+                        "AIQT rule gensrc (generated-artefact-source-only): this Bash command writes {} ({}), which "
+                        "is the generated artefact {} of {}/.aiqt/gensrc.json or lies inside it; it is changed only "
+                        "through its source, so a hand-edit is denied. Edit {} and regenerate with {} instead; "
+                        "source and derivative land in the same change. Reads and generator runs that spell no "
+                        "shell sink are never judged.".format(
+                            real, eff.word, entry_target, root_c, ", ".join(sources), regenerate),
+                        "AIQT guardrail: denied a Bash write to the generated artefact {} (rule gensrc): edit the "
+                        "source and regenerate ({}).".format(entry_target, regenerate))
+        if why:
+            reasons = "; ".join(sorted(set(why)))
+            if session_c is not None and session_c not in loaded:
+                loaded[session_c] = _load_gensrc_registry(session_c)
+            session_registry = loaded.get(session_c)
+            if session_registry is not None and session_registry[0] == "bad":
+                return ("deny",
+                        "AIQT rule gensrc (generated-artefact-source-only): the guard could not clear every "
+                        "write this Bash command makes ({}), and the .aiqt/gensrc.json registry of the session "
+                        "repository {} is PRESENT but could not be read ({}), so it cannot tell whether such a "
+                        "write lands on a generated artefact. It fails closed and denies the command. Repair or "
+                        "regenerate the registry first (python3 tools/gen_gensrc.py, or a git restore of "
+                        ".aiqt/gensrc.json), then retry.".format(reasons, session_c, session_registry[1]),
+                        "AIQT guardrail: denied a Bash command with an uncleared write because "
+                        ".aiqt/gensrc.json is present but unreadable/malformed (rule gensrc, fail-closed).")
+            for root_c, (status, payload) in loaded.items():
+                if status != "ok":
+                    continue
+                named = _gensrc_mentions(payload, command, root_c)
+                if named is None:
+                    continue
+                entry_target, sources, regenerate = named
+                return ("deny",
+                        "AIQT rule gensrc (generated-artefact-source-only): the guard could not clear every "
+                        "write this Bash command makes ({}), and the command names the registered generated "
+                        "artefact {} ({}/.aiqt/gensrc.json), so it fails closed and denies the command rather "
+                        "than guess where the uncleared write lands (a deliberate over-denial: the command may "
+                        "not touch {} at all). To change it, edit {} and regenerate with '{}'; otherwise "
+                        "re-spell this command so every write names a literal, resolvable path."
+                        .format(reasons, entry_target, root_c, entry_target, ", ".join(sources), regenerate),
+                        "AIQT guardrail: denied a Bash command with an uncleared write that names the "
+                        "generated artefact {} (rule gensrc, fail-closed); edit the source and regenerate "
+                        "({}), or re-spell the write with a literal path.".format(entry_target, regenerate))
+            notes.append("The guard could not clear every write this Bash command makes ({}), and it names no "
+                         "registered generated artefact, so it is allowed unjudged; if a write lands on a "
+                         "generated artefact, edit its source and regenerate instead.".format(reasons))
+        if notes:
+            return ("note", "AIQT guardrail (rule gensrc, generated-artefact-source-only): " + " ".join(notes)
+                    + " The CI drift gate remains the backstop.")
+        return ("allow",)
+    except (OSError, ValueError, RecursionError, MemoryError) as exc:
+        return ("deny",
+                "AIQT rule gensrc (generated-artefact-source-only, fail-closed): the Bash write-sink detector "
+                "faulted while reading this command ({}: {}), so it cannot clear it and denies it. Split the "
+                "command into simpler steps and retry; a generated artefact changes only through its source "
+                "and its regenerate command.".format(type(exc).__name__, exc),
+                "AIQT guardrail: denied a Bash command the generated-artefact detector could not evaluate "
+                "(rule gensrc, fail-closed).")
+
+
 def gensrc_guard(data):
-    """gensrc (integ/generated-artefact-source-only), PreToolUse on Write|Edit|MultiEdit: DENY-and-educate a
-    Write/Edit/MultiEdit that hand-edits a generated artefact registered in the per-repo
-    .aiqt/gensrc.json, read AT DECISION TIME. A REGISTRY-DRIVEN PATH guard, not a content judge: it
-    fires only when the file_path resolves onto a kind=file or kind=tree registry entry. Coverage is
-    exactly the registry, so an ABSENT registry is the inert ALLOW by design; kind=block entries are
-    EXCLUDED (a path guard cannot see which lines an edit touches); Bash is EXCLUDED by design
-    (regeneration itself runs through Bash), so the matcher is Write|Edit|MultiEdit only. A Write, Edit or
+    """gensrc (integ/generated-artefact-source-only), PreToolUse on Write|Edit|MultiEdit|Bash: DENY-and-educate a
+    write onto a generated artefact registered in a .aiqt/gensrc.json, read AT DECISION TIME. A REGISTRY-DRIVEN
+    PATH guard, not a content judge, on two channels: the Write/Edit/MultiEdit file_path, and the write sinks a
+    Bash command spells literally (_gensrc_bash, which also documents the Bash postures). The registry consulted
+    is the one at the scrubbed git toplevel of the TARGET (_gensrc_target_root: its nearest existing ancestor
+    directory, every ambient GIT_* removed; NOT _gen_common.repo_root, which falls back to cwd and would fabricate
+    a root), not of the session cwd, so a write into a sibling repository or store is judged against that
+    repository registry. Coverage is exactly the registry, so an ABSENT registry is the inert ALLOW by design;
+    kind=block entries are EXCLUDED (a path guard cannot see which lines an edit touches). A Write, Edit or
     MultiEdit to a sibling settings file such as .claude/settings.local.json is not judged either (no generator
     writes it, so no registry entry names it; that it holds only personal settings is a convention, not
     enforced), yet it can change hook behaviour for later sessions; the settings precedence Claude Code gives
-    it is not verified by this pack. NO-ASK posture:
-    a CONFIRMED registry match DENIES and names the source to edit and the regenerate command (a reachable
-    correct action). A PRESENT-but-unreadable/malformed registry ALSO DENIES, fail-closed:
-    a corrupted registry must not silently disable the generated-artefact protection, so a cannot-read of
-    a PRESENT .aiqt/gensrc.json is a cannot-evaluate resolved to the safe (deny) outcome for this protective
-    guard. The remaining cannot-evaluate branches (each routed through _gensrc_fail_ask: an unreadable
-    tool_name (an empty string, a list, a bool), a non-dict tool_input, a missing or unreadable file_path, a
-    control character in file_path, no session cwd, a non-git session, an unresolvable target or repo root, a
-    target outside the repo or a containment fault, a registry entry that cannot be resolved for containment)
-    are NOT confirmed generated-artefact edits, have no "edit the source" action to name, and are outside any
-    expected coverage, so they ALLOW with an informational note rather than block a legitimate edit; a
-    genuinely-ABSENT registry is likewise the inert ALLOW (adopters author their own). An entry scoped
-    "authoring" (gen_gensrc marks the tools/gen_hooks.py AUTHORING_ONLY_REL targets) is honoured only in the
-    pack authoring tree: on its match the guard reads .aiqt/authoring.toml at the repo root, an ABSENT marker
-    skips the entry silently (an adopter's own .claude/settings.json is theirs), the exact marker honours it,
-    and a PRESENT-but-malformed marker denies fail-closed (_gensrc_authoring_marker). The CI
-    generated-artefact drift gate remains the authoritative backstop. Besides a confirmed registry match, the
-    guard denies fail-closed in exactly four cases: a missing tool_name (the shared fail-closed contract), a
-    PRESENT-but-unreadable/malformed registry, a PRESENT-but-malformed authoring marker on a matching
-    authoring-scoped entry, and a mis-wired event (a hard block, exit 2). The repo root is
-    the git toplevel of the SESSION cwd via the scrubbed _recovery_toplevel primitive (NOT
-    _gen_common.repo_root, which falls back to cwd and would fabricate a root)."""
+    it is not verified by this pack. A target inside a NESTED repository is judged against every registry
+    from its innermost repository up to the session repository (_gensrc_root_chain), so a git init, clone or
+    worktree add inside a registered tree never shadows the enclosing registry. Regeneration stays
+    open structurally: a Bash command that spells no recognized sink (python3 tools/gen_x.py) is allowed before
+    any registry read. NO-ASK posture: a CONFIRMED registry match DENIES and names the source to edit and the
+    regenerate command (a reachable correct action). A PRESENT-but-unreadable/malformed registry ALSO DENIES,
+    fail-closed: a corrupted registry must not silently disable the generated-artefact
+    protection. For Write/Edit/MultiEdit the remaining cannot-evaluate branches (each routed through
+    _gensrc_fail_ask: an unreadable tool_name (an empty string, a list, a bool), a non-dict tool_input, a missing
+    or unreadable file_path, a control character in file_path, a relative file_path with no session cwd, an
+    unresolvable target (one over the resolution budget after normalization included), a target outside every
+    git work tree, a target under more nested repositories than the ancestor-walk budget, a target whose real
+    path leaves its own toplevel or a containment fault, a registry entry that cannot be resolved for
+    containment) are NOT confirmed
+    generated-artefact edits and ALLOW with an informational note rather than block a legitimate edit. An entry
+    scoped "authoring" (gen_gensrc marks the tools/gen_hooks.py AUTHORING_ONLY_REL targets) is honoured only in
+    the pack authoring tree: on its match the guard reads .aiqt/authoring.toml at the repo root, an ABSENT marker
+    skips the entry silently (an adopter own .claude/settings.json is theirs), the exact marker honours it, and a
+    PRESENT-but-malformed marker denies fail-closed (_gensrc_authoring_marker). The CI generated-artefact drift
+    gate remains the authoritative backstop. Besides a confirmed registry match, the guard denies fail-closed on
+    a missing tool_name (the shared fail-closed contract), a PRESENT-but-unreadable/malformed registry, a
+    PRESENT-but-malformed authoring marker on a matching authoring-scoped entry, the Bash payload and detector
+    faults _gensrc_bash lists, and a mis-wired event (a hard block, exit 2)."""
     if data.get("hook_event_name") != PRETOOL:
         return _hard_block("aiqt_hooks: gensrc_guard wired to unexpected event {!r}; failing closed"
                            .format(data.get("hook_event_name")))
     tool_name = data.get("tool_name")
     if tool_name is None:
-        # A missing field cannot be matched. This is one of four fail-closed denies, with a present but
-        # unreadable/malformed registry, a present but malformed authoring marker on an authoring-scoped
-        # match, and a mis-wired event (the hard block above).
+        # A missing field cannot be matched: the shared fail-closed deny, beside a present but unreadable/malformed
+        # registry, a present but malformed authoring marker on an authoring-scoped match, the Bash payload and
+        # detector faults, and a mis-wired event (the hard block above).
         return _deny_missing_tool_name("gensrc")
     if not isinstance(tool_name, str) or not tool_name:
-        # A present-but-unreadable tool_name (an empty string, a list, a bool) cannot be matched against
-        # the scope set; allow with a warning systemMessage rather than silently allow. The fail-closed
-        # denies are a MISSING tool_name, a present but unreadable/malformed registry, a present but
-        # malformed authoring marker on an authoring-scoped match, and a mis-wired event.
+        # A present-but-unreadable tool_name (an empty string, a list, a bool) cannot be matched against the scope
+        # set; allow with a warning systemMessage rather than silently allow.
         return _gensrc_fail_ask("the tool_name was unreadable")
+    if tool_name == "Bash":
+        verdict = _gensrc_bash(data)
+        if verdict[0] == "deny":
+            return _deny(verdict[1], verdict[2])
+        if verdict[0] == "note":
+            return _allow_note(verdict[1])
+        return _allow()
     if tool_name not in _GENSRC_TOOLS:
-        return _allow()  # out of scope (defensive; the matcher governs Write/Edit/MultiEdit)
+        return _allow()  # out of scope (defensive; the matcher governs Write/Edit/MultiEdit/Bash)
     tool_input = data.get("tool_input")
     if not isinstance(tool_input, dict):
         return _gensrc_fail_ask("the {} payload carried no readable tool_input".format(tool_name))
@@ -18792,59 +21507,92 @@ def gensrc_guard(data):
     # never crashes.
     if any(ord(ch) < 0x20 or ord(ch) == 0x7f for ch in file_path):
         return _gensrc_fail_ask("the {} payload file_path contains a control character".format(tool_name))
-    cwd = data.get("cwd")
-    if not isinstance(cwd, str) or not cwd:
-        return _gensrc_fail_ask("the payload carried no session cwd, so the repo root cannot be resolved")
-    # The scrubbed rev-parse primitive (every ambient GIT_* removed), so an ambient decoy repo cannot
-    # redirect the registry read; None means the cwd is outside any git work tree (a non-git session).
-    root = _recovery_toplevel(cwd)
-    if root is None:
-        return _gensrc_fail_ask("the session cwd is outside any resolvable git work tree")
-    status, payload = _load_gensrc_registry(root)
-    if status == "absent":
-        return _allow()  # the inert boundary: no registry, no coverage (adopters author their own)
-    if status == "bad":
-        # a PRESENT-but-unreadable/malformed registry is a cannot-evaluate for a
-        # PROTECTIVE guard, so it fails CLOSED (DENY), never allow-note. Allow-noting it let a crippled or
-        # corrupted .aiqt/gensrc.json disable the generated-artefact restriction outright (garble the
-        # registry, then hand-edit any generated file). Only a genuinely-ABSENT registry (adopters author
-        # their own) and a non-git session, where no generated-file protection is expected, stay allow /
-        # allow-note; a PRESENT registry that cannot be read denies and names the (Bash-side) fix.
-        return _deny(
-            "AIQT rule gensrc (generated-artefact-source-only): the .aiqt/gensrc.json registry is PRESENT "
-            "but could not be read ({}), so this guard cannot tell whether the target is a generated "
-            "artefact. It fails closed and denies the edit rather than let a corrupted or unreadable "
-            "registry silently disable the generated-artefact protection. Regenerate or repair "
-            ".aiqt/gensrc.json (its generator runs through Bash, which this guard does not cover), then "
-            "retry.".format(payload),
-            "AIQT guardrail: denied a {} because .aiqt/gensrc.json is present but unreadable/malformed, a "
-            "fail-closed cannot-evaluate (rule gensrc); regenerate or repair the registry, then retry."
-            .format(tool_name))
-    entries = payload
-    if not entries:
-        return _allow()  # a registry of only block entries has nothing this path guard can match
-    # A relative file_path can only arrive via MultiEdit (abs-paths does not cover it); joining it onto
-    # cwd matches the platform's own resolution. Canonicalize both to realpaths for the match; a
-    # resolution fault (a symlink loop, an unresolvable path) is an unresolvable target -> allow with a
-    # warning systemMessage, NOT an uncaught crash the dispatcher would turn into an exit-2 hard DENY.
+    # A relative file_path can only arrive via MultiEdit (abs-paths does not cover it); joining it onto cwd
+    # matches the platform own resolution, so the session cwd is needed only then. Canonicalize to a realpath
+    # for the match; a resolution fault (a symlink loop, an unresolvable path) is an unresolvable target ->
+    # allow with a warning systemMessage, NOT an uncaught crash the dispatcher would turn into an exit-2 deny.
+    if _is_absolute(file_path):
+        joined = file_path
+    else:
+        cwd = data.get("cwd")
+        if not isinstance(cwd, str) or not cwd:
+            return _gensrc_fail_ask("the payload carried a relative file_path and no session cwd, so the target "
+                                    "cannot be resolved")
+        joined = os.path.join(cwd, file_path)
+    # Normalize BEFORE the length budget: the budget bounds the RESOLVED path, so a path padded with ./
+    # runs (long as spelled, short once normalized) is judged like its normalized form, not waved past the
+    # registry. A target still over the budget after normalization is not resolved: resolving it (realpath,
+    # then the ancestor walk) costs time super-linear in its length, so it is treated as an unresolvable
+    # target, within the decision deadline (a RESOLUTION budget, not a claim that no syscall accepts it).
+    joined = os.path.normpath(joined)
+    if len(os.fsencode(joined)) > _GENSRC_MAX_TARGET:
+        return _gensrc_fail_ask("the normalized target path is over the {}-byte resolution budget, so it "
+                                "is not resolved".format(_GENSRC_MAX_TARGET))
     try:
-        target = os.path.realpath(file_path if _is_absolute(file_path) else os.path.join(cwd, file_path))
-        root_c = os.path.realpath(root)
+        target = os.path.realpath(joined)
     except (OSError, ValueError):
-        return _gensrc_fail_ask("the target or repo root could not be resolved (an unresolvable path)")
-    within = _gensrc_within(target, root_c)
-    if within != "in":
-        # "out" (proven outside) OR "err" (a containment fault) both allow with a warning systemMessage: an
-        # uncleared target cannot be judged against the registry of THIS repo, so it must never read as a
-        # silent allow.
-        return _gensrc_fail_ask("the target canonicalizes outside the resolved repo, or the containment "
-                                "check could not be cleared, so it cannot be judged against the registry "
-                                "of this repo")
-    match = _gensrc_match(entries, target, root_c)
-    if match is _GENSRC_MATCH_FAULT:
-        return _gensrc_fail_ask("a registry entry could not be resolved for containment, so a no-match "
-                                "cannot be proven")
-    if match is None:
+        return _gensrc_fail_ask("the target could not be resolved (an unresolvable path)")
+    # The registries of the TARGET own repository AND of every repository enclosing it, innermost first,
+    # up to the session repository (_gensrc_root_chain; each root the scrubbed toplevel of a nearest
+    # existing ancestor, every ambient GIT_* removed, so an ambient decoy repo cannot redirect the registry
+    # read, and a repository nested inside a registered tree cannot shadow the enclosing registry). An
+    # empty chain means the target is outside every git work tree.
+    inner_root = _gensrc_target_root(target)
+    if inner_root is None:
+        return _gensrc_fail_ask("the target is outside any resolvable git work tree")
+    session_c = None
+    session_cwd = data.get("cwd")
+    if isinstance(session_cwd, str) and session_cwd:
+        try:
+            session = _recovery_toplevel(session_cwd)
+            session_c = None if session is None else os.path.realpath(session)
+        except (OSError, ValueError):
+            session_c = None
+    chain, chain_over = _gensrc_root_chain(inner_root, session_c, _GENSRC_MAX_ROOTS)
+    if chain_over:
+        return _gensrc_fail_ask("the target sits under more than {} nested repositories, past the ancestor "
+                                "walk budget, so its governing registries cannot all be read"
+                                .format(_GENSRC_MAX_ROOTS))
+    for root_c in chain:
+        status, payload = _load_gensrc_registry(root_c)
+        if status == "absent":
+            continue  # the inert boundary: no registry, no coverage (adopters author their own)
+        if status == "bad":
+            # a PRESENT-but-unreadable/malformed registry is a cannot-evaluate for a
+            # PROTECTIVE guard, so it fails CLOSED (DENY), never allow-note. Allow-noting it let a crippled or
+            # corrupted .aiqt/gensrc.json disable the generated-artefact restriction outright (garble the
+            # registry, then hand-edit any generated file). Only a genuinely-ABSENT registry (adopters author
+            # their own) and a target outside every work tree, where no generated-file protection is expected,
+            # stay allow / allow-note; a PRESENT registry that cannot be read denies and names the (Bash-side)
+            # fix.
+            return _deny(
+                "AIQT rule gensrc (generated-artefact-source-only): the .aiqt/gensrc.json registry of {} is "
+                "PRESENT but could not be read ({}), so this guard cannot tell whether the target is a "
+                "generated artefact. It fails closed and denies the edit rather than let a corrupted or "
+                "unreadable registry silently disable the generated-artefact protection. Regenerate or repair "
+                ".aiqt/gensrc.json (python3 tools/gen_gensrc.py, or a git restore of it, through Bash: neither "
+                "spells a sink this guard judges), then retry.".format(root_c, payload),
+                "AIQT guardrail: denied a {} because .aiqt/gensrc.json is present but unreadable/malformed, a "
+                "fail-closed cannot-evaluate (rule gensrc); regenerate or repair the registry, then retry."
+                .format(tool_name))
+        entries = payload
+        if not entries:
+            continue  # a registry of only block entries has nothing this path guard can match
+        within = _gensrc_within(target, root_c)
+        if within != "in":
+            # "out" (proven outside: the real path left the toplevel found from it) OR "err" (a containment
+            # fault) both allow with a warning systemMessage: an uncleared target cannot be judged against
+            # this registry, so it must never read as a silent allow.
+            return _gensrc_fail_ask("the target canonicalizes outside its own resolved repo, or the "
+                                    "containment check could not be cleared, so it cannot be judged against "
+                                    "the registry of this repo")
+        match = _gensrc_match(entries, target, root_c)
+        if match is _GENSRC_MATCH_FAULT:
+            return _gensrc_fail_ask("a registry entry could not be resolved for containment, so a no-match "
+                                    "cannot be proven")
+        if match is not None:
+            break
+    else:
         return _allow()  # not a registered generated artefact (or an authoring-only one in an adopter tree)
     entry_target, sources, regenerate, marker = match
     if marker is not None and marker[0] == "bad":
@@ -18858,7 +21606,7 @@ def gensrc_guard(data):
             "PRESENT but malformed ({}), so this guard cannot tell the pack authoring tree from an adopter "
             "tree. It fails closed and denies the edit. Repair .aiqt/authoring.toml (exactly format-version = "
             "1 and role = \"pack-authoring-repository\"), or remove it if this is not the pack authoring "
-            "repository, through Bash, which this guard does not judge, then retry."
+            "repository (removing or rewriting the marker spells no sink this guard judges), then retry."
             .format(file_path, entry_target, marker[1]),
             "AIQT guardrail: denied a {} to the authoring-only artefact {} because .aiqt/authoring.toml is "
             "present but malformed, a fail-closed cannot-evaluate (rule gensrc); repair or remove the marker, "
@@ -18905,6 +21653,13 @@ _ORCH_STATES = frozenset(("open", "closed", "proposed"))
 _ORCH_LOOP_BOUND = 2          # stop-path denies per epoch before ALLOW_WITH_FINDINGS
 _ORCH_SCHEDULE_CAP = 3        # schedule-path denies on an unchanged basis before findings
 _ORCH_MAX_NAMED = 10          # actionable items named in a deny message
+# Enumerator-supplied text reaches a deny message only through _orch_clip, so each named field is one bounded
+# line: an id, a title, and a reason or detail field are each cut to these many characters (mark included).
+_ORCH_NAMED_ID_MAX = 80
+_ORCH_NAMED_TITLE_MAX = 120
+_ORCH_NAMED_REASON_MAX = 200
+_ORCH_CLIP_MARK = "[...]"
+_ORCH_CLIP_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f" "\N{LINE SEPARATOR}\N{PARAGRAPH SEPARATOR}]")
 # The `Operating-mode:` declaration is parsed per PHYSICAL line (the reader splits on newlines first, so the
 # value can never cross a line boundary): optional leading horizontal whitespace, then the key, then the value
 # is the REST OF THAT LINE ONLY. A present declaration whose value does not classify (empty or unrecognized)
@@ -18916,6 +21671,11 @@ _ORCH_MODE_DECL_LINE_RE = re.compile(r"^[ \t]*Operating-mode:[ \t]*(.*)$")
 # `attended (ipad); continuous mode` begin with the mode word and classify. Order: unattended before attended.
 _ORCH_MODE_UNATTENDED_RE = re.compile(r"unattended(\b|$)")
 _ORCH_MODE_ATTENDED_RE = re.compile(r"attended(\b|$)")
+# The structured operating-mode record a JSON mode file may carry instead of the bare {"mode": ...} object:
+# its keys include `mode` and are otherwise drawn only from these, and its `set_at` is a UTC time written
+# YYYY-MM-DDTHH:MM:SSZ in ASCII digits (matched whole, so a trailing newline or offset does not pass).
+_ORCH_MODE_RECORD_KEYS = frozenset(("mode", "phase", "set_by", "set_at"))
+_ORCH_MODE_SET_AT_RE = re.compile(r"([0-9]{4})-([0-9]{2})-([0-9]{2})T([0-9]{2}):([0-9]{2}):([0-9]{2})Z")
 # The guards-armed posture a present-but-unusable mode marker fails closed to: it carries the `unattended`
 # token, so the ask blocker arms on it and _orch_scope_live reads it as a live (non-None) mode. A recognized
 # mode value carries the `attended`/`unattended` family token (so both `unattended` and `attended` spellings,
@@ -19627,6 +22387,33 @@ def _orch_reject_duplicate_keys(pairs):
     return seen
 
 
+def _orch_mode_object_ok(obj):
+    """True when a parsed JSON object is a mode marker whose `mode` string the reader classifies: the bare
+    {"mode": str} object, or a structured operating-mode record whose keys include `mode` and are otherwise
+    drawn only from `phase`, `set_by` and `set_at` (_ORCH_MODE_RECORD_KEYS), with `mode` a string, `phase`
+    null or a string, `set_by` a string, and `set_at` a string of the form YYYY-MM-DDTHH:MM:SSZ that names a
+    real calendar time. False for anything else (another key, a wrong type, a malformed or impossible
+    `set_at`), which the caller fails closed to guards-armed. A duplicate key never reaches here: the parse
+    refuses it first (_orch_reject_duplicate_keys)."""
+    if not isinstance(obj, dict) or not isinstance(obj.get("mode"), str):
+        return False
+    if not set(obj) <= _ORCH_MODE_RECORD_KEYS:
+        return False
+    if "phase" in obj and obj["phase"] is not None and not isinstance(obj["phase"], str):
+        return False
+    if "set_by" in obj and not isinstance(obj["set_by"], str):
+        return False
+    if "set_at" in obj:
+        m = _ORCH_MODE_SET_AT_RE.fullmatch(obj["set_at"]) if isinstance(obj["set_at"], str) else None
+        if m is None:
+            return False
+        try:
+            datetime.datetime(*(int(part) for part in m.groups()))
+        except ValueError:
+            return False                  # the form matched but the time does not exist (month 13, 24:00:00)
+    return True
+
+
 def _orch_mode_read(path):
     """Read the mode file at path without waiting for a FIFO writer and without reading past the bound:
     ('absent', None) when the open reports not found, ('ok', text) for a regular file of at most
@@ -19709,9 +22496,11 @@ def _orch_mode_detail(reg, root):
         a present `Operating-mode:` declaration line whose value is empty or does not begin with attended or
         unattended; or, when no declaration line is present, a JSON-shaped marker (the content begins with
         `{`, `[`, or `"`) that is malformed or partial (an unterminated string, trailing garbage, or duplicate
-        keys), or that parses to anything other than a dict with EXACTLY the single key `mode` whose value is a
-        string beginning with attended or unattended (a scalar, an array, an object with extra keys, or an
-        object whose `mode` is absent, non-string, or an unrecognized value all fail closed here);
+        keys), or that parses to anything other than an accepted mode object (_orch_mode_object_ok: the bare
+        {"mode": str} object, or a structured operating-mode record that adds only `phase`, `set_by` and
+        `set_at` of their stated types) whose `mode` string begins with attended or unattended (a scalar, an
+        array, an object with another key or a wrong-typed value or a malformed `set_at`, or an object whose
+        `mode` is absent, non-string, or an unrecognized value all fail closed here);
       - "attended" when a recognized attended marker is present: a non-None value that does NOT contain
         `unattended`, so _orch_scope_live reads scope as live AND orch_ask_guard judges the ask against
         the fresh backlog (_orch_ask_attended) rather than taking the unattended deny.
@@ -19724,8 +22513,9 @@ def _orch_mode_detail(reg, root):
       3. The value and the JSON `mode` string are classified by the word-anchored mode grammar
          (_orch_mode_classify), a prefix match at the start, never a substring, so `disattended` and
          `not-attended` do NOT match `attended`.
-      4. JSON is parsed strict-exact with a duplicate-key-rejecting hook and an exactly-{"mode": str} shape,
-         so duplicate keys, extra keys, and non-object or non-string-mode values all fail closed."""
+      4. JSON is parsed strict-exact with a duplicate-key-rejecting hook and a closed shape (the bare
+         {"mode": str} object or the structured record of _orch_mode_object_ok), so duplicate keys, other
+         keys, wrong-typed record fields, and non-object or non-string-mode values all fail closed."""
     path = _orch_path(root, (reg.get("mode") or {}).get("path") if isinstance(
         reg.get("mode"), dict) else None)
     if not path:
@@ -19761,11 +22551,11 @@ def _orch_mode_classify_text(text):
         # `{`, `[`, or `"`) fails CLOSED; anything else is ordinary prose with no declaration and no JSON, the
         # no-marker None (fail open, because the file is shared).
         return _ORCH_MODE_ARMED if stripped[:1] in ("{", "[", '"') else None
-    if isinstance(obj, dict) and set(obj) == {"mode"} and isinstance(obj["mode"], str):
+    if _orch_mode_object_ok(obj):
         classified = _orch_mode_classify(obj["mode"])
         return classified if classified is not None else _ORCH_MODE_ARMED
-    # Any other JSON (a scalar, an array, an object with extra keys, or a dict without a string `mode`) is a
-    # present-but-unrecognized marker and fails CLOSED to guards-armed.
+    # Any other JSON (a scalar, an array, an object with a key outside the record keys or a value of the wrong
+    # type, or a dict without a string `mode`) is a present-but-unrecognized marker and fails CLOSED.
     return _ORCH_MODE_ARMED
 
 
@@ -19947,6 +22737,17 @@ def _orch_escape_active(reg, root):
     return (True, None)
 
 
+def _orch_clip(value, limit):
+    """value as one bounded line for a deny message: every control character (LF and CR included) and
+    every Unicode line or paragraph separator becomes a space, and text longer than limit is cut to
+    exactly limit characters ending in _ORCH_CLIP_MARK, so enumerator-supplied text can neither split a
+    reason across lines nor grow it without bound."""
+    text = _ORCH_CLIP_CONTROL_RE.sub(" ", str(value))
+    if len(text) > limit:
+        text = text[:limit - len(_ORCH_CLIP_MARK)] + _ORCH_CLIP_MARK
+    return text
+
+
 def validate_enumeration(obj):
     """AEI v1 strict validation: (items, None) on a valid enumeration, (None, detail) otherwise. A
     duplicate id, a malformed item or field, an unknown version, a missing envelope, or a non-dict
@@ -19956,7 +22757,8 @@ def validate_enumeration(obj):
         return (None, "payload is not a JSON object")
     version = obj.get("version")
     if type(version) is not int or version != 1:
-        return (None, "unknown AEI version {!r} (an exact integer 1 is required)".format(version))
+        return (None, "unknown AEI version {} (an exact integer 1 is required)".format(
+            _orch_clip(repr(version), _ORCH_NAMED_REASON_MAX)))
     gen = obj.get("generated_at_utc")
     gen_ts = _orch_parse_utc(gen) if isinstance(gen, str) else None
     if gen_ts is None:
@@ -19977,29 +22779,31 @@ def validate_enumeration(obj):
         iid = raw.get("id")
         if not isinstance(iid, str) or not iid:
             return (None, "an item has no string id")
+        named_iid = _orch_clip(iid, _ORCH_NAMED_ID_MAX)
         if iid in seen:
-            return (None, "duplicate item id {!r}".format(iid))
+            return (None, "duplicate item id {}".format(_orch_clip(repr(iid), _ORCH_NAMED_ID_MAX)))
         seen.add(iid)
         title = raw.get("title")
         if title is not None and not isinstance(title, str):
-            return (None, "item {} has a non-string title".format(iid))
+            return (None, "item {} has a non-string title".format(named_iid))
         state = raw.get("state")
         if state not in _ORCH_STATES:
-            return (None, "item {} has invalid state {!r}".format(iid, state))
+            return (None, "item {} has invalid state {}".format(
+                named_iid, _orch_clip(repr(state), _ORCH_NAMED_REASON_MAX)))
         granted = raw.get("granted")
         if not isinstance(granted, bool):
-            return (None, "item {} has a non-boolean granted".format(iid))
+            return (None, "item {} has a non-boolean granted".format(named_iid))
         blocker = raw.get("blocker")
         if blocker is not None:
             if not isinstance(blocker, dict) or blocker.get("kind") not in _ORCH_BLOCKER_KINDS \
                     or not isinstance(blocker.get("ref"), str) or not blocker.get("ref").strip():
-                return (None, "item {} has a malformed blocker".format(iid))
+                return (None, "item {} has a malformed blocker".format(named_iid))
             ev = blocker.get("evidence")
             obs = blocker.get("observed_at_utc")
             if (ev is not None and not isinstance(ev, str)) \
                     or (obs is not None and not isinstance(obs, str)):
                 return (None, "item {} has a malformed blocker field (evidence/observed_at_utc)"
-                        .format(iid))
+                        .format(named_iid))
         out.append({"id": iid, "title": title if isinstance(title, str) and title else iid,
                     "state": state, "granted": granted, "blocker": blocker})
     return (out, None)
@@ -20025,10 +22829,12 @@ def _orch_enumerate(reg, root):
     try:
         result = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, cwd=root)
     except (OSError, subprocess.SubprocessError) as exc:
-        return ("ENUMERATOR_ERROR", "enumerator failed to run: {}".format(exc))
+        return ("ENUMERATOR_ERROR", "enumerator failed to run: {}".format(
+            _orch_clip(exc, _ORCH_NAMED_REASON_MAX)))
     if result.returncode != 0:
         return ("ENUMERATOR_ERROR",
-                "enumerator exit {}: {}".format(result.returncode, (result.stderr or "")[:200]))
+                "enumerator exit {}: {}".format(result.returncode,
+                                                _orch_clip(result.stderr or "", _ORCH_NAMED_REASON_MAX)))
     try:
         payload = json.loads(result.stdout)
     except ValueError as exc:
@@ -20085,16 +22891,18 @@ def _orch_pending_haystack(reg, root):
     forge a row via the id-colon match). Returns None when no surface is declared or it is
     unreadable, so an undeclared/unreadable surface HOLDS a human-decision item (cannot-evaluate) rather
     than demoting it to a definite actionable; FIX 1 DENIES the stop on that cannot-evaluate below the loop
-    bound (ignorance refuses the wind-down), the operator escape releasing a genuine block."""
+    bound (ignorance refuses the wind-down), the operator escape releasing a genuine block. The surface is
+    read by _orch_record_surface_read, so a FIFO, a device or a directory there is unreadable at once
+    rather than stalling the hook, and a file longer than _ORCH_BARRIER_MAX_BYTES is unreadable too,
+    since a truncated record could hide a decision row."""
     rec = reg.get("record") if isinstance(reg.get("record"), dict) else {}
     declared = _orch_path(root, rec.get("pending_decisions"))
     if not declared:
         return None
-    try:
-        with open(declared, "r", encoding="utf-8", errors="replace") as fh:
-            return fh.read()
-    except OSError:
+    data, detail = _orch_record_surface_read(declared)
+    if detail is not None or len(data) > _ORCH_BARRIER_MAX_BYTES:
         return None
+    return _orch_record_surface_text(data)
 
 
 def _orch_attestation_refs(reg, root, staleness):
@@ -20313,7 +23121,8 @@ def decide_yield(ctx):
         # the unevaluable items are NAMED here exactly as on the stop path below, so a
         # scope-level cannot-evaluate such as lease:max_age_hours tells the operator WHAT to
         # correct, not only that one exists
-        named_sched = ", ".join(i for i, _c, _p in sched_cannot[:_ORCH_MAX_NAMED])
+        named_sched = ", ".join(_orch_clip(i, _ORCH_NAMED_ID_MAX)
+                                for i, _c, _p in sched_cannot[:_ORCH_MAX_NAMED])
         if len(sched_cannot) > _ORCH_MAX_NAMED:
             named_sched += "; and {} more".format(len(sched_cannot) - _ORCH_MAX_NAMED)
         return ("DENY",
@@ -20337,12 +23146,14 @@ def decide_yield(ctx):
             return ("DENY",
                     "wake hygiene: a permitted idle must name the item or blocker it will recheck; "
                     "pending: {}".format(
-                        ", ".join(i for i, _c, _p in rechecked[:_ORCH_MAX_NAMED])), disposition)
+                        ", ".join(_orch_clip(i, _ORCH_NAMED_ID_MAX)
+                                  for i, _c, _p in rechecked[:_ORCH_MAX_NAMED])), disposition)
         if ctx.get("cannot_evaluate", []):
             cannot_items = ctx.get("cannot_evaluate", [])
             # the unevaluable items are NAMED (bounded), so a scope-level cannot-evaluate such as
             # lease:max_age_hours tells the operator WHAT to correct, not only that one exists
-            named_cannot = ", ".join(i for i, _c, _p in cannot_items[:_ORCH_MAX_NAMED])
+            named_cannot = ", ".join(_orch_clip(i, _ORCH_NAMED_ID_MAX)
+                                     for i, _c, _p in cannot_items[:_ORCH_MAX_NAMED])
             if len(cannot_items) > _ORCH_MAX_NAMED:
                 named_cannot += "; and {} more".format(len(cannot_items) - _ORCH_MAX_NAMED)
             return ("DENY",
@@ -20364,7 +23175,9 @@ def decide_yield(ctx):
                 .format(ctx["schedule_denials"]), disposition)
     named = ctx["actionable"][:_ORCH_MAX_NAMED]
     more = len(ctx["actionable"]) - len(named)
-    listing = "; ".join("{} ({}: {})".format(i, t, w) for i, t, w in named)
+    listing = "; ".join("{} ({}: {})".format(_orch_clip(i, _ORCH_NAMED_ID_MAX),
+                                             _orch_clip(t, _ORCH_NAMED_TITLE_MAX),
+                                             _orch_clip(w, _ORCH_NAMED_REASON_MAX)) for i, t, w in named)
     if more > 0:
         listing += "; and {} more".format(more)
     if kind == "ask":
@@ -20373,7 +23186,8 @@ def decide_yield(ctx):
         if held:
             # the mixed backlog names BOTH sets in one reason: the actionable items above carry the
             # two exits, and the held items are named so the operator knows what to repair
-            named_held = ", ".join(i for i, _c, _p in held[:_ORCH_MAX_NAMED])
+            named_held = ", ".join(_orch_clip(i, _ORCH_NAMED_ID_MAX)
+                                   for i, _c, _p in held[:_ORCH_MAX_NAMED])
             if len(held) > _ORCH_MAX_NAMED:
                 named_held += "; and {} more".format(len(held) - _ORCH_MAX_NAMED)
             held_note = (" Additionally, a proof source for {} open item(s) is unreadable "
@@ -21499,6 +24313,65 @@ def _orch_lexed_amp_places(command, amps):
     return kinds
 
 
+# Runtime start forms: words and forms that can start a background job in a command with no '&' byte, so
+# an open quote or an uncertain '#' in such a command still denies (_orch_foreground_detach_lexed). coproc
+# runs its command asynchronously; eval reads a string, and an '&' built in it at run time, as code;
+# setsid can return before its command finishes (always under -f); disown leaves a job no one waits for;
+# source and a lone '.' (one at the start, or after whitespace (a blank, a newline or other whitespace),
+# ';', '|', '(', '{' or a backquote, with a blank after it) read a file as code, and a here-string (<<<)
+# fed to a shell is code too; a process substitution, <( ) or >( ), runs its command asynchronously. The
+# search reads two texts, each with every quote and backslash removed, so e'v'al, "eval" and \eval match
+# as well: the command as written, which reads a start form written whole, and the command with every
+# backslash-newline pair removed first, which reads a form split by a pair bash joins (ev\<newline>al is
+# eval, <\<newline>( a process substitution) whole. Not every pair is one bash joins (one whose backslash
+# is itself escaped, one ending a comment line, one inside single quotes), and removing such a pair can
+# glue a start word on the next line to the word before it, so a start form in EITHER text keeps the scan's
+# verdict: removing the pairs never lifts a deny the first text gives. '<<<', '<(' and '>(' have no
+# lookbehind, so the second text reads them wherever they sit, whatever is glued in front. The start words
+# and the '.' have one: the start words coproc, eval, setsid, disown and source refuse a match after a word
+# character, a '.' or a '-', and the '.' matches only after whitespace (a blank, a newline or other
+# whitespace), ';', '|', '(', '{' or a backquote, or at the start of the text. When a start word, or a '.'
+# and the blank after it, is split by a backslash-newline pair and any other backslash-newline pair comes
+# before it in the command, the search may miss it: the first text keeps it split, and the second also
+# removes the earlier pair, so the split word can be glued to whatever stood before that pair, and where
+# its lookbehind refuses what is glued in front it is read in neither text. Where the search misses such a
+# form that bash runs, the no-'&' allow can be taken (a disclosed residual). Known shapes, examples and not
+# the full set, each missed in both contexts the self-test pins while bash runs the form:
+# : x\\<newline>ev\<newline>al, : x.\\<newline>ev\<newline>al, # c\<newline>sou\<newline>rce,
+# #-\<newline>sou\<newline>rce, : x\<newline>\\<newline>ev\<newline>al and
+# : x\\<newline>\\<newline>ev\<newline>al (each earlier pair removed, eval glued to the x),
+# : x\\<newline>.\<newline> f, : x\<newline>\\<newline>.\<newline> f and #\<newline>.\<newline> f. Others
+# are read: a blank in : \\<newline>ev\<newline>al, a '/' in : /\\<newline>ev\<newline>al and the '#' of a
+# bare comment line in #\<newline>sou\<newline>rce are not refused, nor is the blank in
+# : \\<newline>.\<newline> f. A start word right after a pair inside single quotes, before the closing quote
+# or directly after it (echo 'x\<newline>'eval), is part of the quoted word, so bash runs no start word
+# there; a start word later in the command can run, as eval does in echo 'x\<newline>'; ev\<newline>al,
+# which the second text reads. A word that matches only after a removal, or one in a body or comment, reads
+# as a start form all the same, which only keeps the scan's verdict. A '.' right after a ')' is not read
+# (prose ends a sentence that way far more often than a case pattern runs '.'), nor is a start word built
+# at run time (from a variable or an ANSI-C escape).
+_ORCH_RUNTIME_START_RE = re.compile(
+    r"(?<![\w.-])(?:coproc|eval|setsid|disown|source)(?![\w.-])|(?<![^\s;|({`])\.(?=[ \t])|<<<|[<>]\(")
+_ORCH_RUNTIME_START_UNQUOTE = str.maketrans("", "", "'\"\\")
+
+
+def _orch_runtime_start_readings(command):
+    """The two texts the runtime start search (_ORCH_RUNTIME_START_RE) reads, a start form in either keeping
+    the scan's verdict: the command with every quote and backslash removed, which reads a start word written
+    whole (one after a pair bash does not join included), and the command with every backslash-newline pair
+    removed first, then every quote and backslash, which reads a form split by a pair bash joins. When a
+    start word, or a '.' and the blank after it, is split by a backslash-newline pair and any other
+    backslash-newline pair comes before it in the command, the search may miss it (a disclosed residual): the
+    first text keeps it split, and the second also removes the earlier pair, so the split word can be glued
+    to whatever stood before that pair, where a start word's lookbehind refuses a word character, a '.' or a
+    '-' and the '.' matches only after whitespace (a blank, a newline or other whitespace), ';', '|', '(',
+    '{' or a backquote, or at the start of the text. '<<<', '<(' and '>(' have no lookbehind and match in
+    the second text wherever they sit. A start word right after a pair inside single quotes, before the
+    closing quote or directly after it, is part of the quoted word, so bash runs no start word there."""
+    return (command.translate(_ORCH_RUNTIME_START_UNQUOTE),
+            command.replace("\\\n", "").translate(_ORCH_RUNTIME_START_UNQUOTE))
+
+
 def _orch_foreground_detach_lexed(command, lifts=None):
     """The foreground detach verdict orch_truncation_guard acts on: "detach", "unbalanced" or None, as the raw
     scan (_orch_foreground_detach_kind) returns them, read beside the shared lexer. The lexer decides first
@@ -21513,10 +24386,10 @@ def _orch_foreground_detach_lexed(command, lifts=None):
     every bare `&` they read lies, where the lexer places it in its one reading of the command
     (_orch_lexed_amp_places), inside one of three shapes: (1) the body of a here-document under a quoted
     delimiter (<<'EOF' or <<"EOF") whose end the lexer can prove is where bash ends it: one read at the
-    top level of the command, with nothing open on the nesting stack and no '(' and no backquote
-    anywhere before the body (inside a command or process substitution or backquotes bash 5.3 can end a
-    body at a line that merely STARTS with the delimiter when a ')' or a backquote follows it on that
-    line, running what this lex would read as body, so such a body records as "body" and is never
+    top level of the command, with nothing open on the nesting stack and no '(', backquote or '${'
+    anywhere before the body (inside a substitution bash 5.3 can end a body at a line that starts with
+    the delimiter and holds the closer anywhere after it, or at a backquote inside backquotes, running
+    what this lex would read as body, so such a body records as "body" and is never
     lifted, fail closed), or the commit message form's body in "$(cat <<'EOF' ... EOF)", whose exact
     close the lex itself resolves; (2)
     a single- or double-quoted string; or (3) a '#' comment. Every other case where the lexer and the scan
@@ -21532,14 +24405,20 @@ def _orch_foreground_detach_lexed(command, lifts=None):
     and the same scan reading every here-document body as text reads a "detach" the narrowing lifts, so a
     caller that must know whether it did reads the list instead of running the scan again.
 
-    COST: a command with no '&' anywhere holds no bare `&` separator for the lexer and no bare `&` for the
-    scan, so neither the lex nor the narrowing can change what the scan returns, and the lex (which can
-    cost more than both scan rules together) is not run; a command that also holds no '#' and no quote
-    gives None from both scan rules (they return anything else only at one of those four characters, or
-    at the end inside a quote one of them opened), so the scan is not run either. The verdict is the same
-    either way."""
+    NO '&': a command with no '&' anywhere holds no bare `&` separator for the lexer and no bare `&` for
+    the scan, so the lex (which can cost more than both scan rules together) is not run. Its "unbalanced"
+    (an open quote or an uncertain '#') says only that a LATER '&' might be hidden, and there is none, so
+    it is None without the scan (an apostrophe in a quoted here-document body the scan reads as code, ahead
+    of any later command, was denied as a possible detach although the command holds no '&' at all), UNLESS
+    the command holds a runtime start form (_ORCH_RUNTIME_START_RE) that can start a background job with no
+    '&' byte: there the scan decides as it does for any command, so an open quote or an uncertain '#' still
+    denies. A command that also holds no '#' and no quote gives None from both scan rules (they return
+    anything else only at one of those four characters, or at the end inside a quote one of them opened),
+    so the scan is not run either. The verdict is the same either way."""
     if "&" not in command:
         if "#" not in command and "'" not in command and '"' not in command:
+            return None
+        if not any(_ORCH_RUNTIME_START_RE.search(text) for text in _orch_runtime_start_readings(command)):
             return None
         return _orch_foreground_detach_kind(command)
     try:
@@ -21633,12 +24512,14 @@ def _orch_foreground_detach(command):
     b"` in the commit-message form) is allowed where the scan reads the rest of the command to its end. A
     body the scan reads as code at the outer quoting level with an unbalanced apostrophe (`cat <<'EOF'`
     to standard output, or one with no delimiter line), or one whose quote leaves the scan open at the end,
-    is still DENIED although nothing detaches, and so is a body `&` under an unquoted delimiter, which the
-    lexer refuses. The commit-message form's body is NOT denied for an unbalanced apostrophe: it sits
-    inside the outer double quotes, where the scan reads an apostrophe as a literal character. The remedy
-    is to quote the delimiter and write the content with `cat > file` in a call of its own that holds
-    nothing but such writes, then run any other command in a separate call, or to write the text to a file
-    and pass the file.
+    is still DENIED although nothing detaches where the command holds an `&` or a runtime start form
+    (_ORCH_RUNTIME_START_RE), and so is a body `&` under an unquoted delimiter, which the lexer refuses; the
+    guard allows such a body in a command that holds neither (_orch_foreground_detach_lexed), where the
+    open quote has no `&` to hide. The commit-message form's body is NOT denied for an unbalanced
+    apostrophe: it sits inside the outer double quotes, where the scan reads an apostrophe as a literal
+    character. The remedy is to quote the delimiter and write the content with `cat > file` in a call of its
+    own that holds nothing but such writes, then run any other command in a separate call, or to write the
+    text to a file and pass the file.
 
     KNOWN FALSE-ALLOW RESIDUAL OF THIS SCAN (confirmed against real bash, disclosed in the manifest, which
     lists the same cases): the scan reads only the outer quoting level, and its quote and comment tracking
@@ -22979,8 +25860,16 @@ def orch_truncation_guard(data):
     that DETACHES a child with a bare `&` launches asynchronous work the foreground tool call does not track,
     and a bare-& detach is never the right way to launch tracked work, so a readable foreground command
     carrying such an operator DENIES-and-educates (use the tracked background dispatch, or keep it foreground
-    and wait). The detach is read by _orch_foreground_detach_lexed: the shared lexer's bare `&` separator
-    denies, the raw quote-tracking scan decides where the lexer refuses the command, and the scan's detach
+    and wait), except a backgrounded polling loop that the shared lexer itself reads as one
+    (_orch_detach_poll_loop): that deny gives orch_untracked_wait_loop's exits (_ORCH_POLL_LOOP_EXITS),
+    which forbid resubmitting the loop in either form, since a tracked or foreground copy still polls; and
+    except a command the lexer refuses whose text holds the poll shape's words (_orch_bg_poll_loop reads
+    'match' only through its text-scan fallback there, a real loop or an over-match on words in quoted or
+    comment text): orch_untracked_wait_loop denies that command with those same exits, so this deny gives a
+    hedged text that states the detach, says that if the command backgrounds a polling loop it must not be
+    resubmitted, and carries those exits, never the generic advice, which would offer the loop again in
+    both forms. The verdict is the same deny in every case. The detach is read by _orch_foreground_detach_lexed: the shared
+    lexer's bare `&` separator denies, the raw quote-tracking scan decides where the lexer refuses the command, and the scan's detach
     is lifted ONLY where every `&` it reads lies, as the lexer places it, in a quoted here-document body, a
     single- or double-quoted string, or a comment. Every other foreground call in registry scope remains
     out of scope (the harness returns its
@@ -23284,8 +26173,14 @@ def orch_truncation_guard(data):
         # scope, but a bare `&` detaches a child into untracked asynchronous work whose result and failure
         # are then lost. A bare-& detach is never the right way to launch tracked work (the tracked
         # background dispatch is), so it DENIES-and-educates: the caller self-corrects to run_in_background
-        # (or waits in the foreground), which is what lets the dispatch ledger record it. An unreadable
-        # (non-string) command fails closed; a non-detaching foreground command is out of scope (ALLOW).
+        # (or waits in the foreground), which is what lets the dispatch ledger record it. Two exceptions to
+        # that advice: a backgrounded polling loop the shared lexer reads as one (_orch_detach_poll_loop)
+        # takes the wait-loop exits instead, and a command the lexer refuses whose text holds the poll
+        # shape's words (_orch_bg_poll_loop's fallback 'match') takes a hedged text carrying those exits,
+        # since orch_untracked_wait_loop denies both and its exits forbid resubmitting the loop in either
+        # form. An
+        # unreadable (non-string) command fails closed; a non-detaching foreground command is out of scope
+        # (ALLOW).
         if not isinstance(command, str):
             return _deny(
                 "AIQT rule trkasy (track-launched-work): this foreground Bash call's command is {}, not a "
@@ -23312,6 +26207,43 @@ def orch_truncation_guard(data):
                 "substitution, or write the text to a file and pass the file.",
                 "AIQT guardrail: denied a foreground command whose quoting or comments this guard could not "
                 "read to the end (rule trkasy, fail-closed).")
+        # COST: the classifier below lexes the command again, so it runs ONCE per detach deny, and
+        # _orch_detach_poll_loop (a further lex) only on its 'match', never on the plain detach path: the
+        # 1 MB deadline shapes whose readings the lexer can judge stay at one classifier lex, within the
+        # timed bounds the hooks self-test pins.
+        detach_poll_kind = _orch_bg_poll_loop(command) if detach_kind == "detach" else "none"
+        if detach_kind == "detach" and detach_poll_kind == "match" and _orch_detach_poll_loop(command):
+            # A backgrounded polling loop is the event orch_untracked_wait_loop denies with its specific
+            # advice (never resubmit the loop). The generic advice below (use the tracked background
+            # dispatch, or keep the command in the foreground) would resubmit that loop, so on this event
+            # the deny gives the same exits as that hook (_ORCH_POLL_LOOP_EXITS). The verdict is unchanged.
+            return _deny(
+                "AIQT rule trkasy (track-launched-work): this foreground command backgrounds a polling loop "
+                "with a bare '&' (a for/while/until loop carrying sleep plus a status probe), launching "
+                "asynchronous work this tool call does not track, so its result and failure would be lost; "
+                "it is denied. " + _ORCH_POLL_LOOP_EXITS,
+                "AIQT guardrail: denied a foreground bare-& polling loop (untracked asynchronous work, rule "
+                "trkasy). " + _ORCH_POLL_LOOP_BANNER_EXITS)
+        if detach_kind == "detach" and detach_poll_kind == "match":
+            # The shared lexer refused the command (so _orch_detach_poll_loop found no lexed loop), but its
+            # text holds the poll shape's words (_orch_bg_poll_loop's text-scan fallback, which can
+            # over-match words in quoted or comment text), so orch_untracked_wait_loop denies the same
+            # command with the wait-loop exits. The generic advice below would offer the loop again in both
+            # forms, against those exits, so this deny states the bare-'&' detach, hedges on whether the
+            # detached work is a polling loop, and gives the same exits. The verdict is unchanged.
+            return _deny(
+                "AIQT rule trkasy (track-launched-work): this foreground command detaches a child with a "
+                "bare '&', launching asynchronous work this tool call does not track, so its result and "
+                "failure would be lost, and it carries a '#' whose comment reading this guard cannot judge "
+                "under both readings, so whether that work is a polling loop is read from the command's "
+                "text alone, which holds the words of one (a for/while/until loop carrying sleep plus a "
+                "status probe), written as code or in quoted or comment text; it is denied. If this "
+                "command backgrounds a polling loop, do not resubmit the loop. If it does not, put a blank "
+                "before such a '#' outside any grouping or substitution, or drop it, so this guard can "
+                "read where those words sit, and re-issue the call. " + _ORCH_POLL_LOOP_EXITS,
+                "AIQT guardrail: denied a foreground bare-'&' detach whose text holds a polling loop's "
+                "words (rule trkasy); if it backgrounds a polling loop, do not resubmit the loop. "
+                + _ORCH_POLL_LOOP_BANNER_EXITS)
         if detach_kind == "detach":
             return _deny(
                 "AIQT rule trkasy (track-launched-work): this foreground command detaches a child with a "
@@ -23602,8 +26534,10 @@ def _orch_bg_poll_loop(command):
     to another's can turn a 'match' into 'indeterminate', and the strictest answer is kept ('match', then
     'indeterminate', then 'none'). Where the lexer cannot judge it that way, the command's text
     (_hash_doubt_scan) is read for the canonical shape's words: a loop header, 'done', an '&', 'sleep' and
-    a probe all present give 'match' (an over-match on such a command, which the truncation guard denies
-    anyway), else 'indeterminate'. The classifier reads the loop words, the '&' and the sleep only where they
+    a probe all present give 'match' (an over-match on such a command is possible; the truncation guard
+    denies it anyway, with a hedged text carrying the wait-loop exits: _orch_detach_poll_loop does not take
+    this text scan, so that guard tests this classifier's 'match' for that text), else
+    'indeterminate'. The classifier reads the loop words, the '&' and the sleep only where they
     are written bare, so no quoting hides them from the text; the --watch and actions/runs probes it reads
     from decoded tokens, so text holding quoting that scan does not decode (_hash_doubt_opaque) counts as
     carrying a probe."""
@@ -23644,6 +26578,50 @@ def _orch_poll_reading(segments):
     if any(segments[k].argv for k in range(amp_idx + 1, len(segments))):
         return "indeterminate"              # a command trails the bare-`&` `done`: not the canonical shape
     return _orch_poll_loop_at(segments, amp_idx)
+
+
+# The exits every denial of a backgrounded polling loop gives. orch_untracked_wait_loop's deny carries them
+# on every 'match', the lexed reading and the text-scan fallback alike. orch_truncation_guard's bare-'&'
+# detach deny carries them too, in one of two texts: where the shared lexer itself reads the poll loop
+# (_orch_detach_poll_loop) its deny states the loop outright and gives these exits, and where the lexer
+# refuses the command but its text holds the poll shape's words (_orch_bg_poll_loop's fallback 'match', a
+# real loop or an over-match) its deny states the bare-'&' detach, hedges on whether the detached work is a
+# polling loop, and gives these exits; only a detach the classifier does not read as 'match' keeps the
+# generic detach advice, and there orch_untracked_wait_loop emits nothing. So no input draws one denial
+# that gives these exits and another that offers the loop again (a command whose detach scan cannot read
+# the command to its end takes the unreadable-quoting deny, which offers no resubmission either).
+# The loop is never resubmitted: a tracked or foreground copy
+# still waits by polling a status probe. Exit (1) needs a CI status reader with a wait mode, which an adopter
+# repository may not have, and many waits are not CI at all, so exit (2), the tracked wake, covers the rest.
+_ORCH_POLL_LOOP_EXITS = (
+    "Remove the trailing '&', do not resubmit the loop in any form (neither as a tracked background dispatch "
+    "nor in the foreground), and take ONE of these exits: (1) only for a CI wait in a repository that has a "
+    "CI status reader with a mode that waits until the run ends: start ONE tracked task as a background "
+    "dispatch (run_in_background: true) that runs that reader in its wait mode (such as tools/ci-status.sh "
+    "<sha> --wait in the AIQT Guardrails repository), collect its completion, and read the outcome from that "
+    "task's exit status as the reader documents its codes, never by matching success or failure words in its "
+    "output; (2) otherwise (a wait that is not CI, such as a health-check poll or waiting on a merge, or a "
+    "repository with no such reader), schedule a tracked wake that re-invokes this session to re-check.")
+_ORCH_POLL_LOOP_BANNER_EXITS = (
+    "Do not resubmit the loop: for a CI wait where the repository has a CI status reader with a wait mode, "
+    "run one tracked task with it and read its exit status; otherwise schedule a tracked wake.")
+
+
+def _orch_detach_poll_loop(command):
+    """True where the shared lexer itself reads command as the backgrounded polling loop
+    orch_untracked_wait_loop denies (a reading _orch_poll_reading classifies 'match', the answer
+    _orch_bg_poll_loop gives on a lexed command), so orch_truncation_guard's detach deny gives that hook's
+    exits instead of its generic advice. A command the lexer refuses is False here, including one whose '#'
+    it cannot judge under both readings: there _orch_bg_poll_loop falls back to a text scan that can read
+    'match' from words in quoted text or a comment, and on such a 'match' the truncation guard gives a
+    hedged text that carries the wait-loop exits and offers neither dispatch form, never the generic detach
+    advice (orch_untracked_wait_loop denies that command too, and the generic advice would offer the loop
+    its deny forbids). Only the reason chooses by this; the truncation guard's verdict does not."""
+    try:
+        readings = _lex_readings(command)
+    except ValueError:                      # _UncertainHashError included: no text-scan fallback here
+        return False
+    return any(_orch_poll_reading(segments) == "match" for segments in readings)
 
 
 def orch_untracked_wait_loop(data):
@@ -23703,13 +26681,9 @@ def orch_untracked_wait_loop(data):
             "AIQT rule trkasy (untracked wait loop): this command backgrounds a polling loop with a bare "
             "'&' (a for/while/until loop carrying sleep plus a status probe). A detached child is not a "
             "harness-tracked task: its completion cannot notify this session, so the result is stranded and "
-            "the session goes dark waiting on it. Remove the trailing '&' and take ONE of these exits: (1) "
-            "submit the same loop as a tracked background dispatch (run_in_background: true) and collect its "
-            "completion; (2) run a bounded foreground watch and act on the observed result (for example: "
-            "timeout <seconds> gh pr checks <ref> --watch); (3) schedule a tracked wake that re-invokes this "
-            "session to re-check.",
+            "the session goes dark waiting on it. " + _ORCH_POLL_LOOP_EXITS,
             "AIQT guardrail: denied an untracked background wait loop; a bare-'&' poll cannot notify this "
-            "session. Use run_in_background, a bounded foreground watch, or a tracked wake.")
+            "session. " + _ORCH_POLL_LOOP_BANNER_EXITS)
     return _allow()                         # 'none' or 'indeterminate': emit nothing; truncation guard backstops
 
 
@@ -27829,12 +30803,13 @@ _RDP_WRITER_OPTIONS = dict((
     ("rmdir", ("p v h V", "ignore-fail-on-non-empty parents verbose help version"))))
 
 
-def _rdp_writer_parse(name, args):
-    """The words args of the writer name (_RDP_WRITER_OPTIONS) as its option parser reads them, options and
-    operands in any order until --: (options, operands, targets, values), options the long names given,
-    targets the -t values, values the (name, value) pairs of every other option given a value; None when
-    the program is not in the table or a word is no option of it (an unknown, ambiguous or misused one)."""
-    spec = _RDP_WRITER_OPTIONS.get(name)
+def _writer_options_parse(spec, args):
+    """The words args as the option parser of the writer whose spec is a (short, long) pair in the
+    _RDP_WRITER_OPTIONS grammar reads them, options and operands in any order until --: (options, operands,
+    targets, values), options the long names given, targets the -t values, values the (name, value) pairs of
+    every other option given a value; None when spec is None or a word is no option of it (an unknown,
+    ambiguous or misused one). Shared by review_dispatch_pin (_rdp_writer_parse) and the gensrc Bash
+    detector (_gensrc_writer_spec), each with its own table."""
     if spec is None:
         return None
     short = dict((token[0], (token[2:] or token[0], token[1:2] == ":")) for token in spec[0].split())
@@ -27880,6 +30855,14 @@ def _rdp_writer_parse(name, args):
                 (targets if key == "target-directory" else values).append((key, value))
                 break
     return (options, operands, [value for _key, value in targets], values)
+
+
+def _rdp_writer_parse(name, args):
+    """The words args of the writer name (_RDP_WRITER_OPTIONS) as its option parser reads them, options and
+    operands in any order until --: (options, operands, targets, values), options the long names given,
+    targets the -t values, values the (name, value) pairs of every other option given a value; None when
+    the program is not in the table or a word is no option of it (an unknown, ambiguous or misused one)."""
+    return _writer_options_parse(_RDP_WRITER_OPTIONS.get(name), args)
 
 
 def _rdp_writer_reaches(name, parsed, words, relation):
@@ -28460,7 +31443,7 @@ _RWH_READ_ONLY_OPTS = {
 }
 # The history-walking verbs also take a bare -<n> count shorthand (git log -1).
 _RWH_COUNT_VERBS = frozenset(("log", "show", "whatchanged", "shortlog", "rev-list", "stash"))
-_RWH_COUNT_RE = re.compile(r"-\d+")
+_RWH_COUNT_RE = re.compile(r"-\d+", re.ASCII)
 # The program-running git forms the hold rule refuses while any hold it can see is live, beyond the
 # curated model _rwh_program_word reads (every global option other than a literal -C, -c and
 # --config-env included, and _rdp_git_runs_program's options, words and subcommands). Each runs a
@@ -30789,20 +33772,121 @@ def _orch_resume_audit_findings(status, reg, root):
     return findings
 
 
+def _orch_record_value_kind(value):
+    """The kind of a registry value in plain words, for a cannot-evaluate finding: an empty string, null,
+    a boolean (tested before a number, since a JSON boolean is a Python int), a number, a list or an
+    object; never a Python type name."""
+    if isinstance(value, str):
+        return "an empty string" if not value else "a string"
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "a boolean"
+    if isinstance(value, (int, float)):
+        return "a number"
+    if isinstance(value, list):
+        return "a list"
+    return "an object" if isinstance(value, dict) else "a value of another kind"
+
+
+def _orch_record_unusable(key, value):
+    """The finding for a record key that is present with a value _orch_path refuses. It names the key
+    and the value's kind, never the value itself, so a large value stays out of the text."""
+    return ("the registry declares record.{} with an unusable value ({}), not a non-empty path string: "
+            "cannot-evaluate".format(key, _orch_record_value_kind(value)))
+
+
+def _orch_record_block(reg):
+    """(record table, finding or None). An absent record block is ({}, None): nothing is declared. A
+    record block that is present and not a table (a list, a string, a number, a boolean or null) is
+    ({}, a cannot-evaluate finding naming the block and its kind), so it never reads as nothing to check."""
+    if "record" not in reg:
+        return ({}, None)
+    rec = reg["record"]
+    if isinstance(rec, dict):
+        return (rec, None)
+    return ({}, "the registry declares the record block as {}, not a table, so no record surface can be "
+                "probed: cannot-evaluate".format(_orch_record_value_kind(rec)))
+
+
+def _orch_record_surface_read(path):
+    """Read a declared record surface without waiting for a FIFO writer and without reading past the
+    bound: (data, None) with at most _ORCH_BARRIER_MAX_BYTES + 1 bytes, or (None, detail). The open is
+    os.open(O_RDONLY | O_NONBLOCK | O_NOCTTY | O_CLOEXEC), so a FIFO with no writer opens at once instead
+    of waiting for one; the opened descriptor is fstat'ed and anything not a regular file (a FIFO, a
+    device, a directory) is (None, "not a regular file") without a read; a UNIX socket fails the open
+    (ENXIO). The read asks for at most _ORCH_BARRIER_MAX_BYTES + 1 bytes in all, so a caller tells a file
+    longer than the bound by len(data) > _ORCH_BARRIER_MAX_BYTES and decides what that means for its
+    surface. A failed open (a missing file, a NUL character in the path), read or close is (None, its
+    text). The descriptor is closed exactly once on every path. Not bounded here: the path lookup can
+    stall on a hung mount, and a regular file on a stalled filesystem can stall the read."""
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOCTTY", 0)
+                     | getattr(os, "O_CLOEXEC", 0))
+    except (OSError, ValueError) as exc:  # ValueError: a path with a NUL character
+        return (None, str(exc))
+    chunks, total, detail = [], 0, None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            detail = "not a regular file"
+        else:
+            while total <= _ORCH_BARRIER_MAX_BYTES:
+                chunk = os.read(fd, _ORCH_BARRIER_MAX_BYTES + 1 - total)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                total += len(chunk)
+    except OSError as exc:
+        detail = str(exc)
+    finally:
+        try:
+            os.close(fd)  # once: after a failed close the descriptor number may already be reused
+        except OSError as exc:
+            detail = detail or str(exc)
+    if detail is not None:
+        return (None, detail)
+    return (b"".join(chunks), None)
+
+
+def _orch_record_surface_text(data):
+    """Decode the bytes _orch_record_surface_read gave for a record surface (handoff, findings or
+    pending_decisions) with the newline translation a text-mode open applies: a CRLF and then a lone CR
+    each become LF, so a Branch or Gate line, a findings row or a decision row after a CR still starts a
+    line. The bound is judged on the bytes, before this."""
+    return data.decode("utf-8", errors="replace").replace("\r\n", "\n").replace("\r", "\n")
+
+
 def _orch_resume_probes(reg, root):
     """The resume-audit probes (shared with tools/orch_doctor.py --resume-audit). Returns a list of
-    finding strings; empty means the recorded state matches observed reality."""
+    finding strings; empty means the recorded state matches observed reality. A record block that is
+    present and not a table is one cannot-evaluate finding (_orch_record_block). Each of handoff,
+    findings and pending_decisions that is present in the record with a value _orch_path refuses (an
+    empty string, null, a number, a boolean, a list or an object) is a cannot-evaluate finding naming the
+    key and the value's kind; an absent key is undeclared. Each declared surface is read by
+    _orch_record_surface_read: a FIFO, a device, a directory or anything else not a regular file is a
+    finding without a read, and no read takes more than _ORCH_BARRIER_MAX_BYTES + 1 bytes. A handoff
+    longer than the bound is a finding, since its Branch and Gate lines are parsed and a truncated handoff
+    cannot be judged; the findings register's content is parsed by _orch_merge_pending_findings, which
+    makes a longer register a finding there; pending_decisions is only required to be readable here, so a
+    longer regular file is no finding from this probe."""
     findings = []
-    rec = reg.get("record") if isinstance(reg.get("record"), dict) else {}
+    rec, block_finding = _orch_record_block(reg)
+    if block_finding is not None:
+        findings.append(block_finding)
+    for key in ("handoff", "findings", "pending_decisions"):
+        if key in rec and _orch_path(root, rec[key]) is None:
+            findings.append(_orch_record_unusable(key, rec[key]))
     handoff_path = _orch_path(root, rec.get("handoff"))
     if handoff_path:
-        try:
-            with open(handoff_path, "r", encoding="utf-8", errors="replace") as fh:
-                handoff = fh.read()
-        except OSError as exc:
+        data, detail = _orch_record_surface_read(handoff_path)
+        if detail is None and len(data) > _ORCH_BARRIER_MAX_BYTES:
+            detail = "larger than the {}-byte bound".format(_ORCH_BARRIER_MAX_BYTES)
+        if detail is not None:
             findings.append("declared handoff unreadable ({}): cannot-evaluate, the barrier holds"
-                            .format(exc))
+                            .format(detail))
             handoff = ""
+        else:
+            handoff = _orch_record_surface_text(data)
         m = re.search(r"^Branch:\s*(\S+)\s*$", handoff, re.MULTILINE)
         if m:
             actual = _head_branch(root)
@@ -30824,12 +33908,10 @@ def _orch_resume_probes(reg, root):
     for key in ("findings", "pending_decisions"):
         path = _orch_path(root, rec.get(key))
         if path:
-            try:
-                with open(path, "r", encoding="utf-8", errors="replace") as fh:
-                    fh.read()
-            except OSError as exc:
+            _data, detail = _orch_record_surface_read(path)
+            if detail is not None:
                 findings.append("declared record surface {} unreadable ({}): cannot-evaluate"
-                                .format(key, exc))
+                                .format(key, detail))
     lease = reg.get("lease") if isinstance(reg.get("lease"), dict) else None
     if lease:
         path = _orch_path(root, lease.get("path"))
@@ -30864,16 +33946,21 @@ def _orch_resume_probes(reg, root):
 def _orch_merge_pending_findings(reg, root):
     """The cheap in-hook layer of the record-drift check: an OPEN merge_pending row whose pr:N ref
     already has first-parent merge evidence is a divergence finding. tools/check_record_drift.py is
-    the authoritative gate; this probe only feeds the resume audit."""
-    rec = reg.get("record") if isinstance(reg.get("record"), dict) else {}
+    the authoritative gate; this probe only feeds the resume audit. A record block that is not a table
+    and an unusable findings value are reported once, by _orch_resume_probes; here they declare nothing.
+    The register is read by _orch_record_surface_read; one that is not a regular file, cannot be read,
+    or is longer than _ORCH_BARRIER_MAX_BYTES is a cannot-evaluate finding, since a truncated register
+    could hide a merge_pending row."""
+    rec = _orch_record_block(reg)[0]
     path = _orch_path(root, rec.get("findings"))
     if not path:
         return []
-    try:
-        with open(path, "r", encoding="utf-8", errors="replace") as fh:
-            text = fh.read()
-    except OSError as exc:
-        return ["declared findings register unreadable ({}): cannot-evaluate".format(exc)]
+    data, detail = _orch_record_surface_read(path)
+    if detail is None and len(data) > _ORCH_BARRIER_MAX_BYTES:
+        detail = "larger than the {}-byte bound".format(_ORCH_BARRIER_MAX_BYTES)
+    if detail is not None:
+        return ["declared findings register unreadable ({}): cannot-evaluate".format(detail)]
+    text = _orch_record_surface_text(data)
     prs = set()
     for line in text.splitlines():
         if "merge_pending" in line:
@@ -34676,7 +37763,7 @@ _WRTSCP_MAX_BYTES = 64 * 1024                    # 64 KB: both artifacts are sma
 # SAME human-authorization discipline as any other scope widening (guardrail-config-integrity), so the actor
 # must not be able to self-declare a companion-store widening through a covered write; freezing the registry
 # against its own covered writes closes that self-widening residual (raised independently by our own QA and
-# the cleanlanguage adopter). BOTH registry files are frozen, not only the LOCAL one: _wrtscp_companion_stores
+# an adopter). BOTH registry files are frozen, not only the LOCAL one: _wrtscp_companion_stores
 # reads companion_stores from EITHER file (via _orch_registry, which falls back to the committed
 # .aiqt/orchestration.json when the LOCAL file is absent), so freezing only the LOCAL file left a covered
 # Write of companion_stores into .aiqt/orchestration.json to take effect IN-SESSION (its cross-repo allow
@@ -35403,6 +38490,7 @@ HANDLERS = {
     "bash_absolute_paths": bash_absolute_paths,
     "git_explicit_binding": git_explicit_binding,
     "git_stash_ref": git_stash_ref,
+    "inline_errexit": inline_errexit,
     "git_discard": git_discard,
     "protected_line": protected_line,
     "branch_root": branch_root,
@@ -35436,7 +38524,8 @@ HANDLERS = {
 # consults the stop_hook_active field of the payload), so on ANY error (unreadable stdin, JSON parse
 # failure, non-dict payload, or a handler crash) it emits a non-blocking systemMessage warning and exits 0.
 # A DELIBERATE backlog-deny is the intended exception (the documented Stop block mechanism, bounded by the
-# loop cap); only a PreToolUse handler fails closed via exit 2 on error.
+# loop cap); only a PreToolUse handler fails closed via exit 2 on error, and not one in
+# NOTE_ONLY_PRETOOL_MODES.
 HANDLER_EVENT = {
     "diff_wall_stop": "Stop",
     "diff_source_pretool": PRETOOL,
@@ -35445,6 +38534,7 @@ HANDLER_EVENT = {
     "bash_absolute_paths": PRETOOL,
     "git_explicit_binding": PRETOOL,
     "git_stash_ref": PRETOOL,
+    "inline_errexit": PRETOOL,
     "git_discard": PRETOOL,
     "protected_line": PRETOOL,
     "branch_root": PRETOOL,
@@ -35797,9 +38887,10 @@ class _DeadlineWindow:
 
     def _take(self):
         """The take, run with every maskable signal blocked, in the order the class docstring gives. The
-        clock is read just before the take, so the window's use is never undercounted (a caller timer comes
-        back at most microseconds early, never late). Anything that raises once the timer is taken gives it
-        back, with the disposition, before the exception goes on."""
+        clock is read just before the take, so the take itself counts as time the window used. That does
+        not keep the restore from being late: _give_back says by how much a caller timer can come back late.
+        Anything that raises once the timer is taken gives it back, with the disposition, before the
+        exception goes on."""
         handler = signal.getsignal(signal.SIGALRM)
         began = time.monotonic()
         timer = self._as_taken(signal.setitimer(signal.ITIMER_REAL, 0))
@@ -35821,8 +38912,12 @@ class _DeadlineWindow:
 
     def _give_back(self):
         """The restore, run with every maskable signal blocked, in the order the class docstring gives: each
-        operation through _twice, the clock read once to decide whether the caller's timer came due, and a
-        due expiry queued last. `armed` is False when it returns or raises."""
+        operation through _twice, the clock read once to decide whether the caller's timer came due and what
+        it has left, and a due expiry queued last. setitimer counts the countdown from the moment the re-arm
+        runs, so a caller timer comes back late by the time between that clock read and the re-arm (normally
+        microseconds; a stall of the process in between adds its whole length) plus up to a microsecond from
+        setitimer rounding up; a relative re-arm computed before it runs cannot avoid this. `armed` is False
+        when it returns or raises."""
         self._live = False
         if not self.armed:
             return
@@ -35890,8 +38985,9 @@ def _pending_alarm_message(handler_name, seconds):
 
 def _dispatcher_fail_open_warn(handler_name, detail):
     """A fail-open dispatcher-level error for a Stop/SubagentStop/SessionStart/TeammateIdle/
-    UserPromptSubmit/PostToolUse handler: a non-blocking systemMessage on exit 0, so no error on
-    these paths can wedge a session, trap a teammate, or block a human prompt. It prints and flushes
+    UserPromptSubmit/PostToolUse handler or a NOTE_ONLY_PRETOOL_MODES handler: a non-blocking
+    systemMessage on exit 0, so no error on these paths can wedge a session, trap a teammate, block a
+    human prompt, or turn a note-only check into a block. It prints and flushes
     the note and returns the exit code 0, so main returns it directly (a note constructor's call is
     only ever the direct value of a return). The flush keeps the note out of the buffer os._exit at the
     entry line would discard. A print or flush failure RAISES out of this leaf (the note-shape scan
@@ -35982,20 +39078,22 @@ def main(argv):
     # a Stop/SubagentStop handler: a hard exit-2 Stop path could re-fire on the forced continuation and
     # wedge the session (an error path keeps no loop bound and never consults the stop_hook_active
     # field of the payload), so a bad-argv Stop invocation WARNS on exit 0 like every other Stop error
-    # path (FIX 2). A bad-argv PreToolUse handler still fails closed (exit 2).
+    # path. A bad-argv PreToolUse handler still fails closed (exit 2), except a note-only one
+    # (NOTE_ONLY_PRETOOL_MODES), which never blocks a call and so takes the fail-open posture throughout.
     mode = argv[0] if argv else None
     if mode not in HANDLERS:
         _stderr_note("aiqt_hooks: usage: aiqt_hooks.py <{}>".format("|".join(sorted(HANDLERS))))
         return 2
     handler_name = mode
-    is_fail_open = HANDLER_EVENT[handler_name] in FAIL_OPEN_EVENTS
+    is_note_only = handler_name in NOTE_ONLY_PRETOOL_MODES
+    is_fail_open = HANDLER_EVENT[handler_name] in FAIL_OPEN_EVENTS or is_note_only
     # Child exit status: with SIGCHLD ignored, a handler's failed git or other child would read as a
-    # success. A PreToolUse mode refuses (exit 2, its fail-closed posture). A fail-open mode must not
-    # exit 2 and must still run its handler (a stop guard's deliberate deny included), so it restores
-    # SIG_DFL for this one short-lived hook process, re-probes, and notes the restore; SIG_DFL is
-    # SIGCHLD's normal disposition, signal.signal also clears SA_NOCLDWAIT, and every spawn the fail-open
-    # handlers reach waits for its child. If the re-probe still fails, it warns without running the
-    # handler.
+    # success. A PreToolUse mode refuses (exit 2, its fail-closed posture), except a note-only one, which
+    # never blocks and so takes the fail-open branch. A fail-open mode must not exit 2 and must still run
+    # its handler (a stop guard's deliberate deny included), so it restores SIG_DFL for this one
+    # short-lived hook process, re-probes, and notes the restore; SIG_DFL is SIGCHLD's normal disposition,
+    # signal.signal also clears SA_NOCLDWAIT, and every spawn the fail-open handlers reach waits for its
+    # child. If the re-probe still fails, it warns without running the handler.
     unobservable = _child_status_refusal()
     if unobservable is not None:
         if not is_fail_open:
@@ -36030,8 +39128,9 @@ def main(argv):
     # and any caller timer restored) before the stdout decision below is written; the stderr notes of
     # the unreadable-payload and handler-crash paths are written inside it, and both paths exit 2 even
     # when the deadline interrupts the note. A fail-open mode gets a window with no deadline, so its
-    # error posture is unchanged. Any other exception out of the window keeps the mode's posture too.
-    window = _DeadlineWindow(None if is_fail_open else PRETOOL_BUDGET_SECONDS)
+    # error posture is unchanged, except a note-only PreToolUse mode, whose deadline warns on exit 0. Any
+    # other exception out of the window keeps the mode's posture too.
+    window = _DeadlineWindow(None if is_fail_open and not is_note_only else PRETOOL_BUDGET_SECONDS)
     payload = None
     try:
         with window:
@@ -36086,6 +39185,13 @@ def main(argv):
     except _HookDeadline as exc:
         if exc.args[:1] != (window,):
             raise  # an enclosing window's deadline (an in-process caller's), not this call's
+        if is_fail_open:
+            # Only a note-only PreToolUse mode is fail-open with a deadline: its check never blocks a call,
+            # so neither does its deadline. The warn print raising loses the warning and keeps the 0.
+            try:
+                return _dispatcher_fail_open_warn(handler_name, "no decision within its deadline")
+            except BaseException:
+                return 0
         # Built inside a guard like the other diagnostics, so a message that cannot be built (a payload
         # whose encoding raises, a MemoryError) still leaves exit 2, with a fixed note in its place. A
         # window that ended at its entry on a SIGALRM already pending gets its own note: its budget did

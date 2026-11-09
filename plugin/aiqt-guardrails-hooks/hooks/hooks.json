@@ -108,7 +108,7 @@
         ]
       },
       {
-        "matcher": "Write|Edit|MultiEdit",
+        "matcher": "Write|Edit|MultiEdit|Bash",
         "hooks": [
           {
             "type": "command",
@@ -162,6 +162,21 @@
               "-I",
               "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/aiqt_hooks.py",
               "git_stash_ref"
+            ],
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3",
+            "args": [
+              "-I",
+              "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/aiqt_hooks.py",
+              "inline_errexit"
             ],
             "timeout": 10
           }

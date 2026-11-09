@@ -6,7 +6,8 @@ path is DERIVED from that frontmatter per the two-axis taxonomy (aiqt/ numbered 
 coded CIA+P). The updater's write root is `.aiqt/core/`; CI runs this in --check so the read tree can never
 silently drift (including orphaned generated files with no source). Vendored `external/` trees are untouched.
   gen_rules.py           regenerate .claude/rules/{aiqt,security}/
-  gen_rules.py --check   fail (exit 1) on drift; exit 2 on a malformed source or a read/write failure
+  gen_rules.py --check   fail (exit 1) on drift; exit 2 on a malformed source or manifest, a rule mapping
+                         to an id its manifest marks withdrawn, or a read/write failure
   gen_rules.py --self-test  assert an invalid-UTF-8 generated target, a source path that is not a
                             directory or a symlink to a directory inside the root, and a .claude/, a
                             .claude/rules or a family directory symlinked outside the root fail closed
@@ -33,7 +34,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import repo_root  # noqa: E402
-from _standards import dir_chain_or_absent, dir_or_absent, dir_present, map_keys  # noqa: E402
+from _standards import (dir_chain_or_absent, dir_or_absent, dir_present, load_manifests, map_keys,  # noqa: E402
+                        withdrawn_mappings)
 
 TIER_FACETS = {"10": {"ACCUR", "INTEG", "QUALI", "TRUST"}, "20": {"PROGR"},
                "30": {"SPEED"}, "40": {"COST"}}
@@ -119,8 +121,12 @@ def _value(v):
         return elems
     if v in ("true", "false"):
         return v == "true"
-    if re.fullmatch(r'-?\d+', v):
+    if re.fullmatch(r'-?\d+', v, re.ASCII):
         return int(v)
+    # str.isdecimal is the Unicode \d set: an integer written in another script's digits is refused, never
+    # kept as a string that int() would read as a number.
+    if v.removeprefix("-").isdecimal():
+        raise ValueError("integer {} is written with non-ASCII digits (use 0-9)".format(ascii(v)))
     return v
 
 
@@ -265,7 +271,14 @@ def run(root, check):
             print("error: {} {} (cannot evaluate)".format(src_dir, problem))
             return 2
         if dir_present(src_dir, root=root):
-            for src, _fm, rel in load_corpus(src_dir):
+            corpus = load_corpus(src_dir)
+            # Each source is copied whole, mapping ids included, so a rule mapping to an id its manifest
+            # marks withdrawn is refused here (exit 2, naming the rule, the key and the id), never written.
+            withdrawn = withdrawn_mappings(corpus, load_manifests(root / ".aiqt" / "standards", root=root))
+            if withdrawn:
+                print("error: {}".format("; ".join(withdrawn)))
+                return 2
+            for src, _fm, rel in corpus:
                 desired[rel] = src.read_text(encoding="utf-8")
     except (ValueError, OSError) as exc:
         print("error: {}".format(exc))
@@ -498,6 +511,24 @@ def self_test_main():
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     failures.extend(_map_keys_refusal_failures())
+    # An integer value is ASCII digits only: Arabic-Indic and fullwidth digits are refused, never kept
+    # as a string or read as the int that int() would make of them.
+    for text in ("١٢", "１２", "-١", "1٢"):
+        try:
+            got = _value(text)
+        except ValueError as exc:
+            if "non-ASCII digits" not in str(exc):
+                failures.append("the non-ASCII digit value {} expected the non-ASCII digits error, got {}"
+                                .format(ascii(text), exc))
+        else:
+            failures.append("the non-ASCII digit value {} expected a refusal, got {!r}".format(
+                ascii(text), got))
+    for text in ("-", "--1", "v12"):
+        if _value(text) != text:
+            failures.append("the bare value {} expected to stay a string, got {!r}".format(
+                ascii(text), _value(text)))
+    if _value("-12") != -12:
+        failures.append("the ASCII value -12 expected the int -12, got {!r}".format(_value("-12")))
 
     if failures:
         print("SELF-TEST FAIL:")

@@ -76,6 +76,7 @@ if tuple(sys.version_info[:2]) < (3, 14):
     os._exit(2)
 
 import contextlib
+import hashlib
 import io
 import json
 import os
@@ -419,7 +420,9 @@ def iso(epoch):
 def workflow_run(run_id, status, conclusion, name, head_sha, created=COMMIT_TIME + 600,
                  event=None, pull_requests=None, path=QUALITY_PATH):
     # event and pull_requests appear only when given: without --require-base the script never reads
-    # them, and the pre-option fixtures prove that by omitting them entirely. Every read requires a
+    # pull_requests and reads event only to tell an advisory run (schedule or workflow_dispatch) apart,
+    # an absent event being judged as before, and the pre-option fixtures prove that by omitting them
+    # entirely. Every read requires a
     # completed successful quality.yml run, so path defaults to that file; path=None omits the key.
     run = {
         "created_at": iso(created),
@@ -607,6 +610,106 @@ class Fixture:
         commit = git("-c", "user.name=Selftest", "-c", "user.email=selftest@example.invalid",
                      "commit-tree", tree, "-p", "HEAD", "-m", message)
         return commit, tree
+
+    def ambiguous_commits(self):
+        # Two commit objects beside HEAD whose ids share their first four hex digits, the shortest
+        # prefix git reads as a short id. The ids are computed here in the repository's own object
+        # format until two share a prefix (65,537 ids cannot all have different four-digit prefixes, as
+        # only 65,536 exist), then written with git, which must return the same ids. Returns the shared
+        # prefix and the written ids.
+        def git(*args, stdin=None):
+            return subprocess.run([GIT, "-C", str(self.repo)] + NO_AUTO_MAINTENANCE + list(args),
+                                  input=stdin, check=True, capture_output=True, text=True,
+                                  timeout=30, env=self.base_env).stdout.strip()
+        object_format = git("rev-parse", "--show-object-format")
+        tree = git("rev-parse", "HEAD^{tree}")
+        parent = git("rev-parse", "HEAD")
+        seen = {}
+        for index in range(65537):
+            body = ("tree {}\nparent {}\nauthor Selftest <selftest@example.invalid> {} +0000\n"
+                    "committer Selftest <selftest@example.invalid> {} +0000\n\nprefix {}\n").format(
+                        tree, parent, COMMIT_TIME, COMMIT_TIME, index)
+            raw = body.encode("utf-8")
+            oid = hashlib.new(object_format, b"commit %d\0" % len(raw) + raw).hexdigest()
+            if oid[:4] in seen:
+                bodies = (seen[oid[:4]], body)
+                break
+            seen[oid[:4]] = body
+        written = [git("hash-object", "-t", "commit", "-w", "--stdin", stdin=body) for body in bodies]
+        return written[0][:4], written
+
+    def prefix_pair(self, kinds):
+        # Two objects of the given kinds ("commit", "blob", or "tag" for an annotated tag of HEAD) whose
+        # ids share a four-digit prefix that no object already in the repository has, computed as
+        # ambiguous_commits does and then written with git. Returns the shared prefix and the written
+        # ids, in the order of kinds.
+        def git(*args, stdin=None):
+            return subprocess.run([GIT, "-C", str(self.repo)] + NO_AUTO_MAINTENANCE + list(args),
+                                  input=stdin, check=True, capture_output=True, text=True,
+                                  timeout=30, env=self.base_env).stdout.strip()
+        object_format = git("rev-parse", "--show-object-format")
+        tree = git("rev-parse", "HEAD^{tree}")
+        parent = git("rev-parse", "HEAD")
+        taken = {line[:4] for line in git("cat-file", "--batch-all-objects",
+                                          "--batch-check=%(objectname)").splitlines()}
+        seen = [{}, {}]
+        for index in range(1 << 20):
+            for slot, kind in enumerate(kinds):
+                if kind == "commit":
+                    body = ("tree {}\nparent {}\nauthor Selftest <selftest@example.invalid> {} +0000\n"
+                            "committer Selftest <selftest@example.invalid> {} +0000\n\npair {} {}\n"
+                            ).format(tree, parent, COMMIT_TIME, COMMIT_TIME, slot, index)
+                elif kind == "tag":
+                    body = ("object {}\ntype commit\ntag pair{}x{}\ntagger Selftest "
+                            "<selftest@example.invalid> {} +0000\n\npair {} {}\n"
+                            ).format(parent, slot, index, COMMIT_TIME, slot, index)
+                else:
+                    body = "pair {} {}\n".format(slot, index)
+                raw = body.encode("utf-8")
+                prefix = hashlib.new(object_format, b"%s %d\0" % (kind.encode("ascii"), len(raw))
+                                     + raw).hexdigest()[:4]
+                other = seen[1 - slot]
+                if prefix not in taken and prefix in other:
+                    bodies = [other[prefix], body] if slot == 1 else [body, other[prefix]]
+                    written = [git("hash-object", "-t", kinds[number], "-w", "--stdin",
+                                   stdin=bodies[number]) for number in (0, 1)]
+                    return written[0][:4], written
+                seen[slot].setdefault(prefix, body)
+        raise RuntimeError("no shared prefix found")
+
+    def commit_and_own_tag(self):
+        # A commit beside HEAD, with a four-digit prefix no object already in the repository has, and an
+        # annotated tag of that commit whose id shares the prefix, both computed in the repository's own
+        # object format and then written with git. Returns the shared prefix, the commit and the tag.
+        def git(*args, stdin=None):
+            return subprocess.run([GIT, "-C", str(self.repo)] + NO_AUTO_MAINTENANCE + list(args),
+                                  input=stdin, check=True, capture_output=True, text=True,
+                                  timeout=30, env=self.base_env).stdout.strip()
+
+        def object_id(kind, body):
+            raw = body.encode("utf-8")
+            return hashlib.new(object_format, b"%s %d\0" % (kind.encode("ascii"), len(raw))
+                               + raw).hexdigest()
+        object_format = git("rev-parse", "--show-object-format")
+        tree = git("rev-parse", "HEAD^{tree}")
+        parent = git("rev-parse", "HEAD")
+        taken = {line[:4] for line in git("cat-file", "--batch-all-objects",
+                                          "--batch-check=%(objectname)").splitlines()}
+        for index in range(1 << 20):
+            body = ("tree {}\nparent {}\nauthor Selftest <selftest@example.invalid> {} +0000\n"
+                    "committer Selftest <selftest@example.invalid> {} +0000\n\nown tag {}\n"
+                    ).format(tree, parent, COMMIT_TIME, COMMIT_TIME, index)
+            if object_id("commit", body)[:4] not in taken:
+                break
+        else:
+            raise RuntimeError("no free prefix found")
+        commit = git("hash-object", "-t", "commit", "-w", "--stdin", stdin=body)
+        for index in range(1 << 24):
+            body = ("object {}\ntype commit\ntag own{}\ntagger Selftest <selftest@example.invalid> {} "
+                    "+0000\n\nown {}\n").format(commit, index, COMMIT_TIME, index)
+            if object_id("tag", body)[:4] == commit[:4]:
+                return commit[:4], commit, git("hash-object", "-t", "tag", "-w", "--stdin", stdin=body)
+        raise RuntimeError("no shared prefix found")
 
     def gh_reads(self, prefix):
         # How many gh calls of the last invocation read an endpoint of the fixture repository starting
@@ -1594,6 +1697,88 @@ def _run_checks():
         check("ci/plain-quality-run-satisfied", satisfied,
               [(0, 1, False), (0, 1, False), (0, 6, False)])
 
+        # THE ADVISORY RUNS: a scheduled or manual quality.yml run on the head is neither a veto nor
+        # merge evidence. Beside valid merge evidence (a push run in a plain read, a conforming
+        # pull_request run under --require-base) a failed advisory run of either event stays green,
+        # and so does a successful one; an advisory success alone is missing evidence (exit 1, one
+        # read; five under --wait); beside failed merge evidence it rescues nothing (exit 1). A failed
+        # push run, the control, still vetoes, so only the two advisory events are exempt.
+        advisory_note = "NOTE: advisory run(s)"
+        failed_merge = workflow_run(927, "completed", "failure", "Quality", head_sha,
+                                    event="push", pull_requests=[])
+        advisory_cases = []
+        for event in ("schedule", "workflow_dispatch"):
+            advisory_failed = workflow_run(925, "completed", "failure", "Quality", head_sha,
+                                           event=event, pull_requests=[])
+            advisory_green = workflow_run(926, "completed", "success", "Quality", head_sha,
+                                          event=event, pull_requests=[])
+            for runs, extra, wait in (
+                    ([plain_push, advisory_failed], (), False),
+                    ([plain_push, advisory_failed], (), True),
+                    ([pr_quality, advisory_failed], require, False),
+                    ([plain_push, advisory_green], (), False),
+                    ([advisory_green], (), False),
+                    ([advisory_green], (), True),
+                    ([advisory_green], require, False),
+                    ([failed_merge, advisory_green], (), False)):
+                rc, output, calls = fixture.invoke([[page(runs)]], wait=wait, extra_args=extra)
+                advisory_cases.append((rc, calls, advisory_note in output,
+                                       "CI concluded with non-success" in output,
+                                       "no completed successful run of the workflow file" in output))
+        rc, output, calls = fixture.invoke([[page([plain_push, failed_merge])]])
+        advisory_cases.append((rc, calls, advisory_note in output,
+                               "CI concluded with non-success" in output,
+                               "no completed successful run of the workflow file" in output))
+        check("ci/advisory-run-neither-veto-nor-evidence", advisory_cases,
+              [(0, 1, True, False, False), (0, 5, True, False, False),
+               (0, 1, True, False, False), (0, 1, True, False, False),
+               (1, 1, True, False, True), (1, 5, True, False, True),
+               (1, 1, True, False, True), (1, 1, True, True, False)] * 2
+              + [(1, 1, False, True, False)])
+
+        # A still-running advisory run keeps no --wait polling: beside a completed successful push
+        # run, an in-progress scheduled or manual run lets the wait settle green on five reads, the
+        # same as the push run alone. Judged as a merge-path run it would keep the wait going to its
+        # deadline (exit 1, TIMEOUT).
+        running = []
+        for event in ("schedule", "workflow_dispatch"):
+            advisory_running = workflow_run(928, "in_progress", None, "Quality", head_sha,
+                                            event=event, pull_requests=[])
+            rc, output, calls = fixture.invoke([[page([plain_push, advisory_running])]], wait=True,
+                                               timeout="90")
+            running.append((rc, calls, advisory_note in output, "TIMEOUT" in output))
+        check("ci/advisory-run-in-progress-keeps-no-wait", running, [(0, 5, True, False)] * 2)
+
+        # An advisory run's id is outside the --wait settle fingerprint: a failed scheduled or manual
+        # run that appears on the third read beside a successful push run leaves the settle count
+        # running, so the wait settles green on five reads. The control: a second push run appearing
+        # the same way is a merge-path run and restarts the window (seven reads).
+        late_push = workflow_run(929, "completed", "success", "Quality", head_sha,
+                                 event="push", pull_requests=[])
+        fingerprint = []
+        for late in [workflow_run(925, "completed", "failure", "Quality", head_sha, event=event,
+                                  pull_requests=[]) for event in ("schedule", "workflow_dispatch")
+                     ] + [late_push]:
+            polls = [[page([plain_push])]] * 2 + [[page([late, plain_push])]]
+            rc, output, calls = fixture.invoke(polls, wait=True)
+            fingerprint.append((rc, calls))
+        check("ci/advisory-run-outside-settle-fingerprint", fingerprint,
+              [(0, 5), (0, 5), (0, 7)])
+
+        # An advisory run is outside the RESULT line's run count: beside a successful push run a
+        # failed scheduled or manual run reads as one successful run with one advisory run not
+        # counted, never as two successful runs.
+        counted = []
+        for event in ("schedule", "workflow_dispatch"):
+            advisory_failed = workflow_run(925, "completed", "failure", "Quality", head_sha,
+                                           event=event, pull_requests=[])
+            rc, output, calls = fixture.invoke([[page([plain_push, advisory_failed])]], wait=True)
+            counted.append((rc, calls,
+                            "RESULT: all 1 observed workflow run(s) successful (1 advisory run(s) "
+                            "not counted); settle observation 1/5" in output,
+                            "all 2 observed" in output))
+        check("ci/advisory-run-outside-result-count", counted, [(0, 5, True, False)] * 2)
+
         # A second positional rev is refused (exit 2) before any git or API
         # read, never read last-wins: a stray positional that resolves (a branch name, say)
         # would silently change which commit is checked.
@@ -1613,6 +1798,332 @@ def _run_checks():
                    for argv in fixture.git_argv),
                any(argv[:3] == ["remote", "get-url", "--all"] for argv in fixture.git_argv)),
               (0, True, True))
+
+        # Every commit id, the positional rev and the --head value alike, resolves to exactly one
+        # commit of this checkout or is refused (exit 2, cannot evaluate) before any API read. A short
+        # id that matches no object (HEAD's first eight hex digits with the eighth changed, an id
+        # extended from memory) does not resolve.
+        wrong_eighth = head_sha[:7] + ("0" if head_sha[7] != "0" else "1")
+        unresolvable = []
+        for rev, extra in ((wrong_eighth, ()), (None, ("--match-tree", "--head", wrong_eighth))):
+            rc, output, _calls = fixture.invoke([[page([success_a, success_b])]], rev=rev,
+                                                extra_args=extra, tree=tree_listing([], {}))
+            unresolvable.append((rc, fixture.gh_argv == [], "COMMIT:" in output,
+                                 "ERROR: cannot evaluate: {} does not resolve to a commit in this "
+                                 "repository.".format(wrong_eighth) in output))
+        check("ci/rev-unresolvable-short-id-refused", unresolvable, [(2, True, False, True)] * 2)
+
+        # Two commit objects whose ids share a four-digit prefix: that prefix names no single commit,
+        # so it is refused as ambiguous (exit 2), never read as either commit.
+        prefix, written = fixture.ambiguous_commits()
+        ambiguous = [(len(set(written)), all(oid.startswith(prefix) for oid in written))]
+        for rev, extra in ((prefix, ()), (None, ("--match-tree", "--head", prefix))):
+            rc, output, _calls = fixture.invoke([[page([success_a, success_b])]], rev=rev,
+                                                extra_args=extra, tree=tree_listing([], {}))
+            ambiguous.append((rc, fixture.gh_argv == [], "COMMIT:" in output,
+                              "ERROR: cannot evaluate: {} is ambiguous".format(prefix) in output))
+        check("ci/rev-ambiguous-short-id-refused", ambiguous,
+              [(2, True)] + [(2, True, False, True)] * 2)
+
+        # A unique short id resolves to its full id, which is the first output line and the id every
+        # read uses: the head_sha query and the tree match's result line name the full id.
+        printed = []
+        rc, output, _calls = fixture.invoke([[page([success_a, success_b])]], rev=head_sha[:8])
+        printed.append((rc, output.splitlines()[:1],
+                        fixture.gh_reads("actions/runs?head_sha={}&".format(head_sha))))
+        rc, output, _calls = fixture.invoke([], rev=None,
+                                            extra_args=("--match-tree", "--head", head_sha[:8]),
+                                            tree=tree_listing([], {}))
+        printed.append((rc, output.splitlines()[:1], " of {} was found".format(head_sha) in output))
+        check("ci/rev-short-id-prints-full-id", printed,
+              [(0, ["COMMIT: " + head_sha], 1), (1, ["COMMIT: " + head_sha], True)])
+
+        # An ambiguous short id followed by a suffix (~0, ^{commit}) is refused as ambiguous, naming
+        # the short id, not as a rev that does not resolve.
+        suffixed = []
+        for suffix in ("~0", "^{commit}"):
+            for rev, extra in ((prefix + suffix, ()), (None, ("--match-tree", "--head", prefix + suffix))):
+                rc, output, _calls = fixture.invoke([[page([success_a, success_b])]], rev=rev,
+                                                    extra_args=extra, tree=tree_listing([], {}))
+                suffixed.append((rc, fixture.gh_argv == [], "COMMIT:" in output,
+                                 "ERROR: cannot evaluate: {}{} is ambiguous: the ids of more than one "
+                                 "commit (or tag of a commit) in this repository start with {}, so it "
+                                 "names no single commit".format(prefix, suffix, prefix) in output,
+                                 "does not resolve" in output))
+        check("ci/rev-ambiguous-suffixed-id-refused", suffixed, [(2, True, False, True, False)] * 4)
+
+        # A short id that only objects of other types (here two blobs) start with names no commit: it
+        # is refused (exit 2) with that cause, and no advice to give a longer id.
+        blob_prefix, blobs = fixture.prefix_pair(("blob", "blob"))
+        no_commit = [(len(set(blobs)), all(oid.startswith(blob_prefix) for oid in blobs))]
+        for rev, extra in ((blob_prefix, ()), (None, ("--match-tree", "--head", blob_prefix)),
+                           (blob_prefix + "~0", ())):
+            rc, output, _calls = fixture.invoke([[page([success_a, success_b])]], rev=rev,
+                                                extra_args=extra, tree=tree_listing([], {}))
+            no_commit.append((rc, fixture.gh_argv == [], "COMMIT:" in output,
+                              "ERROR: cannot evaluate: {} does not resolve to a commit in this "
+                              "repository: no commit id starts with {}, only the ids of objects of "
+                              "other types.".format(rev or blob_prefix, blob_prefix) in output,
+                              "ambiguous: the ids" in output, "longer" in output))
+        check("ci/rev-prefix-of-no-commit-refused", no_commit,
+              [(2, True)] + [(2, True, False, True, False, False)] * 3)
+
+        # A short id that one commit and one blob start with reads as that commit (git asks for a
+        # commit), positionally and through --head, bare and with a suffix.
+        mixed_prefix, mixed = fixture.prefix_pair(("commit", "blob"))
+        mixed_reads = [(mixed[0] != mixed[1], all(oid.startswith(mixed_prefix) for oid in mixed))]
+        for rev, extra in ((None, ("--match-tree", "--head", mixed_prefix)),
+                           (None, ("--match-tree", "--head", mixed_prefix + "~0"))):
+            rc, output, _calls = fixture.invoke([], rev=rev, extra_args=extra, tree=tree_listing([], {}))
+            mixed_reads.append((rc, output.splitlines()[:1]))
+        rc, output, _calls = fixture.invoke([[page([success_a, success_b])]], rev=mixed_prefix)
+        mixed_reads.append((output.splitlines()[:1],
+                            fixture.gh_reads("actions/runs?head_sha={}&".format(mixed[0])) >= 1))
+        check("ci/rev-commit-and-blob-prefix-reads-commit", mixed_reads,
+              [(True, True), (1, ["COMMIT: " + mixed[0]]), (1, ["COMMIT: " + mixed[0]]),
+               (["COMMIT: " + mixed[0]], True)])
+
+        # A hex rev that is also a branch name names the branch's commit, not the commit whose id it
+        # starts (git's own rule); the COMMIT: line shows which.
+        hidden = written[0]
+        branch = hidden[:8]
+        subprocess.run([GIT, "-C", str(fixture.repo)] + NO_AUTO_MAINTENANCE + ["branch", branch, head_sha],
+                       check=True, capture_output=True, timeout=30, env=fixture.base_env)
+        try:
+            rc, output, _calls = fixture.invoke([[page([success_a, success_b])]], rev=branch)
+        finally:
+            subprocess.run([GIT, "-C", str(fixture.repo)] + NO_AUTO_MAINTENANCE + ["branch", "-D", branch],
+                           check=True, capture_output=True, timeout=30, env=fixture.base_env)
+        check("ci/rev-hex-branch-names-branch-commit",
+              (hidden != head_sha, rc, output.splitlines()[:1]), (True, 0, ["COMMIT: " + head_sha]))
+
+        # The COMMIT: line is the first output line under --wait too, and it is printed before a
+        # refusal that comes after the resolution (here no origin remote, exit 2).
+        commit_first = []
+        rc, output, calls = fixture.invoke([[page([success_a, success_b])]] * 6, wait=True,
+                                           rev=head_sha[:8])
+        commit_first.append((rc, output.splitlines()[:1]))
+        rc, output, calls = fixture.invoke([[page([success_a, success_b])]], rev=head_sha[:8],
+                                           git_remote=("", 2))
+        commit_first.append((rc, output.splitlines()[:1], calls,
+                             "ERROR: cannot evaluate: this checkout has no origin remote" in output))
+        check("ci/rev-commit-line-first-under-wait-and-later-refusal", commit_first,
+              [(0, ["COMMIT: " + head_sha]), (2, ["COMMIT: " + head_sha], 0, True)])
+
+        def fixture_git(*args):
+            return subprocess.run([GIT, "-C", str(fixture.repo)] + NO_AUTO_MAINTENANCE + list(args),
+                                  check=True, capture_output=True, text=True, timeout=30,
+                                  env=fixture.base_env).stdout.strip()
+
+        def refusal_text(output):
+            # The script's own refusal lines only: git's error and hint lines on stderr say "ambiguous"
+            # in their own words.
+            return "\n".join(line for line in output.splitlines()
+                             if line.startswith("ERROR: cannot evaluate: "))
+
+        # A hex rev as long as a full id is read as that object id even when a branch has that name
+        # (git ignores such a ref when given a full id): the commit itself is read, and an absent full id
+        # with a same-named branch is refused as not resolving, never through the branch.
+        absent_full = "f" * 39 + ("0" if head_sha[-1] != "0" else "1")
+        full_named = []
+        for name in (written[1], absent_full):
+            fixture_git("branch", name, head_sha)
+        try:
+            rc, output, _calls = fixture.invoke([[page([success_a, success_b])]], rev=written[1])
+            full_named.append((output.splitlines()[:1],
+                               fixture.gh_reads("actions/runs?head_sha={}&".format(written[1])) >= 1))
+            rc, output, _calls = fixture.invoke([[page([success_a, success_b])]], rev=absent_full)
+            full_named.append((rc, "COMMIT:" in output,
+                               "ERROR: cannot evaluate: {} does not resolve to a commit in this "
+                               "repository.".format(absent_full) in output, "the ref" in output))
+        finally:
+            for name in (written[1], absent_full):
+                fixture_git("branch", "-D", name)
+        check("ci/rev-full-hex-id-reads-object-not-branch", (written[1] != head_sha, full_named),
+              (True, [(["COMMIT: " + written[1]], True), (2, False, True, False)]))
+
+        # A short hex rev that git reads as a tag ref pointing at a blob is refused (exit 2) with a
+        # cause naming that ref, not an id-prefix cause, both where commits share the prefix and where
+        # only blobs do; with a suffix the cause says the rev does not lead from the ref to a commit.
+        ref_blob = subprocess.run([GIT, "-C", str(fixture.repo)] + NO_AUTO_MAINTENANCE
+                                  + ["hash-object", "-w", "--stdin"], input="tag ref target\n",
+                                  check=True, capture_output=True, text=True, timeout=30,
+                                  env=fixture.base_env).stdout.strip()
+        hex_refs = []
+        for ref_prefix in (prefix, blob_prefix):
+            fixture_git("update-ref", "refs/tags/" + ref_prefix, ref_blob)
+            try:
+                for rev, extra, shown in ((ref_prefix, (), ref_prefix),
+                                          (None, ("--match-tree", "--head", ref_prefix), ref_prefix),
+                                          (ref_prefix + "~0", (), ref_prefix + "~0")):
+                    rc, output, _calls = fixture.invoke([[page([success_a, success_b])]], rev=rev,
+                                                        extra_args=extra, tree=tree_listing([], {}))
+                    tail = ("which does not lead to a commit." if shown == ref_prefix else
+                            "from which {} does not lead to a commit.".format(shown))
+                    hex_refs.append((rc, fixture.gh_argv == [], "COMMIT:" in output,
+                                     "ERROR: cannot evaluate: {} does not resolve to a commit in this "
+                                     "repository: git reads {} as the ref refs/tags/{}, {}".format(
+                                         shown, ref_prefix, ref_prefix, tail) in output,
+                                     "ambiguous" in refusal_text(output),
+                                     "no commit id starts with" in refusal_text(output)))
+            finally:
+                fixture_git("update-ref", "-d", "refs/tags/" + ref_prefix)
+        check("ci/rev-hex-ref-to-non-commit-names-ref", hex_refs, [(2, True, False, True, False, False)] * 6)
+
+        # A short id that several objects start with, all leading to one commit (two annotated tags of
+        # HEAD; a commit and its own tag), is refused (exit 2), as git refuses it, with a cause saying
+        # several objects start with it, each that commit or a tag of it, and advising the full commit
+        # id; never that it names no single commit.
+        for check_id, (shared, commit) in (
+                ("ci/rev-tags-of-one-commit-prefix-refused",
+                 (fixture.prefix_pair(("tag", "tag"))[0], head_sha)),
+                ("ci/rev-commit-and-own-tag-prefix-refused", fixture.commit_and_own_tag()[:2])):
+            same_commit = []
+            for rev, extra in ((shared, ()), (None, ("--match-tree", "--head", shared)),
+                               (shared + "~0", ())):
+                rc, output, _calls = fixture.invoke([[page([success_a, success_b])]], rev=rev,
+                                                    extra_args=extra, tree=tree_listing([], {}))
+                same_commit.append((rc, fixture.gh_argv == [], "COMMIT:" in output,
+                                    "ERROR: cannot evaluate: {} is ambiguous: the ids of more than one "
+                                    "object in this repository start with {}, each of them the commit {} "
+                                    "or a tag that peels to it".format(rev or shared, shared, commit)
+                                    in output, "give the full commit id." in output,
+                                    "names no single commit" in output))
+            check(check_id, same_commit, [(2, True, False, True, True, False)] * 3)
+
+        # When git cannot read the objects a refused short id's prefix starts (here the loose files of
+        # the two commits sharing a prefix hold garbage), the refusal (exit 2) says the cause is not
+        # known, never that no commit id starts with it, nor that it is ambiguous.
+        def unreadable_reads():
+            reads = []
+            for rev, extra in ((prefix, ()), (None, ("--match-tree", "--head", prefix)), (prefix + "~0", ())):
+                rc, output, _calls = fixture.invoke([[page([success_a, success_b])]], rev=rev,
+                                                    extra_args=extra, tree=tree_listing([], {}))
+                reads.append((rc, fixture.gh_argv == [], "COMMIT:" in output,
+                              "ERROR: cannot evaluate: {} does not resolve to a commit in this repository: "
+                              "git could not read every object whose id starts with {}, so the cause is "
+                              "not known.".format(rev or prefix, prefix) in output,
+                              "no commit id starts with" in refusal_text(output),
+                              "ambiguous" in refusal_text(output)))
+            return reads
+        loose = [fixture.repo / ".git" / "objects" / oid[:2] / oid[2:] for oid in written]
+        saved = [(path.read_bytes(), path.stat().st_mode) for path in loose]
+        try:
+            for path in loose:
+                path.chmod(0o644)
+                path.write_bytes(b"not a zlib stream\n")
+            corrupt = unreadable_reads()
+        finally:
+            for path, (content, mode) in zip(loose, saved):
+                path.chmod(0o644)
+                path.write_bytes(content)
+                path.chmod(mode)
+        check("ci/rev-unreadable-objects-cause-not-misstated", corrupt,
+              [(2, True, False, True, False, False)] * 3)
+
+        # The same with the two loose files at mode 000. A user that can still read a mode-000 file (root)
+        # cannot make them unreadable, so there the case is not evaluated: it is recorded as a harness
+        # error, which the run counts as not passed (exit 2), never as a pass.
+        denied = None
+        try:
+            for path in loose:
+                path.chmod(0)
+            if not any(os.access(path, os.R_OK) for path in loose):
+                denied = unreadable_reads()
+        finally:
+            for path, (_content, mode) in zip(loose, saved):
+                path.chmod(mode)
+        if denied is None:
+            harness_error("ci/rev-mode-000-objects-cause-not-misstated", "this user can read mode-000 files")
+        else:
+            check("ci/rev-mode-000-objects-cause-not-misstated", denied,
+                  [(2, True, False, True, False, False)] * 3)
+
+        # A commit in a pack and a loose blob share a prefix no other object has, and the commit's loose
+        # file is gone. With the pack index readable the prefix reads as the commit (its COMMIT: line;
+        # the later CI read is not this case's subject). With garbage in the
+        # index git reports the bad index on stderr while still listing only the blob, so the refusal
+        # (exit 2) says the cause is not known, never that no commit id starts with the prefix. With the
+        # index at mode 000 git skips the pack without reporting anything, which nothing in the script can
+        # tell, so only the refusal is pinned there (exit 2, no gh call, no COMMIT: line), not its cause;
+        # a user that can read a mode-000 file (root) cannot exercise that, so it is not evaluated there.
+        pack_prefix, (pack_commit, _pack_blob) = fixture.prefix_pair(("commit", "blob"))
+        pack_dir = fixture.repo / ".git" / "objects" / "pack"
+        pack_name = subprocess.run([GIT, "-C", str(fixture.repo)] + NO_AUTO_MAINTENANCE
+                                   + ["pack-objects", str(pack_dir / "pack")], input=pack_commit + "\n",
+                                   check=True, capture_output=True, text=True, timeout=30,
+                                   env=fixture.base_env).stdout.strip()
+        pack_index = pack_dir / "pack-{}.idx".format(pack_name)
+        commit_file = fixture.repo / ".git" / "objects" / pack_commit[:2] / pack_commit[2:]
+        commit_saved = (commit_file.read_bytes(), commit_file.stat().st_mode)
+        index_saved = (pack_index.read_bytes(), pack_index.stat().st_mode)
+        packed = []
+        index_hidden = None
+        try:
+            commit_file.unlink()
+
+            def packed_read(rev, extra):
+                rc, output, _calls = fixture.invoke([[page([success_a, success_b])]], rev=rev,
+                                                    extra_args=extra, tree=tree_listing([], {}))
+                return rc, output
+            for rev, extra in ((pack_prefix, ()), (None, ("--match-tree", "--head", pack_prefix))):
+                rc, output = packed_read(rev, extra)
+                packed.append(output.splitlines()[:1])
+            pack_index.chmod(0o644)
+            pack_index.write_bytes(b"not a pack index\n")
+            for rev, extra in ((pack_prefix, ()), (None, ("--match-tree", "--head", pack_prefix)),
+                               (pack_prefix + "~0", ())):
+                rc, output = packed_read(rev, extra)
+                packed.append((rc, fixture.gh_argv == [], "COMMIT:" in output,
+                               "ERROR: cannot evaluate: {} does not resolve to a commit in this repository: "
+                               "git could not read every object whose id starts with {}, so the cause is "
+                               "not known.".format(rev or pack_prefix, pack_prefix) in output,
+                               "no commit id starts with" in refusal_text(output)))
+            pack_index.write_bytes(index_saved[0])
+            pack_index.chmod(0)
+            if not os.access(pack_index, os.R_OK):
+                index_hidden = []
+                for rev, extra in ((pack_prefix, ()), (None, ("--match-tree", "--head", pack_prefix)),
+                                   (pack_prefix + "~0", ())):
+                    rc, output = packed_read(rev, extra)
+                    index_hidden.append((rc, fixture.gh_argv == [], "COMMIT:" in output,
+                                         "ERROR: cannot evaluate: {} does not resolve to a commit in this "
+                                         "repository".format(rev or pack_prefix) in output))
+        finally:
+            pack_index.chmod(0o644)
+            pack_index.write_bytes(index_saved[0])
+            pack_index.chmod(index_saved[1])
+            for leftover in pack_dir.glob("pack-{}.*".format(pack_name)):
+                leftover.chmod(0o644)
+                leftover.unlink()
+            commit_file.parent.mkdir(exist_ok=True)
+            commit_file.write_bytes(commit_saved[0])
+            commit_file.chmod(commit_saved[1])
+        check("ci/rev-corrupt-pack-index-cause-not-misstated", packed,
+              [["COMMIT: " + pack_commit]] * 2 + [(2, True, False, True, False)] * 3)
+        if index_hidden is None:
+            harness_error("ci/rev-unreadable-pack-index-refused", "this user can read mode-000 files")
+        else:
+            check("ci/rev-unreadable-pack-index-refused", index_hidden, [(2, True, False, True)] * 3)
+
+        # A tag and a branch of the same hex name (the tag at a blob, the branch at HEAD): git's ref
+        # lookup names neither ref for the name, so the refusal (exit 2) is still made but its cause names
+        # no ref.
+        fixture_git("update-ref", "refs/tags/" + blob_prefix, ref_blob)
+        fixture_git("update-ref", "refs/heads/" + blob_prefix, head_sha)
+        two_refs = []
+        try:
+            for rev, extra in ((blob_prefix, ()), (None, ("--match-tree", "--head", blob_prefix))):
+                rc, output, _calls = fixture.invoke([[page([success_a, success_b])]], rev=rev,
+                                                    extra_args=extra, tree=tree_listing([], {}))
+                two_refs.append((rc, fixture.gh_argv == [], "COMMIT:" in output,
+                                 "ERROR: cannot evaluate: {} ".format(blob_prefix) in refusal_text(output),
+                                 "the ref" in refusal_text(output)))
+        finally:
+            fixture_git("update-ref", "-d", "refs/heads/" + blob_prefix)
+            fixture_git("update-ref", "-d", "refs/tags/" + blob_prefix)
+        check("ci/rev-tag-and-branch-same-hex-name-cause-names-no-ref", two_refs,
+              [(2, True, False, True, False)] * 2)
 
         if program is None:
             harness_error("ci/jq-step-direct-cases", "no jq program was extracted")
@@ -2365,6 +2876,25 @@ def _run_checks():
             wrong_file.append((rc, fixture.gh_reads("git/commits/"), unmatched in output))
         check("ci/match-tree-wrong-workflow-file-refused", wrong_file,
               [(1, 0, True), (1, 0, True), (0, 1, False)])
+
+        # An advisory run (THE ADVISORY RUNS) on the same tree is neither a candidate nor a veto: a
+        # failed scheduled or manual run beside a successful push run passes (exit 0), and a
+        # successful one alone refuses (exit 1, no commit read). The control: the same failed run
+        # recorded as a push event vetoes (exit 1).
+        tree_advisory = []
+        for event in ("schedule", "workflow_dispatch"):
+            failed_advisory = workflow_run(730, "completed", "failure", "Quality", same_sha, event=event)
+            green_advisory = workflow_run(731, "completed", "success", "Quality", same_sha, event=event)
+            for runs in ([failed_advisory, quality_same], [green_advisory]):
+                rc, output, _calls = fixture.invoke([], rev=None, extra_args=match,
+                                                    tree=tree_listing(runs, commits))
+                tree_advisory.append((rc, fixture.gh_reads("git/commits/"), unmatched in output))
+        failed_push = workflow_run(732, "completed", "failure", "Quality", same_sha, event="push")
+        rc, output, _calls = fixture.invoke([], rev=None, extra_args=match,
+                                            tree=tree_listing([failed_push, quality_same], commits))
+        tree_advisory.append((rc, fixture.gh_reads("git/commits/"), unmatched in output))
+        check("ci/match-tree-advisory-run-ignored", tree_advisory,
+              [(0, 1, False), (1, 0, True)] * 2 + [(1, 1, False)])
 
         # A successful same-tree run whose named job concluded skipped, ran none of that name, has one
         # of two same-named jobs skipped, or has it still running, never stands as that job's evidence

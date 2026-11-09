@@ -153,8 +153,8 @@ from _opf_store import (  # noqa: E402
 SUPPORTED_SCHEMA = 1
 
 # Every namespace bound to a real record type in the section 8.1 taxonomy: the baseline types, the
-# module-tier types (namespace is the first element of the (namespace, module) pair), and the importer-
-# only quarantine type. A `links` id may point at ANY record type, so its namespace must be one of
+# module-tier types (namespace is the first element of the (namespace, module) pair), and the LF of
+# IMPORTER_TYPES (the standard reserves LF unassigned and no record type uses it). A `links` id may point at ANY record type, so its namespace must be one of
 # these; a namespace bound to no type (e.g. ZZ, the reserved-excluded `transaction`/TX, the unassigned
 # CL) is not a real record-type namespace (spec 8.1, 8.2 one-to-one binding).
 RECORD_NAMESPACES = (
@@ -167,9 +167,10 @@ RECORD_NAMESPACES = (
 # key `"imported:<NS>"`, a number line independent of the clean `<NS>` one.
 IMPORTED_PREFIX = "imported:"
 # The namespaces an imported id or counter may carry: imported history uses the same enabled types in a
-# separate series (spec 8.1 roster notes), so the baseline and module types. The importer-only
-# legacy_fragment (LF) is excluded, because new imports MUST use the imported series and not LF quarantine
-# (spec 8.1); the reserved TX and the unassigned CL are bound to no type and stay excluded (spec 8.1, 8.2).
+# separate series (spec 8.1 roster notes), so the baseline and module types. LF is excluded, because the
+# standard reserves LF unassigned: no record type uses it in either series, and unmappable imported text
+# stays verbatim in `unparsed` (spec 8.1/8.3); the reserved TX and the unassigned CL are bound to no type
+# and stay excluded (spec 8.1, 8.2).
 IMPORTED_NAMESPACES = (
     frozenset(BASELINE_TYPES.values())
     | frozenset(ns for ns, _module in MODULE_TYPES.values())
@@ -1880,12 +1881,12 @@ def _validate_imported_values(record, spec, findings, registered_kinds, imported
 
 def _imported_namespace_refusal(ns):
     """Why the imported series refuses `ns`, a namespace outside IMPORTED_NAMESPACES, stated for that
-    namespace: the importer-only LF, the reserved-excluded TX, the reserved-unassigned CL, or one bound to
-    no type at all (spec 8.1/8.2)."""
+    namespace: LF (the standard reserves LF unassigned and defines no legacy_fragment type), the
+    reserved-excluded TX, the reserved-unassigned CL, or one bound to no type at all (spec 8.1/8.2)."""
     for name, bound in IMPORTER_TYPES.items():
         if ns == bound:
-            return ("it is the namespace of the importer-only {} quarantine type, and the imported series "
-                    "carries no LF (spec 8.1/8.2)".format(name))
+            return ("it is reserved unassigned: the standard defines no {} type and no record type uses "
+                    "it in either series, so the imported series carries no LF (spec 8.1/8.2)".format(name))
     for name, bound in RESERVED_EXCLUDED_TYPES.items():
         if ns == bound:
             return ("it is reserved for the {} type, which is excluded from the adopter standard "
@@ -2059,8 +2060,8 @@ def validate_imported_record(record, expected_type=None, specs=None, registered_
     optional `span`, `history` rows of exactly {field, value}, and `unparsed`). Every omitted non-exempt
     field of the type's schema carries exactly one closed-reason `unrecorded` row; supplied fields keep
     their declared types and vocabularies; historical timestamps are no later than `imported_at`;
-    `proposed_from` is never carried; unknown keys fail. The importer-only legacy_fragment (LF) is
-    refused (spec 8.1/8.2). Before any of the record is read, it must be plain (_plain_problem): exactly
+    `proposed_from` is never carried; unknown keys fail. A legacy_fragment type or an LF namespace is
+    refused: the standard reserves LF unassigned and no record type uses it (spec 8.1/8.2). Before any of the record is read, it must be plain (_plain_problem): exactly
     a dict whose every key and nested value is exactly a plain built-in type, a tree as a parsed record
     is, so no method of a record value (a lookup, a hash, a comparison, a format, a repr, a startswith)
     runs during validation. Its depth is not bounded, since tomllib nests tables to any depth through a
@@ -2171,9 +2172,11 @@ def validate_imported_record(record, expected_type=None, specs=None, registered_
         return RecordValidation(CANNOT_EVALUATE, named(
             ["the record has no `type` and no expected type: cannot identify it"]), rid=rid)
     if rtype in IMPORTER_TYPES:
-        # New imports use the imported series and verbatim `unparsed` text, never LF quarantine.
-        findings.append("type {!r} is the importer-only LF quarantine type, which the imported series "
-                        "refuses (spec 8.1/8.2)".format(rtype))
+        # The standard reserves LF unassigned, and unmappable imported text stays verbatim in `unparsed`.
+        findings.append("type {!r} is not an OPF record type: the standard defines none and reserves "
+                        "{} unassigned, so no record type uses it in either series, and "
+                        "unmappable imported text stays verbatim in `unparsed` (spec 8.1/8.3)".format(
+                            rtype, IMPORTER_TYPES[rtype]))
         return RecordValidation(INVALID, named(findings), rtype, rid)
     spec = specs.get(rtype)
     if spec is None:
@@ -2377,8 +2380,8 @@ def validate_counters(data, known_namespaces=None, optional_namespaces=None, imp
     findings): high_water is {namespace: int}. Each namespace is two uppercase letters (optionally
     restricted to `known_namespaces`); each value is a non-negative int (a bool is rejected).
 
-    `optional_namespaces` names namespaces that are ACCEPTED-if-present but NOT REQUIRED (importer/
-    quarantine namespaces such as LF): a counter namespace is accepted (never flagged "not a known
+    `optional_namespaces` names namespaces that are ACCEPTED-if-present but NOT REQUIRED (the IMPORTER_TYPES
+    namespace LF, which the standard reserves unassigned): a counter namespace is accepted (never flagged "not a known
     namespace") when it is in known_namespaces OR in optional_namespaces, but the completeness check
     (every known namespace must carry a high-water) applies ONLY to known_namespaces, so an optional
     namespace absent from [counters] is not a finding. The section-8.1 taxonomy-validity check still
@@ -2554,7 +2557,7 @@ def next_id(high, ns, known_complete=False, imported_series=False):
     `imported:<NS>`, which allocates `imported:<NS>-<n>` from that key's own high-water and never reads the
     clean `<NS>` line (spec 8.2); the map may then hold both series. Without it, an imported key is refused
     exactly as before. An absent imported key is refused whatever `known_complete` says: spec 8.2
-    requires every imported counter row once the store declares 1.3.0 and lets only a genuinely first
+    requires the imported series' counter rows, one for each enabled type, and lets only a genuinely first
     adoption start at zero, written as an explicit zero row, and a clean-only known_namespaces proof says
     nothing about the imported line, so reading an absent row as high-water 0 would zero-seed prior
     ancestry and could reuse an imported id. On this series-aware path the
@@ -2585,7 +2588,7 @@ def next_id(high, ns, known_complete=False, imported_series=False):
     _validated_counter_map(high, "next_id", imported_series)
     if imported_series and ns.startswith(IMPORTED_PREFIX) and ns not in high:
         # The imported line accepts NO completeness proof for an absent key, known_complete=True included:
-        # spec 8.2 requires every imported counter row once the store declares 1.3.0 and lets only a
+        # spec 8.2 requires the imported series' counter rows, one for each enabled type, and lets only a
         # genuinely first adoption start at zero, written as an explicit zero row, so reading an absent
         # row as high-water 0 would zero-seed prior ancestry and could reuse an imported id. Fail closed;
         # the remedy is recording the counter row, never a proof flag.
@@ -3877,7 +3880,7 @@ def self_test():
     check("imported-unique-default-malformed", bool(check_unique_ids(["imported:BI-1"])))
     check("imported-unique-nonbool-flag-flagged", bool(check_unique_ids(["BI-1"], imported_series=0)))
     # Every helper that accepts imported ids enforces the one IMPORTED_NAMESPACES set (spec 8.1/8.2): the
-    # importer-only LF, the reserved TX, the unassigned CL and an unknown ZZ are refused even when the
+    # unassigned LF and CL, the reserved TX and an unknown ZZ are refused even when the
     # caller's map tracks them.
     for _ns in ("LF", "TX", "CL", "ZZ"):
         _ikey = "imported:" + _ns
@@ -3997,9 +4000,11 @@ def self_test():
                "title": "A legacy fragment", "created_at": TS, "updated_at": TS, "actor": dict(_IMP_ACTOR),
                "import": _imp_table()}
     check("imported-lf-roster-reconciles", _specs_roster_error(_lf_roster) is None)
-    check("imported-lf-type-refused-extended-roster", _imp_refused(_lf_rec, "importer-only LF", specs=_lf_roster))
-    check("imported-lf-type-refused-baseline", _imp_refused(_lf_rec, "importer-only LF"))
-    check("imported-lf-namespace-refused", _imp_refused(_imp_pd(id="imported:LF-1"), "carries no LF"))
+    _lf_needle = "is not an OPF record type: the standard defines none and reserves LF unassigned"
+    check("imported-lf-type-refused-extended-roster", _imp_refused(_lf_rec, _lf_needle, specs=_lf_roster))
+    check("imported-lf-type-refused-baseline", _imp_refused(_lf_rec, _lf_needle))
+    check("imported-lf-namespace-refused", _imp_refused(_imp_pd(id="imported:LF-1"),
+                                                        "the standard defines no legacy_fragment type"))
     # Each refused namespace is refused for its own reason, on an id and on a link: only LF's names LF.
     for _ns, _needle in (("TX", "reserved for the transaction type"), ("CL", "reserved unassigned"),
                          ("ZZ", "bound to no record type in the section 8.1 taxonomy")):
