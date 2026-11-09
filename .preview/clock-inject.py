@@ -14,9 +14,14 @@ Stamp segment. ` | stamp: [YYYY-MM-DD HH:MM ZONE]` is a ready-to-copy status hea
 form stamp-truth-stop.py reads as a message's header claim. It is built from the SAME single clock reading
 as the line's local and UTC segments, in the same local zone, TRUNCATED to the minute (the seconds and any
 fraction are dropped, never rounded up, so 23:59:59.999 stays on its own minute and day). ZONE is the local
-zone's abbreviation when it fits stamp-truth-stop.py's claim grammar (UTC, GMT, 2 to 6 capitals, or a
-numeric offset such as +03); otherwise the local offset in +HHMM form; when neither fits (an offset with
-seconds) the segment is omitted, so the line never offers a stamp that checker would not read.
+zone's abbreviation only when stamp-truth-stop.py converts it to the true offset: a letter name (2 to 6
+capitals), which that hook resolves through the local zone; UTC or GMT, which it reads as offset zero, only
+when the local offset is zero; a numeric name such as +03, which it reads literally, only when it states the
+local offset. A POSIX TZ string can give a name that misstates the offset (TZ=UTC-3 names +03:00 "UTC");
+then, and for any other name, ZONE is the local offset in +HHMM form when that hook converts it (at most 18
+hours). When neither converts (an offset with seconds, or one of 19 hours or more, as TZ=xxx-19 gives) the
+segment is omitted, so the line never offers a stamp that checker would read at another instant or not at
+all. The self-test checks this under such TZ strings, and passes whether the segment is present or not.
 
 Coverage. Registered under PostToolUse it fires after a tool call that SUCCEEDED; registered under
 PostToolUseFailure it fires after a tool call that started and FAILED; registered under UserPromptSubmit it
@@ -553,14 +558,39 @@ def fmt_elapsed(delta):
     return f"{secs // 3600:02d}:{(secs % 3600) // 60:02d}"
 
 
+def _stamp_offset(text):
+    """The offset stamp-truth-stop.py's claim conversion gives the numeric zone `text` ([+-]HH, [+-]HHMM or
+    [+-]HH:MM), as a timedelta, or None when it converts no such zone (hours above 18 or minutes above 59)."""
+    m = re.fullmatch(r"([+-])(\d{2}):?(\d{2})?", text)
+    if m is None:
+        return None
+    hours, mins = int(m.group(2)), int(m.group(3) or 0)
+    if hours > 18 or mins > 59:
+        return None
+    delta = datetime.timedelta(hours=hours, minutes=mins)
+    return delta if m.group(1) == "+" else -delta
+
+
 def stamp_segment(local):
     """The ready-to-copy header `[YYYY-MM-DD HH:MM ZONE]` for the aware datetime `local`, truncated to its
-    minute (strftime drops the seconds; nothing rounds up), or None when no zone form fits the claim grammar.
-    ZONE is the abbreviation when it fits, else the offset as +HHMM; an offset with seconds fits neither."""
-    zone = local.tzname()
+    minute (strftime drops the seconds; nothing rounds up), or None when no zone form converts to the true
+    offset in stamp-truth-stop.py. ZONE is the abbreviation only when that hook converts it to the true
+    offset: a letter name (2 to 6 capitals), which it resolves through the local zone; UTC or GMT, which it
+    reads as offset zero, only when the offset is zero; a numeric name, which it reads literally, only when
+    it states the offset. Otherwise ZONE is the offset as +HHMM when that hook converts it (at most 18 hours);
+    an offset with seconds, or one of 19 hours or more, gives None."""
+    offset, zone = local.utcoffset(), local.tzname()
+    if offset is None:
+        return None
     if not isinstance(zone, str) or not _STAMP_ZONE_RE.fullmatch(zone):
+        zone = None
+    elif zone in ("UTC", "GMT"):
+        zone = zone if offset == datetime.timedelta(0) else None
+    elif zone[0] in "+-":
+        zone = zone if _stamp_offset(zone) == offset else None
+    if zone is None:
         zone = local.strftime("%z")
-        if not re.fullmatch(r"[+-]\d{4}", zone):
+        if _stamp_offset(zone) != offset:
             return None
     return f"[{local.strftime('%Y-%m-%d %H:%M')} {zone}]"
 
@@ -651,19 +681,22 @@ def _self_test():
     # a FIFO test's child timeout is a hang guard only (a blocking open never returns), far above the child's own
     # run (well under a second), so the verdict never depends on the host's speed
     HANG_TIMEOUT = 120
+    # the stamp segment is optional: it is omitted under a zone whose stamp stamp-truth-stop.py cannot convert
     line_re = re.compile(r"^CLOCK \(read by hook, authoritative\): \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} \S+ \| "
-                         r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z \| stamp: \[\d{4}-\d{2}-\d{2} \d{2}:\d{2} \S+\]"
+                         r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z( \| stamp: \[\d{4}-\d{2}-\d{2} \d{2}:\d{2} \S+\])?"
                          r"( \| session elapsed \d{2,}:\d{2})?$")
-    # the line's local segment and its stamp segment, captured to compare them
+    # the line's local segment and its stamp segment (None when omitted), captured to compare them
     parts_re = re.compile(r"^CLOCK \(read by hook, authoritative\): (\d{4}-\d{2}-\d{2} \d{2}:\d{2}):\d{2} (\S+) \| "
-                          r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z \| stamp: \[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}) (\S+)\]")
+                          r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z(?: \| stamp: \[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}) "
+                          r"(\S+)\])?(?: \| session elapsed \d{2,}:\d{2})?$")
 
     def local_reading(*wall):
         """The UTC reading whose process-local wall time is `wall` (year, month, day, hour, minute, second, us)."""
         return datetime.datetime(*wall).astimezone().astimezone(utc)
 
     def segments(line):
-        """(local minute, local zone, stamp minute, stamp zone) of a clock line; fails the test when absent."""
+        """(local minute, local zone, stamp minute, stamp zone) of a clock line, the stamp pair None when the
+        stamp segment is omitted; fails the test when the line has no local segment."""
         m = parts_re.match(line)
         if m is None:
             raise AssertionError("no local and stamp segments in %r" % line)
@@ -704,8 +737,10 @@ def _self_test():
             now = datetime.datetime(2026, 9, 23, 17, 45, 2, tzinfo=utc)
             ln = clock_line(now, datetime.datetime(2026, 9, 23, 14, 17, 10, tzinfo=utc))
             self.assertRegex(ln, line_re)
-            self.assertIn("| 2026-09-23T17:45:02Z | stamp: [", ln)
-            self.assertTrue(ln.endswith("] | session elapsed 03:27"), ln)
+            stamp = stamp_segment(now.astimezone())
+            # the stamp segment, when this zone gives one, sits between the UTC segment and elapsed
+            middle = "" if stamp is None else " | stamp: " + stamp
+            self.assertTrue(ln.endswith("| 2026-09-23T17:45:02Z" + middle + " | session elapsed 03:27"), ln)
 
         def test_line_omits_elapsed_when_unknown(self):
             ln = clock_line(datetime.datetime(2026, 9, 23, 17, 45, 2, tzinfo=utc), None)
@@ -800,27 +835,111 @@ def _self_test():
             self.assertEqual(json.loads(out)["hookSpecificOutput"]["hookEventName"], "PostToolUse")
 
         # -- the ready-to-copy stamp segment and the UserPromptSubmit registration --
-        def expected_zone(self, now_utc):
-            local = now_utc.astimezone()
-            return local.tzname() if _STAMP_ZONE_RE.fullmatch(local.tzname()) else local.strftime("%z")
-
         def test_stamp_agrees_with_local_segment(self):
             now = local_reading(2026, 9, 23, 13, 45, 2, 0)
+            if stamp_segment(now.astimezone()) is None:
+                self.skipTest("this process zone gives no stamp segment (stamp-truth-stop.py cannot convert it)")
             local_min, local_zone, stamp_min, stamp_zone = segments(clock_line(now))
             self.assertEqual(stamp_min, local_min)
             self.assertEqual(stamp_min, now.astimezone().strftime("%Y-%m-%d %H:%M"))
-            self.assertEqual(stamp_zone, self.expected_zone(now))
-            if _STAMP_ZONE_RE.fullmatch(local_zone):
-                self.assertEqual(stamp_zone, local_zone)
+            # the zone's own name, or else its numeric offset
+            self.assertIn(stamp_zone, (local_zone, now.astimezone().strftime("%z")))
 
         def test_stamp_zone_fallbacks(self):
             at = datetime.datetime(2026, 9, 23, 13, 45, 59, 999000)
-            named = at.replace(tzinfo=datetime.timezone(datetime.timedelta(hours=-4), "EDT"))
-            self.assertEqual(stamp_segment(named), "[2026-09-23 13:45 EDT]")
-            odd = at.replace(tzinfo=datetime.timezone(datetime.timedelta(hours=5, minutes=30), "x-ist"))
-            self.assertEqual(stamp_segment(odd), "[2026-09-23 13:45 +0530]")  # an unreadable name: the offset
-            secs = at.replace(tzinfo=datetime.timezone(datetime.timedelta(minutes=19, seconds=32), "lmt"))
-            self.assertIsNone(stamp_segment(secs))  # an offset with seconds fits no claim form: omitted
+
+            def stamp_zone(name, **offset):
+                got = stamp_segment(at.replace(tzinfo=datetime.timezone(datetime.timedelta(**offset), name)))
+                if got is not None:
+                    self.assertTrue(got.startswith("[2026-09-23 13:45 "), got)
+                    return got[len("[2026-09-23 13:45 "):-1]
+                return None
+
+            self.assertEqual(stamp_zone("EDT", hours=-4), "EDT")  # a letter name: resolved through the zone
+            self.assertEqual(stamp_zone("x-ist", hours=5, minutes=30), "+0530")  # an unreadable name: the offset
+            # an offset with seconds fits no claim form: omitted (exactly on the minute, and one second past it)
+            self.assertIsNone(stamp_zone("lmt", minutes=19, seconds=32))
+            self.assertEqual(stamp_zone("lmt", minutes=19), "+0019")
+            self.assertIsNone(stamp_zone("lmt", minutes=19, seconds=1))
+            # UTC and GMT read as offset zero there, so they are kept only at offset zero
+            for name in ("UTC", "GMT"):
+                self.assertEqual(stamp_zone(name, hours=0), name)
+                self.assertEqual(stamp_zone(name, hours=3), "+0300", name)
+                self.assertEqual(stamp_zone(name, hours=-5), "-0500", name)
+                self.assertEqual(stamp_zone(name, minutes=1), "+0001", name)
+            # a numeric name is read literally there, so it is kept only when it states the offset
+            self.assertEqual(stamp_zone("+05", hours=5), "+05")
+            self.assertEqual(stamp_zone("+03", hours=5), "+0500")
+            self.assertEqual(stamp_zone("+05:30", hours=5, minutes=30), "+05:30")
+            self.assertEqual(stamp_zone("-0330", hours=-3, minutes=-30), "-0330")
+            self.assertEqual(stamp_zone("-0330", hours=3, minutes=30), "+0330")  # the wrong sign
+            self.assertEqual(stamp_zone("-00", hours=0), "-00")
+            # the offset there converts at most 18 hours (with any minutes): just inside, at, and past the bound
+            for sign, name in ((1, "+1859"), (-1, "-1859")):
+                self.assertEqual(stamp_zone("xxx", hours=sign * 18), name[0] + "1800")
+                self.assertEqual(stamp_zone("xxx", hours=sign * 18, minutes=sign * 59), name)
+                self.assertEqual(stamp_zone(name, hours=sign * 18, minutes=sign * 59), name)
+                self.assertIsNone(stamp_zone("xxx", hours=sign * 19))
+                self.assertIsNone(stamp_zone(name[0] + "19", hours=sign * 19))
+                self.assertIsNone(stamp_zone("xxx", hours=sign * 19, minutes=sign))
+            self.assertEqual(_stamp_offset("+1859"), datetime.timedelta(hours=18, minutes=59))
+            for text in ("+1900", "+0560", "+05:60", "05", "+5", "+05:3", "+0530x", ""):
+                self.assertIsNone(_stamp_offset(text), text)
+
+        def _stamps_under_tz(self, tz):
+            """[(line, stamp, conversion, minute)] for three readings, computed in a child interpreter whose
+            TZ is `tz`: the clock line and stamp segment of this file, the stamp's conversion by the sibling
+            stamp-truth-stop.py (None when it converts nothing, "nomatch" when its claim grammar does not match),
+            and the epoch microseconds of the reading's local minute. The child runs only this interpreter on
+            these two files (no other executable, no network, nothing written)."""
+            sib = _sibling_or_skip("stamp-truth-stop.py")
+            code = ("import datetime, importlib.util as u, json, sys\n"
+                    "def load(name, path):\n"
+                    "    s = u.spec_from_file_location(name, path)\n"
+                    "    m = u.module_from_spec(s)\n"
+                    "    s.loader.exec_module(m)\n"
+                    "    return m\n"
+                    "ci, st = load('ci', sys.argv[1]), load('st', sys.argv[2])\n"
+                    "out = []\n"
+                    "for wall in ((2026, 9, 23, 13, 45, 59, 999000), (2026, 1, 15, 0, 0, 0, 0),\n"
+                    "             (2026, 6, 30, 23, 59, 59, 999999)):\n"
+                    "    now = datetime.datetime(*wall, tzinfo=datetime.timezone.utc)\n"
+                    "    local = now.astimezone()\n"
+                    "    stamp = ci.stamp_segment(local)\n"
+                    "    conv = None\n"
+                    "    if stamp is not None:\n"
+                    "        m = st._CLAIM_RE.fullmatch(stamp[1:-1])\n"
+                    "        conv = st.claim_us(m) if m else 'nomatch'\n"
+                    "    minute = int(local.replace(second=0, microsecond=0).timestamp()) * st.US\n"
+                    "    out.append([ci.clock_line(now), stamp, conv, minute])\n"
+                    "print(json.dumps(out))\n")
+            env = {k: v for k, v in os.environ.items() if k not in ("AIQT_LEASE_FILE", "ORCH_LEASE_FILE")}
+            env["TZ"] = tz
+            p = subprocess.run([sys.executable, "-I", "-S", "-B", "-c", code, os.path.abspath(__file__), sib],
+                               env=env, capture_output=True, text=True, timeout=HANG_TIMEOUT)
+            self.assertEqual(p.returncode, 0, p.stderr)
+            return json.loads(p.stdout)
+
+        def test_stamp_converts_to_the_reading_under_posix_tz(self):
+            # a POSIX TZ string can name a zone with a name that misstates its offset, or give an offset the stop
+            # hook cannot convert: each stamp present converts there to the reading's minute, and an omitted one
+            # leaves a well-formed line. Each value is the set of stamp zones allowed (None: omitted).
+            cases = (("UTC-3", {"+0300"}), ("GMT+5", {"-0500"}), ("<+03>-5", {"+0500"}), ("xxx-19", {None}),
+                     ("<+001932>-0:19:32", {None}),
+                     # controls: names that state the offset are kept, a letter name through the local zone
+                     ("UTC0", {"UTC"}), ("<+05>-5", {"+05"}), ("EST5EDT", {"EST", "EDT"}),
+                     ("<+1859>-18:59", {"+1859"}), ("xxx-18:59", {"+1859"}))
+            for tz, zones in cases:
+                for line, stamp, conv, minute in self._stamps_under_tz(tz):
+                    with self.subTest(tz=tz, line=line):
+                        self.assertRegex(line, line_re)
+                        local_min, _zone, stamp_min, stamp_zone = segments(line)
+                        self.assertIn(stamp_zone, zones)
+                        self.assertEqual(stamp_min is None, stamp is None)
+                        if stamp is not None:
+                            self.assertEqual(stamp, "[%s %s]" % (stamp_min, stamp_zone))
+                            self.assertEqual(stamp_min, local_min)
+                            self.assertEqual(conv, minute)
 
         def test_stamp_minute_boundaries_truncate_from_one_reading(self):
             for wall, want in (((2026, 9, 23, 13, 45, 0, 0), "2026-09-23 13:45"),
@@ -832,8 +951,11 @@ def _self_test():
                 ln = clock_line(now)
                 self.assertRegex(ln, line_re)
                 local_min, _zone, stamp_min, _szone = segments(ln)
-                self.assertEqual((stamp_min, local_min), (want, want), wall)
-                self.assertIn("| " + now.strftime("%Y-%m-%dT%H:%M:%SZ") + " |", ln, wall)
+                # an omitted stamp (a zone stamp-truth-stop.py cannot convert) leaves the local minute to check
+                stamp_want = None if stamp_segment(now.astimezone()) is None else want
+                self.assertEqual((stamp_min, local_min), (stamp_want, want), wall)
+                # the UTC segment is followed by another segment, or ends the line when the stamp is omitted
+                self.assertIn("| " + now.strftime("%Y-%m-%dT%H:%M:%SZ") + " |", ln + " |", wall)
 
         def test_main_reads_the_clock_once(self):
             # a clock that moves 1 ms across midnight on each read: a second read would put the stamp on the
@@ -857,7 +979,8 @@ def _self_test():
                 globals()["datetime"] = real
             self.assertEqual((rc, len(reads)), (0, 1))
             line = json.loads(out)["hookSpecificOutput"]["additionalContext"]
-            self.assertEqual(segments(line)[0::2], ("2026-09-23 23:59", "2026-09-23 23:59"))
+            stamp_want = None if stamp_segment(first.astimezone()) is None else "2026-09-23 23:59"
+            self.assertEqual(segments(line)[0::2], ("2026-09-23 23:59", stamp_want))
 
         def test_user_prompt_submit_event(self):
             rc, out = run_main(json.dumps({"hook_event_name": "UserPromptSubmit", "session_id": "s",
@@ -866,6 +989,8 @@ def _self_test():
             self.assertEqual((rc, obj["hookEventName"]), (0, "UserPromptSubmit"))
             self.assertRegex(obj["additionalContext"], line_re)
             self.assertIn("UserPromptSubmit", _EVENTS)
+
+        CROSS_FILE_READING = (2026, 9, 23, 13, 45, 59, 999000)
 
         def test_stamp_is_a_bracketed_header_claim_in_stop_hook(self):
             # cross-file: the segment matches stamp-truth-stop.py's claim grammar, converts to the reading's
@@ -879,7 +1004,9 @@ def _self_test():
                 spec.loader.exec_module(mod)
             finally:
                 sys.dont_write_bytecode = old_dwb
-            now = local_reading(2026, 9, 23, 13, 45, 59, 999000)
+            now = local_reading(*self.CROSS_FILE_READING)
+            if stamp_segment(now.astimezone()) is None:
+                self.skipTest("this process zone gives no stamp segment (stamp-truth-stop.py cannot convert it)")
             stamp = re.search(r"\| stamp: (\[[^]]+\])", clock_line(now)).group(1)
             m = mod._CLAIM_RE.fullmatch(stamp[1:-1])
             self.assertIsNotNone(m, stamp)
@@ -1141,7 +1268,8 @@ def _self_test():
 
         # -- sibling parity on a single-hook install --
         PARITY_TESTS = ("test_r13_shared_lease_code_identical_to_stop_hook",
-                        "test_stamp_is_a_bracketed_header_claim_in_stop_hook")
+                        "test_stamp_is_a_bracketed_header_claim_in_stop_hook",
+                        "test_stamp_converts_to_the_reading_under_posix_tz")
         PARITY_SIBLINGS = ("stamp-truth-stop.py",)
 
         def _parity_in_copy(self, siblings, value, dangling=False):
@@ -1200,11 +1328,13 @@ def _self_test():
                 self.assertEqual((got[0], got[1], got[2], got[3] + got[4]), (1, n, 0, n), (value, err))
 
         def test_sibling_parity_runs_and_passes_with_siblings_present(self):
-            # with every sibling beside the copy the parity tests RUN and pass, whatever the variable says
+            # with every sibling beside the copy the parity tests RUN and pass, whatever the variable says; the
+            # cross-file stamp test alone skips, under a process zone that gives no stamp segment
             n = len(self.PARITY_TESTS)
+            no_stamp = int(stamp_segment(local_reading(*self.CROSS_FILE_READING).astimezone()) is None)
             for value in (None, "1"):
                 got, err = self._parity_in_copy(self.PARITY_SIBLINGS, value)
-                self.assertEqual(got, [0, n, 0, 0, 0], (value, err))
+                self.assertEqual(got, [0, n, no_stamp, 0, 0], (value, err))
 
     result = unittest.TextTestRunner(verbosity=2).run(unittest.TestLoader().loadTestsFromTestCase(T))
     return 0 if result.wasSuccessful() else 1
