@@ -20,23 +20,27 @@ A mapping reaches an environment when it is the target: os.environ, os.environb,
 attribute whose last component contains "env" in any case (env, child_env, self.env), assigned
 (plainly, annotated or by :=), updated (update, setdefault, __setitem__, |=, a subscript store),
 or when it is the value of an env= keyword argument of any call, or the mapping or keywords of a
-call named dict on an attribute (mock.patch.dict, patch.dict, also as a decorator) whose first
-argument is a target or the string "os.environ" or "os.environb", or the key of os.putenv or of
-a setenv call (monkeypatch.setenv). Both branches of a conditional expression, every value of an
-or/and and the value of a := given as such a mapping are read as the mapping. Inside such a
-mapping a store is one of these routes:
+call named dict on an attribute (mock.patch.dict, patch.dict, also as a decorator) whose target,
+given as the first argument or as in_dict=, is a target or the string "os.environ" or
+"os.environb"; its mapping is the second argument or values=. The key of os.putenv or of a
+setenv call (monkeypatch.setenv), given as the first argument or as name=, is a store too. Both
+branches of a conditional expression, every value of an or/and and the value of a := given as
+such a mapping are read as the mapping. Inside such a mapping a store is one of these routes:
 
   dict-key          a key of a dict display, also inside a ** entry, a dict(...) argument, a
                     union (os.environ | {...}), a ChainMap(...) argument or the mapping of
-                    patch.dict(os.environ, {...});
+                    patch.dict (patch.dict(os.environ, {...}), patch.dict(os.environ,
+                    values={...}));
   dict-comp-key     the key of a dict comprehension;
   keyword           a keyword argument of dict(...), of the target's update(...) or of
-                    patch.dict(...) (dict(BASH_ENV=path), os.environ.update(ENV=path));
+                    patch.dict(...) other than its own in_dict, values and clear parameters
+                    (dict(BASH_ENV=path), os.environ.update(ENV=path),
+                    patch.dict(in_dict=os.environ, BASH_ENV=path));
   pair              the key of a literal (KEY, v) pair in a literal list or tuple given to
-                    dict(...), update(...), patch.dict(...) or |=;
+                    dict(...), update(...), |= or as the mapping of patch.dict(...);
   fromkeys          a literal key listed in fromkeys([KEY], v);
-  first-argument    the key of os.putenv, of setenv or of the target's setdefault or
-                    __setitem__;
+  first-argument    the key of os.putenv, of setenv (also setenv(name=KEY, value=v)) or of the
+                    target's setdefault or __setitem__;
   second-argument   the key of an unbound call whose first argument is the target
                     (dict.setdefault(env, KEY, v), dict.__setitem__(env, KEY, v));
   subscript-store   a subscript store into the target (env["BASH_ENV"] = path, an augmented or
@@ -67,11 +71,13 @@ format call); a store through operator.setitem, monkeypatch.setitem, setattr or 
 indirection; a mapping loaded from data (json.loads); an environment passed positionally
 (os.execve) or held in a name without "env", including run keyword arguments held in a dict
 (kw = {"env": {...}} or kw["env"] = {...}, then run(c, **kw)) and a tuple target
-(env, x = {"BASH_ENV": p}, 1); a patch.dict target given as any other string; an environment
-inherited from the caller (a launch without env=, tsthrm.17); shell sources; and shell text a
-source launches (an export -f, a declare -fx, or a function or alias named after an executable).
-Those last two are planned as later parts of this lint. A name that contains "env" but holds no
-environment (environment_defaults) is still treated as a target.
+(env, x = {"BASH_ENV": p}, 1); a patch.dict target given as any other string; a patch.dict
+target or mapping, or a setenv name, passed through a ** mapping
+(patch.dict(**{"in_dict": os.environ, "values": m}), setenv(**{"name": "BASH_ENV", ...})); an
+environment inherited from the caller (a launch without env=, tsthrm.17); shell sources; and
+shell text a source launches (an export -f, a declare -fx, or a function or alias named after an
+executable). Those last two are planned as later parts of this lint. A name that contains "env"
+but holds no environment (environment_defaults) is still treated as a target.
 """
 import sys
 
@@ -110,11 +116,17 @@ FUNC_PREFIX = "BASH_FUNC_"
 FUNC_SUFFIX = "%%"
 STARTUP_KEYS = frozenset({"BASH_ENV", "ENV"})
 KEY_METHODS = frozenset({"setdefault", "__setitem__"})
-# Calls whose first argument is a key set in the process environment (os.putenv,
-# monkeypatch.setenv).
+# Calls whose first argument, or name= keyword, is a key set in the process environment
+# (os.putenv, monkeypatch.setenv(name, value)).
 KEY_SETTERS = frozenset({"putenv", "setenv"})
+KEY_SETTER_KEYWORD = "name"
 # The import-path strings mock.patch.dict accepts for the process environment.
 ENVIRON_PATHS = frozenset({"os.environ", "os.environb"})
+# mock.patch.dict(in_dict, values=(), clear=False, **kwargs): its own parameters, which are never
+# environment keys; only the remaining keywords are keys set in the target.
+PATCH_DICT_TARGET = "in_dict"
+PATCH_DICT_VALUES = "values"
+PATCH_DICT_PARAMS = frozenset({PATCH_DICT_TARGET, PATCH_DICT_VALUES, "clear"})
 
 # The reviewed allowlist: (path, enclosing qualname, kind, exact count, reason). Every entry names
 # a current site and why it is accepted for now; a count that no longer matches the scan is a
@@ -166,6 +178,14 @@ def _patched_environment(node):
     (os.environ, os.environb, a name containing env) or the string "os.environ" or
     "os.environb"."""
     return _env_named(node) or _constant_text(node) in ENVIRON_PATHS
+
+
+def _keyword_value(keywords, name):
+    """The value of the keyword argument called name, or None."""
+    for keyword in keywords:
+        if keyword.arg == name:
+            return keyword.value
+    return None
 
 
 def _call_name(func):
@@ -244,11 +264,12 @@ class _Scanner:
         for key, text, route in _mapping_keys(expr, pairs):
             self._record(key, text, route)
 
-    def _keywords(self, keywords):
+    def _keywords(self, keywords, params=frozenset()):
+        """Record each keyword argument as a key, except the call's own parameters in params."""
         for keyword in keywords:
             if keyword.arg is None:
                 self._mapping(keyword.value, False)
-            else:
+            elif keyword.arg not in params:
                 self._record(keyword, keyword.arg, "keyword")
 
     def scan(self, tree):
@@ -286,16 +307,23 @@ class _Scanner:
         func = node.func
         name = _call_name(func)
         if name in KEY_SETTERS:
-            if node.args:
-                self._record(node.args[0], _constant_text(node.args[0]), "first-argument")
+            key = node.args[0] if node.args else _keyword_value(node.keywords, KEY_SETTER_KEYWORD)
+            if key is not None:
+                self._record(key, _constant_text(key), "first-argument")
             return
         if name == "dict" and isinstance(func, ast.Attribute):
             # mock.patch.dict(os.environ, {...}, KEY=v) sets the keys like update, in call,
-            # with and decorator form (a decorator is a Call node the walk reaches).
-            if node.args and _patched_environment(node.args[0]):
+            # with and decorator form (a decorator is a Call node the walk reaches). The target
+            # may be given as in_dict= and the mapping as values=.
+            target = node.args[0] if node.args else _keyword_value(node.keywords,
+                                                                   PATCH_DICT_TARGET)
+            if target is not None and _patched_environment(target):
                 if len(node.args) > 1:
                     self._mapping(node.args[1], True)
-                self._keywords(node.keywords)
+                values = _keyword_value(node.keywords, PATCH_DICT_VALUES)
+                if values is not None:
+                    self._mapping(values, True)
+                self._keywords(node.keywords, PATCH_DICT_PARAMS)
             return
         if not isinstance(func, ast.Attribute) or (name != "update" and name not in KEY_METHODS):
             return
@@ -561,6 +589,22 @@ POSITIVE_VECTORS = (
      "first-argument"),
     ('def test(monkeypatch):\n    monkeypatch.setenv("BASH_FUNC_ls%%", f)\n', "env-func",
      "first-argument"),
+    # patch.dict's target given as in_dict= and its mapping as values=, and setenv's name=
+    ('import os\nfrom unittest import mock\n'
+     'mock.patch.dict(os.environ, values={"BASH_ENV": p}).start()\n', "env-startup", "dict-key"),
+    ('import os\nfrom unittest import mock\n'
+     'mock.patch.dict(os.environ, values=[("BASH_FUNC_ls%%", f)]).start()\n', "env-func", "pair"),
+    ('import os\nfrom unittest import mock\n'
+     'mock.patch.dict(in_dict=os.environ, BASH_ENV=p).start()\n', "env-startup", "keyword"),
+    ('from unittest import mock\n@mock.patch.dict("os.environ", values={"BASH_ENV": p})\n'
+     'def test():\n    pass\n', "env-startup", "dict-key"),
+    ('import os\nfrom unittest import mock\n'
+     'with mock.patch.dict(in_dict=os.environb, values={b"ENV": p}, clear=True):\n    pass\n',
+     "env-startup", "dict-key"),
+    ('def test(monkeypatch):\n    monkeypatch.setenv(name="BASH_ENV", value=p)\n', "env-startup",
+     "first-argument"),
+    ('def test(monkeypatch):\n    monkeypatch.setenv(value=p, name="BASH_FUNC_ls%%")\n',
+     "env-func", "first-argument"),
 )
 
 # Clean sources, each with a flip that is reported: mappings that never reach an environment
@@ -625,6 +669,46 @@ GATED_VECTORS = (
      'def test(monkeypatch):\n    monkeypatch.setenv("BASH_ENV", p)\n'),
     ('def test(monkeypatch):\n    monkeypatch.setenv("HOME", "BASH_ENV")\n',
      'def test(monkeypatch):\n    monkeypatch.setenv("ENV", "BASH_ENV")\n'),
+    # the keyword forms of patch.dict and setenv on a mapping that is not the environment, or
+    # with the key in the value
+    ('from unittest import mock\nmock.patch.dict(config, values={"BASH_ENV": p}).start()\n',
+     'from unittest import mock\nimport os\n'
+     'mock.patch.dict(os.environ, values={"BASH_ENV": p}).start()\n'),
+    ('from unittest import mock\n'
+     'mock.patch.dict(config, values=[("BASH_FUNC_ls%%", f)]).start()\n',
+     'from unittest import mock\nimport os\n'
+     'mock.patch.dict(os.environ, values=[("BASH_FUNC_ls%%", f)]).start()\n'),
+    ('from unittest import mock\nmock.patch.dict(in_dict=config, BASH_ENV=p).start()\n',
+     'from unittest import mock\nimport os\n'
+     'mock.patch.dict(in_dict=os.environ, BASH_ENV=p).start()\n'),
+    ('from unittest import mock\n@mock.patch.dict("app.settings", values={"BASH_ENV": p})\n'
+     'def test():\n    pass\n',
+     'from unittest import mock\n@mock.patch.dict("os.environ", values={"BASH_ENV": p})\n'
+     'def test():\n    pass\n'),
+    ('from unittest import mock\n'
+     'mock.patch.dict(in_dict="app.settings", values={"ENV": p}).start()\n',
+     'from unittest import mock\n'
+     'mock.patch.dict(in_dict="os.environb", values={"ENV": p}).start()\n'),
+    ('def test(monkeypatch):\n    monkeypatch.setenv(name="HOME", value="BASH_ENV")\n',
+     'def test(monkeypatch):\n    monkeypatch.setenv(name="BASH_ENV", value="HOME")\n'),
+    ('def test(monkeypatch):\n    monkeypatch.setenv(value="BASH_FUNC_ls%%", name="HOME")\n',
+     'def test(monkeypatch):\n    monkeypatch.setenv(value="HOME", name="BASH_FUNC_ls%%")\n'),
+)
+
+# The key texts each route reads before the kind test, as sorted (text, route) pairs: patch.dict's
+# own in_dict, values and clear parameters and setenv's value= are never read as keys, while the
+# same names given to the target's update are keys.
+RECORDED_VECTORS = (
+    ('import os\nfrom unittest import mock\n'
+     'mock.patch.dict(in_dict=os.environ, values={"HOME": t}, clear=True, PATH=p).start()\n',
+     [("HOME", "dict-key"), ("PATH", "keyword")]),
+    ('import os\nfrom unittest import mock\n'
+     'mock.patch.dict(os.environ, values=[("HOME", t)], clear=False).start()\n',
+     [("HOME", "pair")]),
+    ('import os\nos.environ.update(in_dict=t, values=t, clear=t)\n',
+     [("clear", "keyword"), ("in_dict", "keyword"), ("values", "keyword")]),
+    ('def test(monkeypatch):\n    monkeypatch.setenv(value="BASH_ENV", name="HOME")\n',
+     [("HOME", "first-argument")]),
 )
 
 # Boundary and removal vectors that must stay clean.
@@ -651,6 +735,8 @@ NEGATIVE_VECTORS = (
     'import os\nfrom unittest import mock\nmock.patch.dict(os.environ, clear=True).start()\n',
     'def test(monkeypatch):\n    monkeypatch.delenv("BASH_FUNC_ls%%")\n',
     'env = {"BASH_ENV": p}.get(k) if p else None\n',
+    'import os\nfrom unittest import mock\n'
+    'mock.patch.dict(in_dict=os.environ, values={"HOME": t}, clear=True).start()\n',
 )
 
 _REASON = "self-test reason"
@@ -747,6 +833,23 @@ TREE_VECTORS = (
 )
 
 
+class _RecordingScanner(_Scanner):
+    """A scanner that keeps every (key text, route) a route reads, before the kind test."""
+
+    def __init__(self):
+        super().__init__(frozenset())
+        self.recorded = []
+
+    def _record(self, node, text, route):
+        self.recorded.append((text, route))
+
+
+def _recorded(source):
+    scanner = _RecordingScanner()
+    scanner.scan(ast.parse(source))
+    return sorted(scanner.recorded)
+
+
 def self_test():
     failures = []
     for row, source, kind, flip in ROWS:
@@ -775,6 +878,11 @@ def self_test():
             failures.append("gated negative flagged: " + repr(source) + " -> " + repr(got))
         if not scan_source(flip):
             failures.append("gated flip " + repr(flip) + ": expected a finding, got none")
+    for source, expected in RECORDED_VECTORS:
+        got = _recorded(source)
+        if got != expected:
+            failures.append("recorded keys " + repr(source) + ": expected " + repr(expected)
+                            + ", got " + repr(got))
     unexercised = sorted(set(ROUTES) - exercised)
     if unexercised:
         failures.append("routes without a vector: " + ", ".join(unexercised))
@@ -795,9 +903,10 @@ def self_test():
         return 1
     print("SELF-TEST PASS: shell-function-standins: {} table rows and their flips, {} positive"
           " vectors (each clean without its route), {} negatives, {} clean sources and their"
-          " reported flips, {} fail-closed and allowlist tree vectors and their"
-          " flips.".format(len(ROWS), len(POSITIVE_VECTORS), len(NEGATIVE_VECTORS),
-                           len(GATED_VECTORS), len(TREE_VECTORS)))
+          " reported flips, {} recorded-key vectors, {} fail-closed and allowlist tree vectors"
+          " and their flips.".format(len(ROWS), len(POSITIVE_VECTORS), len(NEGATIVE_VECTORS),
+                                     len(GATED_VECTORS), len(RECORDED_VECTORS),
+                                     len(TREE_VECTORS)))
     return 0
 
 
