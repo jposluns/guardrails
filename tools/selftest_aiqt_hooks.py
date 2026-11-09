@@ -25283,7 +25283,8 @@ def _main_isolated(monitor):
         # value, so a read option spelled as an option value or after the NAME selects no mode and the command
         # still sets the value; each deny vector below set the identity on git 2.53.0 (with a stand-in name).
         # A git alias whose value holds '-c author.name=X', a git clone --config pair and a default-value
-        # expansion of EMAIL or a git identity variable set an identity git records too.
+        # expansion of EMAIL or a git identity variable set an identity git records too, and so does a git clone
+        # -c pair attached to its word or to a short option cluster ending in c (-qcauthor.name=X).
         for _ci_label, _ci_cmd in (
                 ("(ci-idc28) a --comment value spelled -l does not make git config a read, denies",
                  "git config --comment -l author.name Claude"),
@@ -25322,7 +25323,21 @@ def _main_isolated(monitor):
                 ("(ci-idc46) a default-value expansion that assigns an AI EMAIL denies",
                  ": \"${EMAIL:=noreply@anthropic.com}\"; export EMAIL; git commit -m x"),
                 ("(ci-idc47) a default-value expansion that assigns an AI GIT_AUTHOR_NAME denies",
-                 ": ${GIT_AUTHOR_NAME=Claude}; export GIT_AUTHOR_NAME; git commit -m x")):
+                 ": ${GIT_AUTHOR_NAME=Claude}; export GIT_AUTHOR_NAME; git commit -m x"),
+                ("(ci-idc48) a git clone -c word with an attached AI author.name pair denies",
+                 "git clone -q -cauthor.name=Claude . c2"),
+                ("(ci-idc49) a git clone short option cluster ending in c with an attached AI Committer.Email "
+                 "denies", "git clone -qcCommitter.Email=noreply@anthropic.com . c2"),
+                ("(ci-idc50) a git clone short option cluster ending in c, the AI author.name pair in the next "
+                 "word, denies", "git clone -qc author.name=Claude . c2"),
+                ("(ci-idc51) a git clone -c word with an attached AI user.name pair denies",
+                 "git clone -cuser.name=Claude . c2"),
+                ("(ci-idc52) a git clone -c word with an attached alias that sets an AI author.name denies",
+                 "git clone -q '-calias.ci=-c author.name=Claude commit' . c2"),
+                ("(ci-idc53) a git clone -c word with an attached AI author.name in a rebase -x line denies",
+                 "git rebase -x 'git clone -cauthor.name=Claude . c2' HEAD"),
+                ("(ci-idc54) a git clone -c word with an attached AI author.name in a command the tokenizer "
+                 "cannot parse denies", "git clone -cauthor.name='Claude' . c2; git commit -m 'x")):
             ciexpect(_ci_label, _ci_cmd, "deny")
         for _ci_label, _ci_cmd in (
                 ("(ci-idc-c23) git config -l before the NAME allows", "git config -l author.name claude"),
@@ -25342,7 +25357,17 @@ def _main_isolated(monitor):
                 ("(ci-idc-c31) a use-default expansion of an AI EMAIL, which assigns nothing, allows",
                  ": \"${EMAIL:-noreply@anthropic.com}\""),
                 ("(ci-idc-c32) a commit message that quotes -c author.name with an AI name allows",
-                 "git commit -m 'use -c author.name=Claude in an alias'")):
+                 "git commit -m 'use -c author.name=Claude in an alias'"),
+                ("(ci-idc-c33) a git clone -c word with an attached unrelated key and an AI-named value allows",
+                 "git clone -cinit.templateDir=claude-templates . c2"),
+                ("(ci-idc-c34) a git clone short option cluster ending in c with an unrelated key allows",
+                 "git clone -qccore.sshCommand=claude-ssh . c2"),
+                ("(ci-idc-c35) a git clone -c word with an attached key git does not read as author.name allows",
+                 "git clone -q -cauthor.names=Claude . c2"),
+                ("(ci-idc-c36) a git clone -c word with an attached author.name that names no AI allows",
+                 "git clone -qcauthor.name=Me . c2"),
+                ("(ci-idc-c37) a git clone -o value that holds c and an author.name pair, an origin name, allows",
+                 "git clone -q -ocauthor.name=Claude . c2")):
             ciexpect(_ci_label, _ci_cmd, "allow")
         # A git commit behind leading reserved words, a function or coprocess name, VAR=value words or a wrapper
         # word (env, timeout, command, exec, nohup, xargs, sudo, nice, setsid, stdbuf, time) is judged like the

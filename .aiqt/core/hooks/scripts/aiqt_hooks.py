@@ -4992,8 +4992,10 @@ IDENTITY_CONF_NAME_RE = re.compile(r"(?i)(?:user|author|committer)\.(?:name|emai
 # lookahead). No value starts with whitespace, so either way a value starts after the whole run, where it started
 # when the run was split, and when no value starts after the '=', the '=' itself is the value, as it was when a
 # space before it was taken for the separator: the context finds the same values. The author.name context (the
-# author and committer config names) has the same shape for the same reason. The identity variable, EMAIL,
-# user.name and author.name contexts judge a command too long to read only when it holds none of their names
+# author and committer config names) has the same shape for the same reason. Both also start right after a git
+# clone -c word or a short option cluster ending in it (-cauthor.name=X, -qcuser.name=X; CONFIG_SHORT_RE), where
+# no word boundary stands; that letter is read in lower case only. The identity variable, EMAIL, user.name and
+# author.name contexts judge a command too long to read only when it holds none of their names
 # (_cmtidn_identity_word), so there they find no place to start.
 _VALUE = r"(\"[^\"]*\"|'[^']*'|[^\s\"';|&]+)"
 _RAW_IDENTITY_CONTEXTS = (
@@ -5001,9 +5003,10 @@ _RAW_IDENTITY_CONTEXTS = (
     (re.compile(r"(?i)--au(?:t(?:h(?:o(?:r)?)?)?)?[=\s]\s*" + _VALUE), "--author value"),
     (re.compile(r"(?i)\bGIT_(?:AUTHOR|COMMITTER)_(?:NAME|EMAIL)\s*\+?=\s*" + _VALUE), "git identity variable"),
     (re.compile(r"\bEMAIL\s*\+?=\s*" + _VALUE), "EMAIL variable"),
-    (re.compile(r"(?i)\buser\.(?:name|email)(?:\s*+=\s*+|(?=[^\S ]*+ )\s*+)" + _VALUE),
+    (re.compile(r"(?i)(?:\b|(?-i:(?<=[-vqnls46]c)))user\.(?:name|email)(?:\s*+=\s*+|(?=[^\S ]*+ )\s*+)" + _VALUE),
      "user.name/user.email value"),
-    (re.compile(r"(?i)\b(?:author|committer)\.(?:name|email)(?:\s*+=\s*+|(?=[^\S ]*+ )\s*+)" + _VALUE),
+    (re.compile(r"(?i)(?:\b|(?-i:(?<=[-vqnls46]c)))(?:author|committer)\.(?:name|email)"
+                r"(?:\s*+=\s*+|(?=[^\S ]*+ )\s*+)" + _VALUE),
      "author/committer config value"),
 )
 
@@ -5185,7 +5188,9 @@ def _identity_assignment_ai(tokens):
       word followed by a value, on any segment, as before author and committer were read;
     - an author.name=VALUE, author.email=VALUE, committer.name=VALUE or committer.email=VALUE word (any case)
       right after a -c word, the git -c inline form (a git alias or function standing for git included), or
-      after a git clone --config word, and any of the six in a git clone --config=NAME=VALUE word;
+      after a git clone --config word or a git clone short option cluster ending in c (-qc), and any of the six
+      in a git clone --config=NAME=VALUE word or in the rest of a git clone -c word or cluster
+      (-cauthor.name=VALUE, -qcauthor.name=VALUE: CONFIG_SHORT_RE);
     - a ${EMAIL:=VALUE} or ${EMAIL=VALUE} default-value expansion, or one of a git identity variable, in any
       word (_identity_default_assignment_ai);
     - a git alias definition whose value holds an identity config assignment (-c author.name=VALUE), given
@@ -5209,12 +5214,17 @@ def _identity_assignment_ai(tokens):
         m = USER_CONF_EQ_RE.match(tok)
         if m and AI_IDENTITY_RE.search(m.group(1)):
             return "user.name/user.email value {!r}".format(tok.strip()[:80])
-        inline = tok if i > 0 and tokens[i - 1] in _CMTIDN_CONFIG_OPTS else None
-        m = CONFIG_OPT_EQ_RE.match(tok)
-        if m:
-            inline = m.group(1)  # git clone --config=NAME=VALUE, the -c form in one word
-        if inline is not None:
-            hit = _identity_inline_config_ai(inline)
+        pairs = []
+        if i > 0:
+            prev = tokens[i - 1]
+            m = CONFIG_SHORT_RE.match(prev)
+            if prev in _CMTIDN_CONFIG_OPTS or (m and not m.group(1)):
+                pairs.append(tok)  # the pair in the word after -c, --config or a cluster ending in c (-qc)
+        m = CONFIG_OPT_EQ_RE.match(tok) or CONFIG_SHORT_RE.match(tok)
+        if m and m.group(1):
+            pairs.append(m.group(1))  # the pair in the same word: --config=NAME=VALUE, -cNAME=VALUE, -qcNAME=VALUE
+        for pair in pairs:
+            hit = _identity_inline_config_ai(pair)
             if hit is not None:
                 return hit
         if tok in ("user.name", "user.email") and i + 1 < n and AI_IDENTITY_RE.search(tokens[i + 1]):
@@ -5238,6 +5248,13 @@ def _identity_assignment_ai(tokens):
 # safe-direction over-deny.
 _CMTIDN_CONFIG_OPTS = frozenset(("-c", "--co", "--con", "--conf", "--confi", "--config"))
 CONFIG_OPT_EQ_RE = re.compile(r"(?s)^--co(?:n(?:f(?:i(?:g)?)?)?)?=(.*)$")
+# The -c option of git clone, which git 2.53.0 reads as other short options are: its NAME=VALUE pair is the
+# rest of its word (-cauthor.name=X) or else the next word, and it may end a cluster of the git clone short
+# options that take no value (-v, -q, -n, -l, -s, -4, -6: -qcauthor.name=X, -qc author.name=X). A letter that
+# takes a value (-o, -b, -u, -j) takes the rest of the word, c included, so it is not read as part of a cluster.
+# The word is read so on any segment, as a separate -c word is; git refuses the attached form as a git global
+# option, and git commit reads -cVALUE as a commit, so reading it there is a safe-direction over-deny.
+CONFIG_SHORT_RE = re.compile(r"(?s)^-[vqnls46]*c(.*)$")
 # A git alias definition: its key (any case) and, in the NAME=VALUE form, its value. git runs an alias value
 # that does not start with '!' as git options and a subcommand, so a '-c author.name=X' inside it sets the
 # identity of the command the alias runs (git config alias.ci '-c author.name=X commit'; git ci).
