@@ -7024,9 +7024,16 @@ def _restored_countdown_bounds(seconds, armed, read, clocks=None, holder=None):
     from the restore's clock read to the setitimer that re-arms it, which only the high end allows, each
     measured up to the monotonic read just after that setitimer returned. Rounding to the microsecond moves
     the low end by two microseconds (getitimer, and a take's setitimer, read a countdown rounded down) and the
-    high end by one (a re-arming setitimer rounds up). Nothing else is allowed for: a host stall outside the
-    two gaps moves both ends with the reads, and one inside a gap widens only that gap's end, by the stall.
-    With either gap not measured, no countdown is in bounds."""
+    high end by one (a re-arming setitimer rounds up). Nothing else is allowed for, so the bound's width is
+    the two measured spans plus both bracket widths (and those three microseconds). A host stall between
+    armed[1] and read[0] and outside both gaps moves both ends and the right countdown together; one inside
+    a gap, or inside the armed or read bracket, widens the bound by its length on one side of the right
+    countdown only: above it for a stall in the take's gap, between the setitimer that set the countdown
+    and armed[1], or between read[0] and the getitimer; below it for a stall in the restore's gap, between
+    armed[0] and that setitimer, or between the getitimer and read[1] (a stall from a gap's setitimer
+    acting to the read after it returns falls on the other side). So a wrong countdown whose error lies on
+    the widened side, and is no larger than the stall, can be in bounds under that stall; an unstalled run
+    discriminates. With either gap not measured, no countdown is in bounds."""
     early = late = 0.0
     if holder is not None:
         early, late = clocks.settled(holder, 0), clocks.settled(holder, 1)
@@ -7576,50 +7583,110 @@ def _deadline_restore_failures():
     verbatim) with its interval and handler; an inactive one stays inactive; one that comes due inside the
     window ends the window there and is delivered once; a nested window passes an outer deadline to its
     owner and the outer window restores what it found; and a caller that blocks SIGALRM, or a call off the
-    main thread, gets no deadline and keeps its state."""
+    main thread, gets no deadline and keeps its state. Every restored countdown bounded from below is
+    judged inside _restored_countdown_bounds for its own run, over the gaps a _WindowClocks measured from
+    that run's take and restore (the way dl-nested-outer reads its inner arming), so no fixed host-speed
+    slack is left in any restored-countdown bound. Other fixed limits remain here, such as
+    dl-nested-outer's 0.3-second window, dl-refused-thread's 10-second join, and the 0.4-second body
+    under the default budget. A stall in the right place can let a wrong restore pass
+    (_restored_countdown_bounds says where); an unstalled run discriminates."""
     out = []
     fired = []
 
     def caller_alarm(signum, frame):
         fired.append(signum)
 
+    finished = []
+
     def as_caller(value, interval, stub_seconds, budget=None):
         fired.clear()
+        finished.clear()
+
+        def body(_data):
+            time.sleep(stub_seconds)
+            finished.append(True)
+            return (0, None, None)
+
         signal.signal(signal.SIGALRM, caller_alarm)
+        # The window's own gaps are measured at source: `clocks` stands in for aiqt_hooks.time and
+        # aiqt_hooks.signal, and _restored_countdown_bounds widens its ends by exactly the measured
+        # spans from the take's clock read to the cancel that takes the caller's timer (a span the
+        # window counts twice: the kernel countdown runs on through it and the restore subtracts it
+        # again, as _take discloses) and from the restore's clock read to the re-arming setitimer. A
+        # host stall widens the measured span or armed/read bracket it falls in, never a fixed slack,
+        # so a stall inside the take no longer fails a correct restore. The bound's width is those
+        # two spans plus both bracket widths, so a wrong restore whose error lies on the side a stall
+        # widened, and is no larger than the stall, can pass under it: a stall in the restore's gap
+        # passes one that subtracts too much or twice, and one between the arming setitimer and
+        # armed[1], or between read[0] and the getitimer, passes a verbatim restore. Unstalled runs
+        # discriminate. `finished` says whether the stub's sleep ran to its end, so a deadline that
+        # cut the body is told from one that did not without comparing the run's time against any
+        # bound.
+        clocks = _WindowClocks()
+        armed = (time.monotonic(),)
         signal.setitimer(signal.ITIMER_REAL, value, interval)
-        before = signal.getitimer(signal.ITIMER_REAL)
-        began = time.monotonic()
+        armed += (time.monotonic(),)
         try:
-            with _stub_handler("diff_source_pretool", _sleeper(stub_seconds)):
-                code, err, _seconds = _main_run("diff_source_pretool", budget=budget)
-            used = time.monotonic() - began
-            return code, before, signal.getitimer(signal.ITIMER_REAL), used, signal.getsignal(signal.SIGALRM)
+            aiqt_hooks.time, aiqt_hooks.signal = clocks.time, clocks.signal
+            with _stub_handler("diff_source_pretool", body):
+                code, _err, _seconds = _main_run("diff_source_pretool", budget=budget)
+            read = (time.monotonic(),)
+            after = signal.getitimer(signal.ITIMER_REAL)
+            read += (time.monotonic(),)
+            handler = signal.getsignal(signal.SIGALRM)
         finally:
+            aiqt_hooks.time, aiqt_hooks.signal = time, signal
             signal.setitimer(signal.ITIMER_REAL, 0)
+            cancelled = time.monotonic()
             signal.signal(signal.SIGALRM, signal.SIG_DFL)
+        borrowers = clocks.windows()
+        return types.SimpleNamespace(
+            code=code, after=after, armed=armed, read=read, clocks=clocks,
+            holder=borrowers[0] if len(borrowers) == 1 else None, borrowers=len(borrowers),
+            cancelled=cancelled, handler=handler, used=read[1] - armed[0])
 
     for label, interval in (("single", 0.0), ("periodic", 1800.0)):
-        code, before, after, used, handler = as_caller(3600.0, interval, 0.4)
-        if not (code == 0 and handler is caller_alarm and after[1] == interval and not fired
-                and before[0] - used - 0.1 <= after[0] <= before[0] - 0.3):
-            out.append("(dl-restore-{}) expected the caller countdown back less the {:.2f}s used, with its "
-                       "interval and handler, got exit {}, {!r} -> {!r}, fired {!r}".format(
-                           label, used, code, before, after, fired))
-    code, before, after, used, handler = as_caller(0.0, 0.0, 0.2)
-    if not (code == 0 and before == after == (0.0, 0.0) and handler is caller_alarm and not fired):
+        run = as_caller(3600.0, interval, 0.4)
+        low, high = (_restored_countdown_bounds(3600.0, run.armed, run.read, run.clocks, run.holder)
+                     if run.holder is not None else (float("inf"), float("-inf")))
+        if not (run.code == 0 and run.handler is caller_alarm and run.after[1] == interval and not fired
+                and low <= run.after[0] <= high):
+            out.append("(dl-restore-{}) expected the caller countdown back inside the run's measured "
+                       "bound [{!r}, {!r}] with its interval and handler, got exit {}, timer {!r} after "
+                       "{:.2f}s with {} window(s), fired {!r}".format(
+                           label, low, high, run.code, run.after, run.used, run.borrowers, fired))
+    run = as_caller(0.0, 0.0, 0.2)
+    if not (run.code == 0 and run.after == (0.0, 0.0) and run.handler is caller_alarm and not fired):
         out.append("(dl-restore-inactive) an inactive caller timer must stay inactive, got exit {} and {!r}"
-                   .format(code, after))
-    code, before, after, used, handler = as_caller(0.2, 0.0, 1.0)
-    if not (code == 2 and fired == [signal.SIGALRM] and after == (0.0, 0.0) and handler is caller_alarm
-            and used < 0.8):
+                   .format(run.code, run.after))
+    run = as_caller(0.2, 0.0, 1.0)
+    if not (run.code == 2 and fired == [signal.SIGALRM] and run.after == (0.0, 0.0)
+            and run.handler is caller_alarm and not finished):
         out.append("(dl-restore-due) a caller deadline due inside the window must end it and be delivered "
-                   "once, got exit {} after {:.2f}s, fired {!r}, timer {!r}".format(code, used, fired, after))
-    code, before, after, used, handler = as_caller(0.2, 0.5, 1.0)
-    if not (code == 2 and fired == [signal.SIGALRM] and after[1] == 0.5 and 0 < after[0] <= 0.5
-            and handler is caller_alarm):
+                   "once, got exit {} after {:.2f}s with the stub's sleep returned {}, fired {!r}, timer "
+                   "{!r}".format(run.code, run.used, bool(finished), fired, run.after))
+    run = as_caller(0.2, 0.5, 1.0)
+    reads = [entry[2] for entry in run.clocks.log if entry[0] == "read" and entry[1] is run.holder]
+    # The one due delivery may be followed by real period expiries when the run stalls between the
+    # restore's clock read and the row's own cancel of the timer: each full 0.5-second period in that
+    # measured span allows one more delivery, and the allowance is 0 on an unstalled run, so a second
+    # delivery with no measured period in the span still fails. The allowance ignores the re-arm's
+    # phase inside the period: the restore re-arms the due timer one period less its overdue time
+    # (taken modulo the period; 0.15 to 0.27 ms in one host's measurement) ahead, so a stall from the
+    # restore's clock read to the cancel whose length lands within about that overdue time below a
+    # multiple of 0.5 s delivers one more than the allowance, and such a run turns this row red with
+    # the hook right, a disclosed residual. The phase could be bounded from the measured clock reads
+    # and brackets, not derived exactly; the allowance does not use it. The high end allows the
+    # microsecond a re-arming setitimer rounds up.
+    allowed = 1 + (int((run.cancelled - reads[-1]) // 0.5) if len(reads) == 2 else 0)
+    if not (run.code == 2 and fired and fired == [signal.SIGALRM] * len(fired) and len(fired) <= allowed
+            and run.after[1] == 0.5 and 0 < run.after[0] <= 0.5 + 1e-6
+            and run.handler is caller_alarm and not finished):
         out.append("(dl-restore-due-periodic) a periodic caller deadline due inside the window must be "
-                   "delivered once and resume its period, got exit {}, fired {!r}, timer {!r}".format(
-                       code, fired, after))
+                   "delivered once (plus one delivery per full 0.5s period measured from its restore to "
+                   "the row's cancel, {} allowed here) and resume its period, got exit {}, fired {!r}, "
+                   "timer {!r}, with the stub's sleep returned {}".format(
+                       allowed, run.code, fired, run.after, bool(finished)))
 
     # The inner call's body reads the inner window's countdown, then sleeps 60 s, so once that read is made
     # only a deadline ends the body: a sleep that returns means the outer deadline did not end the inner
@@ -7674,15 +7741,52 @@ def _deadline_restore_failures():
     if problem:
         out.append("(dl-nested-outer) an enclosing window's deadline must reach that window's owner and leave "
                    "the timer as found, {}".format(problem))
-    with aiqt_hooks._DeadlineWindow(5.0):
-        with _stub_handler("diff_source_pretool", _sleeper(1.0)):
-            code, err, seconds = _main_run("diff_source_pretool", budget=0.1)
-        inside = signal.getitimer(signal.ITIMER_REAL)
-    if (code != 2 or seconds >= 0.8 or not 4.0 < inside[0] <= 5.0
+    finished_inner = []
+
+    def outlasting(_data):
+        time.sleep(60.0)
+        finished_inner.append(True)
+        return (0, None, None)
+
+    # The outer window is wide enough (600 s) that no host stall brings it due over the run; the inner
+    # deadline is proved to have cut the body by the sleep not returning; and the outer countdown is
+    # judged inside _restored_countdown_bounds for this run, over the gaps `clocks` measured from the
+    # inner window's own take and restore: the low end allows exactly the measured span from the inner
+    # take's clock read to the cancel that takes the countdown (the span the window counts twice), the
+    # high end exactly the measured span from the restore's clock read to the re-arming setitimer, each
+    # plus setitimer's microsecond rounding. A host stall only widens the measured span or bracket it
+    # falls in, so no fixed host-speed slack is left, and the bound's width is the two measured spans
+    # plus both bracket widths. A wrong restore whose error lies on the side a stall widened, and is
+    # no larger than the stall, can pass under it: a verbatim restore (too high by at least the
+    # 0.1-second budget) fails on the high end on an unstalled run, but passes under a stall longer
+    # than that error between the outer window's arming setitimer and armed[1] or between read[0]
+    # and the getitimer, and a stall in the inner restore's gap can likewise pass one that subtracts
+    # too much or twice. Unstalled runs discriminate.
+    clocks = _WindowClocks()
+    outer = aiqt_hooks._DeadlineWindow(600.0)
+    armed = (time.monotonic(),)
+    try:
+        aiqt_hooks.time, aiqt_hooks.signal = clocks.time, clocks.signal
+        with outer:
+            armed += (time.monotonic(),)
+            with _stub_handler("diff_source_pretool", outlasting):
+                code, _err, _seconds = _main_run("diff_source_pretool", budget=0.1)
+            read = (time.monotonic(),)
+            inside = signal.getitimer(signal.ITIMER_REAL)
+            read += (time.monotonic(),)
+    finally:
+        aiqt_hooks.time, aiqt_hooks.signal = time, signal
+    used = read[1] - armed[0]
+    inner = [window for window in clocks.windows() if window is not outer]
+    low, high = (_restored_countdown_bounds(600.0, armed, read, clocks, inner[0]) if len(inner) == 1
+                 else (float("inf"), float("-inf")))
+    if (code != 2 or finished_inner or not low <= inside[0] <= high
             or signal.getitimer(signal.ITIMER_REAL) != (0.0, 0.0)
             or signal.getsignal(signal.SIGALRM) != signal.SIG_DFL):
-        out.append("(dl-nested-inner) an inner deadline must end only the inner call and give the outer window "
-                   "its countdown back, got exit {} after {:.2f}s, outer timer {!r}".format(code, seconds, inside))
+        out.append("(dl-nested-inner) an inner deadline must end only the inner call and give the outer "
+                   "window its countdown back inside the run's measured bound [{!r}, {!r}], got exit {} "
+                   "after {:.2f}s with the stub's sleep returned {}, outer timer {!r} and {} inner "
+                   "window(s)".format(low, high, code, used, bool(finished_inner), inside, len(inner)))
 
     old_mask = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGALRM})
     try:
@@ -8538,8 +8642,10 @@ def _deadline_enclosing_restore_failures():
     under a caller with a counting handler and a periodic 30-second timer, ends normally; SIGALRM is raised,
     as the outer window's expiry, from an opcode trace event at each instruction of the inner window's
     frames once the outer window's handler is back (one run per instruction). The outer deadline must reach
-    its owner each time, with the caller's handler and periodic timer back, no caller delivery, and neither
-    window left armed."""
+    its owner each time, with the caller's handler and periodic timer back (its countdown judged inside
+    _restored_countdown_bounds for the run, over the gaps a _WindowClocks measured from the outer window's
+    take and restore, with no fixed host-speed slack), no caller delivery, and neither window left
+    armed."""
     out = []
     calls = []
 
@@ -8549,8 +8655,11 @@ def _deadline_enclosing_restore_failures():
     def run(index):
         calls.clear()
         counted = [0]
+        clocks = _WindowClocks()
         signal.signal(signal.SIGALRM, counting)
+        armed = (time.monotonic(),)
         signal.setitimer(signal.ITIMER_REAL, 30.0, 30.0)
+        armed += (time.monotonic(),)
         outer, inner = aiqt_hooks._DeadlineWindow(600.0), aiqt_hooks._DeadlineWindow(5.0)
 
         def when(frame):
@@ -8562,6 +8671,7 @@ def _deadline_enclosing_restore_failures():
         tracer, at = _window_tracer(inner, (when, lambda: signal.raise_signal(signal.SIGALRM)))
         escaped = None
         try:
+            aiqt_hooks.time, aiqt_hooks.signal = clocks.time, clocks.signal
             try:
                 with outer:
                     with inner:
@@ -8572,17 +8682,29 @@ def _deadline_enclosing_restore_failures():
                 escaped = type(exc).__name__
             finally:
                 sys.settrace(None)
-            handler, timer = signal.getsignal(signal.SIGALRM), signal.getitimer(signal.ITIMER_REAL)
+            handler = signal.getsignal(signal.SIGALRM)
+            # The reads either side of the final getitimer close the bracket _restored_countdown_bounds
+            # judges the caller countdown in: the outer window is the borrower that took and re-armed
+            # the caller's timer, so the bound widens by exactly the spans `clocks` measured from the
+            # outer take's and restore's clock reads to their setitimers, with no fixed host-speed slack.
+            read = (time.monotonic(),)
+            timer = signal.getitimer(signal.ITIMER_REAL)
+            read += (time.monotonic(),)
         finally:
+            aiqt_hooks.time, aiqt_hooks.signal = time, signal
             signal.setitimer(signal.ITIMER_REAL, 0)
             signal.signal(signal.SIGALRM, signal.SIG_DFL)
         if index is None:
             return counted[0]
+        low, high = _restored_countdown_bounds(30.0, armed, read, clocks, outer)
+        used = read[1] - armed[0]
         if (at and escaped == "the outer deadline" and handler is counting and timer[1] == 30.0
-                and 29.0 < timer[0] <= 30.0 and not calls and not inner.armed and not outer.armed):
+                and low <= timer[0] <= high and not calls and not inner.armed
+                and not outer.armed):
             return ""
-        return "at {!r}: escaped {}, handler {!r}, timer {!r}, caller deliveries {}, armed {} and {}".format(
-            at, escaped, handler, timer, len(calls), inner.armed, outer.armed)
+        return ("at {!r}: escaped {}, handler {!r}, timer {!r} with {:.2f}s used and the measured bound "
+                "[{!r}, {!r}], caller deliveries {}, armed {} and {}".format(
+                    at, escaped, handler, timer, used, low, high, len(calls), inner.armed, outer.armed))
 
     total = run(None)
     failed = [problem for problem in (run(index) for index in range(total)) if problem]
@@ -9364,9 +9486,15 @@ def _deadline_restore_fault_failures():
     caller's periodic 30-second timer (unnested) and for a 600-second outer window (nested), raising on its
     first call ("once") and on its first two calls ("twice"). Each operation runs in the scenario
     _RESTORE_OPERATIONS gives it: "plain", a 5-second window whose body sleeps 0.05 s, so that a restore
-    that counts the window's time twice, or not at all, is off by at least that much, while a host stall
-    inside the restore's gap widens the bounds by only the stall (_restored_countdown_bounds) and passes
-    such a restore only when it lasts about as long as the body; "expired", a 0.2-second
+    that counts the window's time twice, or not at all, is off by at least that much. A host stall widens
+    the bounds by only the stall (_restored_countdown_bounds), and on one side only, so it passes such a
+    restore only when it lasts about as long as the body and falls on that restore's side. The one that
+    counts twice (too low) can pass under a stall in the restore's gap, between armed[0] and the arming
+    setitimer, or between the getitimer and read[1]; the one that counts not at all (too high) under a
+    stall between the arming setitimer and armed[1], between read[0] and the getitimer, or from the
+    re-arming setitimer's action to the read after it returns. A stall in the take's gap, or anywhere
+    between the take's clock read and the restore's, adds to either wrong restore's error as much as it
+    widens the bound, so it passes neither; "expired", a 0.2-second
     window whose body ends while the first instruction of _give_back waits (up to 1 s, from an opcode trace
     stage) until the window's own expiry is pending, so the restore discards it; "due", the window's own
     expiry at a caller timer due 0.05 s in. Each case is checked at return from the with statement, before
