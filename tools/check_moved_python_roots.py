@@ -20,15 +20,22 @@ origin/HEAD that does not resolve is exit 2. A --base that is an all-zero object
 object id's length (a push event's before value for a newly created ref) is accepted only when the
 head commit has no parent: nothing precedes a root commit, so the change moves no file and the run
 prints that and exits 0; a zero base over pre-existing history is exit 2, the rule
-tools/check_release_cut.py applies to a zero before. The head's parents are read from the raw
+tools/check_release_cut.py applies to a zero before. An info/grafts file (the path
+`git rev-parse --git-path info/grafts` names, when it exists) is exit 2 before any history read,
+the way a shallow repository is refused: a grafts entry rewrites the parent list every history
+walk sees (git merge-base, rev-parse parent operators such as HEAD^, rev-list), so any judged
+range computed over one is untrustworthy. The head's parents are additionally read from the raw
 commit object (git cat-file commit with object replacement disabled), never through a history
-walk such as git rev-list, which honours an info/grafts file and replace refs: a grafts entry
-must not make a head over real history look parentless and let a zero base pass. A named parent
+walk, as a second guard on the zero-base path; a parent id there must be a full 40- or
+64-character lowercase hex id, and a malformed parent line or a named parent
 whose object is missing is exit 2. A shallow repository is exit 2 before any
 judgment, as the branch-root sibling's probe refuses one, because a truncated history can hide the
 true merge base and make the gate judge unrelated history. Each revision is resolved with
 `git rev-parse --verify --end-of-options REV^{commit}`. Every git call runs with the ambient GIT_*
-variables scrubbed and GIT_NO_REPLACE_OBJECTS=1, as the branch-root gate's calls do. The change is
+variables scrubbed and GIT_NO_REPLACE_OBJECTS=1, as the branch-root gate's calls do, and every
+call that parses a commit (rev-parse on a revision, merge-base, diff-tree, ls-tree) passes
+`-c core.commitGraph=false`, so parents and root trees come from the objects themselves, never
+from a stale or crafted commit-graph cache. The change is
 read per merge base of base and head (`git merge-base --all`; none is exit 2, several are each
 judged and the findings combined) with
 `git diff-tree -r -z --name-status --find-renames=50% -l0 <merge-base> <head> --` (-l0 turns the
@@ -166,11 +173,13 @@ def _stderr_text(proc):
 
 
 def _resolve_commit(root, rev):
-    """The full commit id REV resolves to, or CannotEvaluate naming the revision."""
+    """The full commit id REV resolves to, or CannotEvaluate naming the revision. Parent
+    operators in REV (HEAD^, REV~2) parse commits, so the commit-graph cache is disabled:
+    the parents must come from the commit objects themselves."""
     try:
         proc = subprocess.run(
-            ["git", "-C", str(root), "rev-parse", "--verify", "--end-of-options",
-             rev + "^{commit}"],
+            ["git", "-C", str(root), "-c", "core.commitGraph=false", "rev-parse", "--verify",
+             "--end-of-options", rev + "^{commit}"],
             capture_output=True, timeout=GIT_TIMEOUT, env=_git_env())
     except (OSError, subprocess.SubprocessError) as exc:
         _proc_failure(exc)
@@ -201,12 +210,41 @@ def _refuse_shallow(root):
             "judged range unrelated to the change; fetch the full history")
 
 
+def _refuse_grafts(root):
+    """CannotEvaluate when the repository has an info/grafts file, refused before any history
+    read the way a shallow repository is: a grafts entry rewrites the parent list every history
+    walk sees (git merge-base, rev-parse parent operators such as HEAD^, rev-list), so a merge
+    base or a resolved parent computed over one is untrustworthy, and no supported git option
+    turns grafts off per invocation. A failed probe is itself cannot-evaluate, never a silent
+    'no grafts'."""
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "--git-path", "info/grafts"],
+            capture_output=True, timeout=GIT_TIMEOUT, env=_git_env())
+    except (OSError, subprocess.SubprocessError) as exc:
+        _proc_failure(exc)
+    named = proc.stdout.decode("utf-8", "surrogateescape").strip()
+    if proc.returncode != 0 or not named:
+        raise CannotEvaluate(
+            "cannot locate the grafts file ({})".format(
+                _stderr_text(proc) or "git rev-parse --git-path info/grafts failed"))
+    grafts_path = Path(named) if os.path.isabs(named) else Path(root) / named
+    if grafts_path.exists():
+        raise CannotEvaluate(
+            "grafts file {} exists: a grafts entry rewrites the parents every history walk "
+            "sees and can hide the true merge base or the head's real parents; remove the "
+            "file".format(grafts_path))
+
+
 def _commit_parents(root, sha):
     """The parent object ids of sha (a root commit has none), read from the raw commit object
     (git cat-file commit with object replacement disabled), never through a history walk: git
     rev-list honours an info/grafts file and replace refs, either of which could make a head over
-    real history look parentless. cat-file prints the stored object bytes, which no graft rewrites.
-    A malformed parent header line or a named parent whose object is missing is cannot-evaluate."""
+    real history look parentless. cat-file prints the stored object bytes, which no graft rewrites;
+    this is the second guard behind _refuse_grafts, which refuses a grafts file outright. A parent
+    id must be a full 40- or 64-character lowercase hex id (an abbreviation would resolve through
+    the object store's disambiguation, not the stored id); a malformed parent header line or a
+    named parent whose object is missing is cannot-evaluate."""
     try:
         proc = subprocess.run(
             ["git", "-C", str(root), "--no-replace-objects", "cat-file", "commit", sha],
@@ -220,10 +258,11 @@ def _commit_parents(root, sha):
     for raw_line in proc.stdout.split(b"\n\n", 1)[0].split(b"\n"):
         if raw_line.startswith(b"parent "):
             value = raw_line[len(b"parent "):].decode("ascii", "replace")
-            if not value or set(value) - set("0123456789abcdef"):
+            if len(value) not in (40, 64) or set(value) - set("0123456789abcdef"):
                 raise CannotEvaluate(
                     "cannot read the parents of {}: malformed parent line in the commit "
-                    "object".format(sha))
+                    "object (a parent id must be a full 40- or 64-character lowercase hex "
+                    "id)".format(sha))
             parents.append(value)
     for parent in parents:
         try:
@@ -240,11 +279,14 @@ def _commit_parents(root, sha):
 
 
 def _default_base(root, head_sha):
-    """The default --base: the merge base of head and origin/HEAD, each failure a cannot-evaluate."""
+    """The default --base: the merge base of head and origin/HEAD, each failure a cannot-evaluate.
+    merge-base walks history, so it runs behind _refuse_grafts, with replace refs disabled by
+    _git_env and the commit-graph cache disabled here."""
     origin_sha = _resolve_commit(root, "origin/HEAD")
     try:
         proc = subprocess.run(
-            ["git", "-C", str(root), "merge-base", head_sha, origin_sha],
+            ["git", "-C", str(root), "-c", "core.commitGraph=false", "merge-base",
+             head_sha, origin_sha],
             capture_output=True, timeout=GIT_TIMEOUT, env=_git_env())
     except (OSError, subprocess.SubprocessError) as exc:
         _proc_failure(exc)
@@ -256,10 +298,13 @@ def _default_base(root, head_sha):
 
 
 def _merge_bases(root, base, head):
-    """Every merge base of base and head; none (a shallow or unrelated history) is cannot-evaluate."""
+    """Every merge base of base and head; none (a shallow or unrelated history) is cannot-evaluate.
+    merge-base walks history, so it runs behind _refuse_grafts, with replace refs disabled by
+    _git_env and the commit-graph cache disabled here."""
     try:
         proc = subprocess.run(
-            ["git", "-C", str(root), "merge-base", "--all", base, head],
+            ["git", "-C", str(root), "-c", "core.commitGraph=false", "merge-base", "--all",
+             base, head],
             capture_output=True, timeout=GIT_TIMEOUT, env=_git_env())
     except (OSError, subprocess.SubprocessError) as exc:
         _proc_failure(exc)
@@ -275,11 +320,12 @@ def _merge_bases(root, base, head):
 def _diff_tree_bytes(root, merge_base, head):
     """The raw NUL-delimited --name-status records of the change, rename detection on with no
     rename limit (-l0: a 91-file move must not lose pairings to diff.renameLimit, and plumbing
-    ignores diff.renames). Named so the self-test can patch in a malformed record."""
+    ignores diff.renames). diff-tree parses both commits for their root trees, so the
+    commit-graph cache is disabled. Named so the self-test can patch in a malformed record."""
     try:
         proc = subprocess.run(
-            ["git", "-C", str(root), "diff-tree", "-r", "-z", "--name-status",
-             "--find-renames=50%", "-l0", merge_base, head, "--"],
+            ["git", "-C", str(root), "-c", "core.commitGraph=false", "diff-tree", "-r", "-z",
+             "--name-status", "--find-renames=50%", "-l0", merge_base, head, "--"],
             capture_output=True, timeout=GIT_TIMEOUT, env=_git_env())
     except (OSError, subprocess.SubprocessError) as exc:
         _proc_failure(exc)
@@ -326,11 +372,12 @@ def _changes(root, merge_base, head):
 
 
 def _tree_entry(root, rev, path):
-    """(mode, type, object id) of path in rev's tree, or CannotEvaluate (absent included)."""
+    """(mode, type, object id) of path in rev's tree, or CannotEvaluate (absent included).
+    ls-tree parses the commit for its root tree, so the commit-graph cache is disabled."""
     try:
         proc = subprocess.run(
-            ["git", "-C", str(root), "ls-tree", "-z", "--full-tree", rev, "--",
-             ":(literal)" + path],
+            ["git", "-C", str(root), "-c", "core.commitGraph=false", "ls-tree", "-z",
+             "--full-tree", rev, "--", ":(literal)" + path],
             capture_output=True, timeout=GIT_TIMEOUT, env=_git_env())
     except (OSError, subprocess.SubprocessError) as exc:
         _proc_failure(exc)
@@ -961,6 +1008,7 @@ def main(argv=None):
         root = repo_root_default()
     try:
         _refuse_shallow(root)
+        _refuse_grafts(root)
         head_sha = _resolve_commit(root, options.get("--head", "HEAD"))
         base_arg = options.get("--base")
         if (base_arg is not None and set(base_arg) == {"0"}
@@ -1688,10 +1736,12 @@ def self_test(report_path=None):
         check("hist/zero-base-with-history-cannot-evaluate",
               got[0] == 2 and "zero --base" in got[2], got)
 
-        # fixture 23j2: an info/grafts entry that makes HEAD look parentless to a history walk
-        # must not let a zero base pass over real history: the parents are read from the raw
-        # commit object, which no graft rewrites, so the real parent is still found and the run
-        # is refused. The flip restores the rev-list read, which honours the graft and passes.
+        # fixture 23j2: a repository holding an info/grafts file is refused outright before any
+        # history read, the way a shallow one is; the raw-commit-object parent read stays behind
+        # that refusal as an independent guard on the zero-base path (cat-file prints the stored
+        # bytes, which no graft rewrites). The first flip removes only the refusal and shows the
+        # raw read still catching the zero base; the second removes both guards and the graft
+        # then hides the real parent and the zero base passes.
         graft = _init_repo(base, "grafted")
         gr1 = _commit_state(graft, {}, {"a/t.py": P1}, "one")
         gr2 = _commit_state(graft, {"a/t.py": P1}, {"a/t.py": P1 + "# two\n"}, "two")
@@ -1701,8 +1751,19 @@ def self_test(report_path=None):
         parents_read = _commit_parents(Path(graft), gr2)
         got = _launch("--root", str(graft), "--base", "0" * len(gr2), "--head", gr2)
         check("hist/grafted-head-zero-base-cannot-evaluate",
-              parents_read == [gr1] and got[0] == 2 and "zero --base" in got[2],
+              parents_read == [gr1] and got[0] == 2 and "grafts file" in got[2],
               (parents_read, got))
+
+        def _no_graft_refusal(_root):
+            return None
+
+        flip_err = io.StringIO()
+        with (_patched(this, "_refuse_grafts", _no_graft_refusal),
+              contextlib.redirect_stderr(flip_err)):
+            flip_rc = main(["--root", str(graft), "--base", "0" * len(gr2), "--head", gr2])
+        check("hist/grafted-zero-base-raw-read-backstop",
+              flip_rc == 2 and "zero --base" in flip_err.getvalue(),
+              (flip_rc, flip_err.getvalue()))
 
         def _rev_list_parents(walk_root, walk_sha):
             proc = subprocess.run(
@@ -1715,12 +1776,147 @@ def self_test(report_path=None):
             return fields[1:]
 
         flip_out = io.StringIO()
-        with (_patched(this, "_commit_parents", _rev_list_parents),
+        with (_patched(this, "_refuse_grafts", _no_graft_refusal),
+              _patched(this, "_commit_parents", _rev_list_parents),
               contextlib.redirect_stdout(flip_out)):
             flip_rc = main(["--root", str(graft), "--base", "0" * len(gr2), "--head", gr2])
         check("hist/grafted-head-rev-list-flip-passes",
               flip_rc == 0 and "moves no Python file" in flip_out.getvalue(),
               (flip_rc, flip_out.getvalue()))
+
+        # fixture 23j2b: a grafts entry naming the head as the base's parent collapses the merge
+        # base onto the head, so the judged range is empty and a stale move is hidden. Base and
+        # head are siblings over one ancestor; without the grafts file the move is a finding, with
+        # it the run is refused, and the flip (only the refusal removed) exits 0 with an empty
+        # scope: the observed bypass.
+        stale23 = "from pathlib import Path\nROOT = Path(__file__).parents[2]\n"
+        gmb = _init_repo(base, "graft-merge-base")
+        ga = _commit_state(gmb, {}, {"tools/a/b/x.py": stale23}, "a")
+        gb = _commit_state(gmb, {"tools/a/b/x.py": stale23},
+                           {"tools/a/b/x.py": stale23, "other.txt": "o\n"}, "b")
+        _fx(gmb, "checkout", "-q", "-b", "h", ga)
+        gh = _commit_state(gmb, {"tools/a/b/x.py": stale23}, {"tools/a/x.py": stale23}, "h")
+        got = _launch("--root", str(gmb), "--base", gb, "--head", gh)
+        check("hist/graft-merge-base-without-graft-finds",
+              got[0] == 1 and "FINDING: tools/a/b/x.py -> tools/a/x.py" in got[1], got)
+        with open(Path(gmb) / ".git" / "info" / "grafts", "w", encoding="ascii") as handle:
+            handle.write(gb + " " + gh + "\n")
+        got = _launch("--root", str(gmb), "--base", gb, "--head", gh)
+        check("hist/graft-merge-base-refused",
+              got[0] == 2 and "grafts file" in got[2], got)
+        flip_out = io.StringIO()
+        with (_patched(this, "_refuse_grafts", _no_graft_refusal),
+              contextlib.redirect_stdout(flip_out)):
+            flip_rc = main(["--root", str(gmb), "--base", gb, "--head", gh])
+        check("hist/graft-merge-base-flip-bypasses",
+              flip_rc == 0 and "empty scope" in flip_out.getvalue(),
+              (flip_rc, flip_out.getvalue()))
+
+        # fixture 23j2c: a grafts entry can also rewrite what HEAD^ resolves to, steering the
+        # --base HEAD^ form at an untouched head: the graft points HEAD's parent at an old commit
+        # whose tree equals the head's, so the stale move from the true parent vanishes. Refused
+        # with the file present; the flip (only the refusal removed) exits 0 with an empty scope.
+        ghp = _init_repo(base, "graft-head-parent")
+        hp1 = _commit_state(ghp, {}, {"pkg/sub/t.py": P1}, "one")
+        hp2 = _commit_state(ghp, {"pkg/sub/t.py": P1}, {"pkg/t.py": P1}, "two")
+        hp3 = _commit_state(ghp, {"pkg/t.py": P1}, {"pkg/sub/t.py": P1}, "three")
+        got = _launch("--root", str(ghp), "--base", "HEAD^", "--head", "HEAD")
+        check("hist/graft-head-parent-without-graft-finds",
+              got[0] == 1 and "FINDING: pkg/t.py -> pkg/sub/t.py" in got[1], (hp2, got))
+        with open(Path(ghp) / ".git" / "info" / "grafts", "w", encoding="ascii") as handle:
+            handle.write(hp3 + " " + hp1 + "\n")
+        got = _launch("--root", str(ghp), "--base", "HEAD^", "--head", "HEAD")
+        check("hist/graft-head-parent-refused",
+              got[0] == 2 and "grafts file" in got[2], got)
+        flip_out = io.StringIO()
+        with (_patched(this, "_refuse_grafts", _no_graft_refusal),
+              contextlib.redirect_stdout(flip_out)):
+            flip_rc = main(["--root", str(ghp), "--base", "HEAD^", "--head", "HEAD"])
+        check("hist/graft-head-parent-flip-bypasses",
+              flip_rc == 0 and "empty scope" in flip_out.getvalue(),
+              (flip_rc, flip_out.getvalue()))
+
+        # fixture 23j2d: a replace ref rewriting the base commit (same tree, the head as its
+        # parent) would collapse the merge base onto the head the same way; with
+        # GIT_NO_REPLACE_OBJECTS=1 on every call the verdict is identical with and without the
+        # ref. The flip removes only that variable and the bypass is observed: the same judgment
+        # exits 0 with an empty scope.
+        rep = _init_repo(base, "replace-ref")
+        ra = _commit_state(rep, {}, {"tools/a/b/x.py": stale23}, "a")
+        rb = _commit_state(rep, {"tools/a/b/x.py": stale23},
+                           {"tools/a/b/x.py": stale23, "other.txt": "o\n"}, "b")
+        _fx(rep, "checkout", "-q", "-b", "h", ra)
+        rh = _commit_state(rep, {"tools/a/b/x.py": stale23}, {"tools/a/x.py": stale23}, "h")
+        got_before = _launch("--root", str(rep), "--base", rb, "--head", rh)
+        rb_tree = _fx(rep, "rev-parse", rb + "^{tree}")
+        rx = _fx(rep, "commit-tree", rb_tree, "-p", rh, "-m", "x")
+        _fx(rep, "replace", rb, rx)
+        got_after = _launch("--root", str(rep), "--base", rb, "--head", rh)
+        check("hist/replace-ref-ignored-same-verdict",
+              got_before[0] == 1 and "FINDING: tools/a/b/x.py -> tools/a/x.py" in got_before[1]
+              and got_after == got_before, (got_before, got_after))
+        plain_env = _git_env
+
+        def _replace_honouring_env():
+            env = plain_env()
+            env.pop("GIT_NO_REPLACE_OBJECTS", None)
+            return env
+
+        flip_out = io.StringIO()
+        with (_patched(this, "_git_env", _replace_honouring_env),
+              contextlib.redirect_stdout(flip_out)):
+            flip_rc = main(["--root", str(rep), "--base", rb, "--head", rh])
+        check("hist/replace-ref-flip-changes-verdict",
+              flip_rc == 0 and "empty scope" in flip_out.getvalue(),
+              (flip_rc, flip_out.getvalue()))
+
+        # fixture 23j2e: a parent header carrying an abbreviated id is refused: an abbreviation
+        # resolves through the object store's disambiguation, not the stored full id, so it is no
+        # trustworthy parent. The commit is written with hash-object --literally so the malformed
+        # header is really stored. The flip drops only the full-length requirement, under which
+        # the abbreviation resolves and is returned as a parent.
+        shortp = _init_repo(base, "short-parent")
+        sp1 = _commit_state(shortp, {}, {"a.txt": "1\n"}, "one")
+        sp2 = _commit_state(shortp, {"a.txt": "1\n"}, {"a.txt": "2\n"}, "two")
+        raw_commit = subprocess.run(
+            ["git", "-C", str(shortp), "cat-file", "commit", sp2], capture_output=True,
+            timeout=GIT_TIMEOUT, env=_git_fixture_env.git_fixture_env()).stdout
+        mangled_path = Path(base) / "short-parent-commit"
+        with open(mangled_path, "wb") as handle:
+            handle.write(raw_commit.replace(
+                sp1.encode("ascii"), sp1[:7].encode("ascii"), 1))
+        bad_sha = _fx(shortp, "hash-object", "-t", "commit", "-w", "--literally",
+                      str(mangled_path))
+        try:
+            _commit_parents(Path(shortp), bad_sha)
+            got = "returned"
+        except CannotEvaluate as exc:
+            got = "cannot: {}".format(exc)
+        check("hist/short-parent-id-cannot-evaluate",
+              got.startswith("cannot") and "malformed parent" in got, got)
+
+        def _lenient_parents(walk_root, walk_sha):
+            proc = subprocess.run(
+                ["git", "-C", str(walk_root), "--no-replace-objects", "cat-file", "commit",
+                 walk_sha],
+                capture_output=True, timeout=GIT_TIMEOUT, env=_git_env())
+            if proc.returncode != 0:
+                raise CannotEvaluate("cannot read the commit object {}".format(walk_sha))
+            values = [line[len(b"parent "):].decode("ascii", "replace")
+                      for line in proc.stdout.split(b"\n\n", 1)[0].split(b"\n")
+                      if line.startswith(b"parent ")]
+            for parent in values:
+                probe = subprocess.run(
+                    ["git", "-C", str(walk_root), "--no-replace-objects", "cat-file", "-e",
+                     parent],
+                    capture_output=True, timeout=GIT_TIMEOUT, env=_git_env())
+                if probe.returncode != 0:
+                    raise CannotEvaluate("missing parent {}".format(parent))
+            return values
+
+        check("hist/short-parent-id-flip-accepts",
+              _lenient_parents(Path(shortp), bad_sha) == [sp1[:7]],
+              _lenient_parents(Path(shortp), bad_sha))
 
         # fixture 23j3: a commit naming a parent whose object is missing cannot be evaluated
         lostp = _init_repo(base, "lost-parent")
@@ -1888,8 +2084,10 @@ def self_test(report_path=None):
           "in-scope derivation never a pass; the marker clearing exactly its directory and "
           "lapsing on the next move; odd path bytes enumerated; -l0 pairing under "
           "diff.renameLimit=1; criss-cross merge bases combined; above-root hops distinct by "
-          "value; shallow histories and zero bases over history refused, head parents read from "
-          "the raw commit object so a grafts entry hides none; parse, recursion, mode, "
+          "value; shallow histories, grafts files and zero bases over history refused, replace "
+          "refs ignored and the commit-graph cache disabled on commit-parsing reads, head "
+          "parents read from the raw commit object and accepted only as full-length ids; "
+          "parse, recursion, mode, "
           "blob, revision, merge-base and record failures each cannot-evaluate; and the launch "
           "contract); execution set reconciled against tools/selftest_checks.toml".format(
               len(EXECUTED)))

@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "d4b338f0ef84066cff752468d05b3d8f66252edc557a3fbef3e3ade858d9cc1a"
+tree-sha256 = "1a79a20a189059d0a8787556ab8e7e85d35f14982a698be7be8754a403566f05"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -4261,8 +4261,8 @@ sha256 = "3994b3446d75345ebc28ba3d5f6d7bed114fb3f8a4899f5cebad030b81d290d3"
 
 [[sources]]
 path = "tools/check_moved_python_roots.py"
-bytes = 103582
-sha256 = "ca6ffcd7f5cba8e98ebf4f6e8cdad1a2b409c97dcdcee86cccdc443edd8393aa"
+bytes = 115759
+sha256 = "26cc076217b9ac11c5ac4516e51e40ab9ccbca4824e7dc8662ee8bc3c9fec20e"
 
 [[sources]]
 path = "tools/check_msg_leaks.py"
@@ -4661,8 +4661,8 @@ sha256 = "05e1cf87ddae1ac1df6fcfc72e63d856b7425ff8e51522f432a8f317bf7f408e"
 
 [[sources]]
 path = "tools/selftest_checks.toml"
-bytes = 223867
-sha256 = "6e2d3bcf07d8b1c526b690797e63165c6ec0bffecf1d0c07bbb2f03aa49c017c"
+bytes = 224329
+sha256 = "cf53e641b7d8b26bbdd815bbef57a4043d5c74f9a2325b83c82230491c4a37c0"
 
 [[sources]]
 path = "tools/selftest_ci_status.py"
