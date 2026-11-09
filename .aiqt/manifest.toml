@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "f40449e2613e81df4e2aa7c551651260ffb593473a8e06107bf18cfa606bde04"
+tree-sha256 = "5c677c94a0da20da7d19a72ae1e12b03baee514152f9650d58c9596c0071ef5f"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -2382,7 +2382,7 @@ sha256 = "4bf8d8ab972164cd9a26d3ac433eb1e7ccc834d1319c82e8e15b69a52311ab7b"
 [[sources]]
 path = "CHANGELOG.md"
 bytes = 652
-sha256 = "e9bbf7da0e25d113ca0f33db652fd131283a00e234f29bb0dfde29ef1d2da965"
+sha256 = "3c4465308e9d29a365f3dd9c9b758ba555208e7794c1f949002be6c4c500c2c3"
 
 [[sources]]
 path = "DISCLOSURE.md"
@@ -2457,7 +2457,7 @@ sha256 = "79f4539151ecb22ab0bca929f9d0ec7b6efc2541dd8da708b259ea8642d3ec5a"
 [[sources]]
 path = "changelog.toml"
 bytes = 2172
-sha256 = "63d8e3c586b876cf601fbde6bbb5158aa3aae4a5ff492538d01c8c952e5966a3"
+sha256 = "dbed3e0c4a29c0ffd01a4e26ca59964a3ef7e2277fc3dcdc2eed7076272461c1"
 
 [[sources]]
 path = "disclosure.toml"
@@ -3977,7 +3977,7 @@ sha256 = "92616c43a59669c212928b7ccf5eb17bda48aa22377e016df898818f7bfa6bb9"
 [[sources]]
 path = "site/install/details/index.html"
 bytes = 17229
-sha256 = "7751793817f43ac93a9d98e2dbb4af9a51c1d329b6c063a4a8f24aaf91d700b7"
+sha256 = "b2a4a236ea604dbdb2352ce7055e5aa3051e72f8b4cd93dbbc5bc5e7b42beda4"
 
 [[sources]]
 path = "site/install/index.html"
@@ -3997,7 +3997,7 @@ sha256 = "1bb5926f7002841c2ab1b6ba63515ef002cec4f82d981d6ba7082b157b57e51d"
 [[sources]]
 path = "site/mappings/index.html"
 bytes = 409929
-sha256 = "325d5556ca6af5f754c1c1e30cd86868e0912ce3c5fedd0a2a3663b9aa35c0e1"
+sha256 = "60fd10aaa046243539e2062fc9906ae0127746e7d6c98d2bfe311fc5aa517529"
 
 [[sources]]
 path = "site/robots.txt"
@@ -4007,7 +4007,7 @@ sha256 = "fd49919e451ce851893074027b8073b76e87a4d9ba7888fa734d4d5dc970b362"
 [[sources]]
 path = "site/rules/index.html"
 bytes = 11123
-sha256 = "a506838d023a92f98804407bf713a3b99819a13574da97b42bb85712598ee852"
+sha256 = "6696c185e28c0bdbb3628ef259291cbecc81553f7074539a919f2a7eba3bbc5d"
 
 [[sources]]
 path = "site/sitemap.xml"
@@ -4017,7 +4017,7 @@ sha256 = "e84990647039661ef0f3ef9d81ef0be0ed9c2a9a66d4899c64a2b3a1644be696"
 [[sources]]
 path = "site/standard/index.html"
 bytes = 19531
-sha256 = "c7e2c63b222156d4a13b7e9fce78e490676ffc8ccd99e0a000acd02995e9c659"
+sha256 = "d98a56242929d003336dbc1b5065f90af431163e555649358e325af7ad5d522f"
 
 [[sources]]
 path = "site/styles.css"
