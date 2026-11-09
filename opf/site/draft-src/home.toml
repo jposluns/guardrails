@@ -30,15 +30,15 @@ d = "What the specification defines, its conformance language, and its draft sta
 
 [[body.items]]
 href = "core-files/"
-title = "Know the core store files"
+title = "See the technical details"
 n = "5 files"
 d = "The manifest, the ID counters, the version ledger, the worklog, and the lease."
 
 [[body.items]]
 href = "adopt/"
 title = "Adopt it"
-n = "10 verbs"
-d = "Ask your assistant for a plan, review it, then authorize; the 10 command verbs and their status."
+n = "3 steps"
+d = "Ask your assistant for a plan, review it, then authorize; the page links the 10 command verbs and their status."
 
 [[body]]
 component = "value"

@@ -1,9 +1,9 @@
 /index-new / 301
-/install-claude /install/ 301
-/install-chatgpt /install/ 301
-/install-gemini /install/ 301
-/install-copilot /install/ 301
-/install-other /install/ 301
+/install-claude /install/details/#claude 301
+/install-chatgpt /install/details/#chatgpt 301
+/install-gemini /install/details/#gemini 301
+/install-copilot /install/details/#copilot 301
+/install-other /install/details/#other 301
 /rule1 /rules/#rule1 301
 /rule2 /rules/#rule2 301
 /rule3 /rules/#rule3 301
