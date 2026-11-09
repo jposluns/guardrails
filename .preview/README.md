@@ -35,12 +35,15 @@ advisory note still allows with exit 0). Each file states
 what it does not catch in a section headed `RESIDUAL COVERAGE` in its opening docstring; that section is
 the authority, and the summary further down this page only points to it.
 
-- **`clock-inject.py`** reads the real clock after each tool call and adds one short line to the
-  assistant's context, in the form `CLOCK (read by hook, authoritative): <local time> | <UTC time>`,
-  followed by the session's elapsed time when a lease is configured. The freshest time value in context
-  is then a real reading, not one the model composed. It informs; it blocks nothing. Events:
-  `PostToolUse` (after a tool call that succeeded) and `PostToolUseFailure` (after one that started and
-  failed); register both to cover both outcomes.
+- **`clock-inject.py`** reads the real clock after each tool call and when you submit a prompt, and adds
+  one short line to the assistant's context, in the form
+  `CLOCK (read by hook, authoritative): <local time> | <UTC time> | stamp: [YYYY-MM-DD HH:MM TZ]`,
+  followed by the session's elapsed time when a lease is configured. The stamp is a ready-to-copy status
+  header in the bracketed form `stamp-truth-stop.py` checks, taken from the same reading as the local
+  time and truncated to the minute. The freshest time value in context is then a real reading, not one
+  the model composed. It informs; it blocks nothing. Events: `PostToolUse` (after a tool call that
+  succeeded), `PostToolUseFailure` (after one that started and failed), and `UserPromptSubmit` (when a
+  prompt is submitted, so the first text of a turn has a fresh reading too); register all three.
 - **`stamp-truth-stop.py`** checks each finished turn. When the assistant's prose carries a timestamp with
   an explicit zone that lies ahead of the clock, or an elapsed-time footer that disagrees with the
   configured lease, it blocks the stop and says why, so the assistant corrects the value before handing
@@ -184,7 +187,7 @@ files are served from this repository's main branch; for a raw download, use
 | File | SHA-256 | Link |
 |---|---|---|
 | `char-policy-write.py` | `84a08059513f27c76e944d54c08e8ddae520f9e040ebe19296d139d49646b0f8` | [char-policy-write.py](char-policy-write.py) |
-| `clock-inject.py` | `262749a3409d0fe8821cc115db28e05f35311cc0329008ff51f67090fd3d2e54` | [clock-inject.py](clock-inject.py) |
+| `clock-inject.py` | `38f7c8d8a43d11e56d0bec0bc0e180cf6690c84b8931058e1bec945def991691` | [clock-inject.py](clock-inject.py) |
 | `constraint-reread.py` | `725974c306e63a3f9a1b4a2be2992c9ee9792c231aaad66035a813525d10c48a` | [constraint-reread.py](constraint-reread.py) |
 | `future-stamp-write.py` | `1cf8608693f472df1c7bee03b5ab5bf5de3e79a19b00c782a7015e77d167c348` | [future-stamp-write.py](future-stamp-write.py) |
 | `pattern-self-match.py` | `b70287e2aab2b08b0cd240c6c9150feb65141f2e3612adad63e402221dfcbb2f` | [pattern-self-match.py](pattern-self-match.py) |
@@ -281,14 +284,15 @@ fails and report it; do not work around a failed check.
      flush are best-effort: the exit status does not depend on them (each hook exits without the
      interpreter's own exit-time stream flush, so a stream whose flush fails cannot replace the
      exit), and the refusal holds even when standard error is unavailable or failing.
-     Claude Code reads the exit by event: for `clock-inject.py` (`PostToolUse`, `PostToolUseFailure`) the
-     exit is 2 and the tool has already run, so the line only reaches the assistant and nothing is
-     blocked; for the six `PreToolUse` hooks the exit is 2 and every matching tool call the launch guard
-     does not skip is denied; for `stamp-truth-stop.py` (`Stop`), `constraint-reread.py` (`SessionStart`,
-     `PreCompact`, `UserPromptSubmit`, and `Stop`), and `rerun-pass-check.py` (`PostToolUse`,
-     `PostToolUseFailure`, `UserPromptSubmit`, and `Stop`) the exit is 1, a non-blocking error, so no
-     reminder or note is added and every stop goes ahead unchecked (exit 2 would block the stop, and the
-     hook's own block cap would never run, since the hook stops before its loop guard runs). These exits,
+     Claude Code reads the exit by event: for the six `PreToolUse` hooks the exit is 2 and every matching
+     tool call the launch guard does not skip is denied; for `clock-inject.py` (`PostToolUse`,
+     `PostToolUseFailure`, and `UserPromptSubmit`) the exit is 1, a non-blocking error, so the tool has
+     already run or the prompt goes ahead, and no clock line is added (exit 2 would block every prompt);
+     for `stamp-truth-stop.py` (`Stop`), `constraint-reread.py` (`SessionStart`, `PreCompact`,
+     `UserPromptSubmit`, and `Stop`), and `rerun-pass-check.py` (`PostToolUse`, `PostToolUseFailure`,
+     `UserPromptSubmit`, and `Stop`) the exit is 1, a non-blocking error, so no reminder or note is added
+     and every stop goes ahead unchecked (exit 2 would block the stop, and the hook's own block cap would
+     never run, since the hook stops before its loop guard runs). These exits,
      like a hook's other exits, hold while the hook's output (its diagnostic on standard error, and what
      it prints on standard output) can be written and flushed. A failing output stream can change the exit
      status and can lose output, a decision included; a separate fix in progress addresses this. An
@@ -303,10 +307,10 @@ fails and report it; do not work around a failed check.
      the most seconds Claude Code lets one run of the hook take.
 
    This combined example shows the ten hooks. Copy only entries for hooks you have downloaded,
-   checked, and tested. `clock-inject.py` needs both `PostToolUse` and `PostToolUseFailure`, with no
-   matcher (all tools); `stamp-truth-stop.py` uses `Stop`, with no matcher. On `PreToolUse`,
-   `future-stamp-write.py` matches file writes and shell commands, `char-policy-write.py` matches file writes
-   only, and the other four match `Bash`.
+   checked, and tested. `clock-inject.py` needs `PostToolUse`, `PostToolUseFailure`, and
+   `UserPromptSubmit`, with no matcher (all tools); `stamp-truth-stop.py` uses `Stop`, with no
+   matcher. On `PreToolUse`, `future-stamp-write.py` matches file writes and shell commands,
+   `char-policy-write.py` matches file writes only, and the other four match `Bash`.
    `constraint-reread.py` uses `SessionStart` (matcher `compact`), `PreCompact`, `UserPromptSubmit`, and
    `Stop`; `rerun-pass-check.py` uses `PostToolUse` and `PostToolUseFailure` (matcher
    `Bash|Write|Edit|MultiEdit|NotebookEdit`), `UserPromptSubmit`, and `Stop`.
@@ -329,6 +333,7 @@ fails and report it; do not work around a failed check.
          { "hooks": [ { "type": "command", "timeout": 30, "command": "/bin/sh -c '[ -d /dev/stdin ] || [ -d /dev/stdout ] || [ -d /dev/stderr ] || exec python3 -I -S -B \"/ABSOLUTE/PATH/TO/.claude/hooks/constraint-reread.py\"'" } ] }
        ],
        "UserPromptSubmit": [
+         { "hooks": [ { "type": "command", "timeout": 10, "command": "/bin/sh -c '[ -d /dev/stdin ] || [ -d /dev/stdout ] || [ -d /dev/stderr ] || exec python3 -I -S -B \"/ABSOLUTE/PATH/TO/.claude/hooks/clock-inject.py\"'" } ] },
          { "hooks": [ { "type": "command", "timeout": 30, "command": "/bin/sh -c '[ -d /dev/stdin ] || [ -d /dev/stdout ] || [ -d /dev/stderr ] || exec python3 -I -S -B \"/ABSOLUTE/PATH/TO/.claude/hooks/constraint-reread.py\"'" } ] },
          { "hooks": [ { "type": "command", "timeout": 30, "command": "/bin/sh -c '[ -d /dev/stdin ] || [ -d /dev/stdout ] || [ -d /dev/stderr ] || exec python3 -I -S -B \"/ABSOLUTE/PATH/TO/.claude/hooks/rerun-pass-check.py\"'" } ] }
        ],
@@ -513,10 +518,10 @@ printf 'Active-session: sess-%s\n' "$(date -u +%Y%m%dT%H%M%SZ)" > "$AIQT_LEASE_F
 Each hook is a best-effort guard, and each one states what it does not catch in the `RESIDUAL COVERAGE`
 section of its opening docstring. Read that section before relying on a hook; in outline:
 
-- **`clock-inject.py`** informs and enforces nothing: the assistant can still ignore or mis-copy the line.
-  It reproduces the host clock faithfully, so a wrong host clock gives wrong readings, and elapsed time is
-  only as right as the lease. It does not fire for a tool call rejected before it ran, or across a stretch
-  of prose with no tool call.
+- **`clock-inject.py`** informs and enforces nothing: the assistant can still ignore or mis-copy the line,
+  or copy its stamp long after the reading. It reproduces the host clock faithfully, so a wrong host clock
+  gives wrong readings, and elapsed time is only as right as the lease. It does not fire for a tool call
+  rejected before it ran, or across a stretch of prose after a prompt with no tool call.
 - **`stamp-truth-stop.py`** checks only timestamps written with an explicit zone; an unzoned, 12-hour, or
   natural-language time is not checked. A fabricated time in a code span, a code block, a `>` quote line,
   or just after a scheduling word passes. A genuinely future time mentioned in plain prose without a

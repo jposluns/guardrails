@@ -1,21 +1,31 @@
 #!/usr/bin/env python3
-"""PostToolUse and PostToolUseFailure hook (all tools): inject the real clock into the assistant's context.
+"""PostToolUse, PostToolUseFailure and UserPromptSubmit hook (all tools): inject the real clock into context.
 
 Motivated by an assistant composing console timestamps and "Session elapsed HH:MM" footers from its own
 sense of time instead of reading the clock, drifting up to 4h40m ahead (timestamp-from-clock;
-claims-rest-on-observation). After a tool call that ran, it emits ONE short additionalContext line read from
-the process clock, for example:
+claims-rest-on-observation). After a tool call that ran, and when a prompt is submitted, it emits ONE short
+additionalContext line read from the process clock, for example:
 
-    CLOCK (read by hook, authoritative): 2026-09-23 13:45:02 EDT | 2026-09-23T17:45:02Z | session elapsed 03:27
+    CLOCK (read by hook, authoritative): 2026-09-23 13:45:02 EDT | 2026-09-23T17:45:02Z | stamp: [2026-09-23 13:45 EDT] | session elapsed 03:27
 
 so a fresh authoritative reading is the most recent time value in context.
 
+Stamp segment. ` | stamp: [YYYY-MM-DD HH:MM ZONE]` is a ready-to-copy status header in the bracketed console
+form stamp-truth-stop.py reads as a message's header claim. It is built from the SAME single clock reading
+as the line's local and UTC segments, in the same local zone, TRUNCATED to the minute (the seconds and any
+fraction are dropped, never rounded up, so 23:59:59.999 stays on its own minute and day). ZONE is the local
+zone's abbreviation when it fits stamp-truth-stop.py's claim grammar (UTC, GMT, 2 to 6 capitals, or a
+numeric offset such as +03); otherwise the local offset in +HHMM form; when neither fits (an offset with
+seconds) the segment is omitted, so the line never offers a stamp that checker would not read.
+
 Coverage. Registered under PostToolUse it fires after a tool call that SUCCEEDED; registered under
-PostToolUseFailure it fires after a tool call that started and FAILED. The emitted hookEventName matches the
-incoming payload's hook_event_name (PostToolUseFailure when that is the event, otherwise PostToolUse), as the
-hooks contract requires. Both registrations are needed for both outcomes. Neither event fires for a tool
-call rejected before execution (an unknown tool, input failing validation, or a permission denial), so such
-calls, and any stretch of prose with no tool call, see no fresh reading.
+PostToolUseFailure it fires after a tool call that started and FAILED; registered under UserPromptSubmit it
+fires when a prompt is submitted, so the first text of a turn also has a fresh reading. The emitted
+hookEventName matches the incoming payload's hook_event_name (PostToolUseFailure or UserPromptSubmit when
+that is the event, otherwise PostToolUse), as the hooks contract requires. All three registrations are
+needed for full coverage. No event fires for a tool call rejected before execution (an unknown tool, input
+failing validation, or a permission denial), so such calls, and any stretch of prose after the prompt with
+no tool call, see no fresh reading.
 
 Elapsed resolution. The lease file is env AIQT_LEASE_FILE when it is set to a non-empty value (a legacy
 spelling is accepted as a fallback, see _cfg); otherwise there is NO lease and the elapsed segment is
@@ -52,14 +62,16 @@ NEVER fails the tool: any error at all exits 0, including an argument, stdin, or
 payload is evaluated. The one exception to exit 0 is an interpreter older than Python 3.14 that can start the
 hook: the guard at the top of this file reads no input, writes one line beginning
 `error: clock-inject.py requires Python 3.14 or newer` to stderr (a best-effort write: the exit does
-not depend on it) and exits 2. Under PostToolUse and
-PostToolUseFailure the tool call has already run, so that exit blocks nothing: the line reaches the assistant
-and no clock line is added. These exits hold while the hook's output (its diagnostic on stderr, and what it
-prints on stdout) can be written and flushed. A failing output stream can change the exit status and can lose
-output, a decision included; a separate fix in progress addresses this. An older interpreter that cannot start
-the hook never reaches the guard and fails with Python's own error first; .preview/README.md (Installing a
-hook, step 4) describes those cases. The payload is read as BYTES and parsed by json.loads, so its decoding
-does not depend on the process locale.
+not depend on it) and exits 1, which every event this hook uses treats as a non-blocking error: under
+PostToolUse and PostToolUseFailure the tool call has already run, and under UserPromptSubmit the prompt goes
+ahead, and in each case no clock line is added. It does not exit 2: on UserPromptSubmit exit 2 blocks the
+prompt. These exits hold while the hook's output (its diagnostic on stderr, and what it prints on stdout)
+can be written and flushed. A failing output stream can change the exit status and can lose output, a
+decision included; a separate fix in progress addresses this. An older interpreter that cannot start the
+hook never reaches the guard and fails with Python's own error first: one that predates the -I option exits
+2, which blocks every UserPromptSubmit prompt; .preview/README.md (Installing a hook, step 4) describes
+those cases. The payload is read as BYTES and parsed by json.loads, so its decoding does not depend on the
+process locale.
 Unparseable hook input still emits the clock line under PostToolUse (the clock does not
 depend on the payload). An error writing the output (a closed or full stdout) is swallowed and the hook
 still exits 0 (round 24); if the stream cannot even be pointed at /dev/null, the hook ends at once with
@@ -70,8 +82,9 @@ host's debug log.
 In-session subagents are deliberately NOT skipped (there is no agent_id check): they benefit from the true
 time too, and this hook only adds context, it never blocks.
 
-RESIDUAL COVERAGE. This INFORMS; it enforces nothing. The model can
-still ignore the line or mis-copy it; the companion Stop hook (stamp-truth-stop.py) is the check. The line
+RESIDUAL COVERAGE. This INFORMS; it enforces nothing. The model can still ignore the line or mis-copy it, or
+copy the stamp segment long after its reading (it is the reading's minute, not the time of the copy); the
+companion Stop hook (stamp-truth-stop.py) is the check, and it does not require a stamp at all. The line
 reflects the host clock, so a wrong host clock (no NTP) is reproduced faithfully. Elapsed is only as right
 as the lease: a lease id minted from a wrong clock, a stale id after an unclean exit, or a configured lease
 file that belongs to another session yields a wrong or missing elapsed. No session
@@ -103,7 +116,7 @@ if tuple(sys.version_info[:2]) < (3, 14):
         sys.stderr.flush()
     except BaseException:
         pass
-    os._exit(2)
+    os._exit(1)
 
 import datetime
 import json
@@ -113,7 +126,9 @@ import stat
 
 LEASE_MAX_BYTES = 1 << 20
 _SESS_RE = re.compile(r"[A-Za-z0-9]{1,32}-(\d{8}T\d{6}Z)")
-_EVENTS = ("PostToolUse", "PostToolUseFailure")
+_EVENTS = ("PostToolUse", "PostToolUseFailure", "UserPromptSubmit")
+# a zone stamp-truth-stop.py's claim grammar reads after one space: UTC, GMT, 2 to 6 capitals, or an offset
+_STAMP_ZONE_RE = re.compile(r"UTC|GMT|[A-Z]{2,6}|[+-]\d{2}(?::?\d{2})?")
 
 
 def _cfg(name, env=None):
@@ -538,10 +553,26 @@ def fmt_elapsed(delta):
     return f"{secs // 3600:02d}:{(secs % 3600) // 60:02d}"
 
 
+def stamp_segment(local):
+    """The ready-to-copy header `[YYYY-MM-DD HH:MM ZONE]` for the aware datetime `local`, truncated to its
+    minute (strftime drops the seconds; nothing rounds up), or None when no zone form fits the claim grammar.
+    ZONE is the abbreviation when it fits, else the offset as +HHMM; an offset with seconds fits neither."""
+    zone = local.tzname()
+    if not isinstance(zone, str) or not _STAMP_ZONE_RE.fullmatch(zone):
+        zone = local.strftime("%z")
+        if not re.fullmatch(r"[+-]\d{4}", zone):
+            return None
+    return f"[{local.strftime('%Y-%m-%d %H:%M')} {zone}]"
+
+
 def clock_line(now_utc, start=None):
+    # every segment comes from the one reading now_utc, so the stamp never disagrees with the local segment
     local = now_utc.astimezone()
     line = (f"CLOCK (read by hook, authoritative): {local.strftime('%Y-%m-%d %H:%M:%S')} {local.tzname()} | "
             f"{now_utc.strftime('%Y-%m-%dT%H:%M:%SZ')}")
+    stamp = stamp_segment(local)
+    if stamp is not None:
+        line += f" | stamp: {stamp}"
     if start is not None:
         el = fmt_elapsed(now_utc - start)
         if el is not None:
@@ -621,7 +652,22 @@ def _self_test():
     # run (well under a second), so the verdict never depends on the host's speed
     HANG_TIMEOUT = 120
     line_re = re.compile(r"^CLOCK \(read by hook, authoritative\): \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} \S+ \| "
-                         r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z( \| session elapsed \d{2,}:\d{2})?$")
+                         r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z \| stamp: \[\d{4}-\d{2}-\d{2} \d{2}:\d{2} \S+\]"
+                         r"( \| session elapsed \d{2,}:\d{2})?$")
+    # the line's local segment and its stamp segment, captured to compare them
+    parts_re = re.compile(r"^CLOCK \(read by hook, authoritative\): (\d{4}-\d{2}-\d{2} \d{2}:\d{2}):\d{2} (\S+) \| "
+                          r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z \| stamp: \[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}) (\S+)\]")
+
+    def local_reading(*wall):
+        """The UTC reading whose process-local wall time is `wall` (year, month, day, hour, minute, second, us)."""
+        return datetime.datetime(*wall).astimezone().astimezone(utc)
+
+    def segments(line):
+        """(local minute, local zone, stamp minute, stamp zone) of a clock line; fails the test when absent."""
+        m = parts_re.match(line)
+        if m is None:
+            raise AssertionError("no local and stamp segments in %r" % line)
+        return m.groups()
 
     def run_main(stdin_text, env=None, argv=("clock-inject.py",)):
         old_in, old_out, old_env = sys.stdin, sys.stdout, dict(os.environ)
@@ -658,7 +704,8 @@ def _self_test():
             now = datetime.datetime(2026, 9, 23, 17, 45, 2, tzinfo=utc)
             ln = clock_line(now, datetime.datetime(2026, 9, 23, 14, 17, 10, tzinfo=utc))
             self.assertRegex(ln, line_re)
-            self.assertIn("| 2026-09-23T17:45:02Z | session elapsed 03:27", ln)
+            self.assertIn("| 2026-09-23T17:45:02Z | stamp: [", ln)
+            self.assertTrue(ln.endswith("] | session elapsed 03:27"), ln)
 
         def test_line_omits_elapsed_when_unknown(self):
             ln = clock_line(datetime.datetime(2026, 9, 23, 17, 45, 2, tzinfo=utc), None)
@@ -751,6 +798,105 @@ def _self_test():
             self.assertEqual(json.loads(out)["hookSpecificOutput"]["hookEventName"], "PostToolUse")
             rc, out = run_main(json.dumps({"hook_event_name": "Bogus"}))
             self.assertEqual(json.loads(out)["hookSpecificOutput"]["hookEventName"], "PostToolUse")
+
+        # -- the ready-to-copy stamp segment and the UserPromptSubmit registration --
+        def expected_zone(self, now_utc):
+            local = now_utc.astimezone()
+            return local.tzname() if _STAMP_ZONE_RE.fullmatch(local.tzname()) else local.strftime("%z")
+
+        def test_stamp_agrees_with_local_segment(self):
+            now = local_reading(2026, 9, 23, 13, 45, 2, 0)
+            local_min, local_zone, stamp_min, stamp_zone = segments(clock_line(now))
+            self.assertEqual(stamp_min, local_min)
+            self.assertEqual(stamp_min, now.astimezone().strftime("%Y-%m-%d %H:%M"))
+            self.assertEqual(stamp_zone, self.expected_zone(now))
+            if _STAMP_ZONE_RE.fullmatch(local_zone):
+                self.assertEqual(stamp_zone, local_zone)
+
+        def test_stamp_zone_fallbacks(self):
+            at = datetime.datetime(2026, 9, 23, 13, 45, 59, 999000)
+            named = at.replace(tzinfo=datetime.timezone(datetime.timedelta(hours=-4), "EDT"))
+            self.assertEqual(stamp_segment(named), "[2026-09-23 13:45 EDT]")
+            odd = at.replace(tzinfo=datetime.timezone(datetime.timedelta(hours=5, minutes=30), "x-ist"))
+            self.assertEqual(stamp_segment(odd), "[2026-09-23 13:45 +0530]")  # an unreadable name: the offset
+            secs = at.replace(tzinfo=datetime.timezone(datetime.timedelta(minutes=19, seconds=32), "lmt"))
+            self.assertIsNone(stamp_segment(secs))  # an offset with seconds fits no claim form: omitted
+
+        def test_stamp_minute_boundaries_truncate_from_one_reading(self):
+            for wall, want in (((2026, 9, 23, 13, 45, 0, 0), "2026-09-23 13:45"),
+                               ((2026, 9, 23, 13, 45, 59, 999000), "2026-09-23 13:45"),
+                               ((2026, 9, 23, 13, 44, 59, 999999), "2026-09-23 13:44"),
+                               ((2026, 9, 23, 23, 59, 59, 999000), "2026-09-23 23:59"),
+                               ((2026, 9, 24, 0, 0, 0, 0), "2026-09-24 00:00")):
+                now = local_reading(*wall)
+                ln = clock_line(now)
+                self.assertRegex(ln, line_re)
+                local_min, _zone, stamp_min, _szone = segments(ln)
+                self.assertEqual((stamp_min, local_min), (want, want), wall)
+                self.assertIn("| " + now.strftime("%Y-%m-%dT%H:%M:%SZ") + " |", ln, wall)
+
+        def test_main_reads_the_clock_once(self):
+            # a clock that moves 1 ms across midnight on each read: a second read would put the stamp on the
+            # next day while the local segment stays on the first, so the one reading is what keeps them equal
+            first = local_reading(2026, 9, 23, 23, 59, 59, 999000)
+            reads = []
+
+            class OneShot(datetime.datetime):
+                @classmethod
+                def now(cls, tz=None):
+                    reads.append(tz)
+                    return (first + datetime.timedelta(milliseconds=len(reads) - 1)).astimezone(tz)
+
+            real = globals()["datetime"]
+            globals()["datetime"] = type(sys)("datetime_shim")
+            globals()["datetime"].datetime, globals()["datetime"].timezone = OneShot, real.timezone
+            globals()["datetime"].timedelta = real.timedelta
+            try:
+                rc, out = run_main(json.dumps({"hook_event_name": "UserPromptSubmit", "prompt": "go"}))
+            finally:
+                globals()["datetime"] = real
+            self.assertEqual((rc, len(reads)), (0, 1))
+            line = json.loads(out)["hookSpecificOutput"]["additionalContext"]
+            self.assertEqual(segments(line)[0::2], ("2026-09-23 23:59", "2026-09-23 23:59"))
+
+        def test_user_prompt_submit_event(self):
+            rc, out = run_main(json.dumps({"hook_event_name": "UserPromptSubmit", "session_id": "s",
+                                           "prompt": "hello"}))
+            obj = json.loads(out)["hookSpecificOutput"]
+            self.assertEqual((rc, obj["hookEventName"]), (0, "UserPromptSubmit"))
+            self.assertRegex(obj["additionalContext"], line_re)
+            self.assertIn("UserPromptSubmit", _EVENTS)
+
+        def test_stamp_is_a_bracketed_header_claim_in_stop_hook(self):
+            # cross-file: the segment matches stamp-truth-stop.py's claim grammar, converts to the reading's
+            # minute, and is read there as the message's bracketed HEADER (checked for BEHIND), at its bounds
+            import importlib.util
+            sib = _sibling_or_skip("stamp-truth-stop.py")
+            spec = importlib.util.spec_from_file_location("sts_stamp_sibling", sib)
+            mod = importlib.util.module_from_spec(spec)
+            old_dwb, sys.dont_write_bytecode = sys.dont_write_bytecode, True
+            try:
+                spec.loader.exec_module(mod)
+            finally:
+                sys.dont_write_bytecode = old_dwb
+            now = local_reading(2026, 9, 23, 13, 45, 59, 999000)
+            stamp = re.search(r"\| stamp: (\[[^]]+\])", clock_line(now)).group(1)
+            m = mod._CLAIM_RE.fullmatch(stamp[1:-1])
+            self.assertIsNotNone(m, stamp)
+            minute_us = int(now.replace(second=0, microsecond=0).timestamp()) * mod.US
+            self.assertEqual(mod.claim_us(m), minute_us)
+            text = stamp + " working on the change\n"
+            # BEHIND: exactly at the tolerance passes, one microsecond past it is refused as a status stamp
+            self.assertEqual(mod.check_message(text, minute_us + mod.BEHIND_US, None, "x", mod.BEHIND_US), [])
+            late = mod.check_message(text, minute_us + mod.BEHIND_US + 1, None, "x", mod.BEHIND_US)
+            self.assertEqual(len(late), 1, late)
+            self.assertTrue(late[0].startswith("status stamp " + stamp[1:-1]), late)
+            # control: the same stamp without its brackets is history, not a header, so it is never BEHIND
+            self.assertEqual(mod.check_message(stamp[1:-1] + " working\n", minute_us + mod.BEHIND_US + 1, None, "x",
+                                               mod.BEHIND_US), [])
+            # AHEAD: one minute ahead of the reference passes, one microsecond more is refused
+            self.assertEqual(mod.check_message(text, minute_us - mod.AHEAD_US, None, "x", mod.BEHIND_US), [])
+            self.assertEqual(len(mod.check_message(text, minute_us - mod.AHEAD_US - 1, None, "x", mod.BEHIND_US)), 1)
 
         def test_worker_kill_switch_silent(self):
             for env in ({"AIQT_HOOKS_WORKER": "1"}, {"ORCH_WORKER": "1"}):
@@ -994,7 +1140,8 @@ def _self_test():
             self.assertEqual(_wall_clock_asserts(good), [])
 
         # -- sibling parity on a single-hook install --
-        PARITY_TESTS = ("test_r13_shared_lease_code_identical_to_stop_hook",)
+        PARITY_TESTS = ("test_r13_shared_lease_code_identical_to_stop_hook",
+                        "test_stamp_is_a_bracketed_header_claim_in_stop_hook")
         PARITY_SIBLINGS = ("stamp-truth-stop.py",)
 
         def _parity_in_copy(self, siblings, value, dangling=False):
