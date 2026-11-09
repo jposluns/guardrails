@@ -25178,6 +25178,54 @@ def _main_isolated(monitor):
         # commit subcommand (which had made the AI --author invisible) -> DENY.
         ciexpect("(ci-b1) backslash-newline AI-author commit does not slip via an empty argv element, denies",
                  "git \\\n commit --author='Claude <c@x>' -m y", "deny")
+        # git 2.53.0 takes the author from author.name and author.email and the committer from committer.name
+        # and committer.email ahead of user.name and user.email, reads a config name in any case, and takes the
+        # address of both from EMAIL when no user.email is set; a prefix assignment by '+=' sets a variable too.
+        # Each deny vector below allowed while only user.name, user.email and the GIT_AUTHOR_ and GIT_COMMITTER_
+        # variables were read, and with an exact-case pair name; the controls pin a value that names no AI, a
+        # config name git does not read (a longer or shorter key), an environment name spelled otherwise (git
+        # reads EMAIL only as spelled), and a commit message that merely holds the config name.
+        for _ci_label, _ci_cmd in (
+                ("(ci-idc1) an AI author.name given by -c denies", "git -c author.name=Claude commit -m x"),
+                ("(ci-idc2) an AI author.email given by -c denies",
+                 "git -c author.email=noreply@anthropic.com commit -m x"),
+                ("(ci-idc3) an AI committer.name given by -c denies", "git -c committer.name=Claude commit -m x"),
+                ("(ci-idc4) an AI committer.email given by -c denies",
+                 "git -c committer.email=bot@openai.com commit -m x"),
+                ("(ci-idc5) an AI author.name given by -c in mixed case denies",
+                 "git -c Author.Name=Claude commit -m x"),
+                ("(ci-idc6) an AI EMAIL assigned before git commit denies",
+                 "EMAIL=noreply@anthropic.com git commit -m x"),
+                ("(ci-idc7) an AI EMAIL exported in a prior segment denies",
+                 "export EMAIL=noreply@anthropic.com; git commit -m x"),
+                ("(ci-idc8) an AI EMAIL appended by += before git commit denies",
+                 "EMAIL+=noreply@anthropic.com git commit -m x"),
+                ("(ci-idc9) an AI git identity variable appended by += before git commit denies",
+                 "GIT_AUTHOR_NAME+=Claude git commit -m x"),
+                ("(ci-idc10) a config author.name pair naming an AI denies", "git config author.name Claude"),
+                ("(ci-idc11) a config committer.email pair in mixed case naming an AI denies",
+                 "git config --global Committer.Email noreply@anthropic.com"),
+                ("(ci-idc12) a config user.name pair in mixed case naming an AI denies",
+                 "git config User.Name Claude"),
+                ("(ci-idc13) an AI author.name in a command the tokenizer cannot parse denies",
+                 "git -c author.name='Claude' commit -m 'x"),
+                ("(ci-idc14) an AI EMAIL in a command the tokenizer cannot parse denies",
+                 'EMAIL=x@anthropic.com git commit -m "x')):
+            ciexpect(_ci_label, _ci_cmd, "deny")
+        for _ci_label, _ci_cmd in (
+                ("(ci-idc-c1) an author.name that names no AI allows", "git -c author.name=Alice commit -m x"),
+                ("(ci-idc-c2) an EMAIL that names no AI allows", "EMAIL=alice@example.com git commit -m x"),
+                ("(ci-idc-c3) a longer config name git does not read as author.name allows",
+                 "git -c author.names=Claude commit -m x"),
+                ("(ci-idc-c4) a shorter config name git does not read as author.name allows",
+                 "git -c author.nam=Claude commit -m x"),
+                ("(ci-idc-c5) a lower-case email variable, which git does not read, allows",
+                 "email=noreply@anthropic.com git commit -m x"),
+                ("(ci-idc-c6) a variable whose name only ends in EMAIL allows",
+                 "XEMAIL=noreply@anthropic.com git commit -m x"),
+                ("(ci-idc-c7) a commit message that holds author.name and an AI name allows",
+                 "git commit -m 'author.name Claude'")):
+            ciexpect(_ci_label, _ci_cmd, "allow")
         # A git commit behind leading reserved words, a function or coprocess name, VAR=value words or a wrapper
         # word (env, timeout, command, exec, nohup, xargs, sudo, nice, setsid, stdbuf, time) is judged like the
         # bare form: behind a wrapper a git word starts a candidate git command, whatever the wrapper's own
@@ -26560,7 +26608,13 @@ def _main_isolated(monitor):
                 ("(ci-wr163) an AI user.name value with no git word, past the read limit, denies",
                  _ci_body + "\nsetconf user.name Claude", "deny"),
                 ("(ci-wr165) an AI identity variable spelled in lower case, which the reader also judges, with no git "
-                 "word, past the read limit, denies", _ci_body + "\ngit_committer_email=claude@x make", "deny")):
+                 "word, past the read limit, denies", _ci_body + "\ngit_committer_email=claude@x make", "deny"),
+                ("(ci-idc15) an AI author.name value with no git word, past the read limit, denies",
+                 _ci_body + "\nsetconf author.name Claude", "deny"),
+                ("(ci-idc16) an AI EMAIL with no git word, past the read limit, denies",
+                 _ci_body + "\nEMAIL=noreply@anthropic.com make release", "deny"),
+                ("(ci-idc-c8) a lower-case email word, which names no identity variable, with no git word, past "
+                 "the read limit, allows", _ci_body + "\necho email", "allow")):
             _ci_got, _ci_spent = _hook_cpu_timed(lambda _cmd=_ci_long: _decision(cig, _cmd), bound=1.0)
             if _ci_got != _ci_want or _ci_spent > 1.0:
                 failures.append("{}: over {} characters expected {} within 1 s of CPU time, got {} after {:.2f} s"
