@@ -10,10 +10,11 @@ generator's `--check` refuses to pass clean. The uniform invariant, the true fai
 single assertion for every corruption shape: a corrupted target yields a NON-ZERO `--check`. An exit 0 on
 a corrupt target is the violation; the exact non-zero code (drift, decode-error, crash) is not graded.
 
-Enumeration reuses gen_gensrc's OWN validated in-memory loader (discover_declarations + collect_entries),
-imported, never a second parser of .aiqt/gensrc.json, so this gate inherits every fail-closed enumeration
-guarantee already proven in gen_gensrc --self-test (an unreadable tools/ raises, a bad declaration raises,
-zero generators raises) instead of forking a parser that could drift.
+Enumeration reuses gen_gensrc's OWN validated in-memory loader (discover_declarations +
+discover_opf_declarations + collect_entries), imported, never a second parser of .aiqt/gensrc.json, so
+this gate inherits every fail-closed enumeration guarantee already proven in gen_gensrc --self-test (an
+unreadable tools/ raises, a bad declaration raises, zero generators raises) instead of forking a parser
+that could drift, and it sweeps the OPF tooling's generators (opf/tools/gen_*.py) beside the tools/ ones.
 
 Corruption strategy, kind-aware, all under the one "corrupt -> non-zero" assertion:
   - a "file" target, and EVERY regular-file member of a "tree" target, whose pristine bytes decode as
@@ -77,7 +78,8 @@ Exit convention (matches the repo's gates):
   1  a generator VIOLATED the contract: it returned exit 0 on a corrupt target (it ignores its target).
   2  cannot-evaluate: the registry is unreadable/malformed; a baseline `--check` is not clean; a declared
      target is absent (a file/block that is not a regular file, or a tree that is empty or untraversable);
-     a `regenerate` command is not of the grammar `python3 tools/gen_<stem>.py`; a probe times out, cannot
+     a `regenerate` command is not of the grammar `python3 tools/gen_<stem>.py` or
+     `python3 opf/tools/gen_<stem>.py`; a probe times out, cannot
      be launched, or leaves the target uncontained (a symlink/containment violation); the total-runtime
      backstop is exceeded; the sandbox setup, copy, or cleanup fails; or the real tree changed during the
      run.
@@ -95,7 +97,8 @@ stays on that generator's own drift step and is not asserted here. The content-g
 or tree-member target is bounded to the SPECIFIC probed changes (an appended marker line and, where an
 interior ASCII byte exists, one same-length byte swap): passing them shows the generator consults its
 target's content, not that it guards against EVERY possible same-length change beyond the one probed. Only
-the `python3 tools/gen_<stem>.py` grammar is recognized; a wrapper or non-Python generator fails coverage
+the `python3 tools/gen_<stem>.py` and `python3 opf/tools/gen_<stem>.py` grammars are recognized; a wrapper
+or non-Python generator fails coverage
 (exit 2) until the grammar is extended. Encoding is OBSERVED (a UTF-8 decode of the pristine bytes), so an
 ASCII-only binary would be classified as text (none exists today). The temp copy is corruption isolation,
 NOT an OS security sandbox: a malicious generator could still reach absolute paths or the network (the
@@ -606,10 +609,13 @@ def _tree_manifest(root):
 
 
 def _validate_regenerate(regenerate):
-    """Return the generator stem if `regenerate` is exactly `python3 tools/gen_<stem>.py`, else None. Uses
-    shlex.split so the command is validated to shape (tool-argument-validation), never assembled or run as
-    a shell string. A malformed quote, a wrong token count, a non-python3 launcher, or a path off the
-    gen_<stem>.py shape all return None, which the caller treats as cannot-evaluate (exit 2)."""
+    """Return the generator stem if `regenerate` is exactly `python3 tools/gen_<stem>.py` or
+    `python3 opf/tools/gen_<stem>.py`, else None: the bare <stem> for a tools/ generator, and the
+    extensionless script path (`opf/tools/gen_<stem>`) for an OPF tooling one, so the two namespaces never
+    share a baseline. Uses shlex.split so the command is validated to shape (tool-argument-validation),
+    never assembled or run as a shell string. A malformed quote, a wrong token count, a non-python3
+    launcher, or a path off either gen_<stem>.py shape all return None, which the caller treats as
+    cannot-evaluate (exit 2)."""
     try:
         parts = shlex.split(regenerate)
     except ValueError:
@@ -765,12 +771,12 @@ def _process_entry(entry, template, baselines, deadline, violations, cannot, cle
 
     stem = _validate_regenerate(entry["regenerate"])
     if stem is None:
-        cannot.append("{}: regenerate {!r} is not of the grammar 'python3 tools/gen_<stem>.py'"
-                      .format(target_rel, entry["regenerate"]))
+        cannot.append("{}: regenerate {!r} is not of the grammar 'python3 tools/gen_<stem>.py' or "
+                      "'python3 opf/tools/gen_<stem>.py'".format(target_rel, entry["regenerate"]))
         return
     script_rel = stem + ".py" if stem.startswith("opf/tools/") else "tools/gen_{}.py".format(stem)
     if not (template / script_rel).is_file():
-        cannot.append("{}: generator gen_{}.py is absent in the sandbox".format(target_rel, stem))
+        cannot.append("{}: generator {} is absent in the sandbox".format(target_rel, script_rel))
         return
 
     template_real = os.path.realpath(str(template))
@@ -807,8 +813,8 @@ def _process_entry(entry, template, baselines, deadline, violations, cannot, cle
             baselines[stem] = "error: {}".format(exc)
     baseline = baselines[stem]
     if baseline != 0:
-        cannot.append("{}: baseline 'gen_{} --check' on the pristine sandbox returned {!r}, not a clean 0 "
-                      "(a corruption signal would be unattributable)".format(target_rel, stem, baseline))
+        cannot.append("{}: baseline '{} --check' on the pristine sandbox returned {!r}, not a clean 0 "
+                      "(a corruption signal would be unattributable)".format(target_rel, script_rel, baseline))
         return
 
     for rel_path in rel_paths:
@@ -831,9 +837,9 @@ def _process_entry(entry, template, baselines, deadline, violations, cannot, cle
                 if own_exit == 0:
                     # The generator exited 0 on the corrupt target before the bound stopped the wait on a
                     # descendant still holding its output: a wrong result beside a stop is a violation.
-                    violations.append("{}: gen_{} --check exited 0 on {} corrupted with {} before its load-tolerant "
+                    violations.append("{}: {} --check exited 0 on {} corrupted with {} before its load-tolerant "
                                       "bound stopped the wait on a leaked descendant (F-154: the generator does "
-                                      "not consult its target)".format(target_rel, stem, rel_path, shape))
+                                      "not consult its target)".format(target_rel, script_rel, rel_path, shape))
                     continue
                 if own_exit is not None:
                     # It exited NONZERO before the stop: the rejection this probe wanted, standing exactly
@@ -841,13 +847,13 @@ def _process_entry(entry, template, baselines, deadline, violations, cannot, cle
                     # stopped probe already passed the post-probe containment validation (_run_probe);
                     # nothing is recorded.
                     continue
-                cannot.append("{}: probe 'gen_{} --check' on {} corrupted with {} failed to complete ({})"
-                              .format(target_rel, stem, rel_path, shape, exc))
+                cannot.append("{}: probe '{} --check' on {} corrupted with {} failed to complete ({})"
+                              .format(target_rel, script_rel, rel_path, shape, exc))
                 continue
             if actual == 0:
-                violations.append("{}: gen_{} --check returned exit 0 on {} corrupted with {} (the "
+                violations.append("{}: {} --check returned exit 0 on {} corrupted with {} (the "
                                   "generator does not consult its target)"
-                                  .format(target_rel, stem, rel_path, shape))
+                                  .format(target_rel, script_rel, rel_path, shape))
             # any non-zero actual = the corrupt target was rejected = a pass; nothing recorded
 
 
@@ -858,6 +864,7 @@ def sweep(real_root):
     real_root = Path(real_root).resolve()
     try:
         declarations = gen_gensrc.discover_declarations(real_root / "tools")
+        declarations.extend(gen_gensrc.discover_opf_declarations(real_root))
         entries = gen_gensrc.collect_entries(declarations, real_root)
     except (ValueError, OSError) as exc:
         print("cannot-evaluate: the gensrc registry is unreadable or malformed ({}); fail-closed"
@@ -1146,6 +1153,48 @@ if __name__ == "__main__":
     sys.exit(main())
 '''
 
+# OPF-GUARD: a conformant OPF tooling generator (opf/tools/gen_*.py), content-guarding like _GOODFILE,
+# whose declaration is discovered through gen_gensrc.discover_opf_declarations and whose regenerate uses
+# the opf/tools grammar. The sweep must treat it exactly like a tools/ generator (exit 0, no false
+# violation, the baseline launched from its opf/tools script path).
+_OPF_GUARD = '''import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "tools"))
+from _gen_common import repo_root, reconcile
+GENSRC_OUTPUTS = (
+    {"target": "out/opfguard.txt", "kind": "file",
+     "sources": ("src/opfguard-src.txt",), "regenerate": "python3 opf/tools/gen_opfguard.py"},
+)
+def run(root, check):
+    text = (root / "src" / "opfguard-src.txt").read_text(encoding="utf-8")
+    return 1 if reconcile(root / "out" / "opfguard.txt", "GENERATED\\n" + text, check, root) else 0
+def main():
+    return run(repo_root(), "--check" in sys.argv[1:])
+if __name__ == "__main__":
+    sys.exit(main())
+'''
+
+# OPF-BYPASS: an OPF tooling generator that never consults its target (the _BYPASS shape at the opf/tools
+# path), so the sweep must catch it (exit 1); with the opf/tools discovery or the opf/tools regenerate
+# grammar removed, it is not caught, which the self-test shows under each of those two flips.
+_OPF_BYPASS = '''import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "tools"))
+from _gen_common import repo_root
+GENSRC_OUTPUTS = (
+    {"target": "out/opfbypass.txt", "kind": "file",
+     "sources": ("src/opfbypass-src.txt",), "regenerate": "python3 opf/tools/gen_opfbypass.py"},
+)
+def run(root, check):
+    if not check:
+        (root / "out" / "opfbypass.txt").write_text("BYPASS\\n", encoding="utf-8")
+    return 0
+def main():
+    return run(repo_root(), "--check" in sys.argv[1:])
+if __name__ == "__main__":
+    sys.exit(main())
+'''
+
 # DECODE-ONLY: its --check DECODES the target (so it fail-closes to non-zero on invalid UTF-8) but derives
 # its verdict from the SOURCES, ignoring the decoded content, so it returns 0 on valid-but-different (or
 # same-length) content. Thus the invalid-UTF-8 probe alone would pass it (non-zero); only a
@@ -1397,18 +1446,20 @@ def _write_gen(tools_dir, stem, body):
     (tools_dir / "gen_{}.py".format(stem)).write_text(body, encoding="utf-8")
 
 
-def _run_write(root, stem):
-    """Run a synthetic generator in WRITE mode to establish a clean baseline in a fixture repo. A launch
-    failure, a timeout, or a nonzero exit raises _FixtureSetupError naming the generator."""
+def _run_write(root, stem, script_rel=None):
+    """Run a synthetic generator in WRITE mode to establish a clean baseline in a fixture repo; script_rel
+    overrides the default tools/gen_<stem>.py script path (an opf/tools generator). A launch failure, a
+    timeout, or a nonzero exit raises _FixtureSetupError naming the generator."""
+    script_rel = script_rel or "tools/gen_{}.py".format(stem)
     try:
-        proc = subprocess.run([sys.executable, str(root / "tools" / "gen_{}.py".format(stem))],
+        proc = subprocess.run([sys.executable, str(root / script_rel)],
                               cwd=str(root), env=_sanitized_env(), capture_output=True,
                               timeout=SETUP_CALL_TIMEOUT, check=False)
     except (OSError, subprocess.SubprocessError) as exc:
-        raise _FixtureSetupError("gen_{}.py write run did not complete ({})".format(stem, exc)) from exc
+        raise _FixtureSetupError("{} write run did not complete ({})".format(script_rel, exc)) from exc
     if proc.returncode != 0:
-        raise _FixtureSetupError("gen_{}.py write run exited {} ({})"
-                                 .format(stem, proc.returncode, _tail(proc.stderr)))
+        raise _FixtureSetupError("{} write run exited {} ({})"
+                                 .format(script_rel, proc.returncode, _tail(proc.stderr)))
 
 
 def _git_fixture(repo, *args):
@@ -1491,7 +1542,9 @@ def _confirm_targets(base):
     if not _fixture_node(base, base / gen_gensrc.REGISTRY_REL, False):
         raise _FixtureSetupError("the registry {} was not produced".format(gen_gensrc.REGISTRY_REL))
     try:
-        entries = gen_gensrc.collect_entries(gen_gensrc.discover_declarations(base / "tools"), base)
+        declarations = gen_gensrc.discover_declarations(base / "tools")
+        declarations.extend(gen_gensrc.discover_opf_declarations(base))
+        entries = gen_gensrc.collect_entries(declarations, base)
     except (ValueError, OSError) as exc:
         raise _FixtureSetupError("cannot read the fixture's declarations ({})".format(exc)) from exc
     for entry in entries:
@@ -1504,10 +1557,11 @@ def _confirm_targets(base):
             raise _FixtureSetupError("declared target {} was not produced".format(entry["target"]))
 
 
-def _build_repo(base, gens):
+def _build_repo(base, gens, opf_gens=None):
     """Assemble a synthetic repo under base carrying the named generators plus the real gen_gensrc loader,
     generate every target into a clean state, then write the .aiqt/gensrc.json registry. `gens` maps a
-    stem to its source body. A broad set of harmless sources is created so any generator finds its
+    stem to its source body; `opf_gens` does the same for OPF tooling generators, written to
+    opf/tools/gen_<stem>.py. A broad set of harmless sources is created so any generator finds its
     declared inputs; the modechanger fixture also gets a victim file plus the absolute path to it.
     base is made a git repository BEFORE any generator runs: _gen_common.repo_root() resolves the nearest
     ancestor holding .git, so a generator run before `git init` resolves a root ABOVE base whenever an
@@ -1524,7 +1578,7 @@ def _build_repo(base, gens):
     (base / "out").mkdir()
     (base / ".aiqt").mkdir()
     for name in ("goodfile", "bypass", "badcmd", "stateful", "swap", "tolerant", "mode", "decode",
-                 "block", "gitreader"):
+                 "block", "gitreader", "opfguard", "opfbypass"):
         (base / "src" / "{}-src.txt".format(name)).write_text("source for {}\n".format(name),
                                                               encoding="utf-8")
     tree_src = base / "src" / "tree"
@@ -1539,6 +1593,11 @@ def _build_repo(base, gens):
     (base / "src" / "victim-path.txt").write_text(str(victim) + "\n", encoding="utf-8")
     for stem, body in gens.items():
         _write_gen(tools, stem, body)
+    if opf_gens:
+        opf_tools = base / "opf" / "tools"
+        opf_tools.mkdir(parents=True)
+        for stem, body in opf_gens.items():
+            _write_gen(opf_tools, stem, body)
     # Make the fixture a REAL git repository: _materialize_git enumerates real_root's tracked set
     # via `git ls-files` and no longer falls back to `git add -A` on a bare .git marker, so every fixture
     # that reaches materialization must be a genuine repo whose tracked set mirrors its on-disk files. The
@@ -1549,6 +1608,8 @@ def _build_repo(base, gens):
     # Generate targets clean, then the registry last (it lists tools/ and every target).
     for stem in gens:
         _run_write(base, stem)
+    for stem in (opf_gens or {}):
+        _run_write(base, stem, "opf/tools/gen_{}.py".format(stem))
     _run_write(base, "gensrc")
     _confirm_targets(base)
     _git_fixture(base, "add", "-A")
@@ -1632,6 +1693,8 @@ _SELF_TEST_VECTORS = (
     "missing declared target",
     "non-clean baseline",
     "off-grammar regenerate",
+    "opf-tools generator",
+    "opf-tools bypass generator",
     "restoration",
     "real-tree mode change",
     "decode-only generator",
@@ -1942,6 +2005,45 @@ def _self_test_main_isolated():
         _run_vector(cannot, failures, "off-grammar regenerate", lambda: _build_repo(
             tmp / "off-grammar", {"badcmd": _BADCMD}),
             expect_sweep(2, "off-grammar regenerate: expected fail-closed exit 2"))
+
+        # (g2) An OPF tooling generator (opf/tools/gen_*.py): a conformant one is enumerated through
+        #      gen_gensrc.discover_opf_declarations, baselined from its opf/tools script path, and swept
+        #      clean (exit 0, no false violation).
+        _run_vector(cannot, failures, "opf-tools generator", lambda: _build_repo(
+            tmp / "opf-good", {"goodfile": _GOODFILE}, opf_gens={"opfguard": _OPF_GUARD}),
+            expect_sweep(0, "opf-tools generator: expected the sweep to pass (exit 0)"))
+
+        # (g2) An OPF tooling BYPASS generator is caught (exit 1); each flip that removes one piece of the
+        #      gate's opf/tools handling changes that verdict, so the catch depends on exactly that piece:
+        #      with the opf discovery disabled the bypass goes unswept (exit 0), and with the opf/tools
+        #      alternative removed from REGEN_RE its regenerate is refused (exit 2).
+        def _evaluate_opf_bypass(root):
+            global REGEN_RE
+            if sweep_quiet(root) != 1:
+                failures.append("opf-tools bypass generator: expected exit 1 (an opf/tools generator that "
+                                "ignores its target is caught)")
+            real_opf_discovery = gen_gensrc.discover_opf_declarations
+            gen_gensrc.discover_opf_declarations = lambda _root: []
+            try:
+                if sweep_quiet(root) != 0:
+                    failures.append("opf-tools bypass generator: with the opf/tools discovery disabled the "
+                                    "bypass was expected to go unswept (exit 0), so the case does not "
+                                    "depend on that discovery")
+            finally:
+                gen_gensrc.discover_opf_declarations = real_opf_discovery
+            real_regen_re = REGEN_RE
+            REGEN_RE = re.compile(r"^(tools/gen_[A-Za-z0-9_]+)\.py$")
+            try:
+                if sweep_quiet(root) != 2:
+                    failures.append("opf-tools bypass generator: with the opf/tools alternative removed "
+                                    "from REGEN_RE the entry's regenerate was expected to be refused "
+                                    "(exit 2), so the case does not depend on that grammar")
+            finally:
+                REGEN_RE = real_regen_re
+
+        _run_vector(cannot, failures, "opf-tools bypass generator", lambda: _build_repo(
+            tmp / "opf-bypass", {"goodfile": _GOODFILE}, opf_gens={"opfbypass": _OPF_BYPASS}),
+            _evaluate_opf_bypass)
 
         # (h) Restoration: the synthetic real tree is byte-AND-mode identical after a normal run and after
         #     a run whose corrupted PROBE raises (the baseline succeeds first), and the raising run returns

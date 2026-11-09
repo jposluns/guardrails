@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "8eebeba1baa40acb02567d1e4dde69220651a6a6a1a34f2d03b73b17c18a376b"
+tree-sha256 = "6447ce60a43a2ee090db96cbaaabc6db6e01b88bd14398e30e0f8a89d2181c2f"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -3471,8 +3471,8 @@ sha256 = "dd031f0f75629c4eeca26d53edb56be8b660a70c2d313b2973632d5483c9c74d"
 
 [[sources]]
 path = "opf/tools/gen_ci_floor_digests.py"
-bytes = 24298
-sha256 = "70d709d63c9860c4a20ad16be701f08a6d7716e0dd7f005c3168ea955dc07222"
+bytes = 27816
+sha256 = "db3ebe5acee04a0ec768694b9b99f86e9320a57ae46b578906fb5e1b152b2974"
 
 [[sources]]
 path = "opf/tools/opf-declaration.toml"
@@ -4201,8 +4201,8 @@ sha256 = "86cfa0e2453c22a9887cc47ee6eded2d2774a32fc3e47b8e886a863ab26bd9b2"
 
 [[sources]]
 path = "tools/check_gensrc_failclose.py"
-bytes = 179031
-sha256 = "7990f42a8d944d7a498e3d74c99d5bcc88d74b51f940032ff536edc051734c7c"
+bytes = 184770
+sha256 = "b5eb97703c16244cf2f80bcc4c9d8a2a1ecb9c7d723a55c11d9fbb90349e558a"
 
 [[sources]]
 path = "tools/check_git_option_table.py"
@@ -4511,8 +4511,8 @@ sha256 = "56ae8c00690f4b14e6b95b9e8503ba6340d9f20fe80ab03cb731d3cf5a37cd12"
 
 [[sources]]
 path = "tools/gen_gensrc.py"
-bytes = 71349
-sha256 = "c8d10bd6433243a9acc940bf56d362e7d2d47e980ec5ba23afde557efbee538a"
+bytes = 74574
+sha256 = "887887c8792f94a89cb4936f3e68a3e550b117faf07bfe70a66e6132a41f41d8"
 
 [[sources]]
 path = "tools/gen_hooks.py"

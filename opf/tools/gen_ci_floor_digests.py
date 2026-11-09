@@ -308,6 +308,47 @@ def _case_unreadable_target(base, script, failures):
                         "created, got exit {}".format(got))
 
 
+def _perm_unreadable(path):
+    """Make path mode 000 and probe it; None when it is then unreadable, otherwise the reason the case
+    cannot run here (a process that reads mode-000 files anyway, such as root, observes nothing to
+    guard)."""
+    os.chmod(path, 0)
+    try:
+        with open(path, "rb"):
+            pass
+    except PermissionError:
+        return None
+    return "mode 000 leaves {} readable in this process".format(path.name)
+
+
+def _case_unreadable_perm(base, script, failures):
+    if _launch(script) != 0:
+        failures.append("unreadable-perm: the tree did not generate")
+        return None
+    template = base / CI_FLOOR_SOURCES[0][1]
+    reason = _perm_unreadable(template)
+    if reason is not None:
+        return reason
+    _both(script, 2, base / TARGET_REL, failures, "unreadable-perm: a CI floor file that exists with mode 000")
+    return None
+
+
+def _case_unreadable_target_perm(base, script, failures):
+    target = base / TARGET_REL
+    os.utime(target, ns=(_PAST_NS, _PAST_NS))
+    reason = _perm_unreadable(target)
+    if reason is not None:
+        os.chmod(target, 0o644)
+        return reason
+    got = (_launch(script, "--check"), _launch(script))
+    os.chmod(target, 0o644)
+    if (got != (2, 2) or os.stat(target).st_mtime_ns != _PAST_NS
+            or target.read_text(encoding="utf-8") != _STALE):
+        failures.append("unreadable-target-perm: a target that exists with mode 000 expected --check and "
+                        "write exit 2 with the target untouched, got exit {}".format(got))
+    return None
+
+
 def _case_symlink(base, script, failures):
     if _launch(script) != 0:
         failures.append("symlink: the tree did not generate")
@@ -320,11 +361,12 @@ def _case_symlink(base, script, failures):
     _both(script, 2, base / TARGET_REL, failures, "symlink: a CI floor file symlinked to its own bytes")
 
 
-def _sentinel_case(label, text):
+def _sentinel_case(label, *texts):
     def case(base, script, failures):
         target = base / TARGET_REL
-        target.write_text(text, encoding="utf-8")
-        _both(script, 2, target, failures, label)
+        for text in texts:
+            target.write_text(text, encoding="utf-8")
+            _both(script, 2, target, failures, label)
     return case
 
 
@@ -332,6 +374,16 @@ _case_duplicate = _sentinel_case("duplicate: two BEGIN..END regions", _STALE + _
 _case_order = _sentinel_case("order: END before BEGIN", "# head\n{}\nstale\n{}\n# tail\n".format(END, BEGIN))
 _case_missing_end = _sentinel_case("missing END", "# head\n{}\nstale\n# tail\n".format(BEGIN))
 _case_missing_begin = _sentinel_case("missing BEGIN", "# head\nstale\n{}\n# tail\n".format(END))
+# Two BEGIN sentinels beside exactly one END, in both arrangements (BEGIN-BEGIN-END and BEGIN-END-BEGIN),
+# so only the BEGIN-count guard refuses them; and two END sentinels beside exactly one BEGIN
+# (BEGIN-END-END), so only the END-count guard refuses it. Each guard has its own flip below.
+_case_duplicate_begin = _sentinel_case(
+    "duplicate BEGIN: a second BEGIN beside exactly one END",
+    "# head\n{0}\nstale\n{0}\nmore\n{1}\n# tail\n".format(BEGIN, END),
+    "# head\n{0}\nstale\n{1}\nmore\n{0}\n# tail\n".format(BEGIN, END))
+_case_duplicate_end = _sentinel_case(
+    "duplicate END: a second END beside exactly one BEGIN",
+    "# head\n{0}\nstale\n{1}\nmore\n{1}\n# tail\n".format(BEGIN, END))
 
 
 def _case_link_outside(base, script, failures):
@@ -371,10 +423,12 @@ def _case_link_inside(base, script, failures):
 
 
 CASES = (("generate", _case_generate), ("drift", _case_drift), ("unreadable", _case_unreadable),
-         ("unreadable-target", _case_unreadable_target), ("symlink", _case_symlink),
-         ("duplicate", _case_duplicate), ("order", _case_order), ("missing-end", _case_missing_end),
-         ("missing-begin", _case_missing_begin), ("link-outside", _case_link_outside),
-         ("link-inside", _case_link_inside))
+         ("unreadable-perm", _case_unreadable_perm), ("unreadable-target", _case_unreadable_target),
+         ("unreadable-target-perm", _case_unreadable_target_perm), ("symlink", _case_symlink),
+         ("duplicate", _case_duplicate), ("duplicate-begin", _case_duplicate_begin),
+         ("duplicate-end", _case_duplicate_end), ("order", _case_order),
+         ("missing-end", _case_missing_end), ("missing-begin", _case_missing_begin),
+         ("link-outside", _case_link_outside), ("link-inside", _case_link_inside))
 
 # Each flip removes one piece of handling from the code above the self-test (old text, replaced by new
 # text, which must occur there exactly once) and names the cases that handling guards: each of those cases
@@ -383,12 +437,16 @@ FLIPS = (
     ("drift comparison removed", "    if current == desired:\n        return 0\n", "    return 0\n",
      ("drift",)),
     ("read errors not caught", "    except (OSError, ValueError) as exc:\n", "    except ValueError as exc:\n",
-     ("unreadable", "unreadable-target")),
+     ("unreadable", "unreadable-perm", "unreadable-target", "unreadable-target-perm")),
     ("symlink refusal removed",
      "        if path.is_symlink():\n            raise ValueError(\"{} is a symlink; the CI floor digest is "
      "taken of the file itself\".format(rel))\n", "", ("symlink",)),
     ("sentinel count guard removed",
      "    if begin_count != 1:\n|    if end_count != 1:\n", "    if False:\n", ("duplicate",)),
+    ("BEGIN count guard removed", "    begin_count = text.count(BEGIN)\n", "    begin_count = 1\n",
+     ("duplicate-begin",)),
+    ("END count guard removed", "    end_count = text.count(END)\n", "    end_count = 1\n",
+     ("duplicate-end",)),
     ("sentinel order guard removed", "    if j == -1:\n", "    if False:\n", ("order",)),
     ("every sentinel guard removed",
      "    if begin_count != 1:\n|    if end_count != 1:\n|    if j == -1:\n", "    if False:\n",
@@ -412,17 +470,22 @@ def _flipped(source, old, new):
 
 
 def _run_cases(tmp, label, source, names):
-    """Run the named cases over fresh trees with source as the tool; return {name: failures}."""
+    """Run the named cases over fresh trees with source as the tool; return ({name: failures},
+    {name: skip reason}). A case returns a reason when this host cannot exercise it (a process that
+    reads mode-000 files anyway); such a case records no failures."""
     results = {}
+    skips = {}
     for name, case in CASES:
         if name not in names:
             continue
         base = Path(tmp) / "{}-{}".format(label, name)
         script = _build(base, source)
         failures = []
-        case(base, script, failures)
+        reason = case(base, script, failures)
         results[name] = failures
-    return results
+        if reason is not None:
+            skips[name] = reason
+    return results, skips
 
 
 def self_test_main():
@@ -436,9 +499,14 @@ def self_test_main():
               file=sys.stderr)
         return 2
     failures = []
+    skip_count = 0
     try:
-        genuine = _run_cases(tmp, "genuine", source, {name for name, _case in CASES})
+        genuine, skipped = _run_cases(tmp, "genuine", source, {name for name, _case in CASES})
         for name, _case in CASES:
+            if name in skipped:
+                skip_count += 1
+                print("  skip {} ({})".format(name, skipped[name]))
+                continue
             failures.extend("{}: {}".format(name, f) for f in genuine[name])
             if not genuine[name]:
                 print("  ok   {}".format(name))
@@ -447,8 +515,11 @@ def self_test_main():
             if mutant is None:
                 failures.append("flip {!r} could not be applied to the code above the self-test".format(flip))
                 continue
-            flipped = _run_cases(tmp, "flip{}".format(index), mutant, set(guarded))
+            flipped, flip_skipped = _run_cases(tmp, "flip{}".format(index), mutant, set(guarded))
             for name in guarded:
+                if name in flip_skipped:
+                    print("  skip {} under flip: {} ({})".format(name, flip, flip_skipped[name]))
+                    continue
                 if flipped[name]:
                     print("  red  {} under flip: {}".format(name, flip))
                 else:
@@ -461,8 +532,9 @@ def self_test_main():
         for failure in failures:
             print("  - " + failure)
         return 1
-    print("SELF-TEST PASS: {} cases green on the genuine tool, and each guarded case red under each of {} "
-          "flips that remove its handling.".format(len(CASES), len(FLIPS)))
+    print("SELF-TEST PASS: {} cases green on the genuine tool ({} skipped where this host cannot exercise "
+          "them), and each guarded case red under each of {} flips that remove its handling."
+          .format(len(CASES) - skip_count, skip_count, len(FLIPS)))
     return 0
 
 
