@@ -6,11 +6,13 @@ has no corpus line, scans whatever tree --root names, and its self-test vectors 
 none of that notices when this repository stops scanning the OPF prompt pack or redirects the scan. This
 assertion reads .aiqt/cited-standards.toml and fails (exit 1) unless its corpus is present, names the
 rule-file glob, and expands, through the gate's own expand_corpus, to every member opf/prompt-pack/pack.toml
-lists; and unless every cited-standards gate line other than the exact self-test line, in both
-tools/run_all_checks.sh and .github/workflows/quality.yml (read with check_ci_parity's extractors, whose
-grammar already pins the launcher words), is exactly the one permitted invocation,
-tools/check_cited_standards.py --config .aiqt/cited-standards.toml, with nothing added, so an appended
---root or any other extra argument is a finding even when both runners carry the same drifted line.
+lists; and unless every cited-standards gate line other than the exact self-test line in
+tools/run_all_checks.sh (read with check_ci_parity's local extractor, whose grammar already pins the
+launcher words) is exactly the one permitted invocation, tools/check_cited_standards.py --config
+.aiqt/cited-standards.toml, with nothing added, so an appended --root or any other extra argument is a
+finding. The local runner is the one place the full gate roster is pinned, so .github/workflows/quality.yml
+is not read here: whether the workflow carries the gate lines or not, this contract judges the local runner
+alone, and tools/check_ci_parity.py reconciles the workflow's gate lines against that runner.
 pack.toml is validated by its owning validator (opf/tools/check_opf_prompt_pack.py, imported, never
 re-implemented); a pack that validator refuses, a missing or malformed config or runner, a corpus glob
 the gate cannot expand, a pack.toml re-read that fails after validation, an argument list other than
@@ -23,9 +25,11 @@ corpus; it is kept because its message names the fallback.
 --self-test (registered in both runners) drives the real entry point, main, over fixture vectors and
 asserts main's exit code and its diagnostics for every finding and every cannot-evaluate path above:
 among them the --root redirect regression, the mixed cases (the permitted line plus a forbidden one
-that sorts after it, and one that sorts before it, in each runner alone and in both, so a loop over
-only the first or only the last sorted gate line is red), a self-test line with extra arguments (live,
-never excluded), the workflow-side extraction diagnostic, the post-validation pack.toml re-read failure
+that sorts after it, and one that sorts before it, in the local runner, so a loop over only the first
+or only the last sorted gate line is red), a self-test line with extra arguments (live, never
+excluded), the workflow-is-not-read cases (a missing workflow, a workflow with no cited-standards gate
+line, one with a forbidden line and one whose extraction fails each pass, and a workflow line never
+stands in for a missing local one), the post-validation pack.toml re-read failure
 (the owning validator stubbed to accept: in production both reads see the same bytes, so only a race
 reaches that handler), the usage error, the unexpected-exception backstop, the self-test harness
 backstop (a harness failure surfaces as exit 2 through main --self-test, never a false 0) and, in a
@@ -53,7 +57,7 @@ sys.path.insert(1, str(ROOT / "opf" / "tools"))
 try:
     from check_cited_standards import CannotEvaluate, expand_corpus, load_config  # noqa: E402
     from check_ci_parity import (  # noqa: E402
-        EXPECTED_RUN_GATE_BODY, extract_ci, extract_local, read_runner_text)
+        EXPECTED_RUN_GATE_BODY, extract_local, read_runner_text)
     from check_opf_prompt_pack import PACK_FORMAT, VALID, compute_digest, validate_pack  # noqa: E402
 except Exception as exc:  # noqa: BLE001  an unimportable collaborator is cannot-evaluate, never a finding
     print("error: cited-standards repository contract: cannot evaluate: cannot import a collaborator "
@@ -68,7 +72,9 @@ GATE = "tools/check_cited_standards.py"
 # and remove the launcher words and interpreter flags): --config CONFIG and NOTHING else.
 PERMITTED = GATE + " --config " + CONFIG
 SELF_TEST_LINE = GATE + " --self-test"
-RUNNERS = (("tools/run_all_checks.sh", extract_local), (".github/workflows/quality.yml", extract_ci))
+# The local runner alone: the workflow is not read (see the module docstring), so this contract holds
+# whichever gates .github/workflows/quality.yml carries.
+RUNNERS = (("tools/run_all_checks.sh", extract_local),)
 
 
 def corpus_findings(root):
@@ -114,7 +120,7 @@ def corpus_findings(root):
 
 
 def wiring_findings(root):
-    """(findings, errors) for the cited-standards gate lines of both runners."""
+    """(findings, errors) for the cited-standards gate lines of every runner in RUNNERS."""
     findings, errors = [], []
     for source, extract in RUNNERS:
         text, diagnostic = read_runner_text(root / source, source)
@@ -274,12 +280,25 @@ def _selftest_line_with_extras(root):
 
 
 def _workflow_extraction_diagnostic(root):
-    """claude PR #520 round 3 MINOR: an extraction diagnostic on the WORKFLOW side alone (the
-    local-runner vector cannot discriminate a workflow-only disable): an unsupported step key."""
+    """A workflow whose extraction would fail (an unsupported step key): the workflow is not read, so
+    the contract passes on the local runner alone and never reports cannot-evaluate for it."""
     _write(root / ".github/workflows/quality.yml", _ci_runner(gate_lines=(
         "      - name: Cited standards",
         "        run: python3 -I -B {} --config {}".format(GATE, CONFIG),
         "        working-directory: decoy")))
+
+
+def _workflow_without_gate_lines(root):
+    """A workflow that carries no cited-standards line at all, as a workflow without the full gate
+    roster would: the workflow is not read, so the contract passes on the local runner alone."""
+    _write(root / ".github/workflows/quality.yml", _ci_runner(gate_lines=()))
+
+
+def _live_line_in_workflow_only(root):
+    """The local runner keeps only the self-test line while the workflow still carries the permitted
+    live line: a workflow line never stands in for the local one, so one finding names the runner."""
+    _write(root / "tools/run_all_checks.sh", _local_runner(gate_lines=(
+        'run_gate "cited-standards-selftest" python3 -I -B {} --self-test'.format(GATE),)))
 
 
 def _vectors():
@@ -312,42 +331,48 @@ def _vectors():
          2, "owning validator", None),
         ("local runner missing", lambda root: os.remove(root / "tools/run_all_checks.sh"), 2,
          "cannot read tools/run_all_checks.sh", None),
-        ("workflow missing", lambda root: os.remove(root / ".github/workflows/quality.yml"), 2,
-         "cannot read .github/workflows/quality.yml", None),
+        # The workflow is not read: its absence is neither a finding nor cannot-evaluate.
+        ("workflow missing is not read", lambda root: os.remove(root / ".github/workflows/quality.yml"),
+         0, None, None),
+        ("workflow without any cited-standards gate line is not read", _workflow_without_gate_lines,
+         0, None, None),
         ("runner extraction diagnostic",
          lambda root: _write(root / "tools/run_all_checks.sh", _local_runner(gate_lines=(
              'run_gate "cited-standards" python3 -I -B {} --config {}'.format(GATE, CONFIG),
              'run_gate "BadLabel" python3 -I -B tools/x.py',))),
          2, "cannot extract the gates of tools/run_all_checks.sh", None),
         ("no live gate line besides the self-test", _no_live_lines,
-         1, "runs no cited-standards gate line", 2),
-        ("gate line drops --config", _both_runners(""), 1, "permitted invocation", 2),
+         1, "tools/run_all_checks.sh runs no cited-standards gate line", 1),
+        ("no live gate line in the local runner although the workflow carries one",
+         _live_line_in_workflow_only, 1, "tools/run_all_checks.sh runs no cited-standards gate line", 1),
+        # Each drifted line below is written to both runners; only the local runner's is reported.
+        ("gate line drops --config", _both_runners(""), 1, "permitted invocation", 1),
         ("gate line respells the config path",
-         _both_runners("--config ./" + CONFIG), 1, "permitted invocation", 2),
+         _both_runners("--config ./" + CONFIG), 1, "permitted invocation", 1),
         ("--root decoy appended in both runners despite token parity", _decoy_redirect,
-         1, "permitted invocation", 2),
+         1, "permitted invocation", 1),
         ("--root opf appended in both runners", _both_runners("--config {} --root opf".format(CONFIG)),
-         1, "permitted invocation", 2),
-        ("workflow-side extraction diagnostic", _workflow_extraction_diagnostic,
-         2, "cannot extract the gates of .github/workflows/quality.yml", None),
+         1, "permitted invocation", 1),
+        ("workflow whose extraction fails is not read", _workflow_extraction_diagnostic,
+         0, None, None),
         ("self-test line with extra arguments is live, not excluded", _selftest_line_with_extras,
-         1, "permitted invocation", 2),
+         1, "permitted invocation", 1),
         # codex PR #520 round 3 MEDIUM: the permitted line plus a forbidden one, per runner and both.
         ("permitted line plus a forbidden --root line in the local runner alone",
          _mixed_runners(True, False), 1, "permitted invocation", 1),
-        ("permitted line plus a forbidden --root line in the workflow alone",
-         _mixed_runners(False, True), 1, "permitted invocation", 1),
+        ("permitted line plus a forbidden --root line in the workflow alone is not read",
+         _mixed_runners(False, True), 0, None, None),
         ("permitted line plus a forbidden --root line in both runners",
-         _mixed_runners(True, True), 1, "permitted invocation", 2),
+         _mixed_runners(True, True), 1, "permitted invocation", 1),
         # claude PR #520 round 4 MEDIUM: the forbidden --root lines above all sort AFTER the
         # permitted line, so they miss a loop over only the LAST sorted gate line; this forbidden
         # config respelling (./ before .aiqt) sorts BEFORE it and catches that loop.
         ("permitted line plus a forbidden line sorting before it in the local runner alone",
          _mixed_runners(True, False, forbidden="--config ./" + CONFIG), 1, "permitted invocation", 1),
-        ("permitted line plus a forbidden line sorting before it in the workflow alone",
-         _mixed_runners(False, True, forbidden="--config ./" + CONFIG), 1, "permitted invocation", 1),
+        ("permitted line plus a forbidden line sorting before it in the workflow alone is not read",
+         _mixed_runners(False, True, forbidden="--config ./" + CONFIG), 0, None, None),
         ("permitted line plus a forbidden line sorting before it in both runners",
-         _mixed_runners(True, True, forbidden="--config ./" + CONFIG), 1, "permitted invocation", 2),
+         _mixed_runners(True, True, forbidden="--config ./" + CONFIG), 1, "permitted invocation", 1),
     )
 
 
@@ -413,10 +438,6 @@ _STUB_CITED = (
 
 _STUB_PARITY = (
     "EXPECTED_RUN_GATE_BODY = ()\n"
-    "\n"
-    "\n"
-    "def extract_ci(text):\n"
-    "    raise AssertionError('unused in the import-failure vector')\n"
     "\n"
     "\n"
     "def extract_local(text):\n"
@@ -567,7 +588,7 @@ def main(argv=None, root=ROOT):
         return 1
     print("PASS: cited-standards repository contract: {} names {!r} and covers every member "
           "{}/pack.toml (validated by opf/tools/check_opf_prompt_pack.py) lists, and every "
-          "cited-standards gate line in both runners is exactly {!r}".format(
+          "cited-standards gate line in tools/run_all_checks.sh is exactly {!r}".format(
               CONFIG, RULE_GLOB, PACK, PERMITTED))
     return 0
 
