@@ -33,8 +33,10 @@ host's Linux layout. The dual-family verifiers and the private plaintext check
 are the compensating layers. A line carrying a `leak-allow` marker is exempt from the STRUCTURAL layer.
 
 SCANNED SET. The walk yields every file in the working tree except the .git, node_modules and
-__pycache__ subtrees (the denylist file included). Each yielded path is first CLASSIFIED by a stat probe
-(a metadata check, not a content read), then its content is read as bytes and handled one of four ways:
+__pycache__ subtrees and any file so named, a file symlink so named included (the denylist file is
+yielded); a directory symlink so named is not skipped but CANNOT EVALUATE, as the symlink rules below
+state. Each yielded path is first CLASSIFIED by a stat probe (a metadata check, not a content read),
+then its content is read as bytes and handled one of four ways:
   - it is a ZIP archive (a name ending in .zip in any case, or content opening with a ZIP signature,
     whatever that content decodes as): the file is read through one descriptor, its first four bytes
     and then at most MAX_ARCHIVE_FILE_SIZE bytes in all plus one, and an archive whose bytes read are
@@ -87,7 +89,7 @@ SYMLINK RULES, stated exactly: a symlink to a regular file is followed (the stat
 and the target's content is scanned; a dangling or unresolvable file symlink is a read error (exit 2); a
 non-regular target (a FIFO, a device) is CANNOT EVALUATE and its content is never opened; a SYMLINKED
 DIRECTORY is never followed and never silently dropped: it is CANNOT EVALUATE, the subtree behind it
-unread.
+unread, whatever its name (one named .git, node_modules or __pycache__ included).
 CANNOT EVALUATE is never a skip: each such input is named on a CANNOT EVALUATE line and the run exits 2,
 so PASS is printed only when every walked input was read. The PASS and FAIL lines state the scanned-file
 count and the ZIP archive and member counts.
@@ -780,7 +782,10 @@ def main():
 #      NEVER read (the read seam raises for it, so a read-before-classification regression shows as a
 #      read error, not the CANNOT EVALUATE line); 6b. a symlink to a regular file is followed and its
 #      target scanned (exit 1); 6c. a symlinked directory is CANNOT EVALUATE (exit 2, naming it), never
-#      silently dropped; 6d. a dangling symlink fails closed (exit 2),
+#      silently dropped; 6d. a dangling symlink fails closed (exit 2); 6e. a directory symlink named
+#      .git, node_modules or __pycache__ is CANNOT EVALUATE (exit 2, naming it), never pruned as a
+#      skipped directory; 6f. a real directory so named is still skipped (exit 0); 6g. a file symlink
+#      so named is still skipped by name (exit 0),
 #   7. an unreadable file (injected PermissionError) fails closed (exit 2).
 # Cases 1 through 6 each fail on the original scan. Against the first revision this replaces,
 # 2b, 3b, 3c and 6c are new findings or named skips, 6 and 7 run where that revision skipped, and 4b,
@@ -810,8 +815,10 @@ def main():
 # no-break-space names pass (exit 0) and fail here (the NUL name also fails a rule that checks the name
 # zipfile cuts at the NUL, the no-break space one that refuses control characters alone); the 5y
 # undecodable name pins zipfile's own refusal, and the two printable 5y names fail a rule that refuses
-# every non-ASCII name. The planted host path and private IP are assembled from
-# pieces so this source stays clean under its own scan.
+# every non-ASCII name. Against the walk that pruned the skipped directory names before it recorded
+# directory symlinks, each 6e link was dropped with a PASS (exit 0) and fails here; 6f and 6g pass on
+# both and pin the skips that the reordered walk must keep. The planted host path and private IP are
+# assembled from pieces so this source stays clean under its own scan.
 _HOST_PATH = "/" + "opt/" + "fixture-host/private/path"
 _PRIVATE_IP = "10." + "20.30.40"
 
@@ -1694,6 +1701,32 @@ def self_test_main():
         if rc != 2:
             failures.append("a dangling symlink expected exit 2, fail-closed (got {}: {!r})".format(rc, out))
 
+        # 6e. a directory symlink named like a skipped directory (.git, node_modules, __pycache__) is
+        #     CANNOT EVALUATE (exit 2, naming it): the walk records it before the skip-dirs prune, so the
+        #     name cannot hide it. 6f. a real directory so named is still skipped (exit 0, its planted
+        #     private IP unread). 6g. a file symlink so named keeps its skip by name (exit 0, its
+        #     target's planted private IP unread).
+        plant = ("ip " + _PRIVATE_IP + "\n").encode("ascii")
+        (tmp / "skipbehind").mkdir(exist_ok=True)
+        (tmp / "skipbehind" / "plant.md").write_bytes(plant)
+        for index, skipped in enumerate(sorted(SKIP_DIRS)):
+            base = tree("skiplink{}".format(index), dict(clean_files))
+            os.symlink(str(tmp / "skipbehind"), str(base / skipped))
+            rc, out = run_capture(base)
+            expect_cannot_evaluate("6e", "a directory symlink named " + skipped, rc, out, skipped,
+                                   "symlinked directory; not followed")
+            base = tree("skipdir{}".format(index), dict(clean_files, **{skipped + "/plant.md": plant}))
+            rc, out = run_capture(base)
+            if rc != 0 or "PASS" not in out or "2 file(s) scanned" not in out:
+                failures.append("a real directory named {} expected to stay skipped, exit 0 with 2 files "
+                                "scanned (case 6f; got {}: {!r})".format(skipped, rc, out))
+            base = tree("skipfile{}".format(index), dict(clean_files))
+            os.symlink(str(tmp / "skipbehind" / "plant.md"), str(base / skipped))
+            rc, out = run_capture(base)
+            if rc != 0 or "PASS" not in out or "2 file(s) scanned" not in out:
+                failures.append("a file symlink named {} expected to stay skipped by name, exit 0 with 2 "
+                                "files scanned (case 6g; got {}: {!r})".format(skipped, rc, out))
+
         # 7. an unreadable file fails closed (exit 2). Deterministic: the read seam raises the
         #    PermissionError such a file raises, so the case runs on every runner (a chmod-0 probe would
         #    be skipped under a DAC-bypassing root and the guarded defect could ship meanwhile).
@@ -1745,7 +1778,8 @@ def self_test_main():
           "character, a NUL or a no-break space in it), an encrypted, unsupported-method, nested, "
           "CRC-failing, undecodable or size-misstated member, a member with a second deflate stream or one "
           "that never ends, an injected non-regular file (its content never read: its read seam raises if it is) and a symlinked "
-          "directory are each CANNOT EVALUATE (exit 2, naming it), never a skip; verify_archive, the archive "
+          "directory (one named .git, node_modules or __pycache__ included) are each CANNOT EVALUATE (exit 2, "
+          "naming it), never a skip, while a real directory or a file symlink so named stays skipped; verify_archive, the archive "
           "rule as one predicate (the internal-names gate's binary skip), returns a clean archive's bytes and "
           "refuses a CRC-failing member, bytes ahead of the records and an archive over the size bound with "
           "the reason and member the scan names; and a dangling symlink, "

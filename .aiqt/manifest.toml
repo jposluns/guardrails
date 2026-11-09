@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "f40449e2613e81df4e2aa7c551651260ffb593473a8e06107bf18cfa606bde04"
+tree-sha256 = "e60bb67475a6db27054caa0b616987ff24e58bd2c37049381d2efa188f68223b"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -4101,8 +4101,8 @@ sha256 = "792211660bff5157deae6f7203bb5a5cc77ea653a2b9d5ee3553ec06b0702d03"
 
 [[sources]]
 path = "tools/_walk.py"
-bytes = 2223
-sha256 = "aee0148730f5f32b7cc0c85c82f7eff7c0b5e0d652673bc4047b4c8eb3474f62"
+bytes = 2711
+sha256 = "c8fba8a3a27be87d88480142a7d3a742c2b88eaebf9a5315ccc68cb87aae019a"
 
 [[sources]]
 path = "tools/aei_backlog_md.py"
@@ -4231,8 +4231,8 @@ sha256 = "fd606702f9b49af5ec849d5b0623be38231ab001fdea206a2be0ffc97eea2005"
 
 [[sources]]
 path = "tools/check_leaks.py"
-bytes = 120311
-sha256 = "413dc3c80615481c4d69bd95e03338555ae84f86fe0786e80bb012b4d5029e67"
+bytes = 123138
+sha256 = "d4a37f788467d59504fc3e740c56624c7287a7a5e43c0a6a179fcaed7fecfe49"
 
 [[sources]]
 path = "tools/check_license_qualification.py"
