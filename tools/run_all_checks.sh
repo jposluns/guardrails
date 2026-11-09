@@ -224,6 +224,8 @@ run_gate "first-pin-demo-selftest" python3 -I -B tools/gen_first_pin_demo.py --s
 run_gate "first-pin-demo-drift"    python3 -I -B tools/gen_first_pin_demo.py --check
 run_gate "must-deliver-selftest" python3 -I -B tools/check_must_deliver.py --self-test
 run_gate "must-deliver"          python3 -I -B tools/check_must_deliver.py
+run_gate "first-pin-shrink-selftest" python3 -I -B tools/check_selftest_execution.py --suite first-pin-shrink-selftest
+run_gate "first-pin-shrink"      python3 -I -B tools/check_first_pin_shrink.py
 run_gate "mappings-page-selftest" python3 -I -B tools/gen_mappings.py --self-test
 run_gate "mappings-page-drift" python3 -I -B tools/gen_mappings.py --check
 run_gate "reference-roster-selftest" python3 -I -B tools/gen_reference_facts.py --self-test

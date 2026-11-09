@@ -1,0 +1,14 @@
+# Recorded maintainer authorizations for removing a member from an obligation list of the first-pin
+# demonstration (.aiqt/release/first-pin-demonstration.toml), read by tools/check_first_pin_shrink.py.
+# Hand-edited and reviewed, never generated. A removal relative to the merge base with main fails that
+# gate unless one [[reduction]] row names the list, the removed corpus-id and the agents-sha256 of the
+# demonstration that removes it, with an authorization table of exactly authorizer, utc and reason
+# (the form tools/pin.py records for an authorized rollback, carve-out or un-adopt). A row binds one
+# exact AGENTS.md digest, so it authorizes nothing once AGENTS.md changes again. Example row:
+#
+#   [[reduction]]
+#   list = "delivered-prefix-obligations"
+#   id = "cmtidn"
+#   agents-sha256 = "<the agents-sha256 of the regenerated demonstration>"
+#   authorization = { authorizer = "<maintainer>", utc = "YYYY-MM-DDTHH:MM:SSZ", reason = "<why>" }
+format-version = 1

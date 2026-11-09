@@ -10,6 +10,7 @@
 .aiqt/core/conformance/behaviour-checklist.md text eol=lf
 .aiqt/core/dispositions.toml text eol=lf
 .aiqt/core/enforcement-roadmap.toml text eol=lf
+.aiqt/core/first-pin-reductions.toml text eol=lf
 .aiqt/core/gates/byte-canon.toml text eol=lf
 .aiqt/core/gates/canon-vectors/vectors.toml text eol=lf
 .aiqt/core/gates/manifest.toml text eol=lf
@@ -840,6 +841,7 @@ tools/check_crosswalk.py text eol=lf
 tools/check_dangerous_api.py text eol=lf
 tools/check_derived_command_parameters.py text eol=lf
 tools/check_entry_guard.py text eol=lf
+tools/check_first_pin_shrink.py text eol=lf
 tools/check_footer.py text eol=lf
 tools/check_gensrc_failclose.py text eol=lf
 tools/check_git_option_table.py text eol=lf

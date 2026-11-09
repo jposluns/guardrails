@@ -5041,6 +5041,39 @@ expected-check-ids = [
 ]
 
 [[suite]]
+id = "first-pin-shrink-selftest"
+runner = "tools/check_first_pin_shrink.py"
+expected-check-ids = [
+  "shrink/unauthorized-fails",
+  "revert/shrink-rule-removed-red",
+  "shrink/authorized-passes",
+  "revert/authorization-rule-removed-red",
+  "shrink/other-digest-fails",
+  "revert/digest-binding-removed-red",
+  "shrink/one-list-only-fails",
+  "unchanged/passes",
+  "grown/passes",
+  "revert/only-removals-count-red",
+  "base/unresolvable-main-cannot-evaluate",
+  "revert/base-fail-closed-removed-red",
+  "base/no-merge-base-cannot-evaluate",
+  "base/absent-at-base-cannot-evaluate",
+  "base/malformed-cannot-evaluate",
+  "base/replace-ref-ignored",
+  "revert/replace-objects-flag-removed-red",
+  "head/unreadable-cannot-evaluate",
+  "head/wrong-keys-cannot-evaluate",
+  "auth/absent-cannot-evaluate",
+  "auth/unknown-row-key-cannot-evaluate",
+  "auth/unknown-list-cannot-evaluate",
+  "auth/empty-authorizer-cannot-evaluate",
+  "auth/bad-utc-cannot-evaluate",
+  "auth/repeated-row-cannot-evaluate",
+  "auth/format-version-cannot-evaluate",
+  "argv/unrecognized",
+]
+
+[[suite]]
 id = "sitemap-selftest"
 runner = "tools/check_sitemap.py"
 expected-check-ids = [
