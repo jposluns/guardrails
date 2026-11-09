@@ -3031,6 +3031,27 @@ def _run_fixture_process(argv, *, timeout=120, cwd=None, env=None):
                                            out.read(), err.read())
 
 
+# Per-stream byte bound on the captured output a fixture refusal message
+# retains (the same bound _bounded_setup_error applies to its detail).
+_FIXTURE_EVIDENCE_LIMIT = 8192
+
+
+def _fixture_failure_evidence(result):
+    """Both captured streams of a failed fixture, each bounded, for the
+    refusal message. The fixture's own verdict line is printed to its
+    stdout, so a message carrying only stderr discards the cause of a
+    nested FAIL. Each stream keeps its TAIL (the verdict prints last),
+    with the elided length declared; bytes are bounded before decoding,
+    so an oversized stream can never grow the message unboundedly."""
+    def bounded(label, data):
+        note = ""
+        if len(data) > _FIXTURE_EVIDENCE_LIMIT:
+            note = "[... " + str(len(data) - _FIXTURE_EVIDENCE_LIMIT) + " bytes elided] "
+            data = data[-_FIXTURE_EVIDENCE_LIMIT:]
+        return label + ": " + note + data.decode("utf-8", "replace")
+    return bounded("stdout", result.stdout) + "; " + bounded("stderr", result.stderr)
+
+
 def _fixture_main(nonce, fixture_id, argv, expected, process_fixture):
     """Emit only after the requested fixture and its expected-outcome assertion finish."""
     import json
@@ -3096,7 +3117,7 @@ def run_status_owned(argv, *, fixture_id, expected_returncode=0, process_fixture
     trailer = ("\nOPF-FIXTURE " + json.dumps([nonce, fixture_id]) + "\n").encode()
     if not result.stdout.endswith(trailer):
         raise FixtureIncomplete("missing/mismatched completion for " + fixture_id
-                                + ": " + result.stderr.decode("utf-8", "replace"))
+                                + ": " + _fixture_failure_evidence(result))
     if result.returncode != 0:
         raise subprocess.CalledProcessError(result.returncode, command, result.stdout, result.stderr)
     result.stdout = result.stdout[:-len(trailer)]

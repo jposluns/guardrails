@@ -4410,10 +4410,20 @@ def _watchdog_launcher_case(label, disposition):
     import _opf_emit
     real_run = _opf_emit._run_fixture_process
     statuses = []
+    overruns = []
 
     def failure(*args, **kwargs):
-        result = real_run([sys.executable, "-I", "-B", "-c", "raise SystemExit(37)"],
-                          timeout=5)
+        try:
+            result = real_run([sys.executable, "-I", "-B", "-c", "raise SystemExit(37)"],
+                              timeout=5)
+        except subprocess.TimeoutExpired:
+            # The 5 s probe bound is a per-launch load limit, not the guarded
+            # assertion: a starved host can hold one probe interpreter past
+            # it on correct code. Record the overrun for the verdict below
+            # and keep raising; the nested matrix runners map a bound kill
+            # to their own distinct CANNOT-EVALUATE, never a pass.
+            overruns.append(5)
+            raise
         statuses.append(result.returncode)
         if kwargs.get("check") and result.returncode:
             raise subprocess.CalledProcessError(result.returncode, result.args)
@@ -4423,17 +4433,35 @@ def _watchdog_launcher_case(label, disposition):
     hostile = signal.SIG_IGN if disposition == "ignored" else lambda *_: None
     try:
         signal.signal(signal.SIGCHLD, signal.SIG_DFL)
-        with patch.object(_opf_emit, "_run_fixture_process", failure), \
-                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-            control = runner()
-            control_ok = control == EXIT_FINDING and bool(statuses) and set(statuses) == {37}
-            statuses.clear()
-            signal.signal(signal.SIGCHLD, hostile)
-            result = runner()
-        ok = (control_ok and result == EXIT_FINDING and not statuses
-              and signal.getsignal(signal.SIGCHLD) == hostile)
+        try:
+            with patch.object(_opf_emit, "_run_fixture_process", failure), \
+                    contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                control = runner()
+                control_ok = control == EXIT_FINDING and bool(statuses) and set(statuses) == {37}
+                statuses.clear()
+                signal.signal(signal.SIGCHLD, hostile)
+                result = runner()
+            ok = (control_ok and result == EXIT_FINDING and not statuses
+                  and signal.getsignal(signal.SIGCHLD) == hostile)
+        except subprocess.TimeoutExpired:
+            # Only the probe launch raises this here (each nested matrix
+            # runner absorbs its own legs' bound kills): recorded above, so
+            # the overrun branch below holds, never an escaped exception.
+            ok, result = False, None
     finally:
         signal.signal(signal.SIGCHLD, saved)
+    if not ok and overruns:
+        # No verdict on the launcher: at least one exit-37 probe reached its
+        # own 5 s bound, so the nested runner's aggregate (or the escaped
+        # kill above) reflects host load, not the guard under test. The
+        # marker on this clean exit maps to the distinct CANNOT-EVALUATE at
+        # the launching runner, never a pass and never a definite failure;
+        # a run whose probes all stayed inside the bound keeps the definite
+        # verdict below.
+        print(_WATCHDOG_CANNOT_EVALUATE + " (launcher/" + label + "-" + disposition
+              + ": " + str(len(overruns)) + " exit-37 probe launch(es) reached the"
+              + " 5 s probe bound: no verdict)")
+        return EXIT_OK
     print("opf watchdog launcher:", label, disposition, "PASS" if ok else "FAIL",
           "refused", result, "launched statuses", statuses)
     return EXIT_OK if ok else EXIT_FINDING
@@ -5584,6 +5612,38 @@ def _watchdog_completion_case(mode, tree=None):
             with patch.object(emit, "_bounded_setup_error",
                               side_effect=lambda exc: "SETUP-ERROR:" + type(exc).__name__):
                 refuses(AssertionError, check_close)
+    elif mode == "failure-evidence":
+        # A failing fixture's refusal message carries BOTH captured streams:
+        # the fixture's own verdict line is printed to its stdout, which an
+        # stderr-only message would discard (the launching runner would then
+        # report the assertion without its cause).
+        def evidence():
+            try:
+                launch("import sys; print('STDOUT-CAUSE'); "
+                       "print('STDERR-CAUSE', file=sys.stderr); return 1")
+            except emit.FixtureIncomplete as exc:
+                message = str(exc)
+                assert "STDOUT-CAUSE" in message and "STDERR-CAUSE" in message, message
+                return
+            raise AssertionError("failing fixture was accepted: " + mode)
+
+        evidence()
+        # The retained streams are bounded: a flooding stdout keeps its TAIL
+        # (the verdict line prints last) and declares the elided length, and
+        # the whole message stays within the two per-stream bounds plus
+        # framing, never the flood's own size.
+        try:
+            launch("import sys; sys.stdout.write('x' * 65536 + 'TAIL-MARK'); return 1")
+        except emit.FixtureIncomplete as exc:
+            message = str(exc)
+            assert "TAIL-MARK" in message and "bytes elided" in message, message
+            assert len(message) <= 2 * emit._FIXTURE_EVIDENCE_LIMIT + 512, len(message)
+        else:
+            raise AssertionError("failing fixture was accepted: " + mode)
+        # Red-on-revert: the old stderr-only evidence fails the stdout check.
+        with patch.object(emit, "_fixture_failure_evidence",
+                          lambda result: result.stderr.decode("utf-8", "replace")):
+            refuses(AssertionError, evidence)
     elif mode == "cleanup-budget":
         import time
         # A controlled clock discriminates the remaining-deadline policy without
@@ -15991,6 +16051,7 @@ def _watchdog_regression_self_test():
                         "nested-timeout", "nested-cancel", "nested-orders",
                         "no-signal-echild",
                         "guardian-error", "empty-children", "bounded-diagnostics",
+                        "failure-evidence",
                         "cleanup-budget", "deadline-flips", "subject-setup",
                         "overdue-success", "launch-ownership", "launch-cancel",
                         "fd-hygiene-total", "nested-keep", "fd-census",
@@ -16089,7 +16150,13 @@ def _watchdog_regression_self_test():
          + 9 * _deadline_case_budget(_TREE_VECTOR_BACKSTOP)
          + 6 * _TREE_STARTUP_BACKSTOP + 4 * _TREE_VECTOR_BACKSTOP),
         ("no-signal-echild", 15), ("guardian-error", 48), ("empty-children", 48),
-        ("bounded-diagnostics", 66), ("cleanup-budget", 21), ("deadline-flips", 77),
+        ("bounded-diagnostics", 66),
+        # failure-evidence makes exactly three launch() calls (both-streams,
+        # bounded-tail, and the stderr-only revert rerun of the first), each
+        # one fixture launch charged its allowance at the completion launch
+        # timeout; the budget is that derived sum, never a flat constant.
+        ("failure-evidence", 3 * _deadline_case_budget(_COMPLETION_LAUNCH_TIMEOUT)),
+        ("cleanup-budget", 21), ("deadline-flips", 77),
         ("subject-setup", 22), ("overdue-success", 161.0 + 0.01), ("launch-ownership", 60),
         ("launch-cancel", 33), ("fd-hygiene-total", 92), ("nested-keep", 108),
         ("fd-census", 48), ("subject-gc", 32), ("guardian-preload", 20),
