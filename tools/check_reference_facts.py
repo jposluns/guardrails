@@ -89,6 +89,12 @@ generator alone cannot assert:
     numeric characters on a designated line fails loud in any wording, whatever noun, spacing,
     markup or no-break space surrounds it (a missing anchored wording is itself a finding, so a
     reworded count fails loud, never silently unchecked);
+  - the site's Claude Code hook total: each hook-count statement SITE_HOOK_FACTS names must be
+    present in its site/draft-src source (the hand-written page source tools/gen_draft_site.py
+    renders and drift-gates the page against) and must state the same expected_counts hook total
+    the landing README is rendered from, and every "N hooks" or "N Claude Code hooks" figure in any
+    site/draft-src/*.toml source must state that total too (a figure spelled in words or written
+    with a thousands separator is not read, a disclosed residual);
   - the disclosure's shipped-path declaration (the [[code]]/[[noncode]] prefix rows of disclosure.toml,
     the same validated source gen_disclosure renders the public shipped-code sentence from): every
     path the release manifest (.aiqt/manifest.toml) lists must fall under a declared prefix (a
@@ -865,6 +871,54 @@ def check_readme_counts(root, manifests, findings):
                             "page gained an operative count)".format(text[run_start:run_end], label))
 
 
+# The site's Claude Code hook total. The site pages state it in hand-written prose in their sources
+# under site/draft-src/ (tools/gen_draft_site.py renders each page from its source and drift-gates
+# the rendered page against it), so this leg binds those statements to the expected_counts hook total
+# the landing README is rendered from. Each (source, label, wording) below is REQUIRED in its source:
+# a reworded statement is a missing-wording finding, never silently unchecked. Every other
+# "N hooks" or "N Claude Code hooks" figure in ANY site/draft-src/*.toml source must state the same
+# total, so a new sentence carrying a stale figure fails too.
+SITE_DRAFT_SRC = Path("site") / "draft-src"
+SITE_HOOK_FACTS = (
+    ("home.toml", "home page intro",
+     r"\bIn Claude Code, an opt-in plugin of " + _NUM + r" hooks\b"),
+    ("home.toml", "home page value paragraph", r"\bIts " + _NUM + r" Claude Code hooks\b"),
+    ("install-details.toml", "install details page", r"\bThe " + _NUM + r" Claude Code hooks\b"),
+)
+SITE_HOOK_FIGURE = re.compile(_NUM + r"(?:\s+Claude\s+Code)?\s+hooks\b", re.I)
+
+
+def check_site_hook_counts(root, manifests, findings):
+    """The site's hook-count statements against the expected_counts hook total: each SITE_HOOK_FACTS
+    wording must be present in its site/draft-src source with that total, and every SITE_HOOK_FIGURE
+    figure in every site/draft-src/*.toml source must equal it. A missing source directory or a
+    missing named source fails closed (exit 2). The figure is read in ASCII digits only: a figure
+    spelled in words or with a thousands separator is not read by the sweep (a disclosed residual;
+    each required wording still demands ASCII digits, so rewording one of those into words is a
+    missing-wording finding)."""
+    want = str(expected_counts(root, manifests)["hooks"])
+    src_dir = root / SITE_DRAFT_SRC
+    if not src_dir.is_dir():
+        raise OSError("required surface missing: {}".format(src_dir))
+    for name, label, wording in SITE_HOOK_FACTS:
+        rel = (SITE_DRAFT_SRC / name).as_posix()
+        hits = re.findall(wording, _read(src_dir / name))
+        if not hits:
+            findings.append("{}: the {} hook-count wording ({}) was not found; if the page was "
+                            "reworded, update SITE_HOOK_FACTS so the count stays checked".format(
+                                rel, label, wording))
+        for got in hits:
+            if got != want:
+                findings.append("{}: the {} states {} Claude Code hooks; the hooks manifest gives "
+                                "{}".format(rel, label, got, want))
+    for path in sorted(p for p in src_dir.iterdir() if p.suffix == ".toml" and p.is_file()):
+        rel = (SITE_DRAFT_SRC / path.name).as_posix()
+        for hit in SITE_HOOK_FIGURE.finditer(_read(path)):
+            if hit.group(1) != want:
+                findings.append("{}: {!r} states {} hooks; the hooks manifest gives {}".format(
+                    rel, hit.group(0), hit.group(1), want))
+
+
 # The independent code detector backing the shipped-path declaration: a release path is CODE when its
 # suffix (case-insensitive) is on this CLOSED executable list, when it is an HTML page that
 # decodes as UTF-8 (a leading byte-order mark allowed) and contains "<script" case-insensitively
@@ -1118,6 +1172,7 @@ def run(root):
         check_subset_denominator(root, manifests, findings)
         check_json_subset_denominator(root, manifests, findings)
         check_readme_counts(root, manifests, findings)
+        check_site_hook_counts(root, manifests, findings)
     except (ManifestError, OSError, ValueError, KeyError) as exc:
         print("error: {}; fail-closed".format(exc), file=sys.stderr)
         return 2
@@ -1329,7 +1384,14 @@ def main():
 #      wording reworded away -> the not-found diagnostic; the budget source's build moved under
 #      unchanged pages -> a build finding on both pages; a missing or non-string build -> exit 2;
 #      the earlier "measured PACK" wording restored -> the missing-note finding.
-# (1, 7, 12, 13, and 15 through 23 are the invariant-bearing cases; the rest complete the fail-closed
+#  24. the site hook-count leg: each SITE_HOOK_FACTS statement drifted alone one below and one above
+#      the manifest's total -> a finding naming its source and label (the clean fixture, at exactly
+#      the total, is the at-boundary control), and reworded with the count in words -> the not-found
+#      diagnostic; a stale figure (a capitalized noun included) in a site source no statement names
+#      -> a finding naming that source, a true one there -> exit 0; a hook added to the manifest
+#      under unchanged sources -> a finding for every statement; a missing site/draft-src, or a
+#      missing named source -> exit 2 naming it.
+# (1, 7, 12, 13, and 15 through 24 are the invariant-bearing cases; the rest complete the fail-closed
 # contract.)
 
 _MANIFEST = (
@@ -1507,13 +1569,31 @@ _RELEASE_MANIFEST = (
 )
 
 
+# The site page sources the hook-count leg reads, each SITE_HOOK_FACTS wording stating the fixture's
+# two claude-code hooks in the real sentences' shape, plus a source with no hook figure (the sweep
+# reads every site/draft-src/*.toml source, not only the named ones).
+_SITE_SRC = {
+    "home.toml": (
+        'intro = "In Claude Code, an opt-in plugin of 2 hooks blocks or warns on the actions it is '
+        'built to catch."\n\n[[body]]\ncomponent = "value"\nhtml = "Its 2 Claude Code hooks form an '
+        'opt-in plugin that is not yet for direct install."\n'),
+    "install-details.toml": (
+        "[[body]]\ncomponent = \"prose\"\nhtml = '''<p>The 2 Claude Code hooks form an opt-in "
+        "plugin that is not yet for direct install.</p>'''\n"),
+    "rules.toml": 'html = "<p>Of 3 rules, 1 is linked to a gate.</p>"\n',
+}
+
+
 def _write_fixture(base, manifests=None, readme=None, page=None, disclosure=None, json_export=None,
-                   landing=None, release_manifest=None, budget_toml=None, budget_md=None):
+                   landing=None, release_manifest=None, budget_toml=None, budget_md=None,
+                   site_src=None):
     """Write a complete clean fixture tree, overridable per component for a case's single mutation.
     `manifests` is a list of (stem, name, publisher, edition, kind, catalogue); `landing` overrides the
     README.md the counts leg reads; `release_manifest` overrides the .aiqt/manifest.toml the
     shipped-path declaration leg reads; `budget_toml` and `budget_md` override the instruction-budget
-    source and page the budget-note leg reads; `page` overrides the generated Mappings page."""
+    source and page the budget-note leg reads; `page` overrides the generated Mappings page;
+    `site_src` overrides the site/draft-src sources the site hook-count leg reads (a name mapped to
+    None is left out)."""
     if manifests is None:
         manifests = [("full", "Fixture Full Framework", "OWASP Foundation", "1.0", "control", "full"),
                      ("subset", "Fixture Subset Framework", "ISO/IEC", "2023", "guidance", "subset")]
@@ -1531,6 +1611,10 @@ def _write_fixture(base, manifests=None, readme=None, page=None, disclosure=None
     downloads.mkdir()
     (downloads / "mappings.json").write_text(
         json_export if json_export is not None else _JSON, encoding="utf-8")
+    (site / "draft-src").mkdir()
+    for name, text in (site_src if site_src is not None else _SITE_SRC).items():
+        if text is not None:
+            (site / "draft-src" / name).write_text(text, encoding="utf-8")
     (base / "disclosure.toml").write_text(
         disclosure if disclosure is not None else _DISCLOSURE, encoding="utf-8")
     core = base / ".aiqt" / "core"
@@ -3040,6 +3124,81 @@ def self_test_main():
                     or "was not found" not in out):
                 failures.append("a budget note claiming a measured PACK on {} expected exit 1 with "
                                 "the missing-note diagnostic".format(rel))
+
+        # 24. the site hook-count leg. The fixture's hooks manifest gives 2 claude-code hooks, and the
+        #     clean fixture of case 1 (each statement at exactly 2) is the at-boundary control. Each
+        #     SITE_HOOK_FACTS statement drifted alone one below (1) and one above (3) -> a finding
+        #     naming its source and label; each reworded away -> the not-found diagnostic.
+        def _site_src(name, old, new):
+            src = dict(_SITE_SRC)
+            if src[name].count(old) != 1:
+                failures.append("site hook-count fixture: {!r} must appear exactly once in the {} "
+                                "fixture".format(old, name))
+            src[name] = src[name].replace(old, new, 1)
+            return src
+
+        site_cases = (("home.toml", "home page intro", "plugin of 2 hooks", "plugin of {} hooks"),
+                      ("home.toml", "home page value paragraph", "Its 2 Claude", "Its {} Claude"),
+                      ("install-details.toml", "install details page", "The 2 Claude",
+                       "The {} Claude"))
+        if len(site_cases) != len(SITE_HOOK_FACTS):
+            failures.append("site hook-count cases must cover every SITE_HOOK_FACTS statement")
+        for pos, (name, label, old, new) in enumerate(site_cases):
+            for wrong in ("1", "3"):
+                sitefix = tmp / "site-hooks-{}-{}".format(pos, wrong)
+                _write_fixture(sitefix, site_src=_site_src(name, old, new.format(wrong)))
+                code, out = run_out(sitefix)
+                if code != 1 or "site/draft-src/{}: the {} states {} Claude Code hooks; the hooks " \
+                        "manifest gives 2".format(name, label, wrong) not in out:
+                    failures.append("the {} stating {} hooks against a 2-hook manifest expected exit 1 "
+                                    "with its finding (got {!r})".format(label, wrong, code))
+            sitefix = tmp / "site-hooks-{}-words".format(pos)
+            _write_fixture(sitefix, site_src=_site_src(name, old, new.format("two")))
+            code, out = run_out(sitefix)
+            if code != 1 or "site/draft-src/{}: the {} hook-count wording".format(name, label) not in out \
+                    or "was not found" not in out:
+                failures.append("the {} reworded with the count in words expected exit 1 with the "
+                                "not-found diagnostic (got {!r})".format(label, code))
+        # The sweep: a further hook figure in ANY site source must state the total too (a stale figure
+        # in a source no statement names, and a capitalized noun, each -> a finding naming the source),
+        # while a true one there stays clean.
+        for label, sentence, want in (("stale", "The 3 hooks catch it.", 1),
+                                      ("stale capitalized", "Its 3 Claude Code Hooks.", 1),
+                                      ("true", "The 2 hooks catch it.", 0)):
+            sitefix = tmp / "site-hooks-sweep-{}".format(label.replace(" ", "-"))
+            _write_fixture(sitefix, site_src=dict(_SITE_SRC, **{
+                "rules.toml": 'html = "<p>{}</p>"\n'.format(sentence)}))
+            code, out = run_out(sitefix)
+            if code != want or (want and "site/draft-src/rules.toml: " not in out):
+                failures.append("a {} hook figure in another site source expected exit {} (got "
+                                "{!r})".format(label, want, code))
+        # The binding is to the manifest, not to a literal: a third claude-code hook under unchanged
+        # site sources -> a finding for every statement.
+        sitefix = tmp / "site-hooks-manifest-moved"
+        _write_fixture(sitefix)
+        (sitefix / ".aiqt" / "core" / "hooks" / "manifest.toml").write_text(
+            _HOOKS_TOML + '\n[[hook]]\nid = "fixture-hook-third"\nrules = []\nplatform = "claude-code"\n'
+            'default = "block"\n', encoding="utf-8")
+        _code, out = run_out(sitefix)
+        for name, label, _old, _new in site_cases:
+            if "site/draft-src/{}: the {} states 2 Claude Code hooks; the hooks manifest gives " \
+                    "3".format(name, label) not in out:
+                failures.append("a moved hook total under an unchanged {} expected its finding".format(
+                    label))
+        # A missing source directory or named source -> exit 2 (fail-closed, never a skip).
+        sitefix = tmp / "site-hooks-nodir"
+        _write_fixture(sitefix, site_src={})
+        (sitefix / "site" / "draft-src").rmdir()
+        code, err = run_err(sitefix)
+        if code != 2 or "draft-src" not in err:
+            failures.append("a missing site/draft-src expected exit 2 naming it (got {!r})".format(code))
+        for name in ("home.toml", "install-details.toml"):
+            sitefix = tmp / "site-hooks-no-{}".format(name.split(".")[0])
+            _write_fixture(sitefix, site_src=dict(_SITE_SRC, **{name: None}))
+            code, err = run_err(sitefix)
+            if code != 2 or name not in err:
+                failures.append("a missing site/draft-src/{} expected exit 2 naming it (got "
+                                "{!r})".format(name, code))
     finally:
         if unreadable_std is not None:
             os.chmod(unreadable_std, 0o755)  # restore even on an unexpected early exit
@@ -3090,7 +3249,10 @@ def self_test_main():
           "outlives a ratchet at or under "
           "120,000, and a session target, pinned build, or loader character check that differs "
           "from its authoritative value or whose wording is absent (each on each page, the "
-          "build also moved in the budget source) "
+          "build also moved in the budget source), "
+          "and a site hook-count statement one below or one above the hooks manifest's total, "
+          "reworded with the count in words, or left unchanged under a moved total, and a stale "
+          "hook figure in any other site source "
           "each report a finding (exit 1); the deferred span itself is read ONLY through the "
           "positive grammar (blank lines, plain paragraph or continuation text, flat plain list items, "
           "column-0 ATX headings), so a blockquote, a fence, a nested or indented list, list-item HTML, "
@@ -3125,7 +3287,8 @@ def self_test_main():
           "claude-code hook default outside the blocking/warning split, a missing shipped-path "
           "declaration, a missing or empty release manifest, an HTML page that does not decode as "
           "UTF-8 or holds a NUL byte, a listed detector file that is missing or unreadable, a missing "
-          "instruction-budget source, and a missing or non-string claude-code-version in it "
+          "instruction-budget source, a missing or non-string claude-code-version in it, and a "
+          "missing site/draft-src or named site source "
           "all fail closed (exit 2); "
           "a single-line HTML comment above the section "
           "is not over-refused and its section is proven read (the planted name is the finding); the raw "
