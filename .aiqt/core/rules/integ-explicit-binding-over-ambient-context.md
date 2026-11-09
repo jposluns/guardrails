@@ -18,7 +18,7 @@ wall clock, and the order in which results arrive or complete. Where an explicit
 and unused, the action is bound to it; where only an ambient binding exists, the execution target is
 confirmed by observation before the action runs, per the confirm-execution-target discipline.
 
-This manifests in three recurring forms. An asynchronous result is correlated to the dispatch that
+This manifests in four recurring forms. An asynchronous result is correlated to the dispatch that
 produced it only through the authoritative identifier that dispatch returns, a handle, a path, or an
 id, never by wall-clock proximity or arrival order, because two dispatches can complete out of order
 or at the same instant and ambient timing cannot tell them apart; a result with no identifier is
@@ -35,7 +35,12 @@ or broad operation takes its scope from the specific thing under change, an enum
 rather than from ambient whole-tree state; a breadth selector that stages, commits, or discards
 whatever the tree currently holds can sweep in unrelated work, and where committed state is needed
 for a fixture or test, an isolated checkout provides it rather than reshaping the shared working
-tree in place.
+tree in place. A check whose subject is another checkout's committed state records that commit's
+object id at start and reads that commit, not the working tree, which can change mid-run; a step
+needing files uses an isolated checkout of that object id, made fresh from an object store, not a
+copy of the tree; a check whose subject is a working tree snapshots it to an object id and binds to
+that snapshot, as the first paragraph requires, unless the tree is pinned as
+review-in-flight-pins-its-artefact describes.
 
 The preference is to remove the ambient dependency, not merely to check it: a confirmed ambient
 binding is correct only until the surrounding state next shifts. This applies prefer-removing-a-path
