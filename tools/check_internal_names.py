@@ -122,7 +122,14 @@ classify, are scanned as binary (no internal-allow exemption, a byte above 0x7F 
 the pixel data, PLTE and the standard non-text ancillary chunks are unread. Every tracked file whose suffix
 is TRACKED_WOFF2_SUFFIX (.woff2, in lower case only) goes through the WOFF2 rule, verify_woff2 (stated
 beside TRACKED_WOFF2_SUFFIX): a .woff2 over its size bound or without the wOF2 signature CANNOT BE EVALUATED
-and fails closed at exit 2; one it accepts is scanned whole as binary, as a binary PNG chunk is.
+and fails closed at exit 2; one it accepts is scanned whole as binary, as a binary PNG chunk is. Every
+tracked file whose suffix is TRACKED_TTF_SUFFIX (.ttf, in lower case only) goes through the TrueType rule,
+verify_ttf (stated beside TRACKED_TTF_SUFFIX): a .ttf over its size bound, without the 00 01 00 00
+signature, with a truncated header or table directory, a table outside the file or overlapping another, no
+name table, or a name record it cannot decode CANNOT BE EVALUATED and fails closed at exit 2; in one it
+accepts, every name-table string (UTF-16BE for platforms 0 and 3, MacRoman for platform 1) is scanned with
+the scoped scan's structural patterns and no internal-allow exemption. Glyph outlines and every other binary
+table are not text and are not scanned (the residual is stated beside TRACKED_TTF_SUFFIX).
 Any other non-UTF-8 tracked file whatever its suffix (a
 malformed .csv, or a .csv that starts with the ZIP signature, say), a tracked path absent from the working
 tree, or a tracked path that is not a readable regular file CANNOT BE EVALUATED and fails closed at exit 2,
@@ -133,9 +140,10 @@ WHAT THE ROLE RULE CANNOT SEE: an untracked or git-ignored file (outside the sco
 output that is not committed and is not handed to it as a tracked file (a built release archive, a rendered
 site that is not checked in), the content of a tracked .zip's members, which the archive rule reads in
 memory to verify the archive but this rule never scans (the leak gate scans them), text drawn in a tracked
-.png's pixels or held in a chunk the PNG rule skips (see TRACKED_PNG_SUFFIX), a staged change that
-differs from the working-tree copy (it reads the working tree), and the word split or encoded (an HTML
-entity, a zero-width character) so the plain pattern does not match.
+.png's pixels or held in a chunk the PNG rule skips (see TRACKED_PNG_SUFFIX), text in a tracked .ttf
+outside its name table (glyph outlines and the other binary tables; see TRACKED_TTF_SUFFIX), a staged
+change that differs from the working-tree copy (it reads the working tree), and the word split or encoded
+(an HTML entity, a zero-width character) so the plain pattern does not match.
 
 REVIEW-ROUND LABEL RULE, WHOLE TRACKED TREE. The review-round label patterns (_REVIEW_LABELS: a reviewer
 family name followed by a QA round number, and a QA round number followed by a severity grade or a finding
@@ -291,6 +299,31 @@ _PNG_REPEATABLE = frozenset((b"IDAT", b"fcTL", b"fdAT"))
 TRACKED_WOFF2_SUFFIX = ".woff2"
 WOFF2_SIGNATURE = b"wOF2"
 MAX_WOFF2_FILE_SIZE = 8 * 1024 * 1024  # a latin-subset web font is well under 1 MiB
+# The suffix of the TrueType font (a site template's font shipped unconverted), a fourth binary format the role
+# rule evaluates, matched exactly as the PNG suffix is: ".TTF", ".otf", ".ttc" and every other binary suffix
+# still cannot be evaluated. Every tracked file under it goes through verify_ttf whether or not its bytes
+# decode as UTF-8, with the PNG rule's posture: anything the rule cannot read in full cannot be evaluated (exit
+# 2), never skipped. The read stops one byte past MAX_TTF_FILE_SIZE and a file over it is refused; then the
+# first 4 bytes must be the TrueType signature (00 01 00 00; an OpenType CFF font, a collection, a WOFF or the
+# Apple "true" tag is refused), the 12-byte offset table must be whole, numTables must be at least 1 and the
+# table directory whole, every table tag four printable ASCII characters and unique, and every table must lie
+# after the directory and within the file without overlapping another table. The name table is required, and
+# its header, its records and (in format 1) its language-tag records must lie within it, as must every string
+# they point to. Each string is decoded as the specification says: UTF-16BE for platform 0 (Unicode) and
+# platform 3 (Windows), MacRoman for platform 1 (Macintosh) encoding 0 (Roman); a string that does not decode
+# (an odd length or a lone surrogate in UTF-16BE), a platform 1 record in another encoding, a record of any
+# other platform and a name table format other than 0 or 1 cannot be evaluated. Every decoded string is
+# scanned with the scoped scan's structural patterns (the leak gate's host path, private IP, token and
+# account shapes, the provenance ids, the role name and the review-round labels), each a section of its own
+# named by its record, and with no internal-allow exemption: an upstream font has no reason to carry the
+# marker. A hit is a finding (exit 1). RESIDUAL: only the name table is read as text. Glyph outlines and every
+# other binary table (glyf, loca, the hinting programs, the variation tables and the rest) are not text and
+# are not scanned, and neither is text another table may hold (the glyph names of a version 2 post table, a
+# meta table's data, text drawn by the glyphs themselves); table checksums and the fields of every table but
+# name are not validated. A name split or encoded inside a string is not seen, as in a text file.
+TRACKED_TTF_SUFFIX = ".ttf"
+TTF_SIGNATURE = b"\x00\x01\x00\x00"
+MAX_TTF_FILE_SIZE = 8 * 1024 * 1024  # a variable web font is well under 1 MiB
 HASHES_RELPATH = ("tools", "internal-name-hashes.txt")
 
 # The QA-suite shipped surfaces this gate is responsible for keeping genericized. Files are scanned
@@ -979,15 +1012,129 @@ def verify_woff2(path):
     return woff2_sections(data)
 
 
-def scan_role_text(text, honour_marker=True):
+def _ttf_u16(data, at):
+    return int.from_bytes(data[at:at + 2], "big")
+
+
+def _ttf_name_strings(data, start, size):
+    """The decoded strings of the name table at data[start:start + size] as [(where, text)]; raises
+    CannotEvaluate naming the record (or the table) on anything the TrueType rule refuses."""
+    if size < 6:
+        raise check_leaks.CannotEvaluate("the name table holds {} byte(s), fewer than its 6-byte "
+                                         "header".format(size), "name table")
+    table = data[start:start + size]
+    fmt, count, storage = _ttf_u16(table, 0), _ttf_u16(table, 2), _ttf_u16(table, 4)
+    if fmt not in (0, 1):
+        raise check_leaks.CannotEvaluate("name table format {} is neither 0 nor 1".format(fmt), "name table")
+    end = 6 + 12 * count
+    if end > size:
+        raise check_leaks.CannotEvaluate("{} name record(s) run past the table's {} byte(s)".format(count, size),
+                                         "name table")
+    # Each entry: (where, platform, encoding, length, offset); the language-tag strings are UTF-16BE.
+    entries = []
+    for index in range(count):
+        at = 6 + 12 * index
+        platform, encoding = _ttf_u16(table, at), _ttf_u16(table, at + 2)
+        where = "name record {} (platform {}, name ID {})".format(index + 1, platform, _ttf_u16(table, at + 6))
+        entries.append((where, platform, encoding, _ttf_u16(table, at + 8), _ttf_u16(table, at + 10)))
+    if fmt == 1:
+        if end + 2 > size:
+            raise check_leaks.CannotEvaluate("the language-tag count runs past the table", "name table")
+        tags = _ttf_u16(table, end)
+        if end + 2 + 4 * tags > size:
+            raise check_leaks.CannotEvaluate("{} language-tag record(s) run past the table's {} "
+                                             "byte(s)".format(tags, size), "name table")
+        for index in range(tags):
+            at = end + 2 + 4 * index
+            entries.append(("language tag {}".format(index + 1), 0, 0, _ttf_u16(table, at),
+                            _ttf_u16(table, at + 2)))
+    strings = []
+    for where, platform, encoding, length, offset in entries:
+        first = storage + offset
+        if first + length > size:
+            raise check_leaks.CannotEvaluate("its string at storage offset {} of {} byte(s) runs past the "
+                                             "table's {} byte(s)".format(offset, length, size), where)
+        raw = table[first:first + length]
+        if platform in (0, 3):
+            try:
+                text = raw.decode("utf-16-be")
+            except UnicodeDecodeError as exc:
+                raise check_leaks.CannotEvaluate("the string cannot be decoded as UTF-16BE: {}".format(exc), where)
+        elif platform == 1 and encoding == 0:
+            text = raw.decode("mac_roman")
+        else:
+            raise check_leaks.CannotEvaluate("platform {} encoding {} has no decoding the rule "
+                                             "knows".format(platform, encoding), where)
+        strings.append((where, text))
+    return strings
+
+
+def ttf_sections(data):
+    """The TrueType rule (see TRACKED_TTF_SUFFIX) over a file's bytes: returns [(where, text, is_text)], one
+    entry for each name-table string, `where` naming its record and `is_text` false (no internal-allow
+    exemption); raises CannotEvaluate with the first refusal (naming the table or record when one is the
+    cause)."""
+    if len(data) > MAX_TTF_FILE_SIZE:
+        raise check_leaks.CannotEvaluate("a TrueType font of more than MAX_TTF_FILE_SIZE ({}) bytes; the read "
+                                         "stopped at {} bytes and the rest was not read".format(
+                                             MAX_TTF_FILE_SIZE, len(data)))
+    if data[:4] != TTF_SIGNATURE:
+        raise check_leaks.CannotEvaluate("the first 4 bytes are not the TrueType signature (00 01 00 00)")
+    if len(data) < 12:
+        raise check_leaks.CannotEvaluate("truncated header: {} byte(s), fewer than the 12-byte offset "
+                                         "table".format(len(data)))
+    count = _ttf_u16(data, 4)
+    if count < 1:
+        raise check_leaks.CannotEvaluate("numTables is 0: the font has no tables")
+    directory_end = 12 + 16 * count
+    if directory_end > len(data):
+        raise check_leaks.CannotEvaluate("truncated table directory: {} table record(s) need {} bytes, the "
+                                         "file holds {}".format(count, directory_end, len(data)))
+    tables, spans = {}, []
+    for index in range(count):
+        at = 12 + 16 * index
+        tag = data[at:at + 4]
+        if not all(0x20 <= byte <= 0x7E for byte in tag):
+            raise check_leaks.CannotEvaluate("the tag is not four printable ASCII characters",
+                                             "table {}".format(index + 1))
+        where = "table {} {}".format(index + 1, tag.decode("ascii"))
+        offset = int.from_bytes(data[at + 8:at + 12], "big")
+        length = int.from_bytes(data[at + 12:at + 16], "big")
+        if offset < directory_end or offset + length > len(data):
+            raise check_leaks.CannotEvaluate("offset {} and length {} are outside the {} byte(s) after the table "
+                                             "directory".format(offset, length, len(data) - directory_end), where)
+        if tag in tables:
+            raise check_leaks.CannotEvaluate("a second {} table".format(tag.decode("ascii")), where)
+        tables[tag] = (offset, length)
+        spans.append((offset, offset + length, where))
+    spans.sort()
+    for (_, previous_end, previous), (start, _, where) in zip(spans, spans[1:]):
+        if start < previous_end:
+            raise check_leaks.CannotEvaluate("it overlaps {}".format(previous), where)
+    if b"name" not in tables:
+        raise check_leaks.CannotEvaluate("no name table")
+    return [(where, text, False) for where, text in _ttf_name_strings(data, *tables[b"name"])]
+
+
+def verify_ttf(path):
+    """The TrueType rule for a tracked file: its bytes read through one descriptor, stopping one byte past
+    MAX_TTF_FILE_SIZE, then ttf_sections. Raises CannotEvaluate or, on a read error, OSError. Like
+    verify_png it makes no stat probe: the caller classifies the path before the open."""
+    with path.open("rb") as handle:
+        data = handle.read(MAX_TTF_FILE_SIZE + 1)
+    return ttf_sections(data)
+
+
+def scan_role_text(text, honour_marker=True, rules=_TRACKED_RULES):
     """(line, label) role-name and review-round label findings in `text`. A line carrying an `internal-allow`
     marker is exempt; the marker exempts that line only, never the rest of the file. A binary PNG chunk is
-    scanned with `honour_marker` false: it has no real lines, so the marker exempts nothing in it."""
+    scanned with `honour_marker` false: it has no real lines, so the marker exempts nothing in it. A TrueType
+    name-table string is scanned with `rules` set to STRUCTURAL, the scoped scan's patterns."""
     found = []
     for number, line in enumerate(text.splitlines(), 1):
         if honour_marker and "internal-allow" in line:
             continue
-        found += [(number, label) for pattern, label in _TRACKED_RULES if pattern.search(line)]
+        found += [(number, label) for pattern, label in rules if pattern.search(line)]
     return found
 
 
@@ -1022,6 +1169,20 @@ def scan_tracked_roles(root, relpaths):
                 continue
             for where, text, is_text in sections:
                 for number, label in scan_role_text(text, honour_marker=is_text):
+                    findings.append("{}:{}:{}: {}".format(rel, where, number, label))
+            continue
+        if path.suffix == TRACKED_TTF_SUFFIX:
+            try:
+                sections = verify_ttf(path) if _present(path) else None
+            except check_leaks.CannotEvaluate as exc:
+                unevaluable.append("{}: tracked .ttf fails the TrueType rule ({}{}){}".format(
+                    rel, "" if exc.member is None else exc.member + ": ", exc, cannot))
+                continue
+            if sections is None:
+                unevaluable.append("{}: tracked file is absent from the working tree{}".format(rel, cannot))
+                continue
+            for where, text, is_text in sections:
+                for number, label in scan_role_text(text, honour_marker=is_text, rules=STRUCTURAL):
                     findings.append("{}:{}:{}: {}".format(rel, where, number, label))
             continue
         if path.suffix == TRACKED_PNG_SUFFIX:
@@ -3232,6 +3393,236 @@ def _self_test(caller_env=None):
                 len(clean_woff2) - 1, len(clean_woff2))
             check("woff2/file-size-bound-ends",
                   seen[:2] == ["clean", "clean"] and "font.woff2" + woff2_rule + reason in seen[2], seen)
+
+            # The TrueType rule, verify_ttf, over tracked .ttf files, on fonts built here: a clean one modelled
+            # on the real Dancing Script font's name table (Macintosh, Windows and Unicode records), and one
+            # broken vector per refusal. Each paired vector has a flip, a scratch copy of this gate with that
+            # check removed (anchors concatenated so they do not match themselves), which must give the vector
+            # another verdict; then the size bound and both table-range ends one unit inside, at and outside,
+            # and the real gate on a fixture git repository.
+            def ttf_name(records, fmt=0, lang=()):
+                recs, langs, storage = b"", b"", b""
+                for platform, encoding, name_id, raw in records:
+                    recs += struct.pack(">6H", platform, encoding, 0, name_id, len(raw), len(storage))
+                    storage += raw
+                for raw in lang:
+                    langs += struct.pack(">2H", len(raw), len(storage))
+                    storage += raw
+                lang_part = struct.pack(">H", len(lang)) + langs if fmt == 1 else b""
+                return struct.pack(">3H", fmt, len(records), 6 + len(recs) + len(lang_part)) + recs + lang_part \
+                    + storage
+
+            def ttf_font(tables, count=None, pad=b""):
+                directory, body = b"", b""
+                start = 12 + 16 * len(tables) + len(pad)
+                for tag, table in tables:
+                    directory += tag + bytes(4) + struct.pack(">II", start + len(body), len(table))
+                    body += table
+                return TTF_SIGNATURE + struct.pack(">4H", len(tables) if count is None else count, 0, 0, 0) \
+                    + directory + pad + body
+
+            def ttf_patch(data, at, fmt, value):
+                patched = bytearray(data)
+                struct.pack_into(fmt, patched, at, value)
+                return bytes(patched)
+
+            def u16be(text):
+                return text.encode("utf-16-be")
+
+            head_body = bytes(50) + b"\xff\xfe\xfd\xfc"  # not valid UTF-8, so a font is never read as text
+            clean_records = [(1, 0, 1, b"Dancing Script"),
+                             (3, 1, 0, u16be("Copyright 2016 The Dancing Script Project Authors")),
+                             (3, 1, 1, u16be("Dancing Script")), (0, 3, 2, u16be("Regular"))]
+            clean_name = ttf_name(clean_records)
+            clean_ttf = ttf_font([(b"head", head_body), (b"name", clean_name)])
+
+            def ttf_with(*extra):
+                return ttf_font([(b"head", head_body), (b"name", ttf_name(clean_records + list(extra)))])
+
+            ttf_rule = ": tracked .ttf fails the TrueType rule ("
+            name_at = 12 + 32 + len(head_body)  # the clean font's name table offset
+            host_text = "Built in " + "/" + "home" + "/builder/fonts"
+            fifth = "name record 5 (platform {}, name ID 5)"
+            tdir = Path(tempfile.mkdtemp(prefix="aiqt-internal-names-ttf-mutant-"))
+            try:
+                for check_id, flip_id, relname, data, expect, mutations in (
+                        ("ttf/clean-minimal", "ttf/clean-minimal-flip", "font.ttf", clean_ttf, "clean",
+                         (("if path.suffix == " + "TRACKED_TTF_SUFFIX:", "if False:"),)),
+                        ("ttf/bad-signature", "ttf/bad-signature-flip", "font.ttf", b"OTTO" + clean_ttf[4:],
+                         "font.ttf" + ttf_rule + "the first 4 bytes are not the TrueType signature (00 01 00 00))",
+                         (("if data[:4] != " + "TTF_SIGNATURE:", "if False:"),)),
+                        ("ttf/non-truetype-named-refused", "ttf/non-truetype-named-refused-flip", "font.ttf",
+                         b"plain text\n",
+                         "font.ttf" + ttf_rule + "the first 4 bytes are not the TrueType signature (00 01 00 00))",
+                         (("if path.suffix == " + "TRACKED_TTF_SUFFIX:", "if False:"),)),
+                        ("ttf/truncated-header", "ttf/truncated-header-flip", "font.ttf", clean_ttf[:7],
+                         "font.ttf" + ttf_rule + "truncated header: 7 byte(s), fewer than the 12-byte offset table)",
+                         (("if len(data) < " + "12:", "if False:"),)),
+                        ("ttf/no-tables", "ttf/no-tables-flip", "font.ttf", ttf_patch(clean_ttf, 4, ">H", 0),
+                         "font.ttf" + ttf_rule + "numTables is 0: the font has no tables)",
+                         (("if count < " + "1:", "if False:"),)),
+                        ("ttf/truncated-directory", "ttf/truncated-directory-flip", "font.ttf",
+                         ttf_patch(clean_ttf, 4, ">H", 300),
+                         "font.ttf" + ttf_rule + "truncated table directory: 300 table record(s) need 4812 bytes",
+                         (("if directory_end > " + "len(data):", "if False:"),)),
+                        ("ttf/tag-not-printable", "ttf/tag-not-printable-flip", "font.ttf",
+                         ttf_font([(b"he\x01d", head_body), (b"name", clean_name)]),
+                         "font.ttf" + ttf_rule + "table 1: the tag is not four printable ASCII characters)",
+                         (("if not all(0x20 <= byte <= " + "0x7E for byte in tag):", "if False:"),)),
+                        ("ttf/table-out-of-range", "ttf/table-out-of-range-flip", "font.ttf",
+                         ttf_patch(clean_ttf, 12 + 8, ">I", len(clean_ttf)),
+                         "font.ttf" + ttf_rule + "table 1 head: offset {} and length 54 are outside the".format(
+                             len(clean_ttf)),
+                         (("if offset < directory_end or " + "offset + length > len(data):", "if False:"),)),
+                        ("ttf/table-inside-directory", "ttf/table-inside-directory-flip", "font.ttf",
+                         ttf_patch(clean_ttf, 12 + 8, ">I", 40),
+                         "font.ttf" + ttf_rule + "table 1 head: offset 40 and length 54 are outside the",
+                         (("if offset < directory_end or " + "offset + length > len(data):",
+                           "if offset + length > len(data):"),)),
+                        ("ttf/tables-overlap", "ttf/tables-overlap-flip", "font.ttf",
+                         ttf_patch(clean_ttf, 12 + 12, ">I", len(head_body) + 1),
+                         "font.ttf" + ttf_rule + "table 2 name: it overlaps table 1 head)",
+                         (("if start < " + "previous_end:", "if False:"),)),
+                        ("ttf/duplicate-table", "ttf/duplicate-table-flip", "font.ttf",
+                         ttf_font([(b"head", head_body), (b"head", head_body), (b"name", clean_name)]),
+                         "font.ttf" + ttf_rule + "table 2 head: a second head table)",
+                         (("if tag in " + "tables:", "if False:"),)),
+                        ("ttf/no-name-table", "ttf/no-name-table-flip", "font.ttf",
+                         ttf_font([(b"head", head_body)]), "font.ttf" + ttf_rule + "no name table)",
+                         (('if b"name" not in ' + "tables:", "if False:"),)),
+                        ("ttf/name-header-short", "ttf/name-header-short-flip", "font.ttf",
+                         ttf_font([(b"head", head_body), (b"name", bytes(4))]),
+                         "font.ttf" + ttf_rule + "name table: the name table holds 4 byte(s), fewer than its 6-byte "
+                         "header)",
+                         (("if size < " + "6:", "if False:"),)),
+                        ("ttf/name-format-unknown", "ttf/name-format-unknown-flip", "font.ttf",
+                         ttf_patch(clean_ttf, name_at, ">H", 2),
+                         "font.ttf" + ttf_rule + "name table: name table format 2 is neither 0 nor 1)",
+                         (("if fmt not in " + "(0, 1):", "if False:"),)),
+                        ("ttf/name-records-past-table", "ttf/name-records-past-table-flip", "font.ttf",
+                         ttf_patch(clean_ttf, name_at + 2, ">H", 200),
+                         "font.ttf" + ttf_rule + "name table: 200 name record(s) run past the table's",
+                         (("if end > " + "size:", "if False:"),)),
+                        ("ttf/name-string-out-of-range", "ttf/name-string-out-of-range-flip", "font.ttf",
+                         ttf_patch(ttf_with((1, 0, 5, b"abc")), name_at + 6 + 12 * 4 + 10, ">H", 4000),
+                         "font.ttf" + ttf_rule + fifth.format(1) + ": its string at storage offset 4000 of 3 "
+                         "byte(s) runs past the table's",
+                         (("if first + length > " + "size:", "if False:"),)),
+                        ("ttf/name-utf16-undecodable", "ttf/name-utf16-undecodable-flip", "font.ttf",
+                         ttf_with((3, 1, 5, b"\x00A\x00")),
+                         "font.ttf" + ttf_rule + fifth.format(3) + ": the string cannot be decoded as UTF-16BE: ",
+                         (('text = raw.decode(' + '"utf-16-be")', 'text = raw.decode("utf-16-be", "replace")'),)),
+                        ("ttf/name-mac-other-encoding", "ttf/name-mac-other-encoding-flip", "font.ttf",
+                         ttf_with((1, 1, 5, b"Dancing")),
+                         "font.ttf" + ttf_rule + fifth.format(1) + ": platform 1 encoding 1 has no decoding the "
+                         "rule knows)",
+                         (("elif platform == 1 and " + "encoding == 0:", "elif platform == 1:"),)),
+                        ("ttf/name-windows-finding", "ttf/name-windows-finding-flip", "font.ttf",
+                         ttf_with((3, 1, 5, u16be(role_text.decode("ascii")))),
+                         "font.ttf:" + fifth.format(3) + ":1: " + role,
+                         (('return [(where, text, False) for where, text in ' + '_ttf_name_strings(data, '
+                           '*tables[b"name"])]', "return []"),)),
+                        ("ttf/name-macroman-finding", "ttf/name-macroman-finding-flip", "font.ttf",
+                         ttf_with((1, 0, 5, b"\xa5 " + role_text)), "font.ttf:" + fifth.format(1) + ":1: " + role,
+                         (("text = raw.decode(" + '"mac_roman")', 'text = ""'),)),
+                        ("ttf/name-host-path-finding", "ttf/name-host-path-finding-flip", "font.ttf",
+                         ttf_with((3, 1, 5, u16be(host_text))),
+                         "font.ttf:" + fifth.format(3) + ":1: absolute host path",
+                         (("rules=" + "STRUCTURAL)", "rules=_TRACKED_RULES)"),)),
+                        ("ttf/name-marker-ignored", "ttf/name-marker-ignored-flip", "font.ttf",
+                         ttf_with((3, 1, 5, u16be((marker + b" " + role_text).decode("ascii")))),
+                         "font.ttf:" + fifth.format(3) + ":1: " + role,
+                         (("scan_role_text(text, honour_marker=" + "is_text, rules=", "scan_role_text(text, rules="),)),
+                        ("ttf/name-language-tag-finding", "ttf/name-language-tag-finding-flip", "font.ttf",
+                         ttf_font([(b"head", head_body),
+                                   (b"name", ttf_name(clean_records, 1, (u16be(role_text.decode("ascii")),)))]),
+                         "font.ttf:language tag 1:1: " + role,
+                         (("if fmt == " + "1:", "if False:"),)),
+                        ("ttf/other-case-suffix-refused", "ttf/other-case-suffix-refused-flip", "font.TTF",
+                         clean_ttf, "font.TTF" + not_utf8,
+                         (("if path.suffix == " + "TRACKED_TTF_SUFFIX:",
+                           "if path.suffix.lower() == " + "TRACKED_TTF_SUFFIX:"),))):
+                    got = tracked_verdict(this, relname, data)
+                    check(check_id, png_holds(expect, got), (expect, got))
+                    source, faults = gate_source, []
+                    for anchor, replacement in mutations:
+                        if source.count(anchor) != 1:
+                            faults.append("anchor {!r} occurs {} times".format(anchor, source.count(anchor)))
+                        source = source.replace(anchor, replacement)
+                    flipped = None
+                    if not faults:
+                        module = _load_ratchet_mutant(source, tdir, flip_id.replace("/", "_").replace("-", "_"))
+                        flipped = tracked_verdict(module, relname, data)
+                        if (flipped == expect) if expect == "clean" else (expect in flipped):
+                            faults.append("the vector still holds with its check removed")
+                    check(flip_id, not faults, (faults, flipped))
+            finally:
+                shutil.rmtree(tdir, ignore_errors=True)
+            # A lone surrogate in a UTF-16BE string and a record of a platform the rule has no decoding for
+            # cannot be evaluated, and the other font suffixes stay outside the rule.
+            for check_id, relname, data, expect in (
+                    ("ttf/name-lone-surrogate-refused", "font.ttf", ttf_with((0, 3, 5, b"\xd8\x00\x00A")),
+                     "font.ttf" + ttf_rule + fifth.format(0) + ": the string cannot be decoded as UTF-16BE: "),
+                    ("ttf/name-unknown-platform-refused", "font.ttf", ttf_with((2, 0, 5, b"Dancing")),
+                     "font.ttf" + ttf_rule + fifth.format(2) + ": platform 2 encoding 0 has no decoding the rule "
+                     "knows)"),
+                    ("ttf/otf-suffix-unevaluable", "font.otf", clean_ttf, "font.otf" + not_utf8),
+                    ("ttf/ttc-suffix-unevaluable", "font.ttc", clean_ttf, "font.ttc" + not_utf8)):
+                got = tracked_verdict(this, relname, data)
+                check(check_id, png_holds(expect, got), (expect, got))
+            saved, seen = MAX_TTF_FILE_SIZE, []
+            try:
+                for value in (len(clean_ttf) + 1, len(clean_ttf), len(clean_ttf) - 1):
+                    setattr(this, "MAX_TTF_FILE_SIZE", value)
+                    seen.append(tracked_verdict(this, "font.ttf", clean_ttf))
+            finally:
+                setattr(this, "MAX_TTF_FILE_SIZE", saved)
+            reason = "a TrueType font of more than MAX_TTF_FILE_SIZE ({}) bytes; the read stopped at {} " \
+                "bytes".format(len(clean_ttf) - 1, len(clean_ttf))
+            check("ttf/file-size-bound-ends",
+                  seen[:2] == ["clean", "clean"] and "font.ttf" + ttf_rule + reason in seen[2], seen)
+            # Both ends of a table's range: the last table in the file ending one byte inside, at and one byte
+            # past the end of the file, and the first table starting one byte after, at and one byte before
+            # the end of the table directory (the font with one pad byte after its directory gives "after").
+            tail = ttf_font([(b"name", clean_name), (b"head", head_body)])
+            tail_at = 12 + 32 + len(clean_name)
+            ends = [tracked_verdict(this, "font.ttf", ttf_patch(tail, 12 + 16 + 12, ">I", length))
+                    for length in (len(head_body) - 1, len(head_body), len(head_body) + 1)]
+            ends += [tracked_verdict(this, "font.ttf", data) for data in (
+                ttf_font([(b"name", clean_name), (b"head", head_body)], pad=b"\x00"), tail,
+                ttf_patch(tail, 12 + 8, ">I", 43))]
+            check("ttf/table-range-ends",
+                  ends[:2] == ["clean", "clean"] and ends[3:5] == ["clean", "clean"]
+                  and png_holds("font.ttf" + ttf_rule + "table 2 head: offset {} and length {} are outside "
+                                "the".format(tail_at, len(head_body) + 1), ends[2])
+                  and png_holds("font.ttf" + ttf_rule + "table 1 name: offset 43 and length {} are outside "
+                                "the".format(len(clean_name)), ends[5]), ends)
+
+            ttfrepo = tmp / "ttf-repo"
+            (ttfrepo / ".aiqt").mkdir(parents=True)
+            (ttfrepo / ".aiqt" / "manifest.toml").write_text("format-version = 1\nsources = []\n",
+                                                             encoding="utf-8")
+            wired = []
+            for name, content, want_rc, want in (
+                    ("font.ttf", clean_ttf, 0, "PASS"),
+                    ("hit.ttf", ttf_with((3, 1, 5, u16be(role_text.decode("ascii")))), 1,
+                     "hit.ttf:" + fifth.format(3) + ":1: " + role),
+                    ("font.TTF", clean_ttf, 2, "font.TTF" + not_utf8)):
+                (ttfrepo / name).write_bytes(content)
+                steps = (["init", "-q"],) if name == "font.ttf" else ()
+                for args in steps + (["add", "--", name],):
+                    step = subprocess.run(["git", "-C", str(ttfrepo)] + args, capture_output=True, text=True,
+                                          env=_git_fixture_env.git_fixture_env(), timeout=60)
+                    if step.returncode != 0:
+                        wired.append("git {} failed: {!r}".format(args[0], step.stderr))
+                out, err = io.StringIO(), io.StringIO()
+                with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                    rc = run_gate(ttfrepo)
+                report = out.getvalue() + err.getvalue()
+                if rc != want_rc or want not in report:
+                    wired.append("{}: expected exit {} with {!r}, got rc={} {!r}".format(
+                        name, want_rc, want, rc, report))
+            check("ttf/wired-gate-exit-codes", not wired, wired)
         finally:
             shutil.rmtree(pngdir, ignore_errors=True)
     finally:
@@ -3390,7 +3781,17 @@ def _self_test(caller_env=None):
           "rule passes a clean tracked .woff2, refuses (exit 2) another signature (UTF-8 text included), "
           "finds the role name next to a byte above 0x7F and past an internal-allow marker, still cannot "
           "evaluate a .WOFF2 or a .woff, holds the file-size bound one unit inside, at and outside, and each "
-          "of its five paired checks, removed in a copy of the gate, turns its vector red.")
+          "of its five paired checks, removed in a copy of the gate, turns its vector red; and the TrueType "
+          "rule passes a clean tracked .ttf modelled on the real font's name table, refuses (exit 2) another "
+          "signature (UTF-8 text included), a truncated header or table directory, no tables, a tag that is "
+          "not printable, a table outside the file, inside the directory or overlapping another, a second "
+          "table of one tag, no name table, a short name header, an unknown name format, name records or a "
+          "string past the table, an undecodable UTF-16BE string, a Macintosh record in another encoding and "
+          "a record of another platform, finds the role name in a Windows, Macintosh and language-tag string "
+          "and past an internal-allow marker and a host path in a Windows string, still cannot evaluate a "
+          ".TTF, .otf or .ttc, holds the file-size bound and both table-range ends one unit inside, at and "
+          "outside, exits 0, 1 and 2 through the real gate on a fixture repository, and each of its "
+          "twenty-four paired checks, removed in a copy of the gate, turns its vector red.")
     return 0
 
 
