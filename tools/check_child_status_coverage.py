@@ -540,7 +540,9 @@ DYNAMIC_LOADS_REVIEWED = (
      ("importlib.util.spec_from_file_location('_opf_premise_gate', str(ROOT / GATE_REL))",
       "spec.loader.exec_module(module)"),
      (), "the premise-review evaluator library (opf/tools/_opf_premise_gate.py, no entry point), loaded for "
-     "in-process vectors over tempdir fixture stores; the evaluator spawns nothing, and the store readers it "
+     "in-process vectors over tempdir fixture stores, and loaded a second time by spec_from_file_location of "
+     "sys.argv[1] inside the memory-limited -c child script the huge-span row launches, a string the scan "
+     "does not parse; the evaluator spawns nothing, and the store readers it "
      "imports reach subprocess only inside their own self-tests, which neither it nor this runner calls, so "
      "the row follows nothing"),
     ("tools/gen_crosswalk.py",

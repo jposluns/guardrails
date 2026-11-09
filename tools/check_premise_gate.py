@@ -6,15 +6,18 @@
   any other argument list is refused with exit 2 (this draft registers only the self-test; no
   gate or live mode is wired yet, and the evaluator never allows a store it has not fully read)
 
-Each input/* and history/* outcome row asserts one evaluation outcome (the exit and, for a
-refusal, its cause token), and its flip/* companion repeats the same fixture with that row's one
-guard removed (a module attribute replaced in process through unittest.mock; nothing is executed
-from text) and asserts the outcome CHANGES, so a build that loses the guard turns the row red.
+Each input/* and history/* outcome row asserts one evaluation outcome (the exit, for a refusal
+its cause token, and, where another guard refuses the same fixture under the same cause, enough
+of the detail text to tell the two refusals apart), and its flip/* companion repeats the same
+fixture with that row's one guard removed (a module attribute replaced in process through
+unittest.mock; nothing is executed from text) and asserts that asserted outcome CHANGES, so a
+build that loses the guard turns the row red.
 Each flip removes exactly the guard its row's comment names, so a red flip points at that guard.
 The *-first-line rows pin the rendered first line of a result another row already asserts and
 carry no flip; input/archive-span-huge also carries no flip (it pins the arithmetic span read, a
 property of the reconciliation itself, not a removable guard) and runs its evaluation in a child
-process under a memory limit so an expanding build dies there, never in this runner. The
+process under a memory limit and a wall-clock timeout, so an expanding build dies or stalls
+there, never in this runner, and a timed-out child fails that row. The
 evaluator is loaded from its repository path with importlib; the fixtures are synthetic stores
 under a tempdir, and no live store is read or written.
 """
@@ -228,6 +231,63 @@ def relates(target):
     return {"rel": "relates", "id": target}
 
 
+def _toml_value(value):
+    """One Python value as a TOML inline value; only the shapes these fixtures use."""
+    if isinstance(value, str):
+        return _toml_str(value)
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, list):
+        return "[" + ", ".join(_toml_value(item) for item in value) + "]"
+    if isinstance(value, dict):
+        return "{" + ", ".join("{} = {}".format(key, _toml_value(item))
+                               for key, item in value.items()) + "}"
+    raise TypeError("unsupported fixture value {!r}".format(value))
+
+
+def _append_toml_rows(path, table, rows):
+    """Append [[table]] blocks for rows the Fixture serializers cannot express (the imported
+    envelope's unrecorded and import tables)."""
+    parts = []
+    for row in rows:
+        parts.append("\n[[{}]]\n".format(table))
+        for key, value in row.items():
+            parts.append("{} = {}\n".format(key, _toml_value(value)))
+    with open(path, "a", encoding="utf-8") as handle:
+        handle.write("".join(parts))
+
+
+# Envelope-valid imported rows, mirroring _opf_schema's own self-test fixtures, so the rows that
+# refuse them pin the misplacement alone: each row passes the section 8.3 imported envelope.
+IMPORT_RUN = "imp-20260812T091402Z-0123456789abcdef"
+IMPORT_TABLE = {"source": ".working/imported/import/" + IMPORT_RUN + "/originals/DECISIONS.md",
+                "source_sha256": "0123456789abcdef" * 4, "run": IMPORT_RUN,
+                "imported_at": "2026-08-12T09:14:02Z"}
+
+
+def imported_worklog_row(**over):
+    row = {"id": "imported:WL-3", "type": "worklog", "status": "recorded",
+           "title": "Legacy fix entry", "date": "2024-11-02T00:00:00Z", "kind": "fixed",
+           "summary": "Fixed the stale view",
+           "actor": {"kind": "importer", "id": "import-assistant"},
+           "unrecorded": [{"field": "detail", "reason": "not_applicable"}],
+           "import": dict(IMPORT_TABLE)}
+    row.update(over)
+    return row
+
+
+def imported_decision_row():
+    return {"id": "imported:PD-1", "type": "pending_decision", "status": "decided",
+            "title": "Keep the legacy ledger read-only", "created_at": "2025-03-01T10:00:00Z",
+            "actor": {"kind": "importer", "id": "import-assistant"},
+            "decision": "The legacy ledger stays read-only", "decided_by": "maintainer",
+            "unrecorded": [{"field": "updated_at", "reason": "not_recorded_in_source"},
+                           {"field": "decided_at", "reason": "unparsed"}],
+            "import": dict(IMPORT_TABLE, span=[0, 120],
+                           history=[{"field": "decided_at", "value": "2025-03-02"}],
+                           unparsed=["Decided at the March sync; no time recorded."])}
+
+
 class Fixture:
     """One synthetic generation-1 store under its own product root."""
 
@@ -334,21 +394,28 @@ def check(name, ok, detail=""):
 
 
 def _vector(gate, fixture_path, expect_exit, expect_cause, flip, flipped_ok, item=ITEM,
-            expect_head_wl=None):
+            expect_head_wl=None, expect_detail=None):
     """One vector: the plain outcome, then the SAME fixture with the row's guard removed.
 
+    `expect_detail`, where given, is a substring the refusal detail must carry, for a row whose
+    fixture another guard would also refuse under the same cause: the detail then tells this
+    row's guard from the other, and losing only this row's guard still turns the row.
     Returns ((plain_ok, plain_detail), (red_ok, red_detail), plain_result); the caller records
     both through check() with this row's literal ids. unittest.mock is imported here, after the
     execution report is armed: its import registers an atexit callback of its own, and the
     report finalizer must be the process's first registration."""
     from unittest import mock
+
+    def matches(result):
+        return (result.exit_code == expect_exit and result.cause == expect_cause
+                and (expect_detail is None or expect_detail in (result.detail or "")))
+
     got = gate.evaluate(fixture_path, item, expect_head_wl=expect_head_wl)
-    plain = (got.exit_code == expect_exit and got.cause == expect_cause,
-             (got.exit_code, got.cause, got.detail))
+    plain = (matches(got), (got.exit_code, got.cause, got.detail))
     attr, replacement = flip
     with mock.patch.object(gate, attr, replacement):
         flipped = gate.evaluate(fixture_path, item, expect_head_wl=expect_head_wl)
-    turned = not (flipped.exit_code == expect_exit and flipped.cause == expect_cause)
+    turned = not matches(flipped)
     red = (turned and flipped_ok(flipped), (flipped.exit_code, flipped.cause, flipped.detail))
     return plain, red, got
 
@@ -497,15 +564,26 @@ def _self_test():
                  "spec.loader.exec_module(module)\n"
                  "result = module.evaluate(sys.argv[2], sys.argv[3])\n"
                  "print(result.exit_code, result.cause)\n")
-        proc = subprocess.run([sys.executable, "-I", "-B", "-c", child, str(ROOT / GATE_REL),
-                               spanhuge_path, ITEM], capture_output=True, text=True, timeout=60)
-        check("input/archive-span-huge",
-              proc.returncode == 0 and proc.stdout.strip() == "2 archive-unreadable",
-              (proc.returncode, proc.stdout[-500:], proc.stderr[-500:]))
+        try:
+            proc = subprocess.run([sys.executable, "-I", "-B", "-c", child,
+                                   str(ROOT / GATE_REL), spanhuge_path, ITEM],
+                                  capture_output=True, text=True, timeout=60)
+            huge_ok = proc.returncode == 0 and proc.stdout.strip() == "2 archive-unreadable"
+            huge_detail = (proc.returncode, proc.stdout[-500:], proc.stderr[-500:])
+        except subprocess.TimeoutExpired as exc:
+            # A child that stalls past its wall-clock bound (a build that expands the span into
+            # work instead of memory) fails this row, never this runner.
+            huge_ok = False
+            huge_detail = "evaluation child exceeded its {} s timeout".format(exc.timeout)
+        check("input/archive-span-huge", huge_ok, huge_detail)
 
         # input/archive-span-overlap: two declared spans share WL-6; a WL number lives in exactly
-        # one rotated span, so overlap is refused (the choice the archive reconciliation in
-        # opf/tools/_opf_check.py makes). The flip removes the whole span reconciliation.
+        # one rotated span, so overlap is refused with its own detail (the choice the archive
+        # reconciliation in opf/tools/_opf_check.py makes). Without the overlap test this fixture
+        # is still refused under the same cause by the width-sum reconciliation (3 numbers read,
+        # widths summing to 4), so the row asserts the overlap detail text, and the flip removes
+        # only the overlap test: the surviving reconciliation then refuses with the width-sum
+        # detail instead, turning the row red.
         os.makedirs(base / "spanov")
         spanov = Fixture(base / "spanov").unit()
         spanov_path = spanov.write()
@@ -516,15 +594,49 @@ def _self_test():
                       'destination = "archive/2026/worklog.toml"\n[[worklog_moved]]\n'
                       'span = ["WL-6", "WL-7"]\ndestination = "archive/2026/worklog.toml"\n',
                       spanov_side.entries)
+
+        def _read_wl_numbers(entries):
+            read = set()
+            for entry in entries:
+                ref = (gate._opf_worklog._valid_wl_ref(entry.get("id"))
+                       if isinstance(entry, dict) else None)
+                if ref is not None:
+                    read.add(ref[0])
+            return read
+
+        def span_match_no_overlap(declared, entries, bucket):
+            # _require_span_match with only its overlap refusal removed; the membership walk and
+            # the width-sum count still run.
+            read = _read_wl_numbers(entries)
+            spans = sorted(declared)
+            position = 0
+            for number in sorted(read):
+                while position < len(spans) and spans[position][1] < number:
+                    position += 1
+                if position >= len(spans) or number < spans[position][0]:
+                    raise gate.PremiseGateCannot(
+                        "archive-unreadable",
+                        "{}: archived worklog WL-{} is outside every declared rotated "
+                        "span".format(bucket, number))
+            if len(read) != sum(high - low + 1 for low, high in spans):
+                raise gate.PremiseGateCannot(
+                    "archive-unreadable",
+                    bucket + ": the declared rotated spans do not match the WL numbers read "
+                    "from its worklog.toml")
+
         plain, red, _got = _vector(gate, spanov_path, 2, "archive-unreadable",
-                                   ("_require_span_match", _noop),
-                                   lambda res: res.exit_code == 0)
+                                   ("_require_span_match", span_match_no_overlap),
+                                   lambda res: res.cause == "archive-unreadable"
+                                   and "overlap" not in res.detail,
+                                   expect_detail="overlap")
         check("input/archive-span-overlap", plain[0], plain[1])
         check("flip/input/archive-span-overlap", red[0], red[1])
 
         # input/archive-wl-outside-spans: the bucket worklog holds WL-5 and WL-9 while the spans
         # declare WL-5..WL-6, so the distinct-number count matches the span widths and only the
-        # membership test catches WL-9 outside every declared span.
+        # membership test catches WL-9 outside every declared span. The flip removes only that
+        # membership test; the overlap refusal and the width-sum count still run and pass, so the
+        # out-of-span WL-9 rides into history and the store is allowed.
         os.makedirs(base / "spanout")
         spanout = Fixture(base / "spanout").unit()
         spanout_path = spanout.write()
@@ -533,8 +645,26 @@ def _self_test():
             spanout_side.entry("WL-{}".format(number), summary="rotated bookkeeping")
         spanout.bucket("2026", 'schema = 1\n[[worklog_moved]]\nspan = ["WL-5", "WL-6"]\n'
                        'destination = "archive/2026/worklog.toml"\n', spanout_side.entries)
+
+        def span_match_no_membership(declared, entries, bucket):
+            # _require_span_match with only its membership test removed; the overlap refusal and
+            # the width-sum count still run.
+            read = _read_wl_numbers(entries)
+            spans = sorted(declared)
+            for previous, current in zip(spans, spans[1:]):
+                if current[0] <= previous[1]:
+                    raise gate.PremiseGateCannot(
+                        "archive-unreadable",
+                        "{}: worklog_moved spans WL-{}..WL-{} and WL-{}..WL-{} overlap".format(
+                            bucket, previous[0], previous[1], current[0], current[1]))
+            if len(read) != sum(high - low + 1 for low, high in spans):
+                raise gate.PremiseGateCannot(
+                    "archive-unreadable",
+                    bucket + ": the declared rotated spans do not match the WL numbers read "
+                    "from its worklog.toml")
+
         plain, red, _got = _vector(gate, spanout_path, 2, "archive-unreadable",
-                                   ("_require_span_match", _noop),
+                                   ("_require_span_match", span_match_no_membership),
                                    lambda res: res.exit_code == 0)
         check("input/archive-wl-outside-spans", plain[0], plain[1])
         check("flip/input/archive-wl-outside-spans", red[0], red[1])
@@ -647,59 +777,114 @@ def _self_test():
         check("input/importer-record-invalid", plain[0], plain[1])
         check("flip/input/importer-record-invalid", red[0], red[1])
 
-        # input/imported-entry-unknown-kind: an `imported:` worklog row must pass the imported
-        # envelope (spec 8.3) before the firewall may hold it out; an unknown change kind is
-        # record-invalid, never a skip. The flip removes the imported-envelope validation, so the
-        # firewall holds the malformed row out as history and the store is allowed.
-        os.makedirs(base / "impkind")
-        impkind = Fixture(base / "impkind").unit()
-        impkind.entry("imported:WL-1", actor="importer", kind="no-such-kind",
-                      summary="imported history")
-        plain, red, _got = _vector(gate, impkind.write(), 2, "record-invalid",
-                                   ("_validate_imported_record", _noop),
-                                   lambda res: res.exit_code == 0)
-        check("input/imported-entry-unknown-kind", plain[0], plain[1])
-        check("flip/input/imported-entry-unknown-kind", red[0], red[1])
+        # input/imported-row-in-clean-worklog: an envelope-valid `imported:` worklog row in the
+        # clean active ledger is record-invalid: imported worklog rows live only in
+        # worklog.imported.toml (spec 4.2), never a clean worklog. The flip removes the
+        # misplacement refusal, so the row is validated against the imported envelope, held out
+        # as history, and the store is allowed: exactly the lenient read the refusal prevents.
+        os.makedirs(base / "impwl")
+        impwl = Fixture(base / "impwl").unit()
+        impwl_path = impwl.write()
+        _append_toml_rows(Path(impwl_path) / ".working" / "toml" / "worklog.toml", "entry",
+                          [imported_worklog_row()])
+        plain, red, _got = _vector(gate, impwl_path, 2, "record-invalid",
+                                   ("_refuse_imported_in_worklog", _noop),
+                                   lambda res: res.exit_code == 0,
+                                   expect_detail="in a clean worklog")
+        check("input/imported-row-in-clean-worklog", plain[0], plain[1])
+        check("flip/input/imported-row-in-clean-worklog", red[0], red[1])
 
-        # input/imported-entry-unknown-actor-kind: an `imported:` worklog row whose actor kind is
-        # outside the vocabulary (the imported envelope requires an importer actor).
-        os.makedirs(base / "impactor")
-        impactor = Fixture(base / "impactor").unit()
-        impactor.entry("imported:WL-2", actor="no-such-actor", summary="imported history")
-        plain, red, _got = _vector(gate, impactor.write(), 2, "record-invalid",
-                                   ("_validate_imported_record", _noop),
-                                   lambda res: res.exit_code == 0)
-        check("input/imported-entry-unknown-actor-kind", plain[0], plain[1])
-        check("flip/input/imported-entry-unknown-actor-kind", red[0], red[1])
+        # input/imported-row-duplicated: the same envelope-valid imported row seated twice in the
+        # clean ledger is refused at its first appearance; duplication never launders the series
+        # (the imported number line carries no clean duplicate-wl seat to catch it). The flip
+        # removes the misplacement refusal, and BOTH rows are validated and held out, so the
+        # store is allowed.
+        os.makedirs(base / "impdup")
+        impdup = Fixture(base / "impdup").unit()
+        impdup_path = impdup.write()
+        _append_toml_rows(Path(impdup_path) / ".working" / "toml" / "worklog.toml", "entry",
+                          [imported_worklog_row(), imported_worklog_row()])
+        plain, red, _got = _vector(gate, impdup_path, 2, "record-invalid",
+                                   ("_refuse_imported_in_worklog", _noop),
+                                   lambda res: res.exit_code == 0,
+                                   expect_detail="in a clean worklog")
+        check("input/imported-row-duplicated", plain[0], plain[1])
+        check("flip/input/imported-row-duplicated", red[0], red[1])
 
-        # input/imported-record-bad-status: an `imported:` index record whose status is outside
-        # its type's state set.
-        os.makedirs(base / "impstat")
-        impstat = Fixture(base / "impstat").unit()
-        impstat.record("finding", "imported:FN-1", "no-such-status", actor="importer",
-                       links=[relates(ITEM)])
-        plain, red, _got = _vector(gate, impstat.write(), 2, "record-invalid",
-                                   ("_validate_imported_record", _noop),
-                                   lambda res: res.exit_code == 0)
-        check("input/imported-record-bad-status", plain[0], plain[1])
-        check("flip/input/imported-record-bad-status", red[0], red[1])
+        # input/imported-row-registered-vendor: an envelope-valid imported row carrying an
+        # x-<vendor> table the manifest registers is still record-invalid in a clean worklog.
+        # The flip removes the misplacement refusal, and the row is then held out, not refused:
+        # that outcome is reachable only because the imported validation receives the manifest's
+        # registered vendors the way the doctor's imported read passes them, so the registered
+        # extension table does not fail the envelope.
+        os.makedirs(base / "impvend")
+        impvend = Fixture(base / "impvend").unit()
+        impvend_path = impvend.write()
+        vend_manifest = Path(impvend_path) / ".working" / "toml" / "manifest.toml"
+        with open(vend_manifest, "r", encoding="utf-8") as handle:
+            vend_text = handle.read()
+        with open(vend_manifest, "w", encoding="utf-8") as handle:
+            handle.write(vend_text.replace("registered = []", 'registered = ["x-acme"]', 1))
+        _append_toml_rows(Path(impvend_path) / ".working" / "toml" / "worklog.toml", "entry",
+                          [imported_worklog_row(**{"x-acme": {"lane": "history"}})])
+        plain, red, _got = _vector(gate, impvend_path, 2, "record-invalid",
+                                   ("_refuse_imported_in_worklog", _noop),
+                                   lambda res: res.exit_code == 0,
+                                   expect_detail="in a clean worklog")
+        check("input/imported-row-registered-vendor", plain[0], plain[1])
+        check("flip/input/imported-row-registered-vendor", red[0], red[1])
 
-        # input/imported-moved-record-junk: an archived moved record whose seated row carries its
-        # id and nothing but junk = 1; it must fail the imported envelope, never ride the archive
-        # into a silent skip.
-        os.makedirs(base / "impjunk")
-        impjunk = Fixture(base / "impjunk").unit()
-        impjunk_path = impjunk.write()
-        impjunk.bucket("2026", 'schema = 1\n[[moved]]\nid = "imported:BI-9"\n'
-                       'type = "backlog_item"\ndestination = "archive/2026/backlog_item.toml"\n')
-        with open(impjunk.machine / "archive" / "2026" / "backlog_item.toml", "w",
+        # input/imported-row-in-clean-index: an envelope-valid imported record in a clean
+        # <type>.index.toml is record-invalid: imported records live only in
+        # <type>.imported.index.toml (spec 4.2). The flip removes the misplacement refusal.
+        os.makedirs(base / "impidx")
+        impidx = Fixture(base / "impidx").unit()
+        impidx_path = impidx.write()
+        _append_toml_rows(Path(impidx_path) / ".working" / "toml" / "pending_decision.index.toml",
+                          "record", [imported_decision_row()])
+        plain, red, _got = _vector(gate, impidx_path, 2, "record-invalid",
+                                   ("_refuse_imported_in_records", _noop),
+                                   lambda res: res.exit_code == 0,
+                                   expect_detail="imported-series id imported:PD-1")
+        check("input/imported-row-in-clean-index", plain[0], plain[1])
+        check("flip/input/imported-row-in-clean-index", red[0], red[1])
+
+        # input/imported-row-in-archive: an envelope-valid imported record enumerated as moved
+        # and seated once at its archive destination is record-invalid: the imported series never
+        # rotates, so the record archive never holds one (spec 12). The flip removes the
+        # misplacement refusal, and the archived row is validated and held out instead.
+        os.makedirs(base / "imparch")
+        imparch = Fixture(base / "imparch").unit()
+        imparch_path = imparch.write()
+        imparch.bucket("2026", 'schema = 1\n[[moved]]\nid = "imported:PD-1"\n'
+                       'type = "pending_decision"\n'
+                       'destination = "archive/2026/pending_decision.toml"\n')
+        with open(imparch.machine / "archive" / "2026" / "pending_decision.toml", "w",
                   encoding="utf-8") as handle:
-            handle.write('schema = 1\n\n[[record]]\nid = "imported:BI-9"\njunk = 1\n')
-        plain, red, _got = _vector(gate, impjunk_path, 2, "record-invalid",
-                                   ("_validate_imported_record", _noop),
-                                   lambda res: res.exit_code == 0)
-        check("input/imported-moved-record-junk", plain[0], plain[1])
-        check("flip/input/imported-moved-record-junk", red[0], red[1])
+            handle.write("schema = 1\n")
+        _append_toml_rows(imparch.machine / "archive" / "2026" / "pending_decision.toml",
+                          "record", [imported_decision_row()])
+        plain, red, _got = _vector(gate, imparch_path, 2, "record-invalid",
+                                   ("_refuse_imported_in_records", _noop),
+                                   lambda res: res.exit_code == 0,
+                                   expect_detail="imported-series id imported:PD-1")
+        check("input/imported-row-in-archive", plain[0], plain[1])
+        check("flip/input/imported-row-in-archive", red[0], red[1])
+
+        # input/worklog-suffixed-id: a suffixed clean worklog id (WL-5.abcd) is outside the
+        # complete id grammar `<NS>-<n>` (spec 8.2), so the clean schema refuses the row as
+        # record-invalid; it is never parsed down to its number the way the span-bound and
+        # expected-head rows also refuse. The flip removes the clean validation, and the row
+        # then counts as its number and the store is allowed.
+        os.makedirs(base / "suffid")
+        suffid = Fixture(base / "suffid").unit()
+        suffid.entry("WL-5.abcd", summary="suffixed row")
+        plain, red, _got = _vector(gate, suffid.write(), 2, "record-invalid",
+                                   ("_validate_clean_record", _noop),
+                                   lambda res: res.exit_code == 0,
+                                   expect_detail="not a well-formed")
+        check("input/worklog-suffixed-id", plain[0], plain[1])
+        check("flip/input/worklog-suffixed-id", red[0], red[1])
 
         # input/worklog-not-schema-1: the active ledger parses as TOML but is not the declared
         # schema-1 {schema, entry} shape.
@@ -968,8 +1153,10 @@ def _self_test():
           "undeclared bucket worklog, a malformed, inverted, mismatched, overlapping, suffixed, "
           "foreign-destination or file-less rotated span, a huge span refused arithmetically in "
           "a memory-limited child, a WL number outside every declared span, a twice-seated "
-          "moved record, an invalid record (importer-authored and imported-series rows "
-          "included), a mis-shaped index, a duplicate WL, an unknown flow event, a malformed "
+          "moved record, an invalid record (importer-authored rows and a suffixed worklog id "
+          "included), a misplaced imported-series row (in the clean worklog, duplicated, "
+          "vendor-extended, in a clean index and in the record archive, each envelope-valid), "
+          "a mis-shaped index, a duplicate WL, an unknown flow event, a malformed "
           "scope=, a verdict without rev=, an unrelated flow entry, a start entry missing its "
           "fields, a missing start entry, a missing item, a finding without its create entry, a "
           "moved or non-canonical expected head and a unit with any finding each refuse with "

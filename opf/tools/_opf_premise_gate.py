@@ -6,12 +6,14 @@ resolved OPF store and derives, for one backlog item, the declared history the f
 (opf/prompt-pack/flow/SKILL.md sections 5 and 7): the manifest, the active worklog and the
 record-rotation archive read together, the unit's flow entries parsed under the section 5 grammar,
 the writer's lifecycle lines, and the unit's records, all behind the section 8.6 firewall (only
-clean WL-series entries and records by non-importer actors count; an `imported:` id or an
-importer-authored entry or record is history, never read as live state, and never an obligation).
-Every row read is validated before the firewall may hold it out: a clean-series row against its
-clean schema, and a row carrying an `imported:` id against the closed imported envelope
-(OPF-SPEC.md section 8.3, _opf_schema.validate_imported_record); a malformed row of either series
-is record-invalid, never a silent skip.
+clean WL-series entries and records by non-importer actors count; an importer-authored entry or
+record is history, never read as live state, and never an obligation). An importer-authored row
+is validated against its clean schema before the firewall may hold it out; a malformed row is
+record-invalid, never a silent skip. A row carrying an `imported:` id is record-invalid wherever
+this evaluator finds one: OPF-SPEC.md places imported rows only in worklog.imported.toml and
+<type>.imported.index.toml (section 4.2), files this evaluator does not read, and the imported
+series never rotates into the record archive (section 12), so no clean worklog, clean index or
+archive surface read here may hold one, however well-formed the row's own envelope is.
 
 This draft carries the read side only. Its outcomes:
 
@@ -42,9 +44,10 @@ Cannot-evaluate causes, fail-closed and never read as an empty history:
                          or a moved record not seated exactly once at its destination
   index-unreadable       a <type>.index.toml this evaluator reads is absent, unreadable, or not a
                          schema-1 {schema, record} index
-  record-invalid         a worklog entry or record fails its _opf_schema validation (a clean row
-                         against the clean schema, an `imported:` row against the section 8.3
-                         imported envelope), carries a non-WL id, or an id is seated twice
+  record-invalid         a worklog entry or record fails its clean _opf_schema validation,
+                         carries a non-WL id or an `imported:` id (imported rows live only in
+                         the imported leaves, which this evaluator never reads), or an id is
+                         seated twice
   duplicate-wl           two worklog entries carry the same WL number
   unknown-flow-event     a `flow ` detail line carries an event outside the section 5 set (the
                          section 5 run entry, `flow run ...`, is recognised and never read as a
@@ -64,8 +67,10 @@ Cannot-evaluate causes, fail-closed and never read as an empty history:
 
 Boundary notes. The head WL is the highest number over every WL-series entry read, active and
 archived, importer-authored entries included (an importer append still moves the store), while the
-`imported:` series is separate and never counted (each such row is validated against the imported
-envelope, then held out). Declared rotated spans are reconciled arithmetically against the WL
+`imported:` series is separate and never counted: a row carrying an `imported:` id is refused as
+record-invalid wherever it sits in the surfaces read here, since OPF-SPEC.md sections 4.2 and 12
+place imported rows only in the never-rotated imported leaves. Declared rotated spans are
+reconciled arithmetically against the WL
 numbers read from the bucket's worklog file: the sorted spans must not overlap (a WL number lives
 in exactly one rotated span, the same refusal _opf_check.py's archive reconciliation makes), every
 number read must sit inside one span, and the count of distinct numbers read must equal the sum of
@@ -230,8 +235,9 @@ def _require_flow_relates(entry, item, number):
 
 def _ignored_by_firewall(ident, actor_kind):
     """The section 8.6 firewall: imported-series ids and importer-authored writes are history.
-    An `imported:` id reaches this test only after the row passed the section 8.3 imported
-    envelope; a row of either series is validated before it may be held out."""
+    A conforming read reaches this only with importer-authored clean rows, validated before they
+    may be held out; an `imported:` id is refused as misplaced before this test could hold it
+    out, so the imported-series arm matters only to a build that lost that refusal."""
     return ident.startswith(_opf_schema.IMPORTED_PREFIX) or actor_kind == "importer"
 
 
@@ -352,14 +358,49 @@ def _validate_clean_record(row, rtype, where):
             where, "; ".join(validation.findings) or validation.status))
 
 
-def _validate_imported_record(row, rtype, where):
+def _validate_imported_record(row, rtype, where, vendors):
     """One imported-series row through the closed imported envelope (OPF-SPEC.md section 8.3,
-    _opf_schema.validate_imported_record); anything but VALID fails closed. The section 8.6
-    firewall may hold a row out as history only after it validated."""
-    validation = _opf_schema.validate_imported_record(row, expected_type=rtype)
+    _opf_schema.validate_imported_record), the manifest's registered vendors passed the way the
+    doctor's imported read passes them; anything but VALID fails closed. A conforming read never
+    reaches this: an `imported:` id in any surface read here is refused as misplaced first, and
+    only a build that lost that refusal falls through to validating and holding the row out."""
+    validation = _opf_schema.validate_imported_record(row, expected_type=rtype,
+                                                      registered_vendors=vendors)
     if validation.status != _opf_store.VALID:
         raise PremiseGateCannot("record-invalid", "{}: {}".format(
             where, "; ".join(validation.findings) or validation.status))
+
+
+def _refuse_imported_in_worklog(ident, where):
+    """An `imported:` id never sits in a clean worklog: OPF-SPEC.md places imported worklog rows
+    only in worklog.imported.toml (section 4.2), and the imported series never rotates (section
+    12), so the active ledger and every rotated bucket span hold clean WL ids alone. The row is
+    record-invalid whatever its own envelope says, envelope-valid and duplicated rows included."""
+    raise PremiseGateCannot("record-invalid",
+                            "{}: imported-series id {} in a clean worklog (imported worklog rows "
+                            "live only in worklog.imported.toml)".format(where, ident))
+
+
+def _refuse_imported_in_records(ident, rel):
+    """An `imported:` id never sits in a clean record index or the record-rotation archive:
+    OPF-SPEC.md places imported records only in <type>.imported.index.toml (section 4.2) and
+    keeps the imported series out of the record archive (section 12: it never rotates), so a row
+    carrying one here is record-invalid whatever its own envelope says."""
+    raise PremiseGateCannot("record-invalid",
+                            "{}: imported-series id {} in a clean index or the record archive "
+                            "(imported records live only in "
+                            "<type>.imported.index.toml)".format(rel, ident))
+
+
+def _registered_vendors(model):
+    """The manifest's registered x-<vendor> set, derived as the doctor derives it; a malformed
+    [vendors].registered fails closed to the empty set (the validated manifest cannot carry one,
+    but this read never widens on a surprise)."""
+    vendors = model.data.get("vendors") if isinstance(model.data, dict) else None
+    reg = vendors.get("registered") if isinstance(vendors, dict) else None
+    if isinstance(reg, list) and all(isinstance(item, str) for item in reg):
+        return frozenset(reg)
+    return frozenset()
 
 
 def _require_item(records, item):
@@ -636,7 +677,7 @@ def _read_archive_toml(root_fd, rel, snapshot, required):
     return got[1]
 
 
-def _collect_worklog(entries):
+def _collect_worklog(entries, vendors):
     """The clean WL-series history behind the firewall: flow entries, lifecycle facts, head."""
     seen = set()
     clean = []
@@ -650,9 +691,13 @@ def _collect_worklog(entries):
         actor = entry.get("actor")
         kind = actor.get("kind") if isinstance(actor, dict) else None
         if ident.startswith(_opf_schema.IMPORTED_PREFIX):
-            # The imported series is a separate number line, never counted toward the head, but
-            # a row is validated (section 8.3 envelope) before the firewall may hold it out.
-            _validate_imported_record(entry, "worklog", ident)
+            # Imported worklog rows live only in worklog.imported.toml, which this evaluator
+            # does not read, so one here is misplaced whatever its envelope says. A build that
+            # loses this refusal falls through to validating the row against the section 8.3
+            # imported envelope and holding it out as history, the lenient read the refusal
+            # exists to prevent.
+            _refuse_imported_in_worklog(ident, where)
+            _validate_imported_record(entry, "worklog", ident, vendors)
             if _ignored_by_firewall(ident, kind):
                 continue
         ref = _opf_worklog._valid_wl_ref(ident)
@@ -699,7 +744,7 @@ def _links_relate(record, target):
                for link in links)
 
 
-def _collect_records(root_fd, machine_rel, snapshot, archived):
+def _collect_records(root_fd, machine_rel, snapshot, archived, vendors):
     """Each read type's clean records by id, active index plus archive, behind the firewall."""
     records = {}
     for rtype in RECORD_TYPES:
@@ -723,9 +768,13 @@ def _collect_records(root_fd, machine_rel, snapshot, archived):
             actor = row.get("actor")
             kind = actor.get("kind") if isinstance(actor, dict) else None
             if ident.startswith(_opf_schema.IMPORTED_PREFIX):
-                # Validated against the section 8.3 imported envelope before the firewall may
-                # hold the row out of the live record set.
-                _validate_imported_record(row, rtype, ident)
+                # Imported records live only in <type>.imported.index.toml, which this evaluator
+                # does not read, and never rotate into the record archive, so one here (active
+                # index row or archived moved record alike) is misplaced whatever its envelope
+                # says. A build that loses this refusal falls through to validating the row
+                # against the section 8.3 imported envelope and holding it out.
+                _refuse_imported_in_records(ident, rel)
+                _validate_imported_record(row, rtype, ident, vendors)
                 if _ignored_by_firewall(ident, kind):
                     continue
             _validate_clean_record(row, rtype, ident)
@@ -762,10 +811,12 @@ def evaluate(store, item, expect_head_wl=None):
         root_fd = _open_root(res)
         try:
             model = _read_manifest(root_fd, res.machine_rel, snapshot)
+            vendors = _registered_vendors(model)
             document = _load_worklog_history(root_fd, res.machine_rel, model, snapshot)
             archive_entries, archived = _read_archive(root_fd, res.machine_rel, snapshot)
-            history = _collect_worklog(archive_entries + list(document.get("entry", [])))
-            records = _collect_records(root_fd, res.machine_rel, snapshot, archived)
+            history = _collect_worklog(archive_entries + list(document.get("entry", [])),
+                                       vendors)
+            records = _collect_records(root_fd, res.machine_rel, snapshot, archived, vendors)
         finally:
             os.close(root_fd)
         _require_item(records, item)
