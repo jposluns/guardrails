@@ -89,6 +89,39 @@ generator alone cannot assert:
     numeric characters on a designated line fails loud in any wording, whatever noun, spacing,
     markup or no-break space surrounds it (a missing anchored wording is itself a finding, so a
     reworded count fails loud, never silently unchecked);
+  - the site's Claude Code hook total: each hook-count statement SITE_HOOK_FACTS names must be
+    present in its site/draft-src source (the hand-written page source tools/gen_draft_site.py
+    renders and drift-gates the page against) and must state the same expected_counts hook total
+    the landing README is rendered from, and every hook figure in any site/draft-src/*.toml source
+    must state that total too. Both read the parsed TOML string values, never the raw file text, so
+    a TOML comment can neither satisfy nor trip them. Each value is read only when it is written
+    in the closed subset of HTML the site sources use, and is otherwise cannot-evaluate (exit 2):
+    the elements a, code, em, span and strong (inline, read as nothing) and li, p and ul (blocks,
+    read as a word boundary); the attributes class, href, rel, target and title, each value
+    double- or single-quoted; a start tag holding nothing else, an end tag holding only its name;
+    markup strictly nested (each li directly inside a ul, no p or ul inside an open p, every end
+    tag closing the innermost open element, none left open). Refused: every other tag, in any
+    case; every other attribute; every '<!' and '<?' construct (a comment, a DOCTYPE, a CDATA
+    section, a processing instruction); a '</' with no name; a NUL; a value ending inside open
+    markup; and a standard library html.parser that reads a quoted-attribute probe differently
+    from HTML5. Read: the text, parsed by that html.parser, with character references unescaped,
+    format characters dropped, Unicode decimal digits read as digits and whitespace (U+00A0
+    included) folded to one space, and each attribute value swept on its own. Out of scope: a
+    browser's own rendering of that text (the site's CSS can hide, show or run together what the
+    reader reads) and the generator's markup around a value (each value is read as a fragment on
+    its own). A hook figure is a number before "hook" or "hooks", joined by whitespace or a
+    hyphen and with at most three words between (3-hook, 3 Claude Code hook, 3 opt-in hooks), and
+    not followed by a hyphen or a letter (25 hook-linked rules is not one); the number is the
+    whole numeric field, read whole when its digit runs are joined by ',', '.', '+' or '-' or it
+    carries a sign, and read after any character but a digit (identified.30 hooks is a figure). It
+    over-reads: a number about something else that sits within three words of "hooks" (1 hooks
+    file, 17 frameworks and hooks), a field such as 1,031 that never equals the total, and a
+    figure in an attribute value are findings. It does not read a figure spelled in words or
+    written with a non-decimal numeric character such as a superscript, more than three words from
+    its noun, or held in a key or a non-string value; in a field the generator escapes, where the
+    page shows markup as literal text, the reader still reads that markup as markup.
+    gen_draft_site refuses a subfolder or any non-.toml entry in site/draft-src, so no other file
+    there renders and none is read;
   - the disclosure's shipped-path declaration (the [[code]]/[[noncode]] prefix rows of disclosure.toml,
     the same validated source gen_disclosure renders the public shipped-code sentence from): every
     path the release manifest (.aiqt/manifest.toml) lists must fall under a declared prefix (a
@@ -157,6 +190,7 @@ if tuple(sys.version_info[:2]) < (3, 14):
 import json
 import re
 import unicodedata
+from html.parser import HTMLParser
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -865,6 +899,303 @@ def check_readme_counts(root, manifests, findings):
                             "page gained an operative count)".format(text[run_start:run_end], label))
 
 
+# The site's Claude Code hook total. The site pages state it in hand-written prose in their sources
+# under site/draft-src/ (tools/gen_draft_site.py renders each page from its source and drift-gates
+# the rendered page against it), so this leg binds those statements to the expected_counts hook total
+# the landing README is rendered from. Each (source, label, wording) below is REQUIRED in its source:
+# a reworded statement is a missing-wording finding, never silently unchecked. Every other hook
+# figure (SITE_HOOK_FIGURE) in ANY site/draft-src/*.toml source must state the same total, so a new
+# sentence carrying a stale figure fails too. Both read the parsed string values through _site_read,
+# which accepts only a closed subset of HTML (the elements and attributes the site sources use,
+# written strictly and nested strictly) and refuses everything else as cannot-evaluate (exit 2), so
+# what it reads is the text that subset parses to under HTML5, never a guess at markup it does not
+# model. A TOML comment, which never renders, can neither satisfy a wording nor carry a figure; an
+# entity, an inline tag, a no-break space or a non-ASCII decimal digit cannot hide one; and a </p><p>
+# or </li><li> boundary is a word boundary, so it cannot join a figure to the text before it.
+SITE_DRAFT_SRC = Path("site") / "draft-src"
+SITE_HOOK_FACTS = (
+    ("home.toml", "home page intro",
+     r"\bIn Claude Code, an opt-in plugin of " + _NUM + r" hooks\b"),
+    ("home.toml", "home page value paragraph", r"\bIts " + _NUM + r" Claude Code hooks\b"),
+    ("install-details.toml", "install details page", r"\bThe " + _NUM + r" Claude Code hooks\b"),
+)
+# A number, then "hook" or "hooks", joined by whitespace or a hyphen with at most three words between
+# (3-hook, 3 Claude Code hook, 3 opt-in hooks; a word may hold inner hyphens), or written straight on
+# (3hooks, which an inline tag or a zero-width space between them leaves), and the noun not continued
+# by a letter or a hyphen, so the compound adjective in "25 are hook-linked" is not a figure. The
+# words between are not checked, so a number about something else within three words of the noun
+# is read as a hook figure (a disclosed over-read that fails toward a finding). The figure is the
+# whole numeric field: it may open with a sign and join digit runs with '.', ',', '+' or '-' (1,031,
+# 1.31, 2-31 and -31 are each read whole, so none reads as a passing 31), and only a digit before it
+# stops it, so a figure glued to the punctuation of the word before ("identified.30 hooks") is read.
+_SITE_WORD = r"[^\W\d_]+(?:-[^\W\d_]+)*"
+_SITE_NUM = r"(?<![0-9])([+-]?[0-9]+(?:[.,+-][0-9]+)*)"
+SITE_HOOK_FIGURE = re.compile(
+    _SITE_NUM + r"(?:[\s-]+(?:" + _SITE_WORD + r"[\s-]+){0,3})?hooks?(?![^\W\d_]|-)", re.I)
+_SITE_SPACE = re.compile(r"\s+")
+# The closed list of elements a site source value may hold, counted from every string value of every
+# site/draft-src/*.toml source (the only files the check and the generator read there); each is here
+# because the sources use it:
+#   a       links (eight of the eleven sources); inline
+#   code    command names and commit hashes (install, install-details, mappings); inline
+#   em      emphasis (home, install-details, standard); inline
+#   span    classed runs of text (seven sources); inline
+#   strong  strong emphasis (future, install-details, mappings, standard); inline
+#   li      list items, each directly inside a ul (license, mappings); a block
+#   p       paragraphs (eight sources); a block
+#   ul      lists (license, mappings); a block
+# An inline tag reads as nothing (<strong>3</strong> hooks reads as 3 hooks) and a block tag as one
+# space (identified.</p><p>30 hooks reads as two words). Every other tag, in any case, is
+# cannot-evaluate (exit 2): a tag outside the list may be one whose rendering the reader does not
+# model (raw text, an inert template, a moved or dropped table part, an input or image whose
+# attribute renders as text, a tag HTML5 ignores so that the text around it joins).
+_SITE_INLINE_TAGS = frozenset(("a", "code", "em", "span", "strong"))
+_SITE_BLOCK_TAGS = frozenset(("li", "p", "ul"))
+# The closed list of attributes, also counted from the sources: href, rel and target (on a), class
+# (on code, p and span) and title (on code). None renders as page text on these elements, but each
+# value is still swept on its own for a hook figure (a title shows as a tooltip, and a field the
+# generator escapes shows the whole tag as literal text). Any other attribute is cannot-evaluate.
+_SITE_ATTRIBUTES = frozenset(("class", "href", "rel", "target", "title"))
+# Every place the HTML5 tokenizer leaves its data state at '<', scanned on the raw value before it
+# is parsed: '<!' (a comment, a DOCTYPE, a CDATA section, which outside foreign content is a bogus
+# comment ending at the first '>', or another bogus comment) and '<?' (a bogus comment), refused;
+# '</' not followed by an ASCII letter ('</>' is dropped, any other is a bogus comment), refused;
+# and '<' or '</' then an ASCII letter, a tag whose name runs to whitespace, '/' or '>' and must be
+# in the closed lists above. A construct of this shape inside an attribute value is refused too (a
+# disclosed over-refusal). A '<' followed by anything else is text in HTML5 and to the parser.
+_SITE_MARKUP = re.compile(r"<(?:([!?])|(/)(?![A-Za-z])|/?([A-Za-z][^\t\n\f\r />]*))")
+# The only forms a tag may take, so html.parser and the HTML5 tokenizer end it at the same '>': a
+# start tag is its name and attributes each written name="value" or name='value' (or bare), with no
+# '/' anywhere outside a quoted value; an end tag is its name and optional whitespace.
+_SITE_START_TAG = re.compile(
+    r"<[A-Za-z]+(?:[\t\n\f\r ]+[A-Za-z]+(?:=(?:\"[^\"]*\"|'[^']*'))?)*[\t\n\f\r ]*>")
+_SITE_END_TAG_REST = re.compile(r"[\t\n\f\r ]*>")
+# A markup construct left open at the end of a value: on the page it runs on into whatever the
+# generator writes next, so the value alone cannot say what renders, and the reader refuses it.
+_SITE_OPEN_MARKUP = re.compile(r"<[A-Za-z!?/]")
+# Inputs whose HTML5 reading the reader depends on, each with the text HTML5 renders for it: a '>'
+# inside a double- or single-quoted attribute value does not end the tag. check_site_hook_counts
+# runs them first and refuses to evaluate (exit 2) under an html.parser that reads one differently.
+_SITE_HTML5_PROBES = (
+    ('<span title="x > y">a</span>', "a"),
+    ("<span title='x > y'>a</span>", "a"),
+)
+
+
+def _site_tag_name(name):
+    """A tag name as HTML5 compares it: ASCII letters lowered, every other character kept (so a
+    name holding a non-ASCII character never matches a listed one)."""
+    return name.lower() if name.isascii() else name
+
+
+class _SiteTextReader(HTMLParser):
+    """The text of one value _site_read has scanned: character data with character references
+    converted, a space at every _SITE_BLOCK_TAGS tag and nothing at an _SITE_INLINE_TAGS tag, and
+    every attribute value kept apart (attribute_values). A tag outside both lists, a start tag not
+    in the _SITE_START_TAG form, an attribute outside _SITE_ATTRIBUTES, an li not directly inside a
+    ul the value opened, a p or ul opened inside an open p (HTML5 would close that p itself), and an
+    end tag that does not close the innermost element the value holds open (HTML5 can ignore one,
+    joining the text around it) each raise ValueError; so does an element left open at the end."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.parts, self.attribute_values, self.stack = [], [], []
+
+    def handle_data(self, data):
+        self.parts.append(data)
+
+    def handle_starttag(self, tag, attrs):
+        raw = self.get_starttag_text()
+        if tag not in _SITE_INLINE_TAGS and tag not in _SITE_BLOCK_TAGS:
+            raise ValueError("the value holds a <{}> tag, outside the reader's closed list of "
+                             "elements ({!r})".format(tag, raw))
+        if not _SITE_START_TAG.fullmatch(raw):
+            raise ValueError("the start tag {!r} is not its name and quoted attributes alone, so its "
+                             "end cannot be shown to match HTML5's".format(raw))
+        for name, val in attrs:
+            if name not in _SITE_ATTRIBUTES:
+                raise ValueError("the value holds a {!r} attribute, outside the reader's closed list "
+                                 "of attributes ({!r})".format(name, raw))
+            if val is not None:
+                self.attribute_values.append(val)
+        if tag == "li" and self.stack[-1:] != ["ul"]:
+            raise ValueError("the value holds an <li> that is not directly inside a <ul> it "
+                             "opens ({!r})".format(raw))
+        if tag in ("p", "ul") and "p" in self.stack:
+            raise ValueError("the value opens a <{}> inside an open <p>, which HTML5 closes "
+                             "itself ({!r})".format(tag, raw))
+        self.stack.append(tag)
+        if tag in _SITE_BLOCK_TAGS:
+            self.parts.append(" ")
+
+    def handle_endtag(self, tag):
+        if self.stack[-1:] != [tag]:
+            raise ValueError("the value holds a </{}> that does not close the innermost element it "
+                             "holds open ({}), so HTML5 may ignore it".format(
+                                 tag, "<{}>".format(self.stack[-1]) if self.stack else "none"))
+        self.stack.pop()
+        if tag in _SITE_BLOCK_TAGS:
+            self.parts.append(" ")
+
+
+def _site_char(ch):
+    """One character as the sweep reads it: a format character (category Cf, such as a zero-width
+    space or a soft hyphen) renders as nothing, and a Unicode decimal digit (a fullwidth or
+    Arabic-Indic 3, for example) is read as its ASCII digit."""
+    if unicodedata.category(ch) == "Cf":
+        return ""
+    digit = unicodedata.decimal(ch, None)
+    return ch if digit is None else str(digit)
+
+
+def _site_fold(text):
+    """Text as the sweep reads it: each character through _site_char, then every run of whitespace
+    (U+00A0 and the other Unicode spaces included) folded to one space."""
+    return _SITE_SPACE.sub(" ", "".join(_site_char(ch) for ch in text))
+
+
+def _site_read(value):
+    """(text, attribute texts) for one string value of a parsed site/draft-src source. The value is
+    read only when it is written in the closed subset the site sources use, and is otherwise
+    ValueError (cannot-evaluate, exit 2). Refused on the raw value before parsing: a NUL character
+    (HTML5 drops it from text and turns it into U+FFFD in a tag name), every '<!' and '<?' construct
+    (a comment, a DOCTYPE, a CDATA section, a processing instruction or another bogus comment), a
+    '</' not followed by an ASCII letter, a tag outside _SITE_INLINE_TAGS and _SITE_BLOCK_TAGS (its
+    name lowered in ASCII only), and an end tag holding anything after its name but whitespace.
+    Refused while parsing by _SiteTextReader on the standard library html.parser: a start tag not
+    in the _SITE_START_TAG form, an attribute outside _SITE_ATTRIBUTES, and markup that is not
+    strictly nested (an li outside a ul, a p or ul inside an open p, an end tag that does not close
+    the innermost open element, an element left open); and a value ending inside open markup
+    (_SITE_OPEN_MARKUP) or one the parser rejects. What is read: character data, with character
+    references, named and numeric (&nbsp;, &#32;, &#51;), converted; nothing at an inline tag (so
+    <strong>3</strong> hooks reads as 3 hooks) and one space at a block tag; each attribute value
+    apart, as its own text. Both pass through _site_fold. Out of scope: how a browser styles or
+    lays the text out (the site's CSS can hide, show or run together what this reads) and how the
+    generator's own markup around the value changes its parse (the value is read as a fragment on
+    its own). Every string value is read as HTML, so in a field the generator escapes, where the
+    page shows the markup as literal text, the reader still reads the tags as markup."""
+    if "\x00" in value:
+        raise ValueError("the value holds a NUL character, which HTML5 drops from text")
+    for found in _SITE_MARKUP.finditer(value):
+        bang, slash, name = found.groups()
+        shown = value[found.start():found.start() + 24]
+        if bang:
+            raise ValueError("the value holds a '<{}' construct (a comment, a declaration, a CDATA "
+                             "section or a processing instruction), which the reader does not "
+                             "accept ({!r})".format(bang, shown))
+        if slash:
+            raise ValueError("the value holds a '</' with no tag name after it, which HTML5 drops "
+                             "or reads as a comment ({!r})".format(shown))
+        tag = _site_tag_name(name)
+        if tag not in _SITE_INLINE_TAGS and tag not in _SITE_BLOCK_TAGS:
+            raise ValueError("the value holds a <{}> tag, outside the reader's closed list of "
+                             "elements ({!r})".format(tag, shown))
+        if found.group(0).startswith("</") and not _SITE_END_TAG_REST.match(value, found.end()):
+            raise ValueError("the value holds an end tag with more than its name ({!r})".format(shown))
+    reader = _SiteTextReader()
+    try:
+        reader.feed(value)
+        if _SITE_OPEN_MARKUP.match(reader.rawdata):
+            raise ValueError("the value ends inside an open markup construct ({!r})".format(
+                reader.rawdata[:40]))
+        reader.close()
+    except AssertionError as exc:
+        raise ValueError("html.parser rejected the value ({})".format(exc)) from exc
+    if reader.stack:
+        raise ValueError("the value leaves <{}> open at its end".format(reader.stack[-1]))
+    return (_site_fold("".join(reader.parts)),
+            [_site_fold(text) for text in reader.attribute_values])
+
+
+def _site_rendered_text(value):
+    """The text _site_read gives for one value, without its attribute texts."""
+    return _site_read(value)[0]
+
+
+def _site_parser_reads_html5():
+    """None when html.parser reads every _SITE_HTML5_PROBES input as HTML5 renders it, else the
+    first input it reads differently (the reader's attribute handling rests on it)."""
+    for value, want in _SITE_HTML5_PROBES:
+        try:
+            got = _site_rendered_text(value)
+        except ValueError:
+            return value
+        if got != want:
+            return value
+    return None
+
+
+def _site_values(path):
+    """Every string value in one site/draft-src source, parsed as TOML (tables and arrays walked in
+    document order; keys and non-string values are not read), each as the (text, attribute texts)
+    pair _site_read gives. A missing source is OSError; an unparsable source, or a value the HTML
+    reader cannot evaluate, is ValueError naming the source; all fail closed (exit 2)."""
+    if not path.is_file():
+        raise OSError("required surface missing: {}".format(path))
+    try:
+        doc = load_toml(path)
+    except ValueError as exc:
+        raise ValueError("{}: cannot parse ({})".format(path, exc)) from exc
+    values, stack = [], [doc]
+    while stack:
+        item = stack.pop()
+        if isinstance(item, str):
+            try:
+                values.append(_site_read(item))
+            except ValueError as exc:
+                raise ValueError("{}: cannot evaluate a value as HTML ({})".format(path, exc)) from exc
+        elif isinstance(item, dict):
+            stack.extend(reversed(list(item.values())))
+        elif isinstance(item, list):
+            stack.extend(reversed(item))
+    return values
+
+
+def check_site_hook_counts(root, manifests, findings):
+    """The site's hook-count statements against the expected_counts hook total: each SITE_HOOK_FACTS
+    wording must be present in the parsed string values of its site/draft-src source with that
+    total, and every SITE_HOOK_FIGURE figure in the text and in each attribute text of those values
+    of every site/draft-src/*.toml source must equal it. A missing source directory, a missing
+    named source, a source that does not parse, a value _site_read refuses (markup outside its
+    closed lists of elements and attributes, any '<!' or '<?' construct, markup not strictly
+    nested, a NUL, a value ending inside open markup), and an html.parser that reads a
+    _SITE_HTML5_PROBES input differently from HTML5 each fail closed (exit 2). A TOML comment is not
+    a value, so repeating a required wording in a comment does not satisfy it: a statement reworded
+    into words in its value is a missing-wording finding whatever the comments say. The sweep does
+    not read a figure spelled in words or written with a non-decimal numeric character, held more
+    than three words from its noun, or held in a key or a non-string value (disclosed residuals),
+    and it reads a number about something else that sits within three words of "hooks", or across
+    a block boundary from it, a figure joined to other digits by punctuation (1,031), and a figure
+    in an attribute value, as a hook figure (disclosed over-reads)."""
+    unread = _site_parser_reads_html5()
+    if unread is not None:
+        raise ValueError("html.parser does not read {!r} as HTML5 renders it, so the site hook-count "
+                         "leg cannot evaluate the site sources".format(unread))
+    want = str(expected_counts(root, manifests)["hooks"])
+    src_dir = root / SITE_DRAFT_SRC
+    if not src_dir.is_dir():
+        raise OSError("required surface missing: {}".format(src_dir))
+    for name, label, wording in SITE_HOOK_FACTS:
+        rel = (SITE_DRAFT_SRC / name).as_posix()
+        hits = [got for text, _attrs in _site_values(src_dir / name)
+                for got in re.findall(wording, text)]
+        if not hits:
+            findings.append("{}: the {} hook-count wording ({}) was not found; if the page was "
+                            "reworded, update SITE_HOOK_FACTS so the count stays checked".format(
+                                rel, label, wording))
+        for got in hits:
+            if got != want:
+                findings.append("{}: the {} states {} Claude Code hooks; the hooks manifest gives "
+                                "{}".format(rel, label, got, want))
+    for path in sorted(p for p in src_dir.iterdir() if p.suffix == ".toml" and p.is_file()):
+        rel = (SITE_DRAFT_SRC / path.name).as_posix()
+        for text, attrs in _site_values(path):
+            for hit in (hit for value in [text] + attrs for hit in SITE_HOOK_FIGURE.finditer(value)):
+                if hit.group(1) != want:
+                    findings.append("{}: {!r} states {} hooks; the hooks manifest gives {}".format(
+                        rel, hit.group(0), hit.group(1), want))
+
+
 # The independent code detector backing the shipped-path declaration: a release path is CODE when its
 # suffix (case-insensitive) is on this CLOSED executable list, when it is an HTML page that
 # decodes as UTF-8 (a leading byte-order mark allowed) and contains "<script" case-insensitively
@@ -1118,6 +1449,7 @@ def run(root):
         check_subset_denominator(root, manifests, findings)
         check_json_subset_denominator(root, manifests, findings)
         check_readme_counts(root, manifests, findings)
+        check_site_hook_counts(root, manifests, findings)
     except (ManifestError, OSError, ValueError, KeyError) as exc:
         print("error: {}; fail-closed".format(exc), file=sys.stderr)
         return 2
@@ -1329,7 +1661,28 @@ def main():
 #      wording reworded away -> the not-found diagnostic; the budget source's build moved under
 #      unchanged pages -> a build finding on both pages; a missing or non-string build -> exit 2;
 #      the earlier "measured PACK" wording restored -> the missing-note finding.
-# (1, 7, 12, 13, and 15 through 23 are the invariant-bearing cases; the rest complete the fail-closed
+#  24. the site hook-count leg: each SITE_HOOK_FACTS statement drifted alone one below and one above
+#      the manifest's total -> a finding naming its source and label (the clean fixture, at exactly
+#      the total, is the at-boundary control), and reworded with the count in words -> the not-found
+#      diagnostic; a stale figure (a capitalized noun included) in a site source no statement names
+#      -> a finding naming that source, a true one there -> exit 0; a stale figure there written
+#      each way it can render as one (&nbsp;, &#32;, <b>3</b>, &#51;, a fullwidth digit, a TOML line
+#      continuation, &#8203;, <br>, 3-hook, 3 Claude Code hook, 3 opt-in hooks, ho<wbr>oks, a tag
+#      whose quoted attribute holds '>', a </p><p>, <br>, </li><li> or unknown tag after text ending
+#      in a period, a comma or a digit, and after <!-->, <!---> or --!>) and a figure about another
+#      thing (1 hooks file, the disclosed over-read) -> a finding naming the figure read; true
+#      figures in those forms, 25 are hook-linked, an ordinal, an HTML comment holding '>' or
+#      "-- >", attribute text, a bare '<' ending a value, a TOML comment carrying a stale figure,
+#      and the disclosed unread forms (2,003 hooks, three hooks) -> exit 0; a statement reworded
+#      into words behind a TOML comment repeating its wording -> the not-found diagnostic, written
+#      with &nbsp; at the total -> exit 0, one above it -> its finding; a hook added to the manifest
+#      under unchanged sources -> a finding for every statement; a missing site/draft-src, a
+#      missing named source, an unparsable source, a value ending in an open start tag, end tag or
+#      comment, a value holding a noscript (the raw-text form a browser with scripting on shows,
+#      and the markup form it shows with scripting off), template, iframe srcdoc or other
+#      scripting- or parsing-mode element, or an html.parser reading an HTML5 comment probe
+#      differently -> exit 2 naming it; a lookalike tag name, an escaped tag -> read as before.
+# (1, 7, 12, 13, and 15 through 24 are the invariant-bearing cases; the rest complete the fail-closed
 # contract.)
 
 _MANIFEST = (
@@ -1507,13 +1860,31 @@ _RELEASE_MANIFEST = (
 )
 
 
+# The site page sources the hook-count leg reads, each SITE_HOOK_FACTS wording stating the fixture's
+# two claude-code hooks in the real sentences' shape, plus a source with no hook figure (the sweep
+# reads every site/draft-src/*.toml source, not only the named ones).
+_SITE_SRC = {
+    "home.toml": (
+        'intro = "In Claude Code, an opt-in plugin of 2 hooks blocks or warns on the actions it is '
+        'built to catch."\n\n[[body]]\ncomponent = "value"\nhtml = "Its 2 Claude Code hooks form an '
+        'opt-in plugin that is not yet for direct install."\n'),
+    "install-details.toml": (
+        "[[body]]\ncomponent = \"prose\"\nhtml = '''<p>The 2 Claude Code hooks form an opt-in "
+        "plugin that is not yet for direct install.</p>'''\n"),
+    "rules.toml": 'html = "<p>Of 3 rules, 1 is linked to a gate.</p>"\n',
+}
+
+
 def _write_fixture(base, manifests=None, readme=None, page=None, disclosure=None, json_export=None,
-                   landing=None, release_manifest=None, budget_toml=None, budget_md=None):
+                   landing=None, release_manifest=None, budget_toml=None, budget_md=None,
+                   site_src=None):
     """Write a complete clean fixture tree, overridable per component for a case's single mutation.
     `manifests` is a list of (stem, name, publisher, edition, kind, catalogue); `landing` overrides the
     README.md the counts leg reads; `release_manifest` overrides the .aiqt/manifest.toml the
     shipped-path declaration leg reads; `budget_toml` and `budget_md` override the instruction-budget
-    source and page the budget-note leg reads; `page` overrides the generated Mappings page."""
+    source and page the budget-note leg reads; `page` overrides the generated Mappings page;
+    `site_src` overrides the site/draft-src sources the site hook-count leg reads (a name mapped to
+    None is left out)."""
     if manifests is None:
         manifests = [("full", "Fixture Full Framework", "OWASP Foundation", "1.0", "control", "full"),
                      ("subset", "Fixture Subset Framework", "ISO/IEC", "2023", "guidance", "subset")]
@@ -1531,6 +1902,10 @@ def _write_fixture(base, manifests=None, readme=None, page=None, disclosure=None
     downloads.mkdir()
     (downloads / "mappings.json").write_text(
         json_export if json_export is not None else _JSON, encoding="utf-8")
+    (site / "draft-src").mkdir()
+    for name, text in (site_src if site_src is not None else _SITE_SRC).items():
+        if text is not None:
+            (site / "draft-src" / name).write_text(text, encoding="utf-8")
     (base / "disclosure.toml").write_text(
         disclosure if disclosure is not None else _DISCLOSURE, encoding="utf-8")
     core = base / ".aiqt" / "core"
@@ -3040,6 +3415,293 @@ def self_test_main():
                     or "was not found" not in out):
                 failures.append("a budget note claiming a measured PACK on {} expected exit 1 with "
                                 "the missing-note diagnostic".format(rel))
+
+        # 24. the site hook-count leg. The fixture's hooks manifest gives 2 claude-code hooks, and the
+        #     clean fixture of case 1 (each statement at exactly 2) is the at-boundary control. Each
+        #     SITE_HOOK_FACTS statement drifted alone one below (1) and one above (3) -> a finding
+        #     naming its source and label; each reworded away -> the not-found diagnostic.
+        def _site_src(name, old, new):
+            src = dict(_SITE_SRC)
+            if src[name].count(old) != 1:
+                failures.append("site hook-count fixture: {!r} must appear exactly once in the {} "
+                                "fixture".format(old, name))
+            src[name] = src[name].replace(old, new, 1)
+            return src
+
+        site_cases = (("home.toml", "home page intro", "plugin of 2 hooks", "plugin of {} hooks"),
+                      ("home.toml", "home page value paragraph", "Its 2 Claude", "Its {} Claude"),
+                      ("install-details.toml", "install details page", "The 2 Claude",
+                       "The {} Claude"))
+        if len(site_cases) != len(SITE_HOOK_FACTS):
+            failures.append("site hook-count cases must cover every SITE_HOOK_FACTS statement")
+        for pos, (name, label, old, new) in enumerate(site_cases):
+            for wrong in ("1", "3"):
+                sitefix = tmp / "site-hooks-{}-{}".format(pos, wrong)
+                _write_fixture(sitefix, site_src=_site_src(name, old, new.format(wrong)))
+                code, out = run_out(sitefix)
+                if code != 1 or "site/draft-src/{}: the {} states {} Claude Code hooks; the hooks " \
+                        "manifest gives 2".format(name, label, wrong) not in out:
+                    failures.append("the {} stating {} hooks against a 2-hook manifest expected exit 1 "
+                                    "with its finding (got {!r})".format(label, wrong, code))
+            sitefix = tmp / "site-hooks-{}-words".format(pos)
+            _write_fixture(sitefix, site_src=_site_src(name, old, new.format("two")))
+            code, out = run_out(sitefix)
+            if code != 1 or "site/draft-src/{}: the {} hook-count wording".format(name, label) not in out \
+                    or "was not found" not in out:
+                failures.append("the {} reworded with the count in words expected exit 1 with the "
+                                "not-found diagnostic (got {!r})".format(label, code))
+        # The sweep: a further hook figure in ANY site source must state the total too (a stale figure
+        # in a source no statement names, and a capitalized noun, each -> a finding naming the source),
+        # while a true one there stays clean.
+        for label, sentence, want in (("stale", "The 3 hooks catch it.", 1),
+                                      ("stale capitalized", "Its 3 Claude Code Hooks.", 1),
+                                      ("true", "The 2 hooks catch it.", 0)):
+            sitefix = tmp / "site-hooks-sweep-{}".format(label.replace(" ", "-"))
+            _write_fixture(sitefix, site_src=dict(_SITE_SRC, **{
+                "rules.toml": 'html = "<p>{}</p>"\n'.format(sentence)}))
+            code, out = run_out(sitefix)
+            if code != want or (want and "site/draft-src/rules.toml: " not in out):
+                failures.append("a {} hook figure in another site source expected exit {} (got "
+                                "{!r})".format(label, want, code))
+        # Each form below renders as a stale hook figure, so each -> a finding naming the source and
+        # the figure read: an entity, a tag, a non-ASCII decimal digit, a TOML line continuation, a
+        # format character, a hyphenated, singular or modified noun, a figure about another thing
+        # (the disclosed over-read), a tag with a quoted '>' in an attribute, a figure after a
+        # block-level tag that follows a period, a comma or a digit, a figure glued to the
+        # punctuation of the word before it, a figure joined to other digits by punctuation (read
+        # whole), and a figure in an attribute value (swept on its own). The controls stay clean:
+        # true figures in those forms, a compound adjective, an ordinal, a bare '<' ending a value,
+        # a TOML comment (it never renders), every listed element and attribute at the total, and
+        # the disclosed unread form (words), pinned so a change shows here.
+        for pos, (label, text, want, figure) in enumerate((
+                ("no-break space reference", 'html = "<p>The 3&nbsp;hooks catch it.</p>"\n', 1, "3"),
+                ("space reference", 'html = "<p>The 3&#32;hooks catch it.</p>"\n', 1, "3"),
+                ("markup", 'html = "<p>The <strong>3</strong> hooks catch it.</p>"\n', 1, "3"),
+                ("digit reference", 'html = "<p>The &#51; hooks catch it.</p>"\n', 1, "3"),
+                ("fullwidth digit", 'html = "<p>The ３ hooks catch it.</p>"\n', 1, "3"),
+                ("TOML line continuation", 'html = """<p>The 3 \\\n    hooks catch it.</p>"""\n', 1, "3"),
+                ("zero-width space reference", 'html = "<p>The 3&#8203;hooks catch it.</p>"\n', 1, "3"),
+                ("hyphenated", 'html = "<p>A 3-hook plugin catches it.</p>"\n', 1, "3"),
+                ("singular Claude Code", 'html = "<p>The 3 Claude Code hook set.</p>"\n', 1, "3"),
+                ("modified", 'html = "<p>The 3 opt-in hooks catch it.</p>"\n', 1, "3"),
+                ("over-read other thing", 'html = "<p>Its 1 hooks file lists them.</p>"\n', 1, "1"),
+                # A '>' inside a quoted attribute value does not end its tag, so the text after the
+                # tag is read whole.
+                ("double-quoted attribute holding '>'",
+                 "html = '<p>The 3 <span title=\"a > b\">hooks</span> catch it.</p>'\n", 1, "3"),
+                ("single-quoted attribute holding '>'",
+                 "html = \"<p>The 3 <span title='a > b'>hooks</span> catch it.</p>\"\n", 1, "3"),
+                # A block-level tag is a word boundary, so a figure opening a paragraph, list item or
+                # line is read on its own after text ending in a period, a comma or a digit (each would
+                # otherwise join it into one token whose figure the number pattern refuses or misreads).
+                ("paragraph after a period", 'html = "<p>Done.</p><p>3 hooks catch it.</p>"\n', 1, "3"),
+                ("list item after a period",
+                 'html = "<p>Done.</p><ul><li>3 hooks catch it.</li></ul>"\n', 1, "3"),
+                ("list item after a version",
+                 'html = "<ul><li>Version 1.1.0</li><li>3 hooks</li></ul>"\n', 1, "3"),
+                ("paragraph after a comma", 'html = "<p>Rules, gates,</p><p>3 hooks.</p>"\n', 1, "3"),
+                ("paragraph after a digit", 'html = "<p>Release 1</p><p>3 hooks.</p>"\n', 1, "3"),
+                ("list after a digit", 'html = "Release 1<ul>3 hooks<li>x</li></ul>"\n', 1, "3"),
+                # Each inline element reads as nothing, so the figure or noun it splits is read whole.
+                ("inline tags inside the figure and the noun",
+                 "html = \"<p>The 1<span></span>1<em></em>3 h<strong></strong>o<a href='/'></a>o"
+                 "<code></code>ks catch it.</p>\"\n", 1, "113"),
+                # A figure glued to the punctuation of the word before it renders as that figure, and
+                # a figure joined to other digits by punctuation is read whole, never as its tail.
+                ("figure after a period", 'html = "<p>They are identified.3 hooks enforce it.</p>"\n', 1,
+                 "3"),
+                ("thousands separator read whole", 'html = "<p>Of 2,003 hooks.</p>"\n', 1, "2,003"),
+                ("decimal read whole", 'html = "<p>Of 1.2 hooks.</p>"\n', 1, "1.2"),
+                ("range read whole", 'html = "<p>Of 1-2 hooks.</p>"\n', 1, "1-2"),
+                ("signed figure read whole", 'html = "<p>Of -2 hooks.</p>"\n', 1, "-2"),
+                # A '<' not followed by an ASCII letter opens no tag in HTML5, so it is text.
+                ("non-ASCII letter after '<'", 'html = "<p>Done.<ſpan>3 hooks.</p>"\n', 1, "3"),
+                # Every attribute value is swept on its own (a title shows as a tooltip, and a field
+                # the generator escapes shows the whole tag).
+                ("title attribute text",
+                 "html = \"<p><span title='3 hooks'>It catches it.</span></p>\"\n", 1, "3"),
+                ("href attribute text",
+                 "html = \"<p><a href='/3-hooks'>It catches it.</a></p>\"\n", 1, "3"),
+                ("true in every form", 'html = "<p>The <em>2</em>&nbsp;opt-in Claude Code hooks, a '
+                 '2-hook pair, &#50; hooks, ２ hooks and identified.2 hooks.</p>"\n', 0, None),
+                # Every listed element and attribute, used as the site sources use them -> read, not
+                # refused (a list member dropped turns this row into exit 2).
+                ("every listed element and attribute",
+                 "html = \"<p class='x'>The <a href='/' rel='noopener' target='_blank'>2</a> "
+                 "<em>hooks</em>, <code class='h' title='t'>x</code> <span class='c'>y</span> "
+                 "<strong>z</strong>.</p><ul><li>w</li></ul>\"\n", 0, None),
+                ("compound adjective", 'html = "<p>Of 3 rules, 25 are hook-linked.</p>"\n', 0, None),
+                ("ordinal", 'html = "<p>The 3rd-party hooks are out of scope.</p>"\n', 0, None),
+                ("true figure after a block boundary",
+                 'html = "<p>Done.</p><p>2 hooks catch it.</p>"\n', 0, None),
+                ("bare less-than sign at the end", 'html = "<p>It catches it.</p> 1 <"\n', 0, None),
+                ("TOML comment", '# The 3 hooks catch it.\nhtml = "<p>It catches it.</p>"\n', 0, None),
+                ("unread words", 'html = "<p>The three hooks catch it.</p>"\n', 0, None))):
+            sitefix = tmp / "site-hooks-form-{}".format(pos)
+            _write_fixture(sitefix, site_src=dict(_SITE_SRC, **{"rules.toml": text}))
+            code, out = run_out(sitefix)
+            if code != want or (want and "site/draft-src/rules.toml: " not in out) or (
+                    want and "states {} hooks; the hooks manifest gives 2".format(figure) not in out):
+                failures.append("a hook figure in another site source ({}) expected exit {} (got "
+                                "{!r})".format(label, want, code))
+        # A required wording is read from the parsed values, not the raw text: a statement reworded
+        # into words while a TOML comment repeats its old wording -> the not-found diagnostic; the
+        # statement with a no-break space reference at the total -> clean (it renders as the wording),
+        # one above it -> the statement's finding; an unparsable source -> exit 2 naming it.
+        decoy = _site_src("home.toml", "plugin of 2 hooks", "plugin of two hooks")
+        decoy["home.toml"] = "# In Claude Code, an opt-in plugin of 2 hooks\n" + decoy["home.toml"]
+        for label, src, want, expect in (
+                ("comment decoy", decoy, 1, "site/draft-src/home.toml: the home page intro hook-count "
+                 "wording"),
+                ("entity at the total", _site_src("home.toml", "plugin of 2 hooks", "plugin of 2&nbsp;hooks"),
+                 0, None),
+                ("entity above the total", _site_src("home.toml", "plugin of 2 hooks",
+                                                     "plugin of 3&nbsp;hooks"),
+                 1, "site/draft-src/home.toml: the home page intro states 3 Claude Code hooks")):
+            sitefix = tmp / "site-hooks-wording-{}".format(label.replace(" ", "-"))
+            _write_fixture(sitefix, site_src=src)
+            code, out = run_out(sitefix)
+            if code != want or (expect and expect not in out):
+                failures.append("the home page intro ({}) expected exit {} (got {!r})".format(
+                    label, want, code))
+        sitefix = tmp / "site-hooks-unparsable"
+        _write_fixture(sitefix, site_src=dict(_SITE_SRC, **{"rules.toml": 'html = "unterminated\n'}))
+        code, err = run_err(sitefix)
+        if code != 2 or "rules.toml: cannot parse" not in err:
+            failures.append("an unparsable site/draft-src/rules.toml expected exit 2 naming it (got "
+                            "{!r})".format(code))
+        # A value ending inside open markup (a start tag, an end tag, a comment) runs on into the next
+        # thing the generator writes, so it -> exit 2 naming the source, never a reading of the value
+        # alone; a figure inside each would otherwise be read or hidden by the reader's guess.
+        for label, value in (("open start tag", "<p>It catches it.</p><span title='3 hooks"),
+                             ("open end tag", "<p>It catches it.</p"),
+                             ("open comment", "<p>It catches it.</p><!-- 3 hooks")):
+            sitefix = tmp / "site-hooks-open-{}".format(label.split()[1])
+            _write_fixture(sitefix, site_src=dict(_SITE_SRC, **{
+                "rules.toml": 'html = "{}"\n'.format(value)}))
+            code, err = run_err(sitefix)
+            if code != 2 or "rules.toml: cannot evaluate a value as HTML" not in err:
+                failures.append("a site source value ending in an {} expected exit 2 naming it (got "
+                                "{!r})".format(label, code))
+        # Markup outside the reader's closed subset -> exit 2 naming what was refused, never one
+        # reading. The first rows each hide or misplace a stale figure from the reader the closed
+        # subset replaced, so each would pass with the change reverted: a CDATA declaration in HTML
+        # content (a bogus comment ending at its first '>', so the text after it renders), the
+        # same closed by ']]>' (read as nothing before), text that renders from an input's value
+        # and an image's alt, a figure joined to the digit before it across a tag HTML5 ignores in
+        # body (td) or across an end tag that closes nothing (a stray </li>, a </li> outside list
+        # item scope), across a label, and a NUL between the figure and its noun. The rest pin each
+        # refused form: the bare CDATA probe, comments in their HTML5 forms, a processing
+        # instruction, '</' with no name, an end tag with an attribute, a start tag self-closed or
+        # with an unquoted value, an attribute outside the list, markup not strictly nested, an
+        # element left open, the formerly refused noscript, template, iframe, plaintext, math and
+        # svg vectors, an upper-case name, a name holding a vertical tab or a non-ASCII letter, and
+        # each tag in a fixed list of tags outside the closed list.
+        refused_rows = [
+            ("CDATA declaration in HTML content",
+             "<p>Done.</p><p><![CDATA[>3 hooks enforce it.<!--]]>--></p>", "a '<!' construct"),
+            ("CDATA section closed by ]]>", "<p>Done.<![CDATA[x>3 hooks]]></p>", "a '<!' construct"),
+            ("input value", "<p>Done. <input value='3 hooks enforce it' readonly size='30'></p>",
+             "a <input> tag"),
+            ("img alt", "<p>Done. <img alt='3 hooks enforce it'></p>", "a <img> tag"),
+            ("figure joined across a td", "<p>Its 1<td>2 hooks enforce it.</p>", "a <td> tag"),
+            ("figure joined across a stray </li>", "<p>Its 1</li>2 hooks enforce it.</p>",
+             "a </li> that does not close"),
+            ("</li> outside list item scope", "<ul><li>Its 1<ul></li>2 hooks.</ul></li></ul>",
+             "a </li> that does not close"),
+            ("figure joined across a label", "<p>Its 1<label></label>2 hooks.</p>", "a <label> tag"),
+            ("NUL between figure and noun", "<p>The 3\\u0000 hooks.</p>", "a NUL character"),
+            ("CDATA probe", "<![CDATA[x>a", "a '<!' construct"),
+            ("comment", "<p>Done.</p><!-- 3 hooks -->", "a '<!' construct"),
+            ("empty comment <!-->", "<p>Done.</p><!-->3 hooks.", "a '<!' construct"),
+            ("comment closed by --!>", "<p>Done.</p><!-- x --!>3 hooks.", "a '<!' construct"),
+            ("processing instruction", "<p>Done.</p><?x>3 hooks.", "a '<?' construct"),
+            ("'</' with no name", "<p>Done.</p></ 3 hooks><p>x</p>", "with no tag name"),
+            ("end tag with an attribute", "<p>Done.</p title='3 hooks'>", "end tag with more than"),
+            ("self-closed start tag", "<p>The <span/>3 hooks.</p>", "is not its name and quoted"),
+            ("unquoted attribute value", "<p><span class=x>3</span> hooks.</p>",
+             "is not its name and quoted"),
+            ("attribute outside the list", "<p><span style='x'>3 hooks</span></p>",
+             "a 'style' attribute"),
+            ("li outside a ul", "<li>3 hooks</li>", "not directly inside a <ul>"),
+            ("p inside an open p", "<p>Its 1<p>2 hooks.</p></p>", "inside an open <p>"),
+            ("element left open", "<p>3 hooks", "leaves <p> open"),
+            ("noscript raw-text vector", "<p>Done.</p><noscript><!--</noscript><p>3 hooks "
+             "catch it.</p><!-- --></noscript><p>It catches it.</p>", "a <noscript> tag"),
+            ("noscript upper case", "<p>Done.</p><NOSCRIPT>3 hooks.</NOSCRIPT>", "a <noscript> tag"),
+            ("noscript end tag alone", "<p>Done.</p>3 hooks.</noscript>", "a <noscript> tag"),
+            ("template", "<p>Done.</p><template><p>2 hooks.</p></template>", "a <template> tag"),
+            ("iframe srcdoc", "<p>Done.</p><iframe srcdoc='<p>3 hooks.</p>'></iframe>",
+             "a <iframe> tag"),
+            ("plaintext", "<p>Done.</p><plaintext><!--</plaintext>3 hooks.-->", "a <plaintext> tag"),
+            ("math CDATA", "<math><mtext><![CDATA[3 hooks]]></mtext></math>", "a <math> tag"),
+            ("svg CDATA", "<svg><text><![CDATA[3 hooks]]></text></svg>", "a <svg> tag"),
+            ("name holding a vertical tab", "<p>Done.<span\\u000Bx>3 hooks.</p>", "tag, outside"),
+            ("name holding a non-ASCII letter", "<p>Done.<spān>3 hooks.</p>", "tag, outside")]
+        for tag in ("acronym", "b", "body", "br", "button", "canvas", "caption", "div", "embed",
+                    "frameset", "h1", "i", "img", "input", "label", "noembed", "noframes", "object",
+                    "ol", "pre", "script", "select", "style", "table", "td", "textarea", "title", "tr",
+                    "wbr", "x-a", "xmp"):
+            refused_rows.append(("unlisted " + tag, "<p>Done.</p><{0}>2 hooks.</{0}>".format(tag),
+                                 "a <{}> tag".format(tag)))
+        for pos, (label, value, needle) in enumerate(refused_rows):
+            sitefix = tmp / "site-hooks-refused-{}".format(pos)
+            _write_fixture(sitefix, site_src=dict(_SITE_SRC, **{
+                "rules.toml": 'html = "{}"\n'.format(value)}))
+            code, err = run_err(sitefix)
+            if (code != 2 or "rules.toml: cannot evaluate a value as HTML" not in err
+                    or needle not in err):
+                failures.append("a site source value holding {} expected exit 2 naming {!r} (got "
+                                "{!r})".format(label, needle, code))
+        # An escaped tag is text, not markup, so the figure after it is read (-> its finding).
+        sitefix = tmp / "site-hooks-escaped-tag"
+        _write_fixture(sitefix, site_src=dict(_SITE_SRC, **{
+            "rules.toml": 'html = "<p>Done. &lt;noscript&gt;3 hooks.</p>"\n'}))
+        code, out = run_out(sitefix)
+        if code != 1 or "states 3 hooks; the hooks manifest gives 2" not in out:
+            failures.append("a site source value holding an escaped tag expected exit 1 with the "
+                            "stale figure's finding (got {!r})".format(code))
+        # The reader rests on html.parser reading the quoted-attribute forms as HTML5 does: a parser
+        # reading a probe differently (simulated by a probe expecting other text) -> exit 2 naming
+        # the probe, under an otherwise clean fixture.
+        saved_probes = _SITE_HTML5_PROBES
+        globals()["_SITE_HTML5_PROBES"] = saved_probes + (("<p>a</p>", "<p>a</p>"),)
+        try:
+            sitefix = tmp / "site-hooks-parser-probe"
+            _write_fixture(sitefix)
+            code, err = run_err(sitefix)
+        finally:
+            globals()["_SITE_HTML5_PROBES"] = saved_probes
+        if code != 2 or "html.parser does not read '<p>a</p>'" not in err:
+            failures.append("an html.parser reading a probe other than as HTML5 does expected exit 2 "
+                            "naming the probe (got {!r})".format(code))
+        # The binding is to the manifest, not to a literal: a third claude-code hook under unchanged
+        # site sources -> a finding for every statement.
+        sitefix = tmp / "site-hooks-manifest-moved"
+        _write_fixture(sitefix)
+        (sitefix / ".aiqt" / "core" / "hooks" / "manifest.toml").write_text(
+            _HOOKS_TOML + '\n[[hook]]\nid = "fixture-hook-third"\nrules = []\nplatform = "claude-code"\n'
+            'default = "block"\n', encoding="utf-8")
+        _code, out = run_out(sitefix)
+        for name, label, _old, _new in site_cases:
+            if "site/draft-src/{}: the {} states 2 Claude Code hooks; the hooks manifest gives " \
+                    "3".format(name, label) not in out:
+                failures.append("a moved hook total under an unchanged {} expected its finding".format(
+                    label))
+        # A missing source directory or named source -> exit 2 (fail-closed, never a skip).
+        sitefix = tmp / "site-hooks-nodir"
+        _write_fixture(sitefix, site_src={})
+        (sitefix / "site" / "draft-src").rmdir()
+        code, err = run_err(sitefix)
+        if code != 2 or "draft-src" not in err:
+            failures.append("a missing site/draft-src expected exit 2 naming it (got {!r})".format(code))
+        for name in ("home.toml", "install-details.toml"):
+            sitefix = tmp / "site-hooks-no-{}".format(name.split(".")[0])
+            _write_fixture(sitefix, site_src=dict(_SITE_SRC, **{name: None}))
+            code, err = run_err(sitefix)
+            if code != 2 or name not in err:
+                failures.append("a missing site/draft-src/{} expected exit 2 naming it (got "
+                                "{!r})".format(name, code))
     finally:
         if unreadable_std is not None:
             os.chmod(unreadable_std, 0o755)  # restore even on an unexpected early exit
@@ -3090,7 +3752,18 @@ def self_test_main():
           "outlives a ratchet at or under "
           "120,000, and a session target, pinned build, or loader character check that differs "
           "from its authoritative value or whose wording is absent (each on each page, the "
-          "build also moved in the budget source) "
+          "build also moved in the budget source), "
+          "and a site hook-count statement one below or one above the hooks manifest's total, "
+          "reworded with the count in words (a TOML comment repeating its wording included), "
+          "written with a no-break space reference, or left unchanged under a moved total, and a "
+          "stale hook figure in any other site source (plain, capitalized, behind a character "
+          "reference or a tag, in a fullwidth digit, across a TOML line continuation or a "
+          "zero-width space, hyphenated, singular or modified, after a tag whose quoted attribute "
+          "holds '>', after a paragraph, list or list item boundary following text that ends in a "
+          "period, a comma or a digit, split by each listed inline element, glued to "
+          "the period of the word before it, joined to other digits by ',', '.' or '-' or signed "
+          "(read whole), in a title or href value, after a '<' that opens no tag, and a figure "
+          "about another thing, the disclosed over-read) "
           "each report a finding (exit 1); the deferred span itself is read ONLY through the "
           "positive grammar (blank lines, plain paragraph or continuation text, flat plain list items, "
           "column-0 ATX headings), so a blockquote, a fence, a nested or indented list, list-item HTML, "
@@ -3107,7 +3780,11 @@ def self_test_main():
           "surface), a ratchet one unit above "
           "the 120,000 floor, "
           "and the repository's real declaration against its real release manifest "
-          "(the control), stay "
+          "(the control), a true site hook figure in those forms, a compound adjective "
+          "(25 are hook-linked), an ordinal, every listed element and attribute used together, a "
+          "bare '<' ending a value, or a TOML comment carrying a stale figure, and the disclosed "
+          "unread word form, "
+          "stay "
           "clean (exit 0); a missing page, a missing JSON export, an unreadable standards dir, an "
           "unterminated code fence (naming the file and the fence's opening line), a fence not at line "
           "start, list-item HTML, an HTML block other than a single-line comment, or a '#' line that is "
@@ -3125,8 +3802,20 @@ def self_test_main():
           "claude-code hook default outside the blocking/warning split, a missing shipped-path "
           "declaration, a missing or empty release manifest, an HTML page that does not decode as "
           "UTF-8 or holds a NUL byte, a listed detector file that is missing or unreadable, a missing "
-          "instruction-budget source, and a missing or non-string claude-code-version in it "
-          "all fail closed (exit 2); "
+          "instruction-budget source, a missing or non-string claude-code-version in it, and a "
+          "missing site/draft-src, a missing named site source, an unparsable site source, a site "
+          "value ending in an open start tag, end tag or comment, a site value holding markup "
+          "outside the closed subset (a CDATA declaration in HTML content, open or closed by ']]>', "
+          "an input value, an image alt, a figure joined to a digit across a td, a label, a stray "
+          "</li> or a </li> outside list item scope, a NUL, the bare <![CDATA[x>a probe, a comment "
+          "in its HTML5 forms, a processing instruction, '</' with no name, an end tag with an "
+          "attribute, a self-closed start tag, an unquoted attribute value, an attribute outside the "
+          "list, an li outside a ul, a p inside an open p, an element left open, the noscript, "
+          "template, iframe, plaintext, math and svg vectors, an upper-case or a lone end tag, a "
+          "name holding a vertical tab or a non-ASCII letter, and each of a fixed list of unlisted "
+          "tags, each named), or an html.parser reading a quoted-attribute probe differently all "
+          "fail closed (exit 2), while an escaped tag is read as text (exit 1 on its stale "
+          "figure); "
           "a single-line HTML comment above the section "
           "is not over-refused and its section is proven read (the planted name is the finding); the raw "
           "and blockquote-stripped heading readings must agree up to the section end (a "

@@ -1906,7 +1906,7 @@ def _self_test():
              '<a href="https://posluns.ca/security/" target="_blank" rel="noopener noreferrer">Security'
              '<span class="vh"> (opens in a new tab)</span></a></p></div></div>')
     expect("about/landing-exact-markup", page.count(about) == 1)
-    expect("about/after-paragraph", 0 < page.find("arrive with 1.1.0.</p>") < page.find(about))
+    expect("about/after-paragraph", 0 < page.find("a guided install and a setup doctor.</p>") < page.find(about))
     expect("about/inner-pages-none", all('class="about"' not in outputs["site/draft/" + rel]
                                          for rel in ("disclosure/index.html", "license/index.html")))
     expect("placeholder/index.html", page.count("<h1") == 1
