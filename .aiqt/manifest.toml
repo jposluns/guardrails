@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "47d63086cf626a3d54a1d1a0a1cf51b73fdd4af6acab9831131db9d55026c560"
+tree-sha256 = "2155fabd966a31fea77d13216e0968bc2392fef44a7abded3a5aca8aaa05ad9a"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -4261,8 +4261,8 @@ sha256 = "3994b3446d75345ebc28ba3d5f6d7bed114fb3f8a4899f5cebad030b81d290d3"
 
 [[sources]]
 path = "tools/check_moved_python_roots.py"
-bytes = 128155
-sha256 = "6b212ad5b4673230b886cce4b038d1a8c28bf9332755ec56dad4f3ef316df98c"
+bytes = 128262
+sha256 = "d84356023f8f60ba21561adceb25044d1969592327ccfe7263e8438ee31a0645"
 
 [[sources]]
 path = "tools/check_msg_leaks.py"

@@ -28,9 +28,9 @@ range computed over one is untrustworthy. The head's parents are additionally re
 commit object (git cat-file commit with object replacement disabled), never through a history
 walk, as a second guard on the zero-base path; a parent id there must be lowercase hex of the
 head id's own length (the repository's hash length), and a malformed parent line or a named parent
-whose object is missing is exit 2. A shallow repository is exit 2 before any
-judgment, as the branch-root sibling's probe refuses one, because a truncated history can hide the
-true merge base and make the gate judge unrelated history. Each revision is resolved with
+whose object is missing is exit 2. A shallow repository is exit 2 before any judgment, as the
+branch-root sibling's probe refuses one, because a truncated history can hide the true merge base
+and make the gate judge unrelated history. Each revision is resolved with
 `git rev-parse --verify --end-of-options REV^{commit}`. Every git call runs with the ambient GIT_*
 variables scrubbed and GIT_NO_REPLACE_OBJECTS=1, as the branch-root gate's calls do, and every
 call that parses a commit (rev-parse on a revision, merge-base, diff-tree, ls-tree) passes
@@ -40,9 +40,8 @@ git 2.53 honours in merge-base and in a parent operator (HEAD~2) and shows the s
 verdict, with a row for each of three calls: the merge-base --all of base and head, the parent
 operator resolved with an explicit --base, and the default-base merge-base of head and origin/HEAD
 used when --base is omitted; no row covers the setting on diff-tree and ls-tree, kept there as
-defence in depth. The change is
-read per merge base of base and head (`git merge-base --all`; none is exit 2, several are each
-judged and the findings combined) with
+defence in depth. The change is read per merge base of base and head (`git merge-base --all`; none
+is exit 2, several are each judged and the findings combined) with
 `git diff-tree -r -z --name-status --find-renames=50% -l0 <merge-base> <head> --` (-l0 turns the
 rename limit off), parsed strictly: R<nn> takes an old and a new path, A/D/M/T one path, and any
 other status letter or malformed record is exit 2. Judged movers: each rename whose both sides end
@@ -157,8 +156,9 @@ _SCOPE_TYPES = (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, a
 # line are read from their objects, but the ancestors reached from them come from the cache); the
 # self-test forges such an edge and shows the verdict unchanged for each of the three calls with a
 # row (the merge-base in _merge_bases, the parent operator in _resolve_commit and the default-base
-# merge-base in _default_base), each with a flip that empties the setting for that call. No row
-# covers diff-tree or ls-tree, which name only command-line commits: the setting stays on
+# merge-base in _default_base). Each row has a flip: the first two flips empty the setting for the
+# whole run, and the default-base flip empties it only for the merge-base call in _default_base.
+# No row covers diff-tree or ls-tree, which name only command-line commits: the setting stays on
 # them as defence in depth.
 _NO_COMMIT_GRAPH = ("-c", "core.commitGraph=false")
 
