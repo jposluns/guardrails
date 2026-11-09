@@ -535,16 +535,20 @@ A command the lexer cannot read (an unquoted heredoc, a here-string, a process s
 unbalanced quote) has no segments to match and denies whole while in scope. A nested shell `-c` body is
 classified recursively through the wrapper spellings it reads (a bare or path-qualified shell word;
 `NAME=value` prefixes and the `env`, `command`, `nohup` and `timeout` wrappers, peeled repeatedly
-(`env`'s words are read ONLY against a closed set of option forms: the bare flags
+(`env`'s words are read ONLY against a closed set of option forms it fully parses: the bare flags
 `-i`/`--ignore-environment` with the lone `-` spelling, `-0`/`--null` and `-v`/`--debug`, and the
 value options `-u`/`--unset`, `-C`/`--chdir` and `-a`/`--argv0` in their separate, attached and
 `=`-attached spellings, so a consumed value is not read as the command word; `env`'s
-`-S`/`--split-string`, whose value is itself a command line that env runs with the remaining words
-APPENDED to it, is classified as a nested command made of the split value together with the words
-after it, rather than read as a `-c` body; any OTHER `env` option word or cluster (`-vS'...'`,
-`-vu FOO`, an abbreviated long option such as `--uns`, a signal option, an unknown option, or a value
-option missing its value) makes the `env` call one the guard cannot read, which puts the command IN
-SCOPE by itself, so it is denied unless every segment is an allowlisted read-only form; `timeout`'s
+`-S`/`--split-string` carries a whole command line that env re-splits, which the guard does not
+reproduce, so an `env` call carrying `-S`/`--split-string` in any value-bearing spelling is one the
+guard cannot read: it is denied IN SCOPE unless a plain reading of every word of the call (each word
+also read with its quote and backslash characters stripped, so a quote-spliced spelling of a declared
+directory is seen) shows it outside the declared directories; any OTHER `env` option word or cluster
+(`-vS'...'`, `-vu FOO`, an abbreviated long option such as `--uns`, a signal option, an unknown
+option, or a value option missing its value), and any pre-command word containing `=` the assignment
+grammar rejects (`1a=x`, `a.b=x`, `=x`), which env consumes as an assignment and runs the word after
+it, likewise make the `env` call one the guard cannot read, which puts the command IN SCOPE by itself,
+so it is denied unless every segment is an allowlisted read-only form; `timeout`'s
 `-k`/`-s`/`--kill-after`/`--signal` take their values);
 the shell's options before the body, where `-c` counts only as a letter of a single-dash option cluster,
 each `o` or `O` letter of a cluster takes the next word, `--rcfile` and `--init-file` take the next word,
@@ -576,8 +580,11 @@ registered grammar (`--color`, `--word-diff`), a patch tool other than `git appl
 `git am`), a reader behind a wrapper (`timeout`, `command`, `env`), `command -v`/`-V` before a `-c` shell
 (the wrapper peel reaches the `-c` body and classifies it, though `command -v`/`-V` then only prints the
 operand's name and runs nothing), an `env` call carrying an option word or cluster outside the closed
-set the peel parses, which denies even where its raw text names no declared directory and its operands
-would run nothing from one (`env -vS'echo hi'`, `env -iv ls`), a reader whose command word carries
+set the peel parses, a value-bearing `-S`/`--split-string` whose words are not all plainly outside the
+declared directories, or a pre-command `=` word the assignment grammar rejects, which denies even where
+its raw text names no declared directory and what env would run reaches nothing from one
+(`env -vS'echo hi'`, `env -iv ls`, and a `-S` call whose separate-value spelling this host's env does
+not split yet whose body spells a declared directory), a reader whose command word carries
 an option outside the tool's registered grammar, and a `python3 -I` reader script that resolves inside
 a Python standard-library directory (even a benign one) since stdlib programs run their argument. A
 `cd` INTO a declared directory is not an allowlisted move, so `cd <dir>; ls` denies; and the shell and
