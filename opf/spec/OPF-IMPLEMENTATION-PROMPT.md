@@ -1047,12 +1047,24 @@ Implement section 8 (Record model) in full for the baseline types.
   (section 8.2).
 - **Envelope.** Clean records carry `id`, `type`, `status`, `title`, `created_at`, `updated_at`
   and `actor.kind` (`maintainer`, `assistant`, `automation` or `importer`), with optional
-  `proposed_from`, `actor.id`, `summary`, `links`, `refs` and registered `x-<vendor>` tables. The
-  schema is closed: an unknown key fails validation unless it sits under a registered vendor table
-  (section 8.3; section 8.7, Extensions). `proposed_from` is legal only on a `/proposed` status and
-  only naming a legal predecessor state for the type (section 8.3). Every clean record requires
-  `created_at`, whatever its actor; only the imported envelope makes historical timestamps
-  optional, each omitted one given a missingness row in `unrecorded` (section 8.3).
+  `proposed_from`, `name`, `actor.id`, `summary`, `links`, `refs` and registered `x-<vendor>`
+  tables. The schema is closed: an unknown key fails validation unless it sits under a registered
+  vendor table (section 8.3; section 8.7, Extensions). `proposed_from` is legal only on a
+  `/proposed` status and only naming a legal predecessor state for the type (section 8.3). Every
+  clean record requires `created_at`, whatever its actor; only the imported envelope makes
+  historical timestamps optional, each omitted one given a missingness row in `unrecorded`
+  (section 8.3).
+- **Names.** A clean record can carry an optional `name`, a human-chosen label held beside its ID
+  (section 8.3). It is a string of 3 to 64 characters matching `^[A-Z][A-Z0-9]*(?:-[A-Z0-9]+)*\Z`
+  that never matches the clean ID shape `^[A-Z]{2}-[0-9]+\Z`, so `MDX-7` can be a name and `MD-7`
+  and `MD-07` cannot. A name that breaks these rules is refused, never corrected. A name is unique
+  across the whole store, every record type and the active indexes and the record archive
+  together, and is never reused, as an ID is not. Only `create --name` sets it (step 10), and no
+  operation adds, alters or removes it later. The ID stays the record's identity: links, file
+  names, anchors, counters and worklog entries keep naming records by ID, and your writer never
+  derives a name from the title or invents one. Imported records and worklog entries carry no
+  `name`: on either it is an unknown key and fails validation. The C-NAMES check of step 6 owns
+  every other name defect.
 - **Status grammar.** `state` or `state/proposed`. Each type declares a closed state set with one
   initial state and one or more terminal states (section 8.4, The status grammar). Transitions per
   type are in the section 8.5 table.
@@ -1104,10 +1116,11 @@ Implement section 8 (Record model) in full for the baseline types.
   that no unqualified `active` block scopes; implement the full rule all the same, since step 6
   grades it on the imported-series fixtures of step B.
 
-A stored record does not show which actor made its last transition: section 8.8, item 7 says the
-history comparison "sees only the prior snapshot's type and status, which identify neither the
-transitioning actor nor the pre-proposal state". The `/proposed` landing rule is therefore tested
-at the writer, in step 10, not by record validation.
+A stored record does not show which actor made its last transition: section 8.8, item 7 says
+doctor's history comparisons, the status-history comparison and the C-NAMES `name` comparison,
+"see only the prior snapshot's type, status and `name`, which identify neither the transitioning
+actor nor the pre-proposal state". The `/proposed` landing rule is therefore tested at the
+writer, in step 10, not by record validation.
 
 Acceptance checks, over records and snapshots the test builds:
 
@@ -1116,8 +1129,9 @@ Acceptance checks, over records and snapshots the test builds:
   maintainer_decision with `actor.kind = "assistant"`, an open pending_decision carrying any part
   of its resolution bundle, a clean finding at `open` carrying `severity` (section 8.5: "never
   before" the fix decision; open point 24), a link with an unknown `rel`, a clean record without
-  `created_at`, a clean record whose `actor.kind` is `importer` (section 8.6), and, given a prior
-  and a current snapshot, a terminal record moved back to a working state.
+  `created_at`, a clean record whose `actor.kind` is `importer` (section 8.6), an imported record
+  or a worklog entry carrying `name` (section 8.3), and, given a prior and a current snapshot, a
+  terminal record moved back to a working state.
 - An assistant-proposed `active/proposed` block does not make its scoped item non-actionable.
 
 ### Step 5: views and deliverables (`opf render`)
@@ -1136,10 +1150,16 @@ drift checks, so it comes first.
 - Renders are byte-reproducible: UTF-8, LF line endings, stable ordering, no locale-dependent
   sorting, no wall-clock content, no network access and no model involvement. Every generated file
   opens with the header section 10.3 describes, and the header carries no timestamp.
-- `DECISIONS.toml` is a projection (section 10.5): a leading TOML comment header, `schema = 1`,
+- A record's `name` renders beside its ID (section 10.2). Every index table carries a Name column,
+  even when no record in it has a name, with the cell left empty for an unnamed record; a compact
+  list writes the ID, one space and the name, as in `MD-7 INKWARM-DEFAULT`, or the ID alone, with
+  no placeholder mark. A name changes no ordering: rows sort as they would without it, with ID as
+  the final tie-breaker.
+- `DECISIONS.toml` is a projection (section 10.5): a leading TOML comment header, `schema = 2`,
   `projection = "decisions"`, four arrays of tables (one per source type, rows sorted by numeric ID,
-  full base record with `links` and `refs`, `x-<vendor>` tables excluded), and a `[derived]` table
-  with the `effective` and `superseded` pending_decision IDs.
+  full base record with `links` and `refs`, `x-<vendor>` tables excluded, and `name` exactly when
+  the record has one), and a `[derived]` table with the `effective` and `superseded`
+  pending_decision IDs. Schema 2 differs from schema 1 only in that `name` field.
 - `VERSION` renders from `version.toml` into the product root (section 6.1; section 5.8, The
   public deliverables are identical across topologies).
 - `CHANGELOG.md` is never rendered over: it is curated, carries no do-not-edit header, and opens
@@ -1165,6 +1185,10 @@ Acceptance checks, over stores the test builds:
 - Editing one byte of a rendered view makes the check report drift (exit 1), and re-rendering
   clears it.
 - A proposed (`/proposed`) record appears in views as awaiting ratification (section 8.4).
+- A view over a named and an unnamed record shows the Name column, the name beside the named
+  record's ID and an empty cell for the other; a view over unnamed records alone still shows the
+  column; and naming a record changes no row order. A `DECISIONS.toml` row carries `name` exactly
+  when its record has one.
 
 ### Step 6: the validator (`opf doctor`)
 
@@ -1262,6 +1286,14 @@ containment.
   is read at an earlier commit, as open point 20 says of every prior file that does not parse.
 - View drift uses the step 5 renderer for every declared deterministic view and projection,
   `VERSION` included (sections 10.5 and 11).
+- C-NAMES (section 8.3) is on the roster of every store. It checks every clean record's `name`
+  against the step 4 grammar, checks uniqueness over every active index and every archived record
+  file together, reporting each set of records that share a name without choosing an owner, and
+  compares each record's `name` with the same record's row in the prior committed snapshot, read as
+  transition legality reads it (open point 20), beside the status-history comparison. An index or
+  archived record file it cannot read is cannot-evaluate. C-NAMES owns every name defect, its
+  grammar, uniqueness and no-change rules included: report each as a C-NAMES finding and never
+  again under another check.
 - The four imported-series checks named in section 8.3 (C-IMPORTED-SCHEMA, C-IMPORTED-IDS,
   C-IMPORTED-PROVENANCE, C-IMPORTED-SEGREGATION) are on the roster of every store, with
   C-CONTAINMENT recognizing the imported managed leaves and C-LINKS resolving links over both
@@ -1392,6 +1424,11 @@ Acceptance checks, each as an automated test over a throwaway store the test bui
   reports the resurrection as a finding; when `HEAD` holds a `manifest.toml` in two other immediate
   subdirectories of `.working/`, the result is cannot-evaluate.
 - The render write mode refuses on a store with a duplicated ID and writes nothing.
+- C-NAMES reports, each once and under no other check: a malformed name (lowercase, the ID shape
+  `MD-7`, 2 or 65 characters, a trailing line ending); two records sharing a name, one in an
+  active index and one in an archived record file, with both IDs and no owner chosen; and, with a
+  committed store, a name added to, changed on or removed from a record in the working tree. An
+  unreadable archived record file makes it cannot-evaluate.
 - Given a committed store and a working tree that changes one record's status and appends the
   matching `opf-record transition <ID> <from> -> <to>` worklog entry, with the views not yet
   re-rendered and no other defect, a validator that grades the change cannot-evaluate reports it as
@@ -1651,7 +1688,11 @@ Acceptance checks:
 Implement section 8.8 (Authoring operations). Subcommands:
 
 - `create`: a new record of an enabled baseline type in its initial state (not `done` receipts or
-  worklog entries).
+  worklog entries). `create --name <NAME>` sets the new record's optional `name` (section 8.3);
+  without it the record carries no name. `create` refuses, writing nothing, a name that breaks the
+  section 8.3 grammar, a name any record in the store holds, the record archive included, and any
+  `--name` when it cannot read every index and archived record file it compares against. Operands
+  stay IDs: no subcommand accepts a name in place of an ID.
 - `transition`: a checked status change; writes `proposed_from` on an assistant or automation
   landing at `/proposed`; a rejection restores exactly the recorded `proposed_from` state, and
   leaving the `/proposed` status, by rejection or ratification, removes the field; writes or
@@ -1800,6 +1841,10 @@ Acceptance checks:
 - A `transition` to unqualified `done` refuses for every actor, and `done-with-receipt` refuses an
   assistant actor.
 - `transition` refuses a record whose row is not schema-valid and leaves it untouched.
+- `create --name INKWARM-DEFAULT` writes that `name` and exits 0, and a later `transition` of the
+  record leaves it unchanged. `create --name` refuses and writes nothing for a malformed name, for
+  a name an active record holds, for a name only an archived record holds, and when an archived
+  record file cannot be read; a subcommand given a name where an ID belongs refuses.
 - A transition that the validator grades as the pending cannot-evaluate renders, exits 0 and
   reports the change as pending until commit; with any other cannot-evaluate in the store, or any
   finding other than a view drift that the verb's own render remedies, the same transition exits 2.
@@ -2834,7 +2879,7 @@ maintainer's ruling on an open point, report the ruling with it.
    carries the section 10.3 header (the projection as a TOML comment block; `CHANGELOG.md` and the
    init-written `.working/README.md` excepted, and `VERSION` as ratified under open point 8).
 8. The validator runs the full section 11 roster, with counter monotonicity as both step 6 checks,
-   plus the section 8.2 no-deletion check per series, the open point 25 outcome check, the
+   plus the section 8.2 no-deletion check per series, the open point 25 outcome check, C-NAMES, the
    imported-series checks, the section 4.2 control-area registration, C-EVIDENCE-ENUM, adoption
    grading and the staging walk, exits 0, 1 or 2 as step 6 describes, and fails closed on
    unreadable input; its tracked-store check admits unstaged files only on the terms of open

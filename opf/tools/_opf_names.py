@@ -6,9 +6,10 @@ ships ahead of them, reads no store and writes nothing.
 valid_name(value) returns True exactly when `value` is a str of 3 to 64 characters that matches
 NAME_PATTERN (ASCII capital letters, digits and single hyphens, starting with a letter and ending with a
 letter or digit) and does not match ID_SHAPE, the clean ID shape `<NS>-<digits>`. The patterns end in \\Z,
-never $, so a trailing line ending is refused, and they are compiled with re.ASCII, so a non-ASCII
-lookalike is refused. A name that breaks the grammar is refused, never corrected: nothing here changes its
-case, trims it or rewrites it.
+never $, so a trailing line ending is refused, and their classes are the explicit ranges A-Z and 0-9, so a
+non-ASCII lookalike is refused; re.ASCII is set as well, though these classes need no flag to refuse one.
+A name that breaks the grammar is refused, never corrected: nothing here changes its case, trims it or
+rewrites it.
 
 duplicate_names(records) takes a list of records (mappings), the active indexes and the record archive
 together, and returns a sorted list of (name, ids) pairs, one for each name that more than one record
@@ -95,6 +96,12 @@ def self_test():
         check("names-id-shape-md-0", valid_name("MD-0") is False)
         check("names-mdx-7-valid", valid_name("MDX-7") is True)
         check("names-md-7a-valid", valid_name("MD-7A") is True)
+        # A digit after the first letter is allowed, and a digit in the prefix, a one-letter
+        # prefix or a missing hyphen each falls outside the ID shape, so each of these is a name.
+        check("names-first-segment-digit", valid_name("R2D2-X") is True)
+        check("names-digit-prefix-not-id-shape", valid_name("A1-7") is True)
+        check("names-one-letter-prefix-not-id-shape", valid_name("A-7") is True)
+        check("names-no-hyphen-not-id-shape", valid_name("MD7") is True)
         check("names-example-valid", valid_name("INKWARM-DEFAULT") is True)
         # Hyphens: leading, trailing and doubled are refused.
         check("names-leading-hyphen", valid_name("-INKWARM") is False)

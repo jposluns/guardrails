@@ -1386,14 +1386,14 @@ guarantees:
 7. The declared views are rendered.
    Then a full doctor MUST report VALID; a failure leaves the change for review with recovery
    advice scoped to the planned paths. One exception applies to a status change: doctor compares
-   it with the prior committed snapshot, and doctor's history comparison sees only the prior
-   snapshot's type and status, which identify neither the transitioning actor nor the
-   pre-proposal state; doctor validates `proposed_from` but does not use it as rejection
-   evidence, so doctor MAY grade that change cannot-evaluate until the change is committed. The
-   verb's render and final doctor MUST accept that cannot-evaluate only for exactly the record
-   and the from and to statuses it has just written, never a finding and never any other
-   cannot-evaluate, and the verb MUST report it as pending until commit. `opf doctor` itself is
-   unchanged and still reports it until then.
+   it with the prior committed snapshot, and doctor's history comparisons, the status-history
+   comparison and the C-NAMES `name` comparison (section 8.3), see only the prior snapshot's type,
+   status and `name`, which identify neither the transitioning actor nor the pre-proposal state;
+   doctor validates `proposed_from` but does not use it as rejection evidence, so doctor MAY grade
+   that change cannot-evaluate until the change is committed. The verb's render and final doctor
+   MUST accept that cannot-evaluate only for exactly the record and the from and to statuses it
+   has just written, never a finding and never any other cannot-evaluate, and the verb MUST report
+   it as pending until commit. `opf doctor` itself is unchanged and still reports it until then.
 8. The lease MUST be released, and only then are the claimed IDs and touched files reported. The
    change MUST be left uncommitted in the working tree: the verb MUST NOT stage or commit it.
 
@@ -1698,8 +1698,9 @@ decision-resolution link (current effective resolution through the supersession 
 beyond this vocabulary requires a specification version bump; ad hoc logic never enters a
 generator.
 
-A record's `name` (section 8.3) renders beside its ID. An index table carries a Name column, left
-empty for an unnamed record. A compact list writes the ID, one space and the name, as in
+A record's `name` (section 8.3) renders beside its ID. Every index table carries a Name column,
+even when no record in it has a name, so a table's columns never depend on its rows; the cell is
+left empty for an unnamed record. A compact list writes the ID, one space and the name, as in
 `MD-7 INKWARM-DEFAULT`, and the ID alone when the record has no name, with no placeholder mark.
 Rendering a name changes no ordering: rows sort exactly as they would without it, with ID as the
 final tie-breaker.

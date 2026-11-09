@@ -751,7 +751,7 @@ _CONTRACT = {
         _D('That journal is .working/journals/record/journal.'),
         _D('7. The declared views are rendered.'),
         'Then a full doctor MUST report VALID; a failure leaves the change for review with recovery advice scoped to the planned paths.',
-        "One exception applies to a status change: doctor compares it with the prior committed snapshot, and doctor's history comparison sees only the prior snapshot's type and status, which identify neither the transitioning actor nor the pre-proposal state; doctor validates proposed_from but does not use it as rejection evidence, so doctor MAY grade that change cannot-evaluate until the change is committed.",
+        "One exception applies to a status change: doctor compares it with the prior committed snapshot, and doctor's history comparisons, the status-history comparison and the C-NAMES name comparison (section 8.3), see only the prior snapshot's type, status and name, which identify neither the transitioning actor nor the pre-proposal state; doctor validates proposed_from but does not use it as rejection evidence, so doctor MAY grade that change cannot-evaluate until the change is committed.",
         "The verb's render and final doctor MUST accept that cannot-evaluate only for exactly the record and the from and to statuses it has just written, never a finding and never any other cannot-evaluate, and the verb MUST report it as pending until commit.",
         _D('opf doctor itself is unchanged and still reports it until then.'),
         '8. The lease MUST be released, and only then are the claimed IDs and touched files reported.',
