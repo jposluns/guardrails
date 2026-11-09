@@ -3416,6 +3416,23 @@ def _page_bound_source_self_test():
         ]
         for label, rel_path, needle, tmpl, expect in cases:
             for tag, ch in (("homoglyph", HOMO), ("zerowidth", ZW)):
+                if (label, tag) == ("description", "zerowidth"):
+                    # The register generator's own load refuses a Cf format character (U+200B) in a
+                    # roadmap description before any page-bound string is enumerated, a ValueError the
+                    # caller maps to a fail-closed exit 2, so this source must be refused, not scanned.
+                    sub = gen_enforcement_register._build(tmp / "description-zerowidth")
+                    p = sub / rel_path
+                    p.write_text(p.read_text(encoding="utf-8").replace(needle, tmpl.format(ch), 1),
+                                 encoding="utf-8")
+                    try:
+                        _page_bound_sources(sub)
+                        failures.append("INJECT description-zerowidth: the register generator accepted a "
+                                        "zero-width space in a roadmap description")
+                    except ValueError as exc:
+                        if "Cf format character" not in str(exc):
+                            failures.append("INJECT description-zerowidth: refused for another reason "
+                                            "({})".format(exc))
+                    continue
                 fs = inject_and_scan("{}-{}".format(label, tag), rel_path, needle, tmpl.format(ch))
                 if not has(fs, expect):
                     failures.append("COMPLETENESS: a {} in the {} channel source must be flagged (FIX 1)"

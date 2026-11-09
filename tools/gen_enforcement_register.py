@@ -81,6 +81,7 @@ if tuple(sys.version_info[:2]) < (3, 14):
 
 import html
 import re
+import unicodedata
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -197,18 +198,46 @@ GENSRC_OUTPUTS = (
 
 # --- input loading and validation ---------------------------------------------------------------------
 
+def _splits_line(ch):
+    """True when str.splitlines() splits a line at the character ch (LF, CR, VT, FF, the file, group and
+    record separators U+001C to U+001E, NEL U+0085, and the line and paragraph separators U+2028 and
+    U+2029). Asked of splitlines itself, so the set is exactly the one the interpreter uses."""
+    return len(("a" + ch + "a").splitlines()) != 1
+
+
+def _is_cc(ch):
+    """True when ch is in Unicode general category Cc (U+0000 to U+001F and U+007F to U+009F, NEL
+    U+0085 included)."""
+    return unicodedata.category(ch) == "Cc"
+
+
+def _is_cf(ch):
+    """True when ch is in Unicode general category Cf, the invisible format characters (a zero-width space
+    U+200B, a byte order mark U+FEFF, a soft hyphen U+00AD, a direction mark, and the like)."""
+    return unicodedata.category(ch) == "Cf"
+
+
+# The three character classes _no_ctrl refuses, each tested on its own. The self-test's flips replace one
+# entry at a time with a test that answers False, and restore it.
+_NO_CTRL_CLASSES = {"line break": _splits_line, "Cc control": _is_cc, "Cf format": _is_cf}
+
+
 def _no_ctrl(value, where):
-    """Reject an en dash, em dash, control character, or an embedded newline in a SINGLE-LINE display string
+    """Reject an en dash, an em dash, or any character of three classes in a SINGLE-LINE display string
     that renders into a Markdown TABLE CELL (a rule title, a status word, a corpus id, a pending row's
-    description). Fail-closed (ValueError -> exit 2), so a bad source surfaces here rather than as a red site
-    or dash gate on the generated output. A tab or newline in a Markdown table cell would break the row, so
-    this guard is deliberately strict; a mechanism RESIDUE renders into a multi-line sink instead and uses
-    _residue_display, which permits newlines."""
+    description, a partial row's coverage note): a character str.splitlines() splits on (_splits_line), a
+    Unicode Cc control character (_is_cc), or a Unicode Cf format character (_is_cf). Each class is tested on
+    its own, so U+2028 and U+2029 (category Zl and Zp, not Cc) are refused as line breaks and a zero-width
+    space or a byte order mark as format characters. Fail-closed (ValueError -> exit 2), so a bad source
+    surfaces here rather than as a red site or dash gate on the generated output. A tab or line break in a
+    Markdown table cell would break the row, so this guard is deliberately strict; a mechanism RESIDUE
+    renders into a multi-line sink instead and uses _residue_display, which permits newlines."""
     if EN in value or EM in value:
         raise ValueError("{}: contains an en/em dash: {!r}".format(where, value))
     for ch in value:
-        if ch != " " and (ord(ch) < 0x20 or ord(ch) == 0x7f):
-            raise ValueError("{}: contains a control character or newline: {!r}".format(where, value))
+        for name, test in _NO_CTRL_CLASSES.items():
+            if test(ch):
+                raise ValueError("{}: contains a {} character {!r}: {!r}".format(where, name, ch, value))
     return value
 
 
@@ -1494,6 +1523,51 @@ def self_test_main():
                                      'coverage = "Covers one synthetic case of rulebb; the rest of '
                                      'rulebb is uncovered by a linked mechanism."',
                                      'coverage = "   "'))
+        # (m6) Each character class _no_ctrl refuses, in a coverage note written as a TOML escape (so this
+        # source stays ASCII): a character str.splitlines() splits on, a Unicode Cc control character, and
+        # a Unicode Cf format character. Every row fails closed (exit 2).
+        cov_note = ('coverage = "Covers one synthetic case of rulebb; the rest of '
+                    'rulebb is uncovered by a linked mechanism."')
+        ctrl_rows = (("splits", ("\\r", "\\u000B", "\\u000C", "\\u001C", "\\u001D", "\\u001E", "\\u0085",
+                                 "\\u2028", "\\u2029")),
+                     ("cc", ("\\u0001", "\\t", "\\u007F", "\\u0085", "\\u009F")),
+                     ("cf", ("\\u200B", "\\uFEFF", "\\u00AD", "\\u200E")))
+
+        def put_note(escape):
+            return lambda t: replace_in(t / ROADMAP, cov_note,
+                                        'coverage = "Checks: one case.' + escape + ' Not checked: the rest."')
+
+        for cls, escapes in ctrl_rows:
+            for escape in escapes:
+                expect2("roadmap-coverage-{}-{}".format(cls, escape.strip("\\")), put_note(escape))
+
+        # (m7) FLIPS for (m6): with one class's _NO_CTRL_CLASSES test replaced by one that answers False, a
+        # note holding a character only that class catches is accepted (not exit 2), so each class's row
+        # fails without its own leg. NEL (U+0085) and CR are both a line break and Cc: refused while either
+        # leg stands, accepted only with both disabled.
+        def accepted_with(disabled, escape):
+            saved = dict(_NO_CTRL_CLASSES)
+            try:
+                for leg in disabled:
+                    _NO_CTRL_CLASSES[leg] = lambda ch: False
+                tree = _build(tmp / "flip-{}-{}".format("-".join(disabled).replace(" ", "-"),
+                                                       escape.strip("\\")))
+                put_note(escape)(tree)
+                return run_quiet(tree, check=True) != 2
+            finally:
+                _NO_CTRL_CLASSES.update(saved)
+
+        flips = ((("line break",), ("\\u2028", "\\u2029"), True),
+                 (("Cc control",), ("\\u0001", "\\t", "\\u007F", "\\u009F"), True),
+                 (("Cf format",), ("\\u200B", "\\uFEFF", "\\u00AD"), True),
+                 (("line break",), ("\\u0085", "\\r"), False),
+                 (("Cc control",), ("\\u0085", "\\r"), False),
+                 (("line break", "Cc control"), ("\\u0085", "\\r"), True))
+        for disabled, escapes, want in flips:
+            for escape in escapes:
+                if accepted_with(disabled, escape) != want:
+                    failures.append("flip: with {} disabled, a coverage note holding {} expected {}".format(
+                        " and ".join(disabled), escape, "accepted" if want else "still refused (exit 2)"))
         # (q) A stale committed ledger (mutate it so it no longer matches a fresh build).
         expect2("stale-ledger",
                 lambda t: (t / ".aiqt" / "enforceability.json").write_text(
@@ -1662,7 +1736,9 @@ def self_test_main():
           "mechanism mismatch against the ledger linkage, a none row with a description, a pending row missing its "
           "description or carrying a mechanism or carrying only whitespace, a partial row's coverage note "
           "rendered verbatim in its own row in both views while a coverage note on an enforced or none row, "
-          "a newline inside one, or a whitespace-only one fails closed (exit 2), a NEWLINE in a table-cell "
+          "a newline inside one, any other character str.splitlines() splits on, a Cc control character, a Cf "
+          "format character (each class also flipped: accepted once its own test is disabled), or a "
+          "whitespace-only one fails closed (exit 2), a NEWLINE in a table-cell "
           "description, an unsupported lint: reference, a stale committed ledger, an en dash or a raw tab "
           "in a residue, a boolean roadmap version, a site shell missing its content token, and an "
           "invalid-UTF-8 generated Markdown or HTML target, and a published preview hook that does not "
