@@ -3303,6 +3303,8 @@ expected-check-ids = [
   "revert/audit-stdout-stream-misses-dup2-red",
   "revert/audit-report-at-return-red",
   "revert/audit-subinterpreter-unrecorded-red",
+  "verdict/finished-failure-beside-timeout-fails",
+  "verdict/all-timed-out-no-verdict",
   "live/real-tree-passes",
 ]
 
