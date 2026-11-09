@@ -506,7 +506,8 @@
       "regenerate": "python3 tools/gen_draft_site.py",
       "sources": [
         "tools/gen_draft_site.py",
-        "site/draft-src/home.toml"
+        "site/draft-src/home.toml",
+        ".aiqt/core/hooks/manifest.toml"
       ],
       "target": "site/index.html"
     },
@@ -515,7 +516,8 @@
       "regenerate": "python3 tools/gen_draft_site.py",
       "sources": [
         "tools/gen_draft_site.py",
-        "site/draft-src/install-details.toml"
+        "site/draft-src/install-details.toml",
+        ".aiqt/core/hooks/manifest.toml"
       ],
       "target": "site/install/details/index.html"
     },
