@@ -2414,6 +2414,15 @@ _LOAD_SENSITIVE_ROWS = ("TG-11/slow-drip", "TG-11/read-inactivity",
                         "TG-11/tls-timeout")
 _LOAD_SENSITIVE_VECTORS = ("resolver-vector/blocked-timing",)
 
+# The self-test's local TLS fixture server: the per-operation timeout of a
+# served connection (handshake, recv, send and unwrap), and how long
+# Server.close() waits for the server thread. close() shuts the served
+# connection down first, so a blocked operation returns at once; the join
+# bound is derived from the socket timeout and kept above it, so even an
+# operation close() could not interrupt ends inside the join.
+_TLS_FIXTURE_SOCKET_SECONDS = 2.0
+_TLS_FIXTURE_STOP_JOIN_SECONDS = 2 * _TLS_FIXTURE_SOCKET_SECONDS
+
 
 def _runner_launch_entry(expected):
     # The positive registration's own call, run for real: the runner-launched
@@ -2630,7 +2639,7 @@ exit 0
         # them: each row run's 30 s watchdog and its deadlines scaled to
         # connect 2.0 s, inactivity 1.5 s, request 8.0 s and gather 16.0 s;
         # the TLS fixture's 2.0 s socket timeout (raw.settimeout) and its
-        # 1.0 s stop join; the 2.0 s join of a run's resolver workers (a
+        # 4.0 s stop join; the 2.0 s join of a run's resolver workers (a
         # straggler fails the row INVALID); the 1.0 s resolver-slot acquire
         # after a run and in the held-slot queue; the 10 s HELD_JOIN of
         # resolver-vector/positive-held-slot; the 5.0 s resolver join of
@@ -3325,6 +3334,29 @@ def _failure_lines_self_test():
         print("RED forced-{} -> named {}".format(label, wanted[0].split(" ", 1)[1].split(":")[0]))
 
 
+def _setup_or_teardown_row(exc):
+    """The row for an exception that stopped the self-test outside any row:
+    the exception's type and its message, so the report says what failed."""
+    return {
+        "id": "fixture/setup-or-teardown",
+        "test_status": CANNOT_EVALUATE,
+        "exception": type(exc).__name__,
+        "message": str(exc),
+    }
+
+
+def _setup_row_self_test():
+    # The setup-or-teardown row must carry the exception's message, not only
+    # its type name: "AssertionError" alone does not say which fixture failed.
+    identity = "self-test/setup-or-teardown-message"
+    row = _setup_or_teardown_row(AssertionError("local TLS fixture did not stop"))
+    if (row.get("exception") != "AssertionError"
+            or row.get("message") != "local TLS fixture did not stop"
+            or "local TLS fixture did not stop" not in _report_line([row])):
+        raise AssertionError(identity)
+    print("PASS " + identity)
+
+
 def _resolver_stub_bound(function):
     # A resolver worker reads _lookup only when it runs. One that outlives
     # settle_resolvers' bound can run after its case has unwound the fixture
@@ -3408,6 +3440,7 @@ def self_test(vectors_only=False, steady_only=False):
     SELF_TEST_ROSTER = ()
     executed = []
     vector_results = []
+    fixture_failure = None
     module = sys.modules[__name__]
     original_context = ssl.create_default_context
     original_fetch = _fetch
@@ -3504,6 +3537,8 @@ def self_test(vectors_only=False, steady_only=False):
             self.requests = []
             self.errors = []
             self.stop = threading.Event()
+            self.guard = threading.Lock()
+            self.connection = None
             self.listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.listener.bind(("127.0.0.1", 0))
             self.listener.listen(8)
@@ -3522,11 +3557,19 @@ def self_test(vectors_only=False, steady_only=False):
                     break
                 secured = None
                 try:
-                    raw.settimeout(2.0)
+                    raw.settimeout(_TLS_FIXTURE_SOCKET_SECONDS)
+                    if not self.serving(raw):
+                        continue
                     if self.mode == "tls-stall":
                         self.stop.wait(1.10)
                         continue
-                    secured = self.context.wrap_socket(raw, server_side=True)
+                    # Wrap without the handshake, so the wrapped socket is
+                    # published for close() before any blocking operation.
+                    secured = self.context.wrap_socket(
+                        raw, server_side=True, do_handshake_on_connect=False)
+                    if not self.serving(secured):
+                        continue
+                    secured.do_handshake()
                     request = bytearray()
                     while not request.endswith(b"\r\n\r\n"):
                         block = secured.recv(4096)
@@ -3565,16 +3608,78 @@ def self_test(vectors_only=False, steady_only=False):
                 except Exception as exc:
                     self.errors.append(type(exc).__name__)
                 finally:
+                    with self.guard:
+                        self.connection = None
                     if secured is not None:
                         secured.close()
                     raw.close()
 
+        def serving(self, connection):
+            # Publish the connection close() shuts down, or refuse it once
+            # close() has begun. The lock orders the two: a stop set before
+            # this check is seen here, and a close() after it finds this
+            # connection.
+            with self.guard:
+                if self.stop.is_set():
+                    return False
+                self.connection = connection
+                return True
+
         def close(self):
             self.stop.set()
+            with self.guard:
+                connection = self.connection
+            if connection is not None:
+                try:
+                    # The plain socket shutdown, not SSLSocket.shutdown, which
+                    # would drop the TLS state the server thread still uses.
+                    socket.socket.shutdown(connection, socket.SHUT_RDWR)
+                except OSError:
+                    pass
             self.listener.close()
-            self.thread.join(timeout=1.0)
+            self.thread.join(timeout=_TLS_FIXTURE_STOP_JOIN_SECONDS)
             if self.thread.is_alive():
                 raise AssertionError("local TLS fixture did not stop")
+
+    def tls_fixture_stop_check(context, cadata):
+        # A served connection whose peer goes quiet leaves the server thread
+        # blocked in recv for up to the socket timeout, longer than close()
+        # used to join it. close() must make that thread return at once:
+        # neither raise nor wait the timeout out.
+        identity = "self-test/tls-fixture-stop-while-served"
+        server = Server(context, b"", b"")
+        closed = False
+        try:
+            with socket.create_connection(("127.0.0.1", server.port),
+                                          timeout=_TLS_FIXTURE_SOCKET_SECONDS) as raw:
+                with original_context(cadata=cadata).wrap_socket(
+                        raw, server_hostname="codeload.github.com"):
+                    # The server finishes its handshake after this one, then
+                    # waits in recv for a request this client never sends.
+                    began = time.monotonic()
+                    time.sleep(0.2)
+                    closed = True
+                    try:
+                        server.close()
+                    except AssertionError as exc:
+                        raise AssertionError(identity + ": close() raised: "
+                                             + str(exc)) from None
+                    took = time.monotonic() - began
+        finally:
+            if not closed:
+                try:
+                    server.close()
+                except AssertionError:
+                    pass
+        if server.thread.is_alive() or took >= _TLS_FIXTURE_SOCKET_SECONDS:
+            raise AssertionError(
+                identity + ": close() took {:.2f} s, not under the {} s socket "
+                "timeout".format(took, _TLS_FIXTURE_SOCKET_SECONDS))
+        # An operation close() cannot interrupt still ends inside the join.
+        if not _TLS_FIXTURE_STOP_JOIN_SECONDS > _TLS_FIXTURE_SOCKET_SECONDS:
+            raise AssertionError(identity + ": the stop join bound is not above the "
+                                 "socket timeout")
+        print("PASS " + identity)
 
     def snapshot(root):
         result = {}
@@ -5032,6 +5137,11 @@ def self_test(vectors_only=False, steady_only=False):
                 context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
                 context.load_cert_chain(str(cert), str(key))
                 contexts.append(context)
+            # A failure here is a definite one, named after the roster.
+            try:
+                tls_fixture_stop_check(contexts[0], fixture_certificates)
+            except AssertionError as exc:
+                fixture_failure = "FAIL " + str(exc)
 
             git_commit, git_archive = _git_archive_fixture(base)
             add("positive/git-archive", VALID, "reject-git-comment",
@@ -5073,7 +5183,8 @@ def self_test(vectors_only=False, steady_only=False):
                 SELF_TEST_ROSTER = tuple(executed)
                 print(_report_line(executed))
                 _print_failures(_roster_failures(executed)
-                                + ["FAIL roster/rows: the run stopped after its positive control"])
+                                + ["FAIL roster/rows: the run stopped after its positive control"]
+                                + ([fixture_failure] if fixture_failure else []))
                 return 1
 
             guard_rows = (_guard_self_test() + _ownership_self_test()
@@ -5084,16 +5195,15 @@ def self_test(vectors_only=False, steady_only=False):
                 executed.append(record_row(case, run, run_case(base, contexts, case, True)))
             vector_results = resolver_vectors(base, contexts)
     except Exception as exc:
-        executed.append({
-            "id": "fixture/setup-or-teardown",
-            "test_status": CANNOT_EVALUATE,
-            "exception": type(exc).__name__,
-        })
+        executed.append(_setup_or_teardown_row(exc))
         SELF_TEST_ROSTER = tuple(executed)
         print(_report_line(executed))
         # Exit 2 (cannot evaluate), but still name every row that is not
-        # VALID, the setup-or-teardown row included.
-        _print_failures(_roster_failures(executed))
+        # VALID, the setup-or-teardown row included, with its message.
+        _print_failures(_roster_failures(executed)
+                        + ["FAIL fixture/setup-or-teardown: {}: {}".format(
+                            type(exc).__name__, exc)]
+                        + ([fixture_failure] if fixture_failure else []))
         return 2
 
     # Every exit-code departure from main; all concern resolver workers:
@@ -5149,13 +5259,14 @@ def self_test(vectors_only=False, steady_only=False):
     # and the real roster is judged and named whatever its outcome.
     try:
         _failure_lines_self_test()
+        _setup_row_self_test()
         red_failure = None
     except AssertionError as exc:
         red_failure = "FAIL " + str(exc)
     rc = _judge_roster(executed, expected_ids, vector_results, tuple(
         name for name in VECTOR_NAMES if not (steady_only and name in _LOAD_SENSITIVE_VECTORS)))
-    if red_failure is not None:
-        _print_failures([red_failure])
+    if red_failure is not None or fixture_failure is not None:
+        _print_failures([line for line in (red_failure, fixture_failure) if line])
         return 1
     if rc:
         return rc
