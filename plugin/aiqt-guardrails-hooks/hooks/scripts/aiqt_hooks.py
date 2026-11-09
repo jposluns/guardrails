@@ -19368,6 +19368,191 @@ def pgrep_self_match(data):
         "completion file captured at launch.")
 
 
+# heredoc_terminator: the characters that end an unquoted word of the raw command text, and those after which
+# a '#' starts a comment.
+_HDT_WORD_END = frozenset(" \t\n;&|<>()")
+_HDT_COMMENT_AFTER = frozenset(" \t\n;&|()<>")
+
+
+def _hdt_skip_quote(command, i, n, ansi_c=False):
+    """The index just past the quoted string opening at command[i] (a single or double quote), or n when it
+    never closes. A backslash escapes the next character inside double quotes and inside an ANSI-C $'...'
+    string (ansi_c), never inside plain single quotes."""
+    quote = command[i]
+    i += 1
+    while i < n:
+        c = command[i]
+        if c == "\\" and (quote == '"' or ansi_c):
+            i += 2
+            continue
+        if c == quote:
+            return i + 1
+        i += 1
+    return n
+
+
+def _hdt_skip_group(command, i, n, opener, closer):
+    """The index just past the group whose first opener is at command[i] (an arithmetic $(( or ((, a $[ or a
+    ${ expansion), counting nested openers and closers and skipping quoted strings and escaped characters; n
+    when it never closes."""
+    depth = 0
+    while i < n:
+        c = command[i]
+        if c == "\\":
+            i += 2
+            continue
+        if c in "'\"":
+            i = _hdt_skip_quote(command, i, n)
+            continue
+        if c == opener:
+            depth += 1
+        elif c == closer:
+            depth -= 1
+            if depth == 0:
+                return i + 1
+        i += 1
+    return n
+
+
+def _hdt_delimiter(command, i, n):
+    """Read the delimiter word of a here-document opener from command[i] (past any blanks): (token, end),
+    the token after quote removal, or (None, end) when no word follows (a syntax error the shell refuses
+    before running anything)."""
+    while i < n and command[i] in " \t":
+        i += 1
+    parts = []
+    while i < n and command[i] not in _HDT_WORD_END:
+        c = command[i]
+        if c == "\\":
+            parts.append(command[i + 1:i + 2])
+            i += 2
+        elif c in "'\"":
+            end = _hdt_skip_quote(command, i, n)
+            closed = end - i >= 2 and command[end - 1] == c
+            inner = command[i + 1:end - 1] if closed else command[i + 1:end]
+            if c == '"':
+                inner = re.sub(r'\\([\\"$`])', r"\1", inner)
+            parts.append(inner)
+            i = end
+        else:
+            parts.append(c)
+            i += 1
+    if not parts:
+        return None, i
+    return "".join(parts), i
+
+
+def _hdt_unterminated(command):
+    """The first here-document opener of the raw command text with no line equal to its delimiter before
+    the command ends, as (opener, token, line), or None. The scan reads the command as the shell reads its
+    input: a '<<' or '<<-' outside quotes, a comment, an arithmetic $((...)), ((...)) or $[...] and a ${...}
+    expansion opens a here-document, its delimiter word taken after quote removal; '<<<' is a here-string.
+    The bodies of the openers on a line begin after that line's unquoted newline, in order, and each ends at
+    the first line equal to its delimiter, read after removing the line's leading tabs for '<<-'. Linear in
+    the command length: every character is read once by the scan or once by a body search."""
+    n = len(command)
+    i = 0
+    pending = []
+    while i < n:
+        c = command[i]
+        if c == "\\":
+            i += 2
+            continue
+        if c in "'\"":
+            i = _hdt_skip_quote(command, i, n)
+            continue
+        if c == "$" and command.startswith("$'", i):
+            i = _hdt_skip_quote(command, i + 1, n, ansi_c=True)
+            continue
+        if c == "#" and (i == 0 or command[i - 1] in _HDT_COMMENT_AFTER):
+            nl = command.find("\n", i)
+            i = n if nl < 0 else nl
+            continue
+        if c == "$" and command.startswith("$((", i):
+            i = _hdt_skip_group(command, i + 1, n, "(", ")")
+            continue
+        if c == "(" and command.startswith("((", i) and (i == 0 or command[i - 1] in _HDT_COMMENT_AFTER):
+            i = _hdt_skip_group(command, i, n, "(", ")")
+            continue
+        if c == "$" and command.startswith("$[", i):
+            i = _hdt_skip_group(command, i + 1, n, "[", "]")
+            continue
+        if c == "$" and command.startswith("${", i):
+            i = _hdt_skip_group(command, i + 1, n, "{", "}")
+            continue
+        if c == "<" and command.startswith("<<", i):
+            if command.startswith("<<<", i):
+                i += 3
+                continue
+            strip = command.startswith("<<-", i)
+            start = i
+            token, i = _hdt_delimiter(command, i + (3 if strip else 2), n)
+            if token is not None:
+                pending.append((command[start:i].strip(), token, strip,
+                                command.count("\n", 0, start) + 1))
+            continue
+        if c == "\n" and pending:
+            i += 1
+            for opener, token, strip, line in pending:
+                while True:
+                    if i >= n:
+                        return opener, token, line
+                    nl = command.find("\n", i)
+                    end = n if nl < 0 else nl
+                    body_line = command[i:end]
+                    i = end + 1
+                    if (body_line.lstrip("\t") if strip else body_line) == token:
+                        break
+            pending = []
+            continue
+        i += 1
+    if pending:
+        return pending[0][0], pending[0][1], pending[0][3]
+    return None
+
+
+def heredoc_terminator(data):
+    """sectvl (security/tool-argument-validation), PreToolUse/Bash. DENY-and-educate a here-document whose
+    delimiter line never comes (_hdt_unterminated): for each opener in the raw command text (<<TOKEN, a
+    single- or double-quoted TOKEN, <<-TOKEN) a later line must equal its token (after the leading tabs
+    <<- removes) before the command ends, since otherwise the shell reads the rest of the command as the
+    here-document's body: an interpreter fed that body runs it as program text, and the commands after the
+    mistyped terminator never run. A here-string (<<<), a << inside quotes or a comment and an arithmetic
+    shift ($((1 << 2))) open nothing. Hooks never ask. BEST EFFORT: a here-document built at run time (an
+    eval string, a variable, a sourced script) is not seen; the residue in the hook manifest states the
+    shapes read and the misses. A missing tool_name takes the shared deny and a non-string command denies
+    fail-safe, as the sibling deny hooks do."""
+    if data.get("hook_event_name") != PRETOOL:
+        return _hard_block("aiqt_hooks: heredoc_terminator wired to unexpected event {!r}; failing closed"
+                           .format(data.get("hook_event_name")))
+    tool_name = data.get("tool_name")
+    if tool_name is None:
+        return _deny_missing_tool_name("sectvl")
+    if tool_name != "Bash":
+        return _allow()                     # a present-but-different tool is out of scope
+    tool_input = data.get("tool_input")
+    command = tool_input.get("command") if isinstance(tool_input, dict) else None
+    if not isinstance(command, str):
+        return _deny(
+            "AIQT rule sectvl (tool-argument-validation): the Bash payload carried no readable command string, "
+            "so the here-document terminator check could not run; it is denied fail-safe. Re-issue a "
+            "well-formed Bash command.",
+            "AIQT guardrail: denied a Bash call with no readable command (rule sectvl, fail-safe).")
+    hit = _hdt_unterminated(command)
+    if hit is None:
+        return _allow()
+    opener, token, line = hit
+    return _deny(
+        "AIQT rule sectvl (tool-argument-validation): the here-document opened by {!r} on line {} of this "
+        "command has no line equal to its delimiter {!r} before the command ends, so the shell would read "
+        "the rest of the command as that here-document's body: a program fed it runs that text, and the "
+        "commands after it never run. End the body with a line holding exactly {!r} (no blanks or carriage "
+        "return around it; only <<- removes leading tabs, never spaces).".format(
+            opener[:80], line, token[:80], token[:80]),
+        "AIQT guardrail: denied a here-document whose delimiter {!r} never closes it (rule sectvl); end its "
+        "body with a line holding exactly that delimiter.".format(token[:80]))
+
+
 # --- secsec: an obvious hardcoded secret in a Write/Edit/MultiEdit/Bash write-form -------------------
 # A COMPENSATING, shift-left control: it does NOT replace the CI secret-scan and gitleaks gates (they
 # remain the real backstop), it moves the same high-signal detection to the moment a secret would be
@@ -37036,6 +37221,7 @@ HANDLERS = {
     "gate_weakening": gate_weakening,
     "commit_msg_subst": commit_msg_subst,
     "pgrep_self_match": pgrep_self_match,
+    "heredoc_terminator": heredoc_terminator,
     "secrets_shift_left": secrets_shift_left,
     "gensrc_guard": gensrc_guard,
     "write_scope_guard": write_scope_guard,
@@ -37079,6 +37265,7 @@ HANDLER_EVENT = {
     "gate_weakening": PRETOOL,
     "commit_msg_subst": PRETOOL,
     "pgrep_self_match": PRETOOL,
+    "heredoc_terminator": PRETOOL,
     "secrets_shift_left": PRETOOL,
     "gensrc_guard": PRETOOL,
     "write_scope_guard": PRETOOL,

@@ -147,7 +147,7 @@ This register lists every rule and the shipped mechanical controls linked to it.
 | Validate server-initiated requests | `secssr` | No control | No shipped control cites this rule. |
 | Resolve privileged filesystem paths against symlink races | `secspr` | No control | No shipped control cites this rule. |
 | Threat-model new trust boundaries before implementation | `secthm` | No control | No shipped control cites this rule. |
-| Validate tool arguments before use | `sectvl` | Hook-linked | `hook:commit-msg-subst`, class b |
+| Validate tool arguments before use | `sectvl` | Hook-linked | `hook:commit-msg-subst`, class b; `hook:heredoc-terminator`, class b |
 | Untrusted content is data, not instructions | `secunt` | No control | No shipped control cites this rule. |
 | Verify a dependency exists before adding it | `secvde` | No control | No shipped control cites this rule. |
 | Bounded consumption and safe failure | `secres` | No control | No shipped control cites this rule. |
@@ -920,6 +920,20 @@ FAIL POSTURE: a tokenizer ValueError never passes clean where a bare pop/apply c
 
 DEADLINE: main() gives this check 8 seconds (the 10-second hook timeout less 2), counted from before its payload read, and fails closed with exit 2 when it has not decided by then; on the worst shapes the hooks self-test times, up to 1 MB, its slowest call took about 0.52 s in-process on a 24-core host with Python 3.14.4 (one run on 2026-10-18, including the shapes whose comment reading depends on context). Interpreter start-up and a wait the interpreter cannot interrupt (a read from a hung mount, a long call into C code) fall outside that deadline, and whether the platform blocks a call whose hook it stops at its own timeout is unverified. Where SIGALRM, setitimer or the main thread is unavailable, or SIGALRM is blocked, the check runs with no deadline; cleanup that runs while the deadline unwinds is outside it.
 
+```
+
+### `hook:heredoc-terminator`
+
+- Platform: `claude-code`
+- Default: `block`
+- Entry point: `PreToolUse on Bash`
+- Class: `b`
+- Channel: `plugin`
+
+Technical limits (from the enforcement ledger):
+
+```
+A BEST-EFFORT LEXICAL guard over the RAW command text, not the shared lexer's segments, DENY-and-educate with no ask. For each here-document opener (<<TOKEN, a single- or double-quoted or backslash-escaped TOKEN, <<-TOKEN, glued to the command word or not, several on one line) it requires a later line equal to the delimiter after quote removal, read after removing the line's leading tabs for <<- only, before the command ends; the bodies of the openers on a line start after that line's unquoted newline and are read in order, as the shell reads them. Otherwise it DENIES, naming the opener, its line and its delimiter, since the shell would read the rest of the command as that body: an interpreter fed it runs that text, and the commands after the mistyped terminator never run. A delimiter line that is the last line with no newline after it closes the body; a terminator indented with spaces, or with tabs under plain <<, or carrying a trailing blank does not. It ALLOWS a here-string (<<<), a << inside single, double or ANSI-C quotes or a comment, and a << inside an arithmetic $((...)), a ((...)) command, a $[...] expansion or a ${...} expansion. An opener with no delimiter word (a syntax error the shell refuses before running anything) and an unterminated quote with no opener before it are allowed. DISCLOSED OVER-DENIES: a here-document opener written as data in a context the scan does not model (an unquoted << in a [[ ]] test, which the shell rejects anyway); a delimiter line glued to a closing parenthesis inside a command substitution (EOF) on one line). HONEST RESIDUALS (each a silent allow): a here-document built at run time (an eval or sh -c string, which the scan reads only as quoted text, a variable, a function, a sourced script or a script file the command runs); a here-document inside a double-quoted command substitution ("$(cat <<EOF ...)"), read as quoted text; a (( at the start of a word read as arithmetic where the shell falls back to two nested subshells. A missing tool_name takes the shared missing-tool deny and a non-string command denies fail-safe, as the sibling deny hooks do; a present non-Bash tool and an empty command allow. Linear in the command length: every character is read once by the scan or once by a body search. DEADLINE: main() gives this check 8 seconds (the 10-second hook timeout less 2), counted from before its payload read, and fails closed with exit 2 when it has not decided by then. Interpreter start-up and a wait the interpreter cannot interrupt (a read from a hung mount, a long call into C code) fall outside that deadline, and whether the platform blocks a call whose hook it stops at its own timeout is unverified. Where SIGALRM, setitimer or the main thread is unavailable, or SIGALRM is blocked, the check runs with no deadline; cleanup that runs while the deadline unwinds is outside it.
 ```
 
 ### `hook:inline-errexit`

@@ -4324,6 +4324,162 @@ def _test_pgrep_self_match(failures):
         failures.append("(psm-wiring) pgrep_self_match handler/event wiring is missing or wrong")
 
 
+# heredoc_terminator rows (sectvl): (label, command, want, mutant). Each row must reach `want` on the real
+# hook; a "deny" row must go red (allow) with the detector disabled, and a row naming a mutant must go red
+# (the other decision) on a copy of the hook source with that one rule of the scan reverted (_HDT_MUTANTS).
+_HDT_ROWS = (
+    ("(hdt-d1) unquoted delimiter mistyped", "cat <<EOF\nx\nEOFF\necho after", "deny", None),
+    ("(hdt-d2) single-quoted delimiter mistyped", "python3 - <<'PY'\nprint(1)\nPYY\necho after", "deny", None),
+    ("(hdt-d3) double-quoted delimiter mistyped", "cat <<\"END\"\nx\nEDN", "deny", None),
+    ("(hdt-d4) <<- terminator indented with spaces", "cat <<-EOF\n\tx\n  EOF\necho after", "deny", None),
+    ("(hdt-d5) plain << terminator indented with a tab", "cat <<EOF\nx\n\tEOF\necho after", "deny",
+     "dash-always"),
+    ("(hdt-d6) second of two openers on one line unterminated", "cat <<A <<'B'\na\nA\nb\nBB\necho z", "deny",
+     "first-only"),
+    ("(hdt-d7) first of two openers on one line unterminated", "cat <<A <<'B'\na\nAA\nb\nB\necho z", "deny",
+     None),
+    ("(hdt-d8) opener on the last line with no body", "cat <<EOF", "deny", None),
+    ("(hdt-d9) terminator with a trailing blank", "cat <<EOF\nx\nEOF \necho after", "deny", None),
+    ("(hdt-a1) unquoted delimiter closed", "cat <<EOF\nx\nEOF\necho after", "allow", None),
+    ("(hdt-a2) single-quoted delimiter closed", "python3 - <<'PY'\nprint(1)\nPY\necho after", "allow",
+     "no-quote-removal"),
+    ("(hdt-a3) double-quoted delimiter closed", "cat <<\"END\"\nx\nEND", "allow", "no-quote-removal"),
+    ("(hdt-a4) <<- terminator indented with tabs", "cat <<-EOF\n\tx\n\tEOF\necho after", "allow",
+     "dash-never"),
+    ("(hdt-a5) two openers on one line closed in order", "cat <<A <<'B'\na\nA\nb\nB\necho z", "allow", None),
+    ("(hdt-a6) here-string", "cat <<< EOF", "allow", "herestring"),
+    ("(hdt-a7) << inside single quotes", "echo 'a <<EOF b'", "allow", "quotes"),
+    ("(hdt-a8) << inside double quotes", "echo \"a <<EOF b\"", "allow", "quotes"),
+    ("(hdt-a9) << inside a comment", "echo hi # cat <<EOF", "allow", "comment"),
+    ("(hdt-a10) arithmetic shift in $((...))", "echo $((1 << 2))", "allow", "arith-subst"),
+    ("(hdt-a11) arithmetic shift in a ((...)) command", "((x = 1 << 2)); echo done", "allow", "arith-cmd"),
+    ("(hdt-a12) delimiter line last with no newline", "cat <<EOF\nx\nEOF", "allow", None),
+    ("(hdt-a13) opener glued to the command word", "cat<<EOF\nx\nEOF", "allow", None),
+    ("(hdt-a14) comment after the opener", "cat <<EOF # note\nx\nEOF\n", "allow", None),
+    ("(hdt-a15) heredoc inside a command substitution", "x=$(cat <<EOF\nhi\nEOF\n); echo ok", "allow", None),
+    ("(hdt-a16) << inside an ANSI-C string", "echo $'it\\'s <<X'", "allow", "ansi-c"),
+    ("(hdt-a17) << in a $[...] expansion", "echo $[1 << 2]", "allow", "arith-bracket"),
+    ("(hdt-a18) << in a ${...} expansion", "x=a; echo ${x/<</y}", "allow", "param"),
+    ("(hdt-a19) backslash-escaped delimiter closed", "cat <<\\EOF\nx\nEOF", "allow", "no-quote-removal"),
+)
+# Each mutant reverts one rule of the scan in a copy of the hook source: (anchor, replacement) edits, each
+# anchor occurring exactly once.
+_HDT_MUTANTS = {
+    "herestring": (("                i += 3\n                continue\n            strip = ",
+                    "                i += 1\n            strip = "),),
+    "quotes": (('        if c in "\'\\"":\n            i = _hdt_skip_quote(command, i, n)\n            continue\n'
+                '        if c == "$" and command.startswith("$\'", i):\n',
+                '        if c == "$" and command.startswith("$\'", i):\n'),),
+    "ansi-c": (('        if c == "$" and command.startswith("$\'", i):\n',
+                '        if False:\n'),),
+    "comment": (('        if c == "#" and (i == 0 or command[i - 1] in _HDT_COMMENT_AFTER):\n',
+                 '        if False:\n'),),
+    "arith-subst": (('        if c == "$" and command.startswith("$((", i):\n', '        if False:\n'),),
+    "arith-cmd": (('        if c == "(" and command.startswith("((", i) and (i == 0 or command[i - 1] in '
+                   '_HDT_COMMENT_AFTER):\n', '        if False:\n'),),
+    "arith-bracket": (('        if c == "$" and command.startswith("$[", i):\n', '        if False:\n'),),
+    "param": (('        if c == "$" and command.startswith("${", i):\n', '        if False:\n'),),
+    "no-quote-removal": (("            parts.append(inner)\n", "            parts.append(command[i:end])\n"),
+                         ('            parts.append(command[i + 1:i + 2])\n',
+                          '            parts.append(command[i:i + 2])\n')),
+    "dash-never": (('                    if (body_line.lstrip("\\t") if strip else body_line) == token:\n',
+                    '                    if body_line == token:\n'),),
+    "dash-always": (('                    if (body_line.lstrip("\\t") if strip else body_line) == token:\n',
+                     '                    if body_line.lstrip("\\t") == token:\n'),),
+    "first-only": (("            for opener, token, strip, line in pending:\n",
+                    "            for opener, token, strip, line in pending[:1]:\n"),),
+}
+
+
+def _hdt_mutant_handlers(failures, tmp):
+    """Load each _HDT_MUTANTS copy of the hook source as its own module; {name: heredoc_terminator}."""
+    source = Path(aiqt_hooks.__file__).read_text(encoding="utf-8")
+    base = tmp / "heredoc-terminator-mutants"
+    base.mkdir()
+    handlers = {}
+    for name, edits in sorted(_HDT_MUTANTS.items()):
+        text = source
+        for anchor, replacement in edits:
+            if text.count(anchor) != 1:
+                failures.append("(hdt-anchor-{}) the mutant anchor {!r} occurs {} times in the hook source, "
+                                "expected once".format(name, anchor, text.count(anchor)))
+                break
+            text = text.replace(anchor, replacement)
+        else:
+            module_name = "hdt_mutant_" + name.replace("-", "_")
+            path = base / (module_name + ".py")
+            path.write_text(text, encoding="utf-8")
+            spec = importlib.util.spec_from_file_location(module_name, str(path))
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            handlers[name] = module.heredoc_terminator
+    return handlers
+
+
+def _test_heredoc_terminator(failures, tmp):
+    """heredoc_terminator rows (_HDT_ROWS); no row executes a command. Each deny row must also be red with
+    the detector (_hdt_unterminated) patched to find nothing, and each row naming a mutant must be red on
+    that mutant, so every row pins one rule of the scan."""
+    handler = aiqt_hooks.heredoc_terminator
+    for label, command, want, _mutant in _HDT_ROWS:
+        got = _decision(handler, command)
+        if got != want:
+            failures.append("{}: expected {}, got {}".format(label, want, got))
+    saved = aiqt_hooks._hdt_unterminated
+    aiqt_hooks._hdt_unterminated = lambda command: None
+    try:
+        disabled = [(label, _decision(handler, command)) for label, command, want, _m in _HDT_ROWS
+                    if want == "deny"]
+    finally:
+        aiqt_hooks._hdt_unterminated = saved
+    for label, got in disabled:
+        if got != "allow":
+            failures.append("{}: with the detector disabled this deny row must go red (allow), got {}"
+                            .format(label, got))
+    mutants = _hdt_mutant_handlers(failures, tmp)
+    used = set()
+    for label, command, want, mutant in _HDT_ROWS:
+        if mutant is None or mutant not in mutants:
+            continue
+        used.add(mutant)
+        got = _decision(mutants[mutant], command)
+        if got == want:
+            failures.append("{}: with the {} rule reverted this row must go red, got {}"
+                            .format(label, mutant, got))
+    if used != set(_HDT_MUTANTS):
+        failures.append("(hdt-mutants) every mutant must be exercised by a row, unused: {!r}"
+                        .format(sorted(set(_HDT_MUTANTS) - used)))
+    code, stdout_obj, _stderr = handler({"hook_event_name": aiqt_hooks.PRETOOL, "tool_name": "Bash",
+                                         "tool_input": {"command": "python3 - <<'PY'\nx = 1\nPYY\nrm y"}})
+    reason = (stdout_obj or {}).get("hookSpecificOutput", {}).get("permissionDecisionReason", "")
+    if "'PY'" not in reason or "<<'PY'" not in reason or "line 1" not in reason or "sectvl" not in reason:
+        failures.append("(hdt-reason) the deny reason must name the opener, its line, the delimiter and the "
+                        "rule, got {!r}".format(reason))
+    for label, data in (
+            ("(hdt-m1) missing tool_name", {"hook_event_name": aiqt_hooks.PRETOOL,
+                                            "tool_input": {"command": "cat <<EOF"}}),
+            ("(hdt-m2) None tool_name", {"hook_event_name": aiqt_hooks.PRETOOL, "tool_name": None,
+                                         "tool_input": {"command": "cat <<EOF"}})):
+        if handler(data) != aiqt_hooks._deny_missing_tool_name("sectvl"):
+            failures.append("{}: expected the shared missing-tool deny".format(label))
+    for tool_input in (None, [], {}, {"command": None}, {"command": 42}):
+        code, stdout_obj, _stderr = handler({"hook_event_name": aiqt_hooks.PRETOOL, "tool_name": "Bash",
+                                             "tool_input": tool_input})
+        if _reduce_result(code, stdout_obj) != "deny":
+            failures.append("(hdt-unreadable) a non-string command {!r} must deny fail-safe".format(tool_input))
+    if _decision(handler, "", tool="Bash") != "allow":
+        failures.append("(hdt-empty) an empty command must silently allow")
+    if _decision(handler, "cat <<EOF", tool="Read") != "allow":
+        failures.append("(hdt-other-tool) a different tool must silently allow")
+    code, stdout_obj, stderr = handler({"hook_event_name": "Stop", "tool_name": "Bash",
+                                        "tool_input": {"command": "cat <<EOF"}})
+    if not (code == 2 and stdout_obj is None and "heredoc_terminator wired to unexpected event" in (stderr or "")):
+        failures.append("(hdt-event) an unexpected event must use the sibling hard-block contract")
+    if (aiqt_hooks.HANDLERS.get("heredoc_terminator") is not handler or
+            aiqt_hooks.HANDLER_EVENT.get("heredoc_terminator") != aiqt_hooks.PRETOOL):
+        failures.append("(hdt-wiring) heredoc_terminator handler/event wiring is missing or wrong")
+
+
 # === PreToolUse deadline posture ======================================================================
 # main() runs every PreToolUse mode that is not fail-open inside one aiqt_hooks._DeadlineWindow of
 # PRETOOL_BUDGET_SECONDS and fails closed (exit 2) when its check has not decided by then, and the raw
@@ -6380,6 +6536,9 @@ _DEADLINE_SHAPES = {
     "pgrep_distinct": lambda n, base: ("Bash", {"command": "".join(
         "pgrep -x p{:07d}; ".format(k) for k in range(n // 19))}),
     "pgrep_self_after": lambda n, base: ("Bash", {"command": _repeat("true; ", n, "pgrep -f job7 || run job7")}),
+    # heredoc_terminator: closed here-documents, then one whose delimiter never comes after the long prefix.
+    "heredoc_open_after": lambda n, base: ("Bash", {"command": _repeat("cat <<EOF\nx\nEOF\n", n,
+                                                                       "cat <<'E'\nx\nEE\n")}),
     # Uncertain '#' shapes (_DEADLINE_HASH_SHAPES): a run of separators inside a subshell before four '#'
     # characters whose comment reading depends on context (five readings), the same with each '#' on its own
     # line (sixteen readings), inside three parentheses, inside runs of parentheses on both sides, and with a
@@ -6460,6 +6619,7 @@ _DEADLINE_CASES = {
     "orch_untracked_wait_loop": ("git_words", "nest_cmdsubst"),
     "orch_yield_tool": ("wakeup_long",),
     "pgrep_self_match": ("git_words", "nest_parens", "pgrep_distinct", "pgrep_self_after"),
+    "heredoc_terminator": ("heredocs", "nest_parens", "git_words_unbal_dq", "heredoc_open_after"),
     "protected_line": ("git_words_unbal_dq", "push_force_after", "mirror_cfg_run_after",
                        "procsubst_run_after"),
     "review_dispatch_pin": ("git_add_parsed", "nest_cmdsubst"),
@@ -6481,6 +6641,7 @@ _DEADLINE_DENY_CASES = frozenset((
     ("commit_msg_subst", "subst_after"), ("diff_source_pretool", "diff_after"),
     ("gate_weakening", "noverify_after"), ("gate_weakening", "ansi_c_noverify_after"),
     ("git_explicit_binding", "breadth_push_after_unbal"), ("pgrep_self_match", "pgrep_self_after"),
+    ("heredoc_terminator", "heredoc_open_after"),
     ("protected_line", "push_force_after"), ("protected_line", "mirror_cfg_run_after"),
     ("protected_line", "procsubst_run_after")))
 # The (handler, shape) cases whose note must still arrive, each within its bound. For inline_errexit: on
@@ -29913,6 +30074,7 @@ def _main_isolated(monitor):
         _test_git_stash_ref(failures)
         _test_inline_errexit(failures, tmp)
         _test_pgrep_self_match(failures)
+        _test_heredoc_terminator(failures, tmp)
         _test_trkasy_no_amp(failures, tmp)
         _test_wait_loop_deny_text(failures, tmp)
         _test_note_literal_sites(failures, tmp)
