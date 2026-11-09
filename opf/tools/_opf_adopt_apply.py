@@ -6599,8 +6599,10 @@ def verify_prompt_pack(plan, pack_dir=None):
     gate's own grammar (every member's bytes match their row, nothing unlisted sits beside them, and the
     recorded digest recomputes from the version and the rows), and the plan's prompt_pack version and
     digest must each equal that manifest's. Returns (version, digest); any failure raises AdoptApplyError.
-    Passing proves the approved plan names the pack this tool ships, never that an adopter's assistant
-    followed that pack's text, nor that a content change also bumped the version (the gate's own limits)."""
+    The check binds the pack's content (its version and digest), not its location: an identical copy at
+    another path is admitted. Passing proves the approved plan binds the version and digest of the pack
+    at that path (by default the one this tool ships), never that an adopter's assistant followed that
+    pack's text, nor that a content change also bumped the version (the gate's own limits)."""
     import check_opf_prompt_pack as prompt_pack
     bound = plan.get("prompt_pack") if isinstance(plan, dict) else None
     if not isinstance(bound, dict):
@@ -16120,45 +16122,80 @@ def _self_test_checks():
             err = refusal(run_apply, root, plan_bytes, approval_bytes, sheet)
         check("driver-apply-drift-after-approval-refused", "fresh plan" in (err or "") and not seen)
         (root / "keep.md").write_bytes(b"kept\n")
-        # the prompt_pack binding (verify_prompt_pack). Pass row: the fixture plan binds the shipped pack and
-        # the gate admits it; its flip drifts the shipped pack under the same approved plan (a VALID pack
-        # re-stamped at another version), and apply refuses before anything composes. Refuse rows: a plan
-        # frozen and approved with only its prompt_pack version, or only its digest, changed refuses the
-        # same way. Each flip removes the check (verify_prompt_pack a no-op, the product-root open then
-        # refusing in its place so nothing is written) and must lose the prompt-pack refusal.
+        # the prompt_pack binding (verify_prompt_pack). Admit rows: the fixture plan binds the shipped pack and
+        # the gate admits it, and an identical copy of the shipped pack at another path is admitted too (the
+        # check binds the pack's version and digest, its content, never its location). Refuse rows: the
+        # shipped pack copied and re-stamped at another version (a VALID pack) under the same approved plan,
+        # and a plan frozen and approved with only its prompt_pack version, or only its digest, changed. Each
+        # refuse row has a removal flip; the admit rows have none, since removing the check cannot turn an
+        # admission into a refusal. A flip stands a sentinel in for the preflight _compose_checked, a step
+        # run_apply reaches only after verify_prompt_pack, and requires both: with the check in place, the
+        # prompt-pack refusal and the sentinel never reached; with verify_prompt_pack a no-op, the sentinel
+        # reached. Either way nothing composes and nothing is written.
         prior = _snapshot(root)
+        past_reached = []
 
-        def past_check(product_root):
+        def past_check(*args, **kwargs):
+            past_reached.append(args)
             raise AdoptApplyError("a sentinel past the prompt-pack check")
-        check_removed = {"verify_prompt_pack": lambda plan, pack_dir=None: None,
-                         "_open_product_root": past_check}
+        sentinel_only = {"_compose_checked": past_check}
+        check_removed = dict(sentinel_only, verify_prompt_pack=lambda plan, pack_dir=None: None)
+
+        def gate_flip(pack_dir, plan_b, approval_b, sheet_b):
+            """True when run_apply over this plan and the pack at pack_dir refuses on the prompt pack
+            before the sentinel with the check in place, and reaches the sentinel with the check a no-op,
+            composing and writing nothing either way."""
+            arms = []
+            for patches in (sentinel_only, check_removed):
+                del seen[:]
+                del past_reached[:]
+                with landed(composing), mock.patch.object(prompt_pack_gate, "DEFAULT_PACK_DIR", pack_dir), \
+                        mock.patch.dict(globals(), patches):
+                    err_arm = refusal(run_apply, root, plan_b, approval_b, sheet_b) or ""
+                arms.append((err_arm, bool(past_reached), not seen and _snapshot(root) == prior))
+            (kept, kept_reached, kept_clean), (removed, removed_reached, removed_clean) = arms
+            return ("is not the shipped prompt pack" in kept and not kept_reached and kept_clean
+                    and "sentinel past the prompt-pack check" in removed and "prompt pack" not in removed
+                    and removed_reached and removed_clean)
         check("apply-prompt-pack-shipped-binding-admitted", plan_doc.get("prompt_pack") == shipped_pack
               and attempt(verify_prompt_pack, plan_doc)
               == ((shipped_pack["version"], shipped_pack["digest"]), None))
-        moved_version = "0.0.1" if shipped_pack["version"] == "0.0.0" else "0.0.0"
-        with tempfile.TemporaryDirectory(prefix="opf-prompt-pack-moved-") as moved_parent:
-            moved = Path(moved_parent) / "prompt-pack"
-            shutil.copytree(prompt_pack_gate.DEFAULT_PACK_DIR, moved)
-            manifest_path = moved / prompt_pack_gate.MANIFEST_NAME
-            manifest_text = manifest_path.read_text(encoding="utf-8")
-            members = [dict(path=p, sha256=_sha256((moved / p).read_bytes()))
-                       for p in prompt_pack_gate._walk_files(moved) if p != prompt_pack_gate.MANIFEST_NAME]
-            manifest_path.write_text(manifest_text.replace(
-                'version = "{}"'.format(shipped_pack["version"]), 'version = "{}"'.format(moved_version)).replace(
-                shipped_pack["digest"], prompt_pack_gate.compute_digest(moved_version, members)), encoding="utf-8")
+        restamped_version = "0.0.1" if shipped_pack["version"] == "0.0.0" else "0.0.0"
+        with tempfile.TemporaryDirectory(prefix="opf-prompt-pack-elsewhere-") as elsewhere:
+            # an identical copy at another path: the gate admits it directly, and run_apply passes the
+            # check and reaches the sentinel that stands in for the preflight.
+            pack_copy = Path(elsewhere) / "copy" / "prompt-pack"
+            shutil.copytree(prompt_pack_gate.DEFAULT_PACK_DIR, pack_copy)
             del seen[:]
-            with landed(composing), mock.patch.object(prompt_pack_gate, "DEFAULT_PACK_DIR", moved):
+            del past_reached[:]
+            with landed(composing), mock.patch.object(prompt_pack_gate, "DEFAULT_PACK_DIR", pack_copy), \
+                    mock.patch.dict(globals(), sentinel_only):
                 err = refusal(run_apply, root, plan_bytes, approval_bytes, sheet)
-            check("apply-prompt-pack-shipped-pack-moved-refused",
-                  prompt_pack_gate.validate_pack(moved)[0] == VALID
-                  and "is not the shipped prompt pack" in (err or "") and moved_version in (err or "")
+            check("apply-prompt-pack-identical-copy-elsewhere-admitted",
+                  pack_copy.resolve() != Path(prompt_pack_gate.DEFAULT_PACK_DIR).resolve()
+                  and attempt(verify_prompt_pack, plan_doc, pack_copy)
+                  == ((shipped_pack["version"], shipped_pack["digest"]), None)
+                  and "sentinel past the prompt-pack check" in (err or "") and bool(past_reached)
                   and not seen and _snapshot(root) == prior)
-            with landed(composing), mock.patch.object(prompt_pack_gate, "DEFAULT_PACK_DIR", moved), \
-                    mock.patch.dict(globals(), check_removed):
+            restamped = Path(elsewhere) / "restamped" / "prompt-pack"
+            shutil.copytree(prompt_pack_gate.DEFAULT_PACK_DIR, restamped)
+            manifest_path = restamped / prompt_pack_gate.MANIFEST_NAME
+            manifest_text = manifest_path.read_text(encoding="utf-8")
+            members = [dict(path=p, sha256=_sha256((restamped / p).read_bytes()))
+                       for p in prompt_pack_gate._walk_files(restamped) if p != prompt_pack_gate.MANIFEST_NAME]
+            manifest_path.write_text(manifest_text.replace(
+                'version = "{}"'.format(shipped_pack["version"]), 'version = "{}"'.format(restamped_version)).replace(
+                shipped_pack["digest"], prompt_pack_gate.compute_digest(restamped_version, members)),
+                encoding="utf-8")
+            del seen[:]
+            with landed(composing), mock.patch.object(prompt_pack_gate, "DEFAULT_PACK_DIR", restamped):
                 err = refusal(run_apply, root, plan_bytes, approval_bytes, sheet)
-            check("apply-prompt-pack-shipped-pack-moved-flip", "sentinel past the prompt-pack check" in (err or "")
-                  and "prompt pack" not in (err or "") and _snapshot(root) == prior)
-        for label, changed in (("version", dict(shipped_pack, version=moved_version)),
+            check("apply-prompt-pack-restamped-pack-refused",
+                  prompt_pack_gate.validate_pack(restamped)[0] == VALID
+                  and "is not the shipped prompt pack" in (err or "") and restamped_version in (err or "")
+                  and not seen and _snapshot(root) == prior)
+            check("apply-prompt-pack-restamped-pack-flip", gate_flip(restamped, plan_bytes, approval_bytes, sheet))
+        for label, changed in (("version", dict(shipped_pack, version=restamped_version)),
                                ("digest", dict(shipped_pack, digest="sha256:" + (
                                    "1" if shipped_pack["digest"] == "sha256:" + "0" * 64 else "0") * 64))):
             sheet_p = dict(sheet, bindings=dict(sheet["bindings"], prompt_pack=changed))
@@ -16169,10 +16206,8 @@ def _self_test_checks():
                 err = refusal(run_apply, root, plan_bytes_p, approval_bytes_p, sheet_p)
             check("apply-prompt-pack-{}-mismatch-refused".format(label), bool(plan_bytes_p and approval_bytes_p)
                   and "is not the shipped prompt pack" in (err or "") and not seen and _snapshot(root) == prior)
-            with landed(composing), mock.patch.dict(globals(), check_removed):
-                err = refusal(run_apply, root, plan_bytes_p, approval_bytes_p, sheet_p)
-            check("apply-prompt-pack-{}-mismatch-flip".format(label), "sentinel past the prompt-pack check"
-                  in (err or "") and "prompt pack" not in (err or "") and _snapshot(root) == prior)
+            check("apply-prompt-pack-{}-mismatch-flip".format(label), bool(plan_bytes_p and approval_bytes_p)
+                  and gate_flip(prompt_pack_gate.DEFAULT_PACK_DIR, plan_bytes_p, approval_bytes_p, sheet_p))
         with landed(composing):
             txn, err = attempt(run_apply, root, plan_bytes, approval_bytes, sheet)
         check("driver-apply-commits-with-landed-ops", txn == frid and err is None)
