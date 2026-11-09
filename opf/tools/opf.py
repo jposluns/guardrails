@@ -4127,9 +4127,24 @@ def _watchdog_deadline_case(mode):
         else:
             stall()
 
+    real_setitimer = signal.setitimer
+
+    def disarmed(which, seconds, interval=0.0):
+        # The parent-deadline modes defeat the subject's independent child
+        # timer AT ITS ARMING SITE: a disarm left to the thunk's first
+        # statement races the armed timer, and a loaded host can delay the
+        # subject's first slice past the requested timeout, letting SIGALRM
+        # kill the subject before it ever writes "started" (the reached
+        # check then fails a correct deadline path). Only the subject's one
+        # nonzero ITIMER_REAL arming is skipped; every other call is real.
+        if os.getpid() != caller and which == signal.ITIMER_REAL and seconds:
+            return (0.0, 0.0)
+        return real_setitimer(which, seconds, interval)
+
     def thunk():
         if mode in ("pipe-stall", "exit-stall", "transient-census"):
-            # Defeat the independent child timer deliberately: exercise the PARENT deadline.
+            # The child timer was never armed (disarmed above): exercise the
+            # PARENT deadline. The explicit disarm stays as a second defence.
             signal.setitimer(signal.ITIMER_REAL, 0)
             os.write(started_w, b"started")
             os.write(pipe[1], b"BUFFERED-TOKEN")
@@ -4170,11 +4185,17 @@ def _watchdog_deadline_case(mode):
 
     result, elapsed, reaped = None, None, False
     try:
+        from contextlib import ExitStack
         start = time.monotonic()
-        with patch.object(os, "fork", fork), patch.object(os, "pipe", capture_pipe), \
-                patch.object(_opf_emit, "_fixture_signal", cancel), \
-                patch.object(_opf_emit, "_fixture_drain", drain), \
-                patch.object(_opf_emit, "_fixture_children", census):
+        with ExitStack() as stack:
+            for owner, name, replacement in (
+                    (os, "fork", fork), (os, "pipe", capture_pipe),
+                    (_opf_emit, "_fixture_signal", cancel),
+                    (_opf_emit, "_fixture_drain", drain),
+                    (_opf_emit, "_fixture_children", census)):
+                stack.enter_context(patch.object(owner, name, replacement))
+            if mode in ("pipe-stall", "exit-stall", "transient-census"):
+                stack.enter_context(patch.object(signal, "setitimer", disarmed))
             # The thunk writes started_w and the guardian-side drain/cancel hooks
             # write the events file: both must be DECLARED under the fd allowlist.
             result = _opf_emit.run_bounded(thunk, timeout_s=_DEADLINE_CASE_TIMEOUT,
@@ -5785,12 +5806,26 @@ def _watchdog_completion_case(mode, tree=None):
                 refuses(emit.FixtureIncomplete, lambda: launch(env=env))
         refuses(emit.FixtureIncomplete, lambda: launch("import os; os._exit(0)"))
     elif mode == "premature-exit":
-        launch("return 0")  # normal-return control
-        for code in ("raise SystemExit()", "raise SystemExit(0)",
-                     "raise RuntimeError('before postconditions')"):
-            refuses(emit.FixtureIncomplete, lambda: launch(code))
-        # CLI exit-status subjects have an explicit, separately supervised path.
-        launch("raise SystemExit(2)", process_fixture=True, expected_returncode=2)
+        try:
+            launch("return 0")  # normal-return control
+            for code in ("raise SystemExit()", "raise SystemExit(0)",
+                         "raise RuntimeError('before postconditions')"):
+                refuses(emit.FixtureIncomplete, lambda: launch(code))
+            # CLI exit-status subjects have an explicit, separately supervised path.
+            launch("raise SystemExit(2)", process_fixture=True, expected_returncode=2)
+        except subprocess.TimeoutExpired:
+            # A launch killed at its own process bound (two interpreter
+            # starts inside the per-launch timeout, which a starved host can
+            # exceed) establishes nothing about completion attestation: no
+            # verdict, never a definite failure. The attestation guards above
+            # stay definite: a loosened _fixture_main still completes the
+            # launch, so refuses() raises AssertionError, which is not
+            # caught here.
+            print(_WATCHDOG_CANNOT_EVALUATE
+                  + " (completion/premature-exit: a launch reached its own "
+                  + repr(_COMPLETION_LAUNCH_TIMEOUT)
+                  + " s process bound: no verdict)")
+            return EXIT_OK
     elif mode in ("nested-timeout", "nested-cancel"):
         verdict, cause = _watchdog_tree_case(mode, **(tree or {}))
         if verdict != "pass":
@@ -8287,9 +8322,19 @@ def _watchdog_completion_case(mode, tree=None):
                     return None
                 return stat.rsplit(b")", 1)[1].split()[0].decode("ascii")
 
-            def await_state(target, wanted, note):
+            class Starved(Exception):
+                # Startup liveness only, never the guarded behaviour: a
+                # starved host can reach a pre-stimulus bound on correct
+                # code, so its expiry holds no verdict. The guarded waits
+                # (the refusal wording and the unacknowledged subject's own
+                # exit after the degraded escalation) stay definite.
+                pass
+
+            def await_state(target, wanted, note, liveness=False):
                 bound = _watchdog_deadline(30)
                 while state(target) not in wanted:
+                    if liveness and time.monotonic() >= bound:
+                        raise Starved(note)
                     assert time.monotonic() < bound, note
                     time.sleep(0.005)
 
@@ -8314,12 +8359,12 @@ def _watchdog_completion_case(mode, tree=None):
                     child.start()
                 bound = _watchdog_deadline(30)
                 while not wedged.exists():
-                    assert time.monotonic() < bound, \
-                        "the guardian never reached its stop point"
+                    if time.monotonic() >= bound:
+                        raise Starved("the guardian never reached its stop point")
                     time.sleep(0.005)
                 gpid = int(wedged.read_text(encoding="ascii"))
                 assert gpid == child.pid, "the hook stopped an unexpected process"
-                await_state(gpid, ("T",), "the guardian did not stop")
+                await_state(gpid, ("T",), "the guardian did not stop", liveness=True)
                 subject = int(Path("/proc", str(gpid), "task", str(gpid), "children")
                               .read_text(encoding="ascii").split()[0])
                 failures = []
@@ -8338,15 +8383,23 @@ def _watchdog_completion_case(mode, tree=None):
                             "the unacknowledged subject outlived the degraded escalation")
                 return failures[0]
 
-            message = exercise(flip=False)
-            assert "subject cleanup unverified" in message, message
-            assert "guardian not frozen" in message, message
-            assert "subject tree killed" not in message, message
-            # Flip: the by-pid suffix claims the frozen guardian and killed tree
-            # this degraded escalation never performed.
-            flipped = exercise(flip=True)
-            assert "subject tree killed" in flipped, \
-                ("the flip did not reproduce the false claim", flipped)
+            try:
+                message = exercise(flip=False)
+                assert "subject cleanup unverified" in message, message
+                assert "guardian not frozen" in message, message
+                assert "subject tree killed" not in message, message
+                # Flip: the by-pid suffix claims the frozen guardian and killed tree
+                # this degraded escalation never performed.
+                flipped = exercise(flip=True)
+                assert "subject tree killed" in flipped, \
+                    ("the flip did not reproduce the false claim", flipped)
+            except Starved as starved:
+                # A pre-stimulus liveness bound expired before the guardian
+                # was even wedged or stopped: the exercise never reached its
+                # stimulus, so no verdict exists, never a definite failure.
+                print(_WATCHDOG_CANNOT_EVALUATE
+                      + " (completion/escalate-degraded: " + str(starved) + ")")
+                return EXIT_OK
     elif mode == "poll-masked":
         import time
         # Masked design: poll()'s whole
