@@ -40,13 +40,15 @@ the authority, and the summary further down this page only points to it.
   `CLOCK (read by hook, authoritative): <local time> | <UTC time> | stamp: [YYYY-MM-DD HH:MM TZ]`,
   followed by the session's elapsed time when a lease is configured. The stamp is a ready-to-copy status
   header in the bracketed form `stamp-truth-stop.py` checks, taken from the same reading as the local
-  time and truncated to the minute. Its zone is the local zone's name only when `stamp-truth-stop.py`
-  converts that name to this reading's minute: a name such as `UTC` or `+03` set by a `TZ` string that
-  misstates the offset is not used, nor is a letter name in the repeated hour of a backward change that
-  keeps the name (that hook reads it at the earlier pass) or one whose offset has seconds or is 19 hours
-  or more. Otherwise the zone is the offset as `+HHMM`; under a zone whose offset that hook cannot convert
-  (one with seconds, or of 19 hours or more) the stamp segment is left out. The freshest time value in
-  context is then a real reading, not one the model composed. It informs; it blocks nothing.
+  time and truncated to the minute. A name such as `UTC` or `+03` set by a `TZ` string that misstates the
+  offset is not used as its zone. A letter name such as `EST` is used only when the local zone gives the
+  same offset and name 26 hours before and after the reading, so not near a change of offset or name
+  (both passes of a repeated hour included): `stamp-truth-stop.py` converts a letter name with `mktime`,
+  whose result can depend on earlier `mktime` calls in that process. A change and a change back that both
+  fall within those 52 hours are not detected. Nor is a letter name used when its offset has seconds or
+  is 19 hours or more. Otherwise the zone is the offset as `+HHMM`; under a zone whose offset that hook
+  cannot convert (one with seconds, or of 19 hours or more) the stamp segment is left out. The freshest
+  time value in context is then a real reading, not one the model composed. It informs; it blocks nothing.
   Events: `PostToolUse` (after a tool call that succeeded), `PostToolUseFailure` (after one that started
   and failed), and `UserPromptSubmit` (when a prompt is submitted, so the first text of a turn has a
   fresh reading too); register all three.
@@ -193,13 +195,13 @@ files are served from this repository's main branch; for a raw download, use
 | File | SHA-256 | Link |
 |---|---|---|
 | `char-policy-write.py` | `84a08059513f27c76e944d54c08e8ddae520f9e040ebe19296d139d49646b0f8` | [char-policy-write.py](char-policy-write.py) |
-| `clock-inject.py` | `4662ea97f76a847f0504d98a947bb59ad0ff8eeb26eaceac5a43306e7389f347` | [clock-inject.py](clock-inject.py) |
+| `clock-inject.py` | `b7c53f3f2c95022d39e97f467fa35c3150bd6f52542efa377233813844d605d4` | [clock-inject.py](clock-inject.py) |
 | `constraint-reread.py` | `725974c306e63a3f9a1b4a2be2992c9ee9792c231aaad66035a813525d10c48a` | [constraint-reread.py](constraint-reread.py) |
 | `future-stamp-write.py` | `1cf8608693f472df1c7bee03b5ab5bf5de3e79a19b00c782a7015e77d167c348` | [future-stamp-write.py](future-stamp-write.py) |
 | `pattern-self-match.py` | `b70287e2aab2b08b0cd240c6c9150feb65141f2e3612adad63e402221dfcbb2f` | [pattern-self-match.py](pattern-self-match.py) |
 | `record-remove-check.py` | `0ec9642ea95bac4ea13c71ec31ff5239ab01c0ceff94f9922a42de1458f0757f` | [record-remove-check.py](record-remove-check.py) |
 | `rerun-pass-check.py` | `ab5fe8567f34444474d5e58acd61fde9490254e86d38578dae4b5ade7a21da86` | [rerun-pass-check.py](rerun-pass-check.py) |
-| `stamp-truth-stop.py` | `5d3b5d716cdbe6255c750aec4bb44f17a583f167c055cdb26a17a27d5ccfc715` | [stamp-truth-stop.py](stamp-truth-stop.py) |
+| `stamp-truth-stop.py` | `9c6364d63335ec5cbebd8d74a1062a9e25af35474652b49805405a444453c279` | [stamp-truth-stop.py](stamp-truth-stop.py) |
 | `unbounded-wait.py` | `9d2a8f9c26693cc87d058284427d40554e5ff0c3f2eca3df46f4369669a43859` | [unbounded-wait.py](unbounded-wait.py) |
 | `ungated-record.py` | `35c65369b1609683e09b784681a23fab80a05e047c5f36abe5311f100b4f9394` | [ungated-record.py](ungated-record.py) |
 
