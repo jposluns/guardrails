@@ -32529,14 +32529,18 @@ def _orch_chained_rows(path, prefix):
     64*'0' for the first; seq is the line number; ids carry the family prefix) and return
     (rows, detail): rows is None when the file is unreadable or ANY line breaks the chain, shape,
     sequence, or id-prefix discipline, so a tampered or malformed register can never read as a
-    smaller clean one. A compact inline mirror of the authoritative gate
-    (tools/check_mistakes_register.py): the hooks script is standalone in adopter repos and cannot
-    import tools/, so the CI gate remains the authoritative checker and this feeds only the audit."""
+    smaller clean one. A register that is not strict UTF-8 text (a non-UTF-8 byte, an encoded
+    surrogate, a truncated sequence) is unreadable too, never an exception out of the reader. A
+    compact inline mirror of the authoritative gate (tools/check_mistakes_register.py): the hooks
+    script is standalone in adopter repos and cannot import tools/, so the CI gate remains the
+    authoritative checker and this feeds only the audit."""
     try:
         with open(path, "r", encoding="utf-8") as fh:
             lines = fh.read().splitlines()
     except OSError as exc:
         return (None, "unreadable ({})".format(exc))
+    except UnicodeDecodeError as exc:
+        return (None, "not UTF-8 text ({})".format(exc))
     sha = __import__("hashlib").sha256
     rows, prev = [], None
     for n, line in enumerate(lines, 1):
@@ -32571,17 +32575,21 @@ def _orch_register_authority(root, path):
     of an authority the actor cannot trivially forge, its git merge-base state with origin/HEAD when
     the register is tracked, else its <path>.anchor file, with seq/digest identifying the current tip;
     otherwise ('hold', detail, None), a cannot-evaluate the caller routes to a fail-closed HOLD, never
-    a clean pass. RESIDUAL (disclosed): the register is itself actor-writable, and this authority only
-    checks that the on-disk register is an append-only EXTENSION of its committed (merge-base) or
-    anchored prefix. An actor with filesystem write ALONE can therefore APPEND rows past that prefix
-    (uncommitted; git status M) and have them counted as the tip, so the git/anchor authority defends
-    the register-SWAP and prefix-REWRITE classes but not an appended approved row (A2); the categorical
-    residual is closed only by an operator-owned, assistant-non-writable register at the OS layer."""
+    a clean pass. A register, or its merge-base state, that is not strict UTF-8 text is such a HOLD
+    too, never an exception out of the reader. RESIDUAL (disclosed): the register is itself
+    actor-writable, and this authority only checks that the on-disk register is an append-only
+    EXTENSION of its committed (merge-base) or anchored prefix. An actor with filesystem write ALONE
+    can therefore APPEND rows past that prefix (uncommitted; git status M) and have them counted as
+    the tip, so the git/anchor authority defends the register-SWAP and prefix-REWRITE classes but not
+    an appended approved row (A2); the categorical residual is closed only by an operator-owned,
+    assistant-non-writable register at the OS layer."""
     try:
         with open(path, "r", encoding="utf-8") as fh:
             lines = fh.read().splitlines()
     except OSError as exc:
         return ("hold", "register unreadable ({})".format(exc), None)
+    except UnicodeDecodeError as exc:
+        return ("hold", "register is not UTF-8 text ({})".format(exc), None)
     env = _isolate_git_env(dict(os.environ))
     rel = None
     try:
@@ -32609,12 +32617,18 @@ def _orch_register_authority(root, path):
                     return ("hold", "no computable merge-base with origin/HEAD", None)
                 ref = base.stdout.strip()
                 old = subprocess.run(["git", "-C", root, "show", "{}:{}".format(ref, rel)],
-                                     capture_output=True, text=True, timeout=10, env=env)
+                                     capture_output=True, timeout=10, env=env)
             except (OSError, subprocess.SubprocessError) as exc:
                 return ("hold", "cannot read the register authority ({})".format(exc), None)
             if old.returncode != 0:
                 return ("hold", "cannot read the register at its merge-base authority", None)
-            old_lines = old.stdout.splitlines()
+            # decoded as strict UTF-8, as the register on disk is, never by the locale: a merge-base
+            # state that is not UTF-8 text is a HOLD, never an exception out of the reader
+            try:
+                old_lines = old.stdout.decode("utf-8").splitlines()
+            except UnicodeDecodeError as exc:
+                return ("hold", "the register at its merge-base authority is not UTF-8 text "
+                        "({})".format(exc), None)
             if lines[:len(old_lines)] != old_lines:
                 return ("hold",
                         "register is not an append-only extension of its merge-base state", None)
