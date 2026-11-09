@@ -26,11 +26,12 @@ name the characters in its own source without flagging itself; it writes them on
   check_no_dashes.py --default-parity  this repository only: DEFAULT_POLICY equals .aiqt/char-policy.json
 
 Exit: 0 clean; 1 a finding; 2 cannot evaluate (an unreadable tree, a scoped tree that is there but is not a
-directory or a symlink to a directory inside the repository, a malformed policy, a bad argument). A file
-that is not valid UTF-8 is reported as SKIP and not scanned. --default-parity exits 0 when the two are equal,
-and also, saying SKIP, when the file is absent; 1 when they differ; 2 when the file cannot be used. An adopter's
-own policy differs from this repository's by design, so only this repository's check roster runs that mode;
-the self-test never reads the repository's policy file.
+directory or a symlink to a directory inside the repository, a scoped file that is not valid UTF-8, a malformed
+policy, a bad argument). A scoped file that is not valid UTF-8 is named with the offset of its first bad byte;
+the other files are still scanned and their findings printed, and the exit is 2 whatever they hold.
+--default-parity exits 0 when the two are equal, and also, saying SKIP, when the file is absent; 1 when they
+differ; 2 when the file cannot be used. An adopter's own policy differs from this repository's by design, so
+only this repository's check roster runs that mode; the self-test never reads the repository's policy file.
 """
 import sys
 
@@ -319,13 +320,16 @@ def run(root):
         print(f"error: the character policy {POLICY_PATH} cannot be used ({exc}); fail-closed", file=sys.stderr)
         return 2
     chars = list(policy["chars"].items())
-    findings = []
+    findings, undecodable = [], []
     try:
         for path in scope_paths(root, policy):
             try:
                 lines = path.read_text(encoding="utf-8").splitlines()
-            except UnicodeDecodeError:
-                print(f"SKIP (not utf-8): {path.relative_to(root)}")
+            except UnicodeDecodeError as exc:
+                # A scoped file that is not valid UTF-8 cannot be scanned, so whether it holds a policy character
+                # is unknown: a cannot-evaluate (exit 2) naming the file, never skipped into a PASS. The other
+                # files are still scanned, so their findings are reported too.
+                undecodable.append(f"{path.relative_to(root)} (byte {exc.start}: {exc.reason})")
                 continue
             for number, line in enumerate(lines, 1):
                 for char, name in chars:
@@ -339,6 +343,13 @@ def run(root):
         print(f'FAIL: {len(findings)} character(s) forbidden by the "{policy["id"]}" character policy found')
         for finding in findings:
             print(f"  {finding}")
+    if undecodable:
+        print(f"error: {len(undecodable)} scoped file(s) not valid UTF-8, so not scanned; fail-closed",
+              file=sys.stderr)
+        for item in undecodable:
+            print(f"  {item}", file=sys.stderr)
+        return 2
+    if findings:
         return 1
     names = " or ".join(name for _, name in chars)
     print(f'PASS: no {names} in the files the "{policy["id"]}" character policy scopes')
@@ -545,9 +556,35 @@ def _self_test():
         expect("G7 valid file is used", tree({"d/a.md": quote}, policy()), 1)
         expect("G7 valid file with advice and skip", tree({"d/a.md": quote}, policy(
             advice="spell it out", scope=[{"tree": ".", "suffixes": [".md"], "skip": ["x"]}])), 1)
-        # G8 encoding: a file that is not UTF-8 is reported and skipped.
+        # G8 encoding: a scoped file that is not valid UTF-8 is a cannot-evaluate (exit 2) naming the file and
+        # its first bad byte, never skipped into a PASS: a bad byte at the start, in the middle and at the end (a
+        # sequence cut short), and the forms strict UTF-8 refuses (an encoded surrogate, an overlong form); in a
+        # file entry; and beside a finding in another file, which is still listed. Valid UTF-8 at the edges (a
+        # four-byte character, a byte order mark) and an undecodable file the scope leaves out stay clean.
+        not_utf8 = "scoped file(s) not valid UTF-8, so not scanned; fail-closed"
         expect("G8A UTF-8", tree({"d/a.md": em.encode("utf-8")}), 1)
-        expect("G8B not UTF-8", tree({"d/a.md": em.encode("utf-8") + b"\xff"}), 0, "SKIP (not utf-8): d/a.md")
+        expect("G8B not UTF-8", tree({"d/a.md": em.encode("utf-8") + b"\xff"}), 2, "d/a.md (byte 3: invalid start")
+        expect("G8C cp1252 dash byte alone", tree({"d/a.md": b"x\x97y\n"}), 2, "d/a.md (byte 1:")
+        expect("G8D bad first byte", tree({"d/a.md": b"\xffx\n"}), 2, "d/a.md (byte 0:")
+        expect("G8E sequence cut short at the end", tree({"d/a.md": b"x\n" + em.encode("utf-8")[:2]}), 2,
+               "d/a.md (byte 2: unexpected end of data)")
+        expect("G8F encoded surrogate", tree({"d/a.md": b"x\xed\xa0\x80\n"}), 2, "d/a.md (byte 1:")
+        expect("G8G overlong form", tree({"d/a.md": b"x\xc0\xaf\n"}), 2, "d/a.md (byte 1:")
+        expect("G8H file entry not UTF-8", tree({"NOTICE": b"x\x96\n"}), 2, "NOTICE (byte 1:")
+        rc, out, err = scan(tree({"d/a.md": b"x\xff\n", "d/b.md": em}))
+        if (rc != 2 or not_utf8 not in err or "d/a.md (byte 1:" not in err or "d/b.md:1:1: em dash" not in out
+                or "PASS" in out):
+            failures.append(f"G8I not UTF-8 beside a finding: want exit 2, the file named and the finding "
+                            f"listed, got {rc}: {(out + err).strip()[:200]!r}")
+        rc, out, err = scan(tree({"d/a.md": b"x\xff\n", "d/b.md": "x-y\n"}))
+        if rc != 2 or "PASS" in out or not_utf8 not in err:
+            failures.append(f"G8J not UTF-8 beside a clean file: want exit 2 and no PASS, got {rc}: "
+                            f"{(out + err).strip()[:200]!r}")
+        bom, four_byte = chr(0xFEFF), chr(0x1F600)  # built with chr so no invisible character is in this source
+        expect("G8K four-byte character and byte order mark", tree({"d/a.md": f"{bom}x{four_byte}y\n"}), 0, "PASS")
+        expect("G8L not UTF-8 under an unlisted suffix", tree({"d/a.txt": b"x\xff\n"}), 0, "PASS")
+        expect("G8M not UTF-8 in a skipped directory", tree({"t/node_modules/a.md": b"x\xff\n"}, policy(
+            scope=[{"tree": "t", "suffixes": [".md"], "skip": ["node_modules"]}])), 0, "PASS")
         # G9 order and duplicates: overlapping entries report a file once, in its first entry's place.
         overlap = policy(scope=[{"tree": "b", "suffixes": [".md"]}, {"tree": ".", "suffixes": [".md"]}])
         rc, out, _ = scan(tree({"a.md": quote, "b/c.md": quote}, overlap))
