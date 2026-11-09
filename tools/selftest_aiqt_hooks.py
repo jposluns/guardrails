@@ -9107,7 +9107,7 @@ def _pl239_deadline_denial(result):
     if result.returncode != 0 or result.stderr:
         return False
     try:
-        return json.loads(result.stdout) == aiqt_hooks._commit_denial(_PL239_DEADLINE_NOTE)[1]
+        return json.loads(result.stdout) == aiqt_hooks._commit_denial(_PL239_DEADLINE_NOTE, timed_out=True)[1]
     except (TypeError, ValueError):
         return False
 
@@ -9169,7 +9169,7 @@ def _pl239_launch_failures():
     failures = []
     note = _PL239_DEADLINE_NOTE
     deadline = subprocess.CompletedProcess(
-        ["hook"], 0, json.dumps(aiqt_hooks._commit_denial(note)[1]) + "\n", "")
+        ["hook"], 0, json.dumps(aiqt_hooks._commit_denial(note, timed_out=True)[1]) + "\n", "")
     clean = subprocess.CompletedProcess(["hook"], 0, "", "")
     crashed = subprocess.CompletedProcess(["hook"], 1, note, "Traceback: real failure")
     loose = subprocess.CompletedProcess(["hook"], 0, "deny: " + note, "")
@@ -14351,6 +14351,44 @@ def _main_isolated(monitor):
                 failures.append("{}: a non-deadline failure whose message equals the deadline detail must "
                                 "read as unproved remote absence (None), got {!r}"
                                 .format(_pl239_label, _pl239_outcome))
+            if len(_pl239_reads) != 1:
+                failures.append("{}: substitute probe not reached exactly once: {!r}"
+                                .format(_pl239_label, _pl239_reads))
+
+        # The denial wording follows the same type through _commit_evaluate and _commit_denial: a failure
+        # raised at the view probe on a feature branch is a timeout denial only when it is a
+        # _CommitDeadlineExhausted, whatever its text. (pl239-evaluate-deadline-text), a plain
+        # _CommitCannotEvaluate carrying the deadline detail, must render the generic denial, and
+        # (pl239-evaluate-deadline-message), a _CommitDeadlineExhausted under another message, the
+        # timeout denial; a detail comparison in _commit_denial in place of the "timeout" evidence state
+        # turns both red. (pl239-evaluate-deadline-control), the real type with the real detail, renders
+        # the timeout denial either way. Every case still denies.
+        for _case, _raised, _message, _timed_out in (
+                ("text", aiqt_hooks._CommitCannotEvaluate, aiqt_hooks._COMMIT_DEADLINE_DETAIL, False),
+                ("message", aiqt_hooks._CommitDeadlineExhausted, "QA deadline under another message", True),
+                ("control", aiqt_hooks._CommitDeadlineExhausted, aiqt_hooks._COMMIT_DEADLINE_DETAIL, True)):
+            _pl239_reads = []
+
+            def _pl239_raising_view_git(repo, deadline, *args):
+                if args == _pl239_view_query:
+                    _pl239_reads.append(repo)
+                    raise _raised(_message)
+                return _pl239_original_git(repo, deadline, *args)
+
+            aiqt_hooks._commit_git = _pl239_raising_view_git
+            try:
+                _pl239_got, _pl239_reason = _pl239_judge_commit(plf)
+            finally:
+                aiqt_hooks._commit_git = _pl239_original_git
+            _pl239_label = "(pl239-evaluate-deadline-{})".format(_case)
+            _pl239_wanted, _pl239_unwanted = (
+                ("ran out of time on this host", "Commit denied because no admitted proof") if _timed_out
+                else ("Commit denied because no admitted proof", "ran out of time on this host"))
+            if _pl239_got != "deny":
+                failures.append("{}: expected deny, got {}".format(_pl239_label, _pl239_got))
+            if _pl239_wanted not in _pl239_reason or _pl239_unwanted in _pl239_reason:
+                failures.append("{}: expected {!r} and not {!r}, got {!r}"
+                                .format(_pl239_label, _pl239_wanted, _pl239_unwanted, _pl239_reason))
             if len(_pl239_reads) != 1:
                 failures.append("{}: substitute probe not reached exactly once: {!r}"
                                 .format(_pl239_label, _pl239_reads))

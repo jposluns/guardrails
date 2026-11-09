@@ -12924,8 +12924,9 @@ _CommitPostcondition = collections.namedtuple(
 _CommitCertificate = collections.namedtuple(
     "_CommitCertificate", ("shape", "commit_index", "identity", "branch", "switch_index"))
 
-# state: "proved", "protected", or "unverifiable". A proved result carries its explicit
-# certificate; a protected/unverifiable result carries no certificate.
+# state: "proved", "protected", "unverifiable", or "timeout" (the time budget ran out, raised
+# as _CommitDeadlineExhausted). A proved result carries its explicit certificate; a
+# protected, unverifiable or timeout result carries no certificate and denies.
 _CommitEvidence = collections.namedtuple(
     "_CommitEvidence", ("state", "certificate", "detail"))
 
@@ -13559,9 +13560,10 @@ def _push_protected(tokens, args, cwd):
 _COMMIT_SECONDS = 7.0
 _COMMIT_PROBE_SECONDS = 2.0
 _COMMIT_PROBE_BYTES = 65536
-# The one detail an exhausted time budget raises, as _CommitDeadlineExhausted. _commit_denial renders
-# exactly this detail as a timeout denial: still a deny (fail-closed), worded as the check running out
-# of time on this host, never as a finding that the commit is on a protected branch.
+# The one detail an exhausted time budget raises, as _CommitDeadlineExhausted. That type (never this
+# text) becomes the "timeout" evidence state, which _commit_denial renders as a timeout denial: still
+# a deny (fail-closed), worded as the check running out of time on this host, never as a finding that
+# the commit is on a protected branch.
 _COMMIT_DEADLINE_DETAIL = "commit evaluation deadline exhausted"
 
 
@@ -13570,8 +13572,10 @@ class _CommitCannotEvaluate(Exception):
 
 
 class _CommitDeadlineExhausted(_CommitCannotEvaluate):
-    """The evaluation or per-probe time budget ran out. Callers tell it apart by type, never by its
-    message, so another failure whose text happens to match is not read as a timeout."""
+    """The evaluation or per-probe time budget ran out. It is told apart by type, never by its message,
+    on the whole path: _repo_has_remote re-raises it, _commit_evaluate turns it into the "timeout"
+    evidence state, and _commit_denial picks the timeout wording from that state alone, so another
+    failure whose text happens to match is not read as a timeout."""
 
 
 def _commit_remaining(deadline):
@@ -13898,12 +13902,19 @@ def _commit_evaluate(syntax, cwd, deadline):
         if len(evidence) != len(syntax.commit_indexes):
             raise _CommitCannotEvaluate("missing commit evidence")
         return tuple(evidence)
+    except _CommitDeadlineExhausted as exc:
+        # By type, before the base class: the denial wording follows this state, never the text.
+        return (_CommitEvidence("timeout", None, str(exc)),)
     except _CommitCannotEvaluate as exc:
         return (_CommitEvidence("unverifiable", None, str(exc)),)
 
 
 def _commit_on_protected(evidence):
-    """Consume proof only. Unknown/protected states DENY; there is no allow-note exit."""
+    """Consume proof only. Unknown/protected states DENY; there is no allow-note exit.
+
+    A deny is ("timeout", detail) for the "timeout" state and ("deny", detail) for every other,
+    so the caller picks the denial wording from the state, never from the detail text.
+    """
     if isinstance(evidence, _CommitEvidence) and evidence.state == "proved":
         cert = evidence.certificate
         if (isinstance(cert, _CommitCertificate) and cert.shape in _COMMIT_CERTIFICATE_SHAPES
@@ -13913,12 +13924,15 @@ def _commit_on_protected(evidence):
                       and 0 <= cert.switch_index < cert.commit_index)
                      or (cert.shape != "C" and cert.switch_index is None))):
             return None
-    detail = evidence.detail if isinstance(evidence, _CommitEvidence) else "missing commit evidence"
-    return ("deny", detail)
+    if isinstance(evidence, _CommitEvidence):
+        return ("timeout" if evidence.state == "timeout" else "deny", evidence.detail)
+    return ("deny", "missing commit evidence")
 
 
-def _commit_denial(detail):
-    if detail == _COMMIT_DEADLINE_DETAIL:
+def _commit_denial(detail, timed_out=False):
+    """The artbr1 commit denial. timed_out (True only for the "timeout" evidence state, set by type
+    from _CommitDeadlineExhausted) selects the timeout wording; the detail text never does."""
+    if timed_out is True:
         return _deny(
             "AIQT rule artbr1 (branch-and-merge-on-green): " + detail + ": the protected-branch check "
             "ran out of time on this host before its Git and filesystem probes finished, so the commit "
@@ -14326,7 +14340,7 @@ def protected_line(data):
         for item in evidence:
             outcome = _commit_on_protected(item)
             if outcome is not None:
-                return _commit_denial(outcome[1])
+                return _commit_denial(outcome[1], timed_out=outcome[0] == "timeout")
         return _allow()
 
     # Only commit-free commands reach the existing push classifier/help shortcut.
