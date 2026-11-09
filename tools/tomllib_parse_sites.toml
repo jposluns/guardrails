@@ -1190,6 +1190,14 @@ class = "EXEMPT"
 reason = "test-code"
 
 [[site]]
+path = "tools/check_record_readers.py"
+function = "_self_test"
+form = "alias"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
 path = "tools/check_record_sections.py"
 function = "_self_test_isolated"
 form = "alias"
