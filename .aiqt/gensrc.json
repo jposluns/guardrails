@@ -559,7 +559,11 @@
         ".aiqt/standards/",
         ".aiqt/core/rules/",
         "VERSION",
-        "changelog.toml"
+        "changelog.toml",
+        "tools/gen_mappings.py",
+        "tools/gen_rules.py",
+        "tools/_standards.py",
+        "tools/gen_agents.py"
       ],
       "target": "site/mappings/index.html"
     },

@@ -1054,6 +1054,17 @@ def _declaration_self_test():
         check("declaration/well-formed-read", got == frozenset({"site/draft/index.html"}), got)
         got = scan(good)
         check("declaration/well-formed-scan-not-refused", got[0] != 2, got)
+        # A block entry (a file the generator owns only a status line of) at the root beside a page staged
+        # under draft/ is not a template page and does not move the root's template base to "".
+        block = '{"target": "site/llms.txt", "kind": "block", "sources": ("src.toml",), "regenerate": "x"}'
+        mixed = declare("({}, {})".format(entry, block))
+        try:
+            targets = _template_pages.template_targets(mixed)
+            got = (sorted(targets), _template_pages.template_base("site", targets),
+                   _template_pages.is_template_page("site", "llms.txt", targets))
+        except (OSError, ValueError) as exc:
+            got = exc
+        check("declaration/block-entry-not-a-page", got == (["site/draft/index.html"], "draft/", False), got)
         # Each malformed entry (a literal the declaration reader accepts as a tuple of entries) must raise
         # ValueError, never a KeyError, TypeError or a non-string target.
         for name, scan_name, literal in (
