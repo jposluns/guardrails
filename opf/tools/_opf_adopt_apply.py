@@ -532,11 +532,13 @@ _HOMES_SELFTEST_EXEMPT = (
     "_class_sweep_child_main",
     "_class_sweep_placement_self_test",
     "_close_class_sweep_checks",
+    "_committed_base_binding_self_test",
     "_eventfd_skip_call_sites",
     "_function_level_sweep_suite_calls",
     "_init_store_child_main",
     "_init_store_git_checks",
     "_init_store_self_test",
+    "_reconcile_binding_self_test",
     "_self_test_checks",
     "_self_test_fence",
     "_self_test_section",
@@ -6091,7 +6093,7 @@ def _init_store_release(lock_root, root_fd, jr_fd, jr_id, inflight, kept):
 
 class RegistrationContext:
     """What the two registration handlers compose against: the transaction's ApplyOps, the plan's frozen
-    store identity (its `store` table; the manifest every register-unmanaged row rewrites is
+    store identity (its `store_table`; the manifest every register-unmanaged row rewrites is
     _opf_adopt.store_manifest of it, never a caller-supplied path), and the planned postimage MODEL of each
     repoint-consumer path, which the handler re-emits and digest-checks against the row before staging it.
     `kept` maps each kept path to its approved source digest (the plan's keep source rows), against which
@@ -6105,7 +6107,7 @@ class RegistrationContext:
 
     def __init__(self, ops, store_table=None, consumers=None, kept=None, manifest_digest=None):
         self.ops = ops
-        self.store = store_table
+        self.store_table = store_table
         self.consumers = dict(consumers or {})
         self.kept = dict(kept or {})
         self.manifest_digest = manifest_digest
@@ -6242,13 +6244,13 @@ def _reserved_store_path(path, context, model):
     also refuses every control-area path but this run's own archive, so for those paths the two checks are a
     redundant pair (disclosed); this run's archive is the control-area check's alone."""
     run_id = context.ops.run_id
-    for root in sorted({".", context.store["store_root"]}):
+    for root in sorted({".", context.store_table["store_root"]}):
         if schema._in_control_area(path, root):
             return "{!r} lies in the reserved store control area (spec 14.2)".format(path)
         why = schema.protected_destination(path, run_id, root)
         if why is not None:
             return "{!r} is a protected destination: {}".format(path, why)
-    machine = schema.store_manifest(context.store).rsplit("/", 1)[0]
+    machine = schema.store_manifest(context.store_table).rsplit("/", 1)[0]
     if _overlaps(path, machine):
         return "{!r} overlaps the machine store {!r}".format(path, machine)
     views = [v["target"] for v in model.get("views", {}).values()]
@@ -6289,7 +6291,7 @@ def _compose_register_unmanaged(op_row, context):
     write's: the recorded manifest preimage restored, which drops the entry (or, for a manifest this
     transaction creates, the create's removal)."""
     entry = op_row["entry"]
-    manifest = schema.store_manifest(context.store)
+    manifest = schema.store_manifest(context.store_table)
     if manifest is None:
         raise AdoptApplyError("register-unmanaged needs the plan's frozen store identity to name the "
                               "manifest it rewrites, and none was supplied (fail-closed)")
@@ -6370,7 +6372,7 @@ def _compose_repoint_consumer(op_row, context):
     [unmanaged] (live, or registered by an earlier row of this transaction) are never a consumer. Reversal
     is the journaled write's: the recorded old bytes restored."""
     path = op_row["path"]
-    manifest = schema.store_manifest(context.store)
+    manifest = schema.store_manifest(context.store_table)
     if manifest is None:
         raise AdoptApplyError("repoint-consumer needs the plan's frozen store identity to tell the store's "
                               "own files from a consumer, and none was supplied (fail-closed)")

@@ -677,6 +677,253 @@ def _store_write_findings(fname, label, node, store_aliases, line):
     return found
 
 
+_HOMES_ACCEPTED_FORM = ("; if the module is compliant, write the binding in a form the homes rule "
+                        "accepts (listed in _homes_rule_violations' docstring)")
+_HOMES_NAMESPACE_CALLS = frozenset(["globals", "locals", "vars"])
+_HOMES_NAMESPACE_ATTRS = frozenset(["__dict__", "modules"])
+_HOMES_WRITER_NAMES = frozenset(["setattr", "delattr", "globals", "locals", "vars", "__import__",
+                                 "__setattr__", "__delattr__"])
+_HOMES_READ_CONSUMERS = frozenset(["dict", "list", "tuple", "sorted", "len", "set", "frozenset",
+                                   "iter", "repr"])
+_HOMES_READ_METHODS = frozenset(["get", "keys", "values", "items", "copy"])
+
+
+def _write_chain_ids(target):
+    """The ids of every node on the write chains of one target expression: each write position
+    and, below it, the objects it is reached through (an attribute's or subscript's value, a
+    call's callee), so a write INTO sys.modules[...] or globals()[...] is seen as a write through
+    them."""
+    out = set()
+    for sub in _write_positions(target):
+        cur = sub
+        while cur is not None:
+            out.add(id(cur))
+            if isinstance(cur, (ast.Attribute, ast.Subscript, ast.Starred)):
+                cur = cur.value
+            elif isinstance(cur, ast.Call):
+                cur = cur.func
+            else:
+                cur = None
+    return out
+
+
+def _is_namespace_root(node):
+    """True for an expression that IS a live namespace mapping: a call of globals(), locals() or
+    vars(...), any .__dict__ attribute, and any .modules attribute (sys.modules under any
+    spelling of its owner)."""
+    if isinstance(node, ast.Call):
+        return isinstance(node.func, ast.Name) and node.func.id in _HOMES_NAMESPACE_CALLS
+    return isinstance(node, ast.Attribute) and node.attr in _HOMES_NAMESPACE_ATTRS
+
+
+def _namespace_read_only(node, parent, grand, chains):
+    """True when the namespace root `node` sits in one of the read-only positions the rule
+    accepts: an item read (root[key]), an argument of a copying or measuring builtin
+    (_HOMES_READ_CONSUMERS), the receiver of a read method called at once
+    (_HOMES_READ_METHODS), an operand of a comparison (name in sys.modules), or the iterable of
+    a loop or comprehension, in each case not on a write chain."""
+    if parent is None or id(node) in chains:
+        return False
+    if isinstance(parent, ast.Subscript):
+        return (parent.value is node and isinstance(parent.ctx, ast.Load)
+                and id(parent) not in chains)
+    if isinstance(parent, ast.Call):
+        return (isinstance(parent.func, ast.Name) and parent.func.id in _HOMES_READ_CONSUMERS
+                and any(arg is node for arg in parent.args) and not parent.keywords)
+    if isinstance(parent, ast.Attribute):
+        return (parent.value is node and parent.attr in _HOMES_READ_METHODS
+                and isinstance(grand, ast.Call) and grand.func is parent
+                and id(grand) not in chains)
+    if isinstance(parent, ast.Compare):
+        return True
+    if isinstance(parent, (ast.For, ast.AsyncFor, ast.comprehension)):
+        return parent.iter is node
+    return False
+
+
+_HOMES_UNFOREIGN_MODULES = frozenset(["_opf_store", "_opf_init_operation", "sys", "builtins",
+                                      "__main__"])
+
+
+def _homes_foreign_module_names(fname, tree):
+    """The names that are certainly ANOTHER module's object everywhere in this module: every
+    binding of the name anywhere in the file (any form _route_binding_names reads, or a
+    parameter) is an `import X [as name]` of a module X other than this module itself, the
+    store and init modules, sys, builtins and __main__. A setattr or delattr on such a name
+    writes that module's namespace, never this module's."""
+    stem = fname[:-3] if fname.endswith(".py") else fname
+    unforeign = _HOMES_UNFOREIGN_MODULES | {stem}
+    good = {}
+    bad = set()
+    for node in ast.walk(tree):
+        names = list(_route_binding_names(node))
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            args = node.args
+            names += [arg.arg for arg in (args.posonlyargs + args.args + args.kwonlyargs
+                                          + ([args.vararg] if args.vararg else [])
+                                          + ([args.kwarg] if args.kwarg else []))]
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                bound = alias.asname or alias.name.split(".")[0]
+                if alias.asname is not None and alias.name.split(".")[0] not in unforeign:
+                    good[bound] = True
+                elif alias.asname is None and "." not in alias.name and alias.name not in unforeign:
+                    good[bound] = True
+                else:
+                    bad.add(bound)
+            continue
+        bad.update(names)
+    return frozenset(name for name in good if name not in bad)
+
+
+def _homes_sys_modules_key_ok(sub, walked, forbidden):
+    """True when the write target `sub`, an item of sys.modules, has a key the rule resolves to
+    string constants none of which is in `forbidden` (this module, the store and init modules,
+    __main__, or a submodule of one): a string constant, or a name whose every binding in the
+    unit is a for-loop target over a literal tuple or list of string constants."""
+    key = sub.slice
+    if isinstance(key, ast.Constant) and isinstance(key.value, str):
+        values = [key.value]
+    elif isinstance(key, ast.Name):
+        values = []
+        for node in walked:
+            if key.id not in _route_binding_names(node):
+                continue
+            if not (isinstance(node, (ast.For, ast.AsyncFor)) and isinstance(node.target, ast.Name)
+                    and isinstance(node.iter, (ast.Tuple, ast.List)) and node.iter.elts
+                    and all(isinstance(elt, ast.Constant) and isinstance(elt.value, str)
+                            for elt in node.iter.elts)):
+                return False
+            values += [elt.value for elt in node.iter.elts]
+        if not values:
+            return False
+    else:
+        return False
+    return not any(value.split(".")[0] in forbidden for value in values)
+
+
+def _homes_dynamic_binding_findings(fname, label, walked, lines, protected, store_imports,
+                                    foreign, guarded):
+    """Findings for the binding forms the homes rule cannot resolve, over one scanned unit's
+    nodes `walked`: the fail-closed arm of the rule. `protected` holds the module's store
+    aliases, its run_init_operation import names and its _opf_init_operation aliases. Each of
+    these is a finding, whatever object or string it names: (1) an assignment, del, loop, with
+    or comprehension target whose write position is an attribute named like a protected name,
+    on any object; (2) a setattr or delattr call, with any first argument, whose name argument
+    is a protected name or anything but one plain string constant; (3) any star import; (4) a
+    write through a live namespace mapping (globals(), locals(), vars(...), any .__dict__, any
+    .modules such as sys.modules), its item or attribute assigned or deleted, a method other
+    than a read method called on it, or the mapping itself bound, passed or returned (only the
+    read-only positions _namespace_read_only lists are accepted); (5) a reference to setattr,
+    delattr, globals, locals, vars or __import__ other than as the direct callee of a call, and
+    any reference to __setattr__ or __delattr__; (6) an import form the rule does not resolve:
+    `import sys as <other name>`, `from sys import modules`, an import of a submodule of
+    _opf_store or _opf_init_operation, and an `import _opf_store` anywhere but a module-level
+    statement (a function-local import binds a store handle the rule does not track)."""
+    found = []
+    for node in walked:
+        if isinstance(node, ast.ImportFrom) and any(alias.name == "*" for alias in node.names):
+            found.append("{}: {} has a star import from {} (line {}); a star import can bind "
+                         "any name, the protected ones included{}".format(
+                             fname, label, node.module or ".", lines[id(node)],
+                             _HOMES_ACCEPTED_FORM))
+    if not guarded:
+        return found
+    stem = fname[:-3] if fname.endswith(".py") else fname
+    forbidden = frozenset(["_opf_store", "_opf_init_operation", "__main__", stem])
+    parents = {}
+    for node in walked:
+        for child in ast.iter_child_nodes(node):
+            parents[id(child)] = node
+    chains = set()
+    for node in walked:
+        targets = _bind_targets(node)
+        if isinstance(node, ast.comprehension):
+            targets = [node.target]
+        for target in targets:
+            chains |= _write_chain_ids(target)
+            for sub in _write_positions(target):
+                if isinstance(sub, ast.Attribute) and sub.attr in protected:
+                    found.append(
+                        "{}: {} writes or deletes the attribute {} on an object (line {}); the "
+                        "store module alias, the callee's name and the init module alias are "
+                        "bound only by their module-level imports{}".format(
+                            fname, label, sub.attr, lines[id(node)], _HOMES_ACCEPTED_FORM))
+    callees = set()
+    for node in walked:
+        if not isinstance(node, ast.Call):
+            continue
+        callees.add(id(node.func))
+        func = node.func
+        name = (func.id if isinstance(func, ast.Name)
+                else func.attr if isinstance(func, ast.Attribute) else None)
+        if name not in ("setattr", "delattr"):
+            continue
+        key = node.args[1] if len(node.args) > 1 else None
+        resolved = (isinstance(key, ast.Constant) and isinstance(key.value, str)
+                    and not any(isinstance(arg, ast.Starred) for arg in node.args[:2]))
+        foreign_target = (bool(node.args) and isinstance(node.args[0], ast.Name)
+                          and node.args[0].id in foreign)
+        if (not resolved and not foreign_target) or (resolved and key.value in protected):
+            found.append(
+                "{}: {} calls {} with {} (line {}); a setattr or delattr may name only a "
+                "plain string constant that is not the store module alias, the callee's name "
+                "or the init module alias{}".format(
+                    fname, label, name,
+                    "a protected name {!r}".format(key.value) if resolved
+                    else "a name argument the rule cannot resolve", lines[id(node)],
+                    _HOMES_ACCEPTED_FORM))
+    for node in walked:
+        line = lines[id(node)]
+        if isinstance(node, ast.ImportFrom):
+            if node.module == "sys" and any(alias.name == "modules" for alias in node.names):
+                found.append("{}: {} imports sys.modules by name (line {}); the rule reads "
+                             "sys.modules only under that spelling{}".format(
+                                 fname, label, line, _HOMES_ACCEPTED_FORM))
+            if (node.module or "").startswith(("_opf_store.", "_opf_init_operation.")):
+                found.append("{}: {} imports from a submodule of {} (line {}), a form the rule "
+                             "does not resolve{}".format(fname, label, node.module.split(".")[0],
+                                                         line, _HOMES_ACCEPTED_FORM))
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == "sys" and alias.asname not in (None, "sys"):
+                    found.append("{}: {} imports sys under the name {} (line {}); the rule "
+                                 "reads sys.modules only under that spelling{}".format(
+                                     fname, label, alias.asname, line, _HOMES_ACCEPTED_FORM))
+                elif alias.name.startswith(("_opf_store.", "_opf_init_operation.")):
+                    found.append("{}: {} imports the submodule {} (line {}), a form the rule "
+                                 "does not resolve{}".format(fname, label, alias.name, line,
+                                                             _HOMES_ACCEPTED_FORM))
+                elif alias.name == "_opf_store" and id(node) not in store_imports:
+                    found.append("{}: {} imports _opf_store other than by a module-level "
+                                 "statement (line {}); the rule tracks the store module only "
+                                 "through its module-level import{}".format(
+                                     fname, label, line, _HOMES_ACCEPTED_FORM))
+        if isinstance(node, (ast.Name, ast.Attribute)):
+            spelled = node.id if isinstance(node, ast.Name) else node.attr
+            if spelled in _HOMES_WRITER_NAMES and (
+                    spelled in ("__setattr__", "__delattr__") or id(node) not in callees):
+                found.append("{}: {} references {} other than as the direct callee of a call "
+                             "(line {}); the rule reads a namespace writer only where it is "
+                             "called{}".format(fname, label, spelled, line,
+                                                _HOMES_ACCEPTED_FORM))
+        if _is_namespace_root(node):
+            parent = parents.get(id(node))
+            grand = parents.get(id(parent)) if parent is not None else None
+            if (isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name)
+                    and node.value.id == "sys" and isinstance(parent, ast.Subscript)
+                    and parent.value is node and isinstance(parent.ctx, ast.Store)
+                    and _homes_sys_modules_key_ok(parent, walked, forbidden)):
+                continue
+            if not _namespace_read_only(node, parent, grand, chains):
+                found.append("{}: {} writes through, binds or passes a live namespace mapping "
+                             "(globals(), locals(), vars(), __dict__ or sys.modules) (line {}); "
+                             "only an item read, a copy, a read method, a membership test or "
+                             "an iteration is accepted{}".format(
+                                 fname, label, line, _HOMES_ACCEPTED_FORM))
+    return found
+
+
 def _rebind_finding(fname, label, name, line, store_aliases):
     """The finding for a rebinding of a store alias or of a name the module's run_init_operation
     import binds, at module level or through a global declaration."""
@@ -758,7 +1005,8 @@ def _homes_module_binding_findings(fname, tree, store_aliases, direct_names, ini
     return found
 
 
-def _homes_rule_unit_findings(fname, unit_name, nodes, store_aliases, direct_names, init_aliases):
+def _homes_rule_unit_findings(fname, unit_name, nodes, store_aliases, direct_names, init_aliases,
+                              facts):
     """Findings for one production unit (a module-level function's body, or the module-level
     code), fail-closed over FORM: (a) every reference to run_init_operation or to a name the
     module's module-level `from _opf_init_operation import run_init_operation [as name]` binds
@@ -838,6 +1086,9 @@ def _homes_rule_unit_findings(fname, unit_name, nodes, store_aliases, direct_nam
                     or (isinstance(node, ast.Constant) and node.value == "SUPPORTED_HOMES")):
                 found.append("{}: {} names SUPPORTED_HOMES (line {})".format(
                     fname, label, lines[id(node)]))
+    found.extend(_homes_dynamic_binding_findings(
+        fname, label, walked, lines, rebind_names, facts["store_imports"], facts["foreign"],
+        facts["guarded"]))
     for call in rule_calls.values():
         rule = [kw for kw in call.keywords if kw.arg == "homes2"]
         if (any(isinstance(arg, ast.Starred) for arg in call.args)
@@ -952,25 +1203,33 @@ def _homes_rule_violations(sources):
     running python built from strings). opf.py's own init path is held by the route roster
     above, so the uncovered forms sit behind adjacent gates where they are covered at all.
 
-    What it also CANNOT see, disclosed residuals among the writes of the rule's names
-    (init_writes_homes2, SUPPORTED_HOMES) and rebindings of a store alias, even with literal
-    names. An attribute assignment, del, setattr or delattr naming a rule name is a finding on
-    any object, but an item write into the store module's namespace (x.__dict__[name] = v or
-    vars(x)[name] = v) is seen only when x is a store alias, so these escape: the namespace
-    reached through sys.modules (vars(sys.modules["_opf_store"])["SUPPORTED_HOMES"] = 2),
-    through importlib (import_module or any other loader call), through a function-local
-    `import _opf_store [as name]`, which is not a store alias here, or through a second
-    module-level name bound to the store module (st = _opf_store); a write by a method of the
-    namespace on any of these or on a store alias (__dict__.update, vars(...).update,
-    setdefault, pop and the like); a raw namespace handle bound other than by an assignment (a
-    loop or with target, a container element, a call argument); a rebinding of a store alias from
-    another module (other_module.store = fake) or through globals(); a replacement of the store
-    module itself in sys.modules (sys.modules["_opf_store"] = fake) before a module imports it,
-    which every later import then reads as the store; a module-level name rebound through
-    sys.modules[__name__] or globals() with a computed string; and the annotations of a
-    registered def, which are not scanned. Each of these can change init_writes_homes2() for
-    every fresh init, so this check guards against an accidental non-compliant call, not a
-    deliberate dynamic rewrite.
+    Fail-closed binding arm (_homes_dynamic_binding_findings). In a guarded module (one that
+    holds a run_init_operation call or a callee spelling) the protected names are its store
+    aliases, its run_init_operation import names and its _opf_init_operation aliases, and the
+    rule ACCEPTS only these binding forms of them: the module-level imports named above (a store
+    import may sit in a module-level try), the defining module's own def run_init_operation, a
+    function-local binding in a unit that does not call the seam and declares no global, a class
+    body binding, and a parameter of a unit that does not call the seam. Every other form is a
+    finding whose text says to rewrite the binding in an accepted form: an attribute write or
+    delete of a protected name on any object; a setattr or delattr naming a protected name, or
+    with a name argument other than one string constant unless its first argument is a name
+    bound only by imports of another module; a write through globals(), locals(), vars(), any
+    __dict__ or sys.modules (an item or attribute assigned or deleted, a mutating method, the
+    mapping bound, passed or returned; only an item read, a copy, a read method, a membership
+    test or an iteration is accepted, and a sys.modules item assignment whose key resolves to
+    string constants naming no protected module and not this module); a reference to setattr,
+    delattr, globals, locals, vars or __import__ other than as a callee, or to __setattr__ or
+    __delattr__; `import sys as <other>`, `from sys import modules`, an import of a submodule of
+    the store or init module, and a function-local `import _opf_store`. A star import is a
+    finding in every module.
+
+    What it also CANNOT see, forms outside the scanned module: a write made by another module
+    (other_module.store = fake, or another module writing init_writes_homes2 or SUPPORTED_HOMES
+    through a handle it holds); a replacement of the store module in sys.modules by code that is
+    not scanned, before a module imports it; code never handed to the scan; and the bodies and
+    annotations of registered defs. Each of these can change init_writes_homes2() for every
+    fresh init, so this check guards against an accidental non-compliant call, not a deliberate
+    rewrite from outside the module.
     """
     found = []
     summaries = {}
@@ -1061,9 +1320,18 @@ def _homes_rule_violations(sources):
             try:
                 cached = _homes_module_binding_findings(
                     fname, tree, store_aliases, direct_names, init_aliases)
+                # The fail-closed binding arm runs over every unit of a module that holds a
+                # seam call or a callee spelling (a guarded module); a star import is a finding
+                # in every module.
+                facts = dict(
+                    store_imports=frozenset(map(id, _store_import_nodes(tree))),
+                    foreign=_homes_foreign_module_names(fname, tree),
+                    guarded=bool(direct_names or init_aliases)
+                    or any(_is_run_init_call(sub) for sub in ast.walk(tree)))
                 for unit_name, nodes in units:
                     cached.extend(_homes_rule_unit_findings(
-                        fname, unit_name, nodes, store_aliases, direct_names, init_aliases))
+                        fname, unit_name, nodes, store_aliases, direct_names, init_aliases,
+                        facts))
             except Exception as exc:  # noqa: BLE001 -- fail closed with a named cause
                 cached = [_homes_internal_error(fname, exc)]
             summary["findings"][cache_key] = cached
@@ -5304,6 +5572,25 @@ def _suite_isolated(invoke):
                      "try:\n    import _opf_store\nexcept ImportError:\n    _opf_store = None\n"
                      + exempt_import.replace("\n\n", "\n") + "\n\n" + alias_call,
                      "module-level code rebinds the store module alias _opf_store"),
+                    ("a module-level attribute write of the store alias through sys.modules",
+                     "import sys\nimport types\n\n" + exempt_import.replace("\n\n", "\n")
+                     + alias_store + "\nsys.modules[__name__]._opf_store = "
+                     "types.SimpleNamespace(init_writes_homes2=lambda: True)\n\n\n" + alias_call,
+                     "module-level code writes or deletes the attribute _opf_store on an object"),
+                    ("the same attribute write through a module-level handle on sys.modules",
+                     "import sys\nimport types\n\n" + exempt_import.replace("\n\n", "\n")
+                     + alias_store + "\n_this = sys.modules[__name__]\n_this._opf_store = "
+                     "types.SimpleNamespace(init_writes_homes2=lambda: True)\n\n\n" + alias_call,
+                     "module-level code writes or deletes the attribute _opf_store on an object"),
+                    ("a literal setattr of the store alias on the module object",
+                     "import sys\n\n" + exempt_import.replace("\n\n", "\n") + alias_store
+                     + "\n\ndef _swap(fake):\n"
+                     "    setattr(sys.modules[__name__], \"_opf_store\", fake)\n\n\n" + alias_call,
+                     "_swap calls setattr with a protected name '_opf_store'"),
+                    ("a star import beside the store import",
+                     alias_store + exempt_import.replace("\n\n", "\n")
+                     + "from _zz_replacement import *\n\n\n" + alias_call,
+                     "module-level code has a star import from _zz_replacement"),
                 ]
                 for mutant_label, new, expect in alias_rows:
                     mutated_sources = dict(rule_sources)

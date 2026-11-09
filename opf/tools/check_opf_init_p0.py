@@ -365,8 +365,10 @@ def red_on_revert(source, f):
         expanded.extend((guard, old, new, identity) for identity in extra)
     for guard, old, new, identity in expanded:
         check(source.count(old) == 1, "revert/" + guard + "/unique-source")
-        module = types.ModuleType("_opf_init_p0_reverted")
-        module.__file__ = p0.__file__
+        # The reverted source runs in a fresh dict of its own, never through a live module namespace, and
+        # its module-level names are then read as attributes of a plain namespace object.
+        namespace = {"__name__": "_opf_init_p0_reverted", "__doc__": None, "__package__": None,
+                     "__loader__": None, "__spec__": None, "__file__": p0.__file__}
         # The reverted source is loaded and called in this process: a process ending from it (SystemExit 0
         # or None, GeneratorExit, any other BaseException) is a harness failure, CANNOT-EVALUATE (exit 2) in
         # main, never this gate's status; a KeyboardInterrupt propagates so an operator's Ctrl-C stops the run.
@@ -376,7 +378,7 @@ def red_on_revert(source, f):
         # alone. A KeyboardInterrupt of exactly that class propagates; a subclass, which only loaded code
         # raises, is cannot-evaluate and is never re-raised.
         try:
-            exec(compile(source.replace(old, new), module.__file__, "exec"), module.__dict__)
+            exec(compile(source.replace(old, new), p0.__file__, "exec"), namespace)
         except Exception:
             raise
         except KeyboardInterrupt as exc:
@@ -387,6 +389,7 @@ def red_on_revert(source, f):
         except BaseException:  # noqa: BLE001  a process ending at load is cannot-evaluate, never a pass
             raise RuntimeError("revert/" + guard + ": the reverted source ended the process at load; "
                                "fail-closed") from None
+        module = types.SimpleNamespace(**namespace)
         before = fingerprint(f)
         try:
             run_case(module, cases[identity], f)
@@ -629,10 +632,10 @@ def red_on_revert_hostile_str(source, f):
     reaches main's handler, which gives 2 through _failure_status without reading it. Each runs through main
     (its fixtures replaced, for that one run, by red_on_revert over the hostile source), so it is red if
     red_on_revert, main's handler or _failure_status runs code from the caught instance."""
+    global fixtures
     import contextlib
     import io
-    names = globals()
-    real_fixtures = names["fixtures"]
+    real_fixtures = fixtures
     for label, base, raised in HOSTILE_STR_CASES:
         reached = []
 
@@ -640,7 +643,7 @@ def red_on_revert_hostile_str(source, f):
             reached.append(True)
             red_on_revert(hostile, f)
             raise AssertionError("revert/hostile-str/" + label + "/not-raised")
-        names["fixtures"] = _hostile_fixtures
+        fixtures = _hostile_fixtures
         try:
             # fixtures() is main's first call inside its handler and never returns here, so no flag is read
             # before the escape reaches the handler; --vectors-only keeps main in its narrowest mode regardless.
@@ -653,7 +656,7 @@ def red_on_revert_hostile_str(source, f):
         except BaseException as escaped:  # noqa: BLE001  recorded, never this test's own end
             got = type(escaped)
         finally:
-            names["fixtures"] = real_fixtures
+            fixtures = real_fixtures
         check(reached == [True], "revert/hostile-str/" + label + "/fixtures-not-reached")
         check(type(got) is int and got == 2, "revert/hostile-str/" + label)
         print("PASS revert/hostile-str/" + label)
