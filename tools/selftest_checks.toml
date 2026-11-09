@@ -5354,6 +5354,8 @@ expected-check-ids = [
   "flip/binding-probe-namedexpr-target",
   "detect/binding-probe-expr-base-store",
   "flip/binding-probe-expr-base-store",
+  "detect/binding-probe-withitem-optional-vars",
+  "flip/binding-probe-withitem-optional-vars",
   "void/builtins-import-alias-blocks-exception",
   "flip/builtins-import-alias-blocks-exception",
   "void/builtins-def-bound-blocks-exception",

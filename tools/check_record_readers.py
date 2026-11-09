@@ -1544,10 +1544,12 @@ def _concrete_ast_types():
 
 def _is_expression_annotation(annotation):
     """True when one _field_types annotation is an expression: ast.expr or a subclass, alone or
-    with None (an optional expression). A list of expressions is not one."""
+    with None (an optional expression). A list of expressions is not one. Only a list is
+    refused by its __origin__: an optional expression is a union, which carries an __origin__
+    too on some Python releases (typing.Union on 3.14), and must still count."""
     if isinstance(annotation, type):
         return issubclass(annotation, ast.expr)
-    if getattr(annotation, "__origin__", None) is not None:
+    if getattr(annotation, "__origin__", None) is list:
         return False
     args = getattr(annotation, "__args__", ())
     return (any(isinstance(a, type) and issubclass(a, ast.expr) for a in args)
@@ -1555,18 +1557,19 @@ def _is_expression_annotation(annotation):
                     for a in args))
 
 
-def _binding_shaped_fields(cls):
+def _binding_shaped_fields(cls, is_expression=_is_expression_annotation):
     """The fields of the binding-shaped probe of one ast node class: every ctx field (by name or
     by its expr_context annotation) set to ast.Store(), every field whose annotated type is an
-    expression set to a fresh ast.Name with a Store ctx, and every other field set to "_". The
-    annotations are read from the class's _field_types, which the running interpreter supplies;
-    a class without it raises here, which fails the self-test closed."""
+    expression (is_expression, _is_expression_annotation by default) set to a fresh ast.Name
+    with a Store ctx, and every other field set to "_". The annotations are read from the
+    class's _field_types, which the running interpreter supplies; a class without it raises
+    here, which fails the self-test closed."""
     fields = {}
     for field in cls._fields:
         annotation = cls._field_types.get(field)
         if field == "ctx" or annotation is ast.expr_context:
             fields[field] = ast.Store()
-        elif _is_expression_annotation(annotation):
+        elif is_expression(annotation):
             fields[field] = ast.Name(id="_", ctx=ast.Store())
         else:
             fields[field] = "_"
@@ -1583,19 +1586,26 @@ def _binding_shaped_fields(cls):
 # second with every field set to the placeholder string "_" (truthy, so a branch that guards
 # on a name field still reads it, and a branch that descends into a field raises), and the
 # third binding-shaped (_binding_shaped_fields), so a branch that tests a ctx or a target
-# field, not only the node type, yields a name on it.
-def _ast_probe_instances(cls, binding_shaped=True):
+# field, not only the node type, yields a name on it. The binding-shaped probe gives every ctx,
+# including that of each Name it places in an expression field, a Store context, so two shapes
+# are not probed: a Del context (a branch reading an attribute, subscript or any expression
+# only when deleted) and an inner Load context (a branch reading a stored attribute or
+# subscript whose value is a Name with a Load ctx, as in __builtins__.__import__ = 1). A list
+# of expressions (such as a Tuple's or List's elts, or the targets of an Assign or a Delete)
+# is set to "_", so a branch reading a Name from inside such a list is not probed either.
+def _ast_probe_instances(cls, binding_shaped=True, is_expression=_is_expression_annotation):
     """The probe instances of one ast node class: the empty and "_" probes, and the
     binding-shaped probe unless binding_shaped is false (the self-test's flips drop it to show
-    which findings depend on it). Each is built by ast.AST.__new__ and ast.AST.__init__
-    directly, so a deprecated class whose own constructor returns another node type (ast.Index,
-    ast.ExtSlice) still yields an instance of itself."""
+    which findings depend on it), its expression fields chosen by is_expression (a flip passes
+    a narrower test to show which findings depend on the optional fields). Each is built by
+    ast.AST.__new__ and ast.AST.__init__ directly, so a deprecated class whose own constructor
+    returns another node type (ast.Index, ast.ExtSlice) still yields an instance of itself."""
     probes = []
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         shapes = [{}, {field: "_" for field in cls._fields}]
         if binding_shaped:
-            shapes.append(_binding_shaped_fields(cls))
+            shapes.append(_binding_shaped_fields(cls, is_expression))
         for fields in shapes:
             node = ast.AST.__new__(cls)
             ast.AST.__init__(node, **fields)
@@ -1674,6 +1684,20 @@ _FIELD_TESTING_MUTANTS = {
         if isinstance(node, ast.expr) and isinstance(getattr(node, "ctx", None), ast.Store)
         else ())),
 }
+
+# A mutant branch that reads a Name from an optional expression field of an unlisted type
+# (with a as name: pass), which only the binding-shaped probe matches, and only when that
+# probe sets an optional expression field to a Name.
+_OPTIONAL_FIELD_MUTANT = ("withitem", lambda node: (
+    (node.optional_vars.id,) if isinstance(node, ast.withitem)
+    and isinstance(getattr(node, "optional_vars", None), ast.Name) else ()))
+
+
+def _is_plain_expression_annotation(annotation):
+    """True only when one _field_types annotation is ast.expr or a subclass alone: the
+    expression test with optional expressions left out, which the self-test's flip passes to
+    the binding-shaped probe to show that the optional-field finding rests on them."""
+    return isinstance(annotation, type) and issubclass(annotation, ast.expr)
 
 
 def _gate_without_builtins_blocker(files):
@@ -2594,6 +2618,20 @@ def _self_test():
             _BRANCH_NODE_TYPES, mutant_branches, _type_param_binds, covered_node_types, no_row,
             lambda cls: _ast_probe_instances(cls, binding_shaped=False))
         check(flip_id, meta_ok, meta_detail)
+    # A branch that reads a Name from an optional expression field of an unlisted type (a with
+    # item's optional_vars) is found because the binding-shaped probe sets an optional field to
+    # a Name, as it does a plain one; with optional fields left out of that probe the same
+    # mutant passes unseen, so the finding rests on them.
+    type_name, extra = _OPTIONAL_FIELD_MUTANT
+    mutant_branches = _branches_widened(_BINDING_BRANCHES, "store-or-delete", extra)
+    meta_ok, meta_detail = _binding_node_types_meta(
+        _BRANCH_NODE_TYPES, mutant_branches, _type_param_binds, covered_node_types, no_row)
+    check("detect/binding-probe-withitem-optional-vars",
+          not meta_ok and type_name in meta_detail["unlisted_types_binding"], meta_detail)
+    meta_ok, meta_detail = _binding_node_types_meta(
+        _BRANCH_NODE_TYPES, mutant_branches, _type_param_binds, covered_node_types, no_row,
+        lambda cls: _ast_probe_instances(cls, is_expression=_is_plain_expression_annotation))
+    check("flip/binding-probe-withitem-optional-vars", meta_ok, meta_detail)
 
     # A binding of __builtins__ with no bare-name or attribute occurrence the scan reads: the
     # bound object is the mapping a bare-name __import__ resolves through, so the __import__
@@ -2956,7 +2994,9 @@ def _self_test():
           "through the meta row), and a branch that raises on ast.keyword, and the meta row "
           "fails each of four branches that test an unlisted type with a ctx or target field "
           "(a stored or deleted attribute, a starred store, a walrus target, a store context on "
-          "any expression), each passing unseen with the binding-shaped probe dropped; "
+          "any expression), each passing unseen with the binding-shaped probe dropped, and a "
+          "branch that reads a Name from a with item's optional_vars, passing unseen with "
+          "optional expression fields left out of that probe; "
           "the loop-key, helper, module-alias and comprehension rebinding scans take their "
           "per-node bindings from the same branches), and dropping "
           "__builtins__ from the "
