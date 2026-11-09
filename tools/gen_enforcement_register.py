@@ -223,15 +223,15 @@ _NO_CTRL_CLASSES = {"line break": _splits_line, "Cc control": _is_cc, "Cf format
 
 
 def _no_ctrl(value, where):
-    """Reject an en dash, an em dash, or any character of three classes in a SINGLE-LINE display string
-    that renders into a Markdown TABLE CELL (a rule title, a status word, a corpus id, a pending row's
-    description, a partial row's coverage note): a character str.splitlines() splits on (_splits_line), a
-    Unicode Cc control character (_is_cc), or a Unicode Cf format character (_is_cf). Each class is tested on
-    its own, so U+2028 and U+2029 (category Zl and Zp, not Cc) are refused as line breaks and a zero-width
-    space or a byte order mark as format characters. Fail-closed (ValueError -> exit 2), so a bad source
-    surfaces here rather than as a red site or dash gate on the generated output. A tab or line break in a
-    Markdown table cell would break the row, so this guard is deliberately strict; a mechanism RESIDUE
-    renders into a multi-line sink instead and uses _residue_display, which permits newlines."""
+    """Reject an en dash, an em dash, or any character of three classes in a SINGLE-LINE display string that
+    renders into a Markdown TABLE CELL (a rule title, a pending row's description, a partial row's coverage
+    note): a character str.splitlines() splits on (_splits_line), a Unicode Cc control character (_is_cc), or
+    a Unicode Cf format character (_is_cf). Each class is tested on its own, so U+2028 and U+2029 (category
+    Zl and Zp, not Cc) are refused as line breaks and a zero-width space or a byte order mark as format
+    characters. Fail-closed (ValueError -> exit 2), so a bad source surfaces here rather than as a red site
+    or dash gate on the generated output. A tab or line break in a Markdown table cell would break the row,
+    so this guard is deliberately strict; a mechanism RESIDUE renders into a multi-line sink instead and uses
+    _residue_display, which permits newlines."""
     if EN in value or EM in value:
         raise ValueError("{}: contains an en/em dash: {!r}".format(where, value))
     for ch in value:
@@ -245,11 +245,14 @@ def _residue_display(value, where):
     """Validate a mechanism RESIDUE for its actual sinks, which are NOT a table cell: it renders into a
     fenced Markdown code block (render_md) and an HTML blockquote (render_html), both of which carry
     multi-line, multi-paragraph text safely. So a residue MAY contain newlines (the two enforced hook
-    residues git-stash-ref and protected-line-guard are legitimately multi-paragraph). What is still
-    rejected: an en/em dash (the house no-dash convention, also caught by the whole-corpus dash gate) and
-    any control character OTHER than newline (a raw NUL, backspace, tab, or carriage return has no faithful
-    rendering in either sink). Newline is the only control character permitted; each view renders it safely,
-    the fenced block by lengthening its fence past any backtick run (_fence_for) and the blockquote by
+    residues git-stash-ref and protected-line-guard are legitimately multi-paragraph). What is rejected is
+    exactly: an en/em dash (the house no-dash convention, also caught by the whole-corpus dash gate), a C0
+    control character U+0000 to U+001F other than newline (a raw NUL, backspace, tab, or carriage return has
+    no faithful rendering in either sink), and DEL U+007F. Apart from the two dashes, no character above
+    U+007F is tested, so a C1 control character (U+0080 to U+009F, NEL U+0085 included), the line and
+    paragraph separators U+2028 and U+2029, and a Cf format character such as a zero-width space U+200B all
+    pass this guard. Newline is the only C0 control character permitted; each view renders it safely, the
+    fenced block by lengthening its fence past any backtick run (_fence_for) and the blockquote by
     HTML-escaping the text under a white-space:pre-wrap style so the line breaks show. Fail-closed
     (ValueError -> exit 2) so a bad residue surfaces here, exactly as _no_ctrl does for a table cell."""
     if EN in value or EM in value:
@@ -1543,8 +1546,8 @@ def self_test_main():
 
         # (m7) FLIPS for (m6): with one class's _NO_CTRL_CLASSES test replaced by one that answers False, a
         # note holding a character only that class catches is accepted (not exit 2), so each class's row
-        # fails without its own leg. NEL (U+0085) and CR are both a line break and Cc: refused while either
-        # leg stands, accepted only with both disabled.
+        # fails without its own leg. CR, VT, FF, U+001C to U+001E and NEL (U+0085) are each both a line break
+        # and Cc: refused while either leg stands, accepted only with both disabled.
         def accepted_with(disabled, escape):
             saved = dict(_NO_CTRL_CLASSES)
             try:
@@ -1557,12 +1560,13 @@ def self_test_main():
             finally:
                 _NO_CTRL_CLASSES.update(saved)
 
+        both_legs = ("\\r", "\\u000B", "\\u000C", "\\u001C", "\\u001D", "\\u001E", "\\u0085")
         flips = ((("line break",), ("\\u2028", "\\u2029"), True),
                  (("Cc control",), ("\\u0001", "\\t", "\\u007F", "\\u009F"), True),
-                 (("Cf format",), ("\\u200B", "\\uFEFF", "\\u00AD"), True),
-                 (("line break",), ("\\u0085", "\\r"), False),
-                 (("Cc control",), ("\\u0085", "\\r"), False),
-                 (("line break", "Cc control"), ("\\u0085", "\\r"), True))
+                 (("Cf format",), ("\\u200B", "\\uFEFF", "\\u00AD", "\\u200E"), True),
+                 (("line break",), both_legs, False),
+                 (("Cc control",), both_legs, False),
+                 (("line break", "Cc control"), both_legs, True))
         for disabled, escapes, want in flips:
             for escape in escapes:
                 if accepted_with(disabled, escape) != want:
