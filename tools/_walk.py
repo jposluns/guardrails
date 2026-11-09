@@ -5,7 +5,8 @@ Uses os.walk(onerror=raise), NOT Path.rglob: rglob SILENTLY yields nothing on an
 directory (it suppresses the traversal OSError), so a scanner would skip an unreadable subtree and still
 report clean, a fail-open a security gate must never have. os.walk with a raising onerror surfaces the
 read error so the caller can fail closed (exit 2). Skip-dirs are pruned in place, so the walk never
-descends into (or fails on) .git/node_modules/__pycache__ etc.
+descends into (or fails on) .git/node_modules/__pycache__ etc.; a directory symlink is reported to a
+caller that asks for symlinks before that prune, so a skip-dir name never hides one.
 """
 import os
 from pathlib import Path
@@ -16,19 +17,23 @@ def walk_files(root, skip_dirs=frozenset(), suffixes=None, symlink_dirs=None):
     pruned (not descended), and a FILE whose name is in skip_dirs is skipped too (a git worktree's `.git`
     is a file, not a dir). suffixes, if given, keeps only files with those extensions (e.g. {".md"}).
     symlink_dirs, if given as a list, receives every directory SYMLINK the walk meets (os.walk never
-    follows one: followlinks stays False), so a caller can name the subtree behind such a link instead
-    of losing it silently; with the default None the behaviour is unchanged.
+    follows one: followlinks stays False), whatever its name, one named in skip_dirs included, so a
+    caller can name the subtree behind such a link instead of losing it silently; with the default None
+    the behaviour is unchanged.
     Raises OSError if a directory that must be walked cannot be listed (caller converts to exit 2)."""
     def _raise(exc):
         raise exc
     root = Path(root)
     for dirpath, dirnames, filenames in os.walk(root, onerror=_raise):
-        dirnames[:] = [d for d in dirnames if d not in skip_dirs]
         if symlink_dirs is not None:
+            # Record directory symlinks BEFORE the skip_dirs prune: a link named .git, node_modules or
+            # __pycache__ is not the tool metadata the prune keeps out, and pruning it first would drop
+            # it with no trace. A real directory so named is not a symlink and is still pruned below.
             for d in dirnames:
                 entry = Path(dirpath) / d
                 if entry.is_symlink():
                     symlink_dirs.append(entry)
+        dirnames[:] = [d for d in dirnames if d not in skip_dirs]
         for fn in filenames:
             # Also skip a FILE whose name is in skip_dirs: in a git worktree `.git` is a file (a pointer),
             # not a directory, and it is tool metadata that must not be scanned, exactly like the .git dir.
