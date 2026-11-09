@@ -27536,6 +27536,12 @@ def _main_isolated(monitor):
         # source basename) and gr3 a malformed registry; four empty repos exercise the 4-root budget.
         try:
             os.makedirs(os.path.join(gr, "gen"), exist_ok=True)
+            # Links an earlier command could have made: lk/f onto GEN.md, lk/t onto the gen tree, and lk/o onto
+            # lk/out, a directory outside every registered target.
+            os.makedirs(os.path.join(gr, "lk", "out"), exist_ok=True)
+            os.symlink(os.path.join(gr, "GEN.md"), os.path.join(gr, "lk", "f"))
+            os.symlink(os.path.join(gr, "gen"), os.path.join(gr, "lk", "t"))
+            os.symlink(os.path.join(gr, "lk", "out"), os.path.join(gr, "lk", "o"))
             gs_reg3.write_text("{ not json", encoding="utf-8")
             gb_extra = [str(_gs_init("gbroot{}".format(n))) for n in range(1, 5)]
             # A registry repo with a git repository NESTED inside its registered gen/ tree (and one in an
@@ -27575,6 +27581,8 @@ def _main_isolated(monitor):
             print("SELF-TEST ERROR: could not build the gensrc Bash fixtures: {}".format(exc), file=sys.stderr)
             return 2
         gnest = str(gs_nest)
+        # Session working directories inside the registered gen tree and inside lk, outside every target.
+        ggen, glk = os.path.join(gr, "gen"), os.path.join(gr, "lk")
         gdeep = str(gs_deep)
         gdeepest = os.path.join(gdeep, "na", "nb", "nc", "nd")
         # Real paths, so a change through no link reads the same lexically and physically wherever the
@@ -27841,6 +27849,33 @@ def _main_isolated(monitor):
              gr),
             ("(gb-p20d) a one-statement write to a constant path is a judged sink and allows", "allow",
              "python3 -c \"open('n.txt','w').write('see GEN.md')\"", gr),
+            # the path the program writes is joined to the session working directory and resolved through the
+            # links that exist now, so a relative path from inside a registered tree, a path through a link onto
+            # a registered target and an argument index past the words keep the data a mention; a path that
+            # resolves outside every registered target still notes
+            ("(gb-p22) a sys.argv path relative to a working directory in the gen tree keeps the data a mention",
+             "deny", "python3 -c \"import sys; open(sys.argv[1],'w').write('see gen/a.md')\" a.md", ggen),
+            ("(gb-p22b) a bound path relative to a working directory in the gen tree keeps the data a mention",
+             "deny", "python3 -c \"p='a.md'; open(p,'w').write('see GEN.md')\"", ggen),
+            ("(gb-p22c) a pathlib write relative to a working directory in the gen tree keeps the data a mention",
+             "deny", "python3 -c \"import pathlib; p='a.md'; pathlib.Path(p).write_text('regenerate gen/a.md')\"",
+             ggen),
+            ("(gb-p22d) a bound path through a link onto GEN.md keeps the data a mention", "deny",
+             "python3 -c \"p='lk/f'; open(p,'w').write('GEN.md')\"", gr),
+            ("(gb-p22e) a bound path through a link onto the gen tree keeps the data a mention", "deny",
+             "python3 -c \"p='lk/t/a.md'; open(p,'w').write('gen/a.md')\"", gr),
+            ("(gb-p22f) a sys.argv path through a link onto GEN.md keeps the data a mention", "deny",
+             "python3 -c \"import sys; open(sys.argv[1],'w').write('GEN.md')\" lk/f", gr),
+            ("(gb-p22g) a .. after a link onto the gen tree is read physically and keeps the data a mention",
+             "deny", "python3 -c \"p='lk/t/../lk/f'; open(p,'w').write('GEN.md')\"", gr),
+            ("(gb-p22h) a sys.argv index past the argument words keeps the data a mention", "deny",
+             "python3 -c \"import sys; open(sys.argv[2],'w').write('GEN.md')\" n.txt", gr),
+            ("(gb-p22i) a relative path from a working directory outside every registered target notes",
+             "allow-note", "python3 -c \"import sys; open(sys.argv[1],'w').write('see gen/a.md')\" a.md", glk),
+            ("(gb-p22j) a bound path through a link that resolves outside every registered target notes",
+             "allow-note", "python3 -c \"p='lk/o/n.md'; open(p,'w').write('GEN.md')\"", gr),
+            ("(gb-p22k) a negative sys.argv index is no constant integer, so it keeps the data a mention",
+             "deny", "python3 -c \"import sys; open(sys.argv[-1],'w').write('GEN.md')\" n.txt", gr),
             # tree containment and the boundary
             ("(gb-e1) a redirect into a tree denies", "deny", "echo x > gen/new.md", gr),
             ("(gb-e2) a redirect under gen-extra allows", "allow", "echo x > gen-extra/x.md", gr),
@@ -28129,6 +28164,16 @@ def _main_isolated(monitor):
             failures.append("(gb-labels) two gb cases share a label")
         for _gb_label, _gb_want, _gb_cmd, _gb_cwd in _gb_cases:
             bexpect(_gb_label, _gb_want, _gb_cmd, _gb_cwd)
+        # (gb-p22l) the data is blanked only against an absolute working directory: with none, or a relative one,
+        # the command stays whole even where the path would resolve outside every target; (gb-p22m) with gr it
+        # is blanked.
+        _gb_code = "import sys; open(sys.argv[1],'w').write('GEN.md')"
+        _gb_cmd = "python3 -c \"{}\" n.txt".format(_gb_code)
+        for _gb_cwd in (None, "", "gen", "."):
+            if aiqt_hooks._gensrc_unmention(_gb_cmd, _gb_code, _gb_cwd, lambda _real: True) != _gb_cmd:
+                failures.append("(gb-p22l) the data was blanked with the working directory {!r}".format(_gb_cwd))
+        if aiqt_hooks._gensrc_unmention(_gb_cmd, _gb_code, gr, lambda _real: True) == _gb_cmd:
+            failures.append("(gb-p22m) the data was not blanked with the absolute working directory gr")
         # (gb-reach-*) the skip_empty pre-pass of _gensrc_bash against the full lex, on every gb command: both
         # lexes give the same flags (gb-reach-flags); a command any reading of whose full lex has an effect holds a
         # segment that can add one (_gensrc_reach, gb-reach-writes); and where its text holds no ) and no segment
