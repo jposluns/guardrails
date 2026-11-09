@@ -5240,6 +5240,7 @@ expected-check-ids = [
   "404-structure/unparsed-page-still-checked",
   "declaration/well-formed-read",
   "declaration/well-formed-scan-not-refused",
+  "declaration/block-entry-not-a-page",
   "declaration/real-is-promoted",
   "declaration/staged-flip-differs",
   "declaration/entry-without-target-refused",

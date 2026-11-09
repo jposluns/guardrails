@@ -103,6 +103,20 @@ SCHEME_BUTTON = (
     '12h2.2M19.3 12h2.2M5.3 5.3l1.6 1.6M17.1 17.1l1.6 1.6M5.3 18.7l1.6-1.6M17.1 6.9l1.6-1.6"/></svg>'
     '<span class="vh">Dark mode</span></button>')
 
+# The registry declaration (read statically by tools/gen_gensrc.py). Each page's sources are the inputs its
+# bytes derive from: the generator and the page's data file, plus VERSION and changelog.toml for a page whose
+# data renders the document control strip (_c_control), and STATUS_SOURCE for a page whose data carries the
+# $OPF_STATUS token. The kind "block" entries are the STATUS_LINES files, of which this generator owns only
+# the status line; page_targets() keeps them out of the page set. Two STATUS_LINES files have no entry
+# (_STATUS_LINES_UNREGISTERED). The self-test rows under "gensrc/" hold these sources to the built pages and
+# to STATUS_LINES. The mappings page also declares the modules whose functions render its bodies
+# (_mappings_data and the _mappings_by_* renderers): tools/gen_mappings.py (rows, registry and wording),
+# tools/gen_rules.py (the rule corpus loader), tools/_standards.py (the manifest loader) and
+# tools/gen_agents.py (the rule order). Not declared, a disclosed residual: every page's navigation (_nav)
+# shows a nav item only when a sibling page is built at that item's path, so a page's bytes can change when a
+# sibling data file under the same draft-src/ folder is added, removed, or its path field changes. Directory
+# sources here name content inputs (as .aiqt/standards/ does), and naming each sibling folder would make
+# every page depend on every other page's data.
 GENSRC_OUTPUTS = (
     {"target": "site/index.html", "kind": "file",
      "sources": ("tools/gen_draft_site.py", "site/draft-src/home.toml"),
@@ -123,23 +137,25 @@ GENSRC_OUTPUTS = (
      "sources": ("tools/gen_draft_site.py", "site/draft-src/install.toml"),
      "regenerate": "python3 tools/gen_draft_site.py"},
     {"target": "site/install/details/index.html", "kind": "file",
-     "sources": ("tools/gen_draft_site.py", "site/draft-src/install-details.toml"),
+     "sources": ("tools/gen_draft_site.py", "site/draft-src/install-details.toml", "VERSION",
+                 "changelog.toml"),
      "regenerate": "python3 tools/gen_draft_site.py"},
     {"target": "site/license/index.html", "kind": "file",
      "sources": ("tools/gen_draft_site.py", "site/draft-src/license.toml"),
      "regenerate": "python3 tools/gen_draft_site.py"},
     {"target": "site/mappings/index.html", "kind": "file",
      "sources": ("tools/gen_draft_site.py", "site/draft-src/mappings.toml",
-                 ".aiqt/standards/", ".aiqt/core/rules/"),
+                 ".aiqt/standards/", ".aiqt/core/rules/", "VERSION", "changelog.toml",
+                 "tools/gen_mappings.py", "tools/gen_rules.py", "tools/_standards.py", "tools/gen_agents.py"),
      "regenerate": "python3 tools/gen_draft_site.py"},
     {"target": "site/rules/index.html", "kind": "file",
-     "sources": ("tools/gen_draft_site.py", "site/draft-src/rules.toml"),
+     "sources": ("tools/gen_draft_site.py", "site/draft-src/rules.toml", "VERSION", "changelog.toml"),
      "regenerate": "python3 tools/gen_draft_site.py"},
     {"target": "site/standard/index.html", "kind": "file",
-     "sources": ("tools/gen_draft_site.py", "site/draft-src/standard.toml"),
+     "sources": ("tools/gen_draft_site.py", "site/draft-src/standard.toml", "VERSION", "changelog.toml"),
      "regenerate": "python3 tools/gen_draft_site.py"},
     {"target": "opf/site/index.html", "kind": "file",
-     "sources": ("tools/gen_draft_site.py", "opf/site/draft-src/home.toml"),
+     "sources": ("tools/gen_draft_site.py", "opf/site/draft-src/home.toml", "opf/tools/opf.py"),
      "regenerate": "python3 tools/gen_draft_site.py"},
     {"target": "opf/site/404.html", "kind": "file",
      "sources": ("tools/gen_draft_site.py", "opf/site/draft-src/404.toml"),
@@ -148,7 +164,7 @@ GENSRC_OUTPUTS = (
      "sources": ("tools/gen_draft_site.py", "opf/site/draft-src/adopt.toml"),
      "regenerate": "python3 tools/gen_draft_site.py"},
     {"target": "opf/site/core-files/index.html", "kind": "file",
-     "sources": ("tools/gen_draft_site.py", "opf/site/draft-src/core-files.toml"),
+     "sources": ("tools/gen_draft_site.py", "opf/site/draft-src/core-files.toml", "opf/tools/opf.py"),
      "regenerate": "python3 tools/gen_draft_site.py"},
     {"target": "opf/site/draft/index.html", "kind": "file",
      "sources": ("tools/gen_draft_site.py", "opf/site/draft-src/draft.toml"),
@@ -165,7 +181,16 @@ GENSRC_OUTPUTS = (
     {"target": "opf/site/standard/index.html", "kind": "file",
      "sources": ("tools/gen_draft_site.py", "opf/site/draft-src/standard.toml"),
      "regenerate": "python3 tools/gen_draft_site.py"},
+    {"target": "opf/site/llms.txt", "kind": "block",
+     "sources": ("tools/gen_draft_site.py", "opf/tools/opf.py"),
+     "regenerate": "python3 tools/gen_draft_site.py"},
 )
+
+
+def page_targets(entries=GENSRC_OUTPUTS):
+    """The target of every page entry (kind "file") of a declaration: the set build() must produce and the
+    page folders stray_outputs() lists. The kind "block" STATUS_LINES entries are not pages."""
+    return frozenset(entry["target"] for entry in entries if entry["kind"] == "file")
 
 # The 6 project sites in rainbow order (specification section 1): key, name word, domain, footer slice.
 FAMILY = (
@@ -1594,7 +1619,7 @@ def build(pages=None, sites=SITES, registered=True):
                 raise RefusedPage("{}: built by more than 1 site".format(target))
             outputs[target] = render_page(site, site_pages, page)
     if declared and registered:
-        targets = {entry["target"] for entry in GENSRC_OUTPUTS}
+        targets = page_targets()
         if set(outputs) != targets:
             raise RefusedPage("built outputs {} differ from GENSRC_OUTPUTS {}".format(
                 sorted(outputs), sorted(targets)))
@@ -1679,13 +1704,13 @@ def unresolved_links(outputs, sites=SITES, tree=ROOT):
 
 def stray_outputs(tree, sites=SITES, targets=None):
     """Every .html file (the extension in any case) in a folder that holds a generated page of a site (the
-    folder of a target) that the targets (GENSRC_OUTPUTS by default) do not list, apart from a kept live
-    path's own file. Only those
+    folder of a target) that the targets (the page targets of GENSRC_OUTPUTS by default) do not list, apart
+    from a kept live path's own file. Only those
     folders are listed, not their subfolders, so the asset folder and a promoted root's other folders (its
     downloads, its draft placeholder) are not read; a page in a folder holding no generated page is not
     found here."""
     if targets is None:
-        targets = {entry["target"] for entry in GENSRC_OUTPUTS}
+        targets = page_targets()
     found = []
     for site in sites:
         prefix = site["root"] + "/"
@@ -1769,6 +1794,129 @@ def run(root, check, outputs=None):
     if drift:
         print("run tools/gen_draft_site.py to regenerate")
     return 1 if drift or stray else 0
+
+
+# The register rows: the declared sources of each page entry hold to what its built page carries, and each
+# STATUS_LINES file has its own entry. Each row id is a key of the dict _register_findings returns.
+_FOOTER_ROW = "gensrc/footer-pages-declare-version-and-changelog"
+_NOTE_ROW = "gensrc/status-note-pages-declare-status-source"
+_LINES_ROW = "gensrc/status-lines-registered"
+_BUILT_ROW = "gensrc/page-entries-built"
+_FOOTER_SOURCES = ("VERSION", "changelog.toml")
+# The STATUS_LINES files with no register entry; the status line of each stays covered by this generator's
+# --check alone. .aiqt/core/ownership.toml excludes opf/README.md from the release (repository
+# documentation, not shipped), and tools/gen_manifest.py refuses an exclusion over any register target.
+# tools/check_overclaim.py scans every register target, a block target as its whole file, and the current
+# wording of opf/spec/OPF-SPEC.md draws findings there. The row requires each of these to have no entry, so
+# registering one fails until it is taken off this list.
+_STATUS_LINES_UNREGISTERED = ("opf/README.md", "opf/spec/OPF-SPEC.md")
+# Each flip: (the row it must turn red, alone; the text it replaces inside the GENSRC_OUTPUTS literal, which
+# must occur there exactly once; its replacement). In order: a page that carries the rendered text loses a
+# source (under-declaration); a page that does not carry it gains one (over-declaration); the block entry
+# goes, or loses one of the 2 sources it must name; opf/README.md, on _STATUS_LINES_UNREGISTERED, gains an
+# entry; a page entry names a target the build does not produce; the block entry is declared twice (the upper
+# bound of exactly 1); the block entry's kind becomes "tree", a registry kind the build does not treat as a
+# page, so only the kind guard fires; a footer page loses changelog.toml alone, and a page without the footer
+# gains changelog.toml alone, so each of the 2 footer sources is held in both directions; and
+# opf/spec/OPF-SPEC.md, the other file on _STATUS_LINES_UNREGISTERED, gains an entry.
+_LLMS_ENTRY = ('\n    {"target": "opf/site/llms.txt", "kind": "block",\n'
+               '     "sources": ("tools/gen_draft_site.py", "opf/tools/opf.py"),\n'
+               '     "regenerate": "python3 tools/gen_draft_site.py"},')
+_REGISTER_FLIPS = (
+    (_FOOTER_ROW, 'site/draft-src/rules.toml", "VERSION", ', 'site/draft-src/rules.toml", '),
+    (_NOTE_ROW, 'opf/site/draft-src/core-files.toml", "opf/tools/opf.py"', 'opf/site/draft-src/core-files.toml"'),
+    (_FOOTER_ROW, '"site/draft-src/license.toml")', '"site/draft-src/license.toml", "VERSION")'),
+    (_NOTE_ROW, '"opf/site/draft-src/license.toml")', '"opf/site/draft-src/license.toml", "opf/tools/opf.py")'),
+    (_LINES_ROW, _LLMS_ENTRY, ''),
+    (_LINES_ROW, '"sources": ("tools/gen_draft_site.py", "opf/tools/opf.py"),\n     "regenerate"',
+     '"sources": ("tools/gen_draft_site.py",),\n     "regenerate"'),
+    (_LINES_ROW, '"sources": ("tools/gen_draft_site.py", "opf/tools/opf.py"),\n     "regenerate"',
+     '"sources": ("opf/tools/opf.py",),\n     "regenerate"'),
+    (_LINES_ROW, _LLMS_ENTRY, _LLMS_ENTRY + _LLMS_ENTRY.replace('"opf/site/llms.txt"', '"opf/README.md"')),
+    (_BUILT_ROW, _LLMS_ENTRY, _LLMS_ENTRY + '\n    {"target": "site/unbuilt/index.html", "kind": "file",\n'
+                              '     "sources": ("tools/gen_draft_site.py",),\n'
+                              '     "regenerate": "python3 tools/gen_draft_site.py"},'),
+    (_LINES_ROW, _LLMS_ENTRY, _LLMS_ENTRY + _LLMS_ENTRY),
+    (_LINES_ROW, '"opf/site/llms.txt", "kind": "block"', '"opf/site/llms.txt", "kind": "tree"'),
+    (_FOOTER_ROW, 'site/draft-src/rules.toml", "VERSION", "changelog.toml"', 'site/draft-src/rules.toml", "VERSION"'),
+    (_FOOTER_ROW, '"site/draft-src/license.toml")', '"site/draft-src/license.toml", "changelog.toml")'),
+    (_LINES_ROW, _LLMS_ENTRY, _LLMS_ENTRY + _LLMS_ENTRY.replace('"opf/site/llms.txt"', '"opf/spec/OPF-SPEC.md"')),
+)
+
+
+def _footer_markup(version, status):
+    """The Version and Status cells of the document control strip as _c_control renders them."""
+    return '<div><dt>Version</dt><dd>{}</dd></div><div><dt>Status</dt><dd>{}</dd></div>'.format(
+        _t(version), _t(status))
+
+
+def _register_findings(entries, outputs, footer, note):
+    """{row id: findings} for a declaration `entries` against the built pages `outputs` ({target: text}).
+    `footer` is the control strip's Version and Status markup and `note` the status note, each as rendered.
+    A page entry whose page carries `footer` must declare VERSION and changelog.toml, and one whose page
+    carries `note` must declare STATUS_SOURCE; a page entry declaring either set while its page does not
+    carry the text is a finding too. A page entry whose target is not among `outputs` is a finding of its
+    own row. Each STATUS_LINES file must have exactly 1 entry, of kind "block", naming this generator and
+    STATUS_SOURCE among its sources, apart from a file on _STATUS_LINES_UNREGISTERED, which must have
+    none."""
+    rows = {_FOOTER_ROW: [], _NOTE_ROW: [], _LINES_ROW: [], _BUILT_ROW: []}
+    for entry in entries:
+        if entry["kind"] != "file":
+            continue
+        target, sources = entry["target"], set(entry["sources"])
+        if target not in outputs:
+            rows[_BUILT_ROW].append("{}: declared but not built".format(target))
+            continue
+        for row, text, wanted in ((_FOOTER_ROW, footer, set(_FOOTER_SOURCES)), (_NOTE_ROW, note, {STATUS_SOURCE})):
+            carries = text in outputs[target]
+            declared = sources & wanted
+            if carries and declared != wanted:
+                rows[row].append("{}: its page carries the rendered text but its sources lack {}".format(
+                    target, ", ".join(sorted(wanted - declared))))
+            elif declared and not carries:
+                rows[row].append("{}: its sources name {} but its page does not carry the rendered text".format(
+                    target, ", ".join(sorted(declared))))
+    for rel, _prefix, _lead in STATUS_LINES:
+        matches = [entry for entry in entries if entry["target"] == rel]
+        if rel in _STATUS_LINES_UNREGISTERED:
+            if matches:
+                rows[_LINES_ROW].append("{}: registered while on _STATUS_LINES_UNREGISTERED ({})".format(
+                    rel, matches))
+        elif len(matches) != 1 or matches[0]["kind"] != "block" or not {
+                "tools/gen_draft_site.py", STATUS_SOURCE} <= set(matches[0]["sources"]):
+            rows[_LINES_ROW].append("{}: needs exactly 1 block entry naming tools/gen_draft_site.py and {} "
+                                    "({} found)".format(rel, STATUS_SOURCE, matches))
+    return rows
+
+
+def _register_mutant_source(source, old, new):
+    """`source` with `old` replaced by `new` inside its GENSRC_OUTPUTS literal, where `old` must occur
+    exactly once; None otherwise, so a stale anchor fails its flip rather than passing it."""
+    head, sep, rest = source.partition("\nGENSRC_OUTPUTS = (\n")
+    decl, end, tail = rest.partition("\n)\n")
+    if not sep or not end or decl.count(old) != 1:
+        return None
+    return head + sep + decl.replace(old, new) + end + tail
+
+
+def _load_register_mutant(source, directory, tag):
+    """Write one register mutant (this file's own source, read from __file__ by the one caller, with one
+    reviewed literal substitution from _REGISTER_FLIPS, or unmutated as the control) under the self-test's
+    temporary directory and load it with importlib; it is never registered in sys.modules. This is the
+    self-test's one code-loading site, so the dangerous-API allowlist entry is scoped to it."""
+    import importlib.util
+    name = "gen_draft_site_register_{}".format(tag)
+    path = Path(directory) / (name + ".py")
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write(source)
+    spec = importlib.util.spec_from_file_location(name, str(path))
+    module = importlib.util.module_from_spec(spec)
+    saved_sys_path = list(sys.path)
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        sys.path[:] = saved_sys_path
+    return module
 
 
 def _self_test():
@@ -2315,7 +2463,7 @@ def _self_test():
     # The declared build: both sites at "/", their pages at the live roots, the asset URLs still under
     # /draft/assets/baseline/ (the asset base stays where the files are served), the robots meta gone from
     # every page but the /draft/ placeholder.
-    expect("base/live-targets-at-root", sorted(live_outputs) == sorted(e["target"] for e in GENSRC_OUTPUTS)
+    expect("base/live-targets-at-root", sorted(live_outputs) == sorted(page_targets())
            and all("/draft/" not in rel or rel.endswith("/draft/index.html") for rel in live_outputs),
            sorted(live_outputs))
     for rel, text in sorted(live_outputs.items()):
@@ -2700,8 +2848,8 @@ def _self_test():
            unresolved_links(outputs, staged_))
     promoted_sites_ = promoted_sites(staged_)
     promoted = build(sites=promoted_sites_, registered=False)
-    expect("links/promoted-targets-at-live-root", sorted(promoted) == sorted(
-        entry["target"] for entry in GENSRC_OUTPUTS) and promoted == live_outputs, sorted(promoted))
+    expect("links/promoted-targets-at-live-root", sorted(promoted) == sorted(page_targets())
+           and promoted == live_outputs, sorted(promoted))
     expect("links/resolve-live-clean", unresolved_links(live_outputs) == [], unresolved_links(live_outputs))
     staged_home, opf_home = "site/draft/index.html", "opf/site/draft/index.html"
 
@@ -2887,6 +3035,28 @@ def _self_test():
                 handle.write("VERB_STATUS = {}\n".format(bad))
             refused(name, verb_status, tmp)
 
+    # The register rows over the live declaration and the declared build, then each flip of _REGISTER_FLIPS:
+    # a copy of this file whose GENSRC_OUTPUTS literal carries that one change, loaded with importlib, must
+    # turn its row (and only that row) red, while the unmutated copy stays clean.
+    footer = _footer_markup(*_version_and_status())
+    for row, found in sorted(_register_findings(GENSRC_OUTPUTS, live_outputs, footer, live_note).items()):
+        expect(row, found == [], found)
+    with open(__file__, encoding="utf-8") as handle:
+        own = handle.read()
+    with tempfile.TemporaryDirectory(prefix="gen-draft-site-register-") as tmp:
+        control = _load_register_mutant(own, tmp, "control")
+        got = control._register_findings(control.GENSRC_OUTPUTS, live_outputs, footer, live_note)
+        expect("gensrc/flip-control-clean", not any(got.values()), got)
+        for position, (row, old, new) in enumerate(_REGISTER_FLIPS):
+            name = "{}/flip{}-red".format(row, position)
+            mutated = _register_mutant_source(own, old, new)
+            if mutated is None:
+                expect(name, False, "the flip's anchor is not in GENSRC_OUTPUTS exactly once")
+                continue
+            mutant = _load_register_mutant(mutated, tmp, "flip{}".format(position))
+            got = mutant._register_findings(mutant.GENSRC_OUTPUTS, live_outputs, footer, live_note)
+            expect(name, sorted(key for key, found in got.items() if found) == [row], got)
+
     if failures:
         print("SELF-TEST FAIL: gen_draft_site {} failure(s)".format(len(failures)))
         for failure in failures:
@@ -2897,8 +3067,8 @@ def _self_test():
           "cycle, base path, every "
           "component's reference markup, the data-file refusals, derived scripts with rail.js only where "
           "the rail lists sections, the link rules, kept live paths, the mappings bodies, promotion "
-          "switch, text-field escaping, the structural link guard, the checked title and meta keys and "
-          "--check exit codes)")
+          "switch, text-field escaping, the structural link guard, the checked title and meta keys, "
+          "--check exit codes and the register rows with their flips)")
     return 0
 
 
