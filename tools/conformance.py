@@ -171,10 +171,14 @@ def check_c1(root, cache):
 # --- C2: no drift -----------------------------------------------------------------------------------
 
 def _claude_drift(root, corpus):
-    """Mirror gen_rules.main()'s reconciliation, re-rooted at root (never call that main()).
+    """Compare .claude/rules/ byte for byte with the rule sources it is copied from, re-rooted at root
+    (never call gen_rules.main()).
 
     Returns (status, detail). Absent .claude/rules/ surface -> NOT APPLICABLE (the adopter did not
-    install the Claude surface). Present-but-different or orphaned generated files -> FAIL."""
+    install the Claude surface). Present-but-different or orphaned generated files -> FAIL. This is a
+    comparison only: it does not apply gen_rules' refusal of a rule mapping to a withdrawn id (there
+    gen_rules exits 2 and writes nothing, while here a source that differs from its copy reads as drift);
+    C4 reports the withdrawn id."""
     claude_dir = root / ".claude" / "rules"
     # dir_chain_or_absent, as gen_rules probes the same paths: .claude/rules and, before the first read, each
     # family directory, at every component under the root (.claude/ too).

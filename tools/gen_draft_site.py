@@ -5,7 +5,8 @@ placeholder page each keeps (noindex, linking the root).
   gen_draft_site.py              write every registered page
   gen_draft_site.py --check      exit 1 if any target differs from a fresh build or a page folder holds an
                                  unlisted page, 2 if one cannot be read or a root-relative link resolves
-                                 to nothing the site serves (both checks also run on a normal run)
+                                 to nothing the site serves (both checks also run on a normal run); it
+                                 also compares the reference CLI status lines (STATUS_LINES)
   gen_draft_site.py --self-test  assert the shell, the components, the refusals and the base-path rules
 
 Every page is built from 1 shell (template specification section 5): `<html lang="en" class="site-<name>">`,
@@ -441,8 +442,138 @@ def _any_link(site, href, text, where):
 
 
 def _inline(site, value):
-    """An inline HTML value with the $BASE/ token rendered as the site's base path."""
+    """An inline HTML value with the $BASE/ token rendered as the site's base path and the $OPF_STATUS
+    token rendered as the reference CLI status note (status_note)."""
+    if "$OPF_STATUS" in value:
+        value = value.replace("$OPF_STATUS", status_note())
     return value.replace("$BASE/", site["base"])
+
+
+# The reference CLI status note: generated from VERB_STATUS in opf/tools/opf.py, read as a literal from the
+# file's syntax tree (the module is never imported or run), and rendered wherever the $OPF_STATUS token
+# appears, on the opf/README.md and opf/spec/OPF-SPEC.md lines that start with its prefix, and on the Adopt
+# line of opf/site/llms.txt.
+STATUS_SOURCE = "opf/tools/opf.py"
+STATUS_PREFIX = "Reference CLI status. "
+_STATUS_KINDS = ("available", "partial", "in progress")
+# The lines this generator owns outside the pages: (file, the prefix that names the line, the text before
+# the note). Exactly 1 line of each file starts with its prefix; the generator rewrites only that line.
+_LLMS_ADOPT = ("- [Adopt](/adopt/): installing or adopting OPFiles is at /adopt/. Adopt with your AI development "
+               "assistant through the `opf adopt` flow (investigate, propose one plan, take one approval, apply, "
+               "verify), or create the plain-TOML store and wire its checks by hand. ")
+STATUS_LINES = (
+    ("opf/README.md", STATUS_PREFIX, ""),
+    ("opf/spec/OPF-SPEC.md", STATUS_PREFIX, ""),
+    ("opf/site/llms.txt", "- [Adopt](/adopt/): ", _LLMS_ADOPT),
+)
+
+
+def verb_status(root=ROOT):
+    """VERB_STATUS from opf/tools/opf.py under root, read as a literal: a tuple of (verb, status, scope)
+    rows. RefusedPage when the file cannot be read or parsed, binds it other than once at top level, or
+    holds a row that is not 3 strings with a known status."""
+    path = Path(root) / STATUS_SOURCE
+    import ast
+    try:
+        with open(path, encoding="utf-8") as handle:
+            source = handle.read()
+        tree = ast.parse(source, str(path))
+        nodes = [node.value for node in tree.body if isinstance(node, ast.Assign)
+                 and any(isinstance(t, ast.Name) and t.id == "VERB_STATUS" for t in node.targets)]
+        if len(nodes) != 1:
+            raise ValueError("VERB_STATUS is bound {} times at top level".format(len(nodes)))
+        table = ast.literal_eval(nodes[0])
+    except (OSError, UnicodeDecodeError, SyntaxError, ValueError, TypeError, RecursionError,
+            MemoryError) as exc:
+        raise RefusedPage("{}: cannot read VERB_STATUS ({}: {})".format(STATUS_SOURCE, type(exc).__name__, exc))
+    if not isinstance(table, tuple) or not table or not all(
+            isinstance(row, tuple) and len(row) == 3 and all(isinstance(cell, str) for cell in row)
+            and row[1] in _STATUS_KINDS for row in table):
+        raise RefusedPage("{}: VERB_STATUS is not a tuple of (verb, status, scope) rows with a known "
+                          "status".format(STATUS_SOURCE))
+    return table
+
+
+def status_note(table=None):
+    """The 1-line status note for `table` (default verb_status()): the available verbs, each partial verb
+    with its scope, and the in progress verbs, each group in table order; an empty group is left out."""
+    table = verb_status() if table is None else table
+    parts = [STATUS_PREFIX.rstrip()]
+    available = [verb for verb, status, _scope in table if status == "available"]
+    partial = ["{} ({})".format(verb, scope) for verb, status, scope in table if status == "partial"]
+    pending = [verb for verb, status, _scope in table if status == "in progress"]
+    if available:
+        parts.append("Available: {}.".format(", ".join(available)))
+    if partial:
+        parts.append("Partial: {}.".format(", ".join(partial)))
+    if pending:
+        parts.append("In progress: {}; {} in this build.".format(
+            ", ".join(pending), "each exits 2" if len(pending) > 1 else "it exits 2"))
+    return " ".join(parts)
+
+
+def status_lines(root, check, table=None):
+    """Write (or with `check`, compare) the status lines of STATUS_LINES under root: 0 clean or written, 1 on
+    drift (check), 2 when a file cannot be read or written, is not a regular file, or has other than 1 line
+    starting with its prefix (nothing is written then). Each changed file is written to a temporary file
+    first, and none is replaced until all are written."""
+    try:
+        note = status_note(table)
+    except RefusedPage as exc:
+        print("error: refused: {}".format(exc), file=sys.stderr)
+        return 2
+    planned = []
+    for rel, prefix, lead in STATUS_LINES:
+        path = Path(root) / rel
+        try:
+            data = _existing(path)
+            if data is None:
+                raise OSError("it does not exist")
+            text = data.decode("utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            print("error: {}: {}".format(rel, exc), file=sys.stderr)
+            return 2
+        lines = text.split("\n")
+        hits = [index for index, line in enumerate(lines) if line.startswith(prefix)]
+        if len(hits) != 1:
+            print("error: {}: {} lines start with {!r}, not 1; fail-closed".format(rel, len(hits), prefix),
+                  file=sys.stderr)
+            return 2
+        lines[hits[0]] = lead + note
+        planned.append((rel, path, data, "\n".join(lines).encode("utf-8")))
+    pending = [(rel, path, fresh) for rel, path, data, fresh in planned if fresh != data]
+    if check:
+        for rel, _path, _fresh in pending:
+            print("drift: {}".format(rel))
+        if pending:
+            print("run tools/gen_draft_site.py to regenerate")
+        return 1 if pending else 0
+    # Every changed file is written to a temporary file beside it first, and only once all are written is
+    # each replaced, so a write that fails leaves every file as it was. A replace that fails part-way is
+    # reported (exit 2) and can leave the files before it replaced.
+    staged = []
+    try:
+        for rel, path, fresh in pending:
+            temp = path.with_name(".{}.{}.tmp".format(path.name, os.getpid()))
+            with open(temp, "xb") as handle:
+                staged.append(temp)
+                handle.write(fresh)
+            os.chmod(temp, stat.S_IMODE(os.stat(path).st_mode))
+        for (rel, path, _fresh), temp in zip(pending, staged):
+            os.replace(temp, path)
+            print("wrote {}".format(rel))
+    except OSError as exc:
+        print("error: cannot write the status lines ({}); fail-closed".format(exc), file=sys.stderr)
+        return 2
+    finally:
+        for temp in staged:
+            try:
+                os.unlink(temp)
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                print("error: cannot remove the temporary file {} ({})".format(temp, exc), file=sys.stderr)
+    return 0
 
 
 # ---------------------------------------------------------------------------------------------------
@@ -2698,6 +2829,64 @@ def _self_test():
         codes.append(run(tmp, check=True, outputs=live_outputs))
     expect("check/unresolved-link-refused", codes == [2, 2, 1] and written == [], (codes, written))
 
+    # The status note: rendered from a table, held to the live table, and its lines written and drift-checked.
+    fixture_table = (("a", "available", ""), ("b", "partial", "x, y"), ("c", "in progress", ""),
+                     ("d", "in progress", ""))
+    expect("status/note-text", status_note(fixture_table) == (
+        "Reference CLI status. Available: a. Partial: b (x, y). In progress: c, d; each exits 2 in this build."),
+        status_note(fixture_table))
+    expect("status/note-one-pending", status_note(fixture_table[:3]).endswith("In progress: c; it exits 2 in "
+                                                                              "this build."))
+    live_note = status_note()
+    expect("status/live-note-on-pages", live_note in live_outputs["opf/site/index.html"]
+           and live_note in live_outputs["opf/site/core-files/index.html"], live_note)
+    expect("status/live-note-wording", not any(word in live_note.lower() for word in (
+        "not ready", "cannot", "not yet", "of 10", "10 command", "sorry")), live_note)
+    with tempfile.TemporaryDirectory(prefix="gen-draft-site-status-") as tmp:
+        for rel, prefix, _lead in STATUS_LINES:
+            os.makedirs((Path(tmp) / rel).parent, exist_ok=True)
+            with open(Path(tmp) / rel, "w", encoding="utf-8") as handle:
+                handle.write("# T\n\n{}old\nkept\n".format(prefix))
+        codes = [status_lines(tmp, True, fixture_table), status_lines(tmp, False, fixture_table),
+                 status_lines(tmp, True, fixture_table)]
+        with open(Path(tmp) / "opf/README.md", encoding="utf-8") as handle:
+            readme = handle.read()
+        codes.append(status_lines(tmp, True, fixture_table[:3]))
+        with open(Path(tmp) / "opf/site/llms.txt", "a", encoding="utf-8") as handle:
+            handle.write(STATUS_LINES[-1][1] + "twice\n")
+        codes.append(status_lines(tmp, False, fixture_table))
+        with open(Path(tmp) / "opf/README.md", encoding="utf-8") as handle:
+            after = handle.read()
+    expect("status/lines-codes", codes == [1, 0, 0, 1, 2], codes)
+    expect("status/lines-written", readme == "# T\n\n{}\nkept\n".format(status_note(fixture_table)), readme)
+    expect("status/doubled-prefix-writes-nothing", after == readme, after)
+    # A temporary file that cannot be written (its name already taken by a directory) refuses the run at
+    # exit 2 with every status line file as it was: no file is replaced until every temporary file is written.
+    with tempfile.TemporaryDirectory(prefix="gen-draft-site-status-atomic-") as tmp:
+        for rel, prefix, _lead in STATUS_LINES:
+            os.makedirs((Path(tmp) / rel).parent, exist_ok=True)
+            with open(Path(tmp) / rel, "w", encoding="utf-8") as handle:
+                handle.write("# T\n\n{}old\nkept\n".format(prefix))
+        last = Path(tmp) / STATUS_LINES[-1][0]
+        os.mkdir(last.with_name(".{}.{}.tmp".format(last.name, os.getpid())))
+        code = status_lines(tmp, False, fixture_table)
+        kept = []
+        for rel, prefix, _lead in STATUS_LINES:
+            with open(Path(tmp) / rel, encoding="utf-8") as handle:
+                kept.append(handle.read() == "# T\n\n{}old\nkept\n".format(prefix))
+        leftovers = sorted(name for rel, _p, _l in STATUS_LINES for name in os.listdir((Path(tmp) / rel).parent)
+                           if name.endswith(".tmp") and name != last.with_name(".{}.{}.tmp".format(
+                               last.name, os.getpid())).name)
+    expect("status/write-all-or-nothing", code == 2 and all(kept) and not leftovers, (code, kept, leftovers))
+    for name, bad in (("status/unknown-status-refused", '(("a", "done", ""),)'),
+                      ("status/short-row-refused", '(("a", "available"),)'),
+                      ("status/computed-table-refused", 'tuple(x for x in ())')):
+        with tempfile.TemporaryDirectory(prefix="gen-draft-site-status-src-") as tmp:
+            os.makedirs((Path(tmp) / STATUS_SOURCE).parent)
+            with open(Path(tmp) / STATUS_SOURCE, "w", encoding="utf-8") as handle:
+                handle.write("VERB_STATUS = {}\n".format(bad))
+            refused(name, verb_status, tmp)
+
     if failures:
         print("SELF-TEST FAIL: gen_draft_site {} failure(s)".format(len(failures)))
         for failure in failures:
@@ -2719,7 +2908,10 @@ def main(argv):
         return 2
     if argv == ["--self-test"]:
         return _self_test()
-    return run(ROOT, check=argv == ["--check"])
+    pages = run(ROOT, check=argv == ["--check"])
+    if pages == 2:
+        return 2
+    return max(pages, status_lines(ROOT, check=argv == ["--check"]))
 
 
 if __name__ == "__main__":

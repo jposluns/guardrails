@@ -115,7 +115,7 @@ def build(root):
     full = sorted((m for m in manifests.values() if m.catalogue == "full"),
                   key=lambda m: natkey(m.name))
     if full:
-        counts = {len(m.ids) for m in full}
+        counts = {len(m.active_ids()) for m in full}   # a withdrawn id is not an entry of the list
         extent = ("all {} entries (the complete list)".format(next(iter(counts)))
                   if len(counts) == 1 else "the complete list")
         complete_clause = " For {} it lists {}; for every other referenced framework it lists a subset.".format(

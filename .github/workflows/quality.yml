@@ -15,7 +15,8 @@ on:
     # than the Secrets (gitleaks) step below pins. A label added to any other pull request into main
     # starts a run whose heavy jobs are skipped (the job-level if: below, the second layer), so its
     # Quality gates fails. A head with no run of this workflow reads as missing, never as passing:
-    # ci-status.sh requires a completed successful run of this workflow FILE on every read.
+    # ci-status.sh requires a completed successful run of this workflow FILE on every read, other
+    # than a run whose event is schedule or workflow_dispatch, which it treats as advisory.
     # tools/check_ci_parity.py holds these types to exactly [labeled].
     # no `edited`: it fires on a PR title/body edit AND on a base-branch retarget, and would re-run
     # every job here. The title/body side matters only to the message/metadata leak scan
@@ -34,6 +35,14 @@ on:
     types: [labeled]
   push:
     branches: [main]
+  # A manual full run. Run on main it runs every heavy job (the job-level if: below); run on any other
+  # ref the heavy jobs are skipped, so Quality gates fails there. tools/ci-status.sh treats a manual or
+  # scheduled run as advisory: in its reads such a run is never merge evidence and never vetoes a
+  # commit or a tree. Branch protection does not read ci-status.sh: it requires the Quality gates check,
+  # so a manual run on a ref other than main records a failing required check on that commit and can
+  # block that commit's merge until a new head is pushed (whether a later passing run on the same commit
+  # clears it is not verified). Manual full runs belong on main only.
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -41,7 +50,8 @@ permissions:
 # A newer run of the same pull request cancels its superseded run, which then reads red (Quality gates
 # fails on a cancelled job), never green. A push run gets a group of its own (its run id), so a
 # push-to-main run is never cancelled and never queued behind another run. A cancelled run stays on its
-# commit and tools/ci-status.sh refuses a commit with any non-success run, so a cancelled run on a live
+# commit and tools/ci-status.sh refuses a commit with any non-success run other than an advisory one
+# (event schedule or workflow_dispatch), so a cancelled run on a live
 # head (a label added while its run is in progress, the merge-train label re-applied included, or a
 # push back to an earlier head) needs a new head commit, labelled again. tools/check_ci_parity.py and
 # tools/check_python_host_pin.py accept exactly this block.
@@ -74,8 +84,10 @@ jobs:
   # is the one required status of this workflow and aggregates every job (msg-leaks.yml is a second).
   # The heavy jobs (opf-tooling-a, opf-tooling-b, opf-tooling-c, selftest-execution, the
   # git-fixture-env-core canary, the five host-patch jobs and byte-canon-matrix) carry one pinned job-level if:,
-  # so they run only on a push and on a pull request whose head is a merge-train-* branch of this
-  # repository; every other job runs in every run. That if: is the second layer behind the labeled
+  # so they run only on a push, on a workflow_dispatch or schedule run of refs/heads/main, and on a pull
+  # request whose head is a merge-train-* branch of this repository; every other job runs in every run.
+  # This workflow carries no schedule: trigger yet; the schedule arm makes a future scheduled run on
+  # main a full run, as a manual run on main is. That if: is the second layer behind the labeled
   # trigger above, which already keeps a member head from running at all. In any other pull request
   # run (a label added to a pull request that is not a train) the heavy jobs are skipped
   # and Quality gates fails by design (skipped is not success): such a change merges only by riding a
@@ -474,7 +486,7 @@ jobs:
   # exactly one line here, in a heavy job.
   opf-tooling-a:
     name: OPF tooling gates A (3.14)
-    if: needs.scope.outputs.site_only != 'true' && (github.event_name == 'push' || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository))
+    if: needs.scope.outputs.site_only != 'true' && (github.event_name == 'push' || ((github.event_name == 'workflow_dispatch' || github.event_name == 'schedule') && github.ref == 'refs/heads/main') || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository))
     needs: scope
     runs-on: ubuntu-latest
     steps:
@@ -538,7 +550,7 @@ jobs:
 
   opf-tooling-b:
     name: OPF tooling gates B (3.14)
-    if: needs.scope.outputs.site_only != 'true' && (github.event_name == 'push' || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository))
+    if: needs.scope.outputs.site_only != 'true' && (github.event_name == 'push' || ((github.event_name == 'workflow_dispatch' || github.event_name == 'schedule') && github.ref == 'refs/heads/main') || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository))
     needs: scope
     runs-on: ubuntu-latest
     steps:
@@ -576,6 +588,14 @@ jobs:
         shell: bash
         run: python3 -I -B tools/check_opf_enforce_platforms.py
 
+      - name: OPF enforcement-pack residual register gate self-test
+        shell: bash
+        run: python3 -I -B tools/check_opf_enforce_residuals.py --self-test
+
+      - name: OPF enforcement-pack residual register gate
+        shell: bash
+        run: python3 -I -B tools/check_opf_enforce_residuals.py
+
       - name: OPF adoption apply-shell self-test (clean-start adoption U1)
         shell: bash
         run: python3 -I -B opf/tools/_opf_adopt_apply.py --self-test
@@ -606,7 +626,7 @@ jobs:
 
   opf-tooling-c:
     name: OPF tooling gates C (3.14)
-    if: needs.scope.outputs.site_only != 'true' && (github.event_name == 'push' || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository))
+    if: needs.scope.outputs.site_only != 'true' && (github.event_name == 'push' || ((github.event_name == 'workflow_dispatch' || github.event_name == 'schedule') && github.ref == 'refs/heads/main') || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository))
     needs: scope
     runs-on: ubuntu-latest
     steps:
@@ -884,8 +904,14 @@ jobs:
           if [ "$EVENT_NAME" = "pull_request" ]; then
             python3 -I -B tools/check_release_cut.py
           else
-            # Check every first-parent transition in the pushed range.
-            python3 -I -B tools/check_release_cut.py --protected "origin/${GITHUB_REF_NAME}" --base "$PUSH_BEFORE"
+            if [ "$EVENT_NAME" = "push" ]; then
+              # Check every first-parent transition in the pushed range.
+              python3 -I -B tools/check_release_cut.py --protected "origin/${GITHUB_REF_NAME}" --base "$PUSH_BEFORE"
+            else
+              # A workflow_dispatch or schedule run has no pushed range: the gate compares the
+              # checked-out tip with its first parent, and refuses any other event.
+              python3 -I -B tools/check_release_cut.py --protected "origin/${GITHUB_REF_NAME}"
+            fi
           fi
 
       - name: Version monotonicity self-test
@@ -893,11 +919,12 @@ jobs:
         run: python3 -I -B tools/check_version_monotonicity.py --self-test
 
       # The baseline differs by trigger: a pull_request compares against its target branch
-      # (origin/$GITHUB_BASE_REF, the auto-set trusted branch name); a push probes HEAD^ first and
+      # (origin/$GITHUB_BASE_REF, the auto-set trusted branch name); every other event (a push, a
+      # workflow_dispatch or a schedule run) probes HEAD^ first and
       # passes it as --base when it resolves, otherwise invokes the gate with no --base so the gate's
       # own root detection decides (a genuine root: NOT APPLICABLE; a shallow or broken-parent
-      # history: fail-closed). The rev-parse probe is an if-guard, so its nonzero exit on a first
-      # push (no HEAD^) does not abort the step under set -e.
+      # history: fail-closed). The rev-parse probe is an if-guard, so its nonzero exit on a root
+      # HEAD (no HEAD^, as on a first push) does not abort the step under set -e.
       - name: Version monotonicity
         shell: bash
         env:
@@ -927,9 +954,11 @@ jobs:
             python3 -I -B tools/check_branch_root.py --protected "origin/${GITHUB_BASE_REF}" --head "$PR_HEAD_SHA" --max-lag 200
           else
             # On push to main, HEAD is the protected line itself, so this branch is a SELF-CHECK (main vs
-            # origin/main resolves to main with zero lag). The pull_request job above, which compares the
-            # PR head against its target branch, is the effective branch-root gate; this push job only
-            # keeps the gate wired and green on the protected line.
+            # origin/main resolves to main with zero lag). A workflow_dispatch or schedule run takes this
+            # branch too, with origin/${GITHUB_REF_NAME} naming the ref the run was started on.
+            # The pull_request job above, which compares the
+            # PR head against its target branch, is the effective branch-root gate; this branch only
+            # keeps the gate wired on the ref the run is for, and green on the protected line.
             python3 -I -B tools/check_branch_root.py --protected "origin/${GITHUB_REF_NAME}" --max-lag 200
           fi
 
@@ -1162,7 +1191,7 @@ jobs:
 
   selftest-execution:
     name: Execution-reconciled self-tests
-    if: needs.scope.outputs.site_only != 'true' && (github.event_name == 'push' || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository))
+    if: needs.scope.outputs.site_only != 'true' && (github.event_name == 'push' || ((github.event_name == 'workflow_dispatch' || github.event_name == 'schedule') && github.ref == 'refs/heads/main') || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository))
     needs: scope
     runs-on: ubuntu-latest
     steps:
@@ -1239,7 +1268,7 @@ jobs:
 
   git-fixture-env-core:
     name: Git-fixture-env core self-test
-    if: needs.scope.outputs.site_only != 'true' && (github.event_name == 'push' || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository))
+    if: needs.scope.outputs.site_only != 'true' && (github.event_name == 'push' || ((github.event_name == 'workflow_dispatch' || github.event_name == 'schedule') && github.ref == 'refs/heads/main') || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository))
     needs: scope
     runs-on: ubuntu-latest
     steps:
@@ -1291,7 +1320,7 @@ jobs:
   # request's title or body starts no Quality run.
   opf-host-patch:
     name: OPF tooling (host patch)
-    if: needs.scope.outputs.site_only != 'true' && (github.event_name == 'push' || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository))
+    if: needs.scope.outputs.site_only != 'true' && (github.event_name == 'push' || ((github.event_name == 'workflow_dispatch' || github.event_name == 'schedule') && github.ref == 'refs/heads/main') || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository))
     needs: scope
     runs-on: ubuntu-24.04
     steps:
@@ -1323,7 +1352,7 @@ jobs:
 
   git-fixture-env-core-host-patch:
     name: Git-fixture-env core self-test (host patch)
-    if: needs.scope.outputs.site_only != 'true' && (github.event_name == 'push' || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository))
+    if: needs.scope.outputs.site_only != 'true' && (github.event_name == 'push' || ((github.event_name == 'workflow_dispatch' || github.event_name == 'schedule') && github.ref == 'refs/heads/main') || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository))
     needs: scope
     runs-on: ubuntu-24.04
     steps:
@@ -1351,7 +1380,7 @@ jobs:
 
   git-fixture-env-config-combined-host-patch:
     name: Git-fixture-env combined config lane (host patch)
-    if: needs.scope.outputs.site_only != 'true' && (github.event_name == 'push' || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository))
+    if: needs.scope.outputs.site_only != 'true' && (github.event_name == 'push' || ((github.event_name == 'workflow_dispatch' || github.event_name == 'schedule') && github.ref == 'refs/heads/main') || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository))
     needs: scope
     runs-on: ubuntu-24.04
     steps:
@@ -1379,7 +1408,7 @@ jobs:
 
   git-fixture-env-config-malformed-host-patch:
     name: Git-fixture-env malformed config lane (host patch)
-    if: needs.scope.outputs.site_only != 'true' && (github.event_name == 'push' || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository))
+    if: needs.scope.outputs.site_only != 'true' && (github.event_name == 'push' || ((github.event_name == 'workflow_dispatch' || github.event_name == 'schedule') && github.ref == 'refs/heads/main') || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository))
     needs: scope
     runs-on: ubuntu-24.04
     steps:
@@ -1407,7 +1436,7 @@ jobs:
 
   git-fixture-env-config-system-host-patch:
     name: Git-fixture-env system config lane (host patch)
-    if: needs.scope.outputs.site_only != 'true' && (github.event_name == 'push' || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository))
+    if: needs.scope.outputs.site_only != 'true' && (github.event_name == 'push' || ((github.event_name == 'workflow_dispatch' || github.event_name == 'schedule') && github.ref == 'refs/heads/main') || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository))
     needs: scope
     runs-on: ubuntu-24.04
     steps:
@@ -1577,6 +1606,9 @@ jobs:
         shell: bash
         run: python3 -I -B tools/check_applies.py
 
+      - name: Standards mappings self-test (execution-reconciled)
+        shell: bash
+        run: python3 -I -B tools/check_selftest_execution.py --suite mappings-selftest
       - name: Standards mappings
         shell: bash
         run: python3 -I -B tools/check_mappings.py
@@ -1679,7 +1711,7 @@ jobs:
   # would surface as a carriage-return finding, failing the job.
   byte-canon-matrix:
     name: Byte canon vectors (${{ matrix.os }})
-    if: needs.scope.outputs.site_only != 'true' && (github.event_name == 'push' || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository))
+    if: needs.scope.outputs.site_only != 'true' && (github.event_name == 'push' || ((github.event_name == 'workflow_dispatch' || github.event_name == 'schedule') && github.ref == 'refs/heads/main') || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository))
     needs: scope
     runs-on: ${{ matrix.os }}
     strategy:

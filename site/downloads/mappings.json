@@ -976,9 +976,9 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-poisoning-resistance.md",
       "framework": "csa-aicm",
       "relation": "supports control",
-      "fit": "tight",
-      "identifier": "DSP-21",
-      "identifier_title": "Data Poisoning Prevention & Detection"
+      "fit": "broad",
+      "identifier": "MDS-08",
+      "identifier_title": "Model Integrity Checks"
     },
     {
       "rule_id": "secpsn",
@@ -987,8 +987,8 @@
       "framework": "csa-aicm",
       "relation": "supports control",
       "fit": "tight",
-      "identifier": "MDS-08",
-      "identifier_title": "Model Integrity Checks"
+      "identifier": "DSP-21",
+      "identifier_title": "Data Poisoning Prevention & Detection"
     },
     {
       "rule_id": "secaud",
@@ -3146,7 +3146,7 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-QUALI-surface-counterproductive-instructions.md",
       "framework": "iso-42001",
       "relation": "supports control",
-      "fit": "tight",
+      "fit": "broad",
       "identifier": "A.3.3",
       "identifier_title": "Reporting of concerns"
     },
@@ -5686,7 +5686,7 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-data-boundary.md",
       "framework": "nist-80053",
       "relation": "supports control",
-      "fit": "tight",
+      "fit": "broad",
       "identifier": "MP-3",
       "identifier_title": "Media Marking"
     },

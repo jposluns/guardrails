@@ -173,7 +173,9 @@ import contextlib
 import datetime
 import dis
 import hashlib
+import importlib.util
 import io
+import itertools
 import json
 import os
 import random
@@ -2739,6 +2741,791 @@ def _test_git_stash_ref(failures):
         failures.append("(sr-wiring) git_stash_ref handler/event wiring is missing or wrong")
 
 
+# The inline_errexit mutants: each is the live hook source with one rule removed by exact source edits
+# ((anchor, replacement) pairs, each anchor occurring once), loaded from tmp with importlib. A row that the
+# real handler passes and its mutant fails shows that the removed rule is what decides that row. Four
+# entries make two edits each: "raw-text" (reading quoted text as code needs both the de-quoted lex and a set
+# read anywhere in a segment), "case-pattern-end" (the one rule that a case pattern ends at its ), in the
+# header line and on a later line), and, for rows two rules decide alike, "or-and-never" (the || branch
+# handles the failure, and true or exit gives errexit nothing to stop at) and "lone-dash" (a lone - ends the
+# set options both as an end-of-options word and as a word too short to be an option).
+_IE_MUTANTS = {
+    "e-cluster": (('if letter == "e":', 'if arg == "-e":'),),
+    "o-option": (('elif letter == "o" and i < len(args):', 'elif False:'),),
+    "o-name": (('if args[i] == "errexit":', 'if True:'),),
+    "plus-sign": (('on = arg[0] == "-"', 'on = True'),),
+    "dashdash": (('if arg in ("-", "--"):', 'if False:'),),
+    "operand": (('if arg[:1] not in ("-", "+") or len(arg) < 2:', 'if False:'),),
+    "lone-dash": (('if arg in ("-", "--"):', 'if arg == "--":'),
+                  ('if arg[:1] not in ("-", "+") or len(arg) < 2:', 'if arg[:1] not in ("-", "+"):')),
+    "shopt": (('if words[0] == "shopt":', 'if False:'),),
+    "shopt-unset": (("on = False  # shopt -u -o errexit turns errexit off", "on = True"),),
+    "shopt-query": (('if word == "shopt" and _errexit_shopt_queries(words):', "if False:"),),
+    "shopt-set-safe": (("return False  # setting or unsetting exits 0: a -q beside them only silences output",
+                        "return True"),),
+    "shopt-quiet-set": (("return False  # setting or unsetting exits 0: a -q beside them only silences output",
+                         'return "q" in letters'),),
+    "shopt-set-unset": (("return True  # shopt refuses setting and unsetting at once", "return False"),),
+    "shopt-letters": (('if any(letter not in "qsuop" for letter in letters):', "if False:"),),
+    "shopt-names": (("return bool(names)  # names alone, queried or not, report their state in the exit "
+                     "status", "return False"),),
+    "shopt-bare-query": (("return bool(names)  # names alone, queried or not, report their state in the exit "
+                          "status", 'return "q" in letters or bool(names)'),),
+    "shopt-pipefail": (('return on if "errexit" in names else None, on if "pipefail" in names else None',
+                        'return on if "errexit" in names else None, None'),),
+    "no-fallback": ((r"""quoted = _ERREXIT_UNQUOTED_HEREDOC_RE.sub(r"<<\1\2'\3'", command)""",
+                     "quoted = command"),),
+    "unquoted-body": ((r"""quoted = _ERREXIT_UNQUOTED_HEREDOC_RE.sub(r"<<\1\2'\3'", command)""",
+                       'quoted = _ERREXIT_UNQUOTED_HEREDOC_RE.sub("", command)'),),
+    "quoted-body": (("i = _skip_heredoc_bodies(command, i, n, pending_heredocs)", "i = i"),),
+    "quoted-body-end": (("if cand == delim:\n                break\n    return i\n",
+                         "if False:\n                break\n    return i\n"),),
+    "raw-text": (("segments, exact, in_progress = _lex_command(command, partial=True)",
+                  "segments, exact, in_progress = _lex_command(_dequoted_text(command), partial=True)"),
+                 ("effect, pipefail_effect = _errexit_set_effect(words)",
+                  'effect, pipefail_effect = _errexit_set_effect(words[words.index("set"):] if "set" in '
+                  "words else words)")),
+    "initial-on": (("on = False  # errexit starts off: only a set or shopt in the command turns it on",
+                    "on = True"),),
+    "condition": (('_ERREXIT_CONDITION_WORDS = frozenset(("if", "elif", "while", "until"))',
+                   "_ERREXIT_CONDITION_WORDS = frozenset()"),),
+    "condition-list": (("last, negated, joiner, piped, continued = None, False, None, False, False  # a new "
+                        "statement", "last, negated, joiner, piped, continued, exempt = None, False, None, False, "
+                        "False, False"),),
+    "negation": (("negated = True  # and in a pipeline negated by !", "pass"),),
+    "negation-pipeline": (("negated = False  # ! negates one pipeline only", "pass"),),
+    "branch": (("armed = False  # else and elif open another branch, which the branch before does not run on "
+                "into", "pass"),),
+    "if-carry": (("frames[-1][1] = _errexit_armed(frames[-1][1], armed)  # the branch before can fail "
+                  "before fi", "pass"),),
+    "closer": (('_ERREXIT_CLOSER_WORDS = frozenset(("fi", "done", "esac", "}"))',
+                "_ERREXIT_CLOSER_WORDS = frozenset()"),),
+    "header": (('_ERREXIT_HEADER_WORDS = frozenset(("for", "select"))', "_ERREXIT_HEADER_WORDS = frozenset()"),),
+    "case-pattern-end": (('frames.append(["case", False, kind != "close"])',
+                          'frames.append(["case", False, True])'),
+                         ("arms[2] = False  # the pattern ends at its ), and the arm's body follows", "pass")),
+    "case-branch": (("armed = False  # ;; ends the arm: the next arm is another branch, not a later step",
+                     "pass"),),
+    "case-carry": (("arms[1] = _errexit_armed(arms[1], armed)  # a step of this arm can still fail before "
+                    "esac", "pass"),),
+    "or-handled": (("if after_or:", "if False:"),),
+    "function-set": (("on = outside_on  # an option change in a body takes effect only when it is called",
+                      "pass"),),
+    "or-and-never": (("if after_or:", "if False:"),
+                     ('_ERREXIT_NEVER_FAILS = frozenset(("true", ":", "exit", "set", "shopt"))',
+                      '_ERREXIT_NEVER_FAILS = frozenset(("set", "shopt"))')),
+    "or-false": (('cannot_succeed = word == "false"  # a || branch that cannot succeed handles nothing',
+                  "cannot_succeed = False"),),
+    "or-return-top": (("cannot_succeed = not in_function  # return fails outside a function body",
+                       "cannot_succeed = False"),),
+    "lone-return": (("return not in_function  # a lone return fails outside a function body, and ends the "
+                     "function inside one", "return False"),),
+    "never-fails": (('_ERREXIT_NEVER_FAILS = frozenset(("true", ":", "exit", "set", "shopt"))',
+                     '_ERREXIT_NEVER_FAILS = frozenset(("set", "shopt"))'),),
+    "set-exempt": (('_ERREXIT_NEVER_FAILS = frozenset(("true", ":", "exit", "set", "shopt"))',
+                    '_ERREXIT_NEVER_FAILS = frozenset(("true", ":", "exit"))'),),
+    "piped": (("if last_stops or pipefail:", "if False:"),),
+    "piped-or": (("if piped and after_or:", "if False:"),),
+    "pipefail-last": (('return "possible" if pipefail is None else False  # off: the last command decides; '
+                       "unknown: possible", "return True"),),
+    "pipefail-unknown": (('return "possible" if pipefail is None else False  # off: the last command decides; '
+                          "unknown: possible", "return False"),),
+    "pipefail-track": (("pipefail = pipefail_effect if unconditional and not in_branch else None  # else: "
+                        "state unknown", "pass"),),
+    "pipefail-off": (("pipefail = on  # set -o pipefail turns pipefail on and set +o pipefail turns it off",
+                      "pipefail = True"),),
+    "branch-pipefail": (("in_branch = bool(frames) or loops > 0  # an if, case or loop body may not run",
+                         "in_branch = False"),),
+    "function-pipefail": (("pipefail = outside_pipefail  # pipefail likewise: the definition changes no "
+                           "option", "pass"),),
+    "pipeline-exit": (('last_stops = word in ("exit", "return") or word not in _ERREXIT_NEVER_FAILS',
+                       'last_stops = not in_function if word == "return" else word not in '
+                       "_ERREXIT_NEVER_FAILS"),),
+    "armed-merge": (("if current is True or new is True:", "if False:"),),
+    "subshell-pipefail": (("pipefail = outside_pipefail  # and a pipefail setting made inside (...) ends "
+                           "with it too", "pass"),),
+    "redirect-only": (("return armed, on  # a statement of redirections only is a later statement: bash still "
+                       "runs them", "pass"),),
+    "redirect-only-empty": (("if not words and redirected and armed and not closer:",
+                             "if not words and armed and not closer:"),),
+    "redirect-later-kind": (("if not words and redirected and armed and not closer:",
+                             'if kind == "list" and not words and redirected and armed and not closer:'),),
+    "closer-redirect": (("closer = True  # even carrying a redirection, the closer is no later statement",
+                         "pass"),),
+    "and-final": (('stops = _errexit_stops(last[1], joiner == "||", piped, functions > 0, pipefail)',
+                   'stops = _errexit_stops(last[1], joiner is not None, piped, functions > 0, pipefail)'),),
+    "function-body": (('stops = _errexit_stops(last[1], joiner == "||", piped, functions > 0, pipefail)',
+                       'stops = _errexit_stops(last[1], joiner == "||", piped, False, pipefail)'),),
+    "function-header": (('if kind == "open" and i < count and pairs[i][:2] == ([], ")") and (',
+                         "if False and ("),),
+    "function-keyword": (('elif word == "function" and k + 1 < len(words):', "elif False:"),),
+    "function-scope": (("armed = outside  # the definition itself runs nothing", "pass"),),
+    "set-conditional": (("if effect is not None and unconditional:", "if effect is not None:"),),
+    "substitution": (("on = False  # bash runs a $(...) command substitution with errexit off", "pass"),),
+    "substitution-status": (("last = (on, None)  # a command of assignments only takes the substitution's "
+                             "status", "pass"),),
+    "statement-start": (("last = (on, word)  # errexit as the pipeline's last command starts",
+                         "last = (last[0] if last else on, word)"),),
+    "and-or": (('{"&&": "and-or", "||": "and-or",', '{"&&": "list", "||": "list",'),),
+    "newline": (('";": "list", "": "list",', '";": "list", "": "pipe",'),),
+    "pipe-amp": (('"|": "pipe", "|&": "pipe",', '"|": "pipe", "|&": "list",'),),
+    "background": (('"&": "background",', '"&": "list",'),),
+    "continuation": (('elif kind == "list" and not words and continued:', "elif False:"),),
+    "subshell-later": (("return armed, on  # the subshell is a later statement", "pass"),),
+    "subshell-open": (("scopes.append((on, pipefail, armed, last,",
+                       "return False, False and ((on, pipefail, armed, last,"),),
+    "subshell-errexit": (("on = outside_on  # an errexit setting made inside (...) ends with the subshell",
+                          "pass"),),
+    "subshell-step": (("armed = outside_armed  # and so does a step inside it: what follows the subshell runs "
+                       "either way", "pass"),),
+    "subshell-ignored": (("ignored = ignored or exempt or negated  # so does a subshell in a condition or after !",
+                          "pass"),),
+    "later-step": (("armed = _errexit_armed(armed, stops)  # a later statement of this scope would run after "
+                    "this", "return True, on"),),
+    "tail": (('return armed, on  # the tail counts only as a later statement, preserving a "possible" reading',
+              "return False, on"),),
+    "tail-redirect": (('return armed, on  # the tail counts only as a later statement, preserving a "possible" '
+                       "reading", "return armed and bool(tail), on"),),
+    "possible-tail": (('return armed, on  # the tail counts only as a later statement, preserving a "possible" '
+                       "reading", "return bool(armed), on"),),
+    "nothing-after": (("return False, on  # the last statement never notes: nothing runs after it",
+                       "return on, on"),),
+    "unread-tool-name": (('return _errexit_unreadable("tool_name", "tool_name" in data, tool, "a string")',
+                          "return _allow()"),),
+    "unread-tool-input": (('return _errexit_unreadable("tool_input", "tool_input" in data, tool_input, "an object")',
+                           "return _allow()"),),
+    "unread-command": (('return _errexit_unreadable("command", "command" in tool_input, command, "a string")',
+                        "return _allow()"),),
+    "unread-empty-command": (("if not isinstance(command, str) or not command:\n"
+                              '        return _errexit_unreadable("command"',
+                              "if not isinstance(command, str):\n"
+                              '        return _errexit_unreadable("command"'),),
+    "unread-rest": (("if _errexit_unread_mentions(unread):", "if False:"),),
+    "unread-any": (("if _errexit_unread_mentions(unread):", "if unread:"),),
+    "unread-on": (("if unread and on:", "if False:"),),
+    "unread-on-read": (("if unread and on:", "if on:"),),
+    "unread-on-scopes": (("any(scope[0] for scope in scopes)", "False"),),
+    "unread-on-body": (("any(entry[3] for entry in braces if entry[0])", "False"),),
+    "unread-on-group": (("for entry in braces if entry[0])", "for entry in braces)"),),
+    "unread-raw": (("_ERREXIT_UNREAD_RE.search(unread) or", "False or"),),
+    "unread-quoting": (('_ERREXIT_UNREAD_QUOTING_RE.sub("", unread)', "unread"),),
+    "unread-quotes": ((r"""_ERREXIT_UNREAD_QUOTING_RE = re.compile(r"\\\n|[\\'\"]")""",
+                       r"""_ERREXIT_UNREAD_QUOTING_RE = re.compile(r"\\\n|[\\]")"""),),
+    "unread-continuation": ((r"""_ERREXIT_UNREAD_QUOTING_RE = re.compile(r"\\\n|[\\'\"]")""",
+                             r"""_ERREXIT_UNREAD_QUOTING_RE = re.compile(r"[\\'\"]")"""),),
+    "unread-complete": (('return ""  # the lex read it all', "pass"),),
+    "unread-tail-start": (("return segments[-1].raw  # the segment the lex stopped inside, to the end of text",
+                           "return text"),),
+    "unread-read-end": (("return text[at + len(seg.raw):] if at >= 0 else text", "return text"),),
+    "unread-none": (("return text  # the lex stopped before any segment with text, so none of it counts as read",
+                     'return ""'),),
+    "unread-word-left": ((r'_ERREXIT_UNREAD_RE = re.compile(r"(?<![\w-])(?:set|shopt)',
+                          r'_ERREXIT_UNREAD_RE = re.compile(r"(?:set|shopt)'),),
+    "unread-word-right": ((r'(?:set|shopt)(?![\w-])|errexit|pipefail")', r'(?:set|shopt)|errexit|pipefail")'),),
+    "unread-shopt": ((r'(?:set|shopt)(?![\w-])|errexit|pipefail")', r'(?:set)(?![\w-])|errexit|pipefail")'),),
+    "unread-errexit": ((r'(?![\w-])|errexit|pipefail")', r'(?![\w-])|pipefail")'),),
+    "unread-pipefail": ((r'(?![\w-])|errexit|pipefail")', r'(?![\w-])|errexit")'),),
+}
+
+# (label, command, mutant): rows the real handler must note, each silent under its mutant.
+_IE_FIRE_ROWS = (
+    ("(ie-f1) the reported incident shape", "set -euo pipefail; false; echo after", "e-cluster"),
+    ("(ie-f2) newline joins", "set -e\ngit apply /abs/p.diff\nmake test", "newline"),
+    ("(ie-f3) set -o errexit", "set -o errexit; a; b", "o-option"),
+    ("(ie-f4a) e in a cluster", "set -eu; a; b", "e-cluster"),
+    ("(ie-f4b) e after another letter", "set -xe; a; b", "e-cluster"),
+    ("(ie-f4c) e inside a long cluster with -o", "set -Eeuo pipefail; a; b", "e-cluster"),
+    ("(ie-f5) errexit on inside an and-or list", "set -e && git apply /abs/p.diff; make", "statement-start"),
+    ("(ie-f6) the last pipeline after && is a step that can fail", "set -e; a && b; c", "and-final"),
+    ("(ie-f7) inside a subshell", "(set -e; a; b)", "subshell-open"),
+    ("(ie-f8) after a quoted heredoc that writes a file",
+     "cat <<'EOF' > /abs/s.sh\nx\nEOF\nset -e; a; b", "quoted-body-end"),
+    ("(ie-f10) shopt -so errexit", "shopt -so errexit; a; b", "shopt"),
+    ("(ie-f11) shopt -s -o errexit", "shopt -s -o errexit; a; b", "shopt"),
+    ("(ie-f14) a subshell is a later statement", "set -e; a; (b)", "subshell-later"),
+    ("(ie-f15) a multi-line if body", "set -e\nif a\nthen\n  b\n  c\nfi", "newline"),
+    ("(ie-f16) || return at top level fails, so it handles nothing", "set -e; false || return; echo after",
+     "or-return-top"),
+    ("(ie-f17) || return 1 at top level", "set -e; a || return 1; b", "or-return-top"),
+    ("(ie-f18) a || branch that is a lone false", "set -e; a || false; b", "or-false"),
+    ("(ie-f19) a lone return at top level fails", 'set -e; [ -n "$x" ] && return 0; work', "lone-return"),
+    ("(ie-f20) a one-line case arm with two steps", "set -e; case $x in a) foo; bar;; esac", "case-pattern-end"),
+    ("(ie-f21) a multi-line case arm with two steps", "set -e\ncase $x in\n  a) foo; bar;;\nesac",
+     "case-pattern-end"),
+    ("(ie-f22) a step of a case arm still counts after esac", "set -e; case $x in a) foo;; esac; b",
+     "case-carry"),
+    ("(ie-f23) a step of the then branch still counts after fi", "set -e; if a; then b; else exit 1; fi; c",
+     "if-carry"),
+    ("(ie-f24) ! negates one pipeline only", "set -e; ! a && b; c", "negation-pipeline"),
+    ("(ie-f25) a pipeline of several commands ending in true", "set -euo pipefail; a | true; b", "piped"),
+    ("(ie-f26) an assignment takes its substitution's status", "set -e; v=$(git describe); echo $v",
+     "substitution-status"),
+    ("(ie-f28) a function definition does not run its set +e", "set -e; f() { set +e; }; false; echo after",
+     "function-set"),
+    ("(ie-f29) a shopt query reports in its exit status", "set -e; shopt -q login_shell; echo after",
+     "shopt-query"),
+    ("(ie-f30) a pipeline under set -o pipefail fails with any stage", "set -o pipefail; set -e; a | true; b",
+     "pipefail-track"),
+    ("(ie-f31) a pipeline whose pipefail state is unknown is a possible hazard",
+     "set -e; true || set -o pipefail; a | true; b", "pipefail-unknown"),
+    ("(ie-f32) a fully read statement of redirections only still runs them",
+     "set -e; make; > /abs/build.log", "redirect-only"),
+    ("(ie-f33) shopt -s with -u is an error whose status can fail", "set -e; shopt -s -u extglob; echo after",
+     "shopt-set-unset"),
+    ("(ie-f34) an option letter shopt does not take can fail", "set -e; shopt -x; echo after",
+     "shopt-letters"),
+    ("(ie-f35) shopt names alone report their state", "set -e; shopt extglob; echo after", "shopt-names"),
+    ("(ie-f36) a function definition does not run its set +o pipefail",
+     "set -eo pipefail; f() { set +o pipefail; }; false | true; echo after", "function-pipefail"),
+    ("(ie-f37) shopt -s -o pipefail turns pipefail on", "shopt -s -o pipefail; set -e; false | true; echo after",
+     "shopt-pipefail"),
+    ("(ie-f38) an exit in a pipeline only fails its own stage", "set -e\ntrue | exit 1\necho after",
+     "pipeline-exit"),
+    ("(ie-f39) a return in a pipeline inside a function only fails its own stage",
+     "set -e; f() { true | return 1; echo after; }; f", "pipeline-exit"),
+    ("(ie-f40) a pipefail change inside an if body may not run",
+     "set -o pipefail; set -e; if a; then set +o pipefail; fi; false | true; echo after", "branch-pipefail"),
+    ("(ie-f41) a pipefail change inside a loop body may not run",
+     "set -o pipefail; set -e; while a; do set +o pipefail; done; false | true; echo after",
+     "branch-pipefail"),
+    ("(ie-f42) a background statement of redirections only still runs them",
+     "set -e; false\n> /abs/log &", "redirect-later-kind"),
+    ("(ie-f43) an && list of redirections only is a later statement",
+     "set -e; false; > /abs/a && > /abs/b", "redirect-only"),
+    ("(ie-f44) a pipefail change inside a case arm may not run",
+     "set -o pipefail; set -e; case $x in a) set +o pipefail;; esac; false | true; echo after",
+     "branch-pipefail"),
+)
+
+# (label, command, mutant): rows the real handler must leave silent, each noted by its mutant.
+_IE_SILENT_ROWS = (
+    ("(ie-n1) a ; chain with no inline errexit", "bash /abs/s.sh; echo done", "initial-on"),
+    ("(ie-n2) a script file run with bash after set -e", "set -e; bash /abs/s.sh", "later-step"),
+    ("(ie-n3) the chain inside bash -c", "bash -c 'set -e; a; b'", "raw-text"),
+    ("(ie-n4) a lone set -e", "set -e", "nothing-after"),
+    ("(ie-n5) a lone set -euo pipefail", "set -euo pipefail", "nothing-after"),
+    ("(ie-n6) set -e joined by &&", "set -e && a && b", "and-or"),
+    ("(ie-n7) one && statement after set -e", "set -e; a && b", "and-or"),
+    ("(ie-n8) one step after set -e", "set -e; a", "later-step"),
+    ("(ie-n9) one step and a trailing ;", "set -e; a;", "later-step"),
+    ("(ie-n10) set +e", "set +e; a; b", "plus-sign"),
+    ("(ie-n11) errexit turned off again", "set -e; set +e; a; b", "plus-sign"),
+    ("(ie-n12) set +o errexit", "set -e; set +o errexit; a; b", "plus-sign"),
+    ("(ie-n13) -o names another option", "set -o pipefail; a; b", "o-name"),
+    ("(ie-n14) -e after -- is a positional parameter", "set -- -e; a; b", "dashdash"),
+    ("(ie-n15) -e after an operand is a positional parameter", "set x -e; a; b", "operand"),
+    ("(ie-n16) set -e in an echo string", 'echo "set -e; a; b"', "raw-text"),
+    ("(ie-n17) set -e in a commit message", 'git commit -m "set -e; a; b"', "raw-text"),
+    ("(ie-n18) set -e in a quoted heredoc that writes a script",
+     "cat <<'EOF' > /abs/s.sh\nset -e\na\nb\nEOF\nbash /abs/s.sh", "quoted-body"),
+    ("(ie-n19) set -e only in an unquoted heredoc body",
+     "cat <<EOF > /abs/out.txt\nset -e\na\nb\nEOF\necho done", "unquoted-body"),
+    ("(ie-n20) a step guarded by || exit", "set -e; a || exit 1; b", "or-and-never"),
+    ("(ie-n22) every earlier step guarded", "set -e; a || exit; b || exit 1; c", "or-and-never"),
+    ("(ie-n23) an option change is no step that can fail", "set -e; set -u; a", "set-exempt"),
+    ("(ie-n24) a background step", "set -e; a & b", "background"),
+    ("(ie-n25) errexit set inside a subshell ends with it", "(set -e; a); b; c", "subshell-errexit"),
+    ("(ie-n26) a step inside a subshell is not followed by what comes after it", "(set -e; a;); b",
+     "subshell-step"),
+    ("(ie-n27) a newline after && continues the statement",
+     "set -e\ngit apply /abs/p.diff &&\nmake test\n", "continuation"),
+    ("(ie-n28) a loop condition", "set -e; while a; do :; done", "condition"),
+    ("(ie-n29) a negated pipeline", "set -e; ! a; b", "negation"),
+    ("(ie-n30) fi runs nothing", "set -e; if a; then b; fi", "closer"),
+    ("(ie-n31) a loop header", "set -e; for f in x y; do a; done", "header"),
+    ("(ie-n32) else opens another branch", "set -e; if a; then b; else c; fi", "branch"),
+    ("(ie-n33) shopt -u -o errexit", "shopt -so errexit; shopt -uo errexit; a; b", "shopt-unset"),
+    ("(ie-n34) set -o errexit turned off by +o", "set -o errexit; set +o errexit; a; b", "plus-sign"),
+    ("(ie-n36) a || branch handles the failure before it", "set -e; a || recover; b", "or-handled"),
+    ("(ie-n37) a || true branch", "set -e; x || true; b", "or-and-never"),
+    ("(ie-n38) an && list ending in true", "set -e; a && true; b", "never-fails"),
+    ("(ie-n39) an && list ending in exit", "set -e; a && exit 0; b", "never-fails"),
+    ("(ie-n40) || return inside a function keyword body", "set -e; function f { a || return 1; b; }",
+     "function-keyword"),
+    ("(ie-n41) || return inside a name () body", "set -e; f() { a || return 1; b || return 1; }; f",
+     "function-header"),
+    ("(ie-n42) a lone return inside a function body", 'set -e; f() { [ -n "$x" ] && return 0; work; }',
+     "function-body"),
+    ("(ie-n43) a function definition runs nothing", "set -e; f() { a; }; b", "function-scope"),
+    ("(ie-n44) case arms are branches", "set -e; case $x in a) foo;; b) bar;; c) baz;; esac", "case-branch"),
+    ("(ie-n45) a pipeline after || handles the failure", "set -e; a || b | c; d", "piped-or"),
+    ("(ie-n46) a set after || may not run", "true || set -e; a; b", "set-conditional"),
+    ("(ie-n47) a set in a pipeline runs in a subshell", "set -e | cat; a; b", "set-conditional"),
+    ("(ie-n48) a command substitution runs with errexit off", "set -e; v=$(cd /abs/x; git describe)",
+     "substitution"),
+    ("(ie-n49) a condition list up to then", "set -e; if a; b; then c; fi", "condition-list"),
+    ("(ie-n50) a negated subshell", "set -e; ! (a; b; c)", "subshell-ignored"),
+    ("(ie-n51) an until condition", "set -e; until a; do :; done; b", "condition"),
+    ("(ie-n52) a select header", "set -e; select f in x y; do a; done", "header"),
+    ("(ie-n53) elif opens another branch", "set -e; if a; then b; elif c; then d; fi", "branch"),
+    ("(ie-n54) a newline after || continues the statement", "set -e; a ||\n  recover; b", "continuation"),
+    ("(ie-n55) a newline after a pipe continues the pipeline", "set -e; a ||\n  b |\n  c; d", "continuation"),
+    ("(ie-n56) |& joins one pipeline", "set -e; a || b |& c; d", "pipe-amp"),
+    ("(ie-n57) a lone - ends the set options", "set - -e; a; b", "lone-dash"),
+    ("(ie-n58) a function definition does not run its set -e", "f() { set -e; }; false; echo after",
+     "function-set"),
+    ("(ie-n59) a shopt that sets a known option form cannot fail", "set -e; shopt -s nullglob; echo after",
+     "shopt-set-safe"),
+    ("(ie-n60) without pipefail a pipeline takes its last command's status",
+     "set -e; false | true; echo after", "pipefail-last"),
+    ("(ie-n61) a pipefail set inside a subshell ends with it", "(set -o pipefail; a); set -e; x | true; b",
+     "subshell-pipefail"),
+    ("(ie-n62) a trailing ; leaves no later statement", "set -e; a;", "redirect-only-empty"),
+    ("(ie-n63) a } carrying a redirection closes its group", "set -e; { false; } > /abs/log",
+     "closer-redirect"),
+    ("(ie-n64) fi carrying a redirection closes its if", "set -e; if a; then false; fi > /abs/log",
+     "closer-redirect"),
+    ("(ie-n65) done carrying a redirection closes its loop",
+     "set -e; for f in x y; do false; done > /abs/log", "closer-redirect"),
+    ("(ie-n66) esac carrying a redirection closes its case",
+     "set -e; case $x in a) false;; esac > /abs/log", "closer-redirect"),
+    ("(ie-n67) a loop fed by a redirection on its done",
+     'set -e\nwhile read -r l; do echo "$l"; done < /abs/list.txt', "closer-redirect"),
+    ("(ie-n68) shopt -qs sets silently and exits 0", "set -e; shopt -qs extglob; echo after",
+     "shopt-quiet-set"),
+    ("(ie-n69) shopt -q -s sets silently and exits 0", "set -e; shopt -q -s extglob; echo after",
+     "shopt-quiet-set"),
+    ("(ie-n70) a bare shopt -q exits 0", "set -e; shopt -q; echo after", "shopt-bare-query"),
+    ("(ie-n71) set +o pipefail turns pipefail off",
+     "set -eo pipefail; set +o pipefail; false | true; echo after", "pipefail-off"),
+    ("(ie-n72) a function definition does not run its set -o pipefail",
+     "set -e; f() { set -o pipefail; }; false | true; echo after", "function-pipefail"),
+)
+
+# (label, command, mutant, noted): commands the lexer could not read in full whose read part shows no hazard.
+# The real handler gives exactly the unread-rest note on a noted row and a silent allow on the others, and
+# each row gets the other result under its mutant.
+_IE_UNREAD_ROWS = (
+    ("(ie-u1) a process substitution before set -e", "cat <(true); set -e; false; echo after", "unread-rest",
+     True),
+    ("(ie-u2) a here-string before set -e", "cat <<< x; set -e; false; echo after", "unread-rest", True),
+    ("(ie-u3) a {fd} redirect before set -e", "exec {fd}>/tmp/x; set -e; false; echo after", "unread-rest", True),
+    ("(ie-n35) a set the lexer stopped inside, never read as a set", "set -e <(true); a; b", "unread-rest", True),
+    ("(ie-u4) a construct that stops the lexer at the start of a segment", "a; <<< x; set -e; false; echo after",
+     "unread-rest", True),
+    ("(ie-u5) a NUL stops the lexer before any segment", "true\x00; set -e; false; echo after", "unread-none",
+     True),
+    ("(ie-u6) a rest past an unquoted heredoc read again",
+     "cat <<EOF > /abs/out.txt\nbody\nEOF\ndiff <(a) <(b); set -e; false; echo after", "unread-rest", True),
+    ("(ie-u7) a rest that mentions only shopt", "cat <(true); shopt -s nullglob; a; b", "unread-shopt", True),
+    ("(ie-u8) a rest that mentions only errexit", "cat <(true); SHELLOPTS=errexit bash /abs/s.sh",
+     "unread-errexit", True),
+    ("(ie-u9) a rest that mentions only pipefail", "cat <(true); SHELLOPTS=pipefail bash /abs/s.sh",
+     "unread-pipefail", True),
+    ("(ie-u10) a process substitution whose rest mentions no option word",
+     "diff <(sort /abs/a) <(sort /abs/b); echo done", "unread-any", False),
+    ("(ie-u11) a here-string whose rest mentions no option word", 'grep -q x <<< "$v"; echo done', "unread-any",
+     False),
+    ("(ie-u12) a set word before the segment the lexer stopped inside was read", "echo set; diff <(a) <(b)",
+     "unread-tail-start", False),
+    ("(ie-u13) a set word in a segment read before the stop", "echo set; <<< x; a; b", "unread-read-end", False),
+    ("(ie-u14) a set -e only in the body of an unquoted heredoc read again in full",
+     "cat <<EOF > /abs/out.txt\nset -e\nEOF", "unread-complete", False),
+    ("(ie-u15) set joined to a longer word by a hyphen", "git remote set-url origin /abs/r <(true); a; b",
+     "unread-word-right", False),
+    ("(ie-u16) set at the end of a longer word", "cat <(true) /abs/reset.txt; a; b", "unread-word-left", False),
+    ("(ie-u17) a set spelled with a backslash in the rest", "cat <(true); s\\et -e; false; echo after",
+     "unread-quoting", True),
+    ("(ie-u18) a set split by quotes in the rest", "cat <(true); s''et -e; false; echo after", "unread-quotes",
+     True),
+    ("(ie-u19) a set split by a line continuation in the rest", "cat <(true); se\\\nt -e; false; echo after",
+     "unread-continuation", True),
+    ("(ie-u20) a set that removing the quoting joins to a longer word", 'cat <(true); "$x"set -e; a; b',
+     "unread-raw", True),
+)
+
+# (label, command, mutant, noted): commands the lexer could not read in full whose read part shows no hazard,
+# where whether errexit is on where the lexer stopped decides the result. The real handler gives exactly the
+# errexit-on unread note on a noted row and a silent allow on the others, and each row gets the other result
+# under its mutant. A silent row here pins a bound: errexit read as off at the stop, or a command read in full.
+_IE_UNREAD_ON_ROWS = (
+    ("(ie-o1) a process substitution after set -e", "set -e; cat <(true); false; echo after", "unread-on", True),
+    ("(ie-o2) a here-string after set -e", 'set -e; grep -q x <<< "$v"; false; echo after', "unread-on", True),
+    ("(ie-o3) a {fd} redirect after set -e", "set -e; exec {fd}>/tmp/x; false; echo after", "unread-on", True),
+    ("(ie-o4) a process substitution after set -e, newline joins", "set -e\ncat <(true)\nfalse\necho after",
+     "unread-on", True),
+    ("(ie-o5) process substitutions after set -euo pipefail",
+     "set -euo pipefail; diff <(sort /abs/a) <(sort /abs/b); rm -f /abs/c; echo ok", "unread-on", True),
+    ("(ie-o6) a diff of process substitutions after set -e", "set -e; diff <(a) <(b); echo done", "unread-on",
+     True),
+    ("(ie-o7) a here-string after set -e, then a failing step", "set -e; cat <<< x; false; echo after",
+     "unread-on", True),
+    ("(ie-o8) a here-string after set -e, then one step", 'set -e; grep -q foo <<< "$v"; echo done', "unread-on",
+     True),
+    ("(ie-o9) process substitutions after set -o pipefail and set -e",
+     "set -o pipefail; set -e; cmp <(a) <(b); false | true; echo after", "unread-on", True),
+    ("(ie-o10) a subshell open where the lexer stopped", "set -e; (cat <(true); false; echo after)", "unread-on",
+     True),
+    ("(ie-o11) a command substitution open where the lexer stopped",
+     "set -e; v=$(cat <(true)); false; echo after", "unread-on-scopes", True),
+    ("(ie-o12) a function body open where the lexer stopped, its set +e ending with it",
+     "set -e; f() { set +e; cat <(true); false; }; false; echo after", "unread-on-body", True),
+    ("(ie-o13) errexit on in a command read in full", "set -e; a", "unread-on-read", False),
+    ("(ie-o14) errexit turned off again before the stop", "set -e; set +e; diff <(a) <(b); echo done",
+     "plus-sign", False),
+    ("(ie-o15) errexit set inside a subshell closed before the stop", "(set -e; a) && diff <(a) <(b); echo done",
+     "subshell-errexit", False),
+    ("(ie-o16) a set +e inside a { } group open where the lexer stopped",
+     "set -e; { set +e; cat <(true); false; }; echo after", "unread-on-group", False),
+    ("(ie-o17) a set -e after || may not run", "true || set -e; diff <(a) <(b); echo done", "set-conditional",
+     False),
+    ("(ie-o18) a set -e inside a function body closed before the stop", "f() { set -e; }; diff <(a) <(b); echo done",
+     "function-set", False),
+)
+
+
+def _ie_mutant_handlers(failures, tmp):
+    """{mutant name: its inline_errexit} for each _IE_MUTANTS entry whose anchors each occur once in the live
+    hook source (an entry whose anchor does not is a failure and builds no handler)."""
+    source = Path(aiqt_hooks.__file__).read_text(encoding="utf-8")
+    base = tmp / "inline-errexit-mutants"
+    base.mkdir()
+    handlers = {}
+    for name, edits in sorted(_IE_MUTANTS.items()):
+        text = source
+        for anchor, replacement in edits:
+            if text.count(anchor) != 1:
+                failures.append("(ie-anchor-{}) the mutant anchor {!r} occurs {} times in the hook source, "
+                                "expected once".format(name, anchor, text.count(anchor)))
+                break
+            text = text.replace(anchor, replacement)
+        else:
+            module_name = "ie_mutant_" + name.replace("-", "_")
+            path = base / (module_name + ".py")
+            path.write_text(text, encoding="utf-8")
+            spec = importlib.util.spec_from_file_location(module_name, str(path))
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            handlers[name] = module.inline_errexit
+    return handlers
+
+
+def _ie_dispatch_failures():
+    """(ie-dispatch-*) main() never blocks inline_errexit on an error path (NOTE_ONLY_PRETOOL_MODES): a bad
+    invocation, an unreadable payload, a handler crash or malformed result, its deadline and an unwritable
+    stdout each warn on exit 0, and a child-status probe that fails runs the handler once the SIGCHLD restore
+    clears it or warns on exit 0 when it does not, while a miswired event still hard-blocks with exit 2 and a
+    fail-closed PreToolUse mode still exits 2 on an unreadable payload and on a failing child-status probe. A
+    stand-in for _DeadlineWindow keeps every timer out of this process (the deadline child times the real one),
+    records the budget main() gives the mode, and lets a stub raise its deadline; a stand-in probe returns its
+    reasons in turn, and the suite's own SIGCHLD disposition is put back after each call that uses one."""
+    out = []
+    windows = []
+
+    class Window:
+        def __init__(self, seconds):
+            self.seconds = seconds
+            self.pending_at_entry = False
+            windows.append(self)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+    class Unwritable(io.StringIO):
+        def write(self, text):
+            raise OSError("ie-unwritable")
+
+    def dispatch(argv, stdin_text, handler=None, stdout=None, probe=None):
+        saved = (sys.stdin, aiqt_hooks._DeadlineWindow, aiqt_hooks.HANDLERS["inline_errexit"],
+                 aiqt_hooks._child_status_refusal)
+        disposition = aiqt_hooks.signal.getsignal(aiqt_hooks.signal.SIGCHLD)
+        buf, err = io.StringIO() if stdout is None else stdout, io.StringIO()
+        try:
+            sys.stdin = io.StringIO(stdin_text)
+            aiqt_hooks._DeadlineWindow = Window
+            if handler is not None:
+                aiqt_hooks.HANDLERS["inline_errexit"] = handler
+            if probe is not None:
+                aiqt_hooks._child_status_refusal = probe
+            with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(err):
+                code = aiqt_hooks.main(argv)
+        finally:
+            (sys.stdin, aiqt_hooks._DeadlineWindow, aiqt_hooks.HANDLERS["inline_errexit"],
+             aiqt_hooks._child_status_refusal) = saved
+            if probe is not None:
+                aiqt_hooks.signal.signal(aiqt_hooks.signal.SIGCHLD, disposition)
+        return code, ("" if stdout is not None else buf.getvalue()), err.getvalue()
+
+    def failing(*reasons):
+        reasons = iter(reasons)
+        return lambda: next(reasons, None)
+
+    noting = json.dumps({"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                         "tool_input": {"command": "set -e; a; b"}})
+
+    def crash(_data):
+        raise RuntimeError("ie-crash")
+
+    def deadline(_data):
+        raise aiqt_hooks._HookDeadline(windows[-1])
+
+    code, stdout, _err = dispatch(["inline_errexit"], noting)
+    if code != 0 or "rule nocncl" not in stdout:
+        out.append("(ie-dispatch-note) a noting command must exit 0 with the note, got exit {} and {!r}".format(
+            code, stdout))
+    if not windows or windows[-1].seconds != aiqt_hooks.PRETOOL_BUDGET_SECONDS:
+        out.append("(ie-dispatch-window) main() must give inline_errexit the PreToolUse deadline, got {!r}".format(
+            [window.seconds for window in windows]))
+    for label, argv, stdin_text, handler, needle in (
+            ("(ie-dispatch-argv)", ["inline_errexit", "extra"], noting, None, "bad invocation"),
+            ("(ie-dispatch-unreadable)", ["inline_errexit"], "{", None, "unreadable payload"),
+            ("(ie-dispatch-crash)", ["inline_errexit"], noting, crash, "RuntimeError: ie-crash"),
+            ("(ie-dispatch-result)", ["inline_errexit"], noting, lambda _data: (1, None, None), "handler crash"),
+            ("(ie-dispatch-deadline)", ["inline_errexit"], noting, deadline, "no decision within its deadline")):
+        code, stdout, err = dispatch(argv, stdin_text, handler)
+        if code != 0 or needle not in stdout or "non-blocking" not in stdout:
+            out.append("{} the error path must warn on exit 0 naming {!r}, got exit {}, stdout {!r} and stderr "
+                       "{!r}".format(label, needle, code, stdout, err))
+    code, _stdout, err = dispatch(["inline_errexit"], noting, stdout=Unwritable())
+    if code != 0:
+        out.append("(ie-dispatch-stdout) a note that cannot be written must keep exit 0, got exit {} and {!r}"
+                   .format(code, err))
+    miswired = json.dumps({"hook_event_name": "Stop", "tool_name": "Bash",
+                           "tool_input": {"command": "set -e; a; b"}})
+    code, _stdout, err = dispatch(["inline_errexit"], miswired)
+    if code != 2 or "inline_errexit wired to unexpected event" not in err:
+        out.append("(ie-dispatch-event) a miswired event is the one path that blocks (exit 2), got exit {} and "
+                   "{!r}".format(code, err))
+    code, _stdout, err = dispatch(["git_stash_ref"], "{")
+    if code != 2:
+        out.append("(ie-dispatch-control) a fail-closed PreToolUse mode must still exit 2 on an unreadable "
+                   "payload, got exit {} and {!r}".format(code, err))
+    ignored = "SIGCHLD is ignored (SIG_IGN) in this process"
+    code, stdout, err = dispatch(["inline_errexit"], noting, probe=failing(ignored))
+    if code != 0 or "rule nocncl" not in stdout or "SIGCHLD restored to SIG_DFL" not in err:
+        out.append("(ie-dispatch-child-status) a child-status probe the SIGCHLD restore clears must run the "
+                   "handler on exit 0 with its note, never exit 2, got exit {}, stdout {!r} and stderr {!r}"
+                   .format(code, stdout, err))
+    code, stdout, err = dispatch(["inline_errexit"], noting,
+                                 probe=failing(ignored, "a probe child that exited 77 was read as 0"))
+    if code != 0 or "child exit status unobservable" not in stdout or "non-blocking" not in stdout:
+        out.append("(ie-dispatch-child-status-unrestored) a child-status probe still failing after the SIGCHLD "
+                   "restore must warn on exit 0, never exit 2, got exit {}, stdout {!r} and stderr {!r}"
+                   .format(code, stdout, err))
+    code, _stdout, err = dispatch(["git_stash_ref"], noting, probe=failing(ignored))
+    if code != 2 or "failing closed" not in err:
+        out.append("(ie-dispatch-child-status-control) a fail-closed PreToolUse mode must still exit 2 on a "
+                   "failing child-status probe, got exit {} and {!r}".format(code, err))
+    return out
+
+
+def _test_inline_errexit(failures, tmp):
+    """(ie-*) inline_errexit, called directly; no submitted Bash command is executed. Each fire row must
+    allow with the note and no decision, and each silent row must allow silently; each row must then flip
+    under its mutant (_IE_MUTANTS), so every row is red when the rule, or for the "or-and-never" rows the two
+    rules, that decide it are removed."""
+    handler = aiqt_hooks.inline_errexit
+    mutants = _ie_mutant_handlers(failures, tmp)
+    used = set()
+
+    def payload(command):
+        return {"hook_event_name": aiqt_hooks.PRETOOL, "tool_name": "Bash",
+                "tool_input": {"command": command}}
+
+    def noted(result):
+        code, stdout_obj, stderr = result
+        return (code == 0 and isinstance(stdout_obj, dict) and set(stdout_obj) == {"systemMessage"} and
+                "rule nocncl" in stdout_obj["systemMessage"] and stderr is None)
+
+    for rows, want_note in ((_IE_FIRE_ROWS, True), (_IE_SILENT_ROWS, False)):
+        for label, command, mutant in rows:
+            used.add(mutant)
+            result = handler(payload(command))
+            if (noted(result) if want_note else result == (0, None, None)) is not True:
+                failures.append("{}: expected {} from the real handler, got {!r}".format(
+                    label, "the note" if want_note else "a silent allow", result))
+            if mutant not in mutants:
+                failures.append("{}: its mutant {} was not built".format(label, mutant))
+                continue
+            flipped = mutants[mutant](payload(command))
+            if (flipped == (0, None, None) if want_note else noted(flipped)) is not True:
+                failures.append("{}: the {} mutant must {} this row, so the row shows the rule decides it; got "
+                                "{!r}".format(label, mutant, "silence" if want_note else "note", flipped))
+    # Wording-level rules need wording-level flips: the stronger of two armed readings must win whichever
+    # order the branches close in, a "possible" reading must survive the tail path, and the heredoc fallback
+    # is what reads a set -e after an unquoted heredoc as a step, where without it the rest is unread. Past a
+    # stop with errexit on, the tail rules and the heredoc fallback are what give the hazard note, where without
+    # them the unread rest gives the errexit-on unread note. Each check pins the exact note from the real
+    # handler, then shows its mutant changing that wording.
+    unread_on = aiqt_hooks._ERREXIT_UNREAD_ON_NOTE
+    for label, command, suffix, mutant, degraded_note in (
+            ("(ie-f9) after an unquoted heredoc (best-effort reading)",
+             "set -e; cat <<EOF > /abs/out.txt\nbody $X\nEOF\na; b", aiqt_hooks._ERREXIT_PARTIAL_NOTE,
+             "no-fallback", unread_on),
+            ("(ie-f13) a later statement the lexer stopped inside", "set -e; a; b <(true)",
+             aiqt_hooks._ERREXIT_PARTIAL_NOTE, "tail", unread_on),
+            ("(ie-f27) a later statement the lexer stopped inside that holds only a redirect",
+             "set -e; a; > /abs/out <(b)", aiqt_hooks._ERREXIT_PARTIAL_NOTE, "tail-redirect", unread_on),
+            ("(ie-note-armed-merge)",
+             "set -e; if a; then set -o pipefail; fi; if b; then false | true; else false; fi; echo after",
+             "", "armed-merge", aiqt_hooks._ERREXIT_NOTE + aiqt_hooks._ERREXIT_PIPEFAIL_NOTE),
+            ("(ie-note-possible-tail-flip)",
+             "set -e; true || set -o pipefail; false | true; echo after <(true)",
+             aiqt_hooks._ERREXIT_PIPEFAIL_NOTE + aiqt_hooks._ERREXIT_PARTIAL_NOTE, "possible-tail",
+             aiqt_hooks._ERREXIT_NOTE + aiqt_hooks._ERREXIT_PARTIAL_NOTE),
+            ("(ie-note-heredoc-fallback)", "cat <<EOF > /abs/out.txt\nbody $X\nEOF\nset -e; a; b",
+             aiqt_hooks._ERREXIT_PARTIAL_NOTE, "no-fallback", aiqt_hooks._ERREXIT_UNREAD_NOTE)):
+        used.add(mutant)
+        want = aiqt_hooks._ERREXIT_NOTE + suffix
+        if handler(payload(command)) != aiqt_hooks._allow_note(want):
+            failures.append("{} expected the note {!r} for {!r}".format(label, want, command))
+        if mutant not in mutants:
+            failures.append("{}: its mutant {} was not built".format(label, mutant))
+            continue
+        degraded = aiqt_hooks._allow_note(degraded_note)
+        if mutants[mutant](payload(command)) != degraded:
+            failures.append("{}: the {} mutant must change the note wording for {!r}, so the check shows the "
+                            "rule decides it".format(label, mutant, command))
+    # A payload field the guard cannot read allows with the note naming that field and what it held, never in
+    # silence and never with a deny; each row is silent under the mutant that restores the silent allow there.
+    unread = aiqt_hooks._ERREXIT_UNREADABLE_NOTE
+    for label, data, mutant, field, held in (
+            ("(ie-m1) a missing tool_name", {"tool_input": {"command": "set -e; a; b"}}, "unread-tool-name",
+             "tool_name", "missing"),
+            ("(ie-m2) a null tool_name", {"tool_name": None, "tool_input": {"command": "set -e; a; b"}},
+             "unread-tool-name", "tool_name", "null, not a string"),
+            ("(ie-m3) an empty tool_name", {"tool_name": "", "tool_input": {"command": "set -e; a; b"}},
+             "unread-tool-name", "tool_name", "empty"),
+            ("(ie-m4) an array tool_name", {"tool_name": ["Bash"], "tool_input": {"command": "set -e; a; b"}},
+             "unread-tool-name", "tool_name", "an array, not a string"),
+            ("(ie-m5) a missing tool_input", {"tool_name": "Bash"}, "unread-tool-input", "tool_input", "missing"),
+            ("(ie-m6) a null tool_input", {"tool_name": "Bash", "tool_input": None}, "unread-tool-input",
+             "tool_input", "null, not an object"),
+            ("(ie-m7) an array tool_input", {"tool_name": "Bash", "tool_input": []}, "unread-tool-input",
+             "tool_input", "an array, not an object"),
+            ("(ie-m8) a string tool_input", {"tool_name": "Bash", "tool_input": "set -e; a; b"}, "unread-tool-input",
+             "tool_input", "a string, not an object"),
+            ("(ie-m9) a missing command", {"tool_name": "Bash", "tool_input": {}}, "unread-command", "command",
+             "missing"),
+            ("(ie-m10) a null command", {"tool_name": "Bash", "tool_input": {"command": None}}, "unread-command",
+             "command", "null, not a string"),
+            ("(ie-m11) a number command", {"tool_name": "Bash", "tool_input": {"command": 42}}, "unread-command",
+             "command", "a number, not a string"),
+            ("(ie-m12) an empty command", {"tool_name": "Bash", "tool_input": {"command": ""}},
+             "unread-empty-command", "command", "empty"),
+            ("(ie-m13) an array command", {"tool_name": "Bash", "tool_input": {"command": ["set -e; a; b"]}},
+             "unread-command", "command", "an array, not a string")):
+        used.add(mutant)
+        data = dict(data, hook_event_name=aiqt_hooks.PRETOOL)
+        want = aiqt_hooks._allow_note(unread.format(field, held))
+        if handler(data) != want:
+            failures.append("{}: expected the unreadable-input note {!r}, got {!r}".format(label, want, handler(data)))
+        if mutant not in mutants:
+            failures.append("{}: its mutant {} was not built".format(label, mutant))
+            continue
+        if mutants[mutant](data) != (0, None, None):
+            failures.append("{}: the {} mutant must silence this row, so the row shows the note decides it; got "
+                            "{!r}".format(label, mutant, mutants[mutant](data)))
+    # A command the lexer could not read in full, whose read part shows no hazard, notes that the rest was not
+    # read where errexit is on where the lexer stopped, and otherwise only where that rest mentions set or
+    # shopt as a word, errexit or pipefail; each row must then give the other result under its mutant.
+    unread_note = aiqt_hooks._allow_note(aiqt_hooks._ERREXIT_UNREAD_NOTE)
+    unread_on_note = aiqt_hooks._allow_note(aiqt_hooks._ERREXIT_UNREAD_ON_NOTE)
+    for label, command, mutant, want_note, note in (
+            [row + (unread_note,) for row in _IE_UNREAD_ROWS] +
+            [row + (unread_on_note,) for row in _IE_UNREAD_ON_ROWS]):
+        used.add(mutant)
+        want, flip = (note, (0, None, None)) if want_note else ((0, None, None), note)
+        got = handler(payload(command))
+        if got != want:
+            failures.append("{}: expected {!r} from the real handler, got {!r}".format(label, want, got))
+        if mutant not in mutants:
+            failures.append("{}: its mutant {} was not built".format(label, mutant))
+            continue
+        flipped = mutants[mutant](payload(command))
+        if flipped != flip:
+            failures.append("{}: the {} mutant must give {!r} for this row, so the row shows the rule decides it; "
+                            "got {!r}".format(label, mutant, flip, flipped))
+
+    unused = sorted(set(_IE_MUTANTS) - used)
+    if unused:
+        failures.append("(ie-mutant-unused) mutants no row uses: {}".format(", ".join(unused)))
+
+    # The note is the exact constant, with the best-effort suffix only on a command the lexer could not
+    # read in full and the pipefail suffix only where the one step read as failing is a pipeline whose
+    # stopping depends on a pipefail state the walker could not read.
+    for label, command, suffix in (("(ie-note-exact)", "set -euo pipefail; false; echo after", ""),
+                                   ("(ie-note-heredoc)", "cat <<EOF > /abs/out.txt\nbody $X\nEOF\nset -e; a; b",
+                                    aiqt_hooks._ERREXIT_PARTIAL_NOTE),
+                                   ("(ie-note-tail)", "set -e; a; b <(true)", aiqt_hooks._ERREXIT_PARTIAL_NOTE),
+                                   ("(ie-note-pipefail)", "set -e; true || set -o pipefail; a | true; b",
+                                    aiqt_hooks._ERREXIT_PIPEFAIL_NOTE),
+                                   ("(ie-note-pipefail-on)", "set -euo pipefail; a | true; b", ""),
+                                   ("(ie-note-branch-pipefail)",
+                                    "set -e; if a; then set -o pipefail; fi; false | true; echo after",
+                                    aiqt_hooks._ERREXIT_PIPEFAIL_NOTE),
+                                   ("(ie-note-possible-tail)",
+                                    "set -e; true || set -o pipefail; false | true; echo after <(true)",
+                                    aiqt_hooks._ERREXIT_PIPEFAIL_NOTE + aiqt_hooks._ERREXIT_PARTIAL_NOTE)):
+        want = aiqt_hooks._ERREXIT_NOTE + suffix
+        if handler(payload(command)) != aiqt_hooks._allow_note(want):
+            failures.append("{} expected the note {!r} for {!r}".format(label, want, command))
+
+    # _lex_command's real partial return shape: the segment it stopped inside is the tail, never a set; a
+    # tail holding only a redirect is [], and a command with no tail gives None. Each fully read segment
+    # carries whether it holds a redirection, so a redirect-only statement is told from a bare separator, and
+    # a run of segments with no word and no redirect that end with ';' keeps only its first two. The unread
+    # rest starts at the tail's segment, or past the last segment read when there is no tail, and is empty
+    # when the lexer, or its reading again with each unquoted heredoc delimiter quoted, read everything.
+    for label, command, want in (
+            ("(ie-lex-tail)", "set -e; a; b <(true)",
+             ([(["set", "-e"], ";", False), (["a"], ";", False)], ["b"], False, " b <(true)")),
+            ("(ie-lex-tail-redirect)", "set -e; a; > /abs/out <(b)",
+             ([(["set", "-e"], ";", False), (["a"], ";", False)], [], False, " > /abs/out <(b)")),
+            ("(ie-lex-set-unread)", "set -e <(true); a; b", ([], ["set", "-e"], False, "set -e <(true); a; b")),
+            ("(ie-lex-unread-stop)", "a; <<< x; b", ([(["a"], ";", False)], None, False, "; <<< x; b")),
+            ("(ie-lex-unread-heredoc)", "cat <<EOF\nset -e\nEOF",
+             ([(["cat"], "", False), ([], "", False)], None, False, "")),
+            ("(ie-lex-complete)", "set -e; a",
+             ([(["set", "-e"], ";", False), (["a"], "", False)], None, True, "")),
+            ("(ie-lex-redirect-only)", "set -e; a; > /abs/log",
+             ([(["set", "-e"], ";", False), (["a"], ";", False), ([], "", True)], None, True, "")),
+            ("(ie-lex-separator-run-under)", "set -e;; a",
+             ([(["set", "-e"], ";", False), ([], ";", False), (["a"], "", False)], None, True, "")),
+            ("(ie-lex-separator-run-at)", "set -e;;; a",
+             ([(["set", "-e"], ";", False), ([], ";", False), ([], ";", False), (["a"], "", False)], None, True,
+              "")),
+            ("(ie-lex-separator-run-over)", "set -e;;;; a",
+             ([(["set", "-e"], ";", False), ([], ";", False), ([], ";", False), (["a"], "", False)], None, True,
+              "")),
+            ("(ie-lex-separator-run)", "set -e;;;;; a",
+             ([(["set", "-e"], ";", False), ([], ";", False), ([], ";", False), (["a"], "", False)], None, True,
+              ""))):
+        got = aiqt_hooks._errexit_statements(command)
+        if got != want:
+            failures.append("{} _errexit_statements({!r}) gave {!r}, want {!r}".format(label, command, got, want))
+
+    # Note-only: another tool allows silently.
+    data = {"hook_event_name": aiqt_hooks.PRETOOL, "tool_name": "Read", "tool_input": {"command": "set -e; a; b"}}
+    if handler(data) != (0, None, None):
+        failures.append("(ie-other-tool): a note-only guard must allow another tool silently, got {!r}".format(
+            handler(data)))
+
+    data = payload("set -e; a; b")
+    data["hook_event_name"] = "Stop"
+    code, stdout_obj, stderr = handler(data)
+    if not (code == 2 and stdout_obj is None and isinstance(stderr, str) and
+            "inline_errexit wired to unexpected event" in stderr):
+        failures.append("(ie-event) an unexpected event must use the sibling hard-block contract")
+    # A payload that names no event hard-blocks the same way: its missing event is not PreToolUse.
+    data = payload("set -e; a; b")
+    del data["hook_event_name"]
+    code, stdout_obj, stderr = handler(data)
+    if not (code == 2 and stdout_obj is None and isinstance(stderr, str) and
+            "inline_errexit wired to unexpected event None" in stderr):
+        failures.append("(ie-event-missing) a payload with no hook_event_name must use the same hard-block "
+                        "contract, got {!r}".format((code, stdout_obj, stderr)))
+
+    if (aiqt_hooks.HANDLERS.get("inline_errexit") is not aiqt_hooks.inline_errexit or
+            aiqt_hooks.HANDLER_EVENT.get("inline_errexit") != aiqt_hooks.PRETOOL or
+            "inline_errexit" not in aiqt_hooks.NOTE_ONLY_PRETOOL_MODES):
+        failures.append("(ie-wiring) inline_errexit handler/event/note-only wiring is missing or wrong")
+    failures.extend(_ie_dispatch_failures())
+
+
 # pgrep_self_match rows (trkasy): each deny row is a process check that can match the shell running it (pgrep,
 # pkill or pidwait with -f, with or without -A, or ps piped into a program given a pattern), found anywhere in
 # the command text; each allow row is one the guard must pass.
@@ -2891,8 +3678,9 @@ _PSM_IDIOM_ROWS = (
     ("(psm-i8) pidwait -f with the bracket idiom", "pidwait -f '[j]ob7'"))
 # Long bracket idioms, each one scan of the command: (label, command, decision). A test that searched the
 # whole command once per class letter used about 104 s of CPU on the first at 400 KB; each row must stay
-# under _PSM_TIMED_BOUND CPU seconds (about 0.01 to 0.06 s in-process on an 80-core host with Python 3.14.4,
-# 2026-10-29). The last is a literal whose period letter is the class letter, which is not judged and denies.
+# under _PSM_TIMED_BOUND CPU seconds of the calling thread's own work (_hook_cpu_timed; about 0.01 to
+# 0.06 s in-process on an 80-core host with Python 3.14.4, 2026-10-29). The last is a literal whose
+# period letter is the class letter, which is not judged and denies.
 _PSM_TIMED_ROWS = (
     ("(psm-t1) a 200,000-letter class", "pgrep -f '[" + "a" * 200000 + "]x' " + "b" * 200000, "allow"),
     ("(psm-t2) a 200,000-letter literal", "pgrep -f '[b]" + "a" * 199999 + "c' " + "a" * 200000, "allow"),
@@ -3162,15 +3950,318 @@ def _test_trkasy_no_amp(failures, tmp):
         aiqt_hooks._orch_foreground_detach_lexed = fixed
 
 
+_WAIT_LOOP_DENY_COMMAND = "while true; do gh run view 1; sleep 30; done &"
+
+
+_WAIT_LOOP_CHECKS_API_COMMANDS = ("gh pr checks", "gh pr status", "gh run watch")
+
+
+# The only spans of a poll-loop deny text (flattened and lower-cased) that may name the foreground, the
+# background dispatch flag, or the loop itself ("a foreground command" only describes the denied call): the
+# clause that forbids resubmitting the loop, and exit (1)'s
+# dispatch of the CI status reader (a different command, not the loop). Outside them, any word of
+# _WAIT_LOOP_RERUN_WORDS offers the loop again in some form (in the foreground, as a tracked dispatch, or by a
+# rerun), which contradicts the denial even where it never says "resubmit".
+_WAIT_LOOP_SANCTIONED_SPANS = (
+    "do not resubmit the loop in any form (neither as a tracked background dispatch nor in the foreground)",
+    "a background dispatch (run_in_background: true) that runs that reader",
+    "do not resubmit the loop")
+_WAIT_LOOP_RERUN_WORDS = ("in the foreground", "foreground wait", "run it foreground", "run_in_background",
+                          "the loop", "this loop", "rerun", "re-run", "keep it foreground",
+                          "retry it as a tracked background dispatch", "start the poll again",
+                          "the same polling command again")
+
+
+def _wait_loop_deny_text_faults(reason, banner):
+    """The faults of a deny text for a backgrounded polling loop (orch_untracked_wait_loop's, and
+    orch_truncation_guard's bare-'&' detach deny on the same loop). Neither the reason nor the banner may name
+    gh pr checks, gh pr status or gh run watch (each reads the Checks API, which a fine-grained token cannot
+    read, as tools/ci-status.sh's header says). Each must forbid resubmitting the loop: it carries "do not
+    resubmit the loop", every "resubmit" in it is inside that phrase, and it never says "same loop" or gives
+    the generic detach advice that would resubmit it (use the tracked background dispatch, or keep the
+    command in the foreground). Outside the do-not-resubmit clause and exit (1)'s dispatch of the reader
+    (_WAIT_LOOP_SANCTIONED_SPANS) it offers neither a foreground run or wait, run_in_background, the loop,
+    nor a rerun (_WAIT_LOOP_RERUN_WORDS), so a reworded offer to run the loop again ("run the loop in the foreground",
+    "rerun the loop with run_in_background", "keep it foreground", "retry it as a tracked background
+    dispatch", "start the poll again", "the same polling command again") is a fault. The remedy is one tracked task read by its exit
+    status, never by output words; the reason confines that exit to a CI wait in a repository that has such a reader and sends every
+    other wait to the tracked wake. The hook ships to adopter repositories that may have no
+    tools/ci-status.sh, so that path is not required; where the text names it, it must be only an example
+    ("such as tools/ci-status.sh")."""
+    faults = []
+    for where, text in (("reason", reason), ("banner", banner)):
+        flat = " ".join(text.split()).lower()
+        for name in _WAIT_LOOP_CHECKS_API_COMMANDS:
+            if name in flat:
+                faults.append("the {} names {}".format(where, name))
+        if flat.count("tools/ci-status.sh") != flat.count("such as tools/ci-status.sh"):
+            faults.append("the {} names tools/ci-status.sh other than as an example".format(where))
+        if "exit status" not in flat:
+            faults.append("the {} does not say to read the exit status".format(where))
+        if "do not resubmit the loop" not in flat:
+            faults.append("the {} does not say do not resubmit the loop".format(where))
+        if flat.count("resubmit") != flat.count("do not resubmit the loop"):
+            faults.append("the {} says resubmit other than in do not resubmit the loop".format(where))
+        if "same loop" in flat:
+            faults.append("the {} suggests resubmitting the same loop".format(where))
+        for advice in ("use the platform's tracked background dispatch", "keep the command in the foreground",
+                       "run it foreground", "use the tracked background dispatch or run it in the foreground"):
+            if advice in flat:
+                faults.append("the {} gives the generic detach advice {!r}, which resubmits the loop"
+                              .format(where, advice))
+        rest = flat
+        for span in _WAIT_LOOP_SANCTIONED_SPANS:
+            rest = rest.replace(span, " ")
+        for word in _WAIT_LOOP_RERUN_WORDS:
+            if word in rest:
+                faults.append("the {} offers to run the loop again ({!r} outside the do-not-resubmit clause and "
+                              "exit (1))".format(where, word))
+    flat = " ".join(reason.split()).lower()
+    if "never by matching success or failure words" not in flat:
+        faults.append("the reason does not forbid matching success or failure words in the output")
+    if "(1) only for a ci wait in a repository that has a ci status reader" not in flat:
+        faults.append("the reason does not confine exit (1) to a CI wait in a repository with a CI status reader")
+    if "(2) otherwise" not in flat:
+        faults.append("the reason does not send every other wait to exit (2), the tracked wake")
+    return faults
+
+
+def _wait_loop_deny_faults(handler, root, command=_WAIT_LOOP_DENY_COMMAND):
+    """handler's deny on command, _WAIT_LOOP_DENY_COMMAND unless given (a foreground call in registry scope
+    at root), judged by _wait_loop_deny_text_faults; a call that does not deny is itself the fault."""
+    code, stdout_obj, _stderr = handler({"hook_event_name": aiqt_hooks.PRETOOL, "tool_name": "Bash",
+                                         "cwd": str(root), "tool_input": {"command": command}})
+    if _reduce_result(code, stdout_obj) != "deny":
+        return ["the poll loop did not deny ({})".format(_reduce_result(code, stdout_obj))]
+    reason = (stdout_obj or {}).get("hookSpecificOutput", {}).get("permissionDecisionReason", "")
+    banner = (stdout_obj or {}).get("systemMessage", "")
+    if not isinstance(reason, str) or not isinstance(banner, str):
+        return ["the reason or banner is not a string"]
+    return _wait_loop_deny_text_faults(reason, banner)
+
+
+# Each mutant appends text to the orch_untracked_wait_loop deny reason that the row must catch: the label,
+# the appended text, and a word every fault it must raise holds.
+_WAIT_LOOP_DENY_MUTANTS = (
+    ("gh-pr-checks", " (for example: timeout <seconds> gh pr checks <ref> --watch)", "names gh pr checks"),
+    ("resubmit-tracked", " (3) resubmit this loop with run_in_background: true.", "resubmit other than"),
+    ("gh-run-watch", " (3) run gh run watch <id>.", "names gh run watch"),
+    ("gh-pr-status", " (3) run gh pr status.", "names gh pr status"),
+    ("foreground-wait", " Or run the loop in the foreground and wait.", "run the loop again"),
+    ("rerun-tracked", " (3) rerun the loop with run_in_background: true.", "run the loop again"),
+    ("keep-it-foreground", " Or keep it foreground.", "run the loop again"),
+    ("retry-tracked-dispatch", " (3) retry it as a tracked background dispatch.", "run the loop again"),
+    ("start-poll-again", " Then start the poll again.", "run the loop again"),
+    ("same-polling-command", " Then run the same polling command again.", "run the loop again"))
+
+
+def _test_wait_loop_deny_text(failures, tmp):
+    """orch_untracked_wait_loop deny text, in registry scope (a git toplevel holding the registry): the
+    matching poll loop denies, and the reason and banner pass _wait_loop_deny_text_faults. Each mutant in
+    _WAIT_LOOP_DENY_MUTANTS wraps _deny so the reason carries its text, and the row must then go red with
+    the fault it names.
+
+    The same loop also meets orch_truncation_guard's bare-'&' detach deny, so the row runs that handler on
+    it as well and requires its reason and banner to pass the same check. That is the property that the two
+    reasons do not contradict: both deny, both say "do not resubmit the loop" and resubmit nothing else, and
+    neither gives the generic detach advice (use the tracked background dispatch, or keep the command in the
+    foreground) that would resubmit the loop the other forbids. Its flip patches _orch_detach_poll_loop to
+    find no poll loop and _orch_bg_poll_loop to read 'none' (with only the first patch the guard's hedged
+    fallback text, which also passes this check, would take over), which restores the generic detach text
+    for this command, and the row must then go red."""
+    try:
+        root = _init_repo(tmp / "wait-loop-deny-text")
+    except (OSError, subprocess.SubprocessError) as exc:
+        failures.append("(wl-deny-text-cannot-evaluate) the registry-scope repository could not be built: {}"
+                        .format(exc))
+        return
+    (root / ".aiqt").mkdir(parents=True, exist_ok=True)
+    (root / ".aiqt" / "orchestration.local.json").write_text(json.dumps({"version": 1}), encoding="utf-8")
+    handler = aiqt_hooks.orch_untracked_wait_loop
+    faults = _wait_loop_deny_faults(handler, root)
+    if faults:
+        failures.append("(wl-deny-text) the untracked wait-loop deny text is wrong: {}"
+                        .format("; ".join(faults)))
+    saved = aiqt_hooks._deny
+    for label, extra, expected in _WAIT_LOOP_DENY_MUTANTS:
+        def mutant_deny(reason, banner, extra=extra):
+            return saved(reason + extra, banner)
+        aiqt_hooks._deny = mutant_deny
+        try:
+            flipped = _wait_loop_deny_faults(handler, root)
+        finally:
+            aiqt_hooks._deny = saved
+        if not any(expected in fault for fault in flipped):
+            failures.append("(wl-deny-text-flip-{}) with the reason carrying {!r} the row must go red with a "
+                            "fault naming {!r}, got {!r}".format(label, extra, expected, flipped))
+    guard = aiqt_hooks.orch_truncation_guard
+    faults = _wait_loop_deny_faults(guard, root)
+    if faults:
+        failures.append("(wl-deny-text-truncation-guard) the truncation guard's deny of the same poll loop "
+                        "contradicts the wait-loop deny: {}".format("; ".join(faults)))
+    saved_poll = aiqt_hooks._orch_detach_poll_loop
+    saved_bg = aiqt_hooks._orch_bg_poll_loop
+    aiqt_hooks._orch_detach_poll_loop = lambda command: False
+    aiqt_hooks._orch_bg_poll_loop = lambda command: "none"
+    try:
+        flipped = _wait_loop_deny_faults(guard, root)
+    finally:
+        aiqt_hooks._orch_detach_poll_loop = saved_poll
+        aiqt_hooks._orch_bg_poll_loop = saved_bg
+    if not any("generic detach advice" in fault for fault in flipped):
+        failures.append("(wl-deny-text-truncation-guard-flip) with the truncation guard's generic detach text "
+                        "restored for the poll loop the row must go red, got {!r}".format(flipped))
+    _wait_loop_overmatch_rows(failures, root)
+    _wait_loop_fallback_rows(failures, root)
+
+
+# A detach whose '#' the shared lexer cannot judge under both readings, with the poll shape's words only in
+# quoted text: _orch_bg_poll_loop's text-scan fallback reads it as 'match' (the wait-loop hook's disclosed
+# over-match), but it is not a polling loop. The wait-loop hook still denies it with the wait-loop exits,
+# so the truncation guard's deny gives the hedged fallback text (the detach stated, the poll loop stated
+# only conditionally, and the same exits), never the generic detach advice that would offer the loop the
+# other deny forbids, and never the lexed poll text, which would state outright a loop that is not there.
+_WAIT_LOOP_OVERMATCH_COMMAND = "npm run serve & x=\"$(echo # (\n)\"; echo \"for gh sleep done\""
+
+
+# The hedge the truncation guard's fallback poll text carries (the poll loop stated conditionally), and the
+# opening the lexed poll text states outright; _wait_loop_overmatch_faults tells the two texts apart by them.
+_WAIT_LOOP_HEDGE_PHRASE = "if this command backgrounds a polling loop"
+_WAIT_LOOP_OUTRIGHT_PHRASE = "this foreground command backgrounds a polling loop"
+
+
+def _wait_loop_overmatch_faults(root, command=_WAIT_LOOP_OVERMATCH_COMMAND):
+    """The faults of orch_truncation_guard's deny on command (a foreground call in registry scope at root),
+    _WAIT_LOOP_OVERMATCH_COMMAND unless given: it must deny with the hedged fallback text, judged by
+    _wait_loop_deny_text_faults (so it carries the wait-loop exits and offers neither a foreground run nor
+    run_in_background) plus the hedge itself (_WAIT_LOOP_HEDGE_PHRASE), and it must not state the loop
+    outright as the lexed poll text does (_WAIT_LOOP_OUTRIGHT_PHRASE), since the fallback 'match' may be an
+    over-match on words in quoted or comment text."""
+    code, stdout_obj, _stderr = aiqt_hooks.orch_truncation_guard(
+        {"hook_event_name": aiqt_hooks.PRETOOL, "tool_name": "Bash", "cwd": str(root),
+         "tool_input": {"command": command}})
+    if _reduce_result(code, stdout_obj) != "deny":
+        return ["the over-matched detach did not deny ({})".format(_reduce_result(code, stdout_obj))]
+    reason = (stdout_obj or {}).get("hookSpecificOutput", {}).get("permissionDecisionReason", "")
+    banner = (stdout_obj or {}).get("systemMessage", "")
+    if not isinstance(reason, str) or not isinstance(banner, str):
+        return ["the reason or banner is not a string"]
+    faults = _wait_loop_deny_text_faults(reason, banner)
+    flat = " ".join(reason.split()).lower()
+    if _WAIT_LOOP_HEDGE_PHRASE not in flat:
+        faults.append("the reason lacks the hedge ({!r})".format(_WAIT_LOOP_HEDGE_PHRASE))
+    if _WAIT_LOOP_OUTRIGHT_PHRASE in flat:
+        faults.append("the reason states the poll loop outright on a command the lexer did not read as one")
+    if "keep the command in the foreground" in flat:
+        faults.append("the reason gives the generic detach advice")
+    return faults
+
+
+def _wait_loop_overmatch_rows(failures, root):
+    """orch_truncation_guard on _WAIT_LOOP_OVERMATCH_COMMAND: the precondition (the shared lexer refuses it
+    with _UncertainHashError, and the wait-loop classifier's text-scan fallback then reads it as 'match'),
+    the row (_wait_loop_overmatch_faults), a flip that gates the lexed poll text on the classifier's answer,
+    fallback included, under which the row must go red (the loop stated outright), and a flip that reads the
+    fallback as 'none', which restores the generic detach text and must also turn the row red."""
+    try:
+        aiqt_hooks._lex_readings(_WAIT_LOOP_OVERMATCH_COMMAND)
+        lexed = True
+    except aiqt_hooks._UncertainHashError:
+        lexed = False
+    except ValueError:
+        lexed = True
+    if lexed or aiqt_hooks._orch_bg_poll_loop(_WAIT_LOOP_OVERMATCH_COMMAND) != "match":
+        failures.append("(wl-deny-text-overmatch-cannot-evaluate) the over-match fixture no longer reads 'match' "
+                        "only through the text-scan fallback, so the row below tests nothing")
+        return
+    faults = _wait_loop_overmatch_faults(root)
+    if faults:
+        failures.append("(wl-deny-text-overmatch) the truncation guard's deny of an over-matched detach is "
+                        "wrong: {}".format("; ".join(faults)))
+    saved_poll = aiqt_hooks._orch_detach_poll_loop
+    aiqt_hooks._orch_detach_poll_loop = lambda command: aiqt_hooks._orch_bg_poll_loop(command) == "match"
+    try:
+        flipped = _wait_loop_overmatch_faults(root)
+    finally:
+        aiqt_hooks._orch_detach_poll_loop = saved_poll
+    if not any("states the poll loop outright" in fault for fault in flipped):
+        failures.append("(wl-deny-text-overmatch-flip) with the lexed poll text gated on the fallback's 'match' "
+                        "the row must go red, got {!r}".format(flipped))
+    saved_bg = aiqt_hooks._orch_bg_poll_loop
+    aiqt_hooks._orch_bg_poll_loop = lambda command: "none"
+    try:
+        flipped = _wait_loop_overmatch_faults(root)
+    finally:
+        aiqt_hooks._orch_bg_poll_loop = saved_bg
+    if not any("generic detach advice" in fault for fault in flipped):
+        failures.append("(wl-deny-text-overmatch-generic-flip) with the generic detach text restored for the "
+                        "over-matched detach the row must go red, got {!r}".format(flipped))
+
+
+# Commands where a bare '&' really backgrounds work in a polling loop but the shared lexer refuses the
+# command (a '#' it cannot judge under both readings, here inside a backquote substitution or a quoted
+# "$( ... )"), with the '&' before the first such '#' so the detach scan reads it: _orch_bg_poll_loop reads
+# 'match' only through its text-scan fallback while _orch_detach_poll_loop is False. The truncation guard's
+# deny must give the hedged fallback text (the wait-loop exits, offering neither a foreground run nor
+# run_in_background), and orch_untracked_wait_loop denies the same command with those exits, so the two
+# denials must not contradict on any of them.
+_WAIT_LOOP_FALLBACK_LOOP_ROWS = (
+    ("backquote-hash", "while true; do gh run view 1; sleep 30; done & x=`echo #`"),
+    ("backquote-hash-second-line", "while true; do gh run view 1; sleep 30; done &\nx=`echo #`"),
+    ("quoted-subst-hash", "while true; do gh run view 1; sleep 30; done & x=\"$(echo # (\n)\""),
+    ("amp-in-body", "while true; do gh run view 1 & sleep 30; done; x=`echo #`"),
+    ("for-curl", "for i in 1 2 3; do curl -fsS https://example.invalid/status; sleep 5; done & x=`echo #`"),
+)
+
+
+def _wait_loop_fallback_rows(failures, root):
+    """orch_truncation_guard and orch_untracked_wait_loop on each _WAIT_LOOP_FALLBACK_LOOP_ROWS command: the
+    precondition (the shared lexer refuses it with _UncertainHashError, _orch_bg_poll_loop reads 'match'
+    only through its text-scan fallback, and _orch_detach_poll_loop finds no lexed loop), the guard's deny
+    judged by _wait_loop_overmatch_faults (the hedged fallback text with the wait-loop exits), the wait-loop
+    hook's deny on the same command judged by _wait_loop_deny_text_faults (the property that the two denials
+    do not contradict), and a flip that reads the fallback as 'none', which restores the guard's generic
+    detach text and must turn each row red with the generic-advice fault."""
+    for label, command in _WAIT_LOOP_FALLBACK_LOOP_ROWS:
+        try:
+            aiqt_hooks._lex_readings(command)
+            uncertain = False
+        except aiqt_hooks._UncertainHashError:
+            uncertain = True
+        except ValueError:
+            uncertain = False
+        if (not uncertain or aiqt_hooks._orch_bg_poll_loop(command) != "match"
+                or aiqt_hooks._orch_detach_poll_loop(command)):
+            failures.append("(wl-deny-text-fallback-{}-cannot-evaluate) the fixture no longer reads 'match' "
+                            "only through the text-scan fallback, so the row tests nothing".format(label))
+            continue
+        faults = _wait_loop_overmatch_faults(root, command)
+        if faults:
+            failures.append("(wl-deny-text-fallback-{}) the truncation guard's deny of a fallback-matched "
+                            "poll loop is wrong: {}".format(label, "; ".join(faults)))
+        faults = _wait_loop_deny_faults(aiqt_hooks.orch_untracked_wait_loop, root, command)
+        if faults:
+            failures.append("(wl-deny-text-fallback-{}-wait-loop) the wait-loop deny of a fallback-matched "
+                            "poll loop is wrong: {}".format(label, "; ".join(faults)))
+        saved_bg = aiqt_hooks._orch_bg_poll_loop
+        aiqt_hooks._orch_bg_poll_loop = lambda cmd: "none"
+        try:
+            flipped = _wait_loop_overmatch_faults(root, command)
+        finally:
+            aiqt_hooks._orch_bg_poll_loop = saved_bg
+        if not any("generic detach advice" in fault for fault in flipped):
+            failures.append("(wl-deny-text-fallback-{}-flip) with the generic detach text restored for the "
+                            "fallback-matched loop the row must go red, got {!r}".format(label, flipped))
+
+
 def _test_pgrep_self_match(failures):
     """pgrep_self_match rows; only the real-bash oracle rows (_psm_oracle) execute a command. Each deny row
     must also be red with the hook disabled (its detector _psm_hit patched to find nothing), so the row pins
     this hook's decision, and each bracket idiom row must be red with the idiom exception removed."""
     handler = aiqt_hooks.pgrep_self_match
     for label, command, want in _PSM_TIMED_ROWS:
-        start = time.process_time()
-        got = _decision(handler, command)
-        spent = time.process_time() - start
+        got, spent = _hook_cpu_timed(lambda command=command: _decision(handler, command),
+                                     bound=_PSM_TIMED_BOUND)
         if got != want or spent > _PSM_TIMED_BOUND:
             failures.append("{}: expected {} within {} s of CPU, got {} in {:.3f} s".format(
                 label, want, _PSM_TIMED_BOUND, got, spent))
@@ -5058,6 +6149,119 @@ def _lex_fork_tail_by_index():
         aiqt_hooks._LexFork = fork_class
 
 
+# Commands for the errexit walker's cut of separator runs (_errexit_statements), with set -e on: runs of ';'
+# after a word, after '(' and ')', after && and a pipe, in a case pattern and arm and in a function body, before
+# uncertain '#' lines, and beside a pipefail state left unknown, so the first two segments of a run meet each
+# rule the walker reads such a segment by; runs of '(' and of equal statements, which the cut keeps whole; and
+# a run after set +e, where the walk ends with errexit off.
+_ERREXIT_RUN_TEXTS = (
+    "set -e;;;;; a", "set -e; case x in a) (false) ; ; b) echo;; esac",
+    "set -e; case x in a) false;; b) true;; esac", "set -e; case x in a) false;;;; b) true;; esac; echo",
+    "set -e\nfalse;;;\necho", "set -e; false &&;;; echo", "set -e; (;;;; false); echo", "set -e; a |;;; b",
+    "set -e; f() { ;;; false; }; f; b", "set -e; (" + ";" * 40 + " #a\n #b\n #c\n #d\n); b",
+    "set -e; true || set -o pipefail; a | true;;; b", "set -e; (((false); true)); echo",
+    "set -e; (((true))\n) echo", "set -e; false; false; false", "set -e; case x in a" + ";" * 9 + ") false;; esac; b",
+    "set -e; set +e;;;; a")
+_ERREXIT_RUN_ALPHABET = ("set -e", ";", ";", ";;", ";;;", " ", "\n", "(", ")", "case x in ", "a)", "esac", "if ",
+                         "then ", "fi", "false", "true", "&&", "||", "|", "&", "{ ", "}", "f() ", " #a", "do ", "done")
+
+
+def _errexit_pairs_full(command):
+    """The first three of _errexit_statements' (pairs, tail, exact, unread) for command with every segment
+    kept, no run cut."""
+    segments, exact, in_progress = aiqt_hooks._lex_command(command, partial=True)
+    if not exact:
+        quoted = aiqt_hooks._ERREXIT_UNQUOTED_HEREDOC_RE.sub(r"<<\1\2'\3'", command)
+        if quoted != command:
+            segments, _complete, in_progress = aiqt_hooks._lex_command(quoted, partial=True)
+    pairs = [(seg.argv, seg.sep_after, bool(seg.redirects)) for seg in segments]
+    tail = pairs.pop()[0] if in_progress else None
+    return pairs, tail, exact
+
+
+def _errexit_cut(keep):
+    """A wrong cut for _errexit_runs_failures: the full reading with each run of equal pairs cut to keep(pair)
+    of them (None keeps the whole run)."""
+    def statements(command):
+        pairs, tail, exact = _errexit_pairs_full(command)
+        cut = []
+        for pair, run in itertools.groupby(pairs):
+            cut.extend(itertools.islice(run, keep(pair)))
+        return cut, tail, exact
+    return statements
+
+
+def _errexit_run_mismatches(statements, texts):
+    """The texts on which the walker (_errexit_hazard, its decision and whether errexit is on where it ended)
+    over statements(text) differs from it over the full reading (_errexit_pairs_full), or whose tail or exact
+    flag differs: [(text, got, want)], at most three."""
+    out = []
+    for text in texts:
+        pairs, tail, exact = _errexit_pairs_full(text)
+        want = (aiqt_hooks._errexit_hazard(pairs, tail), tail, exact)
+        pairs, tail, exact = statements(text)[:3]
+        got = (aiqt_hooks._errexit_hazard(pairs, tail), tail, exact)
+        if got != want:
+            out.append((text, got, want))
+            if len(out) == 3:
+                return out
+    return out
+
+
+def _errexit_runs_failures(count=6000, seed=20261025):
+    """(dl-errexit-runs) _errexit_statements, which keeps only the first two of each run of segments with no word
+    and no redirect that end with ';', gives the walker (_errexit_hazard) the same decision and errexit state
+    where it ended, tail and exact flag as the full reading (_errexit_pairs_full) on _ERREXIT_RUN_TEXTS and
+    `count` seeded random texts over _ERREXIT_RUN_ALPHABET. The corpus must hold texts whose decision is True,
+    "possible" and False, texts the walk ends with errexit on and off, and texts with a run the cut shortens
+    (dl-errexit-runs-corpus). Three wrong cuts (one keeping only the first of each such run, one dropping every
+    such segment, one cutting every run of equal pairs to two) must each be caught by the same comparison
+    (dl-errexit-runs-red-*), so it discriminates.
+    (dl-errexit-runs-taken) The cut is taken: on a run of 4096 separators before four '#' lines (sixteen
+    readings) _errexit_statements gives fewer than 200 pairs, where the full reading gives more than 60,000
+    (dl-errexit-runs-taken-red), so the count discriminates."""
+    out = []
+    rng = random.Random(seed)
+    texts = list(_ERREXIT_RUN_TEXTS)
+    for _ in range(count):
+        texts.append("set -e; " + "".join(rng.choice(_ERREXIT_RUN_ALPHABET) for _ in range(rng.randint(1, 16))))
+    decisions = set()
+    stops = set()
+    shortened = 0
+    for text in texts:
+        pairs, tail, _exact = _errexit_pairs_full(text)
+        decision, on = aiqt_hooks._errexit_hazard(pairs, tail)
+        decisions.add(decision)
+        stops.add(on)
+        shortened += len(aiqt_hooks._errexit_statements(text)[0]) < len(pairs)
+    if decisions != {True, "possible", False} or stops != {True, False} or not shortened:
+        out.append("(dl-errexit-runs-corpus) the corpus must hold texts whose decision is True, possible and False "
+                   "(it holds {!r}), texts the walk ends with errexit on and off ({!r}) and texts with a run the "
+                   "cut shortens ({})".format(sorted(map(str, decisions)), sorted(stops), shortened))
+    for text, got, want in _errexit_run_mismatches(aiqt_hooks._errexit_statements, texts):
+        out.append("(dl-errexit-runs) the walker over _errexit_statements({!r}) gave {!r}, over the full reading "
+                   "{!r}".format(text, got, want))
+    empty = ([], ";", False)
+    wrong = (
+        ("keep-one", lambda pair: 1 if pair == empty else None),
+        ("drop", lambda pair: 0 if pair == empty else None),
+        ("every-run", lambda pair: 2),
+    )
+    for name, keep in wrong:
+        if not _errexit_run_mismatches(_errexit_cut(keep), texts):
+            out.append("(dl-errexit-runs-red-{}) a wrong cut passes the comparison".format(name))
+    lines = "(" + ";" * 4096 + " #a\n #b\n #c\n #d\n)"
+    built = len(aiqt_hooks._errexit_statements(lines)[0])
+    if built >= 200:
+        out.append("(dl-errexit-runs-taken) _errexit_statements gave {} pairs for {!r}; the cut must leave fewer "
+                   "than 200".format(built, lines[:12] + "..."))
+    built = len(_errexit_pairs_full(lines)[0])
+    if built <= 60000:
+        out.append("(dl-errexit-runs-taken-red) the full reading gave {} pairs for {!r}, not more than 60,000, so "
+                   "the count cannot see a reading that keeps each run whole".format(built, lines[:12] + "..."))
+    return out
+
+
 def _repeat(unit, size, tail=""):
     return unit * max(1, (size - len(tail)) // len(unit)) + tail
 
@@ -5088,6 +6292,15 @@ _DEADLINE_SHAPES = {
                                                + ")" * (n // 3 - 3)}),
     "nest_cmdsubst_background": lambda n, base: ("Bash", {"command": "echo " + "$(" * (n // 3 - 3) + "true"
                                                           + ")" * (n // 3 - 3), "run_in_background": True}),
+    "errexit_guarded": lambda n, base: ("Bash", {"command": "set -e\n" + _repeat("a || exit 1\n", n - 7)}),
+    "errexit_nest_parens": lambda n, base: ("Bash", {"command": "set -e; " + "(" * (n // 2 - 6) + "true"
+                                                     + ")" * (n // 2 - 6)}),
+    "errexit_case_arms": lambda n, base: ("Bash", {"command": "set -e; case $x in "
+                                                   + _repeat("a) true;; ", n - 24) + "esac"}),
+    "errexit_note_after": lambda n, base: ("Bash", {"command": "set -e; " + _repeat("true; ", n - 8, "a; b")}),
+    # A run of separators the lexer reads before a here-string it stops at, set -e past it: the unread rest is
+    # found past the last segment read, across the whole run, and searched for an option word.
+    "errexit_unread_after": lambda n, base: ("Bash", {"command": "a" + ";" * (n - 21) + " <<< x; set -e; a; b"}),
     # A double-quoted run of command substitutions each holding a case statement, whose pattern ')' the shared
     # lexer's skip ends each substitution at, so only bash_absolute_paths' second reading (_AbspthReader) reads
     # them as modelled; the *_after form ends with one whose case body truncates a relative file, which that
@@ -5188,7 +6401,9 @@ _DEADLINE_SHAPES = {
 # with no word and no redirect, the two costliest cases measured on one host (max of five runs) are
 # gate_weakening on seps_hash5 at 1 MB, 0.63 s against the 7 s bound, and commit_identity on seps_hash_lines
 # at 64 KB, under 0.01 s against the 1.5 s bound; before those changes they measured 3.1 s and 0.7 s on the
-# same host, which overran those bounds on hosts 3 to 4.5 times slower.
+# same host, which overran those bounds on hosts 3 to 4.5 times slower. Those figures predate inline_errexit,
+# which is timed on these shapes too and costs more: its slowest, paren_hash4 at 1 MB, used 2.19 to 2.22 s of
+# CPU over two runs on a 24-core host with Python 3.14.4 (2026-10-25), against the same 7 s bound.
 _DEADLINE_HASH_SHAPES = ("seps_hash", "seps_hash_lines", "seps_hash_nested", "paren_hash4", "seps_hash5")
 _DEADLINE_HASH_DECISIONS = {
     ("orch_truncation_guard", "seps_hash"): "deny", ("orch_truncation_guard", "seps_hash_lines"): "deny",
@@ -5237,6 +6452,8 @@ _DEADLINE_CASES = {
     "git_discard": ("git_segments_reset", "nest_parens", "procsubst_run_after"),
     "git_explicit_binding": ("git_add_unbal", "cd_git_fetch_unbal", "breadth_push_after_unbal"),
     "git_stash_ref": ("sep_semicolon", "cd_git_fetch_unbal", "nest_parens", "ansi_c_herestr"),
+    "inline_errexit": ("sep_semicolon", "heredocs", "nest_parens", "cd_git_fetch_unbal", "errexit_guarded",
+                       "errexit_nest_parens", "errexit_case_arms", "errexit_note_after", "errexit_unread_after"),
     "orch_ask_guard": ("ask_long",),
     "orch_resume_barrier": ("git_words", "write_content"),
     "orch_truncation_guard": ("nest_cmdsubst_background", "git_words"),
@@ -5266,12 +6483,16 @@ _DEADLINE_DENY_CASES = frozenset((
     ("git_explicit_binding", "breadth_push_after_unbal"), ("pgrep_self_match", "pgrep_self_after"),
     ("protected_line", "push_force_after"), ("protected_line", "mirror_cfg_run_after"),
     ("protected_line", "procsubst_run_after")))
-# The (handler, shape) cases whose known outcome outside registry scope is a note, each within its bound:
-# a detach or detacher (fg_detach_after, fg_setsid_options), a construct left open at the end of the
-# scan (the repeated unclosed `$((` openers and the unterminated heredoc body), which the scan reports as
-# unreadable instead of a silent allow, and the `&` in a body under an unquoted delimiter
-# (fg_heredocs_amp), which the in-scope detector reads as a bare detach (an accepted over-note).
+# The (handler, shape) cases whose note must still arrive, each within its bound. For inline_errexit: on
+# errexit_note_after errexit is on for the whole long prefix and the hazard is at its end, and on
+# errexit_unread_after the set -e is in the rest past the long prefix that the lexer did not read. For
+# orch_truncation_guard, whose known outcome outside registry scope is a note: a detach or detacher
+# (fg_detach_after, fg_setsid_options), a construct left open at the end of the scan (the repeated unclosed
+# `$((` openers and the unterminated heredoc body), which the scan reports as unreadable instead of a silent
+# allow, and the `&` in a body under an unquoted delimiter (fg_heredocs_amp), which the in-scope detector
+# reads as a bare detach (an accepted over-note).
 _DEADLINE_NOTE_CASES = frozenset((
+    ("inline_errexit", "errexit_note_after"), ("inline_errexit", "errexit_unread_after"),
     ("orch_truncation_guard", "fg_detach_after"), ("orch_truncation_guard", "fg_setsid_options"),
     ("orch_truncation_guard", "fg_arith_open"), ("orch_truncation_guard", "fg_heredoc_ops_open"),
     ("orch_truncation_guard", "fg_heredocs_amp")))
@@ -5298,23 +6519,38 @@ _DEADLINE_SIZES = (65536, 262144, 1048576)
 # at 256 KB and 1.83 s at 1 MB (on nest_parens, under git_discard or git_stash_ref), its wall-clock time
 # within 0.01 s of that; before them, five handlers took 15 to 39 s or more at 64 KB. A further run on a
 # 24-core host with Python 3.14.4 (2026-10-16) measured at most 0.10, 0.48 and 2.07 s of CPU (2.07 s on
-# nest_parens under git_stash_ref), each within 0.01 s of its wall-clock time. Each bound keeps a margin of
-# about 15, 6 and 3.4 times the slowest of those runs and stays under PRETOOL_BUDGET_SECONDS. The truncation
-# guard on seps_hash_lines with its '&' (_DEADLINE_HASH_DETACH_SHAPES) later measured about 2.9 to 3.2 s of
-# CPU at 1 MB with Python 3.14.4 (2026-11-02), which leaves the 1 MB bound a margin of about 2.2 times. These are
-# measured bounds on these cases, not a complexity guarantee: they fail a return of the growth the old
-# scans had, but an implementation whose super-linear cost is small enough on these sizes fits all three.
+# nest_parens under git_stash_ref), each within 0.01 s of its wall-clock time. inline_errexit, timed on these
+# shapes later, costs more at 1 MB: at most 2.22 s of CPU on paren_hash4 (above), and a further run of it on a
+# 24-core host with Python 3.14.4 (2026-10-25) measured at most 0.10, 0.46 and 2.01 s of CPU, each on
+# paren_hash4. Every timed row, here and in
+# the lex-cost rows, compares the median of its _TIMED_RUNS (3) runs' CPU times (_judged, the
+# second-fastest) with its CPU bound and checks every run's outcome: one run slowed by a loaded host is
+# tolerated, while a slowdown on two of the three runs fails. Measured on one shared 80-CPU host
+# (2026-11-01, one-minute load average 38 to 44, no load added), as that median over 3 to 5 trials with
+# the handler's work done once (honest) and twice (doubled): cd_git_fetch_unbal under review_workdir_hold
+# at 256 KB, honest 0.861 to 0.947 s, doubled 1.801 to 1.908 s, so a 2.0 s bound would pass every doubled
+# trial and 256 KB keeps its 3.0 s bound; git_add_unbal under gate_weakening at 1 MB, honest 3.737 to
+# 3.868 s, doubled 7.925 to 8.709 s, each over the 7.0 s bound. The truncation guard on seps_hash_lines
+# with its '&' (_DEADLINE_HASH_DETACH_SHAPES) later measured about 2.9 to 3.2 s of CPU at 1 MB with Python
+# 3.14.4 (2026-11-02), which leaves the 1 MB bound a margin of about 2.2 times. These are measured bounds
+# on these cases, not a complexity guarantee: they fail a return of the growth the old scans had, but an
+# implementation whose super-linear cost is small enough on these sizes fits all three.
 _DEADLINE_BOUNDS = {65536: 1.5, 262144: 3.0, 1048576: 7.0}
+_TIMED_RUNS = 3
 # Wall-clock seconds one such call may take on any size: PRETOOL_BUDGET_SECONDS, the deadline main() gives
 # the same call in production, so a regression whose time goes to waiting (a sleep, a lock, a slow
 # filesystem), which the CPU bounds do not see, fails here as that call would fail closed there. Against
-# the slowest wall-clock times above at 64 KB and 256 KB (at most 0.10 and 0.49 s) the 8-second gate leaves
-# a margin of about 80 and 16 times; at 1 MB the truncation guard on seps_hash_lines with its '&'
+# the 2026-10-16 wall-clock times above at 64 KB and 256 KB (at most 0.10 and 0.49 s) the 8-second gate
+# leaves a margin of about 80 and 16 times; at 1 MB the truncation guard on seps_hash_lines with its '&'
 # (_DEADLINE_HASH_DETACH_SHAPES) measured about 2.9 to 3.2 s of CPU, its wall-clock time within 0.01 s of
-# that, a margin of about 2.5 times. A run over this bound fails, whatever a later run does: a case whose run
-# reached a decision over it is run once more only as a diagnostic, and the failure carries both runs'
-# wall-clock times, CPU times and outcomes, so a stall of a loaded host is reported as one, never passed
-# over, and an intermittent wait cannot pass on its second run.
+# that, a margin of about 2.5 times, and against the 2026-11-01 honest 1 MB runs above, whose wall-clock
+# medians were 3.738 to 3.869 s on the loaded host (the figures above are those runs' CPU medians), about
+# 2.1 times. inline_errexit's CPU time at 1 MB (at most 2.22 s, above; its wall-clock time was not
+# recorded) is under those 1 MB figures. Like the CPU bounds, this bound judges the median of the case's _TIMED_RUNS runs: a hang or
+# wait on two of the three runs fails, while one run stalled by a loaded host does not fail the case, so a
+# wait on only one run in three passes here. A case whose median wall-clock time is over it, with at least
+# one run reaching a decision, fails and is run once more only as a diagnostic, which never clears it; the
+# failure carries every run's wall-clock time, CPU time and outcome, and the diagnostic run's as well.
 _DEADLINE_WALL_BOUND = aiqt_hooks.PRETOOL_BUDGET_SECONDS
 # Each case runs under a _DeadlineWindow of this many wall-clock seconds, a hang guard only: it ends a case
 # that would run on for minutes, so the run reports it instead of stalling. The wall-clock gate is
@@ -5352,6 +6588,96 @@ def _cpu_seconds():
     return time.process_time() + children.children_user + children.children_system
 
 
+def _hook_cpu_timed(call, bound=None, runs=3):
+    """(the last call()'s result, the least CPU seconds the calling thread spent in one call()): the
+    clock of every row that holds one in-process handler call to a fixed absolute CPU bound. It charges
+    the call only for its own work, which a fixed bound can judge, where one process-CPU reading also
+    charges it for work it did not do (a commit-identity row so charged measured 2.43 s inside the full
+    suite on a host at a load near half its CPUs, against at most 0.03 s for the same call alone, about
+    80 times; at these rows the suite runs one thread, arms no interval timer and triggers no cyclic
+    collection, so that charge came from outside the call). Three guards, each against a charge a fixed
+    absolute bound cannot absorb: time.thread_time charges only the calling thread, so work another
+    thread does while the call runs is never billed to it; the cyclic collector is held off across the
+    call, the prior state restored after the second clock reading, so a collection that the call's own
+    allocations tip over a generation threshold cannot bill a pass over the whole suite heap, which a
+    hook process at its production size never carries, to the one call that tipped it (the deferred
+    collection runs outside every timed region, charged to no row); and with a bound the call is
+    re-timed, up to runs times in all, only while the least reading so far is at or over it, and that
+    least reading is judged, since stray charges the clock cannot see apart (kernel reclaim billed to
+    an allocating thread as system time, a co-scheduled sibling's cache pressure) only ever add time,
+    so the least of up to three is the fairest reading of the call's own cost. The call's own work, its
+    reference counting included, is always charged. The re-timed call must be deterministic: same
+    input, same decision, no state carried across runs (a counting shim is reset inside the call).
+    Disclosed limit: a real super-linear regression of the measured path is over the bound on every
+    run, and so still fails, only in a call that meets that precondition, and then only after up to
+    runs timed calls of the regressed path, so in about runs times its own cost: the psm-t rows, which
+    time one call at about 400 KB with no smaller probe first, are the worst recorded case (about 104 s
+    of CPU per call at 400 KB, so about five minutes), while the rows that time a small probe first
+    fail on that probe; a call that keeps state between runs (a memoised quadratic helper, for example)
+    can read low on its second and third runs, and its least reading then passes the bound. The
+    median-judged rows (_timed_runs over the
+    lex-cost and deadline-shape cases) keep their existing clocks, time.process_time in the lex-cost
+    rows and _cpu_seconds in the deadline-shape cases, and judge the median of three runs, which
+    already tolerates one slowed run."""
+    import gc
+    spent = None
+    for _ in range(max(1, runs)):
+        enabled = gc.isenabled()
+        gc.disable()
+        try:
+            started = time.thread_time()
+            result = call()
+            once = time.thread_time() - started
+        finally:
+            if enabled:
+                gc.enable()
+        spent = once if spent is None else min(spent, once)
+        if bound is None or spent < bound:
+            break
+    return result, spent
+
+
+def _judged(times):
+    """The time a timed row judges among its runs' times: their median, the second-fastest of three (the
+    lower middle one of an even count). The CPU-timed rows judge exactly _TIMED_RUNS (3) runs with it; the
+    deadline-path rows, whose run count can be even, judge with _judged_half_fails."""
+    return sorted(times)[(len(times) - 1) // 2]
+
+
+def _judged_half_fails(times):
+    """The time a deadline-path row judges among its runs' times: their median for an odd count, the UPPER
+    middle one of an even count, so a time over a bound on half of the runs, or more, puts the judged time
+    over it. A deadline-path row can take an even count of runs (a run that logs no clock read is replaced
+    for the tail judgement, while its wall-clock time still counts for the whole-run judgement, so that
+    judgement sees 3 to 6 times): the lower middle of an even count would let a row pass with a stall on
+    half of its runs, which the three-run rows' rule fails. For 3 or 5 runs the two rules agree."""
+    return sorted(times)[len(times) // 2]
+
+
+def _timed_runs(timed):
+    """timed() called _TIMED_RUNS times, every call made whatever an earlier one gave, each returning a
+    tuple that starts with its CPU seconds: (the median of the calls' CPU seconds (_judged), [every call's
+    tuple]). Every timed row compares only that median with its bound and checks the outcome of every call,
+    so no call's outcome clears another's failure; times are judged together, so a time over the bound on
+    fewer than half of the calls does not fail the row."""
+    results = [timed() for _ in range(_TIMED_RUNS)]
+    return _judged([result[0] for result in results]), results
+
+
+def _lex_cost_problems(name, guard, length, cpu, runs, want):
+    """The lex-cost failures of one input and guard pair: cpu the median CPU seconds of its runs
+    (_timed_runs), runs [(cpu_seconds, decision)] for every run, want the decision every run must reach."""
+    out = []
+    if cpu >= 1.0:
+        out.append("(lex-cost-{}) {} took {:.2f} s of CPU on a {}-character command as the median of {} runs; "
+                   "the bound is 1 s".format(name, guard, cpu, length, len(runs)))
+    wrong = [got for _cpu, got in runs if got != want]
+    if wrong:
+        out.append("(lex-cost-{}) {} decided {} on {} of its {} runs on the same command, expected {}".format(
+            name, guard, ", ".join(wrong), len(wrong), len(runs), want))
+    return out
+
+
 def _deadline_shape_case(name, shape, size, cwd):
     """One (handler, shape, size) case, in-process under a _DeadlineWindow of _DEADLINE_HANG_SECONDS:
     (cpu_seconds, wall_seconds, outcome), the outcome being the reduced decision, "deadline" when the window
@@ -5375,8 +6701,8 @@ def _deadline_shape_case(name, shape, size, cwd):
 
 
 def _deadline_shape_runs(tmp, sizes):
-    """Every (handler, shape, size) case once (_deadline_shape_case): [(handler, shape, size, cwd,
-    cpu_seconds, wall_seconds, outcome)]."""
+    """Every (handler, shape, size) case _TIMED_RUNS times (_timed_runs over _deadline_shape_case):
+    [(handler, shape, size, cwd, (cpu_seconds, wall_seconds, outcome) for each run...)]."""
     plain, orch, gensrc = _deadline_fixtures(tmp)
     runs = []
     for name, shapes in sorted(_DEADLINE_CASES.items()):
@@ -5384,13 +6710,14 @@ def _deadline_shape_runs(tmp, sizes):
                   gensrc if name == "gensrc_guard" else plain)
         for shape in shapes + _DEADLINE_HASH_SHAPES:
             for size in sorted(sizes):
-                runs.append((name, shape, size, cwd) + _deadline_shape_case(name, shape, size, cwd))
+                runs.append((name, shape, size, cwd) + tuple(_timed_runs(
+                    lambda: _deadline_shape_case(name, shape, size, cwd))[1]))
     with _no_registry_above(plain):
         for name, shapes in sorted(_DEADLINE_PLAIN_CASES.items()):
             for shape in shapes:
                 for size in sorted(sizes):
-                    runs.append((name, shape, size, str(plain))
-                                + _deadline_shape_case(name, shape, size, str(plain)))
+                    runs.append((name, shape, size, str(plain)) + tuple(_timed_runs(
+                        lambda: _deadline_shape_case(name, shape, size, str(plain)))[1]))
     return runs
 
 
@@ -5418,10 +6745,14 @@ def _no_registry_above(root):
 
 
 def _deadline_shape_problems(name, shape, size, cpu, wall, outcome):
-    """What one run of a (handler, shape, size) case got wrong, as a list of phrases ([] for none)."""
+    """What one run of a (handler, shape, size) case got wrong, cpu and wall being the CPU and wall-clock
+    times judged: the medians of the case's runs (_judged), or a diagnostic re-run's own, as a list of
+    phrases ([] for none)."""
     if outcome == "deadline":
         return ["reached no decision within the {:g}-second hang guard".format(_DEADLINE_HANG_SECONDS)]
     problems = []
+    if name in aiqt_hooks.NOTE_ONLY_PRETOOL_MODES and outcome == "deny":
+        problems.append("a note-only mode must never deny, whatever its timing")
     if cpu > _DEADLINE_BOUNDS[size]:
         problems.append("used {:.2f}s of CPU time, over its {}s bound".format(cpu, _DEADLINE_BOUNDS[size]))
     if wall > _DEADLINE_WALL_BOUND:
@@ -5441,23 +6772,34 @@ def _deadline_shape_problems(name, shape, size, cpu, wall, outcome):
 
 
 def _deadline_shape_verdicts(runs, retime):
-    """The dl-shape failures for runs [(handler, shape, size, cwd, cpu_seconds, wall_seconds, outcome)]:
-    one line for each run that fails any check. A run that reached a decision over the wall-clock bound is
-    run once more by retime(handler, shape, size, cwd) only as a diagnostic: the line still records the
-    failure, carries both runs' wall-clock times, CPU times and outcomes, and applies every check to the
+    """The dl-shape failures for runs [(handler, shape, size, cwd, (cpu_seconds, wall_seconds, outcome) for
+    each run...)]: one line for each case whose median CPU time (_judged) is over its CPU bound, whose median
+    wall-clock time is over the wall-clock bound, or any of whose runs fails another check. A case whose
+    median wall-clock time is over the wall-clock bound, with at least one run reaching a decision, is run
+    once more by retime(handler, shape, size, cwd) only as a diagnostic: the line still records the
+    failure, carries every run's wall-clock time, CPU time and outcome, and applies every check to the
     diagnostic run as well."""
     out = []
-    for name, shape, size, cwd, cpu, wall, outcome in runs:
-        problems = _deadline_shape_problems(name, shape, size, cpu, wall, outcome)
+    for name, shape, size, cwd, *timed in runs:
+        cpu_judged = _judged([cpu for cpu, _wall, _outcome in timed])
+        wall_judged = _judged([wall for _cpu, wall, _outcome in timed])
+        problems = []
+        for _cpu, _wall, outcome in timed:
+            problems += [problem for problem
+                         in _deadline_shape_problems(name, shape, size, cpu_judged, wall_judged, outcome)
+                         if problem not in problems]
         if not problems:
             continue
-        line = "(dl-shape-{}-{}-{}) {} (run: {:.2f}s wall-clock, {:.2f}s of CPU time, outcome {})".format(
-            name, shape, size, "; ".join(problems), wall, cpu, outcome)
-        if outcome != "deadline" and wall > _DEADLINE_WALL_BOUND:
+        line = "(dl-shape-{}-{}-{}) {} (median times judged; {})".format(
+            name, shape, size, "; ".join(problems), "; ".join(
+                "run: {:.2f}s wall-clock, {:.2f}s of CPU time, outcome {}".format(wall, cpu, outcome)
+                for cpu, wall, outcome in timed))
+        if wall_judged > _DEADLINE_WALL_BOUND and any(
+                outcome != "deadline" for _cpu, _wall, outcome in timed):
             cpu_again, wall_again, outcome_again = retime(name, shape, size, cwd)
             again = _deadline_shape_problems(name, shape, size, cpu_again, wall_again, outcome_again)
-            line += ("; a diagnostic re-run, which never clears the first run, took {:.2f}s wall-clock and "
-                     "{:.2f}s of CPU time with outcome {} ({})".format(
+            line += ("; a diagnostic re-run, which never clears the case's failure, took {:.2f}s "
+                     "wall-clock and {:.2f}s of CPU time with outcome {} ({})".format(
                          wall_again, cpu_again, outcome_again, "; ".join(again) if again else "within every check"))
         out.append(line)
     return out
@@ -5467,8 +6809,9 @@ def _deadline_shape_failures(tmp):
     """(dl-shape) Every PreToolUse handler has shapes here, and on each shape at 64 KB, 256 KB and 1 MB it
     reaches a decision within the hang guard, that size's CPU-time bound and the wall-clock bound, denying
     where the case carries a hazard and reaching the pinned base commit's decision on each uncertain '#'
-    shape (_DEADLINE_HASH_SHAPES, which every handler runs) (_deadline_shape_verdicts: a run over the
-    wall-clock bound fails, and a diagnostic re-run is reported beside it, never in its place)."""
+    shape (_DEADLINE_HASH_SHAPES, which every handler runs) (_deadline_shape_verdicts: a case whose median
+    wall-clock time is over the wall-clock bound fails, and a diagnostic re-run is reported beside it, never
+    in its place)."""
     out = []
     missing = sorted(name for name, event in aiqt_hooks.HANDLER_EVENT.items()
                      if event == aiqt_hooks.PRETOOL and name not in _DEADLINE_CASES)
@@ -5478,8 +6821,8 @@ def _deadline_shape_failures(tmp):
 
 
 def _deadline_shape_rerun_failures():
-    """(dl-shape-rerun-*) A failed run is never erased by a later one. _deadline_shape_verdicts is given
-    recorded runs and a re-run that returns a recorded result, with no handler run:
+    """(dl-shape-rerun-*) A failed case is never erased by its diagnostic re-run. _deadline_shape_verdicts
+    is given recorded runs and a re-run that returns a recorded result, with no handler run:
     dl-shape-rerun-pass: a run over the wall-clock bound (9.25 s, 0.03 s of CPU, allow) whose re-run passes
     (0.15 s, 0.02 s, allow) must still fail, with both runs' wall-clock times, CPU times and outcomes.
     dl-shape-rerun-decision: a deny case run over the wall-clock bound that allowed (9.25 s, 0.03 s, allow)
@@ -5488,10 +6831,20 @@ def _deadline_shape_rerun_failures():
     allows (0.15 s, 0.02 s, allow) must fail with both outcomes and the re-run's wrong decision named.
     dl-shape-rerun-control, a control, which also passes on the pinned base commit: a run within every
     check gives no line and no re-run.
-    dl-shape-rerun-bounds: each bound at its edge, both inclusive. A run exactly at the wall-clock bound
-    (8 s) or exactly at the 64 KB CPU bound (1.5 s) gives no line and no re-run; one a microsecond over the
-    wall-clock bound whose re-run passes gives one line and one re-run; one a microsecond over the CPU
-    bound gives one line and no re-run (its time within the wall-clock bound)."""
+    dl-shape-rerun-bounds: each bound at its edge, both inclusive. A run a microsecond inside or exactly at
+    the wall-clock bound (8 s) or the 64 KB CPU bound (1.5 s) gives no line and no re-run; one a microsecond
+    over the wall-clock bound whose re-run passes gives one line and one re-run; one a microsecond over the
+    CPU bound gives one line and no re-run (its time within the wall-clock bound). Both bounds judge the
+    median of a case's runs: three runs at 9 s, 5 s and 5 s wall-clock give no line and no re-run, three at
+    9 s, 9 s and 5 s give one line and one re-run. Three runs at 256 KB, one a second over its CPU bound
+    (3.0 s), one at 0.5 s and the median a microsecond inside or exactly at the bound, give no line; with
+    the median a microsecond over it, one line and no re-run.
+    dl-shape-rerun-outcomes: every run's outcome is checked. A deny case whose three runs are within every
+    bound and decide deny, allow and deny gives one line naming the allow, and none when all three deny.
+    timed-runs-count and timed-runs-median: _timed_runs calls its timed function three times, whatever an
+    earlier call gave, and returns the median of their CPU seconds with every call's result.
+    lex-cost-runs: _lex_cost_problems checks every run's decision, so runs deciding deny, allow and deny
+    where deny is expected give one line, and three denies none."""
     out = []
     retimed = []
 
@@ -5504,12 +6857,12 @@ def _deadline_shape_rerun_failures():
     plain = ("absolute_paths", "write_content", 65536, "/")
     deny = ("protected_line", "push_force_after", 65536, "/")
     cases = (
-        ("pass", plain + (0.03, 9.25, "allow"), (0.02, 0.15, "allow"),
+        ("pass", plain + ((0.03, 9.25, "allow"),), (0.02, 0.15, "allow"),
          ("9.25s wall-clock", "0.03s of CPU", "outcome allow", "0.15s wall-clock", "0.02s of CPU",
           "within every check")),
-        ("decision", deny + (0.03, 9.25, "allow"), (0.02, 0.15, "deny"),
+        ("decision", deny + ((0.03, 9.25, "allow"),), (0.02, 0.15, "deny"),
          ("9.25s wall-clock", "expected deny, got allow", "outcome allow", "0.15s wall-clock", "outcome deny")),
-        ("both", deny + (0.03, 9.25, "deny"), (0.02, 0.15, "allow"),
+        ("both", deny + ((0.03, 9.25, "deny"),), (0.02, 0.15, "allow"),
          ("9.25s wall-clock", "0.03s of CPU", "outcome deny", "0.15s wall-clock", "0.02s of CPU",
           "with outcome allow (expected deny, got allow)")))
     for label, run, result, wants in cases:
@@ -5520,21 +6873,94 @@ def _deadline_shape_rerun_failures():
                        "runs' times and outcomes {!r}, got {!r} with re-runs {!r}".format(
                            label, wants, lines, retimed))
     retimed.clear()
-    lines = _deadline_shape_verdicts([plain + (0.03, 0.15, "allow")], recorded((0.02, 0.15, "allow")))
+    lines = _deadline_shape_verdicts([plain + ((0.03, 0.15, "allow"),)], recorded((0.02, 0.15, "allow")))
     if lines or retimed:
         out.append("(dl-shape-rerun-control) a run within every check must give no line and no re-run, got "
                    "{!r} with re-runs {!r}".format(lines, retimed))
     wall_bound, cpu_bound = float(_DEADLINE_WALL_BOUND), _DEADLINE_BOUNDS[65536]
+    plain_256k, cpu_bound_256k = plain[:2] + (262144,) + plain[3:], 3.0
     for edge, run, want_lines, want_reruns in (
-            ("at the wall-clock bound", plain + (0.03, wall_bound, "allow"), 0, 0),
-            ("over the wall-clock bound", plain + (0.03, wall_bound + 1e-6, "allow"), 1, 1),
-            ("at the CPU bound", plain + (cpu_bound, 0.15, "allow"), 0, 0),
-            ("over the CPU bound", plain + (cpu_bound + 1e-6, 0.15, "allow"), 1, 0)):
+            ("just inside the wall-clock bound", plain + ((0.03, wall_bound - 1e-6, "allow"),), 0, 0),
+            ("at the wall-clock bound", plain + ((0.03, wall_bound, "allow"),), 0, 0),
+            ("over the wall-clock bound", plain + ((0.03, wall_bound + 1e-6, "allow"),), 1, 1),
+            ("of three at 9 s, 5 s and 5 s wall-clock",
+             plain + ((0.03, 9.0, "allow"), (0.03, 5.0, "allow"), (0.03, 5.0, "allow")), 0, 0),
+            ("of three at 9 s, 9 s and 5 s wall-clock",
+             plain + ((0.03, 9.0, "allow"), (0.03, 9.0, "allow"), (0.03, 5.0, "allow")), 1, 1),
+            ("just inside the CPU bound", plain + ((cpu_bound - 1e-6, 0.15, "allow"),), 0, 0),
+            ("at the CPU bound", plain + ((cpu_bound, 0.15, "allow"),), 0, 0),
+            ("over the CPU bound", plain + ((cpu_bound + 1e-6, 0.15, "allow"),), 1, 0),
+            ("of three just inside the 256 KB CPU bound at its median", plain_256k + (
+                (cpu_bound_256k + 1, 0.15, "allow"), (cpu_bound_256k - 1e-6, 0.15, "allow"),
+                (0.5, 0.15, "allow")), 0, 0),
+            ("of three at the 256 KB CPU bound at its median", plain_256k + (
+                (cpu_bound_256k + 1, 0.15, "allow"), (cpu_bound_256k, 0.15, "allow"),
+                (0.5, 0.15, "allow")), 0, 0),
+            ("of three over the 256 KB CPU bound at its median", plain_256k + (
+                (cpu_bound_256k + 1, 0.15, "allow"), (cpu_bound_256k + 1e-6, 0.15, "allow"),
+                (0.5, 0.15, "allow")), 1, 0)):
         retimed.clear()
         lines = _deadline_shape_verdicts([run], recorded((0.02, 0.15, "allow")))
         if len(lines) != want_lines or len(retimed) != want_reruns:
             out.append("(dl-shape-rerun-bounds) a run {} must give {} line(s) and {} re-run(s), got {!r} with "
                        "re-runs {!r}".format(edge, want_lines, want_reruns, lines, retimed))
+    for outcomes, want_lines in ((("deny", "allow", "deny"), 1), (("deny", "deny", "deny"), 0)):
+        retimed.clear()
+        lines = _deadline_shape_verdicts([deny + tuple((0.03, 0.15, outcome) for outcome in outcomes)],
+                                         recorded((0.02, 0.15, "deny")))
+        if len(lines) != want_lines or retimed or (lines and "expected deny, got allow" not in lines[0]):
+            out.append("(dl-shape-rerun-outcomes) a deny case whose runs decide {} must give {} line(s) "
+                       "naming every wrong decision, got {!r} with re-runs {!r}".format(
+                           ", ".join(outcomes), want_lines, lines, retimed))
+    recorded_runs = iter(((1.0, "first"), (3.0, "second"), (2.0, "third"), (4.0, "fourth")))
+    judged, results = _timed_runs(lambda: next(recorded_runs))
+    if results != [(1.0, "first"), (3.0, "second"), (2.0, "third")]:
+        out.append("(timed-runs-count) _timed_runs must call its timed function three times, got {!r}".format(
+            results))
+    if judged != 2.0:
+        out.append("(timed-runs-median) _timed_runs must judge the median of 1.0, 3.0 and 2.0 CPU seconds, "
+                   "2.0, got {!r}".format(judged))
+    for decisions, want_lines in ((("deny", "allow", "deny"), 1), (("deny", "deny", "deny"), 0)):
+        lines = _lex_cost_problems("recorded", "guard", 1, 0.1, [(0.1, got) for got in decisions], "deny")
+        if len(lines) != want_lines:
+            out.append("(lex-cost-runs) a lex-cost pair expecting deny whose runs decide {} must give {} "
+                       "line(s), got {!r}".format(", ".join(decisions), want_lines, lines))
+    return out
+
+
+def _deadline_note_only_deny_failures():
+    """(dl-shape-note-only-deny, dl-shape-note-only-deny-control, dl-shape-note-only-nonempty) A denying
+    outcome goes red for every shape
+    of every mode in NOTE_ONLY_PRETOOL_MODES, independent of timing: a synthetic deny within every time
+    bound must give one failure line naming the never-deny rule and no diagnostic re-run (the decision alone
+    is the failure), while the mode's expected outcome on the same case stays green. A note-only mode with
+    no timed shape at all is itself a failure, so an empty shape collection cannot pass vacuously. No
+    handler is run."""
+    out = []
+    retimed = []
+
+    def retime(name, shape, size, cwd):
+        retimed.append((name, shape, size))
+        return 0.02, 0.15, "deny"
+
+    for name in aiqt_hooks.NOTE_ONLY_PRETOOL_MODES:
+        shapes = _DEADLINE_CASES.get(name, ())
+        if not shapes:
+            out.append("(dl-shape-note-only-nonempty) note-only mode {} has no timed shape, so the never-deny "
+                       "rule would be asserted on nothing".format(name))
+        for shape in shapes:
+            retimed.clear()
+            lines = _deadline_shape_verdicts([(name, shape, 65536, "/", (0.03, 0.15, "deny"))], retime)
+            if len(lines) != 1 or retimed or "must never deny" not in lines[0]:
+                out.append("(dl-shape-note-only-deny) a synthetic deny within every bound must fail for "
+                           "({}, {}) with no re-run, got {!r} with re-runs {!r}".format(
+                               name, shape, lines, retimed))
+            good = "allow-note" if (name, shape) in _DEADLINE_NOTE_CASES else "allow"
+            retimed.clear()
+            lines = _deadline_shape_verdicts([(name, shape, 65536, "/", (0.03, 0.15, good))], retime)
+            if lines or retimed:
+                out.append("(dl-shape-note-only-deny-control) the {} control for ({}, {}) must stay green, "
+                           "got {!r} with re-runs {!r}".format(good, name, shape, lines, retimed))
     return out
 
 
@@ -5647,15 +7073,271 @@ def _sleeper(seconds, result=(0, None, None)):
     return handler
 
 
+# How long a deadline-path stub sleeps by its own clock: a 0.1-second deadline must cut it short.
+_DEADLINE_STUB_SECONDS = 0.8
+# Wall-clock seconds a deadline-path run may take from the arming of its deadline window to main()'s
+# return, both read by the run itself: the arming by a clock read _armed_window takes just before the take
+# that starts the 0.1-second budget's countdown, the return by a read right after main() gives back
+# control. The span covers the budget window, the deadline's firing and everything after it (building and
+# writing the refusal, restoring the timer); its floor is the budget itself, since the deadline fires a
+# budget after the arming and the arming read comes no later than the arming, so the payload read and the
+# handler dispatch, which run inside the window before the stub's first clock read, spend budget without
+# shrinking the span. Measured from the arming on one shared 80-CPU host (2026-11-07): 460 firing runs
+# (20 sweeps of the 22 modes and the slow-read case, no load added, one-minute load average 16 to 22)
+# spanned 0.1003 to 0.1009 s, and 276 runs (12 sweeps, the measuring process and 8 busy loops pinned by
+# os.sched_setaffinity to one CPU, load average 21 to 23) spanned 0.1002 to 0.1180 s, every run arming its
+# window and cutting its stub, the arming-to-first-read gap at most 0.00025 s. Spans in earlier records
+# were measured from the stub's last clock read instead, a read inside the window, so each sat under its
+# run's arming span by that run's arming-to-read gap, which none of them recorded: 460 firing runs
+# (2026-11-02, 20 sweeps, load average 32 to 36) spanned 0.1001 to 0.1009 s; 575 more from the same
+# session (25 sweeps, 8 busy loops left to the scheduler, load average rising to 38) spanned 0.0998 to
+# 0.1015 s, under the budget exactly because of that shrinkage; 414 pinned runs (2026-11-07, 18 sweeps,
+# load average 19 to 27) spanned 0.1001 to 0.1189 s; 230 unpinned runs from the same session with no load
+# added (10 sweeps, load average about 19 to 21) spanned 0.1001 to 0.1007 s; and an earlier run of the
+# same pinned method measured spans up to 0.1288 s over 414 runs, its date, load and span floor not
+# recorded. The 0.17-second bound is 0.052 s above the worst span measured from the arming (0.1180 s,
+# pinned), and 0.041 s above the worst from the older reference (0.1288 s, pinned, the bound about 1.32
+# times it) before adding that run's unrecorded arming-to-read gap; a run whose span doubles the honest
+# floor (at least 0.2 s, the floor being the 0.1-second budget itself) overshoots the bound by at least
+# 0.03 s, so the bound separates an honest span under pinned load from one twice the floor with those
+# stated margins. A loaded host may still inflate one run's span past the bound with no stall in the run,
+# so the bound judges no single run: like the CPU bounds of the timed rows, it judges the median
+# (_judged_half_fails, here always over exactly _DEADLINE_TAIL_RUNS spans, where that rule and _judged
+# agree) of the spans, each from a fresh run of the row (_deadline_row_problems, _deadline_tail_problems).
+# A stall on two of the three runs, whichever two, or on all three fails the row; a stall on one run in
+# three passes it, as does contention that inflates one span. A run that never logged its window's arming
+# gives no span and is no evidence either way: it is replaced by a fresh run, up to
+# _DEADLINE_TAIL_MAX_RUNS runs in all, and a row left with fewer than _DEADLINE_TAIL_RUNS spans fails, its
+# tail unmeasured.
+_DEADLINE_TAIL_SECONDS = 0.17
+# How many spans a row's tail is judged over, each from a fresh run; a cut fault, or any fault of the
+# deadline's behaviour, fails the row on the run that shows it, with no further run.
+_DEADLINE_TAIL_RUNS = 3
+# The most runs a row gets in all while it collects _DEADLINE_TAIL_RUNS spans, runs whose window never
+# logged its arming included.
+_DEADLINE_TAIL_MAX_RUNS = 2 * _DEADLINE_TAIL_RUNS
+# Wall-clock seconds a whole deadline-path run must stay under, from before the payload is handed to
+# main() to its return. The tail bound above starts at the window's arming, so it cannot see time spent
+# before the window is armed (the dispatcher's probes and argument checks ahead of it): this bound
+# covers the whole run, so a stall anywhere in it counts. Each run of these rows had this same 0.8-second
+# single-run bound before they were judged over fresh re-runs; it is kept as it was and judged over EVERY
+# fresh run the row took (3 to 6 of them), on the median of an odd count of times and the upper middle of
+# an even count (_judged_half_fails), so a stall on half of the runs or more fails the row: a
+# run that never logged its window's arming gives no tail span and is replaced for the tail judgement, but
+# its wall-clock time still counts here, so a stall in such a run is not discarded
+# (_deadline_total_problems). Honest whole runs measured with the spans above (2026-11-07) took 0.108 to
+# 0.130 s of wall-clock time each unpinned, and 0.136 to 0.749 s pinned to one CPU with the 8 busy loops:
+# a single pinned run can approach this bound, which is why no single run's time decides the row.
+_DEADLINE_TOTAL_SECONDS = 0.8
+
+
+def _clocked_sleep(seconds, reads):
+    """Sleep until `seconds` after this call's first time.monotonic read, logging in reads that end
+    (reads["end"]) and each read the loop compares with it (reads["reached"], the last one kept): the sleep
+    has run to its end only when reached >= end. A deadline that fires first cuts it short, leaving reached
+    below end, or ends the run before this call logs anything."""
+    reads["end"] = time.monotonic() + seconds
+    while True:
+        reads["reached"] = time.monotonic()
+        if reads["reached"] >= reads["end"]:
+            return
+        time.sleep(reads["end"] - reads["reached"])
+
+
+def _clocked_sleeper(seconds, reads, result=(0, None, None)):
+    def handler(_data):
+        _clocked_sleep(seconds, reads)
+        return result
+    return handler
+
+
+@contextlib.contextmanager
+def _armed_window(reads):
+    """Patch aiqt_hooks._DeadlineWindow so a window the enclosed code arms logs in reads["armed"] a
+    time.monotonic read taken just before the take that arms its timer, the reference the budget's
+    countdown is set against: the read comes no later than the arming setitimer, so a span measured from
+    it is never shorter than one measured from the arming itself, and a stall inside the take only widens
+    it. The read is kept only when the take returns (the first one kept), so a window that never arms (a
+    fail-open window, or a take that raises before arming) logs nothing."""
+    saved = aiqt_hooks._DeadlineWindow
+
+    class _Window(saved):
+        def _take(self):
+            armed = time.monotonic()
+            saved._take(self)
+            reads.setdefault("armed", armed)
+    aiqt_hooks._DeadlineWindow = _Window
+    try:
+        yield
+    finally:
+        aiqt_hooks._DeadlineWindow = saved
+
+
+def _deadline_cut_problems(label, what, code, err, want, seconds, reads):
+    """What one deadline-path run got wrong with its cut, as a list of phrases ([] for none): code and err
+    its exit and stderr, want the text its stderr must hold, seconds its wall-clock time (reported only),
+    and reads the clock reads of the _clocked_sleep the deadline must cut short. Whether the deadline fired
+    is judged by the stub's reads, not by the run's wall-clock time: the window's timer is armed before the
+    stub starts its sleep and its expiry, due first, interrupts the sleep however late the host then
+    schedules the run, while a deadline that does not fire lets the sleep reach its end. Measured on an
+    80-CPU host at a one-minute load average of 50 to 53: 198 firing runs (22 modes) took 0.109 to 0.131 s
+    of wall-clock time, and 66 more with 8 busy loops sharing their one CPU took 0.175 to 0.347 s, each
+    cutting the stub short; with the deadline disabled and the stub returning the refusal itself, 88 runs
+    took 0.810 to 0.916 s, each sleep run to its end. A full self-test run at a load average of about 38
+    saw a firing run take 2.06 s, past every disabled run measured, so a fixed wall-clock bound, on one run
+    or on the median of three, does not separate the two under such load, and the stub's reads do. The
+    run's time after the cut is judged separately, over a row's runs (_deadline_row_problems)."""
+    finished = "end" in reads and reads.get("reached", float("-inf")) >= reads["end"]
+    if not (code == 2 and want in err and not finished):
+        return ["({}) expected exit 2 with {} before the stub's {:g}-second sleep ended, got exit {} after "
+                "{:.2f}s with the stub's sleep {} and {!r}".format(
+                    label, what, _DEADLINE_STUB_SECONDS, code, seconds,
+                    "run to its end" if finished else "cut short", err)]
+    return []
+
+
+def _deadline_note_cut_problems(label, what, code, streams, want, seconds, reads):
+    """What one run of a note-only mode (NOTE_ONLY_PRETOOL_MODES) got wrong with its cut, as a list of
+    phrases ([] for none), in the shape of _deadline_cut_problems: streams is the pair (stdout text,
+    stderr text) of the run, want the text its stdout must hold. A note-only mode's deadline never blocks:
+    the run must exit 0 with the warning on stdout, carry no fail-closed refusal on stderr, and the deadline
+    must still cut the stub's sleep short. As there, whether the deadline fired is judged by the stub's
+    reads, not by the run's wall-clock time (reported only), which a loaded host can stretch with nothing
+    wrong; the run's time after the cut is judged separately, over a row's runs (_deadline_row_problems)."""
+    printed, err = streams
+    finished = "end" in reads and reads.get("reached", float("-inf")) >= reads["end"]
+    if code != 0 or want not in printed or "could not reach a decision" in err or finished:
+        return ["({}) expected exit 0 with {} on stdout and no fail-closed refusal on stderr before the "
+                "stub's {:g}-second sleep ended, got exit {} after {:.2f}s with the stub's sleep {}, stdout "
+                "{!r} and stderr {!r}".format(
+                    label, what, _DEADLINE_STUB_SECONDS, code, seconds,
+                    "run to its end" if finished else "cut short", printed, err)]
+    return []
+
+
+def _deadline_tail_span(reads, returned):
+    """Seconds from the arming of the run's deadline window (reads["armed"], the clock read _armed_window
+    takes just before the take that arms the timer) to `returned`, a clock read taken right after main()
+    returned. The budget's countdown is set against the arming, so a firing run's span has the budget as
+    its floor however late the stub's first clock read comes: a delay between the arming and that read
+    spends budget and does not shrink the span. None when the run never logged its window's arming, which
+    leaves nothing to measure the span from: such a run is no evidence about the tail, and its row
+    replaces it with a fresh run (_deadline_row_problems)."""
+    if "armed" in reads:
+        return returned - reads["armed"]
+    return None
+
+
+def _deadline_tail_problems(label, spans, runs):
+    """What a row's tail got wrong, as a list of phrases ([] for none), judged over spans, the
+    _deadline_tail_span of each of its runs that logged its window's arming, in run order, out of runs
+    runs in all. A row with fewer than _DEADLINE_TAIL_RUNS spans fails, its tail unmeasured: a run that
+    logged no arming never counts as a pass. Otherwise the row fails when the judged span
+    (_judged_half_fails: the median, always of exactly _DEADLINE_TAIL_RUNS spans here) is over
+    _DEADLINE_TAIL_SECONDS, that is when two of the three spans or all three are over it, the rule the
+    timed rows use for CPU time (see the bound's comment for the measurements)."""
+    if len(spans) < _DEADLINE_TAIL_RUNS:
+        return ["({}) logged its window's arming on {} of {} fresh runs, short of the {} spans the {:g}s "
+                "tail bound judges, so its tail was not measured".format(
+                    label, len(spans), runs, _DEADLINE_TAIL_RUNS, _DEADLINE_TAIL_SECONDS)]
+    if _judged_half_fails(spans) <= _DEADLINE_TAIL_SECONDS:
+        return []
+    # Spans are printed in full (repr), so a span just over the bound never reads as equal to it.
+    return ["({}) took {} seconds from its window's arming to main()'s return over {} fresh runs, "
+            "the median span over the {:g}s tail bound".format(
+                label, ", ".join(repr(span) for span in spans), len(spans),
+                _DEADLINE_TAIL_SECONDS)]
+
+
+def _deadline_total_problems(label, walls):
+    """What a row's whole-run time got wrong, as a list of phrases ([] for none), judged over walls, the
+    wall-clock seconds of EVERY fresh run the row took, runs that never logged their window's arming
+    included, 3 to 6 of them: the row fails when the judged time (_judged_half_fails: the median of an odd
+    count, the upper
+    middle of an even count, so a stall on half of the runs or more fails) is not under
+    _DEADLINE_TOTAL_SECONDS, the same bound each single run had before the rows were judged over fresh
+    re-runs (a run at exactly the bound is not under it)."""
+    if _judged_half_fails(walls) < _DEADLINE_TOTAL_SECONDS:
+        return []
+    # Times are printed in full (repr), so a time just over the bound never reads as equal to it.
+    return ["({}) took {} seconds of wall-clock time over {} fresh runs, the judged time not under the "
+            "{:g}s whole-run bound".format(
+                label, ", ".join(repr(wall) for wall in walls), len(walls), _DEADLINE_TOTAL_SECONDS)]
+
+
+def _deadline_row_problems(label, what, want, run_once, cut=_deadline_cut_problems):
+    """Problems for one deadline-firing row ([] for none), run_once one fresh run of it (a new stub with
+    new clock reads) returning (code, err, seconds, reads, returned). The cut judgement is behavioural and
+    single-run: cut(label, what, code, err, want, seconds, reads) judges each run (a note-only row passes
+    _deadline_note_cut_problems, its err the pair (stdout text, stderr text)), and the first run with a cut
+    problem fails the row at once, with no further run. The tail
+    judgement is a wall-clock bound, the only evidence there is for a stall between the deadline's cut and
+    its refusal reaching the caller, so no single span decides it: the row is run fresh until it has
+    _DEADLINE_TAIL_RUNS spans, whatever an earlier span gave, and fails when their median is over the bound
+    (_deadline_tail_problems). A run with no span (_deadline_tail_span None, its window's arming never
+    logged) is no evidence about the tail, neither a pass nor a fail: it is replaced by a fresh run, up to
+    _DEADLINE_TAIL_MAX_RUNS runs in all.
+    The whole-run judgement is a third, independent one: every run's wall-clock seconds, the replaced
+    unarmed runs' included, count toward the whole-run judgement, whose judged time (_judged_half_fails:
+    a stall on half of the runs or more fails) must stay under _DEADLINE_TOTAL_SECONDS
+    (_deadline_total_problems), so a stall before the deadline window is armed, or in a run the tail
+    judgement replaced, still fails the row."""
+    spans = []
+    walls = []
+    runs = 0
+    while runs < _DEADLINE_TAIL_MAX_RUNS and len(spans) < _DEADLINE_TAIL_RUNS:
+        runs += 1
+        code, err, seconds, reads, returned = run_once()
+        walls.append(seconds)
+        problems = cut(label, what, code, err, want, seconds, reads)
+        if problems:
+            return problems
+        span = _deadline_tail_span(reads, returned)
+        if span is not None:
+            spans.append(span)
+    return _deadline_tail_problems(label, spans, runs) + _deadline_total_problems(label, walls)
+
+
 def _deadline_path_failures():
-    """(dl-fires, dl-read, dl-fail-open, dl-cancelled) The deadline path, driven by handler stubs that sleep
-    past a short test budget: every PreToolUse mode exits 2 with the refusal naming the handler, the budget
-    and the input size; a deadline during the payload read exits 2 too; a fail-open mode keeps its result
+    """(dl-fires, dl-note-only, dl-read, dl-fail-open, dl-cancelled) The deadline path, driven by handler stubs
+    that sleep past a short test budget: every PreToolUse mode exits 2 with the refusal naming the handler,
+    the budget and the input size, except a note-only one (NOTE_ONLY_PRETOOL_MODES), whose deadline fires as
+    soon, cuts the stub short and warns on exit 0 with no fail-closed refusal, judged like the firing rows
+    (its cut by _deadline_note_cut_problems, its tail and whole-run times over fresh runs); a deadline
+    during the payload read exits 2 too; a fail-open mode keeps its result
     (no deadline); and the timer is cancelled, with the caller's SIGALRM disposition back, before the
-    decision is written."""
+    decision is written. A firing deadline is judged by whether it cut the stub's sleep short, single-run
+    and behavioural, by the time from the window's arming (_armed_window) to main()'s return, judged as
+    the median of _DEADLINE_TAIL_RUNS spans, each from a fresh run of the row (_deadline_row_problems),
+    and by each run's whole wall-clock time, judged over every fresh run the row took under a rule that
+    fails a stall on half of the runs or more (_deadline_total_problems, _judged_half_fails);
+    (dl-cut-judged) recorded runs pin the cut judgement at the sleep's end, (dl-note-only-cut-judged)
+    recorded runs pin the note-only cut judgement at the sleep's end and on its exit and streams,
+    (dl-tail-span) recorded reads pin the span's measurement from the arming, however late or absent the
+    stub's own reads, (dl-tail-median) recorded spans pin the
+    median judgement at the bound's ends and a row short of spans, (dl-tail-rerun) recorded rows pin which
+    stall patterns fail, that a clean run ends no row early, that a delay before the stub's first read
+    shrinks no span, and that a run that never logged its window's arming is replaced,
+    never a pass, (dl-total-median) recorded times pin the whole-run judgement at its bound's ends, and
+    (dl-total-rerun) recorded rows pin that a stall before the window, a stall after the cut past both
+    bounds, a stall counted only through replaced unarmed runs, and a stall on half of an even count of
+    runs each fail, while one slow run in three, or stalls on two runs of five, pass."""
     out = []
     size = len(_DEADLINE_PAYLOAD.encode("utf-8"))
     for mode, event in sorted(aiqt_hooks.HANDLER_EVENT.items()):
+        if mode in aiqt_hooks.NOTE_ONLY_PRETOOL_MODES:
+            def note_run(mode=mode):
+                reads = {}
+                printed = io.StringIO()
+                stub = _clocked_sleeper(_DEADLINE_STUB_SECONDS, reads)
+                with _stub_handler(mode, stub), _armed_window(reads):
+                    code, err, seconds = _main_run(mode, budget=0.1, stdout=printed)
+                    returned = time.monotonic()
+                return code, (printed.getvalue(), err), seconds, reads, returned
+            note = "the {} check could not run (no decision within its deadline)".format(mode)
+            out.extend(_deadline_row_problems("dl-note-only-" + mode, "the deadline warning", note, note_run,
+                                              cut=_deadline_note_cut_problems))
+            continue
         if event in aiqt_hooks.FAIL_OPEN_EVENTS:
             with _stub_handler(mode, _sleeper(0.3)):
                 code, err, _seconds = _main_run(mode, budget=0.05)
@@ -5663,24 +7345,212 @@ def _deadline_path_failures():
                 out.append("(dl-fail-open-{}) a fail-open mode must keep its result with no deadline, got "
                            "exit {} and {!r}".format(mode, code, err))
             continue
-        with _stub_handler(mode, _sleeper(1.0)):
-            code, err, seconds = _main_run(mode, budget=0.1)
+
+        def fires_run(mode=mode):
+            reads = {}
+            with _stub_handler(mode, _clocked_sleeper(_DEADLINE_STUB_SECONDS, reads)), _armed_window(reads):
+                code, err, seconds = _main_run(mode, budget=0.1)
+                returned = time.monotonic()
+            return code, err, seconds, reads, returned
         want = ("AIQT guardrail: the {} check could not reach a decision within its 0.1-second budget on an "
                 "input of {} bytes; failing closed. Split the command into smaller calls, or move long content "
                 "into a file and pass its path.".format(mode, size))
-        if code != 2 or want not in err or seconds >= 0.8:
-            out.append("(dl-fires-{}) expected exit 2 with the deadline refusal within 0.8s, got exit {} after "
-                       "{:.2f}s and {!r}".format(mode, code, seconds, err))
+        out.extend(_deadline_row_problems("dl-fires-" + mode, "the deadline refusal", want, fires_run))
 
-    class SlowStdin:
-        def read(self):
-            time.sleep(1.0)
-            return _DEADLINE_PAYLOAD
-    with _stub_handler("diff_source_pretool", _sleeper(0)):
-        code, err, seconds = _main_run("diff_source_pretool", SlowStdin(), budget=0.1)
-    if code != 2 or "on an input it had not finished reading" not in err or seconds >= 0.8:
-        out.append("(dl-read) a deadline during the payload read expected exit 2 naming the unread input, got "
-                   "exit {} after {:.2f}s and {!r}".format(code, seconds, err))
+    def read_run():
+        read_reads = {}
+
+        class SlowStdin:
+            def read(self):
+                _clocked_sleep(_DEADLINE_STUB_SECONDS, read_reads)
+                return _DEADLINE_PAYLOAD
+        with _stub_handler("diff_source_pretool", _sleeper(0)), _armed_window(read_reads):
+            code, err, seconds = _main_run("diff_source_pretool", SlowStdin(), budget=0.1)
+            returned = time.monotonic()
+        return code, err, seconds, read_reads, returned
+    out.extend(_deadline_row_problems("dl-read", "the refusal naming the unread input",
+                                      "on an input it had not finished reading", read_run))
+
+    refusal = "AIQT guardrail: recorded refusal"
+    for edge, code, err, reads, want_lines in (
+            ("cut just inside its end, after 2.06 s of wall-clock time", 2, refusal,
+             {"end": 10.0, "reached": 10.0 - 1e-6}, 0),
+            ("run exactly to its end", 2, refusal, {"end": 10.0, "reached": 10.0}, 1),
+            ("run just past its end", 2, refusal, {"end": 10.0, "reached": 10.0 + 1e-6}, 1),
+            ("never started", 2, refusal, {}, 0),
+            ("cut before its first loop read of the clock", 2, refusal, {"end": 10.0}, 0),
+            ("cut short, the run exiting 0", 0, refusal, {"end": 10.0, "reached": 9.0}, 1),
+            ("cut short, the run without the refusal", 2, "", {"end": 10.0, "reached": 9.0}, 1)):
+        lines = _deadline_cut_problems("recorded", "the refusal", code, err, "recorded refusal", 0.15, reads)
+        if len(lines) != want_lines:
+            out.append("(dl-cut-judged) a recorded run whose stub sleep was {} must give {} line(s), got {!r}"
+                       .format(edge, want_lines, lines))
+
+    warning = "recorded warning"
+    for edge, code, streams, reads, want_lines in (
+            ("cut just inside its end, after 2.06 s of wall-clock time", 0, (warning, ""),
+             {"end": 10.0, "reached": 10.0 - 1e-6}, 0),
+            ("run exactly to its end", 0, (warning, ""), {"end": 10.0, "reached": 10.0}, 1),
+            ("run just past its end", 0, (warning, ""), {"end": 10.0, "reached": 10.0 + 1e-6}, 1),
+            ("never started", 0, (warning, ""), {}, 0),
+            ("cut short, the run exiting 2", 2, (warning, ""), {"end": 10.0, "reached": 9.0}, 1),
+            ("cut short, the run without the warning", 0, ("", ""), {"end": 10.0, "reached": 9.0}, 1),
+            ("cut short, the warning given with a fail-closed refusal on stderr", 0,
+             (warning, "AIQT guardrail: the check could not reach a decision within its budget"),
+             {"end": 10.0, "reached": 9.0}, 1)):
+        lines = _deadline_note_cut_problems("recorded", "the warning", code, streams, warning, 0.15, reads)
+        if len(lines) != want_lines:
+            out.append("(dl-note-only-cut-judged) a recorded note-only run whose stub sleep was {} must give {} "
+                       "line(s), got {!r}".format(edge, want_lines, lines))
+
+    tail = _DEADLINE_TAIL_SECONDS
+    for edge, reads, returned, want_span in (
+            ("from the window's arming", {"armed": 9.0, "end": 10.0, "reached": 9.0}, 9.25, 0.25),
+            ("from the window's arming, unshrunk by a 0.08-second delay before the stub's first read",
+             {"armed": 9.0, "end": 9.88, "reached": 9.08}, 9.25, 0.25),
+            ("from the window's arming when the cut came before the stub's first loop read",
+             {"armed": 9.0, "end": 10.0}, 9.25, 0.25),
+            ("from the window's arming when the cut came before the stub logged any read",
+             {"armed": 9.0}, 9.25, 0.25),
+            ("as None when the run never logged its window's arming", {}, 0.2, None),
+            ("as None when only the stub's reads were logged", {"end": 10.0, "reached": 9.0}, 9.25, None)):
+        span = _deadline_tail_span(reads, returned)
+        ok = span is None if want_span is None else span is not None and abs(span - want_span) < 1e-9
+        if not ok:
+            out.append("(dl-tail-span) the span measured {} must be {!r}, got {!r}".format(
+                edge, want_span, span))
+    for edge, spans, want_lines, want_text in (
+            ("every span just over the bound", [tail + 1e-6] * _DEADLINE_TAIL_RUNS, 1, "median span"),
+            ("its median just over the bound", [tail + 1e-6, tail - 1e-6, tail + 1e-6], 1, "median span"),
+            ("its median exactly at the bound", [tail + 1e-6, tail, tail - 1e-6], 0, ""),
+            ("its median just inside the bound", [tail + 1e-6, tail - 1e-6, tail - 1e-6], 0, ""),
+            ("one span short of the full count, every span over the bound",
+             [tail + 1e-6] * (_DEADLINE_TAIL_RUNS - 1), 1, "not measured"),
+            ("one span short of the full count, every span inside the bound",
+             [tail - 1e-6] * (_DEADLINE_TAIL_RUNS - 1), 1, "not measured")):
+        lines = _deadline_tail_problems("recorded", spans, _DEADLINE_TAIL_MAX_RUNS)
+        if len(lines) != want_lines or (want_lines and want_text not in lines[0]):
+            out.append("(dl-tail-median) a row with {} must give {} line(s) holding {!r}, got {!r}".format(
+                edge, want_lines, want_text, lines))
+
+    total = _DEADLINE_TOTAL_SECONDS
+    for edge, walls, want_lines in (
+            ("every time just inside the bound", [total - 1e-6] * _DEADLINE_TAIL_RUNS, 0),
+            ("every time exactly at the bound", [total] * _DEADLINE_TAIL_RUNS, 1),
+            ("every time just over the bound", [total + 1e-6] * _DEADLINE_TAIL_RUNS, 1),
+            ("its median just inside the bound", [total + 1e-6, total - 1e-6, total - 1e-6], 0),
+            ("its median exactly at the bound", [total + 1e-6, total, total - 1e-6], 1),
+            ("one time of three over the bound", [total + 5.0, 0.15, 0.15], 0),
+            ("half of four times over the bound", [0.15, 0.15, 1.0, 1.0], 1),
+            ("half of four times just over the bound, the other half just inside it",
+             [total - 1e-6, total - 1e-6, total + 1e-6, total + 1e-6], 1),
+            ("the upper middle of four exactly at the bound", [0.15, total, total + 5.0, 0.15], 1),
+            ("the upper middle of four just inside the bound", [0.15, 0.15, total - 1e-6, total + 5.0], 0),
+            ("two of six times over the bound", [0.15, 0.15, 0.15, 0.15, 1.0, 1.0], 0),
+            ("half of six times over the bound", [0.15, 0.15, 0.15, 1.0, 1.0, 1.0], 1),
+            ("the upper middle of six exactly at the bound",
+             [0.15, 0.15, 0.15, total, total + 5.0, total + 5.0], 1),
+            ("the upper middle of six just inside the bound",
+             [0.15, 0.15, 0.15, total - 1e-6, total + 5.0, total + 5.0], 0)):
+        lines = _deadline_total_problems("recorded", walls)
+        if len(lines) != want_lines or (want_lines and "whole-run bound" not in lines[0]):
+            out.append("(dl-total-median) a row whose whole-run times have {} must give {} line(s) holding "
+                       "'whole-run bound', got {!r}".format(edge, want_lines, lines))
+
+    ran = []
+
+    def scripted(runs):
+        queue = list(runs)
+
+        def run_once():
+            # Past its script a row gets clean runs, so a rule that runs a row too often shows in the count.
+            run = queue.pop(0) if queue else inside
+            ran.append(run)
+            return run
+        return run_once
+
+    # The exactly-at-the-bound span must subtract to exactly the bound, so its armed read is 0.0: with a
+    # nonzero base, (base + tail) - base rounds away from tail for a tail whose sum is not representable.
+    inside = (2, refusal, 0.15, {"armed": 9.0, "end": 10.0, "reached": 9.0}, 9.0 + tail - 1e-6)
+    at_bound = (2, refusal, 0.15, {"armed": 0.0, "end": 1.0, "reached": 0.0}, tail)
+    over = (2, refusal, 0.15, {"armed": 9.0, "end": 10.0, "reached": 9.0}, 9.0 + tail + 1e-6)
+    late_read_over = (2, refusal, 0.15, {"armed": 9.0, "end": 9.88, "reached": 9.08}, 9.0 + tail + 1e-6)
+    no_read_over = (2, refusal, 0.15, {"armed": 9.0, "end": 9.85}, 9.0 + tail + 1e-6)
+    unarmed = (2, refusal, 0.15, {}, 0.2)
+    ran_out = (2, refusal, 0.15, {"armed": 9.0, "end": 10.0, "reached": 10.0}, 10.05)
+    bare = (2, "", 0.15, {"armed": 9.0, "end": 10.0, "reached": 9.0}, 9.05)
+    full, most = _DEADLINE_TAIL_RUNS, _DEADLINE_TAIL_MAX_RUNS
+    for edge, runs, want_runs, want_lines, want_text in (
+            ("every run just inside the tail bound", [inside] * full, full, 0, ""),
+            ("every run exactly at the tail bound", [at_bound] * full, full, 0, ""),
+            ("a stall on runs 1 and 2 only", [over, over, inside], full, 1, "median span"),
+            ("a stall on runs 1 and 3 only", [over, inside, over], full, 1, "median span"),
+            ("a stall on runs 2 and 3 only", [inside, over, over], full, 1, "median span"),
+            ("a stall on run 1 only", [over, inside, inside], full, 0, ""),
+            ("a stall on run 3 only", [inside, inside, over], full, 0, ""),
+            ("a stall on run 1 only, the others exactly at the bound", [over, at_bound, at_bound], full, 0,
+             ""),
+            ("a stall on every run", [over] * full, full, 1, "median span"),
+            ("a stall on every run, each with a delay before the stub's first loop read",
+             [late_read_over] * full, full, 1, "median span"),
+            ("a stall on every run, each cut before the stub's first loop read", [no_read_over] * full,
+             full, 1, "median span"),
+            ("a run over the bound then one whose sleep ran to its end", [over, ran_out], 2, 1,
+             "run to its end"),
+            ("a run over the bound then one without the refusal", [over, bare], 2, 1, "expected exit 2"),
+            ("a clean run then one whose sleep ran to its end", [inside, ran_out], 2, 1, "run to its end"),
+            ("a run whose sleep ran to its end, never re-run", [ran_out, inside, inside], 1, 1,
+             "run to its end"),
+            ("a run over the bound, one that never armed its window, one over the bound and one inside it",
+             [over, unarmed, over, inside], full + 1, 1, "median span"),
+            ("a run over the bound then one that never armed its window, then clean runs",
+             [over, unarmed, inside, inside], full + 1, 0, ""),
+            ("no run that armed its window", [unarmed] * most, most, 1, "not measured"),
+            ("two clean runs among runs that never armed their window",
+             [inside, unarmed, unarmed, inside, unarmed, unarmed], most, 1, "not measured")):
+        ran.clear()
+        lines = _deadline_row_problems("recorded", "the refusal", "recorded refusal", scripted(runs))
+        bad = len(ran) != want_runs or len(lines) != want_lines
+        if not bad and want_lines and want_text not in lines[0]:
+            bad = True
+        if bad:
+            out.append("(dl-tail-rerun) a recorded row with {} must take {} run(s) and give {} line(s) "
+                       "holding {!r}, got {} run(s) and {!r}".format(
+                           edge, want_runs, want_lines, want_text, len(ran), lines))
+
+    stalled_after = (2, refusal, 0.95, {"armed": 9.0, "end": 10.0, "reached": 9.0}, 9.0 + 0.95)
+    after_cut_only = (2, refusal, 0.5, {"armed": 9.0, "end": 10.0, "reached": 9.0}, 9.0 + 0.4)
+    stalled_before = (2, refusal, 1.1, {"armed": 9.0, "end": 10.0, "reached": 9.0}, 9.0 + 0.05)
+    slow_unarmed = (2, refusal, 2.0, {}, 0.2)
+    slowish = (2, refusal, 0.9, {"armed": 9.0, "end": 10.0, "reached": 9.0}, 9.0 + 0.05)
+    for edge, runs, want_runs, want_texts in (
+            ("a 0.85-second stall after the deadline's cut on every run", [stalled_after] * full, full,
+             ("median span", "whole-run bound")),
+            ("a 0.3-second stall after the deadline's cut on every run, each whole run inside the "
+             "whole-run bound", [after_cut_only] * full, full, ("median span",)),
+            ("a 1-second stall before the deadline window is armed on every run", [stalled_before] * full,
+             full, ("whole-run bound",)),
+            ("a stall before the window on one run of three", [stalled_before, inside, inside], full, ()),
+            ("a whole-run median pushed over the bound only by two replaced unarmed runs' times",
+             [slow_unarmed, slow_unarmed, inside, inside, slowish], full + 2, ("whole-run bound",)),
+            ("a stall in a replaced unarmed run and one before the window, on two of four runs",
+             [slow_unarmed, stalled_before, inside, inside], full + 1, ("whole-run bound",)),
+            ("a stall in a replaced unarmed run and one after the deadline's cut, on two of four runs",
+             [slow_unarmed, stalled_after, inside, inside], full + 1, ("whole-run bound",)),
+            ("stalls counted only through replaced unarmed runs on three of six runs",
+             [slow_unarmed, slow_unarmed, slow_unarmed, inside, inside, inside], most,
+             ("whole-run bound",)),
+            ("stalls counted only through replaced unarmed runs on two of five runs",
+             [slow_unarmed, slow_unarmed, inside, inside, inside], full + 2, ())):
+        ran.clear()
+        lines = _deadline_row_problems("recorded", "the refusal", "recorded refusal", scripted(runs))
+        bad = len(ran) != want_runs or len(lines) != len(want_texts)
+        if not bad and any(text not in line for text, line in zip(want_texts, lines)):
+            bad = True
+        if bad:
+            out.append("(dl-total-rerun) a recorded row with {} must take {} run(s) and give {} line(s) "
+                       "holding {!r}, got {} run(s) and {!r}".format(
+                           edge, want_runs, len(want_texts), want_texts, len(ran), lines))
 
     seen = []
 
@@ -5950,6 +7820,84 @@ class _Later:
 
     def __getattr__(self, name):
         return getattr(time, name)
+
+
+class _Clocked(_Later):
+    """_Later that also keeps, in order, every value its monotonic() returned (`reads`)."""
+
+    def __init__(self, ahead):
+        super().__init__(ahead)
+        self.reads = []
+
+    def monotonic(self):
+        value = super().monotonic()
+        self.reads.append(value)
+        return value
+
+
+class _Stalled(_Clocked):
+    """_Clocked that, at its second read (a window's restore; the first is its take), sleeps `stall` seconds
+    after keeping the value and before returning it, so that time passes between the restore's clock read
+    and its re-arm."""
+
+    def __init__(self, ahead, stall):
+        super().__init__(ahead)
+        self.stall = stall
+
+    def monotonic(self):
+        value = super().monotonic()
+        if len(self.reads) == 2:
+            time.sleep(self.stall)
+        return value
+
+
+class _TimedSignal:
+    """A stand-in for aiqt_hooks.signal: the signal module, with each setitimer call kept, in order, in
+    `calls` as (its arguments, the time.monotonic read just before it, the one just after it)."""
+
+    def __init__(self):
+        self.calls = []
+
+    def __getattr__(self, name):
+        return getattr(signal, name)
+
+    def setitimer(self, *args):
+        before = time.monotonic()
+        try:
+            return signal.setitimer(*args)
+        finally:
+            self.calls.append((args, before, time.monotonic()))
+
+
+def _countdown_within(low, high, countdown):
+    """Whether countdown is inside the bound (low, high] that _caller_countdown_bounds gives."""
+    return low < countdown <= high
+
+
+def _caller_countdown_bounds(holder, reads, armed, started, finished):
+    """(low, high, problem) for the countdown of a caller's 30-second timer, armed between the time.monotonic
+    reads started[0] and started[1] and read back by getitimer between finished[0] and finished[1], under the
+    elapsed-aware restore of holder, the window that borrowed it (aiqt_hooks.time a _Clocked whose reads are
+    `reads`, aiqt_hooks.signal a _TimedSignal whose setitimer calls are `armed`): the countdown is right when
+    _countdown_within(low, high, countdown), and problem is "" unless what holder recorded at its take is
+    itself out of bounds. A holder that took nothing leaves the timer running from the arming to the read.
+    One that took it re-arms it, with the last setitimer call, at the countdown its take read
+    (holder._timer[0]) less the time from its take's clock read (holder._began) to its restore's (the last of
+    reads); the bound is that countdown less the time from the re-arm to the getitimer, as the clock reads
+    either side of each of those two calls bracket it, so it is only as wide as the two calls take, and a
+    stall anywhere between them moves both ends together. Time between the restore's clock read and its
+    re-arm is not counted: a restore that re-arms late by it is accepted. setitimer rounds a countdown up to
+    the microsecond and getitimer reads one rounded down, so the low end allows the microsecond the read
+    loses and, after a re-arm, the high end the microsecond setitimer adds (the 30-second arming is exact)."""
+    if holder._began is None:
+        return 30.0 - (finished[1] - started[0]) - 1e-6, 30.0 - (finished[0] - started[1]), ""
+    taken, began, restored = holder._timer[0], holder._began, reads[-1]
+    problem = ""
+    if not _countdown_within(30.0 - (restored - started[0]) - 1e-6, 30.0 - (began - started[1]), taken):
+        problem = "the take read {!r}, outside the countdown between its clock reads".format(taken)
+    left = taken - (restored - began)
+    _args, before, after = armed[-1]
+    return left - (finished[1] - before) - 1e-6, left - (finished[0] - after) + 1e-6, problem
 
 
 def _window_codes():
@@ -6250,10 +8198,17 @@ def _deadline_defer_failures():
     disposition (its handler, its countdown) or not holding them at all (the caller's handler and timer); a
     raising handler's exception must leave the with statement (in the nested case with the caller's timer
     due, it or the outer deadline, whichever Python raises last), and otherwise the due deadline; the
-    caller must get back its handler and periodic timer with the deliveries due; and no window may be left
-    armed or broken. Not swept: the instructions of __exit__ before its first statement and the return
-    instruction of __enter__, where no code of the window can run (the class docstring states that
-    limit)."""
+    caller must get back its handler and periodic timer with the deliveries due (with none due, at the
+    countdown the restore's own clock read gives, less the time from its re-arm to the final read:
+    _caller_countdown_bounds); and no window may be left armed or broken. Unlike dl-defer-countdown, the
+    rows judge every run whatever its bound's width: a host stall inside a bracketed timer call widens that
+    run's bound by the stall, and a restore off by less than it can pass that run (direction and position
+    in the bound decide): widening can hide a wrong restore in that run but need not, since an error the
+    widened bound does not cover is still refused (dl-defer-countdown and dl-defer-countdown-stall judge
+    only a run whose bound is narrower than the
+    window's time, the stall variant only one whose window time is below the stall). Not swept: the
+    instructions of __exit__ before its first statement and the return instruction of __enter__, where no
+    code of the window can run (the class docstring states that limit)."""
     out = []
     calls = []
     exit_code = aiqt_hooks._DeadlineWindow.__exit__.__code__
@@ -6274,7 +8229,11 @@ def _deadline_defer_failures():
         seen = {}
         counted = [0]
         signal.signal(signal.SIGALRM, counting)
+        clock = aiqt_hooks.time = _Clocked(0.0)
+        timed = aiqt_hooks.signal = _TimedSignal()
+        started = (time.monotonic(),)
         signal.setitimer(signal.ITIMER_REAL, 30.0, 30.0)
+        started += (time.monotonic(),)
         outer = aiqt_hooks._DeadlineWindow(600.0) if nested else None
         window = aiqt_hooks._DeadlineWindow(5.0)
         interval = 0.0 if nested else 30.0
@@ -6347,11 +8306,15 @@ def _deadline_defer_failures():
                            else "the window's deadline" if exc.args[:1] == (window,) else "another deadline")
             except BaseException as exc:
                 escaped = type(exc).__name__
-            final = (signal.getsignal(signal.SIGALRM), signal.getitimer(signal.ITIMER_REAL))
+            handler = signal.getsignal(signal.SIGALRM)
+            finished = (time.monotonic(),)
+            final = (handler, signal.getitimer(signal.ITIMER_REAL))
+            finished += (time.monotonic(),)
         finally:
             stop()
             sys.settrace(None)
             aiqt_hooks.time = time
+            aiqt_hooks.signal = signal
             signal.setitimer(signal.ITIMER_REAL, 0)
             signal.signal(signal.SIGALRM, signal.SIG_DFL)
             for signum, handler in saved.items():
@@ -6371,9 +8334,15 @@ def _deadline_defer_failures():
             problems.append("handler runs {!r} (True: the window fully held or fully given back)".format(seen))
         if escaped not in want:
             problems.append("escaped {}, want {}".format(escaped, " or ".join(map(str, want))))
-        if not (handler is counting and timer[1] == 30.0
-                and (0 < timer[0] <= 30.0 if fired else 29.0 < timer[0] <= 30.0)):
-            problems.append("caller left {!r} with {!r}".format(handler, timer))
+        # With no expiry due, the caller's countdown is the one the restore's own clock read gives, less the
+        # time from its re-arm to the final read; time between that clock read and the re-arm is not counted
+        # (_caller_countdown_bounds).
+        low, high, countdown = (0.0, 30.0, "") if fired else _caller_countdown_bounds(
+            outer if nested else window, clock.reads, timed.calls, started, finished)
+        if not (handler is counting and timer[1] == 30.0 and 0 < timer[0] <= 30.0
+                and _countdown_within(low, high, timer[0]) and not countdown):
+            problems.append("caller left {!r} with {!r}, want a countdown in ({!r}, {!r}]{}".format(
+                handler, timer, low, high, countdown and "; " + countdown))
         if calls != ([signal.SIGALRM] if fired else []):
             problems.append("caller deliveries {}".format(len(calls)))
         if window.armed or getattr(window, "broken", False) or (outer is not None and outer.armed):
@@ -6410,6 +8379,156 @@ def _deadline_defer_failures():
     finally:
         sys.settrace(None)
         aiqt_hooks.time = time
+        aiqt_hooks.signal = signal
+    return out
+
+
+def _deadline_defer_countdown_failures(stall=0.0):
+    """(dl-defer-countdown) The caller's countdown bound the dl-defer rows apply (_caller_countdown_bounds)
+    accepts a correct restore in a run that takes over a second, which a fixed lower bound of 29 seconds
+    refused, and is narrow enough to refuse that countdown moved by the window's time either way, the
+    countdown errors a restore that did not subtract the window's time or subtracted it twice would make. A
+    5-second window under a caller with a counting SIGALRM handler and a periodic 30-second timer, with 0.9
+    seconds slept before the window and 0.6 seconds in its body: the caller's timer comes back under 29
+    seconds and inside the bound, with no delivery and the window closed. A run whose bound is not narrower
+    than the window's time cannot tell those apart; such a run is not judged, and the vector takes another
+    (at most 3 in all), judges the first run that can tell them apart, and fails, naming each run's bound,
+    when none can. The edge checks put each end, one microsecond inside, exactly at and one microsecond
+    outside, through _countdown_within, the check the dl-defer rows make.
+    (dl-defer-countdown-stall) The same with `stall` seconds slept between the restore's clock read and its
+    re-arm (aiqt_hooks.time a _Stalled), judging only a run whose measured window time is also below the
+    stall: a run the window outran is retried like one whose bound is too wide, and the vector fails,
+    naming each run's bound and time, when none of the 3 qualifies. The bound is anchored on that read and
+    on the re-arm, so it stays as narrow as its two timer calls take: a restore off by the window's time
+    is refused, and the correct one, re-armed late by the stall, is accepted when some run's window time is
+    under the stall; when none of the 3 is, the vector fails as cannot-tell. A bound as wide as the time
+    from the restore's clock read to the final read is at least the stall wide, so it is never narrower
+    than a judged run's window time: no run under it qualifies, and the vector fails instead of passing.
+    Which runs are taken and which is judged is _countdown_judged's, which dl-defer-countdown-judging drives
+    with recorded runs."""
+    out = []
+    calls = []
+    label = "dl-defer-countdown-stall" if stall else "dl-defer-countdown"
+
+    def counting(signum, frame):
+        calls.append(signum)
+
+    def attempt():
+        calls.clear()
+        window = aiqt_hooks._DeadlineWindow(5.0)
+        clock = aiqt_hooks.time = _Stalled(0.0, stall) if stall else _Clocked(0.0)
+        timed = aiqt_hooks.signal = _TimedSignal()
+        try:
+            signal.signal(signal.SIGALRM, counting)
+            started = (time.monotonic(),)
+            signal.setitimer(signal.ITIMER_REAL, 30.0, 30.0)
+            started += (time.monotonic(),)
+            time.sleep(0.9)
+            with window:
+                time.sleep(0.6)
+            handler = signal.getsignal(signal.SIGALRM)
+            finished = (time.monotonic(),)
+            timer = signal.getitimer(signal.ITIMER_REAL)
+            finished += (time.monotonic(),)
+        finally:
+            aiqt_hooks.time = time
+            aiqt_hooks.signal = signal
+            signal.setitimer(signal.ITIMER_REAL, 0)
+            signal.signal(signal.SIGALRM, signal.SIG_DFL)
+        low, high, problem = _caller_countdown_bounds(window, clock.reads, timed.calls, started, finished)
+        used = clock.reads[-1] - window._began if window._began is not None else 0.0
+        return window, handler, timer, low, high, problem, used, len(calls)
+
+    _runs, low, high, problems = _countdown_judged(attempt, stall, counting)
+    edges = [(low - 1e-6, False), (low, False), (low + 1e-6, True),
+             (high - 1e-6, True), (high, True), (high + 1e-6, False)]
+    wrong = [value for value, want in edges if _countdown_within(low, high, value) != want]
+    if wrong:
+        problems.append("the bound ({!r}, {!r}] must hold just inside each end and the high end itself, and "
+                        "refuse the low end itself and just outside each, got wrong {!r}".format(low, high, wrong))
+    if problems:
+        out.append("({}) {}".format(label, "; ".join(problems)))
+    return out
+
+
+def _countdown_judged(attempt, stall, counting):
+    """The judging of dl-defer-countdown (stall 0) and dl-defer-countdown-stall: runs from attempt(), each
+    (window, handler, timer, low, high, problem, used, delivered), are taken until one can tell a correct
+    restore from one off by the window's time (at most 3), and the first such run is judged, its caller
+    handler to be counting. Returns the runs taken, the bound judged (the last run's when none could tell)
+    and the problems found."""
+
+    def can_tell(run):
+        # A bound as wide as the stall can be narrower than an outrun window's time, so the stall variant
+        # judges only a run whose window time stayed below the stall.
+        return run[4] - run[3] < run[6] and (not stall or run[6] < stall)
+
+    runs = []
+    while len(runs) < 3 and not any(can_tell(run) for run in runs):
+        runs.append(attempt())
+    telling = [run for run in runs if can_tell(run)]
+    problems = []
+    if not telling:
+        outran = ", or a window not under the {!r}-second stall".format(stall) if stall else ""
+        problems.append("none of {} runs could tell a correct restore from one off by the window's time (a bound "
+                        "not narrower than it{}): {}".format(len(runs), outran, "; ".join(
+                            "bound ({!r}, {!r}] against {!r} seconds".format(run[3], run[4], run[6])
+                            for run in runs)))
+        low, high = runs[-1][3:5]
+    else:
+        window, handler, timer, low, high, problem, used, delivered = telling[0]
+        if not (handler is counting and timer[1] == 30.0 and timer[0] < 29.0
+                and _countdown_within(low, high, timer[0]) and not problem and delivered == 0
+                and not window.armed and not window.broken):
+            problems.append("a correct restore in a run of over a second must come back under 29 seconds and "
+                            "inside the bound, got {!r} with {!r}, bound ({!r}, {!r}]{}, caller deliveries "
+                            "{}".format(handler, timer, low, high, problem and "; " + problem, delivered))
+        elif not (used >= 0.6 and not _countdown_within(low, high, timer[0] + used)
+                  and not _countdown_within(low, high, timer[0] - used)):
+            problems.append("the bound ({!r}, {!r}] must refuse the countdown {!r} moved by the window's {!r} "
+                            "seconds either way".format(low, high, timer[0], used))
+    return runs, low, high, problems
+
+
+def _deadline_defer_countdown_judging_failures():
+    """(dl-defer-countdown-judging) _countdown_judged under a 1-second stall, driven with recorded runs (no
+    clock is read, nothing sleeps): three runs whose window outran the stall, each under a bound as wide as
+    the time from the restore's clock read to the final read (wider than the stall, narrower than the
+    window's time) with its countdown inside, are none judged and fail as cannot-tell after 3; a run that
+    outran the stall with its countdown outside its bound, then a run under the stall with a correct
+    countdown, pass on the second; a run whose window time is exactly the stall, or one microsecond over
+    it, with its countdown outside a 0.2-millisecond bound is not judged, and the correct run after it
+    passes on the second; one a microsecond under the stall with that countdown is judged, and refused, on
+    the first."""
+    out = []
+
+    def counting(signum, frame):
+        pass
+
+    closed = types.SimpleNamespace(armed=False, broken=False)
+
+    def run(low, width, countdown, used):
+        return closed, counting, (countdown, 30.0), low, low + width, "", used, 0
+
+    overrun = run(27.85, 1.0002, 28.35, 1.1002)
+    right = run(28.4, 2e-4, 28.4001, 0.6001)
+    cases = [
+        ("three runs the window outran", [overrun] * 3, 3, "none of 3 runs could tell"),
+        ("an outrun run with a wrong countdown, then a correct run",
+         [run(27.85, 1.0002, 28.95, 1.1002), right, right], 2, ""),
+        ("a window time exactly the stall with a wrong countdown, then a correct run",
+         [run(28.0, 2e-4, 28.95, 1.0), right, right], 2, ""),
+        ("a window time a microsecond over the stall with a wrong countdown, then a correct run",
+         [run(28.0, 2e-4, 28.95, 1.000001), right, right], 2, ""),
+        ("a window time a microsecond under the stall with a wrong countdown",
+         [run(28.0, 2e-4, 28.95, 0.999999), right, right], 1, "a correct restore in a run"),
+    ]
+    for name, recorded, taken, want in cases:
+        runs, _low, _high, problems = _countdown_judged(iter(recorded).__next__, 1.0, counting)
+        got = "; ".join(problems)
+        if len(runs) != taken or (not got.startswith(want) if want else got):
+            out.append("(dl-defer-countdown-judging) {}: want {} runs taken and {}, got {} and {!r}".format(
+                name, taken, repr(want) if want else "a pass", len(runs), got))
     return out
 
 
@@ -7803,7 +9922,9 @@ def _deadline_child(tmp):
     """The deadline checks that set timers and dispositions, plus the shape timings, in this (child)
     process; returns their failures."""
     return (_deadline_path_failures() + _deadline_restore_failures() + _deadline_race_failures()
-            + _deadline_take_failures() + _deadline_defer_failures() + _deadline_enclosing_restore_failures()
+            + _deadline_take_failures() + _deadline_defer_failures() + _deadline_defer_countdown_failures()
+            + _deadline_defer_countdown_failures(1.0) + _deadline_defer_countdown_judging_failures()
+            + _deadline_enclosing_restore_failures()
             + _deadline_rearm_failures() + _deadline_discard_failures() + _deadline_alarm_failures()
             + _deadline_mask_failures() + _deadline_mask_thread_failures() + _deadline_no_c_mask_failures()
             + _deadline_outer_deadline_failures() + _deadline_restore_fault_failures()
@@ -7833,6 +9954,7 @@ def _test_deadline_posture(failures, tmp):
     """(dl-*) The PreToolUse deadline posture; see the section comment above."""
     failures.extend(_deadline_relation_failures())
     failures.extend(_deadline_shape_rerun_failures())
+    failures.extend(_deadline_note_only_deny_failures())
     failures.extend(_raw_sequence_failures())
     failures.extend(_raw_mirror_failures())
     failures.extend(_procsubst_skip_failures())
@@ -7846,6 +9968,7 @@ def _test_deadline_posture(failures, tmp):
     failures.extend(_lex_skip_floor_failures())
     failures.extend(_lex_repeats_failures())
     failures.extend(_lex_fork_failures())
+    failures.extend(_errexit_runs_failures())
     child_tmp = tmp / "deadline"
     child_tmp.mkdir()
     code = ("import json, sys; sys.path.insert(0, sys.argv[1]); import selftest_aiqt_hooks as m; "
@@ -16967,17 +19090,34 @@ def _main_isolated(monitor):
                         ("floor-long-words", _cost_form + "echo " + "a " * (128 * 1024)),
                         ("main-reading-long-words", "echo \"$(cat <<'EOF'\n)\nEOF\n)\"\necho " + "a " * (128 * 1024)),
                         ("doubt-comment-pipes", "(true #'\n)\npytest |\n" + "# |\n" * (64 * 1024) + "wc"))
+        # Each run of each pair must reach the decision below, the one this code reached on it when these
+        # decisions were pinned (gate_weakening, bash_absolute_paths, protected_line). They are pinned as
+        # observed, not derived from each guard's rules: the pin fails a change of decision on any run,
+        # but does not show that each decision is the right one for its input.
+        _cost_wants = {"long-comment-line": ("allow", "allow", "deny"),
+                       "deep-nesting": ("allow", "allow", "deny"),
+                       "spaced-deep-nesting": ("allow", "allow", "deny"),
+                       "retry-long-comment-line": ("deny", "allow-note", "deny"),
+                       "retry-deep-nesting": ("deny", "allow-note", "deny"),
+                       "floor-long-words": ("allow", "allow", "deny"),
+                       "main-reading-long-words": ("allow", "allow", "deny"),
+                       "doubt-comment-pipes": ("allow-note", "allow", "deny")}
         _cost_doubt_got = None
+
+        def _cost_timed(guard, cmd):
+            t0 = time.process_time()
+            got = _decision(guard, cmd)
+            return time.process_time() - t0, got
         for _cost_name, _cost_cmd in _cost_inputs:
-            for _cost_guard in (aiqt_hooks.gate_weakening, aiqt_hooks.bash_absolute_paths, aiqt_hooks.protected_line):
-                _cost_t0 = time.process_time()
-                _cost_got = _decision(_cost_guard, _cost_cmd)
-                _cost_cpu = time.process_time() - _cost_t0
-                if _cost_cpu >= 1.0:
-                    failures.append("(lex-cost-{}) {} took {:.2f} s of CPU on a {}-character command; the bound "
-                                    "is 1 s".format(_cost_name, _cost_guard.__name__, _cost_cpu, len(_cost_cmd)))
+            for _cost_guard, _cost_want in zip(
+                    (aiqt_hooks.gate_weakening, aiqt_hooks.bash_absolute_paths, aiqt_hooks.protected_line),
+                    _cost_wants[_cost_name]):
+                _cost_cpu, _cost_runs = _timed_runs(lambda: _cost_timed(_cost_guard, _cost_cmd))
+                _cost_got = sorted(set(got for _cpu, got in _cost_runs))
+                failures.extend(_lex_cost_problems(_cost_name, _cost_guard.__name__, len(_cost_cmd), _cost_cpu,
+                                                   _cost_runs, _cost_want))
                 if _cost_name == "doubt-comment-pipes" and _cost_guard is aiqt_hooks.gate_weakening:
-                    _cost_doubt_got = _cost_got
+                    _cost_doubt_got = " and ".join(_cost_got)
         # The doubt-comment-pipes row bounds the fail-closed sink test only while its input still reaches
         # that test: the lex must keep raising the uncertain-'#' doubt on it and gate_weakening must keep
         # giving it the checker-and-pipe note (its terminal word is off the deny list), or the row would
@@ -23891,7 +26031,8 @@ def _main_isolated(monitor):
         # Each rebase reads its options only up to the next rebase subcommand that the segment's git commands read,
         # so a segment of many wrapped rebase commands costs time linear in its length, where reading the rest of
         # the segment for each of them cost time quadratic in it (about 1.5 s to 4 s of CPU time at 65,536
-        # characters for the two forms below). The bound is the handler's CPU time in this process over 'sudo -E git
+        # characters for the two forms below). The bound is the CPU time the calling thread spends in the
+        # handler (_hook_cpu_timed: the thread clock, the cyclic collector held off) over 'sudo -E git
         # rebase x ...' and over 'sudo -E git rebase -x x ...', each padded to 65,536 characters and to
         # _CMTIDN_READ_LIMIT, the longest command the reader reads (131,072 characters): 0.5 s at 65,536 and 1 s at
         # 131,072, the same bound per character, against at most about 0.035 s and 0.07 s measured, a margin of
@@ -23917,10 +26058,10 @@ def _main_isolated(monitor):
                     _ci_cmd = "sudo" + _ci_unit * _ci_reps
                     _ci_cmd += " " * (_ci_size - len(_ci_cmd))
                     _ci_want = [_ci_reps, _ci_reps if " -x " in _ci_unit else 0]
-                    _ci_counts[:] = [0, 0]
-                    _ci_start = time.process_time()
-                    _ci_got = _decision(cig, _ci_cmd)
-                    _ci_spent = time.process_time() - _ci_start
+                    def _ci_reset_and_decide(_cmd=_ci_cmd):
+                        _ci_counts[:] = [0, 0]
+                        return _decision(cig, _cmd)
+                    _ci_got, _ci_spent = _hook_cpu_timed(_ci_reset_and_decide, bound=_ci_cap)
                     if _ci_got != "allow" or _ci_spent > _ci_cap or _ci_counts != _ci_want:
                         failures.append("(ci-wr-rebase-cpu) {} characters of 'sudo{} ...' gave {} after {:.2f} s of "
                                         "CPU time, {} rebase reads and {} run lines built (want allow within {} s, "
@@ -23935,7 +26076,8 @@ def _main_isolated(monitor):
         # raw-string scan that judges a command the tokenizer cannot parse (_RAW_IDENTITY_CONTEXTS) take each
         # whitespace run whole, so a long run costs time linear in its length, where giving it back one character at
         # a time cost time quadratic in it (about 53 s and 130 s of CPU time at _CMTIDN_READ_LIMIT characters for
-        # the two forms below). The bound is the handler's CPU time in this process over a commit message of a
+        # the two forms below). The bound is the CPU time the calling thread spends in the handler
+        # (_hook_cpu_timed: the thread clock, the cyclic collector held off) over a commit message of a
         # co-author name and a run of newlines, before a second message with an AI co-author trailer, which the
         # reader denies (ci-wr172), and over user.name, a run of spaces and a quote that does not close, before an
         # AI user.name value, which the raw-string scan denies (ci-wr173), each padded to 16,384 characters and to
@@ -23953,10 +26095,10 @@ def _main_isolated(monitor):
                  "' user.name Claude", ("could not be read in full", "(user.name/user.email value 'Claude')"))):
             for _ci_size, _ci_cap in ((16 << 10, 0.125), (aiqt_hooks._CMTIDN_READ_LIMIT, 1.0)):
                 _ci_cmd = _ci_head + _ci_run * (_ci_size - len(_ci_head) - len(_ci_tail)) + _ci_tail
-                _ci_start = time.process_time()
-                _ci_code, _ci_out = cig({"hook_event_name": "PreToolUse", "tool_name": "Bash",
-                                         "tool_input": {"command": _ci_cmd}})[:2]
-                _ci_spent = time.process_time() - _ci_start
+                _ci_result, _ci_spent = _hook_cpu_timed(
+                    lambda _cmd=_ci_cmd: cig({"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                                              "tool_input": {"command": _cmd}}), bound=_ci_cap)
+                _ci_code, _ci_out = _ci_result[:2]
                 _ci_got = _reduce_result(_ci_code, _ci_out)
                 _ci_reason = ((_ci_out or {}).get("hookSpecificOutput") or {}).get("permissionDecisionReason", "")
                 if _ci_got != "deny" or _ci_spent > _ci_cap or not all(_ci_w in _ci_reason for _ci_w in _ci_wants):
@@ -24378,9 +26520,8 @@ def _main_isolated(monitor):
                  "denies (the disclosed over-deny)", '; git commit -m "thanks Claudette"', "deny"),
                 ("(ci-wr-c47) a command past the read limit that names no AI identity allows",
                  "; git commit -m x", "allow")):
-            _ci_start = time.process_time()
-            _ci_got = _decision(cig, _ci_wide + _ci_tail)
-            _ci_spent = time.process_time() - _ci_start
+            _ci_got, _ci_spent = _hook_cpu_timed(
+                lambda _cmd=_ci_wide + _ci_tail: _decision(cig, _cmd), bound=1.0)
             if _ci_got != _ci_want or _ci_spent > 1.0:
                 failures.append("{}: over {} characters expected {} within 1 s of CPU time, got {} after {:.2f} s"
                                 .format(_ci_label, len(_ci_wide + _ci_tail), _ci_want, _ci_got, _ci_spent))
@@ -24420,9 +26561,7 @@ def _main_isolated(monitor):
                  _ci_body + "\nsetconf user.name Claude", "deny"),
                 ("(ci-wr165) an AI identity variable spelled in lower case, which the reader also judges, with no git "
                  "word, past the read limit, denies", _ci_body + "\ngit_committer_email=claude@x make", "deny")):
-            _ci_start = time.process_time()
-            _ci_got = _decision(cig, _ci_long)
-            _ci_spent = time.process_time() - _ci_start
+            _ci_got, _ci_spent = _hook_cpu_timed(lambda _cmd=_ci_long: _decision(cig, _cmd), bound=1.0)
             if _ci_got != _ci_want or _ci_spent > 1.0:
                 failures.append("{}: over {} characters expected {} within 1 s of CPU time, got {} after {:.2f} s"
                                 .format(_ci_label, len(_ci_long), _ci_want, _ci_got, _ci_spent))
@@ -27200,18 +29339,16 @@ def _main_isolated(monitor):
         # COST: an escaped '>' run inside one absolute target word is passed over, so the scan makes one word
         # read for that run, not one per '>' (a read per '>' grows with the square of the run's length).
         _ut_cost_cmd = "cat <<<y > /" + "\\>/" * 8000
-        _ut_t0 = time.process_time()
-        _ut_cost_got = _decision(aiqt_hooks.bash_absolute_paths, _ut_cost_cmd)
-        _ut_cpu = time.process_time() - _ut_t0
+        _ut_cost_got, _ut_cpu = _hook_cpu_timed(
+            lambda _cmd=_ut_cost_cmd: _decision(aiqt_hooks.bash_absolute_paths, _cmd), bound=1.0)
         if _ut_cpu >= 1.0 or _ut_cost_got != "allow":
             failures.append("(ap-c95e) the escaped-'>' run must allow in under 1 s of CPU; got {} in {:.2f} s"
                             .format(_ut_cost_got, _ut_cpu))
         # the second reading a backquote starts cuts each run to two, so each '>' it reads ends the word before
         # it and the reads stay linear in the command's length.
         _ut_cost_cmd = "echo `true`; cat <<<y > /" + "\\\\\\>/" * 8000
-        _ut_t0 = time.process_time()
-        _ut_cost_got = _decision(aiqt_hooks.bash_absolute_paths, _ut_cost_cmd)
-        _ut_cpu = time.process_time() - _ut_t0
+        _ut_cost_got, _ut_cpu = _hook_cpu_timed(
+            lambda _cmd=_ut_cost_cmd: _decision(aiqt_hooks.bash_absolute_paths, _cmd), bound=1.0)
         if _ut_cpu >= 1.0 or _ut_cost_got != "allow":
             failures.append("(ap-c95f) the odd backslash runs after a backquote must allow in under 1 s of CPU; "
                             "got {} in {:.2f} s".format(_ut_cost_got, _ut_cpu))
@@ -27763,17 +29900,21 @@ def _main_isolated(monitor):
             failures.append("(eb-e22) git_explicit_binding handler/event wiring is missing or wrong")
 
         # (pf-modes) PYTHON-FLOOR: the floor guard runs before HANDLER_EVENT exists, so it carries its own
-        # FLOOR_FAIL_OPEN_MODES literal; it must name exactly the handlers whose event is fail-open, or an
-        # older interpreter would block a Stop-type event (or wave a PreToolUse one through).
+        # FLOOR_FAIL_OPEN_MODES literal; it must name exactly the handlers whose event is fail-open and the
+        # note-only PreToolUse handlers, or an older interpreter would block a Stop-type event or a note-only
+        # check (or wave a blocking PreToolUse one through).
         _pf_want = tuple(sorted(name for name, event in aiqt_hooks.HANDLER_EVENT.items()
-                                if event in aiqt_hooks.FAIL_OPEN_EVENTS))
+                                if event in aiqt_hooks.FAIL_OPEN_EVENTS
+                                or name in aiqt_hooks.NOTE_ONLY_PRETOOL_MODES))
         if aiqt_hooks.FLOOR_FAIL_OPEN_MODES != _pf_want:
             failures.append("(pf-modes) FLOOR_FAIL_OPEN_MODES {!r} differs from the fail-open handlers in "
                             "HANDLER_EVENT {!r}".format(aiqt_hooks.FLOOR_FAIL_OPEN_MODES, _pf_want))
 
         _test_git_stash_ref(failures)
+        _test_inline_errexit(failures, tmp)
         _test_pgrep_self_match(failures)
         _test_trkasy_no_amp(failures, tmp)
+        _test_wait_loop_deny_text(failures, tmp)
         _test_note_literal_sites(failures, tmp)
         _test_stop_dispatch_note_sites(failures, tmp)
         _test_note_shape_pins(failures, tmp)

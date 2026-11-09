@@ -611,6 +611,11 @@ ALLOWLIST = (
      " substitutions, or of the repository's own tools/check_python_floor.py; no external input"),
     ("tools/gen_crosswalk.py", "_fdopen_vectors.flipped", "code", 1,
      _MUTANT + " (each fdopen close revert, loaded by exec_module from a scratch file)"),
+    ("tools/selftest_aiqt_hooks.py", "_ie_mutant_handlers", "code", 1,
+     "self-test mutant loader: exec_module of a copy, written under the self-test's temporary"
+     " directory, of the repository's own hook source (read from aiqt_hooks.__file__) with the"
+     " reviewed literal substitutions of one _IE_MUTANTS entry, each anchor matched exactly once;"
+     " no external input"),
     ("tools/_close_selftest.py", "_StCloseFault.__init__", "shell", 1,
      "self-test fault injector: wraps the os functions named in its own fixed _ST_WATCHED"
      " tuple (descriptor stat and seek calls) to count closes; never runs a shell"),
@@ -668,6 +673,11 @@ ALLOWLIST = (
     ("tools/check_ci_parity.py", "self_test", "shell", 1, _SAVED),
     ("tools/check_gensrc_failclose.py", "_self_test_main_isolated._check_no_maintenance", "shell", 1,
      _SAVED + " (the no-maintenance vector's recorder of the template git argv lists)"),
+    ("tools/check_gensrc_failclose.py", "_self_test_main_isolated._evaluate_launch_failure", "shell", 1,
+     _SAVED + " (the gc launch-failure vector's double, raising for the gc launch, delegating the rest)"),
+    ("tools/check_gensrc_failclose.py", "_self_test_main_isolated._evaluate_interrupt", "shell", 1,
+     _SAVED + " (the real Popen subclassed by the gc interrupt vector's double, whose wait raises"
+     " KeyboardInterrupt once)"),
     ("tools/check_release_build.py", "_self_test_main_isolated", "shell", 1, _SAVED),
     ("tools/check_release_delta.py", "_self_test_main_isolated", "shell", 1, _SAVED),
     ("tools/check_mistakes_register.py", "self_test", "shell", 2,

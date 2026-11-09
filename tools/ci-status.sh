@@ -27,7 +27,9 @@
 # Every invocation requires a completed successful run of the workflow file
 # .github/workflows/quality.yml on the commit (see THE REQUIRED WORKFLOW below), except --match-tree,
 # which requires one on a commit with the same TREE and refuses that tree when any completed run of
-# that file on it, within the window THE TREE MATCH below states, concluded otherwise.
+# that file on it, within the window THE TREE MATCH below states, concluded otherwise. In every mode a
+# run whose event is schedule or workflow_dispatch is advisory (THE ADVISORY RUNS below): it never
+# satisfies that requirement and never refuses the commit or the tree.
 #
 # Usage:
 #   tools/ci-status.sh                              # current HEAD, report once
@@ -49,7 +51,9 @@
 #                                                   # .github/workflows/quality.yml whose head commit
 #                                                   # has the TREE of REV (default HEAD), each NAME
 #                                                   # concluded success in that run, and no completed
-#                                                   # run of it on that tree concluded otherwise. The
+#                                                   # run of it on that tree concluded otherwise,
+#                                                   # an advisory run (THE ADVISORY RUNS) being
+#                                                   # neither that run nor a refusal. The
 #                                                   # window: up to 5 listing pages, all read in full,
 #                                                   # with trees read for the newest 20 distinct head
 #                                                   # commits; a non-success run on one of them with
@@ -513,6 +517,27 @@ SETTLE_OBSERVATIONS=5
 # one-shot and --wait mode alike), never skipped and never read as some other file, because whether
 # it is the required workflow file cannot be evaluated.
 #
+# THE ADVISORY RUNS. A run whose recorded event is exactly schedule or workflow_dispatch is advisory
+# here. The test reads the event alone, never the workflow, so it covers two workflows alike: a manual
+# run of quality.yml (that workflow carries no schedule: trigger yet; its job-level if: makes a future
+# scheduled run on main a full run, as a manual run on main is) and a scheduled or manual run of
+# currency.yml (the monthly standards staleness audit). What this script guarantees is limited to its
+# own reads: an advisory run is never merge evidence and never vetoes a commit or a tree. It does not
+# keep such a run from blocking a merge elsewhere. Branch protection requires the Quality gates check,
+# so a manual quality.yml run on a ref other than main, which skips the heavy jobs and fails Quality
+# gates, records a failing required check on that commit and can block that commit's merge until a new
+# head is pushed (whether a later passing run on the same commit clears it is not verified). Manual
+# full runs of quality.yml belong on main only. Such a run is
+# listed and named on a NOTE line, then left out of every rule below, in every mode: a failed,
+# cancelled or still-running advisory run is no veto and keeps no --wait polling, its id is left out
+# of the --wait settle fingerprint (a new advisory run does not restart the five-read settle window)
+# and out of the run count on the RESULT line, and a successful one
+# does not satisfy THE REQUIRED WORKFLOW, so a head whose only runs are advisory reads as missing
+# (exit 1). Under --require-base it is neither unmet nor conforming. THE TREE MATCH skips it too: it is
+# neither a candidate nor a veto. A run whose event is absent or any other value is judged as before
+# (a missing event in a plain read is not a malformed record, as it was not before), so only those two
+# exact event names are exempt.
+#
 # THE BASE-BRANCH REQUIREMENT (--require-base BRANCH). The merge lane trusts
 # a green run for a merge into BRANCH only when that run evaluated its pull request against BRANCH: a
 # run that passed while the PR targeted another branch says nothing about a merge into BRANCH, and
@@ -577,7 +602,7 @@ SETTLE_OBSERVATIONS=5
 # "more", then the page reduced to the fields used here as one compact JSON line. "verdict" receives the
 # head_sha query's pages and the reduced scan pages, re-checks every completeness condition, and emits
 # the run rows. Status, conclusion, the base-requirement verdict (a fixed token: "-", "met" or
-# "unmet") and the required-workflow verdict (a fixed token: "match" or "other", in every mode) come
+# "unmet", or "advisory" for an advisory run in every mode, see THE ADVISORY RUNS) and the required-workflow verdict (a fixed token: "match" or "other", in every mode) come
 # FIRST in every TSV row, then the base verdict's display detail, then the run's recorded workflow
 # path (display-only; the read is refused before any row is emitted unless every run of the commit
 # records its path as a nonempty string, so an empty or non-string path can neither shift later
@@ -680,10 +705,14 @@ def explained_shift($previous):
 def scan_page_overrun($index):
   .total_count < (100 * $index + (.workflow_runs | length));
 def projection:
-  [.head_sha, .status, .conclusion, .name, .html_url, .path]
-  + (if $require_base == "" then [] else [.event, [.pull_requests[] | .base.ref]] end);
+  [.head_sha, .status, .conclusion, .name, .html_url, .path, .event]
+  + (if $require_base == "" then [] else [[.pull_requests[] | .base.ref]] end);
+def advisory_run:
+  (.event == "schedule") or (.event == "workflow_dispatch");
 def base_requirement:
-  if $require_base == "" then ["-", "-"]
+  if advisory_run then
+    ["advisory", "its event is " + (.event | tojson) + ", an advisory run"]
+  elif $require_base == "" then ["-", "-"]
   elif .event != "pull_request" then
     ["unmet", "its event is " + (.event | tojson) + ", not pull_request"]
   elif (.pull_requests | length) == 0 then
@@ -707,8 +736,8 @@ if $mode == "step" then
     | (if terminal_page then "stop" else "more" end),
       ({total_count,
         workflow_runs: [.workflow_runs[]
-                        | {id, head_sha, status, conclusion, name, html_url, created_at, path}
-                          + (if $require_base == "" then {} else {event, pull_requests} end)]}
+                        | {id, head_sha, status, conclusion, name, html_url, created_at, path, event}
+                          + (if $require_base == "" then {} else {pull_requests} end)]}
        | tojson)
   end
 elif $mode != "verdict" then
@@ -1187,7 +1216,8 @@ pr_probe() {
 # resolved locally to its commit and that commit's tree. Runs are read newest first from the
 # unfiltered `actions/runs` listing the scan above reads, one page per request. A run is a candidate
 # only when its recorded .path is exactly REQUIRE_WORKFLOW (never its display name, for the reason THE
-# REQUIRED WORKFLOW states), its status is completed and its conclusion is success. A completed run of
+# REQUIRED WORKFLOW states), its status is completed and its conclusion is success. An advisory run
+# (THE ADVISORY RUNS) is neither a candidate nor a veto. A completed run of
 # that file whose conclusion is anything else (failure, cancelled, timed_out, skipped, none, ...) is a
 # veto: as on a commit, where any completed non-success run fails the read, a later pass never erases
 # an earlier failure, so the tree of a veto's head commit fails the read even beside a successful run.
@@ -1283,7 +1313,8 @@ if $mode == "runs" then
     .[0]
     | (if (.workflow_runs | length) < 100 then "stop" else "more" end),
       (.workflow_runs[]
-       | select((.path == $require_workflow) and (.status == "completed"))
+       | select((.path == $require_workflow) and (.status == "completed")
+                and (.event != "schedule") and (.event != "workflow_dispatch"))
        | [(if .conclusion == "success" then "pass" else "veto" end), (.id | tostring), .head_sha,
           (.conclusion // "-")]
        | @tsv)
@@ -1552,8 +1583,17 @@ while :; do
   nonterminal_names=()
   unknown_statuses=()
   base_unmet=()
+  advisory_names=()
   while IFS=$'\t' read -r status concl base_state base_detail wf_state path id name url; do
     report "$status" "$concl" "$name" "$url"
+    # THE ADVISORY RUNS (see above): a scheduled or manual run is listed, never judged. Only the
+    # exact token "advisory" skips the rules below; any other token is judged as a merge-path run.
+    # The skip comes before run_ids, so an advisory run's id is neither in the --wait settle
+    # fingerprint (a new advisory run does not restart the settle window) nor in the RESULT count.
+    if [ "$base_state" = "advisory" ]; then
+      advisory_names+=("${name} (${status}/${concl})")
+      continue
+    fi
     run_ids+=("$id")
     # The gating tokens come from the jq program's fixed sets ("-", "met", "unmet" for the base
     # requirement; "match", "other" for the required workflow), never from a display field;
@@ -1584,6 +1624,13 @@ while :; do
         ;;
     esac
   done <<<"$lines"
+
+  if [ "${#advisory_names[@]}" -ne 0 ]; then
+    echo "NOTE: advisory run(s) (a schedule or workflow_dispatch event) are neither merge evidence nor a veto:"
+    for item in "${advisory_names[@]}"; do
+      printf '  %s\n' "$item"
+    done
+  fi
 
   # A run cancelled by the workflow's concurrency group is a completed non-success run: it fails this
   # head for good, and only a refresh push escapes it.
@@ -1674,7 +1721,11 @@ while :; do
       SETTLE_FINGERPRINT="$fingerprint"
       SETTLE_COUNT=1
     fi
-    last_summary="all ${#run_ids[@]} observed workflow run(s) successful; settle observation ${SETTLE_COUNT}/${SETTLE_OBSERVATIONS}"
+    last_summary="all ${#run_ids[@]} observed workflow run(s) successful"
+    if [ "${#advisory_names[@]}" -ne 0 ]; then
+      last_summary+=" (${#advisory_names[@]} advisory run(s) not counted)"
+    fi
+    last_summary+="; settle observation ${SETTLE_COUNT}/${SETTLE_OBSERVATIONS}"
     if [ "$missing_required" -eq 1 ]; then
       last_summary+=" (no completed successful run of the workflow file ${REQUIRE_WORKFLOW} yet)"
     fi
