@@ -39,7 +39,7 @@ THREE SURFACE COLLECTORS (VER-CORE 4.4c; replaces the former site-only scan):
      leg below), so no per-page carve-out is needed. This is robust by construction: a plain scan over the
      whole page cannot be fooled by an exemption heuristic.
   2. The hand-authored repo prose roster (README.md, INSTRUCTION-BUDGET.md, SCOPE.md, SYSTEM-HARDENING.md,
-     aiqt-barebones.md): RELEASE_PATTERNS. The spec's other named prose surfaces (DISCLOSURE.md, CHANGELOG.md, ROADMAP.md,
+     aiqt-barebones.md, the gates manifest, opf/spec/OPF-SPEC.md): RELEASE_PATTERNS. The spec's other named prose surfaces (DISCLOSURE.md, CHANGELOG.md, ROADMAP.md,
      CLAUDE.md) are gensrc-REGISTERED generated outputs and so arrive through collector 3; the roster
      carries the hand-authored remainder, including the shipped starter file aiqt-barebones.md. Every rostered path is REQUIRED; an absent one is exit 2. Nothing is dormant
      today (every rostered surface exists), so the roster is a single declared constant with no idle
@@ -418,8 +418,12 @@ THIRD_PARTY_TITLES = (
 # (absent = exit 2). Nothing is dormant today, so this is a single declared constant, not idle dormant/armed
 # machinery. NOTE: the gates manifest now carries THIS gate's own residue AND is a scanned surface, so that
 # residue must itself stay clean under the gate (verified: it uses no banned release-integrity vocabulary).
+# The published OPF specification opf/spec/OPF-SPEC.md is rostered here whatever its gensrc registration:
+# it is normative prose that describes release identity and record integrity, so a release-integrity
+# overclaim in it ships just as surely as one in the README. If it is later registered as a generated block
+# target, collector 3 reaches it too and the identity dedup scans it once.
 REPO_PROSE_ROSTER = ("README.md", "INSTRUCTION-BUDGET.md", "SCOPE.md", "SYSTEM-HARDENING.md",
-                     "aiqt-barebones.md", ".aiqt/core/gates/manifest.toml")
+                     "aiqt-barebones.md", ".aiqt/core/gates/manifest.toml", "opf/spec/OPF-SPEC.md")
 
 # (name, pattern, guard): guard is "" (none), "neg" (skip when a negator is in the pre-match clause
 # window), "intent" (skip when a negator OR an intent hedge is in that window), or
@@ -2937,6 +2941,18 @@ def _collector_self_test():
         f = _collect(r, [], set())
         if not any("INSTRUCTION-BUDGET.md" in x for x in f):
             failures.append("COLLECTOR: an overclaim appended to INSTRUCTION-BUDGET.md must be a finding")
+
+        # (b3) the roster covers the published OPF specification whatever its gensrc registration: an
+        # overclaim appended to it is a finding with an EMPTY registry, so only the roster can reach it.
+        # MUTATION: dropping opf/spec/OPF-SPEC.md from REPO_PROSE_ROSTER leaves the file unscanned and
+        # this case fails.
+        r = _make_root("opf-spec-roster")
+        (r / "opf" / "spec").mkdir(parents=True, exist_ok=True)  # present even when the roster omits it
+        with (r / "opf" / "spec" / "OPF-SPEC.md").open("a", encoding="utf-8") as fh:
+            fh.write("The plan is checked against an independent anchor.\n")
+        f = _collect(r, [], set())
+        if not any("opf/spec/OPF-SPEC.md" in x for x in f):
+            failures.append("COLLECTOR: an overclaim appended to opf/spec/OPF-SPEC.md must be a finding")
 
         # (c) a registered file target absent -> _FailClosed.
         r = _make_root("absentfile")

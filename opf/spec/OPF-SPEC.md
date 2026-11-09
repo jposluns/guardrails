@@ -438,7 +438,7 @@ hand-authored truth.
 
 A conforming store MUST be tracked in a git repository, wherever it lives. An untracked or ignored
 `.working/` tree is a hard failure in scaffolding and validation, not a warning: an untracked
-store has no history, no tamper evidence, and no durability, which defeats the purpose of keeping
+store has no history, no change evidence, and no durability, which defeats the purpose of keeping
 records at all. There is no gitignore fallback. The check runs against the resolved store
 (section 4.3): whichever repository the pointer resolves to must actually track the tree. A store
 placed in a plain directory conforms only once that directory is itself a git repository (the
@@ -474,7 +474,7 @@ enough to name:
   repository's own branch-and-merge discipline.
 - **Private companion repository.** The store lives at the root of a separate, private repository,
   paired with the public product repository. The development process stays private, works across
-  multiple systems with full history and tamper evidence, and the product repository carries only
+  multiple systems with full history and change evidence, and the product repository carries only
   the pointer and the generated public deliverables. Where the development records are not
   intended for publication, this is the pattern this standard suggests.
 - **Local-only, self-backed.** The store lives in a local directory that is its own git
@@ -1808,9 +1808,12 @@ preserving ID permanence. Retention is thereby indefinite by default; an adopter
 retention policy MUST apply it as a recorded maintainer decision governing archival and rotation
 (aged data moved into the archive, preserved byte for byte), never as deletion of a record.
 
-## 13. Tamper evidence
+## 13. Change evidence
 
-Tamper evidence is layered:
+Change evidence is layered. The layers below make an edit that bypasses the recorded flows visible
+to review and to the integrity layer; they do not detect a deliberate edit by someone who can also
+rewrite the history and the recorded digests, which remains the same-user tampering residual
+disclosed in section 14.1:
 
 - **History.** The tracked store (section 5) puts every record change in version-control history
   under the project's review gate, and store relocation preserves that history (section 5.4); the
@@ -1863,7 +1866,8 @@ bind:
 - product and store identities and the observed revision;
 - every source path, byte digest, disposition and preservation destination;
 - exact creations, replacements, removals and consumer repointings;
-- tool release identity, including `manifest_sha256` checked against an independent anchor;
+- tool release identity, including `manifest_sha256` and the named anchor it was checked against
+  (a copy of that digest published apart from the release artefact), the two digests agreeing;
 - the version and digest of the prompt pack;
 - enforcement-pack contents per platform and each platform's disclosed residual coverage;
 - the completion-check roster and the rule that retirement requires green checks and matching bytes;
