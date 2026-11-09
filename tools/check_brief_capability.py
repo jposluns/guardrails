@@ -11,9 +11,9 @@ and for every family, a path outside a declared workdir when the family's row sa
 (P2), or a pinned revision that a git command line of the listed subcommands (P5: clone, checkout, switch,
 reset, fetch, pull, worktree add, merge, rebase, restore --source, archive) reaches through a ref that can move with
 no later cure, or through a dispatch ref that resolves to another commit (P5), or an input the brief declares on an
-INPUT: line that does not exist on the host the lint runs on (P6). The
-signal is structural, not certain: the lint fails closed, so some text a human would pass refuses (see
-RESIDUALS). Every rule that infers a request from free prose (R1, R5, R6, R7) is ADVISORY:
+INPUT: line that does not exist on the host the lint runs on (P6), or a BRIEF-PIN value that is not the full
+lowercase commit id git resolves it to (P7). The signal is structural, not certain: the lint fails closed, so some
+text a human would pass refuses (see RESIDUALS). Every rule that infers a request from free prose (R1, R5, R6, R7) is ADVISORY:
 its hits are printed so a human sees them, and it never refuses. For a family that can execute (`yes` or
 `read-only-sandbox`) no execution rule applies; the PREFLIGHT rules below apply to every family.
 
@@ -287,6 +287,23 @@ PREFLIGHT (the input paths a brief names; read over the whole brief, line by lin
                        conformance is exactly Marko
                        2.2.4's, so rare edge inputs are read exactly where Marko diverges from a strict
                        CommonMark reading (a no-break space accepted after a closing fence, for one).
+  P7 short pin         HARD, for every family. The VALUE of a BRIEF-PIN line (a pin line, P3, labelled BRIEF-PIN)
+                       is the whole word that starts at its pin: the longest run of characters that are not
+                       whitespace, read with str.split, so text glued after the commit (... or ~1, which end
+                       the pin P3 reads) stays part of it. The value must be the full lowercase commit id at
+                       the length of the repository's object format, equal character for character to the
+                       commit id git resolves it to in the repository the lint is pointed at (--repo, read as
+                       P3 reads it), bare or followed by ^{commit}, closing markup (` * _ )) and at most one
+                       sentence stop (. , ; :); the rest of the line (BRIEF-PIN: <id> (main)) is not judged.
+                       The first of these that holds refuses: the value is elided (it holds .., U+2026 or
+                       U+22EF: 3a1b2c3d...e4f5a6b7), it is not one commit id (a ref step, path or other text
+                       glued to the commit: <id>~1, <id>:docs/x, <id>@{u}), it is not lower case, it is
+                       abbreviated (shorter than the resolved id, a prefix git expanded), or it names another
+                       object that git peels to a different commit (an annotated tag's id). The message gives
+                       the reason and the required form, never the id git expands a pin to: the author takes
+                       the id from git. P7 runs after P3, so a bad pin label, pin lines that disagree, a pin
+                       that does not resolve (a made-up full id, a 64-hex id in a SHA-1 repository) and a pin
+                       with no repository to read stay CANNOT_EVALUATE (exit 2), never a pass.
 
 What the preflight cannot know: whether the worker's uid can read a path (permissions, ACLs, a mount, a
 sandbox); that is the dispatcher's check, made where the worker runs, and the hard readability check belongs
@@ -479,11 +496,11 @@ not one, so "do not run, build or install" stays negated.
 Outcomes, printed one finding per line (HARD, INFO, or ADVISORY) and then one summary line:
 
   exit 0  OK               no HARD hit (INFO and ADVISORY findings may be printed).
-  exit 1  REFUSE           at least one HARD hit (S1, S2, S3, P2, P5 or P6). Rewrite the brief, or send the item
-                           to a family that can execute (S1 to S3), name paths it can read (P2) or, after the reach,
-                           add the cure line the hit gives (git -C <dir> checkout --detach <pin>^{commit}) or reach
-                           the pin by a dispatch ref (P5), or provide each missing declared input or correct its
-                           INPUT line (P6).
+  exit 1  REFUSE           at least one HARD hit (S1, S2, S3, P2, P5, P6 or P7). Rewrite the brief, or send the
+                           item to a family that can execute (S1 to S3), name paths it can read (P2) or, after the
+                           reach, add the cure line the hit gives (git -C <dir> checkout --detach <pin>^{commit}) or
+                           reach the pin by a dispatch ref (P5), provide each missing declared input or correct its
+                           INPUT line (P6), or write each BRIEF-PIN value as the full lowercase commit id (P7).
                            When a hit is a command line (S2 or S3), the REFUSE line
                            says how to rewrite: name the function, row or entry instead of embedding the
                            command (quote the def line of X, not the line that runs git push).
@@ -542,7 +559,10 @@ outside the numbered items (S3) and is not dropped with its item; a family addre
 hides that family's text up to the next marker or address, so an instruction for the linted family placed there
 without an address is hidden. The lint reads only the bytes it is given: run it on the final per-family bytes that
 are sent, since a brief composed after the lint runs is not covered. Run alone, it is advisory; it blocks
-only where the sender refuses to send on exit 1 or 2.
+only where the sender refuses to send on exit 1 or 2. P7 judges only the value of a BRIEF-PIN line: a REVIEWED HEAD
+line (P3 lets it hold a prefix of the BRIEF-PIN value), a look-alike pin line, a P5 confirm clause, a git command
+operand, a sha256 digest, and a commit id in prose, a code span or a fence outside a pin line are not judged, so an
+abbreviated or elided id there passes; nor does P7 tell that a full id is the commit the author meant.
 
 TIME. Linearity rests on two kinds of evidence, not on a proof: a regex audit and measured shapes. No regular
 expression reads a run of arguments, options or markup: such runs are walked token by token in Python.
@@ -1799,6 +1819,22 @@ PIN_RE = re.compile(r"(?:REVIEWED\s+HEAD|BRIEF-PIN)[*_]*+\s*+[:=]?+[*_]*+\s*+[`*
                     r"([0-9a-fA-F]{64}|[0-9a-fA-F]{7,40})(?![\w-])")
 # a line that opens with a pin label must carry a pin (PIN_RE); a label with anything else cannot be resolved
 PIN_LABEL_RE = re.compile(r"(?:REVIEWED\s+HEAD|BRIEF-PIN)(?!-|[^\W_])")
+# P7: the value of a BRIEF-PIN line is the whole word that starts at its pin (brief_pin_word); a word holding one of
+# PIN_ELISIONS is elided, and a word is one commit id when, once a closing run of PIN_CLOSERS holding at most one of
+# PIN_STOPS and then one PEEL_SUFFIX are removed from its end (brief_pin_core), it is the pin PIN_RE read
+PIN_ELISIONS = ("..", "…", "⋯")
+PIN_CLOSERS = "`*_).,;:"
+PIN_STOPS = ".,;:"
+# the reason each P7 finding gives (pin_fault), first that holds; none prints the commit id git expands a pin to
+PIN_ELIDED = ("BRIEF-PIN value is elided (it holds .., U+2026 or U+22EF), so no reader can tell which commit it "
+              "names; write the full lowercase commit id")
+PIN_NOT_ONE = ("BRIEF-PIN value is not one commit id (a ref step, path or other text is glued to it); write the full "
+               "lowercase commit id alone, bare or followed by ^{commit}")
+PIN_UPPER = "BRIEF-PIN value is not lower case; write the full lowercase commit id as git prints it"
+PIN_ABBREVIATED = ("BRIEF-PIN value is an abbreviated commit id, which git expands by prefix; write the full lowercase "
+                   "commit id at the repository's object-format length")
+PIN_OTHER = ("BRIEF-PIN value is not the id of the commit git resolves it to (another object, such as an annotated "
+             "tag, that git peels); write the commit's own full lowercase id")
 # a LOOK-ALIKE pin line (near_pin) is no pin line, but once its text is folded to NEAR_PIN_FORM and every dash of a
 # category in NEAR_PIN_DASHES is read as -, it opens (after markup) with REVIEWED HEAD or BRIEF-PIN in any case, with
 # backticks and table pipes skipped around the label, and then a commit id; rule_p3 compares that id with the pin
@@ -2032,6 +2068,13 @@ def near_pin(line):
     return found.group(1) if found else None
 
 
+def brief_pin_word(line, pin):
+    """The value word of a pin line (P7): the longest run of characters that are not whitespace, starting where
+    PIN_RE's pin `pin` starts, read with str.split and no pattern, so the text PIN_RE leaves after the pin (`...`,
+    `~1`, `:path`) stays part of the word."""
+    return line[pin.start(1):].split(None, 1)[0]
+
+
 class PreflightText:
     """The paths a brief names, found once: [(line, path)] for the path words P2 judges (see path_words), split
     into the absolute ones and the ones it cannot place (unplaced), each kept only when no prohibition
@@ -2061,6 +2104,7 @@ class PreflightText:
         self.bad_pins = []   # [line] for a pin label with no valid pin after it
         self.brief_pins = []   # [(line, pin)] for the pin lines labelled BRIEF-PIN, whose value a cure names (P5)
         self.reviewed_heads = []   # [(line, pin)] for the pin lines labelled REVIEWED HEAD
+        self.brief_pin_words = []   # [(line, word, pin)] for the BRIEF-PIN lines: the value word P7 judges
         self.near_pins = []   # [(line, commit id)] for the look-alike pin lines (near_pin)
         self.unclear = []   # [(line, reason)] for a declaration whose workdir cannot be read
         # the INPUT declarations P6 checks and the malformed or look-alike INPUT lines, each [(line, ...)],
@@ -2106,6 +2150,8 @@ class PreflightText:
                 self.pins.append((number, pin.group(1)))
                 (self.brief_pins if line.startswith("BRIEF-PIN", start) else self.reviewed_heads).append(
                     (number, pin.group(1)))
+                if line.startswith("BRIEF-PIN", start):
+                    self.brief_pin_words.append((number, brief_pin_word(line, pin), pin.group(1)))
             elif PIN_LABEL_RE.match(line, start):
                 self.bad_pins.append(number)
             elif near_pin(line) is not None:
@@ -2397,6 +2443,57 @@ def rule_p3(names, row, repo):
                 findings.append(("P3", "ADVISORY", line, "path does not exist at the pinned revision {}: if it "
                                  "is an input, the worker cannot read it there; if the brief asks the worker to "
                                  "create it, nothing is wrong".format(rev), _excerpt(path)))
+    return findings
+
+
+def brief_pin_core(word):
+    """A BRIEF-PIN value word with its closing run of PIN_CLOSERS and then one PEEL_SUFFIX removed from its end,
+    read without a pattern; a closing run holding more than one of PIN_STOPS is not removed, so the word is not one
+    commit id."""
+    core = word.rstrip(PIN_CLOSERS)
+    if sum(character in PIN_STOPS for character in word[len(core):]) > 1:
+        return word
+    return core.removesuffix(PEEL_SUFFIX)
+
+
+def same_text(text, other):
+    """Whether two commit ids are the same text, character for character: no prefix and no other case agrees."""
+    return text == other
+
+
+def pin_fault(word, pin, resolved):
+    """The first P7 reason that holds for a BRIEF-PIN value word, its pin as PIN_RE read it and the commit id git
+    resolves the pin to, else None: elided (PIN_ELISIONS), not one commit id (brief_pin_core is not the pin), not
+    lower case, abbreviated (shorter than the resolved id, whose length is the object format's) or another object's
+    id. No reason names the resolved id."""
+    if any(mark in word for mark in PIN_ELISIONS):
+        return PIN_ELIDED
+    if brief_pin_core(word) != pin:
+        return PIN_NOT_ONE
+    if not same_text(pin, pin.lower()):
+        return PIN_UPPER
+    if not same_text(pin, resolved):
+        return PIN_ABBREVIATED if len(pin) < len(resolved) else PIN_OTHER
+    return None
+
+
+def rule_p7(names, row, repo):
+    """P7 HARD, for every family: a BRIEF-PIN value (brief_pin_words) that is not the full lowercase commit id at the
+    repository's object-format length, equal character for character to the commit id git resolves it to
+    (resolve_revision, read once for each distinct pin); pin_fault gives the reason. It runs after rule_p3, which
+    leaves a bad pin label, pin lines that disagree, a pin that does not resolve and no repository CannotEvaluate,
+    so the BRIEF-PIN lines here hold one pin that resolved; with no repository it is CannotEvaluate too."""
+    if not names.brief_pin_words:
+        return []
+    if repo is None:
+        raise CannotEvaluate("the brief pins a revision but no repository was given to read it from")
+    resolved, findings = {}, []
+    for line, word, pin in names.brief_pin_words:
+        if pin not in resolved:
+            resolved[pin] = resolve_revision(repo, pin)
+        reason = pin_fault(word, pin, resolved[pin])
+        if reason is not None:
+            findings.append(("P7", "HARD", line, reason, _excerpt(word)))
     return findings
 
 
@@ -3041,11 +3138,12 @@ def rule_p6(names, row, repo):
 
 
 def preflight(text, row, repo, raw):
-    """The preflight findings (P1 to P6) for a brief's text and its family's row; they apply to every family. `raw`
-    is the text before decode_brief removed format characters, which the P5 cure reads."""
+    """The preflight findings (P1 to P7) for a brief's text and its family's row; they apply to every family. `raw`
+    is the text before decode_brief removed format characters, which the P5 cure reads. P7 runs right after P3,
+    whose CannotEvaluate for a pin it cannot read comes first."""
     names = PreflightText(text, raw)
-    return rule_p1(names, row, repo) + rule_p2(names, row, repo) + rule_p3(names, row, repo) + rule_p4(
-        names, row, repo) + rule_p5(names, row, repo) + rule_p6(names, row, repo)
+    return rule_p1(names, row, repo) + rule_p2(names, row, repo) + rule_p3(names, row, repo) + rule_p7(
+        names, row, repo) + rule_p4(names, row, repo) + rule_p5(names, row, repo) + rule_p6(names, row, repo)
 
 
 def can_execute(row):
@@ -3108,9 +3206,12 @@ COMMAND_LINE_HINT = ("to ask about a command line, name the function, row or ent
                      "embedding the command (for example: quote the def line of X, not the line that runs git push)")
 
 
-PREFLIGHT_RULES = frozenset(("P1", "P2", "P3", "P4", "P5", "P6"))
+PREFLIGHT_RULES = frozenset(("P1", "P2", "P3", "P4", "P5", "P6", "P7"))
 # added to a REFUSE line when a P6 hit is among the hard hits
 INPUT_HINT = "; provide each missing declared input, or correct its INPUT line, before sending"
+# added to a REFUSE line when a P7 hit is among the hard hits; it names the form, never the id git expands a pin to
+PIN_HINT = ("; write each BRIEF-PIN value as the full lowercase commit id at the repository's object-format length, "
+            "taken from git, never abbreviated, elided, upper case or followed by a ref")
 
 
 def run(brief_path, family, table_path, scoped=True, repo=None):
@@ -3124,26 +3225,31 @@ def run(brief_path, family, table_path, scoped=True, repo=None):
         print("{}:{}: {} {}: {}: {}".format(brief_path, line, severity, rule, message, excerpt))
     hard = [rule for rule, severity, _, _, _ in findings if severity == "HARD"]
     missing_input = INPUT_HINT if "P6" in hard else ""
+    pin_form = PIN_HINT if "P7" in hard else ""
     if code == EXIT_REFUSE and set(hard) - PREFLIGHT_RULES:
         print("REFUSE: family {} cannot execute and the brief carries a structural execution request ({} hard "
-              "hit(s): {}); rewrite the brief or send these items to a family that can execute{}{}".format(
+              "hit(s): {}); rewrite the brief or send these items to a family that can execute{}{}{}".format(
                   family, len(hard), ", ".join("{} x{}".format(r, hard.count(r)) for r in sorted(set(hard))),
-                  "; " + COMMAND_LINE_HINT if set(hard) & {"S2", "S3"} else "", missing_input))
+                  "; " + COMMAND_LINE_HINT if set(hard) & {"S2", "S3"} else "", missing_input, pin_form))
     elif code == EXIT_REFUSE and "P5" in hard:
         print("REFUSE: family {}: the brief reaches a pinned revision through a ref that can move ({} hard hit(s): "
-              "{}); after the reach, add the line each P5 hit gives ({}), or reach the pin by a dispatch ref{}{}; "
+              "{}); after the reach, add the line each P5 hit gives ({}), or reach the pin by a dispatch ref{}{}{}; "
               "{}".format(
                   family, len(hard), ", ".join("{} x{}".format(r, hard.count(r)) for r in sorted(set(hard))),
                   CURE_EXAMPLE.format("<pin>"), ", and name paths under the declared workdir" if "P2" in hard else "",
-                  missing_input, CURE_SHAPE))
+                  missing_input, pin_form, CURE_SHAPE))
     elif code == EXIT_REFUSE and set(hard) == {"P6"}:
         print("REFUSE: family {}: the brief declares an input that does not exist on this host ({} hard hit(s): "
               "P6 x{}){}".format(family, len(hard), len(hard), INPUT_HINT))
+    elif code == EXIT_REFUSE and set(hard) <= {"P6", "P7"}:
+        print("REFUSE: family {}: a BRIEF-PIN value is not the full commit id git resolves it to ({} hard hit(s): "
+              "{}){}{}".format(family, len(hard), ", ".join("{} x{}".format(r, hard.count(r)) for r in sorted(
+                  set(hard))), PIN_HINT, missing_input))
     elif code == EXIT_REFUSE:
         print("REFUSE: family {}: the brief names an input the family cannot read ({} hard hit(s): {}); name "
-              "paths under the declared workdir, or state a path the worker must not use as a prohibition{}".format(
+              "paths under the declared workdir, or state a path the worker must not use as a prohibition{}{}".format(
                   family, len(hard), ", ".join("{} x{}".format(r, hard.count(r)) for r in sorted(set(hard))),
-                  missing_input))
+                  missing_input, pin_form))
     elif can_execute(table[family]):
         advisory = sum(1 for _, severity, _, _, _ in findings if severity == "ADVISORY")
         print("OK: family {} can execute ({}); the execution rules do not apply{}".format(
@@ -3645,6 +3751,13 @@ P2_NOT_NEGATED = ("Workdir /w/repo.\nRead /etc/x.md; never write it.\n",
 P3_PIN_ONLY = "BRIEF-PIN {}\nAnswer the question.\n"
 P3_BRIEF = "REVIEWED HEAD: {} (main).\nRead {} before you answer.\n"
 P3_MID_LINE = "Name a REVIEWED HEAD: 0123456789ab line.\nRead docs/absent.md before you answer.\n"
+# P7 briefs, each formatted with the fixture repository's full commit id ({0}): a full lowercase BRIEF-PIN value bare,
+# before one stop, in markup, peeled or before more words on its line passes; a short or elided id in prose is quiet
+P7_FULL_PINS = ("BRIEF-PIN {0}\n", "BRIEF-PIN: {0}.\n", "*BRIEF-PIN*: `{0}`\n", "BRIEF-PIN: {0}^{{commit}}\n",
+                "BRIEF-PIN: {0} (main)\n")
+P7_PROSE_SHORT = "BRIEF-PIN: {0}\nCommit {0:.7} fixed it; abcd1234...ef567890 is in the log.\n"
+# an elided BRIEF-PIN value: its first and last eight digits around each elision mark, and a trailing ..
+P7_ELIDED = ("{0:.8}...{1}", "{0:.8}…{1}", "{0:.8}⋯{1}", "{0:.8}..")
 P4_WHOLE_FILE = "Paste the whole file in your reply.\n"
 P4_NAMED = P4_WHOLE_FILE + "HAND-BACK FILE: /dev/shm/h/x.diff\n"
 P4_NEGATED = "Do not paste the whole file.\n"
@@ -5769,6 +5882,64 @@ def self_test(report_path=None):
                _outcome(P3_PIN_ONLY.format(head), "alpha"), _outcome(P3_PIN_ONLY.format(head), "alpha", True, repo)),
               ("CannotEvaluate", "CannotEvaluate", (0, [])))
 
+        # P7: a BRIEF-PIN value must be the full lowercase commit id git resolves it to, compared character for
+        # character; the first reason that holds is given (elided, not one commit id, upper case, abbreviated)
+        def p7(value, text=P3_PIN_ONLY, family="alpha"):
+            return _outcome(text.format(value), family, True, repo)
+
+        def p7_reasons(value, text=P3_PIN_ONLY):
+            """The P7 messages for a brief, or "CannotEvaluate"."""
+            try:
+                found = evaluate(text.format(value).encode("utf-8"), "alpha",
+                                 parse_table(TABLE_FIXTURE.encode("utf-8")), True, repo)[1]
+            except CannotEvaluate:
+                return "CannotEvaluate"
+            return [message for rule, _, _, message, _ in found if rule == "P7"]
+
+        pin_refused = (1, [("P7", "HARD")])
+        elided = [form.format(head, head[-8:]) for form in P7_ELIDED]
+        check("preflight/p7-pin-short-refuses", ([p7(head[:count]) for count in (7, 12, 39)]
+                                                 + [p7(head[:12], family="gamma")], p7_reasons(head[:12])),
+              ([pin_refused] * 4, [PIN_ABBREVIATED]))
+        check("preflight/p7-pin-elided-refuses", ([p7(value) for value in elided], [p7_reasons(value) for value in
+                                                                                     elided]),
+              ([pin_refused] * 4, [[PIN_ELIDED]] * 4))
+        # upper case comes before abbreviated, and a glued ref before upper case
+        check("preflight/p7-pin-upper-refuses", ([p7(head.upper()), p7(head[:12].upper())],
+                                                 [p7_reasons(head.upper()), p7_reasons(head[:12].upper())]),
+              ([pin_refused] * 2, [[PIN_UPPER]] * 2))
+        trailing = (head + "~1", head + ":docs/present.md", head + "@{u}", head + ".;", head[:8].upper() + "~1")
+        check("preflight/p7-pin-trailing-ref-refuses", ([p7(value) for value in trailing],
+                                                        [p7_reasons(value) for value in trailing]),
+              ([pin_refused] * 5, [[PIN_NOT_ONE]] * 5))
+        # each end of the pin length just outside, at and just inside: 6 and 41 are bad pins, 7 and 39 abbreviated
+        check("preflight/p7-pin-length-boundary", [p7((head + head)[:count]) for count in (6, 7, 8, 39, 40, 41)],
+              ["CannotEvaluate", pin_refused, pin_refused, pin_refused, (0, []), "CannotEvaluate"])
+        check("preflight/p7-pin-full-passes", [p7(head, form) for form in P7_FULL_PINS]
+              + [p7(head, form, "gamma") for form in P7_FULL_PINS], [(0, [])] * 10)
+        check("preflight/p7-reviewed-head-short-quiet", (p3("docs/present.md"), p3("docs/present.md", head[:7])),
+              ((0, []), (0, [])))
+        check("preflight/p7-prose-short-id-quiet", p7(head, P7_PROSE_SHORT), (0, []))
+        check("preflight/p7-cannot-evaluate-dominates", (_outcome(P3_PIN_ONLY.format(head[:12]), "alpha"),
+                                                         p7("f" * 40), p7("f" * 12), p7(elided[0].replace(
+                                                             head[:8], "f" * 8))), ("CannotEvaluate",) * 4)
+
+        def p7_refuse_line():
+            """(exit code, the P7 REFUSE line printed, PIN_HINT printed, the cannot-execute line printed) for run()
+            on a brief with a short BRIEF-PIN."""
+            brief_path, table_path = base / "p7-brief.md", base / "p7-table.toml"
+            with open(brief_path, "w", encoding="utf-8") as handle:
+                handle.write(P3_PIN_ONLY.format(head[:12]))
+            with open(table_path, "w", encoding="utf-8") as handle:
+                handle.write(TABLE_FIXTURE)
+            printed = io.StringIO()
+            with contextlib.redirect_stdout(printed):
+                code = run(str(brief_path), "alpha", table_path, True, repo)
+            return (code, "a BRIEF-PIN value is not the full commit id" in printed.getvalue(),
+                    PIN_HINT in printed.getvalue(), "cannot execute" in printed.getvalue())
+
+        check("preflight/p7-refuse-line", p7_refuse_line(), (1, True, True, False))
+
         def under_foreign_git_env():
             """A caller's GIT_DIR and GIT_OBJECT_DIRECTORY point elsewhere; the read still uses `repo`."""
             with _environ(GIT_DIR=str(base / "elsewhere"), GIT_OBJECT_DIRECTORY=str(base / "elsewhere")):
@@ -6044,8 +6215,10 @@ def self_test(report_path=None):
               [refused] * len(P5_NOT_CURE_COMMANDS))
         check("preflight/p5-cure-physical-line", p5(P5_CURE_JOINED), refused)
         check("preflight/p5-cure-order", p5(P5_CURE_BEFORE), refused)
+        # the 12-digit BRIEF-PIN cures nothing (P5) and is abbreviated (P7)
         check("preflight/p5-cure-pin", [p5(text) for text in (P5_CURE_BRIEF_PIN, P5_CURE_PIN_DIGITS, P5_CURE_CONFIRM)
-                                        + P5_CURE_EXACT + (P5_CURE_OTHER,)], [refused] * 6)
+                                        + P5_CURE_EXACT + (P5_CURE_OTHER,)],
+              [refused, (1, [("P5", "HARD"), ("P7", "HARD")])] + [refused] * 4)
         check("preflight/p5-tree-reaches", ([p5(text) for text in P5_TREE_DENY], [p5(text) for text in P5_TREE_ALLOW]),
               ([refused] * 4, [(0, [])] * 4))
         check("preflight/p5-reset-any-mode", [p5(text) for text in P5_RESET_DENY], [refused] * 2)
@@ -6191,6 +6364,18 @@ def self_test(report_path=None):
                                             repository_path=lambda path: path))
         check("revert/p3-unresolved-red", *flip([lambda: p3("docs/present.md", "0123456789ab")],
                                                 [(0, [("P3", "ADVISORY")])], resolve_revision=lambda repo, rev: rev))
+        check("revert/p7-red", *flip([lambda value=value: p7(value) for value in (head[:12], elided[0], head.upper())],
+                                     [(0, [])] * 3, rule_p7=nothing))
+        # a prefix match, as P3's pins_agree reads, passes a short pin; a match in any case passes upper case
+        check("revert/p7-exact-red", *flip([lambda: p7(head[:12])], [(0, [])],
+                                           same_text=lambda text, other: other.startswith(text)))
+        check("revert/p7-case-red", *flip([lambda: p7(head.upper())], [(0, [])],
+                                          same_text=lambda text, other: text.lower() == other.lower()))
+        # the pin PIN_RE reads, cut at the elision, as the value: an elided pin reads as an abbreviated one
+        check("revert/p7-word-red", *flip([lambda: p7_reasons(elided[0])], [[PIN_ABBREVIATED]],
+                                          brief_pin_word=lambda line, pin: pin.group(1)))
+        check("revert/p7-hint-red", *flip([p7_refuse_line], [(1, False, True, True)],
+                                          PREFLIGHT_RULES=PREFLIGHT_RULES - {"P7"}))
         check("revert/p3-git-env-red", *flip([lambda: under_foreign_git_env()[0]], ["CannotEvaluate"],
                                              _git_read_env=caller_git_dir_env))
         # with the caller's HOME kept, the malformed global config there fails every read
@@ -6349,7 +6534,8 @@ def self_test(report_path=None):
             [lambda: p5(P5_CURE_BRIEF_PIN)], [(0, [])],
             cure_pins=lambda names: [pin for _, pin in names.pins if len(pin) == CURE_PIN_DIGITS]))
         check("revert/p5-cure-pin-digits-red", *flip(
-            [lambda: p5(P5_CURE_PIN_DIGITS)], [(0, [])], cure_pins=lambda names: [pin for _, pin in names.brief_pins]))
+            [lambda: p5(P5_CURE_PIN_DIGITS)], [(1, [("P7", "HARD")])],
+            cure_pins=lambda names: [pin for _, pin in names.brief_pins]))
         check("revert/p5-cure-exact-red", *flip(
             [lambda text=text: p5(text) for text in P5_CURE_EXACT], [(0, [])] * 2, cure_matches=pin_matches))
         check("revert/p5-cure-advice-red", *flip([cure_given], [([False], [False] * 2)], cure_advice=lambda pins: ""))
@@ -6906,7 +7092,7 @@ def self_test(report_path=None):
         if os.path.lexists(locked):
             os.chmod(locked, 0o700)
         shutil.rmtree(inputs, ignore_errors=True)
-    check("revert/every-flip-ran", len(flipped), 218)
+    check("revert/every-flip-ran", len(flipped), 223)
 
     for check_id in sorted(expected - _EXECUTED_SET):
         FAILURES.append("execution-set/missing: {}".format(check_id))
