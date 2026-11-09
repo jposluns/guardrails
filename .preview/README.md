@@ -41,10 +41,12 @@ the authority, and the summary further down this page only points to it.
   followed by the session's elapsed time when a lease is configured. The stamp is a ready-to-copy status
   header in the bracketed form `stamp-truth-stop.py` checks, taken from the same reading as the local
   time and truncated to the minute. Its zone is the local zone's name only when `stamp-truth-stop.py`
-  reads that name as the true offset (a name such as `UTC` or `+03` set by a `TZ` string that misstates
-  the offset is not used), otherwise the offset as `+HHMM`; under a zone whose offset that hook cannot
-  convert (one with seconds, or of 19 hours or more) the stamp segment is left out. The freshest time
-  value in context is then a real reading, not one the model composed. It informs; it blocks nothing.
+  converts that name to this reading's minute: a name such as `UTC` or `+03` set by a `TZ` string that
+  misstates the offset is not used, nor is a letter name in the repeated hour of a backward change that
+  keeps the name (that hook reads it at the earlier pass) or one whose offset has seconds or is 19 hours
+  or more. Otherwise the zone is the offset as `+HHMM`; under a zone whose offset that hook cannot convert
+  (one with seconds, or of 19 hours or more) the stamp segment is left out. The freshest time value in
+  context is then a real reading, not one the model composed. It informs; it blocks nothing.
   Events: `PostToolUse` (after a tool call that succeeded), `PostToolUseFailure` (after one that started
   and failed), and `UserPromptSubmit` (when a prompt is submitted, so the first text of a turn has a
   fresh reading too); register all three.
@@ -191,7 +193,7 @@ files are served from this repository's main branch; for a raw download, use
 | File | SHA-256 | Link |
 |---|---|---|
 | `char-policy-write.py` | `84a08059513f27c76e944d54c08e8ddae520f9e040ebe19296d139d49646b0f8` | [char-policy-write.py](char-policy-write.py) |
-| `clock-inject.py` | `de44466c241a81fa3ec8ab6aaee374c1c43b8ee69c9d0a13a5c8b69f9c0681a2` | [clock-inject.py](clock-inject.py) |
+| `clock-inject.py` | `4662ea97f76a847f0504d98a947bb59ad0ff8eeb26eaceac5a43306e7389f347` | [clock-inject.py](clock-inject.py) |
 | `constraint-reread.py` | `725974c306e63a3f9a1b4a2be2992c9ee9792c231aaad66035a813525d10c48a` | [constraint-reread.py](constraint-reread.py) |
 | `future-stamp-write.py` | `1cf8608693f472df1c7bee03b5ab5bf5de3e79a19b00c782a7015e77d167c348` | [future-stamp-write.py](future-stamp-write.py) |
 | `pattern-self-match.py` | `b70287e2aab2b08b0cd240c6c9150feb65141f2e3612adad63e402221dfcbb2f` | [pattern-self-match.py](pattern-self-match.py) |
