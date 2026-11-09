@@ -340,7 +340,7 @@ residue = "The scheduled-yield binding of the decision core: a call that parks t
 
 [[hook]]
 id = "orch-ask-unattended"
-rules = ["cntdef", "recfst", "humovs"]
+rules = ["cntdef", "recfst"]
 platform = "claude-code"
 event = "PreToolUse"
 matcher = "AskUserQuestion"

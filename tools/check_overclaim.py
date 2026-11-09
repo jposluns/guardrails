@@ -1517,7 +1517,7 @@ def _md_rule_row(md_text, cid):
 def _md_field_rendered(md_text, channel, key, raw):
     """(rendered, location_label) for one page-bound (channel, key, raw): whether the field renders at ITS OWN
     expected Markdown location by EXACT value equality, not by mere substring presence somewhere in scope. Row
-    channels (title, corpus-id, description) bind to the EXACT Rules-table row keyed by the corpus id and
+    channels (title, corpus-id, description, coverage) bind to the EXACT Rules-table row keyed by the corpus id and
     compare the specific CELL for equality; mechanism channels (mech-id, the metadata fields, residue) bind to
     the mechanism block keyed by the reference, the metadata fields comparing the EXACT `- Label:` LINE in the
     region BEFORE the residual heading, and the residue comparing the fence content. Escaping mirrors the
@@ -1527,7 +1527,7 @@ def _md_field_rendered(md_text, channel, key, raw):
     outside its own row all satisfied the old `in scope` / `in md_text` test while the real field was wrong or
     absent."""
     cell = gen_enforcement_register._md_cell
-    if channel in ("corpus-id", "title", "description"):
+    if channel in ("corpus-id", "title", "description", "coverage"):
         cells = _md_rule_row(md_text, key)
         if channel == "corpus-id":
             return (cells is not None, "the Corpus ID cell of row {}".format(key))
@@ -1535,6 +1535,13 @@ def _md_field_rendered(md_text, channel, key, raw):
             return (False, "the Rules row for {}".format(key))
         if channel == "title":
             return (cells[0] == cell(raw), "the Rule cell of row {}".format(key))
+        if channel == "coverage":
+            # The generator appends the coverage note to the partial row's linked-controls cell after
+            # a fixed ". Coverage: " marker, so the exact escaped note must END that row's own cell and
+            # the Status cell must carry the partial suffix; a note elsewhere on the page cannot satisfy it.
+            return (cells[2].endswith(gen_enforcement_register.PARTIAL_SUFFIX)
+                    and cells[3].endswith(cell(". Coverage: " + raw)),
+                    "the coverage tail of partial row {}".format(key))
         return (cells[2] == "Pending" and cells[3] == cell(raw),
                 "the How cell of pending row {}".format(key))
     scope = _md_mech_scope(md_text, key)
@@ -3174,7 +3181,7 @@ def _page_bound_source_self_test():
         # (n2) the full channel set is present (structural, against drift).
         channels = {c for c, _k, _r in _page_bound_sources(tree)}
         for needed in ("title", "corpus-id", "mech-id", "platform", "default", "entry", "class",
-                       "residue", "description"):
+                       "residue", "description", "coverage"):
             if needed not in channels:
                 failures.append("COMPLETENESS: page_content_strings must emit the {!r} channel (FIX 1)"
                                 .format(needed))

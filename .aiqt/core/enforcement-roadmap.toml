@@ -4,12 +4,20 @@
 # pending. enforced: the enforceability ledger links at least one shipped control to the rule;
 #   `mechanisms` RESTATES that linkage (namespaced gate:/hook: refs, unique and sorted) so this file is
 #   reviewable standalone, and tools/gen_enforcement_register.py CROSS-VALIDATES it against the ledger, so
-#   the two can never fork. A rule whose only linked controls are preview-channel hooks (the [[hook]] rows of
+#   the two can never fork. enforced records that LINKAGE only, never complete coverage: it is not a claim
+#   that the linked mechanisms cover the whole rule (the register's explainer says a link records that a
+#   control exists, not how much of the rule it covers, and the published views never display the word
+#   enforced as a status). Once the linked mechanisms are shown to cover only part of the rule, the
+#   status here is partial. A rule whose only linked controls are preview-channel hooks (the [[hook]] rows of
 #   .aiqt/core/hooks/preview.toml: standalone .preview/ files installed by hand, not in the plugin) is still
 #   enforced or partial here, by that linkage, and the register shows it as "Preview only". partial: the
 #   same linkage invariant as enforced, and the linked mechanisms are
 #   known to cover only part of the rule (their residues name what each does not catch, not every
-#   uncovered clause of every linked rule). none: enforcement is
+#   uncovered clause of every linked rule). A partial row may carry `coverage`: one single-line statement,
+#   rendered verbatim in that rule's register row, naming at least one clause or case the linked
+#   mechanisms cover and what stays uncovered; say "no linked mechanism" for the uncovered part, because
+#   an unlinked control or a ledger-declared preview hook may still check part of a clause, and name such
+#   a declared preview hook where one does. none: enforcement is
 #   not built yet. pending: not built yet, and `description` states the intended build. This file records
 #   the DECISION only; the linkage itself is authored in the gate and hook manifests and rendered into
 #   .aiqt/enforceability.json, never re-authored here.
@@ -19,8 +27,9 @@ version = 1
 
 [[rule]]
 corpus-id = "abspth"
-status = "enforced"
+status = "partial"
 mechanisms = ["hook:abs-paths", "hook:abs-paths-bash"]
+coverage = "hook:abs-paths denies a relative path in the path fields of the file and search tools (honouring the relative search-pattern carve-out), and hook:abs-paths-bash denies only a destructive truncating redirect to a relative or opaque target, allowing a relative cd, pushd or non-destructive redirect with a note and never judging an arbitrary command operand. So abspth.1 is uncovered for a relative path handed to a program inside a Bash command, and no linked mechanism covers abspth.2 or abspth.3 (a permitted relative path is used only against a named fixed root, identified where the path appears)."
 
 [[rule]]
 corpus-id = "actbef"
@@ -34,8 +43,9 @@ mechanisms = []
 
 [[rule]]
 corpus-id = "artbr1"
-status = "enforced"
+status = "partial"
 mechanisms = ["hook:protected-line-guard"]
+coverage = "hook:protected-line-guard makes a direct or apparent git commit prove itself against a closed grammar and denies a force, delete or mirror push paired with a protected branch name, the isolation edge of artbr1.1 for the git verbs it recognizes (its own text says other commit-producing verbs and other tools remain outside this boundary). No linked mechanism checks that a change passed a review gate or that its checks passed before integration, so artbr1.2 and artbr1.3 (put the change through a review gate and integrate it only when its checks pass) are uncovered."
 
 [[rule]]
 corpus-id = "asadv1"
@@ -64,8 +74,9 @@ mechanisms = ["gate:branch-root", "hook:branch-root-guard", "hook:git-discard"]
 
 [[rule]]
 corpus-id = "chgchk"
-status = "enforced"
+status = "partial"
 mechanisms = ["gate:entry-guard", "gate:selftest-execution"]
+coverage = "gate:selftest-execution proves that every check registered in the expectation manifest actually ran (the static call-site set and the executed-id report reconciled against the manifest), and gate:entry-guard holds the canonical module entry in place for every rostered script, so chgchk.3 is covered for that registered surface. Neither sees a behaviour change land, proves an assertion discriminating (a constant-true check counts as executed) or carries mutation sensitivity, so no linked mechanism covers chgchk.1 (a change lands with a check that fails when the change is absent), chgchk.2, chgchk.4 through chgchk.10 (an absence check is paired with a deliberate flip observed to fail, kept as a durable companion case) or chgchk.11 (a verdict-sorting fix is tested on sibling cases)."
 
 [[rule]]
 corpus-id = "chgtrk"
@@ -79,8 +90,9 @@ mechanisms = []
 
 [[rule]]
 corpus-id = "chtrk1"
-status = "enforced"
+status = "partial"
 mechanisms = ["gate:record-drift"]
+coverage = "gate:record-drift reads only rows carrying merge_pending with typed refs in the declared findings register, and fails when the first-parent history or the declared changelog already carries the merge. It never requires a record to exist, so chtrk1.1 through chtrk1.5 (every substantive change carries a record of what changed, when and why, tied to the shipped version) are covered only in that stale-row slice, and no linked mechanism reads backlog item numbers, so none covers chtrk1.6 (item numbers are permanent and never reused)."
 
 [[rule]]
 corpus-id = "citint"
@@ -104,18 +116,21 @@ mechanisms = []
 
 [[rule]]
 corpus-id = "cmtidn"
-status = "enforced"
+status = "partial"
 mechanisms = ["hook:commit-identity"]
+coverage = "hook:commit-identity sees only Bash commands: it denies a git command that records an AI as author, committer or co-author, and allows every other tool. It never sees a record written any other way, so no linked mechanism covers cmtidn.1 or cmtidn.2 beyond that git-command case (the identity rule holds anywhere a record names a party, change-log entries included, and a record written by Write or Edit, or outside a git command, is not judged)."
 
 [[rule]]
 corpus-id = "cnclse"
-status = "enforced"
+status = "partial"
 mechanisms = ["hook:orch-lease-heartbeat-post", "hook:orch-lease-heartbeat-stop", "hook:orch-resume-audit", "hook:orch-stop-guard"]
+coverage = "hook:orch-lease-heartbeat-post and hook:orch-lease-heartbeat-stop are warn-only keepers: they refresh and report only this session's own lease and never block, and the lease handling never seizes a lease another run holds, so cnclse.2 and cnclse.3 are covered in that reconcile-and-warn channel, which hook:orch-resume-audit extends at SessionStart (an event the platform cannot block) and hook:orch-stop-guard at turn end. Every binding warns rather than prevents, so no linked mechanism covers cnclse.1 (the lease prevents two runs from acting on the same session at once)."
 
 [[rule]]
 corpus-id = "cnsdif"
-status = "enforced"
+status = "partial"
 mechanisms = ["hook:diff-source", "hook:diff-wall-stop"]
+coverage = "hook:diff-source denies a git command confirmed to dump a console patch and allows every other producer form with a note, and hook:diff-wall-stop surfaces a raw diff wall in the final message as a non-blocking warning (the wall has already rendered). A dump from a source other than a recognized git producer, and a wall emitted mid-turn, are not judged, so cnsdif.1 is covered only for that git-command shape, and no linked mechanism covers cnsdif.2 or cnsdif.3 (the change is reported as a concise summary and the full detail surfaced through the channel the environment expects)."
 
 [[rule]]
 corpus-id = "cnsprd"
@@ -124,13 +139,15 @@ mechanisms = []
 
 [[rule]]
 corpus-id = "cnstpr"
-status = "enforced"
+status = "partial"
 mechanisms = ["hook:constraint-reread"]
+coverage = "hook:constraint-reread (a preview hook) fires only on a platform-reported compaction: it reminds the assistant of the constraints the declared record lists and refuses the turn end until a re-read entry is recorded, capped at a fixed number of refusals, and it does nothing at all when no record is declared. So cnstpr.1 and cnstpr.2 are covered only for that compaction case, and no linked mechanism covers cnstpr.3, cnstpr.4 or cnstpr.5 (only the authority that set a constraint can lift it, never context loss alone, and when the assistant cannot confirm a constraint still applies it holds and checks rather than proceeds)."
 
 [[rule]]
 corpus-id = "cntdef"
-status = "enforced"
+status = "partial"
 mechanisms = ["hook:orch-ask-unattended", "hook:orch-stop-guard", "hook:orch-teammate-idle-guard", "hook:orch-yield-tool-guard"]
+coverage = "hook:orch-stop-guard and hook:orch-teammate-idle-guard deny a stop or idle past enumerated actionable work or on cannot-evaluate, bounded by a loop counter, hook:orch-yield-tool-guard judges a scheduling call the same way, and hook:orch-ask-unattended denies a blocking question in unattended mode (judging one in attended mode against the backlog). All are registry-scoped boundary guards, so cntdef.1 is covered only at those boundaries, not inside a turn, and no linked mechanism covers cntdef.6 (a minimum-effort floor is a minimum, never a ceiling), cntdef.9 (a low-value or delicate item is still done) or cntdef.11 (an activity floor stays within the granted resource share)."
 
 [[rule]]
 corpus-id = "cntprd"
@@ -167,22 +184,17 @@ corpus-id = "dscres"
 status = "none"
 mechanisms = []
 
-# estsep is partial. hook:orch-yield-tool-guard covers one case of estsep.1: a scheduling call that claims
-# more quiet minutes than the gap measured since the last genuine human input (by more than one minute) is
-# refused. hook:orch-prompt-stamp only labels the measured gap in its own context line on a timer prompt.
-# Neither reads a figure the assistant reports, so no mechanism covers estsep.1 outside that one claim,
-# estsep.2 (measured and estimated figures are reported in labelled separation), estsep.3 (an unknown
-# quantity is reported as unknown, never zero) or estsep.4 (a figure derived from an estimate is labelled
-# as one).
 [[rule]]
 corpus-id = "estsep"
 status = "partial"
 mechanisms = ["hook:orch-prompt-stamp", "hook:orch-yield-tool-guard"]
+coverage = "hook:orch-yield-tool-guard covers one case of estsep.1's concern that a claimed figure never stands in for a measured one: a scheduling call whose text claims more quiet minutes than the clock-measured gap since the last genuine human input, by more than one minute, is refused, so the measured figure wins over the unmeasured claim on that call. The check needs a readable registry, a live scope, a tool the registry's yield_tools roster names and a recorded last-human-input stamp, and it reads the claim with a best-effort regex (the first minutes figure anywhere in the call's text, with the word quiet anywhere in it), so a claim worded past that regex is missed and an unrelated minutes figure can be the one judged; it never looks for a figure blended from measured and estimated inputs, the act estsep.1 literally forbids. hook:orch-prompt-stamp only labels the measured gap in its own context line on a timer prompt. Neither reads a figure the assistant reports, so no linked mechanism covers estsep.1 beyond that overstated-claim case, estsep.2 (measured and estimated figures are reported in labelled separation), estsep.3 (an unknown quantity is reported as unknown, never zero) or estsep.4 (a figure derived from an estimate is labelled as one)."
 
 [[rule]]
 corpus-id = "evgcmp"
-status = "enforced"
+status = "partial"
 mechanisms = ["gate:selftest-execution"]
+coverage = "gate:selftest-execution emits its PASS only from an observation that ran the exact registered set (the executed check-id report reconciled against the expectation manifest), one mechanical instance of evgcmp.8 for registered self-test suites. It sees no other completion claim, so no linked mechanism covers evgcmp.1 through evgcmp.7 (no completion claim without evidence: re-read the files in scope, quote the supporting lines, search for contradictions, state every unverified item, and a marker is evidence only with its payload present), evgcmp.8 outside the registered suites, evgcmp.9 through evgcmp.15 (a class-scoped fix claim carries a validated completeness probe, and an applied edit is proven by re-reading the result), evgcmp.16 (review transfers only to a byte-identical replayed diff) or evgcmp.17 (the consuming tool's own parser accepts the edited file)."
 
 [[rule]]
 corpus-id = "exauth"
@@ -196,8 +208,9 @@ mechanisms = ["gate:derived-command-parameters", "hook:write-scope"]
 
 [[rule]]
 corpus-id = "expbnd"
-status = "enforced"
+status = "partial"
 mechanisms = ["hook:git-discard", "hook:git-explicit-binding", "hook:git-stash-ref", "hook:orch-dispatch-ledger"]
+coverage = "hook:git-explicit-binding denies only a whole-tree breadth stage followed by a publish in the same command and allows any other ambient git binding with a note, hook:git-stash-ref allows a bare stash pop or apply with a note by design, hook:git-discard snapshots before a lossy git verb, and hook:orch-dispatch-ledger records dispatch ids so an asynchronous result can bind to them (expbnd.2 in part, as a recorder that never blocks). An ambient binding outside that one deny is only noted, so expbnd.1, expbnd.3 and expbnd.4 are covered only in that breadth-then-publish slice, and no linked mechanism covers expbnd.5 (where only an ambient binding exists, the execution target is confirmed by observation before the action)."
 
 [[rule]]
 corpus-id = "fndfix"
@@ -206,13 +219,15 @@ mechanisms = []
 
 [[rule]]
 corpus-id = "gatdis"
-status = "enforced"
+status = "partial"
 mechanisms = ["gate:ci-parity", "gate:relied-exit-pipes", "hook:gate-weakening-guard"]
+coverage = "hook:gate-weakening-guard denies a git bypass spelling (--no-verify, and -n where it means that) and fails closed on an uncertain git segment, gate:ci-parity keeps the local and CI check rosters identical, and gate:relied-exit-pipes fails a declared relied-on command run through a pipe, launcher or background form. Those cover gatdis.1, gatdis.2 and the bypass-flag and truncating-pipe parts of gatdis.21. No linked mechanism covers gatdis.3 (understand a failure before any override), gatdis.4 through gatdis.6 (a floor shrinks only through the maintainer's recorded authorization), gatdis.7 through gatdis.11 beyond adopter-declared relied-on commands (a verdict is read from the gate's own unmasked termination status), gatdis.12 and gatdis.13 (an event-triggered gate's preconditions are confirmed), gatdis.14 through gatdis.20 (a replaced control's covered cases are enumerated and accounted for) or the deleted-tests and lowered-thresholds part of gatdis.21."
 
 [[rule]]
 corpus-id = "gensrc"
-status = "enforced"
+status = "partial"
 mechanisms = ["gate:adapters-drift", "gate:agents-drift", "gate:changelog-drift", "gate:char-policy-drift", "gate:claude-drift", "gate:crosswalk-schema-drift", "gate:cursor-drift", "gate:disclosure-drift", "gate:draft-site-drift", "gate:enforceability-drift", "gate:enforcement-register-drift", "gate:first-pin-demo-drift", "gate:gensrc-failclose", "gate:gensrc-registry-drift", "gate:hooks-drift", "gate:manifest-gen-drift", "gate:mappings-page-drift", "gate:notice-drift", "gate:reference-roster-drift", "gate:renderers-drift", "gate:roadmap-drift", "gate:rules-drift", "gate:secret-patterns-drift", "gate:skill-drift", "gate:worker-pack-drift", "hook:gensrc-edit-guard"]
+coverage = "The drift gates regenerate each registered surface and fail on a byte difference, so a hand-edited target or a stale source landing apart from its derivative fails, covering gensrc.1 through gensrc.4; gate:gensrc-failclose proves each generator's --check consults its target (a corrupted copy never yields a clean exit); and hook:gensrc-edit-guard denies a write onto a registered file or tree target at edit time (kind=block entries are excluded from the hook by design and backstopped by their drift gates). All of them judge the generated target only: none compares the source originals before and after a regeneration, and the hook matches no source path, so no linked mechanism covers gensrc.5 (deriving leaves the source originals byte-for-byte unchanged and writes separate outputs; in-place derivation uses copies and refuses any path or alias writing back to an original)."
 
 [[rule]]
 corpus-id = "goalfd"
@@ -221,24 +236,19 @@ mechanisms = []
 
 [[rule]]
 corpus-id = "grdinp"
-status = "enforced"
+status = "partial"
 mechanisms = ["gate:aei-enumerator-selftest", "gate:derived-command-parameters"]
+coverage = "gate:aei-enumerator-selftest proves the reference backlog enumerator fails closed (a malformed item, an unknown blocker kind, a duplicate id or an unaffirmed empty backlog is an enumeration error, never a drained set), one guard's instance of grdinp.5, grdinp.6 and grdinp.12, and gate:derived-command-parameters flags a hardcoded literal at an adopter-declared command sink, a slice of grdinp.7. Neither reads any other guard, so no linked mechanism covers grdinp.1 through grdinp.4 (whether the source can answer what is asked; a handed premise or the guard's own control is validated), grdinp.8 (a document's fact is verified against an independent authority), grdinp.9 (a range question takes a membership test), grdinp.10 and grdinp.11 (a negative string scan is scoped to the defect locus) or grdinp.13 through grdinp.15 (a pre-apply check shares the apply's predicate)."
 
 [[rule]]
 corpus-id = "hiasrv"
 status = "none"
 mechanisms = []
 
-# humovs is partial. hook:orch-ask-unattended sees only AskUserQuestion calls: it denies a blocking question
-# in unattended mode (and judges one in attended mode against the backlog), and its deny reason tells the
-# assistant to record and HOLD an item at the oversight threshold. It never sees the high-consequence,
-# irreversible or outward-facing action itself, so no mechanism covers humovs.1 or humovs.2 (such an action
-# needs proportionate human authorization and holds when in doubt), humovs.3 (a timeout or ambiguous state
-# never selects the risky path) or humovs.4 (the threshold is set by consequence and reversibility).
 [[rule]]
 corpus-id = "humovs"
-status = "partial"
-mechanisms = ["hook:orch-ask-unattended"]
+status = "none"
+mechanisms = []
 
 [[rule]]
 corpus-id = "kltwat"
@@ -262,8 +272,9 @@ mechanisms = []
 
 [[rule]]
 corpus-id = "mstreg"
-status = "enforced"
+status = "partial"
 mechanisms = ["gate:mistakes-register", "gate:mistakes-register-append-selftest"]
+coverage = "gate:mistakes-register verifies the declared register's digest chain, permanent ids and legal status transitions, and that a landed row's cited commit and check path exist, and gate:mistakes-register-append-selftest proves the appender refuses at write time an append the gate would reject, so mstreg.2 is covered, with the row-shape and append-only parts of mstreg.1. Neither can see a mistake that was never written down, nor anything after acceptance, so no linked mechanism covers the records-every-confirmed-error half of mstreg.1 or mstreg.3 (an accepted row's guardrail becomes an open obligation tracked to closure)."
 
 [[rule]]
 corpus-id = "mtchcd"
@@ -272,8 +283,9 @@ mechanisms = []
 
 [[rule]]
 corpus-id = "nocncl"
-status = "enforced"
+status = "partial"
 mechanisms = ["hook:inline-errexit", "hook:orch-truncation-guard"]
+coverage = "hook:inline-errexit is note-only: it allows every Bash command and at most notes an inline set -e that a later step may outlive, and hook:orch-truncation-guard denies one concealment shape, a background dispatch piped into a truncating sink whose failing producer would read as a clean, finished run. Neither blocks an error hidden, swallowed or downgraded in any other form (a discarded exit status, a silenced error stream, a result forced to success), so beyond that pipeline shape no linked mechanism covers nocncl.1 (a failing state is surfaced, never concealed) or nocncl.2 and nocncl.3 (no stubbed, mocked or simulated result is presented as finished)."
 
 [[rule]]
 corpus-id = "nofabr"
@@ -292,13 +304,15 @@ mechanisms = []
 
 [[rule]]
 corpus-id = "prsunc"
-status = "enforced"
+status = "partial"
 mechanisms = ["hook:git-discard"]
+coverage = "hook:git-discard snapshots and then allows (or denies when no recovery snapshot can be made) a command naming a recognized lossy git verb, which covers prsunc.2 for those git discards: the work is saved to an inert recovery ref before the discard runs. It judges only git commands in Bash, so no linked mechanism covers prsunc.1 (revert only the specific lines, never blind-revert a whole file holding uncommitted work) or either clause for a discard outside git, such as a Write overwrite or an rm."
 
 [[rule]]
 corpus-id = "prtbrn"
-status = "enforced"
+status = "partial"
 mechanisms = ["hook:protected-line-guard"]
+coverage = "hook:protected-line-guard denies a direct or unproven git commit and a force, delete or mirror push naming the protected branch, covering prtbrn.4 for the git verbs it recognizes (its own text says other commit-producing verbs and other tools remain outside this boundary). It cannot see whether an integration was reviewed or verified, so no linked mechanism covers prtbrn.1 through prtbrn.3 (the protected line changes only through a reviewed, verified integration)."
 
 [[rule]]
 corpus-id = "prtwhl"
@@ -312,13 +326,15 @@ mechanisms = []
 
 [[rule]]
 corpus-id = "recfst"
-status = "enforced"
+status = "partial"
 mechanisms = ["hook:orch-ask-unattended", "hook:orch-dispatch-ledger"]
+coverage = "hook:orch-ask-unattended denies a blocking question in unattended mode with an instruction to record it and continue, itself appending a redacted pending-ask row (a bounded summary and digest, never the question text) where that write succeeds, and hook:orch-dispatch-ledger appends launch and completion rows for tracked dispatches (a recorder that never blocks; a failed write only adds a note). Neither reads a ruling or a decision, so no linked mechanism covers recfst.1 (every ruling and decision is recorded to the durable store the session it is made) or recfst.2 (the record, not the conversation, is the source of truth) beyond those two slices; the declared preview hook future-stamp-write (a standalone .preview/ file listed in the ledger's previews, not a linked control) checks one further slice of the record discipline, denying a future-dated observed-time literal written into a store."
 
 [[rule]]
 corpus-id = "recncl"
-status = "enforced"
+status = "partial"
 mechanisms = ["gate:record-drift", "gate:record-sections", "hook:orch-lease-heartbeat-post", "hook:orch-lease-heartbeat-stop", "hook:orch-resume-audit", "hook:orch-resume-barrier"]
+coverage = "gate:record-drift fails a merge_pending row whose merge the truth sources already carry, gate:record-sections fails a two-parent merge that drops a declared record section without a supersession marker (recncl.5 for declared files), hook:orch-resume-audit reconciles the record at resume but can only warn, hook:orch-resume-barrier is warn-first and blocks nothing yet, and the lease heartbeat hooks keep warn-only lease bookkeeping. No linked mechanism reconciles the wider record at the close checkpoint, and an in-session divergence is only warned, so the close-checkpoint and resolve-the-finding parts of recncl.2 and recncl.3 are uncovered outside those two narrow gate shapes."
 
 [[rule]]
 corpus-id = "refcap"
@@ -337,8 +353,9 @@ mechanisms = []
 
 [[rule]]
 corpus-id = "rerunf"
-status = "enforced"
+status = "partial"
 mechanisms = ["hook:rerun-pass-check"]
+coverage = "hook:rerun-pass-check (a preview hook) notes a recognized CI or local rerun and refuses a turn end that presents a pass as conclusive while a certain rerun is outstanding and the earlier failure goes unnamed, capped at a fixed number of refusals and cleared by any disclosure word. It never checks that the earlier failure was recorded or investigated, so rerunf.1 through rerunf.4 are covered only in that present-as-conclusive case, and no linked mechanism covers rerunf.5 (both results remain part of the gate evidence)."
 
 [[rule]]
 corpus-id = "rmvpth"
@@ -372,8 +389,9 @@ mechanisms = []
 
 [[rule]]
 corpus-id = "secaud"
-status = "enforced"
+status = "partial"
 mechanisms = ["gate:mistakes-register"]
+coverage = "gate:mistakes-register makes the declared registers append-only in a detectable way (a broken digest chain or sequence, a reused id, an illegal status transition or a rewrite of anchored or merge-base rows fails), covering the append-only or integrity-protected half of secaud.1 within those detection bounds. The register, its anchor and the gate are same-authority local files the recorded actor can rewrite together, so no linked mechanism covers secaud.2 (audit records held under authority separate from the actor or agent they record), and an audit record kept outside the declared registers is not covered at all."
 
 [[rule]]
 corpus-id = "secazn"
@@ -570,14 +588,11 @@ corpus-id = "sectok"
 status = "none"
 mechanisms = []
 
-# sectvl is partial. hook:commit-msg-subst covers one case of sectvl.2: in a Bash command, a backtick or $(
-# command substitution in a double-quoted or unquoted token after a recognized git commit is denied. No
-# mechanism covers sectvl.1 (every tool, shell, database or file argument is validated against an expected
-# schema) or sectvl.2 for any other command, query, path or request.
 [[rule]]
 corpus-id = "sectvl"
 status = "partial"
 mechanisms = ["hook:commit-msg-subst"]
+coverage = "hook:commit-msg-subst covers one case of sectvl.2: in a Bash command, a backtick or $( command substitution in a double-quoted or unquoted token after a recognized git commit is denied. No linked mechanism covers sectvl.1 (every tool, shell, database or file argument is validated against an expected schema) or sectvl.2 for any other command, query, path or request."
 
 [[rule]]
 corpus-id = "secunt"
@@ -611,13 +626,15 @@ mechanisms = []
 
 [[rule]]
 corpus-id = "sesres"
-status = "enforced"
+status = "partial"
 mechanisms = ["hook:orch-resume-audit", "hook:orch-resume-barrier"]
+coverage = "hook:orch-resume-audit reconciles the durable record against observed reality at SessionStart (an event the platform cannot block) and arms a barrier on divergence, and hook:orch-resume-barrier is warn-first and blocks nothing yet, surfacing the first mutation outside its allowlist while the barrier is armed. Both channels only warn, so sesres.1 and sesres.2 are covered only by those warnings: no linked mechanism refuses a session that starts cold instead of resuming from the durable handoff, and none of them checks that the session works under a single named operating mode."
 
 [[rule]]
 corpus-id = "setcmp"
-status = "enforced"
+status = "partial"
 mechanisms = ["hook:orch-stop-guard", "hook:orch-teammate-idle-guard", "hook:orch-yield-tool-guard"]
+coverage = "hook:orch-stop-guard, hook:orch-teammate-idle-guard and hook:orch-yield-tool-guard refuse ending a turn, going idle or scheduling a wake past a fresh enumeration of the backlog, which covers setcmp.7, and the stop-shaped cases of setcmp.4 and setcmp.5, at those boundaries. No linked mechanism reads a completion-class claim made in prose, so setcmp.1, setcmp.2 and setcmp.3 are uncovered outside those boundaries, and none covers setcmp.9 or setcmp.10 (retiring, splitting, merging or removing items from a record that names more than one item)."
 
 [[rule]]
 corpus-id = "slfgrd"
@@ -646,8 +663,9 @@ mechanisms = []
 
 [[rule]]
 corpus-id = "trkasy"
-status = "enforced"
+status = "partial"
 mechanisms = ["hook:orch-dispatch-ledger", "hook:orch-stop-guard", "hook:orch-teammate-idle-guard", "hook:orch-truncation-guard", "hook:orch-untracked-wait-loop", "hook:pgrep-self-match"]
+coverage = "hook:orch-truncation-guard denies a bare '&' detach and a background dispatch piped into a truncating sink, steering to the tracked mechanism (trkasy.1, trkasy.2, trkasy.3 and trkasy.6 in part, and trkasy.5 for that sink shape; a capture redirected or piped elsewhere is allowed with a note), hook:orch-untracked-wait-loop denies a backgrounded polling loop, hook:pgrep-self-match denies a process check whose pattern can match the shell running it, hook:orch-dispatch-ledger records launch and completion rows, and the stop and idle guards hold the session past open tracked work. No linked mechanism covers trkasy.4 (running work untracked is a deliberate, recorded choice, not the default)."
 
 [[rule]]
 corpus-id = "trsrcv"
@@ -659,16 +677,11 @@ corpus-id = "trstre"
 status = "none"
 mechanisms = []
 
-# tstamp is partial. hook:orch-prompt-stamp writes a clock-read time into turn-state for each genuine human
-# prompt (the hook writes that stamp, not the assistant), and hook:orch-yield-tool-guard refuses a scheduling
-# call that claims more quiet minutes than the gap measured from that stamp. Neither reads a time the
-# assistant writes into a record, a file or a message, so no mechanism covers tstamp.1 (a time the assistant
-# records is read from the clock), tstamp.2 or tstamp.3 (an external or earlier time comes from an
-# authoritative source, identified as such) or tstamp.4 (an unavailable time is recorded as unknown).
 [[rule]]
 corpus-id = "tstamp"
 status = "partial"
 mechanisms = ["hook:orch-prompt-stamp", "hook:orch-yield-tool-guard"]
+coverage = "hook:orch-yield-tool-guard covers one case of tstamp.1, and its deny cites tstamp: an elapsed-time figure the assistant writes into a scheduling call (a claim of quiet minutes since the last genuine human input) is judged against the clock-measured gap and refused when it overstates that gap by more than one minute, so on that call the inferred figure cannot displace the clock. The check needs a readable orchestration registry, a live scope, a tool the registry's yield_tools roster names and a recorded last-human-input stamp, and it reads the claim with a best-effort regex (the first minutes figure anywhere in the call's text, with the word quiet anywhere in it), so a claim worded past that regex is missed. hook:orch-prompt-stamp supplies the clock-read stamp that gap is measured from, writing it into turn-state for each genuine human prompt (the hook writes that stamp, not the assistant; it needs a readable registry and a live holder session, and a stamp save can fail). Neither linked hook reads a time the assistant writes into a record, a file or a message, so no linked mechanism covers tstamp.1 beyond that scheduling-call case (a time the assistant records is read from the clock), tstamp.2 or tstamp.3 (an external or earlier time comes from an authoritative source, identified as such) or tstamp.4 (an unavailable time is recorded as unknown); the declared preview hooks future-stamp-write and stamp-truth-stop (standalone .preview/ files listed in the ledger's previews, not linked controls) each check part of tstamp.1 there, the first denying a future-dated observed-time literal written into a store, the second blocking a turn whose timestamp claims disagree with the clock."
 
 [[rule]]
 corpus-id = "tsthrm"
@@ -697,8 +710,9 @@ mechanisms = []
 
 [[rule]]
 corpus-id = "vrfdlv"
-status = "enforced"
+status = "partial"
 mechanisms = ["hook:orch-truncation-guard"]
+coverage = "hook:orch-truncation-guard denies a background dispatch that pipes its producer into a truncating sink, which covers vrfdlv.11 for that dispatch shape (a capture piped through a truncating filter is a degraded delivery), and its own residue names the delivery-marker discipline as a separate post-execution layer. No linked mechanism covers vrfdlv.1 through vrfdlv.10 (a verdict needs the agreed positive evidence in the delivery, a truncated, empty or errored delivery is no verdict, re-dispatch, and the panel and family rules), vrfdlv.12 (UNVERIFIABLE on a required input the verifier cannot read) or vrfdlv.13 (a provider refusal or content stop counts as a refusal, not a verdict)."
 
 [[rule]]
 corpus-id = "wowo01"
