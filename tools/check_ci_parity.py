@@ -4924,12 +4924,15 @@ def _prepare_stubs(root, python3=_STUB_PYTHON3):
 
     python3 is the body of the python3 fixture (_cdpath_outcome passes
     _STUB_PYTHON3_PWD, which also records $PWD). Call this before any scenario thread
-    starts and share the result read-only. execve of a file that any process holds
-    open for writing fails ETXTBSY, and a child forked on another thread holds every
-    descriptor open at that moment until it execs, so a stub written while scenarios
-    run can be caught open by a sibling's fork. Scenario trees therefore hold no file
-    that is executed directly: only the runner text, whose path is passed to bash as
-    its script argument, and the call log.
+    starts and share the result read-only. The order relies on platform behaviour that
+    this code does not check: execve of a file that any process holds open for writing
+    fails ETXTBSY, and a child forked on another thread holds every descriptor open at
+    that moment until it execs, so a stub written while scenarios run can be caught open
+    by a sibling's fork. Scenario trees therefore hold no file that is executed
+    directly: only the runner text, whose path is passed to bash as its script argument,
+    and the call log. Self-test vector 27 checks the order of the writes, not that
+    behaviour: in runner_naming_problems, every stub is written and chmodded on the main
+    thread before the scenario pool is constructed.
     """
     bin_dir = root / "bin"
     bin_dir.mkdir()
