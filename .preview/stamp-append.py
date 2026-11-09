@@ -27,20 +27,24 @@ JSONL mode (--format jsonl). stdin holds one JSON object, parsed strictly: a dup
 NaN, Infinity and -Infinity are refused. The field named by --field (default ts) must be absent or equal
 the placeholder; any other value is refused, so the caller cannot supply the time. The placeholder in any
 other key or value is refused. The object is written as one compact line (separators "," and ":", UTF-8
-kept as is), with the field set to the stamp; an absent field is added first. Other values keep their
-meaning, though a number is written in Python's own form (1e5 becomes 100000.0).
+kept as is), with the field set to the stamp; an absent field is added first. Numbers: an integer keeps
+its exact value, written in plain decimal (-0 becomes 0). A number with a fraction or an exponent is read
+as a binary float and written in Python's shortest form for that float (1e5 becomes 100000.0, 1.10 becomes
+1.1); one whose written form would be a different value is refused, whether too large for a float (1e400,
+-1e400), too small (1e-400) or more precise than a float holds (9007199254740993.0, 1.00000000000000000001).
+Strings, booleans and null are kept.
 
 Order of steps:
   1. validate the arguments and the record;
   2. open the file with O_APPEND, O_NOFOLLOW and O_NONBLOCK, and require a regular file; an absent file is
-     created only with --create;
+     created only with --create, and a run that creates it and then refuses removes it again;
   3. take an exclusive flock, waiting less than 5 seconds (a wait that reaches 5 seconds is refused);
   4. refuse a non-empty file whose last byte is not LF, and read the last stamp the helper wrote;
   5. read the clock;
   6. write the whole record, then fsync;
   7. print the stamped time on stdout.
 If a write or the fsync fails, the file is truncated back to its size at step 4; if that also fails, the
-refusal names the offset where the partial record starts.
+refusal names the offset where the record, whole or in part, may start.
 
 Clock failure. The clock read raising, a reading earlier than CLOCK_FLOOR (2026-01-01T00:00:00Z, the mark
 of an unset clock; a reading exactly at the floor is accepted), or a reading whose whole second is earlier
@@ -53,8 +57,12 @@ is a JSON object and the value has the stamp form; in text mode the last stamp-f
 line that holds one.
 
 Exit status: 0 written (the stamp, or the unknown marker, on stdout); 2 refused or a usage error, with one
-line on stderr and the file unchanged. An interpreter older than Python 3.14 that can start the file gets
-one line beginning `error: stamp-append.py requires Python 3.14 or newer` on stderr and exit 2.
+line on stderr. That line ends `nothing was written` only when the file holds what it held before the run.
+When bytes of the record may remain (a write or the fsync failed and the truncation back failed too, or
+closing the file failed after the record was written and synced), it ends instead `the file may hold part
+or all of the record, so check it before retrying`. When a file --create made could not be removed, it
+says the empty file was left in place and why. An interpreter older than Python 3.14 that can start the
+file gets one line beginning `error: stamp-append.py requires Python 3.14 or newer` on stderr and exit 2.
 
 RESIDUAL COVERAGE. The helper protects only the writes made through it: Write and Edit tool writes,
 interpreter writes, scripts and `bash -c` strings are not routed to it, and record-remove-check.py's append
@@ -67,10 +75,14 @@ in a body. Stamps are to the second, so two appends in one second carry equal st
 does not order writers that do not take it, and the truncation after a failed write can cut bytes such a
 writer appended meanwhile. O_NOFOLLOW guards the final path component only. The step-back check reads only
 the last 64 KiB and, in text mode, the last line holding a stamp-form token, which can be a body line
-rather than the last heading: an earlier body stamp there weakens the check, and a later one refuses.
+rather than the last heading: an earlier body stamp there weakens the check, and a later one refuses. A
+file --create made is removed on a refusal only while the run holds its lock and the path still names it
+empty; between that check and the removal another process could replace the path, and a writer that opened
+the file before the removal goes on writing to an unlinked file.
 
-Self-test: python3 -I -S -B stamp-append.py --self-test (T1 to T15, in a temporary directory; no child
-process is started, and no live clock decides a result).
+Self-test: python3 -I -S -B stamp-append.py --self-test (T1 to T18, in a temporary directory; no child
+process is started, and no live clock decides a passing result: T6 waits on a worker thread with a 30-second
+live hang guard that can only fail it).
 """
 
 import sys
@@ -88,8 +100,10 @@ if tuple(sys.version_info[:2]) < (3, 14):
     os._exit(2)
 
 import calendar
+import decimal
 import errno
 import fcntl
+import io
 import json
 import math
 import os
@@ -113,7 +127,8 @@ LITERAL_RE = re.compile(r"(?<!\d)\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}")
 # The one form the helper writes.
 STAMP_RE = re.compile(r"(?<![0-9A-Za-z])\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z(?![0-9A-Za-z])")
 
-# Seams: the self-test replaces these to drive the clock, the lock wait and the write.
+# Seams: the self-test replaces these to drive the clock, the lock wait, the write, the close and the
+# removal of a file --create made.
 SEAMS = {
     "clock": time.time,
     "monotonic": time.monotonic,
@@ -121,6 +136,8 @@ SEAMS = {
     "write": os.write,
     "fsync": os.fsync,
     "ftruncate": os.ftruncate,
+    "close": os.close,
+    "unlink": os.unlink,
 }
 
 USAGE = ("usage: stamp-append.py --file /ABSOLUTE/PATH [--format text|jsonl] [--field NAME] [--create] "
@@ -128,7 +145,27 @@ USAGE = ("usage: stamp-append.py --file /ABSOLUTE/PATH [--format text|jsonl] [--
 
 
 class Refusal(Exception):
-    """A refusal: exit 2, one line on stderr, the file unchanged."""
+    """A refusal: exit 2 and one line on stderr.
+
+    changed is True when bytes of the record may remain in the file; left names why an empty file that
+    --create made was left in place. With neither, the file holds what it held before the run.
+    """
+
+    def __init__(self, message, changed=False):
+        super().__init__(message)
+        self.message = message
+        self.changed = changed
+        self.left = None
+
+
+def _refusal_line(exc):
+    if exc.changed:
+        tail = "the file may hold part or all of the record, so check it before retrying"
+    elif exc.left is not None:
+        tail = "no record was written, but the empty file --create made was left in place ({})".format(exc.left)
+    else:
+        tail = "nothing was written"
+    return "stamp-append: refused: {}; {}\n".format(exc.message, tail)
 
 
 def _parse_args(argv):
@@ -217,20 +254,39 @@ def _no_constant(name):
     raise Refusal("the JSON record holds {}, which is not JSON".format(name))
 
 
+def _exact_float(token):
+    """Parse a JSON number with a fraction or exponent; refuse one the float written for it would change."""
+    value = float(token)
+    if not math.isfinite(value):
+        raise Refusal("the JSON record holds the number {}, which is too large for a float".format(token[:40]))
+    if decimal.Decimal(repr(value)) != decimal.Decimal(token):
+        raise Refusal("the JSON record holds the number {}, which would be written as {}, a different "
+                      "value".format(token[:40], repr(value)))
+    return value
+
+
 def _holds_placeholder(value):
-    if isinstance(value, str):
-        return PLACEHOLDER in value
-    if isinstance(value, dict):
-        return any(_holds_placeholder(k) or _holds_placeholder(v) for k, v in value.items())
-    if isinstance(value, list):
-        return any(_holds_placeholder(v) for v in value)
+    # Iterative, so a deeply nested record cannot exhaust the interpreter's recursion limit.
+    stack = [value]
+    while stack:
+        item = stack.pop()
+        if isinstance(item, str):
+            if PLACEHOLDER in item:
+                return True
+        elif isinstance(item, dict):
+            for key, child in item.items():
+                stack.append(key)
+                stack.append(child)
+        elif isinstance(item, list):
+            stack.extend(item)
     return False
 
 
 def _jsonl_template(text, field):
     """Validate a JSONL record; return a function of the slot value giving the record's bytes."""
     try:
-        obj = json.loads(text, object_pairs_hook=_no_duplicates, parse_constant=_no_constant)
+        obj = json.loads(text, object_pairs_hook=_no_duplicates, parse_constant=_no_constant,
+                         parse_float=_exact_float)
     except Refusal:
         raise
     except (ValueError, RecursionError, MemoryError) as exc:
@@ -253,7 +309,7 @@ def _jsonl_template(text, field):
             out = {field: slot}
             out.update(obj)
         try:
-            line = json.dumps(out, ensure_ascii=False, separators=(",", ":"))
+            line = json.dumps(out, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
             return (line + "\n").encode("utf-8")
         except (ValueError, RecursionError, UnicodeEncodeError) as exc:
             raise Refusal("the record cannot be written as UTF-8 JSON ({})".format(str(exc)[:120]))
@@ -263,31 +319,61 @@ def _jsonl_template(text, field):
 
 # --- steps 2 to 4: the file -----------------------------------------------------------------------
 
-def _open_flags(create):
-    flags = os.O_RDWR | os.O_APPEND | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
-    if create:
-        flags |= os.O_CREAT
-    return flags
+OPEN_FLAGS = os.O_RDWR | os.O_APPEND | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
 
 
 def _open(path, create):
+    """Open the file; return (fd, created), created being True when this run made the file."""
     try:
-        fd = os.open(path, _open_flags(create), 0o666)
+        if create:
+            try:
+                # O_EXCL tells a file this run makes from one that was there, so a refusal removes only its own.
+                return os.open(path, OPEN_FLAGS | os.O_CREAT | os.O_EXCL, 0o666), True
+            except FileNotFoundError:
+                raise Refusal("the directory that would hold {} does not exist; --create makes the file, "
+                              "not its directory".format(path))
+            except FileExistsError:
+                pass
+        return os.open(path, OPEN_FLAGS), False
     except FileNotFoundError:
+        if create:
+            raise Refusal("{} was removed while it was being opened".format(path))
         raise Refusal("{} does not exist (pass --create to create it)".format(path))
     except OSError as exc:
         if exc.errno == errno.ELOOP:
             raise Refusal("{} is a symbolic link".format(path))
         raise Refusal("cannot open {}: {}".format(path, exc.strerror or exc))
+
+
+def _check_regular(fd, path):
     try:
         mode = os.fstat(fd).st_mode
     except OSError as exc:
-        os.close(fd)
         raise Refusal("cannot stat {}: {}".format(path, exc.strerror or exc))
     if not stat.S_ISREG(mode):
-        os.close(fd)
         raise Refusal("{} is not a regular file".format(path))
-    return fd
+
+
+def _discard_created(fd, path):
+    """Remove the empty file this run made; return None, or why it was left in place."""
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        return "another writer holds its lock"
+    try:
+        here = os.fstat(fd)
+        there = os.stat(path, follow_symlinks=False)
+    except OSError as exc:
+        return "it cannot be checked: {}".format(exc.strerror or exc)
+    if (here.st_dev, here.st_ino) != (there.st_dev, there.st_ino):
+        return "the path no longer names it"
+    if here.st_size != 0:
+        return "it is no longer empty"
+    try:
+        SEAMS["unlink"](path)
+    except OSError as exc:
+        return "it cannot be removed: {}".format(exc.strerror or exc)
+    return None
 
 
 def _lock(fd):
@@ -387,10 +473,31 @@ def _write_all(fd, data, size):
         try:
             SEAMS["ftruncate"](fd, size)
         except OSError as exc2:
-            raise Refusal("the write failed ({}) and the file could not be truncated back ({}); a partial "
-                          "record may start at offset {}".format(reason, exc2.strerror or exc2, size))
+            raise Refusal("the write failed ({}) and the file could not be truncated back ({}); the record "
+                          "or part of it may start at offset {}".format(reason, exc2.strerror or exc2, size),
+                          changed=True)
         raise Refusal("the write failed ({}); the file was truncated back to its original size {}".format(
             reason, size))
+
+
+def _append_open(fd, opts, render):
+    """Steps 3 to 6 on the open file. Returns (stamp, warning)."""
+    _check_regular(fd, opts["file"])
+    _lock(fd)
+    try:
+        size = _check_end(fd)
+        last = _last_stamp(fd, size, opts["format"], opts["field"])
+    except OSError as exc:
+        raise Refusal("cannot read {}: {}".format(opts["file"], exc.strerror or exc))
+    stamp, failure = _read_clock(last)
+    warning = ""
+    if failure is not None:
+        if opts["on_clock_failure"] != "unknown":
+            raise Refusal(failure)
+        stamp = UNKNOWN_MARK
+        warning = "stamp-append: warning: {}; the time was recorded as unknown\n".format(failure)
+    _write_all(fd, render(stamp), size)
+    return stamp, warning
 
 
 def append(argv, data):
@@ -407,26 +514,32 @@ def append(argv, data):
             render = _jsonl_template(text, opts["field"])
         else:
             render = _text_template(text)
-        fd = _open(opts["file"], opts["create"])
+        fd, created = _open(opts["file"], opts["create"])
         try:
-            _lock(fd)
-            size = _check_end(fd)
-            last = _last_stamp(fd, size, opts["format"], opts["field"])
-            stamp, failure = _read_clock(last)
-            warning = ""
-            if failure is not None:
-                if opts["on_clock_failure"] != "unknown":
-                    raise Refusal(failure)
-                stamp = UNKNOWN_MARK
-                warning = "stamp-append: warning: {}; the time was recorded as unknown\n".format(failure)
-            _write_all(fd, render(stamp), size)
-        finally:
-            os.close(fd)
+            try:
+                stamp, warning = _append_open(fd, opts, render)
+            except OSError as exc:
+                # _write_all handles every failure from the write on, so this one came before any byte.
+                raise Refusal(exc.strerror or str(exc))
+        except Refusal as exc:
+            if created and not exc.changed:
+                exc.left = _discard_created(fd, opts["file"])
+            try:
+                SEAMS["close"](fd)
+            except OSError:
+                pass  # the refusal already says what the file holds; a failed close does not change it
+            raise
+        try:
+            SEAMS["close"](fd)
+        except OSError as exc:
+            raise Refusal("the record was written and synced, but closing the file failed ({})".format(
+                exc.strerror or exc), changed=True)
         return 0, stamp + "\n", warning
     except Refusal as exc:
-        return 2, "", "stamp-append: refused: {}; nothing was written\n".format(exc)
+        return 2, "", _refusal_line(exc)
     except OSError as exc:
-        return 2, "", "stamp-append: refused: {}; nothing was written\n".format(exc.strerror or exc)
+        # Not expected: every known failure is a Refusal above. Claim nothing about the file.
+        return 2, "", _refusal_line(Refusal(exc.strerror or str(exc), changed=True))
 
 
 # --- self-test ------------------------------------------------------------------------------------
@@ -473,7 +586,20 @@ def _expect(cond, message):
 def _refused(code, err, before, path, needle):
     _expect(code == 2, "expected exit 2, got {} ({})".format(code, err.strip()))
     _expect(needle in err, "the refusal lacks {!r}: {}".format(needle, err.strip()))
+    _expect(err.count("\n") == 1 and err.endswith("; nothing was written\n"),
+            "the refusal is not one line ending 'nothing was written': {!r}".format(err))
     _expect(_read(path) == before, "the file changed on a refusal")
+
+
+def _kept_bytes(code, err, path, want, needle):
+    """A refusal after which bytes of the record may remain: it must say so, never 'nothing was written'."""
+    _expect(code == 2, "expected exit 2, got {} ({})".format(code, err.strip()))
+    _expect(needle in err, "the refusal lacks {!r}: {}".format(needle, err.strip()))
+    _expect("nothing was written" not in err, "the refusal says nothing was written: {}".format(err.strip()))
+    _expect(err.count("\n") == 1 and err.endswith("; the file may hold part or all of the record, so check "
+                                                  "it before retrying\n"),
+            "the refusal does not say the file may hold the record: {!r}".format(err))
+    _expect(_read(path) == want, "the file holds {!r}, not {!r}".format(_read(path), want))
 
 
 def _store(work, name, data=b"# log\n"):
@@ -539,7 +665,9 @@ def t6(work):
     holder = os.open(path, os.O_RDWR)
     try:
         fcntl.flock(holder, fcntl.LOCK_EX)
-        with _Seams(clock=lambda: reading["now"], sleep=sleep):
+        # The lock wait reads a fixed monotonic time, so the 5-second bound never ends it however slowly
+        # the threads run; only the 30-second hang guards below read the live clock.
+        with _Seams(clock=lambda: reading["now"], monotonic=_fixed(0.0), sleep=sleep):
             thread = threading.Thread(target=worker, daemon=True)
             thread.start()
             _expect(blocked.wait(30), "the helper never waited on the held lock")
@@ -610,7 +738,26 @@ def t10(work):
         code, _, err = append(["--file", path, "--format", "jsonl", "--field", "at"], b'{"ts":"kept"}')
     expected += b'{"at":"2026-11-01T12:00:00Z","ts":"kept"}\n'
     _expect(code == 0 and _read(path) == expected, "--field at: exit {}, wrote {!r}".format(code, _read(path)))
+    # Kept: the floats on each side of 9007199254740993.0, the largest finite float and the smallest
+    # subnormal; refused below: the value between them, a value past the largest and one under the smallest.
+    numbers = (b'{"a":1e5,"b":1.10,"c":9007199254740993,"d":-0.0,"e":0.1,"f":9007199254740992.0,'
+               b'"g":9007199254740994.0,"h":1.7976931348623157e308,"i":5e-324}')
+    with _Seams(clock=_fixed(T0)):
+        code, _, err = append(["--file", path, "--format", "jsonl"], numbers)
+    expected += (b'{"ts":"2026-11-01T12:00:00Z","a":100000.0,"b":1.1,"c":9007199254740993,"d":-0.0,"e":0.1,'
+                 b'"f":9007199254740992.0,"g":9007199254740994.0,"h":1.7976931348623157e+308,"i":5e-324}\n')
+    _expect(code == 0 and _read(path) == expected, "numbers: exit {} ({}), wrote {!r}".format(
+        code, err.strip(), _read(path)))
     bad = ((b'{"ts":"2026-11-01T11:59:00Z"}', "supplies"),
+           (b'{"n":1e400}', "too large for a float"),
+           (b'{"n":-1e400}', "too large for a float"),
+           (b'{"n":[{"m":1E+999}]}', "too large for a float"),
+           (b'{"n":9007199254740993.0}', "a different value"),
+           (b'{"n":1.00000000000000000001}', "a different value"),
+           (b'{"n":1e-400}', "a different value"),
+           (b'{"n":1.7976931348623158e308}', "a different value"),
+           (b'{"n":1.7976931348623159e308}', "too large for a float"),
+           (b'{"n":2e-324}', "a different value"),
            (b'{"a":1,"a":2}', "repeats the key"),
            (b'{"a":{"b":1,"b":2}}', "repeats the key"),
            (b'{"a":NaN}', "NaN"),
@@ -651,6 +798,71 @@ def t12(work):
     with _Seams(clock=_fixed(T0)):
         code, _, err = append(["--file", missing, "--create"], b"## @@NOW_UTC@@ x\n")
     _expect(code == 0 and _read(missing) == b"## 2026-11-01T12:00:00Z x\n", "--create did not create the file")
+
+
+def t16(work):
+    # A run that --create made the file for, then refused, removes the file it made.
+    for label, clock in (("unset clock", _fixed(0)), ("raising clock", _raise)):
+        path = os.path.join(work, "t16-" + label.replace(" ", "-"))
+        with _Seams(clock=clock):
+            code, _, err = append(["--file", path, "--create"], b"## @@NOW_UTC@@ x\n")
+        _expect(code == 2 and err.count("\n") == 1 and err.endswith("; nothing was written\n"),
+                "{}: exit {} ({!r})".format(label, code, err))
+        _expect(not os.path.lexists(path), "{}: the file --create made was left after a refusal".format(label))
+    # A file that was there before keeps its bytes on a refusal, even with --create.
+    path = _store(work, "t16-existing", b"")
+    with _Seams(clock=_fixed(0)):
+        code, _, err = append(["--file", path, "--create"], b"## @@NOW_UTC@@ x\n")
+    _refused(code, err, b"", path, "unset clock")
+    # When the file cannot be removed, the refusal says it was left in place.
+    path = os.path.join(work, "t16-kept")
+
+    def no_unlink(_path):
+        raise OSError(errno.EACCES, "seeded")
+
+    with _Seams(clock=_fixed(0), unlink=no_unlink):
+        code, _, err = append(["--file", path, "--create"], b"## @@NOW_UTC@@ x\n")
+    _expect(code == 2 and err.count("\n") == 1 and "nothing was written" not in err
+            and "the empty file --create made was left in place (it cannot be removed: seeded)" in err,
+            "an unremovable created file: exit {} ({!r})".format(code, err))
+    _expect(_read(path) == b"", "the file left in place is not empty")
+    # A missing directory gets a hint that fits --create.
+    path = os.path.join(work, "no-such-dir", "log")
+    with _Seams(clock=_fixed(T0)):
+        code, _, err = append(["--file", path, "--create"], b"## @@NOW_UTC@@ x\n")
+    _expect(code == 2 and "pass --create" not in err and "directory that would hold" in err
+            and err.endswith("; nothing was written\n"), "a missing directory: exit {} ({!r})".format(code, err))
+
+
+def t17(work):
+    # The depths at which a recursive placeholder scan crashed: refused or written, never a traceback.
+    path = _store(work, "t17", b"")
+    expected = b""
+    for depth, record in ((498, "[" * 498 + "]" * 498), (497, '{"k":' * 497 + "1" + "}" * 497)):
+        data = '{"d":' + record + "}"
+        with _Seams(clock=_fixed(T0)):
+            code, _, err = append(["--file", path, "--format", "jsonl"], data.encode())
+        _expect(code == 0, "depth {}: expected exit 0, got {} ({})".format(depth, code, err.strip()[:200]))
+        expected += b'{"ts":"2026-11-01T12:00:00Z",' + data[1:].encode() + b"\n"
+        _expect(_read(path) == expected, "depth {}: wrote the wrong bytes".format(depth))
+    deep = '{"d":' + "[" * 200000 + "]" * 200000 + "}"
+    with _Seams(clock=_fixed(T0)):
+        code, _, err = append(["--file", path, "--format", "jsonl"], deep.encode())
+    _refused(code, err, expected, path, "not one JSON object")
+
+
+def t18(work):
+    # --self-test with another argument refuses with one stderr line and runs no test.
+    saved = sys.argv, sys.stderr, sys.stdout
+    err, out = io.StringIO(), io.StringIO()
+    sys.argv, sys.stderr, sys.stdout = ["stamp-append.py", "--self-test", "--file", "/x"], err, out
+    try:
+        code = main()
+    finally:
+        sys.argv, sys.stderr, sys.stdout = saved
+    _expect(code == 2 and out.getvalue() == "", "exit {}, stdout {!r}".format(code, out.getvalue()))
+    _expect(err.getvalue() == "stamp-append: refused: --self-test takes no other argument; nothing was written\n",
+            "stderr {!r} is not one refusal line".format(err.getvalue()))
 
 
 def t13(work):
@@ -722,7 +934,25 @@ def t15(work):
 
     with _Seams(clock=_fixed(T0), write=partial, ftruncate=no_truncate):
         code, _, err = append(["--file", path], b"## @@NOW_UTC@@ a longer record\n")
-    _expect(code == 2 and "offset 6" in err, "an untruncatable partial write: exit {} ({})".format(code, err.strip()))
+    _kept_bytes(code, err, path, b"# log\n## 2026-11-01T12:00:00Z a longer rec", "offset 6")
+
+    def no_fsync(_fd):
+        raise OSError(errno.EIO, "seeded fsync")
+
+    path = _store(work, "t15-whole")
+    with _Seams(clock=_fixed(T0), fsync=no_fsync, ftruncate=no_truncate):
+        code, _, err = append(["--file", path], b"## @@NOW_UTC@@ whole record\n")
+    _kept_bytes(code, err, path, b"# log\n## 2026-11-01T12:00:00Z whole record\n", "offset 6")
+
+    def bad_close(fd):
+        os.close(fd)
+        raise OSError(errno.EIO, "seeded close")
+
+    path = _store(work, "t15-close")
+    with _Seams(clock=_fixed(T0), close=bad_close):
+        code, out, err = append(["--file", path], b"## @@NOW_UTC@@ closed\n")
+    _kept_bytes(code, err, path, b"# log\n## 2026-11-01T12:00:00Z closed\n", "closing the file failed")
+    _expect(out == "", "stdout {!r} on a refusal".format(out))
 
 
 TESTS = (("T1", "a date-time literal in the heading is refused", t1),
@@ -739,7 +969,10 @@ TESTS = (("T1", "a date-time literal in the heading is refused", t1),
          ("T12", "a symbolic link or non-regular target is refused", t12),
          ("T13", "the lock wait bound", t13),
          ("T14", "the unknown mode writes the marker, never a time", t14),
-         ("T15", "a partial write is truncated back", t15))
+         ("T15", "a failed write is truncated back, or the refusal says bytes may remain", t15),
+         ("T16", "a refusal removes the file --create made, and a missing directory is named", t16),
+         ("T17", "a deeply nested JSONL record is written or refused, never a traceback", t17),
+         ("T18", "--self-test with another argument refuses on one stderr line", t18))
 
 
 def self_test():
@@ -778,7 +1011,7 @@ def main():
     if argv == ["--self-test"]:
         return self_test()
     if "--self-test" in argv:
-        sys.stderr.write("stamp-append: refused: --self-test takes no other argument\n" + USAGE + "\n")
+        sys.stderr.write("stamp-append: refused: --self-test takes no other argument; nothing was written\n")
         return 2
     if not argv:
         sys.stderr.write(USAGE + "\n")
