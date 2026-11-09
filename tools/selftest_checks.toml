@@ -5357,3 +5357,59 @@ expected-check-ids = [
   "totals/every-id-counted-when-none-withdrawn",
   "refuse/unrecognized-argument",
 ]
+
+[[suite]]
+id = "brief-carry-selftest"
+runner = "tools/check_brief_carry.py"
+expected-check-ids = [
+  # ---------- carry: the exact-set comparison, each refusal beside its clean control ----------
+  "carry/incident-drop-refused",
+  "carry/incident-restored-ok",
+  "carry/flip-compare-silences",
+  "carry/reworded-refused",
+  "carry/exact-text-ok",
+  "carry/retired-still-carried-refused",
+  "carry/retired-omitted-ok",
+  "carry/reactivated-required",
+  "carry/reactivated-carried-ok",
+  "carry/extra-pair-refused",
+  # ---------- ledger: each kind of damage exits 2 and its own flip moves it off 2 ----------
+  "ledger/retired-no-reason",
+  "ledger/chain-broken",
+  "ledger/duplicate-key",
+  "ledger/bad-json",
+  "ledger/seq-gap",
+  "ledger/too-deep",
+  "ledger/first-row-retired",
+  "ledger/repeated-status",
+  "ledger/cr-in-line",
+  "ledger/blank-line",
+  "ledger/duplicate-active-pair",
+  "ledger/no-final-newline",
+  "ledger/unknown-key",
+  "ledger/missing-key",
+  "ledger/control-in-text",
+  "ledger/id-rebinds-pair",
+  "ledger/well-formed-ok",
+  # ---------- input: missing, non-regular, non-UTF-8 and CR inputs exit 2 ----------
+  "input/ledger-missing",
+  "input/ledger-empty-no-block-ok",
+  "input/ledger-not-regular",
+  "input/ledger-fifo-not-regular",
+  "input/ledger-regular-ok",
+  "input/brief-not-regular",
+  "input/brief-missing",
+  "input/ledger-relative-refused",
+  "input/brief-non-utf8",
+  "input/brief-cr",
+  "input/ledger-non-utf8",
+  # ---------- brief structure: the author fixes these (exit 1) ----------
+  "brief/carry-outside-block",
+  "brief/duplicate-line",
+  "brief/second-heading",
+  "brief/malformed-carry-line",
+  "brief/one-block-ok",
+  # ---------- bounds and the command line ----------
+  "bound/zero-one-many",
+  "cli/unrecognized-argument",
+]

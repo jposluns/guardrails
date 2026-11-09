@@ -107,6 +107,7 @@ guarded-surfaces = [
     "tools/check_baseline_pin.py",
     "tools/check_branch_root.py",
     "tools/check_brief_capability.py",
+    "tools/check_brief_carry.py",
     "tools/check_byte_canon.py",
     "tools/check_child_status_coverage.py",
     "tools/check_ci_parity.py",

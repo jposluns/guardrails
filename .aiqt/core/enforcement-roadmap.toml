@@ -319,8 +319,8 @@ mechanisms = []
 
 [[rule]]
 corpus-id = "reqstp"
-status = "none"
-mechanisms = []
+status = "partial"
+mechanisms = ["gate:brief-carry"]
 
 [[rule]]
 corpus-id = "rerunf"
