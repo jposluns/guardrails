@@ -331,20 +331,29 @@ PREFLIGHT (the input paths a brief names; read over the whole brief, line by lin
                        on an indented code line, or on a line opening with > or <!-- is never read (a later
                        line of a multi-line HTML comment or a lazy blockquote continuation is). A totalizing
                        claim about a PR, branch, series or train is ADVISORY, never compared: a first-parent
-                       diff of one commit cannot cover a series. HARD is given only where that one diff can
-                       answer the claim: in a review brief whose TASK: line names a PR, branch, range or
-                       base (a word among pr, prs, pull, mr, branch, branches, range, base, against,
-                       between, since, onto and series; a word holding `..`; a PR number such as #9, pr9,
-                       pr#9 or pr-9; or two different words of 7 to 64 hexadecimal characters), or that
-                       holds a BRIEF-BASE line anywhere (a fence included), EVERY whole-set claim is
-                       ADVISORY, never compared. This test is bounded and fail-safe: a match only lowers
-                       HARD to ADVISORY, and a range written any other way (in prose outside a TASK: line,
-                       "Compared with <base> ...") is not recognized, so its claim is still compared with
-                       the pinned commit alone. Sentences are compared INDEPENDENTLY, never unioned, so an
-                       accurate sentence cannot conceal a stale one, and the finding names both differences
-                       (changed-but-undeclared and declared-but-unchanged), the resolved base and head ids
-                       and the full actual set, so the author can paste it. The git reads live in
-                       tools/_pin_changeset.py, hardened like check_release_cut.py's: inherited GIT_
+                       diff of one commit cannot cover a series. In a review brief whose scope may be wider
+                       than the pinned commit, every whole-set claim is still checked and compared like any
+                       other (each CANNOT_EVALUATE case below still exits 2), and only then is a difference
+                       lowered from HARD to ADVISORY: the wider-scope test never turns exit 2 into exit 0,
+                       and an accurate claim there has no finding. The scope is wider when the brief holds a
+                       BRIEF-BASE label line anywhere (a fence included; the label in any case after markup,
+                       then a colon, so Brief-based or BRIEF-BASELINE: is not one), or when a TASK: line
+                       holds, as a whole word wherever it stands, one of pr, prs, pull, mr, branch,
+                       branches, range, base, against, between, since, onto and series (so ordinary prose
+                       lowers the claim too: "review the pinned commit against its first parent", "since it
+                       is small"); a word holding `..` and something other than dots (a closed range, an
+                       open <base>.. or ..<head>, or a word ending in an ellipsis); a PR number such as #9,
+                       pr9, pr#9 or pr-9; or two words of 7 to 64 hexadecimal letters neither of which is a
+                       prefix of the other (a short and a full id of one commit are one commit, while
+                       English words such as defaced and effaced count as ids). NOT recognized, so the claim
+                       is still compared with the pinned commit alone and a difference refuses: PR's, merge
+                       request, pull-request, !9, a TASK: line soft-wrapped onto the next line (only the
+                       TASK: line's own text is read), "the last two commits", and a range written outside a
+                       TASK: line ("Compared with <base> ..."). Sentences are compared INDEPENDENTLY, never
+                       unioned, so an accurate sentence cannot conceal a stale one, and the finding names
+                       both differences (changed-but-undeclared and declared-but-unchanged), the resolved
+                       base and head ids and the full actual set, so the author can paste it. The git reads
+                       live in tools/_pin_changeset.py, hardened like check_release_cut.py's: inherited GIT_
                        variables dropped, replace refs disabled on both the environment and the command
                        line, the commit graph, fsmonitor and automatic maintenance disabled on the command
                        line only, GIT_CEILING_DIRECTORIES set to the parent of the directory read (a
@@ -629,9 +638,13 @@ without an address is hidden. The lint reads only the bytes it is given: run it 
 are sent, since a brief composed after the lint runs is not covered. P7's residuals: a fix, draft or other
 non-review brief (no TASK: line beginning with review) is never judged, nor is a review brief whose TASK: line
 opens with another word ("TASK: adversarial review of PR 9."); a TASK: line or a claim on a later line of a
-multi-line HTML comment or a lazy blockquote continuation is read; a review brief whose TASK: line names a PR,
-branch, range or base, or that holds a BRIEF-BASE line, gets only ADVISORY P7 findings, never HARD, and a range
-written any other way is not recognized and is compared with the pinned commit alone; a path is normalised only
+multi-line HTML comment or a lazy blockquote continuation is read; in a review brief whose TASK: line names a PR,
+branch, range or base, or that holds a BRIEF-BASE: label line, a difference is ADVISORY, never HARD (every claim is
+still checked first, so an exit 2 stays exit 2), and that test reads whole words wherever they stand on a TASK:
+line, so "against" or "since" in ordinary prose ("against its first parent", "since it is small") lowers a claim
+too, as do two English words of 7 or more hexadecimal letters (defaced, effaced), while PR's, merge request,
+pull-request, !9, a TASK: line soft-wrapped onto the next line, "the last two commits" and a range written outside
+a TASK: line are not recognized, so the claim is compared with the pinned commit alone; a path is normalised only
 when it has no `..` component; a claim holding a bare root name (README.md, Makefile) or any other item without a
 `/` outside a code span is never judged, whether or not that name is right; a path omitted from BOTH the commit and
 the declaration leaves equality nothing to surface; P7 cannot prove the pin is the authoritative task revision (the
@@ -642,12 +655,12 @@ is a plain word ("the docs"), whose paths are mixed with plain words or trailing
 description follow ("tools/x.py: it refuses ...") is quiet, never compared and never CANNOT_EVALUATE, so an
 exhaustive claim written in such a shape also passes unread; claims in list continuations indented like code are
 skipped with the indented-code exclusion, and the bare "touches <list>" convention is documented, not proven
-semantics; the first-parent diff covers the pinned commit only, never a PR or branch series (those subjects, and
-every claim in a wider-scope review brief, are ADVISORY); a rename counts as both its paths by the --no-renames
-convention; a true mismatch on generated mirrors (plugin copies, regenerated site pages) is a correct finding an
-author may find surprising, so the finding prints the full actual set; and the GIT_GRAFT_FILE pin is untested
-hardening (no fixture shows a grafts entry changing the raw-byte reads). Run alone, it is advisory; it blocks only
-where the sender refuses to send on exit 1 or 2.
+semantics; the first-parent diff covers the pinned commit only, never a PR or branch series (those subjects are
+ADVISORY, and so is a difference in a wider-scope review brief); a rename counts as both its paths by the
+--no-renames convention; a true mismatch on generated mirrors (plugin copies, regenerated site pages) is a correct
+finding an author may find surprising, so the finding prints the full actual set; and the GIT_GRAFT_FILE pin is
+untested hardening (no fixture shows a grafts entry changing the raw-byte reads). Run alone, it is advisory; it
+blocks only where the sender refuses to send on exit 1 or 2.
 
 TIME. Linearity rests on two kinds of evidence, not on a proof: a regex audit and measured shapes. No regular
 expression reads a run of arguments, options or markup: such runs are walked token by token in Python.
@@ -3323,24 +3336,57 @@ def p7_pr_number(plain):
     return False
 
 
+def p7_brief_base_line(raw):
+    """Whether a line is a BRIEF-BASE: label line: after up to three list markers (p7_unmarked) and any
+    spaces, `*`, `_`, `#`, backticks and `>`, the label BRIEF-BASE in any case, then any closing `*`, `_`
+    or backticks, then a colon. A word that only begins with those letters (Brief-based, BRIEF-BASELINE)
+    is not the label."""
+    text = p7_unmarked(raw).lstrip(" *_#`>")
+    return text[:10].upper() == "BRIEF-BASE" and text[10:].lstrip("*_`").startswith(":")
+
+
+def p7_range_word(word):
+    """Whether a TASK: line word is a range: it holds `..` (<base>..<head>, an open <base>.. or ..<head>,
+    the three-dot form included) and something other than dots, markup and punctuation. The `..` is
+    looked for in the word as written, never after punctuation is stripped, which would cut an open
+    range's dots away; a word of dots alone (an ellipsis) is not a range, a word ending in one is."""
+    return ".." in word and word.strip(P7_STRIP + "`") != ""
+
+
+def p7_distinct_commits(words):
+    """The commit-id words that name different commits: a word that is a prefix of another (a short and
+    a full id of one commit) is dropped. In sorted order every word that starts with a given word follows
+    it directly, so one comparison with the next word decides, and the reading stays O(n log n)."""
+    ordered = sorted(set(words))
+    return [word for index, word in enumerate(ordered)
+            if index + 1 == len(ordered) or not ordered[index + 1].startswith(word)]
+
+
 def p7_wider_scope(names):
-    """Why the review may cover more than the pinned commit's first-parent diff, or None: a TASK: line
-    whose text names a PR, branch, range or base (a word of P7_SCOPE_WORDS, a word holding `..`, a `#`
-    number, a pr number such as pr9, or two different commit ids), or a BRIEF-BASE line anywhere in the
-    brief (a fence included). A whole-set claim in such a brief is ADVISORY, never compared: the one diff
-    P7 reads cannot answer it. The test is bounded and fail-safe: a match only lowers HARD to ADVISORY."""
+    """Why the review may cover more than the pinned commit's first-parent diff, or None: a BRIEF-BASE:
+    label line anywhere in the brief (p7_brief_base_line, a fence included), or a TASK: line holding a
+    scope word (P7_SCOPE_WORDS, read as whole words wherever they stand, so "against" and "since" in
+    ordinary prose count: "review the pinned commit against its first parent"), a range word
+    (p7_range_word), a PR number (#9, pr9, pr#9 or pr-9), or two words of 7 to 64 hexadecimal letters
+    of which neither is a prefix of the other (p7_distinct_commits; an English word such as "defaced"
+    or "effaced" counts as such a word). Not recognized, so the claim is still compared with the pinned
+    commit: PR's, merge request, pull-request, !9, a TASK: line soft-wrapped onto the next line (only
+    the TASK: line itself is read), "the last two commits", and a range written outside a TASK: line.
+    rule_p7 calls this only after every claim's cannot-evaluate checks and the git read, and only to
+    lower a comparison's HARD finding to ADVISORY, so a match never turns exit 2 into exit 0 and never
+    adds a finding to an accurate claim."""
     for raw in names.text.split("\n"):
-        if p7_unmarked(raw).lstrip(" *_#`>").upper().startswith("BRIEF-BASE"):
+        if p7_brief_base_line(raw):
             return "the brief has a BRIEF-BASE line"
     for raw in p7_task_lines(names):
-        commits = set()
+        commits = []
         for word in p7_task_text(raw).split():
             plain = word.lower().strip(P7_STRIP + "`")
-            if plain in P7_SCOPE_WORDS or ".." in plain or p7_pr_number(plain):
+            if plain in P7_SCOPE_WORDS or p7_range_word(word) or p7_pr_number(plain):
                 return "its TASK: line names a PR, branch, range or base"
             if p7_commit_word(plain):
-                commits.add(plain)
-        if len(commits) > 1:
+                commits.append(plain)
+        if len(p7_distinct_commits(commits)) > 1:
             return "its TASK: line names more than one commit"
     return None
 
@@ -3555,6 +3601,19 @@ def p7_compare(claims, actual, base, head):
     return findings
 
 
+def p7_lowered(findings, wider):
+    """The comparison findings, each HARD one lowered to ADVISORY when the brief's scope may be wider than
+    the pinned commit (`wider`, p7_wider_scope's reason, not None): the claim may describe the whole
+    reviewed scope, which one commit's first-parent diff cannot answer, so the difference is printed, not
+    refused. With `wider` None they are returned unchanged."""
+    if wider is None:
+        return findings
+    return [(rule, "ADVISORY" if severity == "HARD" else severity, line,
+             "a whole-change claim in a review brief whose scope may be wider than the pinned commit ({}), "
+             "so the difference is printed, not refused: {}".format(wider, message), excerpt)
+            for rule, severity, line, message, excerpt in findings]
+
+
 def p7_pin_values(names):
     """[(line, value)] for every pin value the brief carries, of any kind: the BRIEF-PIN and REVIEWED
     HEAD lines (names.pins) and the look-alike pin lines (names.near_pins), whether or not a BRIEF-PIN
@@ -3588,18 +3647,18 @@ def rule_p7(names, row, repo):
     judged): a prose sentence stating the WHOLE set of changed files (p7_claim's closed grammar) whose set
     is not what the brief's pinned commit changed against its first parent (the empty tree for a root
     commit), read through tools/_pin_changeset.py's hardened git reads. A totalizing claim about a PR,
-    branch, series or train, and every whole-set claim in a brief whose TASK: line names a PR, branch, range
-    or base or that has a BRIEF-BASE line (p7_wider_scope), is ADVISORY: one commit's first-parent diff
-    cannot check it. An item counts as a path only when it holds a `/` or is a code span (p7_pathlike), so a
-    claim holding a bare root name is out of scope and quiet; a compared item is normalised (p7_normal). A
-    recognized claim with an item that cannot be placed as one repository-relative path, with no pin line or
-    no repository, whose pin values (p7_pin_values, look-alike pin lines included) do not all name one
-    commit, or whose pinned commit cannot be read (any failed git read: an unresolved pin, malformed commit
-    bytes, an absent tree or first parent) is CannotEvaluate, never a pass, never an empty set and never a
-    fallback guess."""
+    branch, series or train is ADVISORY and never compared: one commit's first-parent diff cannot check it.
+    An item counts as a path only when it holds a `/` or is a code span (p7_pathlike), so a claim holding a
+    bare root name is out of scope and quiet; a compared item is normalised (p7_normal). A recognized claim
+    with an item that cannot be placed as one repository-relative path, with no pin line or no repository,
+    whose pin values (p7_pin_values, look-alike pin lines included) do not all name one commit, or whose
+    pinned commit cannot be read (any failed git read: an unresolved pin, malformed commit bytes, an absent
+    tree or first parent) is CannotEvaluate, never a pass, never an empty set and never a fallback guess,
+    in every review brief. Only after those checks and the comparison, in a brief whose scope may be wider
+    than the pinned commit (p7_wider_scope), is each HARD comparison finding lowered to ADVISORY
+    (p7_lowered); an accurate claim there has no finding."""
     if not p7_review_brief(names):
         return []
-    wider = p7_wider_scope(names)
     claims, findings = [], []
     for line, sentence in p7_sentences(names):
         read = p7_claim(sentence)
@@ -3610,11 +3669,6 @@ def rule_p7(names, row, repo):
             findings.append(("P7", "ADVISORY", line, "a whole-change claim about a PR, branch, series or "
                              "train: the pinned commit's first-parent diff cannot check it, so it is "
                              "printed, not compared", _excerpt(sentence)))
-            continue
-        if wider is not None:
-            findings.append(("P7", "ADVISORY", line, "a whole-change claim in a review brief whose scope "
-                             "may be wider than the pinned commit ({}): its first-parent diff cannot "
-                             "check it, so it is printed, not compared".format(wider), _excerpt(sentence)))
             continue
         for item, atomic in items:
             reason = p7_unplaceable(item, atomic)
@@ -3636,7 +3690,7 @@ def rule_p7(names, row, repo):
         base, head, actual = _pin_changeset.changed_set(repo, pin)
     except _pin_changeset.ChangesetError as exc:
         raise CannotEvaluate("the pinned commit's changed files cannot be read: {}".format(exc))
-    return findings + p7_compare(claims, actual, base, head)
+    return findings + p7_lowered(p7_compare(claims, actual, base, head), p7_wider_scope(names))
 
 
 def preflight(text, row, repo, raw):
@@ -5098,6 +5152,44 @@ def _p7_selftest(flip, flip_record):
             p7(stale_claim, ids["c2"], task="TASK: review {} to {}.\n".format(ids["c1"][:6], ids["c2"][:6]))],
             [(0, [("P3", "ADVISORY"), ("P7", "ADVISORY")])] * 2 + [(0, [("P7", "ADVISORY")])] * 6
             + [(1, [("P7", "HARD")])] * 3)
+        # the wider-scope test only lowers a comparison's HARD finding: in a wider brief a claim with no
+        # pin line, a glob item or a pin whose parent is absent still exits 2, and an accurate claim has
+        # no finding at all
+        wide_task = "TASK: review PR 9.\n"
+        checked_cases = [
+            lambda: _outcome(wide_task + "\nThe change touches src/a.py.\n", "alpha", True, repo),
+            lambda: p7("The change touches docs/*.md and src/a.py.", ids["c2"], task=wide_task),
+            lambda: p7("The change touches no files.", ids["absent"], task=wide_task),
+            lambda: p7("The change touches src/a.py and tools/c.py.", ids["c2"], task=wide_task)]
+        check("preflight/p7-wider-scope-checks-first", [case() for case in checked_cases],
+              ["CannotEvaluate"] * 3 + [(0, [])])
+        # only a BRIEF-BASE label followed by a colon widens the scope; a word that begins with the same
+        # letters leaves the stale claim HARD
+        base_cases = [lambda task=task: p7(stale_claim, ids["c2"], task=task + review) for task in (
+            "Brief-based checks follow.\n",
+            "BRIEF-BASELINE: notes\n",
+            "BRIEF-BASE: {}\n".format(ids["c1"]),
+            "- **BRIEF-BASE:** {}\n".format(ids["c1"]))]
+        check("preflight/p7-brief-base-label", [case() for case in base_cases],
+              [(1, [("P7", "HARD")])] * 2 + [(0, [("P7", "ADVISORY")])] * 2)
+        # an open or closed range keeps its `..` through the punctuation strip; a word of dots alone (an
+        # ellipsis) is not a range
+        range_cases = [lambda task=task: p7(stale_claim, ids["c2"], task=task) for task in (
+            "TASK: review {}..\n".format(ids["c1"][:7]),
+            "TASK: review ..{}.\n".format(ids["c2"][:7]),
+            "- TASK: review `{}..`.\n".format(ids["c1"][:7]),
+            "TASK: review {}..{}.\n".format(ids["c1"][:7], ids["c2"][:7]),
+            "TASK: review the pinned commit ...\n")]
+        check("preflight/p7-open-range-scope", [case() for case in range_cases],
+              [(0, [("P7", "ADVISORY")])] * 4 + [(1, [("P7", "HARD")])])
+        # one commit written as a short and a full id is one commit, so the claim is still judged; two
+        # ids where neither is a prefix of the other are two commits
+        commit_cases = [lambda task=task: p7(stale_claim, ids["c2"], task=task) for task in (
+            "TASK: review commit {} ({}).\n".format(ids["c2"][:12], ids["c2"]),
+            "TASK: review {} and {}.\n".format(ids["c2"][:7], ids["c2"][:12]),
+            "TASK: review {} and {}.\n".format(ids["c1"][:7], ids["c2"][:7]))]
+        check("preflight/p7-one-commit-two-forms", [case() for case in commit_cases],
+              [(1, [("P7", "HARD")])] * 2 + [(0, [("P7", "ADVISORY")])])
         # a claimed path is normalised before the comparison (src/./a.py and src//a.py name src/a.py);
         # a `..` component and a trailing `.` component stay unplaceable
         normal_cases = [lambda text=text: p7(text, ids["c2"]) for text in (
@@ -5267,6 +5359,28 @@ def _p7_selftest(flip, flip_record):
         check("revert/p7-wider-scope-red", *flip(
             wide_cases, [(1, [("P3", "ADVISORY"), ("P7", "HARD")])] * 2 + [(1, [("P7", "HARD")])] * 6,
             p7_wider_scope=lambda names: None))
+        original_rule_p7 = rule_p7
+
+        def early_continue_p7(names, row_, repo_):
+            """the earlier order: a wider brief's claims printed as ADVISORY before the unplaceable-item,
+            pin-line and git-read checks, so each of those cannot-evaluate conditions passed"""
+            if p7_review_brief(names) and p7_wider_scope(names) is not None:
+                return [("P7", "ADVISORY", line, "printed, not compared", _excerpt(sentence))
+                        for line, sentence in p7_sentences(names) if p7_claim(sentence) is not None]
+            return original_rule_p7(names, row_, repo_)
+        check("revert/p7-wider-scope-order-red", *flip(
+            checked_cases, [(0, [("P7", "ADVISORY")])] * 4, rule_p7=early_continue_p7))
+        # the BRIEF-BASE test read as a bare prefix again: a word beginning with those letters widens
+        check("revert/p7-brief-base-label-red", *flip(
+            base_cases, [(0, [("P7", "ADVISORY")])] * 4,
+            p7_brief_base_line=lambda raw: p7_unmarked(raw).lstrip(" *_#`>").upper().startswith("BRIEF-BASE")))
+        # the range test made after the punctuation strip again: an open range loses its `..`
+        check("revert/p7-open-range-red", *flip(
+            range_cases, [(1, [("P7", "HARD")])] * 3 + [(0, [("P7", "ADVISORY")]), (1, [("P7", "HARD")])],
+            p7_range_word=lambda word: ".." in word.lower().strip(P7_STRIP + "`")))
+        # every different commit-id word counted again: a short and a full id are two commits
+        check("revert/p7-commit-prefix-red", *flip(
+            commit_cases, [(0, [("P7", "ADVISORY")])] * 3, p7_distinct_commits=lambda words: set(words)))
         check("revert/p7-normpath-red", *flip(normal_cases, [(1, [("P7", "HARD")])] * 3,
                                               p7_normal=lambda item: item))
         original_unplaceable_dot = p7_unplaceable
@@ -8155,7 +8269,7 @@ def self_test(report_path=None):
             os.chmod(locked, 0o700)
         shutil.rmtree(inputs, ignore_errors=True)
     _p7_selftest(flip, flipped.append)
-    check("revert/every-flip-ran", len(flipped), 257)
+    check("revert/every-flip-ran", len(flipped), 261)
 
     for check_id in sorted(expected - _EXECUTED_SET):
         FAILURES.append("execution-set/missing: {}".format(check_id))
@@ -8216,9 +8330,10 @@ def self_test(report_path=None):
           "line, a list item included, opening with review) stating a whole changed-file set (a closed grammar "
           "read word by word, each path normalised) that is not what the pinned commit changed against its first "
           "parent (the empty tree for a root), read hermetically from raw commit bytes and diff-tree over resolved "
-          "ids (P7; an unplaceable item, an absent parent or a failed read exits 2; a PR or branch claim, and "
-          "every claim in a review brief whose TASK: line names a PR, branch, range or base or that holds a "
-          "BRIEF-BASE line, is ADVISORY), and each preflight rule and guard patched out flips its fixture; "
+          "ids (P7; an unplaceable item, an absent parent or a failed read exits 2, in a wider-scope review "
+          "brief too; a PR or branch claim is ADVISORY, and so is a difference in a review brief whose TASK: "
+          "line names a PR, branch, range or base or that holds a BRIEF-BASE: label line), and each preflight "
+          "rule and guard patched out flips its fixture; "
           "the regex audit reads the module-level patterns and COMMAND_FORMS (and, without claiming completeness, "
           "container and class globals and the production source's re calls), flags no pattern, "
           "detects the previous revisions' and loses its canary with each guard patched out; 38 repeated shapes "
