@@ -32,7 +32,8 @@ an unknown or missing key, a wrong type, a duplicate output path, and a data dir
 (exit 2, nothing written). The page's scripts are derived from its content: copy.js where a copy block
 renders, select.js where the install selector renders, and rail.js where the rail lists in-page sections
 (section 7.6); no rail link carries a static aria-current. In an inline HTML value the token `$BASE/`
-renders as the base path, so content survives promotion unchanged. The document control strip reads its
+renders as the base path, so content survives promotion unchanged, and the token `$HOOK_COUNT` renders as
+the number of Claude Code hooks in .aiqt/core/hooks/manifest.toml, so no page types that count. The document control strip reads its
 Version from the repository's VERSION file and its Status from changelog.toml.
 
 Escaping: every data value is text, escaped for its context (element text, or a double-quoted attribute
@@ -105,7 +106,7 @@ SCHEME_BUTTON = (
 
 GENSRC_OUTPUTS = (
     {"target": "site/index.html", "kind": "file",
-     "sources": ("tools/gen_draft_site.py", "site/draft-src/home.toml"),
+     "sources": ("tools/gen_draft_site.py", "site/draft-src/home.toml", ".aiqt/core/hooks/manifest.toml"),
      "regenerate": "python3 tools/gen_draft_site.py"},
     {"target": "site/404.html", "kind": "file",
      "sources": ("tools/gen_draft_site.py", "site/draft-src/404.toml"),
@@ -123,7 +124,8 @@ GENSRC_OUTPUTS = (
      "sources": ("tools/gen_draft_site.py", "site/draft-src/install.toml"),
      "regenerate": "python3 tools/gen_draft_site.py"},
     {"target": "site/install/details/index.html", "kind": "file",
-     "sources": ("tools/gen_draft_site.py", "site/draft-src/install-details.toml"),
+     "sources": ("tools/gen_draft_site.py", "site/draft-src/install-details.toml",
+                 ".aiqt/core/hooks/manifest.toml"),
      "regenerate": "python3 tools/gen_draft_site.py"},
     {"target": "site/license/index.html", "kind": "file",
      "sources": ("tools/gen_draft_site.py", "site/draft-src/license.toml"),
@@ -442,11 +444,74 @@ def _any_link(site, href, text, where):
 
 
 def _inline(site, value):
-    """An inline HTML value with the $BASE/ token rendered as the site's base path and the $OPF_STATUS
-    token rendered as the reference CLI status note (status_note)."""
+    """An inline HTML value with the $BASE/ token rendered as the site's base path, the $OPF_STATUS
+    token rendered as the reference CLI status note (status_note) and the $HOOK_COUNT token rendered as
+    the Claude Code hook count (hook_count) of the site's "tree" (the tree build() is given; ROOT when the site
+    names none)."""
     if "$OPF_STATUS" in value:
         value = value.replace("$OPF_STATUS", status_note())
+    if "$HOOK_COUNT" in value:
+        value = value.replace("$HOOK_COUNT", str(hook_count(site.get("tree", ROOT))))
     return value.replace("$BASE/", site["base"])
+
+
+# The Claude Code hook count the pages state: the [[hook]] entries of the hooks manifest whose platform is
+# "claude-code" (the predicate tools/check_reference_facts.py counts for the README), rendered wherever the
+# $HOOK_COUNT token appears, so a hook added to or removed from the manifest drifts the pages that state it.
+HOOKS_SOURCE = ".aiqt/core/hooks/manifest.toml"
+
+
+def hook_count(root=ROOT):
+    """The number of [[hook]] entries in the hooks manifest under root whose platform is "claude-code".
+    RefusedPage when the manifest cannot be read or parsed, when its hook key is not an array of tables
+    each with a string platform, or when it holds no Claude Code hook. Before the open, each directory on
+    the manifest's path below root is checked with lstat, from root down, and refused unless it is a
+    directory (a symbolic link to a directory is refused), and the manifest path itself is checked with
+    lstat and refused unless it is a regular file. The open does not follow a symbolic link at the manifest
+    path and does not wait on a FIFO, and the opened descriptor is refused unless fstat reports a regular
+    file. The descriptor is closed once, whether the read succeeds or is refused."""
+    path = Path(root) / HOOKS_SOURCE
+    try:
+        # These lstat checks run before the open: a directory replaced by a symbolic link after its check
+        # is not caught here (O_NOFOLLOW below applies to the manifest path's last component only).
+        rel = Path()
+        for part in Path(HOOKS_SOURCE).parent.parts:
+            rel = rel / part
+            if not stat.S_ISDIR(os.lstat(Path(root) / rel).st_mode):
+                raise RefusedPage("{}: {} is not a directory (a symbolic link or other entry)".format(
+                    HOOKS_SOURCE, rel.as_posix()))
+        if not stat.S_ISREG(os.lstat(path).st_mode):
+            raise RefusedPage("{}: not a regular file (a symbolic link or other entry)".format(HOOKS_SOURCE))
+        # O_NOFOLLOW and O_NONBLOCK keep an entry swapped in after the lstat from being followed or from
+        # blocking the open (a FIFO); the opened descriptor is checked again before anything is read.
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                # After an O_NOFOLLOW open, a symbolic link has already failed the open (ELOOP); what
+                # fstat can see here is an opened entry of another kind, such as a FIFO or a device.
+                raise RefusedPage("{}: the opened entry is not a regular file".format(HOOKS_SOURCE))
+            with os.fdopen(fd, "rb", closefd=False) as handle:
+                data = handle.read(MAX_PAGE_BYTES + 1)
+        finally:
+            os.close(fd)
+    except OSError as exc:
+        raise RefusedPage("{}: unreadable ({})".format(HOOKS_SOURCE, exc)) from exc
+    if len(data) > MAX_PAGE_BYTES:
+        raise RefusedPage("{}: larger than {} bytes".format(HOOKS_SOURCE, MAX_PAGE_BYTES))
+    try:
+        doc = tomllib.loads(data.decode("utf-8"))
+    except (RecursionError, MemoryError, ValueError, UnicodeError) as exc:
+        # tomllib raises the ValueError family on malformed TOML and RecursionError or MemoryError on
+        # hostile nesting; each is disposed of here, at the parse site, as a refusal.
+        raise RefusedPage("{}: cannot parse ({}: {})".format(HOOKS_SOURCE, type(exc).__name__, exc)) from exc
+    hooks = doc.get("hook")
+    if not isinstance(hooks, list) or not all(
+            isinstance(hook, dict) and isinstance(hook.get("platform"), str) for hook in hooks):
+        raise RefusedPage("{}: hook is not an array of tables each with a string platform".format(HOOKS_SOURCE))
+    count = sum(1 for hook in hooks if hook["platform"] == "claude-code")
+    if not count:
+        raise RefusedPage("{}: no hook has platform \"claude-code\"".format(HOOKS_SOURCE))
+    return count
 
 
 # The reference CLI status note: generated from VERB_STATUS in opf/tools/opf.py, read as a literal from the
@@ -1572,14 +1637,15 @@ def staged_sites(sites=SITES):
     return tuple(dict(site, base=DRAFT_BASE, root=site["live"] + "/draft") for site in sites)
 
 
-def build(pages=None, sites=SITES, registered=True):
+def build(pages=None, sites=SITES, registered=True, tree=ROOT):
     """{target path: text} for every registered output. Each site is loaded from its own data directory
     and rendered with its own context; with the default page sets, the built set must match the
     GENSRC_OUTPUTS declaration, so a page cannot land or vanish without its registry entry. A given
     `pages` list (a fixture) is rendered for every site in `sites`. Every kept live path of a site must
     exist under its live root before anything renders, and no 2 sites may build the same output path.
     `registered` false skips the declaration match, for a fixture build of the declared pages at another
-    base (promoted_sites)."""
+    base (promoted_sites). `tree` is the repository tree whose hooks manifest gives the $HOOK_COUNT value
+    (run() passes the root it is given)."""
     declared = pages is None
     outputs = {}
     for site in sites:
@@ -1592,7 +1658,7 @@ def build(pages=None, sites=SITES, registered=True):
             target = "{}/{}".format(site["root"], page["rel"])
             if target in outputs:
                 raise RefusedPage("{}: built by more than 1 site".format(target))
-            outputs[target] = render_page(site, site_pages, page)
+            outputs[target] = render_page(dict(site, tree=tree), site_pages, page)
     if declared and registered:
         targets = {entry["target"] for entry in GENSRC_OUTPUTS}
         if set(outputs) != targets:
@@ -1720,10 +1786,10 @@ def _existing(path):
 
 def run(root, check, outputs=None):
     """Write (or with `check`, compare) the built pages under root. `outputs` (a self-test's prebuilt pages)
-    defaults to build()."""
+    defaults to build(tree=root)."""
     try:
         if outputs is None:
-            outputs = build()
+            outputs = build(tree=root)
     except RefusedPage as exc:
         print("error: refused: {}".format(exc), file=sys.stderr)
         return 2
@@ -2802,6 +2868,9 @@ def _self_test():
     expect("stray/tree-clean", stray_outputs(ROOT) == [], stray_outputs(ROOT))
 
     with tempfile.TemporaryDirectory(prefix="gen-draft-site-selftest-") as tmp:
+        # run() counts the hooks of the tree it is given, so the tree carries the live hooks manifest.
+        os.makedirs((Path(tmp) / HOOKS_SOURCE).parent)
+        shutil.copyfile(ROOT / HOOKS_SOURCE, Path(tmp) / HOOKS_SOURCE)
         first = run(tmp, check=True)
         second = run(tmp, check=False)
         third = run(tmp, check=True)
@@ -2887,6 +2956,310 @@ def _self_test():
                 handle.write("VERB_STATUS = {}\n".format(bad))
             refused(name, verb_status, tmp)
 
+    # The hook count: read from the hooks manifest, rendered for the $HOOK_COUNT token, and the only form the
+    # pages state it in.
+    live_hooks = hook_count()
+    for rel, wording in (("site/index.html", "an opt-in plugin of {} hooks"),
+                         ("site/index.html", "Its {} Claude Code hooks"),
+                         ("site/install/details/index.html", "The {} Claude Code hooks")):
+        expect("hooks/live-count-on-pages", wording.format(live_hooks) in live_outputs[rel], (rel, wording))
+    expect("hooks/no-unrendered-token", not any("$HOOK_COUNT" in text for text in live_outputs.values()))
+    # A typed count: a number (digits or a number word) followed by "hooks" with at most 4 words between,
+    # in any case, matched after TOML \u and \U escapes and HTML character references (&nbsp; among them)
+    # are decoded, so neither a number word nor a no-break space hides a typed count. The pattern matches
+    # only a number or number word with at most 4 words before "hooks": a count with 5 or more words before
+    # "hooks", or not followed by "hooks" at all, is not matched.
+    number_words = ("zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|"
+                    "fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|"
+                    "eighty|ninety|hundred|dozen")
+    typed_count = re.compile(r"\b(?:\d+|" + number_words + r")\b(?:\W+\w+){0,4}?\W+hooks\b", re.IGNORECASE)
+
+    def typed_counts(text):
+        def code_point(match):
+            value = int(match.group(1) or match.group(2), 16)
+            return chr(value) if value <= 0x10FFFF else " "
+        text = re.sub(r"\\u([0-9A-Fa-f]{4})|\\U([0-9A-Fa-f]{8})", code_point, text)
+        return [found.group(0) for found in typed_count.finditer(_html.unescape(text))]
+
+    for name, text, want in (
+            ("hooks/typed-count-digits", "of 12 hooks", True),
+            ("hooks/typed-count-number-word", "of twelve hooks", True),
+            ("hooks/typed-count-number-word-capitalised", "Twelve Hooks ship", True),
+            ("hooks/typed-count-nbsp", "of 12&nbsp;hooks", True),
+            ("hooks/typed-count-nbsp-words-between", "The 12&nbsp;Claude&nbsp;Code hooks", True),
+            ("hooks/typed-count-toml-escape", "of 12\\u00a0hooks", True),
+            ("hooks/typed-count-char-reference-digits", "of &#49;&#50; hooks", True),
+            ("hooks/typed-count-hex-char-reference-digits", "of &#x31;&#x32; hooks", True),
+            ("hooks/typed-count-nbsp-not-a-word", "of 12&nbsp;Claude&nbsp;Code&nbsp;opt&nbsp;in hooks", True),
+            ("hooks/typed-count-four-words-between", "the 12 opt in Claude Code hooks", True),
+            ("hooks/typed-count-five-words-between-not-matched", "the 12 a b c d e hooks", False),
+            ("hooks/typed-count-token-not-matched", "The $HOOK_COUNT Claude Code hooks", False),
+            ("hooks/typed-count-no-number-not-matched", "the pack's tools and hooks", False)):
+        found = typed_counts(text)
+        expect(name, bool(found) == want, (text, found))
+    hook_data_files = []
+    for data_site in SITES:
+        with os.scandir(ROOT / data_site["src"]) as entries:
+            hook_data_files.extend("{}/{}".format(data_site["src"], entry.name) for entry in entries
+                                   if entry.name.endswith(".toml"))
+    expect("hooks/data-files-every-site", any(rel.startswith("opf/site/draft-src/") for rel in hook_data_files)
+           and "site/draft-src/home.toml" in hook_data_files, hook_data_files)
+    for rel in sorted(hook_data_files):
+        with open(ROOT / rel, encoding="utf-8") as handle:
+            data_text = handle.read()
+        typed = typed_counts(data_text)
+        carries = "$HOOK_COUNT" in data_text or rel not in ("site/draft-src/home.toml",
+                                                            "site/draft-src/install-details.toml")
+        expect("hooks/data-files-carry-the-token", carries and not typed, (rel, typed))
+    expect("hooks/token-rendered", _inline({"base": "/"}, "a $HOOK_COUNT b") == "a {} b".format(live_hooks))
+    for name, text, want in (
+            ("hooks/count-claude-code-only", '[[hook]]\nplatform = "claude-code"\n[[hook]]\nplatform = "claude-code"\n'
+             '[[hook]]\nplatform = "other"\n', 2),
+            ("hooks/count-one", '[[hook]]\nplatform = "claude-code"\n', 1)):
+        with tempfile.TemporaryDirectory(prefix="gen-draft-site-hooks-") as tmp:
+            os.makedirs((Path(tmp) / HOOKS_SOURCE).parent)
+            with open(Path(tmp) / HOOKS_SOURCE, "w", encoding="utf-8") as handle:
+                handle.write(text)
+            got = hook_count(tmp)
+        expect(name, got == want, got)
+    for name, text in (("hooks/malformed-refused", "[[hook]\n"),
+                       ("hooks/no-hooks-refused", 'format-version = 1\n'),
+                       ("hooks/no-claude-code-hook-refused", '[[hook]]\nplatform = "other"\n'),
+                       ("hooks/platform-missing-refused", '[[hook]]\nid = "x"\n'),
+                       ("hooks/hook-not-a-table-array-refused", 'hook = 3\n'),
+                       ("hooks/missing-manifest-refused", None)):
+        with tempfile.TemporaryDirectory(prefix="gen-draft-site-hooks-") as tmp:
+            if text is not None:
+                os.makedirs((Path(tmp) / HOOKS_SOURCE).parent)
+                with open(Path(tmp) / HOOKS_SOURCE, "w", encoding="utf-8") as handle:
+                    handle.write(text)
+            refused(name, hook_count, tmp)
+    # A symbolic link at the manifest path is refused, never followed, even to a valid manifest.
+    with tempfile.TemporaryDirectory(prefix="gen-draft-site-hooks-") as tmp:
+        os.makedirs((Path(tmp) / HOOKS_SOURCE).parent)
+        with open(Path(tmp) / "real.toml", "w", encoding="utf-8") as handle:
+            handle.write('[[hook]]\nplatform = "claude-code"\n')
+        os.symlink(Path(tmp) / "real.toml", Path(tmp) / HOOKS_SOURCE)
+        refused("hooks/symlink-manifest-refused", hook_count, tmp)
+    # A FIFO at the manifest path is refused without a blocking open. A reader that did open it would wait
+    # for a writer; the writer below feeds such a reader a valid manifest (and gives up once the call returns
+    # or after about 10 seconds), so a reader that opens the FIFO counts a hook and the row fails, not hangs.
+    import threading
+    with tempfile.TemporaryDirectory(prefix="gen-draft-site-hooks-") as tmp:
+        fifo = Path(tmp) / HOOKS_SOURCE
+        os.makedirs(fifo.parent)
+        os.mkfifo(fifo)
+        done = threading.Event()
+
+        def feed():
+            for _attempt in range(1000):
+                if done.wait(0.01):
+                    return
+                try:
+                    fd = os.open(fifo, os.O_WRONLY | os.O_NONBLOCK)
+                except OSError:
+                    continue
+                try:
+                    os.write(fd, b'[[hook]]\nplatform = "claude-code"\n')
+                finally:
+                    os.close(fd)
+                return
+
+        feeder = threading.Thread(target=feed, daemon=True)
+        feeder.start()
+        try:
+            refused("hooks/fifo-manifest-refused", hook_count, tmp)
+        finally:
+            done.set()
+            feeder.join(15)
+    # One row per layer of hook_count's read, each failing when only its layer is removed. The race each
+    # layer guards is driven in process: os.lstat, os.open or os.close is replaced, for 1 call, by a
+    # stand-in that acts on the manifest path (or the descriptor opened for it) and calls the real function
+    # for every other path or descriptor. Each stand-in is patched under its literal attribute name, and the
+    # patch restores the real function when its with statement ends.
+    import contextlib
+    from unittest import mock
+    real_lstat, real_open, real_close = os.lstat, os.open, os.close
+    one_hook = '[[hook]]\nplatform = "claude-code"\n'
+
+    def hooks_tree(tmp):
+        """The manifest path under tmp (its parent directories made) and a valid manifest beside it."""
+        os.makedirs((Path(tmp) / HOOKS_SOURCE).parent)
+        with open(Path(tmp) / "real.toml", "w", encoding="utf-8") as handle:
+            handle.write(one_hook)
+        return Path(tmp) / HOOKS_SOURCE, Path(tmp) / "real.toml"
+
+    def lstat_says_regular(target, regular):
+        """An os.lstat stand-in reporting the regular file `regular` for `target` (really a symbolic link or
+        a FIFO), as if the entry were swapped in between the lstat and the open."""
+        def stand_in(path, *args, **kwargs):
+            if os.fspath(path) == os.fspath(target):
+                return real_lstat(regular)
+            return real_lstat(path, *args, **kwargs)
+        return stand_in
+
+    def row_lstat_refuses_before_open():
+        # The lstat check refuses a symbolic link before any open of the manifest path.
+        with tempfile.TemporaryDirectory(prefix="gen-draft-site-hooks-") as tmp:
+            target, real = hooks_tree(tmp)
+            os.symlink(real, target)
+            opened = []
+
+            def open_recorder(path, *args, **kwargs):
+                if os.fspath(path) == os.fspath(target):
+                    opened.append(os.fspath(path))
+                return real_open(path, *args, **kwargs)
+            with mock.patch.object(os, "open", open_recorder):
+                message = refused("hooks/lstat-refuses-before-open", hook_count, tmp)
+        expect("hooks/lstat-refuses-before-open", not opened and "not a regular file" in message,
+               (opened, message))
+
+    def row_nofollow_refuses_swapped_symlink():
+        # The lstat reports a regular file, but the path is a symbolic link to a valid manifest: O_NOFOLLOW
+        # fails the open, where a following open would read the manifest and count its hook.
+        with tempfile.TemporaryDirectory(prefix="gen-draft-site-hooks-") as tmp:
+            target, real = hooks_tree(tmp)
+            os.symlink(real, target)
+            with mock.patch.object(os, "lstat", lstat_says_regular(target, real)):
+                refused("hooks/nofollow-refuses-swapped-symlink", hook_count, tmp)
+
+    def row_nonblock_opens_swapped_fifo():
+        # The lstat reports a regular file, but the path is a FIFO: with O_NONBLOCK the open returns at once
+        # and fstat refuses. An open without it waits for a writer; the writer below waits about 3 seconds
+        # for the call to return, then unblocks such an open (feeding it a valid manifest) and records that,
+        # so a blocking open fails the row instead of hanging.
+        import threading
+        with tempfile.TemporaryDirectory(prefix="gen-draft-site-hooks-") as tmp:
+            target, real = hooks_tree(tmp)
+            os.mkfifo(target)
+            done = threading.Event()
+            fed = []
+
+            def unblock():
+                if done.wait(3):
+                    return
+                for _attempt in range(1000):
+                    if done.wait(0.01):
+                        return
+                    try:
+                        writer = real_open(target, os.O_WRONLY | os.O_NONBLOCK)
+                    except OSError:
+                        continue
+                    try:
+                        os.write(writer, one_hook.encode("utf-8"))
+                    finally:
+                        real_close(writer)
+                    fed.append(True)
+                    return
+
+            helper = threading.Thread(target=unblock, daemon=True)
+            helper.start()
+            try:
+                with mock.patch.object(os, "lstat", lstat_says_regular(target, real)):
+                    message = refused("hooks/nonblock-opens-swapped-fifo", hook_count, tmp)
+            finally:
+                done.set()
+                helper.join(15)
+        expect("hooks/nonblock-opens-swapped-fifo", not fed and "the opened entry" in message, (fed, message))
+
+    def row_fstat_refuses_opened_fifo(closed_once_id):
+        # The manifest path is a valid regular manifest, but the open returns a FIFO holding a valid manifest
+        # (an entry swapped in between the lstat and the open): only the fstat check refuses it, and the
+        # descriptor is closed exactly once on that refusal.
+        with tempfile.TemporaryDirectory(prefix="gen-draft-site-hooks-") as tmp:
+            target, real = hooks_tree(tmp)
+            with open(target, "w", encoding="utf-8") as handle:
+                handle.write(one_hook)
+            fifo = Path(tmp) / "swapped.fifo"
+            os.mkfifo(fifo)
+            opened = []
+            closes = []
+
+            def open_fifo_instead(path, *args, **kwargs):
+                if os.fspath(path) != os.fspath(target):
+                    return real_open(path, *args, **kwargs)
+                fd = real_open(fifo, os.O_RDONLY | os.O_NONBLOCK)
+                opened.append(fd)
+                writer = real_open(fifo, os.O_WRONLY | os.O_NONBLOCK)
+                try:
+                    os.write(writer, one_hook.encode("utf-8"))
+                finally:
+                    real_close(writer)
+                return fd
+
+            def close_recorder(fd):
+                closes.append(fd)
+                real_close(fd)
+            with mock.patch.object(os, "open", open_fifo_instead), mock.patch.object(os, "close", close_recorder):
+                message = refused("hooks/fstat-refuses-opened-fifo", hook_count, tmp)
+        expect("hooks/fstat-refuses-opened-fifo", len(opened) == 1 and "the opened entry" in message,
+               (opened, message))
+        expect(closed_once_id, len(opened) == 1 and [fd for fd in closes if fd in opened] == opened,
+               (opened, closes))
+
+    def row_closed_once_on_success():
+        # A valid manifest is counted and the descriptor opened for it is closed exactly once.
+        with tempfile.TemporaryDirectory(prefix="gen-draft-site-hooks-") as tmp:
+            target, real = hooks_tree(tmp)
+            with open(target, "w", encoding="utf-8") as handle:
+                handle.write(one_hook)
+            opened = []
+            closes = []
+
+            def open_recorder(path, *args, **kwargs):
+                fd = real_open(path, *args, **kwargs)
+                if os.fspath(path) == os.fspath(target):
+                    opened.append(fd)
+                return fd
+
+            def close_recorder(fd):
+                closes.append(fd)
+                real_close(fd)
+            with mock.patch.object(os, "open", open_recorder), mock.patch.object(os, "close", close_recorder):
+                got = hook_count(tmp)
+        expect("hooks/descriptor-closed-once-on-success",
+               got == 1 and len(opened) == 1 and [fd for fd in closes if fd in opened] == opened,
+               (got, opened, closes))
+
+    def row_symlinked_parent_refused():
+        # A directory on the manifest's path that is a symbolic link to a directory holding a valid manifest
+        # is refused, at each level below the root.
+        parents = Path(HOOKS_SOURCE).parent.parts
+        for depth in range(1, len(parents) + 1):
+            with tempfile.TemporaryDirectory(prefix="gen-draft-site-hooks-") as tmp:
+                linked = Path(tmp).joinpath(*parents[:depth])
+                elsewhere = Path(tmp) / "elsewhere"
+                os.makedirs(elsewhere.joinpath(*parents[depth:]))
+                os.makedirs(linked.parent, exist_ok=True)
+                with open(elsewhere.joinpath(*parents[depth:]) / Path(HOOKS_SOURCE).name, "w",
+                          encoding="utf-8") as handle:
+                    handle.write(one_hook)
+                os.symlink(elsewhere, linked)
+                message = refused("hooks/symlinked-parent-refused", hook_count, tmp)
+            expect("hooks/symlinked-parent-refused", "is not a directory" in message, (depth, message))
+
+    row_lstat_refuses_before_open()
+    row_nofollow_refuses_swapped_symlink()
+    row_nonblock_opens_swapped_fifo()
+    row_fstat_refuses_opened_fifo("hooks/descriptor-closed-once-on-refusal")
+    row_closed_once_on_success()
+    row_symlinked_parent_refused()
+    # run() counts the hooks manifest of the root it is given, not ROOT's: a tree whose manifest holds 1 more
+    # Claude Code hook than the live one gets pages stating that count.
+    import io
+    with tempfile.TemporaryDirectory(prefix="gen-draft-site-hooks-run-") as tmp:
+        os.makedirs((Path(tmp) / HOOKS_SOURCE).parent)
+        with open(Path(tmp) / HOOKS_SOURCE, "w", encoding="utf-8") as handle:
+            handle.write('[[hook]]\nplatform = "claude-code"\n' * (live_hooks + 1))
+        with contextlib.redirect_stdout(io.StringIO()):
+            code = run(tmp, check=False)
+        written = ""
+        if os.path.isfile(Path(tmp) / "site/index.html"):
+            with open(Path(tmp) / "site/index.html", encoding="utf-8") as handle:
+                written = handle.read()
+    expect("hooks/run-counts-its-root",
+           code == 0 and "an opt-in plugin of {} hooks".format(live_hooks + 1) in written, code)
+
     if failures:
         print("SELF-TEST FAIL: gen_draft_site {} failure(s)".format(len(failures)))
         for failure in failures:
@@ -2897,8 +3270,12 @@ def _self_test():
           "cycle, base path, every "
           "component's reference markup, the data-file refusals, derived scripts with rail.js only where "
           "the rail lists sections, the link rules, kept live paths, the mappings bodies, promotion "
-          "switch, text-field escaping, the structural link guard, the checked title and meta keys and "
-          "--check exit codes)")
+          "switch, text-field escaping, the structural link guard, the checked title and meta keys, the "
+          "hook count read from the hooks manifest of the root run() is given (a symbolic link, a FIFO or "
+          "a symbolically linked parent directory there refused, each layer of the read driven on its "
+          "own, and its descriptor closed once), no draft-src data file of either site typing a number (digits or a number word) "
+          "with at most 4 words before \"hooks\" once TOML escapes and HTML character references are "
+          "decoded, and --check exit codes)")
     return 0
 
 
