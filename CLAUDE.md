@@ -1,6 +1,6 @@
 # CLAUDE.md: AIQT Guardrails
 
-**Version 0.2.25** (this file carries its own version, independent of the pack's SemVer release
+**Version 0.2.26** (this file carries its own version, independent of the pack's SemVer release
 version; bump it on every substantive change to this file).
 
 This repository AUTHORS the portable AIQT Guardrails pack and the aiqt.ai site, and it dogfoods the
@@ -67,7 +67,11 @@ adopter-conformance suite, an enforceability-ledger drift gate with a bidirectio
 reads `actions/runs`, needing Actions: Read; under `--wait` it also reads pull requests: `pulls`, for
 which a private repository's token also needs Pull requests: Read, and `commits/<sha>/pulls`, expected
 to need the same (not verified live); see the script's header), never `gh pr checks` (a fine-grained token cannot read
-the Checks API) and never `commits/<sha>/status` (which always reads pending). The script also offers
+the Checks API), and never read the combined `state` of `commits/<sha>/status` as a green signal (for
+Actions it always reads pending). The opt-in `--pr <n> --require-status local-quality` reads only that
+context's own entries (`commits/<sha>/statuses` and `commits/<sha>/status`, never the combined state),
+pins the posting account to the `CI_STATUS_STATUS_CREATOR` environment value, and prints `MERGE-SHA` on
+success; see the script's header for its states and exits. The script also offers
 `--match-tree [--head <rev>] [--require-job-success <job name>]...`, which succeeds only on a completed
 successful run of `.github/workflows/quality.yml` whose head commit's TREE equals the queried commit's
 tree (each run's tree is read from `git/commits/<sha>`, expected to need Contents: Read, not verified

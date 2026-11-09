@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "f40449e2613e81df4e2aa7c551651260ffb593473a8e06107bf18cfa606bde04"
+tree-sha256 = "da6681e10a9df466b8c497f13a2dd2ff40a9f6a78566f4eb0ed0aa9966b16e94"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -4426,8 +4426,8 @@ sha256 = "7a1d4b43ed1953ae2efb555354f5e2f1661a9fa47ed83459a071abfc0c3f7c75"
 
 [[sources]]
 path = "tools/ci-status.sh"
-bytes = 106585
-sha256 = "10e1345f55f4b7be0b53b87cb6bb66426576ee638e17528d415a2f00efd79270"
+bytes = 119970
+sha256 = "14c94e0797ea56e1cfd77069f230dbb48114c283bb0f7afc469cb29ff7911e8e"
 
 [[sources]]
 path = "tools/ci_site_scope.py"
@@ -4656,13 +4656,13 @@ sha256 = "edb3c19204301fc55fe73dac90dadc79315dbac235b41e9d23da0e1218384194"
 
 [[sources]]
 path = "tools/selftest_checks.toml"
-bytes = 220303
-sha256 = "713d1e7990664be9a75c57e8a5597fabcc547a3435d3ca03cd87841d57d71bbb"
+bytes = 220873
+sha256 = "5ffdb80c0c89f380d34768a4a03aab08c47b10f7a956f39778894124d3ad0faf"
 
 [[sources]]
 path = "tools/selftest_ci_status.py"
-bytes = 232418
-sha256 = "a6fd8ef45f66bf09553b17b4c45a7a638a9ea920f39cfd562e0ac00fb27d981b"
+bytes = 245965
+sha256 = "434e5062ebd48309bf12597fc16091877d5c5ab5ad23afbfcefc767fd99d14f8"
 
 [[sources]]
 path = "tools/selftest_git_fixture_env.py"
