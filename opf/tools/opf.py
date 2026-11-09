@@ -1861,6 +1861,12 @@ _WATCHDOG_COMPLETION_FLAT_BUDGETS = {
 # The float-summation headroom each derived completion budget adds to its
 # derived total, as the per-thread budgets add it: not a timing allowance.
 _WATCHDOG_COMPLETION_MARGIN = 0.01
+# Legs that run a derived completion leg's case under their own label and
+# budget, so each one's budget derives from that leg's terms: the safety leg
+# lost-cleanup returns _watchdog_completion_case("no-signal-echild"). Each row
+# is (label, completion mode, the flat budget the label declared before the
+# derivation, kept as its red-on-revert vector).
+_WATCHDOG_COMPLETION_ALIASES = (("lost-cleanup", "no-signal-echild", 16),)
 
 
 def _watchdog_completion_terms():
@@ -1976,16 +1982,28 @@ def _watchdog_completion_terms():
     ))
 
 
+def _watchdog_completion_legs():
+    """Each leg whose budget derives from _watchdog_completion_terms, as
+    (budget label, completion mode, flat budget before the derivation): the
+    derived completion legs, then the legs that run one of their cases under
+    another label (_WATCHDOG_COMPLETION_ALIASES)."""
+    legs = [("completion-" + mode, mode, _WATCHDOG_COMPLETION_FLAT_BUDGETS.get(mode))
+            for mode in _watchdog_completion_terms()]
+    legs.extend(_WATCHDOG_COMPLETION_ALIASES)
+    return legs
+
+
 def _watchdog_completion_budget_faults(budgets):
-    """The faults of `budgets` against _watchdog_completion_terms: a derived
-    leg whose declared budget is missing, not a finite positive number, or
-    below its derived total (_watchdog_path_seconds of its terms). A budget
-    at or above that total also keeps the leg's kill bound (budget plus the
-    launch margin) above every timed wait the derivation lists."""
+    """The faults of `budgets` against _watchdog_completion_terms: a leg of
+    _watchdog_completion_legs whose declared budget is missing, not a finite
+    positive number, or below the derived total of the completion leg it
+    runs (_watchdog_path_seconds of its terms). A budget at or above that
+    total also keeps the leg's kill bound (budget plus the launch margin)
+    above every timed wait the derivation lists."""
     faults = []
-    for mode, terms in _watchdog_completion_terms().items():
-        label = "completion-" + mode
-        derived = _watchdog_path_seconds(terms)
+    terms = _watchdog_completion_terms()
+    for label, mode, _flat in _watchdog_completion_legs():
+        derived = _watchdog_path_seconds(terms[mode])
         budget = budgets.get(label)
         if not _watchdog_finite_seconds(budget):
             faults.append("%s: budget %r is not a finite positive number" % (label, budget))
@@ -1995,17 +2013,17 @@ def _watchdog_completion_budget_faults(budgets):
 
 
 def _watchdog_completion_revert_misses(budgets):
-    """Red on revert for _watchdog_completion_budget_faults: each derived
-    leg's earlier flat budget (_WATCHDOG_COMPLETION_FLAT_BUDGETS), put back
-    alone, must be refused, and so must the derived total less 0.001 s (the
-    boundary just outside); the derived total itself must pass (exactly at
-    the boundary). Returns the vectors that did not behave so."""
+    """Red on revert for _watchdog_completion_budget_faults: each leg's
+    earlier flat budget (_WATCHDOG_COMPLETION_FLAT_BUDGETS, or its
+    _WATCHDOG_COMPLETION_ALIASES row), put back alone, must be refused, and
+    so must the derived total less 0.001 s (the boundary just outside); the
+    derived total itself must pass (exactly at the boundary). Returns the
+    vectors that did not behave so."""
     misses = []
-    for mode, terms in _watchdog_completion_terms().items():
-        label = "completion-" + mode
-        derived = _watchdog_path_seconds(terms)
-        for value, want in ((_WATCHDOG_COMPLETION_FLAT_BUDGETS.get(mode), True),
-                            (derived - 0.001, True), (derived, False)):
+    terms = _watchdog_completion_terms()
+    for label, mode, flat in _watchdog_completion_legs():
+        derived = _watchdog_path_seconds(terms[mode])
+        for value, want in ((flat, True), (derived - 0.001, True), (derived, False)):
             flipped = dict(budgets)
             flipped[label] = value
             refused = any(fault.startswith(label + ":")
@@ -2015,6 +2033,47 @@ def _watchdog_completion_revert_misses(budgets):
                                                   "not refused" if want else "refused"))
     if set(_WATCHDOG_COMPLETION_FLAT_BUDGETS) != set(_watchdog_completion_terms()):
         misses.append("flat-budget vectors and derived legs differ")
+    return misses
+
+
+def _watchdog_completion_alias_misses():
+    """Ties _WATCHDOG_COMPLETION_ALIASES to the code: read from the source of
+    the case functions the regression legs launch under their own labels
+    (deadline, safety, overlap, launcher, ledger), every call of
+    _watchdog_completion_case must take a constant mode inside a
+    `mode == <label>` branch, and the (label, mode) pairs so found must be
+    exactly the alias rows. A leg that starts running a derived case under
+    its own label, with its own budget, is refused until its row (and so
+    its derived budget) exists. Returns the misses."""
+    import ast
+    import inspect
+    found, misses = set(), []
+    for case in (_watchdog_deadline_case, _watchdog_safety_case, _watchdog_overlap_case,
+                 _watchdog_launcher_case, _watchdog_ledger_case):
+        tree = ast.parse(inspect.getsource(case))
+        calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)
+                 and isinstance(node.func, ast.Name)
+                 and node.func.id == "_watchdog_completion_case"]
+        placed = set()
+        for node in ast.walk(tree):
+            test = getattr(node, "test", None) if isinstance(node, ast.If) else None
+            if not (isinstance(test, ast.Compare) and isinstance(test.left, ast.Name)
+                    and test.left.id == "mode" and len(test.ops) == 1
+                    and isinstance(test.ops[0], ast.Eq)
+                    and isinstance(test.comparators[0], ast.Constant)):
+                continue
+            for body in node.body:
+                for call in ast.walk(body):
+                    if call in calls and call.args and isinstance(call.args[0], ast.Constant):
+                        found.add((test.comparators[0].value, call.args[0].value))
+                        placed.add(id(call))
+        misses.extend("%s calls _watchdog_completion_case outside a constant mode branch"
+                      % case.__name__ for call in calls if id(call) not in placed)
+    declared = set((label, mode) for label, mode, _flat in _WATCHDOG_COMPLETION_ALIASES)
+    misses.extend("completion case run as %s (mode %s) has no alias row" % pair
+                  for pair in sorted(found - declared))
+    misses.extend("alias row %s (mode %s) runs no completion case" % pair
+                  for pair in sorted(declared - found))
     return misses
 
 
@@ -16233,7 +16292,13 @@ def _watchdog_regression_self_test():
     budgets = dict((mode, deadline_budget) for mode in deadline_modes)
     budgets.update(("overlap-" + mode, 102.0 + 0.01) for mode in overlap_modes)
     budgets.update((mode, deadline_budget) for mode in safety_modes)
-    budgets.update((("lost-cleanup", 16), ("fork-error", 36), ("poll-error", 36)))
+    budgets.update((("fork-error", 36), ("poll-error", 36)))
+    # A leg that runs a derived completion leg's case declares that leg's
+    # derived total + _WATCHDOG_COMPLETION_MARGIN (lost-cleanup runs the
+    # no-signal-echild case, bounded exit wait included).
+    budgets.update((label, _watchdog_path_seconds(_watchdog_completion_terms()[mode])
+                    + _WATCHDOG_COMPLETION_MARGIN)
+                   for label, mode, _flat in _WATCHDOG_COMPLETION_ALIASES)
     # A launcher case runs its nested runner twice with every launch patched
     # to one exit-37 _run_fixture_process(timeout=5), each charged its allowance.
     budgets.update((label + "-" + disposition,
@@ -17052,11 +17117,13 @@ def _watchdog_regression_self_test():
     flip_missed.extend(_watchdog_closeout_vectors())
     flip_missed.extend("startup diagnosis %r -> %r, want %r" % miss
                        for miss in _watchdog_startup_vectors())
-    # The derived completion budgets: every derived leg's declared budget
-    # covers its derived waits, and each leg's earlier flat budget, put
-    # back, is refused (red on revert).
+    # The derived completion budgets: every derived leg's declared budget,
+    # and that of each leg running a derived leg's case, covers its derived
+    # waits; each one's earlier flat budget, put back, is refused (red on
+    # revert); and the alias rows match the case code.
     flip_missed.extend(_watchdog_completion_budget_faults(budgets))
     flip_missed.extend(_watchdog_completion_revert_misses(budgets))
+    flip_missed.extend(_watchdog_completion_alias_misses())
     flip_missed.extend(_watchdog_await_exited_misses())
     floor = _watchdog_bound_faults(live, budgets)
     if floor or flip_missed:
