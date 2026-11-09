@@ -71,6 +71,26 @@ _PATH_LIMIT = ("the scan checks the root's current path only (a store committed 
                "directory, for example before a rename, is not detected)")
 
 
+# Homes-rule scan exemptions (checked by this gate over its own source too): the fixture suite's
+# driver chain down to the homes-rule analysis helpers, which legitimately carry the rule-name
+# strings they scan for. Every mention of a registered name outside registered code or the
+# module entry's recognized dispatch shapes is a finding.
+_HOMES_SELFTEST_EXEMPT = (
+    "_gen2_cli_vectors",
+    "_homes_module_summary",
+    "_homes_rule_call",
+    "_homes_rule_unit_findings",
+    "_homes_rule_violations",
+    "_init_callee_spellings",
+    "_is_run_init_call",
+    "_self_test",
+    "_self_test_lifecycle",
+    "_store_write_findings",
+    "_suite",
+    "_suite_isolated",
+)
+
+
 def _states_sideline_limit(text):
     flat = " ".join(text.split())
     return _SIDELINE_LIMIT in flat and "unmerged" not in flat
@@ -338,9 +358,10 @@ _ROUTE_EXTERNAL_IMPORTS = dict(
 # The fresh-init entries outside opf.py that choose a store's homes generation. opf.py's _init_main
 # is held to the one rule by its roster above (it admits _opf_store.init_writes_homes2, never
 # SUPPORTED_HOMES). _homes_rule_violations never reads a closed call-site list for coverage: it
-# DISCOVERS every production REFERENCE to run_init_operation in the sources it is given (every
-# module-level statement and every module-level function outside the self-test split of
-# _selftest_production_split, nested functions and lambdas included) and is fail-closed over FORM:
+# DISCOVERS every REFERENCE to run_init_operation in the sources it is given (every module-level
+# statement and every module-level function, nested functions and lambdas included; the only
+# unscanned bodies are the functions a module's own _HOMES_SELFTEST_EXEMPT registry declares,
+# whose every outside mention is itself a finding) and is fail-closed over FORM:
 # a reference that is not the callee of a direct call of the imported name (an alias, a getattr
 # string, a functools.partial, a __call__ spelling, a rebinding, a passed value) is a finding, and
 # each direct call must pass homes2 as exactly <alias>.init_writes_homes2() with no arguments and
@@ -380,17 +401,6 @@ def _is_run_init_call(node):
                      and node.func.attr == "run_init_operation")))
 
 
-def _selftest_dispatch_guard(test):
-    """True when an `if` test carries a string constant naming a self-test dispatch (the house
-    `--self-test` and `--selftest-*-child` argv verbs): the guarded branch is entered by the
-    self-test harness alone, never by production control flow."""
-    for sub in ast.walk(test):
-        if (isinstance(sub, ast.Constant) and isinstance(sub.value, str)
-                and ("self-test" in sub.value or "selftest" in sub.value)):
-            return True
-    return False
-
-
 def _definition_time_exprs(node):
     """The child expressions of a def that the interpreter evaluates AT DEFINITION TIME, in
     the scope that holds the def statement: the decorator expressions and the argument
@@ -416,218 +426,294 @@ def _run_time_children(node):
     return out
 
 
-def _module_function_references(tree):
-    """Every reference to a module-level function of `tree`, as (referrer, target, dispatch)
-    rows: referrer is the enclosing module-level function's name (None for module-level code),
-    a method body's referrer is its qualified "Class.method" name, and dispatch is True when
-    the reference sits inside an `if` branch whose test _selftest_dispatch_guard recognizes.
-    A decorator expression or an argument default of a module-level def or of a method is
-    recorded under a "<definition time>" referrer: the interpreter evaluates it at import,
-    outside the function, and it never counts as a dispatch. A module-level binding whose
-    targets are all plain names (`probe = _fn`, `TABLE = {"k": _fn}`, plain or annotated) is
-    an alias: the binding itself makes no row for the functions its value holds (other than
-    as a call's callee), and each later read of the alias name makes a row for every such
-    function under the reader's own referrer; an alias never read in its module makes an
-    "<alias binding>" row. Any other reference from module-level code or a class body that
-    is not the callee of a call (a tuple-unpacking alias, a class attribute, an alias of an
-    alias) is recorded under an "<alias binding>" referrer. That referrer never counts as a
-    dispatch, so an alias cannot launder its target into the self-test split. A direct
-    self-reference is discounted."""
-    names = {node.name for node in tree.body
-             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
-    callee_ids = {id(sub.func) for sub in ast.walk(tree) if isinstance(sub, ast.Call)}
-    alias_targets = {}
-    alias_value_ids = set()
+_HOMES_EXEMPT_NAME = "_HOMES_SELFTEST_EXEMPT"
+
+
+def _homes_exempt_registry(tree):
+    """The module's declared homes-rule exemption registry, as (names, malformed): the single
+    module-level statement `_HOMES_SELFTEST_EXEMPT = ("name", ...)` -- a plain assignment to that
+    one plain name, its value a tuple of unique nonempty string constants, placed before the
+    first module-level def and bound nowhere else in the file in any form (assignment, del,
+    aug-assign, import alias, def, class, parameter, loop, with or except target, global or
+    nonlocal declaration). A module with no registry returns ((), None); a module whose
+    declaration breaks any of these rules returns (None, reason): the declaration must be
+    textually unambiguous or the module cannot be judged at all."""
+    statements = [node for node in tree.body
+                  if isinstance(node, ast.Assign)
+                  and any(isinstance(target, ast.Name) and target.id == _HOMES_EXEMPT_NAME
+                          for target in node.targets)]
+    other_binds = [node for node in ast.walk(tree)
+                   if _binds_name(node, _HOMES_EXEMPT_NAME)
+                   and not any(node is stmt for stmt in statements)]
+    if not statements:
+        if other_binds:
+            return None, "bound outside a single module-level registry assignment (line {})".format(
+                other_binds[0].lineno)
+        return (), None
+    if other_binds:
+        return None, "bound again outside the registry statement (line {})".format(
+            other_binds[0].lineno)
+    if len(statements) > 1:
+        return None, "declared more than once (lines {})".format(
+            ", ".join(str(stmt.lineno) for stmt in statements))
+    stmt = statements[0]
+    if len(stmt.targets) != 1 or not isinstance(stmt.targets[0], ast.Name):
+        return None, "the registry statement must assign the one plain name (line {})".format(
+            stmt.lineno)
+    first_def = next((node for node in tree.body
+                      if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))), None)
+    if first_def is not None and stmt.lineno > first_def.lineno:
+        return None, "the registry must precede the first module-level def (line {})".format(
+            stmt.lineno)
+    if not isinstance(stmt.value, ast.Tuple):
+        return None, "the registry value must be a tuple of string constants (line {})".format(
+            stmt.lineno)
+    names = []
+    for elt in stmt.value.elts:
+        if not isinstance(elt, ast.Constant) or not isinstance(elt.value, str) or not elt.value:
+            return None, "a registry element is not a nonempty string constant (line {})".format(
+                stmt.lineno)
+        if elt.value in names:
+            return None, "duplicate registry element {!r} (line {})".format(elt.value, stmt.lineno)
+        if elt.value == "main":
+            return None, ("the module entry point main may not be registered; production "
+                          "entries stay scanned and reach their self-test only through the "
+                          "pinned dispatch shapes (line {})".format(stmt.lineno))
+        names.append(elt.value)
+    return tuple(names), None
+
+
+def _homes_registry_statement(tree):
+    """The module's single registry assignment statement, or None (the registry tuple's own
+    strings are the one place a registered name may be spelled at module level)."""
     for node in tree.body:
-        if isinstance(node, ast.Assign):
-            targets, value = node.targets, node.value
-        elif isinstance(node, ast.AnnAssign) and node.value is not None:
-            targets, value = [node.target], node.value
-        else:
-            continue
-        if not all(isinstance(target, ast.Name) and target.id not in names
-                   for target in targets):
-            continue
-        held = [sub for sub in ast.walk(value) if isinstance(sub, ast.Name)
-                and sub.id in names and id(sub) not in callee_ids]
-        for target in targets:
-            alias_targets.setdefault(target.id, set()).update(sub.id for sub in held)
-        alias_value_ids.update(id(sub) for sub in held)
-    alias_read = set()
-    rows = []
+        if (isinstance(node, ast.Assign)
+                and any(isinstance(target, ast.Name) and target.id == _HOMES_EXEMPT_NAME
+                        for target in node.targets)):
+            return node
+    return None
 
-    def scan(node, referrer, dispatch):
-        if isinstance(node, ast.If):
-            scan_each([node.test], referrer, dispatch)
-            scan_each(node.body, referrer, dispatch or _selftest_dispatch_guard(node.test))
-            scan_each(node.orelse, referrer, dispatch)
-            return
-        if isinstance(node, ast.ClassDef):
-            scan_each(node.decorator_list, referrer, dispatch)
-            scan_each(node.bases, referrer, dispatch)
-            scan_each([kw.value for kw in node.keywords], referrer, dispatch)
-            for item in node.body:
-                if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                    scan_each(_definition_time_exprs(item), "<definition time>", dispatch)
-                    scan_each(_run_time_children(item),
-                              "{}.{}".format(node.name, item.name), dispatch)
-                else:
-                    scan(item, referrer, dispatch)
-            return
-        row_referrer = ("<alias binding>" if referrer is None
-                        and id(node) not in callee_ids else referrer)
-        if (isinstance(node, ast.Name) and node.id in names and node.id != referrer
-                and id(node) not in alias_value_ids):
-            rows.append((row_referrer, node.id, dispatch))
-        elif (isinstance(node, ast.Name) and node.id in alias_targets
-              and isinstance(node.ctx, ast.Load)):
-            alias_read.add(node.id)
-            for target in sorted(alias_targets[node.id]):
-                if target != referrer:
-                    rows.append((row_referrer, target, dispatch))
-        scan_each(list(ast.iter_child_nodes(node)), referrer, dispatch)
 
-    def scan_each(children, referrer, dispatch):
-        for child in children:
-            scan(child, referrer, dispatch)
+def _dispatch_template_eq(stmt, template):
+    """True when `stmt` equals the parsed dispatch template by exact AST structure."""
+    try:
+        parsed = ast.parse(template).body[0]
+    except SyntaxError:
+        return False
+    return ast.dump(stmt) == ast.dump(parsed)
+
+
+def _main_dispatch_slots(stmt, registered, roster_names, child_literal_governs):
+    """The ids of the registered-name Name nodes `stmt` is allowed to carry, when it is exactly
+    one of the closed __main__ dispatch shapes (template equality on the dumped AST with the
+    name slots substituted); an unmatched statement allows nothing, so a new shape fails closed:
+
+    - D1: sys.exit(N()), raise SystemExit(N()), or a bare N() expression statement.
+    - D2: <plainName>(N) -- a direct call of any plain name whose sole argument is the bare
+      registered name.
+    - D3: <plainName>(lambda: N(sys.argv[2:])), only under a governing test whose string
+      literal begins "--selftest-"; this slot alone also admits a _HOMES_RULE_SITES roster
+      member of the module (the roster member stays fully scanned production and may never be
+      registered; the shape merely locates the self-test child dispatch of it)."""
+    out = set()
+    if (isinstance(stmt, ast.Raise) and isinstance(stmt.exc, ast.Call)
+            and isinstance(stmt.exc.func, ast.Name) and stmt.exc.func.id == "SystemExit"
+            and len(stmt.exc.args) == 1 and isinstance(stmt.exc.args[0], ast.Call)
+            and isinstance(stmt.exc.args[0].func, ast.Name)):
+        name = stmt.exc.args[0].func.id
+        if name in registered and _dispatch_template_eq(
+                stmt, "raise SystemExit({}())".format(name)):
+            out.add(id(stmt.exc.args[0].func))
+    if not (isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call)):
+        return out
+    call = stmt.value
+    if isinstance(call.func, ast.Name) and call.func.id in registered:
+        if _dispatch_template_eq(stmt, "{}()".format(call.func.id)):
+            out.add(id(call.func))
+    if (isinstance(call.func, ast.Attribute) and len(call.args) == 1
+            and isinstance(call.args[0], ast.Call)
+            and isinstance(call.args[0].func, ast.Name)):
+        name = call.args[0].func.id
+        if name in registered and _dispatch_template_eq(stmt, "sys.exit({}())".format(name)):
+            out.add(id(call.args[0].func))
+    if (isinstance(call.func, ast.Name) and len(call.args) == 1
+            and isinstance(call.args[0], ast.Name)):
+        name = call.args[0].id
+        if name in registered and _dispatch_template_eq(
+                stmt, "{}({})".format(call.func.id, name)):
+            out.add(id(call.args[0]))
+    if (child_literal_governs and isinstance(call.func, ast.Name) and len(call.args) == 1
+            and isinstance(call.args[0], ast.Lambda)
+            and isinstance(call.args[0].body, ast.Call)
+            and isinstance(call.args[0].body.func, ast.Name)):
+        name = call.args[0].body.func.id
+        if (name in registered or name in roster_names) and _dispatch_template_eq(
+                stmt, "{}(lambda: {}(sys.argv[2:]))".format(call.func.id, name)):
+            out.add(id(call.args[0].body.func))
+    if out:
+        # The whole statement matched a pinned shape, so every name it carries is part of that
+        # shape.
+        out.update(id(sub) for sub in ast.walk(stmt) if isinstance(sub, ast.Name))
+    return out
+
+
+# The closed in-function self-test dispatch shapes, each the WHOLE `if` statement by exact AST
+# template, one shape per real entry form in this directory: the guard is a positive equality or
+# membership on a fixed self-test literal (or the pinned default-table resolution of opf.py's
+# self-test runners), the branch body is the single dispatch statement, and there is no else. A
+# negated or widened test, an alias, an extra statement, a keyword argument or a different
+# variable name all fall off the template and stay findings.
+_FN_DISPATCH_PLAIN = (
+    'if sys.argv[1:] == ["--self-test"]:\n    return {}()',    # E1 _opf_changelog / _opf_init
+    'if sys.argv[1:] == ["--selftest"]:\n    return {}()',     # E2 _opf_init alias spelling
+    'if "--self-test" in args:\n    return {}()',              # E3 _opf_adopt_apply
+    'if "--selftest" in args:\n    return {}()',               # E4 _opf_adopt_apply alias
+    'if args in ([], ["--self-test"]):\n    return {}()',      # E7 check_opf_init (its bare run
+                                                               # IS its suite, per its usage)
+)
+_FN_DISPATCH_CHILD = (
+    'if args[:1] == [{!r}]:\n    return {}(args[1:])',             # E5 adopt-apply child entries
+    'if len(args) == 2 and args[0] == {!r}:\n    return {}(args[1])',  # E6 kill child / section
+)
+_FN_DISPATCH_PREFIXES = ("--self-test", "--selftest")
+
+
+def _function_dispatch_slots(stmt, registered):
+    """The ids of the Name nodes `stmt` is allowed to carry when it is exactly one of the closed
+    in-function dispatch shapes above; an unmatched statement allows nothing, so a new shape
+    fails closed. E8 is opf.py's runner form `if tests is None: tests = N()` (the registered
+    self-test table resolved only as the absent-argument default of the unregistered runners)."""
+    if not (isinstance(stmt, ast.If) and not stmt.orelse and len(stmt.body) == 1):
+        return set()
+    out = set()
+    body = stmt.body[0]
+    call = None
+    if isinstance(body, ast.Return) and isinstance(body.value, ast.Call):
+        call = body.value
+    elif isinstance(body, ast.Assign) and isinstance(body.value, ast.Call):
+        call = body.value
+    if not (call is not None and isinstance(call.func, ast.Name)
+            and call.func.id in registered):
+        return set()
+    name = call.func.id
+    for template in _FN_DISPATCH_PLAIN:
+        if _dispatch_template_eq(stmt, template.format(name)):
+            out.add(id(call.func))
+    if isinstance(body, ast.Assign) and _dispatch_template_eq(
+            stmt, "if tests is None:\n    tests = {}()".format(name)):       # E8 opf.py runners
+        out.add(id(call.func))
+    literals = [sub.value for sub in ast.walk(stmt.test)
+                if isinstance(sub, ast.Constant) and isinstance(sub.value, str)]
+    if len(literals) == 1 and literals[0].startswith(_FN_DISPATCH_PREFIXES):
+        for template in _FN_DISPATCH_CHILD:
+            if _dispatch_template_eq(stmt, template.format(literals[0], name)):
+                out.add(id(call.func))
+    if out:
+        # The whole statement matched a pinned shape, so every name it carries is part of it.
+        out.update(id(sub) for sub in ast.walk(stmt) if isinstance(sub, ast.Name))
+    return out
+
+
+def _main_dispatch_allowed(tree, registered, roster_names):
+    """The ids of every registered-name Name node that a module-top-level
+    `if __name__ == "__main__":` block is allowed to carry: the slots of the closed dispatch
+    shapes, found directly in the block or inside plain `if` statements nested in it (whose
+    tests stay ordinary scanned module code). Everything else in the block allows nothing: an
+    alias, a dict, a walrus, an argument nested deeper than these shapes is a finding."""
+    allowed = set()
+
+    def visit(stmts, child_literal_governs):
+        for stmt in stmts:
+            if isinstance(stmt, ast.If):
+                governs = child_literal_governs or any(
+                    isinstance(sub, ast.Constant) and isinstance(sub.value, str)
+                    and sub.value.startswith("--selftest-")
+                    for sub in ast.walk(stmt.test))
+                visit(stmt.body, governs)
+                visit(stmt.orelse, child_literal_governs)
+            else:
+                allowed.update(_main_dispatch_slots(stmt, registered, roster_names,
+                                                    child_literal_governs))
+
+    for node in tree.body:
+        if (isinstance(node, ast.If) and isinstance(node.test, ast.Compare)
+                and isinstance(node.test.left, ast.Name) and node.test.left.id == "__name__"
+                and len(node.test.ops) == 1 and isinstance(node.test.ops[0], ast.Eq)
+                and len(node.test.comparators) == 1
+                and isinstance(node.test.comparators[0], ast.Constant)
+                and node.test.comparators[0].value == "__main__"):
+            visit(node.body, False)
+    return allowed
+
+
+def _homes_exempt_occurrence_findings(fname, tree, registered, cross_registry, roster_names):
+    """Findings for every disallowed occurrence of a registered (exempt) name: an ast.Name with
+    that id or an ast.Constant string exactly equal to it in its own module, a from-import of
+    another handed module's registered name, or an attribute access <alias>.<name> where <alias>
+    is bound by a module-level `import <handed module> [as alias]` and <name> is registered in
+    that module. The only allowed contexts are the body of a registered function of the file
+    where the occurrence sits, the registry tuple itself (a registered def statement's own name
+    is not an expression and makes no occurrence), the recognized __main__ dispatch slots
+    (_main_dispatch_slots), and the closed in-function dispatch shapes
+    (_function_dispatch_slots) inside an unregistered module-top-level function. Detection is
+    form-independent: a lambda body, a dict value, a tuple target, a walrus, a staticmethod
+    argument, a decorator, an argument default and a class attribute each contain a Name,
+    Attribute or Constant node, so an unrecognized reference form is a finding by construction,
+    never an escape. The walk is deliberately recursive, so a source nested deeper than the
+    recursion limit is a cannot-evaluate outcome in the caller, never a silent pass."""
+    found = []
+    allowed = _main_dispatch_allowed(tree, registered, roster_names)
+    registry_stmt = _homes_registry_statement(tree)
+    if registry_stmt is not None:
+        allowed.update(id(sub) for sub in ast.walk(registry_stmt))
+    module_aliases = {}
+    for node in tree.body:
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name in cross_registry:
+                    module_aliases[alias.asname or alias.name] = alias.name
+
+    def hits(node):
+        if isinstance(node, ast.Name) and node.id in registered:
+            return [node.id]
+        if (isinstance(node, ast.Constant) and isinstance(node.value, str)
+                and node.value in registered):
+            return [node.value]
+        if (isinstance(node, ast.ImportFrom) and node.level == 0
+                and node.module in cross_registry):
+            return [node.module + "." + alias.name for alias in node.names
+                    if alias.name in cross_registry[node.module]]
+        if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
+            module = module_aliases.get(node.value.id)
+            if module is not None and node.attr in cross_registry[module]:
+                return [module + "." + node.attr]
+        return []
+
+    def visit(node, label):
+        if id(node) not in allowed:
+            for name in hits(node):
+                found.append(
+                    "{}: {} references the exempt function {} (line {}); a registered "
+                    "self-test name may be mentioned only inside a registered function's "
+                    "body or a recognized __main__ dispatch".format(
+                        fname, label, name, node.lineno))
+        for child in ast.iter_child_nodes(node):
+            visit(child, label)
 
     for node in tree.body:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            scan_each(_definition_time_exprs(node), "<definition time>", False)
-            scan_each(_run_time_children(node), node.name, False)
-        else:
-            scan(node, None, False)
-    for alias in sorted(set(alias_targets) - alias_read):
-        rows.extend(("<alias binding>", target, False)
-                    for target in sorted(alias_targets[alias]))
-    return names, rows
-
-
-def _reference_cycle_groups(names, rows):
-    """Each module-level function's strongly connected component of the in-module reference
-    graph's UNGUARDED references, as name -> frozenset of the component's members. A
-    dispatch-guarded reference is test-side whoever makes it, so it never couples a cycle; a
-    component coupled by unguarded references can only be admitted to the self-test split as a
-    whole, on the references arriving from OUTSIDE it, so the members of a cycle can never
-    vouch for each other."""
-    edges = {}
-    for referrer, target, dispatch in rows:
-        if dispatch:
-            continue
-        if referrer in names and target in names and referrer != target:
-            edges.setdefault(referrer, set()).add(target)
-    order = []
-    seen = set()
-    for start in sorted(names):
-        if start in seen:
-            continue
-        seen.add(start)
-        stack = [(start, iter(sorted(edges.get(start, ()))))]
-        while stack:
-            node, pending = stack[-1]
-            advanced = False
-            for nxt in pending:
-                if nxt not in seen:
-                    seen.add(nxt)
-                    stack.append((nxt, iter(sorted(edges.get(nxt, ())))))
-                    advanced = True
-                    break
-            if not advanced:
-                order.append(node)
-                stack.pop()
-    back = {}
-    for referrer, targets in edges.items():
-        for target in targets:
-            back.setdefault(target, set()).add(referrer)
-    groups = {}
-    assigned = set()
-    for start in reversed(order):
-        if start in assigned:
-            continue
-        assigned.add(start)
-        member_stack = [start]
-        members = []
-        while member_stack:
-            node = member_stack.pop()
-            members.append(node)
-            for prev in sorted(back.get(node, ())):
-                if prev not in assigned:
-                    assigned.add(prev)
-                    member_stack.append(prev)
-        group = frozenset(members)
-        for member in members:
-            groups[member] = group
-    return groups
-
-
-def _selftest_production_split(tree, cross_refs=frozenset(), forced=frozenset()):
-    """The names of `tree`'s module-level functions that are SELF-TEST functions, as the LEAST
-    fixed point built upward from the self-test entry points, never by a hand list and never by
-    a bare name: the set starts EMPTY and a function is ADDED only when every reference to it is
-    already proven test-side, so nothing is ever presumed self-test and pruned later.
-
-    - A CANDIDATE entry is a function whose name carries the house convention ("self_test" in
-      the name) or whose every in-module reference sits under a self-test dispatch guard (the
-      `--selftest-*-child` children).
-    - A reference is test-side when it is dispatch-guarded, made from a function ALREADY in the
-      set, or is the dispatch of a candidate from `main` or from module-level code (how every
-      suite starts); a module-level or class-body reference that is not a call's callee (an
-      alias, which could be called from anywhere) is never such a dispatch, and a method body
-      is judged as a production function under its own "Class.method" referrer, never as
-      module-level code. Decorator expressions and argument defaults of a module-level def or
-      a method run at import, outside the function, so they are never such a dispatch and
-      never count as the function's own references. Functions coupled by UNGUARDED
-      references into a cycle (a mutual pair, a longer cycle) form one strongly connected group that joins only as a
-      whole, judged on the references arriving from OUTSIDE the group alone, so the members
-      can never vouch for each other. The set grows one proven function or group at a time
-      until nothing more qualifies.
-    - Everything the growth never reaches is production. A helper with "self_test" in its
-      name is held to the rules whenever production reaches it through any reference that is
-      not proven test-side: from a function body, a method body, a decorator expression, an
-      argument default, or a module-level alias binding. A pair, a longer cycle or a
-      self-recursive function with no test-side reference from outside itself stays
-      production.
-    - A function referenced from nowhere in its own module is production (an exported seam), a
-      candidate included, unless another scanned module names it (`cross_refs`), as the
-      cross-module self-test seams are; a mutant therefore cannot mint an unreferenced
-      self-test-named referrer to launder a new seam into the split.
-    - Names in `forced` (the presence roster) are always production.
-    """
-    names, rows = _module_function_references(tree)
-    return _split_from_references(names, rows, cross_refs, forced)
-
-
-def _split_from_references(names, rows, cross_refs, forced):
-    """_selftest_production_split over precomputed (names, rows) reference data."""
-    referenced = {}
-    for referrer, target, dispatch in rows:
-        referenced.setdefault(target, []).append((referrer, dispatch))
-    candidates = {name for name in names if "self_test" in name}
-    candidates |= {name for name in names
-                   if referenced.get(name) and all(d for _, d in referenced[name])}
-    candidates -= set(forced)
-    groups = _reference_cycle_groups(names, rows)
-    selftest = set()
-    changed = True
-    while changed:
-        changed = False
-        for name in sorted(set(names) - set(forced) - selftest):
-            group = groups[name]
-            if group & set(forced):
+            for expr in _definition_time_exprs(node):
+                visit(expr, "module-level code")
+            if node.name in registered:
                 continue
-            external = [(referrer, target, dispatch) for referrer, target, dispatch in rows
-                        if target in group and (referrer is None or referrer not in group)]
-            if external:
-                joins = all(d or r in selftest
-                            or (t in candidates and r in (None, "main"))
-                            for r, t, d in external)
-            else:
-                joins = all(member in candidates and member in cross_refs
-                            for member in group)
-            if joins:
-                selftest |= group
-                changed = True
-    return selftest
+            for sub in ast.walk(node):
+                if isinstance(sub, ast.If):
+                    allowed.update(_function_dispatch_slots(sub, registered))
+            for child in _run_time_children(node):
+                visit(child, node.name)
+        else:
+            visit(node, "module-level code")
+    return found
 
 
 def _store_import_aliases(tree):
@@ -860,9 +946,9 @@ _HOMES_SCAN_CACHE = {}
 def _homes_module_summary(text):
     """The per-source data _homes_rule_violations needs, memoized on the source TEXT, so a
     mutated directory scan (one changed file among many) never re-walks the unchanged trees: the
-    parse outcome, the cross-module mention set, the function reference rows for the self-test
-    split, the roster def and call counts, and a per-split findings memo. No AST is retained; a
-    findings miss re-parses its one source."""
+    parse outcome, the declared exemption registry (or its malformedness), the roster def and
+    call counts, the names defined anywhere in the file, and a per-context findings memo. No AST
+    is retained; a findings miss re-parses its one source."""
     key = (len(text), hash(text))
     cached = _HOMES_SCAN_CACHE.get(key)
     if cached is not None and cached["text"] == text:
@@ -874,23 +960,7 @@ def _homes_module_summary(text):
         summary["error"] = type(exc).__name__
         _HOMES_SCAN_CACHE[key] = summary
         return summary
-    mentions = set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Name):
-            mentions.add(node.id)
-        elif isinstance(node, ast.Attribute):
-            mentions.add(node.attr)
-        elif (isinstance(node, ast.Constant) and isinstance(node.value, str)
-              and len(node.value) < 200):
-            mentions.add(node.value)
-    try:
-        names, rows = _module_function_references(tree)
-    except RecursionError:
-        # A source can parse and still nest an expression deeper than the reference walk's
-        # recursion allows; that source is a cannot-evaluate outcome, never a traceback.
-        summary["error"] = "RecursionError in the reference walk"
-        _HOMES_SCAN_CACHE[key] = summary
-        return summary
+    registry, malformed = _homes_exempt_registry(tree)
     defcounts = {}
     callcounts = {}
     for node in tree.body:
@@ -898,12 +968,10 @@ def _homes_module_summary(text):
             defcounts[node.name] = defcounts.get(node.name, 0) + 1
             callcounts[node.name] = sum(
                 1 for sub in ast.walk(node) if _is_run_init_call(sub))
-    referenced_names = {target for _, target, _ in rows}
-    summary.update(
-        mentions=mentions, names=names, rows=rows, defcounts=defcounts,
-        callcounts=callcounts,
-        unref_selftest={name for name in names
-                        if "self_test" in name and name not in referenced_names})
+    all_def_names = {node.name for node in ast.walk(tree)
+                     if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    summary.update(registry=registry, malformed=malformed, defcounts=defcounts,
+                   callcounts=callcounts, all_def_names=all_def_names)
     _HOMES_SCAN_CACHE[key] = summary
     return summary
 
@@ -912,29 +980,54 @@ def _homes_rule_violations(sources):
     """Findings over `sources`, a dict of file name to source text covering the production
     opf/tools modules; an empty list means every production run_init_operation call reads the one
     homes rule and nothing in production writes the rule out from under it (see the roster
-    comment: fail-closed discovery over every production unit, the self-test split excluded by
-    reachability, plus the minimum presence roster). A missing or unparsable source, a source
-    whose reference walk overflows the recursion limit (a cannot-evaluate finding), or a roster
-    function absent or defined more than once at module level or not calling run_init_operation
-    exactly once, is itself a finding.
+    comment: fail-closed discovery over EVERY unit of every module, with the only exemption a
+    per-module declared _HOMES_SELFTEST_EXEMPT registry, plus the minimum presence roster). A
+    missing or unparsable source, a source whose occurrence walk overflows the recursion limit, a
+    malformed registry (each a cannot-evaluate finding), a registered name without exactly one
+    module-top-level def or naming a roster member, a disallowed mention of a registered name, or
+    a roster function absent or defined more than once at module level or not calling
+    run_init_operation exactly once, is itself a finding.
 
-    What this check CAN see: every spelling in the handed sources' ASTs, over every production
-    unit of every module (module-level code and module-level functions, nested functions and
-    lambdas included): indirect references to run_init_operation (an alias, a getattr string, a
-    functools.partial, a __call__ spelling, a rebinding, a passed value), a non-rule homes2, a
-    splat, bindings of init_writes_homes2 or SUPPORTED_HOMES anywhere, writes to any store-module
-    attribute (assignment, del, setattr, delattr, vars(<alias>), <alias>.__dict__), shadowing of
-    the store alias in a calling unit, and the exact rule-name strings.
+    What this check CAN see: every unit of every handed source is scanned -- no
+    production/self-test split, no reachability inference, no alias tracking. The scanned units
+    are the module-level code (class bodies, comprehensions, the __main__ block, defs nested
+    inside module-level compound statements, and the decorator expressions and argument defaults
+    of every module-top-level def, exempt or not, which run at import) and each module-top-level
+    function with its entire lexical contents. Exemption exists only by the per-module declared
+    registry, checked for shape, uniqueness, placement before the first def and roster
+    disjointness; a registry naming the module entry point main is refused as cannot-evaluate,
+    so no production entry body ever goes unscanned, and a registered function reached from an
+    entry's production path is a finding because every entry body is scanned. Any mention of a
+    registered name (a Name or the exact string in its own module, a from-import of it from any
+    handed module, or the attribute spelling <alias>.<name> through a module-level import of a
+    handed module whose registry holds <name>) outside registered bodies, the pinned __main__
+    dispatch shapes (_main_dispatch_slots: D1 sys.exit(N()) or raise SystemExit(N()) or bare
+    N(); D2 <plainName>(N); D3 <plainName>(lambda: N(sys.argv[2:])) under a "--selftest-"
+    literal) and the closed in-function dispatch shapes of the unregistered entry functions
+    (_function_dispatch_slots: a whole-`if` exact template whose guard is a positive equality or
+    membership on a fixed self-test literal and whose branch is the single dispatch call, plus
+    the self-test runners' default-table form `if tests is None: tests = N()`) is a finding, so
+    a reference form never seen before fails closed; guards grant nothing anywhere else. Over every scanned unit it sees every spelling in the handed sources' ASTs:
+    indirect references to run_init_operation (an alias, a getattr string, a functools.partial, a
+    __call__ spelling, a rebinding, a passed value), a non-rule homes2, a splat, bindings of
+    init_writes_homes2 or SUPPORTED_HOMES anywhere, writes to any store-module attribute
+    (assignment, del, setattr, delattr, vars(<alias>), <alias>.__dict__), shadowing of the store
+    alias in a calling unit, and the exact rule-name strings.
 
-    What it CANNOT see: a call or write assembled at runtime (exec or eval on built text, a name
-    spelled in pieces such as "run_init_" + "operation", a sys.modules or importlib lookup, or a
-    mock/patch helper writing on its behalf); code never handed to it (modules outside
-    opf/tools/*.py, extension modules, or a subprocess running python elsewhere); a seam
-    referenced only from genuine self-test code, which the reachability split classifies
-    test-side; and semantics (it proves the one-rule FORM, not what a compliant callee does with
-    the value). The maintenance-pin scan refuses exec and eval in these trees, and opf.py's own
-    init path is held by the route roster above, so the uncovered forms sit behind adjacent gates
-    where they are covered at all.
+    What it CANNOT see: a call or reference assembled at runtime -- exec or eval on built text
+    (refused by the maintenance-pin scan), a name spelled in pieces such as "run_init_" +
+    "operation", a sys.modules or importlib or globals() lookup with a computed string; a
+    CROSS-MODULE reach that rides no module-level import alias -- getattr(<alias>, "<literal>"),
+    a module object passed or rebound as a value, a locally shadowed alias (the attribute prong
+    keys on the module-level import aliases as spelled), or a module bound by a loader such as
+    opf.py's _bootstrap rather than an import statement (the string prong is same-module, and
+    those bootstrap-bound seams are driven only inside registered bodies in this tree, held by
+    the real-sources row); code never handed to it (modules outside opf/tools/*.py, extension modules,
+    or a subprocess running python built from strings); and semantics -- a registered function is
+    trusted test-only because nothing visible references it outside registered code, so an
+    invisible channel reaching it inherits these same residuals. opf.py's own init path is held
+    by the route roster above, so the uncovered forms sit behind adjacent gates where they are
+    covered at all.
     """
     found = []
     summaries = {}
@@ -946,6 +1039,10 @@ def _homes_rule_violations(sources):
         summary = _homes_module_summary(text)
         if summary["error"] is not None:
             found.append("{}: cannot evaluate ({})".format(fname, summary["error"]))
+            continue
+        if summary["malformed"] is not None:
+            found.append("{}: cannot evaluate (malformed {} registry: {})".format(
+                fname, _HOMES_EXEMPT_NAME, summary["malformed"]))
             continue
         summaries[fname] = summary
     for fname, func in _HOMES_RULE_SITES:
@@ -963,22 +1060,40 @@ def _homes_rule_violations(sources):
         if calls != 1:
             found.append("{}: {} calls run_init_operation {} times, not once".format(
                 fname, func, calls))
+    roster_by_file = {}
+    for site_fname, func in _HOMES_RULE_SITES:
+        roster_by_file.setdefault(site_fname, set()).add(func)
+    effective = {}
     for fname in sorted(summaries):
         summary = summaries[fname]
-        # A roster entry is production BY CONTRACT, whatever its in-module referrers: a public seam
-        # called only from other modules (and exercised by this module's own self-test) must never
-        # be absorbed into the self-test split.
-        forced = frozenset(func for site_fname, func in _HOMES_RULE_SITES
-                           if site_fname == fname)
-        cross = set()
-        for other in summaries:
-            if other != fname:
-                cross |= summaries[other]["mentions"]
-        # The split consults the cross-module mentions only for this module's unreferenced
-        # self-test-named candidates, so the findings memo keys on exactly that slice and a
-        # change in ANOTHER file re-evaluates this one only when it could change the split.
-        cross_key = frozenset(name for name in summary["unref_selftest"] if name in cross)
-        cache_key = (fname, cross_key, forced)
+        names = []
+        for name in summary["registry"]:
+            # A registration grants nothing unless it is valid: an invalid name is reported
+            # and the function (if any) stays scanned, so both arms fail closed.
+            if name in roster_by_file.get(fname, ()):
+                found.append("{}: the roster function {} may not be exempt; roster entries "
+                             "are production by contract".format(fname, name))
+                continue
+            count = summary["defcounts"].get(name, 0)
+            if count == 0 and name in summary["all_def_names"]:
+                found.append("{}: the exempt function {} is not a module-top-level def".format(
+                    fname, name))
+                continue
+            if count != 1:
+                found.append("{}: the exempt function {} is defined {} times at module "
+                             "level".format(fname, name, count))
+                continue
+            names.append(name)
+        effective[fname] = frozenset(names)
+    for fname in sorted(summaries):
+        summary = summaries[fname]
+        registered = effective[fname]
+        roster_names = frozenset(roster_by_file.get(fname, ()))
+        cross_registry = {other[:-3]: effective[other] for other in summaries
+                          if other != fname and effective[other]}
+        # The findings memo keys on the other modules' effective registries, so a change in
+        # ANOTHER file re-evaluates this one only when it could change what counts as exempt.
+        cache_key = (fname, frozenset(cross_registry.items()))
         cached = summary["findings"].get(cache_key)
         if cached is None:
             try:
@@ -986,27 +1101,34 @@ def _homes_rule_violations(sources):
             except (SyntaxError, ValueError, RecursionError, MemoryError) as exc:
                 found.append("{}: cannot evaluate ({})".format(fname, type(exc).__name__))
                 continue
-            selftest = _split_from_references(summary["names"], summary["rows"],
-                                              cross_key, forced)
             store_aliases = set(_store_import_aliases(tree))
             direct_names, init_aliases = _init_callee_spellings(tree)
-            # Decorator expressions and argument defaults run at import, so a self-test
-            # function's definition-time expressions are production and scan with the
-            # module-level unit; a production function's own unit already walks its whole def.
+            # Decorator expressions and argument defaults run at import, so EVERY
+            # module-top-level def's definition-time expressions scan with the module-level
+            # unit, an exempt function's included; an exempt function's body (and only its
+            # body) is skipped.
             module_nodes = [node for node in tree.body
                             if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))]
             module_nodes += [expr for node in tree.body
                              if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-                             and node.name in selftest
                              for expr in _definition_time_exprs(node)]
             units = [(None, module_nodes)]
             units += [(node.name, [node]) for node in tree.body
                       if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-                      and node.name not in selftest]
-            cached = []
-            for unit_name, nodes in units:
-                cached.extend(_homes_rule_unit_findings(
-                    fname, unit_name, nodes, store_aliases, direct_names, init_aliases))
+                      and node.name not in registered]
+            try:
+                cached = []
+                for unit_name, nodes in units:
+                    cached.extend(_homes_rule_unit_findings(
+                        fname, unit_name, nodes, store_aliases, direct_names, init_aliases))
+                cached.extend(_homes_exempt_occurrence_findings(
+                    fname, tree, registered, cross_registry, roster_names))
+            except RecursionError:
+                # A source can parse and still nest an expression deeper than the occurrence
+                # walk's recursion allows; that source is a cannot-evaluate outcome, never a
+                # traceback.
+                cached = ["{}: cannot evaluate (RecursionError in the occurrence "
+                          "walk)".format(fname)]
             summary["findings"][cache_key] = cached
         found.extend(cached)
     return found
@@ -4734,15 +4856,18 @@ def _suite_isolated(invoke):
                     encoding="utf-8")
                 check("route gate: the real source is clean",
                       _init_route_violations(gate_source) == [])
-                # The homes rule outside opf.py, held by DISCOVERY over every production module
-                # in this directory (never a closed site list) and fail-closed over FORM: any
-                # production reference to run_init_operation that is not a direct call of the
-                # imported name passing homes2 from the one rule is a finding, any production
-                # write through the store module object is a finding wherever it sits, the rule
-                # is read only through the never-shadowed module-level _opf_store import, and
-                # self-test code is split off by reachability from the self-test entry points,
-                # never by a bare name. One seeded mutant per escape form below; each row asserts
-                # the SPECIFIC finding its form must raise, never only a non-empty list.
+                # The homes rule outside opf.py, held by DISCOVERY over EVERY unit of every
+                # module in this directory (never a closed site list) and fail-closed over FORM:
+                # any reference to run_init_operation that is not a direct call of the imported
+                # name passing homes2 from the one rule is a finding, any write through the
+                # store module object is a finding wherever it sits, and the rule is read only
+                # through the never-shadowed module-level _opf_store import. There is no
+                # production/self-test split and no reachability inference: the only exemption
+                # is each module's declared _HOMES_SELFTEST_EXEMPT registry (which may never
+                # name the entry point main), and any mention of a registered name outside
+                # registered code or the recognized __main__ and in-function entry dispatch
+                # shapes is itself a finding. One seeded mutant per escape form below; each row
+                # asserts the SPECIFIC finding its form must raise, never only a non-empty list.
                 rule_dir = Path(__file__).resolve().parent
                 rule_sources = dict(
                     (path.name, path.read_text(encoding="utf-8"))
@@ -4932,10 +5057,10 @@ def _suite_isolated(invoke):
                      "\n\n\nprobe = _homes_probe_self_test\n\n\n"
                      "def _init_probe(root):\n    return probe(root)\n",
                      "_homes_probe_self_test does not pass homes2"),
-                    ("a deeply nested expression that overflows the reference walk",
+                    ("a deeply nested expression that overflows the occurrence walk",
                      "_zz_homes_mutant.py", None,
                      "probe = 0" + " + 0" * 4000 + "\n",
-                     "cannot evaluate (RecursionError in the reference walk)"),
+                     "cannot evaluate (RecursionError in the occurrence walk)"),
                     ("a self_test-named decorator, calling the seam, on a production def",
                      "_zz_homes_mutant.py", None,
                      "from _opf_init_operation import run_init_operation\n\n\n"
@@ -4992,6 +5117,280 @@ def _suite_isolated(invoke):
                     mutant_rows = _homes_rule_violations(mutated_sources)
                     check("homes rule sites flag " + mutant_label,
                           mutated and any(expect in row for row in mutant_rows))
+                # The exemption registry, the occurrence prong (same-module names and
+                # strings, cross-module from-imports and import-alias attribute accesses),
+                # the __main__ dispatch shapes and the in-function entry dispatch shapes,
+                # mutant and flip side by side: every mutant row names the SPECIFIC
+                # finding it must raise, and every flip row (`expect` None) is the edit that
+                # must turn its mutant's result around to ZERO findings, so each prong is
+                # discriminated in both directions.
+                exempt_import = "from _opf_init_operation import run_init_operation\n\n"
+                exempt_reg = (exempt_import
+                              + "_HOMES_SELFTEST_EXEMPT = (\"_homes_probe_self_test\",)\n\n\n"
+                              "def _homes_probe_self_test(root):\n"
+                              "    return run_init_operation(root)\n")
+                exempt_clean = (exempt_import
+                                + "_HOMES_SELFTEST_EXEMPT = (\"_homes_probe_self_test\", "
+                                "\"_homes_suite_self_test\")\n\n\n"
+                                "def _homes_probe_self_test(root):\n"
+                                "    return run_init_operation(root)\n\n\n"
+                                "def _homes_suite_self_test():\n"
+                                "    return _homes_probe_self_test(None)\n")
+                exempt_ref = "references the exempt function _homes_probe_self_test"
+                plain_def = "def _probe_x():\n    return None\n"
+                entry_reg = ("import sys\n\nfrom _opf_init_operation import "
+                             "run_init_operation\n\n"
+                             "_HOMES_SELFTEST_EXEMPT = (\"self_test\",)\n\n\n"
+                             "def self_test():\n    return run_init_operation(None)\n\n\n"
+                             "if __name__ == \"__main__\":\n")
+                d2_reg = ("import sys\n\nfrom _opf_init_operation import "
+                          "run_init_operation\n\n"
+                          "_HOMES_SELFTEST_EXEMPT = (\"_run_self_test\",)\n\n\n"
+                          "def _run_self_test():\n    return run_init_operation(None)\n\n\n"
+                          "def _fail_closed_main(fn):\n    return fn()\n\n\n"
+                          "if __name__ == \"__main__\":\n"
+                          "    if sys.argv[1:] == [\"--self-test\"]:\n")
+                d3_head = ("import sys\n\nfrom _opf_init_operation import "
+                           "run_init_operation\n\n"
+                           "_HOMES_SELFTEST_EXEMPT = (\"_child_probe\",)\n\n\n"
+                           "def _child_probe(argv):\n    return run_init_operation(None)\n\n\n"
+                           "def _fail_closed_main(fn):\n    return fn()\n\n\n"
+                           "if __name__ == \"__main__\":\n"
+                           "    if len(sys.argv) in (7, 8) and sys.argv[1] == \"{}\":\n")
+                d3_stmt = "        _fail_closed_main(lambda: _child_probe(sys.argv[2:]))\n"
+                fn_reg = ("import sys\n\nfrom _opf_init_operation import "
+                          "run_init_operation\n\n"
+                          "_HOMES_SELFTEST_EXEMPT = (\"self_test\",)\n\n\n"
+                          "def self_test():\n    return run_init_operation(None)\n\n\n"
+                          "def main():\n")
+                fnc_reg = ("import sys\n\nfrom _opf_init_operation import "
+                           "run_init_operation\n\n"
+                           "_HOMES_SELFTEST_EXEMPT = (\"_child_probe\",)\n\n\n"
+                           "def _child_probe(argv):\n    return run_init_operation(None)\n\n\n"
+                           "def main():\n    args = sys.argv[1:]\n")
+                fnt_reg = ("import sys\n\nfrom _opf_init_operation import "
+                           "run_init_operation\n\n"
+                           "_HOMES_SELFTEST_EXEMPT = (\"_probe_tests\",)\n\n\n"
+                           "def _probe_tests():\n    return run_init_operation(None)\n\n\n"
+                           "def run_probe_tests(tests=None):\n")
+                zz = "_zz_homes_mutant.py"
+                registry_rows = [
+                    ("a registered helper reached only from a registered driver scans clean "
+                     "(the exemption's positive arm; flip of the self_test-named helper row)",
+                     zz, None, exempt_clean, None),
+                    ("a registered helper referenced nowhere scans clean (the flip that "
+                     "deletes every disallowed reference below)",
+                     zz, None, exempt_reg, None),
+                    ("a registered helper aliased by a module-level lambda",
+                     zz, None, exempt_reg
+                     + "\n\nprobe = lambda root: _homes_probe_self_test(root)\n", exempt_ref),
+                    ("a registered name in a dict value",
+                     zz, None, exempt_reg
+                     + "\n\n_TABLE = {\"probe\": _homes_probe_self_test}\n", exempt_ref),
+                    ("a registered name in a tuple assignment",
+                     zz, None, exempt_reg
+                     + "\n\nprobe, _unused = _homes_probe_self_test, None\n", exempt_ref),
+                    ("a registered name in a staticmethod class attribute",
+                     zz, None, exempt_reg + "\n\nclass _InitDriver:\n"
+                     "    probe = staticmethod(_homes_probe_self_test)\n", exempt_ref),
+                    ("a registered name in a walrus alias",
+                     zz, None, exempt_reg
+                     + "\n\n_KEEP = (probe := _homes_probe_self_test)\n", exempt_ref),
+                    ("a registered name in a decorator expression",
+                     zz, None, exempt_reg + "\n\n@_homes_probe_self_test\n"
+                     "def _init_prod(root):\n    return root\n", exempt_ref),
+                    ("a registered name in an argument default",
+                     zz, None, exempt_reg + "\n\ndef _init_prod(root, "
+                     "seed=_homes_probe_self_test):\n    return seed\n", exempt_ref),
+                    ("a registered name in a class body",
+                     zz, None, exempt_reg + "\n\nclass _InitDriver:\n"
+                     "    probe = _homes_probe_self_test\n", exempt_ref),
+                    ("a registered name in a module-level comprehension",
+                     zz, None, exempt_reg
+                     + "\n\n_ROWS = [_homes_probe_self_test for _ in (0,)]\n", exempt_ref),
+                    ("a registered name as an exact string in its own module",
+                     zz, None, exempt_reg + "\n\ndef _init_prod(root):\n"
+                     "    return \"_homes_probe_self_test\"\n", exempt_ref),
+                    ("a registered name whose def is nested in `if True:`",
+                     zz, None, "_HOMES_SELFTEST_EXEMPT = (\"_probe_x\",)\n\n"
+                     "if True:\n    def _probe_x():\n        return None\n",
+                     "is not a module-top-level def"),
+                    ("a registered name with zero defs",
+                     zz, None, "_HOMES_SELFTEST_EXEMPT = (\"_probe_gone\",)\n",
+                     "defined 0 times"),
+                    ("a registered name with two defs",
+                     zz, None, "_HOMES_SELFTEST_EXEMPT = (\"_probe_x\",)\n\n\n"
+                     + plain_def + "\n\n" + plain_def, "defined 2 times"),
+                    ("the same name with exactly one top-level def (flip of the nested and "
+                     "0/2-def rows)",
+                     zz, None, "_HOMES_SELFTEST_EXEMPT = (\"_probe_x\",)\n\n\n" + plain_def,
+                     None),
+                    ("a roster member added to a registry (its flip is the unmutated file, "
+                     "held clean by the real-sources row)",
+                     "_opf_adopt_apply.py", "_HOMES_SELFTEST_EXEMPT = (\n",
+                     "_HOMES_SELFTEST_EXEMPT = (\n    \"_init_store_run\",\n",
+                     "may not be exempt"),
+                    ("a registry whose value is a list",
+                     zz, None, "_HOMES_SELFTEST_EXEMPT = [\"_probe_x\"]\n\n\n" + plain_def,
+                     "cannot evaluate"),
+                    ("a registry with a duplicate element",
+                     zz, None, "_HOMES_SELFTEST_EXEMPT = (\"_probe_x\", \"_probe_x\")\n\n\n"
+                     + plain_def, "cannot evaluate"),
+                    ("a second registry statement",
+                     zz, None, "_HOMES_SELFTEST_EXEMPT = (\"_probe_x\",)\n"
+                     "_HOMES_SELFTEST_EXEMPT = (\"_probe_x\",)\n\n\n" + plain_def,
+                     "cannot evaluate"),
+                    ("an aug-assign of the registry name inside a function",
+                     zz, None, "_HOMES_SELFTEST_EXEMPT = (\"_probe_x\",)\n\n\n" + plain_def
+                     + "\n\ndef _grow():\n    global _HOMES_SELFTEST_EXEMPT\n"
+                     "    _HOMES_SELFTEST_EXEMPT += (\"_probe_x\",)\n", "cannot evaluate"),
+                    ("a registry placed after the first top-level def",
+                     zz, None, plain_def + "\n\n_HOMES_SELFTEST_EXEMPT = (\"_probe_x\",)\n",
+                     "cannot evaluate"),
+                    ("a registered function whose default calls the seam (defaults are "
+                     "import-time module code, never exempt)",
+                     zz, None, exempt_import
+                     + "_HOMES_SELFTEST_EXEMPT = (\"_homes_probe_self_test\",)\n\n\n"
+                     "def _homes_probe_self_test(root, seed=run_init_operation(None)):\n"
+                     "    return seed\n", "module-level code does not pass homes2"),
+                    ("the same default moved into the exempt body (flip)",
+                     zz, None, exempt_reg, None),
+                    ("a negated self-test guard over a module-level seam call (guards grant "
+                     "nothing)",
+                     zz, None, "import sys\n\nfrom _opf_init_operation import "
+                     "run_init_operation\n\nif \"--self-test\" not in sys.argv:\n"
+                     "    run_init_operation(None)\n", "does not pass homes2"),
+                    ("the negated guard kept, the call deleted (flip: the guard was never "
+                     "what mattered)",
+                     zz, None, "import sys\n\nfrom _opf_init_operation import "
+                     "run_init_operation\n\nif \"--self-test\" not in sys.argv:\n"
+                     "    pass\n", None),
+                    ("a from-import of another module's registered name",
+                     zz, None, "from _opf_init_operation import _seam_tests\n\n\n"
+                     "def _grab(root):\n    return _seam_tests(root)\n",
+                     "references the exempt function _opf_init_operation._seam_tests"),
+                    ("the from-import removed (flip)",
+                     zz, None, "import _opf_init_operation\n\n\n"
+                     "def _grab(root):\n    return None\n", None),
+                    ("a __main__ alias of a registered name",
+                     zz, None, entry_reg + "    probe = self_test\n",
+                     "references the exempt function self_test"),
+                    ("D1 sys.exit(N()) unconditionally in __main__ (flip of the alias row)",
+                     zz, None, entry_reg + "    sys.exit(self_test())\n", None),
+                    ("D1 raise SystemExit(N()) in __main__",
+                     zz, None, entry_reg + "    raise SystemExit(self_test())\n", None),
+                    ("D1 bare N() in __main__",
+                     zz, None, entry_reg + "    self_test()\n", None),
+                    ("D1 perturbed: the argument wrapped in `or`",
+                     zz, None, entry_reg + "    sys.exit(self_test() or 0)\n",
+                     "references the exempt function self_test"),
+                    ("D2 <plainName>(N) in __main__",
+                     zz, None, d2_reg + "        _fail_closed_main(_run_self_test)\n", None),
+                    ("D2 perturbed: the argument wrapped in a bare lambda",
+                     zz, None, d2_reg
+                     + "        _fail_closed_main(lambda: _run_self_test())\n",
+                     "references the exempt function _run_self_test"),
+                    ("D3 <plainName>(lambda: N(sys.argv[2:])) under a --selftest- literal",
+                     zz, None, d3_head.format("--selftest-child") + d3_stmt, None),
+                    ("D3 perturbed: the governing literal does not begin --selftest-",
+                     zz, None, d3_head.format("--probe-child") + d3_stmt,
+                     "references the exempt function _child_probe"),
+                    ("a registry naming the entry point main is refused",
+                     zz, None, "_HOMES_SELFTEST_EXEMPT = (\"main\",)\n\n\n"
+                     "def main():\n    return None\n", "may not be registered"),
+                    ("the same registry renamed away from main (flip)",
+                     zz, None, "_HOMES_SELFTEST_EXEMPT = (\"_probe_main\",)\n\n\n"
+                     "def _probe_main():\n    return None\n", None),
+                    ("an attribute access of another module's registered name through an "
+                     "import alias",
+                     zz, None, "import _opf_init_operation as iop\n\n\n"
+                     "def _grab(root):\n    return iop._seam_tests(root)\n",
+                     "references the exempt function _opf_init_operation._seam_tests"),
+                    ("the same access retargeted to an unregistered production seam (flip)",
+                     zz, None, "import _opf_init_operation as iop\n\n\n"
+                     "def _grab(root):\n    return iop.init_operation\n", None),
+                    ("E1 if sys.argv[1:] == [\"--self-test\"]: return N() in an entry body",
+                     zz, None, fn_reg + "    if sys.argv[1:] == [\"--self-test\"]:\n"
+                     "        return self_test()\n    return 2\n", None),
+                    ("E1 perturbed: the test negated",
+                     zz, None, fn_reg + "    if sys.argv[1:] != [\"--self-test\"]:\n"
+                     "        return self_test()\n    return 2\n",
+                     "references the exempt function self_test"),
+                    ("E2 if sys.argv[1:] == [\"--selftest\"]: return N() in an entry body",
+                     zz, None, fn_reg + "    if sys.argv[1:] == [\"--selftest\"]:\n"
+                     "        return self_test()\n    return 2\n", None),
+                    ("E2 perturbed: a literal outside the pinned spellings",
+                     zz, None, fn_reg + "    if sys.argv[1:] == [\"--self-check\"]:\n"
+                     "        return self_test()\n    return 2\n",
+                     "references the exempt function self_test"),
+                    ("E3 if \"--self-test\" in args: return N() in an entry body",
+                     zz, None, fn_reg + "    args = sys.argv[1:]\n"
+                     "    if \"--self-test\" in args:\n        return self_test()\n"
+                     "    return 2\n", None),
+                    ("E3 perturbed: the dispatch is not the sole branch statement",
+                     zz, None, fn_reg + "    args = sys.argv[1:]\n"
+                     "    if \"--self-test\" in args:\n        rc = self_test()\n"
+                     "        return rc\n    return 2\n",
+                     "references the exempt function self_test"),
+                    ("E4 if \"--selftest\" in args: return N() in an entry body",
+                     zz, None, fn_reg + "    args = sys.argv[1:]\n"
+                     "    if \"--selftest\" in args:\n        return self_test()\n"
+                     "    return 2\n", None),
+                    ("E4 perturbed: membership on a non-self-test literal",
+                     zz, None, fn_reg + "    args = sys.argv[1:]\n"
+                     "    if \"--verbose\" in args:\n        return self_test()\n"
+                     "    return 2\n",
+                     "references the exempt function self_test"),
+                    ("E5 if args[:1] == [lit]: return N(args[1:]) under a --selftest- "
+                     "literal",
+                     zz, None, fnc_reg + "    if args[:1] == [\"--selftest-probe-child\"]:\n"
+                     "        return _child_probe(args[1:])\n    return 2\n", None),
+                    ("E5 perturbed: the literal does not begin --selftest-",
+                     zz, None, fnc_reg + "    if args[:1] == [\"--probe-child\"]:\n"
+                     "        return _child_probe(args[1:])\n    return 2\n",
+                     "references the exempt function _child_probe"),
+                    ("E6 if len(args) == 2 and args[0] == lit: return N(args[1])",
+                     zz, None, fnc_reg
+                     + "    if len(args) == 2 and args[0] == \"--selftest-kill\":\n"
+                     "        return _child_probe(args[1])\n    return 2\n", None),
+                    ("E6 perturbed: the argument count widened",
+                     zz, None, fnc_reg
+                     + "    if len(args) == 3 and args[0] == \"--selftest-kill\":\n"
+                     "        return _child_probe(args[1])\n    return 2\n",
+                     "references the exempt function _child_probe"),
+                    ("E7 if args in ([], [\"--self-test\"]): return N() (the checker's "
+                     "bare run is its suite)",
+                     zz, None, fn_reg + "    args = sys.argv[1:]\n"
+                     "    if args in ([], [\"--self-test\"]):\n        return self_test()\n"
+                     "    return 2\n", None),
+                    ("E7 perturbed: the membership tuple widened past the pinned pair",
+                     zz, None, fn_reg + "    args = sys.argv[1:]\n"
+                     "    if args in ([], [\"--run\"]):\n        return self_test()\n"
+                     "    return 2\n",
+                     "references the exempt function self_test"),
+                    ("E8 if tests is None: tests = N() (the runners' default table)",
+                     zz, None, fnt_reg + "    if tests is None:\n"
+                     "        tests = _probe_tests()\n    return tests\n", None),
+                    ("E8 perturbed: the default folded into an or-expression",
+                     zz, None, fnt_reg + "    tests = tests or _probe_tests()\n"
+                     "    return tests\n",
+                     "references the exempt function _probe_tests"),
+                ]
+                for mutant_label, fname, old, new, expect in registry_rows:
+                    mutated_sources = dict(rule_sources)
+                    if old is None:
+                        mutated = fname not in rule_sources
+                        mutated_sources[fname] = new
+                    else:
+                        mutated_sources[fname] = rule_sources[fname].replace(old, new)
+                        mutated = mutated_sources[fname] != rule_sources[fname]
+                    mutant_rows = _homes_rule_violations(mutated_sources)
+                    if expect is None:
+                        check("homes exemption registry: " + mutant_label,
+                              mutated and mutant_rows == [])
+                    else:
+                        check("homes exemption registry: " + mutant_label,
+                              mutated and any(expect in row for row in mutant_rows))
                 gate_anchor = '    stage = "preflight"'
                 check("route gate: the mutation anchor is present once",
                       gate_source.count(gate_anchor) == 1)
@@ -8268,10 +8667,10 @@ def _self_test_lifecycle():
 def main(argv=None):
     try:
         args = list(sys.argv[1:] if argv is None else argv)
-        if args not in ([], ["--self-test"]):
-            print("usage: check_opf_init.py [--self-test]", file=sys.stderr)
-            return EXIT_ERROR
-        return _self_test()
+        if args in ([], ["--self-test"]):
+            return _self_test()
+        print("usage: check_opf_init.py [--self-test]", file=sys.stderr)
+        return EXIT_ERROR
     except Exception as exc:  # noqa: BLE001  final class-width fail-closed backstop
         print("check_opf_init: cannot evaluate: {}; exit 2".format(ascii(exc)), file=sys.stderr)
         return EXIT_ERROR

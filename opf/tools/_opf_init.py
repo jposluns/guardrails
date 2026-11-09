@@ -64,6 +64,18 @@ class InitError(Exception):
     """A bootstrap document or requested index is invalid; nothing is returned."""
 
 
+# Homes-rule scan exemptions (checked by check_opf_init.py): this module's self-test
+# drivers and test-only helpers. Every mention of a registered name outside registered
+# code or the module entry's recognized dispatch shapes is a finding there.
+_HOMES_SELFTEST_EXEMPT = (
+    "_entry_wiring_failures",
+    "_fault_channel_vectors",
+    "_self_test",
+    "_self_test_body",
+    "self_test",
+)
+
+
 def _choice(value, vocabulary):
     """Pin the selected token, refusing schema drift rather than selecting by ordinal."""
     if value not in vocabulary:
@@ -784,7 +796,9 @@ def _st_loaded_exit():
 
 
 def main():
-    if sys.argv[1:] in (["--self-test"], ["--selftest"]):
+    if sys.argv[1:] == ["--self-test"]:
+        return self_test()
+    if sys.argv[1:] == ["--selftest"]:
         return self_test()
     print("usage: _opf_init.py --self-test (a library module; no live mode)", file=sys.stderr)
     return 2

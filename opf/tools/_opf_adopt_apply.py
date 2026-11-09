@@ -524,6 +524,30 @@ class ReconcileRefusal(AdoptApplyError):
         self.finding = finding
 
 
+# Homes-rule scan exemptions (checked by check_opf_init.py): this module's self-test
+# drivers and test-only helpers. Every mention of a registered name outside registered
+# code or the module entry's recognized dispatch shapes is a finding there.
+_HOMES_SELFTEST_EXEMPT = (
+    "_class_sweep_bound_self_test",
+    "_class_sweep_child_main",
+    "_class_sweep_placement_self_test",
+    "_close_class_sweep_checks",
+    "_eventfd_skip_call_sites",
+    "_function_level_sweep_suite_calls",
+    "_init_store_child_main",
+    "_init_store_git_checks",
+    "_init_store_self_test",
+    "_self_test_checks",
+    "_self_test_fence",
+    "_self_test_section",
+    "_site_classes_in",
+    "_skip_list_write_sites",
+    "_sweep_report_source",
+    "_sweep_wiring",
+    "self_test",
+)
+
+
 def _sha256(data):
     return hashlib.sha256(data).hexdigest()
 
@@ -7845,11 +7869,12 @@ def self_test(section=None):
     init-store vectors use git too (real fixture repositories, which the substrate binds) and a subprocess
     (a child dispatch of THIS engine, SIGKILLed inside the substrate's publication), under that same
     throwaway HOME, as are the file-ops crash matrix's --selftest-child interpreters of this module,
-    which inherit that environment. `section` (default None, the whole module) names one entry of
-    _SELF_TEST_SECTIONS to run alone (_self_test_section); an unknown name is refused with exit 2."""
-    if section is not None and section not in _SELF_TEST_SECTIONS:
+    which inherit that environment. `section` (default None, the whole module) names one section --
+    "fence" or "kill-matrix" -- to run alone (_self_test_section); an unknown name is refused with
+    exit 2."""
+    if section is not None and section not in ("fence", "kill-matrix"):
         print("OPF-ADOPT-APPLY SELF-TEST: unknown section {!r} (known: {})".format(
-            section, ", ".join(sorted(_SELF_TEST_SECTIONS))), file=sys.stderr)
+            section, "fence, kill-matrix"), file=sys.stderr)
         return 2
     try:
         _journal.require_containment()
@@ -18957,13 +18982,10 @@ def _self_test_outcome(failures, failure_details, checked, bound_expired, skippe
     return 0
 
 
-# The self-test sections `--self-test-section NAME` runs alone, each a suite of _self_test_checks that builds
-# its own fixtures and takes only the check recorder.
-_SELF_TEST_SECTIONS = {"kill-matrix": _kill_matrix_self_test, "fence": _self_test_fence}
-
-
 def _self_test_section(name):
-    """Run the one self-test section `name` and return its exit code: 1 when one of its checks failed, else
+    """Run the one self-test section `name` -- "fence" (_self_test_fence) or "kill-matrix"
+    (_kill_matrix_self_test), each a suite of _self_test_checks that builds its own fixtures and
+    takes only the check recorder -- and return its exit code: 1 when one of its checks failed, else
     0. Only that section runs (no other section and no descriptor census), so the summary names the
     section and never reports a pass of the module self-test."""
     failures, failure_details, checked = [], {}, [0]
@@ -18975,7 +18997,10 @@ def _self_test_section(name):
             if observed is not None:
                 failure_details[check_name] = observed
 
-    _SELF_TEST_SECTIONS[name](check)
+    if name == "fence":
+        _self_test_fence(check)
+    else:
+        _kill_matrix_self_test(check)
     if failures:
         print("OPF-ADOPT-APPLY SELF-TEST SECTION {}: FAIL ({} of {} checks failed)".format(
             name, len(failures), checked[0]))
@@ -23911,13 +23936,15 @@ def main():
         return _init_store_child_main(args[1:])
     if args[:1] == ["--selftest-class-sweep-child"]:
         return _class_sweep_child_main(args[1:])
+    if len(args) == 2 and args[0] == "--self-test-section":
+        return self_test(args[1])
     if args[:1] == ["--self-test-section"]:
-        if len(args) == 2:
-            return self_test(section=args[1])
         print("usage: _opf_adopt_apply.py --self-test-section NAME (one of: {})".format(
-            ", ".join(sorted(_SELF_TEST_SECTIONS))), file=sys.stderr)
+            "fence, kill-matrix"), file=sys.stderr)
         return 2
-    if "--self-test" in args or "--selftest" in args:
+    if "--self-test" in args:
+        return self_test()
+    if "--selftest" in args:
         return self_test()
     print("usage: _opf_adopt_apply.py --self-test | --self-test-section NAME (a library module; the adoption "
           "verb is `opf adopt`)", file=sys.stderr)

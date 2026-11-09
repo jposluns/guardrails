@@ -589,6 +589,18 @@ _CLAIM_POLL_SECONDS = 0.001
 _NEVER_RETRIED = "it is never retried, since its number may have been reused"
 
 
+# Homes-rule scan exemptions (checked by check_opf_init.py): this module's self-test
+# drivers and test-only helpers. Every mention of a registered name outside registered
+# code or the module entry's recognized dispatch shapes is a finding there.
+_HOMES_SELFTEST_EXEMPT = (
+    "_t_f3_3_control_root_close_fd_reuse",
+    "_t_f3_6_shared_walker_handoff",
+    "_t_r2_3_store_fd_close_eio",
+    "self_test",
+    "self_test_isolated",
+)
+
+
 def _unconfirmed_closes(count, what="descriptor"):
     """The wording for `count` closes an interruption cut short after their ownership
     was cleared: whether they closed is UNCONFIRMED, never reported as closed."""

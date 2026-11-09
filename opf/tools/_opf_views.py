@@ -262,6 +262,17 @@ class ViewsManifestError(ViewsError):
 
 # --- source-name -> store file resolution (spec 4.2) -------------------------------------------------
 
+# Homes-rule scan exemptions (checked by check_opf_init.py): this module's self-test
+# drivers and test-only helpers. Every mention of a registered name outside registered
+# code or the module entry's recognized dispatch shapes is a finding there.
+_HOMES_SELFTEST_EXEMPT = (
+    "_entry_wiring_failures",
+    "_fault_channel_vectors",
+    "_self_test",
+    "self_test",
+)
+
+
 def _source_relpath(machine_rel, name, manifest=None):
     """The store-relative path of a view source. A baseline record type reads its `<type>.index.toml`
     inline index (spec 9, `layout = "inline"`); worklog follows its manifest generation while version

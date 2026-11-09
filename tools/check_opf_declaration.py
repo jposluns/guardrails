@@ -798,7 +798,7 @@ def self_test(report_path=None):
     ):
         check(check_id, *opf.run_declaration_cli_vector(vector))
         cli_covered.add(vector)
-    check("registry/cli-vectors-covered", cli_covered == set(name for name, _fn in opf._DECLARATION_CLI_VECTORS))
+    check("registry/cli-vectors-covered", cli_covered == set(opf._DECLARATION_CLI_VECTOR_NAMES))
     with patch.object(opf, "_DECLARATION_GATED", ()):
         check("revert/cli-gate-dropped-red", not opf.run_declaration_cli_vector("gate-refuses-every-store-verb")[0])
     with patch.object(opf, "_DECLARATION_GATED", tuple(opf.KNOWN_VERBS)):

@@ -435,6 +435,16 @@ class Request:
         self.actor = None
 
 
+# Homes-rule scan exemptions (checked by check_opf_init.py): this module's self-test
+# drivers and test-only helpers. Every mention of a registered name outside registered
+# code or the module entry's recognized dispatch shapes is a finding there.
+_HOMES_SELFTEST_EXEMPT = (
+    "_self_test_contexts",
+    "_self_test_units",
+    "self_test",
+)
+
+
 def _clock_now():
     """The wall clock, read once per operation for created_at/updated_at/date (spec 8.3). A seam so a
     fixture can pin deterministic bytes."""

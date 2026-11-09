@@ -151,6 +151,14 @@ class ChangelogResult:
 
 # --- freeze digest + CHANGELOG parsing (spec 6.3, 7.2; schemes defined here) --------------------------
 
+# Homes-rule scan exemptions (checked by check_opf_init.py): this module's self-test
+# drivers and test-only helpers. Every mention of a registered name outside registered
+# code or the module entry's recognized dispatch shapes is a finding there.
+_HOMES_SELFTEST_EXEMPT = (
+    "self_test",
+)
+
+
 def _normalize_lf(text):
     """LF-normalize CHANGELOG text before the freeze digest is taken (spec 7.2: LF line endings), so the
     digest is invariant to a CRLF or lone-CR checkout and depends only on the entry's logical bytes."""
@@ -1258,12 +1266,12 @@ def _parse_cli(args):
 
 
 def main():
-    mode, root, error = _parse_cli(sys.argv[1:])
+    if sys.argv[1:] == ["--self-test"]:
+        return self_test()
+    _mode, root, error = _parse_cli(sys.argv[1:])
     if error is not None:
         print("OPF changelog gates: {} (fail-closed)".format(error), file=sys.stderr)
         return EXIT[CANNOT_EVALUATE]
-    if mode == "self-test":
-        return self_test()
     return run(root)
 
 

@@ -117,6 +117,14 @@ _HEX64_RE = re.compile(r"^[0-9a-f]{64}\Z")
 IMPORTS_REL = _opf_store.store_control_roots(1)[0]
 
 
+# Homes-rule scan exemptions (checked by check_opf_init.py): this module's self-test
+# drivers and test-only helpers. Every mention of a registered name outside registered
+# code or the module entry's recognized dispatch shapes is a finding there.
+_HOMES_SELFTEST_EXEMPT = (
+    "self_test",
+)
+
+
 def _is_import_run_id(name):
     """Whether `name` is an `imp-<UTCSTAMP>Z-<hash16>` run id, the import-home grammar _opf_store owns."""
     try:

@@ -200,6 +200,24 @@ _MANIFEST_RELPATH = "{}/{}".format(_MACHINE_HOME, _opf_store.MANIFEST_NAME)
 GITIGNORE_RELPATH = "{}/.gitignore".format(_opf_store.WORKING_DIRNAME)
 
 
+# Homes-rule scan exemptions (checked by check_opf_init.py): this module's self-test
+# drivers and test-only helpers. Every mention of a registered name outside registered
+# code or the module entry's recognized dispatch shapes is a finding there.
+_HOMES_SELFTEST_EXEMPT = (
+    "_ancestry_tests",
+    "_homes2_plan_tests",
+    "_homes2_tests",
+    "_ignore_tests",
+    "_physical_tests",
+    "_run_self_test",
+    "_run_self_test_isolated",
+    "_run_self_test_lifecycle",
+    "_seam_tests",
+    "_st_gates",
+    "_view_tests",
+)
+
+
 def bootstrap_source_roster(manifest_model):
     """The bootstrap SOURCE roster (store-relative, sorted, init.toml excluded) a plan built from
     `manifest_model` creates: BOOTSTRAP_SOURCE_ROSTER, plus one empty imported leaf per enabled type
