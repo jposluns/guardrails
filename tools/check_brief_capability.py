@@ -294,22 +294,22 @@ PREFLIGHT (the input paths a brief names; read over the whole brief, line by lin
                        opening with > or <!--; a line indented four or more columns is read only as a nested
                        list item: it opens an item, and the lines directly above it, with no blank line
                        between, are list items or their text leaving an item open whose text starts at most
-                       three columns left of its marker, as in "1. Steps:" then "    - TASK: ..."), every one
-                       of whose text begins with the word review (any case). A fix or draft brief, or a brief
-                       with no TASK: line, is never judged by P7: its pin is the commit the work starts from,
-                       so a description of work still to be done is never compared with it. In a review brief,
-                       a prose sentence that states the WHOLE set of files the change touches is compared with
-                       the set the brief's pinned commit (the P3 pin lines' value) changed against its FIRST
-                       parent, or against the empty tree for a root commit, and a difference refuses (exit
-                       1). P7 is the first rule that reads free prose and refuses HARD; its defence is that
-                       recognition is a CLOSED grammar, read word by word without a pattern, and anything
-                       outside the shape never fires (under-reporting, never over-reporting). RECOGNIZED
-                       (the closed list): a subject from the/this change, diff, patch, commit or revision
-                       (never fix) with a totalizing verb (touches, touched, changes, changed, modifies,
-                       modified, edits, edited, or is limited/confined to) and a PURE path list after the
-                       verb (and an optional count): every item a path, which is exactly a plain item
-                       holding a `/` or a code span (plain or emphasised, a leading `.` always kept and a
-                       leading ./ dropped; an item without a `..` component is compared as
+                       three columns left of its marker, as in "1. Steps:" then "    - TASK: ..."), every
+                       one of whose text begins with the word review (any case). A fix or draft brief, or a
+                       brief with no TASK: line, is never judged by P7: its pin is the commit the work
+                       starts from, so a description of work still to be done is never compared with it. In
+                       a review brief, a prose sentence that states the WHOLE set of files the change
+                       touches is compared with the set the brief's pinned commit (the P3 pin lines' value)
+                       changed against its FIRST parent, or against the empty tree for a root commit, and a
+                       difference refuses (exit 1). P7 is the first rule that reads free prose and refuses
+                       HARD; its defence is that recognition is a CLOSED grammar, read word by word without
+                       a pattern, and anything outside the shape never fires (under-reporting, never
+                       over-reporting). RECOGNIZED (the closed list): a subject from the/this change, diff,
+                       patch, commit or revision (never fix) with a totalizing verb (touches, touched,
+                       changes, changed, modifies, modified, edits, edited, or is limited/confined to) and a
+                       PURE path list after the verb (and an optional count): every item a path, which is
+                       exactly a plain item holding a `/` or a code span (plain or emphasised, a leading `.`
+                       always kept and a leading ./ dropped; an item without a `..` component is compared as
                        posixpath.normpath gives it, so src/./a.py and src//a.py name src/a.py). A claim with
                        any other item, such as a bare root name (README.md, .gitattributes, Makefile) or an
                        abbreviation (e.g., Node.js), is out of P7's scope and QUIET, never compared (a
@@ -333,7 +333,7 @@ PREFLIGHT (the input paths a brief names; read over the whole brief, line by lin
                        recognized subject), any subject outside the closed list, imperatives, review-scope
                        and context mentions, and bare additive verbs; a sentence or TASK: line in a fence,
                        on an indented code line, or on a line opening with > or <!-- is never read (a TASK:
-                       line that is a nested list item, as above, is read, while a claim there is not; a later
+                       line that is a nested list item, as above, is read, but a claim there is not; a later
                        line of a multi-line HTML comment or a lazy blockquote continuation is). A totalizing
                        claim about a PR, branch, series or train is ADVISORY, never compared: a first-parent
                        diff of one commit cannot cover a series. In a review brief whose scope may be wider
@@ -348,8 +348,11 @@ PREFLIGHT (the input paths a brief names; read over the whole brief, line by lin
                        line holds, as a whole word wherever it stands, one of pr, prs, pull, mr, branch,
                        branches, range, base, against, between, since, onto and series (so ordinary prose
                        lowers the claim too: "review the pinned commit against its first parent", "since it
-                       is small"); a word holding `..` and something other than dots (a closed range, an
-                       open <base>.. or ..<head>, or a word ending in an ellipsis); a PR number such as #9,
+                       is small"); a word holding `..` beside something other than dots, markup and
+                       punctuation (brackets, braces, angle brackets and a leading hyphen included; a path
+                       component `..` followed by `/` is a path), so a closed range, an open <base>.. or
+                       ..<head> and a word ending in an ellipsis after letters (carefully...) count, while
+                       the words [...], <...>, {...}, -... and ../notes.md do not; a PR number such as #9,
                        pr9, pr#9 or pr-9; or two words of 7 to 64 hexadecimal letters neither of which is a
                        prefix of the other (a short and a full id of one commit are one commit, while
                        English words such as defaced and effaced count as ids). NOT recognized, so the claim
@@ -3199,6 +3202,10 @@ P7_STRIP = "*_\"'().,;:!?"   # markup and sentence punctuation stripped around a
 # that starts with one (_pin_changeset.py, __init__.py) keeps it
 P7_LEAD_STRIP = "*\"'("
 P7_TRAIL_STRIP = "*\"').,;:!?"
+# around a range word (p7_range_word): dots, markup and punctuation, brackets, braces and angle brackets
+# included, so [...], <...> and {...} are punctuation; a hyphen counts only at the word's start (-...)
+P7_RANGE_MARKS = P7_STRIP + "`[]{}<>"
+P7_RANGE_LEAD = "-"
 
 
 def p7_tokens(sentence):
@@ -3317,22 +3324,35 @@ def p7_item_columns(raw):
     return columns
 
 
+def p7_atx_heading(raw):
+    """Whether a line, leading whitespace removed, opens a CommonMark ATX heading: one to six `#`, then a
+    space, a tab or the end of the line (# Notes, ##); #9 work: and ####### x are text."""
+    text = raw.lstrip()
+    hashes = len(text) - len(text.lstrip("#"))
+    return 1 <= hashes <= 6 and (len(text) == hashes or text[hashes] in " \t")
+
+
 def p7_nested_items(text, blocks):
-    """{line number} of each prose line indented four or more columns that CommonMark reads as a nested
-    list item, not as indented code: the line opens a list item (p7_item_columns), and the lines directly
-    above it, with no blank, fence, heading, blockquote or HTML-comment line between, are list items and
-    their continuation text that leave an item open whose content column is at most three columns left
-    of the line's marker (1. Steps: then four spaces and - TASK: ...). Indented code cannot interrupt a
-    paragraph, so such a line is never code. A line after a blank line is not read this way (a reading
-    of the enclosing items across the blank is not made), nor is a line indented four or more columns
-    past every open item (continuation text) or under a line of markers alone (* * *)."""
+    """{line number} of each prose line indented four or more columns that is read as a nested list item,
+    not as indented code: the line opens a list item (p7_item_columns), and the lines directly above it,
+    with no blank, fence, heading (p7_atx_heading), blockquote or HTML-comment line between, are list
+    items and their continuation text (a line such as #9 work: included) that leave an item open whose
+    content column is at most three columns left of the line's marker (1. Steps: then four spaces
+    and - TASK: ...). Indented code cannot interrupt a paragraph, so such a line is never code. This
+    departs from CommonMark in both directions. A nested item numbered other than 1 directly under a
+    paragraph line (1. Steps: then four spaces and 2. TASK: ...) is read here, while CommonMark joins it
+    to that paragraph, since an ordered list may interrupt a paragraph only when it starts at 1. And a
+    line CommonMark may read as a nested item is not read this way after a blank line (a reading of the
+    enclosing items across the blank is not made), under a line of markers alone (* * *, or a setext
+    underline such as ---) or after a heading line; a line indented four or more columns past every open
+    item is continuation text in both readings."""
     prose = set()
     for block in blocks:
         if block.kind == "prose":
             prose.update(number for number, _ in block.lines)
     nested, stack = set(), []
     for number, raw in enumerate(text.split("\n"), 1):
-        if number not in prose or raw.lstrip().startswith((">", "<!--", "#")) \
+        if number not in prose or raw.lstrip().startswith((">", "<!--")) or p7_atx_heading(raw) \
                 or not p7_unmarked(raw).strip(" *-_"):
             stack = []
             continue
@@ -3429,12 +3449,27 @@ def p7_brief_base_line(raw):
     return not rest or not (rest[0].isalnum() or rest[0] == "-")
 
 
+def p7_path_dots(piece, first):
+    """Whether one `/`-separated piece of a word, followed by a `/`, is the path component `..` (the
+    first piece after any leading markup, punctuation and hyphens, so (../notes.md) holds one)."""
+    return (piece.lstrip(P7_RANGE_MARKS.replace(".", "") + P7_RANGE_LEAD) if first else piece) == ".."
+
+
 def p7_range_word(word):
     """Whether a TASK: line word is a range: it holds `..` (<base>..<head>, an open <base>.. or ..<head>,
-    the three-dot form included) and something other than dots, markup and punctuation. The `..` is
-    looked for in the word as written, never after punctuation is stripped, which would cut an open
-    range's dots away; a word of dots alone (an ellipsis) is not a range, a word ending in one is."""
-    return ".." in word and word.strip(P7_STRIP + "`") != ""
+    the three-dot form included) beside something other than dots, markup and punctuation, that is, some
+    text is left once dots, markup and punctuation (P7_RANGE_MARKS: brackets, braces and angle brackets
+    included) are stripped from both ends and hyphens from its start (P7_RANGE_LEAD). The `..` is looked
+    for in the word as written, never after punctuation is stripped, which would cut an open range's dots
+    away, but a path component `..` followed by `/` (p7_path_dots: ../notes.md, src/../a.py) is a path,
+    not a range. So a closed or open range, and a word ending in an ellipsis after letters
+    (carefully...), are ranges, while dots alone or in punctuation ([...], <...>, {...}, -...) and a
+    relative path are not."""
+    pieces = word.split("/")
+    if not any(".." in piece and not (index + 1 < len(pieces) and p7_path_dots(piece, index == 0))
+               for index, piece in enumerate(pieces)):
+        return False
+    return word.lstrip(P7_RANGE_MARKS + P7_RANGE_LEAD).rstrip(P7_RANGE_MARKS) != ""
 
 
 def p7_distinct_commits(words):
@@ -5232,6 +5267,16 @@ def _p7_selftest(flip, flip_record):
                 "Steps:\n    - TASK: fix the pinned commit.\n",
                 "-    Steps:\n    - TASK: fix the pinned commit.\n")],
             [(0, [("P3", "ADVISORY")])] * 3 + [(1, [("P7", "HARD")])] * 2 + [(1, [("P7", "HARD")])] * 4)
+        # a continuation line opening with `#` ends the open list only when it is a CommonMark ATX heading
+        # (one to six `#`, then a space, a tab or the end of the line): under #9 work: or seven `#` the
+        # nested fix line is read, under # Notes, #<tab>Notes, a bare # or six `#` it is not
+        hash_cases = [lambda text=text: p7(fix_claim, ids["c2"], task=review + "- Steps for\n  " + text
+                                           + "\n    - TASK: fix the pinned commit.\n") for text in (
+            "#9 work:", "####### x")]
+        check("preflight/p7-nested-hash-line", [case() for case in hash_cases] + [
+            p7(stale_claim, ids["c2"], task=review + "- Steps for\n  " + text
+               + "\n    - TASK: fix the pinned commit.\n") for text in ("# Notes", "#", "###### x", "#\tNotes")],
+            [(0, [("P3", "ADVISORY")])] * 2 + [(1, [("P7", "HARD")])] * 4)
         # a task-list item (- [ ], - [x], 1. [X]) is a list item: its checkbox is skipped before the label;
         # a bracket that is not a checkbox, or a checkbox with no space after it, leaves the line unread
         box_cases = [lambda task=task, text=text: p7(text, ids["c2"], task=task) for task, text in (
@@ -5310,6 +5355,26 @@ def _p7_selftest(flip, flip_record):
             "TASK: review the pinned commit ...\n")]
         check("preflight/p7-open-range-scope", [case() for case in range_cases],
               [(0, [("P7", "ADVISORY")])] * 4 + [(1, [("P7", "HARD")])])
+        # brackets, braces, angle brackets and a leading hyphen are punctuation, so dots inside them are
+        # no range, and a path component `..` followed by `/` is a path: the stale claim stays HARD; a
+        # word ending in an ellipsis after letters is still a range, and so is ..notes (an open range);
+        # the src/../a.py line also draws a P3 advisory
+        mark_cases = [lambda task=task: p7(stale_claim, ids["c2"], task=task) for task in (
+            "TASK: review the pinned commit [...].\n",
+            "TASK: review the pinned commit <...>.\n",
+            "TASK: review the pinned commit {...}.\n")]
+        hyphen_cases = [lambda: p7(stale_claim, ids["c2"], task="TASK: review the pinned commit -...\n")]
+        path_cases = [lambda task=task: p7(stale_claim, ids["c2"], task=task) for task in (
+            "TASK: review the pinned commit (notes in ../notes.md).\n",
+            "TASK: review the pinned commit (../notes.md).\n",
+            "TASK: review the pinned commit and src/../a.py.\n")]
+        ellipsis_cases = [lambda: p7(stale_claim, ids["c2"],
+                                     task="TASK: review the pinned commit carefully...\n")]
+        check("preflight/p7-range-punctuation-path",
+              [case() for case in mark_cases + hyphen_cases + path_cases + ellipsis_cases] + [
+                  p7(stale_claim, ids["c2"], task="TASK: review the pinned commit (notes in ..notes).\n")],
+              [(1, [("P7", "HARD")])] * 6 + [(1, [("P3", "ADVISORY"), ("P7", "HARD")])]
+              + [(0, [("P7", "ADVISORY")])] * 2)
         # one commit written as a short and a full id is one commit, so the claim is still judged; two
         # ids where neither is a prefix of the other are two commits
         commit_cases = [lambda task=task: p7(stale_claim, ids["c2"], task=task) for task in (
@@ -5526,6 +5591,27 @@ def _p7_selftest(flip, flip_record):
         check("revert/p7-open-range-red", *flip(
             range_cases, [(1, [("P7", "HARD")])] * 3 + [(0, [("P7", "ADVISORY")]), (1, [("P7", "HARD")])],
             p7_range_word=lambda word: ".." in word.lower().strip(P7_STRIP + "`")))
+        # brackets, braces and angle brackets no longer punctuation: dots inside them read as a range
+        check("revert/p7-range-brackets-red", *flip(
+            mark_cases, [(0, [("P7", "ADVISORY")])] * 3, P7_RANGE_MARKS=P7_STRIP + "`"))
+        # a leading hyphen no longer punctuation: -... reads as a range
+        check("revert/p7-range-hyphen-red", *flip(
+            hyphen_cases, [(0, [("P7", "ADVISORY")])], P7_RANGE_LEAD=""))
+        # a path component `..` no longer told from a range: a relative path reads as one
+        check("revert/p7-range-path-red", *flip(
+            path_cases, [(0, [("P7", "ADVISORY")])] * 2 + [(0, [("P3", "ADVISORY"), ("P7", "ADVISORY")])],
+            p7_path_dots=lambda piece, first: False))
+        original_range_word = p7_range_word
+        # a narrower reading that takes a word ending in an ellipsis for prose: carefully... no longer
+        # lowers the claim, so the row pins that such a word stays a range
+        check("revert/p7-range-ellipsis-red", *flip(
+            ellipsis_cases, [(1, [("P7", "HARD")])],
+            p7_range_word=lambda word: original_range_word(word) and not word.endswith("...")))
+        # every `#` line taken for a heading again: a #9 work: or ####### x continuation line ends the
+        # open list, so the nested fix line is hidden and the review brief's fix sentence refuses
+        check("revert/p7-nested-hash-line-red", *flip(
+            hash_cases, [(1, [("P3", "ADVISORY"), ("P7", "HARD")])] * 2,
+            p7_atx_heading=lambda raw: raw.lstrip().startswith("#")))
         # every different commit-id word counted again: a short and a full id are two commits
         check("revert/p7-commit-prefix-red", *flip(
             commit_cases, [(0, [("P7", "ADVISORY")])] * 3, p7_distinct_commits=lambda words: set(words)))
@@ -8417,7 +8503,7 @@ def self_test(report_path=None):
             os.chmod(locked, 0o700)
         shutil.rmtree(inputs, ignore_errors=True)
     _p7_selftest(flip, flipped.append)
-    check("revert/every-flip-ran", len(flipped), 264)
+    check("revert/every-flip-ran", len(flipped), 269)
 
     for check_id in sorted(expected - _EXECUTED_SET):
         FAILURES.append("execution-set/missing: {}".format(check_id))
