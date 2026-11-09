@@ -100,17 +100,20 @@ generator alone cannot assert:
     every other tag (a block-level tag such as </p><p>, a <br>, an unknown tag) read as a word
     boundary, character references unescaped, format characters dropped, Unicode decimal digits
     read as digits and whitespace (U+00A0 included) folded to one space; a value ending inside
-    open markup, or a parser that reads the HTML5 comment forms differently, is cannot-evaluate
-    (exit 2). A hook figure is a number before "hook" or "hooks", joined by whitespace or a hyphen
-    and with at most three words between (3-hook, 3 Claude Code hook, 3 opt-in hooks), and not
+    open markup, a value holding an element whose rendering depends on the reader's scripting or
+    parsing mode (noscript, template, iframe, plaintext, script, style, xmp, noembed, noframes,
+    textarea, title, table, select, frameset, math or svg, named in any case anywhere in the
+    value), or a parser that reads the HTML5 comment forms differently, is cannot-evaluate (exit
+    2). A hook figure is a number before "hook" or "hooks", joined by whitespace or a hyphen and
+    with at most three words between (3-hook, 3 Claude Code hook, 3 opt-in hooks), and not
     followed by a hyphen or a letter (25 hook-linked rules is not one). It over-reads: a number
     about something else that sits within three words of "hooks" (1 hooks file, 17 frameworks and
     hooks) is a finding. It does not read a figure spelled in words, written with a thousands
     separator or with a non-decimal numeric character such as a superscript, more than three words
-    from its noun, with its noun split inside the word by a tag that is not inline, held in a key
-    or a non-string value, or inside a comment or an attribute in a field the generator escapes
-    (shown there as literal text); gen_draft_site refuses a subfolder or any non-.toml entry in site/draft-src, so no other
-    file there renders and none is read;
+    from its noun, with its noun split inside the word by a tag outside the reader's closed list of
+    inline elements, held in a key or a non-string value, or inside a comment or an attribute in a
+    field the generator escapes (shown there as literal text); gen_draft_site refuses a subfolder
+    or any non-.toml entry in site/draft-src, so no other file there renders and none is read;
   - the disclosure's shipped-path declaration (the [[code]]/[[noncode]] prefix rows of disclosure.toml,
     the same validated source gen_disclosure renders the public shipped-code sentence from): every
     path the release manifest (.aiqt/manifest.toml) lists must fall under a declared prefix (a
@@ -897,8 +900,11 @@ def check_readme_counts(root, manifests, findings):
 # sentence carrying a stale figure fails too. Both read the parsed string values as they render
 # (_site_rendered_text, built on the standard library HTML parser), so a TOML comment, which never
 # renders, can neither satisfy a wording nor carry a figure; an entity, an inline tag, a '>' inside
-# a quoted attribute, a no-break space or a non-ASCII decimal digit cannot hide one; and a block-level
-# tag such as </p><p> or <br> is a word boundary, so it cannot join a figure to the text before it.
+# a quoted attribute, a no-break space or a non-ASCII decimal digit cannot hide one; a block-level
+# tag such as </p><p> or <br> is a word boundary, so it cannot join a figure to the text before it;
+# and a value holding an element whose rendering depends on the reader's scripting or parsing mode
+# (_SITE_MODE_DEPENDENT_TAGS: noscript, template, iframe and the rest) is cannot-evaluate (exit 2),
+# never read one way only.
 SITE_DRAFT_SRC = Path("site") / "draft-src"
 SITE_HOOK_FACTS = (
     ("home.toml", "home page intro",
@@ -909,9 +915,9 @@ SITE_HOOK_FACTS = (
 # A number, then "hook" or "hooks", joined by whitespace or a hyphen with at most three words between
 # (3-hook, 3 Claude Code hook, 3 opt-in hooks; a word may hold inner hyphens), or written straight on
 # (3hooks, which an inline tag or a zero-width space between them leaves), and the noun not continued
-# by a letter or a hyphen, so the compound adjective in "25 are hook-linked" is not a figure. The words between are not checked, so a
-# number about something else within three words of the noun is read as a hook figure (a disclosed
-# over-read that fails toward a finding).
+# by a letter or a hyphen, so the compound adjective in "25 are hook-linked" is not a figure. The
+# words between are not checked, so a number about something else within three words of the noun
+# is read as a hook figure (a disclosed over-read that fails toward a finding).
 _SITE_WORD = r"[^\W\d_]+(?:-[^\W\d_]+)*"
 SITE_HOOK_FIGURE = re.compile(
     _NUM + r"(?:[\s-]+(?:" + _SITE_WORD + r"[\s-]+){0,3})?hooks?(?![^\W\d_]|-)", re.I)
@@ -930,6 +936,22 @@ _SITE_INLINE_TAGS = frozenset((
 # a CDATA section or a processing instruction): on the page it runs on into whatever the generator
 # writes next, so the value alone cannot say what renders, and the reader refuses it.
 _SITE_OPEN_MARKUP = re.compile(r"<[A-Za-z!?/]")
+# The elements whose rendering depends on the reader's scripting or parsing mode, so a value that
+# holds one cannot be read one way only: noscript (its content is raw text with scripting on and
+# markup with it off, so either reading misses what the other shows); template (its content is
+# parsed into an inert fragment that never renders); iframe (its srcdoc attribute is a whole
+# document that renders inside it, and its content is raw text); the elements that take the
+# tokenizer out of its data state (plaintext, script, style, xmp, noembed, noframes, textarea,
+# title), which html.parser follows only in recent releases; the insertion modes that move or drop
+# content (table, whose stray text is moved in front of it; select, whose content parsing browsers
+# have changed; frameset); and the foreign content roots math and svg, inside which a CDATA section
+# renders. A start or end tag naming one, in any ASCII case and anywhere in the raw value (inside a
+# comment or an attribute too, a disclosed over-refusal), is cannot-evaluate (exit 2) naming it.
+_SITE_MODE_DEPENDENT_TAGS = frozenset((
+    "frameset", "iframe", "math", "noembed", "noframes", "noscript", "plaintext", "script", "select",
+    "style", "svg", "table", "template", "textarea", "title", "xmp"))
+_SITE_MODE_DEPENDENT_TAG = re.compile(
+    r"</?(" + "|".join(sorted(_SITE_MODE_DEPENDENT_TAGS)) + r")(?![^\t\n\f\r />])", re.I | re.A)
 # Inputs whose HTML5 reading the sweep depends on, each with the text HTML5 renders for it: the
 # empty comments <!--> and <!--->, a comment closed by --!>, a comment whose "-- >" does not close
 # it, and a '>' inside a quoted attribute value. check_site_hook_counts runs them first and refuses
@@ -945,10 +967,11 @@ _SITE_HTML5_PROBES = (
 
 
 class _SiteTextReader(HTMLParser):
-    """The text of one value as a browser renders it: character data with character references
-    converted, a space at every tag not in _SITE_INLINE_TAGS, and nothing for an inline tag, a
-    comment, a declaration or a processing instruction (none of which renders). Attribute values
-    are parsed as attributes and never read as text."""
+    """The text of one value free of _SITE_MODE_DEPENDENT_TAGS (_site_rendered_text refuses the
+    rest): character data with character references converted, a space at every tag not in
+    _SITE_INLINE_TAGS, and nothing for an inline tag, a comment, a declaration or a processing
+    instruction (none of which renders outside foreign content, which math and svg would open).
+    Attribute values are parsed as attributes and never read as text."""
 
     def __init__(self):
         super().__init__(convert_charrefs=True)
@@ -986,9 +1009,17 @@ def _site_rendered_text(value):
     &#32;, &#51;), are converted in the text. Each character is then read by _site_char and every
     run of whitespace (U+00A0 and the other Unicode spaces included) folded to one space. A value
     that ends inside an open markup construct (_SITE_OPEN_MARKUP), or that the parser rejects, is
-    ValueError (cannot-evaluate, exit 2). Every string value is read as HTML, so an entity in a
-    field the generator escapes is read as the character it names (an over-read), but a comment or
-    an attribute there, which the page shows as literal text, is not read (a disclosed miss)."""
+    ValueError (cannot-evaluate, exit 2), and so is a value holding a tag that names one of
+    _SITE_MODE_DEPENDENT_TAGS (noscript, template, iframe and the rest), checked on the raw value
+    before parsing, since its rendering depends on the reader's scripting or parsing mode. Every
+    string value is read as HTML, so an entity in a field the generator escapes is read as the
+    character it names (an over-read), but a comment or an attribute there, which the page shows as
+    literal text, is not read (a disclosed miss)."""
+    modal = _SITE_MODE_DEPENDENT_TAG.search(value)
+    if modal:
+        raise ValueError("the value holds a <{}> element, whose rendering depends on the reader's "
+                         "scripting or parsing mode ({!r})".format(modal.group(1).lower(),
+                                                                   modal.group(0)))
     reader = _SiteTextReader()
     try:
         reader.feed(value)
@@ -1046,8 +1077,9 @@ def check_site_hook_counts(root, manifests, findings):
     wording must be present in the parsed string values of its site/draft-src source with that
     total, and every SITE_HOOK_FIGURE figure in those values of every site/draft-src/*.toml source
     must equal it. A missing source directory, a missing named source, a source that does not
-    parse, a value left inside open markup, and an html.parser that reads a _SITE_HTML5_PROBES input
-    differently from HTML5 each fail closed (exit 2). A TOML comment is not a value, so repeating a
+    parse, a value left inside open markup, a value holding a _SITE_MODE_DEPENDENT_TAGS element, and
+    an html.parser that reads a _SITE_HTML5_PROBES input differently from HTML5 each fail closed
+    (exit 2). A TOML comment is not a value, so repeating a
     required wording in a comment does not satisfy it: a statement reworded into words in its value
     is a missing-wording finding whatever the comments say. The sweep does not read a figure spelled
     in words, written with a thousands separator or a non-decimal numeric character, held more than
@@ -1565,7 +1597,10 @@ def main():
 #      with &nbsp; at the total -> exit 0, one above it -> its finding; a hook added to the manifest
 #      under unchanged sources -> a finding for every statement; a missing site/draft-src, a
 #      missing named source, an unparsable source, a value ending in an open start tag, end tag or
-#      comment, or an html.parser reading an HTML5 comment probe differently -> exit 2 naming it.
+#      comment, a value holding a noscript (the raw-text form a browser with scripting on shows,
+#      and the markup form it shows with scripting off), template, iframe srcdoc or other
+#      scripting- or parsing-mode element, or an html.parser reading an HTML5 comment probe
+#      differently -> exit 2 naming it; a lookalike tag name, an escaped tag -> read as before.
 # (1, 7, 12, 13, and 15 through 24 are the invariant-bearing cases; the rest complete the fail-closed
 # contract.)
 
@@ -3454,6 +3489,52 @@ def self_test_main():
             if code != 2 or "rules.toml: cannot evaluate a value as HTML" not in err:
                 failures.append("a site source value ending in an {} expected exit 2 naming it (got "
                                 "{!r})".format(label, code))
+        # An element whose rendering depends on the reader's scripting or parsing mode -> exit 2
+        # naming it, never one reading: a noscript hiding a stale figure from a scripting-off reader
+        # (a browser with scripting on reads its content as raw text, so the paragraph after the
+        # first </noscript> renders), the scripting-off form a raw-text reader would miss, the tag in
+        # upper case, self-closed, with an attribute or as a lone end tag, template, an iframe
+        # srcdoc document, plaintext, a CDATA section inside math and svg, and every listed element.
+        # The tag name ends at whitespace, '/' or '>' as the HTML tokenizer ends it, so a longer or
+        # hyphenated name, a name ended by a vertical tab, and an escaped tag stay read (-> the stale
+        # figure's finding).
+        modal_rows = [
+            ("noscript raw-text vector", "noscript", "<p>Done.</p><noscript><!--</noscript><p>3 hooks "
+             "catch it.</p><!-- --></noscript><p>It catches it.</p>"),
+            ("noscript scripting-off form", "noscript",
+             "<p>Done.</p><noscript>3 <!-- x -->hooks catch it.</noscript>"),
+            ("noscript upper case", "noscript", "<p>Done.</p><NOSCRIPT>3 hooks.</NOSCRIPT>"),
+            ("noscript self-closed", "noscript", "<p>Done.</p><noscript/>3 hooks."),
+            ("noscript with an attribute", "noscript", "<p>Done.</p><noscript\\tclass=x>3 hooks."),
+            ("noscript end tag alone", "noscript", "<p>Done.</p>3 hooks.</noscript>"),
+            ("template", "template", "<p>Done.</p><template><p>2 hooks.</p></template>"),
+            ("iframe srcdoc", "iframe", "<p>Done.</p><iframe srcdoc='<p>3 hooks.</p>'></iframe>"),
+            ("plaintext", "plaintext", "<p>Done.</p><plaintext><!--</plaintext>3 hooks.-->"),
+            ("math CDATA", "math", "<math><mtext><![CDATA[3 hooks]]></mtext></math>"),
+            ("svg CDATA", "svg", "<svg><text><![CDATA[3 hooks]]></text></svg>")]
+        modal_rows.extend(("listed " + tag, tag, "<p>Done.</p><{0}>2 hooks.</{0}>".format(tag))
+                          for tag in sorted(_SITE_MODE_DEPENDENT_TAGS))
+        for pos, (label, tag, value) in enumerate(modal_rows):
+            sitefix = tmp / "site-hooks-modal-{}".format(pos)
+            _write_fixture(sitefix, site_src=dict(_SITE_SRC, **{
+                "rules.toml": 'html = "{}"\n'.format(value)}))
+            code, err = run_err(sitefix)
+            if (code != 2 or "rules.toml: cannot evaluate a value as HTML" not in err
+                    or "holds a <{}> element".format(tag) not in err):
+                failures.append("a site source value holding {} expected exit 2 naming <{}> (got "
+                                "{!r})".format(label, tag, code))
+        for pos, (label, value) in enumerate((
+                ("longer tag name", "<p>Done.<noscripts>3 hooks.</noscripts></p>"),
+                ("hyphenated tag name", "<p>Done.<noscript-note>3 hooks.</noscript-note></p>"),
+                ("name ended by a vertical tab", "<p>Done.<noscript\\u000Bx>3 hooks.</p>"),
+                ("escaped tag", "<p>Done. &lt;noscript&gt;3 hooks.</p>"))):
+            sitefix = tmp / "site-hooks-modal-lookalike-{}".format(pos)
+            _write_fixture(sitefix, site_src=dict(_SITE_SRC, **{
+                "rules.toml": 'html = "{}"\n'.format(value)}))
+            code, out = run_out(sitefix)
+            if code != 1 or "states 3 hooks; the hooks manifest gives 2" not in out:
+                failures.append("a site source value holding a {} expected exit 1 with the stale "
+                                "figure's finding (got {!r})".format(label, code))
         # The reader rests on html.parser reading the HTML5 comment and quoted-attribute forms as
         # HTML5 does: a parser reading a probe differently (simulated by a probe expecting other
         # text) -> exit 2 naming the probe, under an otherwise clean fixture.
@@ -3595,8 +3676,13 @@ def self_test_main():
           "UTF-8 or holds a NUL byte, a listed detector file that is missing or unreadable, a missing "
           "instruction-budget source, a missing or non-string claude-code-version in it, and a "
           "missing site/draft-src, a missing named site source, an unparsable site source, a site "
-          "value ending in an open start tag, end tag or comment, or an html.parser reading an HTML5 "
-          "comment probe differently all fail closed (exit 2); "
+          "value ending in an open start tag, end tag or comment, a site value holding a noscript (the "
+          "raw-text vector a scripting-on browser renders and the scripting-off form, in upper case, "
+          "self-closed, with an attribute and as a lone end tag), a template, an iframe srcdoc, a "
+          "plaintext, a CDATA section in math or svg, or any other scripting- or parsing-mode "
+          "element (each named), or an html.parser reading an HTML5 comment probe differently all "
+          "fail closed (exit 2), while a longer, hyphenated or vertical-tab-ended tag name and an "
+          "escaped tag are read as before (exit 1 on their stale figure); "
           "a single-line HTML comment above the section "
           "is not over-refused and its section is proven read (the planted name is the finding); the raw "
           "and blockquote-stripped heading readings must agree up to the section end (a "
