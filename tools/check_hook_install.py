@@ -163,14 +163,12 @@ def _read_installed(path):
         opened = os.fstat(fd)
         if not stat.S_ISREG(opened.st_mode) or (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino):
             raise CannotEvaluate("installed path {}: changed while it was read".format(path))
-        with os.fdopen(fd, "rb") as handle:
-            fd = None
+        with os.fdopen(fd, "rb", closefd=False) as handle:
             data = handle.read(MAX_INSTALLED_BYTES + 1)
     except OSError as exc:
         raise CannotEvaluate("installed path {}: unreadable ({})".format(path, exc)) from None
     finally:
-        if fd is not None:
-            os.close(fd)
+        os.close(fd)
     if _over_cap(len(data), MAX_INSTALLED_BYTES):
         raise CannotEvaluate("installed path {}: over the {} byte cap".format(path, MAX_INSTALLED_BYTES))
     return {"path": path, "symlink": is_link, "realpath": real, "bytes": len(data),
@@ -596,12 +594,13 @@ def _case(path, repo, ref, target):
 
 @contextlib.contextmanager
 def _patched(name, value):
-    original = globals()[name]
-    globals()[name] = value
+    module = sys.modules[__name__]
+    original = getattr(module, name)
+    setattr(module, name, value)
     try:
         yield
     finally:
-        globals()[name] = original
+        setattr(module, name, original)
 
 
 def _child_run(args, env=None, timeout=60):
