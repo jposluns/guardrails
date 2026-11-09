@@ -25226,6 +25226,59 @@ def _main_isolated(monitor):
                 ("(ci-idc-c7) a commit message that holds author.name and an AI name allows",
                  "git commit -m 'author.name Claude'")):
             ciexpect(_ci_label, _ci_cmd, "allow")
+        # The config NAME VALUE pair of the author and committer names, and of user.name and user.email in a
+        # case other than lower, is judged only on a git config command that sets a value, so a read-only
+        # command that merely names one of them beside an AI word allows; an EMAIL word is judged only where
+        # the shell or a wrapper runs it as an assignment, so one inside a commit message or another program's
+        # operand allows. Each deny vector below sets an identity git records; each allow control denied while
+        # the pair was judged on any two adjacent words and EMAIL in any word.
+        for _ci_label, _ci_cmd in (
+                ("(ci-idc17) a config set author.name naming an AI denies", "git config set author.name Claude"),
+                ("(ci-idc18) a config --file author.email pair naming an AI denies",
+                 "git config --file .git/config author.email noreply@anthropic.com"),
+                ("(ci-idc19) a config --add committer.name pair naming an AI denies",
+                 "git config --add committer.name Claude"),
+                ("(ci-idc20) a config author.name pair behind sudo and git -C denies",
+                 "sudo -u ci git -C repo config author.name Claude"),
+                ("(ci-idc21) a config author.name pair through a function standing for git denies",
+                 "f() { git \"$@\"; }; f config author.name Claude"),
+                ("(ci-idc22) an AI EMAIL declared with declare -x in a prior segment denies",
+                 "declare -x EMAIL=noreply@anthropic.com; git commit -m x"),
+                ("(ci-idc23) an AI EMAIL given to env before git commit denies",
+                 "env EMAIL=noreply@anthropic.com git commit -m x"),
+                ("(ci-idc24) an AI EMAIL given to sudo after its options denies",
+                 "sudo -u ci EMAIL=noreply@anthropic.com git commit -m x"),
+                ("(ci-idc25) an AI EMAIL given as an env -S operand denies",
+                 "env -S 'EMAIL=noreply@anthropic.com' git commit -m x"),
+                ("(ci-idc26) an AI EMAIL assigned after if denies",
+                 "if EMAIL=noreply@anthropic.com git commit -m x; then :; fi"),
+                ("(ci-idc27) an AI user.name pair in exact case on a read-only command still denies",
+                 "grep user.email CLAUDE.md")):
+            ciexpect(_ci_label, _ci_cmd, "deny")
+        for _ci_label, _ci_cmd in (
+                ("(ci-idc-c9) grep naming author.name beside an AI path allows", "grep -rn author.name .claude/"),
+                ("(ci-idc-c10) grep naming Author.Email beside an AI path allows",
+                 "grep -rln Author.Email .claude/settings.json"),
+                ("(ci-idc-c11) rg naming committer.email beside an AI path allows",
+                 "rg -n committer.email CLAUDE.md AGENTS.md"),
+                ("(ci-idc-c12) git config --get-regexp of author.name allows",
+                 "git config --get-regexp author.name claude"),
+                ("(ci-idc-c13) git config --get of author.name allows", "git config --get author.name claude"),
+                ("(ci-idc-c14) git config --get-regexp given by a prefix allows",
+                 "git config --get-re author.name claude"),
+                ("(ci-idc-c15) git config --unset of author.name allows", "git config --unset author.name Claude"),
+                ("(ci-idc-c16) git config --list allows", "git config --list --show-origin author.name claude"),
+                ("(ci-idc-c17) git config get of author.name allows", "git config get author.name claude"),
+                ("(ci-idc-c18) git log with author.email and an AI path as pathspecs allows",
+                 "git log -1 --format='%an' -- author.email claude.txt"),
+                ("(ci-idc-c19) a commit message that starts with an AI EMAIL assignment allows",
+                 "git commit -m 'EMAIL=noreply@anthropic.com is the bot address'"),
+                ("(ci-idc-c20) a commit message of an AI author.name assignment allows",
+                 "git commit -m 'author.name=Claude'"),
+                ("(ci-idc-c21) an AI EMAIL operand of python3 allows",
+                 "python3 -c 'print(1)' EMAIL=noreply@anthropic.com"),
+                ("(ci-idc-c22) an AI EMAIL that echo only prints allows", "echo EMAIL=noreply@anthropic.com")):
+            ciexpect(_ci_label, _ci_cmd, "allow")
         # A git commit behind leading reserved words, a function or coprocess name, VAR=value words or a wrapper
         # word (env, timeout, command, exec, nohup, xargs, sudo, nice, setsid, stdbuf, time) is judged like the
         # bare form: behind a wrapper a git word starts a candidate git command, whatever the wrapper's own

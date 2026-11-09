@@ -4932,10 +4932,10 @@ def diff_source_pretool(data):
 # command line of its own (_cmtidn_run_lines). The read-side forms that still trip are the disclosed over-denies at
 # _CMTIDN_GIT_WRAPPERS: a wrapped git word right after a wrapper option, which the finder cannot tell from that
 # option's value (sudo -E git log --grep git commit --author=Claude), and a wrapped git command whose
-# subcommand is not a git command name (an alias). Separately, an identity
-# ASSIGNMENT (a git-identity env var or EMAIL, or a user, author or committer name or email config value) is a
-# violation on ANY segment, to harden the common 'set the identity then commit' form. Because the tokens are quote-aware,
-# a trailer hiding inside a quoted -m message (e.g. -m "fix; Co-authored-by: Claude", which the old
+# subcommand is not a git command name (an alias). Separately, an identity ASSIGNMENT (a git-identity env
+# var, an EMAIL assignment the shell runs, or a user, author or committer name or email config value set by -c
+# or by git config; _identity_assignment_ai) is a violation on ANY segment, to harden the common 'set the
+# identity then commit' form. Because the tokens are quote-aware, a trailer hiding inside a quoted -m message (e.g. -m "fix; Co-authored-by: Claude", which the old
 # whitespace split broke at the ';') now lives intact in the single message token, and a substring scan
 # on that token catches it.
 AI_IDENTITY_RE = re.compile(
@@ -4957,8 +4957,9 @@ COMMIT_VERBS = ("commit", "merge", "cherry-pick", "am", "rebase", "revert", "com
 # identities. The whitespace runs after a name end before the next name starts, so a token costs time linear in
 # its length.
 CO_AUTHOR_RE = re.compile(r"(?i)co[- ]?authored[- ]?by(?=\s*+:?\s*+([^\n]{1,160}))")
-# Identity-assignment tokens (any segment): a git-identity env var, the EMAIL variable, or an identity config
-# value in the '-c user.name=VALUE' inline shape. git 2.53.0 takes the author from author.name and
+# Identity-assignment tokens (any segment): a git-identity env var, the EMAIL variable where the shell runs it
+# as an assignment, or an identity config value in the '-c user.name=VALUE' inline shape, the author and
+# committer names only right after a -c word (_identity_assignment_ai). git 2.53.0 takes the author from author.name and
 # author.email, the committer from committer.name and committer.email, each ahead of user.name and user.email,
 # and the address of both from EMAIL when no user.email is set; config keys are read in any case, so the
 # config names match in any case, while EMAIL, an environment variable name, matches only as spelled. An
@@ -4967,7 +4968,8 @@ GIT_ENV_RE = re.compile(r"(?is)^GIT_(?:AUTHOR|COMMITTER)_(?:NAME|EMAIL)\+?=(.*)$
 EMAIL_ENV_RE = re.compile(r"(?s)^EMAIL\+?=(.*)$")
 USER_CONF_EQ_RE = re.compile(r"(?is)^user\.(?:name|email)=(.*)$")
 ROLE_CONF_EQ_RE = re.compile(r"(?is)^(?:author|committer)\.(?:name|email)=(.*)$")
-# An identity config name standing alone as a word, the name of a 'config NAME VALUE' pair.
+# An identity config name standing alone as a word, the NAME of a 'git config NAME VALUE' command that sets a
+# value (_cmtidn_config_setting).
 IDENTITY_CONF_NAME_RE = re.compile(r"(?i)(?:user|author|committer)\.(?:name|email)")
 # Fallback-only raw-string contexts, used when the shared tokenizer cannot parse the command, when a command
 # line that git runs from its operands is left unread, because the tokenizer cannot parse it or it is past the
@@ -5174,28 +5176,149 @@ def _commit_message_and_author_ai(tokens, judged):
 
 
 def _identity_assignment_ai(tokens):
-    """A hit label if any token of this segment ASSIGNS an AI identity: a git-identity env var
-    (GIT_AUTHOR_NAME=..., ...) or the EMAIL variable, by '=' or '+=', a '-c user.name=VALUE' or '-c
-    author.name=VALUE' config inline value (user, author or committer, name or email, in any case), or a
-    'config user.name VALUE'/'config user.name=VALUE' pair of any of those names. Judged on EVERY segment, so
-    setting the identity in a prior segment before the commit is caught too."""
+    """A hit label if any token of this segment ASSIGNS an AI identity. Judged on EVERY segment, so setting the
+    identity in a prior segment before the commit is caught too. A hit is:
+    - a git-identity env var (GIT_AUTHOR_NAME=..., ...) by '=' or '+=' in any word, as before EMAIL was read;
+    - the EMAIL variable by '=' or '+=' only where the shell or a wrapper runs the word as an assignment
+      (_cmtidn_assignment_words), so EMAIL=... in a commit message or another program's operand is not one;
+    - a user.name=VALUE or user.email=VALUE word (any case) anywhere, and an exact-case user.name or user.email
+      word followed by a value, on any segment, as before author and committer were read;
+    - an author.name=VALUE, author.email=VALUE, committer.name=VALUE or committer.email=VALUE word (any case)
+      right after a -c word, the git -c inline form (a git alias or function standing for git included);
+    - one of the six config names (any case) followed by a value, on a git config command that sets a value
+      (_cmtidn_config_setting), so a read-only command that merely names one (grep, rg, git config
+      --get-regexp, git log) is not one."""
     n = len(tokens)
+    assigned = frozenset(_cmtidn_assignment_words(tokens))
     for i, tok in enumerate(tokens):
         m = GIT_ENV_RE.match(tok)
         if m and AI_IDENTITY_RE.search(m.group(1)):
             return "git identity variable {!r}".format(tok.strip()[:80])
         m = EMAIL_ENV_RE.match(tok)
-        if m and AI_IDENTITY_RE.search(m.group(1)):
+        if m and i in assigned and AI_IDENTITY_RE.search(m.group(1)):
             return "EMAIL variable {!r}".format(tok.strip()[:80])
         m = USER_CONF_EQ_RE.match(tok)
         if m and AI_IDENTITY_RE.search(m.group(1)):
             return "user.name/user.email value {!r}".format(tok.strip()[:80])
         m = ROLE_CONF_EQ_RE.match(tok)
-        if m and AI_IDENTITY_RE.search(m.group(1)):
+        if m and i > 0 and tokens[i - 1] == "-c" and AI_IDENTITY_RE.search(m.group(1)):
             return "author/committer config value {!r}".format(tok.strip()[:80])
-        if IDENTITY_CONF_NAME_RE.fullmatch(tok) and i + 1 < n and AI_IDENTITY_RE.search(tokens[i + 1]):
+        if tok in ("user.name", "user.email") and i + 1 < n and AI_IDENTITY_RE.search(tokens[i + 1]):
+            return "user.name/user.email value {!r}".format(tokens[i + 1].strip()[:80])
+    start = _cmtidn_config_setting(tokens)
+    for i in range(n - 1 if start is None else start, n - 1):
+        tok = tokens[i]
+        if IDENTITY_CONF_NAME_RE.fullmatch(tok) and AI_IDENTITY_RE.search(tokens[i + 1]):
             label = "user.name/user.email" if tok[:1] in "uU" else "author/committer config"
             return "{} value {!r}".format(label, tokens[i + 1].strip()[:80])
+    return None
+
+
+# The declaration builtins whose VAR=value operands the shell assigns (export EMAIL=x, declare -x EMAIL=x).
+_CMTIDN_DECLARE_WORDS = frozenset(("export", "declare", "typeset", "local", "readonly"))
+
+
+def _cmtidn_assignment_words(tokens):
+    """Yield the index of each word of one segment that the shell or a wrapper runs as a variable assignment:
+    the VAR=value (or VAR+=value) words before the command word, past leading reserved words
+    (_CMTIDN_RESERVED) as _cmtidn_git_commands passes over them; every VAR=value operand of a declaration
+    builtin command word (_CMTIDN_DECLARE_WORDS); and, when the command word is a wrapper
+    (_CMTIDN_GIT_WRAPPERS), every VAR=value word after it up to its first git word (env EMAIL=x git commit,
+    sudo -u ci EMAIL=x git commit, env -S 'EMAIL=x' git commit), whatever the wrapper's options, the same
+    bounded rule the git command finder uses. A VAR=value word in any other place (a commit message, an echo
+    operand, an argument of python3 -c) is an operand, not an assignment. Not read: a variable set by a for
+    loop, read, printf -v or another builtin that is not an assignment word, and an assignment inside a string
+    a shell parses at run time (bash -c, eval, env -S'...' attached to its option)."""
+    n = len(tokens)
+    i = 0
+    while i < n and tokens[i] in _CMTIDN_RESERVED:
+        named = tokens[i] in ("function", "coproc")
+        i += 1
+        if named and i + 1 < n and tokens[i + 1] in _CMTIDN_COMPOUND_OPENERS:
+            i += 1  # the NAME of a function definition or a named coprocess, before its compound body
+    while i < n and _ENV_ASSIGN_RE.match(tokens[i]):
+        yield i
+        i += 1
+    if i >= n:
+        return
+    word = tokens[i].rsplit("/", 1)[-1]
+    declare = word in _CMTIDN_DECLARE_WORDS
+    if not declare and word not in _CMTIDN_GIT_WRAPPERS:
+        return
+    for j in range(i + 1, n):
+        if not declare and tokens[j].rsplit("/", 1)[-1] == "git":
+            return
+        if _ENV_ASSIGN_RE.match(tokens[j]):
+            yield j
+
+
+# git config reads or edits rather than sets a value under these options and subcommands. A long option is
+# also read by any prefix of at least three characters that one of these names starts with (git accepts an
+# unambiguous prefix, and refuses an ambiguous one, so no prefix that only names one of these sets a value).
+_GIT_CONFIG_READ_LONG = ("--get", "--get-all", "--get-regexp", "--get-urlmatch", "--get-color",
+                         "--get-colorbool", "--list", "--unset", "--unset-all", "--rename-section",
+                         "--remove-section", "--edit")
+_GIT_CONFIG_READ_SHORT = frozenset("le")  # -l (--list) and -e (--edit), alone or in a short option cluster
+_GIT_CONFIG_READ_SUBS = frozenset(("get", "list", "unset", "rename-section", "remove-section", "edit"))
+# git config options that take the next word as their value, so that word is not read as a subcommand.
+_GIT_CONFIG_VALUE_OPTS = frozenset(("-f", "--file", "--blob", "--type", "--default", "--comment", "--value"))
+
+
+def _cmtidn_config_read_option(tok):
+    """True when one word after git config selects a mode that reads or edits rather than sets a value."""
+    if tok.startswith("--"):
+        return len(tok) >= 3 and "=" not in tok and any(name.startswith(tok) for name in _GIT_CONFIG_READ_LONG)
+    if tok.startswith("-") and len(tok) > 1:
+        for letter in tok[1:]:
+            if letter in _GIT_CONFIG_READ_SHORT:
+                return True
+            if letter == "f":
+                return False  # -f takes the rest of its word or the next word as a file name
+    return False
+
+
+def _cmtidn_config_setting(tokens):
+    """The index of the first word after the earliest 'config' word of one segment that a git config command
+    reads as its arguments when that command sets a value, or None when there is none. A config word counts
+    when it is the subcommand of a git command the finder reads (_cmtidn_git_commands: git config, sudo git
+    config, git -C dir config) or stands right after a command word that is not git (a git alias or function
+    standing for git, g config author.name ...). The command sets a value unless one of its words selects a
+    read or edit mode (_cmtidn_config_read_option: --get, --get-regexp, --list, --unset and the rest) or its
+    first word that is not an option is a read or edit subcommand (git config get, list, unset,
+    rename-section, remove-section, edit); git config set and the NAME VALUE form, with any scope, file,
+    type, --add or --replace-all option, set one. One backward pass marks where a read or edit option
+    follows, and each config word's subcommand search stops at its first word that is not an option, so a
+    segment of many config words costs time linear in its length."""
+    n = len(tokens)
+    starts = [k for k in _cmtidn_git_commands(tokens) if tokens[k] == "config"]
+    k = 0
+    while k < n and tokens[k] in _CMTIDN_RESERVED:
+        k += 1
+    while k < n and _ENV_ASSIGN_RE.match(tokens[k]):
+        k += 1
+    if k + 1 < n and tokens[k + 1] == "config" and tokens[k].rsplit("/", 1)[-1] != "git":
+        starts.append(k + 1)
+    if not starts:
+        return None
+    read_after = [False] * (n + 1)  # read_after[i]: a word at index i or later selects a read or edit mode
+    for i in range(n - 1, -1, -1):
+        read_after[i] = read_after[i + 1] or _cmtidn_config_read_option(tokens[i])
+    for k in sorted(starts):
+        if read_after[k + 1]:
+            continue
+        first = None
+        skip = False
+        for j in range(k + 1, n):
+            tok = tokens[j]
+            if skip:
+                skip = False
+            elif tok in _GIT_CONFIG_VALUE_OPTS:
+                skip = True
+            elif not tok.startswith("-"):
+                first = tok
+                break
+        if first not in _GIT_CONFIG_READ_SUBS:
+            return k + 1
     return None
 
 
