@@ -4901,15 +4901,17 @@ SILENT_RUNNER_REVERT = (
 # Stub gates for runner_naming_problems. Both are executable fixtures that start with
 # #!/bin/sh, written to the bin directory that heads the PATH _run_runner_copy sets.
 # Each appends one line, its name and then its arguments, to the call log named by
-# stub_log, which the scenario checks against the declared roster; python3 exits 3
-# only when its arguments equal stub_fail_command, and gitleaks exits with
-# stub_gitleaks_rc. This code defines no shell function or alias for either, and the
-# environment mapping it passes to bash names no BASH_ENV file. runner_naming_problems
-# has _prepare_stubs write them before it constructs its scenario pool; the
-# _stubs_prepared_before_pool docstring states what self-test vector 27 checks of that
-# order.
+# stub_log, which the scenario checks against the declared roster; when stub_trace
+# names a file, each also appends its own path ($0) and then its arguments to that
+# file, which self-test vector 27b reads. python3 exits 3 only when its arguments
+# equal stub_fail_command, and gitleaks exits with stub_gitleaks_rc. This code
+# defines no shell function or alias for either, and the environment mapping it
+# passes to bash names no BASH_ENV file. runner_naming_problems has _prepare_stubs
+# write them before it constructs its scenario pool; the _stubs_prepared_before_pool
+# docstring states what self-test vector 27 checks of that order.
 _STUB_PYTHON3 = """#!/bin/sh
 printf '%s\\n' "python3 $*" >> "$stub_log" || exit 2
+[ -z "${stub_trace-}" ] || printf '%s\\n' "$0 $*" >> "$stub_trace" || exit 2
 if [ "$*" = "$stub_fail_command" ]; then
   exit 3
 fi
@@ -4917,6 +4919,7 @@ exit 0
 """
 _STUB_GITLEAKS = """#!/bin/sh
 printf '%s\\n' "gitleaks $*" >> "$stub_log" || exit 2
+[ -z "${stub_trace-}" ] || printf '%s\\n' "$0 $*" >> "$stub_trace" || exit 2
 exit "$stub_gitleaks_rc"
 """
 
@@ -4946,7 +4949,7 @@ def _prepare_stubs(root, python3=_STUB_PYTHON3):
     return bin_dir
 
 
-def _run_runner_copy(text, bin_dir, fail_command="", gitleaks_rc=0):
+def _run_runner_copy(text, bin_dir, fail_command="", gitleaks_rc=0, trace=None):
     """Run text as tools/run_all_checks.sh in a scratch tree; return (rc, stdout lines, calls).
 
     bin_dir is the shared stub directory from _prepare_stubs, whose python3 and
@@ -4956,7 +4959,9 @@ def _run_runner_copy(text, bin_dir, fail_command="", gitleaks_rc=0):
     this writes is executed directly. It passes bash an explicit environment mapping
     rather than the calling process's environment: PATH is bin_dir, then os.defpath;
     HOME is the scratch tree; LC_ALL is C; and stub_log, stub_fail_command and
-    stub_gitleaks_rc name the call log and the scenario's settings. calls is the
+    stub_gitleaks_rc name the call log and the scenario's settings. When trace is
+    given, stub_trace names it too, so each fixture that runs also appends its own
+    path and arguments to that file (self-test vector 27b passes one). calls is the
     lines the fixtures recorded in the call log.
     """
     import os
@@ -4982,6 +4987,8 @@ def _run_runner_copy(text, bin_dir, fail_command="", gitleaks_rc=0):
             stub_fail_command=fail_command,
             stub_gitleaks_rc=str(gitleaks_rc),
         )
+        if trace is not None:
+            env["stub_trace"] = str(trace)
         proc = subprocess.run(
             [bash, "--noprofile", "--norc", str(runner)],
             cwd=tmp, env=env, stdin=subprocess.DEVNULL,
@@ -5354,14 +5361,17 @@ def _stubs_prepared_before_pool(text, red_command):
     a child process (a cp or install run in a subprocess). An os.open with dir_fd is
     recorded with its path resolved against the working directory (the open audit event
     carries no dir_fd argument), so a relative path opened that way matches the stub
-    only when that resolution happens to name it. In each of these cases only the
-    every-executable-was-seen leg can fail, and only when no recorded event names the
-    stub path at all, except that a symlink or hard link to a stub that is in a scenario
-    tree when that tree's snapshot is taken is listed there as an executable, so the
-    scenario-tree leg fails. Because os.rename, os.link and os.symlink are recorded
-    under their destination path only, a stub renamed away is recorded under its new
-    path and that rename is not matched to the stub path. A dir_fd-relative path is
-    resolved through /proc/self/fd only for the os.chmod, os.rename, os.link and
+    only when that resolution happens to name it, and then the late-event leg counts it.
+    Otherwise no recorded event in these cases names the stub path, so only a leg that
+    checks what the snapshots list can fail: the required-stub leg when the change
+    leaves a stub missing or not executable (an os.fchmod that clears its execute bits,
+    for one), the every-executable-was-seen leg when no recorded event names a
+    stub-directory executable at all, and the scenario-tree leg when a symlink or hard
+    link to a stub is in a scenario tree when that tree's snapshot is taken, since it is
+    listed there as an executable. Because os.rename, os.link and os.symlink are
+    recorded under their destination path only, a stub renamed away is recorded under
+    its new path and that rename is not matched to the stub path. A dir_fd-relative path
+    is resolved through /proc/self/fd only for the os.chmod, os.rename, os.link and
     os.symlink events, and only where that pseudo-filesystem exists; without it such a
     path stays working-directory-resolved, the same residual class as the
     descriptor-only operations.
@@ -5460,6 +5470,65 @@ def _stubs_prepared_before_pool(text, red_command):
             (os.path.basename(p), event)
             for p, event, early in events if p in found and not early).items()),
     )
+
+
+def _stub_launch_evidence(text):
+    """Return the evidence that one runner copy ran its stubbed commands as fixtures.
+
+    Self-test vector 27b runs text once through _run_runner_copy against a fresh bin
+    directory from _prepare_stubs, with a trace file named by stub_trace. Each python3
+    or gitleaks fixture that runs appends its own $0 and then its arguments to the
+    trace; bash sets $0 to the path it found on PATH, so a fixture run names its file
+    in the bin directory. A shell function, alias or exported function standing in for
+    a fixture writes no trace line. A recorder on the CPython subprocess.Popen audit
+    event keeps the environment of every launch whose stub_trace names this trace (the
+    calling process's environment where the launch passes none); that is the
+    environment the bash child starts with, after any wrapper around subprocess.run
+    has changed it. This checks the python3 and gitleaks fixtures of _prepare_stubs
+    only, not _STUB_PYTHON3_PWD or the dirname fixture, and not bash or /bin/sh.
+
+    Returns (exit status, call log lines, trace lines with the bin directory path
+    shown as <bin>, launches recorded, and sorted BASH_ENV or BASH_FUNC_ keys found in
+    any recorded launch environment).
+    """
+    import os
+    import tempfile
+
+    global _WRITE_AUDIT_INSTALLED
+    launches = []
+
+    with tempfile.TemporaryDirectory(prefix="ci-parity-exec-") as tmp:
+        root = Path(tmp)
+        trace = root / "trace.log"
+        trace.write_text("", encoding="utf-8")
+
+        def record(event, args):
+            if event != "subprocess.Popen" or len(args) < 4:
+                return
+            env = os.environ if args[3] is None else args[3]
+            names = {os.fsdecode(name): value for name, value in env.items()}
+            if os.fsdecode(names.get("stub_trace", "")) == str(trace):
+                launches.append(sorted(names))
+
+        bin_dir = _prepare_stubs(root)
+        try:
+            if not _WRITE_AUDIT_INSTALLED:
+                sys.addaudithook(_dispatch_write_audit)
+                _WRITE_AUDIT_INSTALLED = True
+            _WRITE_RECORDERS.append(record)
+            try:
+                rc, _lines, calls = _run_runner_copy(text, bin_dir, trace=trace)
+            finally:
+                _WRITE_RECORDERS.remove(record)
+        finally:
+            bin_dir.chmod(0o700)  # so the scratch tree can be removed
+        prefix = str(bin_dir) + os.sep
+        traced = ["<bin>" + os.sep + line[len(prefix):] if line.startswith(prefix)
+                  else line
+                  for line in trace.read_text(encoding="utf-8").splitlines()]
+    forbidden = sorted({name for names in launches for name in names
+                        if name == "BASH_ENV" or name.startswith("BASH_FUNC_")})
+    return rc, calls, traced, len(launches), forbidden
 
 
 def self_test():
@@ -7158,6 +7227,24 @@ def self_test():
             "27 executable stubs prepared before the pool: got {!r}, expected {!r}".format(
                 ordering, want))
 
+    # Executable fixtures, not stand-ins: one runner copy must run each stubbed command
+    # as its fixture file in the stub directory (the trace line's $0), and bash must
+    # start with no BASH_ENV and no BASH_FUNC_ entry in its environment. A python3 shell
+    # function restored through BASH_ENV, or exported to bash, still writes the call log
+    # but no trace line, and puts its key in the launch environment, so it fails this
+    # vector; the _stub_launch_evidence docstring states what it records.
+    count += 1
+    launch = _stub_launch_evidence(local_fixture(
+        ("python3 -I -B tools/clean.py",),
+        ("if gitleaks dir . --no-banner; then :; else failed=1; fi",)))
+    want = (0, ["python3 -I -B tools/clean.py", "gitleaks dir . --no-banner"],
+            ["<bin>/python3 -I -B tools/clean.py", "<bin>/gitleaks dir . --no-banner"],
+            1, [])
+    if launch != want:
+        failures.append(
+            "27b stubbed commands ran as executable fixtures: got {!r}, expected {!r}".format(
+                launch, want))
+
     # Byte-level reader: Path.read_text() translates a carriage return
     # into a newline (universal newlines) BEFORE any text screen can run,
     # so a forbidden byte planted in a runner ON DISK formerly vanished on
@@ -7280,6 +7367,9 @@ def self_test():
             ("_run_runner_copy", "read_text"): 1,
             ("_run_runner_copy", "splitlines"): 2,
             ("_shadow_check", "splitlines"): 1,
+            # The stub trace file vector 27b writes, never a runner or workflow.
+            ("_stub_launch_evidence", "read_text"): 1,
+            ("_stub_launch_evidence", "splitlines"): 1,
             ("adapt_standalone_runner", "splitlines"): 1,
             ("extract_ci", "splitlines"): 1,
             ("extract_local", "splitlines"): 2,
