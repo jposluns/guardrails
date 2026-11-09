@@ -3332,27 +3332,38 @@ def p7_atx_heading(raw):
     return 1 <= hashes <= 6 and (len(text) == hashes or text[hashes] in " \t")
 
 
+def p7_list_heading(raw, stack):
+    """Whether a line ends the open list as a heading: an ATX heading (p7_atx_heading) indented at most
+    three columns past the text column of the innermost open item it reaches (stack: the open items'
+    content columns; the margin when none is reached). A `#` line four or more columns past that column
+    is continuation text in CommonMark (- Steps for, then six spaces and # x), so the list stays open."""
+    expanded = raw.expandtabs(4)
+    indent = len(expanded) - len(expanded.lstrip(" "))
+    column = max((open_column for open_column in stack if open_column <= indent), default=0)
+    return indent - column <= 3 and p7_atx_heading(raw)
+
+
 def p7_nested_items(text, blocks):
     """{line number} of each prose line indented four or more columns that is read as a nested list item,
     not as indented code: the line opens a list item (p7_item_columns), and the lines directly above it,
-    with no blank, fence, heading (p7_atx_heading), blockquote or HTML-comment line between, are list
-    items and their continuation text (a line such as #9 work: included) that leave an item open whose
-    content column is at most three columns left of the line's marker (1. Steps: then four spaces
-    and - TASK: ...). Indented code cannot interrupt a paragraph, so such a line is never code. This
-    departs from CommonMark in both directions. A nested item numbered other than 1 directly under a
-    paragraph line (1. Steps: then four spaces and 2. TASK: ...) is read here, while CommonMark joins it
-    to that paragraph, since an ordered list may interrupt a paragraph only when it starts at 1. And a
-    line CommonMark may read as a nested item is not read this way after a blank line (a reading of the
-    enclosing items across the blank is not made), under a line of markers alone (* * *, or a setext
-    underline such as ---) or after a heading line; a line indented four or more columns past every open
-    item is continuation text in both readings."""
+    with no blank, fence, heading (p7_list_heading), blockquote or HTML-comment line between, are list
+    items and their continuation text (a line such as #9 work:, or a # line four or more columns past an
+    open item's text, included) that leave an item open whose content column is at most three columns
+    left of the line's marker (1. Steps: then four spaces and - TASK: ...). Indented code cannot
+    interrupt a paragraph, so such a line is never code. This departs from CommonMark in both directions.
+    A nested item numbered other than 1 directly under a paragraph line (1. Steps: then four spaces and
+    2. TASK: ...) is read here, while CommonMark joins it to that paragraph, since an ordered list may
+    interrupt a paragraph only when it starts at 1. And a line CommonMark may read as a nested item is
+    not read this way after a blank line (a reading of the enclosing items across the blank is not made),
+    under a line of markers alone (* * *, or a setext underline such as ---) or after a heading line; a
+    line indented four or more columns past every open item is continuation text in both readings."""
     prose = set()
     for block in blocks:
         if block.kind == "prose":
             prose.update(number for number, _ in block.lines)
     nested, stack = set(), []
     for number, raw in enumerate(text.split("\n"), 1):
-        if number not in prose or raw.lstrip().startswith((">", "<!--")) or p7_atx_heading(raw) \
+        if number not in prose or raw.lstrip().startswith((">", "<!--")) or p7_list_heading(raw, stack) \
                 or not p7_unmarked(raw).strip(" *-_"):
             stack = []
             continue
@@ -3463,8 +3474,9 @@ def p7_range_word(word):
     for in the word as written, never after punctuation is stripped, which would cut an open range's dots
     away, but a path component `..` followed by `/` (p7_path_dots: ../notes.md, src/../a.py) is a path,
     not a range. So a closed or open range, and a word ending in an ellipsis after letters
-    (carefully...), are ranges, while dots alone or in punctuation ([...], <...>, {...}, -...) and a
-    relative path are not."""
+    (carefully...), are ranges, while dots alone or inside only those marks ([...], <...>, {...}, -...)
+    and a word whose every `..` is a component followed by `/` (../notes.md) are not. Dots inside any
+    other punctuation (|...|, ~...~, #...) and a `..` with no `/` after it (src/.., ../..) are ranges."""
     pieces = word.split("/")
     if not any(".." in piece and not (index + 1 < len(pieces) and p7_path_dots(piece, index == 0))
                for index, piece in enumerate(pieces)):
@@ -5268,15 +5280,22 @@ def _p7_selftest(flip, flip_record):
                 "-    Steps:\n    - TASK: fix the pinned commit.\n")],
             [(0, [("P3", "ADVISORY")])] * 3 + [(1, [("P7", "HARD")])] * 2 + [(1, [("P7", "HARD")])] * 4)
         # a continuation line opening with `#` ends the open list only when it is a CommonMark ATX heading
-        # (one to six `#`, then a space, a tab or the end of the line): under #9 work: or seven `#` the
-        # nested fix line is read, under # Notes, #<tab>Notes, a bare # or six `#` it is not
-        hash_cases = [lambda text=text: p7(fix_claim, ids["c2"], task=review + "- Steps for\n  " + text
-                                           + "\n    - TASK: fix the pinned commit.\n") for text in (
-            "#9 work:", "####### x")]
-        check("preflight/p7-nested-hash-line", [case() for case in hash_cases] + [
-            p7(stale_claim, ids["c2"], task=review + "- Steps for\n  " + text
-               + "\n    - TASK: fix the pinned commit.\n") for text in ("# Notes", "#", "###### x", "#\tNotes")],
-            [(0, [("P3", "ADVISORY")])] * 2 + [(1, [("P7", "HARD")])] * 4)
+        # (one to six `#`, then a space, a tab or the end of the line) at most three columns past the open
+        # item's text: under #9 work:, seven `#`, or a # line four columns past the text (six spaces or
+        # two tabs under "- ", eight spaces under a nested "  - ") the nested fix line is read; under
+        # # Notes, #<tab>Notes, a bare # or six `#` at the text column, or # Notes two or three columns
+        # past it (seven spaces under the nested item), it is not
+        hash_line = "- Steps for\n{}\n    - TASK: fix the pinned commit.\n"
+        nested_hash = "- Steps:\n  - More:\n{}\n      - TASK: fix the pinned commit.\n"
+        hash_cases = [lambda text=text: p7(fix_claim, ids["c2"], task=review + hash_line.format(text))
+                      for text in ("  #9 work:", "  ####### x")]
+        deep_hash_cases = [lambda task=task: p7(fix_claim, ids["c2"], task=review + task) for task in (
+            hash_line.format("      # x"), hash_line.format("\t\t# x"), nested_hash.format("        # x"))]
+        check("preflight/p7-nested-hash-line", [case() for case in hash_cases + deep_hash_cases] + [
+            p7(stale_claim, ids["c2"], task=review + task) for task in [hash_line.format(text) for text in (
+                "  # Notes", "  #", "  ###### x", "  #\tNotes", "    # Notes", "     # Notes")]
+            + [nested_hash.format("       # x")]],
+            [(0, [("P3", "ADVISORY")])] * 5 + [(1, [("P7", "HARD")])] * 7)
         # a task-list item (- [ ], - [x], 1. [X]) is a list item: its checkbox is skipped before the label;
         # a bracket that is not a checkbox, or a checkbox with no space after it, leaves the line unread
         box_cases = [lambda task=task, text=text: p7(text, ids["c2"], task=task) for task, text in (
@@ -5612,6 +5631,11 @@ def _p7_selftest(flip, flip_record):
         check("revert/p7-nested-hash-line-red", *flip(
             hash_cases, [(1, [("P3", "ADVISORY"), ("P7", "HARD")])] * 2,
             p7_atx_heading=lambda raw: raw.lstrip().startswith("#")))
+        # the indent bound on a heading removed: a # line four or more columns past the open item's text
+        # ends the open list again, so the nested fix line is hidden and the fix sentence refuses
+        check("revert/p7-nested-hash-indent-red", *flip(
+            deep_hash_cases, [(1, [("P3", "ADVISORY"), ("P7", "HARD")])] * 3,
+            p7_list_heading=lambda raw, stack: p7_atx_heading(raw)))
         # every different commit-id word counted again: a short and a full id are two commits
         check("revert/p7-commit-prefix-red", *flip(
             commit_cases, [(0, [("P7", "ADVISORY")])] * 3, p7_distinct_commits=lambda words: set(words)))
@@ -8503,7 +8527,7 @@ def self_test(report_path=None):
             os.chmod(locked, 0o700)
         shutil.rmtree(inputs, ignore_errors=True)
     _p7_selftest(flip, flipped.append)
-    check("revert/every-flip-ran", len(flipped), 269)
+    check("revert/every-flip-ran", len(flipped), 270)
 
     for check_id in sorted(expected - _EXECUTED_SET):
         FAILURES.append("execution-set/missing: {}".format(check_id))

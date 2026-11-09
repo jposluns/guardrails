@@ -4181,6 +4181,7 @@ expected-check-ids = [
   "revert/p7-range-path-red",
   "revert/p7-range-ellipsis-red",
   "revert/p7-nested-hash-line-red",
+  "revert/p7-nested-hash-indent-red",
   "revert/p7-commit-prefix-red",
   "revert/p7-normpath-red",
   "revert/p7-dot-component-red",
