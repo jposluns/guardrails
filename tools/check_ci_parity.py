@@ -4911,13 +4911,19 @@ _WEEKLY_LIVE = (
 _WEEKLY_EVENT = (
     "a live gate whose refs come from the pull request or push event, which "
     "a scheduled run does not carry")
+_WEEKLY_SELF_CHECK = (
+    "quality.yml runs this form on a push to main, where it describes it as a "
+    "self-check of main against origin/main with zero lag; a nightly run of "
+    "main adds nothing to that self-check")
 _WEEKLY_GROUP = (
     "one of the local runner's opf.py --self-test-group lines; the one whole "
-    "opf.py --self-test in the weekly file runs the same registered self-tests")
+    "opf.py --self-test in the scheduled file runs the same registered "
+    "self-tests")
 _WEEKLY_HOST_PIN = (
     "the host pin live leg fails on any interpreter but the host patch "
     "release, and tools/check_python_floor.py accepts a patch-release pin only "
-    "in the quality.yml host-patch jobs; its self-test runs in the weekly file")
+    "in the quality.yml host-patch jobs; its self-test runs in the scheduled "
+    "file")
 _WEEKLY_DIGEST = (
     "the advisory reference digest exits 0 on a finding and gates nothing")
 _WEEKLY_PULL_REQUEST = (
@@ -4933,17 +4939,17 @@ _WEEKLY_HISTORY = (
     "on the push that made that commit")
 _WEEKLY_LOCAL_GITLEAKS = (
     "local-only: quality.yml does not run it; it checks the gitleaks binary "
-    "on the host PATH against the pinned version, and a weekly runner "
-    "installs none")
+    "on the host PATH against the pinned version, and the scheduled file "
+    "downloads gitleaks into its working directory, not onto PATH")
 _WEEKLY_LOCAL_HISTORY = (
     "local-only: quality.yml does not run this form; it reads the git "
     "history of the local branch against its protected line")
 # Every reason an entry may carry: a reason outside these is a
 # weekly-exclusion-reason finding, so an entry cannot pass on a stray mark.
 WEEKLY_REASONS = (
-    _WEEKLY_LIVE, _WEEKLY_EVENT, _WEEKLY_GROUP, _WEEKLY_HOST_PIN,
-    _WEEKLY_DIGEST, _WEEKLY_PULL_REQUEST, _WEEKLY_NO_PARENT, _WEEKLY_HISTORY,
-    _WEEKLY_LOCAL_GITLEAKS, _WEEKLY_LOCAL_HISTORY)
+    _WEEKLY_LIVE, _WEEKLY_EVENT, _WEEKLY_SELF_CHECK, _WEEKLY_GROUP,
+    _WEEKLY_HOST_PIN, _WEEKLY_DIGEST, _WEEKLY_PULL_REQUEST, _WEEKLY_NO_PARENT,
+    _WEEKLY_HISTORY, _WEEKLY_LOCAL_GITLEAKS, _WEEKLY_LOCAL_HISTORY)
 WEEKLY_EXCLUSIONS = (
     ("opf/tools/opf.py --self-test-group adopt", _WEEKLY_GROUP),
     ("opf/tools/opf.py --self-test-group core", _WEEKLY_GROUP),
@@ -4953,7 +4959,7 @@ WEEKLY_EXCLUSIONS = (
     ("tools/check_branch_root.py --protected <ref:origin/${GITHUB_BASE_REF}> "
      "--head <ref:$PR_HEAD_SHA> --max-lag 200", _WEEKLY_EVENT),
     ("tools/check_branch_root.py --protected <ref:origin/${GITHUB_REF_NAME}> "
-     "--max-lag 200", _WEEKLY_EVENT),
+     "--max-lag 200", _WEEKLY_SELF_CHECK),
     ("tools/check_release_cut.py --protected <ref:origin/${GITHUB_REF_NAME}> "
      "--base <ref:$PUSH_BEFORE>", _WEEKLY_EVENT),
     ("tools/check_version_monotonicity.py --base <ref:origin/${GITHUB_BASE_REF}>",
