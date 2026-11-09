@@ -141,7 +141,10 @@ in a variable or computed is pinned only by the expression the call spells (R13)
                                                        (tools/_selftest_exit_report.py)
 Exit: 0 every leg holds; 1 findings, each named; 2 cannot evaluate (an input missing, not a regular file,
 unreadable, not UTF-8, outside the parity reader's grammar or unparsable; a directory that cannot be listed or
-walked; an unresolved dynamic load), the live refusal, or usage. There is no warning tier.
+walked; an unresolved dynamic load), the live refusal, or usage. There is no warning tier. A self-test row
+whose result holds a launch that reached the canonical probe's CHILD_TIMEOUT bound (host load) is no verdict
+either way: with no row failed, the self-test prints SELF-TEST CANNOT EVALUATE naming each such row and exits 2,
+never 0; any failed row still makes it exit 1.
 
 Disclosed residuals, not closed by this gate: R1 an ignore or SA_NOCLDWAIT set below Python after interpreter
 start (a native extension, ctypes, an embedding host) is not seen by the disposition read, and the fork probe runs
@@ -2821,8 +2824,38 @@ def _copy(rel, base, text=None):
     return path
 
 
+# What the canonical probe's run_child and through_bash put in a launch result when subprocess.TimeoutExpired
+# ended the launch at their CHILD_TIMEOUT bound.
+LAUNCH_TIMED_OUT = "launch failed (TimeoutExpired)"
+
+
+def _timed_out(got):
+    """Whether got, a launch result or a detail holding launch results (nested in tuples, lists or dict values),
+    holds a launch that reached the probe's CHILD_TIMEOUT bound: exactly (LAUNCH_TIMED_OUT, "", "") from
+    run_child or (None, LAUNCH_TIMED_OUT, "") from through_bash. Any other launch failure (an OSError) is not."""
+    if isinstance(got, tuple) and got in ((LAUNCH_TIMED_OUT, "", ""), (None, LAUNCH_TIMED_OUT, "")):
+        return True
+    if isinstance(got, dict):
+        got = tuple(got.values())
+    return isinstance(got, (tuple, list)) and any(_timed_out(item) for item in got)
+
+
+def _no_verdict_on_timeout(rows):
+    """rows with each failed row whose detail holds a launch that reached its time bound turned to None (no
+    verdict): under host load that launch said nothing about the guard its row tests, and a None row never
+    passes. A passing row, and a failed row whose launches all finished, keep their verdict."""
+    return [(check_id, None if not ok and _timed_out(detail) else bool(ok), detail)
+            for check_id, ok, detail in rows]
+
+
 def _behaviour(probe, base):
-    """[(check id, ok, detail)] for every behaviour, control and guard-removed vector."""
+    """[(check id, ok, detail)] for every behaviour, control and guard-removed vector; ok is None for a row
+    whose launch reached its time bound (_no_verdict_on_timeout)."""
+    return _no_verdict_on_timeout(_behaviour_rows(probe, base))
+
+
+def _behaviour_rows(probe, base):
+    """[(check id, ok, detail)] for every behaviour, control and guard-removed vector, ok a bool."""
     out = []
     python = [sys.executable, "-I", "-B"]
     via = probe.through_bash
@@ -3079,20 +3112,23 @@ def self_test(lane, report_path=None):
     if report_path is not None:
         _selftest_exit_report.arm(report_path, suite, executed)
 
-    def check(check_id, ok, detail=""):
-        results.append((check_id, bool(ok), detail))
+    def check(check_id, ok, detail="", launch=False):
+        # Only a launch row (launch=True) keeps None, which _no_verdict_on_timeout alone produces, as no
+        # verdict; every other row is pass or fail, so a None from any other check stays a failure.
+        results.append((check_id, None if launch and ok is None else bool(ok), detail))
         executed.append(check_id)
 
     probe = _canonical_module()
     if lane == "probe":
         got = dict((check_id, (ok, detail)) for check_id, ok, detail in
-                   probe.self_test_results(str(ROOT / CANONICAL_REL)))
+                   _no_verdict_on_timeout(probe.self_test_results(str(ROOT / CANONICAL_REL))))
         for check_id, _index in (("repro/ignored-reads-failed-child-as-zero", 0),
                                  ("repro/default-reads-failed-child", 1), ("live/default-passes", 2),
                                  ("live/ignored-refuses-by-name", 3), ("layer/handler-seen-by-disposition", 4),
                                  ("layer/lost-status-seen-by-probe", 5), ("layer/no-fork-nothing-probed", 6),
                                  ("layer/no-sigchld-nothing-probed", 7)):
-            check(check_id, got.get(check_id, (False, "not run"))[0], got.get(check_id, (False, "not run"))[1])
+            check(check_id, got.get(check_id, (False, "not run"))[0], got.get(check_id, (False, "not run"))[1],
+                  launch=True)
     else:
         this = sys.modules[__name__]
         trees, texts = _inputs()
@@ -3278,7 +3314,8 @@ def self_test(lane, report_path=None):
                                 ("revert/audit-stdout-stream-misses-dup2-red", 0),
                                 ("revert/audit-report-at-return-red", 0),
                                 ("revert/audit-subinterpreter-unrecorded-red", 0)):
-            check(check_id, behaviour.get(check_id, (False, "not run"))[0], behaviour.get(check_id, (False, None))[1])
+            check(check_id, behaviour.get(check_id, (False, "not run"))[0],
+                  behaviour.get(check_id, (False, None))[1], launch=True)
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             code = run(ROOT)
@@ -3292,12 +3329,21 @@ def self_test(lane, report_path=None):
     elif len(set(executed)) != len(executed) or set(executed) != expected:
         harness.append(("execution-set/reconciled", dict(missing=sorted(expected - set(executed)),
                                                          extra=sorted(set(executed) - expected))))
-    failed = [(check_id, detail) for check_id, ok, detail in results if not ok] + harness
+    failed = [(check_id, detail) for check_id, ok, detail in results if ok is False] + harness
+    unevaluated = [(check_id, detail) for check_id, ok, detail in results if ok is None]
     if failed:
         print("SELF-TEST FAIL: {} {} of {} check(s) failed".format(suite, len(failed), len(results)))
         for check_id, detail in failed:
             print("  {}: {!r}".format(check_id, detail))
+    if unevaluated:
+        print("SELF-TEST CANNOT EVALUATE: {} {} of {} check(s) no verdict, a launch reaching its {} s bound "
+              "(host load)".format(suite, len(unevaluated), len(results), probe.CHILD_TIMEOUT))
+        for check_id, detail in unevaluated:
+            print("  {}: {!r}".format(check_id, detail))
+    if failed:
         return 1
+    if unevaluated:
+        return 2
     print("SELF-TEST PASS: {} {} checks".format(suite, len(results)))
     return 0
 
