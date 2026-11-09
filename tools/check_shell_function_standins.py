@@ -8,25 +8,38 @@ Exit: 0 clean within scope; 1 finding; 2 cannot-evaluate.
 Rule text (tsthrm.10): where verification substitutes for an external executable, the substitute
 is an executable fixture, never a shell function or alias. Bash imports an exported function from
 an environment variable named BASH_FUNC_<name>%%, and before it runs a non-interactive script it
-sources the file that BASH_ENV names (ENV for sh, and for bash in POSIX mode). Either key lets a
-shell function stand in for an executable. The scan parses every *.py file under SCAN_ROOTS with
-ast, never importing or running the file, and reports a CONSTANT string key stored into a mapping:
+sources the file that BASH_ENV names. sh and bash read ENV only for an interactive shell; that key
+is listed as a precaution. Either key lets a shell function stand in for an executable. The scan
+parses every *.py file under SCAN_ROOTS with ast, never importing or running the file, and reports
+a CONSTANT str or bytes key stored into a mapping that reaches an environment:
 
   env-func     a key that starts with BASH_FUNC_ or ends with %% (the exported-function form);
   env-startup  a key that is exactly BASH_ENV or ENV (a startup file the shell sources).
 
-A store is one of these routes:
+A mapping reaches an environment when it is the target: os.environ, os.environb, or any name or
+attribute whose last component contains "env" in any case (env, child_env, self.env), assigned
+(plainly, annotated or by :=), updated (update, setdefault, __setitem__, |=, a subscript store),
+or when it is the value of an env= keyword argument of any call, or the key of os.putenv. Inside
+such a mapping a store is one of these routes:
 
-  dict-key          a key of a dict display ({"BASH_ENV": path});
+  dict-key          a key of a dict display, also inside a ** entry, a dict(...) argument, a
+                    union (os.environ | {...}) or a ChainMap(...) argument;
   dict-comp-key     the key of a dict comprehension;
-  keyword           a keyword argument of any call (dict(BASH_ENV=path), env.update(ENV=path));
-  first-argument    the first positional argument of a method or function named setdefault,
-                    putenv or __setitem__ (env.setdefault, os.putenv, os.environ.__setitem__);
-  subscript-store   a subscript store target (env["BASH_ENV"] = path, an augmented or annotated
-                    assignment, a for, with or unpacking target).
+  keyword           a keyword argument of dict(...) or of the target's update(...)
+                    (dict(BASH_ENV=path), os.environ.update(ENV=path));
+  pair              the key of a literal (KEY, v) pair in a literal list or tuple given to
+                    dict(...), update(...) or |=;
+  fromkeys          a literal key listed in fromkeys([KEY], v);
+  first-argument    the key of os.putenv or of the target's setdefault or __setitem__;
+  second-argument   the key of an unbound call whose first argument is the target
+                    (dict.setdefault(env, KEY, v), dict.__setitem__(env, KEY, v));
+  subscript-store   a subscript store into the target (env["BASH_ENV"] = path, an augmented or
+                    annotated assignment, a for, with or unpacking target).
 
 Removing or reading a key is not a store, so a filter that drops BASH_FUNC_ keys from an
-inherited environment (a startswith test, a comparison, pop, del, get, os.unsetenv) is clean.
+inherited environment (a startswith test, a comparison, pop, del, get, os.unsetenv) is clean. A
+mapping that never reaches a target is clean too: a lookup table, a membership test, an
+expected-value literal, a str.format or Template keyword, a counter and a config dict.
 
 A reviewed site is admitted only by an ALLOWLIST entry (path, enclosing qualname, kind, exact
 count, reason); an entry whose count no longer matches is itself a finding. The enclosing qualname
@@ -38,12 +51,16 @@ scan root, a directory the walk cannot list, any symlink inside a scanned root, 
 is not a regular file, and a file the scan cannot read, decode or parse are cannot-evaluate
 (exit 2), never a clean pass. Only the vendored opf/tools/_vendor tree is excluded.
 
-Residuals (not detected by this part): a key built at run time (a name, an f-string, a
-concatenation, a format call); a mapping built from pairs (dict([("BASH_ENV", p)])); a store
-through setattr, operator or another indirection; an environment inherited from the caller (a
-launch without env=, tsthrm.17); shell sources; and shell text a source launches (an export -f,
-a declare -fx, or a function or alias named after an executable). Those last two are planned as
-later parts of this lint.
+Residuals (not detected by this part, a best-effort lexical check): a key held in a name
+(KEY = "BASH_ENV"; env[KEY] = p); an env built by a helper (env=mk("BASH_ENV", p)) or a mapping
+built under another name and merged in later; pairs not written as literals (zip, a generator, a
+list held in a name); a key built at run time (an f-string, a concatenation, a format call); a
+store through operator.setitem, setattr or another indirection; a mapping loaded from data
+(json.loads); an environment passed positionally (os.execve) or held in a name without "env"; an
+environment inherited from the caller (a launch without env=, tsthrm.17); shell sources; and
+shell text a source launches (an export -f, a declare -fx, or a function or alias named after an
+executable). Those last two are planned as later parts of this lint. A name that contains "env"
+but holds no environment (environment_defaults) is still treated as a target.
 """
 import sys
 
@@ -75,12 +92,13 @@ KIND_RULES = {
     "env-func": ("tsthrm",),
     "env-startup": ("tsthrm",),
 }
-ROUTES = ("dict-key", "dict-comp-key", "keyword", "first-argument", "subscript-store")
+ROUTES = ("dict-key", "dict-comp-key", "keyword", "pair", "fromkeys", "first-argument",
+          "second-argument", "subscript-store")
 
 FUNC_PREFIX = "BASH_FUNC_"
 FUNC_SUFFIX = "%%"
 STARTUP_KEYS = frozenset({"BASH_ENV", "ENV"})
-FIRST_ARGUMENT_STORES = frozenset({"setdefault", "putenv", "__setitem__"})
+KEY_METHODS = frozenset({"setdefault", "__setitem__"})
 
 # The reviewed allowlist: (path, enclosing qualname, kind, exact count, reason). Every entry names
 # a current site and why it is accepted for now; a count that no longer matches the scan is a
@@ -107,15 +125,81 @@ def key_kind(text):
 
 
 def _constant_text(node):
-    if isinstance(node, ast.Constant) and isinstance(node.value, str):
-        return node.value
+    """The text of a str or bytes constant (bytes read as latin-1, so b"BASH_ENV" matches), or
+    None."""
+    if isinstance(node, ast.Constant):
+        if isinstance(node.value, str):
+            return node.value
+        if isinstance(node.value, bytes):
+            return node.value.decode("latin-1")
     return None
 
 
-class _Scanner(ast.NodeVisitor):
+def _env_named(node):
+    """Whether node is a name or attribute whose last component contains env in any case
+    (os.environ, os.environb, env, child_env, self.env)."""
+    if isinstance(node, ast.Name):
+        return "env" in node.id.lower()
+    if isinstance(node, ast.Attribute):
+        return "env" in node.attr.lower()
+    return False
+
+
+def _call_name(func):
+    if isinstance(func, ast.Attribute):
+        return func.attr
+    if isinstance(func, ast.Name):
+        return func.id
+    return None
+
+
+def _mapping_keys(expr, pairs):
+    """Yield (node, text, route) for each key the mapping expression expr stores. pairs admits a
+    literal list or tuple of literal (KEY, v) pairs at the top. Iterative, so a long union chain
+    does not recurse."""
+    todo = [(expr, pairs)]
+    while todo:
+        node, pairs_ok = todo.pop()
+        if isinstance(node, ast.Dict):
+            for key, value in zip(node.keys, node.values):
+                if key is None:
+                    todo.append((value, False))
+                else:
+                    yield key, _constant_text(key), "dict-key"
+        elif isinstance(node, ast.DictComp):
+            yield node.key, _constant_text(node.key), "dict-comp-key"
+        elif isinstance(node, ast.BinOp) and isinstance(node.op, ast.BitOr):
+            todo.append((node.left, False))
+            todo.append((node.right, False))
+        elif isinstance(node, (ast.List, ast.Tuple)) and pairs_ok:
+            for item in node.elts:
+                if isinstance(item, (ast.Tuple, ast.List)) and len(item.elts) == 2:
+                    yield item.elts[0], _constant_text(item.elts[0]), "pair"
+        elif isinstance(node, ast.Call):
+            name = _call_name(node.func)
+            if name == "dict" and isinstance(node.func, ast.Name):
+                if node.args:
+                    todo.append((node.args[0], True))
+                for keyword in node.keywords:
+                    if keyword.arg is None:
+                        todo.append((keyword.value, False))
+                    else:
+                        yield keyword, keyword.arg, "keyword"
+            elif name == "ChainMap":
+                todo.extend((arg, False) for arg in node.args)
+            elif (name == "fromkeys" and isinstance(node.func, ast.Attribute) and node.args
+                  and isinstance(node.args[0], (ast.List, ast.Tuple, ast.Set))):
+                for item in node.args[0].elts:
+                    yield item, _constant_text(item), "fromkeys"
+
+
+_SCOPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+
+
+class _Scanner:
     def __init__(self, disabled):
         self.disabled = disabled
-        self.stack = []
+        self.qualname = "<module>"
         self.findings = []
 
     def _record(self, node, text, route):
@@ -123,43 +207,71 @@ class _Scanner(ast.NodeVisitor):
             return
         kind = key_kind(text)
         if kind is not None:
-            self.findings.append((node.lineno, node.col_offset, ".".join(self.stack) or "<module>",
-                                  kind, route, text))
+            self.findings.append((node.lineno, node.col_offset, self.qualname, kind, route, text))
 
-    def _scoped(self, node):
-        self.stack.append(node.name)
-        self.generic_visit(node)
-        self.stack.pop()
+    def _mapping(self, expr, pairs):
+        for key, text, route in _mapping_keys(expr, pairs):
+            self._record(key, text, route)
 
-    visit_FunctionDef = _scoped
-    visit_AsyncFunctionDef = _scoped
-    visit_ClassDef = _scoped
-
-    def visit_Dict(self, node):
-        for key in node.keys:
-            if key is not None:
-                self._record(key, _constant_text(key), "dict-key")
-        self.generic_visit(node)
-
-    def visit_DictComp(self, node):
-        self._record(node.key, _constant_text(node.key), "dict-comp-key")
-        self.generic_visit(node)
-
-    def visit_Call(self, node):
-        for keyword in node.keywords:
-            if keyword.arg is not None:
+    def _keywords(self, keywords):
+        for keyword in keywords:
+            if keyword.arg is None:
+                self._mapping(keyword.value, False)
+            else:
                 self._record(keyword, keyword.arg, "keyword")
-        func = node.func
-        name = func.attr if isinstance(func, ast.Attribute) else (
-            func.id if isinstance(func, ast.Name) else None)
-        if name in FIRST_ARGUMENT_STORES and node.args:
-            self._record(node.args[0], _constant_text(node.args[0]), "first-argument")
-        self.generic_visit(node)
 
-    def visit_Subscript(self, node):
-        if isinstance(node.ctx, ast.Store):
-            self._record(node.slice, _constant_text(node.slice), "subscript-store")
-        self.generic_visit(node)
+    def scan(self, tree):
+        """Walk tree with an explicit stack, never recursing, so a long chain of binary operators
+        cannot exhaust the interpreter's recursion limit."""
+        todo = [(tree, ())]
+        while todo:
+            node, scope = todo.pop()
+            self.qualname = ".".join(scope) or "<module>"
+            self._visit(node)
+            if isinstance(node, _SCOPES):
+                scope = scope + (node.name,)
+            todo.extend((child, scope) for child in ast.iter_child_nodes(node))
+
+    def _visit(self, node):
+        if isinstance(node, ast.Subscript):
+            if isinstance(node.ctx, ast.Store) and _env_named(node.value):
+                self._record(node.slice, _constant_text(node.slice), "subscript-store")
+        elif isinstance(node, ast.Assign):
+            if any(_env_named(target) for target in node.targets):
+                self._mapping(node.value, False)
+        elif isinstance(node, (ast.AnnAssign, ast.NamedExpr)):
+            if node.value is not None and _env_named(node.target):
+                self._mapping(node.value, False)
+        elif isinstance(node, ast.AugAssign):
+            if isinstance(node.op, ast.BitOr) and _env_named(node.target):
+                self._mapping(node.value, True)
+        elif isinstance(node, ast.Call):
+            self._call(node)
+
+    def _call(self, node):
+        for keyword in node.keywords:
+            if keyword.arg == "env":
+                self._mapping(keyword.value, False)
+        func = node.func
+        name = _call_name(func)
+        if name == "putenv":
+            if node.args:
+                self._record(node.args[0], _constant_text(node.args[0]), "first-argument")
+            return
+        if not isinstance(func, ast.Attribute) or (name != "update" and name not in KEY_METHODS):
+            return
+        if _env_named(func.value):
+            args, route = node.args, "first-argument"
+        elif node.args and _env_named(node.args[0]):
+            args, route = node.args[1:], "second-argument"
+        else:
+            return
+        if name == "update":
+            if args:
+                self._mapping(args[0], True)
+            self._keywords(node.keywords)
+        elif args:
+            self._record(args[0], _constant_text(args[0]), route)
 
 
 def scan_source(source, filename="<source>", disabled=()):
@@ -167,7 +279,7 @@ def scan_source(source, filename="<source>", disabled=()):
     SyntaxError, ValueError, RecursionError and MemoryError propagate."""
     tree = ast.parse(source, filename=filename)
     scanner = _Scanner(frozenset(disabled))
-    scanner.visit(tree)
+    scanner.scan(tree)
     return sorted(set(scanner.findings))
 
 
@@ -291,7 +403,8 @@ def run(root):
             print("VIOLATION: shell-function-standins: " + line, file=sys.stderr)
         return 1
     print("PASS: shell-function-standins: no unreviewed constant BASH_FUNC_, %%-suffixed, BASH_ENV"
-          " or ENV key stored into a mapping in the scanned roots; see residuals.")
+          " or ENV key stored into a mapping that reaches an environment in the scanned roots;"
+          " see residuals.")
     return 0
 
 
@@ -335,7 +448,7 @@ POSITIVE_VECTORS = (
     ('env = {"ENV": f}\n', "env-startup", "dict-key"),
     ('env = {"BASH_ENV": p for p in ps}\n', "env-startup", "dict-comp-key"),
     ('env.update(BASH_ENV=f)\n', "env-startup", "keyword"),
-    ('run(cmd, ENV=f)\n', "env-startup", "keyword"),
+    ('run(cmd, env=dict(ENV=f))\n', "env-startup", "keyword"),
     ('env.setdefault("BASH_ENV", f)\n', "env-startup", "first-argument"),
     ('import os\nos.putenv("BASH_FUNC_ls%%", f)\n', "env-func", "first-argument"),
     ('import os\nos.environ.__setitem__("ENV", f)\n', "env-startup", "first-argument"),
@@ -345,6 +458,72 @@ POSITIVE_VECTORS = (
     ('env["BASH_ENV"]: str = f\n', "env-startup", "subscript-store"),
     ('env["ENV"], x = f, 1\n', "env-startup", "subscript-store"),
     ('for env["BASH_ENV"] in paths:\n    pass\n', "env-startup", "subscript-store"),
+    # bytes keys
+    ('import os\nos.environb[b"BASH_ENV"] = b"/x"\n', "env-startup", "subscript-store"),
+    ('env = {b"BASH_FUNC_ls%%": b"() { :; }"}\n', "env-func", "dict-key"),
+    ('import os\nos.putenv(b"BASH_ENV", b"/x")\n', "env-startup", "first-argument"),
+    ('import os\nos.environb.update({b"BASH_FUNC_x%%": f})\n', "env-func", "dict-key"),
+    # unbound methods, fromkeys and literal pairs
+    ('dict.__setitem__(env, "BASH_ENV", p)\n', "env-startup", "second-argument"),
+    ('import os\ndict.setdefault(os.environ, "ENV", p)\n', "env-startup", "second-argument"),
+    ('import collections.abc, os\ncollections.abc.MutableMapping.update(os.environ, BASH_ENV=p)\n',
+     "env-startup", "keyword"),
+    ('dict.update(env, [("BASH_FUNC_ls%%", f)])\n', "env-func", "pair"),
+    ('env = dict.fromkeys(["BASH_ENV"], p)\n', "env-startup", "fromkeys"),
+    ('import os\nos.environ.update([("BASH_ENV", p)])\n', "env-startup", "pair"),
+    ('env.update((("ENV", p),))\n', "env-startup", "pair"),
+    ('env = dict([("BASH_ENV", p)])\n', "env-startup", "pair"),
+    ('env |= [("BASH_FUNC_ls%%", f)]\n', "env-func", "pair"),
+    # the contexts that reach an environment
+    ('import os, subprocess\nsubprocess.run(c, env={**os.environ, "BASH_ENV": p})\n',
+     "env-startup", "dict-key"),
+    ('import os\nrun(c, env=dict(os.environ, **{"ENV": p}))\n', "env-startup", "dict-key"),
+    ('import os\nrun(c, env=os.environ | {"BASH_ENV": p})\n', "env-startup", "dict-key"),
+    ('import os\nfrom collections import ChainMap\nrun(c, env=ChainMap({"ENV": p}, os.environ))\n',
+     "env-startup", "dict-key"),
+    ('import os\nos.environ |= {"BASH_ENV": p}\n', "env-startup", "dict-key"),
+    ('self.child_env = {"BASH_FUNC_ls%%": f}\n', "env-func", "dict-key"),
+    ('childEnv: dict = {"ENV": p}\n', "env-startup", "dict-key"),
+    ('if (env := {"BASH_ENV": p}):\n    pass\n', "env-startup", "dict-key"),
+)
+
+# Clean sources, each with a flip that is reported: mappings that never reach an environment
+# (the flip reaches one), and bytes and literal-shape boundaries.
+GATED_VECTORS = (
+    ('env = {b"BASH_ENVX": f}\n', 'env = {b"BASH_ENV": f}\n'),
+    ('import os\ndel os.environb[b"BASH_ENV"]\n', 'import os\nos.environb[b"BASH_ENV"] = f\n'),
+    ('import os\nrun(c, env=os.environ.copy())\n',
+     'import os\nrun(c, env=os.environ.copy() | {"ENV": f})\n'),
+    ('env = {"A": {"BASH_ENV": p}}\n', 'env = {"A": 1, **{"BASH_ENV": p}}\n'),
+    ('env = [("BASH_ENV", p)]\n', 'env = dict([("BASH_ENV", p)])\n'),
+    ('dict.update(counts, BASH_ENV=p)\n', 'dict.update(env, BASH_ENV=p)\n'),
+    ('blocked = {"BASH_ENV": "startup file"}\nfor k in blocked:\n    env.pop(k, None)\n',
+     'blocked_env = {"BASH_ENV": "startup file"}\nfor k in blocked_env:\n    env.pop(k, None)\n'),
+    ('UNSET = {"BASH_ENV": None, "ENV": None}\nok = k not in UNSET\n',
+     'UNSET_ENV = {"BASH_ENV": None, "ENV": None}\nok = k not in UNSET_ENV\n'),
+    ('drop = {"BASH_ENV": True}\n', 'drop.env = {"BASH_ENV": True}\n'),
+    ('ok = key in {"BASH_ENV": 1, "ENV": 1}\n', 'ok = run(c, env={"BASH_ENV": 1, "ENV": 1})\n'),
+    ('expect = {"BASH_ENV": None}\n', 'expect_env = {"BASH_ENV": None}\n'),
+    ('s = "{BASH_ENV}".format(BASH_ENV=p)\n', 's = env.update(BASH_ENV=p)\n'),
+    ('import string\ns = string.Template("$ENV").substitute(ENV="prod")\n',
+     'import string\ns = string.Template("$ENV").substitute(env=dict(ENV="prod"))\n'),
+    ('counts["BASH_ENV"] = counts.get("BASH_ENV", 0) + 1\n',
+     'env["BASH_ENV"] = env.get("BASH_ENV", 0) + 1\n'),
+    ('seen.setdefault("BASH_ENV", []).append(p)\n',
+     'seen_env.setdefault("BASH_ENV", []).append(p)\n'),
+    ('config = {"ENV": "production"}\n', 'config.ENV = {"ENV": "production"}\n'),
+    ('import logging\nlogging.info("m", extra={"ENV": "ci"})\n',
+     'import logging\nlogging.info("m", env={"ENV": "ci"})\n'),
+    ('from typing import TypedDict\nE = TypedDict("E", {"BASH_ENV": str})\n',
+     'from typing import TypedDict\nE = TypedDict("E", env={"BASH_ENV": str})\n'),
+    ('run(cmd, ENV=1)\n', 'run(cmd, env=dict(ENV=1))\n'),
+    ('dict.setdefault(counts, "BASH_ENV", 0)\n', 'dict.setdefault(env, "BASH_ENV", 0)\n'),
+    ('dict.__setitem__(counts, b"ENV", 0)\n', 'dict.__setitem__(env, b"ENV", 0)\n'),
+    ('lookup = dict.fromkeys(["BASH_ENV"], None)\n',
+     'lookup_env = dict.fromkeys(["BASH_ENV"], None)\n'),
+    ('table = dict([("BASH_ENV", p)])\n', 'table_env = dict([("BASH_ENV", p)])\n'),
+    ('table.update([("BASH_ENV", p)])\n', 'table.environ.update([("BASH_ENV", p)])\n'),
+    ('seen[b"BASH_ENV"] = 1\n', 'import os\nos.environb[b"BASH_ENV"] = 1\n'),
 )
 
 # Boundary and removal vectors that must stay clean.
@@ -415,6 +594,9 @@ def _fifo_a(root):
 # Row 12 and the fail-closed and allowlist tree vectors: (name, kwargs, expected, flip kwargs,
 # flip expected). The flip must change the outcome.
 _VALID = {"tools/a.py": b"x = 1\n"}
+# 500 concatenated terms and a 500-term union: valid code a recursive walk cannot finish.
+_LONG_CHAIN = b"x = " + b" + ".join([b"'a'"] * 500) + b"\n"
+_LONG_UNION = b"env = os.environ" + b" | {}" * 500
 TREE_VECTORS = (
     ("12 errors/unparseable", dict(files={"tools/a.py": b"def (:\n"}), 2,
      dict(files=_VALID), 0),
@@ -448,13 +630,16 @@ TREE_VECTORS = (
      1, dict(files={"tools/a.py": _FUNC_SITE},
              allowlist=(("tools/a.py", "<module>", "env-func", 1, _REASON),)), 0),
     ("allow/qualname", dict(files={"tools/a.py": b"class C:\n    def f(self):\n"
-                                                b"        return dict(BASH_ENV=1)\n"},
+                                                b"        env = dict(BASH_ENV=1)\n"},
                             allowlist=(("tools/a.py", "f", "env-startup", 1, _REASON),)), 1,
-     dict(files={"tools/a.py": b"class C:\n    def f(self):\n        return dict(BASH_ENV=1)\n"},
+     dict(files={"tools/a.py": b"class C:\n    def f(self):\n        env = dict(BASH_ENV=1)\n"},
           allowlist=(("tools/a.py", "C.f", "env-startup", 1, _REASON),)), 0),
     ("allow/malformed", dict(files=_VALID, allowlist=(("tools/a.py", "<module>", "env-func", 0,
                                                        _REASON),)), 2,
      dict(files=_VALID), 0),
+    ("errors/long-chain",
+     dict(files={"tools/a.py": _LONG_CHAIN + _LONG_UNION + b' | {"ENV": f}\n'}), 1,
+     dict(files={"tools/a.py": _LONG_CHAIN + _LONG_UNION + b"\n"}), 0),
 )
 
 
@@ -480,6 +665,12 @@ def self_test():
         got = scan_source(source)
         if got:
             failures.append("negative flagged: " + repr(source) + " -> " + repr(got))
+    for source, flip in GATED_VECTORS:
+        got = scan_source(source)
+        if got:
+            failures.append("gated negative flagged: " + repr(source) + " -> " + repr(got))
+        if not scan_source(flip):
+            failures.append("gated flip " + repr(flip) + ": expected a finding, got none")
     unexercised = sorted(set(ROUTES) - exercised)
     if unexercised:
         failures.append("routes without a vector: " + ", ".join(unexercised))
@@ -499,9 +690,10 @@ def self_test():
         print("SELF-TEST FAIL:\n  " + "\n  ".join(failures))
         return 1
     print("SELF-TEST PASS: shell-function-standins: {} table rows and their flips, {} positive"
-          " vectors (each clean without its route), {} negatives, {} fail-closed and allowlist"
-          " tree vectors and their flips.".format(
-              len(ROWS), len(POSITIVE_VECTORS), len(NEGATIVE_VECTORS), len(TREE_VECTORS)))
+          " vectors (each clean without its route), {} negatives, {} clean sources and their"
+          " reported flips, {} fail-closed and allowlist tree vectors and their"
+          " flips.".format(len(ROWS), len(POSITIVE_VECTORS), len(NEGATIVE_VECTORS),
+                           len(GATED_VECTORS), len(TREE_VECTORS)))
     return 0
 
 
