@@ -46,7 +46,11 @@ the authority, and the summary further down this page only points to it.
   configured lease, it blocks the stop and says why, so the assistant corrects the value before handing
   back. Text in code spans, fenced code blocks, and `>` quote lines is not checked, and a time that a
   scheduling word (such as `until`, `due`, or `next run at`) directly precedes is treated as a scheduled
-  time, not a reading. Event: `Stop`.
+  time, not a reading. Other times may run up to 1 minute ahead, but the bracketed stamp that opens a
+  message, such as `[2026-09-23 13:45 EDT]`, claims the current time and may not be ahead at all: truncate
+  it to the minute and never round up. When that opening stamp uses a zone abbreviation other than the
+  hook's local zone, the hook cannot check it and says so in a note instead of passing silently. Event:
+  `Stop`.
 - **`future-stamp-write.py`** denies a write that would record a future-dated timestamp into a folder you
   have declared as holding working records. An observed-time entry (a heartbeat, a recorded-at value) has
   to come from the clock, so one dated in the future was composed. A scheduled value (a deadline, a next
@@ -190,7 +194,7 @@ files are served from this repository's main branch; for a raw download, use
 | `pattern-self-match.py` | `b70287e2aab2b08b0cd240c6c9150feb65141f2e3612adad63e402221dfcbb2f` | [pattern-self-match.py](pattern-self-match.py) |
 | `record-remove-check.py` | `0ec9642ea95bac4ea13c71ec31ff5239ab01c0ceff94f9922a42de1458f0757f` | [record-remove-check.py](record-remove-check.py) |
 | `rerun-pass-check.py` | `ab5fe8567f34444474d5e58acd61fde9490254e86d38578dae4b5ade7a21da86` | [rerun-pass-check.py](rerun-pass-check.py) |
-| `stamp-truth-stop.py` | `5d3b5d716cdbe6255c750aec4bb44f17a583f167c055cdb26a17a27d5ccfc715` | [stamp-truth-stop.py](stamp-truth-stop.py) |
+| `stamp-truth-stop.py` | `5cde27870cc4867912c19482c4fc9b84225e0039b740634db3501c086a366c21` | [stamp-truth-stop.py](stamp-truth-stop.py) |
 | `unbounded-wait.py` | `9d2a8f9c26693cc87d058284427d40554e5ff0c3f2eca3df46f4369669a43859` | [unbounded-wait.py](unbounded-wait.py) |
 | `ungated-record.py` | `35c65369b1609683e09b784681a23fab80a05e047c5f36abe5311f100b4f9394` | [ungated-record.py](ungated-record.py) |
 
@@ -521,6 +525,9 @@ section of its opening docstring. Read that section before relying on a hook; in
   natural-language time is not checked. A fabricated time in a code span, a code block, a `>` quote line,
   or just after a scheduling word passes. A genuinely future time mentioned in plain prose without a
   scheduling word before it is blocked; the remedy is to add the word or put the time in a code span.
+  An opening stamp in another zone's abbreviation is not checked (only noted); stamp in UTC or a numeric
+  offset, or run the hook under the same `TZ`. An opening stamp read from a different clock that runs ahead
+  of this host's (a remote or container `date`) is refused; put it in a code span.
   Its refusals are capped: within one continuous run of turn ends with no observed new turn it refuses at
   most three times, after which each violating stop is allowed with a cap warning; a stop that carries
   neither `stop_hook_active` nor a `transcript_path` is outside the cap (nothing can key a counter to

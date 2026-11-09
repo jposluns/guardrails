@@ -36,7 +36,12 @@ and expiration. A keyword never exempts a line-leading status stamp, a keyword A
 claim does not exempt it, and a keyword further back does not.
 
 RULES, against the message's reference time REF:
-  1. AHEAD: every timestamp claim outside exempt text must be no more than 1 minute after REF.
+  1. AHEAD: every timestamp claim outside exempt text must be no more than 1 minute after REF, except the
+     message's HEADER stamp (see 2), which CLAIMS the current time and must not be after REF at all: a stamp
+     read from the clock and truncated to its precision never is, so one rounded up or composed ahead is
+     refused, and the block reason then says "truncate to the minute; never round up". A HEADER stamp whose
+     letter abbreviation cannot be matched to the local zone is not checked (see 2), but a Stop that passes
+     says so in a non-blocking "not checked" note instead of passing silently.
   2. BEHIND: a STATUS STAMP is a claim that is the first token of its line (after optional whitespace, `*` or
      `_` emphasis, `[`, and one list bullet `-`, `+`, `*`, or `N.`/`N)` followed by whitespace), outside code
      and blockquotes. The message's HEADER stamp, its FIRST status stamp, CLAIMS the current time only when it
@@ -47,7 +52,8 @@ RULES, against the message's reference time REF:
      (a bulleted history list under the header) are not checked for BEHIND. Every status stamp is checked for
      AHEAD whatever keywords its line carries. Quoted history mid-line is never checked for BEHIND. A claim
      that cannot be converted (an invalid date such as 2020-02-30, or a letter abbreviation that is not the local
-     zone at that wall time) cannot be evaluated and FAILS OPEN, status stamp or not (round 26).
+     zone at that wall time) cannot be evaluated and FAILS OPEN, status stamp or not (round 26); a HEADER stamp
+     on a valid date with such an abbreviation is named in the "not checked" note of rule 1.
   3. ELAPSED FOOTER: the LAST elapsed footer in the message that lies outside fenced code, blockquote lines,
      and inline code spans is checked, wherever it sits (a completion marker, a `---`, or a quote line after
      it does not displace it). Two forms are footers, and the last occurrence of EITHER form wins: "Session
@@ -354,7 +360,8 @@ File reads. The lease and transcript are opened non-blocking and must be regular
 treated as unreadable). The lease read is capped at 1 MiB. The transcript is read backwards in 64 KiB chunks,
 at most 64 MiB, each record at most 4 MiB (a longer record is skipped unparsed); every scan is linear.
 
-Contract: pass = no stdout, exit 0; block = top-level {"decision": "block", "reason": ...} on stdout, exit 0
+Contract: pass = no stdout, exit 0 (a pass that left a header stamp unchecked, rule 1, writes the "not checked"
+note as top-level {"systemMessage": ...}); block = top-level {"decision": "block", "reason": ...} on stdout, exit 0
 (the Claude Code hooks reference, Stop decision control, specifies top-level decision and reason for Stop);
 capped or fail-open allow (see BLOCK CAP), or a busy Stop (see RESIDUAL COVERAGE) = top-level
 {"systemMessage": ...} on stdout (the user-visible warning), exit 0. Round 33: every Stop writes at most ONE
@@ -398,19 +405,23 @@ violations) whenever K > 0. Then extras in this order, each added only while the
 soft cap of MSG_CAP (200) characters (an extra that does not fit is SKIPPED, never cut, and the later,
 shorter ones are still tried): the remedy "; run `date`, `date -u`" (or "; run `date -u`" when only that
 fits); when a violation is a time AHEAD of the clock, the future-fact hint "; a genuine future time: put it
-in a `code span` or after 'due'" (or a shorter form); when the true elapsed is known and an elapsed-footer
+in a `code span` or after 'due'" (or a shorter form), except that when the claim shown is a HEADER stamp
+AHEAD, "; truncate to the minute; never round up" takes the hint's place (the header claims the current
+time, so no future-fact remedy applies to it); when the true elapsed is known and an elapsed-footer
 violation is not the claim shown (it is behind "+K more"), "; elapsed now HH:MM" (round 36: the true session
 elapsed, which `date` does not give, so the footer can be corrected in the same cycle); and "; UTC now ...".
 A core longer than the soft cap
 is sent whole, with no extras. Every systemMessage is one line: a capped or fail-open allow counts the
-unresolved claims and names the first the same way, its literal whole; the busy note is fixed text. stderr
+unresolved claims and names the first the same way, its literal whole; the busy note is fixed text; the "not
+checked" note names the first unchecked header stamp, its literal whole, and counts any others. stderr
 gets at most ONE diagnostic line (the kind, the claim count, the true UTC, elapsed, and the first violation
 in full, never cut), never a copy of the systemMessage. The true local time, the violations after the
 first, and the full remedy text are not sent: the remedy's `date` reads the local time (convert a
 local-zone stamp from it), the count says how many violations remain (a hidden footer's correction value is
 the "elapsed now" extra when it fits), and the full remedy lives here. Every date-time with an explicit
 zone in prose must not be ahead of when it was written; a [bracketed] stamp that starts the first status line
-must also be recent (an unbracketed leading date is history); the LAST elapsed footer outside code and quotes
+must also be recent, and never later than when it was written at all: truncate to the minute (or second),
+never round up (an unbracketed leading date is history); the LAST elapsed footer outside code and quotes
 must match the lease. A genuine FUTURE time mid-line (a deadline, an expiry, a planned run) is allowed only
 when a schedule or validity word immediately precedes it (due, deadline, expires, until, through, valid, next
 run at, scheduled for, not before, by, ...) or when it is in a `code span`; a line-leading stamp is always
@@ -454,7 +465,13 @@ per line and approximate (an unclosed backtick run hides later spans on that lin
 checked, failing toward checking). A letter abbreviation is trusted as local when it matches the process
 zone's abbreviation; a foreign zone sharing that abbreviation is not distinguished, and a claim with a foreign
 abbreviation or an invalid date is not checked anywhere, a line-leading status stamp included (round 26: it
-fails open, so a fabricated `[2026-09-24 09:00 PDT]` header in an Eastern-zone process is a MISS). Genuine-user detection is heuristic on entry shape and a fixed list of
+fails open, so a fabricated `[2026-09-24 09:00 PDT]` header in an Eastern-zone process is a MISS, though a
+pass then carries the non-blocking "not checked" note of rule 1; stamp in UTC or a numeric offset, or run
+the hook under the TZ the stamps use). A header stamp read from ANOTHER clock that runs ahead of this host's
+(a remote or container `date`) is refused, since the header gets no AHEAD slack (a FALSE POSITIVE; put it in
+a `code span`); so is a correct header if the host ever dates a transcript entry before a clock reading it
+contains, an ordering not yet checked against a live transcript.
+Genuine-user detection is heuristic on entry shape and a fixed list of
 notification prefixes. The recovery boundary lives in volatile per-user storage: it is lost on reboot (the
 state is then absent and the whole current turn is evaluated once more). READABLE-BRANCH RESIDUAL:
 on a Stop whose transcript is readable but whose state read failed, the stored pending
@@ -578,6 +595,8 @@ MSG_CAP = 200  # soft cap: the block reason's extras are added only while its li
 REMEDY = ("; run `date`, `date -u`", "; run `date -u`")
 # the block reason's hint when a violation is a time AHEAD of the clock: how a genuine future fact passes
 HINT = ("; a genuine future time: put it in a `code span` or after 'due'", "; future time: `code span` or after 'due'")
+# the block reason's hint in place of HINT when the claim shown is a header stamp AHEAD of the clock (see MESSAGES)
+TRUNCATE = "; truncate to the minute; never round up"
 BLOCK_CAP = 3  # consecutive prior block cycles after which a stop_hook_active Stop allows with a warning
 CAP_SCAN_BYTES = 8 << 20
 CAP_SCAN_RECORDS = 512
@@ -1163,6 +1182,8 @@ def _in_spans(spans, pos):
 
 def _minutes(off_us):
     mins = round(off_us / MINUTE)
+    if off_us > 0 and mins == 0:
+        return "<1 min AHEAD"  # a header stamp under 30 s ahead: never shown as "0 min BEHIND"
     return f"{abs(mins)} min {'AHEAD' if mins > 0 else 'BEHIND'}"
 
 
@@ -1185,7 +1206,10 @@ def _check_claim(m, status, sched, ref, behind, where, cache=None, header=None):
         # that is not the local zone at that wall time) cannot be evaluated, so it FAILS OPEN, status stamp or not
         return None
     diff = got - ref
-    if diff > AHEAD_US and (status or not sched):
+    # the bracketed header CLAIMS the current time, so it gets no AHEAD slack: a stamp read from the clock and
+    # truncated to its precision is never later than when the message was written, while one rounded up or
+    # composed a minute ahead is (other prose times keep AHEAD_US)
+    if diff > (0 if header else AHEAD_US) and (status or not sched):
         return f"timestamp {literal} in {where}: {_minutes(diff)} of when it was written ({fmt_us(ref)})"
     if status and header and -diff > behind:
         return f"status stamp {literal} in {where}: {_minutes(diff)} of when it was written ({fmt_us(ref)})"
@@ -1199,8 +1223,24 @@ def _footer_minutes(m):
     return int(m.group(1) or 0) * 60 + int(m.group(2) or m.group(3) or 0)
 
 
-def check_message(text, ref, start, where, behind):
-    """Violation strings for one assistant message written at `ref` (epoch us); `start` is epoch us or None."""
+def _foreign_zone(m):
+    """Whether a claim that could not be converted names a letter zone other than UTC or GMT on a valid date, so
+    its zone could not be matched to this process's local zone at that wall time."""
+    abbr = m.group(10)
+    if not abbr or abbr in ("UTC", "GMT"):
+        return False
+    try:
+        datetime.datetime(*(int(m.group(i)) for i in range(1, 6)), int(m.group(6) or 0))
+    except (ValueError, OverflowError, TypeError):
+        return False
+    return True
+
+
+def check_message(text, ref, start, where, behind, unchecked=None, heads=None):
+    """Violation strings for one assistant message written at `ref` (epoch us); `start` is epoch us or None.
+    `unchecked` (a list), when given, receives the literal of a HEADER stamp that was not checked because its
+    letter zone could not be matched to the local zone; `heads` (a set), when given, receives the violation
+    string of a HEADER stamp AHEAD of `ref`."""
     bad, seen, cache = [], set(), {}
     lines = text.splitlines()
     code = _code_lines(lines)
@@ -1228,6 +1268,10 @@ def check_message(text, ref, start, where, behind):
                         exempt = sched_exempter(line)
                     sched = exempt(m.start())
                 v = _check_claim(m, status, sched, ref, behind, where, cache, header)
+                if header and unchecked is not None and cache.get(m.group(0), 0) is None and _foreign_zone(m):
+                    unchecked.append(m.group(0))
+                if header and v and heads is not None and _is_ahead(v):
+                    heads.add(v)
             except Exception:
                 continue  # isolate one claim
             if v and v not in seen:
@@ -2085,10 +2129,11 @@ def _evaluate(payload, now, start, notes, dfd, persist, report=None, diag=None, 
             final = None
         elif final_ref is None:
             final = None  # no trustworthy written_at
-    final_bad, earlier_bad = [], []
+    final_bad, earlier_bad, unchecked, heads = [], [], [], set()
     if final is not None:
         try:
-            final_bad = check_message(final, final_ref, start_us, "your final message", FINAL_BEHIND_US)
+            final_bad = check_message(final, final_ref, start_us, "your final message", FINAL_BEHIND_US,
+                                      unchecked, heads)
         except Exception:
             pass
     # Older messages are checked only when the recovery state could be READ: with it unavailable the boundary
@@ -2105,7 +2150,7 @@ def _evaluate(payload, now, start, notes, dfd, persist, report=None, diag=None, 
             continue  # unchecked (the boundary is unknown), or no trustworthy written_at
         try:
             earlier_bad.extend(check_message(text, ref, start_us, f"earlier message {i} of {n} this turn",
-                                             BEHIND_US))
+                                             BEHIND_US, unchecked, heads))
         except Exception:
             continue
     if active and not final_bad:
@@ -2385,6 +2430,9 @@ def _evaluate(payload, now, start, notes, dfd, persist, report=None, diag=None, 
     add(earlier_bad)
     add(kept)
     if not bad:
+        if unchecked and notes is not None:
+            # a header stamp in a zone the hook cannot read passes, but not silently (a non-blocking note)
+            notes.append(_unchecked_note(unchecked))
         return None
     shown = bad + ([f"... and {over[0]} more distinct violation(s) not listed"] if over[0] else [])
     if report is not None:
@@ -2426,9 +2474,21 @@ def _evaluate(payload, now, start, notes, dfd, persist, report=None, diag=None, 
     first = next((i for i, v in enumerate(bad) if _first_claim([v]) is not None), None)
     hidden_footer = el is not None and (over_footer[0] or any(_is_footer(v) for i, v in enumerate(bad)
                                                               if i != first))
+    # a header stamp AHEAD, when it is the claim shown, gets the truncation rule in the hint's place: it claims
+    # the current time, so the future-fact hint does not apply to it
+    hint = TRUNCATE if first is not None and bad[first] in heads else HINT if ahead else ""
     return _fit(_claim_line(BLOCK_PREFIX, claim) + more,
-                [REMEDY, HINT if ahead else "", f"; elapsed now {el}" if hidden_footer else "", f"; UTC now {utc}"],
+                [REMEDY, hint, f"; elapsed now {el}" if hidden_footer else "", f"; UTC now {utc}"],
                 MSG_CAP)
+
+
+def _unchecked_note(unchecked):
+    """The one-line systemMessage of a pass that left header stamps unchecked: the count and the first literal
+    whole, verbatim, in a code span."""
+    more = f" (+{len(unchecked) - 1} more)" if len(unchecked) > 1 else ""
+    return _one_line(f"stamp-truth-stop: header stamp `{unchecked[0]}`{more} not checked: its zone could not be "
+                     "matched to this hook's local zone; stamp in UTC or a numeric offset, or run the hook under "
+                     "the TZ you stamp in")
 
 
 def _is_footer(v):
@@ -2463,7 +2523,7 @@ def _first_claim(bad):
 def _short_off(text):
     """The compact offset: "280 min AHEAD" -> "+280m", "35 min BEHIND" -> "-35m"; any other text unchanged."""
     n, _, way = text.partition(" min ")
-    if n.isdigit() and way in ("AHEAD", "BEHIND"):
+    if (n.isdigit() or n == "<1") and way in ("AHEAD", "BEHIND"):
         return f"{'+' if way == 'AHEAD' else '-'}{n}m"
     return text
 
@@ -2903,6 +2963,66 @@ def _self_test():
             t = datetime.datetime(2026, 11, 1, 5, 30, tzinfo=UTC)
             self.assertIsNone(self.final("[2026-11-01 01:30 EDT] a", t))
             self.assertIn("+60m", self.final("[2026-11-01 01:30 EST] a", t))
+
+        # -- the bracketed header stamp: zero AHEAD tolerance --
+        def test_header_stamp_ahead_by_any_amount_blocks(self):
+            # a minute-precision header one minute later than the clock passed while the slack was 1 minute
+            one_us = datetime.timedelta(microseconds=1)
+            for ref, off in ((self.now, "+1m"), (self.now + one_us, "+1m"),
+                             (self.now + datetime.timedelta(seconds=59, microseconds=999999), "+<1m")):
+                with self.subTest(ref=ref):
+                    r = self.final("[2026-09-23 17:46 UTC] x", ref)
+                    self.assertIsNotNone(r, ref)
+                    self.assertTrue(r.startswith(f"{BLOCK_PREFIX}: `2026-09-23 17:46 UTC` {off}; run `date`, "
+                                                 f"`date -u`{TRUNCATE}"), r)
+                    self.assertNotIn(HINT[1], r)  # the header claims now: the future-fact hint does not apply
+                    self.assertLessEqual(len(r), MSG_CAP)
+            # seconds precision: one second ahead of the clock is ahead too
+            with self.subTest(stamp="17:45:01"):
+                self.assertIn(f"` +<1m; run `date`, `date -u`{TRUNCATE}", self.final("[2026-09-23 17:45:01 UTC] x"))
+            # a non-header time shown first keeps the future-fact hint, even with a header ahead behind it
+            r = self.final("the window opens 2026-09-23T20:00Z\n[2026-09-23 17:46 UTC] x")
+            self.assertTrue(r.startswith(f"{BLOCK_PREFIX}: `2026-09-23T20:00Z` +135m; +1 more"), r)
+            self.assertIn(HINT[0], r)
+            self.assertNotIn(TRUNCATE, r)
+
+        def test_header_stamp_at_or_below_the_clock_passes(self):
+            # exactly at the clock, and the correct truncated floor at the last microsecond of its minute
+            for ref in (self.now, self.now + datetime.timedelta(seconds=59, microseconds=999999)):
+                self.assertIsNone(self.final("[2026-09-23 17:45 UTC] x", ref), ref)
+                self.assertIsNone(self.final(f"{lstamp(self.now)} x", ref), ref)
+
+        def test_non_header_claim_keeps_the_minute_of_slack(self):
+            # only the bracketed header claims the current time: an unbracketed leading stamp, a later status
+            # stamp, and a mid-line claim 60 s ahead still pass, and 60 s plus 1 us ahead still blocks
+            for txt in ("2026-09-23 17:46 UTC starting", "[2026-09-23 17:45 UTC] a\n[2026-09-23 17:46 UTC] b",
+                        "progress at 2026-09-23 17:46 UTC, fine"):
+                self.assertIsNone(self.final(txt), txt)
+            r = self.final("2026-09-23 17:46:00.000001 UTC starting")
+            self.assertIn("` +1m", r)
+            self.assertNotIn("truncate", r)
+
+        def test_foreign_zone_header_notes_not_checked(self):
+            # a header whose letter zone is not the local zone still passes, but with a non-blocking note
+            notes = []
+            txt = "[2026-09-23 13:45 CST] x"
+            self.assertIsNone(evaluate({"last_assistant_message": txt}, self.now, self.start, self.sdir, notes=notes))
+            self.assertEqual(len(notes), 1, notes)
+            self.assertIn("`2026-09-23 13:45 CST` not checked", notes[0])
+            self.assertNotIn("\n", notes[0])
+            # no note for a local-zone header, a foreign zone mid-line, an invalid date, or a UTC header
+            for ok in (f"{lstamp(self.now)} x", "their office shows 2026-09-23 22:25 PDT",
+                       "[2026-02-30 13:45 CST] x", "[2026-09-23 17:45 UTC] x"):
+                notes = []
+                self.assertIsNone(evaluate({"last_assistant_message": ok}, self.now, self.start, self.sdir,
+                                           notes=notes))
+                self.assertEqual(notes, [], ok)
+            # a block still writes only its reason: the note never displaces a refusal
+            notes = []
+            r = evaluate({"last_assistant_message": "[2026-09-23 13:45 CST] x\nat 2099-01-01T00:00Z"}, self.now,
+                         self.start, self.sdir, notes=notes)
+            self.assertTrue(r.startswith(BLOCK_PREFIX), r)
+            self.assertEqual(notes, [])
 
         # -- exemptions --
         def test_quoted_past_stamp_mid_line_passes(self):
@@ -5246,9 +5366,12 @@ def _self_test():
             self.assertEqual(_fit("ab", [("y" * 20, " z"), " d"], 10), "ab z d")
             self.assertEqual(_fit("ab", [("y" * 20, "w" * 20)], 10), "ab")
             # claude minor 4: a block with room names both clocks (`date` gives the local time); round 35: then the
-            # future-fact hint and UTC now, all within the soft cap
-            self.assertEqual(self.final("[2026-09-23T20:00Z] x"), f"{BLOCK_PREFIX}: `2026-09-23T20:00Z` +135m; run "
+            # future-fact hint and UTC now, all within the soft cap; a header stamp AHEAD gets the truncation rule
+            # in the hint's place
+            self.assertEqual(self.final("at 2026-09-23T20:00Z x"), f"{BLOCK_PREFIX}: `2026-09-23T20:00Z` +135m; run "
                              f"`date`, `date -u`{HINT[0]}; UTC now 2026-09-23T17:45:00Z")
+            self.assertEqual(self.final("[2026-09-23T20:00Z] x"), f"{BLOCK_PREFIX}: `2026-09-23T20:00Z` +135m; run "
+                             f"`date`, `date -u`{TRUNCATE}; UTC now 2026-09-23T17:45:00Z")
             # every block through main() is one stdout line within the cap, with one stderr line
             for txt in ("[2099-01-01T00:00Z] x", "[2099-01-01 00:00:00 UTC] x", "2099-01-01T00:00Z 2099-01-02T00:00Z"):
                 old_err, sys.stderr = sys.stderr, io.StringIO()
