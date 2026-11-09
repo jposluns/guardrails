@@ -4922,6 +4922,10 @@ _SCAN_ALLOWED_UNPINNED = (
     ("tools/check_branch_root.py", "_git", ("git",),
      "production gate probe over the real checkout (rev-parse/merge-base family reads under"
      " _git_env); read-only by design, and production launches stay unchanged"),
+    ("tools/check_first_pin_shrink.py", "_git", ("git",),
+     "production gate read funnel under _clean_env (GIT_* scrubbed, GIT_GRAFT_FILE pinned to"
+     " os.devnull) and --no-replace-objects (rev-parse/merge-base/ls-tree/cat-file reads);"
+     " read-only by design, and production launches stay unchanged"),
     ("tools/check_msg_leaks.py", "_run_git", ("git",),
      "production gate read helper (log/rev-parse over the real repository); read-only by"
      " design, and production launches stay unchanged"),

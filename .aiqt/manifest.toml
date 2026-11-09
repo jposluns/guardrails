@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "f40449e2613e81df4e2aa7c551651260ffb593473a8e06107bf18cfa606bde04"
+tree-sha256 = "7f2f57193a44886de68321d48178d7aa33ef04e6fec7c0f9f894bf1cc63195df"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -60,6 +60,11 @@ bytes = 12626
 sha256 = "649b05a3a5579e78e09f8270300b36100354c78949789291238f686a4fa899b2"
 
 [[sources]]
+path = ".aiqt/core/first-pin-reductions.toml"
+bytes = 977
+sha256 = "32422f045a632045afb4bbf8cee8c400a2ada285af41455b7d6ca6f6ba695d7b"
+
+[[sources]]
 path = ".aiqt/core/gates/byte-canon.toml"
 bytes = 2474
 sha256 = "139ab3b1f79cb49d8f777a38afd6c72037c6250fdb3a852e198ca31aca6e58ed"
@@ -71,8 +76,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 584824
-sha256 = "4035e0f915b34d490ccfb08bc5c72fa988e581a14984233e96b7d1e9ea163df9"
+bytes = 586145
+sha256 = "483f10ae182c3fdf8772bd0f6a0f360fbf36c0b7b312793a98a676c2427766c3"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -131,8 +136,8 @@ sha256 = "7665572c121fb72a7493bbcff903b66e61dcd6255baf0b82c23dd3c47f2d0897"
 
 [[sources]]
 path = ".aiqt/core/python-floor.toml"
-bytes = 9434
-sha256 = "16b2fe0e805746c7a11f8bf83f45662eb46b464f9268ef44e277882847fc4147"
+bytes = 9473
+sha256 = "151958e518c80f4d8f53d2514ed28da07c9ad4e294c751d7bfbd89f126c66b42"
 
 [[sources]]
 path = ".aiqt/core/references.toml"
@@ -2306,8 +2311,8 @@ sha256 = "9e0e365fb1e2813246c724267ec062310de3be1c5ca4ad9cba37fa0ce5691af4"
 
 [[sources]]
 path = ".gitattributes"
-bytes = 53714
-sha256 = "21fde9319bf20547792d6aa11a8d14c6cd93eb26b686ec0ea03035802ec0278a"
+bytes = 53807
+sha256 = "4e4d303a31a4559d2ac2e521ce23a988e0291ef140b5ee004a7cab62bbfd775e"
 
 [[sources]]
 path = ".github/copilot-instructions.md"
@@ -2417,7 +2422,7 @@ sha256 = "4e25f91d723d0b329a2af16a82abcc891ce6a506ff2874a149e6c4bf58d353db"
 [[sources]]
 path = "README.md"
 bytes = 5215
-sha256 = "907cc75bbe117406819f7024efae0018dce57d8184d4125ee1ee1301ca0b1935"
+sha256 = "bf8a698dabac67c8ac2be0e96086811877a8dc0b8070d1b37a8ef6f7b846435b"
 
 [[sources]]
 path = "RELEASING.md"
@@ -4151,8 +4156,8 @@ sha256 = "9387831df89640649d02a6382c5714bbcd2afc7079a5ccba60c8632d3f3349d2"
 
 [[sources]]
 path = "tools/check_child_status_coverage.py"
-bytes = 219026
-sha256 = "13213dfb48a9f238e01945c73397c0995bad2afc1d2cba495838adae4b506a7f"
+bytes = 219139
+sha256 = "5e92f46fffcaf568a97bb1a1d61b4a358b2d3c3f8af068812f57297141da9b02"
 
 [[sources]]
 path = "tools/check_ci_parity.py"
@@ -4188,6 +4193,11 @@ sha256 = "f8cb45999cd9d47bcf0537cf68805bcb1ccc1893024458ea75f96569c0642b5c"
 path = "tools/check_entry_guard.py"
 bytes = 271852
 sha256 = "752660aa80ae6cb147fef22c31d97084947df740172afe97ef9d0db391c25f3e"
+
+[[sources]]
+path = "tools/check_first_pin_shrink.py"
+bytes = 42555
+sha256 = "d0516b5a5d5728f9438e94dbfdf4b9e9eb545c8cc0bf5417cf4d8aa34d91976e"
 
 [[sources]]
 path = "tools/check_footer.py"
@@ -4641,8 +4651,8 @@ sha256 = "2b1d57119dd5e8849a0b28d9c58e35f2cfb900742b738b787e68b28650b39c22"
 
 [[sources]]
 path = "tools/run_all_checks.sh"
-bytes = 29542
-sha256 = "9f3beed56449e18e981340c045b03c72f9436abf5ef526ba9aca94a8a58aa29e"
+bytes = 29740
+sha256 = "dcad9bda668d6f7f91c4383c325fd2f35e37aa015e4d9af5c2203b37f545a12d"
 
 [[sources]]
 path = "tools/selftest_aiqt_corpus.py"
@@ -4656,8 +4666,8 @@ sha256 = "edb3c19204301fc55fe73dac90dadc79315dbac235b41e9d23da0e1218384194"
 
 [[sources]]
 path = "tools/selftest_checks.toml"
-bytes = 220303
-sha256 = "713d1e7990664be9a75c57e8a5597fabcc547a3435d3ca03cd87841d57d71bbb"
+bytes = 221794
+sha256 = "f4417800388dab6eec312f713bbc85a6cd39fddfea921b79519d0b2f343a9fdd"
 
 [[sources]]
 path = "tools/selftest_ci_status.py"
@@ -4666,8 +4676,8 @@ sha256 = "a6fd8ef45f66bf09553b17b4c45a7a638a9ea920f39cfd562e0ac00fb27d981b"
 
 [[sources]]
 path = "tools/selftest_git_fixture_env.py"
-bytes = 459288
-sha256 = "420cf32fa183ade14a2eb81d58dbe8162f2d7e9c4027f5ea16f205c5a2ef6e6a"
+bytes = 459602
+sha256 = "c2bca7415cf58ea8bbb736ee6ee7f48b082a6314af8e345ad0fb596419b16fca"
 
 [[sources]]
 path = "tools/selftest_git_fixture_env_config_combined.py"

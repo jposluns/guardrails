@@ -461,6 +461,15 @@ class = "a"
 residue = "It holds every rule listed in .aiqt/core/must-deliver.toml whole inside the first check_release_build.CAP_BYTES bytes of AGENTS.md, recomputing the spans with gen_first_pin_demo.measure (AGENTS.md must be byte-identical to a fresh composition first, offsets are absolute UTF-8 bytes, and the cap is read from the consumer at call time), and fails closed (exit 2) on an absent, unreadable, symlinked, non-UTF-8, malformed or empty list, a listed id with no measured span, or a prefix it cannot measure. Within that surface a listed rule ending past the cap is always caught. It does not catch a rule removed from the list itself, which only review can judge; it does not judge a listed rule's content, so a rule cut down to a stub still passes; it measures the repository file against the configured cap, not any platform's actual truncation behaviour or an instruction budget other files may share; and it assumes the checked-out AGENTS.md keeps the LF line endings .gitattributes pins, so a client that rewrites them to CRLF inflates what a reader there receives unseen."
 
 [[gate]]
+id = "first-pin-shrink"
+script = "tools/check_first_pin_shrink.py"
+rules = []
+platform = "ci"
+default = "block"
+class = "a"
+residue = "It fails when delivered-prefix-obligations or floor-profile-obligations in .aiqt/release/first-pin-demonstration.toml has lost a member relative to the unique merge base of HEAD and the main ref (default origin/main), read from git objects with --no-replace-objects, every GIT_ variable removed and GIT_GRAFT_FILE pinned to os.devnull, unless .aiqt/core/first-pin-reductions.toml carries a row naming that list, that id and the working-tree demonstration's agents-sha256 with an authorization table of authorizer, utc and reason; an unresolvable main ref or HEAD, no or several merge bases, a demonstration absent or malformed at the base, and an absent, unreadable or malformed working-tree input are cannot-evaluate (exit 2). It checks that an authorization row is present and well formed, not who wrote it, so that the row is the maintainer's rests on review of the change; a renamed member reads as a removal plus an addition; a merge base equal to HEAD, as on a push to main, compares the working tree with HEAD itself, so the gate bites on the change that reaches main; and it trusts the working-tree demonstration to be the fresh build the first-pin drift gate holds."
+
+[[gate]]
 id = "brief-capability"
 script = "tools/check_brief_capability.py"
 rules = []

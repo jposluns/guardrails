@@ -1068,6 +1068,12 @@ jobs:
       - name: Must-deliver prefix
         shell: bash
         run: python3 -I -B tools/check_must_deliver.py
+      - name: First-pin shrink self-test (execution-reconciled)
+        shell: bash
+        run: python3 -I -B tools/check_selftest_execution.py --suite first-pin-shrink-selftest
+      - name: First-pin shrink
+        shell: bash
+        run: python3 -I -B tools/check_first_pin_shrink.py
 
       - name: Mappings page self-test
         shell: bash
