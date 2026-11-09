@@ -1685,10 +1685,11 @@ _WATCHDOG_LAUNCH_MARGIN = 30
 # asserts which statuses its nested runner observes, not how fast a trivial
 # child starts. Sized from measurement: one run of the regression-ignored
 # row on a loaded host (80 CPUs at a load average of about 30) measured a
-# worst launch of 2.613 s and a p95 of 0.188 s over 94 launches, so 30 s
-# is about 11x that worst launch and about 160x that p95. Normal wall time
-# is unchanged (a launch returns as soon as its child exits); only a hung
-# launch waits longer before the backstop ends it, and a launch that
+# worst launch of 2.613 s and a p95 of 0.188 s over every launch that row
+# made (one per regression leg, a count that grows with the roster), so
+# 30 s is about 11x that worst launch and about 160x that p95. Normal wall
+# time is unchanged (a launch returns as soon as its child exits); only a
+# hung launch waits longer before the backstop ends it, and a launch that
 # reaches the backstop gives its row no verdict, never a FAIL.
 _WATCHDOG_LAUNCHER_BACKSTOP = 30
 # The per-launch timeout of _watchdog_completion_case's launch() helper.
@@ -5577,6 +5578,33 @@ def _watchdog_tree_vectors():
     return True
 
 
+class _WatchdogStarved(Exception):
+    """A pre-stimulus liveness bound expired before a leg reached its
+    stimulus. A starved host can reach such a bound on correct code, so the
+    expiry holds no verdict, never a definite failure."""
+
+
+def _watchdog_await_state(probe, wanted, note, bound, liveness=False,
+                          clock=None, pause=None):
+    """Poll probe() until it returns a value in `wanted`, ending at the
+    monotonic `bound`. Each pass takes ONE clock sample and chooses the
+    outcome from it: at or past the bound a liveness wait raises
+    _WatchdogStarved and a guarded wait raises AssertionError(note). Two
+    reads (one for the liveness test, one for the assertion) would let a
+    caller descheduled between them see the bound unexpired and then
+    expired, turning a liveness expiry into a definite failure. `clock`
+    and `pause` default to time.monotonic and time.sleep, looked up per
+    call; the await-clock completion row scripts them."""
+    import time
+    while probe() not in wanted:
+        now = (time.monotonic if clock is None else clock)()
+        if now >= bound:
+            if liveness:
+                raise _WatchdogStarved(note)
+            raise AssertionError(note)
+        (time.sleep if pause is None else pause)(0.005)
+
+
 def _watchdog_completion_case(mode, tree=None):
     """Run each irreversible audit-hook/disposition experiment in its own fixture process.
     `tree` carries the nested-orders vectors' parameters into the tree legs
@@ -5785,6 +5813,88 @@ def _watchdog_completion_case(mode, tree=None):
                 (EXIT_MALFORMED, "fired", ("fail", False))):
             verdict, marker, text = fixture(code, change)
             assert (verdict, marker) == want, (code, change, verdict, marker, text)
+    elif mode == "await-clock":
+        # escalate-degraded's wait, _watchdog_await_state, under a scripted
+        # clock and probe: each vector gives the clock readings in order and
+        # the pass from which the probe reports the wanted state. No child is
+        # started, nothing sleeps and no deadline is charged.
+        bound = 100.0
+        early, late = bound - 0.001, bound + 0.001
+
+        class Exhausted(Exception):
+            pass
+
+        def outcome(waiter, readings, reached_at, liveness):
+            script = list(readings)
+            probes = []
+            pauses = []
+
+            def probe():
+                probes.append(None)
+                return "T" if reached_at is not None and len(probes) > reached_at else "R"
+
+            def clock():
+                if not script:
+                    raise Exhausted()
+                return script.pop(0)
+
+            try:
+                waiter(probe, ("T",), "scripted wait", bound, liveness=liveness,
+                       clock=clock, pause=pauses.append)
+            except _WatchdogStarved:
+                result = "starved"
+            except AssertionError as exc:
+                if str(exc) != "scripted wait":
+                    raise
+                result = "failed"
+            except Exhausted:
+                result = "clock read past its script"
+            else:
+                result = "reached"
+            return result, len(pauses), len(script)
+
+        crossing = ((early, late), None, True, ("starved", 1, 0))
+        vectors = (
+            # The deadline crosses between the clock reads of one pass of
+            # the former two-read loop: a liveness wait is no verdict
+            # (Starved), a guarded wait the definite assertion failure.
+            crossing,
+            ((early, late), None, False, ("failed", 1, 0)),
+            # Exactly at the bound is expired, for either wait.
+            ((bound,), None, True, ("starved", 0, 0)),
+            ((bound,), None, False, ("failed", 0, 0)),
+            # Just past the bound on the first sample.
+            ((late,), None, True, ("starved", 0, 0)),
+            ((late,), None, False, ("failed", 0, 0)),
+            # Just inside the bound, then the state arrives: no expiry.
+            ((early,), 1, True, ("reached", 1, 0)),
+            ((early,), 1, False, ("reached", 1, 0)),
+            # The state already holds: the clock is never read.
+            ((), 0, True, ("reached", 0, 0)))
+
+        def red(waiter):
+            return [(readings, reached_at, liveness, want, got)
+                    for readings, reached_at, liveness, want in vectors
+                    for got in (outcome(waiter, readings, reached_at, liveness),)
+                    if got != want]
+
+        assert not red(_watchdog_await_state), red(_watchdog_await_state)
+
+        # Flip: the two-read loop (one clock read for the liveness test, a
+        # second for the assertion) raises the assertion failure for the
+        # crossing liveness wait, so the row turns red.
+        def two_reads(probe, wanted, note, bound, liveness=False, clock=None, pause=None):
+            while probe() not in wanted:
+                if liveness and clock() >= bound:
+                    raise _WatchdogStarved(note)
+                if not clock() < bound:
+                    raise AssertionError(note)
+                pause(0.005)
+
+        flipped = red(two_reads)
+        assert any(readings == crossing[0] and liveness and got[0] == "failed"
+                   for readings, _reached, liveness, _want, got in flipped), \
+            ("the flip did not reproduce the crossing assertion failure", flipped)
     elif mode == "failure-evidence":
         # A failing fixture's refusal message carries BOTH captured streams:
         # the fixture's own verdict line is printed to its stdout, which an
@@ -8555,21 +8665,15 @@ def _watchdog_completion_case(mode, tree=None):
                     return None
                 return stat.rsplit(b")", 1)[1].split()[0].decode("ascii")
 
-            class Starved(Exception):
-                # Startup liveness only, never the guarded behaviour: a
-                # starved host can reach a pre-stimulus bound on correct
-                # code, so its expiry holds no verdict. The guarded waits
-                # (the refusal wording and the unacknowledged subject's own
-                # exit after the degraded escalation) stay definite.
-                pass
-
             def await_state(target, wanted, note, liveness=False):
-                bound = _watchdog_deadline(30)
-                while state(target) not in wanted:
-                    if liveness and time.monotonic() >= bound:
-                        raise Starved(note)
-                    assert time.monotonic() < bound, note
-                    time.sleep(0.005)
+                # A liveness wait is startup liveness only, never the
+                # guarded behaviour: a starved host can reach a pre-stimulus
+                # bound on correct code, so its expiry holds no verdict. The
+                # guarded waits (the refusal wording and the unacknowledged
+                # subject's own exit after the degraded escalation) stay
+                # definite.
+                _watchdog_await_state(lambda: state(target), wanted, note,
+                                      _watchdog_deadline(30), liveness=liveness)
 
             def by_pid(child_self, failure):
                 # The pre-fix suffix chose by subject_pid and always claimed a
@@ -8593,7 +8697,7 @@ def _watchdog_completion_case(mode, tree=None):
                 bound = _watchdog_deadline(30)
                 while not wedged.exists():
                     if time.monotonic() >= bound:
-                        raise Starved("the guardian never reached its stop point")
+                        raise _WatchdogStarved("the guardian never reached its stop point")
                     time.sleep(0.005)
                 gpid = int(wedged.read_text(encoding="ascii"))
                 assert gpid == child.pid, "the hook stopped an unexpected process"
@@ -8626,7 +8730,7 @@ def _watchdog_completion_case(mode, tree=None):
                 flipped = exercise(flip=True)
                 assert "subject tree killed" in flipped, \
                     ("the flip did not reproduce the false claim", flipped)
-            except Starved as starved:
+            except _WatchdogStarved as starved:
                 # A pre-stimulus liveness bound expired before the guardian
                 # was even wedged or stopped: the exercise never reached its
                 # stimulus, so no verdict exists, never a definite failure.
@@ -16235,7 +16339,7 @@ def _watchdog_regression_self_test():
                         "escalate-degraded", "poll-masked",
                         "unpinned-kill", "census-verify",
                         "census-exception", "receipt-high-fd",
-                        "launcher-backstop", "timer-inner-exit")
+                        "launcher-backstop", "timer-inner-exit", "await-clock")
     # Each launcher case's bound DERIVES from its nested callee's sanctioned
     # budget, following the blocked-isolation convention below: with
     # _run_fixture_process patched, every nested case is exactly one exit-37
@@ -16381,7 +16485,10 @@ def _watchdog_regression_self_test():
         ("launcher-backstop", 1),
         # timer-inner-exit likewise starts no child and makes no bounded
         # wait: the timer fixture it drives runs a scripted inner self-test.
-        ("timer-inner-exit", 1)))
+        ("timer-inner-exit", 1),
+        # await-clock likewise starts no child and makes no bounded wait:
+        # its clock, probe and pause are scripted, so it charges nothing.
+        ("await-clock", 1)))
     # The isolation matrix in this leg: 31 timer cases, each one 180 s
     # fixture call, charged its allowance by the leg's ledger. A call that
     # overruns that allowance overruns the leg, which its process bound then
