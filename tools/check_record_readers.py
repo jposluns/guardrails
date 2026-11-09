@@ -496,13 +496,14 @@ def _binding_names(node):
 # language stops a later edit from writing a direct isinstance test of another type into a
 # branch; the self-test's meta row is what refuses it. That row compares the table, read as
 # data, with the per-type void rows plus the closed no-row table, and it calls every binding
-# branch and _type_param_binds on two probe instances of every concrete ast node class the
-# table does not list (enumerated from ast.AST at run time) and fails when any call yields a
-# name or raises. A branch whose condition tests a probe's field values beyond its type can
-# still return nothing for both probes; the probes are the check, not a proof. Order carries
-# meaning where one branch reads different fields per type: store-or-delete is the Name test
-# followed by its Store and Del context markers, and match-capture is the two name captures
-# (MatchAs, MatchStar) followed by the mapping rest (MatchMapping).
+# branch and _type_param_binds on three probe instances of every concrete ast node class the
+# table does not list (enumerated from ast.AST at run time; see _ast_probe_instances) and
+# fails when any call yields a name or raises. A branch whose condition tests a probe's field
+# values beyond its type and beyond the binding shape (a Store ctx, a Name in an expression
+# field) can still return nothing for every probe; the probes are the check, not a proof.
+# Order carries meaning where one branch reads different fields per type: store-or-delete is
+# the Name test followed by its Store and Del context markers, and match-capture is the two
+# name captures (MatchAs, MatchStar) followed by the mapping rest (MatchMapping).
 _BRANCH_NODE_TYPES = {
     "store-or-delete": (ast.Name, ast.Store, ast.Del),
     "parameter": (ast.arg,),
@@ -620,7 +621,7 @@ def _from_import_void_names(alias):
 # global declarations _nested_rebinders reads for a nested def or lambda are outside this
 # closure: they say which names a nested scope can rebind here, not which names a node binds.
 # A branch gaining a test of an unlisted node type is refused by the self-test meta row, which
-# probes every branch with an instance of every concrete ast node class the table does not
+# probes every branch with the probe instances of every concrete ast node class the table does not
 # list (see _BRANCH_NODE_TYPES). Every branch except store-or-delete is guarded by a self-test row that
 # fails with that branch removed; no row can guard store-or-delete, because a stored or deleted
 # bare-name __import__ or __builtins__ is itself a voiding occurrence, so removing that branch
@@ -1541,32 +1542,77 @@ def _concrete_ast_types():
     return found
 
 
-def _ast_probe_instances(cls):
-    """Two minimally constructed instances of one ast node class: one with no field given, and
-    one with every field set to the placeholder string "_" (truthy, so a branch that guards on a
-    name field still reads it, and a branch that descends into a field raises). Each is built by
-    ast.AST.__new__ and ast.AST.__init__ directly, so a deprecated class whose own constructor
-    returns another node type (ast.Index, ast.ExtSlice) still yields an instance of itself."""
+def _is_expression_annotation(annotation):
+    """True when one _field_types annotation is an expression: ast.expr or a subclass, alone or
+    with None (an optional expression). A list of expressions is not one."""
+    if isinstance(annotation, type):
+        return issubclass(annotation, ast.expr)
+    if getattr(annotation, "__origin__", None) is not None:
+        return False
+    args = getattr(annotation, "__args__", ())
+    return (any(isinstance(a, type) and issubclass(a, ast.expr) for a in args)
+            and all(a is type(None) or (isinstance(a, type) and issubclass(a, ast.expr))
+                    for a in args))
+
+
+def _binding_shaped_fields(cls):
+    """The fields of the binding-shaped probe of one ast node class: every ctx field (by name or
+    by its expr_context annotation) set to ast.Store(), every field whose annotated type is an
+    expression set to a fresh ast.Name with a Store ctx, and every other field set to "_". The
+    annotations are read from the class's _field_types, which the running interpreter supplies;
+    a class without it raises here, which fails the self-test closed."""
+    fields = {}
+    for field in cls._fields:
+        annotation = cls._field_types.get(field)
+        if field == "ctx" or annotation is ast.expr_context:
+            fields[field] = ast.Store()
+        elif _is_expression_annotation(annotation):
+            fields[field] = ast.Name(id="_", ctx=ast.Store())
+        else:
+            fields[field] = "_"
+    return fields
+
+
+# The probe instances of the unlisted ast node classes. The class list (_concrete_ast_types)
+# and these constructors both come from the running interpreter: which classes exist, which
+# fields each has and their annotations, and what the constructor fills in for a field not
+# given (Python 3.13 and later default a ctx to Load() and an optional field to None) all
+# follow the Python release, so the meta row's verdict can differ between Python patch
+# releases. A constructor error is not caught: it propagates out of the self-test, which then
+# fails closed instead of passing. Three probes per class: the first with no field given, the
+# second with every field set to the placeholder string "_" (truthy, so a branch that guards
+# on a name field still reads it, and a branch that descends into a field raises), and the
+# third binding-shaped (_binding_shaped_fields), so a branch that tests a ctx or a target
+# field, not only the node type, yields a name on it.
+def _ast_probe_instances(cls, binding_shaped=True):
+    """The probe instances of one ast node class: the empty and "_" probes, and the
+    binding-shaped probe unless binding_shaped is false (the self-test's flips drop it to show
+    which findings depend on it). Each is built by ast.AST.__new__ and ast.AST.__init__
+    directly, so a deprecated class whose own constructor returns another node type (ast.Index,
+    ast.ExtSlice) still yields an instance of itself."""
     probes = []
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        for fields in ({}, {field: "_" for field in cls._fields}):
+        shapes = [{}, {field: "_" for field in cls._fields}]
+        if binding_shaped:
+            shapes.append(_binding_shaped_fields(cls))
+        for fields in shapes:
             node = ast.AST.__new__(cls)
             ast.AST.__init__(node, **fields)
             probes.append(node)
     return probes
 
 
-def _unlisted_binding_types(table, branches, type_param_binds):
+def _unlisted_binding_types(table, branches, type_param_binds, probes=_ast_probe_instances):
     """The sorted names of the concrete ast node classes the table does not list for which any
-    branch in branches, or type_param_binds, yields a name or raises on either probe instance
-    (_ast_probe_instances): a branch that tests a node type outside the table directly, rather
-    than through its table entry, is found here."""
+    branch in branches, or type_param_binds, yields a name or raises on any probe instance
+    (probes, _ast_probe_instances by default): a branch that tests a node type outside the
+    table directly, rather than through its table entry, is found here."""
     listed = {cls for types in table.values() for cls in types}
     callables = list(branches.values()) + [type_param_binds]
     found = set()
     for cls in _concrete_ast_types() - listed:
-        for node in _ast_probe_instances(cls):
+        for node in probes(cls):
             for binds in callables:
                 try:
                     yielded = bool(tuple(binds(node)))
@@ -1577,6 +1623,57 @@ def _unlisted_binding_types(table, branches, type_param_binds):
                 if yielded:
                     found.add(cls.__name__)
     return sorted(found)
+
+
+def _binding_node_types_meta(table, branches, type_param_binds, covered, no_row,
+                             probes=_ast_probe_instances):
+    """The self-test meta row's verdict and detail for one branch table and branch set: true
+    when the table's listed types are exactly accounted for (_binding_node_types_closed) and no
+    branch yields a name for, or raises on, a probe of an unlisted type
+    (_unlisted_binding_types). The meta row and its flips call this one function, so a flip
+    that widens a branch runs the row's whole condition."""
+    unlisted = _unlisted_binding_types(table, branches, type_param_binds, probes)
+    ok = _binding_node_types_closed(table, covered, no_row) and not unlisted
+    return ok, {"listed": sorted(_branch_node_type_names(table)),
+                "rows": sorted(covered), "no_row": sorted(no_row),
+                "unlisted_types_binding": unlisted}
+
+
+def _branches_widened(branches, branch, extra):
+    """A copy of branches whose named branch also yields what extra yields for a node: a
+    mutant that adds a test the table does not declare, for the meta row's flips."""
+    widened = dict(branches)
+    full = branches[branch]
+    widened[branch] = lambda node: tuple(full(node)) + tuple(extra(node))
+    return widened
+
+
+def _raise_on_keyword(node):
+    """A mutant branch that raises on an ast.keyword and yields nothing otherwise: the meta
+    row must count the raise as a finding."""
+    if isinstance(node, ast.keyword):
+        raise AttributeError("mutant branch read a field of an unlisted type")
+    return ()
+
+
+# Mutant branches that test an unlisted type together with a ctx or target field, which only
+# the binding-shaped probe matches: an attribute stored or deleted, a starred store, a walrus
+# target, and a store context on any expression (the abstract-base test).
+_FIELD_TESTING_MUTANTS = {
+    "attribute-store": ("Attribute", lambda node: (
+        (node.attr,) if isinstance(node, ast.Attribute)
+        and isinstance(node.ctx, (ast.Store, ast.Del)) else ())),
+    "starred-store": ("Starred", lambda node: (
+        (node.value.id,) if isinstance(node, ast.Starred) and isinstance(node.ctx, ast.Store)
+        and isinstance(node.value, ast.Name) else ())),
+    "namedexpr-target": ("NamedExpr", lambda node: (
+        (node.target.id,) if isinstance(node, ast.NamedExpr)
+        and isinstance(getattr(node, "target", None), ast.Name) else ())),
+    "expr-base-store": ("Attribute", lambda node: (
+        tuple(n.id for n in ast.walk(node) if isinstance(n, ast.Name))
+        if isinstance(node, ast.expr) and isinstance(getattr(node, "ctx", None), ast.Store)
+        else ())),
+}
 
 
 def _gate_without_builtins_blocker(files):
@@ -2426,19 +2523,16 @@ def _self_test():
     # The coverage closure over the binding branches: every node type the declared table
     # _BRANCH_NODE_TYPES lists has either a per-node-type void row and narrowing flip above or
     # an entry in the closed no-row table, the two sets are disjoint, and neither names a type
-    # the table does not list; and every binding branch and _type_param_binds, called on both
-    # probe instances of every concrete ast node class the table does not list (enumerated from
+    # the table does not list; and every binding branch and _type_param_binds, called on every
+    # probe instance of every concrete ast node class the table does not list (enumerated from
     # ast.AST at run time), yields no name and raises nothing. Each unlisted type that yields a
     # name or raises is reported in this row's detail. The table is compared as data; nothing
-    # parses this file's source.
+    # parses this file's source. The row's verdict is _binding_node_types_meta, which the flips
+    # below that widen a branch call too.
     no_row = frozenset(_NO_ROW_BINDING_NODE_TYPES)
-    unlisted = _unlisted_binding_types(_BRANCH_NODE_TYPES, _BINDING_BRANCHES, _type_param_binds)
-    check("meta/binding-node-types-closed",
-          _binding_node_types_closed(_BRANCH_NODE_TYPES, covered_node_types, no_row)
-          and not unlisted,
-          {"listed": sorted(_branch_node_type_names(_BRANCH_NODE_TYPES)),
-           "rows": sorted(covered_node_types), "no_row": sorted(no_row),
-           "unlisted_types_binding": unlisted})
+    meta_ok, meta_detail = _binding_node_types_meta(
+        _BRANCH_NODE_TYPES, _BINDING_BRANCHES, _type_param_binds, covered_node_types, no_row)
+    check("meta/binding-node-types-closed", meta_ok, meta_detail)
     # The meta row's own flips, one per condition. A mutant table that lists one more node type,
     # with no row and no no-row entry for it, must fail the comparison.
     mutant_table = dict(_BRANCH_NODE_TYPES)
@@ -2465,6 +2559,41 @@ def _self_test():
         (node.arg,) if isinstance(node, (ast.arg, ast.keyword)) else ())
     found = _unlisted_binding_types(_BRANCH_NODE_TYPES, widened, _type_param_binds)
     check("flip/binding-node-types-direct-isinstance-fails", "keyword" in found, found)
+    # The same widening run through the meta row's whole condition must turn the row red: a
+    # row that dropped its unlisted-type condition would pass this widening.
+    meta_ok, meta_detail = _binding_node_types_meta(
+        _BRANCH_NODE_TYPES, widened, _type_param_binds, covered_node_types, no_row)
+    check("flip/binding-node-types-meta-row-direct-isinstance-fails",
+          not meta_ok and "keyword" in meta_detail["unlisted_types_binding"], meta_detail)
+    # A branch that raises on an unlisted type, and yields no name for it, must turn the row
+    # red: the raise is the finding, so a row counting a raise as no finding would pass it.
+    meta_ok, meta_detail = _binding_node_types_meta(
+        _BRANCH_NODE_TYPES, _branches_widened(_BINDING_BRANCHES, "parameter", _raise_on_keyword),
+        _type_param_binds, covered_node_types, no_row)
+    check("flip/binding-node-types-raising-branch-fails",
+          not meta_ok and "keyword" in meta_detail["unlisted_types_binding"], meta_detail)
+    # A branch that tests an unlisted type together with a ctx or target field is found by the
+    # binding-shaped probe and turns the row red; with that probe dropped the same mutant
+    # passes unseen, so the finding rests on it.
+    for mutant, detect_id, flip_id in (
+            ("attribute-store", "detect/binding-probe-attribute-store",
+             "flip/binding-probe-attribute-store"),
+            ("starred-store", "detect/binding-probe-starred-store",
+             "flip/binding-probe-starred-store"),
+            ("namedexpr-target", "detect/binding-probe-namedexpr-target",
+             "flip/binding-probe-namedexpr-target"),
+            ("expr-base-store", "detect/binding-probe-expr-base-store",
+             "flip/binding-probe-expr-base-store")):
+        type_name, extra = _FIELD_TESTING_MUTANTS[mutant]
+        mutant_branches = _branches_widened(_BINDING_BRANCHES, "store-or-delete", extra)
+        meta_ok, meta_detail = _binding_node_types_meta(
+            _BRANCH_NODE_TYPES, mutant_branches, _type_param_binds, covered_node_types, no_row)
+        check(detect_id,
+              not meta_ok and type_name in meta_detail["unlisted_types_binding"], meta_detail)
+        meta_ok, meta_detail = _binding_node_types_meta(
+            _BRANCH_NODE_TYPES, mutant_branches, _type_param_binds, covered_node_types, no_row,
+            lambda cls: _ast_probe_instances(cls, binding_shaped=False))
+        check(flip_id, meta_ok, meta_detail)
 
     # A binding of __builtins__ with no bare-name or attribute occurrence the scan reads: the
     # bound object is the mapping a bare-name __import__ resolves through, so the __import__
@@ -2818,11 +2947,16 @@ def _self_test():
           "branches built from a declared node-type table, the no-row types listed in a closed "
           "table with reasons, and a meta row that compares the declared table, read as data, "
           "with the per-type rows plus the no-row table, requiring equality and no type in both, "
-          "and that calls every binding branch and the type-parameter test on two probe "
-          "instances of every concrete ast node class the table does not list, enumerated from "
-          "the ast module at run time, requiring no name and no exception from any; its flips "
-          "fail a mutant table that lists one more type, a row naming an unlisted type, a type "
-          "with both a row and a no-row entry, and a branch that tests ast.keyword directly; "
+          "and that calls every binding branch and the type-parameter test on three probe "
+          "instances (empty, placeholder and binding-shaped) of every concrete ast node class "
+          "the table does not list, enumerated from the ast module of the running interpreter, "
+          "requiring no name and no exception from any; its flips fail a mutant table that "
+          "lists one more type, a row naming an unlisted type, a type with both a row and a "
+          "no-row entry, a branch that tests ast.keyword directly (through the helper and "
+          "through the meta row), and a branch that raises on ast.keyword, and the meta row "
+          "fails each of four branches that test an unlisted type with a ctx or target field "
+          "(a stored or deleted attribute, a starred store, a walrus target, a store context on "
+          "any expression), each passing unseen with the binding-shaped probe dropped; "
           "the loop-key, helper, module-alias and comprehension rebinding scans take their "
           "per-node bindings from the same branches), and dropping "
           "__builtins__ from the "
