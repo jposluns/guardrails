@@ -2538,12 +2538,17 @@ runpy.run_path(path, run_name="__main__")
 # record publication flip): about 840 s together. A plain --self-test run took 283.5 s on 2026-11-08 at a
 # 1-minute load of 25 to 33, before the kernel sigchld, exit-outlived, exit-at-bound and record publication
 # rows were added, the seven entries about 113 s of it (their second measured runs above), so the rest (the
-# fixture cases, close checks and entry-restore) about 171 s; the replays' time under --red-on-revert was
-# not measured. With every census bound above spent in full, a --self-test run ends by about 680 + 825 + 171
-# = 1676 s and a --red-on-revert run by about 1676 + 840 = 2516 s plus its unmeasured replays. Both exceed
-# the 1200 s default member bound, so the member carries its own 2700 s entry in
-# tools/selftest_git_fixture_env.py, about 184 s above that worst case; measured runs stay far under it (the
-# entry's own comment records them).
+# fixture cases, close checks and entry-restore) about 171 s. The replays (the close-sweep reverts and the
+# mutation replays after entry-restore) run only under --red-on-revert and no bound covers them: one
+# --self-test --red-on-revert run on 2026-11-09 from 12:06:49 to 12:12:56 UTC, on 80 CPUs at a 1-minute load
+# of 23.9 at its start and 29.6 at its end, took 367.0 s wall and passed, its replays 12.1 s of it (from its
+# entry-restore line to its last line). With every census bound above spent in full, a --self-test run ends
+# by about 680 + 825 + 171 = 1676 s and a --red-on-revert run by about 1676 + 840 + 12.1 = 2528.1 s. Both
+# exceed the 1200 s default member bound, so the member carries its own 2700 s entry in
+# tools/selftest_git_fixture_env.py, about 172 s above that worst case: that margin lets the parts no bound
+# covers (the 171 s rest and the 12.1 s replays, about 183 s as measured) take up to 355 s, about 1.9 times
+# as long, before the entry would cut a run whose census bounds all ran out. Measured runs stay far under it
+# (the entry's own comment records them).
 _CENSUS_BOUND_CAP = 600
 _CENSUS_TOTAL_CAP = 720
 # The most a killed entry waits after its group kill, once for its pipes and once more for its group to empty.

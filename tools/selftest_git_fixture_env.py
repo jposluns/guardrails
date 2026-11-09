@@ -1439,11 +1439,18 @@ CONFIG_MEMBER_BOUNDS = {
     # time of it since is known).
     # READ FROM SOURCE (tools/check_release_cut.py, its census budget comment): with every census
     # entry, census row and revert flip spending its bounds in full, a --red-on-revert run ends by
-    # about 2046 s, above the 1200 s default, so the default would cut the member's own worst case
-    # short; 2700 s sits above that worst case with about a third of it as margin.
+    # about 2516 s plus its replays (the close-sweep reverts and mutation replays, which no bound
+    # covers), about 2528 s with the replays as measured below, above the 1200 s default, so the
+    # default would cut the member's own worst case short. 2700 s sits about 172 s above that
+    # worst case, which lets the parts no bound covers (about 183 s as measured: the fixture
+    # cases, close checks and entry-restore, and the replays) take about 1.9 times as long as
+    # measured.
     # MEASURED (2026-11-09, 80-CPU host, load5 about 26 to 29, standalone, plain): one --self-test
-    # run took 283.4 s wall and one --self-test --red-on-revert run took 309.4 s wall, both passed;
-    # the worst case above, not these runs, sizes this entry.
+    # run took 283.4 s wall and one --self-test --red-on-revert run took 309.4 s wall, both passed.
+    # MEASURED (2026-11-09, 12:06:49 to 12:12:56 UTC, 80-CPU host, 1-minute load 23.9 at the start
+    # and 29.6 at the end, standalone, plain): one --self-test --red-on-revert run took 367.0 s
+    # wall and passed, its replays 12.1 s of it. The worst case above, not these runs, sizes this
+    # entry.
     ("tools/check_release_cut.py", "--self-test", "--red-on-revert"): 2700,
 }
 # The sizing account's frozen facts (see SIZING above); _roster_figures derives the live figures
