@@ -17279,17 +17279,29 @@ def _main_isolated(report_path=None):
         nu_hooks = os.path.dirname(os.path.abspath(aiqt_hooks.__file__))
         nu_home = tmp / "nonutf8-home"
         nu_home.mkdir()
-        for nu_name, nu_tail in (("byte", b"\xff\n"), ("surrogate", b"\xed\xa0\x80\n"),
-                                 ("truncated", b"\xe2\x82")):
+        # each row spells its check ids as literals so the static id resolver reads every one
+        nu_tails = {"byte": b"\xff\n", "surrogate": b"\xed\xa0\x80\n", "truncated": b"\xe2\x82"}
+        for nu_name, nu_id_stop, nu_id_chain, nu_id_auth, nu_id_snap in (
+                ("byte", "attest/nonutf8-byte-stop-holds",
+                 "attest/nonutf8-byte-chain-reader-cannot-evaluate",
+                 "attest/nonutf8-byte-authority-holds",
+                 "attest/nonutf8-byte-validate-holds-snapshot"),
+                ("surrogate", "attest/nonutf8-surrogate-stop-holds",
+                 "attest/nonutf8-surrogate-chain-reader-cannot-evaluate",
+                 "attest/nonutf8-surrogate-authority-holds",
+                 "attest/nonutf8-surrogate-validate-holds-snapshot"),
+                ("truncated", "attest/nonutf8-truncated-stop-holds",
+                 "attest/nonutf8-truncated-chain-reader-cannot-evaluate",
+                 "attest/nonutf8-truncated-authority-holds",
+                 "attest/nonutf8-truncated-validate-holds-snapshot")):
             # a fresh ok snapshot bound to the valid register, then the undecodable bytes appended
             # past the anchored row
             write_at(nu_good)
             aiqt_hooks._orch_validate_attestations(areg, str(a.root))
-            at_reg.write_bytes(nu_bytes + nu_tail)
+            at_reg.write_bytes(nu_bytes + nu_tails[nu_name])
             a.set_items([ext("AT-I1", "ci")])
             a.set_turn_state({})
-            check("attest/nonutf8-{}-stop-holds".format(nu_name),
-                  _nu_try(lambda: _verdict(astop())), "block2")
+            check(nu_id_stop, _nu_try(lambda: _verdict(astop())), "block2")
             if nu_name == "byte":
                 # the whole dispatcher in a child process: the stop is denied (exit 2, no stdout),
                 # never a warning on exit 0 that lets the stop through
@@ -17302,14 +17314,14 @@ def _main_isolated(report_path=None):
                 check("attest/nonutf8-byte-dispatcher-denies-stop",
                       (nu_ctl.returncode, nu_ctl.stdout.strip()), (2, ""))
             nu_rows = _nu_try(lambda: aiqt_hooks._orch_chained_rows(str(at_reg), "AT-"))
-            check("attest/nonutf8-{}-chain-reader-cannot-evaluate".format(nu_name),
+            check(nu_id_chain,
                   (nu_rows[0], str(nu_rows[1]).startswith("not UTF-8 text")), (None, True))
             nu_auth = _nu_try(lambda: aiqt_hooks._orch_register_authority(str(a.root), str(at_reg)))
-            check("attest/nonutf8-{}-authority-holds".format(nu_name),
+            check(nu_id_auth,
                   (nu_auth[0], "not UTF-8 text" in str(nu_auth[1])), ("hold", True))
             nu_found = _nu_try(lambda: aiqt_hooks._orch_validate_attestations(areg, str(a.root)))
             nu_snap = json.loads((asd / "attestations-validated.json").read_text(encoding="utf-8"))
-            check("attest/nonutf8-{}-validate-holds-snapshot".format(nu_name),
+            check(nu_id_snap,
                   (isinstance(nu_found, list) and any(
                       "fails its inline chain/shape check (not UTF-8 text" in x for x in nu_found),
                    nu_snap.get("status")), (True, "unreadable"))
