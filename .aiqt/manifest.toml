@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "d6c0279d6563633cf8cf9e977cea504600ba94991bff869dc4093d1cda10741d"
+tree-sha256 = "755ebff1ed9047ebc2f3ad00350400e7058d2fc6b962de7a26f05f78bcdd9a0f"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -2471,8 +2471,8 @@ sha256 = "0e69654bbade4954c032a6134d3d8c9ea4cb1c5fd00654c48ea6be1c83e4cc8c"
 
 [[sources]]
 path = "docs/evidence.md"
-bytes = 5451
-sha256 = "636170e61bc57a486e6d4c4a6a4740d9525e1863c41595aba6d35c5f3baf67ca"
+bytes = 5346
+sha256 = "aa49ebeb87db1534bfba9cbaeffff1962adde20fb6ff5c82468e95c01980ddbe"
 
 [[sources]]
 path = "docs/tech-details.md"
@@ -3971,8 +3971,8 @@ sha256 = "0e78786e2be2bfc810b96d37be5e26351588359f18edfaab806aa128cc501b0b"
 
 [[sources]]
 path = "site/evidence.html"
-bytes = 13001
-sha256 = "c19e94a0abb1e6eafcbc542f468001ddd615441ccd3111f92b9d931227477348"
+bytes = 12896
+sha256 = "3c12eda65671a120b0a0347873740d5069c280167a77087fa498556bd9fcf513"
 
 [[sources]]
 path = "site/favicon.svg"
