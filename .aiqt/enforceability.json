@@ -33,6 +33,13 @@
       "rules": []
     },
     {
+      "file": ".preview/stamp-append.py",
+      "id": "stamp-append",
+      "rules": [
+        "tstamp"
+      ]
+    },
+    {
       "file": ".preview/stamp-truth-stop.py",
       "id": "stamp-truth-stop",
       "rules": [
@@ -2085,6 +2092,7 @@
       "previews": [
         "clock-inject",
         "future-stamp-write",
+        "stamp-append",
         "stamp-truth-stop"
       ],
       "source": ".aiqt/core/rules/accur-timestamp-from-clock.md",
