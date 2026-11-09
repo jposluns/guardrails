@@ -174,24 +174,27 @@ reader whatever you chose. The target is just a path or git URL; `github:owner/r
    covered. The suite's runtime paste test is the primary guard. A repository whose history the scan cannot trust as-is (a shallow clone, any entry
    at the legacy `.git/info/grafts` path, or a grafts path it cannot inspect) is refused as
    cannot-evaluate rather than initialized.
-2. Commit the tree; confirm nothing under `.working/` is ignored.
+2. Commit the tree; confirm nothing under `.working/` is ignored except `.working/journals/` and
+   `.working/staging/`, which the managed ignore block of specification section 4.2 (in
+   `.working/.gitignore`, written by `opf init`) keeps out of git.
 3. Work records-first: append a worklog entry per change; keep the backlog, findings, and decisions
    in their typed files; regenerate views rather than editing them.
 4. At release: record the release and its worklog span in `version.toml`, draft the summary from
    that span, curate it by hand, publish it into `CHANGELOG.md`, and record its freeze digest.
-5. If you later want the store elsewhere: `opf migrate --store <target>`. The generated public
-   deliverables (`CHANGELOG.md` and `VERSION`) are unchanged; migration re-points the committed
-   pointer, updates the manifest's recorded sync target, and records the move as a worklog entry.
+5. Moving the store elsewhere is not available in this build: `opf migrate --store <target>` exits
+   2 and changes nothing. Migration as specification section 5.4 defines it keeps the generated
+   public deliverables (`CHANGELOG.md` and `VERSION`) unchanged, re-points the committed pointer,
+   updates the manifest's recorded sync target, and records the move as a worklog entry.
 
 The reference tooling scaffolds (`opf init`), validates (`opf doctor`) and renders (`opf render`) a
 store; `opf migrate` and `opf sync` exit 2 in this build. The files stay simple enough to keep by
-hand, and a conformance claim is self-asserted and says so. The specification defines one implementation model, with no conformance classes (OPF-SPEC
-section 16.1). Base 2.0.0, with `homes = 2`, is the only base version the specification
-defines, and the reference tooling initializes and validates base 2.0.0 stores with `homes = 2`.
-Its `opf adopt plan`, `approve` and `status` run at base 2.0.0 without reading the adoption journal,
-and `status` says the journal is not read; `opf adopt apply` and `reconcile` refuse at base 2.0.0.
-The reference tooling defines no store upgrade: `opf upgrade`
-refuses every invocation with exit 2, reading and writing nothing.
+hand, and a conformance claim is self-asserted and says so. The specification defines one
+implementation model, with no conformance classes (OPF-SPEC section 16.1). Base 2.0.0, with
+`homes = 2`, is the only base version the specification defines, and the reference tooling
+initializes and validates base 2.0.0 stores with `homes = 2`. Its `opf adopt plan`, `approve` and
+`status` run at base 2.0.0 without reading the adoption journal, and `status` says the journal is
+not read; `opf adopt apply` and `reconcile` refuse at base 2.0.0. The reference tooling defines no
+store upgrade: `opf upgrade` refuses every invocation with exit 2, reading and writing nothing.
 
 The reference tooling's declaration (OPF-SPEC section 16.1) ships as one file, the declaration file
 `opf/tools/opf-declaration.toml`. The shipped-file digest is carried in

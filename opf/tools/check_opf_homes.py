@@ -58,12 +58,20 @@ outside the keyword lint, and the self-test pins the registry's shape, so droppi
 entry turns the self-test red; each sentence of the disclosure page's retired fresh-only item, the
 quickstart's retired conformance-class sentence, the record indexes' deleted importer-only
 legacy_fragment rows and counts, those three files' wording of the removed section 9.2 remedy
-adoption, and the disclosure page's and the record indexes' description of a store upgrade the
-reference tooling no longer defines, and every surface's tooling-status sentences from before the
-tooling initialized and validated base 2.0.0 stores, is searched over its whole file's normalized
-text and is red wherever it lands (_SURFACE_RETIRED). The rest of those files, and additions to them, stay unprotected,
-and beyond those registered retired sentences no retired-text check reads them, so any other
-deleted sentence restored there stays green.
+adoption, the disclosure page's and the record indexes' description of a store upgrade the
+reference tooling no longer defines, the quickstart's steps that said nothing under .working/ is
+ignored and that ran opf migrate, and each tooling-status sentence that tooling_status_probe lists
+on these surfaces as they stood before the tooling initialized and validated base 2.0.0 stores and
+that these files no longer carry, is searched over its whole file's normalized text and is red
+wherever it lands in that file (_SURFACE_RETIRED). That probe's set is every sentence naming an opf
+verb or subcommand from the dispatch table together with what it does (runs, refuses, writes,
+reads, recovers, exits 2, scaffolds, validates, initializes, implements), or grading a store
+(VALID, 1.2.0, cannot-evaluate, a grade); a probe sentence these files still carry is live text the
+probe lists, not a retired one. Residual: the search is an exact substring match, so a reworded or
+shortened variant of a retired sentence, or one planted into another surface's file, stays green.
+The rest of those files, and additions to them, stay unprotected, and beyond those registered
+retired sentences no retired-text check reads them, so any other deleted sentence restored there
+stays green.
 
 The default entry also runs a section 2 keyword lint over every registered pin: a pin without
 MUST, MUST NOT, SHOULD or MAY is red unless the registry marks it descriptive (_D), and a
@@ -1526,8 +1534,13 @@ _SURFACE = {
 # that reconcile recovers an interrupted adoption transaction, and the adopt page's claim that
 # approval did not run), and the claim on the quickstart, the disclosure page, the adopt page and
 # the adoption guide that apply and reconcile refuse until the adoption journal moves, which already
-# sits at its homes-2 home. The record indexes' sentences are held on the core-files page, which
-# carries the record indexes now. Each sentence present in its file's normalized text is a finding.
+# sits at its homes-2 home. The tooling-status entries are every sentence tooling_status_probe lists on
+# the earlier surfaces that these files no longer carry: each is untrue at base 2.0.0 (a 1.2.0 grade or
+# declaration, reconcile or record subcommands named as running), or names what refuses while leaving
+# reconcile out. The quickstart's steps that said nothing under .working/ is ignored (opf init ignores
+# its journals and staging directories) and that ran opf migrate (it exits 2) are retired with them.
+# The record indexes' sentences are held on the core-files page, which carries the record indexes
+# now. Each sentence present in its file's normalized text is a finding.
 _SURFACE_RETIRED = {
     QUICKSTART: (
         'An implementation declares a conformance class: an upgrade-capable one carries older stores forward',
@@ -1542,6 +1555,10 @@ _SURFACE_RETIRED = {
         "Until the tooling implements 2.0.0, opf init in a new repository is the route that this release's 1.2.0 tooling grades VALID",
         "As step 1 states, this release's tooling does not yet grade these files VALID.",
         'Scaffolding, validation, rendering, and migration tooling ships in later releases of the pack',
+        "That VALID is this release's 1.2.0 grade, not conformance to the specification.",
+        'release = "1.0.5" spec_version = "1.2.0" homes = 1 worklog = 1',
+        'confirm nothing under .working/ is ignored.',
+        'If you later want the store elsewhere: opf migrate --store',
     ),
     DISCLOSURE: (
         'A fresh-only implementation (specification section 16.1) proves tested admission and refusal behaviour, not authenticated history: it refuses by name an older store or one in which its admission check detects an item on the closed legacy-state list.',
@@ -1559,6 +1576,8 @@ _SURFACE_RETIRED = {
         'The reference tooling\'s opf doctor grades a manifest declaring spec_version = "2.0.0" with homes = 2 under its 1.2.0 rules, so its VALID verdict on such a store says nothing about conformance to the specification; opf upgrade and opf record refuse such a store.',
         'opf adopt approve, apply, complete, and reconcile refuse with exit 2,',
         'until the adoption journal moves',
+        'opf adopt plan, approve, reconcile and status run, and plan, approve and status write nothing.',
+        'apply refuses every plan in this build and complete refuses every invocation, each with exit 2, so no receipt, completion check or retirement is recorded.',
     ),
     ADOPT_PAGE: (
         "The reference tooling's opf init does not scaffold a 2.0.0 store yet: its scaffold still writes a 1.2.0 store, a format the standard's validation refuses (specification section 9.2).",
@@ -1582,6 +1601,7 @@ _SURFACE_RETIRED = {
         'What it does not run yet: opf adopt approve, apply, complete and reconcile refuse with exit 2,',
         'until the adoption journal moves',
         'reconcile recovers an interrupted adoption transaction, or reports that there is nothing to reconcile.',
+        'What refuses in this build: opf adopt apply and complete refuse with exit 2, so nothing is applied and nothing is retired.',
     ),
     CORE_FILES: (
         'Importer-only (no module toggle)',
@@ -1592,6 +1612,11 @@ _SURFACE_RETIRED = {
         'If an upgrade from 1.0.0 or 1.1.0 passes preflight, it applies the schema delta before failing at render, leaving the changes in place for recovery.',
         "and doctor and re-adoption accept it. That acceptance is the reference tooling's 1.2.0 behaviour and diverges from the standard, whose section 9.2 validation refuses a 1.2.0 manifest as a store.",
         'The reference tooling does not yet implement spec 2.0.0: its scaffold still writes spec_version = "1.2.0" with no homes key.',
+        "That acceptance is the reference tooling's 1.2.0 behaviour and diverges from the standard, whose section 9.2 validation refuses a 1.2.0 manifest as a store.",
+        'record (create, transition, done-with-receipt, and worklog-append; receipt-repair exits 2)',
+        'adopt (plan, approve, reconcile, and status; apply and complete exit 2)',
+        'Plan, approve, reconcile, and status run; apply and complete refuse with exit 2.',
+        'release = "1.0.5" spec_version = "1.2.0" homes = 1 worklog = 1',
     ),
 }
 
@@ -1617,6 +1642,78 @@ def surface_findings(texts=None):
             if fragment in body:
                 findings.append("surface {} restores retired text: {}".format(_surface_name(path), fragment))
     return findings
+
+
+# The tooling-status probe: it lists every sentence of a surface that says what the reference CLI does,
+# so a review sweeps the whole class rather than the examples a report quotes. A sentence is a hit when
+# it names a verb of the dispatch table ("opf <verb>"), a subcommand of opf record ("opf record <sub>")
+# or a subcommand of opf adopt (bare, as the surfaces list them) together with an action word (runs,
+# refuses, writes, reads, recovers, exits 2, scaffolds, validates, initializes, implements, executable),
+# or when it grades a store (VALID, 1.2.0, cannot-evaluate, a grade). The vocabulary is read as literals
+# from opf.py (KNOWN_VERBS, ADOPT_SUBCOMMANDS) and _opf_record.py (SUBCOMMANDS), never imported.
+_TOOLING_ACTION = re.compile(
+    r"\b(?:runs?|running|refus(?:e|es|ed|ing)|writ(?:e|es|ing|ten)|reads?|reading|recover(?:s|ed|ing)?|"
+    r"exits? (?:with )?(?:exit )?2|scaffold(?:s|ed|ing)?|validat(?:e|es|ed|ing)|initializ(?:e|es|ed|ing)|"
+    r"implement(?:s|ed)?|executable)\b")
+_TOOLING_BLOCK_TAGS = frozenset(("p", "div", "td", "th", "tr", "li", "ul", "ol", "pre", "table", "thead", "tbody",
+                                 "caption", "br", "h1", "h2", "h3", "h4", "h5", "h6", "blockquote", "button"))
+_TOOLING_GRADE = re.compile(r"\bVALID\b|\b1\.2\.0\b|\b(?i:cannot[- ]evaluate)\b|\bgrad(?:e|es|ed|ing)\b")
+
+
+def _tooling_literal(path, name):
+    match = re.search(r"^" + name + r" = (\([^)]*\))", path.read_text(encoding="utf-8"), re.M)
+    try:
+        value = ast.literal_eval(match.group(1)) if match else None
+    except (ValueError, TypeError, SyntaxError, MemoryError, RecursionError):
+        value = None
+    if type(value) is not tuple or not value or not all(type(item) is str and item for item in value):
+        raise ValueError("{} does not hold {} as a tuple of names".format(path.name, name))
+    return value
+
+
+def tooling_vocabulary(tools=None):
+    """(verbs, adopt subcommands, record subcommands), read from the dispatch table's literals."""
+    tools = Path(__file__).resolve().parent if tools is None else tools
+    return (_tooling_literal(tools / "opf.py", "KNOWN_VERBS"),
+            _tooling_literal(tools / "opf.py", "ADOPT_SUBCOMMANDS"),
+            _tooling_literal(tools / "_opf_record.py", "SUBCOMMANDS"))
+
+
+def tooling_status_sentences(text, vocabulary):
+    """[(line, sentence)]: each tooling-status sentence of `text`, numbered by the source line it starts
+    on and normalized as surface_findings reads it (tags and backticks removed, a tag's line ends kept),
+    so a hit can be registered as a retired fragment as printed. A blank line or a block tag (a
+    paragraph, a table cell, a heading) ends a sentence as a period does, and a period followed by a
+    word character (1.2.0, OPF-SPEC.md) does not."""
+    verbs, adopt_subs, record_subs = vocabulary
+    names = re.compile(r"\bopf (?:" + "|".join(map(re.escape, verbs)) + r")\b|\bopf record (?:"
+                       + "|".join(map(re.escape, record_subs)) + r")\b|\b(?:"
+                       + "|".join(map(re.escape, adopt_subs)) + r")\b")
+    plain = re.sub(r"<(/?)([A-Za-z0-9]*)[^>]*>", lambda m: "\n" * m.group().count("\n") + (
+        "\x1e" if m.group(2).lower() in _TOOLING_BLOCK_TAGS else ""), text).replace("`", "")
+    hits = []
+    for match in re.finditer(r"(?:[^.!?\n\x1e]|\n(?![ \t]*\n)|[.!?](?=\w))+[.!?]?", plain):
+        sentence = " ".join(match.group().split())
+        if sentence and (_TOOLING_GRADE.search(sentence) or (
+                names.search(sentence) and _TOOLING_ACTION.search(sentence))):
+            start = match.start() + len(match.group()) - len(match.group().lstrip())
+            hits.append((plain.count("\n", 0, start) + 1, sentence))
+    return hits
+
+
+def tooling_status_probe(root):
+    """Print every tooling-status sentence of the surfaces under checkout `root` as path:line: sentence,
+    reading the vocabulary from this checkout's opf/tools, then the hit count; return the count."""
+    root = Path(root)
+    vocabulary = tooling_vocabulary()
+    count = 0
+    for path in _SURFACE:
+        rel = path.relative_to(SPEC.parents[1].parent).as_posix()
+        for line, sentence in tooling_status_sentences((root / rel).read_text(encoding="utf-8"), vocabulary):
+            print("{}:{}: {}".format(rel, line, sentence))
+            count += 1
+    print("tooling-status sentences: {}".format(count))
+    return count
 
 
 # The transitional aliases of store.HOMES and store.SPEC_VERSION are retired: no module under opf/tools
@@ -6707,8 +6804,19 @@ def _self_test_vectors():
     # gate red with its own finding.
     check("surface-retired-registry", lambda: tuple(_SURFACE_RETIRED) == (
         QUICKSTART, DISCLOSURE, ADOPT_PAGE, ADOPT_GUIDE, CORE_FILES) and
-          tuple(map(len, _SURFACE_RETIRED.values())) == (12, 15, 11, 8, 8) and
+          tuple(map(len, _SURFACE_RETIRED.values())) == (16, 17, 11, 9, 13) and
           set(_SURFACE_RETIRED) <= set(_SURFACE))
+    # The tooling-status probe reads its vocabulary from the dispatch table and finds a sentence in a
+    # table cell, numbered by its source line, normalized as the retired-text check reads it.
+    vocabulary = tooling_vocabulary()
+    check("tooling-probe-vocabulary", lambda: "migrate" in vocabulary[0] and "reconcile" in vocabulary[1]
+          and "receipt-repair" in vocabulary[2])
+    check("tooling-probe-cell", lambda: tooling_status_sentences(
+        "<p>Intro.</p>\n\n<tr><td><code>adopt</code></td><td>Plan, approve, reconcile, and status run;\napply and "
+        "complete refuse with exit 2.</td></tr>\n", vocabulary) == [
+        (3, "Plan, approve, reconcile, and status run; apply and complete refuse with exit 2.")])
+    check("tooling-probe-plain", lambda: tooling_status_sentences(
+        "The weather is fine. Plans run late.\n", vocabulary) == [])
     for path, fragments in _SURFACE_RETIRED.items():
         normalized = _surface_text(surfaces[path])
         for fragment in fragments:
