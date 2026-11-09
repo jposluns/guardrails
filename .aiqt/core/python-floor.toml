@@ -70,6 +70,7 @@ guarded-surfaces = [
     "opf/tools/_opf_init_contract.py",
     "opf/tools/_opf_init_operation.py",
     "opf/tools/_opf_init_substrate.py",
+    "opf/tools/_opf_names.py",
     "opf/tools/_opf_observe.py",
     "opf/tools/_opf_oplock.py",
     "opf/tools/_opf_pack_manifest.py",
