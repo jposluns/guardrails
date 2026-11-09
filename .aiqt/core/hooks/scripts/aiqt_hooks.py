@@ -16922,12 +16922,19 @@ def _verification_sink_message(hit):
 # it (tag) or sends it on (push). Only a '&&' join lets the pipeline's status decide whether the action runs:
 # after ';' or a newline the action runs whatever the status, piped or not ('false; git commit' commits), so
 # the pipe is not what lets a failing check through there and the status tier does not judge it. The forms
-# that record, mark or send nothing are not gated actions: a tag listing or verify (a bare 'git tag', -l,
-# --list, -n, -v, --verify, --contains, --no-contains, --points-at, --merged, --no-merged), a merge or am
-# abort or quit, am --show-current-patch, a --dry-run (push -n too) and a --help or -h.
+# that record, mark or send nothing are not gated actions: a tag listing or verify (a 'git tag' with no tag
+# name and none of -a, -s, -u, -d, -f, -m or -F, or with -l, --list, -n, -v, --verify, --contains,
+# --no-contains, --points-at, --merged or --no-merged), a merge or am abort or quit, am
+# --show-current-patch, a dry run (_gate_git_dry_run) and a --help or -h.
 _GATE_GATED_GIT = frozenset(("commit", "push", "merge", "tag", "am"))
 _GATE_TAG_READS = frozenset(("-l", "--list", "-n", "-v", "--verify", "--contains", "--no-contains",
                              "--points-at", "--merged", "--no-merged"))
+# The git tag options that make a tag listing something else (-a, -s, -u, -d, -f, -m, -F), as short letters
+# and as long names; a long word that is a prefix of one of these names counts as it.
+_GATE_TAG_MAKES = ("asudfmF", ("annotate", "sign", "local-user", "delete", "force", "message", "file"))
+# The commit options that imply --dry-run (git 2.53.0: commit --short, --porcelain or --long records
+# nothing, and a later --no-short, --no-porcelain or --no-long undoes it).
+_GATE_COMMIT_FORMATS = ("short", "porcelain", "long")
 _GATE_GIT_RECOVERY = {"merge": frozenset(("--abort", "--quit")),
                       "am": frozenset(("--abort", "--quit", "--show-current-patch"))}
 # The value-taking options of each gated action, so that an option's value is never read as one of the
@@ -16950,18 +16957,21 @@ _GATE_GATED_VALUE_OPTS = {
 
 
 def _gate_git_opts(sub, words):
-    """The option words of a gated action's own arguments (the words after its subcommand), read as git reads
-    them: up to the first '--' or '--end-of-options' that is not an option's value, each long option cut to
-    its name before any '=', and the value of a value-taking option (_GATE_GATED_VALUE_OPTS: the next word
-    after a long option or after a short cluster that ends in a mandatory letter) left out."""
+    """The (option words, operands) of a gated action's own arguments (the words after its subcommand), read
+    as git reads them: options up to the first '--' or '--end-of-options' that is not an option's value, each
+    long option cut to its name before any '=', the value of a value-taking option (_GATE_GATED_VALUE_OPTS:
+    the next word after a long option or after a short cluster that ends in a mandatory letter) left out of
+    both, and the operands the other words, every word after that terminator included."""
     shorts, stuck, longs = _GATE_GATED_VALUE_OPTS.get(sub, ("", "", frozenset()))
-    opts, i, n = [], 0, len(words)
+    opts, operands, i, n = [], [], 0, len(words)
     while i < n:
         tok = words[i]
         i += 1
         if tok in ("--", "--end-of-options"):
+            operands.extend(words[i:])
             break
         if not tok.startswith("-") or tok == "-":
+            operands.append(tok)
             continue
         if tok.startswith("--"):
             name = tok.split("=", 1)[0]
@@ -16977,13 +16987,78 @@ def _gate_git_opts(sub, words):
                 if k == len(tok) - 1:
                     i += 1
                 break
-    return opts
+    return opts, operands
+
+
+def _gate_short_letters(sub, tok):
+    """The option letters of a short cluster of a gated action, up to and including its first value-taking
+    letter (_GATE_GATED_VALUE_OPTS), since the rest of the word is that letter's value."""
+    shorts, stuck, _longs = _GATE_GATED_VALUE_OPTS.get(sub, ("", "", frozenset()))
+    letters = ""
+    for ch in tok[1:]:
+        letters += ch
+        if ch in shorts or ch in stuck:
+            break
+    return letters
+
+
+def _gate_long_names(tok, full):
+    """True when the long option word tok (cut before any '=') is --FULL or an abbreviation of it. git takes
+    a unique prefix as the option and refuses an ambiguous one (git 2.53.0: commit --dry and push --dr are
+    --dry-run; commit --d and push --d stop with 'ambiguous option'), and no option of git 2.53.0 commit or
+    push is named exactly by a prefix of --dry-run, --short, --porcelain or --long, so such a prefix either is
+    that option or runs nothing. Reading a word as a negation or a tag-making option only denies more."""
+    name = tok[2:]
+    return bool(name) and full.startswith(name)
+
+
+def _gate_git_dry_run(sub, opts):
+    """True when a gated action's option words (_gate_git_opts) make it a dry run, read in order as git reads
+    them, the last word deciding: --dry-run sets it and --no-dry-run clears it (on commit and push an
+    abbreviation of either counts as it), push -n sets it alone or inside a short cluster (-nf, -qn) before
+    any value-taking letter, and on commit --short, --porcelain or --long (or an abbreviation) imply it
+    unless a later --no-short, --no-porcelain or --no-long clears that, whatever --no-dry-run says. git
+    2.53.0 records or sends after commit --dry-run --no-dry-run, push -n --no-dry-run and commit --short
+    --no-short, and nothing after commit --no-dry-run --dry-run, push -fn, commit --dry or commit --short
+    --no-dry-run."""
+    abbrev = sub in ("commit", "push")
+    dry = fmt = False
+    for tok in opts:
+        if not tok.startswith("--"):
+            if sub == "push" and "n" in _gate_short_letters(sub, tok):
+                dry = True
+            continue
+        if tok == "--dry-run" or (abbrev and _gate_long_names(tok, "dry-run")):
+            dry = True
+        elif tok == "--no-dry-run" or (abbrev and _gate_long_names(tok, "no-dry-run")):
+            dry = False
+        elif sub == "commit" and any(_gate_long_names(tok, full) for full in _GATE_COMMIT_FORMATS):
+            fmt = True
+        elif sub == "commit" and any(_gate_long_names(tok, "no-" + full) for full in _GATE_COMMIT_FORMATS):
+            fmt = False
+    return dry or fmt
+
+
+def _gate_tag_listing(opts, operands):
+    """True when a git tag names no tag and carries none of -a, -s, -u, -d, -f, -m or -F (_GATE_TAG_MAKES): git
+    2.53.0 then lists (git tag --sort=-v:refname, --format, --column, -i) or stops with its usage text, and
+    records nothing."""
+    letters, names = _GATE_TAG_MAKES
+    if operands:
+        return False
+    for tok in opts:
+        if tok.startswith("--"):
+            if any(_gate_long_names(tok, full) for full in names):
+                return False
+        elif any(ch in letters for ch in _gate_short_letters("tag", tok)):
+            return False
+    return True
 
 
 def _gate_gated_git(seg):
     """The gated git action (_GATE_GATED_GIT) a segment runs, read after its leading assignments and the env,
     nice, timeout and time wrappers (_gate_peel), or None; a form that records, marks or sends nothing (a tag
-    listing or verify, a recovery option, --dry-run, --help) is None. Those forms are read only from real
+    listing or verify, a recovery option, a dry run, --help) is None. Those forms are read only from real
     option words: a -h or --help among git's global options (each value of _GIT_ARG_OPTS skipped), and the
     subcommand's own option words read by _gate_git_opts, which skips every listed option's value and stops
     at a '--', so an option's value is never taken for one of those forms."""
@@ -16997,11 +17072,12 @@ def _gate_gated_git(seg):
     while k < end:
         head.append(argv[k])
         k += 2 if "=" not in argv[k] and argv[k] in _GIT_ARG_OPTS else 1
-    opts = _gate_git_opts(sub, rest)
-    if (any(tok in ("--help", "-h") for tok in head) or any(tok in ("--help", "-h", "--dry-run") for tok in opts)
-            or (sub == "push" and "-n" in opts)):
+    opts, operands = _gate_git_opts(sub, rest)
+    if (any(tok in ("--help", "-h") for tok in head) or any(tok in ("--help", "-h") for tok in opts)
+            or _gate_git_dry_run(sub, opts)):
         return None
-    if sub == "tag" and (not rest or any(tok in _GATE_TAG_READS or tok.startswith("-n") for tok in opts)):
+    if sub == "tag" and (not rest or any(tok in _GATE_TAG_READS or tok.startswith("-n") for tok in opts)
+                         or _gate_tag_listing(opts, operands)):
         return None
     if any(tok in _GATE_GIT_RECOVERY.get(sub, ()) for tok in opts):
         return None
@@ -17012,9 +17088,10 @@ def _gate_status_passthrough(seg):
     """True when a command '&&'-joined between a masked pipeline and a gated git action cannot gate that action
     on the check's outcome: a known-benign command (_gate_benign_prefix: cd DIR, plain echo, true, ':' or pwd)
     or a plain 'git add' or 'git status' with no redirection. Any other command ends the walk unread: one may
-    gate the action (a test of PIPESTATUS, a second verification run), and one that does not read the check's
-    status (git diff --quiet, [ -s LOG ] or grep -q PATTERN LOG, which a failing check's log can pass, or
-    make clean) leaves the action unjudged, residual R5."""
+    gate the action on the check's status (a test of PIPESTATUS), and one that does not read that status (git
+    diff --quiet, [ -s LOG ] or grep -q PATTERN LOG, which a failing check's log can pass, make clean, or a
+    second verification run, which stops the action only on its own status) leaves the action unjudged,
+    residual R5."""
     if _gate_benign_prefix(seg):
         return True
     argv = seg.argv
@@ -18610,8 +18687,8 @@ def gate_weakening(data):
     --no-verify deny keeps its own message, and it suppresses the note. STATUS tier, after that deny
     (_gate_status_masked): the same known verification invocation piped into ANY later stage, pass-through
     stages (tee, cat) and other filters included, whose pipeline is joined by '&&' to a gated git action
-    (git commit, push, merge, tag or am in a form that records, marks or sends, directly or through further
-    '&&'-joined commands that cannot gate it, _gate_status_passthrough) DENIES, because by default the
+    (git commit, push, merge, tag or am in any form but the exempt ones _gate_gated_git names, directly or
+    through further '&&'-joined commands that cannot gate it, _gate_status_passthrough) DENIES, because by default the
     pipeline's status is its last stage's, so a failing check does not stop the action; on a parse error
     the recovered complete segments, those of the uncertain-'#' path included, deny the same way when the
     shape is proven, and an unproven one there keeps the fallback's decision, which can be a silent allow.
@@ -18684,16 +18761,21 @@ def gate_weakening(data):
     (tools/doctor.py, sha256sum -c, a build); R4 a plain '| grep PATTERN' filter or '| wc', which are not
     counted as truncating sinks; R5 for the status tier, a gated git action reached through a '&' join,
     another pipeline, a compound command, a command off _gate_status_passthrough, whether it cannot gate
-    the action (make clean) or ends the walk without reading the check's status (git diff --quiet, or
-    [ -s LOG ] or grep -q PATTERN LOG, which a failing check's log can pass), or a wrapper other than env,
-    nice, timeout and time (sudo git push, command git commit), a producer off the verification list, set
-    up by an assignment or env prefix or with its stdout redirected while its pipe still carries the
+    the action (make clean) or ends the walk without reading the check's status (git diff --quiet, git log
+    --oneline -1, a quoted echo, or [ -s LOG ] or grep -q PATTERN LOG, which a failing check's log can
+    pass), a second verification run (the action waits on its status alone), or a wrapper other than env,
+    nice, timeout and time (sudo git push, command git commit), an action outside the five gated ones (git
+    cherry-pick, git revert, git rebase --continue, gh pr create), a producer off the verification list
+    (uv run pytest, npx), set up by an assignment or env prefix or with its stdout redirected while its pipe
+    still carries the
     status (pytest > LOG 2>&1 | cat, pytest 2>&1 > LOG | tee ERR), a last stage that is a compound
     command (pytest | (cat), pytest | { cat; }), a here-string or process substitution the lexer stops at
     before the action, the pipeline inside a '( )' or '{ }' group or inside the condition or body of an
     if, while, until, for or case compound (if pytest | tee LOG; then git commit; fi), a '|| true' after
     the pipeline (as after ';', the action then runs whatever the check's status, piped or not), pipefail
-    set by an earlier call (invisible here), an unproven shape on the parse-error path (after a non-benign
+    set by an earlier call (invisible here), a shape left unproven by an earlier command that is not
+    known-benign (source .venv/bin/activate, a set -o pipefail) or a '||' join, which on a parsed command
+    only notes, an unproven shape on the parse-error path (after a non-benign
     command, a set -o pipefail or a '||' join, as before a here-string), which keeps the fallback's decision
     and can allow silently instead of noting, a value-taking option missing from _GATE_GATED_VALUE_OPTS
     whose value spells a form that records nothing, and on the failed-main-reading floor the segments main's

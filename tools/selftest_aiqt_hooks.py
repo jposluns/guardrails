@@ -23922,10 +23922,10 @@ def _main_isolated(monitor):
         # check would not stop the action; with pipefail or another command set before it, or a '||' join
         # before it, the shape only notes. A ';' or newline join runs the action whatever the status, piped or
         # not, so it is left to the other tiers, and any command between the pipeline and the action other
-        # than the pass-through ones ends the walk, whether it gates the action (a test of PIPESTATUS, a second
-        # verification run) or does not read the check's status (git diff --quiet, [ -s LOG ], grep -q PATTERN
-        # LOG: residual R5). The a-rows are controls, over-denial pins and residual R5 pins; the k-rows keep the
-        # sink tier's verdicts. The rows pin the hook's decisions only; none runs its shape in bash.
+        # than the pass-through ones ends the walk, whether it gates the action on the check's status (a test
+        # of PIPESTATUS) or does not read that status (git diff --quiet, [ -s LOG ], grep -q PATTERN LOG, a
+        # second verification run: residual R5). The a-rows are controls, over-denial pins and residual R5
+        # pins; the k-rows keep the sink tier's verdicts. The rows pin the hook's decisions only; none runs its shape in bash.
         _ct_sm = [
             ('(gw-sm-d1) a check piped into tee, then && git commit, denies',
              'pytest | tee /abs/check.log && git commit -m x', 'deny'),
@@ -24153,6 +24153,53 @@ def _main_isolated(monitor):
              'export A=1; pytest | tee /abs/l && git commit -m x; cat <<<y', 'allow'),
             ('(gw-sm-a76) set -o pipefail on the parse-error path keeps the silent allow (residual R5), allows',
              'set -o pipefail; pytest | tee /abs/l && git commit -m x; cat <<<y', 'allow'),
+            # a dry run is read in order, the last word deciding, as git 2.53.0 reads it, and a git tag with no
+            # tag name and none of -a, -s, -u, -d, -f, -m or -F lists. In a scratch repository git 2.53.0
+            # recorded or sent nothing for each allow row's git command and recorded or sent for each deny
+            # row's, except d42 and d47: there git stopped (a remote without push options, a usage error),
+            # so those two pin the hook's reading only (git push -on sends the push option n)
+            ('(gw-sm-d39) a later --no-dry-run undoes --dry-run, so the commit records, denies',
+             'pytest | tee /abs/l && git commit --dry-run --no-dry-run -m y', 'deny'),
+            ('(gw-sm-a77) a later --dry-run undoes --no-dry-run, allows',
+             'pytest | tee /abs/l && git commit --no-dry-run --dry-run -m y', 'allow'),
+            ('(gw-sm-d40) a later --no-dry-run undoes push -n, so the push sends, denies',
+             'pytest | tee /abs/l && git push -n --no-dry-run origin main', 'deny'),
+            ('(gw-sm-a78) a later push -n undoes --no-dry-run, allows',
+             'pytest | tee /abs/l && git push --no-dry-run -n origin main', 'allow'),
+            ('(gw-sm-d41) a later --no-dry-run undoes the n of a push short cluster, denies',
+             'pytest | tee /abs/l && git push -qn --no-dry-run origin main', 'deny'),
+            ('(gw-sm-a79) the n of a push short cluster is a dry run, allows',
+             'pytest | tee /abs/l && git push -nf origin main', 'allow'),
+            ('(gw-sm-d42) push -on takes n as the push option, so the push sends, denies',
+             'pytest | tee /abs/l && git push -on origin main', 'deny'),
+            ('(gw-sm-a80) git commit --dry abbreviates --dry-run, allows',
+             'pytest | tee /abs/l && git commit --dry -m y', 'allow'),
+            ('(gw-sm-a81) git push --dr abbreviates --dry-run, allows',
+             'pytest | tee /abs/l && git push --dr origin main', 'allow'),
+            ('(gw-sm-d43) a later --no-dry abbreviates --no-dry-run, so the commit records, denies',
+             'pytest | tee /abs/l && git commit --dry-run --no-dry -m y', 'deny'),
+            ('(gw-sm-a82) git commit --short implies --dry-run, allows',
+             'pytest | tee /abs/l && git commit --short -m y', 'allow'),
+            ('(gw-sm-a83) git commit --porcelain implies --dry-run, allows',
+             'pytest | tee /abs/l && git commit --porcelain -m y', 'allow'),
+            ('(gw-sm-a84) git commit --long implies --dry-run, allows',
+             'pytest | tee /abs/l && git commit --long -m y', 'allow'),
+            ('(gw-sm-a85) --no-dry-run does not undo --short, allows',
+             'pytest | tee /abs/l && git commit --short --no-dry-run -m y', 'allow'),
+            ('(gw-sm-d44) a later --no-short undoes --short, so the commit records, denies',
+             'pytest | tee /abs/l && git commit --short --no-short -m y', 'deny'),
+            ('(gw-sm-a86) git tag --sort with no tag name lists, allows',
+             'pytest | tee /abs/l && git tag --sort=-v:refname', 'allow'),
+            ('(gw-sm-a87) git tag -i with no tag name lists, allows',
+             'pytest | tee /abs/l && git tag -i', 'allow'),
+            ('(gw-sm-a88) git tag --column with no tag name lists, allows',
+             'pytest | tee /abs/l && git tag --column', 'allow'),
+            ('(gw-sm-d45) git tag --sort with a tag name creates the tag, denies',
+             'pytest | tee /abs/l && git tag --sort=refname v9', 'deny'),
+            ('(gw-sm-d46) a tag name after -- creates the tag, denies',
+             'pytest | tee /abs/l && git tag --sort refname -- v9', 'deny'),
+            ('(gw-sm-d47) git tag -m with no tag name is not a listing, denies',
+             'pytest | tee /abs/l && git tag -m x', 'deny'),
         ]
         for _ct_label, _ct_cmd, _ct_want in _ct_sm:
             gexpect(_ct_label, _ct_cmd, _ct_want)
