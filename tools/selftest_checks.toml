@@ -5011,6 +5011,52 @@ expected-check-ids = [
 ]
 
 [[suite]]
+id = "hook-install-selftest"
+runner = "tools/check_hook_install.py"
+expected-check-ids = [
+  "clean/match-at-c",
+  "clean/match-at-tag",
+  "clean/report-limits",
+  "v1/crlf-drift",
+  "v1/crlf-drift-flip",
+  "v2/older-copy-drift",
+  "v2/older-copy-drift-flip",
+  "v3/root-mismatch",
+  "v3/root-mismatch-flip",
+  "v4/row-mismatch",
+  "v4/row-mismatch-flip",
+  "v5/merge-created-match",
+  "v5/side-branch-match",
+  "v5/merge-created-match-flip",
+  "v6/stale-counts",
+  "v6/carried-before-change",
+  "v6/stale-counts-flip",
+  "v7/shallow-no-match",
+  "v7/shallow-match",
+  "v7/full-no-match-drift",
+  "v7/shallow-no-match-flip",
+  "v8/fifo-refused",
+  "v8/directory-refused",
+  "v8/dangling-link-refused",
+  "v8/link-followed-and-reported",
+  "v8/fifo-refused-flip",
+  "v9/size-cap-ends",
+  "v9/size-cap-ends-flip",
+  "v10/invalid-toml",
+  "v10/deep-toml",
+  "v10/recursion-error",
+  "v10/memory-error",
+  "v10/invalid-toml-flip",
+  "v11/attested-rows",
+  "v11/attested-rows-flip",
+  "v12/stand-in-git-fails",
+  "v12/stand-in-call-log",
+  "v12/stand-in-git-fails-flip",
+  "replace/ignored",
+  "exit/codes-0-1-2",
+]
+
+[[suite]]
 id = "security-txt-selftest"
 runner = "tools/check_security_txt.py"
 expected-check-ids = [

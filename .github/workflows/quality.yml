@@ -438,6 +438,10 @@ jobs:
         shell: bash
         run: python3 -I -B tools/check_baseline_pin.py
 
+      - name: Installed hook copy drift check self-test (execution-reconciled)
+        shell: bash
+        run: python3 -I -B tools/check_selftest_execution.py --suite hook-install-selftest
+
       - name: Site palette contrast (aiqt.ai draft)
         shell: bash
         run: python3 -I -B .baseline/check_palette.py --site aiqt --palettes site/draft/assets/baseline/palettes.css

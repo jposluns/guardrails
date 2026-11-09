@@ -1083,6 +1083,26 @@ count = 1
 class = "EXEMPT"
 reason = "test-code"
 
+# the self-test saves tomllib.loads and restores it around an injected RecursionError and MemoryError at the
+# target manifest's parse call (neither error can be provoked safely), so the parse-site handler is exercised
+[[site]]
+path = "tools/check_hook_install.py"
+function = "_vectors"
+form = "alias"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+# the self-test's flip that drops the parse-site handlers calls tomllib.loads unhandled on purpose, and
+# asserts that the malformed manifest then escapes as a ValueError
+[[site]]
+path = "tools/check_hook_install.py"
+function = "_vectors.<lambda>"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
 # the self-test seam that reads tomllib.loads and tomllib.load as bound: the injection saves and restores
 # them around an injected MemoryError at the parse call (real memory exhaustion cannot be provoked
 # safely), and the restoration checks compare them with the pair bound at import
