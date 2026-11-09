@@ -1,0 +1,15 @@
+---
+corpus-id: pubref
+origin: pack
+family: security
+facet: SECC
+slug: published-no-internal-refs
+map-cwe-broad: [CWE-200]
+---
+
+# Keep internal names out of published artefacts
+
+A published artefact, and every source a published artefact is generated from, names or links no
+repository-internal file or folder. The project declares which outputs it publishes and which names are
+internal, and a deterministic gate holds the two apart; a reference that must appear is carried by a reviewed
+allowlist entry that names its reason.

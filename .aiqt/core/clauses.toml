@@ -6028,3 +6028,30 @@ start-line = 18
 end-line = 19
 canonical-text = "Where the output has a content digest, the consumer binds to it under\nexplicit-binding-over-ambient-context, with size only supplementary;"
 source-digest = "74953e6518c0ee9d3c86299c7c725f533bcbb841e6539e6506ef8e495eeb82c5"
+
+[[clause]]
+clause-id = "pubref.1"
+corpus-id = "pubref"
+source-path = ".aiqt/core/rules/security-secc-published-no-internal-refs.md"
+start-line = 12
+end-line = 13
+canonical-text = "A published artefact, and every source a published artefact is generated from, names or links no\nrepository-internal file or folder."
+source-digest = "9b13e146d4a1181bc7673a0f4dc85278cb526d568b46c789f732d33b8a3c3770"
+
+[[clause]]
+clause-id = "pubref.2"
+corpus-id = "pubref"
+source-path = ".aiqt/core/rules/security-secc-published-no-internal-refs.md"
+start-line = 13
+end-line = 14
+canonical-text = "The project declares which outputs it publishes and which names are\ninternal, and a deterministic gate holds the two apart;"
+source-digest = "9b13e146d4a1181bc7673a0f4dc85278cb526d568b46c789f732d33b8a3c3770"
+
+[[clause]]
+clause-id = "pubref.3"
+corpus-id = "pubref"
+source-path = ".aiqt/core/rules/security-secc-published-no-internal-refs.md"
+start-line = 14
+end-line = 15
+canonical-text = "a reference that must appear is carried by a reviewed\nallowlist entry that names its reason."
+source-digest = "9b13e146d4a1181bc7673a0f4dc85278cb526d568b46c789f732d33b8a3c3770"

@@ -1155,6 +1155,15 @@
       "status": "prose-only"
     },
     {
+      "corpus-id": "pubref",
+      "family": "security",
+      "gates": [],
+      "hooks": [],
+      "previews": [],
+      "source": ".aiqt/core/rules/security-secc-published-no-internal-refs.md",
+      "status": "prose-only"
+    },
+    {
       "corpus-id": "rdbchr",
       "family": "aiqt",
       "gates": [],

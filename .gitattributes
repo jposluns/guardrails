@@ -100,6 +100,7 @@
 .aiqt/core/rules/security-secc-least-privilege-retrieval.md text eol=lf
 .aiqt/core/rules/security-secc-no-cross-context-bleed.md text eol=lf
 .aiqt/core/rules/security-secc-no-hidden-context-disclosure.md text eol=lf
+.aiqt/core/rules/security-secc-published-no-internal-refs.md text eol=lf
 .aiqt/core/rules/security-secc-rotate-leaked-secret.md text eol=lf
 .aiqt/core/rules/security-seci-authentication.md text eol=lf
 .aiqt/core/rules/security-seci-authorization.md text eol=lf
@@ -287,6 +288,7 @@
 .claude/rules/security/SECC-least-privilege-retrieval.md text eol=lf
 .claude/rules/security/SECC-no-cross-context-bleed.md text eol=lf
 .claude/rules/security/SECC-no-hidden-context-disclosure.md text eol=lf
+.claude/rules/security/SECC-published-no-internal-refs.md text eol=lf
 .claude/rules/security/SECC-rotate-leaked-secret.md text eol=lf
 .claude/rules/security/SECI-authentication.md text eol=lf
 .claude/rules/security/SECI-authorization.md text eol=lf
@@ -421,6 +423,7 @@
 .cursor/rules/aiqt-guardrails/security/SECC-least-privilege-retrieval.mdc text eol=lf
 .cursor/rules/aiqt-guardrails/security/SECC-no-cross-context-bleed.mdc text eol=lf
 .cursor/rules/aiqt-guardrails/security/SECC-no-hidden-context-disclosure.mdc text eol=lf
+.cursor/rules/aiqt-guardrails/security/SECC-published-no-internal-refs.mdc text eol=lf
 .cursor/rules/aiqt-guardrails/security/SECC-rotate-leaked-secret.mdc text eol=lf
 .cursor/rules/aiqt-guardrails/security/SECI-authentication.mdc text eol=lf
 .cursor/rules/aiqt-guardrails/security/SECI-authorization.mdc text eol=lf

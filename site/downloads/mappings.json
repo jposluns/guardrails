@@ -4561,6 +4561,16 @@
       "identifier_title": "Exposure of Sensitive Information to an Unauthorized Actor"
     },
     {
+      "rule_id": "pubref",
+      "rule_title": "Keep internal names out of published artefacts",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-published-no-internal-refs.md",
+      "framework": "cwe",
+      "relation": "mitigates weakness",
+      "fit": "broad",
+      "identifier": "CWE-200",
+      "identifier_title": "Exposure of Sensitive Information to an Unauthorized Actor"
+    },
+    {
       "rule_id": "secau1",
       "rule_title": "Strong authentication",
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-authentication.md",

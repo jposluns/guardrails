@@ -17,7 +17,7 @@ This register lists every rule and the shipped mechanical controls linked to it.
 | Preview only | 2 |
 | Preview only, partial | 0 |
 | Pending | 0 |
-| No control | 91 |
+| No control | 92 |
 
 ## Rules
 
@@ -113,6 +113,7 @@ This register lists every rule and the shipped mechanical controls linked to it.
 | Retrieval enforces the requester's authorization | `seclpr` | No control | No shipped control cites this rule. |
 | No cross-context bleed | `secncb` | No control | No shipped control cites this rule. |
 | No disclosure of secrets or hidden context | `secndc` | No control | No shipped control cites this rule. |
+| Keep internal names out of published artefacts | `pubref` | No control | No shipped control cites this rule. |
 | Rotate a leaked secret | `secrot` | No control | No shipped control cites this rule. |
 | Strong authentication | `secau1` | No control | No shipped control cites this rule. |
 | Least-privilege authorization | `secazn` | No control | No shipped control cites this rule. |
