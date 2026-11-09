@@ -20722,16 +20722,22 @@ _GENSRC_DATA_WORD = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVW
 def _gensrc_python_data_spans(code):
     """The character span (start, end) of code that holds only the DATA a python -c program writes, in a
     one-element list, or []. A span is found only for one straight-line shape, in which the data is written
-    once, by the last statement, and nothing in the program can read it back, run it or use it as a path: the
-    last statement is open(P, M).write(D) with M a constant text write mode, or Path(P).write_text(D)
-    (pathlib.Path alike), every call taking only positional arguments; P is a string constant, a name bound
-    to one, or sys.argv[N] with N a constant integer; every earlier statement is import sys, import pathlib,
-    a name bound to a string constant, or a name bound to open(X).read() with X a string constant or a name
-    bound to one, each name bound once and none of open, sys, pathlib or Path rebound; and D holds nothing but
-    string constants, those bound names, + and % and f-strings. Any loop, comprehension, function, lambda,
-    other import, other call (a replace, truncate, unlink, system or environment write among them) or other
-    statement yields no span, as does a program that does not parse, holds a carriage return, or holds text
-    that does not encode."""
+    once, by the last statement, and no statement of the program text can read it back, run it or use it as a
+    path: the last statement is open(P, M).write(D) with M a constant text write mode, or
+    pathlib.Path(P).write_text(D), every call taking only positional arguments; P is a plain literal, a name
+    bound to one, or sys.argv[N] with N a constant integer, where a plain literal is one quoted string
+    literal with no prefix, no backslash and no implicit concatenation, so the command text spells the path
+    (a constant spelled any other way yields no span); every earlier statement is import sys, import
+    pathlib, a name bound to a plain literal, or a name bound to open(X).read() with X a plain literal or a
+    name bound to one, each name bound once and none of open, sys, pathlib or Path rebound; and D holds
+    nothing but string constants, those bound names, + and % and f-strings. Any loop, comprehension,
+    function, lambda, other import, other call (a replace, truncate, unlink, system or environment write
+    among them) or other statement yields no span, as does a program that does not parse, holds a carriage
+    return, or holds text that does not encode. What the program loads is not read: under -c the working
+    directory comes first on the import path unless -I or a safe-path setting is in force, so import pathlib
+    can load a pathlib.py an earlier command planted there, which can read the data back and use it as a
+    path; and a sys.argv path that an earlier command made a link to a registered target writes that target.
+    Neither is seen."""
     if "\r" in code or len(code) > _GENSRC_MAX_PY:
         return []
     try:
@@ -20749,8 +20755,24 @@ def _gensrc_python_data_spans(code):
     def text(node):
         return isinstance(node, ast.Constant) and isinstance(node.value, str)
 
+    def span(node):
+        try:
+            start = starts[node.lineno - 1] + len(lines[node.lineno - 1][:node.col_offset].decode("utf-8"))
+            end = starts[node.end_lineno - 1] + len(lines[node.end_lineno - 1][:node.end_col_offset].decode("utf-8"))
+        except (AttributeError, IndexError, TypeError, ValueError):
+            return None
+        return start, end
+
+    def bare(node):
+        # One plain quoted literal that spells its own value: no prefix, no backslash escape and no implicit
+        # concatenation, so the text of the command shows the path it names.
+        where = span(node) if text(node) else None
+        spelled = code[where[0]:where[1]] if where else ""
+        return (len(spelled) >= 2 and spelled[0] in "'\"" and spelled[-1] == spelled[0] and "\\" not in spelled
+                and spelled[0] not in node.value and spelled[1:-1] == node.value)
+
     def literal(node):
-        return text(node) or (isinstance(node, ast.Name) and node.id in constants)
+        return bare(node) or (isinstance(node, ast.Name) and node.id in constants)
 
     def plain(node, count):
         return isinstance(node, ast.Call) and len(node.args) == count and not node.keywords
@@ -20775,7 +20797,7 @@ def _gensrc_python_data_spans(code):
         name, value = stmt.targets[0].id, stmt.value
         if name in ("open", "sys", "pathlib", "Path") or name in bound:
             return []
-        if text(value):
+        if bare(value):
             constants.add(name)
         elif not (plain(value, 0) and isinstance(value.func, ast.Attribute) and value.func.attr == "read"
                   and plain(value.func.value, 1) and named(value.func.value.func, "open")
@@ -20792,9 +20814,8 @@ def _gensrc_python_data_spans(code):
                 and owner.args[1].value in _GENSRC_DATA_MODES):
             return []
     elif call.func.attr == "write_text":
-        if not (plain(owner, 1) and (named(owner.func, "Path") or (
-                isinstance(owner.func, ast.Attribute) and owner.func.attr == "Path"
-                and named(owner.func.value, "pathlib") and "pathlib" in modules))):
+        if not (plain(owner, 1) and isinstance(owner.func, ast.Attribute) and owner.func.attr == "Path"
+                and named(owner.func.value, "pathlib") and "pathlib" in modules):
             return []
     else:
         return []
@@ -20804,12 +20825,8 @@ def _gensrc_python_data_spans(code):
             or any(isinstance(part, ast.Name) and part.id not in bound for part in parts)
             or any(isinstance(part, ast.Constant) and not isinstance(part.value, str) for part in parts)):
         return []
-    try:
-        start = starts[node.lineno - 1] + len(lines[node.lineno - 1][:node.col_offset].decode("utf-8"))
-        end = starts[node.end_lineno - 1] + len(lines[node.end_lineno - 1][:node.end_col_offset].decode("utf-8"))
-    except (AttributeError, IndexError, TypeError, ValueError):
-        return []
-    return [(start, end)]
+    where = span(node)
+    return [where] if where else []
 
 
 def _gensrc_unmention(command, code):

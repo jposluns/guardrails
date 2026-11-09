@@ -27798,6 +27798,38 @@ def _main_isolated(monitor):
              "python3 -c \"import sys; open(sys.argv[1],'w').write('see GEN.md')\" n.txt && cat n.txt", gr),
             ("(gb-p19p) a path concatenated from constants that spell GEN.md keeps the data a mention", "deny",
              "python3 -c \"open('GE' + 'N.md','w').write('GEN.md')\"", gr),
+            # a path constant counts only as one plain quoted literal, so a bound or read constant spelled
+            # through implicit concatenation or an escape, which the command text never shows, keeps the data
+            # a mention; so do an earlier statement that is not an import or a binding, another open mode,
+            # interpreter option or import, a newline in the program and a bare Path, which nothing binds
+            ("(gb-p21) a bound path spelled by implicit concatenation keeps the data a mention", "deny",
+             "python3 -c \"p='GE' 'N.md'; open(p,'w').write('GEN.md')\"", gr),
+            ("(gb-p21b) a bound path spelled with a hex escape keeps the data a mention", "deny",
+             "python3 -c 'p=\"GE\\x4e.md\"; open(p,\"w\").write(\"GEN.md\")'", gr),
+            ("(gb-p21c) a bound path spelled with an octal escape keeps appended data a mention", "deny",
+             "python3 -c 'p=\"GEN\\56md\"; open(p,\"a\").write(\"see GEN.md\")'", gr),
+            ("(gb-p21d) a bound path spelled with a named escape keeps the data a mention", "deny",
+             "python3 -c 'p=\"\\N{LATIN CAPITAL LETTER G}EN.md\"; open(p,\"w\").write(\"GEN.md\")'", gr),
+            ("(gb-p21e) a concatenated bound path under pathlib keeps the data a mention", "deny",
+             "python3 -c \"import pathlib; p='GE' 'N.md'; pathlib.Path(p).write_text('GEN.md')\"", gr),
+            ("(gb-p21f) a concatenated bound path into the gen tree keeps the data a mention", "deny",
+             "python3 -c \"p='ge' 'n/a.md'; open(p,'w').write('gen/a.md')\"", gr),
+            ("(gb-p21g) a concatenated read-back path keeps the data a mention", "deny",
+             "python3 -c \"import sys; t=open('GE' 'N.md').read(); open(sys.argv[1],'w').write(t + 'GEN.md')\""
+             " n.txt", gr),
+            ("(gb-p21h) an earlier atexit registration that truncates the read-back path denies", "deny",
+             "python3 -c \"import sys; __import__('atexit').register(lambda: __import__('os').truncate("
+             "open(sys.argv[1]).read(),0)); open(sys.argv[1],'w').write('GEN.md')\" n.txt", gr),
+            ("(gb-p21i) an open mode outside the text write modes keeps the data a mention", "deny",
+             "python3 -c \"import sys; open(sys.argv[1],'r+').write('GEN.md')\" n.txt", gr),
+            ("(gb-p21j) an interpreter option outside the fixed set keeps the data a mention", "deny",
+             "python3 -X dev -c \"import sys; open(sys.argv[1],'w').write('GEN.md')\" n.txt", gr),
+            ("(gb-p21k) an import other than sys or pathlib keeps the data a mention", "deny",
+             "python3 -c \"import os,sys; open(sys.argv[1],'w').write('GEN.md')\" n.txt", gr),
+            ("(gb-p21l) a program spelled over two lines keeps the data a mention", "deny",
+             "python3 -c \"import sys\nopen(sys.argv[1],'w').write('GEN.md')\" n.txt", gr),
+            ("(gb-p21m) a bare Path, which the shape never binds, keeps the data a mention", "deny",
+             "python3 -c \"import sys; Path(sys.argv[1]).write_text('GEN.md')\" n.txt", gr),
             # the plain shape: the program is the whole command, writes once, last, to a path from an argument or
             # a name bound to a constant, so data alone naming GEN.md notes; a constant path is a judged sink
             ("(gb-p20) one write to an argument path whose data alone names GEN.md notes", "allow-note",
