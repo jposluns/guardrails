@@ -1812,16 +1812,10 @@ retention policy MUST apply it as a recorded maintainer decision governing archi
 
 Change evidence is layered. History makes every record change, including an edit that bypasses the
 recorded flows, visible to review. The integrity layer (section 11) also reports such an edit
-wherever one of its checks covers it. Examples, not a complete set: a released worklog span or
-published changelog entry whose frozen digest the edit breaks; a per-record index row whose digest
-no longer matches its record file; a deterministic view, in either layout, that no longer matches
-its source (view drift); against the prior committed snapshot, a status change that is not a legal
-transition or that resurrects a terminal record, and a changed body on a created-terminal record;
-an allocated ID that is in neither the active store nor the archive (no deletion); and a rotation
-that `archive.toml` does not enumerate. Section 11 lists the integrity layer's checks. An edit to a
-record that none of those checks covers is visible to review only. No layer detects a deliberate
-edit by someone who can also rewrite the history and the recorded digests, which remains the
-same-user tampering residual disclosed in section 14.1. The layers are:
+wherever one of its checks covers it; section 11 describes its checks. An edit that none of its
+checks covers is visible to review only. No layer detects a deliberate edit by someone who can also
+rewrite the history and the recorded digests, which remains the same-user tampering residual
+disclosed in section 14.1. The layers are:
 
 - **History.** The tracked store (section 5) puts every record change in version-control history
   under the project's review gate, and store relocation preserves that history (section 5.4); the
