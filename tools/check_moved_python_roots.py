@@ -15,7 +15,8 @@ directory from __file__ by a fixed number of parent hops that the move silently 
                                       interpreter exit (tools/_selftest_exit_report.py), as the
                                       execution gate runs it
 
---head defaults to HEAD; --base defaults to the merge base of --head and origin/HEAD, and an
+--head defaults to HEAD; --base defaults to the commit origin/HEAD names, so that every merge base
+of that commit and the head is judged, exactly as with an explicit --base origin/HEAD; an
 origin/HEAD that does not resolve is exit 2. A --base that is an all-zero object id of the head
 object id's length (a push event's before value for a newly created ref) is accepted only when the
 head commit has no parent: nothing precedes a root commit, so the change moves no file and the run
@@ -37,9 +38,9 @@ call that parses a commit (rev-parse on a revision, merge-base, diff-tree, ls-tr
 `-c core.commitGraph=false`, so parents and root trees come from the objects themselves, never
 from a stale or crafted commit-graph cache. The self-test forges a commit-graph parent edge that
 git 2.53 honours in merge-base and in a parent operator (HEAD~2) and shows the setting keeps the
-verdict, with a row for each of three calls: the merge-base --all of base and head, the parent
-operator resolved with an explicit --base, and the default-base merge-base of head and origin/HEAD
-used when --base is omitted; no row covers the setting on diff-tree and ls-tree, kept there as
+verdict, with a row for each of two calls: the merge-base --all of base and head, reached once
+from an explicit --base and once from the default base, and the parent operator resolved with an
+explicit --base; no row covers the setting on the diff-tree and ls-tree calls, kept there as
 defence in depth. The change is read per merge base of base and head (`git merge-base --all`; none
 is exit 2, several are each judged and the findings combined) with
 `git diff-tree -r -z --name-status --find-renames=50% -l0 <merge-base> <head> --` (-l0 turns the
@@ -154,12 +155,12 @@ _SCOPE_TYPES = (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, a
 # objects, never from a commit-graph cache. On git 2.53 a commit-graph file with a crafted parent
 # edge steers merge-base and parent operators such as HEAD~2 (the commits named on the command
 # line are read from their objects, but the ancestors reached from them come from the cache); the
-# self-test forges such an edge and shows the verdict unchanged for each of the three calls with a
-# row (the merge-base in _merge_bases, the parent operator in _resolve_commit and the default-base
-# merge-base in _default_base). Each row has a flip: the first two flips empty the setting for the
-# whole run, and the default-base flip empties it only for the merge-base call in _default_base.
-# No row covers diff-tree or ls-tree, which name only command-line commits: the setting stays on
-# them as defence in depth.
+# self-test forges such an edge and shows the verdict unchanged in three rows: the merge-base in
+# _merge_bases reached from an explicit --base, the same merge-base reached from the default base
+# (origin/HEAD, with no --base), and the parent operator in _resolve_commit. Each row has a flip
+# that empties the setting for the whole run, under which the forged edge hides the move. No row
+# covers diff-tree or ls-tree, which name only command-line commits: the setting stays on them as
+# defence in depth.
 _NO_COMMIT_GRAPH = ("-c", "core.commitGraph=false")
 
 
@@ -309,24 +310,13 @@ def _commit_parents(root, sha):
 
 
 def _default_base(root, head_sha):
-    """The default --base: the merge base of head and origin/HEAD, each failure a cannot-evaluate.
-    merge-base walks history, so it runs behind _refuse_grafts, with replace refs disabled by
-    _git_env and the commit-graph cache disabled here (_NO_COMMIT_GRAPH; the self-test has a
-    forged-graph row with no --base and origin/HEAD set, and a flip that empties the setting only
-    for this merge-base call)."""
-    origin_sha = _resolve_commit(root, "origin/HEAD")
-    try:
-        proc = subprocess.run(
-            ["git", "-C", str(root), *_NO_COMMIT_GRAPH, "merge-base",
-             head_sha, origin_sha],
-            capture_output=True, timeout=GIT_TIMEOUT, env=_git_env())
-    except (OSError, subprocess.SubprocessError) as exc:
-        _proc_failure(exc)
-    if proc.returncode != 0:
-        raise CannotEvaluate(
-            "no merge base between HEAD and origin/HEAD ({}); fetch enough history or pass "
-            "--base REV".format(_stderr_text(proc) or "git merge-base failed"))
-    return proc.stdout.decode("ascii", "replace").strip()
+    """The default --base: the commit origin/HEAD resolves to (an origin/HEAD that does not
+    resolve is cannot-evaluate), so scan takes every merge base of it and head through
+    _merge_bases, exactly as --base origin/HEAD does. It is never a single merge base computed
+    here: plain git merge-base keeps one of several (in a criss-cross history the one with the
+    newest commit date), and judging from that one alone can hide a move the other bases show.
+    head_sha is unused; the signature keeps the self-test's flip a drop-in replacement."""
+    return _resolve_commit(root, "origin/HEAD")
 
 
 def _merge_bases(root, base, head):
@@ -1192,6 +1182,25 @@ def _commit_state(repo, previous, files, message):
     return _fx(repo, "rev-parse", "HEAD")
 
 
+def _dated_commit(repo, previous, files, parents, message, stamp):
+    """A commit object for files as the whole tracked state after previous, with the given
+    parents and both dates pinned to stamp ("<epoch> +0000"), written with hash-object so no
+    date variable is needed in the environment; refs are left to the caller. For a fixture
+    whose verdict depends on commit-date order."""
+    for rel in set(previous) - set(files):
+        (Path(repo) / rel).unlink()
+    _write_files(repo, files)
+    _fx(repo, "add", "-A")
+    tree = _fx(repo, "write-tree")
+    who = "Self Test <selftest@example.invalid> " + stamp
+    text = "tree {}\n{}author {}\ncommitter {}\n\n{}\n".format(
+        tree, "".join("parent {}\n".format(p) for p in parents), who, who, message)
+    path = Path(repo).parent / (Path(repo).name + "-" + message + "-commit")
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write(text)
+    return _fx(repo, "hash-object", "-t", "commit", "-w", str(path))
+
+
 def _repo_with(base, name, base_files, head_files, config=()):
     repo = _init_repo(base, name)
     for key, value in config:
@@ -1992,18 +2001,16 @@ def self_test(report_path=None):
               and "base {}\n".format(cb) in flip_out.getvalue(),
               (flip_rc, flip_out.getvalue()))
 
-        # fixture 23j2h: with no --base the base is the merge base of head and origin/HEAD
-        # (_default_base). origin/HEAD names the base-branch tip db; the parent edge of db2, the
-        # base-branch commit below it, is forged in the commit-graph file to name dh0, the head
-        # commit that moves x.py (git reads the commits named on the command line from their
-        # objects, so the forged edge sits one commit below the tip), and plain git merge-base of
-        # head and db answers dh0, from which the change moves no Python file. With
-        # core.commitGraph=false the default base is the fork point da and the verdict is the
-        # stale-move finding. The first condition of the finding row asserts the forgery is live.
-        # The flip empties _NO_COMMIT_GRAPH only for the merge-base call in _default_base:
-        # origin/HEAD is resolved first by the real _resolve_commit with the setting in place, and
-        # the later _merge_bases, diff-tree and ls-tree calls keep it; the forged edge then hides
-        # the move (empty scope).
+        # fixture 23j2h: with no --base the base is the commit origin/HEAD names (_default_base),
+        # and the judged merge bases come from the merge-base --all of it and the head.
+        # origin/HEAD names the base-branch tip db; the parent edge of db2, the base-branch commit
+        # below it, is forged in the commit-graph file to name dh0, the head commit that moves
+        # x.py (git reads the commits named on the command line from their objects, so the forged
+        # edge sits one commit below the tip), and plain git merge-base of head and db answers
+        # dh0, from which the change moves no Python file. With core.commitGraph=false the merge
+        # base is the fork point da and the verdict is the stale-move finding. The first condition
+        # of the finding row asserts the forgery is live. The flip empties _NO_COMMIT_GRAPH for
+        # the whole run; the forged edge then hides the move (empty scope).
         dgr = _init_repo(base, "forged-commit-graph-default-base")
         da = _commit_state(dgr, {}, {"tools/a/b/x.py": stale23}, "a")
         db1 = {"tools/a/b/x.py": stale23, "b1.txt": "1\n"}
@@ -2022,30 +2029,66 @@ def self_test(report_path=None):
         got = _launch("--root", str(dgr))
         check("hist/forged-commit-graph-default-base-ignored",
               cached_default == dh0 and got[0] == 1
-              and "base {}\n".format(da) in got[1]
+              and "base {}\n".format(db) in got[1]
               and "FINDING: tools/a/b/x.py -> tools/a/x.py" in got[1],
               (cached_default, da, dh0, got))
-        real_default_base = _default_base
-
-        def _default_base_graph_honoured(root, head_sha):
-            origin_sha = _resolve_commit(root, "origin/HEAD")
-
-            def _resolved_origin(_root, rev):
-                if rev != "origin/HEAD":
-                    raise RuntimeError("unexpected revision {!r}".format(rev))
-                return origin_sha
-
-            with (_patched(this, "_NO_COMMIT_GRAPH", ()),
-                  _patched(this, "_resolve_commit", _resolved_origin)):
-                return real_default_base(root, head_sha)
-
         flip_out = io.StringIO()
-        with (_patched(this, "_default_base", _default_base_graph_honoured),
+        with (_patched(this, "_NO_COMMIT_GRAPH", ()),
               contextlib.redirect_stdout(flip_out)):
             flip_rc = main(["--root", str(dgr)])
         check("hist/forged-commit-graph-default-base-flip-hides",
               flip_rc == 0 and "empty scope" in flip_out.getvalue()
-              and "base {}\n".format(dh0) in flip_out.getvalue(),
+              and "base {}\n".format(db) in flip_out.getvalue(),
+              (flip_rc, flip_out.getvalue()))
+
+        # fixture 23j2i: with no --base, a criss-cross history with two merge bases of head and
+        # origin/HEAD. xa holds tools/a/b/x.py with a two-hop root; xb moves it to tools/a/x.py
+        # (the stale move) and xc adds other.txt, each on xa; xd merges xb and xc and is
+        # origin/HEAD, and the head xe merges xc and xb. The merge bases are xb and xc, and xb
+        # carries the newer pinned date, so plain git merge-base keeps xb alone, from which the
+        # change moves no Python file. The default base is the commit origin/HEAD names, so both
+        # merge bases are judged and the stale move is found from xc, as with --base origin/HEAD.
+        # The first condition asserts plain git merge-base really keeps xb, so the row cannot pass
+        # vacuously. The flip restores a default base computed by plain git merge-base (one merge
+        # base of head and origin/HEAD), under which the move is hidden.
+        xr = _init_repo(base, "default-base-criss-cross")
+        x_old = {"tools/a/b/x.py": stale23}
+        x_other = dict(x_old, **{"other.txt": "o\n"})
+        x_moved = {"tools/a/x.py": stale23}
+        x_merged = dict(x_moved, **{"other.txt": "o\n"})
+        xa = _dated_commit(xr, {}, x_old, [], "a", "1700000000 +0000")
+        xc = _dated_commit(xr, x_old, x_other, [xa], "c", "1700000100 +0000")
+        xb = _dated_commit(xr, x_other, x_moved, [xa], "b", "1700000200 +0000")
+        xd = _dated_commit(xr, x_moved, x_merged, [xb, xc], "d", "1700000300 +0000")
+        xe = _dated_commit(xr, x_merged, x_merged, [xc, xb], "e", "1700000400 +0000")
+        _fx(xr, "update-ref", "refs/heads/m", xe)
+        _fx(xr, "update-ref", "refs/remotes/origin/HEAD", xd)
+        single_base = _fx(xr, "merge-base", "HEAD", "origin/HEAD")
+        all_bases = sorted(_fx(xr, "merge-base", "--all", "HEAD", "origin/HEAD").split())
+        got = _launch("--root", str(xr))
+        check("hist/default-base-criss-cross-all-bases-judged",
+              single_base == xb and all_bases == sorted([xb, xc]) and got[0] == 1
+              and "base {}\n".format(xd) in got[1]
+              and "FINDING: tools/a/b/x.py -> tools/a/x.py" in got[1],
+              (single_base, all_bases, xb, xc, got))
+
+        def _single_merge_base_default(root, head_sha):
+            origin_sha = _resolve_commit(root, "origin/HEAD")
+            proc = subprocess.run(
+                ["git", "-C", str(root), *_NO_COMMIT_GRAPH, "merge-base",
+                 head_sha, origin_sha],
+                capture_output=True, timeout=GIT_TIMEOUT, env=_git_env())
+            if proc.returncode != 0:
+                raise CannotEvaluate("no merge base between HEAD and origin/HEAD")
+            return proc.stdout.decode("ascii", "replace").strip()
+
+        flip_out = io.StringIO()
+        with (_patched(this, "_default_base", _single_merge_base_default),
+              contextlib.redirect_stdout(flip_out)):
+            flip_rc = main(["--root", str(xr)])
+        check("hist/default-base-criss-cross-single-base-flip-hides",
+              flip_rc == 0 and "empty scope" in flip_out.getvalue()
+              and "base {}\n".format(xb) in flip_out.getvalue(),
               (flip_rc, flip_out.getvalue()))
 
         # fixture 23j2e: a parent header carrying an abbreviated id is refused: an abbreviation
@@ -2275,10 +2318,11 @@ def self_test(report_path=None):
           "adds matched by name against every same-named deletion or rename source, an unmatched "
           "in-scope derivation never a pass; the marker clearing exactly its directory and "
           "lapsing on the next move; odd path bytes enumerated; -l0 pairing under "
-          "diff.renameLimit=1; criss-cross merge bases combined; above-root hops distinct by "
+          "diff.renameLimit=1; criss-cross merge bases combined, with an explicit base and "
+          "with the default origin/HEAD; above-root hops distinct by "
           "value; shallow histories, grafts files and zero bases over history refused, replace "
           "refs ignored, a forged commit-graph parent edge ignored by the merge-base of base "
-          "and head, a parent operator and the default-base merge-base against origin/HEAD "
+          "and head (from an explicit and from the default base) and by a parent operator "
           "(no row for the setting on diff-tree and ls-tree), head parents read from "
           "the raw commit object and accepted only as ids of the repository's own hash length, "
           "SHA-256 included; "
