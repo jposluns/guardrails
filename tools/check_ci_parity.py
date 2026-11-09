@@ -4898,13 +4898,14 @@ SILENT_RUNNER_REVERT = (
     ('  echo "FAILED GATES: ${failed_names}"\n', ""),
 )
 
-# Stub gates for runner_naming_problems. Both are executable fixtures in the bin
-# directory at the head of PATH, and both record every call in the call log the
-# scenario checks against the declared roster; python3 fails only the selected
-# command, and gitleaks exits with the requested status. No shell function, alias or
-# BASH_ENV file stands in for either: every gate the runner launches by name execs the
-# fixture, one process per gate. _prepare_stubs writes them once, before the scenario
-# pool starts; vector 27 pins that.
+# Stub gates for runner_naming_problems. Both are executable fixtures that start with
+# #!/bin/sh, written to the bin directory that heads the PATH _run_runner_copy sets.
+# Each appends one line, its name and then its arguments, to the call log named by
+# stub_log, which the scenario checks against the declared roster; python3 exits 3
+# only when its arguments equal stub_fail_command, and gitleaks exits with
+# stub_gitleaks_rc. This code defines no shell function or alias for either, and the
+# environment mapping it passes to bash names no BASH_ENV file. _prepare_stubs writes
+# them once, before the scenario pool starts; vector 27 pins that.
 _STUB_PYTHON3 = """#!/bin/sh
 printf '%s\\n' "python3 $*" >> "$stub_log" || exit 2
 if [ "$*" = "$stub_fail_command" ]; then
@@ -4921,14 +4922,14 @@ exit "$stub_gitleaks_rc"
 def _prepare_stubs(root, python3=_STUB_PYTHON3):
     """Write the stub gates once under root; return the bin directory that holds them.
 
-    python3 is the body of the python3 fixture (cdpath_problems passes one that also
-    records the working directory). Call this before any scenario thread starts and
-    share the result read-only. execve
-    of a file that any process holds open for writing fails ETXTBSY (bash reports exit
-    126), and a child forked on another thread holds every descriptor open at that
-    moment until it execs, so a stub written while scenarios run can be caught open by
-    a sibling's fork. Scenario trees therefore hold only data that is never executed:
-    the runner, which bash reads as its script argument, and the call log.
+    python3 is the body of the python3 fixture (_cdpath_outcome passes
+    _STUB_PYTHON3_PWD, which also records $PWD). Call this before any scenario thread
+    starts and share the result read-only. execve of a file that any process holds
+    open for writing fails ETXTBSY, and a child forked on another thread holds every
+    descriptor open at that moment until it execs, so a stub written while scenarios
+    run can be caught open by a sibling's fork. Scenario trees therefore hold no file
+    that is executed directly: only the runner text, whose path is passed to bash as
+    its script argument, and the call log.
     """
     bin_dir = root / "bin"
     bin_dir.mkdir()
@@ -4943,15 +4944,15 @@ def _prepare_stubs(root, python3=_STUB_PYTHON3):
 def _run_runner_copy(text, bin_dir, fail_command="", gitleaks_rc=0):
     """Run text as tools/run_all_checks.sh in a scratch tree; return (rc, stdout lines, calls).
 
-    bin_dir is the shared stub directory from _prepare_stubs; nothing this writes is
-    executed. PATH is bin_dir, then os.defpath, so python3 and gitleaks resolve to
-    the fixtures. The real executables these launches reach are bash, found by
-    shutil.which on the calling process's PATH, which runs the runner text; /bin/sh,
-    the interpreter every fixture runs; and dirname, the one other external command
-    the live runner reaches, from os.defpath. What these system executables read at
-    startup depends on the host's builds and is not asserted here. The environment
-    passed to them is an explicit mapping that carries no credential, and HOME is the
-    scratch tree.
+    bin_dir is the shared stub directory from _prepare_stubs, whose python3 and
+    gitleaks fixtures start with #!/bin/sh. This writes the runner text to
+    tools/run_all_checks.sh and an empty call log in a scratch tree, then runs the
+    runner with bash, found by shutil.which on the calling process's PATH; no file
+    this writes is executed directly. It passes bash an explicit environment mapping
+    rather than the calling process's environment: PATH is bin_dir, then os.defpath;
+    HOME is the scratch tree; LC_ALL is C; and stub_log, stub_fail_command and
+    stub_gitleaks_rc name the call log and the scenario's settings. calls is the
+    lines the fixtures recorded in the call log.
     """
     import os
     import shutil
@@ -5009,8 +5010,9 @@ def _dirname_guard_outcome(text, relative, scenario):
     Scenarios: "missing" (no dirname on PATH), "failed" (prints . and exits 7),
     "empty" (prints nothing and exits 0) and "control" (prints the runner's true
     directory). Every stub is written before the one launch, from this thread.
-    PATH names only fixture directories, so every command the runner looks up by
-    name reaches a fixture or is not found.
+    The PATH this sets names only fixture directories: the dirname fixture's
+    directory (except under "missing"), then the bin directory from
+    _prepare_stubs. HOME is the scratch tree.
     """
     import os
     import shutil
@@ -5107,9 +5109,10 @@ def dirname_guard_problems(text, relative):
     return problems
 
 
-# The python3 executable fixture for cdpath_problems: it also records the working
-# directory each gate launches from ($PWD, which bash exports to the child), so a
-# moved root shows in the log.
+# The python3 executable fixture for cdpath_problems, which _cdpath_outcome passes
+# to _prepare_stubs. Each line it appends to the call log is what $PWD expands to in
+# the fixture, then python3 and its arguments; cdpath_problems reads a line that
+# names the decoy tree as a moved root.
 _STUB_PYTHON3_PWD = """#!/bin/sh
 printf '%s\\n' "$PWD python3 $*" >> "$stub_log" || exit 2
 exit 0
@@ -5121,10 +5124,11 @@ def _cdpath_outcome(text, relative):
     under a CDPATH naming a decoy tree that holds the same relative directory;
     return (rc, tree, decoy, logged gate lines).
 
-    dirname prints the relative directory, as the real one does for a relative
-    $0. Every stub is written before the one launch, from this thread. PATH
-    names only fixture directories, so every command the runner looks up by
-    name reaches a fixture or is not found.
+    The dirname fixture prints the parent of relative. Every stub is written
+    before the one launch, from this thread. The PATH this sets names only
+    fixture directories: the dirname fixture's directory, then the bin directory
+    from _prepare_stubs, whose python3 fixture is _STUB_PYTHON3_PWD. HOME is the
+    scratch tree.
     """
     import os
     import shutil
