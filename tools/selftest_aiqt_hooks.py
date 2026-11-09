@@ -1383,6 +1383,15 @@ def _test_note_literal_sites(failures, tmp):
 
     base = tmp / "note-literals"
     base.mkdir()
+    # the console-stamp check's one note site: an opted-in registry and an unstamped message before the call
+    cs = orch.Fixture(base, "console-stamp")
+    orch._cs_registry(cs, dict(grammar="bracketed-zoned"))
+    cs_path = orch._cs_write(base / "console-stamp.jsonl",
+                             [orch._cs_prompt(), orch._cs_text("Checking."), orch._cs_tool("t1")])
+    note("(nl-console-stamp) an unstamped console message before an opted-in tool call allows with a note",
+         aiqt_hooks.orch_console_stamp_pretool(cs.payload(
+             "PreToolUse", "Bash", dict(command="true"), extra=dict(tool_use_id="t1", transcript_path=str(cs_path)))),
+         "console_stamp")
     y = orch.Fixture(base, "yield")
     sched = lambda iid: aiqt_hooks.orch_yield_tool(  # noqa: E731
         y.payload("PreToolUse", "ScheduleWakeup", dict(prompt="recheck " + iid)))
@@ -6455,6 +6464,7 @@ _DEADLINE_CASES = {
     "inline_errexit": ("sep_semicolon", "heredocs", "nest_parens", "cd_git_fetch_unbal", "errexit_guarded",
                        "errexit_nest_parens", "errexit_case_arms", "errexit_note_after", "errexit_unread_after"),
     "orch_ask_guard": ("ask_long",),
+    "orch_console_stamp_pretool": ("git_words",),
     "orch_resume_barrier": ("git_words", "write_content"),
     "orch_truncation_guard": ("nest_cmdsubst_background", "git_words"),
     "orch_untracked_wait_loop": ("git_words", "nest_cmdsubst"),

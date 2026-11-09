@@ -268,9 +268,9 @@ import sys
 # streams: with a sys.stderr whose write works but whose flush fails, `raise SystemExit` here ended
 # as the interpreter's own exit 120 instead of the refusal exit. Nothing runs before this guard, so
 # os._exit discards no other buffered output; the warning itself is flushed before the exit.
-FLOOR_FAIL_OPEN_MODES = ("diff_wall_stop", "inline_errexit", "orch_dispatch_ledger",
-                         "orch_lease_heartbeat_post", "orch_lease_heartbeat_stop", "orch_prompt_stamp",
-                         "orch_resume_audit", "orch_stop_guard", "orch_teammate_idle")
+FLOOR_FAIL_OPEN_MODES = ("diff_wall_stop", "inline_errexit", "orch_console_stamp_pretool",
+                         "orch_dispatch_ledger", "orch_lease_heartbeat_post", "orch_lease_heartbeat_stop",
+                         "orch_prompt_stamp", "orch_resume_audit", "orch_stop_guard", "orch_teammate_idle")
 
 if tuple(sys.version_info[:2]) < (3, 14):
     import os
@@ -331,7 +331,7 @@ FAIL_OPEN_EVENTS = STOP_EVENTS + ("SessionStart", "TeammateIdle", "UserPromptSub
 # miswired event hard-blocks. main() gives each one the fail-open posture of a FAIL_OPEN_EVENTS mode on every
 # error path, and keeps its PreToolUse deadline, which then warns on exit 0 instead of failing closed.
 # tools/gen_hooks.py reads this tuple: such a mode's control must declare the manifest default "warn".
-NOTE_ONLY_PRETOOL_MODES = ("inline_errexit",)
+NOTE_ONLY_PRETOOL_MODES = ("inline_errexit", "orch_console_stamp_pretool")
 # The platform stops a hook command at the timeout tools/gen_hooks.py writes into hooks.json (its
 # TIMEOUT); HOOK_TIMEOUT_SECONDS mirrors that value, and gen_hooks refuses to render (exit 2) when the two
 # differ, so both numbers come from that one source. main() gives every PreToolUse mode that is not
@@ -32236,6 +32236,266 @@ def orch_prompt_stamp(data):
         "additionalContext": context}}, None)
 
 
+# --- console-stamp lead-in (opt-in, note-only PreToolUse) ---------------------------------------------
+# The bracketed header grammar of the Stop clock-truth hook, copied VERBATIM from
+# .preview/stamp-truth-stop.py (TIME_GRAMMAR, ZONE_GRAMMAR, _BULLET_RE and _lead_end), so this presence
+# check and that truth check read one header the same way; tools/selftest_orch_hooks.py asserts the two
+# strings equal that file's copies and runs both _lead_end copies over one shared table of lines.
+_CONSOLE_TIME_GRAMMAR = r"(?<!\d)(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,9}))?)?"
+_CONSOLE_ZONE_GRAMMAR = r"(?:[ ]?(Z)|[ ]?([+-]\d{2}(?::?\d{2})?)|[ ](UTC|GMT|[A-Z]{2,6}))(?![A-Za-z0-9])"
+_CONSOLE_BULLET_RE = re.compile(r"(?:[-+*]|\d{1,9}[.)])(?=[ \t])")
+# The closed set of grammar names a registry's console_stamp object may choose (never a regex).
+_CONSOLE_GRAMMARS = {"bracketed-zoned": re.compile(_CONSOLE_TIME_GRAMMAR + _CONSOLE_ZONE_GRAMMAR)}
+_CONSOLE_TAIL_BYTES = 2 << 20        # the transcript tail searched for the anchor and its segment
+_CONSOLE_MAX_RECORD_BYTES = 4 << 20  # one record's cap, the Stop hook's MAX_RECORD_BYTES
+_CONSOLE_READ_CHUNK = 1 << 20
+
+
+def _console_lead_end(line):
+    """Index where the permitted status-stamp prefix of `line` ends: whitespace, one bullet, then `*`, `_`,
+    `[`, and whitespace. A claim starting exactly there is a line-leading status stamp."""
+    i, n = 0, len(line)
+    while i < n and line[i] in " \t":
+        i += 1
+    b = _CONSOLE_BULLET_RE.match(line, i)
+    if b:
+        i = b.end()
+    while i < n and line[i] in " \t*_[":
+        i += 1
+    return i
+
+
+def _console_run_stamped(text, pattern):
+    """Whether one console message opens with a bracketed stamp: its first line holding a non-whitespace
+    character (str.splitlines, as the Stop hook splits) must carry `[` immediately before a match of
+    `pattern` that starts at _console_lead_end. A message with no such line passes (it shows nothing)."""
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        i = _console_lead_end(line)
+        return i > 0 and line[i - 1] == "[" and pattern.match(line, i) is not None
+    return True
+
+
+def _console_stamp_config(reg):
+    """The opt-in: None when the registry carries no console_stamp key (the check is inert), the compiled
+    grammar its object names, or the string "malformed" for a value that is not an object naming one of
+    _CONSOLE_GRAMMARS."""
+    if "console_stamp" not in reg:
+        return None
+    conf = reg.get("console_stamp")
+    grammar = conf.get("grammar") if isinstance(conf, dict) else None
+    pattern = _CONSOLE_GRAMMARS.get(grammar) if isinstance(grammar, str) else None
+    return "malformed" if pattern is None else pattern
+
+
+def _console_records(data, start, floor):
+    """The records of a transcript tail, newest first. data holds the file's bytes from offset start; a
+    record whose end lies at or before offset floor is outside the window, and None is yielded in its
+    place before stopping. Each record is yielded as its parsed object, or as a fault string (and the
+    walk stops) when it is longer than _CONSOLE_MAX_RECORD_BYTES, cut at the read's start, or does not
+    parse as a JSON object; a newest record that lacks its newline is used when it parses."""
+    hi = len(data)
+    unfinished = not data.endswith(b"\n")
+    if not unfinished:
+        hi -= 1
+    while hi > 0:
+        lo = data.rfind(b"\n", 0, hi) + 1
+        if start + hi <= floor:
+            yield None
+            return
+        if hi - lo > _CONSOLE_MAX_RECORD_BYTES or (lo == 0 and start > 0):
+            yield "a transcript record is longer than {} bytes".format(_CONSOLE_MAX_RECORD_BYTES)
+            return
+        raw = data[lo:hi]
+        if raw.strip():
+            try:
+                rec = json.loads(raw)
+            except (ValueError, RecursionError):
+                rec = None
+            if not isinstance(rec, dict):
+                yield ("the newest transcript record is unfinished" if unfinished
+                       else "a transcript record is not a readable JSON object")
+                return
+            yield rec
+        unfinished = False
+        hi = lo - 1
+
+
+def _console_tail_records(path):
+    """Read the tail of the transcript at path without blocking: (state, records). state is "ok" with the
+    records iterator of _console_records, "absent" when no file exists at path, or a fault reason (the
+    open, fstat or read failed, or the path is not a regular file: a FIFO with no writer or a directory is
+    refused on the descriptor's own fstat before any read). At most _CONSOLE_TAIL_BYTES plus one record's
+    cap are read."""
+    flags = os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOCTTY", 0) | getattr(os, "O_CLOEXEC", 0)
+    try:
+        fd = os.open(path, flags)
+    except FileNotFoundError:
+        return ("absent", None)
+    except (OSError, ValueError) as exc:
+        return ("the transcript could not be opened: {}".format(_exception_text(exc)), None)
+    parts = []
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            return ("the transcript path is not a regular file", None)
+        size = st.st_size
+        start = max(0, size - _CONSOLE_TAIL_BYTES - _CONSOLE_MAX_RECORD_BYTES)
+        pos = start
+        while pos < size:
+            chunk = os.pread(fd, min(_CONSOLE_READ_CHUNK, size - pos), pos)
+            if not chunk:
+                break
+            parts.append(chunk)
+            pos += len(chunk)
+    except OSError as exc:
+        return ("the transcript could not be read: {}".format(_exception_text(exc)), None)
+    finally:
+        os.close(fd)
+    return ("ok", _console_records(b"".join(parts), start, max(0, size - _CONSOLE_TAIL_BYTES)))
+
+
+def _console_blocks(rec):
+    """The content blocks of one transcript record's message (a string content is one text block)."""
+    msg = rec.get("message")
+    content = msg.get("content") if isinstance(msg, dict) else None
+    if isinstance(content, str):
+        return [{"type": "text", "text": content}]
+    return content if isinstance(content, list) else []
+
+
+def _console_runs(blocks):
+    """The console messages of a segment's blocks (oldest first): each maximal run of text blocks that no
+    tool_use block interrupts, its texts joined by newlines. Thinking and other blocks neither count nor
+    interrupt."""
+    runs, current = [], []
+    for blk in blocks:
+        kind = blk.get("type") if isinstance(blk, dict) else None
+        if kind == "text" and isinstance(blk.get("text"), str):
+            current.append(blk["text"])
+        elif kind == "tool_use":
+            if current:
+                runs.append("\n".join(current))
+            current = []
+    if current:
+        runs.append("\n".join(current))
+    return runs
+
+
+def _console_stamp_findings(records, anchor_id, pattern):
+    """Judge one call from its transcript tail (records newest first, as _console_records yields them).
+    The ANCHOR is the newest assistant record holding a tool_use block whose id is anchor_id; its SEGMENT
+    is the anchor's blocks before that tool_use plus every older assistant record back to the first user
+    record of any kind (a prompt or a tool result) or the transcript's start, so text written before an
+    earlier tool result is never judged again. Sidechain records are skipped. Returns (kind, detail):
+    ("clean", 0), ("sidechain", 0) for a subagent's anchor, ("finding", n) for n unstamped console
+    messages, ("missing", reason) when no anchor is in the window, or ("fault", reason) when a record
+    that could be the anchor or part of its segment cannot be read."""
+    anchor, blocks = False, []
+    for rec in records:
+        if rec is None:
+            if not anchor:
+                return ("missing", "no record in the last {} bytes of the transcript carries this call's "
+                                   "tool_use_id".format(_CONSOLE_TAIL_BYTES))
+            return ("fault", "the call's segment starts before the last {} bytes of the transcript"
+                    .format(_CONSOLE_TAIL_BYTES))
+        if isinstance(rec, str):
+            return ("fault", rec)
+        if not anchor:
+            if rec.get("type") != "assistant":
+                continue
+            content = _console_blocks(rec)
+            at = next((k for k, blk in enumerate(content) if isinstance(blk, dict)
+                       and blk.get("type") == "tool_use" and blk.get("id") == anchor_id), None)
+            if at is None:
+                continue
+            if rec.get("isSidechain"):
+                return ("sidechain", 0)
+            anchor = True
+            blocks.extend(reversed(content[:at]))
+            continue
+        if rec.get("isSidechain"):
+            continue
+        if rec.get("type") == "user":
+            break
+        if rec.get("type") == "assistant":
+            blocks.extend(reversed(_console_blocks(rec)))
+    if not anchor:
+        return ("missing", "no assistant record in the transcript carries this call's tool_use_id")
+    unstamped = sum(1 for text in _console_runs(blocks[::-1]) if not _console_run_stamped(text, pattern))
+    return ("finding", unstamped) if unstamped else ("clean", 0)
+
+
+def _console_stamp_decide(data):
+    """(kind, root, detail) for one call: "allow" (silent: no registry, not opted in, not the lease
+    holder's scope, a clean segment, or a subagent's anchor), "row" (cannot evaluate, recorded as a
+    guard-events row rather than a note on every call: an unusable lease horizon, no tool_use_id, no
+    absolute transcript_path, no transcript file, or no anchor in the tail window) or "note" (an
+    unstamped console message, a malformed opt-in, or a transcript fault, with detail the message)."""
+    root = _orch_root(data)
+    if root is None:
+        return ("allow", None, None)
+    status, reg = _orch_registry(root)
+    if status != "ok":
+        return ("allow", root, None)
+    pattern = _console_stamp_config(reg)
+    if pattern is None:
+        return ("allow", root, None)
+    scope = _orch_scope_live(reg, root, data.get("session_id"))
+    if not scope:
+        return ("allow", root, None)
+    if scope == "cannot":
+        return ("row", root, _ORCH_SCOPE_CANNOT_DETAIL)
+    if pattern == "malformed":
+        return ("note", root, "AIQT guardrail: the registry's console_stamp entry is malformed (it must be an "
+                              "object whose grammar is one of: {}), so the console-stamp check did not run on "
+                              "this call.".format(", ".join(sorted(_CONSOLE_GRAMMARS))))
+    anchor_id = data.get("tool_use_id")
+    if not isinstance(anchor_id, str) or not anchor_id:
+        return ("row", root, "the payload carries no tool_use_id")
+    path = data.get("transcript_path")
+    if not isinstance(path, str) or not path or "\x00" in path or not os.path.isabs(path):
+        return ("row", root, "the payload carries no absolute transcript_path")
+    state, records = _console_tail_records(path)
+    if state == "absent":
+        return ("row", root, "no transcript file exists at the payload's transcript_path")
+    if state == "ok":
+        kind, detail = _console_stamp_findings(records, anchor_id, pattern)
+        if kind == "missing":
+            return ("row", root, detail)
+        if kind == "fault":
+            state = detail
+        elif kind == "finding":
+            return ("note", root, "AIQT guardrail: {} console message(s) written since the last user or tool "
+                                  "result record before this tool call do not open with a bracketed, zoned "
+                                  "clock stamp on their first line, which this repository's console_stamp "
+                                  "opt-in asks for; read the clock and stamp the next message. This note does "
+                                  "not block the call.".format(detail))
+        else:
+            return ("allow", root, None)
+    return ("note", root, "AIQT guardrail: the console-stamp check could not evaluate this call ({}), so it "
+                          "was not checked.".format(state))
+
+
+def orch_console_stamp_pretool(data):
+    """tstamp (adopter-armed, NOTE-ONLY), PreToolUse on every tool: where the registry opts in with a
+    console_stamp object and the session is in lease scope, note a tool call whose preceding console
+    messages in the current segment do not open with a bracketed, zoned stamp. Never blocks: the
+    dispatcher lists it in NOTE_ONLY_PRETOOL_MODES, and a cannot-evaluate allows with a guard-events row
+    or a note, never as clean."""
+    kind, root, detail = _console_stamp_decide(data)
+    if kind == "row":
+        if _orch_guard_event(root, "console-stamp", "fail-open", detail):
+            return _allow()
+        detail = ("AIQT guardrail: the console-stamp check could not evaluate this call ({}), and the "
+                  "guard-events row recording that could not be written; record it manually (nocncl)."
+                  .format(detail))
+    elif kind != "note":
+        return _allow()
+    return _allow_note(detail)
+
+
 # The truncation guard's registry-required deny reasons for each scope it denies, as tools/orch_doctor.py
 # and the resume audit report them (_orch_truncation_scope decides the scope exactly as the guard does).
 _ORCH_STRICT_SCOPE_FINDINGS = dict((
@@ -37049,6 +37309,7 @@ HANDLERS = {
     "review_dispatch_pin": review_dispatch_pin,
     "review_workdir_hold": review_workdir_hold,
     "orch_prompt_stamp": orch_prompt_stamp,
+    "orch_console_stamp_pretool": orch_console_stamp_pretool,
     "orch_resume_audit": orch_resume_audit,
     "orch_resume_barrier": orch_resume_barrier,
     "orch_lease_heartbeat_post": orch_lease_heartbeat_post,
@@ -37092,6 +37353,7 @@ HANDLER_EVENT = {
     "review_dispatch_pin": PRETOOL,
     "review_workdir_hold": PRETOOL,
     "orch_prompt_stamp": "UserPromptSubmit",
+    "orch_console_stamp_pretool": PRETOOL,
     "orch_resume_audit": "SessionStart",
     "orch_resume_barrier": PRETOOL,
     "orch_lease_heartbeat_post": "PostToolUse",

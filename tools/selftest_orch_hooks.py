@@ -12117,6 +12117,332 @@ def _named_text_cases(hooks):
     return table
 
 
+_CS_STAMP = "[2026-11-09 14:05:00 UTC] Checking the queue."
+
+
+def _cs_text(text, side=False):
+    return {"type": "assistant", "isSidechain": side, "message": {"content": [{"type": "text", "text": text}]}}
+
+
+def _cs_tool(tid, side=False):
+    return {"type": "assistant", "isSidechain": side,
+            "message": {"content": [{"type": "tool_use", "id": tid, "name": "Bash", "input": {}}]}}
+
+
+def _cs_think():
+    return {"type": "assistant", "message": {"content": [{"type": "thinking", "thinking": "plan"}]}}
+
+
+def _cs_prompt(text="go"):
+    return {"type": "user", "message": {"content": text}}
+
+
+def _cs_result(tid):
+    return {"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": tid, "content": "ok"}]}}
+
+
+def _cs_write(path, records, tail=b""):
+    """Write records as a JSONL transcript at path, then the raw bytes tail (an unfinished record)."""
+    with open(path, "wb") as fh:
+        for rec in records:
+            fh.write(json.dumps(rec).encode("utf-8") + b"\n")
+        fh.write(tail)
+    return path
+
+
+def _cs_registry(fx, console=None, holder=False):
+    """Rewrite fx's registry with a console_stamp value (omitted when None) and, with holder, a lease that
+    must name the payload's session."""
+    path = fx.root / ".aiqt" / "orchestration.local.json"
+    reg = json.loads(path.read_text(encoding="utf-8"))
+    reg.pop("console_stamp", None)
+    if console is not None:
+        reg["console_stamp"] = console
+    reg["lease"]["holder_is_session_id"] = bool(holder)
+    path.write_text(json.dumps(reg), encoding="utf-8")
+
+
+def _cs_load(name, rel):
+    """Load a .preview hook script from its file path as a module (importlib, never exec)."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(name, str(repo_root() / rel))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _cs_rows(fx):
+    path = Path(aiqt_hooks._orch_state_dir_for_root(str(fx.root))) / "guard-events.jsonl"
+    if not path.exists():
+        return []
+    return [row for row in (json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line)
+            if row.get("kind") == "console-stamp"]
+
+
+def _cs_main(payload):
+    """Run the real dispatcher entry in-process for the console-stamp mode: (exit code, stdout text)."""
+    import contextlib
+    import io
+    saved = sys.stdin
+    out = io.StringIO()
+    try:
+        sys.stdin = io.StringIO(json.dumps(payload))
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            code = aiqt_hooks.main(["orch_console_stamp_pretool"])
+    finally:
+        sys.stdin = saved
+    return code, out.getvalue()
+
+
+def _console_stamp_cases(tmp):
+    """(console-stamp/*) The opt-in, note-only PreToolUse check that a console message before a tool call
+    opens with a bracketed, zoned stamp. Every case is in-process on a synthetic JSONL transcript under
+    tmp except the FIFO case, which runs the real dispatcher in a child process with a timeout; the
+    handler spawns nothing but the git toplevel probe every orchestration hook runs, against the fixture
+    repository. Mutants are attribute patches, each restored, and each must turn its named vector red."""
+    fx = Fixture(tmp, "console-stamp")
+    _cs_registry(fx, {"grammar": "bracketed-zoned"})
+    tdir = tmp / "console-stamp-transcripts"
+    tdir.mkdir()
+    counter = [0]
+
+    def run(records, tid="t1", tail=b"", extra=None):
+        counter[0] += 1
+        path = _cs_write(tdir / "t{}.jsonl".format(counter[0]), records, tail)
+        data = {"tool_use_id": tid, "transcript_path": str(path)}
+        data.update(extra or {})
+        return fx.payload("PreToolUse", "Bash", {"command": "true"}, extra=data)
+
+    def verdict(payload):
+        return _verdict(aiqt_hooks.orch_console_stamp_pretool(payload))
+
+    unstamped = [_cs_prompt(), _cs_text("Let me check the queue."), _cs_tool("t1")]
+    vectors = {
+        "C1": run([_cs_prompt(), _cs_text(_CS_STAMP), _cs_tool("t1")]),
+        "C2": run([_cs_prompt(), _cs_tool("t1")]),
+        "C3": run([_cs_prompt(), _cs_text("  \n\t"), _cs_tool("t1")]),
+        "C4": run([_cs_prompt(), _cs_think(), _cs_tool("t1")]),
+        "C5": run([_cs_prompt(), _cs_text("Let me check."), _cs_tool("t0"), _cs_result("t0"),
+                   _cs_text(_CS_STAMP), _cs_tool("t1")]),
+        "C6": run([_cs_prompt(), _cs_text("Subagent text.", side=True), _cs_tool("t1", side=True)]),
+        "C9a": run([_cs_prompt(), _cs_text("**" + _CS_STAMP), _cs_tool("t1")]),
+        "C9b": run([_cs_prompt(), _cs_text("- " + _CS_STAMP), _cs_tool("t1")]),
+        "R1": run(unstamped),
+        "R2": run([_cs_prompt(), _cs_text("Checking.\n" + _CS_STAMP), _cs_tool("t1")]),
+        "R3": run([_cs_prompt(), _cs_text("`[2026-11-09 14:05:00 UTC]` checking"), _cs_tool("t1")]),
+        "R4": run([_cs_prompt(), _cs_text("[2026-11-09 14:05:00] Checking"), _cs_tool("t1")]),
+        "R6": run([_cs_prompt(), _cs_text(_CS_STAMP), _cs_tool("t1"), _cs_text("Now the second."),
+                   _cs_tool("t2")], tid="t2"),
+        "R7": run([_cs_prompt(), _cs_text("```\n" + _CS_STAMP + "\n```"), _cs_tool("t1")]),
+    }
+    want = {"C1": "allow", "C2": "allow", "C3": "allow", "C4": "allow", "C5": "allow", "C6": "allow",
+            "C9a": "allow", "C9b": "allow", "R1": "warn", "R2": "warn", "R3": "warn", "R4": "warn",
+            "R6": "warn", "R7": "warn"}
+    for key in sorted(vectors):
+        check("console-stamp/vector-" + key, verdict(vectors[key]), want[key])
+    # R5: two parallel calls after one unstamped message: both calls get the note.
+    parallel = [_cs_prompt(), _cs_text("Running both."), _cs_tool("t1"), _cs_tool("t2")]
+    check("console-stamp/vector-R5-parallel-both-noted",
+          (verdict(run(parallel, tid="t1")), verdict(run(parallel, tid="t2"))), ("warn", "warn"))
+    check("console-stamp/note-names-opt-in-not-blocking",
+          [needle in (aiqt_hooks.orch_console_stamp_pretool(vectors["R1"])[1] or {}).get("systemMessage", "")
+           for needle in ("console_stamp", "does not block")], [True, True])
+    # C7: no console_stamp key, C8: a session the lease does not name; both on the unstamped transcript.
+    _cs_registry(fx, None)
+    check("console-stamp/vector-C7-not-opted-in", verdict(run(unstamped)), "allow")
+    _cs_registry(fx, {"grammar": "bracketed-zoned"}, holder=True)
+    check("console-stamp/vector-C8-non-holder", verdict(run(unstamped)), "allow")
+    # K7: a malformed opt-in (an unknown grammar name, a non-object) is a visible note.
+    _cs_registry(fx, {"grammar": "(?s).*"})
+    check("console-stamp/cannot-K7-unknown-grammar", verdict(run(unstamped)), "warn")
+    _cs_registry(fx, "bracketed-zoned")
+    check("console-stamp/cannot-K7-not-an-object", verdict(run(unstamped)), "warn")
+    _cs_registry(fx, {"grammar": "bracketed-zoned"})
+
+    # Cannot-evaluate cases that leave a guard-events row (a silent allow, never a clean read).
+    def row_case(label, payload):
+        before = len(_cs_rows(fx))
+        got = verdict(payload)
+        rows = _cs_rows(fx)
+        check(label, (got, len(rows) - before, rows[-1].get("decision") if rows else None),
+              ("allow", 1, "fail-open"))
+    row_case("console-stamp/cannot-K1-missing-file-row",
+             fx.payload("PreToolUse", "Bash", {"command": "true"},
+                        extra={"tool_use_id": "t1", "transcript_path": str(tdir / "absent.jsonl")}))
+    row_case("console-stamp/cannot-K6-no-tool-use-id-row",
+             fx.payload("PreToolUse", "Bash", {"command": "true"},
+                        extra={"transcript_path": str(vectors["R1"]["transcript_path"])}))
+    row_case("console-stamp/cannot-relative-transcript-path-row", run(unstamped, extra={"transcript_path": "t.jsonl"}))
+    filler = [_cs_text("x" * 1000, side=True)] * 2200
+    row_case("console-stamp/cannot-K4-anchor-beyond-window-row", run(unstamped + filler))
+    saved_event = aiqt_hooks._orch_guard_event
+    try:
+        aiqt_hooks._orch_guard_event = lambda *args: False
+        check("console-stamp/cannot-row-unwritable-notes", verdict(run(unstamped, tid="absent-id")), "warn")
+    finally:
+        aiqt_hooks._orch_guard_event = saved_event
+    # Faults the operator sees as a note.
+    check("console-stamp/cannot-K3-directory-note",
+          verdict(run(unstamped, extra={"transcript_path": str(tdir)})), "warn")
+    check("console-stamp/cannot-K5-unfinished-anchor-note",
+          verdict(run([_cs_prompt(), _cs_text("Let me check.")], tail=json.dumps(_cs_tool("t1"))[:-5].encode())),
+          "warn")
+    check("console-stamp/unfinished-but-parseable-anchor-read",
+          verdict(run([_cs_prompt(), _cs_text(_CS_STAMP)], tail=json.dumps(_cs_tool("t1")).encode())), "allow")
+    # K2: a FIFO with no writer, through the real dispatcher in a child process in its own session with a
+    # timeout: it must decide promptly (exit 0, a note), never wait for a writer.
+    fifo = tdir / "fifo.jsonl"
+    os.mkfifo(fifo)
+    home = tmp / "console-stamp-home"
+    home.mkdir()
+    child = subprocess.Popen(
+        [sys.executable, "-I", "-B", "-c", _CEILED_DISPATCH_CHILD,
+         os.path.dirname(os.path.abspath(aiqt_hooks.__file__)),
+         json.dumps(sorted(_registry_ceiling(tmp, None).above)), "orch_console_stamp_pretool"],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True,
+        env=_controlled_child_env(home, XDG_STATE_HOME=str(tmp / "xdg")))
+    try:
+        out, _err = child.communicate(json.dumps(fx.payload(
+            "PreToolUse", "Bash", {"command": "true"},
+            extra={"tool_use_id": "t1", "transcript_path": str(fifo)})).encode(), timeout=60)
+        fifo_got = (child.returncode, "not a regular file" in out.decode("utf-8", "replace"))
+    except subprocess.TimeoutExpired:
+        fifo_got = ("timeout", False)
+    finally:
+        try:
+            os.killpg(child.pid, 9)
+        except (ProcessLookupError, PermissionError):
+            pass
+        child.wait()
+    check("console-stamp/cannot-K2-fifo-child-decides-note", fifo_got, (0, True))
+
+    # Window and record-cap boundaries, each just inside, exactly at and just outside: a record counts
+    # when its end (before its newline) lies strictly after the window's floor (the file size less the
+    # window), and a record of exactly the cap is read while one byte over it is a fault. On a stamped
+    # transcript the prompt record is the segment's start: inside, the segment is complete and clean; at
+    # or outside it, the segment runs past the window, a visible note. The anchor record (the last) is the
+    # second boundary: inside it is found, at or outside it no anchor is in the window, a guard-events row.
+    spath = _cs_write(tdir / "boundary.jsonl", [_cs_prompt(), _cs_text(_CS_STAMP), _cs_tool("t1")])
+    lines = spath.read_bytes().split(b"\n")[:-1]
+    size = os.path.getsize(spath)
+    prompt_end, anchor_end, longest = len(lines[0]), size - 1, max(len(line) for line in lines)
+    spayload = fx.payload("PreToolUse", "Bash", {"command": "true"},
+                          extra={"tool_use_id": "t1", "transcript_path": str(spath)})
+    saved_tail, saved_cap = aiqt_hooks._CONSOLE_TAIL_BYTES, aiqt_hooks._CONSOLE_MAX_RECORD_BYTES
+
+    def counted():
+        before = len(_cs_rows(fx))
+        got = verdict(spayload)
+        return (got, len(_cs_rows(fx)) - before)
+    try:
+        got = []
+        for tail in (size - prompt_end + 1, size - prompt_end, size - prompt_end - 1):
+            aiqt_hooks._CONSOLE_TAIL_BYTES = tail
+            got.append(counted())
+        check("console-stamp/window-segment-start-inside-at-outside", got,
+              [("allow", 0), ("warn", 0), ("warn", 0)])
+        got = []
+        for tail in (size - anchor_end + 1, size - anchor_end, size - anchor_end - 1):
+            aiqt_hooks._CONSOLE_TAIL_BYTES = tail
+            got.append(counted()[1])
+        check("console-stamp/window-anchor-inside-at-outside-rows", got, [0, 1, 1])
+        aiqt_hooks._CONSOLE_TAIL_BYTES = saved_tail
+        got = []
+        for cap in (longest + 1, longest, longest - 1):
+            aiqt_hooks._CONSOLE_MAX_RECORD_BYTES = cap
+            got.append(counted())
+        check("console-stamp/record-cap-inside-at-outside", got, [("allow", 0), ("allow", 0), ("warn", 0)])
+    finally:
+        aiqt_hooks._CONSOLE_TAIL_BYTES, aiqt_hooks._CONSOLE_MAX_RECORD_BYTES = saved_tail, saved_cap
+
+    # Parity: the grammar strings equal both .preview copies, and both _lead_end copies agree on one table.
+    stop_hook = _cs_load("aiqt_cs_stamp_truth_stop", ".preview/stamp-truth-stop.py")
+    write_hook = _cs_load("aiqt_cs_future_stamp_write", ".preview/future-stamp-write.py")
+    mine = (aiqt_hooks._CONSOLE_TIME_GRAMMAR, aiqt_hooks._CONSOLE_ZONE_GRAMMAR)
+    check("console-stamp/parity-grammar-stamp-truth-stop", mine, (stop_hook.TIME_GRAMMAR, stop_hook.ZONE_GRAMMAR))
+    check("console-stamp/parity-grammar-future-stamp-write", mine,
+          (write_hook.TIME_GRAMMAR, write_hook.ZONE_GRAMMAR))
+    check("console-stamp/parity-bullet-pattern", aiqt_hooks._CONSOLE_BULLET_RE.pattern, stop_hook._BULLET_RE.pattern)
+    table = ("", "   ", "[2026-11-09 14:05 UTC] x", "  - [2026-11-09 14:05 UTC]", "**[x", "1. [x", "12) _[x",
+             "-[x", "* * [x", "\t+ \t[x", "`[x`", "> [x", "1234567890. x", "a [x", "__**[[ x", "- ")
+    check("console-stamp/parity-lead-end-table", [aiqt_hooks._console_lead_end(s) for s in table],
+          [stop_hook._lead_end(s) for s in table])
+    check("console-stamp/parity-lead-end-table-nontrivial",
+          len(set(aiqt_hooks._console_lead_end(s) for s in table)) > 3, True)
+    # Registration: note-only, PreToolUse, and the Python-floor copy names it.
+    name = "orch_console_stamp_pretool"
+    check("console-stamp/registered-note-only",
+          (aiqt_hooks.HANDLERS.get(name) is aiqt_hooks.orch_console_stamp_pretool,
+           aiqt_hooks.HANDLER_EVENT.get(name), name in aiqt_hooks.NOTE_ONLY_PRETOOL_MODES,
+           name in aiqt_hooks.FLOOR_FAIL_OPEN_MODES),
+          (True, aiqt_hooks.PRETOOL, True, True))
+    # K1 through main(): a reader that raises still ends in exit 0 with a warning (note-only posture).
+    saved_reader = aiqt_hooks._console_tail_records
+
+    def raising(_path):
+        raise OSError("console-stamp read fault")
+    try:
+        aiqt_hooks._console_tail_records = raising
+        code, out = _cs_main(vectors["R1"])
+        check("console-stamp/main-read-fault-exit-0-warns",
+              (code, "console-stamp read fault" in out, set(json.loads(out)) if out.strip() else None),
+              (0, True, {"systemMessage"}))
+        # Mutant: not registered as note-only; the same crash then fails closed with exit 2.
+        saved_modes = aiqt_hooks.NOTE_ONLY_PRETOOL_MODES
+        try:
+            aiqt_hooks.NOTE_ONLY_PRETOOL_MODES = tuple(m for m in saved_modes if m != name)
+            check("console-stamp/mutant-not-note-only-red", _cs_main(vectors["R1"])[0], 2)
+        finally:
+            aiqt_hooks.NOTE_ONLY_PRETOOL_MODES = saved_modes
+    finally:
+        aiqt_hooks._console_tail_records = saved_reader
+    check("console-stamp/main-unstamped-exit-0-note", _cs_main(vectors["R1"])[0], 0)
+
+    # Red-on-revert mutants: each patch must turn its named vector from its pinned verdict.
+    def mutant(label, attr, replacement, key, payload=None):
+        saved = getattr(aiqt_hooks, attr)
+        try:
+            setattr(aiqt_hooks, attr, replacement)
+            got = verdict(payload or vectors[key])
+        finally:
+            setattr(aiqt_hooks, attr, saved)
+        check("console-stamp/mutant-" + label, got != want.get(key, "allow"), True)
+
+    first_line_search = lambda text, pattern: pattern.search(text) is not None  # noqa: E731
+    any_lead = lambda text, pattern: pattern.search(  # noqa: E731
+        next((ln for ln in text.splitlines() if ln.strip()), "")) is not None
+    import re
+    loose = {"bracketed-zoned": re.compile(
+        aiqt_hooks._CONSOLE_TIME_GRAMMAR + "(?:" + aiqt_hooks._CONSOLE_ZONE_GRAMMAR + ")?")}
+    saved_records = aiqt_hooks._console_records
+
+    def whole_turn(data, start, floor):
+        for rec in saved_records(data, start, floor):
+            blocks = aiqt_hooks._console_blocks(rec) if isinstance(rec, dict) else []
+            if any(isinstance(b, dict) and b.get("type") == "tool_result" for b in blocks):
+                continue
+            yield rec
+
+    def no_sidechain(data, start, floor):
+        for rec in saved_records(data, start, floor):
+            if isinstance(rec, dict):
+                rec = dict(rec)
+                rec.pop("isSidechain", None)
+            yield rec
+
+    mutant("always-allow-R1", "_console_stamp_decide", lambda data: ("allow", None, None), "R1")
+    mutant("search-not-match-R2", "_console_run_stamped", first_line_search, "R2")
+    mutant("lead-check-dropped-R3", "_console_run_stamped", any_lead, "R3")
+    mutant("zone-optional-R4", "_CONSOLE_GRAMMARS", loose, "R4")
+    mutant("whole-turn-scope-C5", "_console_records", whole_turn, "C5")
+    mutant("sidechain-skip-removed-C6", "_console_records", no_sidechain, "C6")
+    mutant("only-first-run-R6", "_console_runs", lambda blocks, _r=aiqt_hooks._console_runs: _r(blocks)[:1], "R6")
+    _cs_registry(fx, None)
+    mutant("opt-in-gate-removed-C7", "_console_stamp_config",
+           lambda reg: aiqt_hooks._CONSOLE_GRAMMARS["bracketed-zoned"], "C7", payload=run(unstamped))
+    _cs_registry(fx, {"grammar": "bracketed-zoned"})
+
+
 def main(report_path=None):
     if report_path is not None:
         # The execution report is finalized at interpreter exit, after this run's cleanup
@@ -18706,6 +19032,7 @@ def _main_isolated(report_path=None):
         _rdp_cases(tmp)
         _rwh_cases(tmp)
         _gitalias_oracle_cases(tmp)
+        _console_stamp_cases(tmp)
     finally:
         aiqt_hooks._orch_dirfd_has_registry = saved_probe
         shutil.rmtree(tmp, ignore_errors=True)
