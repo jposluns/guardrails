@@ -4904,8 +4904,10 @@ SILENT_RUNNER_REVERT = (
 # stub_log, which the scenario checks against the declared roster; python3 exits 3
 # only when its arguments equal stub_fail_command, and gitleaks exits with
 # stub_gitleaks_rc. This code defines no shell function or alias for either, and the
-# environment mapping it passes to bash names no BASH_ENV file. _prepare_stubs writes
-# them once, before the scenario pool starts; vector 27 pins that.
+# environment mapping it passes to bash names no BASH_ENV file. runner_naming_problems
+# has _prepare_stubs write them before it constructs its scenario pool; the
+# _stubs_prepared_before_pool docstring states what self-test vector 27 checks of that
+# order.
 _STUB_PYTHON3 = """#!/bin/sh
 printf '%s\\n' "python3 $*" >> "$stub_log" || exit 2
 if [ "$*" = "$stub_fail_command" ]; then
@@ -4930,14 +4932,9 @@ def _prepare_stubs(root, python3=_STUB_PYTHON3):
     that moment until it execs, so a stub written while scenarios run can be caught open
     by a sibling's fork. Scenario trees therefore hold no file that is executed
     directly: only the runner text, whose path is passed to bash as its script argument,
-    and the call log. Self-test vector 27 checks recorded file operations and does not
-    test that platform behaviour: while runner_naming_problems runs, an audit hook
-    records each open for writing, chmod, rename, link and symlink, and the vector
-    requires executable python3 and gitleaks stubs in the one stub directory all
-    scenarios share, no executable in a scenario tree, every stub-directory executable
-    to appear in some recorded event, and, apart from the one chmod the vector injects,
-    no recorded event on such an executable to happen off the main thread or after the
-    scenario pool is constructed.
+    and the call log. Self-test vector 27 checks the order this paragraph describes
+    through _stubs_prepared_before_pool, whose docstring states what that check records
+    and what it does not; vector 27 does not test the platform behaviour.
     """
     bin_dir = root / "bin"
     bin_dir.mkdir()
@@ -5321,31 +5318,51 @@ def _stubs_prepared_before_pool(text, red_command):
 
     DETERMINISTIC guard for the ETXTBSY ordering in runner_naming_problems (no stress,
     no timing), in the style of the config/executables-prepared-before-pool control in
-    tools/selftest_git_fixture_env.py: every file a scenario executes must be written
-    and chmodded on the MAIN thread before the scenario pool is constructed. A CPython
-    audit hook records every open-for-write, chmod, rename, link and symlink with its
-    thread and whether the pool exists yet; just before each scenario starts bash,
-    inside the pool, a snapshot lists the executable files in its stub PATH entry and
-    in its scenario tree. Writing stubs per scenario again turns this red on every run,
-    whether or not a fork happens to race a write. The scenario failing red_command
-    chmods the shared gitleaks stub from inside the pool and must be flagged, so a
-    recorder that sees nothing cannot pass; the required-stub and
-    every-executable-was-seen legs keep the rest from passing vacuously.
-    File-descriptor-only operations (os.fchmod, a write through an inherited
-    descriptor) are outside what these audit events name, as is an os.open with
-    dir_fd (the open audit event carries no dir_fd argument, so a relative path
-    opened that way stays working-directory-resolved and is not matched to the
-    stub) and a write made by a child process (a cp or install run in a
-    subprocess); only the never-seen-written leg catches a stub that no Python
-    code wrote. A dir_fd-relative path is resolved through /proc/self/fd only for
-    the os.chmod, os.rename, os.link and os.symlink events, and only where that
-    pseudo-filesystem exists; without it such a path stays working-directory-
-    resolved, the same residual class as the descriptor-only operations.
+    tools/selftest_git_fixture_env.py. A CPython audit hook records only these audit
+    events, and only when the event names a path: an open whose flags include a write,
+    create, truncate or append flag, and os.chmod, os.rename, os.link and os.symlink. An
+    event whose path is a file descriptor is dropped by this recorder (os.fchmod does
+    raise os.chmod, with an integer path). Each recorded event keeps its path, made
+    absolute with os.path.abspath but not resolved, and whether it came from the main
+    thread before construction of the scenario pool began. Just before each scenario
+    starts bash, inside the pool, a snapshot lists the executable files, made absolute
+    the same way, in the first entry of the PATH the scenario passes (its stub
+    directory) and in its scenario tree. Self-test vector 27 requires the pool to have
+    been constructed, five snapshots, one stub directory shared by all of them,
+    executable python3 and gitleaks stubs in it, no executable in any scenario tree,
+    every stub-directory executable to appear in some recorded event, and, among the
+    recorded events on such a path, exactly one that came from another thread or after
+    pool construction began: an os.chmod of the gitleaks stub, the one the red scenario
+    makes. Apart from that injected one it requires no chmod and no number of writes per
+    stub, and it does not check executables reached outside the stub directory and the
+    scenario trees (bash, /bin/sh, and anything found on later PATH entries). Writing
+    stubs per scenario again turns this red on every run, whether or not a fork happens
+    to race a write. The scenario failing red_command chmods the shared gitleaks stub
+    from inside the pool and must be flagged, so a recorder that sees nothing cannot
+    pass; the required-stub and every-executable-was-seen legs keep the rest from
+    passing vacuously.
+
+    Residuals. Paths are compared as text after os.path.abspath, which resolves no
+    symlink and keeps a leading double slash, so a write through a symlinked or
+    double-slash alias of a stub path, or through a hard link, is recorded under the
+    alias and not matched to the stub. Not recorded at all: os.fchmod and any other
+    event whose path is a descriptor (dropped as above), a write through an inherited or
+    already-open descriptor (it raises none of these audit events), and a write made by
+    a child process (a cp or install run in a subprocess). An os.open with dir_fd is
+    recorded but not matched: the open audit event carries no dir_fd argument, so a
+    relative path opened that way is recorded working-directory-resolved. In each of
+    these cases only the every-executable-was-seen leg can fail, and only when no
+    recorded event names the stub path at all. A dir_fd-relative path is resolved
+    through /proc/self/fd only for the os.chmod, os.rename, os.link and os.symlink
+    events, and only where that pseudo-filesystem exists; without it such a path stays
+    working-directory-resolved, the same residual class as the descriptor-only
+    operations.
 
     Returns (pool constructed, scenarios observed, distinct stub directories, required
-    stubs missing, executables never seen written, executables in scenario trees, and
-    sorted (name, event, count) writes to an executable after the pool was constructed,
-    counted so the red chmod cannot mask a real one).
+    stubs missing, stub-directory executables that no recorded event names, executables
+    in scenario trees, and sorted (name, event, count) recorded events on a
+    stub-directory executable that did not come from the main thread before pool
+    construction began, counted so the red chmod cannot mask a real one).
     """
     import collections
     import concurrent.futures
@@ -7114,10 +7131,12 @@ def self_test():
             failures.append(
                 "26 flip: a runner that names no failing gate was not caught")
 
-    # Stub ordering (ETXTBSY): runner_naming_problems writes every executable stub once,
-    # on the main thread, before its scenario pool exists, into one directory shared by
-    # all five scenarios, and no scenario tree holds an executable. The red scenario's
-    # in-pool chmod must be the only late write, so per-scenario stubs fail this vector.
+    # Stub ordering (ETXTBSY): runner_naming_problems writes the executable stubs into
+    # one directory shared by all five scenarios before its scenario pool exists, and no
+    # scenario tree holds an executable. The _stubs_prepared_before_pool docstring
+    # states what this vector records and requires; the red scenario's in-pool chmod
+    # must be the only late event it records on a stub, so per-scenario stubs fail this
+    # vector.
     count += 1
     ordering = _stubs_prepared_before_pool(
         local_fixture(
