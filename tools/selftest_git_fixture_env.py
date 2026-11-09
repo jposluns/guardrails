@@ -5147,10 +5147,12 @@ _SCAN_ALLOWED_UNPINNED = (
      1),
     ("opf/tools/opf.py", "_watchdog_completion_case", ("dynamic",),
      "exec of _FixtureProcess._finish_close rebuilt from _opf_emit's own AST with exactly"
-     " one pinned QA38/QA39/QA40/QA41/QA51 mutation inserted (red-leg mutants); each exec"
-     " only defines the mutant member (for QA51, a one-member class) into dict(vars(emit))"
-     " for the behavioural matrix to drive in-process",
-     5),
+     " one pinned QA38/QA39/QA40/QA41/QA51 mutation inserted (red-leg mutants), and exec"
+     " of _FixtureProcess._guardian's own source with its loop-top deadline check removed"
+     " (the own-deadline red-leg mutant); each exec only defines the mutant member (for"
+     " QA51, a one-member class) into dict(vars(emit)) for the behavioural matrix or the"
+     " deadline-flips leg to drive in-process",
+     6),
     ("opf/tools/opf.py", "_watchdog_completion_case.displaced_outward", ("dynamic",),
      "exec of the two disclosed leg-11 QA37 vector sources (string literals in this"
      " self-test); the exec only defines each vector's mutant function, whose body calls"

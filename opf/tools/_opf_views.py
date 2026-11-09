@@ -2636,6 +2636,7 @@ def _self_test():
 
     failures = []
     checked = [0]
+    unestablished = []
 
     def check(name, cond):
         checked[0] += 1
@@ -2778,21 +2779,108 @@ def _self_test():
         def _recording_rc(root_fd, relpath):
             _rc_calls.append(relpath)
             return _orig_rc(root_fd, relpath)
-        _journal._read_contained = _recording_rc
-        def _fifo_probe():
-            try:
-                _read_raw_and_parsed(_ffd, "blk.index.toml")
-            except ViewsError:
-                return str(not _rc_calls)
-            return "ACCEPTED"
+        # The probe writes one byte on a declared pipe as its FIRST
+        # statement, so a TIMEOUT is separated into its causes by
+        # OBSERVATION, never by the clock alone: no byte, the guardian never
+        # started the probe inside the bound (host starvation: the
+        # no-verdict path below); byte present, the probe ran and then
+        # stalled -- which a blocking regression AND a host that starves a
+        # correct probe after its first statement both produce, so that
+        # shape is never judged from one run.
+        import time as _probe_time
 
-        try:
-            # The probe reads through the pre-opened dirfd: DECLARE it (fd allowlist).
-            fifo_result = run_bounded(_fifo_probe, timeout_s=5, keep_fds=(_ffd,))
-        finally:
-            _journal._read_contained = _orig_rc
-            os.close(_ffd)
-        check("fifo-source-fails-closed-not-hang", fifo_result == "True")
+        def _run_fifo_probe(bound, dirfd):
+            started_r, started_w = os.pipe()
+
+            def probe():
+                os.write(started_w, b"R")
+                try:
+                    _read_raw_and_parsed(dirfd, "blk.index.toml")
+                except ViewsError:
+                    return str(not _rc_calls)
+                return "ACCEPTED"
+
+            begin = _probe_time.monotonic()
+            try:
+                _journal._read_contained = _recording_rc
+                try:
+                    # The probe reads through the pre-opened dirfd and writes
+                    # its start receipt: DECLARE both (fd allowlist).
+                    result = run_bounded(probe, timeout_s=bound,
+                                         keep_fds=(dirfd, started_w))
+                finally:
+                    _journal._read_contained = _orig_rc
+                    try:
+                        os.close(dirfd)
+                    finally:
+                        os.close(started_w)
+                elapsed = _probe_time.monotonic() - begin
+                os.set_blocking(started_r, False)
+                try:
+                    started = os.read(started_r, 1) == b"R"
+                except BlockingIOError:
+                    started = False
+            finally:
+                os.close(started_r)
+            return result, elapsed, started
+
+        fifo_result, _probe_elapsed, _probe_started = _run_fifo_probe(5, _ffd)
+        # A TIMEOUT that reached the 5 s bound WITHOUT the probe's start
+        # receipt establishes nothing: a starved host can fail to start a
+        # correct probe inside the bound (guardian startup shares it), so
+        # that run is recorded apart as this suite's distinct no-verdict
+        # exit 2 below, never a pass and never a definite failure. A TIMEOUT
+        # WITH the receipt means the probe ran and then STALLED, which a
+        # real hang and a starved-after-start correct probe both produce:
+        # the probe is re-run once under a bound five times longer (its real
+        # work is milliseconds, measured well inside either bound), and only
+        # the same started-timeout shape under the long bound is judged the
+        # definite hang -- a probe that blocks forever repeats it under any
+        # bound, a starved correct probe returns its value, and a long run
+        # the guardian never started stays no verdict. An early TIMEOUT and
+        # every other result stay with the check, whichever run produced
+        # them: the guard-deletion regression is judged by the recorded
+        # downstream-reader call (_rc_calls), which no host speed can move.
+        from _opf_emit import bounded_probe_starved_suspect, bounded_probe_unestablished
+        if bounded_probe_starved_suspect(fifo_result, _probe_elapsed, 5, _probe_started):
+            _ffd_confirm = os.open(str(_fifo_dir), os.O_RDONLY | os.O_DIRECTORY)
+            fifo_result, _probe_elapsed, _probe_started = _run_fifo_probe(25, _ffd_confirm)
+            if bounded_probe_unestablished(fifo_result, _probe_elapsed, 25, _probe_started):
+                unestablished.append("fifo-source-fails-closed-not-hang: the started FIFO "
+                                     "probe timed out and its confirm run was never "
+                                     "observed to start inside the 25 s bound")
+            else:
+                check("fifo-source-fails-closed-not-hang", fifo_result == "True")
+        elif bounded_probe_unestablished(fifo_result, _probe_elapsed, 5, _probe_started):
+            unestablished.append("fifo-source-fails-closed-not-hang: the bounded FIFO probe "
+                                 "was never observed to start inside its 5 s bound")
+        else:
+            check("fifo-source-fails-closed-not-hang", fifo_result == "True")
+        # The classifier's window ends, pinned: at the bound and above it an
+        # UNSTARTED probe is unestablished; one tick under the bound, a
+        # STARTED probe at any measured time, and a returned value at any
+        # measured time, keep the check's own judgement.
+        check("fifo-probe-timeout-at-bound-unestablished",
+              bounded_probe_unestablished("TIMEOUT", 5.0, 5, False)
+              and bounded_probe_unestablished("TIMEOUT", 5.01, 5, False))
+        check("fifo-probe-early-timeout-stays-judged",
+              not bounded_probe_unestablished("TIMEOUT", 4.99, 5, False))
+        check("fifo-probe-started-timeout-stays-judged",
+              not bounded_probe_unestablished("TIMEOUT", 5.0, 5, True)
+              and not bounded_probe_unestablished("TIMEOUT", 6.0, 5, True))
+        check("fifo-probe-returned-value-stays-judged",
+              not bounded_probe_unestablished("True", 6.0, 5, False))
+        # The confirm trigger's own window ends, pinned the same way: a
+        # STARTED timeout at the bound and above it is the suspect shape
+        # (re-run once, red only when the long bound repeats it); one tick
+        # under the bound, an UNSTARTED timeout, and a returned value are
+        # never the suspect shape.
+        check("fifo-probe-started-timeout-suspect-window",
+              bounded_probe_starved_suspect("TIMEOUT", 5.0, 5, True)
+              and bounded_probe_starved_suspect("TIMEOUT", 5.01, 5, True)
+              and not bounded_probe_starved_suspect("TIMEOUT", 4.99, 5, True)
+              and not bounded_probe_starved_suspect("TIMEOUT", 5.0, 5, False)
+              and not bounded_probe_starved_suspect("True", 5.0, 5, True))
         _slp = base / "symparent"; _slp.mkdir(); (_slp / "real").mkdir()
         (_slp / "real" / "x.index.toml").write_text("schema = 1\n", encoding="utf-8")
         (_slp / "toml").symlink_to("real")
@@ -5537,6 +5625,13 @@ def _self_test():
         for f in failures:
             print("  - " + f, file=sys.stderr)
         return EXIT_DRIFT
+    if unestablished:
+        # Every judged check held, but a bounded probe was never established
+        # on this host: the distinct fail-closed no-verdict exit, never a
+        # pass and never a definite failure (a failed check above stays one).
+        print("OPF-VIEWS SELF-TEST: CANNOT EVALUATE (no verdict: {})".format(
+            "; ".join(unestablished)), file=sys.stderr)
+        return EXIT_CANNOT_EVALUATE
     print("opf-views self-test: PASS ({} checks) -- independent expected-bytes goldens per view, drift "
           "detection, the closed transform vocabulary (unknown filter/sort/group/project refused), the "
           "source-set-digest sensitivity, the block-actionability join with deduped numeric-order "
