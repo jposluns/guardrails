@@ -20706,6 +20706,266 @@ def _gensrc_python_sinks(code):
     return sinks, faults
 
 
+# The node types a written-data argument may hold for _gensrc_python_data_spans: string constants, names and
+# their concatenation or formatting, so nothing in it can bind a name, call a function or reach a path.
+_GENSRC_DATA_NODES = (ast.Constant, ast.Name, ast.Load, ast.BinOp, ast.Add, ast.Mod, ast.JoinedStr,
+                      ast.FormattedValue)
+# The constant open modes the one write of _gensrc_python_data_spans may carry.
+_GENSRC_DATA_MODES = frozenset(("w", "a", "x", "wt", "at", "xt"))
+# The interpreter options _gensrc_unmention accepts between python and the -c of a lone program.
+_GENSRC_DATA_OPTIONS = frozenset(("-I", "-B", "-E", "-s", "-S", "-u", "-q"))
+# The characters a word around a lone python -c program may hold for _gensrc_unmention: none of them can end
+# the command, start another step, redirect, expand, quote or begin a comment.
+_GENSRC_DATA_WORD = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_./=:,+@%-")
+
+
+def _gensrc_python_data_spans(code):
+    """(spans, target): the character span (start, end) of code that holds only the DATA a python -c program
+    writes, in a one-element list, with the path that write names, ("path", P) for a plain literal or a name
+    bound to one and ("argv", N) for sys.argv[N]; or ([], None). A span is found only for one straight-line
+    shape, in which the data is written once, by the last statement, and no statement of the program text
+    can read it back, run it or use it as a path: the last statement is open(P, M).write(D) with M a constant
+    text write mode, or pathlib.Path(P).write_text(D), every call taking only positional arguments; P is a
+    plain literal, a name bound to one, or sys.argv[N] with N a constant integer, where a plain literal is
+    one quoted string literal with no prefix, no backslash and no implicit concatenation, so the command text
+    spells the path (a constant spelled any other way yields no span); every earlier statement is import
+    sys, import pathlib, a name bound to a plain literal, or a name bound to open(X).read() with X a plain
+    literal or a name bound to one, each name bound once and none of open, sys, pathlib or Path rebound; and
+    D holds nothing but string constants, those bound names, + and % and f-strings. Any loop, comprehension,
+    function, lambda, other import, other call (a replace, truncate, unlink, system or environment write
+    among them) or other statement yields no span, as does a program that does not parse, holds a carriage
+    return, or holds text that does not encode. Where P lands is not judged here: _gensrc_unmention resolves
+    it against the session working directory. What the program loads is not read: under -c the working
+    directory comes first on the import path unless -I or a safe-path setting is in force, so import pathlib
+    can load a pathlib.py an earlier command planted there, which can read the data back and use it as a
+    path, or make a link after the guard resolved P. Neither is seen."""
+    if "\r" in code or len(code) > _GENSRC_MAX_PY:
+        return [], None
+    try:
+        tree = ast.parse(code, mode="exec")
+        lines = [line.encode("utf-8") for line in code.split("\n")]
+    except (SyntaxError, ValueError, RecursionError, MemoryError):
+        return [], None
+    starts = [0]
+    for line in lines:
+        starts.append(starts[-1] + len(line.decode("utf-8")) + 1)
+    if not tree.body:
+        return [], None
+    modules, bound = set(), set()
+    # Each name bound to a plain literal, with the path it spells.
+    constants = {}
+
+    def text(node):
+        return isinstance(node, ast.Constant) and isinstance(node.value, str)
+
+    def span(node):
+        try:
+            start = starts[node.lineno - 1] + len(lines[node.lineno - 1][:node.col_offset].decode("utf-8"))
+            end = starts[node.end_lineno - 1] + len(lines[node.end_lineno - 1][:node.end_col_offset].decode("utf-8"))
+        except (AttributeError, IndexError, TypeError, ValueError):
+            return None
+        return start, end
+
+    def bare(node):
+        # One plain quoted literal that spells its own value: no prefix, no backslash escape and no implicit
+        # concatenation, so the text of the command shows the path it names.
+        where = span(node) if text(node) else None
+        spelled = code[where[0]:where[1]] if where else ""
+        return (len(spelled) >= 2 and spelled[0] in "'\"" and spelled[-1] == spelled[0] and "\\" not in spelled
+                and spelled[0] not in node.value and spelled[1:-1] == node.value)
+
+    def literal(node):
+        return bare(node) or (isinstance(node, ast.Name) and node.id in constants)
+
+    def plain(node, count):
+        return isinstance(node, ast.Call) and len(node.args) == count and not node.keywords
+
+    def named(node, name):
+        return isinstance(node, ast.Name) and node.id == name
+
+    def path_word(node):
+        return literal(node) or (
+            isinstance(node, ast.Subscript) and isinstance(node.value, ast.Attribute)
+            and node.value.attr == "argv" and named(node.value.value, "sys") and "sys" in modules
+            and isinstance(node.slice, ast.Constant) and type(node.slice.value) is int)
+
+    for stmt in tree.body[:-1]:
+        if isinstance(stmt, ast.Import):
+            if any(alias.asname is not None or alias.name not in ("sys", "pathlib") for alias in stmt.names):
+                return [], None
+            modules.update(alias.name for alias in stmt.names)
+            continue
+        if not (isinstance(stmt, ast.Assign) and len(stmt.targets) == 1 and isinstance(stmt.targets[0], ast.Name)):
+            return [], None
+        name, value = stmt.targets[0].id, stmt.value
+        if name in ("open", "sys", "pathlib", "Path") or name in bound:
+            return [], None
+        if bare(value):
+            constants[name] = value.value
+        elif not (plain(value, 0) and isinstance(value.func, ast.Attribute) and value.func.attr == "read"
+                  and plain(value.func.value, 1) and named(value.func.value.func, "open")
+                  and literal(value.func.value.args[0])):
+            return [], None
+        bound.add(name)
+    last = tree.body[-1]
+    if not (isinstance(last, ast.Expr) and plain(last.value, 1) and isinstance(last.value.func, ast.Attribute)):
+        return [], None
+    call = last.value
+    owner = call.func.value
+    if call.func.attr == "write":
+        if not (plain(owner, 2) and named(owner.func, "open") and text(owner.args[1])
+                and owner.args[1].value in _GENSRC_DATA_MODES):
+            return [], None
+    elif call.func.attr == "write_text":
+        if not (plain(owner, 1) and isinstance(owner.func, ast.Attribute) and owner.func.attr == "Path"
+                and named(owner.func.value, "pathlib") and "pathlib" in modules):
+            return [], None
+    else:
+        return [], None
+    node = call.args[0]
+    parts = list(ast.walk(node))
+    path = owner.args[0]
+    if (not path_word(path) or not all(isinstance(part, _GENSRC_DATA_NODES) for part in parts)
+            or any(isinstance(part, ast.Name) and part.id not in bound for part in parts)
+            or any(isinstance(part, ast.Constant) and not isinstance(part.value, str) for part in parts)):
+        return [], None
+    if isinstance(path, ast.Name):
+        target = ("path", constants[path.id])
+    elif isinstance(path, ast.Subscript):
+        target = ("argv", path.slice.value)
+    else:
+        target = ("path", path.value)
+    where = span(node)
+    return ([where], target) if where else ([], None)
+
+
+def _gensrc_physical(joined):
+    """The physical path of the absolute path joined, walked one component at a time through every link that
+    exists now, as the kernel walks it for the writer: a .. pops the physical path walked so far, after the
+    link before it, and a missing component ends the links (the rest is read as written). None where the
+    walk cannot stand in for the writer's: the text, or any path the walk reaches (a component, a link's
+    target), is process-relative (_rwh_process_relative: /proc/self/..., /proc/thread-self/...,
+    /proc/<pid>/..., /dev/fd/... and the /dev/std* aliases name the opening process's own view, so reading
+    them here would give this hook's working directory and descriptors, not the writer's), a link cannot be
+    read, a component cannot be examined for a cause other than its absence, or the walk meets more than
+    40 links (a loop). os.path.realpath is not used: it reads /proc/self/cwd as this process's."""
+    if not os.path.isabs(joined) or _rwh_process_relative(joined):
+        return None
+    pending = [comp for comp in joined.split("/") if comp not in ("", ".")]
+    pending.reverse()
+    current, links, missing = "/", 0, False
+    while pending:
+        comp = pending.pop()
+        if comp in ("", "."):
+            continue
+        if comp == "..":
+            current = os.path.dirname(current)
+            continue
+        step = os.path.join(current, comp)
+        if _rwh_process_relative(step):
+            return None
+        if missing:
+            current = step
+            continue
+        try:
+            mode = os.lstat(step).st_mode
+        except (FileNotFoundError, NotADirectoryError):
+            missing, current = True, step
+            continue
+        except OSError:
+            return None
+        if not stat.S_ISLNK(mode):
+            current = step
+            continue
+        links += 1
+        if links > 40:
+            return None
+        try:
+            dest = os.readlink(step)
+        except OSError:
+            return None
+        if not dest or "\x00" in dest:
+            return None
+        if dest.startswith("/"):
+            current = "/"
+        pending.extend(reversed([part for part in dest.split("/") if part not in ("", ".")]))
+    return current
+
+
+def _gensrc_unmention(command, code, cwd, outside):
+    """command with the written-data spans of the python -c program code (_gensrc_python_data_spans) blanked,
+    for the mention filter alone (_gensrc_mentions), or command unchanged. A span is blanked only where the
+    program is spelled in command exactly once as one plain quoted word: in single quotes when it holds no
+    single quote, or in double quotes when it holds no double quote, $, backquote or backslash, so each
+    character of the program sits at a known place in the raw text, and only where that word is the whole
+    command's one step with no later one: the text before it is python, python3 or python3.N (bare or under
+    /usr/bin or /usr/local/bin), then only the options -I, -B, -E, -s, -S, -u or -q, then -c, and the text
+    after it is plain words, all separated by spaces, with no newline anywhere, so no later step (a pipe, a
+    list, a loop, a heredoc, xargs, a second program) can read the written file back. It is blanked only
+    where the path the program writes resolves: the plain literal, or the argument word sys.argv[N] names
+    (sys.argv[0] being -c), joined to cwd, the absolute session working directory, at most
+    _GENSRC_MAX_TARGET bytes, and walked through every link that exists now (_gensrc_physical), must be no
+    directory and a physical path that outside(real) proves lies outside every registered target. With no
+    cwd, an argument index past the words, or a path that does not resolve (its text or any component or
+    link target the walk reaches lies on /proc or /dev/fd, whose meaning is the writer's own and not this
+    hook's, named directly or through a link an earlier command made) or that resolves onto or into a
+    registered target (a relative path from a working directory inside a registered tree, a link an earlier
+    command made onto or into one), the command stays whole. A name the program spells anywhere else (a
+    path built from it, an argument, another command) stays in the text and still counts."""
+    spans, target = _gensrc_python_data_spans(code)
+    if not spans or "\n" in command or "\r" in command or not isinstance(cwd, str) or not os.path.isabs(cwd):
+        return command
+    hits = []
+    for quote, banned in (("'", "'"), ('"', '"$`\\')):
+        if any(ch in code for ch in banned):
+            continue
+        needle = quote + code + quote
+        at = command.find(needle)
+        while at >= 0 and len(hits) < 2:
+            hits.append(at + 1)
+            at = command.find(needle, at + 1)
+    if len(hits) != 1:
+        return command
+    words = [word for word in command[:hits[0] - 1].split(" ") if word]
+    after = command[hits[0] + len(code) + 1:]
+    python = words[0] if words else ""
+    for root in ("/usr/bin/", "/usr/local/bin/"):
+        if python.startswith(root):
+            python = python[len(root):]
+    if (len(words) < 2 or words[-1] != "-c" or not command[:hits[0] - 1].endswith(" ")
+            or (after and not after.startswith(" "))
+            or any(ch not in _GENSRC_DATA_WORD for ch in "".join(words) + after.replace(" ", ""))
+            or any(word not in _GENSRC_DATA_OPTIONS for word in words[1:-1])
+            or not (python in ("python", "python3") or (
+                python.startswith("python3.") and python[8:] and all(ch in "0123456789" for ch in python[8:])))):
+        return command
+    # The path the program writes, judged as a sink is: a relative one from a working directory inside a
+    # registered tree, or one through a link, never spells the registered name it reaches.
+    if target[0] == "argv":
+        argv = ["-c"] + [word for word in after.split(" ") if word]
+        if not -len(argv) <= target[1] < len(argv):
+            return command
+        path = argv[target[1]]
+    else:
+        path = target[1]
+    if not path or "\x00" in path:
+        return command
+    joined = os.path.join(cwd, path)
+    try:
+        if len(os.fsencode(joined)) > _GENSRC_MAX_TARGET:
+            return command
+        real = _gensrc_physical(joined)
+        if real is None or os.path.isdir(real) or not outside(real):
+            return command
+    except (OSError, ValueError):
+        return command
+    text = list(command)
+    for start, end in spans:
+        for k in range(hits[0] + start, hits[0] + end):
+            text[k] = " "
+    return "".join(text)
+
+
 def _gensrc_git_effects(argv, pi, aop, atl, base, effects):
     """The working-tree paths of git checkout and git restore (decision b), git at argv[pi]. A global -C DIR
     re-bases the paths; --git-dir, --work-tree, a leading GIT_DIR= or GIT_WORK_TREE= word and a global option
@@ -20963,9 +21223,12 @@ def _gensrc_program_effects(prog, argv, pi, aop, atl, base, effects):
         if oa[at]:
             unclear("a python -c program formed with an expansion or substitution")
             return
-        sinks, faults = _gensrc_python_sinks(args[at] if code is None else code)
+        program = args[at] if code is None else code
+        sinks, faults = _gensrc_python_sinks(program)
         for why in faults:
-            unclear(why)
+            # The program rides on its uncleared effect, so the mention filter can tell the data it writes
+            # from the rest of the command (_gensrc_unmention); no path is judged from it.
+            effects.append(_GensrcEffect("uncleared", why, program, None))
         for dst, src in sinks:
             _gensrc_dest(effects, "a python -c write", dst, [] if src is None else [src], False,
                          src is None, False, "file", lambda _word: (False, False), base)
@@ -21196,6 +21459,26 @@ def _gensrc_mentions(entries, command, root_c):
     return None
 
 
+def _gensrc_outside_registered(real, session_c, loaded):
+    """True only where the real path `real` is PROVEN to lie outside every registered target: of every
+    registry on its root chain (_gensrc_target_root, _gensrc_root_chain) and of every registry the decision
+    already consulted (loaded, root to (status, payload)). An unreadable registry, an entry that cannot be
+    resolved for containment and a chain past _GENSRC_MAX_ROOTS are no proof, so they give False."""
+    chain = []
+    inner = _gensrc_target_root(real)
+    if inner is not None:
+        chain, over = _gensrc_root_chain(inner, session_c, _GENSRC_MAX_ROOTS)
+        if over:
+            return False
+    for root_c in list(loaded) + [root for root in chain if root not in loaded]:
+        status, payload = loaded[root_c] if root_c in loaded else _load_gensrc_registry(root_c)
+        if status == "absent":
+            continue
+        if status != "ok" or _gensrc_match(payload, real, root_c) is not None:
+            return False
+    return True
+
+
 def _gensrc_bash(data):
     """The Bash channel verdict of gensrc_guard: ("allow",), ("note", message) or ("deny", reason, banner);
     gensrc_guard turns it into the decision. A payload with no object tool_input or no readable command
@@ -21219,9 +21502,11 @@ def _gensrc_bash(data):
     registered target inside that directory; a restore of a registered target notes. Uncleared effects (and
     an incomplete lex, and roots past the budget) DENY when the session repository registry is present but
     unreadable, DENY when the command text names a registered target of any consulted readable registry
-    (_gensrc_mentions, a deliberate disclosed over-denial), and NOTE otherwise (the command runs, with a
-    note that its writes were not cleared). The first deny wins, then the joined notes. A fault inside the
-    detector (OSError, ValueError, RecursionError, MemoryError) DENIES fail-closed."""
+    (_gensrc_mentions, a deliberate disclosed over-denial; the data a lone faulting python -c program writes
+    to a path that resolves outside every registered target is not read as a mention, _gensrc_unmention),
+    and NOTE otherwise (the command runs, with a note that its writes were not cleared). The first deny
+    wins, then the joined notes. A fault inside the detector (OSError, ValueError, RecursionError,
+    MemoryError) DENIES fail-closed."""
     tool_input = data.get("tool_input")
     command = tool_input.get("command") if isinstance(tool_input, dict) else None
     if not isinstance(command, str) or not command.strip():
@@ -21393,6 +21678,15 @@ def _gensrc_bash(data):
             if session_c is not None and session_c not in loaded:
                 loaded[session_c] = _load_gensrc_registry(session_c)
             session_registry = loaded.get(session_c)
+            # Where every uncleared write is a fault of one and the same python -c program, a name that
+            # stands only in the data that program writes to a path that resolves outside every registered
+            # target is no mention (_gensrc_unmention); any other uncleared write, an unread tail or a budget
+            # overflow keeps the whole text.
+            mention_text = command
+            programs = {eff.path for eff in effects if eff.kind == "uncleared"}
+            if not unread and not overflow and len(programs) == 1 and None not in programs:
+                mention_text = _gensrc_unmention(command, next(iter(programs)), cwd,
+                                                 lambda real: _gensrc_outside_registered(real, session_c, loaded))
             if session_registry is not None and session_registry[0] == "bad":
                 return ("deny",
                         "AIQT rule gensrc (generated-artefact-source-only): the guard could not clear every "
@@ -21406,7 +21700,7 @@ def _gensrc_bash(data):
             for root_c, (status, payload) in loaded.items():
                 if status != "ok":
                     continue
-                named = _gensrc_mentions(payload, command, root_c)
+                named = _gensrc_mentions(payload, mention_text, root_c)
                 if named is None:
                     continue
                 entry_target, sources, regenerate = named
