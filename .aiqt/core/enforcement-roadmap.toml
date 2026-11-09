@@ -294,8 +294,9 @@ mechanisms = []
 
 [[rule]]
 corpus-id = "pubref"
-status = "none"
+status = "pending"
 mechanisms = []
+description = "A deterministic gate that reads the project's declaration of published and internal paths and fails when a published artefact names or links an internal path that no reviewed allowlist entry carries."
 
 [[rule]]
 corpus-id = "rdbchr"

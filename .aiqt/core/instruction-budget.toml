@@ -94,9 +94,9 @@
 #                        files 117926 -> 118464; managed block 360 and file headers 16136 unchanged. This queued
 #                        seed fold measured 538 units against the 559-unit estimate. The ratchet rises by the
 #                        measured delta, 134991 + 538 = 135529, rather than drawing on the estimate.
-#                        Raised 135529 -> 136053 by exactly the measured delta when the new unconditional rule
+#                        Raised 135529 -> 136157 by exactly the measured delta when the new unconditional rule
 #                        security-secc-published-no-internal-refs (pubref) was added: measured PACK 135159 at
-#                        the base 189a280e -> 135683 (+524 units); rule files 118536 -> 118936 (+400), file
+#                        the base 189a280e -> 135787 (+628 units); rule files 118536 -> 119040 (+504), file
 #                        headers 16263 -> 16387 (+124, one more loaded file, 134 -> 135); managed block 360
 #                        unchanged. Recorded approval: the maintainer, 2026-11-08, a standing approval to raise
 #                        the ratchet by exactly the measured delta of a change.
@@ -105,7 +105,7 @@
 #                        128358 ratchet raise; it was not raised with it.
 #   claude-code-version  the Claude Code build whose loading behaviour the gate models.
 #   binary-sha256        the SHA-256 of that build's binary.
-ratchet = 136053
+ratchet = 136157
 ceiling = 90000
 claude-code-version = "2.1.287"
 binary-sha256 = "3920489a5109cff5786a1a392c25277408ff22bc796d5edb9c16a60e5a1718f0"

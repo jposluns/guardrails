@@ -4562,7 +4562,7 @@
     },
     {
       "rule_id": "pubref",
-      "rule_title": "Keep internal names out of published artefacts",
+      "rule_title": "Keep internal paths out of published artefacts",
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-published-no-internal-refs.md",
       "framework": "cwe",
       "relation": "mitigates weakness",
