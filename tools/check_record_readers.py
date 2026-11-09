@@ -622,11 +622,17 @@ def _from_import_void_names(alias):
 # store-or-delete is guarded by a self-test row that fails with that branch removed; no row can
 # guard store-or-delete, because a stored or deleted bare-name __import__ or __builtins__ is
 # itself a voiding occurrence, so removing that branch never changes the exit (the branch is kept
-# for completeness of _bound_anywhere and is covered by the occurrence check). The branch flips
-# the self-test runs remove the except, global-nonlocal, match-capture and type-parameter
-# branches, narrow the match-capture branch to drop its MatchStar and its MatchMapping-rest form,
-# and drop __builtins__ from the exception condition. A MatchAs or MatchStar name and a
-# MatchMapping rest are one branch: each is a match capture.
+# for completeness of _bound_anywhere and is covered by the occurrence check). Beyond the
+# whole-branch flips (which remove the except, global-nonlocal, match-capture and type-parameter
+# branches, or drop __builtins__ from the exception condition), every single AST node type a
+# branch tests has its own void row and a flip that narrows the branch to drop only that type, so
+# a branch that keeps one of its node types and drops another fails too; the only tested node
+# types with no such row are those in the self-test's closed table _NO_ROW_BINDING_NODE_TYPES
+# (the store-or-delete Name test with its Store and Del context markers, a from-import binding of
+# either name, and a nonlocal declaration), each with the reason dropping it alone can never
+# change the exit, and a self-test meta row reads these branches and _type_param_binds by AST and
+# fails when a tested node type has neither a per-type row nor a no-row entry. A MatchAs or
+# MatchStar name and a MatchMapping rest are one branch: each is a match capture.
 _BINDING_BRANCHES = {
     "store-or-delete": lambda node: (
         (node.id,) if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del))
@@ -1480,6 +1486,76 @@ def _gate_with_binding_branch(files, branch, binds):
         _BINDING_BRANCHES[branch] = saved
 
 
+def _branch_without(branch, node_type):
+    """The binds callable of one binding branch narrowed to drop one AST node type while keeping
+    every other type the branch counts: the narrowing each per-node-type flip installs through
+    _gate_with_binding_branch, proving its void row depends on exactly that type, which a
+    whole-branch removal cannot show."""
+    full = _BINDING_BRANCHES[branch]
+    dropped = getattr(ast, node_type)
+
+    def binds(node):
+        return () if isinstance(node, dropped) else full(node)
+    return binds
+
+
+# The closed table of AST node types the binding branches test that have no per-node-type void
+# row, each with the reason dropping that type alone can never change the gate's exit. Every
+# other tested node type has a void row and a narrowing flip in the per-node-type block of the
+# self-test, and the meta row there compares this table and that block against the branches read
+# by AST, so neither this table nor the branches can grow silently.
+_NO_ROW_BINDING_NODE_TYPES = {
+    "Name": "a stored or deleted bare-name __import__ or __builtins__ is itself a voiding "
+            "occurrence, so a store-or-delete binding never changes the exit on its own; the "
+            "voiding-occurrence rows guard it",
+    "Store": "the context marker of the store-or-delete branch's Name test, not a binding "
+             "construct of its own; covered with Name",
+    "Del": "the context marker of the store-or-delete branch's Name test, not a binding "
+           "construct of its own; covered with Name",
+    "ImportFrom": "a from-import binding of __import__ or __builtins__ voids on the from-import "
+                  "itself (_from_import_void_names), so dropping ImportFrom from the "
+                  "import-alias branch never changes the exit; the from-import rows guard that "
+                  "check",
+    "Nonlocal": "a nonlocal declaration of __import__ or __builtins__ parses only under an "
+                "enclosing function-scope binding of the same name, and that binding is counted "
+                "by another branch, so dropping Nonlocal alone never changes the exit",
+}
+
+
+def _binding_branch_node_types():
+    """Every ast node-type name _BINDING_BRANCHES and _type_param_binds test, read from this
+    file's own source: each ast.<Type> attribute referenced by the branch lambdas or by
+    _type_param_binds, with every module-level name they reference (such as _TYPE_PARAM_NODES)
+    resolved and walked too, so a node type added to any branch later appears here and must gain
+    a per-node-type row or a _NO_ROW_BINDING_NODE_TYPES entry; CannotEvaluate when either
+    definition is missing."""
+    tree, _ = _parse_python_text(os.path.abspath(__file__), "check_record_readers.py")
+    definitions = {}
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            definitions[node.name] = node
+        elif (isinstance(node, ast.Assign) and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name)):
+            definitions[node.targets[0].id] = node.value
+    roots = ("_BINDING_BRANCHES", "_type_param_binds")
+    missing = [name for name in roots if name not in definitions]
+    if missing:
+        raise CannotEvaluate("module-level definition(s) {} not found".format(", ".join(missing)))
+    pending = [definitions[name] for name in roots]
+    expanded = set(roots)
+    types = set()
+    while pending:
+        for inner in ast.walk(pending.pop()):
+            if (isinstance(inner, ast.Attribute) and isinstance(inner.value, ast.Name)
+                    and inner.value.id == "ast"):
+                types.add(inner.attr)
+            elif (isinstance(inner, ast.Name) and isinstance(inner.ctx, ast.Load)
+                    and inner.id in definitions and inner.id not in expanded):
+                expanded.add(inner.id)
+                pending.append(definitions[inner.id])
+    return frozenset(types)
+
+
 def _gate_without_builtins_blocker(files):
     """The gate's exit on files with __builtins__ dropped from the names whose binding stops the
     __import__ voiding exception: the flip proving each __builtins__-binding row depends on that
@@ -2188,8 +2264,9 @@ def _self_test():
     # bare-name __import__ or __builtins__ is itself a voiding occurrence, so removing that branch
     # never changes the exit; the branch is kept for completeness of _bound_anywhere and is
     # covered by the occurrence check. The branch flips the self-test runs are exactly the four
-    # removals below, the two match-capture narrowings after them, and the __builtins__
-    # exception-condition drop after those.
+    # removals below, the two match-capture narrowings after them, the per-node-type narrowings
+    # (one per AST node type the branches test, _NO_ROW_BINDING_NODE_TYPES excepted) in the block
+    # after those, and the __builtins__ exception-condition drop.
     for void_id, flip_id, branch, hook, line in (
             ("void/dunder-import-except-bound", "flip/dunder-import-except-bound", "except",
              'try:\n    pass\nexcept ValueError as __import__:\n    pass\n'
@@ -2243,6 +2320,85 @@ def _self_test():
               and "at line {} column".format(line) in out, (rc, out))
         rc, out = _gate_with_binding_branch(files, "match-capture", binds)
         check(flip_id, rc == 0, (rc, out))
+
+    # Every AST node type the binding branches test, one row per type: the module binds
+    # __import__ by exactly that node type beside an otherwise excepted __import__("hashlib")
+    # call, so the call is not excepted and voids; the flip narrows only that type's branch to
+    # drop that type, which a whole-branch removal cannot show, so a branch that keeps its other
+    # types and drops this one fails this row. The types in _NO_ROW_BINDING_NODE_TYPES have no
+    # row because dropping any of them alone can never change the exit; the meta row after the
+    # loop reads _BINDING_BRANCHES and _type_param_binds by AST and fails when a tested node type
+    # has neither a row here nor an entry there, so a node type added later without a row fails
+    # the suite.
+    covered_node_types = set()
+    for node_type, branch, void_id, flip_id, hook, line in (
+            ("arg", "parameter", "void/binding-node-arg", "flip/binding-node-arg",
+             'def f(__import__):\n    return None\nM = __import__("hashlib")\n'
+             'for k in ("ledger_path",):\n    reg.get(k)\n', 5),
+            ("FunctionDef", "def-or-class", "void/binding-node-functiondef",
+             "flip/binding-node-functiondef",
+             'def __import__(name):\n    return None\nM = __import__("hashlib")\n'
+             'for k in ("ledger_path",):\n    reg.get(k)\n', 5),
+            ("AsyncFunctionDef", "def-or-class", "void/binding-node-asyncfunctiondef",
+             "flip/binding-node-asyncfunctiondef",
+             'async def __import__(name):\n    return None\nM = __import__("hashlib")\n'
+             'for k in ("ledger_path",):\n    reg.get(k)\n', 5),
+            ("ClassDef", "def-or-class", "void/binding-node-classdef",
+             "flip/binding-node-classdef",
+             'class __import__:\n    pass\nM = __import__("hashlib")\n'
+             'for k in ("ledger_path",):\n    reg.get(k)\n', 5),
+            ("Import", "import-alias", "void/binding-node-import", "flip/binding-node-import",
+             'import os as __import__\nM = __import__("hashlib")\n'
+             'for k in ("ledger_path",):\n    reg.get(k)\n', 4),
+            ("ExceptHandler", "except", "void/binding-node-excepthandler",
+             "flip/binding-node-excepthandler",
+             'try:\n    pass\nexcept ValueError as __import__:\n    pass\n'
+             'M = __import__("hashlib")\nfor k in ("ledger_path",):\n    reg.get(k)\n', 7),
+            ("Global", "global-nonlocal", "void/binding-node-global", "flip/binding-node-global",
+             'def f():\n    global __import__\nM = __import__("hashlib")\n'
+             'for k in ("ledger_path",):\n    reg.get(k)\n', 5),
+            ("MatchAs", "match-capture", "void/binding-node-matchas",
+             "flip/binding-node-matchas",
+             'def f(v):\n    match v:\n        case str() as __import__:\n            pass\n'
+             'M = __import__("hashlib")\nfor k in ("ledger_path",):\n    reg.get(k)\n', 7),
+            ("MatchStar", "match-capture", "void/binding-node-matchstar",
+             "flip/binding-node-matchstar",
+             'def f(v):\n    match v:\n        case [*__import__]:\n            pass\n'
+             'M = __import__("hashlib")\nfor k in ("ledger_path",):\n    reg.get(k)\n', 7),
+            ("MatchMapping", "match-capture", "void/binding-node-matchmapping",
+             "flip/binding-node-matchmapping",
+             'def f(v):\n    match v:\n        case {**__import__}:\n            pass\n'
+             'M = __import__("hashlib")\nfor k in ("ledger_path",):\n    reg.get(k)\n', 7),
+            ("TypeVar", "type-parameter", "void/binding-node-typevar",
+             "flip/binding-node-typevar",
+             'def f[__import__]():\n    return None\nM = __import__("hashlib")\n'
+             'for k in ("ledger_path",):\n    reg.get(k)\n', 5),
+            ("ParamSpec", "type-parameter", "void/binding-node-paramspec",
+             "flip/binding-node-paramspec",
+             'def f[**__import__]():\n    return None\nM = __import__("hashlib")\n'
+             'for k in ("ledger_path",):\n    reg.get(k)\n', 5),
+            ("TypeVarTuple", "type-parameter", "void/binding-node-typevartuple",
+             "flip/binding-node-typevartuple",
+             'def f[*__import__]():\n    return None\nM = __import__("hashlib")\n'
+             'for k in ("ledger_path",):\n    reg.get(k)\n', 5)):
+        covered_node_types.add(node_type)
+        files = dict(_FIXTURE_FILES, **{HOOK_LIBRARY: hook})
+        rc, out = _gate(files)
+        check(void_id, rc == 2 and "outside the accepted access forms" in out
+              and "at line {} column".format(line) in out, (rc, out))
+        rc, out = _gate_with_binding_branch(files, branch, _branch_without(branch, node_type))
+        check(flip_id, rc == 0, (rc, out))
+
+    # The coverage closure over the binding branches: every node type they test, read from the
+    # source by AST, has either a per-node-type void row and narrowing flip above or an entry in
+    # the closed no-row table, the two sets are disjoint, and neither lists a type the branches
+    # no longer test.
+    tested, crash = _guarded(_binding_branch_node_types)
+    no_row = frozenset(_NO_ROW_BINDING_NODE_TYPES)
+    check("meta/binding-node-types-closed",
+          crash is None and tested == covered_node_types | no_row
+          and not (covered_node_types & no_row),
+          (crash, sorted(tested or ()), sorted(covered_node_types), sorted(no_row)))
 
     # A binding of __builtins__ with no bare-name or attribute occurrence the scan reads: the
     # bound object is the mapping a bare-name __import__ resolves through, so the __import__
@@ -2591,7 +2747,11 @@ def _self_test():
           "so that branch never changes the exit; it is kept for completeness of _bound_anywhere and "
           "is covered by the occurrence check), the flips the self-test runs removing the except, "
           "global-nonlocal, match-capture and type-parameter branches, narrowing the match-capture "
-          "branch to drop its star and its mapping-rest form, and dropping __builtins__ from the "
+          "branch to drop its star and its mapping-rest form, narrowing each branch to drop each "
+          "single AST node type it tests (one void row and one narrowing flip per type, the no-row "
+          "types listed in a closed table with reasons, and a meta row that reads the branches and "
+          "_type_param_binds by AST and fails when a tested type has neither), and dropping "
+          "__builtins__ from the "
           "exception condition (each excepted "
           "shape passes and is refused by the flip that removes the exceptions, and its near "
           "neighbours, a rebound alias of re, a bare compile from re, a non-stdlib literal, a "
