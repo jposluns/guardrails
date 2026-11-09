@@ -1275,11 +1275,20 @@
     {
       "corpus-id": "reqstp",
       "family": "aiqt",
-      "gates": [],
+      "gates": [
+        {
+          "class": "c",
+          "default": "block",
+          "id": "brief-carry",
+          "platform": "ci",
+          "residue": "It reads one carry ledger and one brief and compares the brief's CARRIED CHECKS block with the ledger's active rows as an exact set of gate and text pairs, with no whitespace or case normalisation: an active row the block drops or rewords, a retired row the block still carries, a pair no active row holds, a CARRY line outside the block, a repeated or malformed CARRY line and a second heading exit 1; a missing, non-regular, non-UTF-8 or CR-holding ledger or brief, a relative ledger path and a ledger that is malformed in any way (a broken digest chain, a seq that is not the line number, a duplicated key, a line that is not a JSON object, nesting too deep, a blank line, a missing final LF, a missing or unknown key, a bad field, an illegal status change, an id whose gate or text changes, two active ids with one pair) exit 2. It covers a recognizable SUBSET (class c, partial): it proves only that the ledger it is given is internally consistent, so deleting the last rows of a ledger or replacing the whole ledger still passes until an appender and an anchor file against tail truncation land; it does not check which ledger belongs to which brief, or that a failure ever became a ledger row; an indented CARRY line is not read; a gate the brief lists by hand outside the block is not judged; and it judges the block's words, not whether the worker obeys them. The repository holds no ledger and no brief, so CI runs only the self-test; the lint blocks only where the sender runs it on the final bytes it sends and withholds a brief on exit 1 or 2.",
+          "script": "tools/check_brief_carry.py"
+        }
+      ],
       "hooks": [],
       "previews": [],
       "source": ".aiqt/core/rules/integ-required-step-remains-required.md",
-      "status": "prose-only"
+      "status": "gate-linked"
     },
     {
       "corpus-id": "rerunf",

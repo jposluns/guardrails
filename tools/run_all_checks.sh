@@ -237,6 +237,8 @@ run_gate "sized-instructions" python3 -I -B tools/check_sized_instructions.py
 run_gate "instruction-budget-selftest" python3 -I -B tools/check_instruction_budget.py --self-test
 run_gate "instruction-budget" python3 -I -B tools/check_instruction_budget.py
 run_gate "brief-capability-selftest" python3 -I -B tools/check_brief_capability.py --self-test  # no brief in the repository to lint
+run_gate "brief-carry-selftest" python3 -I -B tools/check_brief_carry.py --self-test  # no ledger in the repository to check
+run_gate "brief-carry-behaviour-selftest" python3 -I -B tools/check_selftest_execution.py --suite brief-carry-selftest
 run_gate "notice-drift"    python3 -I -B tools/gen_notice.py --check
 run_gate "claude-selftest" python3 -I -B tools/gen_claude.py --self-test
 run_gate "claude-drift"    python3 -I -B tools/gen_claude.py --check
