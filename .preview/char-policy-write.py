@@ -1862,32 +1862,49 @@ def _self_test():
                         pass
 
             def send(p, data):
-                """Write data to the child's stdin and flush it. On a loaded host this process can be descheduled
+                """Write data to the child's stdin and flush it; True when the whole write and flush reached the
+                child, False when they raised BrokenPipeError. On a loaded host this process can be descheduled
                 between the launch and the write for longer than the child's read deadline: the child then reads
-                nothing, reports that its payload did not end within the deadline (the note each launch below
-                asserts) and exits, and the write or flush raises BrokenPipeError with data still buffered. That
-                is the expected outcome, not a fault of the test: stdin is closed then, dropping the buffer, so no
-                later flush or close raises again; the assertions on the child's output decide the test."""
+                nothing, reports that its payload did not end within the deadline and exits, and the write or
+                flush raises BrokenPipeError with data still buffered. stdin is closed then, dropping the buffer,
+                so no later flush or close raises again. Such a child never saw the payload, and its note reads
+                the same whether or not the hook waits for the end of input, so its output proves nothing: the
+                launch is run again (see attempts) rather than judged."""
                 try:
                     p.stdin.write(data)
                     p.stdin.flush()
                 except BrokenPipeError:
                     close_once(p.stdin)
+                    return False
+                return True
+
+            # Each launch below is judged only once its payload reached the child. A launch whose child exited
+            # before the write is reaped and started again, up to this many times; when no attempt delivers the
+            # payload the test fails, since passing then would test nothing
+            attempts = 3
+
+            def undelivered(what):
+                return "{}: the input never reached the child in {} attempts".format(what, attempts)
 
             # through the hook as launched: a complete payload on a pipe that stays open, and (with the deadline
             # lowered to 0.5 seconds) an end of input sent 1.5 seconds after the hook says it is about to read
-            p = subprocess.Popen(launch, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                 env=env)
-            try:
-                send(p, good)
-                rc = p.wait(timeout=60)
-                out, err = p.stdout.read(), p.stderr.read()
-            finally:
-                if p.poll() is None:
-                    p.kill()
-                    p.wait()
-                for stream in (p.stdin, p.stdout, p.stderr):
-                    close_once(stream)
+            for _ in range(attempts):
+                p = subprocess.Popen(launch, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                     env=env)
+                try:
+                    delivered = send(p, good)
+                    rc = p.wait(timeout=60)
+                    out, err = p.stdout.read(), p.stderr.read()
+                finally:
+                    if p.poll() is None:
+                        p.kill()
+                        p.wait()
+                    for stream in (p.stdin, p.stdout, p.stderr):
+                        close_once(stream)
+                if delivered:
+                    break
+            else:
+                self.fail(undelivered("the hook as launched"))
             self.assertEqual((rc, err), (0, b""))
             self.is_unchecked(json.loads(out), "did not end within the read deadline")
             late = ("import importlib.util, sys\n"
@@ -1898,21 +1915,26 @@ def _self_test():
                     "sys.stderr.write('ready\\n')\n"
                     "sys.stderr.flush()\n"
                     "sys.exit(module.main(['char-policy-write.py']))\n")
-            p = subprocess.Popen([sys.executable, "-I", "-S", "-B", "-c", late, here], stdin=subprocess.PIPE,
-                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
-            try:
-                send(p, good)
-                ready = p.stderr.readline()
-                time.sleep(1.5)
-                close_once(p.stdin)
-                rc = p.wait(timeout=60)
-                out, err = p.stdout.read(), p.stderr.read()
-            finally:
-                if p.poll() is None:
-                    p.kill()
-                    p.wait()
-                for stream in (p.stdin, p.stdout, p.stderr):
-                    close_once(stream)
+            for _ in range(attempts):
+                p = subprocess.Popen([sys.executable, "-I", "-S", "-B", "-c", late, here], stdin=subprocess.PIPE,
+                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
+                try:
+                    delivered = send(p, good)
+                    ready = p.stderr.readline()
+                    time.sleep(1.5)
+                    close_once(p.stdin)
+                    rc = p.wait(timeout=60)
+                    out, err = p.stdout.read(), p.stderr.read()
+                finally:
+                    if p.poll() is None:
+                        p.kill()
+                        p.wait()
+                    for stream in (p.stdin, p.stdout, p.stderr):
+                        close_once(stream)
+                if delivered:
+                    break
+            else:
+                self.fail(undelivered("the hook with a 0.5 second read deadline"))
             self.assertEqual((ready, rc, err), (b"ready\n", 0, b""))
             self.is_unchecked(json.loads(out), "ending within 0.5 seconds (ValueError: the hook payload did not "
                                                "end within the read deadline)")
