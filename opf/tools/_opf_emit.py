@@ -651,6 +651,19 @@ class ChildStatusUnavailable(RuntimeError):
     """Cannot-evaluate: no observed wait status; never a successful fixture."""
 
 
+class ChildStatusDeadline(ChildStatusUnavailable, TimeoutError):
+    """Cannot-evaluate: a bounded deadline (the descendant-cleanup drain
+    deadline or the fixture startup deadline) expired before a status could
+    be observed. A starved host can reach any such deadline on correct code,
+    so this is DISTINCT from a definite supervision failure: callers that
+    separate no-verdict outcomes map this subclass alone to their
+    cannot-evaluate path, never to a pass and never to a definite failure.
+    Lost ownership and an unexpected wait PID stay plain
+    ChildStatusUnavailable (definite failures). Also a TimeoutError, so
+    deadline-typed handling (run_bounded's startup path and
+    _run_fixture_process's TimeoutExpired mapping) keeps its meaning."""
+
+
 class FixtureIncomplete(RuntimeError):
     """The requested fixture did not deliver its bound completion record."""
 
@@ -1520,6 +1533,13 @@ def _fixture_children():
 # polling bound, not a guarantee that blocking kernel operations will return.
 _FIXTURE_CLEANUP_GRACE = 5.0
 
+# The status-decoding self-test fixtures' subjects terminate on their own, so
+# their status is awaited as an EVENT. This deadline only backstops a fixture
+# that never delivers one, sized to the outer per-fixture process bound the
+# launching watchdog runner applies (180 s), never a flat local scheduling
+# allowance a loaded host can overrun.
+_STATUS_FIXTURE_BOUND = 180.0
+
 
 def _fixture_cleanup_deadline(execution_deadline=None):
     import time
@@ -1554,7 +1574,7 @@ def _fixture_drain(subject, subject_fd=None, *, deadline=None):
         except ChildProcessError:
             return status
         if time.monotonic() >= deadline:
-            raise ChildStatusUnavailable("descendant cleanup deadline: ECHILD not observed")
+            raise ChildStatusDeadline("descendant cleanup deadline: ECHILD not observed")
         pids = _fixture_children()
         for pid in pids:
             fd = subject_fd if pid == subject else _fixture_pidfd(pid)
@@ -1643,6 +1663,40 @@ def _fixture_abort_launch(fixture):
                 resource.close()
             except OSError:
                 pass
+
+
+def _guardian_failure_error(termination, receipt):
+    """Choose the caller-side failure type for a guardian that exited nonzero,
+    from the guardian's recorded receipt alone. A failure whose recorded error
+    (and recorded cleanup outcome, when one is a failure) is deadline expiry
+    alone is the distinct no-verdict ChildStatusDeadline, because a starved
+    host can reach any deadline on correct code; a missing, unparsable or
+    mixed receipt stays the definite ChildStatusUnavailable (fail closed)."""
+    import json
+    message = "fixture guardian failed: {}; receipt={}".format(
+        termination, receipt or "<missing>")
+    try:
+        record = json.loads(receipt)
+    except (ValueError, RecursionError, MemoryError, TypeError, UnicodeError):
+        return ChildStatusUnavailable(message)
+    if not isinstance(record, dict):
+        return ChildStatusUnavailable(message)
+    names = set()
+    # Subscript reads, never method calls: the close-lifecycle closure scan
+    # clears only named methods on these re-entered container members.
+    error = record.get("error")
+    if isinstance(error, dict):
+        names.add(error["type"] if "type" in error else None)
+    else:
+        names.add(error)
+    cleanup = record.get("cleanup")
+    if isinstance(cleanup, dict):
+        names.add(cleanup["type"] if "type" in cleanup else None)
+    elif cleanup not in ("ECHILD", "no subject"):
+        names.add(cleanup)
+    if names and names <= {"ChildStatusDeadline"}:
+        return ChildStatusDeadline(message)
+    return ChildStatusUnavailable(message)
 
 
 class _FixtureProcess:
@@ -1972,7 +2026,7 @@ class _FixtureProcess:
         self._go.set()
         if not self._launched.wait(max(self.deadline - time.monotonic(),
                                        _FIXTURE_CLEANUP_GRACE)):
-            raise TimeoutError("fixture launch deadline")
+            raise ChildStatusDeadline("fixture launch deadline")
         if self._launch_error is not None:
             raise self._launch_error
         pid = self.pid
@@ -1995,7 +2049,7 @@ class _FixtureProcess:
                 os.write(self.control.fileno(), b"G")
                 return pid
         self.timed_out = True
-        raise TimeoutError("fixture startup deadline")
+        raise ChildStatusDeadline("fixture startup deadline")
 
     def _guardian(self):
         """Guardian process body (the forked child's only thread); never returns."""
@@ -2076,6 +2130,21 @@ class _FixtureProcess:
                     break
                 try:
                     if not os.read(self.peer.fileno(), 1):
+                        # Control-channel EOF is the caller collecting the
+                        # tree, and the caller's backstop closes this channel
+                        # at its own copy of the SAME armed deadline, so the
+                        # clock is re-sampled HERE, after the EOF is read: a
+                        # guardian preempted between the loop's pre-expiry
+                        # sample above and this read would otherwise record a
+                        # collection that happened at the deadline as
+                        # timed_out=False. Both clocks are the one shared
+                        # monotonic clock, so with this re-sample expiry is
+                        # judged on every exit from this loop and starvation
+                        # can only delay a sample, never un-expire it; an EOF
+                        # read while the clock still sits before the deadline
+                        # remains an early cancellation, never a timeout.
+                        if time.monotonic() >= self.deadline:
+                            timed_out = True
                         break
                     raise ChildStatusUnavailable("unexpected guardian control byte")
                 except BlockingIOError:
@@ -2202,8 +2271,7 @@ class _FixtureProcess:
         payload = self.report.read(8193)
         if not os.WIFEXITED(raw) or os.WEXITSTATUS(raw) != 0:
             receipt = payload[:8192].decode("ascii", errors="backslashreplace")
-            raise self._record_failure(ChildStatusUnavailable(
-                "fixture guardian failed: {}; receipt={}".format(termination, receipt or "<missing>")))
+            raise self._record_failure(_guardian_failure_error(termination, receipt))
         try:
             if len(payload) > 8192:
                 raise ValueError("oversized receipt")
@@ -2927,15 +2995,26 @@ class _FixtureProcess:
                             # The un-escalated failure paths run with a DEAD
                             # guardian, so the receipt kill was SUBJECT-ONLY
                             # (fix 2y, D2): disclose the residual, never a
-                            # killed tree.
-                            raise ChildStatusUnavailable(
+                            # killed tree. The recorded failure's own kind is
+                            # preserved by explicit direct-name construction
+                            # (the close-lifecycle closure scan resolves only
+                            # direct-name calls, never a computed callable):
+                            # deadline expiry alone stays the distinct
+                            # no-verdict subclass through this annotation, a
+                            # definite failure stays definite.
+                            disclosed = (
                                 str(failure) + "; subject exit proven on its "
                                 "pidfd (subject-only kill through the held "
                                 "receipt pidfd: the guardian is dead, no "
                                 "ownership licenses a member census); "
                                 "descendants, if any, unaddressed "
                                 "(orphan-escape residual, "
-                                "pdeathsig-backed)") from failure
+                                "pdeathsig-backed)")
+                            if isinstance(failure, ChildStatusDeadline):
+                                raise ChildStatusDeadline(
+                                    disclosed) from failure
+                            raise ChildStatusUnavailable(
+                                disclosed) from failure
                         if self._subject_kill is not None:
                             # A PRIOR interrupted close()'s ESCALATION already
                             # ran the guardian-anchored census kill
@@ -3095,8 +3174,14 @@ def run_status_owned(argv, *, fixture_id, expected_returncode=0, process_fixture
     result = _run_fixture_process(command, timeout=timeout, cwd=cwd, env=env)
     trailer = ("\nOPF-FIXTURE " + json.dumps([nonce, fixture_id]) + "\n").encode()
     if not result.stdout.endswith(trailer):
-        raise FixtureIncomplete("missing/mismatched completion for " + fixture_id
-                                + ": " + result.stderr.decode("utf-8", "replace"))
+        # Keep BOTH of the failing child's streams, bounded to their final
+        # bytes: the completion assertion's own traceback reaches stderr, but
+        # the fixture body's diagnostic for WHY it exited nonzero is printed
+        # to stdout, and a failure text without it cannot be acted on.
+        raise FixtureIncomplete(
+            "missing/mismatched completion for " + fixture_id
+            + "; stdout tail: " + result.stdout[-8192:].decode("utf-8", "replace")
+            + "; stderr tail: " + result.stderr[-8192:].decode("utf-8", "replace"))
     if result.returncode != 0:
         raise subprocess.CalledProcessError(result.returncode, command, result.stdout, result.stderr)
     result.stdout = result.stdout[:-len(trailer)]
@@ -3123,6 +3208,49 @@ def _fixture_child_reaped(pid):
 def _bounded_setup_error(exc):
     """Retain the error type and bounded guardian receipt on the sentinel channel."""
     return "SETUP-ERROR:" + type(exc).__name__ + ":" + str(exc)[:8192]
+
+
+def bounded_probe_unestablished(result, elapsed, timeout_s, started):
+    """True when a run_bounded PROBE established nothing on this host: the
+    TIMEOUT sentinel, once the caller's measured monotonic `elapsed` reached
+    `timeout_s`, WITHOUT the probe's start receipt (`started`: whether the
+    one byte the probe writes on a caller-declared keep_fds pipe as its
+    first statement was observed). Starvation is told from a real hang by
+    OBSERVATION, never by the clock alone. With no receipt the guardian
+    never started the probe inside the bound, which only host starvation
+    produces on a correct caller (guardian startup shares the requested
+    deadline; run_bounded computes that deadline AFTER the caller's
+    measurement begins): nothing was established -- no verdict, never a pass
+    and never a definite failure. With the receipt present the probe ran and
+    then BLOCKED, the definite regression a bounded probe exists to catch,
+    so that TIMEOUT stays with the caller's check (a definite failure there,
+    never no verdict). A TIMEOUT measured BEFORE the bound could have
+    elapsed is an early trip of the bound (a run_bounded regression), and
+    every other result is the probe's own outcome; both stay with the
+    caller's check, which judges them as before. The ends of the elapsed
+    window: at exactly `timeout_s` the bound has elapsed (unestablished when
+    unstarted, the same inclusive end _watchdog_window_verdict uses); one
+    tick under it has not (the caller's check keeps the definite failure)."""
+    return result == "TIMEOUT" and elapsed >= timeout_s and not started
+
+
+def bounded_probe_starved_suspect(result, elapsed, timeout_s, started):
+    """True when a run_bounded PROBE's TIMEOUT carries the probe's start
+    receipt and the caller's measured `elapsed` reached `timeout_s`: the probe
+    was observed to start and the bound then elapsed. That observation alone
+    cannot separate a probe that BLOCKED (the definite regression) from a
+    correct probe the host starved AFTER its first statement, because the
+    start receipt only bounds where the stall began, never why. Such a run is
+    therefore never judged on its own: the caller re-runs the same probe once
+    under a bound several times longer and judges a definite failure only
+    when this same shape repeats under that longer bound (a probe that
+    blocks forever repeats it under any bound; a starved correct probe,
+    given several times its measured running time, returns its value). The
+    ends of the elapsed window match bounded_probe_unestablished: at exactly
+    `timeout_s` the bound has elapsed; one tick under it is an early trip of
+    the bound (a run_bounded regression, the caller's own definite failure,
+    never retried here)."""
+    return result == "TIMEOUT" and elapsed >= timeout_s and started
 
 
 def run_bounded(thunk, timeout_s=30, mem_bytes=1024 * 1024 * 1024, keep_fds=()):
@@ -4100,6 +4228,42 @@ def _self_test_body():
         finally:
             child.close()
         return child.status
+
+    # Deadline-expiry classification: deadline expiry alone in the guardian's
+    # recorded receipt is the distinct no-verdict ChildStatusDeadline; a mixed,
+    # missing or unparsable receipt, lost ownership and an unexpected wait PID
+    # stay the definite ChildStatusUnavailable (fail closed, never a pass).
+    import json as _json6
+    for _receipt6, _want6 in (
+            (_json6.dumps({"stage": "supervision",
+                           "error": {"type": "ChildStatusDeadline", "errno": None,
+                                     "message": "descendant cleanup deadline: ECHILD not observed"},
+                           "cleanup": "ECHILD"}), ChildStatusDeadline),
+            (_json6.dumps({"stage": "supervision",
+                           "error": {"type": "ChildStatusDeadline", "errno": None, "message": "m"},
+                           "cleanup": {"type": "ChildStatusDeadline", "errno": None,
+                                       "message": "m"}}), ChildStatusDeadline),
+            (_json6.dumps({"stage": "supervision",
+                           "error": {"type": "ChildStatusUnavailable", "errno": None,
+                                     "message": "lost descendant ownership"},
+                           "cleanup": "ECHILD"}), ChildStatusUnavailable),
+            (_json6.dumps({"stage": "supervision",
+                           "error": {"type": "ChildStatusDeadline", "errno": None, "message": "m"},
+                           "cleanup": {"type": "OSError", "errno": 5,
+                                       "message": "m"}}), ChildStatusUnavailable),
+            ("", ChildStatusUnavailable),
+            ("not json", ChildStatusUnavailable)):
+        _got6 = _guardian_failure_error("raw wait status=32000, exitcode=125", _receipt6)
+        if type(_got6) is not _want6:
+            failures.append("guardian-failure-classification: receipt {!r} mapped to {} "
+                            "(want {}); deadline expiry alone must be the distinct "
+                            "no-verdict type and anything else the definite failure"
+                            .format(_receipt6[:120], type(_got6).__name__, _want6.__name__))
+    if not issubclass(ChildStatusDeadline, ChildStatusUnavailable) or not issubclass(
+            ChildStatusDeadline, TimeoutError):
+        failures.append("guardian-failure-classification: ChildStatusDeadline must stay a "
+                        "ChildStatusUnavailable (callers that do not separate no-verdict "
+                        "keep failing closed) and a TimeoutError (startup-deadline typing)")
     # (4) an UNBOUNDED or INVALID control must yield a distinct SETUP-ERROR sentinel WITHOUT running the
     # thunk: timeout_s <= 0 disarms the timer (setitimer(0,0)) and mem_bytes == RLIM_INFINITY / <= 0
     # installs no address-space cap, yet pre-fix the thunk still ran and its result ("RAN") was returned as
@@ -4140,7 +4304,8 @@ def _self_test_body():
                 _sig6.raise_signal(_sig6.SIGALRM)
                 _sig6.pause()
 
-            _case5 = _FixtureProcess(_time6.monotonic() + 5, subject=_alarm_subject)
+            _case5 = _FixtureProcess(_time6.monotonic() + _STATUS_FIXTURE_BOUND,
+                                     subject=_alarm_subject)
             _case5.start()
             _wst5 = _reap_bounded(_case5)
             if not (_os6.WIFSIGNALED(_wst5) and _os6.WTERMSIG(_wst5) == _sig6.SIGALRM):
@@ -4151,7 +4316,8 @@ def _self_test_body():
             failures.append("run_bounded/status-first: blocked-mask child did not report SIGALRM")
         # regression: a child that exited NORMALLY with bytes returns those bytes (the fix does not swallow
         # a legitimate result).
-        _case5b = _FixtureProcess(_time6.monotonic() + 5, subject=lambda: None)
+        _case5b = _FixtureProcess(_time6.monotonic() + _STATUS_FIXTURE_BOUND,
+                                  subject=lambda: None)
         _case5b.start()
         _wst5b = _reap_bounded(_case5b)
         if _bounded_child_result(b"TOKEN", _wst5b) != "TOKEN":
@@ -4163,7 +4329,8 @@ def _self_test_body():
         # normal exit is an abnormal death. Build a real exit-7 wait-status and pair it with a leftover token;
         # post-fix _bounded_child_result requires WIFEXITED+status 0 and returns CHILD-DIED, pre-fix (only the
         # signal case was checked) it returned the buffered token.
-        _case7 = _FixtureProcess(_time6.monotonic() + 5, subject=lambda: _os6._exit(7))
+        _case7 = _FixtureProcess(_time6.monotonic() + _STATUS_FIXTURE_BOUND,
+                                 subject=lambda: _os6._exit(7))
         _case7.start()
         _wst7 = _reap_bounded(_case7)
         if not (_os6.WIFEXITED(_wst7) and _os6.WEXITSTATUS(_wst7) == 7):

@@ -549,9 +549,11 @@ ALLOWLIST = (
      "self-test rebuild vector (_T87_REBUILDS pickle-round-trip): pickle.loads of the bytes"
      " pickle.dumps made in the same expression from an injected exception this self-test built"
      " itself; no external input"),
-    ("opf/tools/opf.py", "_watchdog_completion_case", "code", 5,
+    ("opf/tools/opf.py", "_watchdog_completion_case", "code", 6,
      "self-test mutants: compile ASTs of the repository's own _opf_emit members with parsed"
-     " literal mutations; no external input"),
+     " literal mutations, and the guardian's own source text with its loop-top deadline check"
+     " removed (the own-deadline red-leg mutant); each exec only defines the mutant into a dict"
+     " copy of the emit namespace; no external input"),
     ("opf/tools/opf.py", "_watchdog_completion_case.displaced_outward", "code", 1,
      "self-test vector: compiles the dedented self-test literal for the leg 11 vector; no"
      " external input"),
