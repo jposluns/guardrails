@@ -65,7 +65,12 @@ real directory inside the root. A rule file that is not a regular file (a FIFO o
 included), in a family directory or loose at the tree root, exits 2 the same way even when its name
 is bad: its listed type is judged before its name, and the descriptor it is read through is judged
 again (opened without blocking). A dot-named entry is skipped before its type is checked, and the
-tree-root metadata names (README.md, PROVENANCE.md) are not type-checked as rule files.
+tree-root metadata names (README.md, PROVENANCE.md) are not type-checked as rule files. A vendored
+source's PROVENANCE.md or LICENSE counts as present only as a regular file that opens for reading
+beneath the source's held descriptor (O_NOFOLLOW, without blocking) as the file its lstat judged, by
+st_dev and st_ino: a directory, a FIFO or any other non-regular entry at either name, a file that
+cannot be opened for reading, and one replaced between its lstat and its open each exit 2 naming it,
+never counted as present and never read as absent; only nothing at the name is missing-provenance.
 
 Emits the deterministic section 6.6 codes: loose, unknown-family, nested-dir, bad-name,
 tier-code-mismatch, numbered-non-aiqt, apex-nonstandard, frontmatter-drift, missing-provenance. Each
@@ -121,6 +126,10 @@ _is_dir = stat.S_ISDIR
 # The listing primitive, named so the self-test can swap the rules directory between the bound open and
 # the listing.
 _scandir = os.scandir
+# The open of a vendored source's PROVENANCE.md or LICENSE, named so the self-test can refuse it as an
+# unreadable file's open is refused (a chmod-based fixture is invisible to root) and replace the file
+# between its lstat and its open.
+_open = os.open
 # A directory below the held rules directory is opened, and a rule file read, beneath its parent's
 # descriptor without following a link; O_NONBLOCK keeps a FIFO at a rule's name from blocking the open
 # (the fstat check then refuses it).
@@ -303,14 +312,38 @@ def _read_rule(dir_fd, path, entry):
         os.close(fd)
 
 
-def _entry_present(dir_fd, path):
-    """Whether path's final component exists beneath dir_fd, judged by lstat; a symlink raises."""
+_NOT_REGULAR_PROVENANCE = "not a regular file where a vendored source's provenance file is required"
+
+
+def _provenance_present(dir_fd, path):
+    """Whether the provenance file path (a vendored source's PROVENANCE.md or LICENSE) is present
+    beneath dir_fd: False only when lstat finds nothing at its name. Present means a regular file
+    that opens for reading beneath dir_fd (O_NOFOLLOW, without blocking) as the very file the lstat
+    judged, by st_dev and st_ino, and is still a regular file by fstat. A symlink, a directory, a
+    FIFO or any other non-regular entry, a file that cannot be opened for reading, and an entry
+    replaced between the lstat and the open each raise OSError naming path, so the gate exits 2
+    (cannot evaluate) rather than counting it as present or reading it as absent."""
     try:
         st = os.lstat(path.name, dir_fd=dir_fd)
     except FileNotFoundError:
         return False
+    except OSError as exc:
+        raise OSError(exc.errno, exc.strerror, str(path)) from exc
     if stat.S_ISLNK(st.st_mode):
         raise OSError(errno.ELOOP, "a symlink in the rules tree, which is never followed", str(path))
+    if not stat.S_ISREG(st.st_mode):
+        raise OSError(errno.EINVAL, _NOT_REGULAR_PROVENANCE, str(path))
+    try:
+        fd = _open(path.name, _FILE_FLAGS, dir_fd=dir_fd)
+    except OSError as exc:
+        raise OSError(exc.errno, exc.strerror, str(path)) from exc
+    try:
+        opened = os.fstat(fd)
+    finally:
+        os.close(fd)
+    if (opened.st_dev, opened.st_ino) != (st.st_dev, st.st_ino) or not stat.S_ISREG(opened.st_mode):
+        raise OSError(errno.ESTALE, "the provenance file opened is not the regular file its lstat "
+                      "judged (it was replaced in between)", str(path))
     return True
 
 
@@ -328,7 +361,8 @@ def _scan_family(family, item, chain, rules, report, checked):
             kept, new = _open_dir_entry(chain, sub, entry, root)
             try:
                 sub_fd = (chain[:kept] + new)[-1][0]
-                present = [_entry_present(sub_fd, sub / name) for name in ("PROVENANCE.md", "LICENSE")]
+                present = [_provenance_present(sub_fd, sub / name)
+                           for name in ("PROVENANCE.md", "LICENSE")]
             finally:
                 close_chain(new)
             if not all(present):
@@ -389,9 +423,10 @@ def _scan_tree(rules, chain, report, checked=lambda path: None):
     what it reaches is still a real directory inside the root. Any other symlink at an
     entry the walk inspects (such an entry, or a vendored source's PROVENANCE.md or LICENSE) raises
     OSError naming it, never followed, as does a rule file that is not a regular file, in a family or
-    loose at the tree root, whatever its name (its type is judged before its name). Dot-named entries
-    of the tree root and of a flat family are skipped unread, and nothing else inside a vendored source
-    is inspected."""
+    loose at the tree root, whatever its name (its type is judged before its name), and a vendored
+    source's PROVENANCE.md or LICENSE that is there but is not a regular file opening for reading as
+    the file its lstat judged (_provenance_present). Dot-named entries of the tree root and of a flat
+    family are skipped unread, and nothing else inside a vendored source is inspected."""
     root = rules.parent.parent
     for entry in _listing(chain[-1][0], rules):
         if entry.name.startswith("."):
@@ -536,12 +571,15 @@ def main(argv=None):
 # descriptor for a link to the root and opens past a symlinked ancestor for search only),
 # and exits 2 on a symlinked rule file or a FIFO rule file (with a bad name or loose at the tree
 # root too), never following or blocking on either, and on a family directory or vendored source
-# replaced by another directory after its listing, never walked into; each
-# listed probe mutant (a scratch copy of _standards.py with one guard reverted, loaded with
-# importlib) is caught by its named probe vector, and the placement mutant (a scratch copy of this
-# file with the listing identity check dropped) by the family vector. It then proves the gate's own --root guard: every
-# --root vector holds, each patched guard mutant fails exactly its named vectors, and the default
-# root, launched as both rosters launch the gate, passes on this tree.
+# replaced by another directory after its listing, never walked into; it exits 2 on a vendored
+# source's PROVENANCE.md or LICENSE that is a directory, a FIFO or a symlink, whose open is refused,
+# or that is replaced between its lstat and its open, while two regular files pass and a missing
+# LICENSE is still missing-provenance; each listed probe mutant (a scratch copy of _standards.py
+# with one guard reverted, loaded with importlib) is caught by its named probe vector, and the
+# placement mutant (a scratch copy of this file with the listing identity check dropped) by the
+# family vector. It then proves the gate's own --root guard: every --root vector holds, each
+# patched guard mutant fails exactly its named vectors, and the default root, launched as both
+# rosters launch the gate, passes on this tree.
 
 FAILURES = []
 EXECUTED = []
@@ -671,6 +709,49 @@ def _replaced_after_listing(module, base, name, entry, inside, fill):
     with _patched(module, "_listing", _replacing_listing(module._listing, target, fill)):
         got = _gate(module, ["--root", str(root)])
     return got, target
+
+
+def _provenance_open(real_open, path, kind):
+    """An open of a vendored source's provenance file that, for path's name, either refuses with EACCES
+    as an unreadable file's open is refused ("refused"), or first moves path aside and puts a FIFO at
+    its name ("replaced"), the window between the gate's lstat of it and its open made deterministic;
+    any other name opens as real_open does."""
+    def _open(name, flags, dir_fd=None):
+        if name == path.name:
+            if kind == "refused":
+                raise PermissionError(errno.EACCES, "open refused by the self-test", name)
+            path.rename(path.with_name(path.name + "-judged"))
+            os.mkfifo(path)
+        return real_open(name, flags, dir_fd=dir_fd)
+    return _open
+
+
+def _provenance_gate(module, base, name, entry, kind):
+    """Run module's gate over a fresh root whose .claude/rules/external/vendor holds PROVENANCE.md and
+    LICENSE as regular files, except entry, made kind: "dir", "fifo", "symlink" (to a regular file
+    inside the root), "absent", or a regular file whose open is "refused" or "replaced" by a FIFO
+    (_provenance_open); with entry None both stay regular files. Returns ((exit code, stdout,
+    stderr), the path of entry)."""
+    root = _root_fixture(base, name, rules="dir").resolve()
+    source = root / ".claude" / "rules" / "external" / "vendor"
+    source.mkdir(parents=True)
+    path = source / (entry or "LICENSE")
+    for file_name in ("PROVENANCE.md", "LICENSE"):
+        if file_name != entry or kind in ("refused", "replaced"):
+            (source / file_name).write_text("{}\n".format(file_name), encoding="utf-8")
+    if kind == "dir":
+        path.mkdir()
+    elif kind == "fifo":
+        os.mkfifo(path)
+    elif kind == "symlink":
+        target = root / "linked-provenance"
+        target.write_text("linked\n", encoding="utf-8")
+        path.symlink_to(target)
+    hook = contextlib.nullcontext()
+    if kind in ("refused", "replaced"):
+        hook = _patched(module, "_open", _provenance_open(module._open, path, kind))
+    with hook:
+        return _gate(module, ["--root", str(root)]), path
 
 
 def _swapping_listing(real_listing, listed, target, link_to):
@@ -1530,6 +1611,33 @@ def self_test(report_path=None):
                                                       inside, fill)
                 check(cid, _refused_naming(got, target), got)
 
+            # 2f. a vendored source's PROVENANCE.md or LICENSE counts as present only as a regular
+            # file that opens for reading beneath the held source directory as the file its lstat
+            # judged: a directory or a FIFO at either name, a file whose open is refused (as an
+            # unreadable file's is), one replaced by a FIFO between its lstat and its open, and a
+            # symlink each exit 2 naming it, where a presence test by lstat alone would count the
+            # first four as present and pass. Two regular files still pass, and a source with no
+            # LICENSE is still missing-provenance (exit 1), never cannot-evaluate.
+            for cid, entry, kind in (
+                    ("gate/provenance-directory-exits-2", "PROVENANCE.md", "dir"),
+                    ("gate/license-directory-exits-2", "LICENSE", "dir"),
+                    ("gate/provenance-fifo-exits-2", "PROVENANCE.md", "fifo"),
+                    ("gate/license-fifo-exits-2", "LICENSE", "fifo"),
+                    ("gate/license-open-refused-exits-2", "LICENSE", "refused"),
+                    ("gate/provenance-replaced-before-open-exits-2", "PROVENANCE.md", "replaced"),
+                    ("gate/license-symlink-exits-2", "LICENSE", "symlink"),
+                    ("gate/provenance-regular-files-pass", None, None),
+                    ("gate/license-absent-missing-provenance", "LICENSE", "absent")):
+                got, path = _provenance_gate(this, base, "gate-" + cid.split("/")[1], entry, kind)
+                if entry is None:
+                    ok = got == (0, "PASS: rule placement conforms to the taxonomy\n", "")
+                elif kind == "absent":
+                    ok = (got[0] == 1 and got[2] == "" and ".claude/rules/external/vendor: "
+                          "missing-provenance: " in got[1].replace(os.sep, "/"))
+                else:
+                    ok = _refused_naming(got, path)
+                check(cid, ok, got)
+
             # 3. each probe mutant (one guard reverted in a scratch copy of _standards.py) must be
             # caught by its named probe vector: the mutant's outcome differs from the intact one.
             # The walk mutant judges only the final component beneath its followed parent, the
@@ -1690,6 +1798,8 @@ def self_test(report_path=None):
           "root, and exits 2 on a symlinked rule file "
           "and on a FIFO rule file, with a bad name or loose at the tree root too, and on a "
           "family directory or vendored source replaced by another directory after its listing, "
+          "and on a vendored source's PROVENANCE.md or LICENSE that is a directory, a FIFO or a "
+          "symlink, whose open is refused or that is replaced before its open, "
           "while still finding a rule's frontmatter drift, and the violation behind a symlinked family "
           "or vendored source when .claude/rules or .claude is swapped after its open; a symlink whose "
           "target lies outside or climbs above the root is refused, and search_only holds a listable "

@@ -3424,6 +3424,16 @@ expected-check-ids = [
   # ---------- family directories and vendored sources replaced after their listing ----------
   "gate/family-replaced-after-listing-exits-2",
   "gate/vendored-source-replaced-after-listing-exits-2",
+  # ---------- a vendored source's PROVENANCE.md and LICENSE: readable regular files only ----------
+  "gate/provenance-directory-exits-2",
+  "gate/license-directory-exits-2",
+  "gate/provenance-fifo-exits-2",
+  "gate/license-fifo-exits-2",
+  "gate/license-open-refused-exits-2",
+  "gate/provenance-replaced-before-open-exits-2",
+  "gate/license-symlink-exits-2",
+  "gate/provenance-regular-files-pass",
+  "gate/license-absent-missing-provenance",
   # ---------- probe mutants, each caught by its named vector ----------
   "mutant/stat-follows-links-caught",
   "mutant/wrong-type-reads-absent-caught",
