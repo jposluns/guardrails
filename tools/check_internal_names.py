@@ -126,10 +126,13 @@ and fails closed at exit 2; one it accepts is scanned whole as binary, as a bina
 tracked file whose suffix is TRACKED_TTF_SUFFIX (.ttf, in lower case only) goes through the TrueType rule,
 verify_ttf (stated beside TRACKED_TTF_SUFFIX): a .ttf over its size bound, without the 00 01 00 00
 signature, with a truncated header or table directory, a table outside the file or overlapping another, no
-name table, or a name record it cannot decode CANNOT BE EVALUATED and fails closed at exit 2; in one it
-accepts, every name-table string (UTF-16BE for platforms 0 and 3, MacRoman for platform 1) is scanned with
-the scoped scan's structural patterns and no internal-allow exemption. Glyph outlines and every other binary
-table are not text and are not scanned (the residual is stated beside TRACKED_TTF_SUFFIX).
+name table, or a name record it cannot decode CANNOT BE EVALUATED and fails closed at exit 2. One it accepts
+is scanned whole as binary, as a .woff2 is (every table, gap and trailing byte, each byte above 0x7F never
+part of a word), and each name-table string is also scanned in its decoded form (UTF-16BE for platform 0
+and platform 3 encodings 0, 1 and 10, MacRoman for platform 1 encoding 0), so UTF-16 text the byte view
+cannot read is seen too; both use the scoped scan's structural patterns with no internal-allow exemption.
+Text that is neither plain ASCII in the file nor in the name table is not seen (the residual is stated
+beside TRACKED_TTF_SUFFIX).
 Any other non-UTF-8 tracked file whatever its suffix (a
 malformed .csv, or a .csv that starts with the ZIP signature, say), a tracked path absent from the working
 tree, or a tracked path that is not a readable regular file CANNOT BE EVALUATED and fails closed at exit 2,
@@ -141,9 +144,10 @@ output that is not committed and is not handed to it as a tracked file (a built 
 site that is not checked in), the content of a tracked .zip's members, which the archive rule reads in
 memory to verify the archive but this rule never scans (the leak gate scans them), text drawn in a tracked
 .png's pixels or held in a chunk the PNG rule skips (see TRACKED_PNG_SUFFIX), text in a tracked .ttf
-outside its name table (glyph outlines and the other binary tables; see TRACKED_TTF_SUFFIX), a staged
-change that differs from the working-tree copy (it reads the working tree), and the word split or encoded
-(an HTML entity, a zero-width character) so the plain pattern does not match.
+that is neither plain ASCII in its bytes nor in its name table (text drawn by glyph outlines, UTF-16 or
+compressed text in another table; see TRACKED_TTF_SUFFIX), a staged change that differs from the
+working-tree copy (it reads the working tree), and the word split or encoded (an HTML entity, a zero-width
+character) so the plain pattern does not match.
 
 REVIEW-ROUND LABEL RULE, WHOLE TRACKED TREE. The review-round label patterns (_REVIEW_LABELS: a reviewer
 family name followed by a QA round number, and a QA round number followed by a severity grade or a finding
@@ -302,25 +306,29 @@ MAX_WOFF2_FILE_SIZE = 8 * 1024 * 1024  # a latin-subset web font is well under 1
 # The suffix of the TrueType font (a site template's font shipped unconverted), a fourth binary format the role
 # rule evaluates, matched exactly as the PNG suffix is: ".TTF", ".otf", ".ttc" and every other binary suffix
 # still cannot be evaluated. Every tracked file under it goes through verify_ttf whether or not its bytes
-# decode as UTF-8, with the PNG rule's posture: anything the rule cannot read in full cannot be evaluated (exit
-# 2), never skipped. The read stops one byte past MAX_TTF_FILE_SIZE and a file over it is refused; then the
+# decode as UTF-8. The read stops one byte past MAX_TTF_FILE_SIZE and a file over it is refused; then the
 # first 4 bytes must be the TrueType signature (00 01 00 00; an OpenType CFF font, a collection, a WOFF or the
 # Apple "true" tag is refused), the 12-byte offset table must be whole, numTables must be at least 1 and the
 # table directory whole, every table tag four printable ASCII characters and unique, and every table must lie
 # after the directory and within the file without overlapping another table. The name table is required, and
 # its header, its records and (in format 1) its language-tag records must lie within it, as must every string
-# they point to. Each string is decoded as the specification says: UTF-16BE for platform 0 (Unicode) and
-# platform 3 (Windows), MacRoman for platform 1 (Macintosh) encoding 0 (Roman); a string that does not decode
-# (an odd length or a lone surrogate in UTF-16BE), a platform 1 record in another encoding, a record of any
-# other platform and a name table format other than 0 or 1 cannot be evaluated. Every decoded string is
-# scanned with the scoped scan's structural patterns (the leak gate's host path, private IP, token and
-# account shapes, the provenance ids, the role name and the review-round labels), each a section of its own
-# named by its record, and with no internal-allow exemption: an upstream font has no reason to carry the
-# marker. A hit is a finding (exit 1). RESIDUAL: only the name table is read as text. Glyph outlines and every
-# other binary table (glyf, loca, the hinting programs, the variation tables and the rest) are not text and
-# are not scanned, and neither is text another table may hold (the glyph names of a version 2 post table, a
-# meta table's data, text drawn by the glyphs themselves); table checksums and the fields of every table but
-# name are not validated. A name split or encoded inside a string is not seen, as in a text file.
+# they point to. Each string is decoded by its platform and encoding: UTF-16BE for platform 0 (Unicode) and
+# for platform 3 (Windows) encodings 0 (Symbol), 1 (Unicode BMP) and 10 (Unicode full repertoire), MacRoman
+# for platform 1 (Macintosh) encoding 0 (Roman). A string that does not decode (an odd length or a lone
+# surrogate in UTF-16BE), a platform 3 record in any other encoding (2 to 6 are legacy CJK encodings such as
+# ShiftJIS, which UTF-16BE would read as unrelated text), a platform 1 record in another encoding, a record
+# of any other platform and a name table format other than 0 or 1 cannot be evaluated (exit 2). A font the
+# rule accepts is scanned whole as binary, as a .woff2 is: one section, "font bytes", with each byte above
+# 0x7F replaced so it is never part of a word, which covers every table (the glyph names of a version 2 post
+# table, cmap, meta and private tables included), name storage no record points to, the gaps between tables
+# and the bytes after the last one. UTF-16 text is not readable in that view, so each decoded name string is
+# also scanned as a section of its own, named by its record. Every section is scanned with the scoped scan's
+# structural patterns (the leak gate's host path, private IP, token and account shapes, the provenance ids,
+# the role name and the review-round labels) and no internal-allow exemption: an upstream font has no reason
+# to carry the marker. A hit is a finding (exit 1). RESIDUAL: text that is neither plain ASCII in the file
+# nor in the name table is not seen (text drawn by the glyphs themselves, UTF-16 or compressed text in a
+# table other than name); table checksums and the fields of every table but name are not validated. A name
+# split or encoded inside a string is not seen, as in a text file.
 TRACKED_TTF_SUFFIX = ".ttf"
 TTF_SIGNATURE = b"\x00\x01\x00\x00"
 MAX_TTF_FILE_SIZE = 8 * 1024 * 1024  # a variable web font is well under 1 MiB
@@ -1055,7 +1063,7 @@ def _ttf_name_strings(data, start, size):
             raise check_leaks.CannotEvaluate("its string at storage offset {} of {} byte(s) runs past the "
                                              "table's {} byte(s)".format(offset, length, size), where)
         raw = table[first:first + length]
-        if platform in (0, 3):
+        if platform == 0 or (platform == 3 and encoding in (0, 1, 10)):
             try:
                 text = raw.decode("utf-16-be")
             except UnicodeDecodeError as exc:
@@ -1071,7 +1079,8 @@ def _ttf_name_strings(data, start, size):
 
 def ttf_sections(data):
     """The TrueType rule (see TRACKED_TTF_SUFFIX) over a file's bytes: returns [(where, text, is_text)], one
-    entry for each name-table string, `where` naming its record and `is_text` false (no internal-allow
+    entry for each decoded name-table string, `where` naming its record, then one binary entry, "font bytes",
+    the whole file (each byte above 0x7F replaced), every entry with `is_text` false (no internal-allow
     exemption); raises CannotEvaluate with the first refusal (naming the table or record when one is the
     cause)."""
     if len(data) > MAX_TTF_FILE_SIZE:
@@ -1113,7 +1122,8 @@ def ttf_sections(data):
             raise check_leaks.CannotEvaluate("it overlaps {}".format(previous), where)
     if b"name" not in tables:
         raise check_leaks.CannotEvaluate("no name table")
-    return [(where, text, False) for where, text in _ttf_name_strings(data, *tables[b"name"])]
+    strings = [(where, text, False) for where, text in _ttf_name_strings(data, *tables[b"name"])]
+    return strings + [("font bytes", data.decode("ascii", "replace"), False)]
 
 
 def verify_ttf(path):
@@ -1128,8 +1138,9 @@ def verify_ttf(path):
 def scan_role_text(text, honour_marker=True, rules=_TRACKED_RULES):
     """(line, label) role-name and review-round label findings in `text`. A line carrying an `internal-allow`
     marker is exempt; the marker exempts that line only, never the rest of the file. A binary PNG chunk is
-    scanned with `honour_marker` false: it has no real lines, so the marker exempts nothing in it. A TrueType
-    name-table string is scanned with `rules` set to STRUCTURAL, the scoped scan's patterns."""
+    scanned with `honour_marker` false: it has no real lines, so the marker exempts nothing in it. Every
+    TrueType section (a decoded name-table string or the font's bytes) is scanned with `rules` set to
+    STRUCTURAL, the scoped scan's patterns."""
     found = []
     for number, line in enumerate(text.splitlines(), 1):
         if honour_marker and "internal-allow" in line:
@@ -3395,11 +3406,13 @@ def _self_test(caller_env=None):
                   seen[:2] == ["clean", "clean"] and "font.woff2" + woff2_rule + reason in seen[2], seen)
 
             # The TrueType rule, verify_ttf, over tracked .ttf files, on fonts built here: a clean one modelled
-            # on the real Dancing Script font's name table (Macintosh, Windows and Unicode records), and one
-            # broken vector per refusal. Each paired vector has a flip, a scratch copy of this gate with that
-            # check removed (anchors concatenated so they do not match themselves), which must give the vector
-            # another verdict; then the size bound and both table-range ends one unit inside, at and outside,
-            # and the real gate on a fixture git repository.
+            # on the real Dancing Script font's name table (its Macintosh and Windows records, with a Unicode
+            # record added), one broken vector per refusal, and plain ASCII the name parse never reads (in an
+            # all-UTF-8 font, a version 2 post table's glyph name, the bytes after the last table) for the
+            # whole-file byte view. Each paired vector has a flip, a scratch copy of this gate with that check
+            # removed (anchors concatenated so they do not match themselves), which must give the vector
+            # another verdict; then the size bound, both table-range ends and the Windows encodings the rule
+            # decodes one unit inside, at and outside, and the real gate on a fixture git repository.
             def ttf_name(records, fmt=0, lang=()):
                 recs, langs, storage = b"", b"", b""
                 for platform, encoding, name_id, raw in records:
@@ -3443,6 +3456,29 @@ def _self_test(caller_env=None):
             name_at = 12 + 32 + len(head_body)  # the clean font's name table offset
             host_text = "Built in " + "/" + "home" + "/builder/fonts"
             fifth = "name record 5 (platform {}, name ID 5)"
+            role_name = role_word.decode("ascii")
+
+            def byte_hit(data, name="font.ttf"):
+                # The finding the whole-file byte view gives for the role word, on the line splitlines puts it.
+                lines = data.decode("ascii", "replace").splitlines()
+                number = next((n for n, line in enumerate(lines, 1) if role_name in line), 0)
+                return "{}:font bytes:{}: {}".format(name, number, role)
+
+            def ttf_holds(expect, got):
+                # A vector expecting more than one finding names every line of the verdict exactly.
+                return got == expect if "\n" in expect else png_holds(expect, got)
+
+            # Every byte of this font, its directory, table and gap included, is below 0x80, so main's text
+            # scan read it as UTF-8; the role text sits in the gap after the directory.
+            utf8_ttf = ttf_font([(b"head", bytes(40)), (b"name", ttf_name([(1, 0, 1, b"Dancing Script")]))],
+                                pad=b"\n" + role_text + b"\n")
+            post_v2 = struct.pack(">IihhIIIII", 0x00020000, 0, 0, 0, 0, 0, 0, 0, 0) + struct.pack(">HH", 1, 258) \
+                + bytes([len(role_word)]) + role_word  # one glyph, named by the first custom Pascal string
+            post_ttf = ttf_font([(b"head", head_body), (b"name", clean_name), (b"post", post_v2)])
+            tail_ttf = clean_ttf + b"\x00" + role_text
+            macroman_ttf = ttf_with((1, 0, 5, b"\xa5 " + role_text))
+            byte_view = ('return strings + [("font bytes", data.' + 'decode("ascii", "replace"), False)]',
+                         "return strings")
             tdir = Path(tempfile.mkdtemp(prefix="aiqt-internal-names-ttf-mutant-"))
             try:
                 for check_id, flip_id, relname, data, expect, mutations in (
@@ -3520,11 +3556,23 @@ def _self_test(caller_env=None):
                         ("ttf/name-windows-finding", "ttf/name-windows-finding-flip", "font.ttf",
                          ttf_with((3, 1, 5, u16be(role_text.decode("ascii")))),
                          "font.ttf:" + fifth.format(3) + ":1: " + role,
-                         (('return [(where, text, False) for where, text in ' + '_ttf_name_strings(data, '
-                           '*tables[b"name"])]', "return []"),)),
-                        ("ttf/name-macroman-finding", "ttf/name-macroman-finding-flip", "font.ttf",
-                         ttf_with((1, 0, 5, b"\xa5 " + role_text)), "font.ttf:" + fifth.format(1) + ":1: " + role,
+                         (('strings = [(where, text, False) for where, text in ' + '_ttf_name_strings(data, '
+                           '*tables[b"name"])]', "strings = []"),)),
+                        ("ttf/name-macroman-finding", "ttf/name-macroman-finding-flip", "font.ttf", macroman_ttf,
+                         "font.ttf:" + fifth.format(1) + ":1: " + role + "\n" + byte_hit(macroman_ttf),
                          (("text = raw.decode(" + '"mac_roman")', 'text = ""'),)),
+                        ("ttf/name-windows-legacy-encoding", "ttf/name-windows-legacy-encoding-flip", "font.ttf",
+                         ttf_with((3, 2, 5, role_text)),
+                         "font.ttf" + ttf_rule + fifth.format(3) + ": platform 3 encoding 2 has no decoding the "
+                         "rule knows)",
+                         (("if platform == 0 or (platform == 3 and " + "encoding in (0, 1, 10)):",
+                           "if platform in (0, 3):"),)),
+                        ("ttf/utf8-font-finding", "ttf/utf8-font-finding-flip", "font.ttf", utf8_ttf,
+                         byte_hit(utf8_ttf), (byte_view,)),
+                        ("ttf/post-glyph-name-finding", "ttf/post-glyph-name-finding-flip", "font.ttf", post_ttf,
+                         byte_hit(post_ttf), (byte_view,)),
+                        ("ttf/after-last-table-finding", "ttf/after-last-table-finding-flip", "font.ttf", tail_ttf,
+                         byte_hit(tail_ttf), (byte_view,)),
                         ("ttf/name-host-path-finding", "ttf/name-host-path-finding-flip", "font.ttf",
                          ttf_with((3, 1, 5, u16be(host_text))),
                          "font.ttf:" + fifth.format(3) + ":1: absolute host path",
@@ -3543,7 +3591,7 @@ def _self_test(caller_env=None):
                          (("if path.suffix == " + "TRACKED_TTF_SUFFIX:",
                            "if path.suffix.lower() == " + "TRACKED_TTF_SUFFIX:"),))):
                     got = tracked_verdict(this, relname, data)
-                    check(check_id, png_holds(expect, got), (expect, got))
+                    check(check_id, ttf_holds(expect, got), (expect, got))
                     source, faults = gate_source, []
                     for anchor, replacement in mutations:
                         if source.count(anchor) != 1:
@@ -3559,8 +3607,16 @@ def _self_test(caller_env=None):
             finally:
                 shutil.rmtree(tdir, ignore_errors=True)
             # A lone surrogate in a UTF-16BE string and a record of a platform the rule has no decoding for
-            # cannot be evaluated, and the other font suffixes stay outside the rule.
+            # cannot be evaluated, and the other font suffixes stay outside the rule. Raw ASCII in a Windows
+            # record (read as CJK text in UTF-16BE) and a Macintosh word right after a byte MacRoman reads as a
+            # letter are both found by the byte view.
+            raw_ascii_ttf = ttf_with((3, 1, 5, role_text))
+            letter_ttf = ttf_with((1, 0, 5, b"\x80" + role_word))
+            check("ttf/utf8-font-is-utf8", utf8_ttf.decode("utf-8", "replace").encode("utf-8") == utf8_ttf,
+                  utf8_ttf)
             for check_id, relname, data, expect in (
+                    ("ttf/name-windows-raw-ascii-finding", "font.ttf", raw_ascii_ttf, byte_hit(raw_ascii_ttf)),
+                    ("ttf/name-macroman-letter-adjacent-finding", "font.ttf", letter_ttf, byte_hit(letter_ttf)),
                     ("ttf/name-lone-surrogate-refused", "font.ttf", ttf_with((0, 3, 5, b"\xd8\x00\x00A")),
                      "font.ttf" + ttf_rule + fifth.format(0) + ": the string cannot be decoded as UTF-16BE: "),
                     ("ttf/name-unknown-platform-refused", "font.ttf", ttf_with((2, 0, 5, b"Dancing")),
@@ -3581,6 +3637,16 @@ def _self_test(caller_env=None):
                 "bytes".format(len(clean_ttf) - 1, len(clean_ttf))
             check("ttf/file-size-bound-ends",
                   seen[:2] == ["clean", "clean"] and "font.ttf" + ttf_rule + reason in seen[2], seen)
+            # The Windows encodings read as UTF-16BE, 0, 1 and 10: 1 at and 2 just outside the low run, 9 just
+            # outside, 10 at and 11 just outside the high one, and 0 (no encoding id lies below it) accepted.
+            encodings = [tracked_verdict(this, "font.ttf", ttf_with((3, encoding, 5, u16be("Regular"))))
+                         for encoding in (0, 1, 2, 9, 10, 11)]
+            legacy = "font.ttf" + ttf_rule + fifth.format(3) + ": platform 3 encoding {} has no decoding the rule " \
+                "knows)"
+            check("ttf/windows-encoding-ends",
+                  [encodings[0], encodings[1], encodings[4]] == ["clean", "clean", "clean"]
+                  and all(png_holds(legacy.format(encoding), encodings[index])
+                          for index, encoding in ((2, 2), (3, 9), (5, 11))), encodings)
             # Both ends of a table's range: the last table in the file ending one byte inside, at and one byte
             # past the end of the file, and the first table starting one byte after, at and one byte before
             # the end of the table directory (the font with one pad byte after its directory gives "after").
@@ -3607,6 +3673,7 @@ def _self_test(caller_env=None):
                     ("font.ttf", clean_ttf, 0, "PASS"),
                     ("hit.ttf", ttf_with((3, 1, 5, u16be(role_text.decode("ascii")))), 1,
                      "hit.ttf:" + fifth.format(3) + ":1: " + role),
+                    ("tail.ttf", tail_ttf, 1, byte_hit(tail_ttf, "tail.ttf")),
                     ("font.TTF", clean_ttf, 2, "font.TTF" + not_utf8)):
                 (ttfrepo / name).write_bytes(content)
                 steps = (["init", "-q"],) if name == "font.ttf" else ()
@@ -3786,12 +3853,15 @@ def _self_test(caller_env=None):
           "signature (UTF-8 text included), a truncated header or table directory, no tables, a tag that is "
           "not printable, a table outside the file, inside the directory or overlapping another, a second "
           "table of one tag, no name table, a short name header, an unknown name format, name records or a "
-          "string past the table, an undecodable UTF-16BE string, a Macintosh record in another encoding and "
-          "a record of another platform, finds the role name in a Windows, Macintosh and language-tag string "
-          "and past an internal-allow marker and a host path in a Windows string, still cannot evaluate a "
-          ".TTF, .otf or .ttc, holds the file-size bound and both table-range ends one unit inside, at and "
-          "outside, exits 0, 1 and 2 through the real gate on a fixture repository, and each of its "
-          "twenty-four paired checks, removed in a copy of the gate, turns its vector red.")
+          "string past the table, an undecodable UTF-16BE string, a Windows record in a legacy encoding, a "
+          "Macintosh record in another encoding and a record of another platform, finds the role name in a "
+          "Windows, Macintosh and language-tag string and past an internal-allow marker and a host path in a "
+          "Windows string, finds plain ASCII through the whole-file byte view in an all-UTF-8 font, a version "
+          "2 post glyph name, the bytes after the last table, raw ASCII in a Windows record and a Macintosh "
+          "word after a letter byte, still cannot evaluate a .TTF, .otf or .ttc, holds the file-size bound, "
+          "both table-range ends and the Windows encodings it decodes one unit inside, at and outside, exits "
+          "0, 1 and 2 through the real gate on a fixture repository, and each of its twenty-eight paired "
+          "checks, removed in a copy of the gate, turns its vector red.")
     return 0
 
 
