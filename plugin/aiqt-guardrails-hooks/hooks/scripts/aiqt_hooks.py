@@ -4416,13 +4416,74 @@ def _diff_output_diversion(argv):
     return False, None
 
 
+# Subcommand options that take a SEPARATED value, so the word after one is that option's value and never a
+# diversion, even when it is shaped like --output=X or -oX: git log -p --grep --output=x searches commit
+# messages for --output=x and prints the patch on stdout. Each was checked against git 2.53.0 by placing a
+# --output=real.txt after it: git took that word as the value and wrote no real.txt. The diff and revision
+# options apply to every producer; log and show add --decorate-refs, --decorate-refs-exclude and -L, and
+# format-patch adds its own options and -v but reads -n as --numbered, a flag. --cc is a value-taking
+# recipient option only for format-patch (for log, show and diff it is the combined diff, a flag).
+_SUB_SEP_VALUE_LONG = frozenset((
+    "--stat-width", "--stat-name-width", "--stat-graph-width", "--stat-count", "--ws-error-highlight",
+    "--src-prefix", "--dst-prefix", "--line-prefix", "--inter-hunk-context", "--output-indicator-new",
+    "--output-indicator-old", "--output-indicator-context", "--ignore-matching-lines", "--diff-algorithm",
+    "--anchored", "--word-diff-regex", "--color-moved-ws", "--rotate-to", "--skip-to", "--find-object",
+    "--diff-filter", "--max-depth", "--max-count", "--skip", "--max-age", "--min-age", "--since",
+    "--since-as-filter", "--after", "--until", "--before", "--author", "--committer", "--grep",
+    "--grep-reflog", "--encoding", "--date", "--diff-merges", "--exclude", "--exclude-hidden", "--glob"))
+_SUB_SEP_VALUE_SHORT = frozenset(("S", "G", "O", "l", "I"))
+_LOG_SEP_VALUE_LONG = frozenset(("--decorate-refs", "--decorate-refs-exclude"))
+_FORMAT_PATCH_SEP_VALUE_LONG = frozenset((
+    "--suffix", "--start-number", "--reroll-count", "--filename-max-length", "--cover-from-description",
+    "--description-file", "--subject-prefix", "--output-directory", "--add-header", "--to", "--cc",
+    "--in-reply-to", "--signature", "--base", "--signature-file", "--interdiff", "--range-diff",
+    "--creation-factor"))
+_SUB_SEP_VALUE_OPTS = {
+    "log": (_SUB_SEP_VALUE_LONG | _LOG_SEP_VALUE_LONG, _SUB_SEP_VALUE_SHORT | {"n", "L"}),
+    "show": (_SUB_SEP_VALUE_LONG | _LOG_SEP_VALUE_LONG, _SUB_SEP_VALUE_SHORT | {"n", "L"}),
+    "format-patch": (_SUB_SEP_VALUE_LONG | _FORMAT_PATCH_SEP_VALUE_LONG, _SUB_SEP_VALUE_SHORT | {"v"}),
+}
+_SUB_SEP_VALUE_DEFAULT = (_SUB_SEP_VALUE_LONG, _SUB_SEP_VALUE_SHORT | {"n"})
+
+
 def _subcommand_output_diversion(argv):
     """(present, target) for a --output/-o diversion among the arguments after a git segment's subcommand
     (_git_subcommand_rest), the only place git reads one as the diff's destination. A --output-shaped word
-    before the subcommand is no diversion: it is the value of a git global option (git --namespace
-    --output=x diff, where --namespace takes it, and git -c and -C alike), which git runs with the patch on
-    stdout, or a word git refuses as an unknown global option (git --output=x diff) and runs nothing for."""
-    return _diff_output_diversion(_git_subcommand_rest(argv)[1])
+    before the subcommand is no diversion. Git runs it with the patch on stdout when it is the value of a
+    global option that accepts it (git --namespace --output=x diff, git -c -oreal.txt diff); otherwise git
+    refuses the command or runs it without a diff (git --output=x diff, git -C --output=x diff, git -c -ox
+    diff, git --exec-path --output=x diff), so treating it as no diversion denies a command that prints no
+    patch, a disclosed over-deny. Among the subcommand's arguments the separated value of a value-taking
+    option (_SUB_SEP_VALUE_OPTS, git log -p --grep --output=x) is skipped, never read as a diversion; the
+    first '--' or '--end-of-options' still ends the scan, as in _diff_output_diversion."""
+    sub, rest = _git_subcommand_rest(argv)
+    long_opts, short_letters = _SUB_SEP_VALUE_OPTS.get(sub, _SUB_SEP_VALUE_DEFAULT)
+    end = len(rest)
+    for j, word in enumerate(rest):
+        if word in _DIFF_END_OF_OPTIONS:
+            end = j
+            break
+    i = 0
+    while i < end:
+        word = rest[i]
+        if word in ("--output", "-o"):
+            return True, (rest[i + 1] if i + 1 < len(rest) else None)
+        if word.startswith("--output="):
+            return True, word[len("--output="):]
+        if word.startswith("-o") and not word.startswith("--") and len(word) > 2:
+            return True, word[2:]
+        if word in long_opts:
+            i += 2  # the next word is this option's value
+            continue
+        if len(word) > 1 and word[0] == "-" and word[1] != "-":
+            # a short cluster: a value letter takes the rest of the word, or the next word when it is last
+            for k in range(1, len(word)):
+                if word[k] in short_letters:
+                    if k == len(word) - 1:
+                        i += 1
+                    break
+        i += 1
+    return False, None
 
 
 def _final_stdout_dest(redirects):

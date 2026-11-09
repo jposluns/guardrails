@@ -20283,7 +20283,7 @@ def _main_isolated(monitor):
                 "git --namespace --output=real.txt log -p", "deny")
         dexpect("(qa-b4k) a --namespace value shaped like --output= before stash show -p -> denies",
                 "git --namespace --output=real.txt stash show -p", "deny")
-        dexpect("(qa-b4l) a separated --output after a --namespace value still diverts to a file -> allows with a note",
+        dexpect("(qa-b4l) an inline --output after a --namespace value still diverts to a file -> allows with a note",
                 "git --namespace ns diff --output=real.txt", "allow-note")
         dexpect("(qa-b4m) a global value shaped like --output= with a real-file redirect earns no plain allow",
                 "git --namespace --output=x diff > out.txt", "allow-note")
@@ -20293,6 +20293,40 @@ def _main_isolated(monitor):
                 "git --namespace --output real.txt diff", "allow-note")
         dexpect("(qa-b4p) a subcommand --output to the console after a global look-alike still denies",
                 "git --namespace --output=x diff --output=/dev/stdout", "deny")
+        # A --output-shaped word that a value-taking subcommand option consumes is that option's value, not a
+        # diversion: in a repository whose commit message and file hold --output=x and -ox, git 2.53.0
+        # printed the patch on stdout and wrote no x for each of qa-b4q to qa-b4y. The controls show a
+        # value given to the option, or an option that takes none, still leaves a real --output diversion
+        # (git wrote x for each of qa-b4z to qa-b4ad), and --cc, -n and -v count only for the subcommands
+        # that read a value after them.
+        dexpect("(qa-b4q) --output= as the separated value of log --grep is no diversion -> denies",
+                "git log -p -1 --grep --output=x", "deny")
+        dexpect("(qa-b4r) --output= as the separated value of log -S is no diversion -> denies",
+                "git log -p -1 -S --output=x", "deny")
+        dexpect("(qa-b4s) --output= as the separated value of log -G is no diversion -> denies",
+                "git log -p -1 -G --output=x", "deny")
+        dexpect("(qa-b4t) -oFILE as the separated value of log --grep is no diversion -> denies",
+                "git log -p -1 --grep -ox", "deny")
+        dexpect("(qa-b4u) -S last in a short cluster takes the next word as its value -> denies",
+                "git show -RS --output=x", "deny")
+        dexpect("(qa-b4v) --output= as the value of diff --src-prefix is no diversion -> denies",
+                "git diff --src-prefix --output=x", "deny")
+        dexpect("(qa-b4w) --output= as the value of show --decorate-refs is no diversion -> denies",
+                "git show --decorate-refs --output=x", "deny")
+        dexpect("(qa-b4x) --output= as the value of format-patch --subject-prefix is no diversion -> denies",
+                "git format-patch --stdout -1 --subject-prefix --output=x", "deny")
+        dexpect("(qa-b4y) --output= as the value of stash show --line-prefix is no diversion -> denies",
+                "git stash show -p --line-prefix --output=x", "deny")
+        dexpect("(qa-b4z) log --grep given its own value leaves --output= a real diversion -> allows with a note",
+                "git log -p -1 --grep foo --output=x", "allow-note")
+        dexpect("(qa-b4aa) show --cc takes no value, so --output= still diverts -> allows with a note",
+                "git show --cc --output=x", "allow-note")
+        dexpect("(qa-b4ab) log -n given its own count leaves --output= a real diversion -> allows with a note",
+                "git log -p -1 -n 1 --output=x", "allow-note")
+        dexpect("(qa-b4ac) diff -U takes only an attached value, so --output= still diverts -> allows with a note",
+                "git diff -U --output=x", "allow-note")
+        dexpect("(qa-b4ad) log -v takes no value, so --output= still diverts -> allows with a note",
+                "git log -p -1 -v --output=x", "allow-note")
         # BLOCKER 5: a redirect target that resolves to a device via '..' or a relative path must NOT earn
         # proof C; a genuine plain-file redirect still ALLOWs.
         dexpect("(qa-b5a) '> /tmp/../dev/stdout' normalizes to a device -> denies",
