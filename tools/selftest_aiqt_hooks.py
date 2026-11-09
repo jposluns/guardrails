@@ -20271,8 +20271,9 @@ def _main_isolated(monitor):
                 "git diff --output=realfile.txt", "allow-note")
         dexpect("(qa-b4f) separated --output realfile.txt allows with a note", "git diff --output realfile.txt", "allow-note")
         # A --output-shaped word BEFORE the subcommand is a git global option's value, not a diversion: git
-        # 2.53.0 printed the patch on stdout and wrote no real.txt for each of qa-b4g to qa-b4k, so each
-        # is a console dump. Only the subcommand's own arguments divert.
+        # 2.53.0 printed the patch on stdout and wrote no real.txt for each of qa-b4g to qa-b4k (the diff
+        # forms given HEAD~1 as their revision), so each is a console dump. Only the subcommand's own
+        # arguments divert.
         dexpect("(qa-b4g) a --namespace value shaped like --output= is no diversion -> denies (console dump)",
                 "git --namespace --output=real.txt diff", "deny")
         dexpect("(qa-b4h) a --namespace value shaped like -oFILE is no diversion -> denies",
@@ -20294,11 +20295,12 @@ def _main_isolated(monitor):
         dexpect("(qa-b4p) a subcommand --output to the console after a global look-alike still denies",
                 "git --namespace --output=x diff --output=/dev/stdout", "deny")
         # A --output-shaped word that a value-taking subcommand option consumes is that option's value, not a
-        # diversion: in a repository whose commit message and file hold --output=x and -ox, git 2.53.0
-        # printed the patch on stdout and wrote no x for each of qa-b4q to qa-b4y. The controls show a
-        # value given to the option, or an option that takes none, still leaves a real --output diversion
-        # (git wrote x for each of qa-b4z to qa-b4ad), and --cc, -n and -v count only for the subcommands
-        # that read a value after them.
+        # diversion: in a repository whose HEAD commit and stash each add --output=x and -ox to a tracked
+        # file, with the same words in the HEAD commit message, git 2.53.0 printed the patch on stdout and
+        # wrote no x for each of qa-b4q to qa-b4y (qa-b4v given HEAD~1 as its revision). The controls show
+        # a value given to the option, or an option that takes none, still leaves a real --output diversion
+        # (git created x for each of qa-b4z to qa-b4ad, qa-b4ac given HEAD~1), and --cc, -n and -v count
+        # only for the subcommands that read a value after them.
         dexpect("(qa-b4q) --output= as the separated value of log --grep is no diversion -> denies",
                 "git log -p -1 --grep --output=x", "deny")
         dexpect("(qa-b4r) --output= as the separated value of log -S is no diversion -> denies",

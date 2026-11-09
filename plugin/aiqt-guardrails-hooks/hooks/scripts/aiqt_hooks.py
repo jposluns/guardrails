@@ -4419,10 +4419,13 @@ def _diff_output_diversion(argv):
 # Subcommand options that take a SEPARATED value, so the word after one is that option's value and never a
 # diversion, even when it is shaped like --output=X or -oX: git log -p --grep --output=x searches commit
 # messages for --output=x and prints the patch on stdout. Each was checked against git 2.53.0 by placing a
-# --output=real.txt after it: git took that word as the value and wrote no real.txt. The diff and revision
-# options apply to every producer; log and show add --decorate-refs, --decorate-refs-exclude and -L, and
-# format-patch adds its own options and -v but reads -n as --numbered, a flag. --cc is a value-taking
-# recipient option only for format-patch (for log, show and diff it is the combined diff, a flag).
+# --output=real.txt after it under log, show, diff, stash show and format-patch: git wrote no patch to
+# real.txt, and created no real.txt except under format-patch --range-diff, which leaves it empty and
+# prints the patch on stdout. The list is not complete (--default takes a separated value and is not on
+# it). The shared diff and revision options are skipped under every subcommand; log and show add
+# --decorate-refs, --decorate-refs-exclude and -L, and format-patch adds its own options and -v but reads
+# -n as --numbered, a flag. --cc is a value-taking recipient option only for format-patch (for log, show
+# and diff it is the combined diff, a flag).
 _SUB_SEP_VALUE_LONG = frozenset((
     "--stat-width", "--stat-name-width", "--stat-graph-width", "--stat-count", "--ws-error-highlight",
     "--src-prefix", "--dst-prefix", "--line-prefix", "--inter-hunk-context", "--output-indicator-new",
@@ -4455,7 +4458,8 @@ def _subcommand_output_diversion(argv):
     diff, git --exec-path --output=x diff), so treating it as no diversion denies a command that prints no
     patch, a disclosed over-deny. Among the subcommand's arguments the separated value of a value-taking
     option (_SUB_SEP_VALUE_OPTS, git log -p --grep --output=x) is skipped, never read as a diversion; the
-    first '--' or '--end-of-options' still ends the scan, as in _diff_output_diversion."""
+    first '--' or '--end-of-options' still ends the scan, as in _diff_output_diversion. The first diversion
+    found is returned, while git writes to the last of two (a disclosed under-deny and over-deny)."""
     sub, rest = _git_subcommand_rest(argv)
     long_opts, short_letters = _SUB_SEP_VALUE_OPTS.get(sub, _SUB_SEP_VALUE_DEFAULT)
     end = len(rest)
