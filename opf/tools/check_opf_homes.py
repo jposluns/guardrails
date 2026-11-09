@@ -1461,6 +1461,8 @@ _SURFACE = {
         "opf init also refuses when the git history of HEAD's first-parent line shows a prior store (specification section 8.2: counters never restart, so record ids are never reissued).",
         'opf adopt is the path for re-adopting any prior ancestry.',
         'The reference tooling defines no store upgrade: opf upgrade refuses every invocation with exit 2, reading and writing nothing.',
+        'The reference tooling scaffolds (opf init), validates (opf doctor) and renders (opf render) a store; opf migrate and opf sync exit 2 in this build.',
+        'A hand start does not create .working/.gitignore, the file in which opf init writes the managed ignore block of specification section 4.2 (/journals/ and /staging/), and opf doctor does not grade that file, so a hand-started store without it can still grade VALID.',
     ),
     DISCLOSURE: (
         "Ordinary import is retired and refuses with exit 2, and nothing in the reference CLI creates legacy_fragment records; the type remains only for stores that already hold such records from the reference CLI's retired import path.",
@@ -1518,12 +1520,14 @@ _SURFACE = {
 # 9.2 defines no path for a manifest below 2.0.0), and the disclosure page's and the record indexes'
 # description of a store upgrade the reference tooling no longer defines, and each surface's
 # tooling-status sentences from before the tooling initialized and validated base 2.0.0 stores (its
-# 1.2.0 scaffold and grading, the adoption subcommands that read or refused over the adoption
-# journal, and the adopt page's claim that approval did not run), and the claim on the quickstart, the
-# disclosure page, the adopt page and the adoption guide that apply and reconcile refuse until the
-# adoption journal moves, which already sits at its homes-2 home. The record indexes'
-# sentences are held on the core-files page, which carries the record indexes now. Each sentence
-# present in its file's normalized text is a finding.
+# 1.2.0 scaffold and grading, the quickstart's caveats that a hand start does not reach VALID, that
+# no upgrade into 2.0.0 is defined and that scaffolding and validation ship in later releases, the
+# adoption subcommands that read or refused over the adoption journal, the adoption guide's claim
+# that reconcile recovers an interrupted adoption transaction, and the adopt page's claim that
+# approval did not run), and the claim on the quickstart, the disclosure page, the adopt page and
+# the adoption guide that apply and reconcile refuse until the adoption journal moves, which already
+# sits at its homes-2 home. The record indexes' sentences are held on the core-files page, which
+# carries the record indexes now. Each sentence present in its file's normalized text is a finding.
 _SURFACE_RETIRED = {
     QUICKSTART: (
         'An implementation declares a conformance class: an upgrade-capable one carries older stores forward',
@@ -1533,6 +1537,11 @@ _SURFACE_RETIRED = {
         'Base 2.0.0, with homes = 2, is the only base version the specification defines, and the reference tooling does not yet implement it.',
         'The reference tooling\'s opf doctor grades a manifest declaring spec_version = "2.0.0" with homes = 2 under its 1.2.0 rules, so its VALID verdict on such a store says nothing about conformance to the specification; opf upgrade and opf record refuse such a store.',
         'until the adoption journal moves',
+        "This release's tooling grades every store under specification 1.2.0, so a 2.0.0 hand start does not yet reach VALID",
+        'Neither the specification nor the reference tooling defines an upgrade of such a store into 2.0.0',
+        "Until the tooling implements 2.0.0, opf init in a new repository is the route that this release's 1.2.0 tooling grades VALID",
+        "As step 1 states, this release's tooling does not yet grade these files VALID.",
+        'Scaffolding, validation, rendering, and migration tooling ships in later releases of the pack',
     ),
     DISCLOSURE: (
         'A fresh-only implementation (specification section 16.1) proves tested admission and refusal behaviour, not authenticated history: it refuses by name an older store or one in which its admission check detects an item on the closed legacy-state list.',
@@ -1572,6 +1581,7 @@ _SURFACE_RETIRED = {
         'opf adopt status, which reports adoption runs and the adoption journal and writes nothing.',
         'What it does not run yet: opf adopt approve, apply, complete and reconcile refuse with exit 2,',
         'until the adoption journal moves',
+        'reconcile recovers an interrupted adoption transaction, or reports that there is nothing to reconcile.',
     ),
     CORE_FILES: (
         'Importer-only (no module toggle)',
@@ -6686,7 +6696,7 @@ def _self_test_vectors():
     # pinned, so dropping a file or any of its pins turns the self-test red.
     check("surface-registry", lambda: tuple(_SURFACE) == (
         QUICKSTART, DISCLOSURE, ADOPT_PAGE, ADOPT_GUIDE, CORE_FILES) and
-          tuple(map(len, _SURFACE.values())) == (10, 7, 12, 7, 11))
+          tuple(map(len, _SURFACE.values())) == (12, 7, 12, 7, 11))
     # Each generated page is registered at its root path, an index.html under its page directory,
     # named by that directory, so the findings tell the pages apart.
     check("surface-page-paths", lambda: all(
@@ -6697,7 +6707,7 @@ def _self_test_vectors():
     # gate red with its own finding.
     check("surface-retired-registry", lambda: tuple(_SURFACE_RETIRED) == (
         QUICKSTART, DISCLOSURE, ADOPT_PAGE, ADOPT_GUIDE, CORE_FILES) and
-          tuple(map(len, _SURFACE_RETIRED.values())) == (7, 15, 11, 7, 8) and
+          tuple(map(len, _SURFACE_RETIRED.values())) == (12, 15, 11, 8, 8) and
           set(_SURFACE_RETIRED) <= set(_SURFACE))
     for path, fragments in _SURFACE_RETIRED.items():
         normalized = _surface_text(surfaces[path])
@@ -6708,6 +6718,45 @@ def _self_test_vectors():
             check("surface-retired-flip-" + _surface_name(path) + "-" + fragment,
                   lambda f=finding, m=mutated, frag=fragment, nb=normalized:
                   frag not in nb and f in surface_findings(m))
+    # The quickstart's 1.2.0 tooling-status caveats and its later-releases tooling sentence, and the
+    # adoption guide's approve and reconcile sentence, each planted back into its live file as those
+    # files wrapped it, backticks included: each is red with its own retired finding, and green once
+    # its entry is dropped from _SURFACE_RETIRED, so that entry is what catches it.
+    restored = (
+        (QUICKSTART, "baseline. This release's tooling grades every store under specification 1.2.0, so a "
+                     "2.0.0 hand\n   start does not yet reach VALID: once those files are committed, its\n",
+         "This release's tooling grades every store under specification 1.2.0, so a 2.0.0 hand start does "
+         "not yet reach VALID"),
+        (QUICKSTART, "Neither the specification nor the reference tooling\n   defines an upgrade of such a "
+                     "store into 2.0.0 (specification section 9.2; the reference\n   tooling's `opf upgrade` "
+                     "refuses every invocation), so what an adopter on this route must do\n   later to hold "
+                     "a conforming 2.0.0 store is not yet defined.\n",
+         "Neither the specification nor the reference tooling defines an upgrade of such a store into 2.0.0"),
+        (QUICKSTART, "Until\n   the tooling implements 2.0.0, `opf init` in a new repository is the route that "
+                     "this release's\n   1.2.0 tooling grades VALID: commit the paths it creates\n",
+         "Until the tooling implements 2.0.0, opf init in a new repository is the route that this release's "
+         "1.2.0 tooling grades VALID"),
+        (QUICKSTART, "8.2). As step 1 states, this release's tooling does not yet grade these files VALID.\n",
+         "As step 1 states, this release's tooling does not yet grade these files VALID."),
+        (QUICKSTART, "Scaffolding, validation, rendering, and migration tooling ships in later releases of "
+                     "the pack; until\nthen the files are simple enough to keep by hand\n",
+         "Scaffolding, validation, rendering, and migration tooling ships in later releases of the pack"),
+        (ADOPT_GUIDE, "What refuses in this build: `opf adopt apply` and `complete` refuse with exit 2, so "
+                      "nothing is applied and nothing is retired. `approve` checks a plan and prints its "
+                      "approval but writes nothing, so no approval is recorded; `reconcile` recovers an "
+                      "interrupted adoption transaction, or reports that there is nothing to reconcile.\n",
+         "reconcile recovers an interrupted adoption transaction, or reports that there is nothing to "
+         "reconcile."),
+    )
+    for path, planted, fragment in restored:
+        mutated = dict(surfaces)
+        mutated[path] = surfaces[path] + "\n" + planted
+        finding = "surface {} restores retired text: {}".format(_surface_name(path), fragment)
+        check("surface-restored-caveat-" + _surface_name(path) + "-" + fragment,
+              lambda f=finding, m=mutated: f in surface_findings(m))
+        with patch.dict(_SURFACE_RETIRED, {path: tuple(x for x in _SURFACE_RETIRED[path] if x != fragment)}):
+            check("surface-restored-caveat-unregistered-" + _surface_name(path) + "-" + fragment,
+                  lambda f=finding, m=mutated: f not in surface_findings(m))
     # Retired gate names: the live tools tree, this module included, spells neither. In a fixture
     # tree, the store module with either alias assignment restored, or a nested module reading it,
     # is refused at that line; a non-.py file naming both is out of scope. The vectors iterate their

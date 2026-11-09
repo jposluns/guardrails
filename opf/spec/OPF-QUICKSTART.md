@@ -183,9 +183,9 @@ reader whatever you chose. The target is just a path or git URL; `github:owner/r
    deliverables (`CHANGELOG.md` and `VERSION`) are unchanged; migration re-points the committed
    pointer, updates the manifest's recorded sync target, and records the move as a worklog entry.
 
-Scaffolding, validation, rendering, and migration tooling ships in later releases of the pack; until
-then the files are simple enough to keep by hand, and a conformance claim is self-asserted and says
-so. The specification defines one implementation model, with no conformance classes (OPF-SPEC
+The reference tooling scaffolds (`opf init`), validates (`opf doctor`) and renders (`opf render`) a
+store; `opf migrate` and `opf sync` exit 2 in this build. The files stay simple enough to keep by
+hand, and a conformance claim is self-asserted and says so. The specification defines one implementation model, with no conformance classes (OPF-SPEC
 section 16.1). Base 2.0.0, with `homes = 2`, is the only base version the specification
 defines, and the reference tooling initializes and validates base 2.0.0 stores with `homes = 2`.
 Its `opf adopt plan`, `approve` and `status` run at base 2.0.0 without reading the adoption journal,
@@ -232,7 +232,10 @@ stands for each of the eleven baseline index types: `autonomous_decision`, `back
 section 9 (`[store]`, `[modules]`, `[providers]`, `[views]`, `[deliverables]` and the rest) may be
 added. The zero counter rows apply only to a new store: a re-adoption seeds both counter series
 from its pinned ancestral snapshot and never zero-seeds prior ancestry (specification section
-8.2).
+8.2). A hand start does not create `.working/.gitignore`, the file in which `opf init` writes the
+managed ignore block of specification section 4.2 (`/journals/` and `/staging/`), and `opf doctor`
+does not grade that file, so a hand-started store without it can still grade VALID. To match what
+`opf init` writes, put that block, exactly as section 4.2 gives it, in `.working/.gitignore`.
 
 ```toml opf-starter manifest.toml
 [opf]
