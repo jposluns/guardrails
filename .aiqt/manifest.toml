@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "ebc4e458e1e321042046c34d12b61d5b3c61116f985dafd0da85542f63b3ee29"
+tree-sha256 = "b78a57bf3363a5f782044b48049555562024902bbdf72a9daca2ac4e0e8a0971"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -71,8 +71,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 587215
-sha256 = "ce7628f1754e402e688a63d2f3795f8aa9420a426a4094d4e8be03a636fc538e"
+bytes = 587733
+sha256 = "b162677370763b1eed49fbbc0951e69946cf090651647d8ada0e1e4e8b9d442b"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -4361,8 +4361,8 @@ sha256 = "62cba7c3a3a459fbd31a27c52bc7ab11a792bd52189db8ba826e27c0327fd55b"
 
 [[sources]]
 path = "tools/check_residue_counts.py"
-bytes = 22710
-sha256 = "23b0bc09e31ab55acabd7b93dd8584c8ce23d137b16b4718b97605d7a089fea8"
+bytes = 24658
+sha256 = "8a90ce05a7c58ac0b5fd223ffd67b4145a8746118310f23990befc4772605086"
 
 [[sources]]
 path = "tools/check_rule_placement.py"
