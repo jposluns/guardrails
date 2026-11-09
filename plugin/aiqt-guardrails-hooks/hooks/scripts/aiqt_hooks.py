@@ -19368,6 +19368,389 @@ def pgrep_self_match(data):
         "completion file captured at launch.")
 
 
+# heredoc_terminator: the characters that end an unquoted word of the raw command text, and those after which
+# a '#' starts a comment.
+_HDT_WORD_END = frozenset(" \t\n;&|<>()")
+_HDT_COMMENT_AFTER = frozenset(" \t\n;&|()<>")
+# The backslash escapes bash removes from the text of a backquoted command substitution before it reads that
+# text as a command, outside double quotes and inside them.
+_HDT_BACKQUOTE_ESCAPE_RE = re.compile(r"\\([\\`$])")
+_HDT_BACKQUOTE_DQ_ESCAPE_RE = re.compile(r'\\([\\`$"])')
+
+
+def _hdt_skip_backquote(command, i, n):
+    """The index just past the backquoted command substitution opening at command[i], or n when it never
+    closes: it ends at the first backquote no backslash escapes, whatever quotes stand inside it, as bash
+    reads it."""
+    i += 1
+    while i < n:
+        c = command[i]
+        if c == "\\":
+            i += 2
+            continue
+        if c == "`":
+            return i + 1
+        i += 1
+    return n
+
+
+def _hdt_skip_quote(command, i, n, ansi_c=False):
+    """The index just past the quoted string opening at command[i] (a single or double quote), or n when it
+    never closes. A backslash escapes the next character inside double quotes and inside an ANSI-C $'...'
+    string (ansi_c), never inside plain single quotes."""
+    quote = command[i]
+    i += 1
+    while i < n:
+        c = command[i]
+        if c == "\\" and (quote == '"' or ansi_c):
+            i += 2
+            continue
+        if c == quote:
+            return i + 1
+        i += 1
+    return n
+
+
+def _hdt_closed(command, i, end, closer, escapes):
+    """True when the quoted string or backquote opening at command[i], skipped to end (_hdt_skip_quote,
+    _hdt_skip_backquote), closes before the command ends: end lies short of the end of the text, or its last
+    character is the closer, past the opening one and, where a backslash escapes (escapes), after an even
+    run of backslashes."""
+    if end < len(command):
+        return True
+    if end - i < 2 or command[end - 1] != closer:
+        return False
+    inner = command[i + 1:end - 1]
+    return not escapes or (len(inner) - len(inner.rstrip("\\"))) % 2 == 0
+
+
+def _hdt_skip_group(command, i, n, opener, closer):
+    """The index just past the group whose first opener is at command[i] (an arithmetic $(( or ((, a $[ or a
+    ${ expansion), counting nested openers and closers and skipping quoted strings (an ANSI-C $'...' one
+    with its backslash escapes) and escaped characters; n when it never closes."""
+    depth = 0
+    while i < n:
+        c = command[i]
+        if c == "\\":
+            i += 2
+            continue
+        if command.startswith("$'", i):
+            i = _hdt_skip_quote(command, i + 1, n, ansi_c=True)
+            continue
+        if c in "'\"":
+            i = _hdt_skip_quote(command, i, n)
+            continue
+        if c == opener:
+            depth += 1
+        elif c == closer:
+            depth -= 1
+            if depth == 0:
+                return i + 1
+        i += 1
+    return n
+
+
+def _hdt_delimiter(command, i, n):
+    """Read the delimiter word of a here-document opener from command[i] (past any blanks): (token, end,
+    quoted), the token after quote removal and quoted True when any part of the word is quoted or escaped
+    (bash then reads the body as written, with no backslash-newline joining), or (None, end, False) when no
+    word follows (a syntax error the shell refuses before running anything). A backslash-newline inside the
+    word is removed, as bash removes it before reading the word; a $'...' part is decoded as bash decodes it
+    (_ansi_c_escape) and a $"..." part reads as a double-quoted one, the '$' dropped. A word holding a
+    ${...} or $(...) with a blank or parenthesis inside ends there (a disclosed over-deny)."""
+    while i < n and command[i] in " \t":
+        i += 1
+    parts = []
+    quoted = False
+    while i < n and command[i] not in _HDT_WORD_END:
+        c = command[i]
+        if c == "\\" and command.startswith("\\\n", i):
+            i += 2
+            continue
+        ansi_c = command.startswith("$'", i)
+        if c == "$" and command.startswith(("$'", '$"'), i):
+            i += 1
+            c = command[i]
+        if c == "\\":
+            parts.append(command[i + 1:i + 2])
+            quoted = True
+            i += 2
+        elif c in "'\"":
+            end = _hdt_skip_quote(command, i, n, ansi_c=ansi_c)
+            closed = end - i >= 2 and command[end - 1] == c
+            inner = command[i + 1:end - 1] if closed else command[i + 1:end]
+            if c == '"':
+                inner = re.sub(r'\\([\\"$`])', r"\1", inner)
+            elif ansi_c:
+                inner = _ANSI_C_ESCAPE_RE.sub(_ansi_c_escape, inner)
+            parts.append(inner)
+            quoted = True
+            i = end
+        else:
+            parts.append(c)
+            i += 1
+    if not parts:
+        return None, i, False
+    return "".join(parts), i, quoted
+
+
+# The reserved words a (( glued to them still opens an arithmetic command after (for((, if((, !((), as bash
+# reads it.
+_HDT_ARITH_KEYWORDS = ("for", "while", "until", "if", "elif", "then", "else", "do", "!")
+# A command or process substitution, the only place a here-document can open inside a ${...} expansion.
+_HDT_SUBST_RE = re.compile(r"\$\((?!\()|`|[<>]\(")
+# A << that is not part of a <<< here-string: a here-document opener as written, wherever it stands.
+_HDT_OPENER_RE = re.compile(r"(?<!<)<<(?!<)")
+
+
+def _hdt_arith_start(command, i):
+    """True when the (( at command[i] opens an arithmetic command: at the start of the text, after a character
+    that ends a word, or glued to one of the reserved words _HDT_ARITH_KEYWORDS standing as a whole word."""
+    if i == 0 or command[i - 1] in _HDT_COMMENT_AFTER:
+        return True
+    for word in _HDT_ARITH_KEYWORDS:
+        at = i - len(word)
+        if at >= 0 and command.startswith(word, at) and (at == 0 or command[at - 1] in _HDT_COMMENT_AFTER):
+            return True
+    return False
+
+
+def _hdt_skip_param(command, i, n):
+    """(end, unsure) for the ${...} expansion opening at command[i], outside or inside double quotes: end just
+    past it (_hdt_skip_group, which reads its nested quotes), and unsure True when its text holds both a '<<'
+    and a command or process substitution, where a here-document could open that the skip does not read."""
+    end = _hdt_skip_group(command, i + 1, n, "{", "}")
+    text = command[i:end]
+    return end, "<<" in text and _HDT_SUBST_RE.search(text) is not None
+
+
+def _hdt_unterminated(command):
+    """The first here-document opener of the raw command text with no line equal to its delimiter before
+    the command ends, as (opener, token, line), or None. The scan reads the command as the shell reads its
+    input: a '<<' or '<<-' outside quotes, a comment, an arithmetic $((...)), ((...)) (also glued to a
+    reserved word, _hdt_arith_start) or $[...] and a ${...} expansion opens a here-document, its delimiter
+    word taken after quote removal (_hdt_delimiter) with its own leading tabs kept; '<<<' is a here-string.
+    A double-quoted string is read up to its closing quote with a $(...) inside it read as a command with
+    its own quoting (its own quotes, a here-document and its body), so neither an inner quote nor a quote in
+    such a body ends the string; an arithmetic $((...)) and a ${...} expansion inside it are skipped whole.
+    A backquoted substitution, quoted or not, ends at its first unescaped backquote, and its text, with
+    bash's backslash escapes removed, is scanned on its own, so a delimiter line glued to the closing
+    backquote ends its body. The top level and each $(...), <(...) and >(...) keep their own pending
+    openers, whose bodies begin at the first unquoted newline back in that same context, in order, so a
+    body opened inside a substitution is read before an outer one, which starts only after the line the
+    substitution closes on, as bash reads them; a substitution closing with its own opener pending is
+    unterminated. Each body ends at the first line equal to its delimiter, or for '<<-' equal to it after
+    the line's leading tabs are removed; for a delimiter with no quoted or escaped part a body line ending
+    in an odd number of backslashes joins the next line first, as bash joins it. Where the scan cannot be
+    sure it fails closed, returning a token of None: a ${...} holding both a '<<' and a substitution
+    (_hdt_skip_param); a single quote, $'...' string or backquote that runs to the end of the command
+    unclosed (_hdt_closed) with a '<<' after its start, which a quote the scan misreads can swallow while
+    bash reads it as an opener; and, once a case word stands inside a substitution (its pattern's ')' read
+    as the closing parenthesis), a substitution closing while an opener read before that parenthesis is
+    pending or the scan ending inside an open quote, an unclosed quoted string or backquote, or a
+    substitution. Linear in the command length apart from the backquote rescan (a
+    backquote k levels deep needs 2^(k-1)-1 backslashes before it, so the depth is at most logarithmic):
+    every character is read once by the scan or once by a body search, and an opener keeps its offset, its
+    line number counted only for the one opener returned (a count at every opener rereads the prefix each
+    time, quadratic in the number of openers)."""
+    n = len(command)
+    i = 0
+    pending = []        # the openers of the current context whose bodies start at its next unquoted newline
+    stack = []          # the enclosing contexts, innermost last: '"' for a double-quoted string, or for a $(, <(
+    #                     or >( a list [parenthesis depth, the pending list of the context around it]
+    waiting = 0         # the openers pending in every context, the current one included
+    case_at = -1        # the offset of the first case word inside a substitution, -1 while none
+    open_at = -1        # the offset of a ', $'...' or backquote running to the end unclosed, -1 while none
+    while i < n:
+        c = command[i]
+        if c == "\\":
+            i += 2
+            continue
+        top = stack[-1] if stack else None
+        if c == "`":
+            end = _hdt_skip_backquote(command, i, n)
+            inner = command[i + 1:end - 1] if end - 1 > i and command[end - 1] == "`" else command[i + 1:end]
+            escapes = _HDT_BACKQUOTE_DQ_ESCAPE_RE if top == '"' else _HDT_BACKQUOTE_ESCAPE_RE
+            hit = _hdt_unterminated(escapes.sub(r"\1", inner))
+            if hit is not None:
+                return hit[0], hit[1], command.count("\n", 0, i) + hit[2]
+            if not _hdt_closed(command, i, end, "`", True):
+                open_at = i
+            i = end
+            continue
+        if top == '"':
+            if c == '"':
+                stack.pop()
+            elif c == "$" and command.startswith("$((", i):
+                i = _hdt_skip_group(command, i + 1, n, "(", ")")
+                continue
+            elif c == "$" and command.startswith("${", i):
+                end, unsure = _hdt_skip_param(command, i, n)
+                if unsure:
+                    return "${", None, command.count("\n", 0, i) + 1
+                i = end
+                continue
+            if not (c == "$" and command.startswith("$(", i)):
+                i += 1
+                continue
+        if c in "'\"":
+            if c == "'":
+                end = _hdt_skip_quote(command, i, n)
+                if not _hdt_closed(command, i, end, "'", False):
+                    open_at = i
+                i = end
+            else:
+                stack.append('"')
+                i += 1
+            continue
+        if c == "$" and command.startswith("$'", i):
+            end = _hdt_skip_quote(command, i + 1, n, ansi_c=True)
+            if not _hdt_closed(command, i + 1, end, "'", True):
+                open_at = i
+            i = end
+            continue
+        if c == "#" and (i == 0 or command[i - 1] in _HDT_COMMENT_AFTER):
+            nl = command.find("\n", i)
+            i = n if nl < 0 else nl
+            continue
+        if c == "$" and command.startswith("$((", i):
+            i = _hdt_skip_group(command, i + 1, n, "(", ")")
+            continue
+        if c == "(" and command.startswith("((", i) and _hdt_arith_start(command, i):
+            i = _hdt_skip_group(command, i, n, "(", ")")
+            continue
+        if c == "$" and command.startswith("$[", i):
+            i = _hdt_skip_group(command, i + 1, n, "[", "]")
+            continue
+        if c == "$" and command.startswith("${", i):
+            end, unsure = _hdt_skip_param(command, i, n)
+            if unsure:
+                return "${", None, command.count("\n", 0, i) + 1
+            i = end
+            continue
+        if c in "$<>" and command.startswith("(", i + 1):
+            stack.append([0, pending])
+            pending = []
+            i += 2
+            continue
+        if (top is not None and case_at < 0 and c == "c" and command.startswith("case", i)
+                and (i == 0 or command[i - 1] in _HDT_COMMENT_AFTER) and command[i + 4:i + 5] in " \t\n"):
+            case_at = i
+        if top is not None and c in "()":
+            if c == "(":
+                top[0] += 1
+            elif top[0]:
+                top[0] -= 1
+            else:
+                if pending:
+                    return pending[0][0], pending[0][1], command.count("\n", 0, pending[0][3]) + 1
+                pending = stack.pop()[1]
+                if case_at >= 0 and waiting:
+                    return "case", None, command.count("\n", 0, case_at) + 1
+            i += 1
+            continue
+        if c == "<" and command.startswith("<<", i):
+            if command.startswith("<<<", i):
+                i += 3
+                continue
+            strip = command.startswith("<<-", i)
+            start = i
+            token, i, quoted = _hdt_delimiter(command, i + (3 if strip else 2), n)
+            if token is not None:
+                pending.append((command[start:i].strip(), token, strip, start, quoted))
+                waiting += 1
+            continue
+        if c == "\n" and pending:
+            i += 1
+            waiting -= len(pending)
+            for opener, token, strip, start, quoted in pending:
+                while True:
+                    if i >= n:
+                        return opener, token, command.count("\n", 0, start) + 1
+                    parts = []
+                    while True:
+                        nl = command.find("\n", i)
+                        end = n if nl < 0 else nl
+                        segment = command[i:end]
+                        i = end + 1
+                        if quoted or nl < 0 or (len(segment) - len(segment.rstrip("\\"))) % 2 == 0:
+                            parts.append(segment)
+                            break
+                        parts.append(segment[:-1])
+                    body_line = "".join(parts)
+                    if body_line == token or (strip and body_line.lstrip("\t") == token):
+                        break
+            pending.clear()
+            continue
+        i += 1
+    if case_at >= 0 and (stack or open_at >= 0):
+        return "case", None, command.count("\n", 0, case_at) + 1
+    if waiting:
+        lists = [pending] + [entry[1] for entry in stack if entry != '"']
+        first = min((found[0] for found in lists if found), key=lambda opener: opener[3], default=None)
+        if first is not None:
+            return first[0], first[1], command.count("\n", 0, first[3]) + 1
+    if open_at >= 0 and _HDT_OPENER_RE.search(command, open_at):
+        opener = "$'" if command.startswith("$'", open_at) else command[open_at]
+        return opener, None, command.count("\n", 0, open_at) + 1
+    return None
+
+
+def heredoc_terminator(data):
+    """sectvl (security/tool-argument-validation), PreToolUse/Bash. DENY-and-educate a here-document whose
+    delimiter line never comes (_hdt_unterminated): for each opener in the raw command text (<<TOKEN, a
+    single- or double-quoted TOKEN, <<-TOKEN) a later line must equal its token (after the leading tabs
+    <<- removes) before the command ends, since otherwise the shell reads the rest of the command as the
+    here-document's body: an interpreter fed that body runs it as program text, and the commands after the
+    mistyped terminator never run. A here-string (<<<), a << inside quotes (including a double-quoted
+    argument inside a double-quoted $(...) or backquote) or a comment and an arithmetic shift ($((1 << 2)))
+    open nothing; a here-document inside a $(...) or backquotes, quoted or not, is read with its body. Hooks
+    never ask. BEST EFFORT: a here-document built at run time (an eval string, a variable, a sourced
+    script) is not seen, and some rare shapes are read otherwise than bash reads them; the residue in the
+    hook manifest states the shapes read, the over-denies and the misses. A missing tool_name takes the
+    shared deny and a non-string command denies fail-safe, as the sibling deny hooks do."""
+    if data.get("hook_event_name") != PRETOOL:
+        return _hard_block("aiqt_hooks: heredoc_terminator wired to unexpected event {!r}; failing closed"
+                           .format(data.get("hook_event_name")))
+    tool_name = data.get("tool_name")
+    if tool_name is None:
+        return _deny_missing_tool_name("sectvl")
+    if tool_name != "Bash":
+        return _allow()                     # a present-but-different tool is out of scope
+    tool_input = data.get("tool_input")
+    command = tool_input.get("command") if isinstance(tool_input, dict) else None
+    if not isinstance(command, str):
+        return _deny(
+            "AIQT rule sectvl (tool-argument-validation): the Bash payload carried no readable command string, "
+            "so the here-document terminator check could not run; it is denied fail-safe. Re-issue a "
+            "well-formed Bash command.",
+            "AIQT guardrail: denied a Bash call with no readable command (rule sectvl, fail-safe).")
+    hit = _hdt_unterminated(command)
+    if hit is None:
+        return _allow()
+    opener, token, line = hit
+    if token is None:
+        return _deny(
+            "AIQT rule sectvl (tool-argument-validation): this command holds {!r} on line {}, a shape whose "
+            "here-document bodies this check cannot place reliably (a ${{...}} expansion holding both a << and "
+            "a command or process substitution, a quote or backquote left open with a << after it, or a case "
+            "statement inside a substitution while a here-document is pending or a quote or substitution is "
+            "left open), so it is denied fail-closed. Close every quote, or move the here-document out of "
+            "that construct, for example into a variable assigned on an earlier line.".format(opener, line),
+            "AIQT guardrail: denied a here-document shape this check cannot read reliably (rule sectvl, "
+            "fail-closed); close every quote, or move the here-document out of the ${...} expansion or case "
+            "statement.")
+    return _deny(
+        "AIQT rule sectvl (tool-argument-validation): the here-document opened by {!r} on line {} of this "
+        "command has no line equal to its delimiter {!r} before the command ends, so the shell would read "
+        "the rest of the command as that here-document's body: a program fed it runs that text, and the "
+        "commands after it never run. End the body with a line holding exactly {!r} (no blanks or carriage "
+        "return around it; only <<- removes leading tabs, never spaces).".format(
+            opener[:80], line, token[:80], token[:80]),
+        "AIQT guardrail: denied a here-document whose delimiter {!r} never closes it (rule sectvl); end its "
+        "body with a line holding exactly that delimiter.".format(token[:80]))
+
+
 # --- secsec: an obvious hardcoded secret in a Write/Edit/MultiEdit/Bash write-form -------------------
 # A COMPENSATING, shift-left control: it does NOT replace the CI secret-scan and gitleaks gates (they
 # remain the real backstop), it moves the same high-signal detection to the moment a secret would be
@@ -37036,6 +37419,7 @@ HANDLERS = {
     "gate_weakening": gate_weakening,
     "commit_msg_subst": commit_msg_subst,
     "pgrep_self_match": pgrep_self_match,
+    "heredoc_terminator": heredoc_terminator,
     "secrets_shift_left": secrets_shift_left,
     "gensrc_guard": gensrc_guard,
     "write_scope_guard": write_scope_guard,
@@ -37079,6 +37463,7 @@ HANDLER_EVENT = {
     "gate_weakening": PRETOOL,
     "commit_msg_subst": PRETOOL,
     "pgrep_self_match": PRETOOL,
+    "heredoc_terminator": PRETOOL,
     "secrets_shift_left": PRETOOL,
     "gensrc_guard": PRETOOL,
     "write_scope_guard": PRETOOL,
