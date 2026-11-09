@@ -616,6 +616,11 @@ ALLOWLIST = (
      " directory, of the repository's own hook source (read from aiqt_hooks.__file__) with the"
      " reviewed literal substitutions of one _IE_MUTANTS entry, each anchor matched exactly once;"
      " no external input"),
+    ("tools/selftest_orch_hooks.py", "_cs_load", "code", 1,
+     "self-test loader: exec_module of the repository's own .preview/stamp-truth-stop.py or"
+     " .preview/future-stamp-write.py (its two callers pass those literal paths under repo_root()),"
+     " never registered in sys.modules, the equivalent of an import, so the console-stamp parity"
+     " checks compare against the hooks' own copies; no external input"),
     ("tools/_close_selftest.py", "_StCloseFault.__init__", "shell", 1,
      "self-test fault injector: wraps the os functions named in its own fixed _ST_WATCHED"
      " tuple (descriptor stat and seek calls) to count closes; never runs a shell"),
