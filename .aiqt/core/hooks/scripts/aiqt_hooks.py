@@ -19372,6 +19372,26 @@ def pgrep_self_match(data):
 # a '#' starts a comment.
 _HDT_WORD_END = frozenset(" \t\n;&|<>()")
 _HDT_COMMENT_AFTER = frozenset(" \t\n;&|()<>")
+# The backslash escapes bash removes from the text of a backquoted command substitution before it reads that
+# text as a command, outside double quotes and inside them.
+_HDT_BACKQUOTE_ESCAPE_RE = re.compile(r"\\([\\`$])")
+_HDT_BACKQUOTE_DQ_ESCAPE_RE = re.compile(r'\\([\\`$"])')
+
+
+def _hdt_skip_backquote(command, i, n):
+    """The index just past the backquoted command substitution opening at command[i], or n when it never
+    closes: it ends at the first backquote no backslash escapes, whatever quotes stand inside it, as bash
+    reads it."""
+    i += 1
+    while i < n:
+        c = command[i]
+        if c == "\\":
+            i += 2
+            continue
+        if c == "`":
+            return i + 1
+        i += 1
+    return n
 
 
 def _hdt_skip_quote(command, i, n, ansi_c=False):
@@ -19415,53 +19435,105 @@ def _hdt_skip_group(command, i, n, opener, closer):
 
 
 def _hdt_delimiter(command, i, n):
-    """Read the delimiter word of a here-document opener from command[i] (past any blanks): (token, end),
-    the token after quote removal, or (None, end) when no word follows (a syntax error the shell refuses
-    before running anything)."""
+    """Read the delimiter word of a here-document opener from command[i] (past any blanks): (token, end,
+    quoted), the token after quote removal and quoted True when any part of the word is quoted or escaped
+    (bash then reads the body as written, with no backslash-newline joining), or (None, end, False) when no
+    word follows (a syntax error the shell refuses before running anything). A backslash-newline inside the
+    word is removed, as bash removes it before reading the word; a $'...' part is decoded as bash decodes it
+    (_ansi_c_escape) and a $"..." part reads as a double-quoted one, the '$' dropped. A word holding a
+    ${...} or $(...) with a blank or parenthesis inside ends there (a disclosed over-deny)."""
     while i < n and command[i] in " \t":
         i += 1
     parts = []
+    quoted = False
     while i < n and command[i] not in _HDT_WORD_END:
         c = command[i]
+        if c == "\\" and command.startswith("\\\n", i):
+            i += 2
+            continue
+        ansi_c = command.startswith("$'", i)
+        if c == "$" and command.startswith(("$'", '$"'), i):
+            i += 1
+            c = command[i]
         if c == "\\":
             parts.append(command[i + 1:i + 2])
+            quoted = True
             i += 2
         elif c in "'\"":
-            end = _hdt_skip_quote(command, i, n)
+            end = _hdt_skip_quote(command, i, n, ansi_c=ansi_c)
             closed = end - i >= 2 and command[end - 1] == c
             inner = command[i + 1:end - 1] if closed else command[i + 1:end]
             if c == '"':
                 inner = re.sub(r'\\([\\"$`])', r"\1", inner)
+            elif ansi_c:
+                inner = _ANSI_C_ESCAPE_RE.sub(_ansi_c_escape, inner)
             parts.append(inner)
+            quoted = True
             i = end
         else:
             parts.append(c)
             i += 1
     if not parts:
-        return None, i
-    return "".join(parts), i
+        return None, i, False
+    return "".join(parts), i, quoted
 
 
 def _hdt_unterminated(command):
     """The first here-document opener of the raw command text with no line equal to its delimiter before
     the command ends, as (opener, token, line), or None. The scan reads the command as the shell reads its
     input: a '<<' or '<<-' outside quotes, a comment, an arithmetic $((...)), ((...)) or $[...] and a ${...}
-    expansion opens a here-document, its delimiter word taken after quote removal; '<<<' is a here-string.
-    The bodies of the openers on a line begin after that line's unquoted newline, in order, and each ends at
-    the first line equal to its delimiter, read after removing the line's leading tabs for '<<-'. Linear in
-    the command length: every character is read once by the scan or once by a body search, and an opener
-    keeps its offset, its line number counted only for the one opener returned (a count at every opener
-    rereads the prefix each time, quadratic in the number of openers)."""
+    expansion opens a here-document, its delimiter word taken after quote removal (_hdt_delimiter), the
+    leading tabs removed from it for '<<-'; '<<<' is a here-string. A double-quoted string is read up to
+    its closing quote with a $(...) inside it read as a command with its own quoting (its own quotes, a
+    here-document and its body), so neither an inner quote nor a quote in such a body ends the string; an
+    arithmetic $((...)) inside it is skipped whole. A backquoted substitution, quoted or not, ends at its
+    first unescaped backquote, and its text, with bash's backslash escapes removed, is scanned on its own,
+    so a delimiter line glued to the closing backquote ends its body. The bodies of the openers on a line
+    begin after that line's unquoted newline (at the top level or inside a $(...)), in order, and each ends
+    at the first line equal to its delimiter, read after removing the line's leading tabs for '<<-'; for a
+    delimiter with no quoted or escaped part a body line ending in an odd number of backslashes joins the
+    next line first, as bash joins it. Linear in the command length apart from the backquote rescan (a
+    backquote k levels deep needs 2^(k-1)-1 backslashes before it, so the depth is at most logarithmic):
+    every character is read once by the scan or once by a body search, and an opener keeps its offset, its
+    line number counted only for the one opener returned (a count at every opener rereads the prefix each
+    time, quadratic in the number of openers)."""
     n = len(command)
     i = 0
     pending = []
+    stack = []          # the open contexts, innermost last: '"' for a double-quoted string, a depth for a $(
     while i < n:
         c = command[i]
         if c == "\\":
             i += 2
             continue
+        top = stack[-1] if stack else None
+        if c == "`":
+            end = _hdt_skip_backquote(command, i, n)
+            inner = command[i + 1:end - 1] if end - 1 > i and command[end - 1] == "`" else command[i + 1:end]
+            escapes = _HDT_BACKQUOTE_DQ_ESCAPE_RE if top == '"' else _HDT_BACKQUOTE_ESCAPE_RE
+            hit = _hdt_unterminated(escapes.sub(r"\1", inner))
+            if hit is not None:
+                return hit[0], hit[1], command.count("\n", 0, i) + hit[2]
+            i = end
+            continue
+        if top == '"':
+            if c == '"':
+                stack.pop()
+            elif c == "$" and command.startswith("$((", i):
+                i = _hdt_skip_group(command, i + 1, n, "(", ")")
+                continue
+            elif c == "$" and command.startswith("$(", i):
+                stack.append(0)
+                i += 2
+                continue
+            i += 1
+            continue
         if c in "'\"":
-            i = _hdt_skip_quote(command, i, n)
+            if c == "'":
+                i = _hdt_skip_quote(command, i, n)
+            else:
+                stack.append('"')
+                i += 1
             continue
         if c == "$" and command.startswith("$'", i):
             i = _hdt_skip_quote(command, i + 1, n, ansi_c=True)
@@ -19482,26 +19554,43 @@ def _hdt_unterminated(command):
         if c == "$" and command.startswith("${", i):
             i = _hdt_skip_group(command, i + 1, n, "{", "}")
             continue
+        if top is not None and c in "()":
+            if c == "(":
+                stack[-1] += 1
+            elif top:
+                stack[-1] -= 1
+            else:
+                stack.pop()
+            i += 1
+            continue
         if c == "<" and command.startswith("<<", i):
             if command.startswith("<<<", i):
                 i += 3
                 continue
             strip = command.startswith("<<-", i)
             start = i
-            token, i = _hdt_delimiter(command, i + (3 if strip else 2), n)
+            token, i, quoted = _hdt_delimiter(command, i + (3 if strip else 2), n)
             if token is not None:
-                pending.append((command[start:i].strip(), token, strip, start))
+                token = token.lstrip("\t") if strip else token
+                pending.append((command[start:i].strip(), token, strip, start, quoted))
             continue
         if c == "\n" and pending:
             i += 1
-            for opener, token, strip, start in pending:
+            for opener, token, strip, start, quoted in pending:
                 while True:
                     if i >= n:
                         return opener, token, command.count("\n", 0, start) + 1
-                    nl = command.find("\n", i)
-                    end = n if nl < 0 else nl
-                    body_line = command[i:end]
-                    i = end + 1
+                    parts = []
+                    while True:
+                        nl = command.find("\n", i)
+                        end = n if nl < 0 else nl
+                        segment = command[i:end]
+                        i = end + 1
+                        if quoted or nl < 0 or (len(segment) - len(segment.rstrip("\\"))) % 2 == 0:
+                            parts.append(segment)
+                            break
+                        parts.append(segment[:-1])
+                    body_line = "".join(parts)
                     if (body_line.lstrip("\t") if strip else body_line) == token:
                         break
             pending = []
@@ -19518,11 +19607,13 @@ def heredoc_terminator(data):
     single- or double-quoted TOKEN, <<-TOKEN) a later line must equal its token (after the leading tabs
     <<- removes) before the command ends, since otherwise the shell reads the rest of the command as the
     here-document's body: an interpreter fed that body runs it as program text, and the commands after the
-    mistyped terminator never run. A here-string (<<<), a << inside quotes or a comment and an arithmetic
-    shift ($((1 << 2))) open nothing. Hooks never ask. BEST EFFORT: a here-document built at run time (an
-    eval string, a variable, a sourced script) is not seen; the residue in the hook manifest states the
-    shapes read and the misses. A missing tool_name takes the shared deny and a non-string command denies
-    fail-safe, as the sibling deny hooks do."""
+    mistyped terminator never run. A here-string (<<<), a << inside quotes (including a double-quoted
+    argument inside a double-quoted $(...) or backquote) or a comment and an arithmetic shift ($((1 << 2)))
+    open nothing; a here-document inside a $(...) or backquotes, quoted or not, is read with its body. Hooks
+    never ask. BEST EFFORT: a here-document built at run time (an eval string, a variable, a sourced
+    script) is not seen, and some rare shapes are read otherwise than bash reads them; the residue in the
+    hook manifest states the shapes read, the over-denies and the misses. A missing tool_name takes the
+    shared deny and a non-string command denies fail-safe, as the sibling deny hooks do."""
     if data.get("hook_event_name") != PRETOOL:
         return _hard_block("aiqt_hooks: heredoc_terminator wired to unexpected event {!r}; failing closed"
                            .format(data.get("hook_event_name")))

@@ -4325,8 +4325,9 @@ def _test_pgrep_self_match(failures):
 
 
 # heredoc_terminator rows (sectvl): (label, command, want, mutant). Each row must reach `want` on the real
-# hook; a "deny" row must go red (allow) with the detector disabled, and a row naming a mutant must go red
-# (the other decision) on a copy of the hook source with that one rule of the scan reverted (_HDT_MUTANTS).
+# hook; a "deny" row must go red (allow) with the detector disabled, a row naming a mutant must go red (the
+# other decision) on a copy of the hook source with that one rule of the scan reverted (_HDT_MUTANTS), and
+# an "allow" row naming no mutant must go red (deny) with its closing line mistyped (_HDT_CLOSING_LINE).
 _HDT_ROWS = (
     ("(hdt-d1) unquoted delimiter mistyped", "cat <<EOF\nx\nEOFF\necho after", "deny", None),
     ("(hdt-d2) single-quoted delimiter mistyped", "python3 - <<'PY'\nprint(1)\nPYY\necho after", "deny", None),
@@ -4361,15 +4362,64 @@ _HDT_ROWS = (
     ("(hdt-a17) << in a $[...] expansion", "echo $[1 << 2]", "allow", "arith-bracket"),
     ("(hdt-a18) << in a ${...} expansion", "x=a; echo ${x/<</y}", "allow", "param"),
     ("(hdt-a19) backslash-escaped delimiter closed", "cat <<\\EOF\nx\nEOF", "allow", "no-quote-removal"),
+    ("(hdt-a20) << in a double-quoted argument inside a double-quoted $(...)",
+     "n=\"$(echo 'a<<b' | grep -c \"<<\")\"; echo \"$n\"", "allow", "dq-subst"),
+    ("(hdt-a21) commit message form with an odd quote and a << in its body",
+     "echo \"$(cat <<'EOF'\nSay \"hi\nuse a <<x here\nEOF\n)\"\necho after", "allow", "subst-bodies"),
+    ("(hdt-a22) << in a double-quoted backquote inside double quotes", "echo \"n=`echo \"a<<b\"`\"; echo after",
+     "allow", "backquote"),
+    ("(hdt-a23) arithmetic shift in $((...)) inside double quotes", "echo \"$((1 << 2))\"", "allow",
+     "dq-arith"),
+    ("(hdt-a24) terminator glued to a closing backquote", "x=`cat <<EOF\nhi\nEOF`; echo \"$x\"", "allow",
+     "backquote"),
+    ("(hdt-a25) ANSI-C quoted delimiter closed", "cat <<$'EOF'\nx\nEOF\necho after", "allow", "dollar-quote"),
+    ("(hdt-a26) ANSI-C delimiter decoded", "cat <<$'E\\x4fF'\nx\nEOF\necho after", "allow", "ansi-c-decode"),
+    ("(hdt-a27) $\"...\" delimiter closed", "cat <<$\"EOF\"\nx\nEOF\necho after", "allow", "dollar-quote"),
+    ("(hdt-a28) backslash-newline inside the delimiter word", "cat <<A\\\nB\nx\nAB\necho after", "allow",
+     "delim-continuation"),
+    ("(hdt-a29) unquoted body joined by backslash-newline into the delimiter", "cat <<EOF\nE\\\nOF\necho after",
+     "allow", "body-join"),
+    ("(hdt-a30) <<- removes leading tabs from the delimiter too", "cat <<-'\tEOF'\nx\n\tEOF\necho after", "allow",
+     "dash-delim"),
+    ("(hdt-a31) << in double quotes after a closed $(...)", "n=\"$(echo hi)\"; echo \"a<<b\"", "allow",
+     "subst-parens"),
+    ("(hdt-d10) backslash-newline in an unquoted body hides the terminator", "cat <<EOF\nx\\\nEOF\necho after",
+     "deny", "body-join"),
+    ("(hdt-d11) $\"...\" delimiter with a $ kept on its line", "cat <<$\"EOF\"\nx\n$EOF\necho after", "deny",
+     "dollar-quote"),
+    ("(hdt-d12) here-document unterminated in a double-quoted $(...)", "echo \"$(cat <<EOF\nhi\n)\"\necho after",
+     "deny", "dq-subst"),
+    ("(hdt-d13) here-document mistyped in backquotes", "x=`cat <<EOF\nhi\nEOFF`; echo \"$x\"; echo after", "deny",
+     None),
+    ("(hdt-d14) quote in a $(...) here-document body, a later opener unterminated",
+     "echo \"$(cat <<'EOF'\nit's\nEOF\n)\"\ncat <<X\nx", "deny", None),
 )
+# An allow row that pins no single rule of the scan (its mutant is None) names the one line, its delimiter
+# line, that closes it: with only that line mistyped the same command must deny, so its allow comes from that
+# delimiter line and not from an opener the scan missed.
+_HDT_CLOSING_LINE = {"(hdt-a1)": 2, "(hdt-a5)": 4, "(hdt-a12)": 2, "(hdt-a13)": 2, "(hdt-a14)": 2,
+                     "(hdt-a15)": 2}
 # Each mutant reverts one rule of the scan in a copy of the hook source: (anchor, replacement) edits, each
 # anchor occurring exactly once.
 _HDT_MUTANTS = {
     "herestring": (("                i += 3\n                continue\n            strip = ",
                     "                i += 1\n            strip = "),),
-    "quotes": (('        if c in "\'\\"":\n            i = _hdt_skip_quote(command, i, n)\n            continue\n'
-                '        if c == "$" and command.startswith("$\'", i):\n',
-                '        if c == "$" and command.startswith("$\'", i):\n'),),
+    "quotes": (('        if c in "\'\\"":\n            if c == "\'":\n',
+                '        if False:\n            if c == "\'":\n'),),
+    "dq-subst": (('            elif c == "$" and command.startswith("$(", i):\n                stack.append(0)\n',
+                  '            elif False:\n                stack.append(0)\n'),),
+    "dq-arith": (('            elif c == "$" and command.startswith("$((", i):\n', '            elif False:\n'),),
+    "subst-bodies": (('        if c == "\\n" and pending:\n', '        if c == "\\n" and pending and not stack:\n'),),
+    "subst-parens": (('        if top is not None and c in "()":\n', '        if False:\n'),),
+    "backquote": (('        if c == "`":\n            end = _hdt_skip_backquote(',
+                   '        if False:\n            end = _hdt_skip_backquote('),),
+    "dollar-quote": (('        if c == "$" and command.startswith(("$\'", \'$"\'), i):\n', '        if False:\n'),),
+    "ansi-c-decode": (('            elif ansi_c:\n                inner = _ANSI_C_ESCAPE_RE',
+                       '            elif False:\n                inner = _ANSI_C_ESCAPE_RE'),),
+    "delim-continuation": (('        if c == "\\\\" and command.startswith("\\\\\\n", i):\n', '        if False:\n'),),
+    "body-join": (('                        if quoted or nl < 0 or ',
+                   '                        if True or quoted or nl < 0 or '),),
+    "dash-delim": (('                token = token.lstrip("\\t") if strip else token\n', '                pass\n'),),
     "ansi-c": (('        if c == "$" and command.startswith("$\'", i):\n',
                 '        if False:\n'),),
     "comment": (('        if c == "#" and (i == 0 or command[i - 1] in _HDT_COMMENT_AFTER):\n',
@@ -4386,8 +4436,8 @@ _HDT_MUTANTS = {
                     '                    if body_line == token:\n'),),
     "dash-always": (('                    if (body_line.lstrip("\\t") if strip else body_line) == token:\n',
                      '                    if body_line.lstrip("\\t") == token:\n'),),
-    "first-only": (("            for opener, token, strip, start in pending:\n",
-                    "            for opener, token, strip, start in pending[:1]:\n"),),
+    "first-only": (("            for opener, token, strip, start, quoted in pending:\n",
+                    "            for opener, token, strip, start, quoted in pending[:1]:\n"),),
 }
 
 
@@ -4418,13 +4468,33 @@ def _hdt_mutant_handlers(failures, tmp):
 
 def _test_heredoc_terminator(failures, tmp):
     """heredoc_terminator rows (_HDT_ROWS); no row executes a command. Each deny row must also be red with
-    the detector (_hdt_unterminated) patched to find nothing, and each row naming a mutant must be red on
-    that mutant, so every row pins one rule of the scan."""
+    the detector (_hdt_unterminated) patched to find nothing, each row naming a mutant must be red on that
+    mutant, and each allow row naming no mutant must deny with only its closing delimiter line mistyped
+    (_HDT_CLOSING_LINE), so every row has a red check: a deny row and a row with a mutant pin one rule of
+    the scan, and an allow row with no mutant pins that its delimiter line, not a missed opener, allows it."""
     handler = aiqt_hooks.heredoc_terminator
     for label, command, want, _mutant in _HDT_ROWS:
         got = _decision(handler, command)
         if got != want:
             failures.append("{}: expected {}, got {}".format(label, want, got))
+    closing = {}
+    for label, command, want, mutant in _HDT_ROWS:
+        key = label.split(" ", 1)[0]
+        if want == "allow" and mutant is None:
+            closing[key] = command
+    if set(closing) != set(_HDT_CLOSING_LINE):
+        failures.append("(hdt-red) every allow row naming no mutant, and only those, must name its closing "
+                        "line: rows {!r}, named {!r}".format(sorted(closing), sorted(_HDT_CLOSING_LINE)))
+    for key, command in sorted(closing.items()):
+        lines = command.split("\n")
+        at = _HDT_CLOSING_LINE.get(key)
+        if at is None or not 0 < at < len(lines):
+            continue
+        lines[at] += "X"
+        got = _decision(handler, "\n".join(lines))
+        if got != "deny":
+            failures.append("{}: with its closing delimiter line {} mistyped this allow row must go red (deny), "
+                            "got {}".format(key, at, got))
     saved = aiqt_hooks._hdt_unterminated
     aiqt_hooks._hdt_unterminated = lambda command: None
     try:
