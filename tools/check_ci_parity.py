@@ -4930,9 +4930,14 @@ def _prepare_stubs(root, python3=_STUB_PYTHON3):
     that moment until it execs, so a stub written while scenarios run can be caught open
     by a sibling's fork. Scenario trees therefore hold no file that is executed
     directly: only the runner text, whose path is passed to bash as its script argument,
-    and the call log. Self-test vector 27 checks the order of the writes, not that
-    behaviour: in runner_naming_problems, every stub is written and chmodded on the main
-    thread before the scenario pool is constructed.
+    and the call log. Self-test vector 27 checks recorded file operations and does not
+    test that platform behaviour: while runner_naming_problems runs, an audit hook
+    records each open for writing, chmod, rename, link and symlink, and the vector
+    requires executable python3 and gitleaks stubs in the one stub directory all
+    scenarios share, no executable in a scenario tree, every stub-directory executable
+    to appear in some recorded event, and, apart from the one chmod the vector injects,
+    no recorded event on such an executable to happen off the main thread or after the
+    scenario pool is constructed.
     """
     bin_dir = root / "bin"
     bin_dir.mkdir()
