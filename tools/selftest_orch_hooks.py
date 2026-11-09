@@ -17249,6 +17249,110 @@ def _main_isolated(report_path=None):
                 nr_lines[-1].encode("utf-8")).hexdigest()}), encoding="utf-8")
         check("attest/git-failure-tracked-decision-holds",
               aiqt_hooks._orch_register_authority(str(nonrepo), str(nr_reg))[0], "hold")
+        # A declared register that is not strict UTF-8 text (a non-UTF-8 byte, an encoded surrogate,
+        # a sequence cut off at the end of the file) is unreadable: both register readers answer
+        # cannot-evaluate and the stop HOLDS. An exception out of a reader is a handler crash, which
+        # the Stop dispatcher turns into a warning and an allowed stop. _nu_try returns a raised
+        # exception as a named result, so a reader that raises is a red check, not a crashed suite.
+        def _nu_try(fn):
+            try:
+                return fn()
+            except Exception as exc:
+                return ("raised", type(exc).__name__)
+
+        # CONTROLS: a valid register whose text carries two, three and four byte UTF-8 sequences
+        # reads clean and its fresh approved row still allows, so the holds below come from the
+        # bytes that do not decode, not from non-ASCII text
+        nu_good = json.dumps(
+            {"seq": 1, "id": "AT-1", "ts": now_iso(0), "status": "accepted",
+             "mistake": "attests ci café € \U0001f600", "evidence": "run pending",
+             "rule": "corexc", "guardrail": "n/a", "ref": "ci", "check_ref": "seed.txt",
+             "prev": "0" * 64}, sort_keys=True, ensure_ascii=False) + "\n"
+        nu_bytes = nu_good.encode("utf-8")
+        write_at(nu_good)
+        check("attest/nonutf8-control-multibyte-validates-clean",
+              _nu_try(lambda: aiqt_hooks._orch_validate_attestations(areg, str(a.root))), [])
+        a.set_items([ext("AT-I1", "ci")])
+        a.set_turn_state({})
+        check("attest/nonutf8-control-multibyte-stop-allows", _nu_try(lambda: _verdict(astop())),
+              "allow")
+        nu_hooks = os.path.dirname(os.path.abspath(aiqt_hooks.__file__))
+        nu_home = tmp / "nonutf8-home"
+        nu_home.mkdir()
+        for nu_name, nu_tail in (("byte", b"\xff\n"), ("surrogate", b"\xed\xa0\x80\n"),
+                                 ("truncated", b"\xe2\x82")):
+            # a fresh ok snapshot bound to the valid register, then the undecodable bytes appended
+            # past the anchored row
+            write_at(nu_good)
+            aiqt_hooks._orch_validate_attestations(areg, str(a.root))
+            at_reg.write_bytes(nu_bytes + nu_tail)
+            a.set_items([ext("AT-I1", "ci")])
+            a.set_turn_state({})
+            check("attest/nonutf8-{}-stop-holds".format(nu_name),
+                  _nu_try(lambda: _verdict(astop())), "block2")
+            if nu_name == "byte":
+                # the whole dispatcher in a child process: the stop is denied (exit 2, no stdout),
+                # never a warning on exit 0 that lets the stop through
+                a.set_turn_state({})
+                nu_ctl = subprocess.run(
+                    [sys.executable, "-I", "-B", "-c", _CEILED_DISPATCH_CHILD, nu_hooks,
+                     json.dumps(sorted(_registry_ceiling(a.root, None).above)), "orch_stop_guard"],
+                    input=json.dumps(a.payload("Stop")), capture_output=True, text=True,
+                    timeout=120, env=_controlled_child_env(nu_home))
+                check("attest/nonutf8-byte-dispatcher-denies-stop",
+                      (nu_ctl.returncode, nu_ctl.stdout.strip()), (2, ""))
+            nu_rows = _nu_try(lambda: aiqt_hooks._orch_chained_rows(str(at_reg), "AT-"))
+            check("attest/nonutf8-{}-chain-reader-cannot-evaluate".format(nu_name),
+                  (nu_rows[0], str(nu_rows[1]).startswith("not UTF-8 text")), (None, True))
+            nu_auth = _nu_try(lambda: aiqt_hooks._orch_register_authority(str(a.root), str(at_reg)))
+            check("attest/nonutf8-{}-authority-holds".format(nu_name),
+                  (nu_auth[0], "not UTF-8 text" in str(nu_auth[1])), ("hold", True))
+            nu_found = _nu_try(lambda: aiqt_hooks._orch_validate_attestations(areg, str(a.root)))
+            nu_snap = json.loads((asd / "attestations-validated.json").read_text(encoding="utf-8"))
+            check("attest/nonutf8-{}-validate-holds-snapshot".format(nu_name),
+                  (isinstance(nu_found, list) and any(
+                      "fails its inline chain/shape check (not UTF-8 text" in x for x in nu_found),
+                   nu_snap.get("status")), (True, "unreadable"))
+        # the declared mistakes register is read by the same chain reader: a non-UTF-8 byte there is
+        # a finding, never an exception out of the audit
+        write_at(nu_good)
+        mr_reg.write_bytes(b"\xff\n")
+        nu_mr = _nu_try(lambda: aiqt_hooks._orch_validate_attestations(areg, str(a.root)))
+        check("attest/nonutf8-mistakes-register-finding",
+              isinstance(nu_mr, list) and any(x.startswith(
+                  "declared mistakes register fails its inline chain/shape check (not UTF-8 text")
+                  for x in nu_mr), True)
+        mr_reg.write_text("", encoding="utf-8")
+        # a tracked register is compared with its merge-base state, read from git as strict UTF-8:
+        # a CONTROL first (a valid tracked register answers ok), then a merge-base state that is not
+        # UTF-8 text under a valid working copy, which is a HOLD
+        nu_repo = tmp / "authority-tracked"
+        nu_repo.mkdir()
+
+        def nu_git(*args):
+            subprocess.run(["git", "-C", str(nu_repo), "-c", "user.name=T",
+                            "-c", "user.email=t@example.invalid", "-c", "commit.gpgsign=false"]
+                           + list(args), check=True, capture_output=True, timeout=30)
+
+        nu_git("init", "-q", "-b", "main")
+        nu_reg = nu_repo / "attestations.jsonl"
+        nu_reg.write_bytes(nu_bytes)
+        nu_git("add", "attestations.jsonl")
+        nu_git("commit", "-q", "-m", "valid register")
+        nu_git("update-ref", "refs/remotes/origin/HEAD", "HEAD")
+        check("attest/nonutf8-control-tracked-register-ok",
+              _nu_try(lambda: aiqt_hooks._orch_register_authority(str(nu_repo), str(nu_reg)))[0],
+              "ok")
+        nu_reg.write_bytes(nu_bytes + b"\xff\n")
+        nu_git("commit", "-q", "-a", "-m", "register with a non-UTF-8 byte")
+        nu_git("update-ref", "refs/remotes/origin/HEAD", "HEAD")
+        nu_reg.write_bytes(nu_bytes)
+        nu_tracked = _nu_try(lambda: aiqt_hooks._orch_register_authority(str(nu_repo), str(nu_reg)))
+        check("attest/nonutf8-tracked-merge-base-holds",
+              (nu_tracked[0], "merge-base authority is not UTF-8 text" in str(nu_tracked[1])),
+              ("hold", True))
+        # leave the attestation register as the anchor vectors left it
+        write_at(mirror_tip)
 
         # ---------- GD-127: the systemic-lapse lifecycle (verdict-preservation legs) ----------
         # The appender validates in the register gate's own root, resolved from the gate's
