@@ -92,9 +92,19 @@ generator alone cannot assert:
   - the site's Claude Code hook total: each hook-count statement SITE_HOOK_FACTS names must be
     present in its site/draft-src source (the hand-written page source tools/gen_draft_site.py
     renders and drift-gates the page against) and must state the same expected_counts hook total
-    the landing README is rendered from, and every "N hooks" or "N Claude Code hooks" figure in any
-    site/draft-src/*.toml source must state that total too (a figure spelled in words or written
-    with a thousands separator is not read, a disclosed residual);
+    the landing README is rendered from, and every hook figure in any site/draft-src/*.toml source
+    must state that total too. Both read the parsed TOML string values, never the raw file text, so
+    a TOML comment can neither satisfy nor trip them, and each value is read as it renders: HTML
+    comments and tags removed, character references unescaped, format characters dropped, Unicode
+    decimal digits read as digits and whitespace (U+00A0 included) folded to one space. A hook
+    figure is a number before "hook" or "hooks", joined by whitespace or a hyphen and with at most
+    three words between (3-hook, 3 Claude Code hook, 3 opt-in hooks), and not followed by a hyphen
+    or a letter (25 hook-linked rules is not one). It over-reads: a number about something else
+    that sits within three words of "hooks" (1 hooks file, 17 frameworks and hooks) is a finding.
+    It does not read a figure spelled in words, written with a thousands separator or with a
+    non-decimal numeric character such as a superscript, more than three words from its noun, or
+    held in a key or a non-string value; gen_draft_site refuses a subfolder or any non-.toml
+    entry in site/draft-src, so no other file there renders and none is read;
   - the disclosure's shipped-path declaration (the [[code]]/[[noncode]] prefix rows of disclosure.toml,
     the same validated source gen_disclosure renders the public shipped-code sentence from): every
     path the release manifest (.aiqt/manifest.toml) lists must fall under a declared prefix (a
@@ -160,6 +170,7 @@ if tuple(sys.version_info[:2]) < (3, 14):
         pass
     os._exit(2)
 
+import html
 import json
 import re
 import unicodedata
@@ -875,9 +886,11 @@ def check_readme_counts(root, manifests, findings):
 # under site/draft-src/ (tools/gen_draft_site.py renders each page from its source and drift-gates
 # the rendered page against it), so this leg binds those statements to the expected_counts hook total
 # the landing README is rendered from. Each (source, label, wording) below is REQUIRED in its source:
-# a reworded statement is a missing-wording finding, never silently unchecked. Every other
-# "N hooks" or "N Claude Code hooks" figure in ANY site/draft-src/*.toml source must state the same
-# total, so a new sentence carrying a stale figure fails too.
+# a reworded statement is a missing-wording finding, never silently unchecked. Every other hook
+# figure (SITE_HOOK_FIGURE) in ANY site/draft-src/*.toml source must state the same total, so a new
+# sentence carrying a stale figure fails too. Both read the parsed string values as they render
+# (_site_rendered_text), so a TOML comment, which never renders, can neither satisfy a wording nor
+# carry a figure, and an entity, a tag, a no-break space or a non-ASCII decimal digit cannot hide one.
 SITE_DRAFT_SRC = Path("site") / "draft-src"
 SITE_HOOK_FACTS = (
     ("home.toml", "home page intro",
@@ -885,24 +898,84 @@ SITE_HOOK_FACTS = (
     ("home.toml", "home page value paragraph", r"\bIts " + _NUM + r" Claude Code hooks\b"),
     ("install-details.toml", "install details page", r"\bThe " + _NUM + r" Claude Code hooks\b"),
 )
-SITE_HOOK_FIGURE = re.compile(_NUM + r"(?:\s+Claude\s+Code)?\s+hooks\b", re.I)
+# A number, then "hook" or "hooks", joined by whitespace or a hyphen with at most three words between
+# (3-hook, 3 Claude Code hook, 3 opt-in hooks; a word may hold inner hyphens), or written straight on
+# (3hooks, which a removed <br> leaves), and the noun not continued by a letter or a hyphen, so the
+# compound adjective in "25 are hook-linked" is not a figure. The words between are not checked, so a
+# number about something else within three words of the noun is read as a hook figure (a disclosed
+# over-read that fails toward a finding).
+_SITE_WORD = r"[^\W\d_]+(?:-[^\W\d_]+)*"
+SITE_HOOK_FIGURE = re.compile(
+    _NUM + r"(?:[\s-]+(?:" + _SITE_WORD + r"[\s-]+){0,3})?hooks?(?![^\W\d_]|-)", re.I)
+_SITE_HTML_COMMENT = re.compile(r"<!--.*?(?:-->|\Z)", re.S)
+_SITE_TAG = re.compile(r"<[^>]*>")
+_SITE_SPACE = re.compile(r"\s+")
+
+
+def _site_char(ch):
+    """One character as the sweep reads it: a format character (category Cf, such as a zero-width
+    space or a soft hyphen) renders as nothing, and a Unicode decimal digit (a fullwidth or
+    Arabic-Indic 3, for example) is read as its ASCII digit."""
+    if unicodedata.category(ch) == "Cf":
+        return ""
+    digit = unicodedata.decimal(ch, None)
+    return ch if digit is None else str(digit)
+
+
+def _site_rendered_text(value):
+    """One string value of a parsed site/draft-src source as it reads on the page: HTML comments and
+    tags removed (a tag renders as nothing, so <b>3</b> hooks reads as 3 hooks), then HTML character
+    references unescaped once, named and numeric (&nbsp;, &#32;, &#51;), then each character read by
+    _site_char, then every run of whitespace (U+00A0 and the other Unicode spaces included) folded to
+    one space. Every string value is read as HTML, so an entity in a field the generator escapes is
+    read as the character it names (an over-read, never a miss)."""
+    text = _SITE_HTML_COMMENT.sub("", value)
+    text = _SITE_TAG.sub("", text)
+    text = html.unescape(text)
+    text = "".join(_site_char(ch) for ch in text)
+    return _SITE_SPACE.sub(" ", text)
+
+
+def _site_values(path):
+    """Every string value in one site/draft-src source, parsed as TOML (tables and arrays walked in
+    document order; keys and non-string values are not read), each as _site_rendered_text gives it.
+    A missing source is OSError and an unparsable one ValueError, both fail-closed (exit 2)."""
+    if not path.is_file():
+        raise OSError("required surface missing: {}".format(path))
+    try:
+        doc = load_toml(path)
+    except ValueError as exc:
+        raise ValueError("{}: cannot parse ({})".format(path, exc)) from exc
+    values, stack = [], [doc]
+    while stack:
+        item = stack.pop()
+        if isinstance(item, str):
+            values.append(_site_rendered_text(item))
+        elif isinstance(item, dict):
+            stack.extend(reversed(list(item.values())))
+        elif isinstance(item, list):
+            stack.extend(reversed(item))
+    return values
 
 
 def check_site_hook_counts(root, manifests, findings):
     """The site's hook-count statements against the expected_counts hook total: each SITE_HOOK_FACTS
-    wording must be present in its site/draft-src source with that total, and every SITE_HOOK_FIGURE
-    figure in every site/draft-src/*.toml source must equal it. A missing source directory or a
-    missing named source fails closed (exit 2). The figure is read in ASCII digits only: a figure
-    spelled in words or with a thousands separator is not read by the sweep (a disclosed residual;
-    each required wording still demands ASCII digits, so rewording one of those into words is a
-    missing-wording finding)."""
+    wording must be present in the parsed string values of its site/draft-src source with that
+    total, and every SITE_HOOK_FIGURE figure in those values of every site/draft-src/*.toml source
+    must equal it. A missing source directory, a missing named source or a source that does not
+    parse fails closed (exit 2). A TOML comment is not a value, so repeating a required wording in a
+    comment does not satisfy it: a statement reworded into words in its value is a missing-wording
+    finding whatever the comments say. The sweep does not read a figure spelled in words, written
+    with a thousands separator or a non-decimal numeric character, or held more than three words
+    from its noun (disclosed residuals), and it reads a number about something else that sits
+    within three words of "hooks" as a hook figure (a disclosed over-read)."""
     want = str(expected_counts(root, manifests)["hooks"])
     src_dir = root / SITE_DRAFT_SRC
     if not src_dir.is_dir():
         raise OSError("required surface missing: {}".format(src_dir))
     for name, label, wording in SITE_HOOK_FACTS:
         rel = (SITE_DRAFT_SRC / name).as_posix()
-        hits = re.findall(wording, _read(src_dir / name))
+        hits = [got for value in _site_values(src_dir / name) for got in re.findall(wording, value)]
         if not hits:
             findings.append("{}: the {} hook-count wording ({}) was not found; if the page was "
                             "reworded, update SITE_HOOK_FACTS so the count stays checked".format(
@@ -913,10 +986,11 @@ def check_site_hook_counts(root, manifests, findings):
                                 "{}".format(rel, label, got, want))
     for path in sorted(p for p in src_dir.iterdir() if p.suffix == ".toml" and p.is_file()):
         rel = (SITE_DRAFT_SRC / path.name).as_posix()
-        for hit in SITE_HOOK_FIGURE.finditer(_read(path)):
-            if hit.group(1) != want:
-                findings.append("{}: {!r} states {} hooks; the hooks manifest gives {}".format(
-                    rel, hit.group(0), hit.group(1), want))
+        for value in _site_values(path):
+            for hit in SITE_HOOK_FIGURE.finditer(value):
+                if hit.group(1) != want:
+                    findings.append("{}: {!r} states {} hooks; the hooks manifest gives {}".format(
+                        rel, hit.group(0), hit.group(1), want))
 
 
 # The independent code detector backing the shipped-path declaration: a release path is CODE when its
@@ -1388,9 +1462,17 @@ def main():
 #      the manifest's total -> a finding naming its source and label (the clean fixture, at exactly
 #      the total, is the at-boundary control), and reworded with the count in words -> the not-found
 #      diagnostic; a stale figure (a capitalized noun included) in a site source no statement names
-#      -> a finding naming that source, a true one there -> exit 0; a hook added to the manifest
-#      under unchanged sources -> a finding for every statement; a missing site/draft-src, or a
-#      missing named source -> exit 2 naming it.
+#      -> a finding naming that source, a true one there -> exit 0; a stale figure there written
+#      each way it can render as one (&nbsp;, &#32;, <b>3</b>, &#51;, a fullwidth digit, a TOML line
+#      continuation, &#8203;, <br>, 3-hook, 3 Claude Code hook, 3 opt-in hooks) and a figure about
+#      another thing (1 hooks file, the disclosed over-read) -> a finding naming the figure read;
+#      true figures in those forms, 25 are hook-linked, an ordinal, an HTML comment holding '>', a
+#      TOML comment carrying a stale figure, and the disclosed unread forms (2,003 hooks, three
+#      hooks) -> exit 0; a statement reworded into words behind a TOML comment repeating its
+#      wording -> the not-found diagnostic, written with &nbsp; at the total -> exit 0, one above
+#      it -> its finding; a hook added to the manifest under unchanged sources -> a finding for
+#      every statement; a missing site/draft-src, a missing named source, or an unparsable source
+#      -> exit 2 naming it.
 # (1, 7, 12, 13, and 15 through 24 are the invariant-bearing cases; the rest complete the fail-closed
 # contract.)
 
@@ -3172,6 +3254,66 @@ def self_test_main():
             if code != want or (want and "site/draft-src/rules.toml: " not in out):
                 failures.append("a {} hook figure in another site source expected exit {} (got "
                                 "{!r})".format(label, want, code))
+        # Each form below renders as a stale hook figure, so each -> a finding naming the source and
+        # the figure read: an entity, a tag, a non-ASCII decimal digit, a TOML line continuation, a
+        # format character, a hyphenated, singular or modified noun, and a figure about another thing
+        # (the disclosed over-read). The controls stay clean: true figures in those forms, a compound
+        # adjective, an ordinal, an HTML comment holding '>', a TOML comment (it never renders), and
+        # the disclosed unread forms (a thousands separator, words), pinned so a change shows here.
+        for label, text, want, figure in (
+                ("no-break space reference", 'html = "<p>The 3&nbsp;hooks catch it.</p>"\n', 1, "3"),
+                ("space reference", 'html = "<p>The 3&#32;hooks catch it.</p>"\n', 1, "3"),
+                ("markup", 'html = "<p>The <b>3</b> hooks catch it.</p>"\n', 1, "3"),
+                ("digit reference", 'html = "<p>The &#51; hooks catch it.</p>"\n', 1, "3"),
+                ("fullwidth digit", 'html = "<p>The ３ hooks catch it.</p>"\n', 1, "3"),
+                ("TOML line continuation", 'html = """<p>The 3 \\\n    hooks catch it.</p>"""\n', 1, "3"),
+                ("zero-width space reference", 'html = "<p>The 3&#8203;hooks catch it.</p>"\n', 1, "3"),
+                ("line break tag", 'html = "<p>The 3<br>hooks catch it.</p>"\n', 1, "3"),
+                ("hyphenated", 'html = "<p>A 3-hook plugin catches it.</p>"\n', 1, "3"),
+                ("singular Claude Code", 'html = "<p>The 3 Claude Code hook set.</p>"\n', 1, "3"),
+                ("modified", 'html = "<p>The 3 opt-in hooks catch it.</p>"\n', 1, "3"),
+                ("over-read other thing", 'html = "<p>Its 1 hooks file lists them.</p>"\n', 1, "1"),
+                ("true in every form", 'html = "<p>The <b>2</b>&nbsp;opt-in Claude Code hooks, a '
+                 '2-hook pair, &#50; hooks and ２ hooks.</p>"\n', 0, None),
+                ("compound adjective", 'html = "<p>Of 3 rules, 25 are hook-linked.</p>"\n', 0, None),
+                ("ordinal", 'html = "<p>The 3rd-party hooks are out of scope.</p>"\n', 0, None),
+                ("HTML comment", 'html = "<p>It catches it.</p><!-- a > b, 3 hooks -->"\n', 0, None),
+                ("TOML comment", '# The 3 hooks catch it.\nhtml = "<p>It catches it.</p>"\n', 0, None),
+                ("unread thousands separator", 'html = "<p>Of 2,003 hooks.</p>"\n', 0, None),
+                ("unread words", 'html = "<p>The three hooks catch it.</p>"\n', 0, None)):
+            sitefix = tmp / "site-hooks-form-{}".format(label.replace(" ", "-"))
+            _write_fixture(sitefix, site_src=dict(_SITE_SRC, **{"rules.toml": text}))
+            code, out = run_out(sitefix)
+            if code != want or (want and "site/draft-src/rules.toml: " not in out) or (
+                    want and "states {} hooks; the hooks manifest gives 2".format(figure) not in out):
+                failures.append("a hook figure in another site source ({}) expected exit {} (got "
+                                "{!r})".format(label, want, code))
+        # A required wording is read from the parsed values, not the raw text: a statement reworded
+        # into words while a TOML comment repeats its old wording -> the not-found diagnostic; the
+        # statement with a no-break space reference at the total -> clean (it renders as the wording),
+        # one above it -> the statement's finding; an unparsable source -> exit 2 naming it.
+        decoy = _site_src("home.toml", "plugin of 2 hooks", "plugin of two hooks")
+        decoy["home.toml"] = "# In Claude Code, an opt-in plugin of 2 hooks\n" + decoy["home.toml"]
+        for label, src, want, expect in (
+                ("comment decoy", decoy, 1, "site/draft-src/home.toml: the home page intro hook-count "
+                 "wording"),
+                ("entity at the total", _site_src("home.toml", "plugin of 2 hooks", "plugin of 2&nbsp;hooks"),
+                 0, None),
+                ("entity above the total", _site_src("home.toml", "plugin of 2 hooks",
+                                                     "plugin of 3&nbsp;hooks"),
+                 1, "site/draft-src/home.toml: the home page intro states 3 Claude Code hooks")):
+            sitefix = tmp / "site-hooks-wording-{}".format(label.replace(" ", "-"))
+            _write_fixture(sitefix, site_src=src)
+            code, out = run_out(sitefix)
+            if code != want or (expect and expect not in out):
+                failures.append("the home page intro ({}) expected exit {} (got {!r})".format(
+                    label, want, code))
+        sitefix = tmp / "site-hooks-unparsable"
+        _write_fixture(sitefix, site_src=dict(_SITE_SRC, **{"rules.toml": 'html = "unterminated\n'}))
+        code, err = run_err(sitefix)
+        if code != 2 or "rules.toml: cannot parse" not in err:
+            failures.append("an unparsable site/draft-src/rules.toml expected exit 2 naming it (got "
+                            "{!r})".format(code))
         # The binding is to the manifest, not to a literal: a third claude-code hook under unchanged
         # site sources -> a finding for every statement.
         sitefix = tmp / "site-hooks-manifest-moved"
@@ -3251,8 +3393,12 @@ def self_test_main():
           "from its authoritative value or whose wording is absent (each on each page, the "
           "build also moved in the budget source), "
           "and a site hook-count statement one below or one above the hooks manifest's total, "
-          "reworded with the count in words, or left unchanged under a moved total, and a stale "
-          "hook figure in any other site source "
+          "reworded with the count in words (a TOML comment repeating its wording included), "
+          "written with a no-break space reference, or left unchanged under a moved total, and a "
+          "stale hook figure in any other site source (plain, capitalized, behind a character "
+          "reference, a tag or a line break tag, in a fullwidth digit, across a TOML line "
+          "continuation or a zero-width space, hyphenated, singular or modified, and a figure "
+          "about another thing, the disclosed over-read) "
           "each report a finding (exit 1); the deferred span itself is read ONLY through the "
           "positive grammar (blank lines, plain paragraph or continuation text, flat plain list items, "
           "column-0 ATX headings), so a blockquote, a fence, a nested or indented list, list-item HTML, "
@@ -3269,7 +3415,10 @@ def self_test_main():
           "surface), a ratchet one unit above "
           "the 120,000 floor, "
           "and the repository's real declaration against its real release manifest "
-          "(the control), stay "
+          "(the control), a true site hook figure in those forms, a compound adjective "
+          "(25 are hook-linked), an ordinal, an HTML comment holding '>' or a TOML comment "
+          "carrying a stale figure, and the disclosed unread thousands-separator and word forms, "
+          "stay "
           "clean (exit 0); a missing page, a missing JSON export, an unreadable standards dir, an "
           "unterminated code fence (naming the file and the fence's opening line), a fence not at line "
           "start, list-item HTML, an HTML block other than a single-line comment, or a '#' line that is "
@@ -3288,7 +3437,7 @@ def self_test_main():
           "declaration, a missing or empty release manifest, an HTML page that does not decode as "
           "UTF-8 or holds a NUL byte, a listed detector file that is missing or unreadable, a missing "
           "instruction-budget source, a missing or non-string claude-code-version in it, and a "
-          "missing site/draft-src or named site source "
+          "missing site/draft-src, a missing named site source or an unparsable site source "
           "all fail closed (exit 2); "
           "a single-line HTML comment above the section "
           "is not over-refused and its section is proven read (the planted name is the finding); the raw "
