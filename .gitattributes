@@ -881,6 +881,7 @@ tools/check_rule_placement.py text eol=lf
 tools/check_secrets.py text eol=lf
 tools/check_security_txt.py text eol=lf
 tools/check_selftest_execution.py text eol=lf
+tools/check_shell_function_standins.py text eol=lf
 tools/check_site.py text eol=lf
 tools/check_site_versions.py text eol=lf
 tools/check_sitemap.py text eol=lf
