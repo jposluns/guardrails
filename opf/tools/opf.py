@@ -1411,7 +1411,8 @@ def _watchdog_window_verdict(result, elapsed, timeout_s):
 def _watchdog_timer_case(label, mode, bounded=None, clock=None):
     """Private subprocess fixture: its timers belong to this process alone.
     When every check holds but the window exercise's subject run was never
-    established on this host (_watchdog_window_verdict), the exact
+    established on this host (_watchdog_window_verdict), or the inner
+    self-test could not evaluate (its exit 2), the exact
     _WATCHDOG_CANNOT_EVALUATE marker is printed on the clean exit, which
     the launching runner maps to the distinct CANNOT-EVALUATE outcome,
     never a pass and never a definite failure. `bounded` and `clock` exist
@@ -1517,29 +1518,44 @@ def _watchdog_timer_case(label, mode, bounded=None, clock=None):
         with contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
             rc = functions[label]()
     after = signal.getitimer(which)
-    ok = (rc == EXIT_OK and not mutations and not shields and after[1] == before[1]
-          and signal.getsignal(signum) is handler
-          and signal.pthread_sigmask(signal.SIG_BLOCK, set()) == mask)
+    # `held`: every timer, handler, mask and fired-signal check of the case,
+    # apart from the inner self-test's own exit.
+    held = (not mutations and not shields and after[1] == before[1]
+            and signal.getsignal(signum) is handler
+            and signal.pthread_sigmask(signal.SIG_BLOCK, set()) == mask)
     if mode == "expiry":
-        ok = ok and after == (0.0, 0.0) and fired == [signum]
+        held = held and after == (0.0, 0.0) and fired == [signum]
     elif mode == "inactive":
-        ok = ok and before == after == (0.0, 0.0) and not fired
+        held = held and before == after == (0.0, 0.0) and not fired
     else:
         # No syscall can reset the countdown or phase; no narrow wall-clock
         # assertion. CPU timers continue in their own kernel clock domains.
-        ok = ok and 0 < after[0] <= before[0] and not fired
+        held = held and 0 < after[0] <= before[0] and not fired
     if mode == "pending":
-        ok = ok and signal.SIGALRM in pending and signal.SIGALRM in signal.sigpending()
+        held = held and signal.SIGALRM in pending and signal.SIGALRM in signal.sigpending()
+    ok = held and rc == EXIT_OK
+    if held and type(rc) is int and rc == EXIT_MALFORMED:
+        # The inner self-test could not evaluate (its exit 2) while every
+        # check of this case held: no verdict on the case, so the exact
+        # marker on the clean exit below (the runner maps it to the distinct
+        # CANNOT-EVALUATE), never a pass and never a definite failure. An
+        # inner exit 1, any other nonzero exit, and any timer or signal
+        # change stay a failure.
+        ok = True
+        unestablished.append("the inner " + label + " self-test exited "
+                             + str(EXIT_MALFORMED) + " (cannot evaluate): "
+                             + output.getvalue().strip())
     if not ok:
         print(label, mode, rc, before, after, mutations, fired, output.getvalue())
         # No save/restore or teardown mutation: the subprocess exits with its timer.
         return EXIT_FINDING
     if unestablished:
         # Every check held, but the window subject's run was never
-        # established: the exact marker on this clean exit, never a pass
-        # (the runner maps it to the distinct CANNOT-EVALUATE) and never a
-        # definite failure; a failed check above stays one (fail closed:
-        # the marker is honored only on a clean exit).
+        # established or the inner self-test could not evaluate: the exact
+        # marker on this clean exit, never a pass (the runner maps it to the
+        # distinct CANNOT-EVALUATE) and never a definite failure; a failed
+        # check above stays one (fail closed: the marker is honored only on
+        # a clean exit).
         print(_WATCHDOG_CANNOT_EVALUATE + " (timer/" + label + "/" + mode + ": "
               + "; ".join(unestablished) + ")")
     # No save/restore or teardown mutation: the subprocess exits with its timer.
@@ -1663,6 +1679,19 @@ _DEADLINE_RECEIPT_ALLOWANCE = 1.0
 # Interpreter start, `import opf` and _bootstrap for one fixture process: the
 # launch margin the regression runner adds on top of a leg's own budget.
 _WATCHDOG_LAUNCH_MARGIN = 30
+# The wall-clock deadline of each exit-37 launch the watchdog launcher rows
+# make (_watchdog_launcher_case), and the per-launch term of their budget.
+# It is a backstop against a hung launch, never the rows' stimulus: a row
+# asserts which statuses its nested runner observes, not how fast a trivial
+# child starts. Sized from measurement: one run of the regression-ignored
+# row on a loaded host (80 CPUs at a load average of about 30) measured a
+# worst launch of 2.613 s and a p95 of 0.188 s over every launch that row
+# made (one per regression leg, a count that grows with the roster), so
+# 30 s is about 11x that worst launch and about 160x that p95. Normal wall
+# time is unchanged (a launch returns as soon as its child exits); only a
+# hung launch waits longer before the backstop ends it, and a launch that
+# reaches the backstop gives its row no verdict, never a FAIL.
+_WATCHDOG_LAUNCHER_BACKSTOP = 30
 # The per-launch timeout of _watchdog_completion_case's launch() helper.
 _COMPLETION_LAUNCH_TIMEOUT = 10
 # The tree legs' startup liveness backstop (nested-timeout/nested-cancel).
@@ -4127,9 +4156,24 @@ def _watchdog_deadline_case(mode):
         else:
             stall()
 
+    real_setitimer = signal.setitimer
+
+    def disarmed(which, seconds, interval=0.0):
+        # The parent-deadline modes defeat the subject's independent child
+        # timer AT ITS ARMING SITE: a disarm left to the thunk's first
+        # statement races the armed timer, and a loaded host can delay the
+        # subject's first slice past the requested timeout, letting SIGALRM
+        # kill the subject before it ever writes "started" (the reached
+        # check then fails a correct deadline path). Only the subject's one
+        # nonzero ITIMER_REAL arming is skipped; every other call is real.
+        if os.getpid() != caller and which == signal.ITIMER_REAL and seconds:
+            return (0.0, 0.0)
+        return real_setitimer(which, seconds, interval)
+
     def thunk():
         if mode in ("pipe-stall", "exit-stall", "transient-census"):
-            # Defeat the independent child timer deliberately: exercise the PARENT deadline.
+            # The child timer was never armed (disarmed above): exercise the
+            # PARENT deadline. The explicit disarm stays as a second defence.
             signal.setitimer(signal.ITIMER_REAL, 0)
             os.write(started_w, b"started")
             os.write(pipe[1], b"BUFFERED-TOKEN")
@@ -4170,11 +4214,17 @@ def _watchdog_deadline_case(mode):
 
     result, elapsed, reaped = None, None, False
     try:
+        from contextlib import ExitStack
         start = time.monotonic()
-        with patch.object(os, "fork", fork), patch.object(os, "pipe", capture_pipe), \
-                patch.object(_opf_emit, "_fixture_signal", cancel), \
-                patch.object(_opf_emit, "_fixture_drain", drain), \
-                patch.object(_opf_emit, "_fixture_children", census):
+        with ExitStack() as stack:
+            for owner, name, replacement in (
+                    (os, "fork", fork), (os, "pipe", capture_pipe),
+                    (_opf_emit, "_fixture_signal", cancel),
+                    (_opf_emit, "_fixture_drain", drain),
+                    (_opf_emit, "_fixture_children", census)):
+                stack.enter_context(patch.object(owner, name, replacement))
+            if mode in ("pipe-stall", "exit-stall", "transient-census"):
+                stack.enter_context(patch.object(signal, "setitimer", disarmed))
             # The thunk writes started_w and the guardian-side drain/cancel hooks
             # write the events file: both must be DECLARED under the fd allowlist.
             result = _opf_emit.run_bounded(thunk, timeout_s=_DEADLINE_CASE_TIMEOUT,
@@ -4379,7 +4429,8 @@ def _watchdog_launcher_case(label, disposition):
     def shared():
         try:
             run_status_owned([sys.executable, "-I", "-B", "-c", "raise SystemExit(37)"],
-                             fixture_id="launcher/exit-37", check=True, capture_output=True, timeout=5)
+                             fixture_id="launcher/exit-37", check=True, capture_output=True,
+                             timeout=_WATCHDOG_LAUNCHER_BACKSTOP)
         except (RuntimeError, subprocess.CalledProcessError):
             return EXIT_FINDING
         return EXIT_OK
@@ -4388,33 +4439,80 @@ def _watchdog_launcher_case(label, disposition):
               "regression": _watchdog_regression_self_test, "shared": shared}[label]
     import _opf_emit
     real_run = _opf_emit._run_fixture_process
+    phase = ["control"]
+    launches = []
     statuses = []
+    expiries = []
 
     def failure(*args, **kwargs):
-        result = real_run([sys.executable, "-I", "-B", "-c", "raise SystemExit(37)"],
-                          timeout=5)
-        statuses.append(result.returncode)
+        # A call counts as a launch of its run only once a child was started:
+        # the real call returned, or raised the TimeoutExpired only a started
+        # child can produce. A refusal the real launcher raises before it
+        # starts any child (ChildStatusUnavailable under a non-default
+        # SIGCHLD) is not a launch, so a hostile run that the real launcher
+        # refused is never counted as the launch that run must never make,
+        # while a hostile launch that reached the backstop still is one.
+        try:
+            result = real_run([sys.executable, "-I", "-B", "-c", "raise SystemExit(37)"],
+                              timeout=_WATCHDOG_LAUNCHER_BACKSTOP)
+        except subprocess.TimeoutExpired:
+            # The backstop against a hung launch ended this one: host load,
+            # not the guarded assertion, on correct code. Recorded for the
+            # verdict below and raised on; the nested matrix runners map a
+            # bound kill to their own distinct CANNOT-EVALUATE, never a pass.
+            launches.append(phase[0])
+            expiries.append(phase[0])
+            raise
+        launches.append(phase[0])
+        statuses.append((phase[0], result.returncode))
         if kwargs.get("check") and result.returncode:
             raise subprocess.CalledProcessError(result.returncode, result.args)
         return result
 
     saved = signal.getsignal(signal.SIGCHLD)
     hostile = signal.SIG_IGN if disposition == "ignored" else lambda *_: None
+    control = result = held = None
     try:
         signal.signal(signal.SIGCHLD, signal.SIG_DFL)
-        with patch.object(_opf_emit, "_run_fixture_process", failure), \
-                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-            control = runner()
-            control_ok = control == EXIT_FINDING and bool(statuses) and set(statuses) == {37}
-            statuses.clear()
-            signal.signal(signal.SIGCHLD, hostile)
-            result = runner()
-        ok = (control_ok and result == EXIT_FINDING and not statuses
-              and signal.getsignal(signal.SIGCHLD) == hostile)
+        try:
+            with patch.object(_opf_emit, "_run_fixture_process", failure), \
+                    contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                control = runner()
+                phase[0] = "hostile"
+                signal.signal(signal.SIGCHLD, hostile)
+                result = runner()
+                held = signal.getsignal(signal.SIGCHLD)
+        except subprocess.TimeoutExpired:
+            # Only a launch at its backstop raises this here (each nested
+            # matrix runner absorbs its own legs' bound kills); it is in
+            # `expiries`, and the run it ended has no result below.
+            pass
     finally:
         signal.signal(signal.SIGCHLD, saved)
+    control_statuses = sorted(set(status for run, status in statuses if run == "control"))
+    wrong = [status for status in control_statuses if status != 37]
+    hostile_launches = launches.count("hostile")
+    hostile_ok = result == EXIT_FINDING and held == hostile
+    ok = (not expiries and control == EXIT_FINDING and control_statuses == [37]
+          and not hostile_launches and hostile_ok)
+    if (expiries and not wrong and not hostile_launches
+            and control in (EXIT_FINDING, EXIT_MALFORMED, None)
+            and (result is None or hostile_ok)):
+        # No verdict on the row: a control launch reached the backstop, so
+        # the nested runner's aggregate (or the escaped expiry above)
+        # reflects host load, not the guard under test, and nothing else
+        # observed is wrong. The marker on this clean exit maps to the
+        # distinct CANNOT-EVALUATE at the launching runner, never a pass.
+        # A wrong status, any launch in the hostile run (one that reached
+        # the backstop included), a hostile run that did not refuse, or a
+        # control run that passed despite an expiry stays a FAIL below.
+        print(_WATCHDOG_CANNOT_EVALUATE + " (launcher/" + label + "-" + disposition
+              + ": " + str(len(expiries)) + " exit-37 launch(es) reached the "
+              + str(_WATCHDOG_LAUNCHER_BACKSTOP) + " s launch backstop: no verdict)")
+        return EXIT_OK
     print("opf watchdog launcher:", label, disposition, "PASS" if ok else "FAIL",
-          "refused", result, "launched statuses", statuses)
+          "control", control, "statuses", control_statuses, "refused", result,
+          "hostile launches", hostile_launches, "backstop expiries", len(expiries))
     return EXIT_OK if ok else EXIT_FINDING
 
 
@@ -5480,6 +5578,33 @@ def _watchdog_tree_vectors():
     return True
 
 
+class _WatchdogStarved(Exception):
+    """A pre-stimulus liveness bound expired before a leg reached its
+    stimulus. A starved host can reach such a bound on correct code, so the
+    expiry holds no verdict, never a definite failure."""
+
+
+def _watchdog_await_state(probe, wanted, note, bound, liveness=False,
+                          clock=None, pause=None):
+    """Poll probe() until it returns a value in `wanted`, ending at the
+    monotonic `bound`. Each pass takes ONE clock sample and chooses the
+    outcome from it: at or past the bound a liveness wait raises
+    _WatchdogStarved and a guarded wait raises AssertionError(note). Two
+    reads (one for the liveness test, one for the assertion) would let a
+    caller descheduled between them see the bound unexpired and then
+    expired, turning a liveness expiry into a definite failure. `clock`
+    and `pause` default to time.monotonic and time.sleep, looked up per
+    call; the await-clock completion row scripts them."""
+    import time
+    while probe() not in wanted:
+        now = (time.monotonic if clock is None else clock)()
+        if now >= bound:
+            if liveness:
+                raise _WatchdogStarved(note)
+            raise AssertionError(note)
+        (time.sleep if pause is None else pause)(0.005)
+
+
 def _watchdog_completion_case(mode, tree=None):
     """Run each irreversible audit-hook/disposition experiment in its own fixture process.
     `tree` carries the nested-orders vectors' parameters into the tree legs
@@ -5563,6 +5688,245 @@ def _watchdog_completion_case(mode, tree=None):
             with patch.object(emit, "_bounded_setup_error",
                               side_effect=lambda exc: "SETUP-ERROR:" + type(exc).__name__):
                 refuses(AssertionError, check_close)
+    elif mode == "launcher-backstop":
+        import contextlib
+        import io
+        # The launcher rows' verdict under scripted launches: each call
+        # _watchdog_launcher_case passes to the launcher is answered by a stub
+        # (an exit status, the TimeoutExpired a launch at its backstop raises,
+        # or, once a hostile run's script is spent, the refusal the real
+        # launcher raises under a hostile SIGCHLD before it starts any child),
+        # and the shared row's run_status_owned is replaced by one that, as
+        # the real one does, passes every call through _run_fixture_process.
+        # No child is started.
+        def row(control, hostile=()):
+            scripts = {True: list(control), False: list(hostile)}
+            timeouts = []
+            refusals = []
+
+            def stub(argv, *, timeout=None, **_kwargs):
+                timeouts.append(timeout)
+                owned_disposition = signal.getsignal(signal.SIGCHLD) == signal.SIG_DFL
+                steps = scripts[owned_disposition]
+                if not steps:
+                    assert not owned_disposition, "control script exhausted"
+                    refusals.append(timeout)
+                    raise emit.ChildStatusUnavailable("unowned SIGCHLD disposition")
+                step = steps.pop(0)
+                if step == "expire":
+                    raise subprocess.TimeoutExpired(argv, timeout)
+                return subprocess.CompletedProcess(argv, step, b"", b"")
+
+            def owned(argv, **kwargs):
+                steps = scripts[signal.getsignal(signal.SIGCHLD) == signal.SIG_DFL]
+                emit._run_fixture_process(list(argv), timeout=kwargs["timeout"])
+                while steps:
+                    emit._run_fixture_process(list(argv), timeout=kwargs["timeout"])
+                raise emit.FixtureIncomplete("missing completion for " + kwargs["fixture_id"])
+
+            out = io.StringIO()
+            with patch.object(emit, "_run_fixture_process", stub), \
+                    patch.object(emit, "run_status_owned", owned), contextlib.redirect_stdout(out):
+                rc = _watchdog_launcher_case("shared", "ignored")
+            assert timeouts and set(timeouts) == {_WATCHDOG_LAUNCHER_BACKSTOP}, timeouts
+            return rc, _WATCHDOG_CANNOT_EVALUATE in out.getvalue(), out.getvalue(), len(refusals)
+
+        def expect(want_rc, want_marker, control, hostile=(), refused=None):
+            rc, marker, text, refusals = row(control, hostile)
+            assert (rc, marker) == (want_rc, want_marker), (control, hostile, rc, text)
+            assert refused is None or refusals == refused, (control, hostile, refusals, text)
+
+        # A control launch that reaches the backstop is no verdict: a clean
+        # exit carrying the CANNOT-EVALUATE marker, never a pass or a FAIL.
+        expect(EXIT_OK, True, ["expire"])
+        # Flip: the same launch answered inside the backstop is a definite
+        # PASS with no marker, so the expiry alone makes the no-verdict. Its
+        # hostile call reaches the launcher, which refuses it before starting
+        # any child: that refusal is not a launch, so the row still passes.
+        expect(EXIT_OK, False, [37], refused=1)
+        # Flip: the hostile call answered by a started child (its status
+        # returned) is a launch that run must never make, so it stays a FAIL.
+        expect(EXIT_FINDING, False, [37], [37], refused=0)
+        # Flip: the expiry moved into the hostile run, a started launch that
+        # run must never make, stays a FAIL.
+        expect(EXIT_FINDING, False, [37], ["expire"], refused=0)
+        # A wrong status still fails, with or without a later expiry.
+        expect(EXIT_FINDING, False, [36])
+        expect(EXIT_FINDING, False, [36, "expire"])
+        # Flip: the status corrected to 37, the expiry kept, is no verdict
+        # again, so the wrong status alone makes the FAIL.
+        expect(EXIT_OK, True, [37, "expire"])
+    elif mode == "timer-inner-exit":
+        import contextlib
+        import io
+        # The isolation timer fixture's verdict on its inner self-test's
+        # exit: the REAL _watchdog_timer_case runs here in its "inactive"
+        # mode (it arms no timer) with the emit self-test replaced by a stub
+        # that returns a scripted exit, optionally after one change the case
+        # must catch, made through the signal functions captured before the
+        # case patches them. The SIGALRM disposition, the real itimer and
+        # the signal mask are restored around each call. No child is started.
+        arm, dispose, mask_with = signal.setitimer, signal.signal, signal.pthread_sigmask
+
+        def fixture(code, change=None):
+            def inner():
+                print("inner self-test: scripted exit", code)
+                if change == "timer":
+                    arm(signal.ITIMER_REAL, 3600.0)
+                elif change == "handler":
+                    dispose(signal.SIGALRM, signal.SIG_IGN)
+                elif change == "mask":
+                    mask_with(signal.SIG_BLOCK, {signal.SIGALRM})
+                elif change == "fired":
+                    signal.raise_signal(signal.SIGALRM)
+                return code
+
+            sigalrm = signal.getsignal(signal.SIGALRM)
+            timer = signal.getitimer(signal.ITIMER_REAL)
+            blocked = signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGALRM})
+            out = io.StringIO()
+            try:
+                with patch.object(emit, "self_test", inner), contextlib.redirect_stdout(out):
+                    rc = _watchdog_timer_case("emit", "inactive")
+            finally:
+                signal.setitimer(signal.ITIMER_REAL, *timer)
+                signal.signal(signal.SIGALRM, sigalrm)
+                signal.pthread_sigmask(signal.SIG_SETMASK, blocked)
+            text = out.getvalue()
+            return _watchdog_completion_verdict(rc, text), _WATCHDOG_CANNOT_EVALUATE in text, text
+
+        for code, change, want in (
+                # An inner cannot-evaluate with every check holding is no
+                # verdict: the marker on a clean exit.
+                (EXIT_MALFORMED, None, ("cannot-evaluate", True)),
+                # Flip: a clean inner exit is a definite pass, unmarked.
+                (EXIT_OK, None, ("pass", False)),
+                # Flip: an inner exit 1, and any other nonzero exit, stays a
+                # FAIL with no honored marker.
+                (EXIT_FINDING, None, ("fail", False)),
+                (EXIT_MALFORMED + 1, None, ("fail", False)),
+                # Flip: an inner exit 2 with a timer, handler, mask or
+                # fired-signal change stays a FAIL.
+                (EXIT_MALFORMED, "timer", ("fail", False)),
+                (EXIT_MALFORMED, "handler", ("fail", False)),
+                (EXIT_MALFORMED, "mask", ("fail", False)),
+                (EXIT_MALFORMED, "fired", ("fail", False))):
+            verdict, marker, text = fixture(code, change)
+            assert (verdict, marker) == want, (code, change, verdict, marker, text)
+    elif mode == "await-clock":
+        # escalate-degraded's wait, _watchdog_await_state, under a scripted
+        # clock and probe: each vector gives the clock readings in order and
+        # the pass from which the probe reports the wanted state. No child is
+        # started, nothing sleeps and no deadline is charged.
+        bound = 100.0
+        early, late = bound - 0.001, bound + 0.001
+
+        class Exhausted(Exception):
+            pass
+
+        def outcome(waiter, readings, reached_at, liveness):
+            script = list(readings)
+            probes = []
+            pauses = []
+
+            def probe():
+                probes.append(None)
+                return "T" if reached_at is not None and len(probes) > reached_at else "R"
+
+            def clock():
+                if not script:
+                    raise Exhausted()
+                return script.pop(0)
+
+            try:
+                waiter(probe, ("T",), "scripted wait", bound, liveness=liveness,
+                       clock=clock, pause=pauses.append)
+            except _WatchdogStarved:
+                result = "starved"
+            except AssertionError as exc:
+                if str(exc) != "scripted wait":
+                    raise
+                result = "failed"
+            except Exhausted:
+                result = "clock read past its script"
+            else:
+                result = "reached"
+            return result, len(pauses), len(script)
+
+        crossing = ((early, late), None, True, ("starved", 1, 0))
+        vectors = (
+            # The deadline crosses between the clock reads of one pass of
+            # the former two-read loop: a liveness wait is no verdict
+            # (Starved), a guarded wait the definite assertion failure.
+            crossing,
+            ((early, late), None, False, ("failed", 1, 0)),
+            # Exactly at the bound is expired, for either wait.
+            ((bound,), None, True, ("starved", 0, 0)),
+            ((bound,), None, False, ("failed", 0, 0)),
+            # Just past the bound on the first sample.
+            ((late,), None, True, ("starved", 0, 0)),
+            ((late,), None, False, ("failed", 0, 0)),
+            # Just inside the bound, then the state arrives: no expiry.
+            ((early,), 1, True, ("reached", 1, 0)),
+            ((early,), 1, False, ("reached", 1, 0)),
+            # The state already holds: the clock is never read.
+            ((), 0, True, ("reached", 0, 0)))
+
+        def red(waiter):
+            return [(readings, reached_at, liveness, want, got)
+                    for readings, reached_at, liveness, want in vectors
+                    for got in (outcome(waiter, readings, reached_at, liveness),)
+                    if got != want]
+
+        assert not red(_watchdog_await_state), red(_watchdog_await_state)
+
+        # Flip: the two-read loop (one clock read for the liveness test, a
+        # second for the assertion) raises the assertion failure for the
+        # crossing liveness wait, so the row turns red.
+        def two_reads(probe, wanted, note, bound, liveness=False, clock=None, pause=None):
+            while probe() not in wanted:
+                if liveness and clock() >= bound:
+                    raise _WatchdogStarved(note)
+                if not clock() < bound:
+                    raise AssertionError(note)
+                pause(0.005)
+
+        flipped = red(two_reads)
+        assert any(readings == crossing[0] and liveness and got[0] == "failed"
+                   for readings, _reached, liveness, _want, got in flipped), \
+            ("the flip did not reproduce the crossing assertion failure", flipped)
+    elif mode == "failure-evidence":
+        # A failing fixture's refusal message carries BOTH captured streams:
+        # the fixture's own verdict line is printed to its stdout, which an
+        # stderr-only message would discard (the launching runner would then
+        # report the assertion without its cause).
+        def evidence():
+            try:
+                launch("import sys; print('STDOUT-CAUSE'); "
+                       "print('STDERR-CAUSE', file=sys.stderr); return 1")
+            except emit.FixtureIncomplete as exc:
+                message = str(exc)
+                assert "STDOUT-CAUSE" in message and "STDERR-CAUSE" in message, message
+                return
+            raise AssertionError("failing fixture was accepted: " + mode)
+
+        evidence()
+        # The retained streams are bounded: a flooding stdout keeps its TAIL
+        # (the verdict line prints last) and declares the elided length, and
+        # the whole message stays within the two per-stream bounds plus
+        # framing, never the flood's own size.
+        try:
+            launch("import sys; sys.stdout.write('x' * 65536 + 'TAIL-MARK'); return 1")
+        except emit.FixtureIncomplete as exc:
+            message = str(exc)
+            assert "TAIL-MARK" in message and "bytes elided" in message, message
+            assert len(message) <= 2 * emit._FIXTURE_EVIDENCE_LIMIT + 512, len(message)
+        else:
+            raise AssertionError("failing fixture was accepted: " + mode)
+        # Red-on-revert: the old stderr-only evidence fails the stdout check.
+        with patch.object(emit, "_fixture_failure_evidence",
+                          lambda result: result.stderr.decode("utf-8", "replace")):
+            refuses(AssertionError, evidence)
     elif mode == "cleanup-budget":
         import time
         # A controlled clock discriminates the remaining-deadline policy without
@@ -5785,12 +6149,26 @@ def _watchdog_completion_case(mode, tree=None):
                 refuses(emit.FixtureIncomplete, lambda: launch(env=env))
         refuses(emit.FixtureIncomplete, lambda: launch("import os; os._exit(0)"))
     elif mode == "premature-exit":
-        launch("return 0")  # normal-return control
-        for code in ("raise SystemExit()", "raise SystemExit(0)",
-                     "raise RuntimeError('before postconditions')"):
-            refuses(emit.FixtureIncomplete, lambda: launch(code))
-        # CLI exit-status subjects have an explicit, separately supervised path.
-        launch("raise SystemExit(2)", process_fixture=True, expected_returncode=2)
+        try:
+            launch("return 0")  # normal-return control
+            for code in ("raise SystemExit()", "raise SystemExit(0)",
+                         "raise RuntimeError('before postconditions')"):
+                refuses(emit.FixtureIncomplete, lambda: launch(code))
+            # CLI exit-status subjects have an explicit, separately supervised path.
+            launch("raise SystemExit(2)", process_fixture=True, expected_returncode=2)
+        except subprocess.TimeoutExpired:
+            # A launch killed at its own process bound (two interpreter
+            # starts inside the per-launch timeout, which a starved host can
+            # exceed) establishes nothing about completion attestation: no
+            # verdict, never a definite failure. The attestation guards above
+            # stay definite: a loosened _fixture_main still completes the
+            # launch, so refuses() raises AssertionError, which is not
+            # caught here.
+            print(_WATCHDOG_CANNOT_EVALUATE
+                  + " (completion/premature-exit: a launch reached its own "
+                  + repr(_COMPLETION_LAUNCH_TIMEOUT)
+                  + " s process bound: no verdict)")
+            return EXIT_OK
     elif mode in ("nested-timeout", "nested-cancel"):
         verdict, cause = _watchdog_tree_case(mode, **(tree or {}))
         if verdict != "pass":
@@ -8287,11 +8665,15 @@ def _watchdog_completion_case(mode, tree=None):
                     return None
                 return stat.rsplit(b")", 1)[1].split()[0].decode("ascii")
 
-            def await_state(target, wanted, note):
-                bound = _watchdog_deadline(30)
-                while state(target) not in wanted:
-                    assert time.monotonic() < bound, note
-                    time.sleep(0.005)
+            def await_state(target, wanted, note, liveness=False):
+                # A liveness wait is startup liveness only, never the
+                # guarded behaviour: a starved host can reach a pre-stimulus
+                # bound on correct code, so its expiry holds no verdict. The
+                # guarded waits (the refusal wording and the unacknowledged
+                # subject's own exit after the degraded escalation) stay
+                # definite.
+                _watchdog_await_state(lambda: state(target), wanted, note,
+                                      _watchdog_deadline(30), liveness=liveness)
 
             def by_pid(child_self, failure):
                 # The pre-fix suffix chose by subject_pid and always claimed a
@@ -8314,12 +8696,12 @@ def _watchdog_completion_case(mode, tree=None):
                     child.start()
                 bound = _watchdog_deadline(30)
                 while not wedged.exists():
-                    assert time.monotonic() < bound, \
-                        "the guardian never reached its stop point"
+                    if time.monotonic() >= bound:
+                        raise _WatchdogStarved("the guardian never reached its stop point")
                     time.sleep(0.005)
                 gpid = int(wedged.read_text(encoding="ascii"))
                 assert gpid == child.pid, "the hook stopped an unexpected process"
-                await_state(gpid, ("T",), "the guardian did not stop")
+                await_state(gpid, ("T",), "the guardian did not stop", liveness=True)
                 subject = int(Path("/proc", str(gpid), "task", str(gpid), "children")
                               .read_text(encoding="ascii").split()[0])
                 failures = []
@@ -8338,15 +8720,23 @@ def _watchdog_completion_case(mode, tree=None):
                             "the unacknowledged subject outlived the degraded escalation")
                 return failures[0]
 
-            message = exercise(flip=False)
-            assert "subject cleanup unverified" in message, message
-            assert "guardian not frozen" in message, message
-            assert "subject tree killed" not in message, message
-            # Flip: the by-pid suffix claims the frozen guardian and killed tree
-            # this degraded escalation never performed.
-            flipped = exercise(flip=True)
-            assert "subject tree killed" in flipped, \
-                ("the flip did not reproduce the false claim", flipped)
+            try:
+                message = exercise(flip=False)
+                assert "subject cleanup unverified" in message, message
+                assert "guardian not frozen" in message, message
+                assert "subject tree killed" not in message, message
+                # Flip: the by-pid suffix claims the frozen guardian and killed tree
+                # this degraded escalation never performed.
+                flipped = exercise(flip=True)
+                assert "subject tree killed" in flipped, \
+                    ("the flip did not reproduce the false claim", flipped)
+            except _WatchdogStarved as starved:
+                # A pre-stimulus liveness bound expired before the guardian
+                # was even wedged or stopped: the exercise never reached its
+                # stimulus, so no verdict exists, never a definite failure.
+                print(_WATCHDOG_CANNOT_EVALUATE
+                      + " (completion/escalate-degraded: " + str(starved) + ")")
+                return EXIT_OK
     elif mode == "poll-masked":
         import time
         # Masked design: poll()'s whole
@@ -15938,6 +16328,7 @@ def _watchdog_regression_self_test():
                         "nested-timeout", "nested-cancel", "nested-orders",
                         "no-signal-echild",
                         "guardian-error", "empty-children", "bounded-diagnostics",
+                        "failure-evidence",
                         "cleanup-budget", "deadline-flips", "subject-setup",
                         "overdue-success", "launch-ownership", "launch-cancel",
                         "fd-hygiene-total", "nested-keep", "fd-census",
@@ -15947,11 +16338,12 @@ def _watchdog_regression_self_test():
                         "poll-collected", "close-cancel",
                         "escalate-degraded", "poll-masked",
                         "unpinned-kill", "census-verify",
-                        "census-exception", "receipt-high-fd")
+                        "census-exception", "receipt-high-fd",
+                        "launcher-backstop", "timer-inner-exit", "await-clock")
     # Each launcher case's bound DERIVES from its nested callee's sanctioned
     # budget, following the blocked-isolation convention below: with
-    # _run_fixture_process patched, every nested
-    # case is exactly one 5 s exit-37 launch and the callee runs TWICE
+    # _run_fixture_process patched, every nested case is exactly one exit-37
+    # launch at _WATCHDOG_LAUNCHER_BACKSTOP and the callee runs TWICE
     # (control + hostile), plus launch margin -- never a flat empirical
     # constant sitting below what the callee itself is sanctioned to wait
     # for (the earlier kill-timeout-exceeds-callee-wait flake).
@@ -16004,9 +16396,10 @@ def _watchdog_regression_self_test():
     budgets.update((mode, deadline_budget) for mode in safety_modes)
     budgets.update((("lost-cleanup", 16), ("fork-error", 36), ("poll-error", 36)))
     # A launcher case runs its nested runner twice with every launch patched
-    # to one exit-37 _run_fixture_process(timeout=5), each charged its allowance.
+    # to one exit-37 _run_fixture_process at the launch backstop, each
+    # charged its allowance, so the row's process bound follows the backstop.
     budgets.update((label + "-" + disposition,
-                    2 * nested_launches[label] * _deadline_case_budget(5))
+                    2 * nested_launches[label] * _deadline_case_budget(_WATCHDOG_LAUNCHER_BACKSTOP))
                    for label in launcher_labels for disposition in launcher_dispositions)
     budgets.update(("completion-" + mode, seconds) for mode, seconds in (
         ("audit-ignore", 16), ("reaper", 42), ("nonce", 32), ("fixture-id", 32),
@@ -16036,7 +16429,13 @@ def _watchdog_regression_self_test():
          + 9 * _deadline_case_budget(_TREE_VECTOR_BACKSTOP)
          + 6 * _TREE_STARTUP_BACKSTOP + 4 * _TREE_VECTOR_BACKSTOP),
         ("no-signal-echild", 15), ("guardian-error", 48), ("empty-children", 48),
-        ("bounded-diagnostics", 66), ("cleanup-budget", 21), ("deadline-flips", 77),
+        ("bounded-diagnostics", 66),
+        # failure-evidence makes exactly three launch() calls (both-streams,
+        # bounded-tail, and the stderr-only revert rerun of the first), each
+        # one fixture launch charged its allowance at the completion launch
+        # timeout; the budget is that derived sum, never a flat constant.
+        ("failure-evidence", 3 * _deadline_case_budget(_COMPLETION_LAUNCH_TIMEOUT)),
+        ("cleanup-budget", 21), ("deadline-flips", 77),
         ("subject-setup", 22), ("overdue-success", 161.0 + 0.01), ("launch-ownership", 60),
         ("launch-cancel", 33), ("fd-hygiene-total", 92), ("nested-keep", 108),
         ("fd-census", 48), ("subject-gc", 32), ("guardian-preload", 20),
@@ -16079,7 +16478,17 @@ def _watchdog_regression_self_test():
         ("pdeathsig", 32), ("escalation-subject", 884 + 6), ("escalate-reaped", 784),
         ("poll-collected", 1266), ("close-cancel", 1014), ("escalate-degraded", 784),
         ("poll-masked", 2954), ("unpinned-kill", 600), ("census-verify", 630),
-        ("census-exception", 780), ("receipt-high-fd", 10)))
+        ("census-exception", 780), ("receipt-high-fd", 10),
+        # launcher-backstop starts no child and makes no bounded wait: every
+        # launch it drives is a scripted stub in place of the charged
+        # _run_fixture_process, so it charges nothing and 1 s is headroom only.
+        ("launcher-backstop", 1),
+        # timer-inner-exit likewise starts no child and makes no bounded
+        # wait: the timer fixture it drives runs a scripted inner self-test.
+        ("timer-inner-exit", 1),
+        # await-clock likewise starts no child and makes no bounded wait:
+        # its clock, probe and pause are scripted, so it charges nothing.
+        ("await-clock", 1)))
     # The isolation matrix in this leg: 31 timer cases, each one 180 s
     # fixture call, charged its allowance by the leg's ledger. A call that
     # overruns that allowance overruns the leg, which its process bound then

@@ -261,6 +261,13 @@ jobs:
       # its licence as NOASSERTION and has required a licence key for organization
       # repositories; the binary avoids both that and a third-party action in the
       # supply chain. Bump GITLEAKS_VERSION and GITLEAKS_SHA256 together.
+      # A transient release-download fault (an HTTP error, a body that fails the checksum, or a
+      # stalled transfer) is retried: at most 3 attempts, 10 seconds apart, each one's archive
+      # checked against the pinned checksum, and a failed or mismatched archive removed before the
+      # next attempt. Each curl attempt is bounded (30 seconds to connect, 300 seconds in total), so
+      # a stall fails that attempt instead of holding the job until its timeout. Only an archive
+      # that matched the checksum is extracted; when no attempt matches, the step exits 1.
+      # tools/check_ci_parity.py pins this run: body line for line (GITLEAKS_STEP_RUN).
       - name: Secrets (gitleaks)
         shell: bash
         env:
@@ -269,8 +276,24 @@ jobs:
         run: |
           set -euo pipefail
           url="https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
-          curl -sSL -o gitleaks.tar.gz "$url"
-          echo "${GITLEAKS_SHA256}  gitleaks.tar.gz" | sha256sum -c -
+          verified="no"
+          for attempt in 1 2 3; do
+            if curl -fsSL --connect-timeout 30 --max-time 300 -o gitleaks.tar.gz "$url"; then
+              if echo "${GITLEAKS_SHA256}  gitleaks.tar.gz" | sha256sum -c -; then
+                verified="yes"
+                break
+              fi
+            fi
+            echo "gitleaks download attempt ${attempt} of 3 failed or did not match the pinned checksum"
+            rm -f gitleaks.tar.gz
+            if [ "${attempt}" -lt 3 ]; then
+              sleep 10
+            fi
+          done
+          if [ "${verified}" != "yes" ]; then
+            echo "FAIL: no gitleaks download matched the pinned checksum in 3 attempts"
+            exit 1
+          fi
           tar -xzf gitleaks.tar.gz gitleaks
           ./gitleaks dir . --no-banner --redact --exit-code 1
 

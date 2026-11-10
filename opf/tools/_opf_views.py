@@ -65,9 +65,18 @@ mis-reported as a downstream malformed-record error, and never silently rendered
 `<TYPE>-INDEX.md` mirrors cover the baseline record types only; module-type mirrors are DEFERRED until
 module-type record schemas ship (`_opf_schema.validate_record` knows only the baseline specs, so no
 module-type mirror can be rendered regardless). Every record source is read from its ACTIVE
-`<type>.index.toml` only (_source_relpath); no view reads a record rotated to the archive, whereas the
-doctor's decision-chain check reads archived records beside the active ones, so a decision supersession
-chain is evaluated here over its active decisions alone (join_resolution states what that leaves unseen).
+`<type>.index.toml` (_source_relpath), with one addition: the two decision outputs, DECISIONS.md and
+DECISIONS.toml, also read the pending decisions rotated to the archive, through the doctor's own archive
+walk (_archived_decisions over _opf_check.archive_read, never a second reader), so a decision supersession
+chain is evaluated there over the decisions the doctor's decision-chain check reads (join_resolution
+states which of the doctor's chains the views then refuse, and which they do not). When either decision
+output is declared, an archive whose population the walk could not read or confirm in full, or that
+_archived_decisions otherwise refuses, refuses the whole plan: plan_views raises before it returns any
+view, so every declared view is refused, not only the two decision outputs. Every archive file the walk
+parsed enters the two decision outputs' source-set digest. The archive is walked once per plan; a doctor
+run walks it twice, once for its own archive and decision-chain checks and once inside the plan_views call
+of its C-VIEW-DRIFT check, so those checks judge two separate reads of the archive. Every other view, the
+PENDING_DECISION-INDEX.md mirror included, reads the active index alone.
 
 The write path (spec 5.7/5.8/11): a mutating render gates on the `_opf_check.validate_store`
 store-integrity layer (cross-record uniqueness, coverage, reconciliation, view drift, changelog/version
@@ -797,12 +806,19 @@ def join_resolution(decisions):
     cannot render part of a graph it cannot evaluate. A chain with no such link is evaluated over its own
     edges as before, so a chain the doctor connects only through a link from a non-decided decision or a
     proposal is more than one chain here, each with its own head. The join sees only the decisions it is
-    given, and the views read the active pending_decision index, never the archive, while the doctor's
-    decision_chains also reads the decisions rotated to the archive. A `supersedes` link to an archived
-    decision therefore links nothing here, and an archived decision's link to an active one is not seen: a
-    chain the doctor joins through an archived decision is evaluated over its active decisions alone, so
-    two non-importer current resolutions that only an archived decision joins into one chain are NOT
-    refused, and each renders as an effective resolution."""
+    given. The two decision outputs hand it the active pending decisions together with the ones rotated to
+    the archive (plan_views, _archived_decisions), the population the doctor's decision_chains reads, so an
+    archived decision takes part in a chain here exactly as an active one does. The views therefore refuse a
+    chain the doctor refuses through an archived decision only where this join connects that chain as well:
+    through edges from decided decisions (a fork or a cycle among those edges raises as above, an archived
+    decision's edges included), or as a chain an importer-authored link joins (two non-importer current
+    resolutions that only an archived importer-authored decision joins into one chain are refused here as
+    the doctor refuses them). Disclosed residual, which predates the archive read: outside a chain an
+    importer-authored link joins, this join builds edges from decided decisions only, so a chain the doctor
+    joins only through a withdrawn or otherwise non-decided decision, archived or active, is not refused
+    here even where the doctor reports that chain as a finding: its parts render, each with its own head. A
+    direct caller that passes the active decisions alone gets the narrower answer: a `supersedes` link to a
+    decision it did not pass links nothing."""
     mixed = _mixed_provenance_chains(decisions)
     decisions = t_filter(t_filter(decisions, "not_importer_authored"), "not_proposed")
     supersedes_map = {}
@@ -1203,9 +1219,9 @@ def render_decisions(src):
     superseding it is effective with no `supersedes` tail naming it. A pending decision chain that joins
     imported and current decisions through any `supersedes` link, a proposal's included, and keeps more
     than one current effective resolution is a cannot-evaluate (join_resolution), and so is the whole
-    view: a clean chain beside it is not rendered either. A decision rotated to the archive is not read
-    (join_resolution states what that leaves unseen). When the view renders, every valid record of every
-    source thus lands in exactly one place."""
+    view: a clean chain beside it is not rendered either. The pending decisions rotated to the archive are
+    read with the active ones (plan_views, _archived_decisions) and land in the same sections. When the
+    view renders, every valid record of every source thus lands in exactly one place."""
     pend, auto = src["pending_decision"], src["autonomous_decision"]
     md = src.get("maintainer_decision", [])
     pp = src.get("preference_pattern", [])
@@ -1387,8 +1403,9 @@ def render_decisions_toml(src):
     its links remove no decision from `effective`. The join is handed every pending decision, so a chain
     joining imported and current decisions through any link, a proposal's included, that keeps more than
     one current effective resolution is a cannot-evaluate there, and the whole projection then refuses, a
-    clean chain beside it included; a decision rotated to the archive is not read (join_resolution).
-    x-<vendor> tables are excluded (profile-owned). The body is emitted through
+    clean chain beside it included. The pending decisions rotated to the archive are read with the active
+    ones (plan_views, _archived_decisions) and project as rows of the same array, so every id in `[derived]`
+    has its row. x-<vendor> tables are excluded (profile-owned). The body is emitted through
     _opf_emit.emit_checked, which reparses and byte-canon-proves its own output (fail-closed)."""
     sources = ("pending_decision", "autonomous_decision", "maintainer_decision", "preference_pattern")
     doc = {"projection": "decisions", "schema": PROJECTION_SCHEMA}
@@ -1734,6 +1751,68 @@ def _registered_vendors_and_kinds(manifest):
     return registered, None
 
 
+# The decision outputs whose resolution join reads the pending decisions rotated to the archive beside the
+# active ones (spec 8.5, 8.8, 12): the doctor's decision_chains reads that population, so these views do too.
+_ARCHIVE_DECISION_VIEWS = frozenset(("DECISIONS.md", "DECISIONS.toml"))
+
+
+def _archived_decisions(store_root_fd, machine_rel, manifest, registered_vendors, active_decisions):
+    """The archived pending decisions the two decision outputs join beside the active ones, read through
+    the doctor's own archive walk (_opf_check.archive_read, one _validate_archive walk per call, so never a
+    second read of the archive within one plan; a doctor run still walks the archive twice, once for its own
+    checks and once through this function in its C-VIEW-DRIFT plan). Returns (records, source_bytes): the
+    pending_decision bodies the walk seated, in walk order, and the walk's map of each archive file it
+    parsed to the exact bytes of that parse, every archive.toml, index and worklog among them, so the
+    caller's source-set digest accounts for every input a successful walk depends on. The walk takes the
+    manifest-derived arguments opf record passes it.
+
+    Refuses (ViewsError, a cannot-evaluate) rather than render over a partial population: when the walk
+    reports any problem (a missing, unreadable or malformed archive input, a C-ROTATION message, an
+    archived id seated twice), when it could not read or confirm a population in full (`complete` False),
+    when an archived pending decision is not a valid record or repeats an active decision's id, or when a
+    parsed path is also a declared active source read with different bytes. Each of those can hide or
+    duplicate a chain member, and a view cannot render part of a graph it cannot evaluate. A store with no
+    archive tree has rotated nothing: ([], {}). The refusal is conservative where the walk is: an archive
+    fault in another record type also refuses, and a moved row whose declared destination is an active
+    location leaves `complete` False here (archive_read is passed no active locations) where the doctor
+    counts it. The import is call-time, as render's is, since _opf_check imports this module at its top;
+    archive_read runs no validate_store, so the doctor's C-VIEW-DRIFT call into plan_views does not recur."""
+    import _opf_check
+    base = manifest.get("opf")
+    import_status = base.get("import_status") if isinstance(base, dict) else None
+    enabled_types = _opf_check._authoritative_types(_opf_check._enabled_modules(manifest),
+                                                    manifest.get("types"))
+    read = _opf_check.archive_read(store_root_fd, machine_rel, enabled_types, registered_vendors,
+                                   import_status, homes=_opf_store.homes_generation(manifest))
+    if read.problems or not read.complete:
+        causes = list(read.problems)
+        if not read.complete:
+            causes.append("the archive's record population could not all be read or confirmed")
+        raise ViewsError("the archive does not pass the doctor's own archive walk ({}), so the decision "
+                         "outputs are refused: their supersession join reads the archived pending "
+                         "decisions beside the active ones (spec 8.5, 8.8, 12); fail-closed".format(
+                             "; ".join(causes)))
+    active_ids = {r.get("id") for r in active_decisions if isinstance(r, dict)}
+    records = []
+    for location, rtype, body in read.records:
+        if rtype != "pending_decision":
+            continue
+        if not isinstance(body, dict):
+            raise ViewsError("an archived pending decision row in {} is not a table; fail-closed".format(
+                location))
+        rv = _opf_schema.validate_record(body, expected_type="pending_decision",
+                                         registered_vendors=registered_vendors)
+        if rv.status != _opf_store.VALID:
+            raise ViewsError("archived pending decision {} in {} is malformed: {}".format(
+                rv.id or "?", location, "; ".join(rv.findings)))
+        if body.get("id") in active_ids:
+            raise ViewsError("archived pending decision {} in {} repeats an active pending decision's id "
+                             "(spec 8.2, 11); the decision outputs are refused rather than join two records "
+                             "under one id; fail-closed".format(body.get("id"), location))
+        records.append(body)
+    return records, dict(read.source_bytes)
+
+
 def render(argv, observations=None, accepted=None):
     """`opf render [--root DIR] (--check | --write)`: render every declared view of the store at a PRODUCT
     root. Exactly one of --check / --write is required (a bare `render` is a usage error, exit 2). --check is
@@ -2030,7 +2109,11 @@ def plan_views(store_root_fd, machine_rel, *, on_legacy_conflict=None, supported
     (view_name, scope, dest_relpath, text) WITHOUT writing anything. Raises ViewsError (a cannot-evaluate)
     on an unreadable manifest or source, a `per-record` store (deferred), a view/kind/target mismatch,
     or a byte-canon-invalid render, exactly as the render path does; _render_resolved calls it and performs
-    the writes. It makes no state-changing or outbound side effect (a planner is a preview)."""
+    the writes. When DECISIONS.md or DECISIONS.toml is declared it also reads the archived pending decisions
+    through one archive walk per plan (_archived_decisions); an archive refusal there, or an archive input
+    read with bytes other than its declared active source's, raises out of the whole plan, so every view is
+    refused, not only the two decision outputs. It makes no state-changing or outbound side effect (a
+    planner is a preview)."""
     if manifest_model is None:
         manifest_model = _with_worklog_diagnostics(
             lambda: _opf_worklog.read_manifest_model_at(
@@ -2081,6 +2164,20 @@ def plan_views(store_root_fd, machine_rel, *, on_legacy_conflict=None, supported
             rows_by_source[name] = records
         raw_by_relpath[relpath] = raw
 
+    # The two decision outputs join the archived pending decisions beside the active ones, as the doctor's
+    # decision_chains does (_archived_decisions refuses an archive it could not read in full). The archive
+    # is walked once, only when one of them is declared; every other view, the pending_decision mirror
+    # included, keeps the active rows alone. A parsed archive path that is also a declared active source
+    # must carry the bytes that source was read with, so one digest never binds two reads of a path.
+    archived_pd, archive_blobs = [], {}
+    if _ARCHIVE_DECISION_VIEWS & set(views):
+        archived_pd, archive_blobs = _archived_decisions(
+            store_root_fd, machine_rel, manifest, registered_vendors, rows_by_source["pending_decision"])
+        for relpath in sorted(set(archive_blobs) & set(raw_by_relpath)):
+            if archive_blobs[relpath] != raw_by_relpath[relpath]:
+                raise ViewsError("{} was read twice with different bytes (an active source and an archive "
+                                 "input); the decision outputs are refused; fail-closed".format(relpath))
+
     # Render every target's full text from the loaded sources, before any target is written. Each target is
     # bound to its OWN spec destination; a manifest `target` that does not match is rejected, never silently
     # redirected.
@@ -2105,12 +2202,16 @@ def plan_views(store_root_fd, machine_rel, *, on_legacy_conflict=None, supported
                              "cannot rebind a view off its spec destination (fail-closed, spec 5.8/9)"
                              .format(name, declared_target, dest_rel))
         src = {s: rows_by_source[s] for s in required}
+        if name in _ARCHIVE_DECISION_VIEWS:
+            src["pending_decision"] = rows_by_source["pending_decision"] + archived_pd
         body = renderer(src)
         if name == "VERSION":
             text = body                                   # header-exempt exact-bytes deliverable (spec 6.1)
         else:
             source_blobs = {_source_relpath(machine_rel, s, manifest):
                             raw_by_relpath[_source_relpath(machine_rel, s, manifest)] for s in required}
+            if name in _ARCHIVE_DECISION_VIEWS:
+                source_blobs.update(archive_blobs)   # the archive inputs the decision join depends on
             if kind == "projection":
                 # A machine projection (spec 10.5) carries the SAME identity header as a markdown view, but a
                 # `.toml` deliverable takes it as leading `#` comment lines (_toml_header), never the HTML
@@ -4693,6 +4794,84 @@ def _self_test():
         check("linesep-collapse-off-reaches-views",
               ls_pre and _ls_off_rc == EXIT_OK and all(ch in _ls_off_refs for ch in ls_seps))
 
+        # --- A store holding U+0085 inside a rendered line, but neither U+2028 nor U+2029, drifts in its
+        # Markdown view (spec 5.7). The U+0085 collapse kept GENERATOR_VERSION, so REFERENCES.md as a tool
+        # without that collapse rendered it (the reference locator holding a literal U+0085 inside the
+        # line, the U+2028/U+2029 collapse left on) differs from the current render, and render --check
+        # reports it as drift until one re-render. With U+0085 left out of _MD_LINESEP_RE both renders are
+        # the same bytes and these checks fail. A U+0085 only at the end of a rendered line is the
+        # exception: the per-line rstrip() removes it either way, so both renders are the same bytes
+        # (checked below). The modelled earlier tool differs from the current one only in that collapse; a
+        # real earlier tool without it also writes an older generator version, so its views differ anyway.
+        nelroot = new_root()
+        write_toml(nelroot, "manifest.toml", manifest)
+        empty_indexes(nelroot)
+        write_toml(nelroot, "reference.index.toml", "\n".join([
+            "schema = 1", "", "[[record]]",
+            'id = "RF-1"', 'type = "reference"', 'status = "recorded"', 'title = "a source"',
+            'created_at = "2026-01-01T00:00:00Z"', 'updated_at = "2026-01-02T00:00:00Z"',
+            'actor = { kind = "maintainer" }',
+            'refs = [{ kind = "doc", locator = "loc\\u0085x", note = "a note" }]',
+        ]) + "\n")
+        _nel_refs = nelroot / WORKING_DIRNAME / "REFERENCES.md"
+        _nel_store = "".join(_p.read_text(encoding="utf-8")
+                             for _p in sorted((nelroot / WORKING_DIRNAME / "toml").iterdir()))
+        _nel_saved = globals()["_MD_LINESEP_RE"]
+        try:
+            globals()["_MD_LINESEP_RE"] = re.compile("[\N{LINE SEPARATOR}\N{PARAGRAPH SEPARATOR}]")
+            _nel_prior_rc = render_write(nelroot)
+        finally:
+            globals()["_MD_LINESEP_RE"] = _nel_saved
+        _nel_prior = _nel_refs.read_bytes() if _nel_refs.is_file() else b""
+        _nel_now_rc = render_write(nelroot)
+        _nel_now = _nel_refs.read_bytes() if _nel_refs.is_file() else b""
+        _nel_pre = ("\\u0085" in _nel_store
+                    and not any(_s in _nel_store for _s in ("\\u2028", "\\u2029") + ls_seps)
+                    and _nel_prior_rc == EXIT_OK and _nel_now_rc == EXIT_OK)
+        check("nel-only-store-prior-render-differs",
+              _nel_pre and "\x85".encode("utf-8") in _nel_prior
+              and "\x85".encode("utf-8") not in _nel_now and _nel_prior != _nel_now)
+        _nel_refs.write_bytes(_nel_prior)
+        check("nel-only-store-markdown-view-drifts",
+              _nel_pre and render(["--root", str(nelroot), "--check"]) == EXIT_DRIFT)
+        check("nel-only-store-one-rerender-clears",
+              _nel_pre and _nel_prior != _nel_now
+              and render_write(nelroot) == EXIT_OK and _nel_refs.read_bytes() == _nel_now
+              and render(["--root", str(nelroot), "--check"]) == EXIT_OK)
+        # A U+0085 only at the end of a rendered line, alone and in a run with a space: the render without
+        # the U+0085 collapse and the current render are the same bytes, and render --check finds no drift.
+        # If the line-end strip stopped removing U+0085, the render without the collapse would keep it at
+        # the line end, and this check fails.
+        nelendroot = new_root()
+        write_toml(nelendroot, "manifest.toml", manifest)
+        empty_indexes(nelendroot)
+        write_toml(nelendroot, "reference.index.toml", "\n".join([
+            "schema = 1", "", "[[record]]",
+            'id = "RF-1"', 'type = "reference"', 'status = "recorded"', 'title = "a source"',
+            'created_at = "2026-01-01T00:00:00Z"', 'updated_at = "2026-01-02T00:00:00Z"',
+            'actor = { kind = "maintainer" }',
+            'refs = [{ kind = "doc", locator = "loc\\u0085", note = "a note" },'
+            ' { kind = "doc", locator = "end\\u0085 \\u0085", note = "a note" }]',
+        ]) + "\n")
+        _nelend_refs = nelendroot / WORKING_DIRNAME / "REFERENCES.md"
+        _nelend_store = (nelendroot / WORKING_DIRNAME / "toml" / "reference.index.toml").read_text(
+            encoding="utf-8")
+        _nelend_saved = globals()["_MD_LINESEP_RE"]
+        try:
+            globals()["_MD_LINESEP_RE"] = re.compile("[\N{LINE SEPARATOR}\N{PARAGRAPH SEPARATOR}]")
+            _nelend_prior_rc = render_write(nelendroot)
+        finally:
+            globals()["_MD_LINESEP_RE"] = _nelend_saved
+        _nelend_prior = _nelend_refs.read_bytes() if _nelend_refs.is_file() else b""
+        _nelend_now_rc = render_write(nelendroot)
+        _nelend_now = _nelend_refs.read_bytes() if _nelend_refs.is_file() else b""
+        check("nel-line-end-renders-byte-identical",
+              _nelend_store.count("\\u0085") == 3 and "\x85" not in _nelend_store
+              and _nelend_prior_rc == EXIT_OK and _nelend_now_rc == EXIT_OK and _nelend_prior == _nelend_now
+              and body_of(_nelend_now.decode("utf-8"))
+              == "\n# REFERENCES\n\n- RF-1 a source\n  - doc: loc\n  - doc: end\n"
+              and render(["--root", str(nelendroot), "--check"]) == EXIT_OK)
+
         # --- a per-record store is a CLEAR cannot-evaluate (deferred), not a silent inline render --------
         prroot = new_root()
         write_toml(prroot, "manifest.toml", manifest.replace('layout = "inline"', 'layout = "per-record"'))
@@ -5302,12 +5481,181 @@ def _self_test():
         finally:
             globals()["_WRITE_GATE_COMPOSED"] = _saved_flag
 
+        # --- the decision outputs read the archived pending decisions (spec 8.5, 8.8, 12) ---------------
+        # Each store below is the whole-store-valid _gate_store shape with its pending decisions and its
+        # 2026 archive bucket replaced after the pre-render, so DECISIONS.md and DECISIONS.toml are planned
+        # over active and archived decisions together through the one archive walk.
+        import _opf_emit as _ad_emit
+        import _opf_check as _ad_check
+        _ad_ts = "2026-06-01T00:00:00Z"
+        _ad_pd_index = "archive/2026/pending_decision.index.toml"
+
+        def _ad_pd(n, supersedes=None, importer=False, title="t"):
+            r = {"id": "PD-{}".format(n), "type": "pending_decision", "status": "decided", "title": title,
+                 "created_at": _ad_ts, "updated_at": _ad_ts,
+                 "actor": {"kind": "importer" if importer else "maintainer"},
+                 "decision": "x", "decided_at": _ad_ts, "decided_by": "maintainer"}
+            if supersedes is not None:
+                r["links"] = [{"rel": "supersedes", "id": supersedes}]
+            return r
+
+        def _ad_put(root, rel, doc):
+            (root / WORKING_DIRNAME / "toml" / rel).write_text(_ad_emit.emit(doc), encoding="utf-8")
+
+        def _ad_store(active, archived, destination=True):
+            def _mut(root, _bi):
+                _ad_put(root, "pending_decision.index.toml", {"schema": 1, "record": active})
+                _ad_put(root, "archive/2026/archive.toml", {
+                    "schema": 1,
+                    "moved": [{"id": r["id"], "type": "pending_decision", "destination": _ad_pd_index}
+                              for r in archived],
+                    "worklog_moved": [{"span": ["WL-1", "WL-2"], "destination": "archive/2026/worklog.toml"}]})
+                if archived and destination:
+                    _ad_put(root, _ad_pd_index, {"schema": 1, "record": archived})
+                # _gate_store's counters, with PD raised to the highest decision id written here.
+                _ad_put(root, "counters.toml", {"schema": 1, "counters": {
+                    "BI": 2, "DN": 1, "WL": 4, "FN": 0, "PD": len({r["id"] for r in active + archived}),
+                    "AD": 0, "BL": 0, "HO": 1, "RF": 0, "CN": 0, "MD": 0, "PP": 0}})
+            return _gate_store(mutate=_mut)
+
+        def _ad_resolve(root):
+            return _opf_store.resolve_store(Path(os.path.abspath(str(root))))
+
+        def _ad_outcome(root):
+            res = _ad_resolve(root)
+            fd = _opf_store._open_store_root_fd(res.store_root, res.pointer_source != "default")
+            try:
+                return "rendered", {n: t for n, _s, _d, t in plan_views(fd, res.machine_rel)}
+            except ViewsError as exc:
+                return "refused", str(exc)
+            finally:
+                _opf_store._close_fd_exc_safe(fd)
+
+        def _ad_digest(text):
+            return next((ln for ln in text.split("\n") if "source-set-digest:" in ln), None)
+
+        def _ad_without_archive_read(fn, keep_records=False):
+            real = _archived_decisions
+
+            def _stub(*args, **kwargs):
+                return (real(*args, **kwargs)[0] if keep_records else []), {}
+
+            globals()["_archived_decisions"] = _stub
+            try:
+                return fn()
+            finally:
+                globals()["_archived_decisions"] = real
+
+        # A maintainer PD-1 and PD-3 joined only through an importer-authored PD-2 rotated to the archive:
+        # the doctor's C-DECISION-CHAINS reports the chain's two current resolutions, and both decision
+        # outputs refuse the chain the same way, naming it through the archived member, while the doctor's
+        # C-VIEW-DRIFT cannot evaluate the refused views. The same chain with PD-2 active refuses too. Red
+        # without the archive read: the views then see PD-1 and PD-3 as two chains and render both.
+        _ad_two = "chain [PD-1, PD-2, PD-3] (current: PD-1, PD-3) has more than one"
+        _ad_br_root, _ad_br_obs = _ad_store([_ad_pd(1), _ad_pd(3, supersedes="PD-2")],
+                                            [_ad_pd(2, supersedes="PD-1", importer=True)])
+        _ad_br_doc = _ad_check.validate_store(_ad_resolve(_ad_br_root), observations=_ad_br_obs)
+        _ad_br = _ad_outcome(_ad_br_root)
+        check("archived-importer-bridge-doctor-finding",
+              _ad_br_doc.checks.get("C-DECISION-CHAINS") == "FINDING"
+              and _ad_br_doc.checks.get("C-VIEW-DRIFT") == "CANNOT-EVALUATE")
+        check("archived-importer-bridge-views-refused", _ad_br[0] == "refused" and _ad_two in _ad_br[1])
+        check("archived-importer-bridge-render-check-refused",
+              render(["--root", str(_ad_br_root), "--check"]) == EXIT_CANNOT_EVALUATE)
+        _ad_ac_root, _ad_ac_obs = _ad_store(
+            [_ad_pd(1), _ad_pd(2, supersedes="PD-1", importer=True), _ad_pd(3, supersedes="PD-2")], [])
+        _ad_ac = _ad_outcome(_ad_ac_root)
+        check("active-importer-bridge-views-refused", _ad_ac[0] == "refused" and _ad_two in _ad_ac[1])
+        _ad_br_flip = _ad_without_archive_read(lambda: _ad_outcome(_ad_br_root))
+        check("archived-importer-bridge-red-without-archive-read", _ad_br_flip[0] == "rendered")
+
+        # A valid archived clean predecessor: maintainer PD-1 rotated to the archive and superseded by an
+        # active PD-2. Both outputs render PD-1 as superseded and PD-2 as the one effective resolution, the
+        # projection carries a row for every derived id, the decision headers name the archive inputs the
+        # walk parsed while TODO.md's does not, and a repeated plan is byte-identical.
+        _ad_pr_root, _ad_pr_obs = _ad_store([_ad_pd(2, supersedes="PD-1")], [_ad_pd(1, title="archived ruling")])
+        _ad_pr = _ad_outcome(_ad_pr_root)
+        _ad_pr_ok = _ad_pr[0] == "rendered"
+        _ad_pr_md = _ad_pr[1].get("DECISIONS.md", "") if _ad_pr_ok else ""
+        _ad_pr_toml = _ad_pr[1].get("DECISIONS.toml", "") if _ad_pr_ok else ""
+        try:
+            _ad_pr_doc = tomllib.loads(_ad_pr_toml)
+        except tomllib.TOMLDecodeError:
+            _ad_pr_doc = {}
+        check("archived-predecessor-decisions-md",
+              "## Effective resolutions\n- PD-2 t (supersedes PD-1)\n" in _ad_pr_md
+              and "## Superseded resolutions\n- PD-1 archived ruling\n" in _ad_pr_md)
+        check("archived-predecessor-decisions-toml",
+              _ad_pr_doc.get("derived") == {"effective": ["PD-2"], "superseded": ["PD-1"]}
+              and [r.get("id") for r in _ad_pr_doc.get("pending_decision", [])] == ["PD-1", "PD-2"])
+        _ad_inputs = ("/archive/2026/archive.toml", "/" + _ad_pd_index, "/archive/2026/worklog.toml")
+        check("archived-predecessor-headers-name-archive-inputs",
+              _ad_pr_ok and all(p in _ad_pr_md.split("\n")[1] and p in _ad_pr_toml.split("\n")[1]
+                                for p in _ad_inputs)
+              and "/archive/" not in _ad_pr[1].get("TODO.md", "/archive/").split("-->")[0])
+        check("archived-predecessor-plan-repeatable", _ad_pr_ok and _ad_outcome(_ad_pr_root) == _ad_pr)
+
+        # The source-set digest of both decision outputs changes when an archived decision changes, and
+        # TODO.md, which reads no archive input, keeps its bytes. Red when the archive bytes are left out
+        # of the decision outputs' source set.
+        _ad_put(_ad_pr_root, _ad_pd_index, {"schema": 1, "record": [_ad_pd(1, title="archived ruling, edited")]})
+        _ad_ed = _ad_outcome(_ad_pr_root)
+        check("archived-decision-change-moves-decision-digests",
+              _ad_pr_ok and _ad_ed[0] == "rendered"
+              and all(_ad_digest(_ad_ed[1][n]) not in (None, _ad_digest(_ad_pr[1][n]))
+                      for n in ("DECISIONS.md", "DECISIONS.toml"))
+              and _ad_ed[1]["TODO.md"] == _ad_pr[1]["TODO.md"])
+        _ad_ed_flip = _ad_without_archive_read(lambda: _ad_outcome(_ad_pr_root), keep_records=True)
+        _ad_put(_ad_pr_root, _ad_pd_index, {"schema": 1, "record": [_ad_pd(1, title="archived ruling")]})
+        _ad_pr_flip =_ad_without_archive_read(lambda: _ad_outcome(_ad_pr_root), keep_records=True)
+        check("archived-decision-digest-red-without-archive-bytes",
+              _ad_ed_flip[0] == "rendered" and _ad_pr_flip[0] == "rendered"
+              and _ad_digest(_ad_ed_flip[1]["DECISIONS.md"]) == _ad_digest(_ad_pr_flip[1]["DECISIONS.md"]))
+
+        # An incomplete archive refuses both outputs: a moved PD-1 whose destination index is missing. Each
+        # arm of the walk's verdict refuses alone, on the otherwise valid predecessor store: `complete`
+        # False with no problem, and a problem with `complete` True. Red when the walk's verdict is
+        # ignored: the incomplete store then renders over the decisions the walk did seat.
+        _ad_in_root, _ad_in_obs = _ad_store([_ad_pd(2, supersedes="PD-1")], [_ad_pd(1)], destination=False)
+        _ad_in = _ad_outcome(_ad_in_root)
+        check("archive-incomplete-views-refused",
+              _ad_in[0] == "refused" and "does not pass the doctor's own archive walk" in _ad_in[1])
+        _ad_real_read = _ad_check.archive_read
+
+        def _ad_forced(fn, problems, complete):
+            def _fake(*args, **kwargs):
+                r = _ad_real_read(*args, **kwargs)
+                return _ad_check.ArchiveRead(r.tree, r.records, r.worklog, list(problems), complete,
+                                             r.source_bytes)
+
+            _ad_check.archive_read = _fake
+            try:
+                return fn()
+            finally:
+                _ad_check.archive_read = _ad_real_read
+
+        _ad_arm_incomplete = _ad_forced(lambda: _ad_outcome(_ad_pr_root), (), False)
+        _ad_arm_problem = _ad_forced(lambda: _ad_outcome(_ad_pr_root), ("C-ARCHIVE-ENUM: forced",), True)
+        check("archive-incomplete-flag-alone-refused",
+              _ad_arm_incomplete[0] == "refused" and "could not all be read or confirmed" in _ad_arm_incomplete[1])
+        check("archive-problem-alone-refused",
+              _ad_arm_problem[0] == "refused" and "C-ARCHIVE-ENUM: forced" in _ad_arm_problem[1])
+        _ad_in_flip = _ad_forced(lambda: _ad_outcome(_ad_in_root), (), True)
+        check("archive-incomplete-red-when-walk-verdict-ignored", _ad_in_flip[0] == "rendered")
+
+        # An archived pending decision repeating an active one's id refuses both outputs (the walk alone
+        # does not report it, since it reads no active records).
+        _ad_dp_root, _ad_dp_obs = _ad_store([_ad_pd(1)], [_ad_pd(1)])
+        _ad_dp = _ad_outcome(_ad_dp_root)
+        check("archived-decision-repeating-active-id-refused",
+              _ad_dp[0] == "refused" and "repeats an active pending decision's id" in _ad_dp[1])
+
         # --- one-time re-spelling of the DECISIONS.toml projection (spec 5.7/10.5): the emitter now writes
         # U+2028/U+2029 as escapes, with NO generator-version bump, so a projection an EARLIER tool rendered
         # from a record holding either character differs from the current render in exactly that spelling.
         # The byte-level drift gate is NOT loosened: the old-spelled view reads as C-VIEW-DRIFT until one
         # re-render re-spells it, and a projection over records holding neither character is byte-identical
-        # across a re-render, so a store without these characters sees no drift.
+        # across a re-render, so this re-spelling brings no drift to a store without these characters.
         import _opf_check as _sep_check
         _sep_decision = {"id": "MD-1", "type": "maintainer_decision", "status": "recorded",
                          "title": "a ruling",

@@ -1371,6 +1371,22 @@ def _self_test():
         def at(self, rel):
             return os.path.join(self.root, *rel.split("/"))
 
+        def run_filled(self, args, data, **kwargs):
+            """subprocess.run(args, **kwargs) with data and its end of input already in a pipe on the child's
+            stdin before the launch. Writing the input after the launch makes the child's read deadline race
+            this process: descheduled past it, the child reports a late payload instead of judging the call.
+            The write end is non-blocking, so data that does not fit the pipe raises here instead of hanging."""
+            r, w = os.pipe()
+            try:
+                try:
+                    os.set_blocking(w, False)
+                    self.assertEqual(os.write(w, data), len(data))
+                finally:
+                    os.close(w)
+                return subprocess.run(args, stdin=r, **kwargs)
+            finally:
+                os.close(r)
+
         def edit(self, rel, old, new, **extra):
             payload = {"hook_event_name": "PreToolUse", "tool_name": "Edit",
                        "tool_input": {"file_path": self.at(rel), "old_string": old, "new_string": new}}
@@ -1448,8 +1464,8 @@ def _self_test():
             data = json.dumps({"tool_name": "Edit", "tool_input": {
                 "file_path": self.at("docs/a.md"), "old_string": "x", "new_string": em}}).encode("ascii")
             for env, want in (({"LC_ALL": "C"}, b""), ({"LC_ALL": "C", ROOT_VAR: self.root}, b"deny")):
-                p = subprocess.run([sys.executable, "-I", "-S", "-B", here], input=data, capture_output=True,
-                                   env=env, timeout=60)
+                p = self.run_filled([sys.executable, "-I", "-S", "-B", here], data, capture_output=True,
+                                    env=env, timeout=60)
                 self.assertEqual(p.returncode, 0)
                 if want:
                     self.assertEqual(json.loads(p.stdout)["hookSpecificOutput"]["permissionDecision"], "deny")
@@ -1459,8 +1475,8 @@ def _self_test():
             for junk, needle in ((b"", "cannot be read as JSON"), (b"not json", "cannot be read as JSON"),
                                  (b"\xff", "cannot be read as JSON"), (b"[1]", "not a JSON object"),
                                  (b'{"tool_name": "Write"}', "tool_input is not an object")):
-                p = subprocess.run([sys.executable, "-I", "-S", "-B", here], input=junk, capture_output=True,
-                                   env={"LC_ALL": "C", ROOT_VAR: self.root}, timeout=60)
+                p = self.run_filled([sys.executable, "-I", "-S", "-B", here], junk, capture_output=True,
+                                    env={"LC_ALL": "C", ROOT_VAR: self.root}, timeout=60)
                 self.assertEqual(p.returncode, 0, junk)
                 self.is_unchecked(json.loads(p.stdout), needle)
                 p = subprocess.run([sys.executable, "-I", "-S", "-B", here], input=junk, capture_output=True,
@@ -1502,8 +1518,8 @@ def _self_test():
                     handles.append(write_end)
                     stdout_target = write_end
                 try:
-                    p = subprocess.run([sys.executable, "-I", "-S", "-B", here], input=data,
-                                       stdout=stdout_target, stderr=subprocess.PIPE, env=env, timeout=60)
+                    p = self.run_filled([sys.executable, "-I", "-S", "-B", here], data,
+                                        stdout=stdout_target, stderr=subprocess.PIPE, env=env, timeout=60)
                 finally:
                     for handle in handles:
                         try:
@@ -1735,10 +1751,9 @@ def _self_test():
                     payload = {"tool_name": tool, "tool_input": {"file_path": target} | bad}
                     self.is_unchecked(_decide(payload, env), needle)
                     self.assertIsNone(_decide({"tool_name": tool, "tool_input": {"file_path": target} | good}, env))
-                p = subprocess.run([sys.executable, "-I", "-S", "-B", here], capture_output=True, timeout=60,
-                                   input=json.dumps({"tool_name": tool, "tool_input": {
-                                       "file_path": os.path.join(empty, "x.md")} | bad}).encode("ascii"),
-                                   env={"LC_ALL": "C", ROOT_VAR: empty})
+                p = self.run_filled([sys.executable, "-I", "-S", "-B", here], json.dumps({
+                    "tool_name": tool, "tool_input": {"file_path": os.path.join(empty, "x.md")} | bad}).encode(
+                    "ascii"), capture_output=True, timeout=60, env={"LC_ALL": "C", ROOT_VAR: empty})
                 self.assertEqual((p.returncode, p.stderr), (0, b""), tool)
                 self.is_unchecked(json.loads(p.stdout), needle)
 
@@ -1766,70 +1781,95 @@ def _self_test():
                    "duplicate top-level key": good[:-1] + b', "tool_name": "Write"}'}
             self.assertTrue(all(raw != good for raw in bad.values()))
 
-            def piped(parts, deadline=2.0, within=None):
+            real_select = select.select
+
+            def piped(parts, deadline=60.0):
                 """_read_payload(r, deadline) on a pipe that a thread fills with parts, (pause, bytes) each, with
-                None as the bytes for the end of input; the parsed payload, or "refused" for a ValueError. When
-                within is given, the read must also return within that many seconds (the pauses that remain end
-                once it returns, so a reader that waits for the end of input fails here instead of hanging)."""
+                None as the bytes for the end of input; the parsed payload, _LATE for a payload refused by the
+                deadline, or "refused" for any other ValueError. The feeder starts at the reader's first wait for
+                input, which comes after its clock has started (or 60 seconds after the feeder starts, if no wait
+                comes by then), and each pause counts from the part before it (the first from that start), so no
+                part reaches the reader sooner than its pause allows. The default deadline is far beyond any pause
+                here, so only a feeder thread the OS holds back for about a minute could turn a payload into a
+                late one; only the cases that test the deadline pass a short one. When parts hold no end of input,
+                the reader must return while the write end is still open, an event rather than a time window; as a
+                last resort, so that a reader that waits for the end of input fails here instead of hanging, the
+                feeder closes the write end 60 seconds after it has written the last part."""
                 r, w = os.pipe()
-                open_w, done = [True], threading.Event()
+                ended, started, done = [False], threading.Event(), threading.Event()
+
+                def first_wait(*args):
+                    started.set()
+                    return real_select(*args)
 
                 def feed():
+                    started.wait(60)
                     for pause, chunk in parts:
                         done.wait(pause)
                         if chunk is None:
+                            ended[0] = True
                             os.close(w)
-                            open_w[0] = False
                             return
                         os.write(w, chunk)
+                    if not done.wait(60):
+                        ended[0] = True
+                        os.close(w)
 
                 feeder = threading.Thread(target=feed)
                 feeder.start()
-                start = time.monotonic()
                 try:
-                    try:
-                        got = _read_payload(r, deadline)
-                    except ValueError:
-                        got = "refused"
-                    if within is not None:
-                        self.assertLess(time.monotonic() - start, within)
+                    with mock.patch.dict(globals(), {"select": mock.Mock(select=first_wait)}):
+                        try:
+                            got = _read_payload(r, deadline)
+                        except ValueError as exc:
+                            got = _LATE if str(exc) == _LATE else "refused"
+                    if all(chunk is not None for _, chunk in parts):
+                        self.assertFalse(ended[0], "the reader returned only once the write end was closed")
                     return got
                 finally:
+                    started.set()
                     done.set()
                     feeder.join()
-                    if open_w[0]:
+                    if not ended[0]:
                         os.close(w)
                     os.close(r)
 
             self.assertEqual(piped([(0, good), (0, None)]), json.loads(good))
             for label, raw in bad.items():
                 self.assertEqual(piped([(0, raw), (0, None)]), "refused", label)
-            # the deadline: an open pipe after a complete payload, and an end of input after the deadline
-            self.assertEqual(piped([(0, good), (10, None)], 0.3, within=5), "refused")
-            self.assertEqual(piped([(0, good), (0.6, None)], 0.3), "refused")
+            # the deadline: an open pipe after a complete payload, and an end of input after the deadline, are
+            # refused as late; an end of input that comes after a pause, well inside the deadline, is read
+            self.assertEqual(piped([(0, good)], 0.3), _LATE)
+            self.assertEqual(piped([(0, good), (0.6, None)], 0.3), _LATE)
             self.assertEqual(piped([(0, good), (0.05, None)]), json.loads(good))
-            # the clock is read again after every wait and every read: with the payload and its end of input
-            # already in the pipe, the reader takes 7 readings; whichever reading (from the second on) is the
-            # first past the deadline, the payload is refused, and with none past it, it is read
-            for late in range(2, 9):
-                readings = [0]
+            # the deadline at every reading of the clock, with a clock the test sets and the payload and its end
+            # of input already in the pipe: the reader takes 7 readings, the first of which starts the clock at 0.
+            # For each reading from the second on, every earlier reading is 0 and that one and every later one
+            # read t, against a deadline of 1.0. Just inside the deadline (0.999) the payload is read; exactly at
+            # it (1.0) and just past it (1.001) it is refused as late, whichever reading is the first to reach t.
+            # Reaching t first at the 7th reading, the one taken after the read that returns the end of input, is
+            # the only row that a comparison there letting a reading equal to the deadline through would fail;
+            # with t due first at an 8th reading, which the reader never takes, the payload is read
+            for first in range(2, 9):
+                for t in (0.999, 1.0, 1.001):
+                    readings = [0]
 
-                def monotonic():
-                    readings[0] += 1
-                    return 0.0 if readings[0] < late else 100.0
+                    def monotonic():
+                        readings[0] += 1
+                        return 0.0 if readings[0] < first else t
 
-                r, w = os.pipe()
-                os.write(w, good)
-                os.close(w)
-                try:
-                    with mock.patch.dict(globals(), {"time": mock.Mock(monotonic=monotonic)}):
-                        try:
-                            got = _read_payload(r, 1.0)
-                        except ValueError as exc:
-                            got = str(exc)
-                finally:
-                    os.close(r)
-                self.assertEqual(got, json.loads(good) if late == 8 else _LATE, late)
+                    r, w = os.pipe()
+                    os.write(w, good)
+                    os.close(w)
+                    try:
+                        with mock.patch.dict(globals(), {"time": mock.Mock(monotonic=monotonic)}):
+                            try:
+                                got = _read_payload(r, 1.0)
+                            except ValueError as exc:
+                                got = str(exc)
+                    finally:
+                        os.close(r)
+                    self.assertEqual(got, json.loads(good) if first == 8 or t < 1.0 else _LATE, (first, t))
             # an escaped lone surrogate is standard JSON, read as sent: it is not a policy character (the
             # validator refuses one), so it neither adds one nor hides one; the rest of the text is judged
             self.assertIsNone(_decide(call("\ud800safe"), self.env))
@@ -1837,61 +1877,139 @@ def _self_test():
             launch = [sys.executable, "-I", "-S", "-B", here]
             env = {"LC_ALL": "C", ROOT_VAR: self.root}
             for label, raw in bad.items():
-                p = subprocess.run(launch, input=raw, capture_output=True, env=env, timeout=60)
+                p = self.run_filled(launch, raw, capture_output=True, env=env, timeout=60)
                 self.assertEqual((p.returncode, p.stderr), (0, b""), label)
                 note = self.is_unchecked(json.loads(p.stdout), "cannot be read as JSON in UTF-8")
                 if label.startswith("duplicate"):
                     self.assertIn("duplicate key", note, label)
             for raw, want in ((good, None), (good.replace(b'"safe"', b'"\\ud800safe"'), None),
                               (good.replace(b'"safe"', b'"\\ud800\\u2014"'), "deny")):
-                p = subprocess.run(launch, input=raw, capture_output=True, env=env, timeout=60)
+                p = self.run_filled(launch, raw, capture_output=True, env=env, timeout=60)
                 self.assertEqual((p.returncode, p.stderr), (0, b""), raw)
                 if want is None:
                     self.assertEqual(p.stdout, b"", raw)
                 else:
                     self.is_deny(json.loads(p.stdout))
-            # through the hook as launched: a complete payload on a pipe that stays open, and (with the deadline
-            # lowered to 0.5 seconds) an end of input sent 1.5 seconds after the hook says it is about to read
-            p = subprocess.Popen(launch, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                 env=env)
-            try:
-                p.stdin.write(good)
-                p.stdin.flush()
-                rc = p.wait(timeout=60)
-                out, err = p.stdout.read(), p.stderr.read()
-            finally:
-                if p.poll() is None:
-                    p.kill()
-                    p.wait()
-                for stream in (p.stdin, p.stdout, p.stderr):
-                    stream.close()
+
+            def held(args, data, step=None, pass_fds=()):
+                """Launch args with data already in a pipe on its stdin before the launch, the write end held open
+                here, and return (rc, out, err) once the child exits. None of these launches can lose its input to
+                a child that has already exited. Without step, the pipe stays open until the child exits. With
+                step, step(p) runs first, while the child runs with the write end open; the write end is closed
+                once step returns. The pipes from the child's stdout and stderr are unbuffered here (bufsize=0), so
+                step can read stderr a line at a time without taking in the bytes of the next line."""
+                r, w = os.pipe()
+                fds = [r, w]
+                try:
+                    os.set_blocking(w, False)
+                    self.assertEqual(os.write(w, data), len(data))
+                    p = subprocess.Popen(args, stdin=r, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env,
+                                         bufsize=0, pass_fds=pass_fds)
+                    try:
+                        if step is not None:
+                            step(p)
+                            fds.remove(w)
+                            os.close(w)
+                        rc = p.wait(timeout=60)
+                        return rc, p.stdout.read(), p.stderr.read()
+                    finally:
+                        if p.poll() is None:
+                            p.kill()
+                            p.wait()
+                        p.stdout.close()
+                        p.stderr.close()
+                finally:
+                    for fd in fds:
+                        os.close(fd)
+
+            # through the hook as launched: a complete payload on a pipe that stays open gets the late note. This
+            # launch reads the real clock, so a hook that accepts a payload without its end of input would also
+            # give this note if the OS held it past its 2 second deadline before its first read; the launch below,
+            # on a clock this test moves, tells the two apart for the hooks its comment names
+            rc, out, err = held(launch, good)
             self.assertEqual((rc, err), (0, b""))
             self.is_unchecked(json.loads(out), "did not end within the read deadline")
-            late = ("import importlib.util, sys\n"
-                    "spec = importlib.util.spec_from_file_location('late_hook', sys.argv[1])\n"
-                    "module = importlib.util.module_from_spec(spec)\n"
-                    "spec.loader.exec_module(module)\n"
-                    "module._READ_DEADLINE = 0.5\n"
-                    "sys.stderr.write('ready\\n')\n"
-                    "sys.stderr.flush()\n"
-                    "sys.exit(module.main(['char-policy-write.py']))\n")
-            p = subprocess.Popen([sys.executable, "-I", "-S", "-B", "-c", late, here], stdin=subprocess.PIPE,
-                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
+            # the open pipe judged by the order of the reader's own steps rather than by time: through main, with
+            # the deadline lowered to 0.5 seconds after the import (so it must be read at call time) and a clock
+            # that only this test moves, from 0 to 0.45 and then to 0.75 seconds, past the lowered deadline and
+            # inside the 2 second default. Every wait and read goes to the real one unchanged; the child says on
+            # stderr each read of its input, each wait it enters once it holds the whole payload with the clock
+            # reading it last took, and the reading it last took when main returned. The clock moves to 0.45 only
+            # once the child has entered its fourth such wait at 0, and to 0.75 only once it has entered its
+            # second at 0.45. A wait it has entered is one it has already decided on, so its decision after its
+            # third wait at 0, and after its first wait at 0.45, is taken before the clock moves, however late the
+            # OS runs this test or the child; an announced wait alone would not show that. Before its deadline a
+            # hook that waits for the end of input cannot return, so at each move it must still be running with
+            # nothing on stdout. A hook that accepts the payload without its end of input before either of those
+            # waits, whether it polls, waits or reads, after a count of waits or after up to 0.45 seconds without
+            # input on its own clock, returns while its clock reads 0 or 0.45 and its last line says so. Once the
+            # clock reads 0.75 the write end closes: the hook must give the late note having read 0.75, and one
+            # that keeps the 2 second default reads the end of input and accepts it. A hook that accepts only at a
+            # later wait, or only after more than 0.45 seconds without input, can still pass if the clock moves
+            # first
+            observed = ("import importlib.util, os, select, sys, types\n"
+                        "spec = importlib.util.spec_from_file_location('observed_hook', sys.argv[1])\n"
+                        "module = importlib.util.module_from_spec(spec)\n"
+                        "spec.loader.exec_module(module)\n"
+                        "module._READ_DEADLINE = 0.5\n"
+                        "size, clock, taken, moved, now = int(sys.argv[2]), int(sys.argv[3]), [0], [0], [0.0]\n"
+                        "def say(line):\n"
+                        "    sys.stderr.write(line + '\\n')\n"
+                        "    sys.stderr.flush()\n"
+                        "def read(fd, n, real=os.read):\n"
+                        "    chunk = real(fd, n)\n"
+                        "    if fd == 0:\n"
+                        "        taken[0] += len(chunk)\n"
+                        "        say('read %d' % len(chunk))\n"
+                        "    return chunk\n"
+                        "def wait(rlist, wlist, xlist, timeout=None):\n"
+                        "    if taken[0] >= size:\n"
+                        "        say('waiting at %g' % now[0])\n"
+                        "    return select.select(rlist, wlist, xlist, timeout)\n"
+                        "def monotonic(real=os.read):\n"
+                        "    if moved[0] < 2 and select.select([clock], [], [], 0)[0]:\n"
+                        "        moved[0] += len(real(clock, 2))\n"
+                        "        now[0] = (0.0, 0.45, 0.75)[min(moved[0], 2)]\n"
+                        "    return now[0]\n"
+                        "os.read = read\n"
+                        "module.select = types.SimpleNamespace(select=wait)\n"
+                        "module.time = types.SimpleNamespace(monotonic=monotonic)\n"
+                        "rc = module.main(['char-policy-write.py'])\n"
+                        "say('returned at %g' % now[0])\n"
+                        "sys.exit(rc)\n")
+            at0, at45 = b"waiting at 0\n", b"waiting at 0.45\n"
+
+            def before_deadline(p):
+                def lines(waiting, count):
+                    # the child's stderr lines through its count-th waiting line, or through its end of output or
+                    # a 60 second silence, whichever comes first
+                    got = []
+                    while got.count(waiting) < count and select.select([p.stderr], [], [], 60)[0]:
+                        got.append(p.stderr.readline())
+                        if not got[-1]:
+                            break
+                    return got
+
+                self.assertEqual(lines(at0, 4), [b"read %d\n" % len(good)] + [at0] * 4)
+                self.assertIsNone(p.poll())
+                self.assertEqual(select.select([p.stdout], [], [], 0)[0], [])
+                os.write(move, b"m")
+                # waits the child entered at 0 before it read the moved clock may come first
+                got = lines(at45, 2)
+                self.assertEqual(got, [at0] * (len(got) - 2) + [at45] * 2)
+                self.assertIsNone(p.poll())
+                self.assertEqual(select.select([p.stdout], [], [], 0)[0], [])
+                os.write(move, b"m")
+
+            clock, move = os.pipe()
             try:
-                p.stdin.write(good)
-                p.stdin.flush()
-                ready = p.stderr.readline()
-                time.sleep(1.5)
-                p.stdin.close()
-                rc = p.wait(timeout=60)
-                out, err = p.stdout.read(), p.stderr.read()
+                rc, out, err = held([sys.executable, "-I", "-S", "-B", "-c", observed, here, str(len(good)),
+                                     str(clock)], good, before_deadline, (clock,))
             finally:
-                if p.poll() is None:
-                    p.kill()
-                    p.wait()
-                for stream in (p.stdin, p.stdout, p.stderr):
-                    stream.close()
-            self.assertEqual((ready, rc, err), (b"ready\n", 0, b""))
+                os.close(clock)
+                os.close(move)
+            after = err.splitlines(keepends=True)
+            self.assertEqual((rc, after), (0, [at45] * (len(after) - 1) + [b"returned at 0.75\n"]))
             self.is_unchecked(json.loads(out), "ending within 0.5 seconds (ValueError: the hook payload did not "
                                                "end within the read deadline)")
 
@@ -1916,10 +2034,10 @@ def _self_test():
             # a missing target, and a missing directory above it that the write would create, still resolve
             self.is_deny(self.write("docs/new/deeper/a.md", em))
             self.assertIsNone(self.write("docs/new/deeper/a.md", "safe"))
-            p = subprocess.run([sys.executable, "-I", "-S", "-B", here], capture_output=True, timeout=60,
-                               input=json.dumps({"tool_name": "Write", "tool_input": {
-                                   "file_path": os.path.join(empty, "loop", "a.md"), "content": "safe"}}).encode(
-                                   "ascii"), env={"LC_ALL": "C", ROOT_VAR: empty})
+            p = self.run_filled([sys.executable, "-I", "-S", "-B", here], json.dumps({
+                "tool_name": "Write", "tool_input": {"file_path": os.path.join(empty, "loop", "a.md"),
+                                                     "content": "safe"}}).encode("ascii"),
+                                capture_output=True, timeout=60, env={"LC_ALL": "C", ROOT_VAR: empty})
             self.assertEqual((p.returncode, p.stderr), (0, b""))
             self.is_unchecked(json.loads(p.stdout), "cannot be resolved or encoded as a file name (OSError)")
 
@@ -1997,9 +2115,9 @@ def _self_test():
                        "spec.loader.exec_module(module)\n"
                        "module._MAX_INPUT = 64\n"
                        "sys.exit(module.main(['char-policy-write.py']))\n")
-            p = subprocess.run([sys.executable, "-I", "-S", "-B", "-c", bounded, here], capture_output=True,
-                               input=json.dumps(payload).encode("ascii"), env={"LC_ALL": "C", ROOT_VAR: self.root},
-                               timeout=60)
+            p = self.run_filled([sys.executable, "-I", "-S", "-B", "-c", bounded, here],
+                                json.dumps(payload).encode("ascii"), capture_output=True,
+                                env={"LC_ALL": "C", ROOT_VAR: self.root}, timeout=60)
             self.assertEqual(p.returncode, 0)
             self.is_unchecked(json.loads(p.stdout), "at most 64 bytes, ending within 2 seconds (ValueError: hook "
                                                     "payload over the read bound)")

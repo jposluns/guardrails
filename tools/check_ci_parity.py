@@ -130,8 +130,26 @@ inferred over a workflow default), also not observed; defaults.run.working-direc
 (Step shell, above); and the
 runner image, runs-on labels, services and environment values (a job or step env:
 can set a variable such as BASH_ENV that changes what an accepted gate command
-does). Inside a run: block the exact line exit 1 is accepted, because it can only
-end a step red; every other exit spelling stays unclassified.
+does, including the step's exit status). Inside a run: block the exact line exit 1
+is accepted, because it can only end a step red; every other exit spelling stays
+unclassified.
+GITLEAKS DOWNLOAD. A run: | block holding a line that names curl, wget, sha256sum or
+gitleaks.tar.gz, or one of the retry loop's lines, must equal GITLEAKS_STEP_RUN line
+for line (indentation removed, blank lines and shell comments skipped): the bounded
+retry of the Secrets (gitleaks) step, which bounds each curl attempt's connect and
+total time, checks every downloaded archive against the pinned checksum, removes a
+failed or mismatched one before the next attempt and exits 1 when no attempt matched.
+Any departure in the run: text (the checksum line dropped, the loop or its failure
+exit removed, another attempt count, a curl time bound removed) is cannot-evaluate
+(gitleaks-download-pin), and curl, tar and a checksum pipeline are no longer accepted
+by the generic run-line grammar anywhere else. The pin covers edits to the run: text
+only. Not checked: the pinned version and checksum values; bash's own behaviour on
+the pinned body; and what any line of the pinned body does, including the step's
+exit status (for example through a BASH_ENV EXIT trap) and which curl, sha256sum,
+tar or gitleaks runs, which a step or job env: (for example PATH or BASH_ENV, which
+can name a repository directory or file supplying a sha256sum that always passes)
+or an earlier step (for example one that writes GITHUB_PATH) can change; the gate
+does not check that.
 TWO WORKFLOWS. The CI side is the union of the named workflows in CI_WORKFLOWS:
 quality.yml and msg-leaks.yml, which holds the message/metadata leak scan alone
 so that only its one job re-runs on a PR title/body edit. A gate may run in
@@ -512,7 +530,7 @@ thread inherits every descriptor still open at that moment, and an exec of a stu
 that any process holds open for writing fails ETXTBSY, exactly as _prepare_stubs
 states. That catches a reset or early exit that fires
 unconditionally or on one gate's failure in the stub environment. Residual masks
-include harness detection (stub_* variables, BASH_ENV, or SECONDS), environments the
+include harness detection (stub_* variables or SECONDS), environments the
 stubs do not produce (including gitleaks absent and the NOT RUN branch), and untested
 combinations of failing gates. Harness detection can hide even a single-gate reset;
 it does not require a combination of failures or the gitleaks NOT RUN branch.
@@ -847,6 +865,76 @@ SCOPE_DECIDE_RUN_LINES = frozenset({
     'python3 -I -B "${RUNNER_TEMP}/ci_site_scope_base.py" --ci-decide',
     'echo "site_only=false" >> "${GITHUB_OUTPUT}"',
 })
+
+# The Secrets (gitleaks) step's run: body, pinned line for line (each line with its
+# indentation removed; blank lines and shell comments skipped): a bounded retry of the
+# release download (3 attempts, 10 seconds apart, each curl attempt limited to 30 seconds
+# to connect and 300 seconds in total, so a stalled transfer fails that attempt) in which
+# each downloaded archive is checked against the pinned GITLEAKS_SHA256, a failed or
+# mismatched archive is removed before the next attempt, the step exits 1 when no
+# attempt matched, and only a matched archive is extracted and run. Any run: block
+# holding a line of GITLEAKS_FETCH_LINES, or a line naming curl, wget, sha256sum or
+# gitleaks.tar.gz, must equal this tuple exactly (gitleaks-download-pin,
+# cannot-evaluate), so an edit to the run: text that drops, reorders, bypasses or makes
+# optional the checksum check is refused. The pin covers the run: text only: a step or
+# job env: (for example PATH or BASH_ENV) or an earlier step (for example one that
+# writes GITHUB_PATH) can change what any line of this body does, including the step's
+# exit status (for example through a BASH_ENV EXIT trap) and which curl, sha256sum, tar
+# or gitleaks runs, and the gate does not check that. This gate does not model bash and
+# does not run this body: an exact pin was chosen so that any edit to the step's script
+# is a finding until the pin and the workflow change together under review. This pin is
+# a consistency check within the reviewed repository, not an authorization, and it does
+# not check the pinned version or checksum values (tools/check_gitleaks_pin.py reads the
+# version pin).
+GITLEAKS_SCAN_LINE = "./gitleaks dir . --no-banner --redact --exit-code 1"
+GITLEAKS_CURL_LINE = (
+    'if curl -fsSL --connect-timeout 30 --max-time 300 '
+    '-o gitleaks.tar.gz "$url"; then')
+GITLEAKS_STEP_RUN = (
+    "set -euo pipefail",
+    'url="https://github.com/gitleaks/gitleaks/releases/download/'
+    'v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"',
+    'verified="no"',
+    "for attempt in 1 2 3; do",
+    GITLEAKS_CURL_LINE,
+    'if echo "${GITLEAKS_SHA256}  gitleaks.tar.gz" | sha256sum -c -; then',
+    'verified="yes"',
+    "break",
+    "fi",
+    "fi",
+    'echo "gitleaks download attempt ${attempt} of 3 failed or did not match '
+    'the pinned checksum"',
+    "rm -f gitleaks.tar.gz",
+    'if [ "${attempt}" -lt 3 ]; then',
+    "sleep 10",
+    "fi",
+    "done",
+    'if [ "${verified}" != "yes" ]; then',
+    'echo "FAIL: no gitleaks download matched the pinned checksum in 3 attempts"',
+    "exit 1",
+    "fi",
+    "tar -xzf gitleaks.tar.gz gitleaks",
+    GITLEAKS_SCAN_LINE,
+)
+# The pinned lines the generic run-line grammar refuses, admitted only inside a block
+# equal to GITLEAKS_STEP_RUN (anywhere else each one triggers the pin and is refused).
+# The scan line keeps its member route and every other pinned line is already in the
+# generic grammar.
+GITLEAKS_FETCH_LINES = frozenset({
+    "for attempt in 1 2 3; do",
+    GITLEAKS_CURL_LINE,
+    'if echo "${GITLEAKS_SHA256}  gitleaks.tar.gz" | sha256sum -c -; then',
+    "break",
+    "rm -f gitleaks.tar.gz",
+    "sleep 10",
+    "done",
+    "tar -xzf gitleaks.tar.gz gitleaks",
+})
+# A run line that downloads or verifies an archive, or names the gitleaks archive: its
+# block must be the pinned one.
+GITLEAKS_FETCH_MARK_RE = re.compile(
+    r"(?<![A-Za-z0-9_.-])(?:curl|wget|sha256sum)(?![A-Za-z0-9_.-])"
+    r"|gitleaks\.tar\.gz")
 
 # The members that may run only in a job carrying the pinned HEAVY_JOB_IF_LINE
 # (module docstring, LANES): each is an expensive suite the lowered-spend lanes
@@ -2465,6 +2553,11 @@ def _classify_ci_command(
                 "tools/ci_site_scope.py")
         return
 
+    if block and stripped in GITLEAKS_FETCH_LINES:
+        # A pinned download-and-verify line (GITLEAKS_STEP_RUN); _gitleaks_fetch_pin
+        # refuses its block unless the block equals the pin line for line.
+        return
+
     tokenized = _tokenize(stripped)
     if not tokenized.ok:
         diagnostics.append(_diagnostic(
@@ -2509,15 +2602,6 @@ def _classify_ci_command(
         benign = True
     elif (block
             and tokens
-            and tokens[0] in ("curl", "tar")
-            and _safe_simple(tokens)):
-        benign = True
-    elif (block
-            and re.fullmatch(
-                r"echo .+ \| sha256sum -c -", stripped)):
-        benign = True
-    elif (block
-            and tokens
             and tokens[0] == "echo"
             and _safe_simple(tokens)):
         benign = True
@@ -2552,6 +2636,38 @@ def _classify_ci_command(
             "workflow command is outside the disclosed parity grammar: "
             "{!r}".format(stripped),
         ))
+
+
+def _gitleaks_fetch_pin(block_lines, source):
+    """Diagnostics for one run: | block, given as (line number, line with its
+    indentation removed) for each line that is not blank or a shell comment: none
+    when no line is a GITLEAKS_FETCH_LINES line or matches GITLEAKS_FETCH_MARK_RE,
+    or when the block equals GITLEAKS_STEP_RUN line for line; otherwise one
+    gitleaks-download-pin diagnostic naming the first line that departs."""
+    if not any(text in GITLEAKS_FETCH_LINES or GITLEAKS_FETCH_MARK_RE.search(text)
+               for _, text in block_lines):
+        return []
+    got = tuple(text for _, text in block_lines)
+    if got == GITLEAKS_STEP_RUN:
+        return []
+    for position in range(max(len(got), len(GITLEAKS_STEP_RUN))):
+        have = got[position] if position < len(got) else None
+        want = (GITLEAKS_STEP_RUN[position]
+                if position < len(GITLEAKS_STEP_RUN) else None)
+        if have != want:
+            break
+    line_number = (block_lines[position][0] if position < len(block_lines)
+                   else block_lines[-1][0])
+    return [_diagnostic(
+        source,
+        line_number,
+        "gitleaks-download-pin",
+        "a run: block that downloads, verifies or names the gitleaks archive "
+        "departs from the pinned Secrets (gitleaks) body (GITLEAKS_STEP_RUN) at "
+        "line {} of it: got {!r}, expected {!r}; only the pinned bounded retry, "
+        "which checks the pinned checksum on every attempt, is accepted".format(
+            position + 1, have, want),
+    )]
 
 
 def _classify_uses(value, source, line_number, diagnostics):
@@ -3577,6 +3693,7 @@ def extract_ci(text, source=CI_SOURCE):
                     index += 1
                     content_indent = None
                     leading_blank = None
+                    block_lines = []
                     while index < len(lines):
                         body_raw = lines[index]
                         body_number = index + 1
@@ -3670,6 +3787,7 @@ def extract_ci(text, source=CI_SOURCE):
                             index += 1
                             continue
 
+                        block_lines.append((body_number, body_code.strip()))
                         _classify_ci_command(
                             body_code.strip(),
                             source,
@@ -3682,6 +3800,8 @@ def extract_ci(text, source=CI_SOURCE):
                                 current_job[:-1], set()),
                         )
                         index += 1
+                    diagnostics.extend(
+                        _gitleaks_fetch_pin(block_lines, source))
                     continue
 
                 if not value:
@@ -4898,60 +5018,71 @@ SILENT_RUNNER_REVERT = (
     ('  echo "FAILED GATES: ${failed_names}"\n', ""),
 )
 
-# Stub gates for runner_naming_problems. Both record their calls; python3 fails only
-# the selected command, and gitleaks exits with the requested status. python3 is also a
-# shell function that bash loads through BASH_ENV before the runner starts; it shadows
-# the executable, saving a process per gate, and the executable remains the fallback.
-# _prepare_stubs writes them once, before the scenario pool starts; vector 27 pins that.
+# Stub gates for runner_naming_problems. Both are executable fixtures that start with
+# #!/bin/sh, written to the bin directory that heads the PATH _run_runner_copy sets.
+# Each appends one line, its name and then its arguments, to the call log named by
+# stub_log, which the scenario checks against the declared roster; when stub_trace
+# names a file, each also appends its own path ($0) and then its arguments to that
+# file, which self-test vector 27b reads. python3 exits 3 only when its arguments
+# equal stub_fail_command, and gitleaks exits with stub_gitleaks_rc. This code
+# defines no shell function or alias for either, and the environment mapping it
+# passes to bash names no BASH_ENV file. runner_naming_problems has _prepare_stubs
+# write them before it constructs its scenario pool; the _stubs_prepared_before_pool
+# docstring states what self-test vector 27 checks of that order.
 _STUB_PYTHON3 = """#!/bin/sh
 printf '%s\\n' "python3 $*" >> "$stub_log" || exit 2
+[ -z "${stub_trace-}" ] || printf '%s\\n' "$0 $*" >> "$stub_trace" || exit 2
 if [ "$*" = "$stub_fail_command" ]; then
   exit 3
 fi
 exit 0
 """
-_STUB_PYTHON3_FUNCTION = """python3() {
-  printf '%s\\n' "python3 $*" >> "$stub_log" || return 2
-  if [ "$*" = "$stub_fail_command" ]; then
-    return 3
-  fi
-  return 0
-}
-"""
 _STUB_GITLEAKS = """#!/bin/sh
 printf '%s\\n' "gitleaks $*" >> "$stub_log" || exit 2
+[ -z "${stub_trace-}" ] || printf '%s\\n' "$0 $*" >> "$stub_trace" || exit 2
 exit "$stub_gitleaks_rc"
 """
 
 
-def _prepare_stubs(root):
-    """Write the stub gates once under root; return (bin directory, BASH_ENV file).
+def _prepare_stubs(root, python3=_STUB_PYTHON3):
+    """Write the stub gates once under root; return the bin directory that holds them.
 
-    Call this before any scenario thread starts and share the result read-only. execve
-    of a file that any process holds open for writing fails ETXTBSY (bash reports exit
-    126), and a child forked on another thread holds every descriptor open at that
-    moment until it execs, so a stub written while scenarios run can be caught open by
-    a sibling's fork. Scenario trees therefore hold only data that is never executed:
-    the runner, which bash reads as its script argument, and the call log.
+    python3 is the body of the python3 fixture (_cdpath_outcome passes
+    _STUB_PYTHON3_PWD, which also records $PWD). Call this before any scenario thread
+    starts and share the result read-only. The order relies on platform behaviour that
+    this code does not check: execve of a file that any process holds open for writing
+    fails ETXTBSY, and a child forked on another thread holds every descriptor open at
+    that moment until it execs, so a stub written while scenarios run can be caught open
+    by a sibling's fork. Scenario trees therefore hold no file that is executed
+    directly: only the runner text, whose path is passed to bash as its script argument,
+    and the call log. Self-test vector 27 checks the order this paragraph describes
+    through _stubs_prepared_before_pool, whose docstring states what that check records
+    and what it does not; vector 27 does not test the platform behaviour.
     """
-    functions = root / "stubs.bash"
-    functions.write_text(_STUB_PYTHON3_FUNCTION, encoding="utf-8")
-    functions.chmod(0o400)
     bin_dir = root / "bin"
     bin_dir.mkdir()
-    for name, body in (("python3", _STUB_PYTHON3), ("gitleaks", _STUB_GITLEAKS)):
+    for name, body in (("python3", python3), ("gitleaks", _STUB_GITLEAKS)):
         stub = bin_dir / name
         stub.write_text(body, encoding="utf-8")
         stub.chmod(0o500)
     bin_dir.chmod(0o500)
-    return bin_dir, functions
+    return bin_dir
 
 
-def _run_runner_copy(text, stubs, fail_command="", gitleaks_rc=0):
+def _run_runner_copy(text, bin_dir, fail_command="", gitleaks_rc=0, trace=None):
     """Run text as tools/run_all_checks.sh in a scratch tree; return (rc, stdout lines, calls).
 
-    stubs is the shared (bin directory, BASH_ENV file) pair from _prepare_stubs; nothing
-    this writes is executed.
+    bin_dir is the shared stub directory from _prepare_stubs, whose python3 and
+    gitleaks fixtures start with #!/bin/sh. This writes the runner text to
+    tools/run_all_checks.sh and an empty call log in a scratch tree, then runs the
+    runner with bash, found by shutil.which on the calling process's PATH; no file
+    this writes is executed directly. It passes bash an explicit environment mapping
+    rather than the calling process's environment: PATH is bin_dir, then os.defpath;
+    HOME is the scratch tree; LC_ALL is C; and stub_log, stub_fail_command and
+    stub_gitleaks_rc name the call log and the scenario's settings. When trace is
+    given, stub_trace names it too, so each fixture that runs also appends its own
+    path and arguments to that file (self-test vector 27b passes one). calls is the
+    lines the fixtures recorded in the call log.
     """
     import os
     import shutil
@@ -4961,7 +5092,6 @@ def _run_runner_copy(text, stubs, fail_command="", gitleaks_rc=0):
     bash = shutil.which("bash")
     if bash is None:
         raise RuntimeError("bash not found")
-    bin_dir, functions = stubs
     with tempfile.TemporaryDirectory(prefix="ci-parity-runner-") as tmp:
         root = Path(tmp)
         (root / "tools").mkdir()
@@ -4971,13 +5101,14 @@ def _run_runner_copy(text, stubs, fail_command="", gitleaks_rc=0):
         log.write_text("", encoding="utf-8")
         env = dict(
             PATH=str(bin_dir) + os.pathsep + os.defpath,
-            BASH_ENV=str(functions),
             HOME=tmp,
             LC_ALL="C",
             stub_log=str(log),
             stub_fail_command=fail_command,
             stub_gitleaks_rc=str(gitleaks_rc),
         )
+        if trace is not None:
+            env["stub_trace"] = str(trace)
         proc = subprocess.run(
             [bash, "--noprofile", "--norc", str(runner)],
             cwd=tmp, env=env, stdin=subprocess.DEVNULL,
@@ -5004,13 +5135,18 @@ def _path_absent(path):
     return False
 
 
-def _dirname_guard_outcome(text, relative, scenario):
+def _dirname_guard_outcome(text, relative, scenario, trace=None):
     """Run a runner text from relative in a scratch tree under one dirname
     scenario; return (rc, no gate launched).
 
     Scenarios: "missing" (no dirname on PATH), "failed" (prints . and exits 7),
     "empty" (prints nothing and exits 0) and "control" (prints the runner's true
     directory). Every stub is written before the one launch, from this thread.
+    The PATH this sets names only fixture directories: the dirname fixture's
+    directory (except under "missing"), then the bin directory from
+    _prepare_stubs. HOME is the scratch tree. When trace is given, stub_trace
+    names it, so the python3 and gitleaks fixtures that run also append their
+    own path and arguments to that file (self-test vector 27b passes one).
     """
     import os
     import shutil
@@ -5022,7 +5158,7 @@ def _dirname_guard_outcome(text, relative, scenario):
         raise RuntimeError("bash not found")
     with tempfile.TemporaryDirectory(prefix="ci-parity-dirname-") as tmp:
         root = Path(tmp)
-        bin_dir, functions = _prepare_stubs(root)
+        bin_dir = _prepare_stubs(root)
         runner = root / "tree" / relative
         runner.parent.mkdir(parents=True)
         runner.write_text(text, encoding="utf-8")
@@ -5039,10 +5175,12 @@ def _dirname_guard_outcome(text, relative, scenario):
             stub.chmod(0o500)
             path.insert(0, str(dirname_dir))
         log = root / "calls.log"
-        env = dict(PATH=os.pathsep.join(path), BASH_ENV=str(functions),
+        env = dict(PATH=os.pathsep.join(path),
                    HOME=tmp, LC_ALL="C", stub_log=str(log),
                    stub_fail_command="", stub_gitleaks_rc="0",
                    stub_dirname_out=out, stub_dirname_rc=rc)
+        if trace is not None:
+            env["stub_trace"] = str(trace)
         proc = subprocess.run(
             [bash, "--noprofile", "--norc", str(runner)],
             cwd=str(caller), env=env, stdin=subprocess.DEVNULL,
@@ -5107,22 +5245,31 @@ def dirname_guard_problems(text, relative):
     return problems
 
 
-# The python3 shell function for cdpath_problems: it also records the working
-# directory each gate launches from, so a moved root shows in the log.
-_STUB_PYTHON3_PWD_FUNCTION = """python3() {
-  printf '%s\\n' "$PWD python3 $*" >> "$stub_log" || return 2
-  return 0
-}
+# The python3 executable fixture for cdpath_problems, which _cdpath_outcome passes
+# to _prepare_stubs. Each line it appends to the call log is what $PWD expands to in
+# the fixture, then python3 and its arguments; cdpath_problems reads a line that
+# names the decoy tree as a moved root. When stub_trace names a file, it also
+# appends its own path ($0) and then its arguments to that file, as _STUB_PYTHON3
+# does; self-test vector 27b reads it.
+_STUB_PYTHON3_PWD = """#!/bin/sh
+printf '%s\\n' "$PWD python3 $*" >> "$stub_log" || exit 2
+[ -z "${stub_trace-}" ] || printf '%s\\n' "$0 $*" >> "$stub_trace" || exit 2
+exit 0
 """
 
 
-def _cdpath_outcome(text, relative):
+def _cdpath_outcome(text, relative, trace=None):
     """Run a runner text by its RELATIVE path from its scratch tree's root
     under a CDPATH naming a decoy tree that holds the same relative directory;
     return (rc, tree, decoy, logged gate lines).
 
-    dirname prints the relative directory, as the real one does for a relative
-    $0. Every stub is written before the one launch, from this thread.
+    The dirname fixture prints the parent of relative. Every stub is written
+    before the one launch, from this thread. The PATH this sets names only
+    fixture directories: the dirname fixture's directory, then the bin directory
+    from _prepare_stubs, whose python3 fixture is _STUB_PYTHON3_PWD. HOME is the
+    scratch tree. When trace is given, stub_trace names it, so the python3 and
+    gitleaks fixtures that run also append their own path and arguments to that
+    file (self-test vector 27b passes one).
     """
     import os
     import shutil
@@ -5134,10 +5281,7 @@ def _cdpath_outcome(text, relative):
         raise RuntimeError("bash not found")
     with tempfile.TemporaryDirectory(prefix="ci-parity-cdpath-") as tmp:
         root = Path(tmp)
-        bin_dir, _functions = _prepare_stubs(root)
-        functions = root / "stubs-pwd.bash"
-        functions.write_text(_STUB_PYTHON3_PWD_FUNCTION, encoding="utf-8")
-        functions.chmod(0o400)
+        bin_dir = _prepare_stubs(root, _STUB_PYTHON3_PWD)
         tree = root / "tree"
         runner = tree / relative
         runner.parent.mkdir(parents=True)
@@ -5151,10 +5295,12 @@ def _cdpath_outcome(text, relative):
         stub.chmod(0o500)
         log = root / "calls.log"
         env = dict(PATH=os.pathsep.join([str(dirname_dir), str(bin_dir)]),
-                   BASH_ENV=str(functions), HOME=tmp, LC_ALL="C",
+                   HOME=tmp, LC_ALL="C",
                    CDPATH=str(decoy), stub_log=str(log),
                    stub_fail_command="", stub_gitleaks_rc="0",
                    stub_dirname_out=str(Path(relative).parent), stub_dirname_rc="0")
+        if trace is not None:
+            env["stub_trace"] = str(trace)
         proc = subprocess.run(
             [bash, "--noprofile", "--norc", relative],
             cwd=str(tree), env=env, stdin=subprocess.DEVNULL,
@@ -5236,13 +5382,13 @@ def runner_naming_problems(text, first_only=False):
     with tempfile.TemporaryDirectory(prefix="ci-parity-stubs-") as shared:
         # Every executable exists, closed, before the pool does; see _prepare_stubs.
         try:
-            stubs = _prepare_stubs(Path(shared))
+            bin_dir = _prepare_stubs(Path(shared))
         except OSError as exc:
             return ["runner stubs could not be prepared: {!r}".format(exc)]
 
         def run(scenario):
             try:
-                return _run_runner_copy(text, stubs, scenario[1], scenario[2])
+                return _run_runner_copy(text, bin_dir, scenario[1], scenario[2])
             except Exception as exc:  # no bash, a scratch-tree error, or a timeout
                 return exc
 
@@ -5256,7 +5402,7 @@ def runner_naming_problems(text, first_only=False):
                     if first_only and problems:
                         break
         finally:
-            stubs[0].chmod(0o700)  # so the shared directory can be removed
+            bin_dir.chmod(0o700)  # so the shared directory can be removed
     return problems
 
 
@@ -5310,31 +5456,66 @@ def _stubs_prepared_before_pool(text, red_command):
 
     DETERMINISTIC guard for the ETXTBSY ordering in runner_naming_problems (no stress,
     no timing), in the style of the config/executables-prepared-before-pool control in
-    tools/selftest_git_fixture_env.py: every file a scenario executes must be written
-    and chmodded on the MAIN thread before the scenario pool is constructed. A CPython
-    audit hook records every open-for-write, chmod, rename, link and symlink with its
-    thread and whether the pool exists yet; just before each scenario starts bash,
-    inside the pool, a snapshot lists the executable files in its stub PATH entry and
-    in its scenario tree. Writing stubs per scenario again turns this red on every run,
-    whether or not a fork happens to race a write. The scenario failing red_command
-    chmods the shared gitleaks stub from inside the pool and must be flagged, so a
-    recorder that sees nothing cannot pass; the required-stub and
-    every-executable-was-seen legs keep the rest from passing vacuously.
-    File-descriptor-only operations (os.fchmod, a write through an inherited
-    descriptor) are outside what these audit events name, as is an os.open with
-    dir_fd (the open audit event carries no dir_fd argument, so a relative path
-    opened that way stays working-directory-resolved and is not matched to the
-    stub) and a write made by a child process (a cp or install run in a
-    subprocess); only the never-seen-written leg catches a stub that no Python
-    code wrote. A dir_fd-relative path is resolved through /proc/self/fd only for
-    the os.chmod, os.rename, os.link and os.symlink events, and only where that
-    pseudo-filesystem exists; without it such a path stays working-directory-
-    resolved, the same residual class as the descriptor-only operations.
+    tools/selftest_git_fixture_env_config_combined.py. A CPython audit hook records only
+    these audit events, and only when the event names a path: an open whose flags
+    include a write, create, truncate or append flag, and os.chmod, os.rename, os.link
+    and os.symlink. For os.rename, os.link and os.symlink only the destination path is
+    recorded; the source path is not. An event whose path is a file descriptor is
+    dropped by this recorder (os.fchmod does raise os.chmod, with an integer path). Each
+    recorded event keeps its path, made absolute with os.path.abspath but not resolved,
+    and whether it came from the main thread before construction of the scenario pool
+    began. Just before each scenario starts bash, inside the pool, a snapshot lists the
+    executable files, made absolute the same way, in the first entry of the PATH the
+    scenario passes (its stub directory) and in its scenario tree. Self-test vector 27
+    requires the pool to have been constructed, five snapshots, one stub directory
+    shared by all of them, executable python3 and gitleaks stubs in it, no executable in
+    any scenario tree, every stub-directory executable to appear in some recorded event,
+    and, among the recorded events on such a path, exactly one that came from another
+    thread or after pool construction began: an os.chmod of the gitleaks stub (the red
+    scenario makes one; the vector does not check which scenario made it). Apart from
+    that injected one it requires no chmod and no number of writes per stub, and it does
+    not check executables reached outside the stub directory and the scenario trees
+    (bash, /bin/sh, and anything found on later PATH entries). Writing stubs per
+    scenario again turns this red on every run, whether or not a fork happens to race a
+    write. The scenario failing red_command chmods the shared gitleaks stub from inside
+    the pool and must be flagged, so a recorder that sees nothing cannot pass; the
+    required-stub and every-executable-was-seen legs keep the rest from passing
+    vacuously.
+
+    Residuals. Paths are compared as text after os.path.abspath, which resolves no
+    symlink and keeps a leading double slash, so a write through a symlinked or
+    double-slash alias of a stub path, or through a hard link, is recorded under the
+    alias and not matched to the stub. Not recorded at all: os.truncate (it raises its
+    own os.truncate audit event, which this recorder ignores), os.fchmod and any other
+    event whose path is a descriptor (dropped as above), a write through an inherited or
+    already-open descriptor (it raises none of these audit events), and a write made by
+    a child process (a cp or install run in a subprocess). An os.open with dir_fd is
+    recorded with its path resolved against the working directory (the open audit event
+    carries no dir_fd argument), so a relative path opened that way matches the stub
+    only when that resolution happens to name it, and then the late-event leg counts it.
+    Otherwise no recorded event in these cases names the stub path. An alias that is
+    itself in the stub directory (a hard link or symlink made there) is listed by the
+    snapshots as a stub-directory executable in its own right, so a recorded event on
+    the alias's own path that did not come from the main thread before pool construction
+    began is counted by the late-event leg, under the alias's name rather than the
+    stub's. In the remaining cases, only a leg that checks what the snapshots list can
+    fail: the required-stub leg when the change leaves a stub missing or not executable
+    (an os.fchmod that clears its execute bits, for one), the every-executable-was-seen
+    leg when no recorded event names a stub-directory executable at all, and the
+    scenario-tree leg when a symlink or hard link to a stub is in a scenario tree when
+    that tree's snapshot is taken, since it is listed there as an executable. Because
+    os.rename, os.link and os.symlink are recorded under their destination path only, a
+    stub renamed away is recorded under its new path and that rename is not matched to
+    the stub path. A dir_fd-relative path is resolved through /proc/self/fd only for the
+    os.chmod, os.rename, os.link and os.symlink events, and only where that
+    pseudo-filesystem exists; without it such a path stays working-directory-resolved,
+    the same residual class as the descriptor-only operations.
 
     Returns (pool constructed, scenarios observed, distinct stub directories, required
-    stubs missing, executables never seen written, executables in scenario trees, and
-    sorted (name, event, count) writes to an executable after the pool was constructed,
-    counted so the red chmod cannot mask a real one).
+    stubs missing, stub-directory executables that no recorded event names, executables
+    in scenario trees, and sorted (name, event, count) recorded events on a
+    stub-directory executable that did not come from the main thread before pool
+    construction began, counted so the red chmod cannot mask a real one).
     """
     import collections
     import concurrent.futures
@@ -5424,6 +5605,97 @@ def _stubs_prepared_before_pool(text, red_command):
             (os.path.basename(p), event)
             for p, event, early in events if p in found and not early).items()),
     )
+
+
+def _stub_launch_evidence(text, launcher="runner"):
+    """Return the evidence that one launch of text ran its stubbed commands as fixtures.
+
+    Self-test vector 27b runs text once through each launcher that starts bash with
+    the bin directory of _prepare_stubs on PATH, with a trace file named by
+    stub_trace: "runner" is _run_runner_copy against a fresh bin directory, "dirname"
+    is _dirname_guard_outcome under its "control" scenario, and "cdpath" is
+    _cdpath_outcome, whose python3 fixture is _STUB_PYTHON3_PWD; the last two run
+    text as tools/run_all_checks.sh in a scratch tree of their own, with their own
+    bin directory. Each python3 or gitleaks fixture that runs appends its own $0 and
+    then its arguments to the trace. bash passes execve the path where it found the
+    fixture on PATH, and /bin/sh, reading the fixture as its script, sets $0 to that
+    path, so a fixture run names its file in the bin directory. A shell function,
+    alias or exported function standing in for a fixture writes no trace line. In
+    the trace lines returned, a $0 whose directory is entry n of the PATH in the one
+    recorded launch environment is shown as <PATH n> and its file name; the bin
+    directory of _prepare_stubs is entry 1 for the "runner" launcher and entry 2,
+    after the dirname fixture's directory, for the other two.
+
+    A recorder on the CPython subprocess.Popen audit event keeps the environment of
+    every launch whose stub_trace names this trace (the calling process's
+    environment where the launch passes none). That is the environment of the
+    executable the launch starts, after any wrapper around subprocess.run has
+    changed it; it is the environment bash starts with only when that executable is
+    bash itself. A launch that runs bash through a wrapper such as env, which can
+    set BASH_ENV from its own arguments, is not seen by this leg; only the trace leg
+    can then catch a stand-in. This checks the python3 and gitleaks fixtures only,
+    not the dirname fixture, and not bash or /bin/sh.
+
+    Returns (exit status, call log lines, trace lines, launches recorded, and sorted
+    BASH_ENV or BASH_FUNC_ keys found in any recorded launch environment). The call
+    log lines are None for the "dirname" launcher, which does not return them; for
+    "cdpath", a line that begins with the scratch tree's path shows it as <tree>.
+    """
+    import os
+    import tempfile
+
+    global _WRITE_AUDIT_INSTALLED
+    launches = []
+    relative = "tools/run_all_checks.sh"
+
+    with tempfile.TemporaryDirectory(prefix="ci-parity-exec-") as tmp:
+        root = Path(tmp)
+        trace = root / "trace.log"
+        trace.write_text("", encoding="utf-8")
+
+        def record(event, args):
+            if event != "subprocess.Popen" or len(args) < 4:
+                return
+            env = os.environ if args[3] is None else args[3]
+            names = {os.fsdecode(name): value for name, value in env.items()}
+            if os.fsdecode(names.get("stub_trace", "")) == str(trace):
+                launches.append((sorted(names), os.fsdecode(names.get("PATH", ""))))
+
+        bin_dir = _prepare_stubs(root) if launcher == "runner" else None
+        try:
+            if not _WRITE_AUDIT_INSTALLED:
+                sys.addaudithook(_dispatch_write_audit)
+                _WRITE_AUDIT_INSTALLED = True
+            _WRITE_RECORDERS.append(record)
+            try:
+                if launcher == "runner":
+                    rc, _lines, calls = _run_runner_copy(text, bin_dir, trace=trace)
+                elif launcher == "dirname":
+                    rc, _absent = _dirname_guard_outcome(
+                        text, relative, "control", trace=trace)
+                    calls = None
+                else:
+                    rc, tree, _decoy, calls = _cdpath_outcome(text, relative, trace=trace)
+                    calls = ["<tree>" + call[len(tree):] if call.startswith(tree + " ")
+                             else call for call in calls]
+            finally:
+                _WRITE_RECORDERS.remove(record)
+        finally:
+            if bin_dir is not None:
+                bin_dir.chmod(0o700)  # so the scratch tree can be removed
+        entries = launches[0][1].split(os.pathsep) if len(launches) == 1 else []
+        traced = []
+        for line in trace.read_text(encoding="utf-8").splitlines():
+            for number, entry in enumerate(entries, 1):
+                rest = line[len(entry) + 1:]
+                if (entry and line.startswith(entry + os.sep)
+                        and os.sep not in rest.split(" ", 1)[0]):
+                    line = "<PATH {}>{}{}".format(number, os.sep, rest)
+                    break
+            traced.append(line)
+    forbidden = sorted({name for names, _path in launches for name in names
+                        if name == "BASH_ENV" or name.startswith("BASH_FUNC_")})
+    return rc, calls, traced, len(launches), forbidden
 
 
 def self_test():
@@ -7103,10 +7375,13 @@ def self_test():
             failures.append(
                 "26 flip: a runner that names no failing gate was not caught")
 
-    # Stub ordering (ETXTBSY): runner_naming_problems writes every executable stub once,
-    # on the main thread, before its scenario pool exists, into one directory shared by
-    # all five scenarios, and no scenario tree holds an executable. The red scenario's
-    # in-pool chmod must be the only late write, so per-scenario stubs fail this vector.
+    # Stub ordering (ETXTBSY): runner_naming_problems writes the executable stubs into
+    # one directory shared by all five scenarios before its scenario pool exists, and no
+    # scenario tree holds an executable. The _stubs_prepared_before_pool docstring
+    # states what this vector records and requires; one in-pool os.chmod of the gitleaks
+    # stub, which the red scenario makes, must be the only late event it records on a
+    # stub (the vector does not check which scenario made it), so per-scenario stubs
+    # fail this vector.
     count += 1
     ordering = _stubs_prepared_before_pool(
         local_fixture(
@@ -7118,6 +7393,33 @@ def self_test():
         failures.append(
             "27 executable stubs prepared before the pool: got {!r}, expected {!r}".format(
                 ordering, want))
+
+    # Executable fixtures, not stand-ins: one launch through each of _run_runner_copy,
+    # _dirname_guard_outcome (its control scenario) and _cdpath_outcome must run each
+    # stubbed command as its fixture file in the stub directory (the trace line's $0),
+    # and the launch environment must hold no BASH_ENV and no BASH_FUNC_ entry. A
+    # python3 shell function restored through BASH_ENV, or exported to bash, in any of
+    # the three still writes the call log but no trace line, and puts its key in the
+    # launch environment, so it fails this vector; the _stub_launch_evidence docstring
+    # states what it records and what it does not.
+    count += 1
+    stubbed = local_fixture(
+        ("python3 -I -B tools/clean.py",),
+        ("if gitleaks dir . --no-banner; then :; else failed=1; fi",))
+    for launcher, stub_entry, want_calls in (
+            ("runner", 1, ["python3 -I -B tools/clean.py", "gitleaks dir . --no-banner"]),
+            ("dirname", 2, None),
+            ("cdpath", 2, ["<tree> python3 -I -B tools/clean.py",
+                           "gitleaks dir . --no-banner"])):
+        launch = _stub_launch_evidence(stubbed, launcher)
+        want = (0, want_calls,
+                ["<PATH {}>/python3 -I -B tools/clean.py".format(stub_entry),
+                 "<PATH {}>/gitleaks dir . --no-banner".format(stub_entry)],
+                1, [])
+        if launch != want:
+            failures.append(
+                "27b stubbed commands ran as executable fixtures ({} launcher): got {!r}, "
+                "expected {!r}".format(launcher, launch, want))
 
     # Byte-level reader: Path.read_text() translates a carriage return
     # into a newline (universal newlines) BEFORE any text screen can run,
@@ -7241,6 +7543,9 @@ def self_test():
             ("_run_runner_copy", "read_text"): 1,
             ("_run_runner_copy", "splitlines"): 2,
             ("_shadow_check", "splitlines"): 1,
+            # The stub trace file vector 27b writes, never a runner or workflow.
+            ("_stub_launch_evidence", "read_text"): 1,
+            ("_stub_launch_evidence", "splitlines"): 1,
             ("adapt_standalone_runner", "splitlines"): 1,
             ("extract_ci", "splitlines"): 1,
             ("extract_local", "splitlines"): 2,
@@ -10059,6 +10364,144 @@ def self_test():
         if "moved" not in got:
             failures.append("45 {} mutant (CDPATH= removed) gave {}, expected moved".format(
                 relative, got))
+
+    # 46 GITLEAKS DOWNLOAD PIN: a run: block that downloads, verifies or names the
+    # gitleaks archive is accepted only as GITLEAKS_STEP_RUN, the bounded retry that
+    # checks the pinned checksum on every attempt. Each departure below is refused
+    # (gitleaks-download-pin), the step without a checksum line among them; before
+    # this pin, the pre-retry step and the same step without its checksum line both
+    # passed the generic grammar (curl, tar and the checksum pipeline were each
+    # accepted alone).
+    def gitleaks_step(body):
+        return (
+            "      - name: Secrets (gitleaks)",
+            "        shell: bash",
+            "        env:",
+            "          GITLEAKS_VERSION: 8.30.1",
+            "          GITLEAKS_SHA256: 00",
+            "        run: |",
+        ) + tuple("          " + line if line else "" for line in body)
+
+    def gitleaks_codes(extra_steps):
+        return sorted({
+            item.code for item in extract_ci(
+                ci_fixture(common, extra_steps)).diagnostics})
+
+    def gitleaks_case(name, extra_steps, want):
+        nonlocal count
+        count += 1
+        got = gitleaks_codes(extra_steps)
+        if got != want:
+            failures.append("46 {}: diagnostics {}, expected {}".format(
+                name, got, want))
+
+    pinned = list(GITLEAKS_STEP_RUN)
+    checksum = pinned.index(
+        'if echo "${GITLEAKS_SHA256}  gitleaks.tar.gz" | sha256sum -c -; then')
+    old_step = [
+        pinned[0], pinned[1],
+        'curl -sSL -o gitleaks.tar.gz "$url"',
+        'echo "${GITLEAKS_SHA256}  gitleaks.tar.gz" | sha256sum -c -',
+        "tar -xzf gitleaks.tar.gz gitleaks",
+        GITLEAKS_SCAN_LINE,
+    ]
+    verified_check = pinned.index('if [ "${verified}" != "yes" ]; then')
+    pin_only = ["gitleaks-download-pin"]
+    pin_and_grammar = ["gitleaks-download-pin", "unclassified-command"]
+    gitleaks_case("pinned body accepted", gitleaks_step(pinned), [])
+    gitleaks_case("pinned body with a shell comment and a blank line accepted",
+                  gitleaks_step(pinned[:3] + ["# retry the download", ""]
+                                + pinned[3:]), [])
+    step_rows = (
+            # The checksum check dropped: its if line and the matching fi.
+            ("checksum line removed",
+             pinned[:checksum] + pinned[checksum + 1:checksum + 3]
+             + pinned[checksum + 4:], pin_only),
+            ("pre-retry single-attempt step", old_step, pin_and_grammar),
+            ("pre-retry step without its checksum line",
+             old_step[:3] + old_step[4:], pin_and_grammar),
+            ("failure exit removed",
+             [line for line in pinned if line != "exit 1"], pin_only),
+            ("verified check removed",
+             pinned[:verified_check] + pinned[verified_check + 4:], pin_only),
+            ("four attempts",
+             [line.replace("in 1 2 3;", "in 1 2 3 4;") for line in pinned],
+             pin_and_grammar),
+            ("curl failure masked",
+             [line.replace('"$url"; then', '"$url" || true; then')
+              for line in pinned], pin_and_grammar),
+            ("checksum after extraction",
+             pinned[:checksum] + pinned[checksum + 1:-2] + [pinned[-2],
+                                                           pinned[checksum]]
+             + pinned[-1:], pin_only),
+            ("extraction ahead of the loop",
+             pinned[:3] + [pinned[-2]] + pinned[3:-2] + pinned[-1:], pin_only),
+            # The curl time bounds: without them a stalled transfer is never
+            # retried and holds the job until its timeout.
+            ("curl total-time bound removed",
+             [line.replace(" --max-time 300", "") for line in pinned],
+             pin_and_grammar),
+            ("curl connect bound removed",
+             [line.replace(" --connect-timeout 30", "") for line in pinned],
+             pin_and_grammar),
+            ("curl without either time bound",
+             [line.replace(" --connect-timeout 30 --max-time 300", "")
+              for line in pinned], pin_and_grammar),
+            ("curl total-time bound raised",
+             [line.replace("--max-time 300 ", "--max-time 3000 ")
+              for line in pinned], pin_and_grammar))
+    for name, body, want in step_rows:
+        gitleaks_case(name, gitleaks_step(body), want)
+    # A pinned loop line, or a checksum pipeline or download, in another step's
+    # block (the generic grammar accepted the last two alone before this pin).
+    def other_step(body):
+        return (
+            "      - name: Other",
+            "        shell: bash",
+            "        run: |",
+        ) + tuple("          " + line for line in body)
+
+    other_rows = (
+            ("pinned sleep line in another step", ["sleep 10"], pin_only),
+            ("bare checksum pipeline in another step",
+             ['echo "00  x.tar.gz" | sha256sum -c -'], pin_and_grammar),
+            ("bare curl download in another step",
+             ['curl -fsSL -o x.tar.gz "https://x.invalid/x.tar.gz"'],
+             pin_and_grammar))
+    for name, body, want in other_rows:
+        gitleaks_case(name, other_step(body), want)
+    # Flips: with the block pin disabled, every row above that expects only
+    # gitleaks-download-pin is accepted, so the pin alone refuses it; every row
+    # that expects both codes still gives unclassified-command, so the generic
+    # run-line grammar refuses it as well, independently of the pin.
+    flip_rows = tuple((name, gitleaks_step(body), want)
+                      for name, body, want in step_rows) + tuple(
+        (name, other_step(body), want) for name, body, want in other_rows)
+    for name, extra_steps, want in flip_rows:
+        expected = [] if want == pin_only else ["unclassified-command"]
+        with patch.object(module, "_gitleaks_fetch_pin",
+                          lambda block_lines, source: []):
+            count += 1
+            flipped = gitleaks_codes(extra_steps)
+        if flipped != expected:
+            failures.append(
+                "46 flip {}: with the pin disabled gave {}, expected {}".format(
+                    name, flipped, expected))
+    # The live quality.yml carries the pinned body.
+    count += 1
+    live_text, live_why = read_runner_text(ROOT / CI_SOURCE, CI_SOURCE)
+    if live_text is None:
+        failures.append("46 live: {} cannot be read: {}".format(
+            CI_SOURCE, live_why))
+    elif any(item.code == "gitleaks-download-pin"
+             for item in extract_ci(live_text).diagnostics):
+        failures.append("46 live: {} departs from GITLEAKS_STEP_RUN".format(
+            CI_SOURCE))
+    elif "\n            {}\n".format(GITLEAKS_STEP_RUN[4]) not in live_text:
+        # Without a download line the pin never triggers, so the rows above
+        # would hold for a workflow that downloads nothing.
+        failures.append("46 live: {} carries no pinned gitleaks body".format(
+            CI_SOURCE))
 
     if failures:
         print("SELF-TEST FAIL:")
