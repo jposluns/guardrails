@@ -15003,9 +15003,11 @@ def branch_root(data):
     start, a rooted one included, DENIES with no ancestry probe (_BRNROT_DETACH_UNPINNED), the decision
     the guard gave every detach before it read this form: under any --git-dir, GIT_DIR=, GIT_DIR+=,
     GIT_COMMON_DIR=, GIT_WORK_TREE= or other leading assignment, --work-tree, -c or other global option,
-    an empty or unresolvable -C, and after or beside any other command. A detach
-    with a missing or extra operand or beside -b/-B, an --orphan, and a bare 'worktree add <path>
-    [<commit-ish>]' (git may create a branch there) still DENY as forms this guard cannot classify
+    an empty or unresolvable -C, and after or beside any other command. Residual, unchanged from before
+    this form was read: a detach run through a shell wrapper this guard does not read (eval git, env git
+    or command git) ALLOWS on any commit-ish, an orphaned or unresolvable one included. A detach with a
+    missing or extra operand or beside -b/-B, an --orphan, and a bare 'worktree add <path> [<commit-ish>]'
+    (git may create a branch there) still DENY as forms this guard cannot classify
     (_worktree_creation_start). A MISSING protected line (no origin/HEAD and no local
     main/master) is NOT evidence a plain local branch is orphaned, so a resolvable-start creation ALLOWS;
     a detached worktree there DENIES, as no probe can show its commit-ish rooted (_branch_root_detach_outcome).
