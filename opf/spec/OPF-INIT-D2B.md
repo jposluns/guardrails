@@ -92,7 +92,7 @@ The plan requires discrete explicit sets for Sources (S), Views (V), Keep decisi
 
 ### Bootstrap Provenance
 
-The ratified managed provenance artifact is `.working/toml/init.toml`. It is a new managed store artifact of base spec 1.2.0. This tooling defines no store upgrade, so no store reaches it by upgrade, and no provenance is fabricated for an existing D2a store. Its `source_digest` is computed over an enumerated bootstrap source set that EXCLUDES `init.toml` itself; the outer plan digest is computed afterward.
+The ratified managed provenance artifact is `.working/toml/init.toml`. It is a managed store artifact of base spec 2.0.0. This tooling defines no store upgrade, so no store reaches it by upgrade, and no provenance is fabricated for an existing D2a store. Its `source_digest` is computed over an enumerated bootstrap source set that EXCLUDES `init.toml` itself; the outer plan digest is computed afterward.
 
 ```text
 {

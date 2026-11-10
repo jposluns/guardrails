@@ -42,8 +42,8 @@ heading = "The manual path"
 
 [[body]]
 component = "prose"
-html = '''<p>The shape of the manual path is short: create the store (write the files from the specification and schemas), commit it, generate the views with <code>opf render --write</code> for a supported store or your own renderer, and then work records-first. The standard requires no particular tool. The reference tooling requires Python 3.14 or newer. It validates spec 1.2.0 stores in either layout, with limits: it does not render or drift-check per-record views, and the baseline validator reports module-tier and importer record content schemas as cannot-evaluate. For a store with module-tier or importer records, or a per-record store that declares views, doctor's overall verdict is cannot-evaluate (exit 2).</p>
-<p>The reference tooling's <code>opf init</code> does not scaffold this store yet: its scaffold still writes a 1.2.0 store, a format the standard's validation refuses (specification section 9.2). Conformance you assert by hand is self-asserted, and you should say so wherever you claim it, because no validator has checked it for you yet.</p>'''
+html = '''<p>The shape of the manual path is short: create the store (write the files from the specification and schemas), commit it, generate the views with <code>opf render --write</code> for a supported store or your own renderer, and then work records-first. The standard requires no particular tool. The reference tooling requires Python 3.14 or newer. It validates spec 2.0.0 stores in either layout, with limits: it does not render or drift-check per-record views, and the baseline validator reports module-tier and importer record content schemas as cannot-evaluate. For a store with module-tier or importer records, or a per-record store that declares views, doctor's overall verdict is cannot-evaluate (exit 2).</p>
+<p>The reference tooling's <code>opf init</code> scaffolds this store: base 2.0.0 with <code>homes = 2</code>. Conformance you assert by hand is self-asserted, and you should say so wherever you claim it, because no validator has checked it for you yet.</p>'''
 
 [[body]]
 component = "record"
@@ -91,7 +91,8 @@ heading = "Where the reference tooling stands"
 
 [[body]]
 component = "prose"
-html = '''<p>The reference tooling's <code>opf init</code> does not scaffold a 2.0.0 store yet: its scaffold still writes a 1.2.0 store, a format the standard's validation refuses (specification section 9.2). The reference tooling does not yet implement spec 2.0.0, the only base version the standard defines; it validates spec 1.2.0 stores, as described above. Its <code>opf doctor</code> grades a manifest declaring <code>spec_version = "2.0.0"</code> with <code>homes = 2</code> under its 1.2.0 rules, so its VALID verdict on such a store says nothing about conformance to the standard; <code>opf upgrade</code> and <code>opf record</code> refuse such a store. The reference tooling defines no store upgrade: <code>opf upgrade</code> refuses every invocation with exit 2, reading and writing nothing.</p>'''
+html = '''<p>The reference tooling's <code>opf init</code> scaffolds a 2.0.0 store with <code>homes = 2</code>. The reference tooling initializes and validates spec 2.0.0 stores with <code>homes = 2</code>, the only base version the standard defines, as described above. The reference tooling defines no store upgrade: <code>opf upgrade</code> refuses every invocation with exit 2, reading and writing nothing.</p>
+<p>The reference CLI runs investigation and planning today, and prints the approval without recording it; recording the approval, apply and completion are not executable yet, so the assistant stops there and reports. At base 2.0.0, <code>opf adopt plan</code>, <code>approve</code> and <code>status</code> run without reading the adoption journal, and <code>status</code> says the journal is not read. <code>opf adopt apply</code> and <code>reconcile</code> refuse with exit 2 at base 2.0.0, and <code>complete</code> refuses with exit 2, so no approval is recorded, nothing is applied, and nothing is retired.</p>'''
 
 [[body]]
 component = "prose"

@@ -73,6 +73,7 @@ class InitQA(unittest.TestCase):
         # the pinned snapshot and publishes EMPTY indexes (no historical record is restored).
         baseline, importer, _ = op._roster_namespaces()
         values = {ns: 0 for ns in baseline | importer}
+        values.update({op.IMPORTED_PREFIX + ns: 0 for ns in op._imported_seed_namespaces()})
         values.update(high)
         op._write(str(Path(self.root, op.COUNTERS_RELPATH)), op._counters_toml(values))
         op._git(["add", "--", op.COUNTERS_RELPATH], self.root, self.env)

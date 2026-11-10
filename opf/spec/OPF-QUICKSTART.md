@@ -68,23 +68,8 @@ reader whatever you chose. The target is just a path or git URL; `github:owner/r
    `worklog.imported.toml`, and create the root `CHANGELOG.md` (a required public deliverable,
    specification section 5.8), each holding exactly the starting contents under "Hand-start file
    contents" below, never a zero-byte file; specification sections 4, 8 and 9 give the full file
-   baseline. This release's tooling grades every store under specification 1.2.0, so a 2.0.0 hand
-   start does not yet reach VALID: once those files are committed, its
-   `opf doctor --require-store` grades the store CANNOT-EVALUATE (exit 2), with C-COUNTERS
-   findings for the imported counter rows in `counters.toml`, C-CONTAINMENT findings for the
-   imported leaves as unregistered paths, and its three history checks (C-HISTORY-APPEND-ONLY,
-   C-HISTORY-COUNTERS and C-HISTORY-RESURRECTION) not evaluated, and its `opf render --write`
-   refuses the store; without the root `CHANGELOG.md` it adds a C-CHANGELOG-GATES finding. Until
-   the tooling implements 2.0.0, `opf init` in a new repository is the route that this release's
-   1.2.0 tooling grades VALID: commit the paths it creates (its root `CHANGELOG.md` included), run
-   `opf render --write`, and commit the rendered views. That VALID is this release's 1.2.0 grade,
-   not conformance to the specification. The reference tooling's `opf init` does not scaffold this
-   store yet: its scaffold still writes a 1.2.0 store, a format the specification's validation
-   refuses (specification section 9.2). Neither the specification nor the reference tooling
-   defines an upgrade of such a store into 2.0.0 (specification section 9.2; the reference
-   tooling's `opf upgrade` refuses every invocation), so what an adopter on this route must do
-   later to hold a conforming 2.0.0 store is not yet defined. A `[profiles.aiqt]` table is
-   optional and is ignored by base-only tooling.
+   baseline. The reference tooling's `opf init` scaffolds this store: base 2.0.0 with
+   `homes = 2`. A `[profiles.aiqt]` table is optional and is ignored by base-only tooling.
    Anything already sitting in `.working/` takes a per-file disposition in the adoption plan
    (`opf adopt`; a fresh `opf init` refuses an existing `.working/` directory and an existing root
    `CHANGELOG.md` or `VERSION`): keep it, migrate it for a later post-adoption import, move it, or
@@ -98,7 +83,12 @@ reader whatever you chose. The target is just a path or git URL; `github:owner/r
    `opf-init-plain`). It refuses a record whose holder may still be live, and it refuses and keeps
    a record that another operation left, even when that holder is confirmed dead, the init an
    `opf adopt` run performs (`opf-init`) included; the refusal names the next step.
-   `opf init` also refuses when the git
+   `opf init` also writes `.working/.gitignore` (specification section 4.2) after inspecting git's
+   effective ignore rules and index, and that inspection refuses as cannot-evaluate (exit 2, nothing
+   written) while the environment carries a runtime git configuration override (`GIT_CONFIG_GLOBAL`,
+   `GIT_CONFIG_SYSTEM`, `GIT_CONFIG_COUNT` with its key and value pairs, `GIT_CONFIG_PARAMETERS`, or
+   `GIT_CONFIG`; `GIT_CONFIG_NOSYSTEM` is allowed), since its answer could then differ from the
+   adopter's own git: unset them and retry. `opf init` also refuses when the git
    history of HEAD's first-parent line shows a prior store (specification section 8.2: counters
    never restart, so record ids are never reissued). That scan follows the first-parent line only: a store that never reached a tree on
    HEAD's first-parent line (for example one created and deleted on a side branch, merged or not)
@@ -184,24 +174,27 @@ reader whatever you chose. The target is just a path or git URL; `github:owner/r
    covered. The suite's runtime paste test is the primary guard. A repository whose history the scan cannot trust as-is (a shallow clone, any entry
    at the legacy `.git/info/grafts` path, or a grafts path it cannot inspect) is refused as
    cannot-evaluate rather than initialized.
-2. Commit the tree; confirm nothing under `.working/` is ignored.
+2. Commit the tree; confirm nothing under `.working/` is ignored except `.working/journals/` and
+   `.working/staging/`, which the managed ignore block of specification section 4.2 (in
+   `.working/.gitignore`, written by `opf init`) keeps out of git.
 3. Work records-first: append a worklog entry per change; keep the backlog, findings, and decisions
    in their typed files; regenerate views rather than editing them.
 4. At release: record the release and its worklog span in `version.toml`, draft the summary from
    that span, curate it by hand, publish it into `CHANGELOG.md`, and record its freeze digest.
-5. If you later want the store elsewhere: `opf migrate --store <target>`. The generated public
-   deliverables (`CHANGELOG.md` and `VERSION`) are unchanged; migration re-points the committed
-   pointer, updates the manifest's recorded sync target, and records the move as a worklog entry.
+5. Moving the store elsewhere is not available in this build: `opf migrate --store <target>` exits
+   2 and changes nothing. Migration as specification section 5.4 defines it keeps the generated
+   public deliverables (`CHANGELOG.md` and `VERSION`) unchanged, re-points the committed pointer,
+   updates the manifest's recorded sync target, and records the move as a worklog entry.
 
-Scaffolding, validation, rendering, and migration tooling ships in later releases of the pack; until
-then the files are simple enough to keep by hand, and a conformance claim is self-asserted and says
-so. The specification defines one implementation model, with no conformance classes (OPF-SPEC
-section 16.1). Base 2.0.0, with `homes = 2`, is the only base version the specification
-defines, and the reference tooling does not yet implement it. The reference tooling's `opf doctor`
-grades a manifest declaring `spec_version = "2.0.0"` with `homes = 2` under its 1.2.0 rules, so its
-VALID verdict on such a store says nothing about conformance to the specification; `opf upgrade`
-and `opf record` refuse such a store. The reference tooling defines no store upgrade: `opf upgrade`
-refuses every invocation with exit 2, reading and writing nothing.
+The reference tooling scaffolds (`opf init`), validates (`opf doctor`) and renders (`opf render`) a
+store; `opf migrate` and `opf sync` exit 2 in this build. The files stay simple enough to keep by
+hand, and a conformance claim is self-asserted and says so. The specification defines one
+implementation model, with no conformance classes (OPF-SPEC section 16.1). Base 2.0.0, with
+`homes = 2`, is the only base version the specification defines, and the reference tooling
+initializes and validates base 2.0.0 stores with `homes = 2`. Its `opf adopt plan`, `approve` and
+`status` run at base 2.0.0 without reading the adoption journal, and `status` says the journal is
+not read; `opf adopt apply` and `reconcile` refuse at base 2.0.0. The reference tooling defines no
+store upgrade: `opf upgrade` refuses every invocation with exit 2, reading and writing nothing.
 
 The reference tooling's declaration (OPF-SPEC section 16.1) ships as one file, the declaration file
 `opf/tools/opf-declaration.toml`. The shipped-file digest is carried in
@@ -209,8 +202,8 @@ The reference tooling's declaration (OPF-SPEC section 16.1) ships as one file, t
 
 ```toml opf-declaration
 release = "1.0.5"
-spec_version = "1.2.0"
-homes = 1
+spec_version = "2.0.0"
+homes = 2
 worklog = 1
 ```
 
@@ -242,7 +235,10 @@ stands for each of the eleven baseline index types: `autonomous_decision`, `back
 section 9 (`[store]`, `[modules]`, `[providers]`, `[views]`, `[deliverables]` and the rest) may be
 added. The zero counter rows apply only to a new store: a re-adoption seeds both counter series
 from its pinned ancestral snapshot and never zero-seeds prior ancestry (specification section
-8.2). As step 1 states, this release's tooling does not yet grade these files VALID.
+8.2). A hand start does not create `.working/.gitignore`, the file in which `opf init` writes the
+managed ignore block of specification section 4.2 (`/journals/` and `/staging/`), and `opf doctor`
+does not grade that file, so a hand-started store without it can still grade VALID. To match what
+`opf init` writes, put that block, exactly as section 4.2 gives it, in `.working/.gitignore`.
 
 ```toml opf-starter manifest.toml
 [opf]

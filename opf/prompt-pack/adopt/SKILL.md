@@ -39,11 +39,11 @@ Three rules govern everything else:
 | Discover sources | the read-only `discover_sources` entry (section 3) | runs; writes nothing |
 | Investigate | the planner's read-only `investigate` entry (section 3) | runs; writes nothing |
 | Plan | `opf adopt plan --inputs FILE [--root DIR]` | runs; prints the frozen plan; writes nothing |
-| Status | `opf adopt status [--root DIR]` | runs; writes nothing |
+| Status | `opf adopt status [--root DIR]` | runs; says the adoption journal is not read; writes nothing |
 | Approve | `opf adopt approve` | runs; re-checks the frozen plan against the live tree and prints the approval; writes nothing |
 | Apply | `opf adopt apply` | not yet executable: refuses with exit 2 |
 | Complete | `opf adopt complete` | not yet executable: refuses with exit 2 |
-| Reconcile | `opf adopt reconcile [--root DIR]` | runs; recovers an interrupted adoption transaction from the adoption journal (section 2) |
+| Reconcile | `opf adopt reconcile [--root DIR]` | not yet executable: not enabled at base 2.0.0, so it refuses with exit 2, reading and writing nothing (section 2) |
 | Import | `opf record import --batch`; `opf import --prompt`, `--status`, `--verify` (procedure: `import/SKILL.md`) | not yet executable: `opf record` has no `import` subcommand, and `opf import` refuses every argument with exit 2 |
 
 Inside the apply engine, each of the ten plan operations has an executor, but `opf adopt apply`
@@ -68,52 +68,17 @@ The reference tooling requires Python 3.14 or newer. Its exit convention is 0 cl
    the adopter confirms. Both are read-only, but the adopter should know their scope before they
    run.
 3. Run `opf adopt status --root <product root>`. Exit 0 with "no adoption run exists" is the
-   expected first-adoption result. Exit 0 listing an adoption run, exit 1 (a held journal lock,
-   an interrupted transaction, an evidence bundle that does not verify, or a directory at the
-   adoption evidence home whose name is not a run id) or exit 2 means stop and report what it
-   printed. No command resumes a run. A held journal lock or an interrupted transaction is
-   recovered only by `opf adopt reconcile --root <product root>`, and only after the adopter
-   confirms that no adoption run is live. It works from the adoption journal alone: it rolls each
-   interrupted transaction back, or forward when every change had already landed, prints each
-   outcome, and names a lock it released from a run that is no longer running. Beside an
-   interrupted transaction other than an `init-store` one, it holds, while it recovers, the
-   adoption journal lock and the store lease (a `lease.toml`, such as `.working/toml/lease.toml`)
-   of each machine directory under `.working/` that no interrupted transaction's operations name,
-   and it releases the leases it took. It also releases a leftover store lease that an interrupted
-   adoption apply kept (operation `adopt-apply`) beside such a transaction, but only once that
-   apply's process is confirmed dead on this host, and it prints that release whatever the
-   outcome, before a refusal or error too. Any other store lease present beside such a
-   transaction refuses as `store-lease-held`, for example another operation's lease, an adoption
-   apply's lease whose process may still be running or runs on another host, or a lease reconcile
-   cannot read. So does an adoption apply's lease whose path an interrupted transaction's
-   operations name, and a store pointer (`.opf.toml` or `.opf.local.toml`) whose whole content
-   is not the in-root target `"dir:."` that `init-store` writes. Beside an interrupted
-   `init-store` transaction alone, reconcile neither refuses on a store lease nor takes one: that
-   operation may have left its own lease. Reconcile never touches a lease beside no interrupted
-   transaction. Releasing a lease that reconcile does not release is the adopter's own step.
-   Exit 0 with "nothing to reconcile" means it wrote nothing, or, when it says every transaction
-   was already terminal, that it made no recovery write. Exit 2 means stop and report what it
-   printed. A refusal named `journal-lock-held`, `journal-unclassifiable`, `store-lease-held`,
-   `init-store-reversal-unproven` or `pre-lock-fault` came before any recovery write.
-   `recovery-failed` has three causes. The recovery started and may be partial: the journal
-   records how far it got, and a later reconcile resumes it. A transaction directory was replaced
-   during the recovery, which is never reported as recovered. Or the recovery finished, but the
-   journal lock it took was not confirmed released: its release faulted or left that lock in
-   place, or reconcile could not observe the lock afterwards, for example because the journal
-   path no longer names the journal it recovered. The message says so, and names the lock if it
-   stays or each place it may stay. A later reconcile breaks such a lock once its owner has exited
-   if the lock can be read and is well formed, and refuses on it as `journal-unclassifiable`
-   while it cannot be read or is malformed. Reconcile takes, reads back and releases its journal
-   lock in the journal directory it opened, and checks that the journal path still names that
-   directory only twice: once the lock is taken, and after the release. It cannot see the journal
-   moved away and put back between those two checks. Another run that took the journal lock
-   meanwhile, in whatever stood at the journal path, can then run beside it, and the message does
-   not mention that run. `store-lease-release-failed` means the recovery
-   finished but releasing a store lease it took faulted; the message names each lease that stays.
-   Exit 2 with "cannot evaluate" and no finding has two causes. The product root could not be
-   evaluated. Or an unexpected error stopped reconcile, which can happen after a recovery already
-   ran; the message names that error and everything recorded on it, such as a lock or lease that
-   stays. After reconcile, run `opf adopt status` again.
+   expected first-adoption result. Every report also says that the adoption journal state is
+   unknown: the adoption journal is at `.working/journals/adoption/journal`, and this build does
+   not read it, so status never reports a held journal lock or an interrupted transaction there.
+   Exit 0 listing an adoption run, exit 1
+   (an evidence bundle that does not verify, or a directory at the adoption evidence home whose
+   name is not a run id) or exit 2 means stop and report what it printed. No command resumes a
+   run, and in this build no command recovers one: `opf adopt reconcile` is not enabled at base
+   2.0.0 and refuses with exit 2, reading and writing nothing. `.working/journals/adoption/` is
+   recovery state: never delete it, or the `.working/` that holds it. If the
+   adopter knows of an earlier adoption run that stopped partway, stop and report it; never
+   recover it by hand.
 4. Keep every working file of this procedure (the worksheet, saved observations and plans)
    outside the product repository. A new file inside an investigated root changes the
    inventory, and the plan then refuses as "inventory changed".

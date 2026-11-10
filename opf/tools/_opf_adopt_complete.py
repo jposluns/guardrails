@@ -711,11 +711,11 @@ def _ci_template_identity(ev, row):
 
 def _doctor_roster():
     """The per-check roster a VALID doctor result must grade: exactly what the whole-store validator
-    requires of the store a clean-start adoption initializes in this release, a homes-1 store with no
-    active imported series (SUPPORTED_HOMES is 1, and import runs only after adoption completes), so
-    required_checks(1): the strict checks, every id read from the validator's own constants."""
+    requires of the store a clean-start adoption initializes in this release, a homes-2 store at base
+    2.0.0, so the validator's one doctor roster (DOCTOR_ROSTER: the strict checks with the homes-2 and
+    imported-series checks), every id read from the validator's own constants."""
     import _opf_check
-    return tuple(_opf_check.required_checks(1))
+    return tuple(_opf_check.DOCTOR_ROSTER)
 
 
 def _doctor_findings(result):
@@ -1310,7 +1310,9 @@ def _parity_trees():
     grade under. `unmanaged` None leaves the tree storeless; a list resolves a default store registering those
     unmanaged paths (a recorded exclusion each)."""
     deep = "/".join(["n"] * 4)
-    chain32 = ".working/imports" + "/d" * 31
+    # A resolved store's walked .working content sits under .working/notes: .working/imports and the other
+    # store-control homes are recorded exclusions at 2.0.0, so the producer refuses a root beneath them.
+    chain32 = ".working/notes" + "/d" * 31
 
     def sizes(obs):
         return sum(row["size"] for row in obs["entries"] if row["kind"] == "file") + obs["walk"]["manifest_bytes"]
@@ -1359,12 +1361,12 @@ def _parity_trees():
         ("resolved-store", {"legacy/r.md": b"r"}, [], ["legacy"], [], [], (plain, total, entries)),
         ("resolved-unmanaged-exclusion", {".working/private/p": b"p", "legacy/r.md": b"r"}, [], ["legacy"], [],
          [".working/private"], (plain, total, path_bytes)),
-        ("resolved-nested-depth", {".working/imports/a/b/c/f": b"f"}, [], [], [".working/imports/a"], [],
+        ("resolved-nested-depth", {".working/notes/a/b/c/f": b"f"}, [], [], [".working/notes/a"], [],
          (depth,)),
         ("many-roots", {"r1/f": b"1", "r2/f": b"2", "r3/g/h": b"3"}, [], ["r1", "r2", "r3"], ["t1", "t2/u"], None,
          (plain, entries, path_bytes)),
         ("deliverables", {"VERSION": b"1.0\n", "CHANGELOG.md": b"c"}, [], [], [], None, (plain, total)),
-        ("review-total-bytes", dict((".working/imports/f{}".format(i), bytes(big)) for i in range(9)), [], [],
+        ("review-total-bytes", dict((".working/notes/f{}".format(i), bytes(big)) for i in range(9)), [], [],
          [], [], (plain, lambda obs: [dict(MAX_TOTAL_BYTES=sizes(obs) - big)])),
         ("review-nested-depth", {chain32 + "/d/f": b"x"}, [], [], [chain32 + "/d"], [], (plain,)),
         ("review-nested-depth-control", {chain32 + "/f": b"x"}, [], [], [chain32], [], (plain,)),
@@ -1382,8 +1384,8 @@ def _parity_trees():
          ["s/missing", "t/u/v"], None, (plain, entries, path_bytes, total)),
         ("absent-under-absent-parent", {"CLAUDE.md": b"c"}, [], [], [".github", "gone/x", "gone2"], None,
          (plain, entries, path_bytes)),
-        ("absent-under-resolved-store", {".working/imports/a/f": b"f"}, [], [],
-         [".working/imports/a/missing", ".working/imports/b/c"], [], (plain, depth, entries, path_bytes)),
+        ("absent-under-resolved-store", {".working/notes/a/f": b"f"}, [], [],
+         [".working/notes/a/missing", ".working/notes/b/c"], [], (plain, depth, entries, path_bytes)),
     ) + _random_parity_trees(plain, entries, path_bytes, at_depth(1, 2, 3, 4, 5))
 
 
@@ -2206,6 +2208,21 @@ def self_test():
         # Producer parity: investigate() on a real tree and the rebuild over its sealed observation agree.
         agreed, accepted, refused_count, trees = _parity_sweep()
         check("check-2-rebuild-producer-parity", agreed and accepted >= 100 and refused_count >= 100 and trees >= 45)
+        # At 2.0.0 .working/imports is a resolved store's store-control exclusion: the producer refuses a root
+        # beneath it, and the rebuild over the observation naming that root refuses with the producer's text.
+        import _opf_init
+        with tempfile.TemporaryDirectory(prefix="opf-adopt-complete-") as root:
+            _put(root, ".working/imports/a/b/c/f", b"f")
+            resolved = tomllib.loads(_opf_init.build_manifest())
+            resolved["unmanaged"]["paths"] = []
+            _put(root, ".working/toml/manifest.toml", _emit(resolved))
+            beneath = planner.investigate(root, sources=[], targets=[".working/imports/a"])
+            free = planner.investigate(root, sources=[], targets=[])
+        sealed = tomllib.loads(free.observation.decode("utf-8")) if free.observation else {}
+        problem = rebuilt_observation_problem(dict(sealed, targets=[".working/imports/a"])) if sealed else None
+        check("check-2-rebuild-producer-store-control-refused", beneath.status == CANNOT_EVALUATE
+              and beneath.findings == ("source is in an excluded subtree: '.working/imports/a'",)
+              and free.status == VALID and problem is not None and beneath.findings[0] in problem)
         # The walker stops early only where build_observation refuses (its docstring): on each tree the
         # producer's refusal is raised while the walker lists or reads, before it has listed or read it all,
         # and the rebuild over the observation sealed with the bounds lifted refuses with the same text.
@@ -2291,8 +2308,8 @@ def self_test():
         check("check-4-doctor-result-subclass-cannot", _only(subclassed, _red(OPERATIONAL, CANNOT_EVALUATE))
               and _says(subclassed, OPERATIONAL, "the doctor run returned a _Derived, not"))
         # The full strict roster graded PASS: a check absent, a check graded other than PASS, or a check id
-        # outside the roster (the homes-2 evidence enumeration a homes-1 store never runs), under VALID.
-        check("check-4-doctor-roster-is-strict-roster", _doctor_roster() == tuple(_opf_check.REQUIRED_CHECKS))
+        # outside the roster (an id the validator never defines), under VALID.
+        check("check-4-doctor-roster-is-strict-roster", _doctor_roster() == tuple(_opf_check.DOCTOR_ROSTER))
         first = _doctor_roster()[0]
         lacking = dict((cid, verdict) for cid, verdict in green.checks.items() if cid != first)
         gap = _case(lambda r, i: dict(doctor=_Doctor(checks=lacking)))
@@ -2302,10 +2319,10 @@ def self_test():
         unpassed = _case(lambda r, i: dict(doctor=_Doctor(checks=failing)))
         check("check-4-doctor-roster-check-not-pass-cannot", _only(unpassed, _red(OPERATIONAL, CANNOT_EVALUATE))
               and _says(unpassed, OPERATIONAL, "doctor reports VALID while grading {} FINDING".format(first)))
-        padded = dict(green.checks, **dict([("C-EVIDENCE-ENUM", "PASS")]))
+        padded = dict(green.checks, **dict([("C-NOT-ON-THE-ROSTER", "PASS")]))
         offroster = _case(lambda r, i: dict(doctor=_Doctor(checks=padded)))
         check("check-4-doctor-roster-unknown-id-cannot", _only(offroster, _red(OPERATIONAL, CANNOT_EVALUATE))
-              and _says(offroster, OPERATIONAL, "the doctor graded C-EVIDENCE-ENUM outside its required roster"))
+              and _says(offroster, OPERATIONAL, "the doctor graded C-NOT-ON-THE-ROSTER outside its required roster"))
         check("check-4-doctor-roster-empty-cannot", _only(_case(lambda r, i: dict(doctor=_Doctor(checks={}))),
                                                           _red(OPERATIONAL, CANNOT_EVALUATE)))
         # An INVALID result keeps its own findings whatever its per-check map holds.

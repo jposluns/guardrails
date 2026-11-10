@@ -581,10 +581,10 @@ def _require_no_store_manifest(root_fd, resolution):
 def _resolved_unmanaged(manifest, machine_rel):
     """The resolved manifest's [unmanaged] paths, in order, each a contained path (_path) that neither
     equals, contains nor lies within a reserved store path: the machine subtree at `machine_rel`, a store
-    control root of the manifest's homes generation, or a declared view target. Source discovery
+    control root (every homes-2 root, the only generation), or a declared view target. Source discovery
     (_opf_adopt_discover) shares this check, so it refuses an [unmanaged] entry exactly where
     investigation does."""
-    control = list(store.store_control_roots(store.homes_generation(manifest)))
+    control = list(store.store_control_roots(store.HOMES))
     paths = []
     for path in manifest.get("unmanaged", {}).get("paths", []):
         # Conservative collision check: do not let an exclusion conceal the
@@ -634,20 +634,24 @@ def _inventory(root, sources, targets):
             if checked.status != store.VALID:
                 raise PlanError("resolved manifest is not valid: " + "; ".join(checked.findings))
             excluded.append({"path": resolution.machine_rel, "reason": "machine-store"})
-            # A legacy store (homes 1) reserves only the imports tree and excludes nothing more; homes 2
-            # also reserves every store control root and excludes it from investigation (spec 14.2).
+            # Homes 2 reserves every store control root and excludes it from investigation (spec 14.2).
+            # Validation admits only the homes-2 declaration; any other generation still refuses here.
             homes = store.homes_generation(manifest)
-            control = list(store.store_control_roots(homes))
+            if homes != store.HOMES:
+                raise PlanError("resolved manifest is not a homes-2 store; refusing to investigate it")
             excluded.extend({"path": path, "reason": "registered-unmanaged"}
                             for path in _resolved_unmanaged(manifest, resolution.machine_rel))
-            if homes >= 2:
-                excluded.extend({"path": path, "reason": "store-control"} for path in control)
+            excluded.extend({"path": path, "reason": "store-control"}
+                            for path in store.store_control_roots(store.HOMES))
             manifest_digest = _digest(raw)
             traces.append(manifest_path)
             view_targets = sorted(v["target"] for v in manifest.get("views", {}).values())
             deliverables = _deliverable_destinations(manifest)
         else:
-            homes = 1
+            # A root with no resolved store is adopted at homes 2, the only generation. Its control area
+            # is still walked, never a candidate, so a first adoption observes the absence of its default
+            # Move and adoption-archive destinations there (spec 14.2).
+            homes = store.HOMES
             manifest = None
             manifest_path = ""
             manifest_digest = ""
@@ -733,8 +737,8 @@ def investigate(product_root, *, sources, targets=()):
 
 
 def _investigate(product_root, sources, targets):
-    """investigate, plus the resolved store's homes generation (legacy 1 when nothing resolved), its
-    declared view targets and its parsed manifest (both None when nothing resolved)."""
+    """investigate, plus the homes generation (2, the only one, whether or not a store resolved), the
+    resolved store's declared view targets and its parsed manifest (both None when nothing resolved)."""
     try:
         if not isinstance(product_root, (str, os.PathLike)):
             raise PlanError("product_root must be an absolute path")
@@ -746,7 +750,7 @@ def _investigate(product_root, sources, targets):
         return observed, homes, views, manifest
     except (OSError, ValueError, UnicodeError, RecursionError, MemoryError, EmitError,
             store.StoreError, store._journal.JournalError) as exc:
-        return AdoptResult(store.CANNOT_EVALUATE, [str(exc)]), 1, None, None
+        return AdoptResult(store.CANNOT_EVALUATE, [str(exc)]), store.HOMES, None, None
 
 
 def _managed_destinations(doc, views):
@@ -954,7 +958,7 @@ def plan(product_root, *, sources, expected_observation_digest, product, decisio
         if type(ops) is not list:
             raise PlanError("ops must be an ordered list")
         for row in ops:
-            checked = schema.validate_op(row, homes=homes)
+            checked = schema.validate_op(row)
             if checked.status != store.VALID:
                 return AdoptResult(checked.status, checked.findings, observation=observed.observation)
             if row["op"] in ("register-unmanaged", "move-file", "retire-file"):
@@ -986,7 +990,7 @@ def plan(product_root, *, sources, expected_observation_digest, product, decisio
         ordered = _order_ops(disposition_ops, ops)
         _bind_registrations(ordered, doc, manifest_model)
         for row in disposition_ops:
-            checked = schema.validate_op(row, homes=homes)
+            checked = schema.validate_op(row)
             if checked.status != store.VALID:
                 return AdoptResult(checked.status, checked.findings, observation=observed.observation)
         # DISCLOSED-RESIDUAL (disclose-guard-residuals): re-adoption binds the adoption kind only. Spec
@@ -1019,7 +1023,7 @@ def plan(product_root, *, sources, expected_observation_digest, product, decisio
             "ops": ordered,
         }
         frozen = _seal(proposal, "plan_digest")
-        checked = schema.validate_plan(tomllib.loads(frozen.decode("utf-8")), homes=homes)
+        checked = schema.validate_plan(tomllib.loads(frozen.decode("utf-8")))
         if checked.status != store.VALID:
             return AdoptResult(checked.status, checked.findings, observation=observed.observation)
         return AdoptResult(store.VALID, observation=observed.observation,
@@ -1402,7 +1406,8 @@ def self_test():
             result = self.make_plan(decisions=[decision])
             self.assertEqual(result.status, store.CANNOT_EVALUATE)
             self.assertEqual((self.root / "archive/legacy.md").read_bytes(), b"occupied")
-            # An explicit destination inside the store tree must lie beneath .working/archive/moved/.
+            # An explicit destination inside the store tree must lie beneath .working/archive/moved/,
+            # which homes 2 admits though it reserves the rest of .working/archive (spec 14.2).
             self.targets = [".working/elsewhere/legacy.md", ".working/archive/moved/legacy.md"]
             for destination, status in ((".working/elsewhere/legacy.md", store.INVALID),
                                         (".working/archive/moved/legacy.md", store.VALID)):
@@ -1442,6 +1447,8 @@ def self_test():
                                   "outside .working/archive/moved/, and the frozen plan refuses one there "
                                   "whether or not an enforcement row names it; omit the destination to "
                                   "take the default, or choose another file name", result.findings[0])
+            # The default destination the refusal advises, a declared one beneath the Move archive, and
+            # another file name each plan, the first two at their Move archive destination.
             for destination in (None, moved, "legacy/hooks/pre-commit.old"):
                 with self.subTest(destination=destination):
                     decision = dict(path=".opf/hooks/pre-commit", disposition="move", actor="fixture")
@@ -1451,13 +1458,18 @@ def self_test():
                         decision,
                         dict(path=".opf/hooks/install.sh", disposition="retire", actor="fixture")])
                     self.assertEqual(result.status, store.VALID, result.findings)
+                    p = tomllib.loads(result.plan.decode())
+                    self.assertEqual([row["destination"] for row in p["ops"] if row["op"] == "move-file"],
+                                     [store.moved_dest(".opf/hooks/pre-commit") if destination is None
+                                      else destination])
 
         def test_default_move_destination(self):
             # A move without a destination plans the spec 14.2 default from the row's own path,
             # never stripped: legacy/OLD.md lands at .working/archive/moved/legacy/OLD.md, and a
-            # store-tree source keeps its .working/ prefix beneath the Move root. A non-occupying
-            # default Move is preserved at that destination; an occupying one is archived, and
-            # still moves to its default destination.
+            # store-tree source keeps its .working/ prefix beneath the Move root, which homes 2
+            # admits though it reserves the rest of .working/archive. A non-occupying default Move
+            # is preserved at that destination; an occupying one is archived, and still moves to
+            # its default destination.
             (self.root / "legacy").mkdir()
             (self.root / "legacy/OLD.md").write_bytes(b"old\n")
             (self.root / ".working").mkdir()
@@ -1499,16 +1511,13 @@ def self_test():
             # destination's store base is excluded: its absence is unproven, which is
             # cannot-evaluate naming the source.
             import _opf_init
-            manifest = tomllib.loads(_opf_init.build_manifest())
-            manifest["opf"].update(homes=2, spec_version=store.HOMES2_SPEC_VERSION)
             (self.root / ".working/toml").mkdir(parents=True)
-            (self.root / ".working/toml/manifest.toml").write_text(emit_checked(manifest),
+            (self.root / ".working/toml/manifest.toml").write_text(_opf_init.build_manifest(),
                                                                    encoding="utf-8")
             (self.root / ".working/archive/moved").mkdir(parents=True)
             self.with_init = False
-            with mock.patch.object(store, "SUPPORTED_HOMES", 2):
-                doc = tomllib.loads(self.observation().observation.decode())
-                result = self.make_plan(decisions=[dict(self.decision, disposition="move")])
+            doc = tomllib.loads(self.observation().observation.decode())
+            result = self.make_plan(decisions=[dict(self.decision, disposition="move")])
             self.assertIn(dict(path=".working/archive", reason="store-control"), doc["exclusions"])
             self.assertEqual(result.status, store.CANNOT_EVALUATE)
             self.assertIsNone(result.plan)
@@ -1745,8 +1754,8 @@ def self_test():
             self.assertIn({"path": preserved, "digest": digests[0]}, p["effects"]["creations"])
 
         def test_control_area_never_selected(self):
-            # Spec 14.2 carries no homes qualifier: in a legacy (homes 1) layout the store control area,
-            # a committed adoption-archive original included, is inventoried but never a candidate. A
+            # Spec 14.2 carries no homes qualifier: on a root with no resolved store the store control
+            # area, a committed adoption-archive original included, is inventoried but never a candidate. A
             # decision naming it refuses rather than keeping, registering, moving or retiring it, and no
             # caller creation lands in it.
             archived = ".working/archive/adoption/adopt-20250101T000000Z-0123456789abcdef/old.md"
@@ -1919,14 +1928,15 @@ def self_test():
             self.assertEqual(ancestry()["traces"], [".opf.toml"])
 
         def test_refused_older_manifest_and_hand_step(self):
-            # A resolved manifest declaring a below-supported spec_version refuses investigation
-            # with the finding that names the manifest's own path, states that no store upgrade
-            # reaches spec_version 2.0.0, and states the operator hand step (spec 4.5/9.2); a
-            # refusal that falls back to "the store manifest" or offers an upgrade is red.
+            # A resolved manifest declaring a spec_version below 2.0.0 refuses investigation with
+            # the finding that names the manifest's own path, states that the declared version
+            # names no version the specification defines, and states the operator hand step
+            # (spec 4.5/9.2); a refusal that falls back to "the store manifest" or offers an
+            # upgrade is red.
             import _opf_init
             (self.root / ".working/toml").mkdir(parents=True)
             old_manifest = _opf_init.build_manifest().replace(
-                'spec_version = "' + store.SUPPORTED_SPEC_VERSION + '"', 'spec_version = "1.1.0"')
+                'spec_version = "' + store.SPEC_VERSION + '"', 'spec_version = "1.1.0"')
             self.assertIn('spec_version = "1.1.0"', old_manifest)
             (self.root / ".working/toml/manifest.toml").write_text(old_manifest, encoding="utf-8")
             (self.root / ".working/toml/counters.toml").write_bytes(b"[x]\n")
@@ -1934,11 +1944,11 @@ def self_test():
             self.assertEqual(refused.status, store.CANNOT_EVALUATE)
             self.assertEqual(list(refused.findings), [
                 "resolved manifest is not valid: '.working/toml/manifest.toml' declares "
-                "[opf].spec_version '1.1.0', older than the {0} this tooling implements; "
-                "no store upgrade reaches spec_version 2.0.0, so the store is refused; "
-                "to adopt this tree instead, first move '.working/toml/manifest.toml' "
-                "aside by hand: its files are then ordinary foreign content for a first "
-                "adoption (spec 9.2; fail-closed)".format(store.SUPPORTED_SPEC_VERSION)])
+                "[opf].spec_version '1.1.0', which is below {0} and names no version this "
+                "specification defines, so the store is refused; to adopt this tree instead, "
+                "first move '.working/toml/manifest.toml' aside by hand: its files are then "
+                "ordinary foreign content for a first adoption "
+                "(spec 9.2; fail-closed)".format(store.SPEC_VERSION)])
             # The hand step, as the refusal words it: the operator moves the manifest aside, a
             # step no OPF command performs. The remaining files, the reserved-name counters
             # included, are then ordinary foreign content for a first adoption.

@@ -20,9 +20,8 @@ runtime_check(path) is the runtime check. It reads the installed copy at `path` 
                    not a bare SemVer string, a homes or worklog that is not an
                    integer (a bool is not one), or bytes other than the canonical
                    rendering of those values (declaration_bytes)
-  contradictory    a value other than RELEASE_IDENTITY or this tooling's supported   cannot-evaluate, digest
-                   _opf_store.SUPPORTED_SPEC_VERSION, SUPPORTED_HOMES or
-                   SUPPORTED_WORKLOG
+  contradictory    a value other than RELEASE_IDENTITY or this tooling's             cannot-evaluate, digest
+                   _opf_store.SPEC_VERSION, HOMES or SUPPORTED_WORKLOG
   ok               none of the above                                                 authorizes, digest
 
 opf.py runs it before dispatching every verb that can touch a store (render, doctor, init, absorb, record and
@@ -74,8 +73,8 @@ DECLARATION_NAME = "opf-declaration.toml"
 # and the release-version of .aiqt/manifest.toml), which tools/check_opf_declaration.py pins equal to it.
 RELEASE_IDENTITY = "1.0.5"
 # The declaration file's bytes as this release ships them, and their SHA-256 digest (the shipped-file digest).
-SHIPPED_DECLARATION_BYTES = b'release = "1.0.5"\nspec_version = "1.2.0"\nhomes = 1\nworklog = 1\n'
-SHIPPED_DECLARATION_SHA256 = "5f13d71937d37efa09894c7176e98c1a94dbb2271143f155a56e051562b121bc"
+SHIPPED_DECLARATION_BYTES = b'release = "1.0.5"\nspec_version = "2.0.0"\nhomes = 2\nworklog = 1\n'
+SHIPPED_DECLARATION_SHA256 = "4b448a4b30fa2358ce1b19587897276d0d79ffc43a4db89355105eb4a739db4f"
 MAX_DECLARATION_BYTES = 4096
 FIELDS = ("release", "spec_version", "homes", "worklog")
 NOT_READ = "not-read"
@@ -174,8 +173,8 @@ def _contradiction(fields):
     """The fields whose value contradicts this build, as one detail, or "" where none does."""
     expected = (
         ("release", RELEASE_IDENTITY),
-        ("spec_version", _opf_store.SUPPORTED_SPEC_VERSION),
-        ("homes", _opf_store.SUPPORTED_HOMES),
+        ("spec_version", _opf_store.SPEC_VERSION),
+        ("homes", _opf_store.HOMES),
         ("worklog", _opf_store.SUPPORTED_WORKLOG),
     )
     return "; ".join("{} = {!r}, but this build carries {!r}".format(key, fields[key], value)
@@ -264,8 +263,8 @@ def _with_shipped_digest(data, fn):
 
 
 def _variant(**fields):
-    values = dict(release=RELEASE_IDENTITY, spec_version=_opf_store.SUPPORTED_SPEC_VERSION,
-                  homes=_opf_store.SUPPORTED_HOMES, worklog=_opf_store.SUPPORTED_WORKLOG)
+    values = dict(release=RELEASE_IDENTITY, spec_version=_opf_store.SPEC_VERSION,
+                  homes=_opf_store.HOMES, worklog=_opf_store.SUPPORTED_WORKLOG)
     values.update(fields)
     return declaration_bytes(**values)
 
@@ -339,7 +338,7 @@ def _v_crlf_is_digest_mismatch(tmp):
 
 
 def _v_field_edit_is_digest_mismatch(tmp):
-    data = _variant(homes=_opf_store.SUPPORTED_HOMES + 1)
+    data = _variant(homes=_opf_store.HOMES + 1)
     return _state(runtime_check(_write(tmp, data)), DIGEST_MISMATCH, hashlib.sha256(data).hexdigest())
 
 
@@ -370,7 +369,7 @@ def _v_malformed_extra_key(tmp):
 
 
 def _v_malformed_bool_homes(tmp):
-    return _malformed(tmp, SHIPPED_DECLARATION_BYTES.replace(b"homes = 1", b"homes = true"),
+    return _malformed(tmp, SHIPPED_DECLARATION_BYTES.replace(b"homes = 2", b"homes = true"),
                       "homes is not an integer")
 
 
@@ -402,7 +401,7 @@ def _v_contradictory_spec_version(tmp):
 
 
 def _v_contradictory_homes(tmp):
-    return _contradictory(tmp, _variant(homes=_opf_store.SUPPORTED_HOMES + 1), "homes")
+    return _contradictory(tmp, _variant(homes=_opf_store.HOMES + 1), "homes")
 
 
 def _v_contradictory_worklog(tmp):
@@ -436,7 +435,7 @@ def _v_report_not_read_pairs_cannot_evaluate(tmp):
 
 
 def _v_report_restates_shipped_on_mismatch(tmp):
-    data = _variant(homes=_opf_store.SUPPORTED_HOMES + 1)
+    data = _variant(homes=_opf_store.HOMES + 1)
     text = report_text(runtime_check(_write(tmp, data)), False)
     return text == _expected_report(hashlib.sha256(data).hexdigest(), RESULT_CANNOT_EVALUATE), text
 
@@ -455,8 +454,8 @@ def _v_report_digest_form(tmp):
 
 def _v_declaration_tracks_constants(tmp):
     fields, problem = parse_declaration(SHIPPED_DECLARATION_BYTES)
-    want = dict(release=RELEASE_IDENTITY, spec_version=_opf_store.SUPPORTED_SPEC_VERSION,
-                homes=_opf_store.SUPPORTED_HOMES, worklog=_opf_store.SUPPORTED_WORKLOG)
+    want = dict(release=RELEASE_IDENTITY, spec_version=_opf_store.SPEC_VERSION,
+                homes=_opf_store.HOMES, worklog=_opf_store.SUPPORTED_WORKLOG)
     return problem is None and fields == want, (fields, problem, want)
 
 

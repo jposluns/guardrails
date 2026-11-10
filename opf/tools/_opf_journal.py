@@ -283,10 +283,9 @@ def recover_transaction(cap, kind, run_id):
 # the entry and names it in the refusal (DEF-5), and the kept entry reads as reserved
 # (conservative) until a repeat call under the same capability re-establishes its durability
 # through the read-back below.
-# The record writer reserves through it: opf record at homes 2 (_opf_record._reserve_claim). That
-# path is reached only once activation sets _opf_store.SUPPORTED_HOMES to 2 (and the record verb
-# admits the homes-2 spec_version); while SUPPORTED_HOMES is 1, the record verb refuses a store
-# declaring homes 2 before any write (_opf_record._probe_homes).
+# The record writer reserves through it: opf record at homes 2 (_opf_record._reserve_claim). The
+# record verb admits only a store declaring spec_version 2.0.0 with homes = 2 and refuses any other
+# before any write (_opf_record._probe_admission).
 
 ALLOCATION_FORMAT = "opf.journal.allocation/v1"
 # The kinds whose runs may claim the imported series (spec 8.2): the import engine's kinds. Import

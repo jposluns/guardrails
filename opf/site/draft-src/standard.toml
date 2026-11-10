@@ -10,7 +10,7 @@ meta = "OPFiles is defined by a written specification. The canonical specificati
 
 [[body]]
 component = "scope"
-html = "The standard requires a tracked git store and a review flow. Schema and drift checks are intended to catch structural defects; review recorded claims against their evidence. The reference tooling initializes stores at base 1.2.0; it does not yet implement base 2.0.0."
+html = "The standard requires a tracked git store and a review flow. Schema and drift checks are intended to catch structural defects; review recorded claims against their evidence. The reference tooling initializes and validates base 2.0.0 stores with <code>homes = 2</code>."
 
 [[body]]
 component = "prose"

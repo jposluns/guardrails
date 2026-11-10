@@ -742,9 +742,9 @@ def self_test(report_path=None):
         ("revert/release-cross-check-dropped-red", "contradictory-release",
          expected_line.format("release", "RELEASE_IDENTITY"), ""),
         ("revert/spec_version-cross-check-dropped-red", "contradictory-spec_version",
-         expected_line.format("spec_version", "_opf_store.SUPPORTED_SPEC_VERSION"), ""),
+         expected_line.format("spec_version", "_opf_store.SPEC_VERSION"), ""),
         ("revert/homes-cross-check-dropped-red", "contradictory-homes",
-         expected_line.format("homes", "_opf_store.SUPPORTED_HOMES"), ""),
+         expected_line.format("homes", "_opf_store.HOMES"), ""),
         ("revert/worklog-cross-check-dropped-red", "contradictory-worklog",
          expected_line.format("worklog", "_opf_store.SUPPORTED_WORKLOG"), ""),
         ("revert/report-emits-pass-red", "report-four-parts",
@@ -766,12 +766,12 @@ def self_test(report_path=None):
             red, detail = False, "{}: {}".format(vector, exc)
         check(check_id, red, detail)
         reverted.add(vector)
-    edited = shipped.replace(b"homes = 1", b"homes = 2")
+    edited = shipped.replace(b"homes = 2", b"homes = 3")
     check("revert/shipped-file-alone-red",
           _red(_mutant(tmp, "file", "MAX_DECLARATION_BYTES = 4096", "MAX_DECLARATION_BYTES = 4096", edited),
                "shipped-digest-matches-file"))
     shutil.rmtree(tmp)
-    with patch.object(_opf_store, "SUPPORTED_HOMES", _opf_store.SUPPORTED_HOMES + 1):
+    with patch.object(_opf_store, "SUPPORTED_WORKLOG", _opf_store.SUPPORTED_WORKLOG + 1):
         check("revert/constants-flipped-without-the-file-red",
               not _opf_declaration.run_vector("declaration-tracks-constants")[0])
     reverted |= {"declaration-tracks-constants"}
@@ -853,13 +853,13 @@ def self_test(report_path=None):
           and not any(rows.get(vector, True) for vector in states), rows)
 
     # 4. this gate's own rules over synthetic documentation and files
-    homes2 = shipped.replace(b"homes = 1", b"homes = 2")
+    homes3 = shipped.replace(b"homes = 2", b"homes = 3")
     no_worklog = b"".join(line for line in shipped.splitlines(keepends=True) if not line.startswith(b"worklog"))
     version = _opf_declaration.RELEASE_IDENTITY + "\n"
     check("doc/equal-passes", doc_problems(shipped, _sample_surfaces(shipped, shipped)) == [],
           doc_problems(shipped, _sample_surfaces(shipped, shipped)))
-    found = doc_problems(shipped, _sample_surfaces(homes2, shipped))
-    check("doc/value-changed-red", len(found) == 1 and "gives homes = 2" in found[0], found)
+    found = doc_problems(shipped, _sample_surfaces(homes3, shipped))
+    check("doc/value-changed-red", len(found) == 1 and "gives homes = 3" in found[0], found)
     found = doc_problems(shipped, _sample_surfaces(shipped, no_worklog))
     check("doc/field-omitted-red", len(found) == 1 and "omits worklog" in found[0], found)
     found = doc_problems(shipped, _sample_surfaces(shipped + b'class = "full"\n', shipped))
@@ -877,7 +877,7 @@ def self_test(report_path=None):
     found = file_problems(shipped, "1.0.99\n")
     check("doc/release-not-version-red", len(found) == 1 and "pack release version" in found[0], found)
     with patch.object(sys.modules[__name__], "_restatement_problem", lambda rel, block, fields: None):
-        found = doc_problems(shipped, _sample_surfaces(homes2, no_worklog))
+        found = doc_problems(shipped, _sample_surfaces(homes3, no_worklog))
     check("revert/doc-restatement-compare-dropped-red", found == [], found)
     here = sys.modules[__name__]
     commented = dict((rel, "<!--\n" + text + "-->\n") for rel, text in _sample_surfaces(shipped, shipped).items())

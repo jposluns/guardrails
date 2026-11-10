@@ -656,9 +656,9 @@ conformance claim (checklist item 19) until the maintainer resolves it.
     reservation of section 8.2 and creates only the missing receipt and its worklog entry, so its
     content derives from the request, the item and the schema rules as item 4 requires. It also
     serves an item whose only receipts are importer-authored (section 8.6). The reference tooling
-    runs it only where a reservation home exists and refuses it elsewhere, recording nothing (like
-    every subcommand, it first reconciles any interrupted earlier run, and that recovery, where one
-    is needed, writes the store before the run refuses).
+    runs it only where a reservation home exists: like every `opf record` subcommand, it admits only
+    a store declaring base 2.0.0 with `homes = 2`, which has that home, and refuses any other readable
+    manifest before any reconciliation or write, recording nothing.
     No general operation that adds a record from a reviewed edit is defined, so step 14 still
     reports any other repair class that needs a new ID as not run until an operation for it is
     added.
