@@ -2420,9 +2420,10 @@ _LOAD_SENSITIVE_VECTORS = ("resolver-vector/blocked-timing",)
 # connection down first, so a blocked operation returns at once; the join
 # bound is derived from the socket timeout and kept above it, so even an
 # operation close() could not interrupt ends inside the join. The stop check
-# waits up to the reach bound for the server to block in recv before it
-# closes; a server that does not get there in time leaves the check unable
-# to evaluate, so the bound is generous and only delays that outcome.
+# waits up to the reach bound for the server to reach its recv (or its
+# handshake) before it closes; a server that does not get there in time
+# leaves the check unable to evaluate, so the bound is generous and only
+# delays that outcome.
 _TLS_FIXTURE_SOCKET_SECONDS = 2.0
 _TLS_FIXTURE_STOP_JOIN_SECONDS = 2 * _TLS_FIXTURE_SOCKET_SECONDS
 _TLS_FIXTURE_REACH_SECONDS = 10 * _TLS_FIXTURE_SOCKET_SECONDS
@@ -3668,9 +3669,16 @@ def self_test(vectors_only=False, steady_only=False):
             self.stop = threading.Event()
             self.guard = threading.Lock()
             self.connection = None
-            # Set just before each blocking recv of a request, so the stop
-            # check closes only once the server is waiting in it.
+            # Set just before the server calls recv for a request, and just
+            # before it wraps a connection for its handshake. Each shows the
+            # server got that far, not that the call has blocked yet; close()
+            # ends the call either way, since recv or a handshake on a
+            # connection already shut down returns at once.
             self.in_recv = threading.Event()
+            self.in_handshake = threading.Event()
+            # A served connection whose blocking call ran out its socket
+            # timeout after close() began: close() did not interrupt it.
+            self.timed_out = []
             self.listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.listener.bind(("127.0.0.1", 0))
             self.listener.listen(8)
@@ -3695,6 +3703,7 @@ def self_test(vectors_only=False, steady_only=False):
                     if self.mode == "tls-stall":
                         self.stop.wait(1.10)
                         continue
+                    self.in_handshake.set()
                     # Wrap without the handshake, so the wrapped socket is
                     # published for close() before any blocking operation.
                     secured = self.context.wrap_socket(
@@ -3740,6 +3749,11 @@ def self_test(vectors_only=False, steady_only=False):
                         secured.unwrap().close()
                     except (OSError, ssl.SSLError):
                         pass
+                except socket.timeout:
+                    # Expected for deadline cases. One that ends a call after
+                    # close() began is recorded for the stop check.
+                    if self.stop.is_set():
+                        self.timed_out.append(True)
                 except (OSError, ssl.SSLError):
                     # Expected for wrong-chain/name and deadline cases.
                     pass
@@ -3807,24 +3821,28 @@ def self_test(vectors_only=False, steady_only=False):
 
     def tls_fixture_stop_check(context, cadata, server_class=None, mode="normal",
                                clock=time.monotonic, pause=None,
-                               reach_seconds=_TLS_FIXTURE_REACH_SECONDS):
+                               reach_seconds=_TLS_FIXTURE_REACH_SECONDS, stage="recv"):
         # A served connection whose peer goes quiet leaves the server thread
         # blocked in recv for up to the socket timeout, longer than close()
         # used to join it. close() must make that thread return at once.
-        # Returns (outcome, reason, detail). A close() that raises any
-        # exception (in the cleanup after an unmet precondition too) fails.
-        # A server that never reached its blocking recv within reach_seconds
-        # (or a client that could not get there) is a precondition this run
-        # did not establish: cannot evaluate, returned before the thread is
-        # looked at. Once the precondition was met, a thread still alive
-        # after close() returned fails. An exception after close() raised,
-        # or after it returned with the thread still alive, does not hide
-        # that failure: it is returned and the exception is dropped; any
-        # other exception propagates. Only the close() call is timed, from
-        # clock(), so a delay before it (pause, the seam a test uses to stand
-        # for one) is never charged to it; a close() that still took the
-        # socket timeout is cannot evaluate too, since timing alone cannot
-        # tell one that waited the timeout out from a host that stalled it.
+        # stage "handshake" stops it in its handshake instead: the client
+        # opens the connection and never sends its hello. Returns (outcome,
+        # reason, detail). A close() that raises any exception (in the
+        # cleanup after an unmet precondition too) fails. A server that never
+        # signalled its stage within reach_seconds (or a client that could
+        # not get there) is a precondition this run did not establish:
+        # cannot evaluate, returned before the thread is looked at. Once the
+        # precondition was met, a thread still alive after close() returned
+        # fails, and so does a server call that ran out its socket timeout
+        # after close() began (close() did not interrupt it), whatever close()
+        # took. An exception after close() raised, or after it returned with
+        # the thread still alive, does not hide that failure: it is returned
+        # and the exception is dropped; any other exception propagates. Only
+        # the close() call is timed, from clock(), so a delay before it
+        # (pause, the seam a test uses to stand for one) is never charged to
+        # it; a close() that still took the socket timeout with no call
+        # timed out is cannot evaluate too, since timing alone cannot tell one
+        # that waited the timeout out from a host that stalled it.
         def raised_text(exc):
             # The message alone for the fixture's own AssertionError, which
             # names what failed; the type too for any other exception.
@@ -3840,11 +3858,17 @@ def self_test(vectors_only=False, steady_only=False):
         try:
             with socket.create_connection(("127.0.0.1", server.port),
                                           timeout=reach_seconds) as raw:
-                with original_context(cadata=cadata).wrap_socket(
-                        raw, server_hostname="codeload.github.com"):
+                if stage == "handshake":
+                    reached = server.in_handshake
+                    client = contextlib.nullcontext()
+                else:
                     # The server finishes its handshake after this one, then
-                    # waits in recv for a request this client never sends.
-                    if server.in_recv.wait(reach_seconds):
+                    # calls recv for a request this client never sends.
+                    reached = server.in_recv
+                    client = original_context(cadata=cadata).wrap_socket(
+                        raw, server_hostname="codeload.github.com")
+                with client:
+                    if reached.wait(reach_seconds):
                         if pause is not None:
                             pause()
                         closed = True
@@ -3855,8 +3879,8 @@ def self_test(vectors_only=False, steady_only=False):
                             raised = raised_text(exc)
                         took = clock() - began
                     else:
-                        unmet = ("the server did not reach its blocking recv within "
-                                 "{} s".format(reach_seconds))
+                        unmet = ("the server did not reach its {} within "
+                                 "{} s".format(stage, reach_seconds))
         except Exception as exc:
             # ssl.SSLError is an OSError. One raised before close() is the
             # client failing to establish the precondition. Any other
@@ -3880,6 +3904,9 @@ def self_test(vectors_only=False, steady_only=False):
             return STOP_UNEVALUATED, "precondition", unmet
         if server.thread.is_alive():
             return STOP_FAIL, "alive", "the server thread is alive after close() returned"
+        if server.timed_out:
+            return (STOP_FAIL, "timed-out", "a server call ran out its socket timeout after "
+                    "close() began: close() did not interrupt it")
         if took >= _TLS_FIXTURE_SOCKET_SECONDS:
             return (STOP_UNEVALUATED, "slow-close",
                     "close() took {:.2f} s, not under the {} s socket timeout".format(
@@ -3916,6 +3943,12 @@ def self_test(vectors_only=False, steady_only=False):
         if not _TLS_FIXTURE_STOP_JOIN_SECONDS > _TLS_FIXTURE_SOCKET_SECONDS:
             failures.append("FAIL " + identity + ": the stop join bound is not above "
                             "the socket timeout")
+        # A server in its handshake stops promptly too: the wrapped socket is
+        # published before the handshake, so close() shuts down the socket
+        # that call uses. The pause lets the server start that call.
+        judge("self-test/tls-fixture-stop-in-handshake",
+              check(context, cadata, stage="handshake", pause=lambda: time.sleep(0.2)),
+              (STOP_PASS, "prompt"))
 
         # A scheduling delay between reaching recv and close() is not
         # close() time: a clock that jumps well past the socket timeout
@@ -3927,8 +3960,8 @@ def self_test(vectors_only=False, steady_only=False):
         judge("self-test/tls-fixture-stop-after-delay",
               check(context, cadata, clock=lambda: now[0], pause=delayed),
               (STOP_PASS, "prompt"))
-        # A server that never reaches its blocking recv cannot evaluate the
-        # stop: neither a pass nor a definite failure.
+        # A server that never reaches its recv cannot evaluate the stop:
+        # neither a pass nor a definite failure.
         judge("self-test/tls-fixture-stop-never-in-recv",
               check(context, cadata, mode="quiet", reach_seconds=0.5),
               (STOP_UNEVALUATED, "precondition"))
@@ -5539,7 +5572,7 @@ def self_test(vectors_only=False, steady_only=False):
             results.extend((name, vectors_started.get(name, []) + ["cannot evaluate: " + reason])
                            for name in names if name not in done)
 
-    def resolver_vectors(base, contexts, results):
+    def resolver_vectors(base, contexts, results, vectors=None, join=join_resolvers):
         # Appends (name, failures) per vector to results as each ends, so an
         # exception here keeps the earlier vectors' results for the caller;
         # a vector that raises reports "cannot evaluate", after the failures
@@ -5547,7 +5580,9 @@ def self_test(vectors_only=False, steady_only=False):
         # are joined, and the cleanup vector requires none alive, the
         # self-test lookup and the real slot still bound, the slot free, and
         # a raising vector's report to carry its exception's message and
-        # the failure it recorded before it raised.
+        # the failure it recorded before it raised. The cleanup vector runs
+        # last, after vectors (the resolver vectors when None), and joins
+        # the workers with join.
         lookup_before = module._lookup
         slot_before = module._RESOLVER_SLOT
 
@@ -5572,7 +5607,7 @@ def self_test(vectors_only=False, steady_only=False):
             if probe != [("vector/failing-then-raising", [
                     "the forced failure", "cannot evaluate: AssertionError: the forced exception"])]:
                 failures.append("a vector that raised lost the failure it had recorded")
-            if join_resolvers(5.0):
+            if join(5.0):
                 failures.append("a resolver worker outlived the vectors")
             if module._lookup is not lookup_before or module._RESOLVER_SLOT is not slot_before:
                 failures.append("the vectors left a fixture bound")
@@ -5581,13 +5616,50 @@ def self_test(vectors_only=False, steady_only=False):
             else:
                 _RESOLVER_SLOT.release()
             results.append((VECTOR_NAMES[12], failures))
-        for vector, names in ((straggler_vectors, VECTOR_NAMES[:8]),
-                              (retained_vector, VECTOR_NAMES[8:9]),
-                              (leaked_vector, VECTOR_NAMES[9:10]),
-                              (held_slot_vector, VECTOR_NAMES[10:11]),
-                              (sweep_leaked_vector, VECTOR_NAMES[11:12]),
-                              (cleanup, VECTOR_NAMES[12:])):
+        if vectors is None:
+            vectors = ((straggler_vectors, VECTOR_NAMES[:8]),
+                       (retained_vector, VECTOR_NAMES[8:9]),
+                       (leaked_vector, VECTOR_NAMES[9:10]),
+                       (held_slot_vector, VECTOR_NAMES[10:11]),
+                       (sweep_leaked_vector, VECTOR_NAMES[11:12]))
+        for vector, names in tuple(vectors) + ((cleanup, VECTOR_NAMES[12:]),):
             run_vector(vector, names, base, contexts, results)
+
+    class RaisingSlot:
+        # A resolver slot whose acquire raises: an exception in the cleanup
+        # vector after it recorded a failure.
+        def acquire(self, blocking=True, timeout=None):
+            raise RuntimeError("forced slot exception")
+
+        def release(self):
+            pass
+
+    def cleanup_vector_self_test(base, contexts, failures, unevaluated):
+        # The cleanup vector itself records a failure (a join that reports a
+        # worker alive), then raises (a slot whose acquire raises): its
+        # report still carries that failure beside its cannot-evaluate line,
+        # and resolver_vectors returns instead of raising. No vector runs
+        # before it and no resolver worker is started.
+        identity = "self-test/cleanup-vector-failure-kept-after-raise"
+        if join_resolvers(2.0):
+            unevaluated.append("FAIL " + identity + ": cannot evaluate: a resolver worker "
+                               "is alive")
+            return
+        results = []
+        try:
+            with mock.patch.object(module, "_RESOLVER_SLOT", RaisingSlot()):
+                resolver_vectors(base, contexts, results, vectors=(),
+                                 join=lambda seconds: {"forced worker"})
+            outcome = "returned"
+        except Exception as exc:
+            outcome = type(exc).__name__ + ": " + _exception_text(exc)
+        if outcome != "returned" or results != [(VECTOR_NAMES[12], [
+                "a resolver worker outlived the vectors",
+                "cannot evaluate: RuntimeError: forced slot exception"])]:
+            failures.append("FAIL " + identity + ": the cleanup vector's failure was lost "
+                            "to its later exception ({})".format(outcome))
+        else:
+            print("PASS " + identity)
 
     try:
         if tuple(case[0] for case in cases if "fetch_bound" in case[3]) != _LOAD_SENSITIVE_ROWS:
@@ -5639,6 +5711,7 @@ def self_test(vectors_only=False, steady_only=False):
             tls_fixture_stop_rows_self_test(fixture_failures)
             tls_fixture_stop_rows(contexts[0], fixture_certificates,
                                   fixture_failures, fixture_unevaluated)
+            cleanup_vector_self_test(base, contexts, fixture_failures, fixture_unevaluated)
 
             git_commit, git_archive = _git_archive_fixture(base)
             add("positive/git-archive", VALID, "reject-git-comment",
