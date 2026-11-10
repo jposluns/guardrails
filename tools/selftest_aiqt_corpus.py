@@ -29,6 +29,7 @@ if tuple(sys.version_info[:2]) < (3, 14):
     os._exit(2)
 
 import ast
+import contextlib
 import datetime
 import os
 import subprocess
@@ -146,6 +147,165 @@ class ScanRootTests(unittest.TestCase):
             (root / "docs" / "node_modules" / "x.md").write_text("x", encoding="utf-8")
             got = iter_scan_roots_markdown(["docs"], repo_root=root)
             self.assertEqual({p.name for p in got}, {"x.md"})
+
+
+@contextlib.contextmanager
+def _denied(target, mode=0):
+    """Make ``target`` (a directory) unreadable at ``mode`` for the block.
+
+    An ordinary account gets a real chmod. A privileged account ignores mode
+    bits, so there os.stat, os.lstat and os.scandir are patched to raise
+    PermissionError the way the chmod would: entries under ``target`` cannot
+    be inspected, and ``target`` itself cannot be listed unless ``mode``
+    grants read.
+    """
+    target = Path(target)
+    if os.geteuid() != 0:
+        os.chmod(target, mode)
+        try:
+            yield
+        finally:
+            os.chmod(target, 0o755)
+        return
+    real = {"stat": os.stat, "lstat": os.lstat, "scandir": os.scandir}
+
+    def blocked(path, listing):
+        p = Path(os.fsdecode(path)) if not isinstance(path, int) else None
+        if p is None:
+            return False
+        if p == target:
+            return listing and not mode & 0o444
+        return target in p.parents
+
+    def guard(name, listing):
+        def call(path=".", *args, **kwargs):
+            if blocked(path, listing):
+                raise PermissionError(13, "Permission denied", str(path))
+            return real[name](path, *args, **kwargs)
+        return call
+
+    with mock.patch.object(os, "stat", guard("stat", False)), \
+            mock.patch.object(os, "lstat", guard("lstat", False)), \
+            mock.patch.object(os, "scandir", guard("scandir", True)):
+        yield
+
+
+class PresenceRefusalTests(unittest.TestCase):
+    """A declared input that is present but cannot be inspected is refused.
+
+    iter_targets and iter_scan_roots_markdown used Path.is_file() and is_dir(),
+    which return False on a permission error, a dangling symlink or a symlink
+    loop, and pathlib's rglob silently skips a directory it cannot list. Such an
+    input read as absent and was dropped, so a caller saw an empty or partial
+    corpus and passed. Genuine absence still skips; everything else raises
+    OSError naming the path. The absent and followed-symlink rows hold before
+    and after the fix; every refusal row fails against the old is_file()/is_dir()
+    and rglob code.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _refused(self, call, path):
+        with self.assertRaises(OSError) as ctx:
+            call()
+        # a refusal must never look like absence to a caller
+        self.assertNotIsInstance(ctx.exception, FileNotFoundError)
+        self.assertIn(str(path), str(ctx.exception))
+
+    def _docs(self, *parts):
+        d = self.root.joinpath(*parts)
+        d.mkdir(parents=True)
+        (d / "a.md").write_text("a", encoding="utf-8")
+        return d
+
+    def test_targets_absent_input_skipped(self):
+        self.assertEqual(iter_targets([self.root / "missing"]), [])
+
+    def test_targets_symlinked_input_followed(self):
+        docs = self._docs("docs")
+        (self.root / "link").symlink_to(docs)
+        got = iter_markdown_targets([self.root / "link"])
+        self.assertEqual([p.name for p in got], ["a.md"])
+
+    def test_targets_unsearchable_parent_refused(self):
+        docs = self._docs("locked", "docs")
+        with _denied(self.root / "locked"):
+            self._refused(lambda: iter_targets([docs]), docs)
+
+    def test_targets_unlistable_dir_refused(self):
+        docs = self._docs("docs")
+        with _denied(docs):
+            self._refused(lambda: iter_targets([docs]), docs)
+
+    def test_targets_unlistable_subdir_refused(self):
+        sub = self._docs("docs", "sub")
+        with _denied(sub):
+            self._refused(lambda: iter_targets([self.root / "docs"]), sub)
+
+    def test_targets_uninspectable_entry_refused(self):
+        docs = self._docs("docs")
+        with _denied(docs, 0o444):
+            self._refused(lambda: iter_targets([docs]), docs / "a.md")
+
+    def test_targets_fifo_input_refused(self):
+        fifo = self.root / "pipe.md"
+        os.mkfifo(fifo)
+        self._refused(lambda: iter_targets([fifo]), fifo)
+
+    def test_targets_dangling_symlink_input_refused(self):
+        link = self.root / "gone.md"
+        link.symlink_to(self.root / "nowhere.md")
+        self._refused(lambda: iter_targets([link]), link)
+
+    def test_targets_dangling_symlink_entry_refused(self):
+        docs = self._docs("docs")
+        (docs / "b.md").symlink_to(docs / "nowhere.md")
+        self._refused(lambda: iter_targets([docs]), docs / "b.md")
+
+    def test_scan_roots_absent_root_skipped(self):
+        self.assertEqual(iter_scan_roots_markdown(["missing", "gone/x.md"], repo_root=self.root), [])
+
+    def test_scan_roots_md_named_dir_still_listed(self):
+        # Parity with the former rglob("*.md"), which listed every entry so named.
+        docs = self._docs("docs")
+        (docs / "dir.md").mkdir()
+        got = iter_scan_roots_markdown(["docs"], repo_root=self.root)
+        self.assertEqual({p.name for p in got}, {"a.md", "dir.md"})
+
+    def test_scan_roots_unsearchable_parent_refused(self):
+        docs = self._docs("locked", "docs")
+        with _denied(self.root / "locked"):
+            self._refused(lambda: iter_scan_roots_markdown(["locked/docs"], repo_root=self.root), docs)
+
+    def test_scan_roots_unlistable_root_refused(self):
+        docs = self._docs("docs")
+        with _denied(docs):
+            self._refused(lambda: iter_scan_roots_markdown(["docs"], repo_root=self.root), docs)
+
+    def test_scan_roots_unlistable_subdir_refused(self):
+        sub = self._docs("docs", "sub")
+        with _denied(sub):
+            self._refused(lambda: iter_scan_roots_markdown(["docs"], repo_root=self.root), sub)
+
+    def test_scan_roots_fifo_root_refused(self):
+        os.mkfifo(self.root / "pipe.md")
+        self._refused(lambda: iter_scan_roots_markdown(["pipe.md"], repo_root=self.root),
+                      self.root / "pipe.md")
+
+    def test_scan_roots_dangling_symlink_root_refused(self):
+        (self.root / "docs").symlink_to(self.root / "nowhere")
+        self._refused(lambda: iter_scan_roots_markdown(["docs"], repo_root=self.root),
+                      self.root / "docs")
+
+    def test_scan_roots_dangling_symlink_ancestor_refused(self):
+        (self.root / "link").symlink_to(self.root / "nowhere")
+        self._refused(lambda: iter_scan_roots_markdown(["link/docs"], repo_root=self.root),
+                      self.root / "link" / "docs")
 
 
 class ReadTextSafeTests(unittest.TestCase):
