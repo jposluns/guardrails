@@ -30760,8 +30760,8 @@ def _rwh_ref_writer_text(sub, marker, path):
             "--update-head-ok or relaxed by the receiving side's configuration), and that "
             "repository has a live review hold (dispatch {}, worktree {} held at {}, marker {}). "
             "Run it from a "
-            "separate clone, or end the hold first; the dispatcher removes the marker when the "
-            "review ends.".format(sub, marker["dispatch_id"], marker["workdir"],
+            "separate clone; ending the hold first is the operator's step, not the assistant's, "
+            "and the dispatcher removes the marker when the review ends.".format(sub, marker["dispatch_id"], marker["workdir"],
                                   marker["head"][:12], path))
 
 
@@ -30772,9 +30772,9 @@ def _rwh_repo_hold_text(marker, path):
             "still reach the held worktree through shared refs, shared configuration or a program "
             "an option runs from the target's tree, whether or not the raw text names the held "
             "path, so every such command is withheld, a stated over-refusal for the forms that "
-            "cannot reach it. Run one plain read-only git command, make the change in a repository "
-            "the hold does not pin, or end the hold first; the dispatcher removes the marker when "
-            "the review ends.".format(marker["dispatch_id"], marker["workdir"],
+            "cannot reach it. Run one plain read-only git command, or make the change in a "
+            "repository the hold does not pin; ending the hold first is the operator's step, not "
+            "the assistant's, and the dispatcher removes the marker when the review ends.".format(marker["dispatch_id"], marker["workdir"],
                                       marker["head"][:12], path))
 
 
@@ -30784,8 +30784,9 @@ def _rwh_program_text(word, marker, path):
             "is live (dispatch {}, worktree {} held at {}, marker {}). Where such a program runs, "
             "and which worktree it reaches, is not resolved, so while any hold this rule can see "
             "is live every such form is refused, whatever its target: an unrelated rebase -x is "
-            "refused too, a stated over-refusal. Drop the form, or end the hold first; the "
-            "dispatcher removes the marker when the review ends.".format(
+            "refused too, a stated over-refusal. Drop the form; ending the hold first is the "
+            "operator's step, not the assistant's, and the dispatcher removes the marker when the "
+            "review ends.".format(
                 word, marker["dispatch_id"], marker["workdir"], marker["head"][:12], path))
 
 
@@ -30796,8 +30797,9 @@ def _rwh_write_text(word, marker, path):
             "at {}, marker {}). Such a path is not a directory move, so where it lands is not "
             "resolved, and from an unrelated target it can still write into the held worktree; "
             "while any hold this rule can see is live every such option is refused, whatever its "
-            "operand names, a stated over-refusal. Drop the option, or end the hold first; the "
-            "dispatcher removes the marker when the review ends.".format(
+            "operand names, a stated over-refusal. Drop the option; ending the hold first is the "
+            "operator's step, not the assistant's, and the dispatcher removes the marker when the "
+            "review ends.".format(
                 word, marker["dispatch_id"], marker["workdir"], marker["head"][:12], path))
 
 
@@ -30807,8 +30809,8 @@ def _rwh_held_path_text(word, marker, path):
             "{}). Whatever that word means to its verb, a path into the held worktree can name a "
             "file the command creates or rewrites there, so it is refused while the hold is live, "
             "a stated over-refusal for the spellings that only read. Name a path outside the held "
-            "worktree, or end the hold first; the dispatcher removes the marker when the review "
-            "ends.".format(word, marker["workdir"], marker["dispatch_id"], marker["head"][:12],
+            "worktree; ending the hold first is the operator's step, not the assistant's, and the "
+            "dispatcher removes the marker when the review ends.".format(word, marker["workdir"], marker["dispatch_id"], marker["head"][:12],
                            path))
 
 
@@ -30992,8 +30994,8 @@ def _rwh_worktree_hit(args, base, live, views):
                         return ("deny", _rwh_deny_text(marker, path))
                 return None  # the operand resolves to a worktree no live hold pins
     return ("unverifiable", "AIQT rule rvwpin: the worktree this git 'worktree {}' names cannot be "
-            "resolved while a review hold is live; name it with a literal absolute path, or end the "
-            "hold first.".format(op))
+            "resolved while a review hold is live; name it with a literal absolute path (ending the "
+            "hold first is the operator's step, not the assistant's).".format(op))
 
 
 def _rwh_held_head_refs(marker, views):
@@ -31021,8 +31023,8 @@ def _rwh_chain_hit(name, marker, path, views):
     if chain is None:
         return ("unverifiable", "AIQT rule rvwpin: the symbolic HEAD chain of the held worktree {} "
                 "cannot be resolved while a review hold is live, so whether this ref write moves the "
-                "held HEAD cannot be ruled out; retry once the repository answers, or end the hold "
-                "first.".format(marker["workdir"]))
+                "held HEAD cannot be ruled out; retry once the repository answers (ending the hold "
+                "first is the operator's step, not the assistant's).".format(marker["workdir"]))
     for ref in chain:
         if name in (ref, ref.removeprefix("refs/heads/")):
             return ("deny", _rwh_deny_text(marker, path))
@@ -31043,15 +31045,15 @@ def _rwh_update_ref_hit(args, target, live, views):
     name, deref = _rwh_update_ref_parse(args)
     if name is None:
         return ("unverifiable", "AIQT rule rvwpin: the refs this git 'update-ref' writes cannot be "
-                "read from its argv while a review hold is live; name one ref per plain call, or end "
-                "the hold first.")
+                "read from its argv while a review hold is live; name one ref per plain call (ending "
+                "the hold first is the operator's step, not the assistant's).")
     names = [name]
     if deref:
         chain = _rwh_ref_chain(target, name)
         if chain is None:
             return ("unverifiable", "AIQT rule rvwpin: the ref this git 'update-ref' dereferences "
                     "cannot be resolved while a review hold is live; retry once the repository "
-                    "answers, or end the hold first.")
+                    "answers (ending the hold first is the operator's step, not the assistant's).")
         names.extend(chain)
     for marker, path in live:
         for ref_name in names:
@@ -31130,8 +31132,8 @@ def _rwh_symbolic_ref_hit(args, t_gitdir, live, views):
         return None
     if name is None:
         return ("unverifiable", "AIQT rule rvwpin: the ref this git 'symbolic-ref' writes cannot be "
-                "read from its argv while a review hold is live; name the ref explicitly, or end the "
-                "hold first.")
+                "read from its argv while a review hold is live; name the ref explicitly (ending the "
+                "hold first is the operator's step, not the assistant's).")
     for marker, path in live:
         if name == "HEAD":
             held_view = _rwh_view(marker["workdir"], views)
@@ -31820,8 +31822,8 @@ def _rwh_decide(data):
                 "option {!r}, which this rule does not model (only -s, -r, -sr, -rs, --symbolic "
                 "and --relative are modelled), while a review hold is live, so whether a later "
                 "step through that link reaches the held worktree cannot be ruled out; create "
-                "the link in a separate command first, spell it with only those options, or end "
-                "the hold first.".format(link_held))
+                "the link in a separate command first, or spell it with only those options (ending "
+                "the hold first is the operator's step, not the assistant's).".format(link_held))
     gate_live = (list(set_payload) if set_state == "live" else []) + list(s_live)
     word = _rwh_program_gate(segments) if segments is not None else None
     if word is not None:
@@ -31857,14 +31859,16 @@ def _rwh_decide(data):
                 "process-relative path {} (a /proc or /dev/fd spelling) while a review hold is "
                 "live, and where it lands only the process that opens it knows, so a write into "
                 "the held worktree cannot be ruled out; name the directory it resolves to with a "
-                "literal absolute path, or end the hold first.".format(proc_live))
+                "literal absolute path (ending the hold first is the operator's step, not the "
+                "assistant's).".format(proc_live))
     if link_unresolved:
         # a live hold is reachable and the command creates a link whose operand this scan could
         # not resolve: the link can point a later step anywhere, the held worktree included
         return ("unverifiable", "AIQT rule rvwpin: this command creates a link (ln) whose operand "
                 "cannot be resolved from its literal text while a review hold is live, so a later "
                 "step through that link reaching the held worktree cannot be ruled out; use "
-                "literal absolute ln operands, or end the hold first.")
+                "literal absolute ln operands (ending the hold first is the operator's step, not "
+                "the assistant's).")
     if raw_relative:
         # a live hold is reachable and the raw text carries a relative path after -C, --git-dir,
         # --work-tree, cd or a GIT_ assignment: the directory that runs it (an option value runs
@@ -31874,7 +31878,8 @@ def _rwh_decide(data):
                 "path after -C, --git-dir, --work-tree, cd or a GIT_ assignment (in an option value "
                 "or a step its one-plain-git form does not model), which resolves against a "
                 "directory this rule cannot fix, so while a review hold is live whether it reaches a "
-                "held worktree cannot be ruled out; use an absolute path, or end the hold first.")
+                "held worktree cannot be ruled out; use an absolute path (ending the hold first is "
+                "the operator's step, not the assistant's).")
     # a live hold in a repository this command can reach: only the one plain git segment whose
     # target is certain and resolves outside every held worktree may still pass
     if simple is not None and not _rwh_git_env_touched(segments) and \
@@ -31960,7 +31965,8 @@ def _rwh_decide(data):
                                         "worktree this git command targets cannot be resolved "
                                         "while a review hold is live, so a mutation enclosing a "
                                         "held worktree cannot be ruled out; run it with a "
-                                        "readable non-bare target, or end the hold first.")
+                                        "readable non-bare target (ending the hold first is "
+                                        "the operator's step, not the assistant's).")
                             if _rwh_inside(held_real, top):
                                 return ("deny", _rwh_enclosing_text(marker, path))
                         if t_live:
@@ -31978,8 +31984,9 @@ def _rwh_decide(data):
                                     "fix, so whether the command modifies a held worktree cannot "
                                     "be ruled out, whatever the step names, a stated "
                                     "over-refusal; run one plain 'git -C /absolute/path "
-                                    "<subcommand>' naming no other directory, or end the hold "
-                                    "first.".format(steps[0]))
+                                    "<subcommand>' naming no other directory (ending the hold "
+                                    "first is the operator's step, not the assistant's)."
+                                    .format(steps[0]))
                         # the shape that still passes: a segment bound to a certain target in an
                         # unrelated unheld repository, carrying no program-running option and
                         # walking to no directory beyond that target. A program git runs from the
@@ -31992,7 +31999,7 @@ def _rwh_decide(data):
             "in a repository it can reach, and it is not one plain git segment whose read-only "
             "form or certain target this rule can resolve; run one plain 'git -C /absolute/path "
             "<subcommand>' with no wrapper, reserved word, substitution, heredoc or directory "
-            "change, or end the hold first.")
+            "change (ending the hold first is the operator's step, not the assistant's).")
 
 
 def review_workdir_hold(data):
