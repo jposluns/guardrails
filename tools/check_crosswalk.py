@@ -571,7 +571,10 @@ def check_unit_coverage(root, cw):
     hand-written partial-component header; a forged header claiming a whole component it did not touch is
     outside this clause-level binding, exactly as the journal's accident-recovery model is."""
     journal_root = root / JOURNAL_REL
-    if not journal_root.is_dir():
+    # A no-follow lstat classifies the journal: only a genuinely absent journal (no cutover yet) yields no
+    # findings. A symlink (dangling or not), a regular file, a FIFO, or a path that cannot be inspected is
+    # refused (GateError naming the path), never read as absent the way Path.is_dir() read it.
+    if not _present_or_fail(journal_root, True):
         return []
     findings = []
     comps = components(cw)
@@ -587,9 +590,16 @@ def check_unit_coverage(root, cw):
     except (_journal.JournalError, OSError) as exc:
         raise GateError("cannot open journal root ({})".format(exc))
     try:
-        for entry in sorted(journal_root.iterdir()):
-            if not entry.is_dir():
-                continue
+        # Enumerate through the held journal-root descriptor with the engine's strict no-follow listing: a
+        # transaction directory is gated and the engine's own regular `lock` and `lock.break` files are
+        # skipped, while an entry that cannot be inspected, a symlink, or any other type is refused. A
+        # Path.is_dir() filter skipped all of these as if absent, so a journal that could be listed but not
+        # searched hid every transaction and the leg passed.
+        try:
+            txn_dirs = _journal._journal_txn_dirs(jr_fd, journal_root, strict=True)
+        except (_journal.JournalError, OSError) as exc:
+            raise GateError("cannot classify the entries of journal {} ({})".format(journal_root, exc))
+        for entry in txn_dirs:
             # Route through the SINGLE validated classification. Only a genuinely COMPLETE cutover
             # ([INTENT, COMPLETE] AND header kind == "cutover") is coverage-gated; a mismatched-txn or
             # invalid-sequence journal fails closed (GateError), and a rolled-back, open, un-adopt, or
@@ -1216,6 +1226,71 @@ def self_test():
                                               "component-successors": wsuccs})
         if run_quiet(c7nc) != 0:
             failures.append("a non-cutover terminal must not be mis-gated (real cutover PASSes)")
+        n += 1
+
+        # Journal presence is classified no-follow, never by Path.is_dir(): a journal or a journal entry
+        # that is present but not the expected type, or cannot be inspected, fails closed (exit 2) instead
+        # of reading as absent and passing. The engine's own regular lock files are still skipped.
+        jfile = _build_install(tmp / "journal-file", base_text, [_LEGACY_ONE, _LEGACY_TWO], inv)
+        _write(jfile / JOURNAL_REL, "not a directory\n")
+        if run_quiet(jfile) != 2:
+            failures.append("a journal that is a regular file must fail closed (exit 2), not read as absent")
+        n += 1
+        jdang = _build_install(tmp / "journal-dangling", base_text, [_LEGACY_ONE, _LEGACY_TWO], inv)
+        os.symlink(str(tmp / "journal-nowhere"), str(jdang / JOURNAL_REL))
+        if run_quiet(jdang) != 2:
+            failures.append("a journal that is a dangling symlink must fail closed (exit 2), not read as absent")
+        n += 1
+        # A journal that can be listed but not searched, holding a partial-component cutover (exit 1 when
+        # readable): every entry stat fails, and the leg must refuse rather than skip them all. A privileged
+        # account searches it anyway, so there the entry stat is made to raise the same permission error.
+        jsearch = _build_install(tmp / "journal-unsearchable", base_text, [_LEGACY_ONE, _LEGACY_TWO], inv)
+        _write_journal_txn(jsearch, "txn.partial", {"unit": ukey, "kind": "cutover",
+                                                    "component-predecessors": wpreds[:1],
+                                                    "component-successors": wsuccs})
+        jsearch_dir = jsearch / JOURNAL_REL
+        real_lstat = os.lstat
+        os.chmod(str(jsearch_dir), 0o444)
+        try:
+            try:
+                real_lstat(str(jsearch_dir / "txn.partial"))
+                privileged = True
+            except PermissionError:
+                privileged = False
+            if privileged:
+                def denied_lstat(path, *args, dir_fd=None, **kwargs):
+                    if dir_fd is not None and path == "txn.partial":
+                        raise PermissionError(13, "Permission denied (simulated for a privileged run)", path)
+                    return real_lstat(path, *args, dir_fd=dir_fd, **kwargs)
+                os.lstat = denied_lstat
+            got = run_quiet(jsearch)
+        finally:
+            os.lstat = real_lstat
+            os.chmod(str(jsearch_dir), 0o755)
+        if got != 2:
+            failures.append("a journal that can be listed but not searched must fail closed (exit 2), got "
+                            "{}".format(got))
+        n += 1
+        for label, make in (("dangling-symlink",
+                             lambda p: os.symlink(str(tmp / "entry-nowhere"), str(p))),
+                            ("regular-file", lambda p: p.write_text("x\n", encoding="utf-8")),
+                            ("fifo", lambda p: os.mkfifo(str(p)))):
+            jent = _build_install(tmp / ("journal-entry-" + label), base_text, [_LEGACY_ONE, _LEGACY_TWO], inv)
+            (jent / JOURNAL_REL).mkdir(parents=True)
+            make(jent / JOURNAL_REL / "txn.stray")
+            if run_quiet(jent) != 2:
+                failures.append("a journal entry that is a {} must fail closed (exit 2), not be skipped"
+                                .format(label.replace("-", " ")))
+            n += 1
+        jlock = _build_install(tmp / "journal-lock-files", base_text, [_LEGACY_ONE, _LEGACY_TWO], inv)
+        _write_journal_txn(jlock, "txn.ok", {"unit": ukey, "kind": "cutover",
+                                             "component-predecessors": wpreds,
+                                             "component-successors": wsuccs})
+        _write(jlock / JOURNAL_REL / "lock", "pid = 1\n")
+        _write(jlock / JOURNAL_REL / "lock.break", "")
+        if run_quiet(jlock) != 0:
+            failures.append("the engine's regular lock and lock.break files beside a whole-component cutover "
+                            "must still PASS (0)")
         n += 1
 
         # A non-dict row container is a GateError (exit 2), never an uncaught AttributeError.

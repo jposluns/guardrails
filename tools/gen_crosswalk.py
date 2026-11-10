@@ -404,19 +404,73 @@ def _rank_candidates(pred_text, successor_texts):
     return [sid for _, sid in scored]
 
 
+def _legacy_files(legacy_root):
+    """Every legacy file beneath legacy_root, sorted. Each entry is classified explicitly instead of by
+    rglob() and Path.is_file(), which skip a directory that cannot be listed and read an entry that cannot
+    be inspected as not a file, so part of a legacy tree was silently left out of the archive. An absent
+    root, or an entry removed since its directory was listed, is absent. A real directory is walked. A
+    regular file, or a symlink to one (legacy trees may carry symlinked files, and the archive read follows
+    them), is a legacy file. Anything else (a listing or stat error, a dangling symlink, a symlink to a
+    directory, a FIFO, socket or device) is refused with an AdoptError naming the path."""
+    try:
+        os.lstat(str(legacy_root))
+    except FileNotFoundError:
+        return []
+    except OSError as exc:
+        raise AdoptError("cannot inspect legacy root {} ({})".format(legacy_root, exc))
+    try:
+        root_st = os.stat(str(legacy_root))
+    except OSError as exc:
+        raise AdoptError("cannot inspect legacy root {} ({})".format(legacy_root, exc))
+    if not stat.S_ISDIR(root_st.st_mode):
+        raise AdoptError("legacy root {} is not a directory".format(legacy_root))
+    files = []
+    pending = [legacy_root]
+    while pending:
+        directory = pending.pop()
+        try:
+            names = os.listdir(str(directory))
+        except OSError as exc:
+            raise AdoptError("cannot list legacy directory {} ({})".format(directory, exc))
+        for name in names:
+            entry = directory / name
+            try:
+                st = os.lstat(str(entry))
+            except FileNotFoundError:
+                continue                                  # removed since the listing: absent
+            except OSError as exc:
+                raise AdoptError("cannot inspect legacy entry {} ({})".format(entry, exc))
+            if stat.S_ISDIR(st.st_mode):
+                pending.append(entry)
+                continue
+            if stat.S_ISLNK(st.st_mode):
+                try:
+                    st = os.stat(str(entry))
+                except OSError as exc:
+                    raise AdoptError("legacy entry {} is a symlink whose target cannot be inspected ({})"
+                                     .format(entry, exc))
+                if stat.S_ISDIR(st.st_mode):
+                    raise AdoptError("legacy entry {} is a symlink to a directory, which is not walked"
+                                     .format(entry))
+            if not stat.S_ISREG(st.st_mode):
+                raise AdoptError("legacy entry {} is neither a regular file nor a directory".format(entry))
+            files.append(entry)
+    return sorted(files)
+
+
 def build_candidates(legacy_root, archive_fd, successor_texts):
     """Archive every legacy file FIRST (beneath the no-follow-anchored archive_fd), then emit candidate
     predecessor rows, candidate mapping rows with EMPTY review fields, and the computed unmatched list.
     Deterministic ordering. No pointer is read from the archived source bytes (8.6)."""
     legacy_root = Path(legacy_root)
-    files = sorted(p for p in legacy_root.rglob("*") if p.is_file())
+    files = _legacy_files(legacy_root)
     if not files:
         raise AdoptError("no legacy files under {}".format(legacy_root), exit_code=1)
     archive_rows, predecessor_rows, mapping_rows = [], [], []
     for f in files:
         # Capture the 8.2 OWNER from the SAME opened source fd the raw bytes come from, so the
         # recorded owner cannot disagree with the archived payload. No O_NOFOLLOW here: legacy trees may
-        # legitimately carry symlinked files that rglob(is_file) and the prior read_bytes both followed.
+        # legitimately carry symlinked files that _legacy_files and the prior read_bytes both follow.
         fd = os.open(str(f), os.O_RDONLY)
         try:
             owner = os.fstat(fd).st_uid
@@ -1065,6 +1119,79 @@ def self_test():
         os.close(afd2)
         if not cand["unmatched"]:
             failures.append("a predecessor with no mappable successor must appear in the unmatched list")
+
+        # Legacy-file presence is classified explicitly, never by rglob() and Path.is_file(): a legacy entry
+        # that is present but cannot be listed or inspected, or is neither a file (or a symlink to one) nor
+        # a real directory, is refused (exit 2) instead of being silently left out of the archive. An
+        # absent root keeps its refusal (exit 1), and a nested file and a symlinked file are archived.
+        def legacy_tree(label):
+            base = tmp / ("presence-" + label)
+            (base / "sub").mkdir(parents=True)
+            (base / "top.md").write_text("Top level legacy obligation.\n", encoding="utf-8")
+            (base / "sub" / "inner.md").write_text("Inner legacy obligation.\n", encoding="utf-8")
+            return base
+
+        def adopt_count(legacy, label):
+            out_dir = tmp / ("presence-out-" + label)
+            got = quiet(run_adopter, legacy, out_dir, {})
+            archive = out_dir / ".aiqt" / "archive"
+            return got, (len(os.listdir(str(archive))) if archive.is_dir() else 0)
+
+        pres_ok = legacy_tree("ok")
+        (tmp / "presence-linked.md").write_text("A symlinked legacy file is archived.\n", encoding="utf-8")
+        os.symlink(str(tmp / "presence-linked.md"), str(pres_ok / "linked.md"))
+        got = adopt_count(pres_ok, "ok")
+        if got != (0, 3):
+            failures.append("a readable legacy tree with a nested file and a symlinked file must archive all "
+                            "three (exit 0), got {}".format(got))
+        if adopt_count(tmp / "presence-absent", "absent") != (1, 0):
+            failures.append("an absent legacy root must keep its refusal (exit 1) with nothing archived")
+        real_lstat, real_listdir = os.lstat, os.listdir
+        for label, mode, seam in (("unsearchable", 0o444, "lstat"), ("unlistable", 0o000, "listdir")):
+            pres = legacy_tree(label)
+            sub = pres / "sub"
+            os.chmod(str(sub), mode)
+            try:
+                # A privileged account lists and searches the directory anyway; there the seam the mode
+                # denies is made to raise the same permission error for that path.
+                try:
+                    if seam == "lstat":
+                        real_lstat(str(sub / "inner.md"))
+                    else:
+                        real_listdir(str(sub))
+                    privileged = True
+                except PermissionError:
+                    privileged = False
+                if privileged:
+                    denied = str(sub / "inner.md") if seam == "lstat" else str(sub)
+                    real = real_lstat if seam == "lstat" else real_listdir
+
+                    def refuse(path, *args, _real=real, _denied=denied, **kwargs):
+                        if str(path) == _denied:
+                            raise PermissionError(13, "Permission denied (simulated for a privileged run)", path)
+                        return _real(path, *args, **kwargs)
+                    if seam == "lstat":
+                        os.lstat = refuse
+                    else:
+                        os.listdir = refuse
+                got = adopt_count(pres, label)
+            finally:
+                os.lstat, os.listdir = real_lstat, real_listdir
+                os.chmod(str(sub), 0o755)
+            if got != (2, 0):
+                failures.append("a legacy subdirectory that is {} must be refused (exit 2) with nothing "
+                                "archived, got {}".format(label, got))
+        for label, make in (("dangling-symlink",
+                             lambda p: os.symlink(str(tmp / "presence-nowhere"), str(p / "gone.md"))),
+                            ("symlink-to-directory",
+                             lambda p: os.symlink(str(p / "sub"), str(p / "linked"))),
+                            ("fifo", lambda p: os.mkfifo(str(p / "pipe.md")))):
+            pres = legacy_tree(label)
+            make(pres)
+            got = adopt_count(pres, label)
+            if got != (2, 0):
+                failures.append("a legacy entry that is a {} must be refused (exit 2) with nothing archived, "
+                                "got {}".format(label.replace("-", " "), got))
 
         # (G8) a SYMLINKED payload under an existing hash dir is refused (a following read would have
         # accepted redirectable external bytes as if immutable).

@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "f40449e2613e81df4e2aa7c551651260ffb593473a8e06107bf18cfa606bde04"
+tree-sha256 = "600ffe1ab0d313bb081fc15e40b5dfffcdb5fb1e196ae9aebab6bb286fe36ad3"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -4171,8 +4171,8 @@ sha256 = "1e2a372431a7ae2e44fd5e3542be2c38c9bf6c4b966cfec9f446a24c76e0c9bb"
 
 [[sources]]
 path = "tools/check_crosswalk.py"
-bytes = 87690
-sha256 = "0238bb4c907c358a4718a70f8630a92517444f64139b4c0517004bfdbf2321ec"
+bytes = 92757
+sha256 = "3a96ababfed40af23e1f30830d81dc866199243036cf46b80c44a3ec730d3252"
 
 [[sources]]
 path = "tools/check_dangerous_api.py"
@@ -4471,8 +4471,8 @@ sha256 = "9f130090b2cd71faa1326cfbc85b0978a6ef7f65bf00e744bc0955bfb47b07da"
 
 [[sources]]
 path = "tools/gen_crosswalk.py"
-bytes = 68307
-sha256 = "6b9efb3ba80f02352fa2f84fe37daaaaa697163f17d155edf86dbf2c0c8b1ce5"
+bytes = 75216
+sha256 = "462e7277a2e59780406d96f7aa7352378b543aede479884a9b46ebe2310bd41a"
 
 [[sources]]
 path = "tools/gen_cursor.py"
