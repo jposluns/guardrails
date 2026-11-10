@@ -6175,16 +6175,15 @@ def self_test():
         pr_machine = clean_machine()
         # Spec 9: the per-record layout requires the concurrent-operation module, so the clean
         # per-record fixture enables it and carries its session_lease type (registered, with an empty
-        # index, an empty imported leaf, and both counter rows at zero).
+        # index and a zero counter row). Its imported series is inactive, so it carries no imported
+        # leaf and no imported counter row, as in clean_machine.
         pr_machine["manifest.toml"] = base_manifest(layout="per-record")
         pr_machine["manifest.toml"]["modules"] = {"concurrent_operation": True}
         pr_machine["manifest.toml"]["types"]["session_lease"] = {"namespace": "SL"}
         pr_machine["manifest.toml"]["vendors"] = {"registered": ["x-acme"]}
         pr_counters = counters(FN=2, BI=0, DN=0, WL=0, HO=0, SL=0)
-        pr_counters["counters"]["imported:SL"] = 0
         pr_machine["counters.toml"] = pr_counters
         pr_machine["session_lease.index.toml"] = idx([])
-        pr_machine.update(_opf_init.imported_leaf_documents(pr_machine["manifest.toml"]))
         pr_machine["backlog_item.index.toml"] = idx([])
         pr_machine["done.index.toml"] = idx([])
         pr_machine["handoff.index.toml"] = idx([])
@@ -11953,7 +11952,6 @@ def self_test():
         cgf = copy.deepcopy(pr_machine)
         cgf["worklog.toml"] = {"schema": 1, "entry": [wl(1), wl(3)]}
         cg_counters = counters(FN=2, BI=0, DN=0, WL=3, HO=0, SL=0)
-        cg_counters["counters"]["imported:SL"] = 0
         cgf["counters.toml"] = cg_counters
         cg_obs = {"tracked": "tracked",
                   "prior": {"releases": [],
@@ -12745,7 +12743,6 @@ def self_test():
         _f6a = copy.deepcopy(pr_machine)
         _f6a["worklog.toml"] = {"schema": 1, "entry": [wl(2), wl(3)]}
         _f6a_counters = counters(FN=2, BI=0, DN=0, WL=3, HO=0, SL=0)
-        _f6a_counters["counters"]["imported:SL"] = 0
         _f6a["counters.toml"] = _f6a_counters
         _f6a_obs = {"tracked": "tracked",
                     "prior": {"releases": [],
@@ -12962,11 +12959,15 @@ def self_test():
             h2_clean, h2_reservation("record", 1, {"SL": 1}), h2_reservation("record", 2, {"SL": 2}),
             obs=held_prior, SL=2), 2))
         # The imported series' kept row on the active store: legal at zero, owed above it unless
-        # reservations hold its numbers, and the C-IMPORTED-IDS replay carries the same finding.
+        # reservations hold its numbers, and the C-IMPORTED-IDS replay carries the same finding. The
+        # shipped constants leave the imported series inactive, so each run raises SUPPORTED_HOMES to 2
+        # and SUPPORTED_SPEC_VERSION to IMPORTED_SPEC_VERSION, as the imported-series vectors above do.
         def kept_act(*reservations, **rows):
             machine = act_machine()
             machine["counters.toml"]["counters"].update(rows)
-            return act_run(machine, working=dict(reservations))
+            with _patch.object(_opf_store, "SUPPORTED_HOMES", 2), \
+                    _patch.object(_opf_store, "SUPPORTED_SPEC_VERSION", _opf_store.IMPORTED_SPEC_VERSION):
+                return act_run(machine, working=dict(reservations))
 
         r = kept_act(**{"SL": 0, "imported:SL": 0})
         check("kept-module-imported-row-zero-valid", r is not None and r.status == VALID

@@ -3004,8 +3004,11 @@ def boundary_self_test():
     check("doctor-legacy-roster-exact", lambda: legacy_roster(legacy_report)
           and tuple(legacy_report.checks) == doctor.REQUIRED_CHECKS and "C-EVIDENCE-ENUM" not in doctor.REQUIRED_CHECKS)
     # The pin is independent of the live _RESIDUALS constant: sha256 over the 12 legacy residuals joined by
-    # a newline, UTF-8. Any added, removed, reordered or reworded legacy residual changes it.
-    legacy_residuals_sha256 = "6901f8734d2293e714c521e9b74836a188627839d7d8a08a3888b4a9cc7a8a0b"
+    # a newline, UTF-8. Any added, removed, reordered or reworded legacy residual changes it. It last moved
+    # when section 8.5 stated the full module schemas: the module-tier residual was reworded to say the
+    # specification states them and the baseline validator does not implement them yet; the count and
+    # the other eleven residuals are unchanged.
+    legacy_residuals_sha256 = "51c0692ff09981afbadd7e1820bb11ba27e8540cae7bae10e0072cea0dc8635e"
     check("doctor-legacy-residuals-unchanged", lambda: len(legacy_report.residuals) == 12
           and hashlib.sha256("\n".join(legacy_report.residuals).encode("utf-8")).hexdigest()
           == legacy_residuals_sha256
