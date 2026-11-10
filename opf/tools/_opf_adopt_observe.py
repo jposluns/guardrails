@@ -3669,16 +3669,20 @@ def self_test(vectors_only=False, steady_only=False):
             self.stop = threading.Event()
             self.guard = threading.Lock()
             self.connection = None
-            # Set just before the server calls recv for a request, and just
-            # before it wraps a connection for its handshake. Each shows the
-            # server got that far, not that the call has blocked yet; close()
-            # ends the call either way, since recv or a handshake on a
-            # connection already shut down returns at once.
+            # Set just before the server calls recv for a request, just
+            # before it wraps a connection for its handshake, and once the
+            # wrapped socket is published, just before do_handshake(). Each
+            # shows the server got that far, not that the call has blocked
+            # yet; close() ends the call either way, since recv or a
+            # handshake on a connection already shut down returns at once.
             self.in_recv = threading.Event()
             self.in_handshake = threading.Event()
+            self.handshaking = threading.Event()
             # A served connection whose blocking call ran out its socket
-            # timeout after close() began: close() did not interrupt it.
+            # timeout after close() began (close() did not interrupt it), or
+            # before close() began (close() had no call to interrupt).
             self.timed_out = []
+            self.expired = threading.Event()
             self.listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.listener.bind(("127.0.0.1", 0))
             self.listener.listen(8)
@@ -3710,6 +3714,7 @@ def self_test(vectors_only=False, steady_only=False):
                         raw, server_side=True, do_handshake_on_connect=False)
                     if not self.serving(secured):
                         continue
+                    self.handshaking.set()
                     secured.do_handshake()
                     if self.mode == "quiet":
                         # Never reaches recv: the stop check's unmet
@@ -3750,10 +3755,13 @@ def self_test(vectors_only=False, steady_only=False):
                     except (OSError, ssl.SSLError):
                         pass
                 except socket.timeout:
-                    # Expected for deadline cases. One that ends a call after
-                    # close() began is recorded for the stop check.
+                    # Expected for deadline cases. Whether it ended a call
+                    # after or before close() began is recorded for the stop
+                    # check.
                     if self.stop.is_set():
                         self.timed_out.append(True)
+                    else:
+                        self.expired.set()
                 except (OSError, ssl.SSLError):
                     # Expected for wrong-chain/name and deadline cases.
                     pass
@@ -3819,9 +3827,10 @@ def self_test(vectors_only=False, steady_only=False):
 
     STOP_PASS, STOP_FAIL, STOP_UNEVALUATED = "pass", "fail", "cannot evaluate"
 
-    def tls_fixture_stop_check(context, cadata, server_class=None, mode="normal",
+    def tls_fixture_stop_check(context, cadata, shown, server_class=None, mode="normal",
                                clock=time.monotonic, pause=None,
-                               reach_seconds=_TLS_FIXTURE_REACH_SECONDS, stage="recv"):
+                               reach_seconds=_TLS_FIXTURE_REACH_SECONDS, stage="recv",
+                               connect=socket.create_connection):
         # A served connection whose peer goes quiet leaves the server thread
         # blocked in recv for up to the socket timeout, longer than close()
         # used to join it. close() must make that thread return at once.
@@ -3831,18 +3840,25 @@ def self_test(vectors_only=False, steady_only=False):
         # cleanup after an unmet precondition too) fails. A server that never
         # signalled its stage within reach_seconds (or a client that could
         # not get there) is a precondition this run did not establish:
-        # cannot evaluate, returned before the thread is looked at. Once the
-        # precondition was met, a thread still alive after close() returned
-        # fails, and so does a server call that ran out its socket timeout
-        # after close() began (close() did not interrupt it), whatever close()
-        # took. An exception after close() raised, or after it returned with
-        # the thread still alive, does not hide that failure: it is returned
-        # and the exception is dropped; any other exception propagates. Only
-        # the close() call is timed, from clock(), so a delay before it
-        # (pause, the seam a test uses to stand for one) is never charged to
-        # it; a close() that still took the socket timeout with no call
-        # timed out is cannot evaluate too, since timing alone cannot tell one
-        # that waited the timeout out from a host that stalled it.
+        # cannot evaluate, returned before the thread is looked at. Once
+        # close() ran, a thread still alive after it returned fails, and so
+        # does a server call that ran out its socket timeout after close()
+        # began (close() did not interrupt it), whatever close() took.
+        # Otherwise a server with no blocking call for close() to interrupt
+        # is cannot evaluate: its call ran out its socket timeout before
+        # close() began, or (stage "handshake") it had not published its
+        # wrapped socket and started do_handshake() by then. An exception
+        # after close() raised, or after it returned with the thread still
+        # alive, is dropped and that failure is returned. After a server
+        # call that timed out once close() began, the failure is handed to
+        # shown and then the exception propagates, so the caller can record
+        # both. Any other exception propagates. connect opens the client's
+        # connection, a seam for a row that opens no socket. Only the close()
+        # call is timed, from clock(), so a delay before it (pause, the seam
+        # a test uses to stand for one) is never charged to it; a close()
+        # that still took the socket timeout with no call timed out is
+        # cannot evaluate too, since timing alone cannot tell one that
+        # waited the timeout out from a host that stalled it.
         def raised_text(exc):
             # The message alone for the fixture's own AssertionError, which
             # names what failed; the type too for any other exception.
@@ -3852,12 +3868,12 @@ def self_test(vectors_only=False, steady_only=False):
 
         server = (server_class or Server)(context, b"", b"", mode=mode)
         closed = False
+        engaged = True
         raised = None
         unmet = None
         pending = None
         try:
-            with socket.create_connection(("127.0.0.1", server.port),
-                                          timeout=reach_seconds) as raw:
+            with connect(("127.0.0.1", server.port), timeout=reach_seconds) as raw:
                 if stage == "handshake":
                     reached = server.in_handshake
                     client = contextlib.nullcontext()
@@ -3869,8 +3885,15 @@ def self_test(vectors_only=False, steady_only=False):
                         raw, server_hostname="codeload.github.com")
                 with client:
                     if reached.wait(reach_seconds):
+                        if stage == "handshake":
+                            # Bounded well under the socket timeout, so a
+                            # server that blocks before it publishes (its
+                            # handshake inside wrap_socket) is still in that
+                            # call when close() begins.
+                            server.handshaking.wait(_TLS_FIXTURE_SOCKET_SECONDS / 2)
                         if pause is not None:
                             pause()
+                        engaged = stage != "handshake" or server.handshaking.is_set()
                         closed = True
                         began = clock()
                         try:
@@ -3884,7 +3907,7 @@ def self_test(vectors_only=False, steady_only=False):
         except Exception as exc:
             # ssl.SSLError is an OSError. One raised before close() is the
             # client failing to establish the precondition. Any other
-            # exception is held until a failure already shown is returned.
+            # exception is held until close()'s own outcome is settled below.
             if closed or not isinstance(exc, OSError):
                 pending = exc
             else:
@@ -3898,15 +3921,26 @@ def self_test(vectors_only=False, steady_only=False):
                     raised = raised_text(exc)
         if raised is not None:
             return STOP_FAIL, "raised", "close() raised: " + raised
-        if pending is not None and not (closed and server.thread.is_alive()):
+        if closed and server.thread.is_alive():
+            return STOP_FAIL, "alive", "the server thread is alive after close() returned"
+        if closed and server.timed_out:
+            result = (STOP_FAIL, "timed-out", "a server call ran out its socket timeout after "
+                      "close() began: close() did not interrupt it")
+            if pending is None:
+                return result
+            # Handed over before the exception propagates, so the caller
+            # records this failure and the exception both.
+            shown(result)
+        if pending is not None:
             raise pending
         if unmet is not None:
             return STOP_UNEVALUATED, "precondition", unmet
-        if server.thread.is_alive():
-            return STOP_FAIL, "alive", "the server thread is alive after close() returned"
-        if server.timed_out:
-            return (STOP_FAIL, "timed-out", "a server call ran out its socket timeout after "
-                    "close() began: close() did not interrupt it")
+        if server.expired.is_set():
+            return (STOP_UNEVALUATED, "precondition", "a server call ran out its socket "
+                    "timeout before close() began: close() had no call to interrupt")
+        if not engaged:
+            return (STOP_UNEVALUATED, "precondition", "the server had not started its "
+                    "handshake when close() began")
         if took >= _TLS_FIXTURE_SOCKET_SECONDS:
             return (STOP_UNEVALUATED, "slow-close",
                     "close() took {:.2f} s, not under the {} s socket timeout".format(
@@ -3921,34 +3955,88 @@ def self_test(vectors_only=False, steady_only=False):
         # could not be evaluated to unevaluated, so a row that raises leaves
         # every earlier row's line for the caller to report.
 
-        def judge(identity, result, wanted):
-            outcome, reason, detail = result
-            if (outcome, reason) == wanted:
-                print("PASS " + identity)
-            elif outcome == STOP_UNEVALUATED and reason == "precondition":
-                unevaluated.append("FAIL " + identity + ": cannot evaluate: " + detail)
-            else:
-                failures.append("FAIL {}: expected {} ({}), got {} ({}): {}".format(
-                    identity, wanted[0], wanted[1], outcome, reason, detail))
+        def judge(identity, wanted=None, **options):
+            # Runs one check and records its result. The same recorder is the
+            # check's shown, so a failure the check hands over before an
+            # exception propagates is recorded first. wanted None is the
+            # plain row: any definite failure fails it as it is.
+            def settle(result):
+                outcome, reason, detail = result
+                if wanted is None and outcome == STOP_FAIL:
+                    failures.append("FAIL " + identity + ": " + detail)
+                elif (outcome, reason) == (wanted or (STOP_PASS, reason)):
+                    print("PASS " + identity)
+                elif outcome == STOP_UNEVALUATED and (wanted is None
+                                                      or reason == "precondition"):
+                    unevaluated.append("FAIL " + identity + ": cannot evaluate: " + detail)
+                else:
+                    failures.append("FAIL {}: expected {} ({}), got {} ({}): {}".format(
+                        identity, wanted[0], wanted[1], outcome, reason, detail))
+            settle(check(context, cadata, settle, **options))
 
         identity = "self-test/tls-fixture-stop-while-served"
-        outcome, reason, detail = check(context, cadata)
-        if outcome == STOP_PASS:
-            print("PASS " + identity)
-        elif outcome == STOP_UNEVALUATED:
-            unevaluated.append("FAIL " + identity + ": cannot evaluate: " + detail)
-        else:
-            failures.append("FAIL " + identity + ": " + detail)
+        judge(identity)
         # An operation close() cannot interrupt still ends inside the join.
         if not _TLS_FIXTURE_STOP_JOIN_SECONDS > _TLS_FIXTURE_SOCKET_SECONDS:
             failures.append("FAIL " + identity + ": the stop join bound is not above "
                             "the socket timeout")
         # A server in its handshake stops promptly too: the wrapped socket is
         # published before the handshake, so close() shuts down the socket
-        # that call uses. The pause lets the server start that call.
-        judge("self-test/tls-fixture-stop-in-handshake",
-              check(context, cadata, stage="handshake", pause=lambda: time.sleep(0.2)),
-              (STOP_PASS, "prompt"))
+        # that call uses. The check waits for the server to signal it has
+        # published that socket and is starting do_handshake().
+        judge("self-test/tls-fixture-stop-in-handshake", (STOP_PASS, "prompt"),
+              stage="handshake")
+
+        def stand_in(handshaking=True, timed_out=False, expired=False):
+            # A server_class that opens no socket: its stage is reached at
+            # once (do_handshake() started only when handshaking), its thread
+            # is never started, so never alive, and its close() records a
+            # call that ran out its socket timeout after close() began
+            # (timed_out) or before (expired).
+            class StandIn:
+                port = 0
+
+                def __init__(self, *args, **kwargs):
+                    self.in_recv, self.in_handshake = threading.Event(), threading.Event()
+                    self.handshaking, self.expired = threading.Event(), threading.Event()
+                    self.in_recv.set()
+                    self.in_handshake.set()
+                    if handshaking:
+                        self.handshaking.set()
+                    self.timed_out = []
+                    self.thread = threading.Thread(target=lambda: None)
+
+                def close(self):
+                    if timed_out:
+                        self.timed_out.append(True)
+                    if expired:
+                        self.expired.set()
+            return StandIn
+
+        def unconnected(address, timeout):
+            return contextlib.nullcontext()
+        # A server that had not started do_handshake() when close() began,
+        # or whose call had run out its socket timeout by then, gave close()
+        # nothing to interrupt: cannot evaluate, not a pass. Both open no
+        # socket; the real server's expiry is the after-expiry row below.
+        judge("self-test/tls-fixture-stop-handshake-not-started",
+              (STOP_UNEVALUATED, "precondition"), server_class=stand_in(handshaking=False),
+              stage="handshake", connect=unconnected)
+        judge("self-test/tls-fixture-stop-expired-before-close",
+              (STOP_UNEVALUATED, "precondition"), server_class=stand_in(expired=True),
+              stage="handshake", connect=unconnected)
+        served = []
+
+        def kept_server(*args, **kwargs):
+            served.append(Server(*args, **kwargs))
+            return served[-1]
+
+        def until_expired():
+            # Holds close() back until the real server's recv has run out
+            # its socket timeout, bounded as the stage wait is.
+            served[-1].expired.wait(_TLS_FIXTURE_REACH_SECONDS)
+        judge("self-test/tls-fixture-stop-after-expiry", (STOP_UNEVALUATED, "precondition"),
+              server_class=kept_server, pause=until_expired)
 
         # A scheduling delay between reaching recv and close() is not
         # close() time: a clock that jumps well past the socket timeout
@@ -3957,20 +4045,16 @@ def self_test(vectors_only=False, steady_only=False):
 
         def delayed():
             now[0] += 10 * _TLS_FIXTURE_SOCKET_SECONDS
-        judge("self-test/tls-fixture-stop-after-delay",
-              check(context, cadata, clock=lambda: now[0], pause=delayed),
-              (STOP_PASS, "prompt"))
+        judge("self-test/tls-fixture-stop-after-delay", (STOP_PASS, "prompt"),
+              clock=lambda: now[0], pause=delayed)
         # A server that never reaches its recv cannot evaluate the stop:
         # neither a pass nor a definite failure.
-        judge("self-test/tls-fixture-stop-never-in-recv",
-              check(context, cadata, mode="quiet", reach_seconds=0.5),
-              (STOP_UNEVALUATED, "precondition"))
+        judge("self-test/tls-fixture-stop-never-in-recv", (STOP_UNEVALUATED, "precondition"),
+              mode="quiet", reach_seconds=0.5)
         # A close() that raises in the cleanup after that unmet precondition
         # still fails: the precondition does not hide it.
-        judge("self-test/tls-fixture-stop-cleanup-raised",
-              check(context, cadata, server_class=RaisingServer, mode="quiet",
-                    reach_seconds=0.5),
-              (STOP_FAIL, "raised"))
+        judge("self-test/tls-fixture-stop-cleanup-raised", (STOP_FAIL, "raised"),
+              server_class=RaisingServer, mode="quiet", reach_seconds=0.5)
 
         def failing_after_close():
             # A clock whose second reading, the one just after close(),
@@ -3989,12 +4073,27 @@ def self_test(vectors_only=False, steady_only=False):
             raise RuntimeError("forced error before close()")
         # A close() that raised still fails when an error follows it, and
         # when the cleanup close() raises after an error before close().
-        judge("self-test/tls-fixture-stop-raised-then-error",
-              check(context, cadata, server_class=RaisingServer, clock=failing_after_close()),
-              (STOP_FAIL, "raised"))
-        judge("self-test/tls-fixture-stop-error-then-cleanup-raised",
-              check(context, cadata, server_class=RaisingServer, pause=failing_before_close),
-              (STOP_FAIL, "raised"))
+        judge("self-test/tls-fixture-stop-raised-then-error", (STOP_FAIL, "raised"),
+              server_class=RaisingServer, clock=failing_after_close())
+        judge("self-test/tls-fixture-stop-error-then-cleanup-raised", (STOP_FAIL, "raised"),
+              server_class=RaisingServer, pause=failing_before_close)
+        # A server call that ran out its socket timeout after close() began,
+        # then an error after close(): the failure is handed to shown before
+        # the error propagates, so the caller gets both. No socket is opened.
+        identity = "self-test/tls-fixture-stop-timed-out-then-error"
+        seen = []
+        try:
+            result = check(context, cadata, seen.append, server_class=stand_in(timed_out=True),
+                           stage="handshake", connect=unconnected, clock=failing_after_close())
+            outcome = "returned {} ({})".format(result[0], result[1])
+        except OSError as exc:
+            outcome = "raised " + _exception_text(exc)
+        shown = [entry[:2] for entry in seen]
+        if outcome != "raised forced error after close()" or shown != [(STOP_FAIL, "timed-out")]:
+            failures.append("FAIL {}: the timed-out failure and the later error did not both "
+                            "reach the caller ({}; shown {})".format(identity, outcome, shown))
+        else:
+            print("PASS " + identity)
         # A server thread still alive after close() returned fails, and
         # still fails when an error follows close().
         lingering = []
@@ -4003,13 +4102,10 @@ def self_test(vectors_only=False, steady_only=False):
             lingering.append(LingeringServer(*args, **kwargs))
             return lingering[-1]
         try:
-            judge("self-test/tls-fixture-stop-thread-alive",
-                  check(context, cadata, server_class=lingering_server),
-                  (STOP_FAIL, "alive"))
-            judge("self-test/tls-fixture-stop-alive-then-error",
-                  check(context, cadata, server_class=lingering_server,
-                        clock=failing_after_close()),
-                  (STOP_FAIL, "alive"))
+            judge("self-test/tls-fixture-stop-thread-alive", (STOP_FAIL, "alive"),
+                  server_class=lingering_server)
+            judge("self-test/tls-fixture-stop-alive-then-error", (STOP_FAIL, "alive"),
+                  server_class=lingering_server, clock=failing_after_close())
         finally:
             for server in lingering:
                 server.release.set()
@@ -4020,25 +4116,30 @@ def self_test(vectors_only=False, steady_only=False):
 
     def tls_fixture_stop_rows_self_test(failures):
         # A stop row that raises must leave every earlier row's FAIL line in
-        # the caller's list, for the setup-or-teardown report to count. A
-        # check that fails its first row and raises on its second stands
-        # for the real one; no server is started.
+        # the caller's list, for the setup-or-teardown report to count, and
+        # its own failure when the check handed that to shown before it
+        # raised. A check that fails its first row, then hands a timed-out
+        # failure to shown and raises on its second, stands for the real
+        # one; no server is started.
         identity = "self-test/tls-fixture-stop-rows-kept"
         calls, kept = [], []
 
-        def failing_then_raising(*args, **kwargs):
-            calls.append(kwargs)
+        def failing_then_raising(context, cadata, shown, **options):
+            calls.append(options)
             if len(calls) > 1:
+                shown((STOP_FAIL, "timed-out", "forced timeout"))
                 raise RuntimeError("forced stop row exception")
             return STOP_FAIL, "raised", "close() raised: forced"
         try:
             tls_fixture_stop_rows(None, None, kept, [], check=failing_then_raising)
         except RuntimeError:
             pass
-        if (len(calls) != 2 or kept != ["FAIL self-test/tls-fixture-stop-while-served: "
-                                        "close() raised: forced"]):
-            failures.append("FAIL " + identity + ": a stop row that raised lost the "
-                            "earlier rows' FAIL lines")
+        if (len(calls) != 2 or kept != [
+                "FAIL self-test/tls-fixture-stop-while-served: close() raised: forced",
+                "FAIL self-test/tls-fixture-stop-in-handshake: expected pass (prompt), got "
+                "fail (timed-out): forced timeout"]):
+            failures.append("FAIL " + identity + ": a stop row that raised lost a FAIL "
+                            "line recorded before it raised")
         else:
             print("PASS " + identity)
 
@@ -5701,13 +5802,14 @@ def self_test(vectors_only=False, steady_only=False):
                 context.load_cert_chain(str(cert), str(key))
                 contexts.append(context)
             # Named after the roster: a close() that raised or left the server
-            # thread alive, or a stop row that missed its outcome, fails the
-            # run (exit 1), even when a later step raises; a stop check that
-            # could not be evaluated (the server never reached recv, or
-            # close() took the socket timeout, which timing alone cannot
-            # charge to close()) exits 2 unless something failed. The rows
-            # fill these lists in place, so a row that raises keeps the
-            # earlier rows' lines.
+            # thread alive, a server call that ran out its socket timeout
+            # after close() began, or a stop row that missed its outcome,
+            # fails the run (exit 1), even when a later step raises; a stop
+            # check that could not be evaluated (the server never reached its
+            # stage, had no blocking call when close() began, or close() took
+            # the socket timeout, which timing alone cannot charge to close())
+            # exits 2 unless something failed. The rows fill these lists in
+            # place, so a row that raises keeps the lines recorded before it.
             tls_fixture_stop_rows_self_test(fixture_failures)
             tls_fixture_stop_rows(contexts[0], fixture_certificates,
                                   fixture_failures, fixture_unevaluated)
