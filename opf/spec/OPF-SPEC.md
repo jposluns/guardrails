@@ -619,12 +619,7 @@ its writes begin, so a second system's reconciliation sees the held lease and re
 NOT be seized from a live holder; it MUST be reconciled against recorded state on resume or close,
 and a leftover lease from a dead run MUST be released only through that reconciliation. Where
 the concurrent-operation module is enabled, the lease MUST additionally be recorded as a
-`session_lease` record. That record is lease bookkeeping only (section 8.5): the claim writes it
-at `held`, the release or reconciliation moves it to `released` or `reconciled` in the same act as
-the lease transition it mirrors, and the write MUST NOT carry a worklog entry, since it records no
-store change of its own and is not a store operation under section 16.1; the lease file above,
-never the record, is what holds the lease. There is a residual window between taking the lease
-and its reaching the
+`session_lease` record. There is a residual window between taking the lease and its reaching the
 target in which two systems can both begin; the divergence check above is the overlapping control
 that catches that collision after the fact, and the two layers together are the guarantee (disclosed
 in section 17).
@@ -1067,12 +1062,7 @@ machine-proven. Preserved originals remain the restoration authority.
 
 Imported records and their worklog entries MUST be immutable after publication; corrections MUST be
 a fresh import run retaining the old evidence. A conforming imported series can reach doctor VALID:
-this specification states every enabled type's schema, the module tables of section 8.5 included,
-so no enabled type's imported records are ungradable by schema. The reference doctor does not
-implement the section 8.5 module schemas yet: it grades a clean record of an enabled module type as
-a named cannot-evaluate deferral, and it reports an imported record of an enabled module type as a
-C-IMPORTED-SCHEMA finding naming a type it holds no schema for, so a store holding either does not
-reach VALID under the reference tooling. C-IMPORTED-SCHEMA checks
+it MUST NOT enter the module-schema deferral seam. C-IMPORTED-SCHEMA checks
 this envelope and missingness; C-IMPORTED-IDS checks the series grammar, counters and no-deletion;
 C-IMPORTED-PROVENANCE re-reads each preserved original and verifies `source_sha256`.
 C-IMPORTED-IDS owns every imported-series ID defect exclusively, its grammar, counter rows,
@@ -1111,11 +1101,7 @@ qualifier ::= "proposed"
   unqualified state. A recorded factual entry that proposes nothing and awaits no ratification is
   exempt: the worklog, whose entries record facts rather than propose a transition, MUST NOT take
   `/proposed`, so an assistant-authored or automation-authored worklog entry (status `recorded`) is
-  a conformant recorded fact rather than an unratified proposal. Lease bookkeeping is exempt the
-  same way: the `session_lease` record's `held` > `released` or `reconciled` transition is written
-  only by the lease machinery, in the same act as the lease transition it mirrors (section 5.7),
-  records a fact rather than proposing one, and is not a store operation under section 16.1
-  (section 8.5), so it MUST NOT take `/proposed` whatever the actor's kind.
+  a conformant recorded fact rather than an unratified proposal.
 - Standing authorization for `contribution` `sent`: `sent` gating is on by default, but an adopter
   MAY declare a standing authorization for a named recipient that deactivates per-send gating for
   that recipient, letting an assistant or automation land the unqualified `sent` grant to it without
@@ -1169,10 +1155,10 @@ state that grants current authority is a gated state (an artifact's `promoted`, 
 | artifact | `staged` > `promoted` or `rejected` | A delivery artifact under assurance. Required `locator` (`{kind, locator}`, the section 8.6 reference shape without `note`) naming the artifact, and required `digest` (64 lowercase hexadecimal SHA-256 digits) binding its bytes at staging; optional `media_type`. `promoted` grants delivery authority, so it is gated: an assistant or automation lands `promoted/proposed` and only a maintainer lands the bare grant (section 8.4). A `rejected` record MUST record its reason in `summary`. |
 | gate_run | `recorded` | Created terminal, immutable, a factual record like `reference`: it carries no qualifier whatever the actor. Required `gate` (one line naming the gate that ran) and required `verdict`, exactly one of `pass`, `fail`, or `cannot_evaluate`; the verdict is its own field and MUST NOT be folded into `status`. Evidence rides `refs`; the graded subject, where it is a record, rides a `relates` link. |
 | release | `planned` > `published` or `abandoned` | Required `version`, the SemVer version string. At `planned` the `version.toml` ledger row need not exist yet; a record at `published` MUST name an existing `version.toml` release row by that `version`, and the ledger row is the fact (section 8.1). `published` grants release authority, so it is gated: an assistant or automation lands `published/proposed`. An `abandoned` record MUST record its reason in `summary`. |
-| waiver | `active` > `expired` or `revoked` | Required `scope`, one line naming the waived obligation (the waived finding, where one exists, rides a `relates` link), and required `expires_at` (RFC 3339 UTC), required at creation: a waiver without `expires_at` MUST be refused, never written. `active` is the gated initial state: an assistant or automation creating a waiver lands `active/proposed` (sections 8.4 and 8.8). A waiver confers nothing at or after its `expires_at`, whatever its recorded status (section 8.6); the transition to `expired` records the lapse. A `revoked` record MUST record its reason in `summary`. |
-| mode | `active` > `retired` | Required `mode`, a lowercase machine token naming the operating mode; the policy prose rides `summary`. `active` is the gated initial state: an assistant or automation lands `active/proposed`. At most one clean, unqualified `active` mode record per `mode` token MAY exist among records authored by non-importer actors (section 8.6), and activating a replacement MUST retire the previous record of that token in the same act: the operation that lands the replacement at unqualified `active`, a maintainer's activation or ratification of `active/proposed`, MUST move the predecessor to `retired` in the same journaled transaction (section 8.8), so a replacement at `active/proposed` retires nothing until that act. |
+| waiver | `active` > `expired` or `revoked` | Required `scope`, one line naming the waived obligation (the waived finding, where one exists, rides a `relates` link), and required `expires_at` (RFC 3339 UTC), required at creation: a waiver without `expires_at` MUST be refused, never written. `active` is the gated initial state: an assistant or automation creating a waiver lands `active/proposed` (sections 8.4 and 8.8). A waiver confers nothing at or after its `expires_at`, whatever its recorded status; the transition to `expired` records the lapse. A `revoked` record MUST record its reason in `summary`. |
+| mode | `active` > `retired` | Required `mode`, a lowercase machine token naming the operating mode; the policy prose rides `summary`. `active` is the gated initial state: an assistant or automation lands `active/proposed`. At most one clean, unqualified `active` mode record per `mode` token MAY exist among records authored by non-importer actors (section 8.6). |
 | tier_assessment | `recorded` | Created terminal, immutable, a factual record like `gate_run`: no qualifier whatever the actor. Required `tier` (the assessed tier, from the adopter's tier vocabulary where the manifest declares one as `[types.tier_assessment].tier_vocabulary`, otherwise any one-line, non-empty string, section 9) and required `subject`, one line naming what was assessed; the basis rides `summary` and `refs`. A re-assessment is a new record linking `follows`. |
-| session_lease | `held` > `released` or `reconciled` | Lease bookkeeping (section 5.7), written only by the lease machinery, never by `create` or `transition` (section 8.8). Required `holder`, `operation` and `acquired_at` (RFC 3339 UTC), mirroring `lease.toml`; `ended_at` (RFC 3339 UTC) MUST be absent at `held` and present once `released` or `reconciled`. No state is gated: the record confers no lease and no authority, the lease file does (sections 5.7 and 8.6), and its writes carry no worklog entry and are not store operations (section 16.1). |
+| session_lease | `held` > `released` or `reconciled` | Lease bookkeeping (section 5.7), written only by the lease machinery, never by `create` or `transition` (section 8.8). Required `holder`, `operation` and `acquired_at` (RFC 3339 UTC), mirroring `lease.toml`; `ended_at` (RFC 3339 UTC) MUST be absent at `held` and present once `released` or `reconciled`. No state is gated: the record confers no lease and no authority, the lease file does (section 5.7). |
 
 Actionability: a clean backlog item authored by a non-importer actor is actionable when its
 state is `open` or `active` and no clean, unqualified `active` block authored by a non-importer
@@ -1208,8 +1194,7 @@ supersession obligation of any record authored by a non-importer actor. The same
 every current obligation, record-level or store-level, including field-borne authority: a
 gate_run verdict, a tier_assessment outcome, an artifact's promoted state, a release's published
 state and a maintainer_action's done on an importer-authored record describe history and
-discharge nothing now, and the first two discharge an obligation only from a maintainer-created
-record in any series (the joins below). A clean `done` record's `receipt_of` MUST target a clean backlog item, and a clean backlog item
+discharge nothing now. A clean `done` record's `receipt_of` MUST target a clean backlog item, and a clean backlog item
 reaching ratified `done` MUST hold a clean receipt authored by a non-importer actor.
 An importer-authored decision MUST NOT be treated as the current effective resolution of a clean
 `pending_decision` chain; resolving such a chain now MUST take a new clean decision linking back.
@@ -1220,28 +1205,6 @@ active `preference_pattern`; a state-bearing status on an importer-authored reco
 history at its source and MUST confer nothing now, and every current-state join, including the
 section 8.5 at-most-one-current handoff rule, MUST evaluate only clean records authored by
 non-importer actors.
-The module types bind to that rule with these joins, each evaluated over clean records authored by
-non-importer actors only. A current waiver for an obligation is a clean, unqualified `active`
-waiver whose `scope` names the obligation and whose `expires_at` is after the evaluating
-operation's clock value; an expired-by-clock, `/proposed`, `revoked` or importer-authored waiver
-confers nothing. The active mode for a `mode` token is the at-most-one clean, unqualified `active`
-record of that token (section 8.5). The current verdict is keyed on the gate and its subject
-together: for a `gate` and a record subject it is the `verdict` field of the clean `gate_run`
-carrying that `gate` whose `relates` link names that subject, with the greatest clean `<n>`, for
-a `gate` run against no record subject it is the `verdict` of the clean `gate_run` carrying that
-`gate` and no `relates` link, with the greatest clean `<n>`, and a run of the same gate against
-another subject MUST NOT stand in. The current tier assessment for a `subject` is the clean
-`tier_assessment` carrying that `subject` with the greatest clean `<n>`. Both are recorded facts,
-never grants: a `gate_run` verdict or a `tier_assessment` outcome MUST NOT discharge an obligation
-unless its record is maintainer-created, since a created-terminal factual record is never ratified
-(section 8.5), and a verdict MUST NOT be read out of `status` (section 8.5). A delivery obligation is satisfied by an artifact only at clean,
-unqualified `promoted`. A release obligation is satisfied only by a clean, unqualified `published`
-release whose `version` names an existing `version.toml` release row, and a `published` release
-without that ledger row MUST be a C-VERSION-LEDGER finding, the ledger check that reads those
-rows. A maintainer action is discharged only by its own clean
-record at unqualified `done`. A held lease is evidenced by `lease.toml` (section 5.7), never by a
-`session_lease` record: that record is bookkeeping in both series and confers no lease, held or
-otherwise.
 The clean-series writer MUST refuse a transition on an importer-authored record in either series
 (section 8.8). Acting on history MUST take a new strict clean record at the present time, with a
 link back to the historical record.
@@ -1374,9 +1337,6 @@ linking back (section 8.6). Its subcommands:
   high-water of a namespace that has issued no IDs. It MUST refuse an unknown module name, a module
   already enabled, and a module
   any of whose types this writer cannot author (the section 14.1 bar), each with nothing written.
-  `session_lease` is written by the lease machinery, never authored (section 8.5), so that bar
-  MUST NOT make `enable-module` refuse the concurrent-operation module to a writer whose lease
-  machinery performs the section 5.7 writes.
   It creates no record.
 - `disable-module NAME`: maintainer-only. It MUST refuse an unknown module name and a module not
   enabled, each with nothing written. It MUST refuse while any clean or imported record of any
@@ -1640,12 +1600,6 @@ Readers always enter at `<type>.index.toml` in either layout. The ledgers are ex
 per-record layout: `version.toml` and `worklog.toml` MUST always be single files, written under the
 store lock (allocation of WL IDs still goes through `counters.toml` atomically).
 
-The layouts couple to the concurrent-operation module one way only: a manifest declaring
-`layout = "per-record"` without `concurrent_operation = true` MUST be refused, while an inline
-store with `concurrent_operation = true` stays valid, and enabling the module changes no layout by
-itself. An implementation that supports the concurrent-operation module MUST support both layouts,
-the per-record registry duties above included.
-
 ### 9.1 Base standard and profiles
 
 The manifest declares one **base** standard and zero or more **profiles**.
@@ -1897,10 +1851,8 @@ buckets) on manifest-declared age or size thresholds. Worklog records are exclud
 terminal-record permission and rotate solely under the release-based rule: only released, frozen
 worklog spans MAY rotate, and the unreleased `recorded` tail never rotates whatever its age or size,
 because it is pre-terminal and mutable-until-release (sections 6.2 and 8.4). Open records, active
-blocks, unresolved decisions, waivers at `active`, the current handoff, and the
-unreleased worklog tail MUST NOT rotate; a revoked waiver confers nothing whatever its
-`expires_at` (section 8.6) and, like an `expired` one, MAY rotate under the terminal-record
-permission above. The imported series MUST NOT rotate:
+blocks, unresolved decisions, unexpired waivers, the current handoff, and the
+unreleased worklog tail MUST NOT rotate. The imported series MUST NOT rotate:
 `<type>.imported.index.toml` and `worklog.imported.toml` sit outside the rotation thresholds and
 their records MUST NOT move to the record archive.
 
@@ -2044,10 +1996,7 @@ be verified against official platform documentation at build time. Per-clone hoo
 bypass, canonical hand edits, shell or interpreter wrapping, same-user tampering and unverified
 platform denial are not eliminated by this pack and MUST each be disclosed as residuals. Adoption
 MUST refuse to enable a record type the writer cannot author, and enforcement
-MUST NOT ship before the writer can perform every operation it forces. `session_lease` is written
-by the lease machinery, never authored (sections 5.7 and 8.8), so for it that bar reads on the
-lease machinery's section 5.7 writes and MUST NOT refuse the concurrent-operation module to a
-writer whose lease machinery performs them. Curated `CHANGELOG.md`
+MUST NOT ship before the writer can perform every operation it forces. Curated `CHANGELOG.md`
 edits remain the curator's responsibility.
 
 Post-adoption import MUST use the approved, versioned prompt pack, with an example for every record
@@ -2508,11 +2457,6 @@ The gates in this standard are strong where they are strong and say so where the
 - Public deliverables reach the product repository through `opf render` under the product
   repository's normal review flow (section 5.8); the quality of that review flow is the adopter's
   own discipline, which this standard requires to exist but does not itself gate.
-- C-VERSION-LEDGER is named in section 8.6 as the check that reports a `published` release record
-  without its `version.toml` ledger row, and this specification does not yet define that check's
-  full scope. The reference doctor's C-VERSION-LEDGER checks the structure of `version.toml` alone,
-  and the reference doctor does not grade module records (section 8.3), so no reference check yet
-  reports such a release record.
 - A declared `tier_vocabulary` is a non-empty list of distinct, non-empty strings (section 9); this
   specification sets no character rule on its members, so a whitespace-only member, a member that
   holds a line break or an invisible character, and two members that differ only in Unicode

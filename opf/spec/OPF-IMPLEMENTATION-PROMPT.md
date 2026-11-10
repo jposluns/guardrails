@@ -175,13 +175,11 @@ maintainer before step 1, and keep the confirmation in your implementation notes
   neither as an exclusion.
 - **Layout.** Use `layout = "inline"` (section 9, The manifest, storage layout). `per-record`
   needs the concurrent-operation module.
-- **Modules.** Enable every module in your project's store (`governance`,
-  `delivery_assurance`, `operational_policy`, `concurrent_operation`), each through the step C
-  `enable-module` operation after the store exists; initialization itself still creates the store
-  with every module off, since section 8.1 (Type taxonomy and placement) says modules ship
-  default-off. Section 8.5 (Transition rules) gives each module type its full schema, and section
-  14.1 says adoption MUST refuse to enable a record type the writer cannot author, so your writer
-  supports every module type before step C enables its module; a conformance claim does not name
+- **Modules.** Leave every module off in your project's store (`governance`,
+  `delivery_assurance`, `operational_policy`, `concurrent_operation`). Section 8.1 (Type taxonomy
+  and placement) says modules ship default-off, and section 14.1 says adoption MUST refuse to
+  enable a record type the writer cannot author. Your implementation still builds module
+  enablement in step C, for the same reason as relocation; a conformance claim does not name
   modules as an exclusion.
 - **Profiles.** Declare no profile. The `[profiles.aiqt]` table in the section 9 example is
   optional and ignored by base-only tooling (section 9.1, Base standard and profiles).
@@ -689,8 +687,7 @@ In the default in-repo pattern they are the same repository.
       version.toml           release ledger (section 6.1)
       worklog.toml           durable operational record (section 6.2)
       init.toml              bootstrap provenance of the coupled init (section 9)
-      <type>.index.toml      one per enabled type except worklog (sections 4.2, 8.1; baseline
-                             at init, module types once step C enables their modules)
+      <type>.index.toml      one per enabled baseline type except worklog (sections 4.2, 8.1)
       <type>.imported.index.toml   empty imported leaf, one per enabled type except worklog
       worklog.imported.toml  the worklog's empty imported leaf (section 4.2)
     archive/                 reserved: moved/ and adoption/<run-id>/ (sections 4.2, 14.2)
@@ -2038,10 +2035,8 @@ type or module later MUST create its imported leaf in the same act as its clean 
 "Enabling a further type or module MUST also add its imported counter row in the same act as its
 clean index, at zero only where no imported ancestry exists and otherwise at the largest `<n>` of
 that namespace's `imported:<NS>-<n>` IDs." Where the concurrent-operation module is enabled, the
-lease is additionally recorded as a `session_lease` record, lease bookkeeping that carries no
-worklog entry (section 5.7), and the `per-record` layout becomes available (section 9), while an
-inline store with the module enabled stays valid. Enable all four modules in your project's store
-once these checks pass there (Choices to make before you start, Modules).
+lease is additionally recorded as a `session_lease` record (section 5.7), and the `per-record`
+layout becomes available (section 9).
 
 Acceptance checks, on throwaway stores:
 
@@ -2153,9 +2148,8 @@ nothing rotates, and the step 6 validator already refuses an archive it cannot r
   named `toml`; section 4.2 says "the example name `toml` MUST NOT be hardcoded").
 - Only records in unqualified terminal states, other than worklog records, may rotate, so a
   `/proposed` record stays active. Worklog records rotate only as released, frozen spans. Open
-  records, active blocks, unresolved decisions, waivers at `active`, the current handoff and the
-  unreleased worklog tail never rotate (section 12: a revoked waiver confers nothing whatever its
-  `expires_at` and, like an expired one, may rotate), and the imported series never rotates.
+  records, active blocks, unresolved decisions, unexpired waivers, the current handoff and the
+  unreleased worklog tail never rotate (section 12), and the imported series never rotates.
 - Each rotation writes that year's `archive.toml`, enumerating every moved ID (and, for the
   worklog, every moved span) and its destination. Counters are untouched. Validation confirms that
   every ID exists in exactly one active or archived location, and coverage gates read active and
@@ -2365,7 +2359,7 @@ platform." Wire all four, not only the platform you run on.
   | R16a | A `working` summary's prose in `CHANGELOG.md`, the unreleased section's included, drafted or edited | 6.3, 7.2 ("edited with no ceremony"), 7.3 | any actor but an importer; publication stays R16 | a direct edit of `CHANGELOG.md`, which writes no store TOML and which no deny rule covers |
   | R16b | The `covers = "unreleased"` summary row added or removed, with its `## unreleased` heading | 6.1, 6.3, 7.1 | a maintainer; an assistant drafts the section's prose (R16a) once the row exists | maintainer's reviewed edit |
   | R17 | A manifest change other than R17a: a posture change, a registration | 8.1, 8.7, 9, 11 | a maintainer; a posture weakening only under the maintainer's recorded authorization | maintainer's reviewed edit |
-  | R17a | A module enabled: its `[modules]` flag, and for each of its types the `[types.<name>]` row, clean index, imported leaf, clean counter row and imported counter row, in one act | 4.2, 8.1, 8.2 | the operator | module enablement (step C); your project's store enables each of the four modules this way (checklist item 5) |
+  | R17a | A module enabled: its `[modules]` flag, and for each of its types the `[types.<name>]` row, clean index, imported leaf, clean counter row and imported counter row, in one act | 4.2, 8.1, 8.2 | the operator | module enablement (step C); your project's store enables none (checklist item 5) |
   | R19 | `lease.toml` taken and released | 5.7 | the running operation | the step 7 lease, inside every operation that writes the store |
   | R20 | `init.toml`, the empty imported leaves, the pointer `.opf.toml`, `.working/.gitignore` and `.working/README.md`, each created | 4.2, 9; OPF-INIT-D2B; open point 14 | the operator | `opf init` (step 9), and module enablement (step C) for an enabled module's imported leaves; no operation writes them after, and every other file init creates is then written by the rows that name it |
   | R21 | Records moved to the archive, with the year's `archive.toml` | 12 | the operator | rotation (step 12); until it exists nothing rotates |
@@ -2390,9 +2384,8 @@ platform." Wire all four, not only the platform you run on.
     correction of a valid clean record's title, summary, links, refs or registered `x-<vendor>`
     tables is a new record through `create` linking `corrects`; ask the maintainer to ratify it. A
     defect that keeps the store from validating, such as a dangling link, is repaired under R22
-    instead. A module type's records, once step C enables its module (checklist item 5), take the
-    same reading under the section 8.5 module schemas; enabling a module is R17a, the step C
-    operation, and section 14.1 says adoption "MUST refuse to
+    instead. No module is enabled (checklist item 5), so no module type's fields have rows;
+    enabling one is R17a, the step C operation, and section 14.1 says adoption "MUST refuse to
     enable a record type the writer cannot author".
   - R16, R16b and R17: none of those changes is an assistant's act here. Publication follows the
     curation flow of section 7.3, where "the published words are the curator's"; a posture weakening
@@ -2560,9 +2553,9 @@ Acceptance checks:
   tooling supports a later version, so report that branch as not run, naming that reason. The
   hand move-aside is a remedy only for a tree to be adopted, which this clone is not.
   For R17, make a change that leaves the store valid, such as registering a vendor token. For
-  R17a, enable a module with the step C operation in the throwaway clone, as the same operation
-  enables each module in your project's store (checklist item 5); open point 26 is resolved, so
-  the operation performs the enablement and R17a runs. Report each row's result by its row number.
+  R17a, enable a module with the step C operation in the throwaway clone; your project's store
+  enables no module (checklist item 5). Open point 26 is resolved, so the operation performs the
+  enablement and R17a runs. Report each row's result by its row number.
 - Who runs a maintainer's step in these checks. A reviewed edit, and a commit with the hooks
   bypassed that builds a defect for a part b row, is the maintainer's act, made outside any
   assistant tool call. Write each such step as a script, ask the maintainer to run it in their own
@@ -2843,10 +2836,8 @@ maintainer's ruling on an open point, report the ruling with it.
 4. `.opf.toml` resolves the store; resolution and discovery fail closed in the step 2 cases.
 5. `manifest.toml` declares `standard = "opf"`, `spec_version = "2.0.0"`, `homes = 2`,
    `layout = "inline"`, `posture = "required"`, the providers as ratified under step 3 (this
-   prompt's choice: `local-directory` and `generic-git-remote`), and every module enabled, each
-   through the step C `enable-module` operation after initialization (which itself enables none).
-6. Every enabled type, baseline and module tier, other than `worklog` has a clean index and an
-   imported index; the
+   prompt's choice: `local-directory` and `generic-git-remote`), and no module enabled.
+6. Every enabled baseline type other than `worklog` has a clean index and an imported index; the
    worklog has `worklog.toml` and `worklog.imported.toml`; `counters.toml` covers every clean and
    imported namespace; `version.toml` and `worklog.toml` exist with `schema = 1`; `init.toml`,
    `CHANGELOG.md` and the `.working/README.md` of open point 14 exist.

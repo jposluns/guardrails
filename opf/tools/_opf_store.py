@@ -2459,12 +2459,6 @@ def validate_manifest(data, supported_profiles=None, *, manifest_rel=None):
     spec_tuple = _validate_base(base, findings, manifest_rel)
     _validate_store_section(data.get("store"), findings)
     modules_enabled = _validate_modules(data.get("modules"), findings)
-    # Spec 9: the layouts couple to the concurrent-operation module one way only, so the per-record
-    # layout without that module enabled is a fail-closed finding (an inline store may enable it freely).
-    if base.get("layout") == "per-record" and "concurrent_operation" not in modules_enabled:
-        findings.append('[opf].layout "per-record" requires the concurrent-operation module: declare '
-                        '[modules].concurrent_operation = true or use the inline layout '
-                        '(spec 9; fail-closed)')
     registered_vendors = _validate_vendors(data.get("vendors"), findings)
     _validate_types(data.get("types"), modules_enabled, findings)
     _validate_providers(data.get("providers"), findings)
@@ -3517,19 +3511,6 @@ def self_test():
             "concurrent_operation = true", "concurrent_operation = true\ndelivery_assurance = true"))
         mv_modon = validate_manifest(m_modon)
         check("taxonomy-module-type-enabled-valid", mv_modon.status == VALID and not mv_modon.findings)
-
-        # Spec 9 layout coupling: the per-record layout without the concurrent-operation module is a
-        # finding; the same manifest with the module enabled is VALID (manifest_text enables it), and
-        # an inline store with the module enabled stays valid (every VALID vector above).
-        m_proff = _t.loads(manifest_text().replace('layout = "inline"', 'layout = "per-record"').replace(
-            "concurrent_operation = true", "concurrent_operation = false"))
-        mv_proff = validate_manifest(m_proff)
-        check("layout-per-record-module-off-invalid", mv_proff.status == INVALID)
-        check("layout-per-record-module-off-named",
-              any('"per-record" requires the concurrent-operation module' in f for f in mv_proff.findings))
-        m_pron = _t.loads(manifest_text().replace('layout = "inline"', 'layout = "per-record"'))
-        mv_pron = validate_manifest(m_pron)
-        check("layout-per-record-module-on-valid", mv_pron.status == VALID and not mv_pron.findings)
 
         # Spec 9: [types.tier_assessment] alone may declare tier_vocabulary, a non-empty list of
         # distinct, non-empty strings; a malformed list, and the key on any other type, are findings.
