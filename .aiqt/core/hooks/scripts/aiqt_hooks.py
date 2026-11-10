@@ -16926,9 +16926,11 @@ def _verification_sink_message(hit):
 # name and none of -a, -s, -u, -d, -f, -m or -F, or with -l, --list, -n, -v, --verify, --contains,
 # --no-contains, --merged, --no-merged or a --points-at no later --no-points-at clears), a merge abort or
 # quit no later --no-abort or --no-quit clears, an am abort, quit or --show-current-patch, a dry run
-# (_gate_git_dry_run) and a --help or -h. Every one of those flags is read by one resolver
-# (_gate_flag_last) over git's own option table, its abbreviations and negations included, and none is read
-# from an action that holds a word bash expands (_gate_words_expand): that word could spell a negation.
+# (_gate_git_dry_run) and a --help or -h. The flags of _GATE_GIT_EXEMPT are read by one resolver
+# (_gate_flag_last) over git's own option table, their abbreviations and negations included; --help and -h
+# count only as those exact words (an abbreviated --help exempts nothing as help), a tag -n by its prefix
+# (any short word that begins -n), and a tag that names no tag by _gate_tag_listing. None is read from an
+# action that holds a word bash expands (_gate_words_expand): that word could spell a negation.
 _GATE_GATED_GIT = frozenset(("commit", "push", "merge", "tag", "am"))
 # git 2.53.0's long options of each gated action, as 'git <verb> --git-completion-helper-all' prints them:
 # the options first, then '--', then the negations git accepts (the options 'git <verb> -h' marks
@@ -17091,8 +17093,10 @@ def _gate_flag_last(sub, opts, names, shorts):
     options names share set: read in order as git reads them, the last word deciding, each long word
     resolved by _gate_git_long (so an abbreviation counts as its option and --no-NAME, or its abbreviation,
     clears the setting where git negates NAME), and a short word sets it when it is -L for a letter L of
-    shorts, or on push holds L in a short cluster before any value-taking letter (-nf, -qn). This is the
-    one resolver every exempt flag goes through (_GATE_GIT_EXEMPT, _gate_git_dry_run, _gate_gated_git)."""
+    shorts, or on push holds L in a short cluster before any value-taking letter (-nf, -qn). Every flag of
+    _GATE_GIT_EXEMPT is read here (_gate_git_dry_run, _gate_gated_git); the other exempt forms are not:
+    _gate_gated_git matches --help and -h only as those exact words and a tag -n by its prefix, and
+    _gate_tag_listing reads a tag that names no tag."""
     on = False
     for tok in opts:
         if not tok.startswith("--"):
@@ -17242,7 +17246,10 @@ def _gate_status_masked(records, open_seg=None):
     with no exempt form, since its unread words can clear any exemption read before the stop. doubt says
     whether the action is read fail-closed, so the message does not present a doubt as a finding: 'open' for
     that stopped segment, 'expand' for an action gated only because a word of it is one bash expands (read
-    from that word's unexpanded text it is a form that records, marks or sends nothing), else None."""
+    from that word's unexpanded text it is a form that records, marks or sends nothing), else None. The
+    action's words are those of its segment as the lexer splits it, and an unquoted $( ) or $(( ))
+    substitution ends that segment: git tag $(echo -l) --list is read as git tag with the operand '$', a tag
+    name, so it is gated with no doubt and its deny states the finding text, though the command only lists."""
     n = len(records)
     benign, pipefail = True, False
     for (i, seg), case_depth in zip(enumerate(records), _gate_case_depths(records)):
@@ -18845,12 +18852,13 @@ def gate_weakening(data):
     --no-verify deny keeps its own message, and it suppresses the note. STATUS tier, after that deny
     (_gate_status_masked): the same known verification invocation piped into ANY later stage, pass-through
     stages (tee, cat) and other filters included, whose pipeline is joined by '&&' to a gated git action
-    (git commit, push, merge, tag or am in any form but the exempt ones _gate_gated_git names, each exempt
-    flag read by one resolver over git 2.53.0's option table, _gate_flag_last, directly or
-    through further '&&'-joined commands that cannot gate it, _gate_status_passthrough) DENIES, because by default the
-    pipeline's status is its last stage's, so a failing check does not stop the action; on a parse error
-    the recovered complete segments, those of the uncertain-'#' path included, deny the same way when the
-    shape is proven, and an unproven one there keeps the fallback's decision, which can be a silent allow.
+    (git commit, push, merge, tag or am in any form but the exempt ones _gate_gated_git names: the flags of
+    _GATE_GIT_EXEMPT read by one resolver over git 2.53.0's option table, _gate_flag_last, --help and -h
+    only as those exact words, a tag -n by its prefix), directly or through further '&&'-joined commands
+    that cannot gate it (_gate_status_passthrough), DENIES, because by default the pipeline's status is its
+    last stage's, so a failing check does not stop the action; on a parse error the recovered complete
+    segments, those of the uncertain-'#' path included, deny the same way when the shape is proven, and an
+    unproven one there keeps the fallback's decision, which can be a silent allow.
     A ';' or newline join is not judged here (the action runs after it whatever the status, piped or not).
     The same shape after a command that is not known-benign (a set -o pipefail included, which the note
     names) or joined by '||' to the command before it ALLOWS-WITH-NOTE on a parsed command after the flow

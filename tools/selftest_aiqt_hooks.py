@@ -3977,11 +3977,12 @@ def _gso_corpus(hooks=None):
     """The deduplicated, sorted corpus, its option words generated from the guard tables of hooks (this
     tree's aiqt_hooks by default) by _gso_options: the pinned forms; for each gated action each
     exempt-related core word (_gso_related) followed by each other core word (so two exempt-related words
-    meet in both orders), with an operand list and placement chosen by the pair's index; every core word with every operand list in both placements, and
-    every extra word with one operand list chosen by its index; each core word before every trail, and each
-    exempt-related core word and every fourth other core word in every lead; each spelling of each
-    exempt-related core word; and a few actions under every wrapper, git spelling and global option
-    placement. The generation is deterministic, so the corpus is the same on every run of one tree."""
+    meet in both orders), with an operand list and placement chosen by the pair's index; every core word
+    with every operand list in both placements, and every extra word with one operand list chosen by its
+    index; each core word before every trail, and each exempt-related core word and every fourth other core
+    word in every lead; each spelling of each exempt-related core word; and a few actions under every
+    wrapper, git spelling and global option placement. The generation is deterministic, so the corpus is the
+    same on every run of one tree."""
     hooks = aiqt_hooks if hooks is None else hooks
     corpus = set(_GSO_PINNED) | set(_GSO_ANCHORS)
     corpus.update(lead + action for lead in _GSO_LEADS for action in _GSO_REPORTED_ACTIONS)
@@ -24685,9 +24686,9 @@ def _main_isolated(monitor):
              'pytest | tee /abs/l && git tag --sort refname -- v9', 'deny'),
             ('(gw-sm-d47) git tag -m with no tag name is not a listing, denies',
              'pytest | tee /abs/l && git tag -m x', 'deny'),
-            # every exempt flag goes through one resolver over git 2.53.0's option table: the last of --flag
-            # and --no-flag decides where git negates the flag, an unambiguous abbreviation counts as its
-            # option, and an ambiguous or unknown word exempts nothing
+            # the flags of _GATE_GIT_EXEMPT go through one resolver over git 2.53.0's option table: the last
+            # of --flag and --no-flag decides where git negates the flag, an unambiguous abbreviation counts
+            # as its option, and an ambiguous or unknown word exempts nothing
             ('(gw-sm-d48) merge --abort then --no-abort merges, denies',
              'pytest | tee /abs/l && git merge --abort --no-abort topic', 'deny'),
             ('(gw-sm-d49) merge --abort then --no-ab, an abbreviated --no-abort, merges, denies',
