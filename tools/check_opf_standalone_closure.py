@@ -624,6 +624,24 @@ _CI_SETUP_ALLOWANCE_S = 600    # checkout with full history and setup-python, be
 #     a bound.
 # 311 + 38.4 = 349.4 s, rounded up to 350 s.
 _VECTOR_ALLOWANCE_S = 350
+# The ARITHMETIC regression-leg budgets of opf.py --self-test (opf.py's _watchdog_declared_budgets, in
+# seconds) that this gate's sizing accounts for. _declared_wait_sites reads only literal `timeout=`
+# sites, so it never sees a budget built from named constants: when such a budget grows, the
+# opf-tooling-selftest bound above stays where it was, and so do the opf-closure-a fit and the config
+# lanes' deadline for this gate's opf-closure-a member, all of which then cover less of the leg than
+# they did. Each row is the largest budget the sizing was checked against, and
+# closure/declared-budgets-seen refuses, by name, a live budget above its row, a live budget with no
+# row and a row with no live budget, so a budget can grow only in a change that also re-derives those
+# bounds from new measurements and raises the row. FIGURE BASIS: "deadline-case" is one requested run
+# at 0.25 s and its one confirm run at 1 s, each priced at the 5 s execution bound, the 5 s cleanup
+# grace and the 1 s receipt allowance (11 + 11 = 22 s). "completion-deadline-flips" is that leg's
+# formula at two priced attempts per retried row (2 x 210.2 + 38 = 458.4 s, so 459 s); at three
+# attempts it is 668.6 s, which this row refuses, and the 77 s fixed budget it replaced held no
+# retried row and no confirm run.
+_OPF_DECLARED_BUDGETS_SEEN = {
+    "deadline-case": 22,
+    "completion-deadline-flips": 459,
+}
 
 
 class _BoundError(Exception):
@@ -774,6 +792,98 @@ def _leg_bounds(tools_dir, ceilings=None, launch_margin_s=None, bound_floors=Non
                     floors.get(name, 0))
         bounds[name] = (bound, ceiling, declared)
     return bounds
+
+
+def _opf_declared_budgets(tools_dir, attempts=None):
+    """{leg label: budget in seconds} from the opf.py under tools_dir (its _watchdog_declared_budgets),
+    imported in this process with tools_dir first on sys.path; sys.path and sys.modules are restored
+    afterwards, so the import leaves nothing behind. attempts, when given, stands in for opf.py's
+    _DEADLINE_FLIPS_ATTEMPTS during the call (the self-test's flip). Raises _BoundError (cannot
+    evaluate) when the module or the function cannot be loaded."""
+    tools_dir = str(Path(tools_dir))
+    before = set(sys.modules)
+    sys.path.insert(0, tools_dir)
+    try:
+        try:
+            import opf
+            declared = opf._watchdog_declared_budgets
+        except (ImportError, AttributeError, SyntaxError, OSError) as exc:
+            raise _BoundError("cannot read opf.py's declared budgets under {}: {}: {}".format(
+                tools_dir, type(exc).__name__, exc))
+        if attempts is None:
+            return dict(declared())
+        saved = opf._DEADLINE_FLIPS_ATTEMPTS
+        opf._DEADLINE_FLIPS_ATTEMPTS = attempts
+        try:
+            return dict(declared())
+        finally:
+            opf._DEADLINE_FLIPS_ATTEMPTS = saved
+    finally:
+        sys.path.remove(tools_dir)
+        for name in set(sys.modules) - before:
+            del sys.modules[name]
+
+
+def _declared_budget_faults(live, seen):
+    """Each fault between opf.py's live declared budgets and the rows the sizing accounts for
+    (_OPF_DECLARED_BUDGETS_SEEN): a live budget above its row, one that is not a finite non-negative
+    number, a live budget with no row, and a row with no live budget. [] when every live budget is at
+    or below its row."""
+    faults = []
+    for label in sorted(set(live) | set(seen)):
+        have, cap = live.get(label), seen.get(label)
+        if label not in seen:
+            faults.append("{}: declared budget {!r}s has no row in _OPF_DECLARED_BUDGETS_SEEN".format(
+                label, have))
+        elif label not in live:
+            faults.append("{}: row {}s names no declared budget of opf.py".format(label, cap))
+        elif type(have) not in (int, float) or not math.isfinite(have) or have < 0:
+            faults.append("{}: declared budget {!r} is not a finite non-negative number".format(
+                label, have))
+        elif have > cap:
+            faults.append("{}: declared budget {}s exceeds the {}s the closure's sizing sees".format(
+                label, have, cap))
+    return faults
+
+
+def _declared_budgets_self_test(root):
+    """closure/declared-budgets-seen: every arithmetic regression-leg budget of the real opf.py sits at
+    or below the row the sizing accounts for, and the comparison is discriminating at its boundary
+    (just inside, exactly at and just outside each row), on a missing or stale row and on the
+    three-attempt deadline-flips formula this row was set against."""
+    check = "declared-budgets-seen"
+    tools_dir = Path(root) / "opf" / "tools"
+    live = _under_test(check, _opf_declared_budgets, tools_dir, refuses=(_BoundError,))
+    faults = _under_test(check, _declared_budget_faults, live, _OPF_DECLARED_BUDGETS_SEEN)
+    if faults:
+        raise _CheckFailure("closure/{}: {}".format(check, "; ".join(faults)))
+    for label in sorted(live):
+        print("  declared budget {:28s} {}s (row {}s)".format(
+            label, live[label], _OPF_DECLARED_BUDGETS_SEEN[label]))
+    for label, cap in sorted(_OPF_DECLARED_BUDGETS_SEEN.items()):
+        for have, want in ((cap - 0.01, []), (cap, []),
+                           (cap + 0.01, ["{}: declared budget {}s exceeds the {}s the closure's "
+                                         "sizing sees".format(label, cap + 0.01, cap)])):
+            got = _declared_budget_faults(dict(live, **{label: have}), _OPF_DECLARED_BUDGETS_SEEN)
+            if got != want:
+                raise _CheckFailure("closure/{}: {} at {}s gave {!r}, want {!r}".format(
+                    check, label, have, got, want))
+    for live_table, seen_table, needle in (
+            (dict(live, extra=1.0), _OPF_DECLARED_BUDGETS_SEEN, "extra: declared budget"),
+            (live, dict(_OPF_DECLARED_BUDGETS_SEEN, stale=1), "stale: row 1s names no"),
+            (dict(live, **{"deadline-case": float("nan")}), _OPF_DECLARED_BUDGETS_SEEN,
+             "deadline-case: declared budget nan is not")):
+        got = _declared_budget_faults(live_table, seen_table)
+        if not any(needle in fault for fault in got):
+            raise _CheckFailure("closure/{}: {!r} not named in {!r}".format(check, needle, got))
+    flipped = _under_test(check, _opf_declared_budgets, tools_dir, attempts=3, refuses=(_BoundError,))
+    got = _declared_budget_faults(flipped, _OPF_DECLARED_BUDGETS_SEEN)
+    if not any(fault.startswith("completion-deadline-flips: declared budget") for fault in got):
+        raise _CheckFailure("closure/{}: three deadline-flips attempts ({}s) not refused: {!r}".format(
+            check, flipped.get("completion-deadline-flips"), got))
+    print("PASS closure/{} (every arithmetic budget at or below its row; RED one hundredth over a row, "
+          "a budget with no row, a stale row, a NaN budget, and three deadline-flips attempts at "
+          "{}s)".format(check, flipped["completion-deadline-flips"]))
 
 
 def _bound_faults(bounds, needs):
@@ -4875,6 +4985,7 @@ def _fast_vectors(root):
     _check_routing_self_test()
     _cleanup_doubles_self_test()
     required = _bounds_self_test(root)
+    _declared_budgets_self_test(root)
     _timeout_vectors_self_test(required)
     _after_launch_fault_self_test()
     return required

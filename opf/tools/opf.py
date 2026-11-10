@@ -1745,6 +1745,51 @@ def _deadline_case_budget(timeout_s=_DEADLINE_CASE_TIMEOUT):
             + _DEADLINE_RECEIPT_ALLOWANCE)
 
 
+# The attempts the deadline-flips leg grants each retried row: a starved
+# first run is retried ONCE, never more. Every attempt is priced in full by
+# the leg's declared budget (_deadline_flips_budget), and opf.py --self-test
+# runs that leg inside the opf-tooling-selftest closure leg, whose bound and
+# whose CI and config-lane deadlines are sized from measured runs and a
+# literal wait-site scan that cannot read an arithmetic budget. So the
+# attempts are held where the leg's worst case stays inside the growth
+# figure tools/check_opf_standalone_closure.py records for it
+# (_OPF_DECLARED_BUDGETS_SEEN, held there by its self-test): raising this
+# count raises that worst case by one whole attempt per step.
+_DEADLINE_FLIPS_ATTEMPTS = 2
+
+
+def _deadline_flips_budget():
+    """The deadline-flips leg's declared budget, term by term (the terms are
+    stated beside its row in the regression runner's budget table): every
+    priced attempt of the retried rows, then the un-retried flips, then 4 s
+    for conversion ticks the host's scheduling can add to the charged waits."""
+    import _opf_emit
+    per_attempt = (6 * _deadline_case_budget()
+                   + (_opf_emit._FIXTURE_CLEANUP_GRACE + _DEADLINE_RECEIPT_ALLOWANCE + 0.2)
+                   + 2 * _deadline_case_budget(4 * _DEADLINE_CASE_TIMEOUT)
+                   + (_deadline_case_budget()
+                      + _deadline_case_budget(4 * _DEADLINE_CASE_TIMEOUT))
+                   + 2 * _deadline_case_budget()
+                   + 3 * 2 * _deadline_case_budget(_DEADLINE_EXECUTION_BOUND + 1))
+    return (_DEADLINE_FLIPS_ATTEMPTS * per_attempt
+            + _deadline_case_budget()
+            + _deadline_case_budget(_DEADLINE_EXECUTION_BOUND + 1)
+            + _deadline_case_budget(4 * _DEADLINE_CASE_TIMEOUT) + 4)
+
+
+def _watchdog_declared_budgets():
+    """{leg label: declared budget in seconds} for every regression leg whose
+    budget is ARITHMETIC (derived from named constants, so the closure gate's
+    literal wait-site scan cannot read it): the confirm-priced deadline legs
+    (one requested-timeout run and one confirm run at four times it) and the
+    deadline-flips leg. The regression runner takes these figures from here,
+    and tools/check_opf_standalone_closure.py reads the same function, so the
+    figure the closure checks is the figure the leg runs under."""
+    deadline = _deadline_case_budget() + _deadline_case_budget(4 * _DEADLINE_CASE_TIMEOUT)
+    return {"deadline-case": deadline,
+            "completion-deadline-flips": _deadline_flips_budget()}
+
+
 # Two literals of _opf_emit's close-out code, named here for the close-out
 # derivation and checked against that code by _watchdog_closeout_vectors:
 # the sleep between polls of each close-out polling loop (the startup READY
@@ -5883,7 +5928,7 @@ def _watchdog_completion_case(mode, tree=None):
 
         starved_run = "no subject reached and no guardian-side cancel recorded"
 
-        def settled(mode_name, attempts=3):
+        def settled(mode_name, attempts=_DEADLINE_FLIPS_ATTEMPTS):
             # A starved run (its guardian never released a subject and
             # recorded nothing: the fixture's own 0.25 s startup window can
             # genuinely starve on a loaded host) establishes NOTHING about
@@ -6114,7 +6159,7 @@ def _watchdog_completion_case(mode, tree=None):
                 return "drain-starved"
             return outcome
 
-        def own_deadline_wait(guardian, retried, attempts=3):
+        def own_deadline_wait(guardian, retried, attempts=_DEADLINE_FLIPS_ATTEMPTS):
             # Retry ONLY the shapes `retried` declares starvation can
             # produce, bounded by `attempts` (the declared budget prices
             # every attempt); every other outcome is the run's own and is
@@ -16682,8 +16727,7 @@ def _watchdog_regression_self_test():
     # the one confirm run a starvation-suspect failure launches at four times
     # that timeout (both allowances are 11 while the timeout sits under the
     # execution bound), term by term, never a blended number.
-    deadline_budget = (_deadline_case_budget()
-                       + _deadline_case_budget(4 * _DEADLINE_CASE_TIMEOUT))
+    deadline_budget = _watchdog_declared_budgets()["deadline-case"]
     # Every leg's budget is DECLARED here and checked on every run: the leg
     # runs under _watchdog_leg_entry, which charges each bounded wait it makes
     # at its full timeout and fails the leg when the charges exceed this
@@ -16748,44 +16792,35 @@ def _watchdog_regression_self_test():
          + 6 * _TREE_STARTUP_BACKSTOP + 4 * _TREE_VECTOR_BACKSTOP),
         ("no-signal-echild", 15), ("guardian-error", 48), ("empty-children", 48),
         ("bounded-diagnostics", 66), ("cleanup-budget", 21),
-        # deadline-flips, term by term: ten settled deadline-case flips,
-        # each priced at its worst case of three attempts (a starved run is
-        # retried). Per attempt: six single runs at the requested 0.25 s
-        # timeout (the expired-cleanup, lost-ownership, deaf-guardian,
-        # swallowed-census and backstop-EOF rows, and the late-observation
-        # row's own run), plus the late-observation hold (cleanup grace +
-        # receipt allowance + 0.2) its stand-in sleeps; the confirm runs at
-        # four times the requested timeout that the expired-cleanup and
-        # backstop-EOF rows start when a host stall (4.75 s or more between
-        # the case's start sample and run_bounded's adjacent reading)
-        # inflates their first run's armed reading past the execution bound
-        # (two); the never-kills row at the requested timeout plus its
-        # confirm run at four times it (both allowances 11, both under the
-        # execution bound); the own-deadline row's green run AND its mutant
-        # flip, each retried on starved shapes in its own loop (one attempt
-        # per priced attempt, each attempt charging its polling deadline at
-        # the execution bound plus its fixture's cleanup grace and receipt
-        # allowance); and the three forced-late rows (late,
-        # never-kills-late, late-expired) each charging a first run AND a
-        # confirm run at the forced late deadline (the execution bound +
-        # 1). Then the un-retried flips: one starved-start fixture call,
-        # and the first-run-only late reading (one forced-late run and one
-        # confirm run at four times the requested timeout). The three
-        # armed-reading boundary rows substitute run_bounded entirely and
-        # run on a pinned clock, so they charge no bounded wait and add no
-        # term, nor do the own-deadline watch rows (a stand-in fixture on a
-        # scripted clock). And 4 for conversion ticks the host's scheduling can add to
-        # the charged waits.
-        ("deadline-flips", 3 * (6 * _deadline_case_budget()
-         + (_opf_emit._FIXTURE_CLEANUP_GRACE + _DEADLINE_RECEIPT_ALLOWANCE + 0.2)
-         + 2 * _deadline_case_budget(4 * _DEADLINE_CASE_TIMEOUT)
-         + (_deadline_case_budget()
-            + _deadline_case_budget(4 * _DEADLINE_CASE_TIMEOUT))
-         + 2 * _deadline_case_budget()
-         + 3 * 2 * _deadline_case_budget(_DEADLINE_EXECUTION_BOUND + 1))
-         + _deadline_case_budget()
-         + _deadline_case_budget(_DEADLINE_EXECUTION_BOUND + 1)
-         + _deadline_case_budget(4 * _DEADLINE_CASE_TIMEOUT) + 4),
+        # deadline-flips, term by term (_deadline_flips_budget): ten settled
+        # deadline-case flips, each priced at its worst case of
+        # _DEADLINE_FLIPS_ATTEMPTS attempts (a starved run is retried once).
+        # Per attempt: six single runs at the requested 0.25 s timeout (the
+        # expired-cleanup, lost-ownership, deaf-guardian, swallowed-census and
+        # backstop-EOF rows, and the late-observation row's own run), plus the
+        # late-observation hold (cleanup grace + receipt allowance + 0.2) its
+        # stand-in sleeps; the confirm runs at four times the requested
+        # timeout that the expired-cleanup and backstop-EOF rows start when a
+        # host stall (4.75 s or more between the case's start sample and
+        # run_bounded's adjacent reading) inflates their first run's armed
+        # reading past the execution bound (two); the never-kills row at the
+        # requested timeout plus its confirm run at four times it (both
+        # allowances 11, both under the execution bound); the own-deadline
+        # row's green run AND its mutant flip, each retried on starved shapes
+        # in its own loop (one attempt per priced attempt, each attempt
+        # charging its polling deadline at the execution bound plus its
+        # fixture's cleanup grace and receipt allowance); and the three
+        # forced-late rows (late, never-kills-late, late-expired) each
+        # charging a first run AND a confirm run at the forced late deadline
+        # (the execution bound + 1). Then the un-retried flips: one
+        # starved-start fixture call, and the first-run-only late reading (one
+        # forced-late run and one confirm run at four times the requested
+        # timeout). The three armed-reading boundary rows substitute
+        # run_bounded entirely and run on a pinned clock, so they charge no
+        # bounded wait and add no term, nor do the own-deadline watch rows (a
+        # stand-in fixture on a scripted clock). And 4 for conversion ticks
+        # the host's scheduling can add to the charged waits.
+        ("deadline-flips", _watchdog_declared_budgets()["completion-deadline-flips"]),
         ("subject-setup", 22), ("overdue-success", 161.0 + 0.01), ("launch-ownership", 60),
         ("launch-cancel", 33), ("fd-hygiene-total", 92), ("nested-keep", 108),
         ("fd-census", 48), ("subject-gc", 32), ("guardian-preload", 20),
