@@ -25,9 +25,10 @@ on, I/O blocked under memory or disk pressure) is stopped exactly like a hung on
 caller reports a Hung that carries no failure evidence as the bound firing, CANNOT-EVALUATE (exit 2), never
 as a proven hang; and each call site sizes stall_s above the longest silent wait its callee legitimately
 makes, and states that wait at the call site. A Hung is not a licence to drop failure evidence: when the
-child had already exited on its own before the stop (a descendant still held its output open, or a
-fault such as a decode failure arrived only after the wait had completed), Hung.returncode carries
-that exit status. A NONZERO status there is judged exactly as the nonzero exit
+child had already exited on its own before the stop (a descendant still held its output open, or
+the wait had completed and then a member of its group counted as running, the completion was read
+past the budget, or a fault such as a decode failure arrived), Hung.returncode carries that exit
+status. A NONZERO status there is judged exactly as the nonzero exit
 of a completed run, whatever bound fired, never filed as cannot-evaluate: a failure where the caller
 wanted success, and in the tools/check_gensrc_failclose.py probes, where a nonzero --check exit is the
 wanted rejection of a corrupt target, that status stands as the rejection (after the same post-probe
@@ -155,20 +156,22 @@ member still RUNNING in it (a descendant started with its output redirected, no 
 setpgid) makes the run leave as Hung kind "descendant", never as a pass, and the leader's own
 exit status rides it as for every stop. A member that has already exited but is not yet reaped
 (a zombie, or a task already exiting) is not running and does not count: run() does not reap
-it and leaves it to the parent it was re-parented to, even where that parent is this process
-(a child subreaper). A /proc scan that is not complete, or that sees no member while the group
-is still non-empty, also counts as a running member, and the Hung reason then says a running
-member could not be ruled out. The group is then sent SIGKILL through the leader's pidfd and
-polled until no member is still running, with a REAP_S deadline checked between scans, so not
-a strict bound on elapsed time; the Hung reason says whether the SIGKILL was sent or failed and
-whether a member was still running, or still could not be ruled out, at the last scan, after
-which the deadline had passed. Second, the budget (_over_budget): the watch reads it only when
-a poll times out, so a completion whose load-adjusted elapsed time exceeds budget_s leaves as
-Hung kind "budget". The two ends differ by derivation: a child still running when the clock
-reads exactly the budget is stopped, and a child whose completion is read at exactly the budget
-passes. A descendant stop is judged first, so it takes precedence when both apply. An honest
-child that completes after its load-adjusted budget, under host load included, now fails as a
-budget stop where it used to pass; the callers' treatment of that stop is stated above.
+it; it is left to its parent (the process it was re-parented to, if its own parent has exited),
+even where that parent is this process (a child subreaper). A /proc scan that is not complete,
+or that sees no member while the group is still non-empty, also counts as a running member,
+and the Hung reason then says a running member could not be ruled out. The group is then sent
+SIGKILL through the leader's pidfd and polled until no member is running or a REAP_S deadline
+has passed, the deadline checked between scans, so not a strict bound on elapsed time; the
+Hung reason says whether the SIGKILL was sent, failed, or found the group already empty, and
+after a SIGKILL sent or failed, whether a later scan found no member running or the last scan,
+after which the deadline had passed, found one running or could not rule one out. Second, the
+budget (_over_budget): the watch reads it only when a poll times out, so a completion whose
+load-adjusted elapsed time exceeds budget_s leaves as Hung kind "budget". The two ends differ
+by derivation: a child still running when the clock reads exactly the budget is stopped, and a
+child whose completion is read at exactly the budget passes. A descendant stop is judged first,
+so it takes precedence when both apply. An honest child that completes after its load-adjusted
+budget, under host load included, now fails as a budget stop where it used to pass; the
+callers' treatment of that stop is stated above.
 
 git. run() does not knowingly launch git (ValueError before any launch). It resolves the program the
 exec in the child would run, the way that exec looks it up: a head with a directory part relative to cwd,
@@ -488,17 +491,16 @@ class Hung(subprocess.TimeoutExpired):
     a correct silent wait also trips), "budget" (the load-adjusted budget was spent, also by a child
     that completed after it), "descendant" (the child completed but a member of its process group was
     still running or a running member could not be ruled out, an exited member not yet reaped not
-    counted; the reason says which, and whether the SIGKILL sent to the group then stopped it) or
-    "monitor" (the monitoring itself failed). The stop is attributed to the bound, never proven a
-    hang. returncode is the
-    exit status the child had already reached on its own before the stop (a descendant still held its
-    output open, or the fault arrived only after a completed wait), or None when the stop ended it or
-    the status could not be read: the caller judges a
-    NONZERO returncode exactly as it judges the exit status of a completed run, never filing it as
-    cannot-evaluate; an own exit of 0 beside a stop is judged by each caller's stated contract (module
-    docstring), conservatively. output and stderr hold what was captured before the stop PLUS the
-    post-stop drain of each still-open pipe (bytes the child had written that no read had yet taken,
-    _drain), kept in state
+    counted; the reason says which, and whether the SIGKILL to the group was sent, failed or found it
+    already empty, and what the scans after it found) or "monitor" (the monitoring itself failed). The
+    stop is attributed to the bound, never proven a hang. returncode is the exit status the child had
+    already reached on its own before the stop (a descendant still held its output open, or the wait
+    had completed and a "descendant" or "budget" stop or a fault came after it), or None when the stop
+    ended it or the status could not be read: the caller judges a NONZERO returncode exactly as it
+    judges the exit status of a completed run, never filing it as cannot-evaluate; an own exit of 0
+    beside a stop is judged by each caller's stated contract (module docstring), conservatively.
+    output and stderr hold what was captured before the stop PLUS the post-stop drain of each
+    still-open pipe (bytes the child had written that no read had yet taken, _drain), kept in state
     independent of any exception (a Hung of kind monitor keeps them even when a communicate call
     faulted between two reads, recovered by _recover_partial, or the text decode itself failed), as str when run() was given text=True or errors (decoded
     AFTER capture with the requested errors, falling back to errors="replace" where that raises)."""
@@ -662,27 +664,28 @@ def _sweep_group(pidfd, pgid, reap_s=None, sender=None, members=None):
     """After the leader COMPLETED and Popen reaped it: find every member still RUNNING in the group
     it led (a descendant started in that group that outlived the leader with its output
     redirected, so the completed wait never saw it), SIGKILL the group and poll until no member is
-    still running. The group is addressed only through the leader's own pid record
-    (pidfd_send_signal with PIDFD_SIGNAL_PROCESS_GROUP, exact after the reap): signal 0 probes it,
-    and ESRCH means it is empty. The probe also answers for a member that has exited but is not
-    yet reaped (a zombie), which is not running and which this function does not reap, even
-    where this process is the parent it was re-parented to (a child subreaper), so a non-empty
-    group is then read through /proc (members, _group_members, pgid being the leader's pid
-    number, which the kernel cannot hand to another process while the group still has a member).
-    The group counts as having a running member when that scan finds one, and also when a
-    running member cannot be ruled out: the scan is not complete, or the scan finds no member at
-    all while a second probe still finds the group non-empty (a member the scan cannot see);
-    each of those is the fail-closed direction, and the note says which applied. Returns
-    (remained, note): False with "" when no member is running; True with a note saying what the
-    scan found, whether the SIGKILL was sent or failed, and whether no member was still running
-    at a later scan or one was still running (or still could not be ruled out) at the last scan,
-    after which the reap_s (REAP_S) deadline had passed (an exited member is left to the parent
-    it was re-parented to); or None with the reason the group could not be checked (no pidfd, no
-    pidfd_send_signal, or a kernel refusing the group flag with EINVAL): the leader is reaped by
-    then, so nothing is signalled by number, the disclosed residual. The deadline is checked
-    between scans, so it is not a strict bound on the polling's elapsed time: the polling can run
-    past reap_s by up to one sleep between scans (0.05 s requested) and one whole scan (its
-    probes and /proc read). sender stands in for signal.pidfd_send_signal."""
+    running or the reap_s deadline has passed. The group is addressed only through the leader's
+    own pid record (pidfd_send_signal with PIDFD_SIGNAL_PROCESS_GROUP, exact after the reap):
+    signal 0 probes it, and ESRCH means it is empty. The probe also answers for a member that has
+    exited but is not yet reaped (a zombie), which is not running and which this function does
+    not reap, even where this process is its parent (a child subreaper it was re-parented to), so
+    a non-empty group is then read through /proc (members, _group_members, pgid being the
+    leader's pid number, which the kernel cannot hand to another process while the group still
+    has a member). The group counts as having a running member when that scan finds one, and
+    also when a running member cannot be ruled out: the scan is not complete, or the scan finds
+    no member at all while a second probe still finds the group non-empty (a member the scan
+    cannot see); each of those is the fail-closed direction, and the note says which applied.
+    Returns (remained, note): False with "" when no member is running; True with a note saying
+    what the scan found and whether the SIGKILL was sent, failed, or found the group already
+    empty, and after a SIGKILL sent or failed, whether a later scan found no member running or
+    the last scan, after which the reap_s (REAP_S) deadline had passed, found one running or
+    could not rule one out (an exited member is left to its parent, the process it was
+    re-parented to if its own parent has exited); or None with the reason the group could not be
+    checked (no pidfd, no pidfd_send_signal, or a kernel refusing the group flag with EINVAL): the
+    leader is reaped by then, so nothing is signalled by number, the disclosed residual. The
+    deadline is checked between scans, so it is not a strict bound on the polling's elapsed time:
+    the polling can run past reap_s by up to one sleep between scans (0.05 s requested) and one
+    whole scan (its probes and /proc read). sender stands in for signal.pidfd_send_signal."""
     reap_s = REAP_S if reap_s is None else reap_s
     sender = getattr(signal, "pidfd_send_signal", None) if sender is None else sender
     members = _group_members if members is None else members
@@ -733,12 +736,12 @@ def _sweep_group(pidfd, pgid, reap_s=None, sender=None, members=None):
         if not found:
             break
         if time.monotonic() >= deadline:
-            later = ("a member was still running" if found == _SWEEP_RUNNING
-                     else "a running member could still not be ruled out")
+            later = ("a member was running" if found == _SWEEP_RUNNING
+                     else "a running member could not be ruled out")
             return True, (note + "; {} at the last scan, after which the {} s deadline had passed"
                           .format(later, reap_s))
         time.sleep(0.05)
-    return True, note + "; then no member was still running"
+    return True, note + "; a later scan found no member running"
 
 
 def _over_budget(spent, budget_s, completed):
@@ -1208,10 +1211,10 @@ def run(argv, *, budget_s, stall_s, input=None, cwd=None, env=None, text=False, 
             # it started in its own group with its output redirected can still be running. A
             # running member, or one the scan cannot rule out, makes the run leave as Hung kind
             # "descendant" (the handler below adds the leader's own exit status); the group is
-            # sent SIGKILL and polled until no member is still running, and the reason says
-            # which it was and how that went. An exited member not yet reaped is not running
-            # and does not count. Judged before the budget, so a descendant stop takes
-            # precedence when both apply.
+            # sent SIGKILL and polled until no member is running or the REAP_S deadline has
+            # passed, and the reason says which it was and how that went. An exited member not
+            # yet reaped is not running and does not count. Judged before the budget, so a
+            # descendant stop takes precedence when both apply.
             remained, sweep_note = _sweep_group(group_fd, proc.pid)
             if remained:
                 raise Hung(argv, budget_s, "descendant",
@@ -3603,8 +3606,10 @@ def vector_failures(python):
     # The sweep's outcomes and its words, with an injected sender and scan: the run fails only
     # for a running member or one the scan cannot rule out (an incomplete scan, or a group the
     # scan sees empty while the probe does not), the note says which, never that a member was
-    # running when it could only not be ruled out, and it says whether SIGKILL was sent or
-    # failed, never that a member was killed when the kill failed.
+    # running when it could only not be ruled out, and it says whether SIGKILL was sent, failed
+    # or found the group already empty, never that a member was killed when the kill failed. What
+    # the last scan found is worded on its own, never as "still" what an earlier scan found,
+    # since the first and the last scan can disagree on whether a member was seen running.
     def scripted(probes, kill_error=None):
         sent = []
 
@@ -3632,23 +3637,34 @@ def vector_failures(python):
              (False, ""), (), ()),
             ("running, then stopped", [None], None, scans(([10], [], True), ([], [10], True)),
              True, ("a member of its process group was still running; SIGKILL was sent to the "
-                    "group", "then no member was still running"),
-             ("failed", "ruled out")),
+                    "group", "; a later scan found no member running"),
+             ("failed", "ruled out", "last scan")),
             ("kill refused", [None], PermissionError(errno.EPERM, "not permitted"),
              scans(([10], [], True)), True,
-             ("SIGKILL to the group failed (PermissionError", "a member was still running at the "
+             ("SIGKILL to the group failed (PermissionError", "; a member was running at the "
               "last scan, after which the 0.2 s deadline had passed"),
-             ("was sent", "no member was still running", "ruled out")),
+             ("was sent", "later scan", "ruled out")),
+            ("group empty before the kill", [None], gone, scans(([10], [], True)), True,
+             ("a member of its process group was still running; the group was empty before "
+              "SIGKILL could be sent",),
+             ("was sent to", "failed", "last scan", "later scan")),
             ("incomplete scan", [None], None, scans(([], [], False)), True,
              ("could not be ruled out (the /proc scan was not complete)",
-              "SIGKILL was sent to the group", "a running member could still not be ruled out at "
-              "the last scan, after which the 0.2 s deadline had passed"), ("still running",)),
+              "SIGKILL was sent to the group", "; a running member could not be ruled out at "
+              "the last scan, after which the 0.2 s deadline had passed"), ("still",)),
             ("exited member, incomplete scan", [None], None, scans(([], [11], False)), True,
-             ("could not be ruled out (the /proc scan was not complete)",), ("still running",)),
+             ("could not be ruled out (the /proc scan was not complete)",), ("still",)),
             ("scan sees none, group still non-empty", [None], None, scans(([], [], True)), True,
              ("could not be ruled out (the /proc scan saw no member while the group was still "
-              "non-empty)", "could still not be ruled out at the last scan"),
-             ("still running",))):
+              "non-empty)", "; a running member could not be ruled out at the last scan"),
+             ("still running", "could still")),
+            ("uncertain, then running", [None], None, scans(([], [], False), ([10], [], True)),
+             True, ("could not be ruled out (the /proc scan was not complete); SIGKILL was sent "
+                    "to the group", "; a member was running at the last scan"), ("still",)),
+            ("running, then uncertain", [None], None, scans(([10], [], True), ([], [], False)),
+             True, ("a member of its process group was still running; SIGKILL was sent to the "
+                    "group", "; a running member could not be ruled out at the last scan"),
+             ("was still running at", "could still"))):
         sender, sent = scripted(list(probes), kill_error)
         got = _sweep_group(-1, 50, reap_s=0.2, sender=sender, members=members)
         killed = sent.count(_KILL)

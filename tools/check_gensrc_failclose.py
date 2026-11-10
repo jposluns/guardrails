@@ -824,11 +824,12 @@ def _process_entry(entry, template, baselines, deadline, violations, cannot, cle
             except (subprocess.TimeoutExpired, OSError) as exc:
                 own_exit = getattr(exc, "returncode", None)
                 if own_exit == 0:
-                    # The generator exited 0 on the corrupt target before the bound stopped the wait on a
-                    # descendant still holding its output: a wrong result beside a stop is a violation.
+                    # The generator exited 0 on the corrupt target before the bound stopped the run (the
+                    # stop's cause is in its reason): a wrong result beside a stop is a violation.
                     violations.append("{}: gen_{} --check exited 0 on {} corrupted with {} before its load-tolerant "
-                                      "bound stopped the wait on a leaked descendant (F-154: the generator does "
-                                      "not consult its target)".format(target_rel, stem, rel_path, shape))
+                                      "bound stopped the run ({}) (F-154: the generator does not consult its "
+                                      "target)".format(target_rel, stem, rel_path, shape,
+                                                       getattr(exc, "reason", exc)))
                     continue
                 if own_exit is not None:
                     # It exited NONZERO before the stop: the rejection this probe wanted, standing exactly

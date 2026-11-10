@@ -26,7 +26,8 @@ an absent or unreadable one is exit 2), and every other entry must be a hook fil
       load-adjusted seconds, or the heuristic SELFTEST_STALL_S stall bound) delivered no verdict and is a
       cannot-evaluate (exit 2), attributed to the bound, never reported as a hook failure or a proven hang,
       unless the self-test had already exited nonzero on its own before the stop (a descendant still held
-      its output): that exit is a finding, whatever bound fired. A stop that carries captured stderr but
+      its output, or the run completed and was then stopped for a group member that was or might be
+      running, or for its budget): that exit is a finding, whatever bound fired. A stop that carries captured stderr but
       no exit status stays a cannot-evaluate: a hook self-test legitimately writes its progress to stderr,
       so this gate judges the exit status alone and captured stderr beside a stop is not failure evidence
       here (a tolerance named in the tools/_load_bound.py module docstring).
@@ -323,7 +324,7 @@ def _tail(data, n=15):
 
 def leg_selftest(pdir, hooks, findings, unverifiable):
     """(a) Run each hook's own --self-test isolated; nonzero is a finding (also when it exited nonzero
-    before a bound stopped the wait); a stop with no exit status, or with an own exit of 0 (a 0 beside
+    before a bound stopped the run); a stop with no exit status, or with an own exit of 0 (a 0 beside
     a stop is not the proven pass a completed 0 is: the stop may have cut the verdict's delivery
     short), is unverifiable, also when stderr was
     captured beside it: this gate judges the exit status alone (a hook self-test legitimately writes its
@@ -345,10 +346,10 @@ def leg_selftest(pdir, hooks, findings, unverifiable):
                                       clock=_load_bound.LoadClock(factor=_load_factor))
             except subprocess.TimeoutExpired as exc:
                 if getattr(exc, "returncode", None):
-                    # The self-test exited nonzero on its own before the bound stopped the wait (a descendant
-                    # held its output): a finding, whatever bound fired.
+                    # The self-test exited nonzero on its own before the bound stopped the run (the stop's
+                    # cause is in its reason): a finding, whatever bound fired.
                     findings.append("{}/{}: --self-test exited {} before this gate's load-tolerant bound "
-                                    "stopped the wait on a descendant still holding its output ({}) (a)".format(
+                                    "stopped the run ({}) (a)".format(
                                         PREVIEW_DIR, name, exc.returncode, exc.reason))
                     continue
                 unverifiable.append("{}/{}: --self-test was stopped by this gate's load-tolerant bound ({} "
@@ -744,7 +745,8 @@ def self_test_main():
         _load_factor = lambda: 1.0  # noqa: E731
         try:
             case("a finding beside a stopped self-test", 1, r, needle="was stopped by this gate")
-            case("a self-test that exits 1 beside a leaked descendant", 1, r_leaky, needle="exited 1 before")
+            case("a self-test that exits 1 beside a leaked descendant", 1, r_leaky,
+                 needle="exited 1 before this gate's load-tolerant bound stopped the run (")
         finally:
             SELFTEST_TIMEOUT, _load_factor = saved
             # The survivor scan's three distinct results: None on a host WITH /proc is a

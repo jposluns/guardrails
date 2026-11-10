@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "bca65e4e352f146d1159024f737a22c21ef8f496c840cad0e6f1ee0322eb5175"
+tree-sha256 = "9b877ce50638b7407bddef104e35f5a79dbbecd4679ba21b4d65c94713fbd850"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -4071,8 +4071,8 @@ sha256 = "26a3371c747fdfefde2b66126a6df4faaea5c890689347867c7b34f56db8b106"
 
 [[sources]]
 path = "tools/_load_bound.py"
-bytes = 229347
-sha256 = "fbf159365ccd093198052f7c1020e9e29ade0ed3830001770fb26f6236f59a35"
+bytes = 230948
+sha256 = "55ab423ac19cbbdfe364f092eb3dececaba2ccb5dd9e501f64d46fee8e616d6b"
 
 [[sources]]
 path = "tools/_qa_adapter.py"
@@ -4196,8 +4196,8 @@ sha256 = "86cfa0e2453c22a9887cc47ee6eded2d2774a32fc3e47b8e886a863ab26bd9b2"
 
 [[sources]]
 path = "tools/check_gensrc_failclose.py"
-bytes = 178683
-sha256 = "97e9be14c7d047f9d19bdb1f7d133d44186da3f3d8aa64e749db597aa0306c23"
+bytes = 178742
+sha256 = "181e8e586a0711e8e98f4f53be1fec7d766b2b080c5d1d8dc4e6a95eef57c7d3"
 
 [[sources]]
 path = "tools/check_git_option_table.py"
@@ -4216,8 +4216,8 @@ sha256 = "7de00bde82268e3d13fe503a84ccbcbc1042cb96e9d91df6cd0781bee044b841"
 
 [[sources]]
 path = "tools/check_hooks_preview.py"
-bytes = 49992
-sha256 = "8dfc2f59805c973c295196b7bf618cb6c938da109e7a0fc3544449a8ab99fc49"
+bytes = 50136
+sha256 = "c1161a56621feaa3dcf10e615982a7a0db84f00f3e6a3c1000ee15d1c1b625df"
 
 [[sources]]
 path = "tools/check_instruction_budget.py"
