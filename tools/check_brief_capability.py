@@ -3903,25 +3903,57 @@ LINEAR_FACTOR, LINEAR_SLACK, LINEAR_TIMEOUT = 16, 1.0, 120
 # start, the kill, the reap and the result decode measured 0.04 to 0.14 s past the deadline on the two
 # old-ceiling shapes (an 80-cpu host at one-minute load averages 35 to 43), so three seconds is wide
 DEADLINE_MARGIN_SECONDS = 3.0
-# The deadline rows judge a whole read() by wall clock, and wall clock is stretched by host load. Their
-# bound has two parts that load treats differently. PARSE_DEADLINE_SECONDS is a wall-clock count by
-# construction (the parent's communicate timeout), so load cannot lengthen it and it is never scaled.
-# DEADLINE_MARGIN_SECONDS covers work the parent must be scheduled to do around that wait (the child's
-# spawn, the wake-up at the timeout, the group kill, the reap, the result decode), and a loaded host
-# stretches that work the way it stretches any work this process does. So the margin is scaled by a
-# stretch factor read from a reference workload timed in this same process just before the measured
-# call and again just after it (a busy loop of DEADLINE_REFERENCE_CPU_SECONDS of thread CPU time; its
-# wall time over its CPU time is how far the host is stretching this process's work right then; the
-# larger of the two readings is used, so load that rises while the call waits is seen too). The factor
-# is at least 1, so an idle host keeps the measured three-second margin, and the margin is never raised
-# by hand. A parse that runs on past the deadline still fails: an in-process parse (the thread join the
-# flip restores) is stretched by the same factor as the margin, so it stays over the bound at any load;
-# and DEADLINE_STRETCH_CAP keeps the bound (10 + 3 * 4 = 22 s) under the shortest uncut parse of any
-# measured shape (the 100 KiB unclosed <? paragraph parsed for 25.3 s in a child with the deadline
-# lifted, the 100 KiB underscore-mark run for 37.5 s, the two old-ceiling shapes past 120 s), so even
-# a child that ran uncut at full speed while only this process was starved still fails its row.
+# The deadline rows judge a whole read() by wall clock. Their bound has two parts. PARSE_DEADLINE_SECONDS
+# is a wall-clock count by construction (the parent's communicate timeout), so load cannot lengthen it
+# and it is never scaled. DEADLINE_MARGIN_SECONDS is the allowance past it for the parent's own work
+# around that wait (the child's spawn, the wake-up at the timeout, the group kill, the reap, the result
+# decode). That work is small: it measured 0.04 to 0.14 s at the load averages above, and at most
+# 0.15 s with this process sharing its CPU about nine ways, so the CPU work itself does not come near
+# three seconds at any load measured, and the overruns of more than three seconds this bound was widened
+# for were not reproduced. What the scaling covers is the time the parent waits to be scheduled for that
+# work: the margin is multiplied by a stretch factor read from a reference workload timed in this same
+# process just before the measured call and again just after it (a busy loop of
+# DEADLINE_REFERENCE_CPU_SECONDS of thread CPU time; its wall time over its CPU time is how far this
+# process's work was being stretched right then; the larger of the two readings is used). It does not
+# cover a stall neither reading sees (one that starts after the first reading and ends before the
+# second), a stall that is not CPU scheduling (paging, a blocked disk), or a cause of overrun other than
+# a starved parent; and any busy thread in this process reads as host load too. The factor is at least
+# 1, so an idle host keeps the measured three-second margin. A parse that runs on past the deadline
+# still fails: an in-process parse (the thread join the flip restores) is stretched by the same factor
+# as the margin, and DEADLINE_STRETCH_CAP keeps the capped bound (10 + 3 * 3 = 19 s) under the CPU time
+# of the shortest uncut parse of the ceiling shapes, so even a child that ran uncut at full speed while
+# only this process was starved fails its row. That is not taken on trust: the self-test row
+# parse/deadline-cap-under-uncut-parse runs each ceiling shape's parse with the deadline lifted under a
+# CPU limit of the capped bound times 1 + DEADLINE_UNCUT_MARGIN and requires the limit, not the parse,
+# to end it (measured 26.8 s and 38.9 s of CPU for the <? paragraph and the underscore-mark run, whole
+# child, at one-minute load average 36 on 80 cpus, 2026-11-10; a cap of 4 would put its 22 s bound
+# only 18 % under the shorter of them, so the cap is 3). The two old-ceiling shapes are shown past the
+# bound by revert/parse-thread-join-red.
 DEADLINE_REFERENCE_CPU_SECONDS = 0.1
-DEADLINE_STRETCH_CAP = 4.0
+DEADLINE_STRETCH_CAP = 3.0
+DEADLINE_UNCUT_MARGIN = 0.2
+# the probe child for parse/deadline-cap-under-uncut-parse: it builds one ceiling shape (argv[2] its
+# repeated unit, behind the self-test's parse-forcing lead), lifts the deadline on the in-process parse
+# (PARSE_IN_CHILD=False, a join with no timeout), turns core files off, and sets its CPU limit to the
+# CPU it has spent so far plus argv[3] seconds, rounded up, before it parses; so SIGXCPU (or SIGKILL at
+# the hard limit) ends it only if the parse alone needs more CPU than argv[3] seconds
+UNCUT_PARSE_PROBE = (
+    "import math, resource, sys\n"
+    "sys.path.insert(0, sys.argv[1])\n"
+    "import _input_declarations as m\n"
+    "m.PARSE_IN_CHILD = False\n"
+    "m.PARSE_DEADLINE_SECONDS = None\n"
+    "lead = 'Input notes.' + chr(10) + chr(10)\n"
+    "unit = sys.argv[2]\n"
+    "text = lead + unit * ((m.MAX_TEXT_BYTES - len(lead) - 1) // len(unit)) + chr(10)\n"
+    "resource.setrlimit(resource.RLIMIT_CORE, (0, 0))\n"
+    "used = resource.getrusage(resource.RUSAGE_SELF)\n"
+    "limit = math.ceil(used.ru_utime + used.ru_stime + float(sys.argv[3]))\n"
+    "resource.setrlimit(resource.RLIMIT_CPU, (limit, limit + 5))\n"
+    "try:\n"
+    "    m.read(text)\n"
+    "except m.DeclarationError:\n"
+    "    pass\n")
 # the probe child for revert/parse-thread-join-red: it runs the shared reading with the thread join
 # restored (PARSE_IN_CHILD=False) over one shape at the old ceiling and never returns within the
 # deadline (the join's timeout cannot fire while one regex match holds the GIL); the parent shows it
@@ -3965,19 +3997,78 @@ def _deadline_bound(stretch):
     return _input_declarations.PARSE_DEADLINE_SECONDS + DEADLINE_MARGIN_SECONDS * stretch
 
 
-def _deadline_held(read, text):
+def _deadline_held(read, text, clock=time.monotonic, stretch=_host_stretch):
     """(how read(text) ended, "answered" or "refused", whether its wall time held _deadline_bound): the
     reference workload is timed just before the call and again just after it, the larger factor taken,
-    and neither reading falls inside the timed span."""
-    before = _host_stretch()
-    began = time.monotonic()
+    and neither reading falls inside the timed span. The wall clock and the stretch reading are seams
+    the boundary row drives with set timings, so that row judges this function's own comparison."""
+    before = stretch()
+    began = clock()
     try:
         read(text)
         ended = "answered"
     except _input_declarations.DeclarationError:
         ended = "refused"
-    elapsed = time.monotonic() - began
-    return ended, elapsed <= _deadline_bound(max(before, _host_stretch()))
+    elapsed = clock() - began
+    return ended, elapsed <= _deadline_bound(max(before, stretch()))
+
+
+def _deadline_boundary_reading():
+    """What _deadline_held itself returns at each end of its bound, driven with set timings: for the
+    stretch readings (1, 1), (cap, 1) and (1, cap) taken before and after the call, a read that took
+    1 ms under the bound, exactly the bound, and 1 ms over it (the clock reads 0 when the call begins,
+    so the elapsed time is exact). The bound is written out here as the deadline plus the margin times
+    the factor, not taken from _deadline_bound, so a change to either the bound or the comparison moves
+    the reading. A refused read is judged the same way as an answered one."""
+    def answer(text):
+        return text
+
+    def refuse(text):
+        raise _input_declarations.DeclarationError("a stand-in refusal")
+
+    deadline = _input_declarations.PARSE_DEADLINE_SECONDS
+    reading = []
+    for before, after in ((1.0, 1.0), (DEADLINE_STRETCH_CAP, 1.0), (1.0, DEADLINE_STRETCH_CAP)):
+        bound = deadline + DEADLINE_MARGIN_SECONDS * max(before, after)
+        row = []
+        for elapsed in (bound - 0.001, bound, bound + 0.001):
+            for read in (answer, refuse):
+                ticks, factors = iter((0.0, elapsed)), iter((before, after))
+                row.append(_deadline_held(read, "", ticks.__next__, factors.__next__))
+        reading.append((bound, row))
+    return reading
+
+
+def _cap_under_uncut_parse(timeout=600):
+    """For each ceiling shape of parse/deadline-held-at-ceiling (the underscore-mark run and the <?
+    opener paragraph), whether its uncut parse spends more CPU time than the capped bound
+    _deadline_bound(DEADLINE_STRETCH_CAP) times 1 + DEADLINE_UNCUT_MARGIN: True only when the probe
+    child (UNCUT_PARSE_PROBE) is ended by its CPU limit; a parse that finishes under the limit, a child
+    that fails otherwise, or one still running after `timeout` wall seconds reads False. Both children
+    run at once, each in its own process group, and both groups are killed before this returns."""
+    spend = _deadline_bound(DEADLINE_STRETCH_CAP) * (1.0 + DEADLINE_UNCUT_MARGIN)
+    probes, outlasted = [], []
+    try:
+        for unit in ("_a", "x<?"):
+            probes.append(subprocess.Popen([sys.executable, "-I", "-B", "-c", UNCUT_PARSE_PROBE,
+                                            str(Path(__file__).resolve().parent), unit, repr(spend)],
+                                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                           start_new_session=True))
+        until = time.monotonic() + timeout
+        for probe in probes:
+            try:
+                probe.communicate(timeout=max(0.0, until - time.monotonic()))
+                outlasted.append(probe.returncode in (-signal.SIGXCPU, -signal.SIGKILL))
+            except subprocess.TimeoutExpired:
+                outlasted.append(False)
+    finally:
+        for probe in probes:
+            try:
+                os.killpg(probe.pid, signal.SIGKILL)
+            except OSError:
+                probe.kill()
+            probe.communicate()
+    return outlasted
 # a stand-in parse child: _CHILD_PATH is pointed at a script that opens with this prefix (the text read
 # from stdin, the script's own directory as `here`) and then runs one vector's body, so each way a child
 # can end is shown against the parent's reading of it
@@ -5427,17 +5518,24 @@ def self_test(report_path=None):
         held.append((len(shape.encode("utf-8")) <= ceiling, _deadline_held(read_inputs, shape)[1]))
     check("parse/deadline-held-at-ceiling", held, [(True, True)] * 2)
     # the bound itself at each end: the stretch factor is clamped to 1 just under, at and just over 1,
-    # and to the cap just under, at and just over it; and a read is held at the bound just inside it and
-    # exactly at it (the comparison is inclusive), and not held just outside it, at both clamp ends
+    # and to the cap just under, at and just over it; and _deadline_held itself, driven with set timings
+    # (_deadline_boundary_reading), holds an answered or refused read 1 ms inside the bound and exactly
+    # at it (its comparison is inclusive) and does not hold one 1 ms outside it, at factor 1 and at the
+    # cap, the cap read before the call or after it
     cap, margin = DEADLINE_STRETCH_CAP, DEADLINE_MARGIN_SECONDS
     deadline = _input_declarations.PARSE_DEADLINE_SECONDS
+    held_at_each_end = [("answered", True), ("refused", True)] * 2 + [("answered", False), ("refused", False)]
     check("parse/deadline-bound-boundary",
           ([_stretch_of(wall, 1.0) for wall in (0.999, 1.0, 1.001, cap - 0.001, cap, cap + 0.001)],
-           [(_deadline_bound(stretch), [elapsed <= _deadline_bound(stretch) for elapsed in (
-               deadline + margin * stretch - 0.001, deadline + margin * stretch,
-               deadline + margin * stretch + 0.001)]) for stretch in (1.0, cap)]),
-          ([1.0, 1.0, 1.001, cap - 0.001, cap, cap],
-           [(deadline + margin, [True, True, False]), (deadline + margin * cap, [True, True, False])]))
+           [_deadline_bound(stretch) for stretch in (1.0, cap)], _deadline_boundary_reading()),
+          ([1.0, 1.0, 1.001, cap - 0.001, cap, cap], [deadline + margin, deadline + margin * cap],
+           [(deadline + margin, held_at_each_end), (deadline + margin * cap, held_at_each_end),
+            (deadline + margin * cap, held_at_each_end)]))
+    # and the cap is safe on this host: each ceiling shape's parse, the deadline lifted, needs more CPU
+    # time than the capped bound plus DEADLINE_UNCUT_MARGIN of it, so a read whose child was never killed
+    # stays over the bound however starved this process is (a cap raised until the capped bound nears
+    # the shorter parse turns this red)
+    check("parse/deadline-cap-under-uncut-parse", _cap_under_uncut_parse(), [True, True])
     # and shown red under the flip that restores the thread join: a probe child runs the flipped read on
     # each shape, has NOT returned at the same load-scaled bound, its reference workload timed just
     # before the probe starts (join cannot fire while one regex match holds the GIL), and its own process
