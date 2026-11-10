@@ -621,7 +621,10 @@ _CI_SETUP_ALLOWANCE_S = 600    # checkout with full history and setup-python, be
 #     either: their work (one read of the lane runner's roster through its _registered_selftests, a
 #     few parses of its source and three more bound scans) is NOT measured into it; one roster read
 #     took 1.9 s in one probe on 2026-10-23 (plain, 24-CPU host, load not recorded), a figure, never
-#     a bound.
+#     a bound. Nor are the failure-evidence vectors (_failure_evidence_self_test): their stub legs
+#     exit at once, except the timeout row, which holds a 3 s leg bound and then its cleanup
+#     deadline of _DRAIN_MARGIN_S (the group kill closes the pipe, so a passing run spends about
+#     none of it). Those 3 s, and up to 10 s of cleanup, are NOT counted in the 311 s sum above.
 # 311 + 38.4 = 349.4 s, rounded up to 350 s.
 _VECTOR_ALLOWANCE_S = 350
 
@@ -1666,33 +1669,53 @@ def _tail(output, keep=3):
     return "\n".join((output or b"").decode("utf-8", "replace").splitlines()[-keep:])
 
 
-# The failure evidence a leg that exited with a positive status keeps (_failure_evidence): every line
-# of its output naming a failure, then its last _EVIDENCE_TAIL_LINES lines, so a failing row inside a
-# long leg is reported without a re-run. The size is bounded: at most _EVIDENCE_MAX_FAILURE_LINES
-# failure lines (the first ones; the count left out is stated), and each line clipped to
-# _EVIDENCE_LINE_CHARS characters (the count clipped is stated), so the whole evidence is at most
-# _EVIDENCE_MAX_CHARS characters, whatever the leg wrote.
+# The failure evidence a launched leg that did not exit 0 keeps (_failure_evidence): a positive
+# status, a signal or a kill at its bound. It holds the lines of its output naming a failure, then its
+# last _EVIDENCE_TAIL_LINES lines, so a failing row inside a long leg is reported without a re-run.
+# The size is bounded: at most _EVIDENCE_MAX_FAILURE_LINES failure lines (the count left out is
+# stated), and each line clipped to _EVIDENCE_LINE_CHARS characters (the count clipped is stated), so
+# the whole evidence is at most _EVIDENCE_MAX_CHARS characters, whatever the leg wrote.
 _EVIDENCE_TAIL_LINES = 40
 _EVIDENCE_MAX_FAILURE_LINES = 60
 _EVIDENCE_LINE_CHARS = 400
 # A line names a failure when it carries FAIL (FAILED included) or CANNOT EVALUATE as a word,
 # AssertionError, or opens a traceback; the exception line that ends a traceback (its first unindented
 # line after the header) is kept too (_failure_evidence). The match is case-sensitive: lowercase prose
-# such as "fails closed" in a passing row's description is not a failure.
+# such as "fails closed" in a passing row's description is not a failure. A line that names FAIL only
+# inside a row whose own verdict is PASS (its last PASS or FAIL word is PASS, as in "FAIL vectors
+# rejected as designed: PASS") is ranked after every other failure line when the cap cuts, so such
+# passing rows cannot crowd the leg's real failure out; a word such as FAILSAFE still matches.
 _TRACEBACK_HEADER = "Traceback (most recent call last):"
 _FAILURE_LINE_RE = re.compile(r"\bFAIL|\bCANNOT EVALUATE\b|AssertionError|^" + re.escape(_TRACEBACK_HEADER))
+_VERDICT_WORD_RE = re.compile(r"\bPASS\b|\bFAIL")
 # Every evidence line is a two-space indent, a line number of at most 12 digits and ": " (16
 # characters), then at most _EVIDENCE_LINE_CHARS characters of the line and a clip note of at most
-# 48 characters; the evidence adds at most three header lines of at most 200 characters each.
+# 48 characters; the evidence adds two header lines of at most 200 characters each (the bound counts
+# three). This is an upper bound derived from those limits, not a clip of its own.
 _EVIDENCE_MAX_CHARS = ((_EVIDENCE_MAX_FAILURE_LINES + _EVIDENCE_TAIL_LINES)
                        * (16 + _EVIDENCE_LINE_CHARS + 48 + 1) + 3 * (200 + 1))
+# The whole report is bounded too (_report): each line of a leg's final lines it shows is clipped to
+# _EVIDENCE_LINE_CHARS characters, and every line it prints to _REPORT_LINE_CHARS characters, each
+# clip stated. Per leg it prints at most three such lines (its status, its summary and its cleanup
+# faults) and its evidence, each evidence line indented by four more characters; the report adds at
+# most seven fixed lines. So the whole report over n legs is at most _report_max_chars(n) characters,
+# whatever the legs wrote.
+_REPORT_LINE_CHARS = 2000
+_REPORT_LEG_MAX_CHARS = (3 * (_REPORT_LINE_CHARS + 48 + 1) + _EVIDENCE_MAX_CHARS
+                         + 4 * (_EVIDENCE_MAX_FAILURE_LINES + _EVIDENCE_TAIL_LINES + 3))
+
+
+def _report_max_chars(legs):
+    """The most characters _report prints, stdout and stderr together, for a results list of legs
+    rows."""
+    return legs * _REPORT_LEG_MAX_CHARS + 7 * (_REPORT_LINE_CHARS + 48 + 1)
 
 
 class _LegOutput(str):
     """A leg's captured final lines, the str value exactly as _tail gives it (the text the verdict
     reads for the CANNOT EVALUATE marker, so the marker is still read in the final lines alone),
-    carrying beside it the bounded failure evidence of a leg that exited with a positive status
-    (evidence: a list of report lines from _failure_evidence). A plain str row carries none."""
+    carrying beside it the bounded failure evidence of a launched leg that did not exit 0 (evidence:
+    a list of report lines from _failure_evidence). A plain str row carries none."""
 
     def __new__(cls, tail, evidence):
         value = super().__new__(cls, tail)
@@ -1700,40 +1723,58 @@ class _LegOutput(str):
         return value
 
 
+def _clip_text(text, width):
+    """text, clipped to width characters with the count clipped stated (the note adds at most 48)."""
+    if len(text) > width:
+        return "{} [clipped: {} more characters]".format(text[:width], len(text) - width)
+    return text
+
+
 def _evidence_line(number, text):
     """One evidence line: the one-based line number and the line, clipped to _EVIDENCE_LINE_CHARS
     characters with the count clipped stated."""
-    if len(text) > _EVIDENCE_LINE_CHARS:
-        text = "{} [clipped: {} more characters]".format(text[:_EVIDENCE_LINE_CHARS],
-                                                        len(text) - _EVIDENCE_LINE_CHARS)
-    return "  {}: {}".format(number, text)
+    return "  {}: {}".format(number, _clip_text(text, _EVIDENCE_LINE_CHARS))
+
+
+def _passing_mention(text):
+    """Whether a line naming a failure names only FAIL, inside a row whose own verdict is PASS: no
+    CANNOT EVALUATE or AssertionError, and its last PASS or FAIL word is PASS."""
+    if "CANNOT EVALUATE" in text or "AssertionError" in text:
+        return False
+    words = _VERDICT_WORD_RE.findall(text)
+    return bool(words) and words[-1] == "PASS"
 
 
 def _failure_evidence(output):
-    """The report lines that keep the evidence of a leg that exited with a positive status: every line
-    of its output naming a failure (_FAILURE_LINE_RE, plus the exception line ending each traceback),
-    in order and numbered, then its last _EVIDENCE_TAIL_LINES lines, numbered. Bounded: the first
-    _EVIDENCE_MAX_FAILURE_LINES failure lines are kept and the number left out is stated, and every
-    line is clipped to _EVIDENCE_LINE_CHARS characters with the number clipped stated, so the joined
-    evidence is at most _EVIDENCE_MAX_CHARS characters. Pure: it reads only output."""
+    """The report lines that keep the evidence of a launched leg that did not exit 0: the lines of its
+    output naming a failure (_FAILURE_LINE_RE, plus the exception line ending each traceback), in
+    order and numbered, then its last _EVIDENCE_TAIL_LINES lines, numbered. Bounded: at most
+    _EVIDENCE_MAX_FAILURE_LINES failure lines are kept, the lines whose own verdict is a failure
+    first (a line naming FAIL inside a row whose verdict is PASS, _passing_mention, only fills what is
+    left), and the number left out is stated; every line is clipped to _EVIDENCE_LINE_CHARS
+    characters with the number clipped stated, so the joined evidence is at most _EVIDENCE_MAX_CHARS
+    characters. Pure: it reads only output."""
     lines = (output or b"").decode("utf-8", "replace").splitlines()
     named = []
     in_traceback = False
     for number, text in enumerate(lines, 1):
         if text.startswith(_TRACEBACK_HEADER):
             in_traceback = True
-            named.append((number, text))
+            named.append((False, number, text))
         elif _FAILURE_LINE_RE.search(text):
-            named.append((number, text))
+            named.append((_passing_mention(text), number, text))
             in_traceback = in_traceback and text[:1].isspace()
         elif in_traceback and text and not text[:1].isspace():
-            named.append((number, text))
+            named.append((False, number, text))
             in_traceback = False
-    kept = named[:_EVIDENCE_MAX_FAILURE_LINES]
+    kept = sorted(sorted(named)[:_EVIDENCE_MAX_FAILURE_LINES], key=lambda item: item[1])
+    kept = [(number, text) for _passing, number, text in kept]
+    passing = sum(1 for item in named if item[0])
     first_tail = max(1, len(lines) - _EVIDENCE_TAIL_LINES + 1)
     evidence = ["failure evidence: {} line(s) naming a failure{}:".format(
-        len(named), "" if len(kept) == len(named) else "; the first {} shown, {} more not shown".format(
-            len(kept), len(named) - len(kept)))]
+        len(named), "" if len(kept) == len(named) else
+        "; {} shown, {} more not shown ({} name FAIL only in a row whose verdict is PASS; those are "
+        "ranked last)".format(len(kept), len(named) - len(kept), passing))]
     evidence.extend(_evidence_line(number, text) for number, text in kept)
     evidence.append("last {} of {} output line(s):".format(len(lines) - first_tail + 1, len(lines)))
     evidence.extend(_evidence_line(number, text)
@@ -1831,8 +1872,8 @@ def _run_one(opf_root, script, args, run_dir, env, bound_s, drain_s=_DRAIN_MARGI
     unless the descendant itself left the group with setpgid() or setsid(), the disclosed residual on
     _kill_and_reap (such a survivor is neither killed nor reaped). Returns
     (rc, output, elapsed_s, launched, cleanup): output is the decoded last lines of what the leg wrote
-    (for a positive rc a _LegOutput, those same lines carrying the leg's bounded failure evidence),
-    or with raw True its WHOLE output (stdout with stderr merged) as the undecoded bytes it wrote, a
+    (for a launched leg that did not exit 0, killed at its bound included, a _LegOutput: those same
+    lines carrying the leg's bounded failure evidence), or with raw True its WHOLE output (stdout with stderr merged) as the undecoded bytes it wrote, a
     launch failure's text encoded UTF-8. rc is None when the leg was killed at its bound (the bound
     tripped; the leg itself reported nothing), a negative rc is a signal this runner did not send (-N
     for signal N; the leg reported no exit status, and the status cannot tell an outside signal from
@@ -1847,6 +1888,11 @@ def _run_one(opf_root, script, args, run_dir, env, bound_s, drain_s=_DRAIN_MARGI
     tools/ tree, so only the copied opf/tools/ is reachable to `python3 -I`."""
     def shaped(stdout):
         return (stdout or b"") if raw else _tail(stdout)
+
+    def kept(stdout):
+        # A leg that did not exit 0 (a positive status, a signal, or a kill at its bound) keeps its
+        # failure evidence beside the final lines, which stay the text the verdict reads (_LegOutput).
+        return (stdout or b"") if raw else _LegOutput(_tail(stdout), _failure_evidence(stdout))
 
     def harness(message):
         return message.encode("utf-8") if raw else message
@@ -1868,7 +1914,7 @@ def _run_one(opf_root, script, args, run_dir, env, bound_s, drain_s=_DRAIN_MARGI
         stdout, _err = proc.communicate(timeout=bound_s)
     except subprocess.TimeoutExpired:
         stdout, cleanup = _kill_and_reap(proc, drain_s)
-        return None, shaped(stdout), time.monotonic() - start, True, cleanup
+        return None, kept(stdout), time.monotonic() - start, True, cleanup
     except BaseException as exc:
         # Any other end of the wait (an OSError reading the pipe, an interrupt) still owns a launched
         # leg: its group is killed, its leader reaped and its pipe closed under the same bounded
@@ -1883,12 +1929,8 @@ def _run_one(opf_root, script, args, run_dir, env, bound_s, drain_s=_DRAIN_MARGI
         for fault in cleanup:
             exc.add_note("CLEANUP INCOMPLETE after the leg's {}: {}".format(type(exc).__name__, fault))
         raise
-    if not raw and proc.returncode > 0:
-        # A positive status is a failure or the leg's cannot-evaluate declaration: keep its failure
-        # evidence beside the final lines, which stay the text the verdict reads (_LegOutput).
-        return (proc.returncode, _LegOutput(_tail(stdout), _failure_evidence(stdout)),
-                time.monotonic() - start, True, [])
-    return proc.returncode, shaped(stdout), time.monotonic() - start, True, []
+    output = shaped(stdout) if proc.returncode == 0 else kept(stdout)
+    return proc.returncode, output, time.monotonic() - start, True, []
 
 
 def _run_subset(opf_root, run_dir, bounds, legs=None):
@@ -1914,11 +1956,25 @@ def _said_cannot_evaluate(row):
     return bool(row[4]) and row[1] == 2 and _CANNOT_EVALUATE_MARKER in (row[2] or "")
 
 
+def _say(text, err=True):
+    """Print one report line, clipped to _REPORT_LINE_CHARS characters with the count clipped stated,
+    to stderr (err True) or stdout, so no line of the report is unbounded (_report_max_chars)."""
+    print(_clip_text(text, _REPORT_LINE_CHARS), file=sys.stderr if err else sys.stdout)
+
+
+def _shown_tail(tail):
+    """A leg's final lines as the report shows them on one line: joined by " | ", each line clipped
+    to _EVIDENCE_LINE_CHARS characters with the count clipped stated. The verdict still reads the
+    unclipped tail (_said_cannot_evaluate)."""
+    return " | ".join(_clip_text(line, _EVIDENCE_LINE_CHARS) for line in tail.split("\n"))
+
+
 def _print_evidence(tail):
-    """Print, indented under a failed or cannot-evaluate leg's summary line, the bounded failure
-    evidence _run_one kept for it (_LegOutput); a row with none (a plain str) prints nothing more."""
+    """Print, indented under a leg's summary line, the bounded failure evidence _run_one kept for a
+    launched leg that did not exit 0 (_LegOutput); a row with none (a plain str) prints nothing
+    more."""
     for line in getattr(tail, "evidence", None) or ():
-        print("    " + line, file=sys.stderr)
+        _say("    " + line)
 
 
 def _report(results):
@@ -1938,15 +1994,19 @@ def _report(results):
     there can end its own leg), so the report says so rather than blame the environment. A killed leg
     whose cleanup did not complete (row[6], the named faults from _kill_and_reap: an unreaped leader, a
     pipe still held by an escaped descendant) is reported as CLEANUP INCOMPLETE by name, and never reads
-    as clean either. A failed or cannot-evaluate leg's summary line is followed by the bounded failure
-    evidence _run_one kept for it (every line naming a failure, then its last lines; _failure_evidence),
-    so the failing row is reported without a re-run; a passing leg's report is unchanged. A sweep that
+    as clean either. The summary line of a leg that failed, declared cannot-evaluate, was ended by a
+    signal or was killed at its bound is followed by the bounded failure evidence _run_one kept for it
+    (up to _EVIDENCE_MAX_FAILURE_LINES lines naming a failure, then its last lines; _failure_evidence),
+    so a failing row that the leg printed and the pattern names is reported without a re-run; a
+    passing leg's report is unchanged. The whole report is bounded: each shown line of a leg's final
+    lines is clipped to _EVIDENCE_LINE_CHARS characters and every printed line to _REPORT_LINE_CHARS,
+    each clip stated, so the report is at most _report_max_chars(len(results)) characters. A sweep that
     ran NO leg proves nothing: an empty results list is refused (2), and the OK line is printed only
     after at least one leg's clean row (the caller separately requires the swept legs to be exactly the
     legs the sweep owes)."""
     if not results:
-        print("STANDALONE CLOSURE: NOT EVALUATED (the sweep ran no leg; an empty sweep proves nothing "
-              "and never reads as clean)", file=sys.stderr)
+        _say("STANDALONE CLOSURE: NOT EVALUATED (the sweep ran no leg; an empty sweep proves nothing "
+             "and never reads as clean)")
         return 2
     failed = [row for row in results
               if row[4] and row[1] is not None and row[1] > 0 and not _said_cannot_evaluate(row)]
@@ -1971,51 +2031,52 @@ def _report(results):
             status = "CANNOT EVALUATE rc=2 ({:.1f}s)".format(elapsed)
         else:
             status = "FAILED rc={} ({:.1f}s)".format(rc, elapsed)
-        print("  {:38s} {}".format(name, status))
+        _say("  {:38s} {}".format(name, status), err=False)
     if failed:
-        print("STANDALONE CLOSURE: BROKEN (the isolated opf/ subtree does not verify itself; an exit 2 "
-              "without the {} marker counts as a failure, fail-closed):".format(_CANNOT_EVALUATE_MARKER),
-              file=sys.stderr)
+        _say("STANDALONE CLOSURE: BROKEN (the isolated opf/ subtree does not verify itself; an exit 2 "
+             "without the {} marker counts as a failure, fail-closed):".format(_CANNOT_EVALUATE_MARKER))
         for name, rc, tail, _elapsed, _launched, _bound, _cleanup in failed:
-            print("  {} (rc={}): {}".format(name, rc, tail.replace("\n", " | ")), file=sys.stderr)
+            _say("  {} (rc={}): {}".format(name, rc, _shown_tail(tail)))
             _print_evidence(tail)
     if cannot:
-        print("STANDALONE CLOSURE: LEG CANNOT EVALUATE (each leg below exited 2 and printed the {} "
-              "marker: it said it could not evaluate its own checks, so closure was not evaluated "
-              "for it):".format(_CANNOT_EVALUATE_MARKER), file=sys.stderr)
+        _say("STANDALONE CLOSURE: LEG CANNOT EVALUATE (each leg below exited 2 and printed the {} "
+             "marker: it said it could not evaluate its own checks, so closure was not evaluated "
+             "for it):".format(_CANNOT_EVALUATE_MARKER))
         for name, _rc, tail, _elapsed, _launched, _bound, _cleanup in cannot:
-            print("  {} (rc=2): {}".format(name, tail.replace("\n", " | ")), file=sys.stderr)
+            _say("  {} (rc=2): {}".format(name, _shown_tail(tail)))
             _print_evidence(tail)
     if unlaunched:
-        print("STANDALONE CLOSURE: NOT EVALUATED (a leg below never launched; the failure is the "
-              "harness's, never the leg's, whatever text it carries):", file=sys.stderr)
+        _say("STANDALONE CLOSURE: NOT EVALUATED (a leg below never launched; the failure is the "
+             "harness's, never the leg's, whatever text it carries):")
         for name, _rc, tail, _elapsed, _launched, _bound, _cleanup in unlaunched:
-            print("  {}: {}".format(name, tail.replace("\n", " | ")), file=sys.stderr)
+            _say("  {}: {}".format(name, _shown_tail(tail)))
     if signalled:
-        print("STANDALONE CLOSURE: NOT EVALUATED (a signal this gate did not send ended each leg below "
-              "before it reported an exit status; the status cannot tell an outside signal, from another "
-              "process, the OOM killer or an interpreter crash, from one the leg or its own process group "
-              "sent itself; closure was not evaluated for it):", file=sys.stderr)
+        _say("STANDALONE CLOSURE: NOT EVALUATED (a signal this gate did not send ended each leg below "
+             "before it reported an exit status; the status cannot tell an outside signal, from another "
+             "process, the OOM killer or an interpreter crash, from one the leg or its own process group "
+             "sent itself; closure was not evaluated for it):")
         for name, rc, tail, elapsed, _launched, _bound, _cleanup in signalled:
-            print("  {}: ended by {} after {:.1f}s; last output: {}".format(
-                name, _signal_name(rc), elapsed, tail.replace("\n", " | ") or "(none)"), file=sys.stderr)
+            _say("  {}: ended by {} after {:.1f}s; last output: {}".format(
+                name, _signal_name(rc), elapsed, _shown_tail(tail) or "(none)"))
+            _print_evidence(tail)
     if timed_out:
-        print("STANDALONE CLOSURE: LEG BOUND EXCEEDED (the gate killed each leg below at its wall-clock bound; "
-              "the bound tripped, not a failure the leg reported, so closure was not evaluated for it):",
-              file=sys.stderr)
+        _say("STANDALONE CLOSURE: LEG BOUND EXCEEDED (the gate killed each leg below at its wall-clock "
+             "bound; the bound tripped, not a failure the leg reported, so closure was not evaluated for "
+             "it):")
         for name, _rc, tail, elapsed, _launched, bound, _cleanup in timed_out:
-            print("  {}: killed at its {}s bound after {:.1f}s; last output: {}".format(
-                name, bound, elapsed, tail.replace("\n", " | ") or "(none)"), file=sys.stderr)
+            _say("  {}: killed at its {}s bound after {:.1f}s; last output: {}".format(
+                name, bound, elapsed, _shown_tail(tail) or "(none)"))
+            _print_evidence(tail)
     if uncleaned:
-        print("STANDALONE CLOSURE: CLEANUP INCOMPLETE (the cleanup after the kill of each leg below did "
-              "not complete; nothing here is claimed reaped or drained):", file=sys.stderr)
+        _say("STANDALONE CLOSURE: CLEANUP INCOMPLETE (the cleanup after the kill of each leg below did "
+             "not complete; nothing here is claimed reaped or drained):")
         for name, _rc, _tail_text, _elapsed, _launched, _bound, cleanup in uncleaned:
-            print("  {}: {}".format(name, "; ".join(cleanup)), file=sys.stderr)
+            _say("  {}: {}".format(name, "; ".join(cleanup)))
     if failed:
         return 1
     if cannot or timed_out or signalled or unlaunched or uncleaned:
         return 2
-    print("STANDALONE CLOSURE: OK (opf/ verifies itself with no AIQT tree reachable)")
+    _say("STANDALONE CLOSURE: OK (opf/ verifies itself with no AIQT tree reachable)", err=False)
     return 0
 
 
@@ -4961,37 +5022,52 @@ def _evidence_sections(evidence):
 
 
 def _failure_evidence_self_test():
-    """A failed or cannot-evaluate leg keeps its failure evidence, bounded, and a passing leg's report
-    is unchanged. Stub legs run through the real runner (_run_one: sys.executable -I -B on a stub
-    script in a temporary directory, the only executable reached; it reads a data file there and
-    writes it out, no network, nothing written outside that directory) and their rows go through
-    _report. MIDDLE LINE: a leg exiting 1 with its one failure line at line 250 of 500 is reported
-    with that line, numbered, and its last 40 lines; the 3-line tail alone, the whole report before
-    this evidence was kept, loses it (the red side, shown on the same row). CANNOT EVALUATE: a leg
+    """A launched leg that did not exit 0 keeps its failure evidence, bounded, the whole report is
+    bounded, and a passing leg's report is unchanged. Stub legs run through the real runner (_run_one:
+    sys.executable -I -B on a stub script in a temporary directory, the only executable reached; it
+    reads a data file there, writes it out, then exits with the status given, ends itself with the
+    signal given, or sleeps for at most 120 s until the runner kills it at its bound; no network,
+    nothing written outside that directory) and their rows go through _report. MIDDLE LINE: a leg
+    exiting 1 with its one failure line at line 250 of 500 is reported with that line, numbered, and
+    its last 40 lines; the 3-line tail alone, the whole report before this evidence was kept, loses it
+    (the red side, shown on the same row). TIMEOUT: a leg that prints a failure line, then 50 progress
+    lines, then hangs is killed at its bound and reported under LEG BOUND EXCEEDED with that failure
+    line (the 3-line tail alone loses it). SIGNAL: a leg that prints a failure line in the middle and
+    then ends itself with SIGTERM is reported with that line, NOT EVALUATED. CANNOT EVALUATE: a leg
     exiting 2 with the marker in its final lines shows its middle failure line under LEG CANNOT
     EVALUATE, and a leg exiting 2 with the marker only in the middle is still BROKEN (the marker is
     still read in the final lines alone). TRACEBACK: a traceback's header and its exception line are
-    kept, an AssertionError line is kept, and lowercase prose such as "fails closed" is not. PASSING: a
-    passing leg's row is a plain str with no evidence, and its report is the OK row and OK line byte
-    for byte. BOUND: failure lines at the cap less one, at the cap and one over it (the count left out
-    stated only over it), a line at the clip length less one, at it and one over it (clipped, the
-    count stated, only over it), outputs of 39, 40 and 41 lines (the last 40 kept), and an output of
-    10000 failure lines of 5000 characters each stays within _EVIDENCE_MAX_CHARS."""
+    kept, an AssertionError line is kept, and lowercase prose such as "fails closed" is not. RANKED:
+    with 500 passing rows that name FAIL inside a PASS verdict and the real failure at line 250, the
+    real failure is kept within the cap. PASSING: a passing leg's row is a plain str with no evidence,
+    and its report is the OK row and OK line byte for byte. BOUND: failure lines at the cap less one,
+    at the cap and one over it (the count left out stated only over it), a line at the clip length
+    less one, at it and one over it (clipped, the count stated, only over it), outputs of 39, 40 and
+    41 lines (the last 40 kept), and an output of 10000 failure lines of 5000 characters each stays
+    within _EVIDENCE_MAX_CHARS (a derived upper bound, not a clip, so it has no over-cap case).
+    REPORT BOUND: a 100,005-character final line in a leg of each kind (failed, cannot evaluate,
+    killed at its bound, ended by a signal, never launched) and a long cleanup fault give a report
+    within _report_max_chars, each such line shown clipped; the old unclipped summary line of one
+    such leg alone is over the cap (the red side); and a report line at _REPORT_LINE_CHARS less one,
+    at it and one over it is clipped, the count stated, only over it."""
     name = "opf-tooling-selftest"
     tmp = Path(tempfile.mkdtemp(prefix="opf-closure-evidence-"))
     try:
         stub_root = tmp / "opf"
         os.makedirs(stub_root / "tools")
         (stub_root / "tools" / "stub_emit.py").write_text(
-            "import sys\nfrom pathlib import Path\nsys.stdout.buffer.write(Path(sys.argv[1]).read_bytes())\n"
-            "sys.stdout.flush()\nsys.exit(int(sys.argv[2]))\n", encoding="utf-8")
+            "import os, sys, time\nfrom pathlib import Path\n"
+            "sys.stdout.buffer.write(Path(sys.argv[1]).read_bytes())\nsys.stdout.flush()\n"
+            "code = int(sys.argv[2])\nif code < 0:\n    os.kill(os.getpid(), -code)\n"
+            "if len(sys.argv) > 3:\n    time.sleep(float(sys.argv[3]))\nsys.exit(code)\n",
+            encoding="utf-8")
         env = _isolated_env()
 
-        def leg(check, lines, rc):
+        def leg(check, lines, rc, hang=None, bound=60):
             data = tmp / "output.txt"
             data.write_text("".join(line + "\n" for line in lines), encoding="utf-8")
-            return _under_test(check, _run_one, stub_root, "stub_emit.py", [str(data), str(rc)], tmp,
-                               env, 60)
+            args = [str(data), str(rc)] + ([] if hang is None else [str(hang)])
+            return _under_test(check, _run_one, stub_root, "stub_emit.py", args, tmp, env, bound)
 
         def reported(check, rows):
             out = io.StringIO()
@@ -5017,6 +5093,37 @@ def _failure_evidence_self_test():
                                 "{!r}".format(rc, code, said))
         print("RED a failing leg whose failure line is in the middle of 500 lines -> the 3-line tail "
               "alone loses it; the report now shows it, numbered, and the last 40 lines")
+
+        failure = "opf verb status self-test: FAIL row 3: expected 'ok', got 'broken'"
+        hung = [failure] + ["opf case {} self-test: running".format(number) for number in range(1, 51)]
+        rc, tail, elapsed, launched, cleanup = leg("failure-evidence-timeout-lost", hung, 0, hang=120,
+                                                   bound=3)
+        row = (name, rc, tail, elapsed, launched, 3, cleanup)
+        _code, before = reported("failure-evidence-timeout-lost", [row[:2] + (str(tail),) + row[3:]])
+        code, said = reported("failure-evidence-timeout-lost", [row])
+        if (rc is not None or not launched or cleanup or not isinstance(tail, _LegOutput)
+                or str(tail) != "\n".join(hung[-3:]) or failure in before or code != 2
+                or "LEG BOUND EXCEEDED" not in said or "      1: " + failure not in said
+                or "      51: opf case 50 self-test: running" not in said or "BROKEN" in said):
+            raise _CheckFailure("closure/failure-evidence-timeout-lost (rc={!r}, exit {}): {!r}".format(
+                rc, code, said))
+        print("RED a leg that prints a failure line, then 50 progress lines, then hangs -> killed at its "
+              "bound, the 3-line tail alone loses the failure line; the report now shows it, numbered")
+
+        ended = list(lines[:100])
+        ended[9] = middle
+        rc, tail, elapsed, launched, cleanup = leg("failure-evidence-signal-lost", ended,
+                                                   -int(signal.SIGTERM))
+        row = (name, rc, tail, elapsed, launched, 60, cleanup)
+        _code, before = reported("failure-evidence-signal-lost", [row[:2] + (str(tail),) + row[3:]])
+        code, said = reported("failure-evidence-signal-lost", [row])
+        if (rc != -int(signal.SIGTERM) or not isinstance(tail, _LegOutput) or middle in before
+                or code != 2 or "ended by SIGTERM" not in said or "      10: " + middle not in said
+                or "BROKEN" in said):
+            raise _CheckFailure("closure/failure-evidence-signal-lost (rc={!r}, exit {}): {!r}".format(
+                rc, code, said))
+        print("RED a leg that prints a failure line and then ends itself with SIGTERM -> the 3-line tail "
+              "alone loses the line; the report now shows it under NOT EVALUATED, numbered")
 
         marker = "OPF-ADOPT-APPLY SELF-TEST: CANNOT EVALUATE (1 bound(s) expired)"
         declared = lines[:499] + [marker]
@@ -5051,6 +5158,25 @@ def _failure_evidence_self_test():
         print("PASS closure/failure-evidence-traceback (the header and the exception line kept, "
               "AssertionError kept, lowercase prose not)")
 
+        crowd = ["opf case {}: FAIL vectors rejected as designed: PASS".format(number)
+                 for number in range(1, 501)]
+        crowd[249] = middle
+        crowd[299] = "opf case 300: expected PASS, got FAIL"
+        evidence = _under_test("failure-evidence-ranked", _failure_evidence,
+                               "\n".join(crowd).encode("utf-8"))
+        named, _tail_lines = _evidence_sections(evidence)
+        first_cut = [number for number, text in enumerate(crowd, 1)
+                     if _FAILURE_LINE_RE.search(text)][:_EVIDENCE_MAX_FAILURE_LINES]
+        if (evidence[0] != "failure evidence: 500 line(s) naming a failure; {} shown, {} more not shown "
+                           "(498 name FAIL only in a row whose verdict is PASS; those are ranked "
+                           "last):".format(_EVIDENCE_MAX_FAILURE_LINES, 500 - _EVIDENCE_MAX_FAILURE_LINES)
+                or len(named) != _EVIDENCE_MAX_FAILURE_LINES or named[0] != "  1: " + crowd[0]
+                or named[-2:] != ["  250: " + middle, "  300: " + crowd[299]] or 250 in first_cut):
+            raise _CheckFailure("closure/failure-evidence-ranked: {!r}".format(evidence[:1] + named[-3:]))
+        print("RED 500 passing rows naming FAIL inside a PASS verdict and the real failure at line 250 "
+              "-> the first {} matches alone lose it; the ranked cap keeps it and a row whose verdict is "
+              "FAIL".format(_EVIDENCE_MAX_FAILURE_LINES))
+
         passing = ["opf case 1: FAIL vectors rejected as designed: PASS", "SELF-TEST PASS"]
         rc, tail, elapsed, launched, cleanup = leg("failure-evidence-passing-changed", passing, 0)
         code, said = reported("failure-evidence-passing-changed",
@@ -5065,8 +5191,9 @@ def _failure_evidence_self_test():
         cap = _EVIDENCE_MAX_FAILURE_LINES
         for count, header in ((cap - 1, "failure evidence: {} line(s) naming a failure:".format(cap - 1)),
                               (cap, "failure evidence: {} line(s) naming a failure:".format(cap)),
-                              (cap + 1, "failure evidence: {} line(s) naming a failure; the first {} "
-                                        "shown, 1 more not shown:".format(cap + 1, cap))):
+                              (cap + 1, "failure evidence: {} line(s) naming a failure; {} shown, 1 "
+                                        "more not shown (0 name FAIL only in a row whose verdict is "
+                                        "PASS; those are ranked last):".format(cap + 1, cap))):
             evidence = _under_test("failure-evidence-bound", _failure_evidence,
                                    "\n".join(["FAIL {}".format(n) for n in range(count)]).encode("utf-8"))
             named, _tail_lines = _evidence_sections(evidence)
@@ -5100,6 +5227,51 @@ def _failure_evidence_self_test():
         print("PASS closure/failure-evidence-bound (failure lines at {} less one, at and over the cap; "
               "a line at {} less one, at and over the clip; 39, 40 and 41 output lines; 10000 lines of "
               "5000 characters -> {} characters, within {})".format(cap, clip, size, _EVIDENCE_MAX_CHARS))
+
+        width = 100005
+        huge = "z" * width
+        clipped = "z" * clip + " [clipped: {} more characters]".format(width - clip)
+
+        def kept_rows(text_lines):
+            data = "".join(line + "\n" for line in text_lines).encode("utf-8")
+            return _LegOutput(_tail(data), _failure_evidence(data))
+
+        rc, tail, elapsed, launched, cleanup = leg("failure-evidence-report-bound", lines[:499] + [huge], 1)
+        rows = [(name, rc, tail, elapsed, launched, 2400, cleanup),
+                (name, 2, kept_rows(lines[:498] + [marker, huge]), 1.0, True, 2400, []),
+                (name, None, kept_rows(lines[:499] + [huge]), 3.0, True, 2400, ["drain-timeout: " + huge]),
+                (name, -9, kept_rows(lines[:499] + [huge]), 2.0, True, 2400, []),
+                (name, 2, huge, 0.0, False, 2400, [])]
+        code, said = reported("failure-evidence-report-bound", rows)
+        _code, alone = reported("failure-evidence-report-bound", rows[:1])
+        old_line = "  {} (rc=1): {}".format(name, str(tail).replace("\n", " | "))
+        longest = max(len(line) for line in said.splitlines())
+        if (rc != 1 or code != 1 or len(said) > _report_max_chars(len(rows)) or said.count(clipped) != 9
+                or len(alone) > _report_max_chars(1)
+                or longest > _REPORT_LINE_CHARS + 48 or "LEG CANNOT EVALUATE" not in said
+                or "  250: " + middle not in said or len(old_line) <= _report_max_chars(1)):
+            raise _CheckFailure("closure/failure-evidence-report-bound ({} characters, cap {}; {} "
+                                "clipped lines, longest {}; exit {})".format(
+                                    len(said), _report_max_chars(len(rows)), said.count(clipped),
+                                    longest, code))
+        prefix = "  {}: ".format(name)
+        for line_width in (_REPORT_LINE_CHARS - 1, _REPORT_LINE_CHARS, _REPORT_LINE_CHARS + 1):
+            fault = "f" * (line_width - len(prefix))
+            _code, shown = reported("failure-evidence-report-bound",
+                                    [(name, None, "", 1.0, True, 2400, [fault])])
+            line = prefix + fault
+            want_line = (line if line_width <= _REPORT_LINE_CHARS else
+                         line[:_REPORT_LINE_CHARS] + " [clipped: 1 more characters]")
+            if shown.splitlines()[-1] != want_line:
+                raise _CheckFailure("closure/failure-evidence-report-bound (a {}-character report line): "
+                                    "{!r}".format(line_width, shown.splitlines()[-1][-60:]))
+        print("RED a {}-character final line in a failed, cannot-evaluate, timed-out, signal-ended and "
+              "never-launched leg and a cleanup fault -> {} characters, within the {}-character report "
+              "cap, each line clipped; the failed leg alone -> {} characters, within its {}-character "
+              "cap, where its old unclipped summary line alone is {} characters; a report line at {} "
+              "less one, at and over the line clip".format(
+                  width, len(said), _report_max_chars(len(rows)), len(alone), _report_max_chars(1),
+                  len(old_line), _REPORT_LINE_CHARS))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
