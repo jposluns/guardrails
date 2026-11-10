@@ -314,7 +314,7 @@ _CONTRACT = {
         _D('Base discovery token: opf.'),
         _D('Status: this specification is a draft.'),
         _D("The reference tooling's status in this build is the generated status note that follows, also published in opf/README.md, on opfiles.ai, and in opf/site/llms.txt (generated from VERB_STATUS in opf/tools/opf.py):"),
-        _D('Reference CLI status. Available: init, render, doctor, absorb. Partial: record (create, transition, done-with-receipt, and worklog-append; receipt-repair exits 2), adopt (plan, approve, reconcile, and status; apply and complete exit 2). In progress: upgrade, import, migrate, sync; each exits 2 in this build.'),
+        _D('Reference CLI status. Available: init, render, doctor, absorb. Partial: record (create, transition, done-with-receipt, and worklog-append; receipt-repair exits 2), adopt (plan, approve, reconcile, and status; apply and complete exit 2), import (prompt, status, and verify). In progress: upgrade, migrate, sync; each exits 2 in this build.'),
         _D('Date: 2026-10-24 (UTC).'),
         _D('OPFiles is a neutral, self-contained operational-files standard published under the Apache License 2.0 (except vendored third-party material, which remains under its own terms).'),
         _D('AIQT and AIQT Guardrails are trademarks (registration pending); AIQT is a brand, not a legal entity, and the standard is authored and maintained by its lead maintainer.'),
@@ -907,6 +907,11 @@ _CONTRACT = {
         'Missingness, ambiguity, conflicts and source precision MUST remain explicit; unmappable text MUST be retained verbatim.',
         'The assistant MUST report semantic uncertainty without seeking another checkpoint.',
         _D('opf import --prompt, --status and --verify expose that activity.'),
+        _D('The import surface is opf.import.surface/v1.'),
+        "opf import --prompt MUST read only the shipped prompt pack and the adoption run's approved plan, MUST print the pack's version, digest and import members and the plan's approved migrate-source scope, MUST refuse a pack that does not verify or does not match the plan's prompt-pack binding, MUST write nothing, and MUST exit 0 on a printed report and 2 on every refusal or cannot-evaluate.",
+        "opf import --status MUST read only the store manifest, the approved plan, the imported series and each frozen migrate source's live bytes, MUST report import_status and each migrate-disposed source's referencing import runs and records, MUST write nothing, and MUST exit 0 on a clean report, 1 on a finding and 2 on a cannot-evaluate.",
+        'opf import --verify MUST evaluate each migrate-disposed source\'s import completion read-only on the live tree, MUST record nothing, and MUST exit 0 only when every source is complete, 1 on an incomplete source and 2 on one it cannot evaluate.',
+        _D('Recording a source\'s result, its retirement and import_status stays with the completion writer, which this surface does not include.'),
         "For each migrate-disposed source, import completion MUST verify the preserved original's digest (the archived copy under section 14.2 for a source that occupied a managed destination, the frozen live file and its apply-archived retirement preimage otherwise), at least one imported record referencing that source or a recorded skip under the approved policy, and doctor VALID over both the strict store and the imported series, evaluated on the live tree.",
         "It MUST record the source's result in the adoption receipt's outcome-event chain.",
         "A green result records the source's retirement: for a frozen live source, an imported and a skipped one alike, one journaled transaction MUST record the retirement and remove the file, whose live bytes MUST still match the plan digest, and hence its apply-archived retirement preimage under completion check 3, when that transaction runs, and an archived source is already out of the live tree, so its recorded retirement changes no live path.",
@@ -1012,6 +1017,7 @@ _CONTRACT = {
         _D('An implementation supports base spec_version 2.0.0 and homes generation 2, the only ones this specification defines (sections 4.2 and 9.2), and the worklog storage generation it declares, and initializes stores directly at them.'),
         _D('The reference tooling does not yet implement base 2.0.0: it still initializes and validates stores at base 1.2.0, a pre-release format this specification does not define, and it makes no claim of conformance to this specification.'),
         _D('The reference tooling\'s opf doctor grades a manifest declaring spec_version = "2.0.0" with homes = 2 under its 1.2.0 rules, so its VALID verdict on such a store says nothing about conformance to this specification, and its opf upgrade and opf record refuse such a store.'),
+        _D('Of post-adoption import, the reference tooling implements only the read-only opf import --prompt, --status and --verify that section 14.1 defines, not the batch writer or the completion writer.'),
         _D('The reference tooling defines no store upgrade: its opf upgrade refuses every invocation with exit 2, reading and writing nothing.'),
         'An implementation MUST declare, in the documentation of each release and in every report its emitter writes, its release identity and its supported spec_version, homes generation, and worklog storage generation.',
         'Each release MUST ship that declaration as one file, the declaration file.',
@@ -5870,6 +5876,14 @@ def _self_test_vectors():
             ("The reference tooling's opf doctor grades a manifest", (
              ('so its VALID verdict on such a store says nothing about conformance to this specification,',
               'so its VALID verdict on such a store shows conformance to this specification,'),
+            )),
+            # The reference tooling's import status: red when the sentence says it implements more
+            # of post-adoption import than the read-only verbs.
+            ('Of post-adoption import, the reference tooling implements only', (
+             ('the reference tooling implements only the read-only',
+              'the reference tooling implements the batch writer and the read-only'),
+             ('not the batch writer or the completion writer.',
+              'and the completion writer.'),
             )),
     ))
     spec_vectors("17", (

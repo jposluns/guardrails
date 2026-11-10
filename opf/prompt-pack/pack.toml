@@ -10,19 +10,19 @@
 # without it), by a deployer that renders a member with a per-project overlay into a
 # per-account command (the member doubles as the render template; its overlay slots and the drift check
 # are specified inside the member) and by an adoption plan's prompt_pack {version, digest} binding,
-# which `opf adopt plan` takes as caller input and checks for shape only; nothing verifies that binding
-# against this manifest yet.
+# which `opf adopt plan` takes as caller input and checks for shape only; `opf import --prompt` verifies
+# this manifest and refuses unless that binding is exactly its version and digest.
 # import/SKILL.md is the post-adoption import procedure, and the import/examples/<type>.batch.toml members
 # are its inert examples, one per baseline record type: each is a canonical opf.record.import-batch/v1 batch
 # that the gate also parses and checks (validate_examples). No writer consumes them in this release;
 # `opf record import --batch` does not exist, and the procedure marks that step not yet executable.
 format = "opf.prompt-pack/v1"
-version = "0.7.2"
-digest = "sha256:dd177258ba6a5222fa508c647a8ae7a70e79c66034bbcf2e0f90fe1c03ccc8ed"
+version = "0.7.3"
+digest = "sha256:e5ae3b52aeae960f707b1a769c53ed8f7dfd736b38a8b4abc0548edffe5682ab"
 
 [[members]]
 path = "adopt/SKILL.md"
-sha256 = "632ae20bcef0f92e47cf377fb9f9131c2562a1fe086873463f018891ce9e8c0b"
+sha256 = "6e795204f11eb9c35acebb9fcf35de57d9dafd11635cdad0486be692d77a80f3"
 
 [[members]]
 path = "adopt/clean-start.md"
@@ -30,11 +30,11 @@ sha256 = "25ac6a39c6c32a429af5f14baae41d877392f40e2fadcb5d26c33a96f34a7068"
 
 [[members]]
 path = "flow/SKILL.md"
-sha256 = "f3fe2d0fb62f8669e7bafa759ed4e06977036d7ce31a8425a13203886a41a39e"
+sha256 = "d6ce745ed071426f57d9d2a6cda620c139cdb24ed99ba554faa42c0dc95fd278"
 
 [[members]]
 path = "import/SKILL.md"
-sha256 = "2557ac6f3307e3b520647b540a2108f2a8079c7dab8e4c40393b28bd154c62b6"
+sha256 = "1b7bfbb260ff215a4a3c3fdd85cbbb59928bdc4ea15afbdaabe7dadd35b3be70"
 
 [[members]]
 path = "import/examples/autonomous_decision.batch.toml"
