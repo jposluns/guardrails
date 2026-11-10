@@ -22,8 +22,8 @@ the hooks dispatcher (.aiqt/core/hooks/scripts/aiqt_hooks.py and its generated p
 copies, because each is a single-file unit that cannot import a sibling; opf/tools/_opf_adopt_complete.py,
 opf/tools/_opf_adopt_state.py, opf/tools/_opf_import_complete.py, tools/check_gitleaks_pin.py,
 tools/check_must_deliver.py and tools/check_verifier_delivery.py carry the same inline copy at their entry
-lines. tools/check_child_status_coverage.py pins every copy to this text by AST and enumerates every entry
-point.
+lines, and opf/tools/_opf_declaration.py and tools/check_opf_declaration.py carry it too.
+tools/check_child_status_coverage.py pins every copy to this text by AST and enumerates every entry point.
 
 A refusal is itself a child exit status, so it reaches a verdict only through a reader that can still see
 statuses: a bash parent reads it correctly under an inherited ignore, and a Python parent that ignores SIGCHLD
@@ -169,13 +169,14 @@ def run_child(args, stdin=""):
     return result.returncode, result.stdout, result.stderr
 
 
-def through_bash(disposition, argv, stdin="", cwd=None):
+def through_bash(disposition, argv, stdin="", cwd=None, pass_fds=()):
     """Run argv under the trampoline's disposition ("ignore" or "default") as the child of bash, which reads its
-    exit status: (status as bash read it or None, stdout without bash's status line, stderr)."""
+    exit status, with pass_fds left open at their own numbers: (status as bash read it or None, stdout without
+    bash's status line, stderr)."""
     command = [sys.executable, "-I", "-B", "-c", TRAMPOLINE, disposition, "bash", "-c", BASH_READER, "bash"]
     try:
         result = subprocess.run(command + list(argv), input=stdin, capture_output=True, text=True,
-                                timeout=CHILD_TIMEOUT, env=child_env(), cwd=cwd)
+                                timeout=CHILD_TIMEOUT, env=child_env(), cwd=cwd, pass_fds=pass_fds)
     except (OSError, subprocess.SubprocessError) as exc:
         return None, "launch failed ({})".format(type(exc).__name__), ""
     head, _, last = result.stdout.rstrip("\n").rpartition("\n")

@@ -119,8 +119,12 @@ def _value(v):
         return elems
     if v in ("true", "false"):
         return v == "true"
-    if re.fullmatch(r'-?\d+', v):
+    if re.fullmatch(r'-?\d+', v, re.ASCII):
         return int(v)
+    # str.isdecimal is the Unicode \d set: an integer written in another script's digits is refused, never
+    # kept as a string that int() would read as a number.
+    if v.removeprefix("-").isdecimal():
+        raise ValueError("integer {} is written with non-ASCII digits (use 0-9)".format(ascii(v)))
     return v
 
 
@@ -498,6 +502,24 @@ def self_test_main():
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     failures.extend(_map_keys_refusal_failures())
+    # An integer value is ASCII digits only: Arabic-Indic and fullwidth digits are refused, never kept
+    # as a string or read as the int that int() would make of them.
+    for text in ("١٢", "１２", "-١", "1٢"):
+        try:
+            got = _value(text)
+        except ValueError as exc:
+            if "non-ASCII digits" not in str(exc):
+                failures.append("the non-ASCII digit value {} expected the non-ASCII digits error, got {}"
+                                .format(ascii(text), exc))
+        else:
+            failures.append("the non-ASCII digit value {} expected a refusal, got {!r}".format(
+                ascii(text), got))
+    for text in ("-", "--1", "v12"):
+        if _value(text) != text:
+            failures.append("the bare value {} expected to stay a string, got {!r}".format(
+                ascii(text), _value(text)))
+    if _value("-12") != -12:
+        failures.append("the ASCII value -12 expected the int -12, got {!r}".format(_value("-12")))
 
     if failures:
         print("SELF-TEST FAIL:")

@@ -2605,17 +2605,19 @@ def self_test_main(_vectors=True):
     writable. Each catch is narrow: the RuntimeError must carry the lifecycle's message, and the
     allocation failure is typed at the allocation call itself (_mark_setup_allocations), so an
     OSError from the lifecycle wrapper's write_text or chmod, and anything raised after entry
-    (entered), still propagates."""
-    from _git_fixture_env import fixture_git_lifecycle, scrub_git_environment
+    (entered), still propagates. The lifecycle itself is entered in _self_test_main_lifecycle,
+    which holds the lifecycle allowlist's shape; on_entry, its one listed statement in the with,
+    lifts the allocation typing and marks the setup entered before the isolated cases run."""
     failures = []
-    entered = False
+    entered = []
     restore_mkdtemp = _mark_setup_allocations()
+
+    def on_entry():
+        restore_mkdtemp()
+        entered.append(True)
+
     try:
-        scrub_git_environment()
-        with fixture_git_lifecycle():
-            restore_mkdtemp()
-            entered = True
-            return _self_test_main_isolated(_vectors=_vectors)
+        return _self_test_main_lifecycle(_vectors, on_entry)
     except RuntimeError as exc:
         if entered or "self-test requires git" not in str(exc):
             raise
@@ -2634,6 +2636,15 @@ def self_test_main(_vectors=True):
     return 1
 
 
+def _self_test_main_lifecycle(_vectors, on_entry):
+    # The lifecycle applies the git fixture scrub itself after saving the caller's environment; a
+    # scrub before it would make it save, and so restore, the already scrubbed values.
+    from _git_fixture_env import fixture_git_lifecycle
+    with fixture_git_lifecycle():
+        on_entry()
+        return _self_test_main_isolated(_vectors)
+
+
 def _nested_entry_no_vectors():
     """Every IN-PROCESS nested public-entry call in _not_run_vectors goes through this seam:
     the EXPLICIT no-vectors argument (never the environment, which the in-process nesting
@@ -2644,7 +2655,7 @@ def _nested_entry_no_vectors():
     return self_test_main(_vectors=False)
 
 
-def _self_test_main_isolated(_mkdtemp=None, _symlink=None, _which=None, _vectors=True):
+def _self_test_main_isolated(_vectors=True, _mkdtemp=None, _symlink=None, _which=None):
     from _git_fixture_env import scrub_git_environment
     scrub_git_environment()
     name, email = "Jeff Posluns", "jeff@posluns.ca"
@@ -3375,6 +3386,19 @@ def _self_test_main_isolated(_mkdtemp=None, _symlink=None, _which=None, _vectors
         # direct git launches and the launcher-timeout child's plain descendant stay
         # outside that launcher, as its docstring states).
         _not_run_vectors(failures)
+        # An in-process call of self_test_main() hands the caller's environment back exactly
+        # (HOME, XDG_CONFIG_HOME, the GIT_CONFIG_* pins and the caller's own GIT_* variables),
+        # with the git fixture scrub in effect inside: the entry point is run in a child around
+        # a stand-in main, once with each _vectors value so a constant passed in its place
+        # fails. The probe's child is not a vector-entry child: the stand-in replaces the
+        # isolated main, so it cannot recurse, and it runs only here, never in a marked child
+        # (which launches nothing) or a nested no-vectors run.
+        from _entry_restore_selftest import entry_restore_failures
+        failures.extend(
+            entry_restore_failures(__file__, "self_test_main", "_self_test_main_isolated",
+                                   args=(True,))
+            + entry_restore_failures(__file__, "self_test_main", "_self_test_main_isolated",
+                                     args=(False,)))
 
     if failures:
         print("SELF-TEST FAIL:")

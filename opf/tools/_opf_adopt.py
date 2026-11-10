@@ -446,6 +446,11 @@ def _is_schema_version(value):
 # semantics, never a more permissive proxy):
 #   "filepath"  a contained relpath that names a FILE operand -> _is_contained_filepath (rejects `.`).
 #   "dirpath"   a contained relpath that names a DIRECTORY / store root -> _is_contained_relpath (allows `.`).
+#   "sourcepath" a contained relpath that names a release-manifest source FILE -> _is_contained_filepath,
+#               which refuses every form the apply's release gather refuses (an absolute path, `..`, `.`,
+#               an empty component, a trailing `/`, a backslash, a control character), so such a plan is
+#               refused before it freezes; a release path, never a product operand, so the control-area
+#               and product-path checks that "filepath" feeds never see it.
 #   "digest"    sha256:hex -> _is_digest.  "token" a non-empty single-line str -> _is_token.
 #   "hook-entry" the enable-hook command -> _is_hook_entry (exactly HOOK_COMMAND, never other command text).
 #   "members"   a list of {path (file), digest} tables, each path relative to the op's store_root: the exact
@@ -460,7 +465,7 @@ _FIELD_KINDS = {
     "content_digest": "digest", "source_digest": "digest", "preimage_digest": "digest",
     "old_digest": "digest", "new_digest": "digest",
     "receipt_core_digest": "digest",
-    "source_member": "token", "plugin_entry": "hook-entry", "note": "token",
+    "source_member": "sourcepath", "plugin_entry": "hook-entry", "note": "token",
     "members": "members",
 }
 
@@ -1026,7 +1031,7 @@ def _control_operand_findings(name, row, homes):
 
 def _valid_field(field, value):
     kind = _FIELD_KINDS[field]
-    if kind == "filepath":
+    if kind in ("filepath", "sourcepath"):
         return _is_contained_filepath(value)
     if kind == "dirpath":
         return _is_contained_relpath(value)
@@ -3663,6 +3668,34 @@ def self_test():
     check("plan-v2-pack-source-adapter-elsewhere-valid", _findings_of(lambda p: _insert(p, [{
         "op": "plant-governance", "path": "docs/GOVERNANCE.md", "content_digest": _D5,
         "source_member": "governance/GOVERNANCE.md"}])).status == VALID)
+    # 19c': a plant row's source_member is a contained relative FILE path, refused at plan validation, so a
+    # plan naming an absolute or traversing source never freezes to be refused only at apply. Each vector
+    # also runs under the flip that restores the token kind, where the refused form validates (red against a
+    # source_member typed "token"); the accepted form validates under both.
+
+    def _sourced(source, kind=None):
+        # validate_plan over a plant row sourcing `source`, under the shipped kind, or under `kind` (the flip)
+        saved = _FIELD_KINDS["source_member"]
+        _FIELD_KINDS["source_member"] = kind or saved
+        try:
+            return _findings_of(lambda p: _insert(p, [{
+                "op": "plant-governance", "path": "docs/GOVERNANCE.md", "content_digest": _D5,
+                "source_member": source}]))
+        finally:
+            _FIELD_KINDS["source_member"] = saved
+    _malformed = "op 'plant-governance' field 'source_member' has a malformed value"
+    for label, source in (("absolute", "/governance/GOVERNANCE.md"),
+                          ("dotdot", "../governance/GOVERNANCE.md"),
+                          ("inner-dotdot", "governance/../GOVERNANCE.md"), ("dot", "."),
+                          ("dot-component", "governance/./GOVERNANCE.md"),
+                          ("empty-component", "governance//GOVERNANCE.md"), ("trailing-slash", "governance/"),
+                          ("backslash", "governance\\GOVERNANCE.md")):
+        refused, flipped = _sourced(source), _sourced(source, "token")
+        check("plan-v2-source-member-{}-invalid".format(label), refused.status == INVALID
+              and len(refused.findings) == 1 and refused.findings[0].endswith(": " + _malformed)
+              and flipped.status == VALID)
+    check("plan-v2-source-member-contained-valid", _sourced("governance/GOVERNANCE.md").status == VALID
+          and _sourced("governance/GOVERNANCE.md", "token").status == VALID)
     # 19d: a plan registering HOOK_COMMAND (by the template plant or an enable-hook) plants the hook it runs
     # (red against a validate_plan without _hook_target_refusal, where both refusal vectors are VALID).
     for label, mutate in (("template", _drop(HOOK_MEMBER)),
