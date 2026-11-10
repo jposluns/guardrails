@@ -14387,6 +14387,108 @@ def _main_isolated(monitor):
                     failures.append("(pl239-{}): expected the no-finding wording, got {!r}"
                                     .format(_case, _pl239_reason))
 
+        # A lone commit on main in the genuinely no-remote repository (nr_ctl) passes the no-remote
+        # exemption with every real probe of its proof. (pl239-exempt-deadline-*) then stalls a real
+        # substitute probe (a child that sleeps far past the production probe limit) at the n-th
+        # budget checkpoint after the proof completed, for every n until the command allows: the
+        # checkpoint after the remote probes in _commit_issue, the top of the loop for a later cd
+        # step, and the one after the loop. Each stall must still deny, name the branch, say that the
+        # exemption was proved and that a retry may pass, and must not say the commit needs that proof
+        # or that a retry may still deny it; reverting the exempt wording turns every row red. The
+        # sweep must reach each listed checkpoint, and the first n past the last one must allow.
+        # (pl239-exempt-deadline-control) raises the deadline at the remote probe of the same
+        # repository, before the proof completed, and must keep the unproved-exemption wording.
+        _pl239_real_remaining = aiqt_hooks._commit_remaining
+        _pl239_real_has_remote = aiqt_hooks._repo_has_remote
+        _pl239_nr = str(nr_ctl)
+        _pl239_exempt_wording = "had already proved the lone no-remote exemption"
+        for _case, _cwd, _command, _checkpoints in (
+                ("lone", _pl239_nr, "git commit --allow-empty -m x", 2),
+                ("cd-before", plr, "cd " + shlex.quote(_pl239_nr) + " && git commit --allow-empty -m x", 2),
+                ("cd-after", _pl239_nr, "git commit --allow-empty -m x && cd /", 3)):
+            _pl239_fired = 0
+            for _pl239_position in range(1, _checkpoints + 2):
+                _pl239_state = {"proved": False, "left": _pl239_position}
+                _pl239_reads = []
+
+                def _pl239_proof_has_remote(repo, deadline):
+                    result = _pl239_real_has_remote(repo, deadline)
+                    if result is False:
+                        _pl239_state["proved"] = True
+                    return result
+
+                def _pl239_stalling_remaining(deadline):
+                    if _pl239_state["proved"] and _pl239_state["left"] > 0:
+                        _pl239_state["left"] -= 1
+                        if _pl239_state["left"] == 0:
+                            _pl239_reads.append(deadline)
+                            _pl239_production_probe_run(
+                                [sys.executable, "-I", "-B", "-c", "import time; time.sleep(30)"], deadline)
+                    return _pl239_real_remaining(deadline)
+
+                aiqt_hooks._repo_has_remote = _pl239_proof_has_remote
+                aiqt_hooks._commit_remaining = _pl239_stalling_remaining
+                try:
+                    _pl239_code, _pl239_obj, _pl239_stderr = plg(
+                        {"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                         "tool_input": {"command": _command}, "cwd": _cwd})
+                finally:
+                    aiqt_hooks._repo_has_remote = _pl239_real_has_remote
+                    aiqt_hooks._commit_remaining = _pl239_real_remaining
+                _pl239_got = _reduce_result(_pl239_code, _pl239_obj)
+                _pl239_reason = (_pl239_obj.get("hookSpecificOutput", {}).get("permissionDecisionReason", "")
+                                 if isinstance(_pl239_obj, dict) else "")
+                _pl239_label = "(pl239-exempt-deadline-{}-{})".format(_case, _pl239_position)
+                if not _pl239_state["proved"]:
+                    failures.append("{}: the no-remote exemption was not proved before the stall"
+                                    .format(_pl239_label))
+                if not _pl239_reads:
+                    if _pl239_got != "allow" or (_pl239_code, _pl239_obj, _pl239_stderr) != (0, None, None):
+                        failures.append("{}: with no checkpoint left to stall the exemption must allow "
+                                        "silently, got {!r}".format(_pl239_label,
+                                                                    (_pl239_code, _pl239_obj, _pl239_stderr)))
+                    break
+                _pl239_fired += 1
+                if _pl239_got != "deny":
+                    failures.append("{}: expected deny, got {}".format(_pl239_label, _pl239_got))
+                for wanted in ("ran out of time on this host",
+                               "would commit on protected branch 'refs/heads/main'",
+                               _pl239_exempt_wording, "may pass"):
+                    if wanted not in _pl239_reason:
+                        failures.append("{}: expected {!r}, got {!r}".format(_pl239_label, wanted, _pl239_reason))
+                for wrong in ("needs a completed proof", "may still deny it",
+                              "found no commit of this command on a protected branch",
+                              "Commit denied because no admitted proof", "remote absence could not be proved",
+                              "commit probe failed"):
+                    if wrong in _pl239_reason:
+                        failures.append("{}: a timeout after a proved exemption must not render {!r}, got {!r}"
+                                        .format(_pl239_label, wrong, _pl239_reason))
+                if len(_pl239_reads) != 1:
+                    failures.append("{}: stalled probe not reached exactly once: {!r}"
+                                    .format(_pl239_label, _pl239_reads))
+            if _pl239_fired != _checkpoints:
+                failures.append("(pl239-exempt-deadline-{}): expected a stall at each of {} checkpoints after "
+                                "the proof and an allow past them, stalled {}"
+                                .format(_case, _checkpoints, _pl239_fired))
+        _pl239_reads = []
+
+        def _pl239_nr_deadline_git(repo, deadline, *args):
+            if args == ("remote",) and repo == _pl239_nr:
+                _pl239_reads.append(repo)
+                raise aiqt_hooks._CommitDeadlineExhausted(aiqt_hooks._COMMIT_DEADLINE_DETAIL)
+            return _pl239_original_git(repo, deadline, *args)
+
+        aiqt_hooks._commit_git = _pl239_nr_deadline_git
+        try:
+            _pl239_got, _pl239_reason = _pl239_judge_commit(_pl239_nr)
+        finally:
+            aiqt_hooks._commit_git = _pl239_original_git
+        _pl239_check_protected_timeout_denial("(pl239-exempt-deadline-control)", _pl239_got, _pl239_reason,
+                                              _pl239_reads)
+        if _pl239_exempt_wording in _pl239_reason:
+            failures.append("(pl239-exempt-deadline-control): a timeout before the exemption was proved must "
+                            "not say it was proved, got {!r}".format(_pl239_reason))
+
         # _repo_has_remote tells a timeout from any other probe failure by the exception's type, never by
         # its message: a plain _CommitCannotEvaluate whose text happens to equal the deadline detail is an
         # ordinary failure (None, remote absence unproved), while _CommitDeadlineExhausted propagates.

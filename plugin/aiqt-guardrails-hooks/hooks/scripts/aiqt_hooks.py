@@ -12931,7 +12931,7 @@ _CommitCertificate = collections.namedtuple(
 # or an unproved remote absence), and for a timeout the one it had found before time ran out;
 # it is None when no protected branch was found.
 _CommitEvidence = collections.namedtuple(
-    "_CommitEvidence", ("state", "certificate", "detail", "protected"), defaults=(None,))
+    "_CommitEvidence", ("state", "certificate", "detail", "protected", "exempt"), defaults=(None, False))
 
 
 def _commit_raw_literal(raw):
@@ -13558,15 +13558,20 @@ def _push_protected(tokens, args, cwd):
                         "itself".format(act, head), act_noun)
     return None  # HEAD provably a non-protected branch: the forced or deleted target is off the protected line
 
-# One evaluation gets seven seconds, including parsing, Git and filesystem probes.
-# tools/gen_hooks.py gives the hook ten seconds. No probe resets this deadline.
+# One evaluation gets seven seconds, counted from before the command is parsed: parsing uses up
+# that budget but is never cut off by it, and the budget is checked as evaluation starts, at each
+# step and before each Git or filesystem probe. No probe resets this deadline. tools/gen_hooks.py
+# gives the hook ten seconds, and the whole PreToolUse run has its own eight-second window
+# (PRETOOL_BUDGET_SECONDS in _DeadlineWindow): when that window ends first, the hook exits 2 with
+# its own note, and no commit denial below is reached.
 _COMMIT_SECONDS = 7.0
 _COMMIT_PROBE_SECONDS = 2.0
 _COMMIT_PROBE_BYTES = 65536
 # The one detail an exhausted time budget raises, as _CommitDeadlineExhausted. That type (never this
 # text) becomes the "timeout" evidence state, which _commit_denial renders as a timeout denial: still
 # a deny (fail-closed), worded as the check running out of time on this host. It names a protected
-# branch only when the check had already found one before time ran out, and otherwise states that no
+# branch only when the check had already found one before time ran out, states that the lone
+# no-remote exemption was proved only when that proof had completed, and otherwise states that no
 # protected-branch finding was reached.
 _COMMIT_DEADLINE_DETAIL = "commit evaluation deadline exhausted"
 
@@ -13580,12 +13585,14 @@ class _CommitDeadlineExhausted(_CommitCannotEvaluate):
     on the whole path: _repo_has_remote re-raises it, _commit_evaluate turns it into the "timeout"
     evidence state, and _commit_denial picks the timeout wording from that state alone, so another
     failure whose text happens to match is not read as a timeout. protected names the protected
-    branch the check had already found when time ran out (set by _commit_issue when the remote
-    probe of the no-remote exemption times out), else None."""
+    branch the check had already found when time ran out (set by _commit_issue when the no-remote
+    exemption's probes or its checkpoint run out of time), else None. exempt is True only when that
+    exemption's proof had completed (the remote absence was proved) before time ran out."""
 
-    def __init__(self, detail, protected=None):
+    def __init__(self, detail, protected=None, exempt=False):
         super().__init__(detail)
         self.protected = protected
+        self.exempt = exempt
 
 
 def _commit_remaining(deadline):
@@ -13637,8 +13644,10 @@ def _commit_run(argv, deadline):
     except _CommitCannotEvaluate:
         raise
     except subprocess.TimeoutExpired as exc:
-        # A probe that closed its output but outlived its time is the budget running out (the wait
-        # above is bounded by the same deadline), so it renders as the timeout denial, still a deny.
+        # A probe that closed its output but outlived its time is a time budget running out: the
+        # wait above is bounded by this probe's end, the earlier of the evaluation deadline and the
+        # per-probe limit, so it is usually the per-probe limit. It renders as the timeout denial,
+        # still a deny.
         raise _CommitDeadlineExhausted(_COMMIT_DEADLINE_DETAIL) from exc
     except (OSError, ValueError, subprocess.SubprocessError) as exc:
         raise _CommitCannotEvaluate("commit probe failed: " + type(exc).__name__) from exc
@@ -13841,13 +13850,15 @@ def _commit_issue(syntax, index, step, target, post, deadline):
         # for the repository this commit targets; only admitted cd/pushd segments may accompany it.
         if (len(syntax.commit_indexes) == 1 and post is None
                 and all(other is step or other.kind == "cd" for other in syntax.steps)):
+            remote = None
             try:
                 remote = _repo_has_remote(target.directory, deadline)
                 _commit_remaining(deadline)
             except _CommitDeadlineExhausted as exc:
-                # The branch is already found protected here; only the no-remote exemption's proof
-                # ran out of time, so the timeout carries that verdict into its denial.
-                raise _CommitDeadlineExhausted(str(exc), branch) from exc
+                # The branch is already found protected here, so the timeout carries that verdict
+                # into its denial, and whether the exemption's proof had completed (remote absence
+                # proved before this checkpoint ran out) or itself ran out of time.
+                raise _CommitDeadlineExhausted(str(exc), branch, remote is False) from exc
             if remote is False:
                 certificate = _CommitCertificate("D", index, target.identity, branch, None)
                 return _CommitEvidence("proved", certificate, "D: lone commit; target has no remote",
@@ -13921,13 +13932,15 @@ def _commit_evaluate(syntax, cwd, deadline):
         return tuple(evidence)
     except _CommitDeadlineExhausted as exc:
         # By type, before the base class: the denial wording follows this state, never the text. A
-        # protected branch found before time ran out (in this commit's remote probe, or for an
-        # earlier commit of the command) travels with the timeout, so its denial keeps that verdict.
-        found = exc.protected
+        # protected branch found before time ran out (in this commit's no-remote exemption, or for
+        # an earlier commit of the command) travels with the timeout, so its denial keeps that
+        # verdict, and so does a completed exemption proof: a proved D evidence is the only proved
+        # one that names a protected branch, and a later checkpoint can still run out after it.
+        found, exempt = exc.protected, exc.exempt
         for item in evidence:
-            if found is None:
-                found = item.protected
-        return (_CommitEvidence("timeout", None, str(exc), found),)
+            if found is None and item.protected is not None:
+                found, exempt = item.protected, item.state == "proved"
+        return (_CommitEvidence("timeout", None, str(exc), found, exempt),)
     except _CommitCannotEvaluate as exc:
         return (_CommitEvidence("unverifiable", None, str(exc)),)
 
@@ -13952,12 +13965,29 @@ def _commit_on_protected(evidence):
     return ("deny", "missing commit evidence")
 
 
-def _commit_denial(detail, timed_out=False, protected=None):
+def _commit_denial(detail, timed_out=False, protected=None, exempt=False):
     """The artbr1 commit denial. timed_out (True only for the "timeout" evidence state, set by type
     from _CommitDeadlineExhausted) selects the timeout wording; the detail text never does. For a
     timeout, protected (the evidence's protected field) names the protected branch the check had
     already found before time ran out: the denial then states that verdict, and the wording that
-    no protected branch was found is kept for a timeout with no such branch."""
+    no protected branch was found is kept for a timeout with no such branch. exempt (the evidence's
+    exempt field) is True only when the lone no-remote exemption for that branch had been proved
+    before time ran out: the denial then says so and that a retry may pass, instead of saying the
+    commit needs that proof."""
+    if timed_out is True and isinstance(protected, str) and exempt is True:
+        return _deny(
+            "AIQT rule artbr1 (branch-and-merge-on-green): " + detail + ": the protected-branch check "
+            "had found that this command would commit on protected branch " + repr(protected) + " and "
+            "had already proved the lone no-remote exemption for that commit (the repository has no "
+            "remote), but it ran out of time on this host before it finished, so the commit is denied "
+            "fail-closed (a timed-out check cannot allow, even after that proof). Retrying the same "
+            "command when the host is less busy may pass, as the exemption is proved again. Use a "
+            "separate plain feature-branch commit, or an exact absolute 'git -C /worktree commit' with "
+            "a proved non-protected branch; an admitted switch may precede it through &&. "
+            + _PROTECTED_ALTS,
+            "AIQT guardrail: denied a commit on protected branch " + repr(protected) + " in a "
+            "repository proved to have no remote, whose check then ran out of time on this host (rule "
+            "artbr1, fail-closed); a retry on a less busy host may pass.")
     if timed_out is True and isinstance(protected, str):
         return _deny(
             "AIQT rule artbr1 (branch-and-merge-on-green): " + detail + ": the protected-branch check "
@@ -13973,13 +14003,12 @@ def _commit_denial(detail, timed_out=False, protected=None):
     if timed_out is True:
         return _deny(
             "AIQT rule artbr1 (branch-and-merge-on-green): " + detail + ": the protected-branch check "
-            "ran out of time on this host before its Git and filesystem probes finished, so the commit "
-            "is denied fail-closed (a timed-out check cannot allow). This is not a finding that the "
-            "commit is on a protected branch: the check found no commit of this command on a protected "
-            "branch before time ran out, and retrying the same command when the host is less busy may "
-            "pass. Use a separate plain feature-branch commit, or an exact absolute 'git -C /worktree "
-            "commit' with a proved non-protected branch; an admitted switch may precede it through &&. "
-            + _PROTECTED_ALTS,
+            "ran out of time on this host before it finished, so the commit is denied fail-closed (a "
+            "timed-out check cannot allow). This is not a finding that the commit is on a protected "
+            "branch: the check found no commit of this command on a protected branch before time ran "
+            "out, and retrying the same command when the host is less busy may pass. Use a separate "
+            "plain feature-branch commit, or an exact absolute 'git -C /worktree commit' with a proved "
+            "non-protected branch; an admitted switch may precede it through &&. " + _PROTECTED_ALTS,
             "AIQT guardrail: denied a commit whose check ran out of time on this host (rule artbr1, "
             "fail-closed), not a protected-branch finding; a retry on a less busy host may pass.")
     return _deny(
@@ -14380,7 +14409,8 @@ def protected_line(data):
             outcome = _commit_on_protected(item)
             if outcome is not None:
                 return _commit_denial(outcome[1], timed_out=outcome[0] == "timeout",
-                                      protected=getattr(item, "protected", None))
+                                      protected=getattr(item, "protected", None),
+                                      exempt=getattr(item, "exempt", False))
         return _allow()
 
     # Only commit-free commands reach the existing push classifier/help shortcut.
