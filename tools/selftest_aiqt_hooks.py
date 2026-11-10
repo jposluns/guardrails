@@ -6455,6 +6455,7 @@ _DEADLINE_CASES = {
     "inline_errexit": ("sep_semicolon", "heredocs", "nest_parens", "cd_git_fetch_unbal", "errexit_guarded",
                        "errexit_nest_parens", "errexit_case_arms", "errexit_note_after", "errexit_unread_after"),
     "orch_ask_guard": ("ask_long",),
+    "orch_deliverable_exec_guard": ("git_words", "nest_cmdsubst"),
     "orch_resume_barrier": ("git_words", "write_content"),
     "orch_truncation_guard": ("nest_cmdsubst_background", "git_words"),
     "orch_untracked_wait_loop": ("git_words", "nest_cmdsubst"),
