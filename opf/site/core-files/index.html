@@ -70,7 +70,7 @@ governance = false</pre>
 <p>Present only while a run holds the store's single-writer lease; its absence is the normal state.</p>
 <p class="lbl sec">Record indexes</p>
 <h2 id="backlog-item">The backlog</h2>
-<p>11 baseline typed indexes, their declared generated views, and the planned module schemas. One record per unit of planned work, with a permanent ID, a closed set of states, and a "done" that is ratified.</p>
+<p>11 baseline typed indexes, their declared generated views, and the module record schemas the specification states. One record per unit of planned work, with a permanent ID, a closed set of states, and a "done" that is ratified.</p>
 <h3 id="done">Completion receipts</h3>
 <p>A durable completion receipt, created in its single terminal state and immutable from birth.</p><p>Created by <code>opf init</code> (empty index), by the ratified-done transition, and, as migrated history with provenance, by import (the reference CLI's retired importer, or post-adoption import, which the reference CLI does not implement yet); never updated, since records are immutable, though rotation relocates aged receipts to the archive; read by <code>opf render</code> (DONE.md and the mirror) and validated by <code>opf doctor</code> (schema, uniqueness, the one-to-one receipt link).</p>
 <h3 id="finding">The finding register</h3>

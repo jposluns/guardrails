@@ -129,9 +129,9 @@ def _finding_sites(source, check):
         for start, column, _, _ in sites))
 
     check("F2g-census-recognized-emissions", not unsupported)
-    # 67 append sites (including the directly exercised defensive helper)
+    # 69 append sites (including the directly exercised defensive helper)
     # plus 5 CANNOT_EVALUATE returns in the validator's local call graph.
-    check("F2g-census-site-count-72", len(sites) == 72)
+    check("F2g-census-site-count-74", len(sites) == 74)
     return sites
 
 
@@ -204,7 +204,7 @@ def _census_regressions(source, check):
     function.body[1].body[0] = ast.Pass()
     failures = []
     _finding_sites(ast.unparse(tree), lambda name, ok: failures.append(name) if not ok else None)
-    check("F2g-census-rejects-shrink", failures == ["F2g-census-site-count-72"])
+    check("F2g-census-rejects-shrink", failures == ["F2g-census-site-count-74"])
 
     tree = _optlevel.parse(source)
     helper = next(n for n in tree.body
@@ -218,7 +218,7 @@ if not isinstance(prof.get("base_compat"), str):
     failures = []
     _finding_sites(ast.unparse(tree), lambda name, ok: failures.append(name) if not ok else None)
     check("F2h-census-rejects-reachable-same-wording",
-          "F2g-census-site-count-72" in failures)
+          "F2g-census-site-count-74" in failures)
 
     duplicate = source.replace(
         'findings.append("[profiles] is not a table")',
@@ -227,7 +227,7 @@ if not isinstance(prof.get("base_compat"), str):
     failures = []
     _finding_sites(duplicate, lambda name, ok: failures.append(name) if not ok else None)
     check("F2h-census-rejects-same-line",
-          "F2g-census-site-count-72" in failures
+          "F2g-census-site-count-74" in failures
           and "F2h-census-unambiguous-lines" in failures)
 
 
@@ -366,6 +366,9 @@ def manifest_cases(check):
     add("type-module-disabled", ("types", "session_lease"), {"namespace": "SL"})
     add("type-reserved", ("types", "transaction"), {"namespace": "TX"})
     add("type-unknown", ("types", "unknown"), {"namespace": "ZZ"})
+    add("type-tier-vocabulary", ("types", "tier_assessment"),
+        {"namespace": "TA", "tier_vocabulary": []})
+    add("layout-module-coupling", ("opf", "layout"), "per-record")
     for section in ("providers", "views", "deliverables"):
         add(section + "-entry-table", (section, "fixture"), [])
         add(section + "-entry-unknown", (section, "fixture"), {"unknown": True})

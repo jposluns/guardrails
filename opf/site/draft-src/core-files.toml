@@ -147,7 +147,7 @@ rail = "Record indexes"
 
 [[body]]
 component = "prose"
-html = '''<p>11 baseline typed indexes, their declared generated views, and the planned module schemas. One record per unit of planned work, with a permanent ID, a closed set of states, and a "done" that is ratified.</p>'''
+html = '''<p>11 baseline typed indexes, their declared generated views, and the module record schemas the specification states. One record per unit of planned work, with a permanent ID, a closed set of states, and a "done" that is ratified.</p>'''
 
 [[body]]
 component = "subhead"
