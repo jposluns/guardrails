@@ -63,7 +63,9 @@ if tuple(sys.version_info[:2]) < (3, 14):
         pass
     os._exit(2)
 
+import os
 import re
+import stat
 from pathlib import Path
 
 try:
@@ -437,20 +439,51 @@ def scan_file(root, path, binding, telemetry):
     return findings
 
 
+_lstat = os.lstat  # the self-test replaces this to inject a permission error a privileged runner never sees
+
+
+def config_present(root):
+    """Classify the configuration path under root by a no-follow lstat of each component (.aiqt, then the
+    file). False when a component is genuinely absent (the NOT APPLICABLE case); True when .aiqt is a real
+    directory and the configuration a regular file. Anything else is a GateError naming the path: a
+    component that cannot be inspected (a permission or other OSError), a symlink at either component, a
+    .aiqt that is not a directory, or a configuration that is not a regular file (a FIFO there when this
+    lstat runs is refused before load_config opens it; one swapped in after the lstat is still opened, and
+    that open can block). Path.exists() follows links and returns False on any OSError, so an unsearchable
+    .aiqt/, a .aiqt that is a regular file, or a dangling link would read as absent and pass; and a symlink
+    has no containment guarantee (load_config would open whatever it points at)."""
+    parts = CONFIG_REL.split("/")
+    path = root
+    for i, part in enumerate(parts):
+        path = path / part
+        rel = "/".join(parts[:i + 1])
+        try:
+            st = _lstat(path)
+        except FileNotFoundError:
+            return False
+        except OSError as exc:
+            raise GateError("cannot inspect configuration path {} ({}); its presence cannot be "
+                            "evaluated".format(rel, exc))
+        if stat.S_ISLNK(st.st_mode):
+            raise GateError("configuration path {} is a symlink; a symlinked configuration is not "
+                            "followed".format(rel))
+        if i < len(parts) - 1 and not stat.S_ISDIR(st.st_mode):
+            raise GateError("configuration path {} is not a directory".format(rel))
+    if not stat.S_ISREG(st.st_mode):
+        raise GateError("configuration {} is not a regular file".format(CONFIG_REL))
+    return True
+
+
 def run(root):
     """Scan the declared surfaces under root. Returns the exit code 0/1/2. An absent configuration is NOT
-    APPLICABLE (exit 0); a present configuration is loaded, its surfaces resolved and scanned."""
+    APPLICABLE (exit 0); a present configuration is loaded, its surfaces resolved and scanned; a
+    configuration path that config_present cannot classify as absent or present fails closed (exit 2)."""
     config_path = root / CONFIG_REL
     try:
-        # A symlinked configuration is fail-closed, never followed: Path.exists() follows the link, so a
-        # dangling symlink would otherwise read as absent (NOT APPLICABLE), and a link to a real file has no
-        # containment guarantee (load_config would open it wherever it points). This mirrors the symlink
-        # fail-closed stance resolve_surface takes for declared surfaces. Only a genuinely absent path (not a
-        # symlink and not present) is the NOT APPLICABLE case.
-        if config_path.is_symlink():
-            raise GateError("configuration {} is a symlink; a symlinked configuration is not "
-                            "followed".format(CONFIG_REL))
-        if not config_path.exists():
+        # Only a genuinely absent path is the NOT APPLICABLE case; config_present refuses a symlink, an
+        # uninspectable or non-directory .aiqt, and a non-regular configuration (see its docstring). This
+        # mirrors the symlink fail-closed stance resolve_surface takes for declared surfaces.
+        if not config_present(root):
             print("NOT APPLICABLE: no {} configuration; the derive-don't-hardcode gate is adopter-declared "
                   "and inert without one".format(CONFIG_REL))
             return 0
@@ -524,6 +557,24 @@ def _not_run(failures, case, cause):
 _E2E_CASES = "every end-to-end case over a real synthetic tree"
 _SYMLINK_CASE = "e2e (m) the symlink declared-surface fail-closed case"
 _DANGLING_CASE = "e2e (n) the dangling-symlink configuration fail-closed case"
+_PARENT_LINK_CASE = "e2e (n2) a symlinked .aiqt fail-closed case"
+
+
+def _run_denied(root, denied):
+    """run(root) with the lstat of denied (and anything beneath it) raising the permission error a mode-000
+    directory gives an unprivileged runner, for a runner that can still search it (root or a DAC bypass)."""
+    global _lstat
+    real = _lstat
+
+    def _denying(path):
+        if Path(path) == denied or denied in Path(path).parents:
+            raise PermissionError(13, "Permission denied (injected)", str(path))
+        return real(path)
+    _lstat = _denying
+    try:
+        return _run_quiet(root)
+    finally:
+        _lstat = real
 
 
 def _recorded(output, entry):
@@ -861,6 +912,57 @@ def self_test_main(_mkdtemp=None, _symlink=None, _vectors=True):  # noqa: C901  
                 if _run_quiet(r) != 2:
                     failures.append("e2e: a dangling-symlink configuration expected fail-closed exit 2")
 
+            # (n2) PRESENCE: only a genuinely absent configuration is NOT APPLICABLE. A present .aiqt/
+            # without the file stays exit 0 (case (a) covers no .aiqt/ at all); an unsearchable .aiqt/, a
+            # .aiqt that is a regular file, a dangling .aiqt symlink, and a .aiqt symlink to a directory
+            # outside the root holding a clean configuration are each exit 2, never NOT APPLICABLE or a
+            # scan through the link. Every surface here is clean, so a wrong NOT APPLICABLE or a followed
+            # link reads as exit 0.
+            clean_surface = {"cmd/resume.md": "sample-tool --target $CURRENT_TARGET\n"}
+            r = base_tmp / "aiqt-without-config"
+            (r / ".aiqt").mkdir(parents=True, exist_ok=True)
+            if _run_quiet(r) != 0:
+                failures.append("e2e: a present .aiqt/ without the configuration expected NOT APPLICABLE "
+                                "exit 0")
+            r = _fresh("unsearchable-aiqt", good_cfg, clean_surface)
+            aiqt = r / ".aiqt"
+            os.chmod(aiqt, 0)
+            try:
+                rc = _run_quiet(r) if not os.access(aiqt, os.X_OK) else _run_denied(r, aiqt)
+            finally:
+                os.chmod(aiqt, 0o755)
+            if rc != 2:
+                failures.append("e2e: an unsearchable .aiqt/ expected fail-closed exit 2, got {}".format(rc))
+            r = base_tmp / "file-aiqt"
+            r.mkdir(parents=True, exist_ok=True)
+            (r / ".aiqt").write_text("not a directory\n", encoding="utf-8")
+            if _run_quiet(r) != 2:
+                failures.append("e2e: a .aiqt that is a regular file expected fail-closed exit 2")
+            outside = base_tmp / "outside-aiqt"
+            outside.mkdir(parents=True, exist_ok=True)
+            (outside / "derived-command-parameters.toml").write_text(good_cfg, encoding="utf-8")
+            for tag, target in (("dangling-aiqt", base_tmp / "no-such-dir"), ("linked-aiqt", outside)):
+                r = base_tmp / tag
+                (r / "cmd").mkdir(parents=True, exist_ok=True)
+                (r / "cmd" / "resume.md").write_text(clean_surface["cmd/resume.md"], encoding="utf-8")
+                try:
+                    symlink(r / ".aiqt", target)
+                except (OSError, NotImplementedError) as exc:
+                    _not_run(failures, _PARENT_LINK_CASE, "no symlink support ({})".format(exc))
+                    continue
+                if _run_quiet(r) != 2:
+                    failures.append("e2e: a {} .aiqt expected fail-closed exit 2".format(tag))
+            # A FIFO configuration is refused by the classification itself, before load_config opens it.
+            r = base_tmp / "fifo-config"
+            (r / ".aiqt").mkdir(parents=True, exist_ok=True)
+            if hasattr(os, "mkfifo"):
+                os.mkfifo(r / ".aiqt" / "derived-command-parameters.toml")
+                try:
+                    config_present(r)
+                    failures.append("e2e: a FIFO configuration was classified as present or absent")
+                except GateError:
+                    pass
+
             # (o) SELECTOR RECONCILIATION (finding A): a command selector that matches nothing in the
             # scanned surface (a typo) is a cannot-evaluate, exit 2, not a silent clean pass.
             r = _fresh("typo-command", good_cfg.replace('commands = ["sample-tool"]', 'commands = ["typo-tool"]'),
@@ -938,7 +1040,9 @@ def self_test_main(_mkdtemp=None, _symlink=None, _vectors=True):  # noqa: C901  
             "is bounded, telemetry records the matched selectors, and multiple sinks are all checked")
     print("SELF-TEST PASS: {}; and the end-to-end layer holds (NOT APPLICABLE, clean pass, literal "
           "finding, malformed-version/duplicate-id/empty-scope/absolute/escaping/unmatched/non-UTF-8/"
-          "symlink-surface/dangling-symlink-config fail-closed, directory-prefix scanning, selector "
+          "symlink-surface/dangling-symlink-config fail-closed, a present .aiqt/ without the file NOT "
+          "APPLICABLE while an unsearchable/regular-file/dangling-symlink/symlinked .aiqt and a FIFO "
+          "configuration fail closed, directory-prefix scanning, selector "
           "reconciliation of an unmatched-command/unmatched-option/duplicate-path/overlapping-path/"
           "duplicate-option control failing closed, a line-continuation split sink scanned whole, a "
           "commented-out literal not firing, and a bundled short-option value scanned); an unavailable "

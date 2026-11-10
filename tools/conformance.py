@@ -52,6 +52,7 @@ if tuple(sys.version_info[:2]) < (3, 14):
     os._exit(2)
 
 import os
+import stat
 from pathlib import Path
 
 # Sibling-import idiom, identical to check_rule_placement.py / check_mappings.py: this file lives in
@@ -229,14 +230,39 @@ def _claude_drift(root, corpus):
     return (PASS, ".claude/rules matches regeneration")
 
 
+def _agents_md_state(out):
+    """Classify the AGENTS.md path by a no-follow lstat: (False, None) when it is genuinely absent, (True,
+    None) when it is a regular file, and (None, msg) naming the path for anything else: a stat that fails
+    other than as absent, a symlink (dangling, looping or not, as the composer never reads or writes a
+    target through one), a directory, a FIFO or another non-regular file. Path.exists() follows the link
+    and returns False on any OSError, so a dangling or looping link read as an uninstalled surface (NOT
+    APPLICABLE), and a link to a matching file elsewhere passed."""
+    try:
+        st = os.lstat(out)
+    except FileNotFoundError:
+        return (False, None)
+    except OSError as exc:
+        return (None, "cannot inspect {}: {} (cannot evaluate)".format(out, exc))
+    if stat.S_ISLNK(st.st_mode):
+        return (None, "{} is a symlink; a generated surface is never read through one (cannot "
+                      "evaluate)".format(out))
+    if not stat.S_ISREG(st.st_mode):
+        return (None, "{} is not a regular file (cannot evaluate)".format(out))
+    return (True, None)
+
+
 def _agents_drift(root, corpus):
     """Mirror gen_agents.main()'s composition (_adapter_compose), re-rooted at root, comparing raw bytes.
-    Absent AGENTS.md -> NOT APPLICABLE (the adopter did not install the Codex surface). An absent block
-    registry reads as every target legacy (an install that predates the registry renders exactly that);
-    a malformed or unreadable registry or block source, or an AGENTS.md that is not valid UTF-8 ->
+    Absent AGENTS.md -> NOT APPLICABLE (the adopter did not install the Codex surface); an AGENTS.md that
+    is there but not a regular file, or cannot be inspected -> MALFORMED (see _agents_md_state). An absent
+    block registry reads as every target legacy (an install that predates the registry renders exactly
+    that); a malformed or unreadable registry or block source, or an AGENTS.md that is not valid UTF-8 ->
     MALFORMED."""
     out = root / "AGENTS.md"
-    if not out.exists():
+    present, err = _agents_md_state(out)
+    if err:
+        return (MALFORMED, err)
+    if not present:
         return (NA, "no AGENTS.md surface installed")
     try:
         registry = adapter_compose.load_registry(root, absent_is_legacy=True)
@@ -1231,6 +1257,55 @@ def self_test_main():
                 failures.append("adapter-registry ({}) expected exit {} + C2 {}, got exit {}:\n{}".format(
                     label, want_code, want, code, out))
 
+        # 2e. AGENTS.md presence. Only a genuinely absent AGENTS.md is NOT APPLICABLE (exit 0, the other
+        #     surfaces still judged). A dangling or self-looping symlink there is C2 MALFORMED (exit 2),
+        #     never an uninstalled surface, and so is a symlink to a matching rendering outside the root,
+        #     never read through and passed. A FIFO there and an AGENTS.md under a directory that cannot
+        #     be searched are refused by the classification itself (a FIFO found by the lstat is never
+        #     opened, as a read would block on it; one swapped in after the lstat is still read).
+        def _agents_link(target):
+            def mutate(b):
+                dest = target(b)
+                (b / "AGENTS.md").unlink()
+                os.symlink(dest, b / "AGENTS.md")
+            return mutate
+
+        def _matching_elsewhere(b):
+            elsewhere = tmp / "agents-elsewhere-{}.md".format(b.name)
+            elsewhere.write_bytes((b / "AGENTS.md").read_bytes())
+            return elsewhere
+
+        for label, mutate, want_code, want in (
+                ("absent", lambda b: (b / "AGENTS.md").unlink(), 0, PASS),
+                ("dangling-symlink", _agents_link(lambda b: b / "no-such-AGENTS.md"), 2, MALFORMED),
+                ("looping-symlink", _agents_link(lambda b: "AGENTS.md"), 2, MALFORMED),
+                ("symlink-to-matching-file", _agents_link(_matching_elsewhere), 2, MALFORMED)):
+            atree = tmp / ("agents-presence-" + label)
+            atree.mkdir()
+            _build_conformant(atree)
+            mutate(atree)
+            code, out = run_capture(atree)
+            if code != want_code or status_of(out, "C2") != want:
+                failures.append("AGENTS.md presence ({}) expected exit {} + C2 {}, got exit {}:\n{}".format(
+                    label, want_code, want, code, out))
+        if hasattr(os, "mkfifo"):
+            fifo_dir = tmp / "agents-presence-fifo"
+            fifo_dir.mkdir()
+            os.mkfifo(fifo_dir / "AGENTS.md")
+            got = _agents_md_state(fifo_dir / "AGENTS.md")
+            if got[0] is not None or not got[1]:
+                failures.append("AGENTS.md presence (fifo) expected a refusal, got {!r}".format(got))
+        sealed = tmp / "agents-presence-unsearchable"
+        sealed.mkdir()
+        (sealed / "AGENTS.md").write_text("present\n", encoding="utf-8")
+        os.chmod(sealed, 0)
+        if _unreadable_or_skip(sealed, "2e AGENTS.md-unsearchable-parent"):
+            got = _agents_md_state(sealed / "AGENTS.md")
+            if got[0] is not None or not got[1]:
+                failures.append("AGENTS.md presence (unsearchable parent) expected a refusal, got {!r}"
+                                .format(got))
+        os.chmod(sealed, 0o755)  # restore so cleanup can remove it
+
         # 2c. An orphaned .mdc inside the reserved Cursor subtree (no source rule) -> C2 FAIL.
         corphan = tmp / "cursor-orphan"
         corphan.mkdir()
@@ -1799,7 +1874,7 @@ def self_test_main():
             print("  - " + f)
         return 1
     skip_note = ("" if not skipped_unreadable else
-                 " NOTE: {} unreadable-input-dir case(s) (9-15, 16f) were SKIPPED this run because the "
+                 " NOTE: {} unreadable-input-dir case(s) (2e, 9-15, 16f) were SKIPPED this run because the "
                  "runner could still read the chmod-0 dir (root/DAC-bypass): {}; run where POSIX read "
                  "bits are enforced to exercise them.".format(
                      len(skipped_unreadable), ", ".join(skipped_unreadable)))
@@ -1809,7 +1884,9 @@ def self_test_main():
           "asserted both tight and broad fail; a composed AGENTS.md passes, a local edit or a CRLF "
           "conversion fails, a missing block source, a wrong-typed registry field, a symlinked registry or "
           "an adapter that is not UTF-8 is MALFORMED, and an absent registry reads as every target legacy "
-          "(a composed AGENTS.md then fails, a legacy install passes); the hooks plugin "
+          "(a composed AGENTS.md then fails, a legacy install passes); an absent AGENTS.md is NOT "
+          "APPLICABLE while a dangling, looping or outside-matching symlink, a FIFO or an unsearchable "
+          "parent there is refused; the hooks plugin "
           "surface (C5) verifies when present, "
           "degrades to NOT APPLICABLE when the opt-in plugin is absent, and fails on drift, a hooks "
           "orphan, or an orphaned surface with no source; absent input (corpus, "
