@@ -19,7 +19,7 @@ reason = "Scope note on the rule itself; no obligation of its own."
 
 [[exempt]]
 corpus-id = "citint"
-text = "This rule narrows the reference-capture rule (refcap) to a file opened this session at the commit under review."
+text = "This rule narrows the reference-capture rule (refcap)."
 reason = "Cross-reference explaining how citint.1 to citint.3 narrow the reference-capture rule (refcap); no obligation of its own."
 
 [[exempt]]
@@ -29,12 +29,12 @@ reason = "Scope note for setcmp.1; no obligation of its own."
 
 [[exempt]]
 corpus-id = "setcmp"
-text = "A partial statement scoped to what was\nactually examined, such as that the files that were checked are clean, and an explicitly bounded claim over a\nnamed, closed set, such as that all three of the listed modules pass, are not completeness claims and carry\nno added burden."
+text = "A partial statement scoped to what was\nactually examined, such as that the files that were checked are clean, and an explicitly bounded claim over a\nnamed, closed set, such as that all three of the listed modules pass, are not completeness claims and carry no\nadded burden."
 reason = "Scope carve-out bounding setcmp.1; a permission, not an obligation."
 
 [[exempt]]
 corpus-id = "setcmp"
-text = "The enumeration\nrequirement attaches to a quantifier that asserts the whole set, and the higher bar attaches only to a claim\nthat reduces work."
+text = "The higher bar attaches only to a claim that reduces work."
 reason = "Scope note restating where setcmp.1 and setcmp.4 apply; it adds no obligation."
 
 [[exempt]]
@@ -44,12 +44,12 @@ reason = "Example illustrating cntprd.2; no obligation of its own."
 
 [[exempt]]
 corpus-id = "cntprd"
-text = "This complements the measured-and-estimated-figures-stay-separate rule: that rule attaches a\nfigure's grade, this one its predicate; a sound figure carries both."
+text = "This complements the measured-and-estimated-figures-stay-separate rule: that rule attaches a figure's\ngrade, this one its predicate; a sound figure carries both."
 reason = "Cross-reference to the measured-and-estimated-figures-stay-separate rule (estsep); no obligation of its own."
 
 [[exempt]]
 corpus-id = "cntprd"
-text = "It differs from the\ncompleteness-claim-enumerates-its-set rule, which governs completion-class quantifiers over a whole\nset and already holds that the assistant's count is not that set's authoritative index; this rule governs any\nreported count, claiming completeness or not."
+text = "It differs from the\ncompleteness-claim-enumerates-its-set rule, which governs completion-class quantifiers over a whole set;\nthis rule governs any reported count, claiming completeness or not."
 reason = "Scope note separating this rule from the completeness-claim rule (setcmp); no obligation of its own."
 
 [[exempt]]
@@ -69,12 +69,12 @@ reason = "Rationale for grdinp.3 and grdinp.5; no obligation of its own."
 
 [[exempt]]
 corpus-id = "grdinp"
-text = "A command or control parameter that names the repository, target, or other context an artefact will act\non is itself such an input."
+text = "A command or control parameter that names the repository, target, or other context an artefact will act on is\nitself such an input."
 reason = "Classifies a control parameter as a guard input, so grdinp.7 applies; no obligation of its own."
 
 [[exempt]]
 corpus-id = "grdinp"
-text = "A guard whose own logic is correct still answers about the wrong target when the parameter\nit was handed cannot answer for the current one, so a parameter that cannot be derived or confirmed is a\ncannot-evaluate, not a clean pass."
+text = "A guard\nwith correct logic still answers about the wrong target when its parameter cannot answer for the current one,\nso a parameter that cannot be derived or confirmed is a cannot-evaluate, not a clean pass."
 reason = "Applies grdinp.5 (a cannot-evaluate when the source cannot answer) to a target parameter; it adds no obligation."
 
 [[exempt]]
@@ -84,12 +84,12 @@ reason = "Classifies a document's wording as a guard input, so grdinp.8 applies;
 
 [[exempt]]
 corpus-id = "grdinp"
-text = "The wording\nestablishes only that the text is present, never that what it asserts is true, so a suite of such presence or\nwording checks passing is not evidence the document is correct."
+text = "The wording\nestablishes only that the text is present, never that what it asserts is true, so passing such presence or\nwording checks is not evidence the document is correct."
 reason = "Rationale for grdinp.8; no obligation of its own."
 
 [[exempt]]
 corpus-id = "grdinp"
-text = "A negative check that asserts a string is absent is only as sound as its input in the same way: run against\na whole artefact it cannot tell an operative occurrence from the same string quoted in a correction that\nwarns against it, or recorded as what a value used to be, so it fires on the correction and trains its\nauthor to weaken the check or delete the explanation."
+text = "A negative check that asserts a string is absent is only as sound as its input in the same way: run against a\nwhole artefact it cannot tell an operative occurrence from the same string quoted in a correction that warns\nagainst it, or recorded as what a value used to be, so it fires on the correction and trains its author to\nweaken the check or delete the explanation."
 reason = "Rationale for grdinp.10 and grdinp.11; no obligation of its own."
 
 [[exempt]]
@@ -134,7 +134,7 @@ reason = "Classifies a resource-failure claim as a behavioural claim and names w
 
 [[exempt]]
 corpus-id = "prtwhl"
-text = "This is the consumer-side counterpart to a\ntruncated deliverable not being observable completion."
+text = "This is\nthe consumer-side counterpart to a truncated deliverable not being observable completion."
 reason = "Cross-reference to trkasy.5 (a truncated deliverable is not observable completion); no obligation of its own."
 
 [[exempt]]
@@ -154,13 +154,9 @@ reason = "Opens the disclosed-residual paragraph of vfxcmt.3 to vfxcmt.11; no ob
 
 [[exempt]]
 corpus-id = "vfxcmt"
-text = "It does not catch a declaration whose author omitted a path the change semantically needs (the under-scoped-declaration residual: a planned-but-uncommitted path, absent from both the commit and the declaration, leaves the equality check no divergence to surface), an undeclared context file, a submodule whose working tree diverges behind a clean gitlink, content a checkout filter materializes differently from the committed bytes, a merge reviewed by a combined or non-first-parent diff, which can present a different path set than intended, or a later commit that supersedes the reviewed revision; and a review of an older revision is sound only when the verifier reads a checkout or snapshot bound to it."
+text = "It does not catch the under-scoped-declaration residual (a planned-but-uncommitted path absent from both the commit and the declaration leaves the equality check no divergence to surface), an undeclared context file, a submodule whose working tree diverges behind a clean gitlink, content a checkout filter materializes differently from the committed bytes, a merge reviewed by a combined or non-first-parent diff, which can present a different path set than intended, or a later commit that supersedes the reviewed revision; and a review of an older revision is sound only when the verifier reads a checkout or snapshot bound to it."
 reason = "Disclosed residuals of vfxcmt.3 to vfxcmt.11; the closing clause restates vfxcmt.10 (the verifier reads the declared revision)."
 
-[[exempt]]
-corpus-id = "vfxcmt"
-text = "Base derivation reads the raw parent headers with replacement-ref and graft resolution disabled, so no replacement ref, grafts entry, or commit-graph cache can rewrite the parent the base is taken against; in a shallow or partial clone lacking a needed parent object, the reconciliation is a cannot-evaluate, not a review against a wrong or empty base."
-reason = "Restates vfxcmt.7 and its cannot-evaluate case inside the disclosure paragraph; it adds no obligation."
 
 [[exempt]]
 corpus-id = "vfxcmt"

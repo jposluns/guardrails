@@ -22,7 +22,7 @@ the assistant actually read, so a quotation is an excerpt, never a reconstructio
 Before delivering, re-open each cited range at its stated lines and confirm that it starts and ends
 on lines that carry the cited content, not on a blank line, a comment banner, or a closing delimiter.
 
-This rule narrows the reference-capture rule (refcap) to a file opened this session at the commit under review.
+This rule narrows the reference-capture rule (refcap).
 
 ## Claims about the work rest on observation
 
@@ -47,22 +47,19 @@ the counts are preserved.
 
 A claim that licenses less work, that nothing remains, or that an item may stop, defer, wind down, or close,
 clears a higher evidence bar than a claim that licenses more, because an unfounded stop conceals work that is
-still owed while an unfounded continue only spends effort. Under partial or missing evidence the default is
-to continue rather than to declare the set complete. When such a claim rests on the remaining items being
-unable to proceed, the enumeration records, for each remaining item, the observed condition that blocks it,
-so the claim cannot rest on an unshown assertion that work is blocked. The recorded condition blocks the
-item only when it leaves the item no step that can proceed while the condition holds, every sanctioned
-path completed or observed closed; a condition that gates only a later step of the item, or that degrades
-a resource only that later step consumes, shows that step held, not the item blocked, while a step can
-still proceed or a sanctioned path is not yet completed or observed closed.
+still owed while an unfounded continue only spends effort. Under partial or missing evidence the default is to
+continue rather than to declare the set complete. When such a claim rests on the remaining items being unable
+to proceed, the enumeration records, for each remaining item, the observed condition that blocks it. The
+recorded condition blocks the item only when it leaves the item no step that can proceed while the condition
+holds, every sanctioned path completed or observed closed; a condition that gates only a later step of the
+item, or that degrades a resource only that later step consumes, shows that step held, not the item blocked,
+while a step can still proceed or a sanctioned path is not yet completed or observed closed.
 
 This governs completion-class quantifiers over an open or indexed set. A partial statement scoped to what was
 actually examined, such as that the files that were checked are clean, and an explicitly bounded claim over a
-named, closed set, such as that all three of the listed modules pass, are not completeness claims and carry
-no added burden. Retiring, splitting, merging, or removing items from a record that names more than one item
-is not such a bounded claim and carries the burden the first paragraph sets for it. The enumeration
-requirement attaches to a quantifier that asserts the whole set, and the higher bar attaches only to a claim
-that reduces work.
+named, closed set, such as that all three of the listed modules pass, are not completeness claims and carry no
+added burden. Retiring, splitting, merging, or trimming a multi-item record is not such a bounded claim and
+carries the burden the first paragraph sets for it. The higher bar attaches only to a claim that reduces work.
 
 Ending a turn, scheduling an idle wake, or declaring a work queue drained or all blocked is such a
 completion-class claim over the backlog, and it carries the same enumeration burden.
@@ -87,11 +84,10 @@ silently re-deriving a different one; where no such basis is available, the stat
 figure cannot be reconciled and is re-measured under the same predicate rather than carried forward as
 though it were.
 
-This complements the measured-and-estimated-figures-stay-separate rule: that rule attaches a
-figure's grade, this one its predicate; a sound figure carries both. It differs from the
-completeness-claim-enumerates-its-set rule, which governs completion-class quantifiers over a whole
-set and already holds that the assistant's count is not that set's authoritative index; this rule governs any
-reported count, claiming completeness or not.
+This complements the measured-and-estimated-figures-stay-separate rule: that rule attaches a figure's
+grade, this one its predicate; a sound figure carries both. It differs from the
+completeness-claim-enumerates-its-set rule, which governs completion-class quantifiers over a whole set;
+this rule governs any reported count, claiming completeness or not.
 
 ## Disclose a guard's residual coverage
 
@@ -106,9 +102,9 @@ where the guard is defined, not a footnote discovered after it fails.
 Never claim completion without evidence. Before "done", "fixed", "green", or "verified": re-read the files
 in scope, quote the lines that support the claim, search for contradictions, and state every remaining
 unverified item. A success, health, or backup marker is evidence only when it rests on the expected payload
-being actually present and well-formed; the marker's existence, freshness, or age is not itself that
-evidence, so check the content it stands for rather than the marker. A stated intention is a claim; do not
-end a turn asserting work is proceeding unless it is.
+being actually present and well-formed; the marker's existence, freshness, or age is not that evidence, so
+check the content it stands for. A stated intention is a claim; do not end a turn asserting work is
+proceeding unless it is.
 
 A machine-checkable status or completion assertion over a named set, such as all N gates being green at a
 revision or a coverage figure, is emitted from an observation that ran that exact set, never narrated
@@ -119,33 +115,30 @@ revision transfers only if the replayed diff is byte-identical to the reviewed d
 reopens wherever the change interacts with a file that differs between the reviewed and new bases, whether
 one it relies on or one that calls or consumes what it changes; any other diff needs a new review.
 
-A fix claim scoped to a defect class, not merely the cited instance, is complete only when it
-also accounts for every sibling instance of that class. Such a claim carries either a recorded,
-re-runnable completeness probe (a class-wide search whose current run shows no remaining
-instance) or a named exemption from a closed vocabulary accounting for every instance
-deliberately left unfixed. The probe's defining token or pattern is author-declared, because
-deriving the class automatically from the finding's own wording cannot decide what else belongs
-to it, so the person who fixes the cited instance names the class and records the probe
-standing for it; author-declaration is not licence to under-scope, so the probe is derived from
-and validated against the authoritative source that defines the class, per the
-guard-input-soundness principle, never an ad-hoc pattern a surviving sibling can fall outside.
-An independent verifier first confirms the probe is adequate against that authoritative source,
-then reproduces it rather than re-judging relatedness from its own reading of the finding, and
-treats a live result exceeding the recorded one as a fresh, unaddressed finding. Fixing only
-the cited instance while a sibling of the same class survives unaddressed is an incomplete fix,
-the completeness-claim-enumerates-its-set discipline applied to a defect class standing in for
-the registry that class otherwise lacks. For example, a wording fix is a defect class whose
-probe is derived from and validated against the correction that names the superseded wording, and
-matches that wording across line wraps and escapes. Each instance the probe finds is fixed
-or carries one of exactly two named exemptions: history (a quotation recording the superseded
-wording) or warning (a correction that warns against it). A copy that must change with the
-wording, such as a clause register's canonical text, is in scope, never exempt.
+A fix claim scoped to a defect class, not merely the cited instance, is complete only when it also accounts
+for every sibling instance of that class. Such a claim carries either a recorded, re-runnable completeness
+probe (a class-wide search whose current run shows no remaining instance) or a named exemption from a closed
+vocabulary accounting for every instance deliberately left unfixed. The probe's defining token or pattern is
+author-declared, because deriving the class automatically from the finding's own wording cannot decide what
+else belongs to it, so the person who fixes the cited instance names the class and records the probe
+standing for it; author-declaration is not licence to under-scope, so the probe is derived from and
+validated against the authoritative source that defines the class, per the guard-input-soundness principle,
+never an ad-hoc pattern a surviving sibling can fall outside. An independent verifier first confirms the
+probe is adequate against that authoritative source, then reproduces it rather than re-judging relatedness
+from its own reading of the finding, and treats a live result exceeding the recorded one as a fresh,
+unaddressed finding. This is the completeness-claim-enumerates-its-set discipline applied to a defect class
+standing in for the registry that class otherwise lacks. For example, a wording fix is a defect class whose
+probe is derived from and validated against the correction that names the superseded wording, and matches
+that wording across line wraps and escapes. Each instance the probe finds is fixed or carries one of exactly
+two named exemptions: history (a quotation recording the superseded wording) or warning (a correction that
+warns against it). A copy that must change with the wording, such as a clause register's canonical text, is
+in scope, never exempt.
 
 After an edit applied by a script, a bulk operation, or a subagent, the claim that it landed rests on
 re-reading the resulting source and confirming the intended change is present in it, never on the applier's
 own stdout, exit code, or narration of what it did. A successful process, a narrated or reported
 replacement, a zero-match conditional skip, or an exception raised before the write can each report success
-while leaving the file unchanged, so an applier's account of itself is not the evidence this rule requires.
+while leaving the file unchanged.
 
 Where another tool parses the edited file, completion also rests on that tool's own parser, or the validator
 it names as authoritative, accepting the file as written, not on its self-test fixtures; else the edit is
@@ -167,34 +160,31 @@ a consequential action withholding rather than firing on an unverified basis, ne
 verdict the guard never reached. Inputs absent from the author's own examples are a particular silent-failure
 risk.
 
-A command or control parameter that names the repository, target, or other context an artefact will act
-on is itself such an input. A value hardcoded into a reusable command, or carried over from the source the
-command was copied or templated from, is not evidence of the target the command now runs against: it is
-derived from the authoritative source at the point of use, or validated against it, before the guard
-relies on it. A guard whose own logic is correct still answers about the wrong target when the parameter
-it was handed cannot answer for the current one, so a parameter that cannot be derived or confirmed is a
-cannot-evaluate, not a clean pass.
+A command or control parameter that names the repository, target, or other context an artefact will act on is
+itself such an input. A value hardcoded into a reusable command, or carried over from the source the command
+was copied or templated from, is not evidence of the target the command now runs against: it is derived from
+the authoritative source at the point of use, or validated against it, before the guard relies on it. A guard
+with correct logic still answers about the wrong target when its parameter cannot answer for the current one,
+so a parameter that cannot be derived or confirmed is a cannot-evaluate, not a clean pass.
 
 A document's own wording is itself such an input when a check verifies a fact by matching it. The wording
-establishes only that the text is present, never that what it asserts is true, so a suite of such presence or
-wording checks passing is not evidence the document is correct. Where a document asserts a fact about the
-system it governs, an owning account, a path, a schedule, or an interface, that fact is verified against an
-authority the document's author does not control, the live system or a second in-tree artefact whose purpose
-is to state that same fact, rather than against the document's own words. A membership question over a range
-or interval is likewise answered by a membership test, whether a value falls within the interval, not by
-matching the literal endpoint tokens: a range expressed by its endpoints is not the set of its members, so a
-literal-token scan is a proxy that structurally cannot see a member the range includes only implicitly, one
-lying between its endpoints and written nowhere as a literal token.
+establishes only that the text is present, never that what it asserts is true, so passing such presence or
+wording checks is not evidence the document is correct. Where a document asserts a fact about the system it
+governs, an owning account, a path, a schedule, or an interface, that fact is verified against an authority
+the document's author does not control, the live system or a second in-tree artefact whose purpose is to state
+that same fact, rather than against the document's own words. A membership question over a range or interval
+is likewise answered by testing whether a value falls within it, not by matching the literal endpoint tokens:
+a literal-token scan structurally cannot see a member lying between the endpoints and written nowhere as a
+literal token.
 
-A negative check that asserts a string is absent is only as sound as its input in the same way: run against
-a whole artefact it cannot tell an operative occurrence from the same string quoted in a correction that
-warns against it, or recorded as what a value used to be, so it fires on the correction and trains its
-author to weaken the check or delete the explanation. It is therefore scoped to the narrowest locus where
-the string's presence would be a defect; a whole-artefact scope is right only where every occurrence is a
-defect, such as a leaked secret, an invalid byte, or a forbidden character with no legitimate quotation.
-Where the string legitimately appears elsewhere, the invariant is asserted against the parsed or semantic
-state, or the negative predicate is scoped to the defect locus, rather than run as a naive whole-artefact
-string scan.
+A negative check that asserts a string is absent is only as sound as its input in the same way: run against a
+whole artefact it cannot tell an operative occurrence from the same string quoted in a correction that warns
+against it, or recorded as what a value used to be, so it fires on the correction and trains its author to
+weaken the check or delete the explanation. It is therefore scoped to the narrowest locus where the string's
+presence would be a defect; a whole-artefact scope is right only where every occurrence is a defect, such as a
+leaked secret, an invalid byte, or a forbidden character with no legitimate quotation. Where the string
+legitimately appears elsewhere, the invariant is asserted against the parsed or semantic state or within that
+locus, rather than by a naive whole-artefact string scan.
 
 A list kept by hand that selects what a generated view contains is itself such an input. Comparing the view
 with a fresh run of its generator shows that it is current, never that it is complete, since both read the
@@ -203,11 +193,11 @@ generated, that each item of the authoritative set appears in it or is named in 
 fails on an item in neither; a view that declares itself a curated selection makes no such claim.
 
 A check run ahead of an expensive apply step to report whether it will succeed is such a guard too and
-evaluates every condition the apply enforces, the expected state after the change as well as the state
-before it. An expensive apply and a check of whether it will succeed decide from one shared predicate, or,
-where the apply's predicate is out of reach, a test holds the check to failing on every input the apply
-rejects. A check of whether an expensive apply will succeed refuses an input the apply would refuse, such
-as a version or sequence number no greater than the last one consumed, before any long work begins.
+evaluates every condition the apply enforces, the expected state after the change as well as the state before
+it. The apply and that check decide from one shared predicate, or, where the apply's predicate is out of
+reach, a test holds the check to failing on every input the apply rejects. That check refuses an input the
+apply would refuse, such as a version or sequence number no greater than the last one consumed, before any
+long work begins.
 
 ## Measured and estimated figures stay separate
 
@@ -255,15 +245,14 @@ investigate while work continues, never a stop or a resource-wide alarm.
 
 A read that returns only a bounded slice of a file or of a command's output, a head, a tail, a line or
 byte range, a viewer's default window, or a filtered, grepped, or paginated subset, is evidence only about
-the portion it exposes and establishes nothing about what lies outside it. The assistant does not treat
-such a slice as the complete artefact when a claim or action depends on the whole: it does not conclude
-that a term, setting, error, or definition is absent because the slice did not contain it, nor take the
-slice as representative of the rest, when the read was bounded by a line count, a size limit, a match
-filter, or a tool default rather than by the artefact's own end. Before relying on the whole, it confirms
-it has observed the whole, by reading through to an observed end-of-source, by a search scoped to the
-entire artefact, or by a count reconciled against the artefact's true size, and where only a slice was
-seen it scopes its claim to that slice or widens the read. This is the consumer-side counterpart to a
-truncated deliverable not being observable completion.
+the portion it exposes. The assistant does not treat such a slice as the complete artefact when a claim or
+action depends on the whole: it does not conclude that a term, setting, error, or definition is absent
+because the slice did not contain it, nor take the slice as representative of the rest, when the read was
+bounded by a line count, a size limit, a match filter, or a tool default rather than by the artefact's own
+end. Before relying on the whole, it confirms it has observed the whole, by reading through to an observed
+end-of-source, by a search scoped to the entire artefact, or by a count reconciled against the artefact's
+true size, and where only a slice was seen it scopes its claim to that slice or widens the read. This is
+the consumer-side counterpart to a truncated deliverable not being observable completion.
 
 ## Read before characterizing
 
@@ -301,11 +290,11 @@ Validate an inferred premise before taking an action that depends on it.
 
 Applying a fix on disk is not the same as landing it. Before recording or claiming that a fix shipped, confirm it is actually present in the commit that claims it: inspect the commit's file list (for example git show <ref> --stat) and confirm the changed lines are in the committed content, not only in the working tree or a since-reverted state.
 
-The same discipline applies before independent verification is dispatched over a committed state: the artefact under review is committed first, the verification declares the revision it reviews and the set of paths under review, and the dispatcher reconciles that declaration against the repository before any verifier runs. The declared revision is not trusted as the declarer names it: it is derived from, or validated against, the authoritative task revision the review is for (the change-request head, the dispatched commit, or the task revision under gate), exactly as the guard-input-soundness rule requires a target or context parameter to be derived from or validated against its authoritative source at the point of use. A declarer-named revision that reconciles to no authoritative task revision is a cannot-evaluate, not a pass, so a review pointed at an unrelated or superseded commit whose own diff happens to be empty or clean cannot stand in for the revision actually under gate. The declared revision resolves to a single commit, and the base its changed set is computed against is derived from that commit's own raw structure rather than named by the declarer: the diff is taken against the sole parent for an ordinary commit, against the first parent for a merge commit, and against the empty tree for a root commit. The parent list that base derivation rests on is read from the commit's raw object bytes with replacement-ref and graft resolution disabled, never from a graph view that a replacement ref, a grafts entry, or a commit-graph cache could rewrite, and a parent the object names but whose object is absent is itself a cannot-evaluate rather than a root, so a shallow or truncated history cannot present as a root whose empty-tree diff reviews nothing. This defence against substituted bytes is not confined to the parent read: every git operation the reconciliation and the verifier depend on, the revision resolution, the parent and object-existence checks, the changed-set diff against the derived base, the scoped working-tree cleanliness comparison, and the verifier's read of the reviewed content, reads the content bound to the declared revision's exact object identity with no object substitution applied, or the dispatch is withheld as a cannot-evaluate, so no dependent read the reconciliation or the verifier relies on resolves to bytes other than the authoritative commit's, and where that cannot be guaranteed the dispatch is withheld unverifiable; and the mechanisms that can substitute object content for a named revision, a replacement ref, a grafts entry, the commit-graph cache, and, for materialized content, a checkout filter and a submodule gitlink, are the substitution surface the dispatcher must neutralize by its platform's means or disclose, per the adopter hardening guidance, so a replacement ref, a grafts entry, or the commit-graph cache cannot empty a real changed set into a clean declaration or feed the verifier substituted content. The declared changed set is reconciled for equality against the paths that revision changed relative to that derived base, so a declared path the commit did not change, and a path the commit changed that the declaration omits, are each surfaced rather than silently absorbed; this equality catches a declared path absent from the commit and a committed change absent from the declaration, but it cannot catch a path the change semantically needs that is omitted from both the commit and the declaration together, which remains the disclosed under-scoped-declaration residual below. The working-tree cleanliness the dispatch requires over each declared path covers the whole of that path's uncommitted state, a difference between the declared revision and the index, a difference between the index and the tracked working tree, and an untracked entry at the path including one that recreates a path the commit deleted, so a staged-but-uncommitted or untracked change cannot slip through a worktree-only comparison; each path is matched as a literal byte path rather than a pathspec pattern, and a cleanliness probe whose result is unreadable or malformed is a cannot-evaluate, not a clean pass. The verifier reads the reviewed content from the declared revision, never from the ambient working tree, with the verdict recording the revision it read. A declaration that is missing, malformed, or irreconcilable is a cannot-evaluate, per the guard-input-soundness rule: the dispatch is withheld with a distinct unverifiable outcome, never treated as a pass and never widened into a whole-tree cleanliness demand the declaration did not make. Uncommitted work outside the declared review set does not block the dispatch.
+The same discipline applies before independent verification is dispatched over a committed state: the artefact under review is committed first, the verification declares the revision and the set of paths it reviews, and the dispatcher reconciles that declaration against the repository before any verifier runs. The declared revision is not trusted as named: it is derived from, or validated against, the authoritative task revision the review is for (the change-request head, the dispatched commit, or the task revision under gate), exactly as the guard-input-soundness rule requires of a target or context parameter at the point of use. A declarer-named revision that reconciles to no authoritative task revision is a cannot-evaluate, not a pass, so a review of an unrelated or superseded commit whose own diff is empty or clean cannot stand in for the revision under gate. The declared revision resolves to a single commit, and the base its changed set is diffed against is derived from that commit's own raw structure, not named by the declarer: the sole parent for an ordinary commit, the first parent for a merge commit, and the empty tree for a root commit. The parent list behind that base is read from the commit's raw object bytes with replacement-ref and graft resolution disabled, never from a graph view that a replacement ref, a grafts entry, or a commit-graph cache could rewrite, and a named parent whose object is absent is a cannot-evaluate, not a root, so a shallow, partial, or truncated history cannot present as a root whose empty-tree diff reviews nothing. This defence is not confined to the parent read: every git operation the reconciliation and the verifier depend on, the revision resolution, the parent and object-existence checks, the changed-set diff against the derived base, the scoped working-tree cleanliness comparison, and the verifier's read of the reviewed content, reads the content bound to the declared revision's exact object identity with no object substitution applied, or the dispatch is withheld as a cannot-evaluate; and the mechanisms that can substitute object content for a named revision, a replacement ref, a grafts entry, the commit-graph cache, and, for materialized content, a checkout filter and a submodule gitlink, are the substitution surface the dispatcher must neutralize by its platform's means or disclose, per the adopter hardening guidance. The declared changed set is reconciled for equality against the paths that revision changed relative to that derived base, so a declared path the commit did not change, and a path the commit changed that the declaration omits, are each surfaced rather than silently absorbed; a path the change semantically needs that both omit is the under-scoped-declaration residual disclosed below. The working-tree cleanliness the dispatch requires over each declared path covers all of that path's uncommitted state, a difference between the declared revision and the index or between the index and the tracked working tree, and an untracked entry at the path including one that recreates a path the commit deleted; each path is matched as a literal byte path, not a pathspec pattern, and an unreadable or malformed cleanliness probe result is a cannot-evaluate, not a clean pass. The verifier reads the reviewed content from the declared revision, never from the ambient working tree, with the verdict recording the revision it read. A declaration that is missing, malformed, or irreconcilable is a cannot-evaluate, per the guard-input-soundness rule: the dispatch is withheld with a distinct unverifiable outcome, never treated as a pass and never widened into a whole-tree cleanliness demand the declaration did not make. Uncommitted work outside the declared review set does not block the dispatch.
 
 For example, build a non-root commit's review copy from a snapshot bound to the authoritative task revision, diff the commit against its first parent, not a moving main branch, and keep the reviewer's context files from that snapshot, not only selected changed files.
 
-This reconciliation answers only what the declaration and the repository can answer. It does not catch a declaration whose author omitted a path the change semantically needs (the under-scoped-declaration residual: a planned-but-uncommitted path, absent from both the commit and the declaration, leaves the equality check no divergence to surface), an undeclared context file, a submodule whose working tree diverges behind a clean gitlink, content a checkout filter materializes differently from the committed bytes, a merge reviewed by a combined or non-first-parent diff, which can present a different path set than intended, or a later commit that supersedes the reviewed revision; and a review of an older revision is sound only when the verifier reads a checkout or snapshot bound to it. Base derivation reads the raw parent headers with replacement-ref and graft resolution disabled, so no replacement ref, grafts entry, or commit-graph cache can rewrite the parent the base is taken against; in a shallow or partial clone lacking a needed parent object, the reconciliation is a cannot-evaluate, not a review against a wrong or empty base. These bounds are disclosed here, not implied covered.
+This reconciliation answers only what the declaration and the repository can answer. It does not catch the under-scoped-declaration residual (a planned-but-uncommitted path absent from both the commit and the declaration leaves the equality check no divergence to surface), an undeclared context file, a submodule whose working tree diverges behind a clean gitlink, content a checkout filter materializes differently from the committed bytes, a merge reviewed by a combined or non-first-parent diff, which can present a different path set than intended, or a later commit that supersedes the reviewed revision; and a review of an older revision is sound only when the verifier reads a checkout or snapshot bound to it. These bounds are disclosed here, not implied covered.
 
 ## Anything wrong is fixed first
 

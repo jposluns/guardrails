@@ -94,12 +94,21 @@
 #                        files 117926 -> 118464; managed block 360 and file headers 16136 unchanged. This queued
 #                        seed fold measured 538 units against the 559-unit estimate. The ratchet rises by the
 #                        measured delta, 134991 + 538 = 135529, rather than drawing on the estimate.
+#                        Lowered 135529 -> 133315 on 2026-11-10 by same-meaning cuts that restore a working
+#                        margin in the AGENTS.md delivered prefix for the must-deliver rules (cmtidn margin 18
+#                        -> 2232 bytes): restated sentences and clauses removed or shortened in vfxcmt, grdinp,
+#                        evgcmp, setcmp, cntprd, prtwhl and citint, with no requirement, scope, condition,
+#                        exception or cross-reference dropped. Measured PACK 132945 after the change; rule
+#                        files 118536 -> 116322 (-2214 units, all ASCII, so equal to the byte saving); managed
+#                        block 360 and file headers 16263 unchanged. The ratchet falls by exactly that measured
+#                        reduction, 135529 - 2214 = 133315, so the deliberate headroom recorded in the
+#                        2026-10-29 entry is carried forward unchanged rather than taken as a saving.
 #   ceiling              a reported PACK figure; not enforced, and PACK currently exceeds it. Its value
 #                        predates header counting, which added 16136 units to PACK at the 112222 ->
 #                        128358 ratchet raise; it was not raised with it.
 #   claude-code-version  the Claude Code build whose loading behaviour the gate models.
 #   binary-sha256        the SHA-256 of that build's binary.
-ratchet = 135529
+ratchet = 133315
 ceiling = 90000
 claude-code-version = "2.1.287"
 binary-sha256 = "3920489a5109cff5786a1a392c25277408ff22bc796d5edb9c16a60e5a1718f0"
