@@ -106,12 +106,25 @@
 #                        delta, 135529 + 775 = 136304, leaving the 370 units that remain of the headroom
 #                        recorded in the 2026-10-29 entry, within the maintainer's authorization of 2026-11-08
 #                        for raises up to 148000.
+#                        Lowered 136304 -> 134418 on 2026-11-10 by wording cuts that restore a working margin
+#                        in the AGENTS.md delivered prefix for the must-deliver rules (cmtidn margin 18 -> 1904
+#                        bytes): sentences and clauses that restate text kept in the same rule or in the rule
+#                        it cross-references, or that state a consequence of a kept obligation, removed or
+#                        shortened in vfxcmt, grdinp, evgcmp, setcmp, cntprd, prtwhl and citint. The evgcmp
+#                        sentence that fixing only the cited instance while a sibling survives is an
+#                        incomplete fix, and the vfxcmt condition that the dispatch is withheld where a
+#                        substitution-free read cannot be guaranteed, are kept. Measured PACK 135934 at the
+#                        base a1c8d6fe -> 134048 (-1886 units); rule files 119311 -> 117425 (all ASCII, so
+#                        equal to the byte saving); managed block 360 and file headers 16263 unchanged. The
+#                        ratchet falls by exactly that measured reduction, 136304 - 1886 = 134418, so the
+#                        370-unit headroom the ratchet had over PACK at the base is carried forward unchanged
+#                        rather than taken as a saving.
 #   ceiling              a reported PACK figure; not enforced, and PACK currently exceeds it. Its value
 #                        predates header counting, which added 16136 units to PACK at the 112222 ->
 #                        128358 ratchet raise; it was not raised with it.
 #   claude-code-version  the Claude Code build whose loading behaviour the gate models.
 #   binary-sha256        the SHA-256 of that build's binary.
-ratchet = 136304
+ratchet = 134418
 ceiling = 90000
 claude-code-version = "2.1.287"
 binary-sha256 = "3920489a5109cff5786a1a392c25277408ff22bc796d5edb9c16a60e5a1718f0"
