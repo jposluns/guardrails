@@ -80,6 +80,7 @@ if tuple(sys.version_info[:2]) < (3, 14):
 import hashlib
 import os
 import re
+import stat
 from html import unescape
 from html.parser import HTMLParser
 from pathlib import Path
@@ -987,6 +988,7 @@ def _self_test():
     _card_self_test(quiet)
     _not_found_links_self_test()
     _declaration_self_test()
+    _root_state_self_test()
     _use_staged_declaration(False)
     # The real declaration is the promoted one: the root's 404.html is a template page, a nested draft/ page
     # is not, and turning the staged default back on flips both (fails on purpose).
@@ -1077,6 +1079,92 @@ def _declaration_self_test():
             check(name, isinstance(got, ValueError), got)
             code, err = scan(fixture)
             check(scan_name, code == 2 and "cannot read the template page targets" in err, (code, err))
+
+
+def _root_state_self_test():
+    """Coverage-root classification through run(): an absent root is skipped (a clean pass), and a present
+    root that cannot be inspected, or is a regular file or a symlink instead of a real directory, exits 2 with
+    a message naming the root, even while the other root scans clean."""
+    import contextlib
+    import errno
+    import io
+    import tempfile
+    page = '<!doctype html><title>t</title><link rel="apple-touch-icon" href="/t.png"><p>ok</p>'
+
+    def run_quiet(fixture):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = run(fixture)
+        return code, out.getvalue(), err.getvalue()
+
+    def fixture(base, name, roots=()):
+        r = base / name
+        r.mkdir()
+        for sub in roots:
+            (r / sub).mkdir(parents=True)
+            (r / sub / "t.png").write_bytes(b"png")
+            (r / sub / "a.html").write_text(page, encoding="utf-8")
+        return r
+
+    with tempfile.TemporaryDirectory() as d:
+        base = Path(d)
+        got = run_quiet(fixture(base, "absent"))
+        check("root-state/absent-roots-pass", got[0] == 0 and "PASS: no site/ or opf/site/ directory" in got[1],
+              got)
+        r = fixture(base, "opf-without-site", ("site",))
+        (r / "opf").mkdir()
+        got = run_quiet(r)
+        check("root-state/absent-opf-site-skipped", got[0] == 0 and "opf/site" not in got[1] + got[2], got)
+
+        # opf/ present but not searchable, beside a clean site/. A privileged account searches a mode 000
+        # directory anyway, so there the lstat of opf/site is made to raise the permission error instead.
+        r = fixture(base, "unsearchable", ("site", "opf/site"))
+        opf = r / "opf"
+        real_lstat = os.lstat
+
+        def denied_lstat(path, *args, **kwargs):
+            if str(path).startswith(str(opf) + os.sep):
+                raise PermissionError(errno.EACCES, os.strerror(errno.EACCES), str(path))
+            return real_lstat(path, *args, **kwargs)
+        os.chmod(opf, 0)
+        try:
+            blocked = not os.access(opf, os.X_OK)
+            if not blocked:
+                os.lstat = denied_lstat
+            try:
+                got = run_quiet(r)
+            finally:
+                os.lstat = real_lstat
+        finally:
+            os.chmod(opf, 0o755)
+        check("root-state/unsearchable-parent-exits-2",
+              got[0] == 2 and "cannot inspect coverage root opf/site/" in got[2], (blocked, got))
+
+        r = fixture(base, "opf-site-file", ("site",))
+        (r / "opf").mkdir()
+        (r / "opf" / "site").write_text("x", encoding="utf-8")
+        r = fixture(base, "opf-file", ("site",))
+        (r / "opf").write_text("x", encoding="utf-8")
+        outside = fixture(base, "outside", ("site", "opf/site"))
+        r = fixture(base, "opf-site-link", ("site",))
+        (r / "opf").mkdir()
+        os.symlink(outside / "opf" / "site", r / "opf" / "site")
+        r = fixture(base, "site-link")
+        os.symlink(outside / "site", r / "site")
+        r = fixture(base, "opf-link", ("site",))
+        os.symlink(outside / "opf", r / "opf")
+        r = fixture(base, "dangling-link", ("site",))
+        (r / "opf").mkdir()
+        os.symlink(base / "missing", r / "opf" / "site")
+        for name, fixture_name, root_name, message in (
+                ("root-state/regular-file-root-exits-2", "opf-site-file", "opf/site/", "is not a directory"),
+                ("root-state/regular-file-parent-exits-2", "opf-file", "opf/site/", "is not a directory"),
+                ("root-state/symlink-root-exits-2", "opf-site-link", "opf/site/", "is a symbolic link"),
+                ("root-state/symlink-site-root-exits-2", "site-link", "site/", "is a symbolic link"),
+                ("root-state/symlink-parent-exits-2", "opf-link", "opf/site/", "is a symbolic link"),
+                ("root-state/dangling-symlink-root-exits-2", "dangling-link", "opf/site/", "is a symbolic link")):
+            got = run_quiet(base / fixture_name)
+            check(name, got[0] == 2 and "coverage root " + root_name in got[2] and message in got[2], got)
 
 
 _REAL_TEMPLATE_TARGETS = _template_pages.template_targets
@@ -1613,14 +1701,44 @@ def _not_found_links_self_test():
 COVERAGE_ROOTS = ("site", "opf/site")
 
 
+def _root_state(root, subdir):
+    """Classify the coverage root `subdir` under `root` as ("absent", None), ("directory", None) or ("refused",
+    message naming the root). Each path component is read with a no-follow lstat: a missing component
+    (FileNotFoundError) is absent, every component a real directory is a directory, and anything else (a
+    permission or other OSError, a symlink, a regular file or other type) is refused. Path.is_dir() is not
+    used: it follows symlinks and returns False on any OSError, so a present root under a parent that cannot
+    be searched would read as absent and be skipped."""
+    path = root
+    for part in Path(subdir).parts:
+        path = path / part
+        try:
+            mode = os.lstat(path).st_mode
+        except FileNotFoundError:
+            return "absent", None
+        except OSError as exc:
+            return "refused", "cannot inspect coverage root {}/ ({})".format(subdir, exc)
+        if stat.S_ISLNK(mode):
+            return "refused", "coverage root {}/: {} is a symbolic link, not a directory".format(subdir, path)
+        if not stat.S_ISDIR(mode):
+            return "refused", "coverage root {}/: {} is not a directory".format(subdir, path)
+    return "directory", None
+
+
 def run(root):
     """Scan every present coverage root under `root`. Return the worst per-root exit code; roots are
-    optional (absent is skipped), a present root is scanned, and an unreadable present root fails closed."""
-    present = [sub for sub in COVERAGE_ROOTS if (root / sub).is_dir()]
-    if not present:
+    optional (absent is skipped), a present root is scanned, and a root that cannot be inspected or is not a
+    real directory (_root_state) fails closed with exit 2."""
+    present, worst = [], 0
+    for sub in COVERAGE_ROOTS:
+        state, message = _root_state(root, sub)
+        if state == "directory":
+            present.append(sub)
+        elif state == "refused":
+            print("error: {}; fail-closed".format(message), file=sys.stderr)
+            worst = 2
+    if not present and worst == 0:
         print("PASS: no site/ or opf/site/ directory")
         return 0
-    worst = 0
     for sub in present:
         worst = max(worst, _scan_root(root, sub))
     return worst
