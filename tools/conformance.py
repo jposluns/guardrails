@@ -434,13 +434,15 @@ def check_c3(root):
     its target beneath the held descriptors, never by name from the root, as the gate does. So a
     .claude/rules swapped for a symlink or another directory, or removed, between the probe and its
     open, a .claude replaced by another directory between its lstat and its open, any other symlink at
-    an entry the walk inspects (a rule file included) and a rule file that is not a regular file,
-    whatever its name, are each MALFORMED (exit 2) naming the path, never followed, and a .claude/rules
-    directory swapped after its open changes nothing read, a symlinked family included (the gate's
-    residual for a symlink's target applies). Runs
-    unconditionally: it needs only
-    .claude/rules/, which every adopter has. An absent tree, or one holding no rule file or vendored
-    source, validated nothing and is NOT APPLICABLE, never a hollow PASS."""
+    an entry the walk inspects (a rule file included), a rule file that is not a regular file,
+    whatever its name, and a vendored source's PROVENANCE.md or LICENSE whose lstat fails other than
+    by finding nothing, or that is there but is not a regular file opening for reading as the file
+    its lstat judged (a directory, a FIFO, a file whose open is refused, or one replaced between its
+    lstat and its open), are each MALFORMED (exit 2) naming the path, never followed and never counted
+    as present, and a .claude/rules directory swapped after its open changes nothing read, a symlinked
+    family included (the gate's residual for a symlink's target applies). Runs unconditionally: it
+    needs only .claude/rules/, which every adopter has. An absent tree, or one holding no rule file or
+    vendored source, validated nothing and is NOT APPLICABLE, never a hollow PASS."""
     rules = root / ".claude" / "rules"
     # dir_chain_or_absent, as gen_rules probes the same paths: the tree and each family directory it generates,
     # at every component under the root (.claude/ too), before the first read. The tree is then read only
