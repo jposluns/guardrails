@@ -141,6 +141,10 @@ pattern = "plugin/aiqt-guardrails-hooks/**"
 class = "pack-immutable"
 
 [[release-class]]
+path = ".claude-plugin/marketplace.json"
+class = "pack-immutable"
+
+[[release-class]]
 pattern = "tools/**"
 class = "pack-immutable"
 note = "Shipped pack tooling, byte-exact; explicitly NOT dev-only (Section 12 step 2)."

@@ -94,6 +94,13 @@ HOOKS_SUBTREE_PARTS = PLUGIN_ROOT_PARTS + ("hooks",)
 HOOKS_JSON_REL = PLUGIN_ROOT_REL + "/hooks/hooks.json"
 SCRIPT_REL = PLUGIN_ROOT_REL + "/hooks/scripts/aiqt_hooks.py"
 PLUGIN_JSON_REL = PLUGIN_ROOT_REL + "/.claude-plugin/plugin.json"
+# The repository's plugin marketplace file, rendered from the manifest's optional [marketplace] table (its
+# name) and the [plugin] table (everything else). Like the project settings it is rendered by run() only,
+# and only in the authoring tree, so no adopter tree is ever given one and conformance.py C5 never requires
+# it; unlike them it ships in the release. Its plugin source is the relative path of the plugin root, never
+# a branch, tag or commit: the documented install names the release tag when it adds the marketplace.
+MARKETPLACE_JSON_REL = ".claude-plugin/marketplace.json"
+MARKETPLACE_KEYS = ("name",)
 SCRIPT_NAME = "aiqt_hooks.py"
 # ${CLAUDE_PLUGIN_ROOT} resolves to the installed plugin dir, so the script path is relative to it
 # regardless of where the plugin is nested in this authoring repo.
@@ -200,7 +207,14 @@ GENSRC_OUTPUTS = (
     {"target": ".claude/settings.json", "kind": "file",
      "sources": (".aiqt/core/hooks/manifest.toml",),
      "regenerate": "python3 tools/gen_hooks.py"},
+    {"target": ".claude-plugin/marketplace.json", "kind": "file",
+     "sources": (".aiqt/core/hooks/manifest.toml",),
+     "regenerate": "python3 tools/gen_hooks.py"},
 )
+# Declares this generator as a release renderer (tools/gen_renderers.py), so its shipped targets get
+# ARTIFACTS rows with their digests in the release manifest; gen_renderers drops the AUTHORING_ONLY_REL
+# targets, which never ship.
+RENDERER_DECL = {"renderer-id": "hooks", "semantics-revision": 1}
 
 
 def _exists(path):
@@ -231,9 +245,10 @@ def load_manifest(path):
     more than one control (cnsdif has a Stop layer and a PreToolUse diff-source layer), so the corpus
     linkage lives in `rules` (cross-checked against load_corpus) and `id` keys the control."""
     data = load_toml(path)
-    extra = set(data) - {"plugin", "hook"}
+    extra = set(data) - {"plugin", "hook", "marketplace"}
     if extra:
         raise ValueError("{}: unknown top-level key(s): {}".format(path.name, ", ".join(sorted(extra))))
+    _check_marketplace(data, path.name)
     plugin = data.get("plugin")
     if not isinstance(plugin, dict):
         raise ValueError("{}: a [plugin] table is required".format(path.name))
@@ -329,6 +344,28 @@ def load_manifest(path):
             raise ValueError("{}: class must be the EN-5 letter a/b/c/d".format(where))
         _req_str(hook, "residue", where)  # required, never empty: the control's honest coverage gap
     return plugin, hooks
+
+
+def _check_marketplace(data, name):
+    """Validate the optional [marketplace] table: a table holding only MARKETPLACE_KEYS, its name a
+    kebab-case string. Returns the table, or None when it is absent; raises ValueError otherwise."""
+    if "marketplace" not in data:
+        return None
+    market = data["marketplace"]
+    if not isinstance(market, dict):
+        raise ValueError("{}: marketplace must be a table".format(name))
+    m_extra = set(market) - set(MARKETPLACE_KEYS)
+    if m_extra:
+        raise ValueError("{}: unknown [marketplace] key(s): {}".format(name, ", ".join(sorted(m_extra))))
+    if not ID_RE.match(_req_str(market, "name", "{}: [marketplace]".format(name))):
+        raise ValueError("{}: [marketplace] name must match ^[a-z][a-z0-9-]*$ (kebab-case)".format(name))
+    return market
+
+
+def load_marketplace(path):
+    """The validated [marketplace] table of the hooks manifest at path, or None when it has none. Raises
+    ValueError or OSError like load_manifest, which the caller maps to exit 2."""
+    return _check_marketplace(load_toml(path), path.name)
 
 
 def cross_check(hooks, corpus_ids, script_text, name):
@@ -522,6 +559,19 @@ def render_plugin_json(plugin):
     return json.dumps(obj, indent=2) + "\n"
 
 
+def render_marketplace_json(plugin, market):
+    """The repository's .claude-plugin/marketplace.json, deterministic: the marketplace name from the
+    [marketplace] table, the owner and the one plugin entry from the [plugin] table, the plugin source the
+    plugin root's path relative to the repository root. No branch, tag, ref or commit is ever rendered."""
+    obj = {"name": market["name"],
+           "owner": {"name": plugin["author-name"], "email": plugin["author-email"]},
+           "plugins": [{"name": plugin["name"],
+                        "source": "./" + PLUGIN_ROOT_REL,
+                        "description": plugin["description"],
+                        "version": plugin["version"]}]}
+    return json.dumps(obj, indent=2) + "\n"
+
+
 def render_project_settings(hooks, ids=PROJECT_HOOK_IDS):
     """The repository-local .claude/settings.json, deterministic and generated whole: the controls named in
     ids, in the render_hooks_json order (events in KNOWN_EVENTS order, entries sorted by id), each with its
@@ -627,6 +677,7 @@ def run(root, check, project_ids=PROJECT_HOOK_IDS):
     no project control, so its plugin-surface cases pass project_ids=()."""
     src_dir = root / ".aiqt" / "core" / "hooks"
     desired = {}
+    authoring = False
     try:
         # dir_or_absent (not is_dir) inside the try: an unreadable .aiqt/ parent, or a source path that
         # is there but cannot be read as a directory, must fail closed as exit 2, not read as an absent
@@ -641,9 +692,16 @@ def run(root, check, project_ids=PROJECT_HOOK_IDS):
             return 2
         if dir_present(src_dir, root=root):
             desired = build_desired(root, src_dir)
-            if project_ids and authoring_tree(root):
+            authoring = authoring_tree(root)
+            if project_ids and authoring:
                 _plugin, hooks = load_manifest(src_dir / "manifest.toml")
                 desired[PROJECT_SETTINGS_REL] = render_project_settings(hooks, project_ids)
+            # The marketplace file, in the authoring tree only and only when the manifest has the table.
+            if authoring:
+                market = load_marketplace(src_dir / "manifest.toml")
+                if market is not None:
+                    plugin, _hooks = load_manifest(src_dir / "manifest.toml")
+                    desired[MARKETPLACE_JSON_REL] = render_marketplace_json(plugin, market)
     except (ValueError, OSError) as exc:
         print("error: {}".format(exc))
         return 2
@@ -669,7 +727,9 @@ def run(root, check, project_ids=PROJECT_HOOK_IDS):
         hooks_dir = root.joinpath(*HOOKS_SUBTREE_PARTS)
         plugin_json = root / PLUGIN_JSON_REL
         probed = {}
+        marketplace_json = root / MARKETPLACE_JSON_REL
         for path in (root.joinpath(*PLUGIN_ROOT_PARTS), hooks_dir, plugin_json.parent,
+                     *((marketplace_json.parent,) if authoring else ()),
                      *sorted({(root / rel).parent for rel in desired})):
             probed[path], problem = dir_chain_or_absent(path, root)
             if problem is not None:
@@ -700,6 +760,12 @@ def run(root, check, project_ids=PROJECT_HOOK_IDS):
             drift.append("orphan " + PLUGIN_JSON_REL)
             if not check:
                 plugin_json.unlink()
+        # In the authoring tree a marketplace file the manifest no longer declares is an orphan; in any
+        # other tree it is never read, written or deleted.
+        if authoring and MARKETPLACE_JSON_REL not in desired and _exists(marketplace_json):
+            drift.append("orphan " + MARKETPLACE_JSON_REL)
+            if not check:
+                marketplace_json.unlink()
     except (OSError, ValueError) as exc:
         # ValueError catches UnicodeDecodeError from read_text on a non-utf-8 target during the drift
         # comparison; fail closed (exit 2), never a traceback.
@@ -853,6 +919,10 @@ def main():
 #      refused just below it and generate just above it, so the rule cannot narrow to the onFailure
 #      predicate or to the first hook; with the switch false or absent the below, at and above values
 #      still generate and render the default timeout.
+#  36. the [marketplace] table renders .claude-plugin/marketplace.json in the authoring tree only, to
+#      spelled-out expected bytes with a relative plugin source and no ref, sha, branch or tag key;
+#      drift, a hand-added key, deletion and an undeclared leftover file exit 1, a malformed table
+#      exits 2, build_desired() never carries it, and an adopter tree is never given or changed one.
 # Every vector that removes the entries its own faults caused (cases 20b, 21b, 27 and 28)
 # does so by PROVENANCE, never by message text: each named entry from the staged cleanup,
 # the removal and absence helpers and the launch diagnostic carries its stage and the
@@ -1938,6 +2008,78 @@ def self_test_main(_nested=False):
         _write_marker(noproj)
         if run_project(noproj, check=True) != 2:
             failures.append("a manifest without the project control expected exit 2 (fail-closed)")
+
+        # 36. The marketplace file: rendered in the authoring tree to spelled-out expected bytes (a relative
+        #     plugin source, no ref, branch or tag key), drift-clean on regeneration, drift and deletion exit 1,
+        #     a hand-added key exit 1, an orphan once the table is removed exit 1, a malformed table exit 2,
+        #     never carried by build_desired(), and never written in a tree without the authoring marker.
+        market_tail = '\n[marketplace]\nname = "selftest-market"\n'
+        want_market = ('{\n  "name": "selftest-market",\n  "owner": {\n    "name": "Self Test",\n'
+                       '    "email": "selftest@example.invalid"\n  },\n  "plugins": [\n    {\n'
+                       '      "name": "aiqt-selftest-hooks",\n      "source": "./plugin/aiqt-guardrails-hooks",\n'
+                       '      "description": "Self-test plugin.",\n      "version": "0.1.0"\n    }\n  ]\n}\n')
+        mkt = tmp / "market"
+        mkt.mkdir()
+        _build_project_tree(mkt)
+        mkt_manifest = mkt / ".aiqt" / "core" / "hooks" / "manifest.toml"
+        mkt_file = mkt / ".claude-plugin" / "marketplace.json"
+        try:
+            base_manifest = mkt_manifest.read_text(encoding="utf-8")
+            mkt_manifest.write_text(base_manifest + market_tail, encoding="utf-8")
+            if run_project(mkt, check=False) != 0 or run_project(mkt, check=True) != 0:
+                failures.append("marketplace tree: generation then check expected exit 0")
+            got_market = mkt_file.read_text(encoding="utf-8") if mkt_file.is_file() else None
+            if got_market != want_market:
+                failures.append("marketplace.json: expected {!r}, got {!r}".format(want_market, got_market))
+            if any(key in json.loads(got_market or "{}").get("plugins", [{}])[0]
+                   for key in ("ref", "sha", "branch", "tag")):
+                failures.append("marketplace.json must never render a ref, sha, branch or tag key")
+            mkt_file.write_text(want_market.replace('"0.1.0"', '"0.1.1"'), encoding="utf-8")
+            if run_project(mkt, check=True) != 1:
+                failures.append("a drifted marketplace.json expected exit 1")
+            mkt_file.write_text(want_market.replace('"plugins"', '"extra": 1,\n  "plugins"'), encoding="utf-8")
+            if run_project(mkt, check=True) != 1:
+                failures.append("a hand-added marketplace.json key expected exit 1")
+            mkt_file.unlink()
+            if run_project(mkt, check=True) != 1:
+                failures.append("a deleted marketplace.json expected exit 1")
+            if run_project(mkt, check=False) != 0 or mkt_file.read_text(encoding="utf-8") != want_market:
+                failures.append("regeneration after marketplace drift expected the expected bytes back")
+            if MARKETPLACE_JSON_REL in build_desired(mkt, mkt / ".aiqt" / "core" / "hooks"):
+                failures.append("build_desired() must not carry the marketplace file (adopter C5)")
+            for label, tail in (("unknown key", market_tail + 'ref = "main"\n'),
+                                ("non-kebab name", '\n[marketplace]\nname = "Self_Market"\n'),
+                                ("missing name", '\n[marketplace]\n'),
+                                ("not a table", '\nmarketplace = "selftest-market"\n')):
+                text = base_manifest + tail
+                if label == "not a table":
+                    text = 'marketplace = "selftest-market"\n' + base_manifest
+                mkt_manifest.write_text(text, encoding="utf-8")
+                if run_project(mkt, check=True) != 2:
+                    failures.append("marketplace {}: expected exit 2 (fail-closed)".format(label))
+            mkt_manifest.write_text(base_manifest, encoding="utf-8")
+            if run_project(mkt, check=True) != 1:
+                failures.append("a marketplace.json the manifest no longer declares expected exit 1 (orphan)")
+            if run_project(mkt, check=False) != 0 or mkt_file.exists():
+                failures.append("regeneration must remove the orphan marketplace.json")
+            adopt = tmp / "market-adopter"
+            adopt.mkdir()
+            _build_project_tree(adopt, authoring=False)
+            adopt_manifest = adopt / ".aiqt" / "core" / "hooks" / "manifest.toml"
+            adopt_manifest.write_text(adopt_manifest.read_text(encoding="utf-8") + market_tail,
+                                      encoding="utf-8")
+            for check in (False, True):
+                if run_project(adopt, check=check) != 0:
+                    failures.append("marketplace adopter tree (check={}): expected exit 0".format(check))
+            if (adopt / ".claude-plugin").exists():
+                failures.append("an adopter run must never write a marketplace file")
+            (adopt / ".claude-plugin").mkdir()
+            (adopt / ".claude-plugin" / "marketplace.json").write_text("{}\n", encoding="utf-8")
+            if run_project(adopt, check=False) != 0 or \
+                    (adopt / ".claude-plugin" / "marketplace.json").read_text(encoding="utf-8") != "{}\n":
+                failures.append("an adopter run must leave an adopter marketplace file byte-identical")
+        except (OSError, ValueError) as exc:
+            failures.append("marketplace case: {}".format(exc))
 
         # 20. An adopter-shaped tree (the shipped hooks source, no authoring marker): a write run and a check
         #     run leave an existing adopter .claude/settings.json byte-identical and exit 0, and a tree with

@@ -69,6 +69,15 @@ homepage = "https://aiqt.ai"
 claude-code-min-version = "2.1.295"
 on-failure-render = false
 
+# The plugin marketplace this repository publishes. tools/gen_hooks.py renders it, in this repository only
+# (the tree carrying .aiqt/authoring.toml), as .claude-plugin/marketplace.json at the repository root, and
+# drift-gates it like the plugin's other generated files. Only the marketplace name is authored here: the
+# plugin entry's name, version and description, and the owner, come from the [plugin] table above, and
+# the plugin source is the plugin root's path relative to the repository root, so the file never names a
+# branch, a tag or a commit.
+[marketplace]
+name = "aiqt-guardrails"
+
 [[hook]]
 id = "diff-wall-stop"
 rules = ["cnsdif"]  # trust / no-console-diff-dumps

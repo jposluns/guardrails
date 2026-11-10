@@ -19,7 +19,7 @@ html = '''Both shipped files are prose instructions and reference material only,
 
 [[body]]
 component = "prose"
-html = '''<p>Every platform's last verified date is pending, and ChatGPT, Gemini, Copilot, and Copilot Studio have not yet been tested against AIQT. The 30 Claude Code hooks ship as an opt-in plugin; the generated adapters, a guided install, and a setup doctor arrive with the 1.1.0 developer release.</p>'''
+html = '''<p>Every platform's last verified date is pending, and ChatGPT, Gemini, Copilot, and Copilot Studio have not yet been tested against AIQT. The 31 Claude Code hooks ship as an opt-in plugin; the generated adapters, a guided install, and a setup doctor arrive with the 1.1.0 developer release.</p><p>To install the hooks plugin in Claude Code, pinned to the release tag (the hooks need Python 3.14 or newer as <code>python3</code>), run:</p><p><code>claude plugin marketplace add https://github.com/jposluns/guardrails.git#v1.0.5 &amp;&amp; claude plugin install aiqt-guardrails-hooks@aiqt-guardrails</code></p>'''
 
 [[body]]
 component = "label"
