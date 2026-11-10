@@ -1150,7 +1150,7 @@ Baseline types:
 | pending_decision | `open` > `decided` or `withdrawn` | All-or-none resolution bundle: an open decision MUST carry none of `decision`, `decided_at`, `decided_by`; a decided one MUST carry all. A decided record MAY be superseded by a new decision linking `supersedes`; exactly one current effective resolution MUST exist per chain. |
 | autonomous_decision | `recorded` | Immutable ACT record: the classification basis, the action, links. Overturning MUST be a new record (or maintainer decision) linking it. |
 | block | `active` > `released` or `expired` | Scopes an enumerated list of record IDs. A block created by an assistant or automation actor is `active/proposed` and is a proposal, not a grant: it MUST NOT count toward blocked-ness or justify a stop until a maintainer ratifies it. |
-| handoff | `current` > `superseded` | Posting a new handoff MUST supersede the previous in the same act: the operation that lands the new record at `current` MUST move the predecessor to `superseded` in the same journaled transaction (section 8.8), and where the posting actor's kind is `assistant` or `automation` that move is a terminal transition, so it lands `superseded/proposed` with `proposed_from` recording `current` (sections 8.3 and 8.4). At most one `current` handoff MAY exist among clean records authored by non-importer actors (section 8.6). |
+| handoff | `current` > `superseded` | Posting a new handoff MUST supersede the previous in the same act; at most one `current` handoff MAY exist among clean records authored by non-importer actors (section 8.6). |
 | reference | `recorded` | Immutable captured reference. |
 | contribution | `proposed` > `sent` > `acknowledged` or `superseded`; `proposed` > `withdrawn` | Records what this project proposes or sends to a peer, with a delivery bundle `{channel, ref, sent_at, receipt_ref?, receipted_at?}`: `channel`/`ref`/`sent_at` MUST be present once sent, `sent_at` MUST NOT be present before, and the receipt fields MAY appear only at `acknowledged`. `sent` is gated (an assistant lands `sent/proposed`; a maintainer, or a valid standing authorization for the recipient, lands the bare grant). `acknowledged` is the single positive terminal (responded, adopted, reshaped, or declined); the outcome MUST live in `summary`/`x-<vendor>`, never as a state. A re-send MUST be a new record linking `supersedes`; the superseded record records `superseded`. |
 | maintainer_decision | `recorded` | Created-terminal, immutable maintainer ruling carrying its `decision` (answer plus rationale). `actor.kind` MUST be `maintainer` or `importer` only (a maintainer ruling with assistant attribution is a contradiction; `importer` covers migrated history). Overturning MUST be a new record linking the old. It MAY `exemplifies` the preference_pattern it instantiates. |
@@ -1437,11 +1437,7 @@ guarantees:
 4. Postcondition: the model diff of every rewritten file equals exactly the operation's allowed
    delta (the new rows appended, the counters advanced by exactly the claim, and for a transition
    one status and `updated_at` change plus the `proposed_from` write or removal and, for a
-   pending_decision, the resolution bundle write or removal and the `supersedes` link append, and
-   for an operation that lands a handoff at `current` or a mode at unqualified `active`, the
-   predecessor's paired `superseded` or `retired` status and `updated_at` change, section 8.5, which
-   for a handoff posted by an assistant or automation actor is `superseded/proposed` together with
-   the `proposed_from` write, section 8.4),
+   pending_decision, the resolution bundle write or removal and the `supersedes` link append),
    value for value
    and type for type (a boolean or float is never equal to an integer), before anything is
    written. The expected
