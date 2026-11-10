@@ -25270,15 +25270,26 @@ def _main_isolated(monitor):
                 ("(ci-idc-c16) git config --list allows", "git config --list --show-origin author.name claude"),
                 ("(ci-idc-c17) git config get of author.name allows", "git config get author.name claude"),
                 ("(ci-idc-c18) git log with author.email and an AI path as pathspecs allows",
-                 "git log -1 --format='%an' -- author.email claude.txt"),
-                ("(ci-idc-c19) a commit message that starts with an AI EMAIL assignment allows",
-                 "git commit -m 'EMAIL=noreply@anthropic.com is the bot address'"),
-                ("(ci-idc-c20) a commit message of an AI author.name assignment allows",
-                 "git commit -m 'author.name=Claude'"),
-                ("(ci-idc-c21) an AI EMAIL operand of python3 allows",
-                 "python3 -c 'print(1)' EMAIL=noreply@anthropic.com"),
-                ("(ci-idc-c22) an AI EMAIL that echo only prints allows", "echo EMAIL=noreply@anthropic.com")):
+                 "git log -1 --format='%an' -- author.email claude.txt")):
             ciexpect(_ci_label, _ci_cmd, "allow")
+        # A command whose raw text names an identity in an assignment or default-value form and an AI anywhere
+        # denies (_cmtidn_identity_set_ai), so text that only quotes such an assignment beside an AI name, which
+        # the word reader leaves alone, is the disclosed over-deny of that fail-closed rule.
+        for _ci_label, _ci_cmd in (
+                ("(ci-idc-o1) a commit message that starts with an AI EMAIL assignment denies (over-deny)",
+                 "git commit -m 'EMAIL=noreply@anthropic.com is the bot address'"),
+                ("(ci-idc-o2) a commit message of an AI author.name assignment denies (over-deny)",
+                 "git commit -m 'author.name=Claude'"),
+                ("(ci-idc-o3) an AI EMAIL operand of python3 denies (over-deny)",
+                 "python3 -c 'print(1)' EMAIL=noreply@anthropic.com"),
+                ("(ci-idc-o4) an AI EMAIL that echo only prints denies (over-deny)", "echo EMAIL=noreply@anthropic.com"),
+                ("(ci-idc-o5) a commit message that quotes -c author.name with an AI name denies (over-deny)",
+                 "git commit -m 'use -c author.name=Claude in an alias'"),
+                ("(ci-idc-o6) a git clone -o value that holds c and an AI author.name pair denies (over-deny)",
+                 "git clone -q -ocauthor.name=Claude . c2"),
+                ("(ci-idc-o7) a commit message that names an AI beside a human EMAIL assignment denies (over-deny)",
+                 "EMAIL=alice@example.com git commit -m 'fix the claude adapter'")):
+            ciexpect(_ci_label, _ci_cmd, "deny")
         # git config reads its options only up to its first word that is neither an option nor an option's
         # value, so a read option spelled as an option value or after the NAME selects no mode and the command
         # still sets the value; each deny vector below set the identity on git 2.53.0 (with a stand-in name).
@@ -25337,8 +25348,42 @@ def _main_isolated(monitor):
                 ("(ci-idc53) a git clone -c word with an attached AI author.name in a rebase -x line denies",
                  "git rebase -x 'git clone -cauthor.name=Claude . c2' HEAD"),
                 ("(ci-idc54) a git clone -c word with an attached AI author.name in a command the tokenizer "
-                 "cannot parse denies", "git clone -cauthor.name='Claude' . c2; git commit -m 'x")):
+                 "cannot parse denies", "git clone -cauthor.name='Claude' . c2; git commit -m 'x"),
+                # A default-value expansion sets the variable wherever bash expands it: in a redirect target, a
+                # here-string or an unquoted heredoc body, which the tokenizer does not keep as words, and with a
+                # nested expansion or a quoted '}' before the AI part of its value. Each set the identity on git
+                # 2.53.0 with bash 5.3 (with a stand-in name) and allowed while the expansion was read per word.
+                ("(ci-idc55) an AI EMAIL default in a redirect target under set -a denies",
+                 'set -a; : > "${EMAIL:=noreply@anthropic.com}.txt"; git commit -m x'),
+                ("(ci-idc56) an AI GIT_AUTHOR_NAME default in a 2> redirect target denies",
+                 'export GIT_AUTHOR_NAME=; : 2> "${GIT_AUTHOR_NAME:=Claude}.log"; git commit -m x'),
+                ("(ci-idc57) an AI GIT_AUTHOR_EMAIL default in a brace group redirect target denies",
+                 'export GIT_AUTHOR_EMAIL=; { :; } 2>"${GIT_AUTHOR_EMAIL:=noreply@anthropic.com}"; git commit -m x'),
+                ("(ci-idc58) an AI EMAIL default in an exec redirect target denies",
+                 'export EMAIL; exec 3> "${EMAIL:=noreply@anthropic.com}.log"; git commit -m x'),
+                ("(ci-idc59) an AI EMAIL default in a here-string denies",
+                 'export EMAIL; : <<< "${EMAIL:=noreply@anthropic.com}"; git commit -m x'),
+                ("(ci-idc60) an AI EMAIL default in an unquoted heredoc body denies",
+                 'export EMAIL; : <<EOF\n${EMAIL:=noreply@anthropic.com}\nEOF\ngit commit -m x'),
+                ("(ci-idc61) an AI GIT_COMMITTER_NAME default in an unquoted heredoc body denies",
+                 'export GIT_COMMITTER_NAME=; : <<EOF\n${GIT_COMMITTER_NAME:=Claude}\nEOF\ngit commit -m x'),
+                ("(ci-idc62) an AI EMAIL default behind a nested expansion denies",
+                 'export EMAIL; : "${EMAIL:=${USER:-u}@anthropic.com}"; git commit -m x'),
+                ("(ci-idc63) an AI GIT_AUTHOR_NAME default behind a nested expansion denies",
+                 'export GIT_AUTHOR_NAME=; : "${GIT_AUTHOR_NAME:=${X-}Claude}"; git commit -m x'),
+                ("(ci-idc64) an AI EMAIL default behind a quoted closing brace denies",
+                 'export EMAIL; : "${EMAIL:="}"noreply@anthropic.com}"; git commit -m x'),
+                ("(ci-idc65) an AI EMAIL default whose name a backslash-newline splits denies",
+                 'export EMAIL; : "${EM\\\nAIL:=noreply@anthropic.com}"; git commit -m x')):
             ciexpect(_ci_label, _ci_cmd, "deny")
+        # The raw-text rule reads a command up to the read limit; one past it goes to the too-long fallback,
+        # which denies a command that names an AI anywhere and holds an identity name, so the redirect-target
+        # form denies just inside, at and just past the limit.
+        _ci_base = 'set -a; : > "${EMAIL:=noreply@anthropic.com}.txt"; git commit -m x'
+        for _ci_len in (aiqt_hooks._CMTIDN_READ_LIMIT - 1, aiqt_hooks._CMTIDN_READ_LIMIT,
+                        aiqt_hooks._CMTIDN_READ_LIMIT + 1):
+            ciexpect("(ci-idc-bound) a {}-character redirect-target default denies".format(_ci_len),
+                     _ci_base + " " * (_ci_len - len(_ci_base)), "deny")
         for _ci_label, _ci_cmd in (
                 ("(ci-idc-c23) git config -l before the NAME allows", "git config -l author.name claude"),
                 ("(ci-idc-c24) git config -f FILE -l of author.name allows",
@@ -25356,8 +25401,19 @@ def _main_isolated(monitor):
                  "git clone --config author.name=Me . c2"),
                 ("(ci-idc-c31) a use-default expansion of an AI EMAIL, which assigns nothing, allows",
                  ": \"${EMAIL:-noreply@anthropic.com}\""),
-                ("(ci-idc-c32) a commit message that quotes -c author.name with an AI name allows",
-                 "git commit -m 'use -c author.name=Claude in an alias'"),
+                ("(ci-idc-c38) an ordinary commit allows", 'git commit -m "fix the parser"'),
+                ("(ci-idc-c39) an ordinary commit of all tracked changes allows",
+                 'git commit -am "docs: update the readme"'),
+                ("(ci-idc-c40) a human EMAIL export before a commit allows",
+                 "export EMAIL=alice@example.com; git commit -m x"),
+                ("(ci-idc-c41) a human EMAIL default in a redirect target allows",
+                 'set -a; : > "${EMAIL:=alice@example.com}.txt"; git commit -m x'),
+                ("(ci-idc-c42) a human GIT_AUTHOR_NAME default in an unquoted heredoc body allows",
+                 ': <<EOF\n${GIT_AUTHOR_NAME:=Alice}\nEOF\ngit commit -m x'),
+                ("(ci-idc-c43) human author.name and committer.email pairs given by -c allow",
+                 "git -c author.name=Alice -c committer.email=alice@example.com commit -m x"),
+                ("(ci-idc-c44) a log read that names an AI author and sets no identity allows",
+                 "git log --author=Claude -1"),
                 ("(ci-idc-c33) a git clone -c word with an attached unrelated key and an AI-named value allows",
                  "git clone -cinit.templateDir=claude-templates . c2"),
                 ("(ci-idc-c34) a git clone short option cluster ending in c with an unrelated key allows",
@@ -25367,7 +25423,7 @@ def _main_isolated(monitor):
                 ("(ci-idc-c36) a git clone -c word with an attached author.name that names no AI allows",
                  "git clone -qcauthor.name=Me . c2"),
                 ("(ci-idc-c37) a git clone -o value that holds c and an author.name pair, an origin name, allows",
-                 "git clone -q -ocauthor.name=Claude . c2")):
+                 "git clone -q -ocauthor.name=Maint . c2")):
             ciexpect(_ci_label, _ci_cmd, "allow")
         # A git commit behind leading reserved words, a function or coprocess name, VAR=value words or a wrapper
         # word (env, timeout, command, exec, nohup, xargs, sudo, nice, setsid, stdbuf, time) is judged like the

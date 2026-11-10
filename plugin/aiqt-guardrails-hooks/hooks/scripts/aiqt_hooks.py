@@ -4935,9 +4935,9 @@ def diff_source_pretool(data):
 # subcommand is not a git command name (an alias). Separately, an identity ASSIGNMENT (a git-identity env
 # var, an EMAIL assignment the shell runs, or a user, author or committer name or email config value set by -c
 # or by git config; _identity_assignment_ai) is a violation on ANY segment, to harden the common 'set the
-# identity then commit' form. Because the tokens are quote-aware, a trailer hiding inside a quoted -m message (e.g. -m "fix; Co-authored-by: Claude", which the old
-# whitespace split broke at the ';') now lives intact in the single message token, and a substring scan
-# on that token catches it.
+# identity then commit' form. Because the tokens are quote-aware, a trailer hiding inside a quoted -m
+# message (e.g. -m "fix; Co-authored-by: Claude", which the old whitespace split broke at the ';') now lives
+# intact in the single message token, and a substring scan on that token catches it.
 AI_IDENTITY_RE = re.compile(
     r"(?i)\b(claude|anthropic|openai|chatgpt|codex|copilot|gemini|gpt-?[0-9o][a-z0-9.-]*)\b"
     r"|@anthropic\.com|@openai\.com")
@@ -5191,8 +5191,6 @@ def _identity_assignment_ai(tokens):
       after a git clone --config word or a git clone short option cluster ending in c (-qc), and any of the six
       in a git clone --config=NAME=VALUE word or in the rest of a git clone -c word or cluster
       (-cauthor.name=VALUE, -qcauthor.name=VALUE: CONFIG_SHORT_RE);
-    - a ${EMAIL:=VALUE} or ${EMAIL=VALUE} default-value expansion, or one of a git identity variable, in any
-      word (_identity_default_assignment_ai);
     - a git alias definition whose value holds an identity config assignment (-c author.name=VALUE), given
       by -c alias.NAME=VALUE, git clone --config, or a git config command that sets a value
       (_alias_identity_ai);
@@ -5208,9 +5206,6 @@ def _identity_assignment_ai(tokens):
         m = EMAIL_ENV_RE.match(tok)
         if m and i in assigned and AI_IDENTITY_RE.search(m.group(1)):
             return "EMAIL variable {!r}".format(tok.strip()[:80])
-        hit = _identity_default_assignment_ai(tok)
-        if hit is not None:
-            return hit
         m = USER_CONF_EQ_RE.match(tok)
         if m and AI_IDENTITY_RE.search(m.group(1)):
             return "user.name/user.email value {!r}".format(tok.strip()[:80])
@@ -5263,25 +5258,43 @@ ALIAS_CONF_EQ_RE = re.compile(r"(?is)^alias\.[^=]*=(.*)$")
 # An identity config assignment inside an alias value, read as raw text: a user, author or committer name or
 # email (any case), '=' and a value (a quoted string or a word).
 _ALIAS_IDENTITY_RE = re.compile(r"(?i)(?:user|author|committer)\.(?:name|email)\s*+=\s*+" + _VALUE)
-# A shell default-value expansion that assigns an identity variable when it is unset or empty
-# (${EMAIL:=VALUE} or ${EMAIL=VALUE}, and the same for the git identity variables): bash assigns the
-# variable wherever the expansion stands, an operand of ':' or echo included, and an assignment to a
-# variable already exported, or under set -a, reaches git. The value runs to the first '}'.
-DEFAULT_ASSIGN_RE = re.compile(
-    r"\$\{(?:EMAIL|(?i:GIT_(?:AUTHOR|COMMITTER)_(?:NAME|EMAIL))):?=([^}]*)")
+# An identity name in an assignment or default-value form, sought in the raw command text: EMAIL (as spelled)
+# or a GIT_AUTHOR_ or GIT_COMMITTER_ name or email variable with no letter, digit or underscore before it, or a
+# user, author or committer name or email config key (any case, anywhere in a word, so -cauthor.name=X counts),
+# followed by '=', '+=' or ':=' (EMAIL=X, EMAIL+=X, ${EMAIL=X}, ${EMAIL:=X}, -c author.name=X). bash assigns
+# a default-value expansion wherever it stands (a redirect target, a here-string, an unquoted heredoc body, or
+# behind a nested expansion in its own value), and an assignment to a variable already exported, or under set
+# -a, reaches git, so the form is sought in the whole text rather than in the words the tokenizer keeps.
+_CMTIDN_IDENTITY_SET_RE = re.compile(r"(?<![A-Za-z0-9_])(?:EMAIL|(?i:GIT_(?:AUTHOR|COMMITTER)_(?:NAME|EMAIL)))"
+                                     r"[+:]?=|(?i:(?:user|author|committer)\.(?:name|email))[+:]?=")
+# The characters dropped from the text before the second search for an identity name and an AI name: quotes,
+# backslashes and '$' (a backslash-newline is dropped first), so a name or value that quoting splits
+# (export 'EM''AIL=X', -c author.na"me"=X, Cl"au"de) is found joined. A newline is kept as a word boundary.
+_CMTIDN_SET_UNREAD_RE = re.compile(r"[\\\"'$]")
 
 
-def _identity_default_assignment_ai(tok):
-    """A hit label when the word tok holds a default-value expansion that assigns an AI identity to EMAIL or a
-    git identity variable (DEFAULT_ASSIGN_RE), else None. Read in any word of any segment, a single-quoted one
-    included, where bash does not expand it: the cost is a safe-direction over-deny of such text (a commit
-    message quoting ${EMAIL:=claude@x})."""
-    if "${" not in tok:
+def _cmtidn_identity_set_ai(command):
+    """A hit label when the raw command text, heredoc bodies, redirect words and here-strings included, names an
+    identity in an assignment or default-value form (_CMTIDN_IDENTITY_SET_RE) and also names an AI identity
+    (AI_IDENTITY_RE) anywhere, each sought in the text as written and once the characters of
+    _CMTIDN_SET_UNREAD_RE are dropped; else None. The two need not stand together: a value the shell builds
+    from a nested expansion (${EMAIL:=${USER:-u}@anthropic.com}) or from another word cannot be told from a
+    value that names no AI, so the rule fails closed. The cost is a disclosed over-deny of a command that
+    names both for another reason (a commit message that mentions EMAIL=X and an AI product, an echo, a
+    quoted heredoc that writes such text). Bounded: a command longer than _CMTIDN_READ_LIMIT is not searched
+    here, since the too-long fallback already denies one that names an AI and holds any of these names
+    (_commit_identity_fallback), and each search is one pass of a regex over the text."""
+    if len(command) > _CMTIDN_READ_LIMIT:
         return None
-    for m in DEFAULT_ASSIGN_RE.finditer(tok):
-        if AI_IDENTITY_RE.search(m.group(1)):
-            return "identity variable default {!r}".format(m.group(0).strip()[:80])
-    return None
+    text = _CMTIDN_SET_UNREAD_RE.sub("", command.replace("\\\n", ""))
+    named = _CMTIDN_IDENTITY_SET_RE.search(command) or _CMTIDN_IDENTITY_SET_RE.search(text)
+    if named is None:
+        return None
+    ai = AI_IDENTITY_RE.search(command) or AI_IDENTITY_RE.search(text)
+    if ai is None:
+        return None
+    return "identity assignment {!r} in a command that names an AI identity ({!r})".format(named.group(0),
+                                                                                           ai.group(0))
 
 
 def _alias_identity_ai(value):
@@ -5662,9 +5675,10 @@ _CMTIDN_UNREAD_CHARS_RE = re.compile(r"[\\\"'$\n]")
 # The words that can record an identity, which a command too long to read must also hold before its AI name
 # denies it (_cmtidn_identity_word): the reader judges an --author value or a trailer only on a segment whose
 # git command it finds by a word that is git or a path ending in /git, and a run line only under such a git
-# command, and it judges an identity assignment only in a word that starts with a GIT_AUTHOR_ or GIT_COMMITTER_
-# variable name or EMAIL, or with user.name, user.email, author.name, author.email, committer.name or
-# committer.email (EMAIL as spelled, the others in any case). Each such word holds its letters in the command
+# command, and it judges an identity assignment only in a word that holds a GIT_AUTHOR_ or GIT_COMMITTER_
+# variable name or EMAIL, or user.name, user.email, author.name, author.email, committer.name or
+# committer.email (EMAIL as spelled, the others in any case), as the raw-text rule (_cmtidn_identity_set_ai)
+# judges one only in text that holds such a name. Each such word holds its letters in the command
 # with only the characters of _CMTIDN_UNREAD_CHARS_RE between them, so the variable and config names are sought
 # in the command once those characters are dropped, as the AI name is. git is sought as a whole word: its
 # letters with only those characters between them (g$'i't), and no letter, digit or underscore directly before
@@ -5997,9 +6011,17 @@ def commit_identity(data):
                                            "identity (a co-author trailer, an --author value, a git identity "
                                            "variable, EMAIL, or a user, author or committer name or email "
                                            "value)")
-        return _commit_identity_fallback(_hash_doubt_scan(command), str(exc))
+        hit = _cmtidn_identity_set_ai(command)
+        if hit is None:
+            return _commit_identity_fallback(_hash_doubt_scan(command), str(exc))
     except ValueError as exc:
-        return _commit_identity_fallback(command, str(exc))
+        hit = _cmtidn_identity_set_ai(command)
+        if hit is None:
+            return _commit_identity_fallback(command, str(exc))
+    if hit is None:
+        # Nothing the reader judges sets an AI identity: the raw text decides next, failing closed when it
+        # names an identity in an assignment or default-value form and an AI anywhere (_cmtidn_identity_set_ai).
+        hit = _cmtidn_identity_set_ai(command)
     if hit is None:
         if _SubstHeredocs.reads != reads:
             return _commit_identity_fallback(command, _SUBST_HEREDOC_MAIN_FAILS)  # main's fallback, in place
