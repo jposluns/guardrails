@@ -690,8 +690,9 @@ _HOMES_READ_METHODS = frozenset(["get", "keys", "values", "items", "copy"])
 # below is a finding wherever it appears, whatever object it reads from, unless the exact form
 # matches a row of _HOMES_REACH_ALLOWLIST. Two spellings also read the file's bindings, and only
 # to add findings: a subscript of a name that an import anywhere in the file binds, and an
-# import of the store module under a name other than its first store alias. The allowlist row
-# is the only part of the arm that reads bindings to exempt a form, as the row states.
+# import of the store module under a name other than its first store alias. No part of the arm
+# reads name bindings to exempt a form; the allowlist row reads only the statement holding the
+# item.
 _HOMES_REACH_NAMES = frozenset(["builtins", "__builtins__"])
 _HOMES_REACH_ATTRS = frozenset(["__globals__", "f_globals", "f_locals", "f_builtins", "__dict__",
                                 "__builtins__", "__getattribute__", "__code__", "__defaults__",
@@ -718,15 +719,23 @@ _HOMES_LOOKUP_CALLS = frozenset(["getattr", "setattr", "delattr"])
 _HOMES_REACH_SUFFIX = ("; in a module that calls the seam every dynamic namespace reach is a "
                        "finding unless its exact form is a row of _HOMES_REACH_ALLOWLIST")
 # The reviewed allowlist: the ONLY forms of a listed spelling the namespace-reach arm does not
-# report. Each row is (key, the exact form, why it is safe). A new row is a reviewed change to
-# this table and to the rows of _homes_reach_rows; nothing else exempts a spelling.
+# report. Each row is (key, the exact form, why it is safe). The arm reads its exception keys
+# from this table at each scan and tries each one through its matcher in _homes_reach_allowed,
+# so a form is exempt only while its row is here, and removing a row makes its form a finding.
+# A new row is a reviewed change to this table, to _homes_reach_allowed and to the rows of
+# _homes_reach_rows; nothing else makes this arm exempt a spelling.
 _HOMES_REACH_ALLOWLIST = (
     ("blocked-sys-modules-item",
      "a statement sys.modules[\"<key>\"] = None with one target, whose key is one string "
      "constant naming neither this module, the store or init module, __main__ nor a submodule "
      "of one (_homes_sys_modules_key_ok, the one sys.modules write the binding arm accepts)",
-     "the entry then holds None, so a later import of that key raises ImportError: the write "
-     "binds no object to any module name, and its key names no module the rule reads"),
+     "the statement can only store the constant None under one string-constant key in the "
+     "mapping that sys.modules names at that point; sys is matched by its spelling and not "
+     "resolved, so where the name is not the sys module the write lands in another object or "
+     "raises: it binds no object other than None, and the key's first dotted part names none of "
+     "the modules the rule reads, so a key that names the store by a package path, such as "
+     "opf.tools._opf_store, can only block that import path, never replace the store module "
+     "already bound under its own name"),
 )
 
 
@@ -940,9 +949,13 @@ def _homes_binding_index(nodes):
 
 def _homes_reach_allowed(key, node, parent, facts):
     """True when `node`, a listed spelling, matches the _HOMES_REACH_ALLOWLIST row `key` exactly
-    (blocked-sys-modules-item reads the statement holding the item in facts["parents"])."""
+    (blocked-sys-modules-item reads the statement holding the item in facts["parents"]). The arm
+    calls this for every key the table holds, on every node with exactly one finding text, so
+    each branch matches its row's whole form, the spelling included; a key with no branch here
+    matches nothing."""
     if key == "blocked-sys-modules-item":
-        return (isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name)
+        return (isinstance(node, ast.Attribute) and node.attr == "modules"
+                and isinstance(node.value, ast.Name)
                 and node.value.id == "sys" and isinstance(parent, ast.Subscript)
                 and parent.value is node and isinstance(parent.ctx, ast.Store)
                 and _homes_sys_modules_key_ok(parent, facts["parents"].get(id(parent)),
@@ -954,9 +967,10 @@ def _homes_namespace_reach_findings(fname, label, walked, lines, facts):
     """Findings for the namespace-reach arm, over one guarded unit's nodes `walked`. The arm is
     bounded and fail-closed: it matches each spelling below by its spelled name, whatever object
     it reads from, and reports it wherever it appears, unless its exact form is a row of
-    _HOMES_REACH_ALLOWLIST (_homes_reach_allowed, which reads the parent statement of a
-    sys.modules item, as the row states). Two spellings also read bindings, and only to add
-    findings: the subscript in (4) reads the whole file's binding index in facts["file_binds"]
+    _HOMES_REACH_ALLOWLIST: the arm takes its exception keys from that table at each scan and
+    tries each through _homes_reach_allowed, which reads the parent statement of a sys.modules
+    item, as the row states, and no name binding. Two spellings also read bindings, and only to
+    add findings: the subscript in (4) reads the whole file's binding index in facts["file_binds"]
     to find the names an import binds, and the second-name store import in (7) reads
     facts["store_aliases"]. The spellings: (1) a getattr, setattr or delattr call (by a name or
     an attribute) whose name argument is not one plain string constant, and getattr referenced
@@ -988,11 +1002,13 @@ def _homes_namespace_reach_findings(fname, label, walked, lines, facts):
         if any(isinstance(bind, ast.Import) for bind in nodes))
     reach_strings = _HOMES_REACH_STRINGS | _HOMES_REACH_GC_NAMES
     first_store = facts["store_aliases"][0] if facts["store_aliases"] else None
+    # The exception keys come from the table itself, read at each scan, so a row removed from
+    # _HOMES_REACH_ALLOWLIST is no longer tried.
+    allow = tuple(row[0] for row in _HOMES_REACH_ALLOWLIST)
     for node in walked:
         line = lines[id(node)]
         parent = parents.get(id(node))
         what = []
-        allow = []
         if isinstance(node, ast.Call):
             func = node.func
             name = (func.id if isinstance(func, ast.Name)
@@ -1025,7 +1041,6 @@ def _homes_namespace_reach_findings(fname, label, walked, lines, facts):
                 and parent.value is node):
             what.append("subscripts or calls a method of a namespace mapping ({})".format(
                 node.func.id + "()" if isinstance(node, ast.Call) else "." + node.attr))
-            allow = ["blocked-sys-modules-item"]
         if (isinstance(node, ast.Subscript) and isinstance(node.value, ast.Name)
                 and node.value.id in module_names):
             what.append("subscripts {}, a name an import binds (a module object)".format(
@@ -1385,6 +1400,9 @@ def _homes_reach_rows(alias_store, init_import, alias_call):
          module("sys.modules['_opf_store.sub'] = None\n"),
          reach("module-level code subscripts or calls a method of a namespace mapping "
                "(.modules)")),
+        ("the allowlisted statement's shape on sys.__dict__ instead of sys.modules",
+         module("sys.__dict__['_testcapi'] = None\n"),
+         reach("module-level code reads the attribute __dict__")),
         ("a copy of a parameter's __dict__",
          module("", "\n\ndef _peek(obj):\n    return dict(obj.__dict__)\n"),
          reach("_peek reads the attribute __dict__")),
@@ -1779,31 +1797,33 @@ def _homes_rule_violations(sources):
     reach it lists is a finding wherever it appears, unless the allowlist row below accepts its
     exact form. Two spellings also read the file's bindings, and only to add findings: a
     subscript is matched when an import anywhere in the file binds the subscripted name, and an
-    import of the store module when it binds a name other than the first store alias. The
-    allowlist row is the only part of the arm that reads bindings to exempt a form. The list: a
-    getattr, setattr or delattr whose name argument is not one plain string constant, and
-    getattr referenced other than as a callee; a reference to builtins or __builtins__, however
-    the name is bound; an attribute __globals__, f_globals, f_locals, f_builtins, __dict__,
-    __builtins__, __getattribute__, __code__, __defaults__ or __kwdefaults__, an attribute named
-    globals, locals or vars, and a gc live-object accessor (get_objects, get_referrers,
-    get_referents, garbage, callbacks) as an attribute, on any object; any subscript, item
-    assignment or method call on globals(), locals(), vars(...) or a .modules attribute
-    (sys.modules), and a subscript of a name an import binds; a call of __import__; a string
-    constant naming any of these (or setattr, delattr, getattr, modules, builtins, __setattr__,
-    __delattr__ or __import__) in any position; an import of builtins, ctypes, inspect or
-    operator, a from-import of a gc live-object accessor, a from-import of the store module, and
-    an import of the store module under a name other than the module's first store alias. The
-    literal-name checks are kept: a literal getattr, setattr or delattr name is reported when it
-    is a reach string, and the binding arm's protected-name checks still apply. An import of gc
-    and its other names are not reported, since none returns a live object.
+    import of the store module when it binds a name other than the first store alias. No part of
+    the arm reads name bindings to exempt a form; the allowlist row reads only the statement
+    holding the item. The list: a getattr, setattr or delattr whose name argument is not one
+    plain string constant, and getattr referenced other than as a callee; a reference to
+    builtins or __builtins__, however the name is bound; an attribute __globals__, f_globals,
+    f_locals, f_builtins, __dict__, __builtins__, __getattribute__, __code__, __defaults__ or
+    __kwdefaults__, an attribute named globals, locals or vars, and a gc live-object accessor
+    (get_objects, get_referrers, get_referents, garbage, callbacks) as an attribute, on any
+    object; any subscript, item assignment or method call on globals(), locals(), vars(...) or a
+    .modules attribute (sys.modules), and a subscript of a name an import binds; a call of
+    __import__; a string constant naming any of these (or setattr, delattr, getattr, modules,
+    builtins, __setattr__, __delattr__ or __import__) in any position; an import of builtins,
+    ctypes, inspect or operator, a from-import of a gc live-object accessor, a from-import of
+    the store module, and an import of the store module under a name other than the module's
+    first store alias. The literal-name checks are kept: a literal getattr, setattr or delattr
+    name is reported when it is a reach string, and the binding arm's protected-name checks
+    still apply. An import of gc and its other names are not reported, since none returns a live
+    object.
 
     Exceptions exist only through _HOMES_REACH_ALLOWLIST, a reviewed table of one exact form
     with the reason it is safe: the statement sys.modules["<key>"] = None with one target and a
-    string-constant key naming no protected module, not __main__ and not this module. No other
-    form of a listed spelling is exempt: a name builtins bound to an integer, a reach string
-    bound to a name, a dict copy of a __dict__, a getattr, setattr or delattr whose name comes
-    from a loop or a class's __slots__, and one whose first argument is another module are each
-    a finding.
+    string-constant key naming no protected module, not __main__ and not this module, where sys
+    is matched by its spelling and not resolved. The arm takes its exception keys from that
+    table at each scan, so the form is a finding once its row is removed. No other form of a
+    listed spelling is exempt: a name builtins bound to an integer, a reach string bound to a
+    name, a dict copy of a __dict__, a getattr, setattr or delattr whose name comes from a loop
+    or a class's __slots__, and one whose first argument is another module are each a finding.
 
     Residual. In a guarded module a protected name can be rebound, or the store's rule names
     rewritten, with no finding only through (1) the form the allowlist accepts, exactly as its
@@ -6221,6 +6241,41 @@ def _suite_isolated(invoke):
                         check("homes rule namespace reach: " + mutant_label,
                               mutated and any(all(part in row for part in parts)
                                               for row in mutant_rows))
+                # The table is the arm's only source of exceptions: with each
+                # _HOMES_REACH_ALLOWLIST row taken out in turn, the passing row of its form
+                # (labelled "allowlist <key>:") is a namespace-reach finding. Every row needs
+                # such a form, and each scan uses a source no earlier row used, so no memoized
+                # result answers it.
+                table_module = sys.modules[__name__]
+                real_allowlist = _HOMES_REACH_ALLOWLIST
+                allow_forms = {}
+                for form_label, form_new, form_expect in _homes_reach_rows(
+                        alias_store, exempt_import.replace("\n\n", "\n"), alias_call):
+                    if form_label.startswith("allowlist ") and form_expect is None:
+                        allow_forms[form_label[len("allowlist "):].split(":", 1)[0]] = form_new
+                removal_red = []
+                for allow_row in real_allowlist:
+                    form_new = allow_forms.get(allow_row[0])
+                    if form_new is None:
+                        removal_red.append(False)
+                        continue
+                    removal_sources = dict(rule_sources)
+                    removal_sources[zz] = form_new + "\n_ALLOWLIST_PROBE = {!r}\n".format(
+                        allow_row[0])
+                    setattr(table_module, "_HOMES_REACH_ALLOWLIST",
+                            tuple(other for other in real_allowlist if other is not allow_row))
+                    try:
+                        removal_rows = _homes_rule_violations(removal_sources)
+                    except Exception:  # noqa: BLE001 -- a traceback is this row's failure
+                        removal_rows = None
+                    finally:
+                        setattr(table_module, "_HOMES_REACH_ALLOWLIST", real_allowlist)
+                    removal_red.append(removal_rows is not None and any(
+                        row.startswith(zz + ": ") and _HOMES_REACH_SUFFIX in row
+                        for row in removal_rows))
+                check("homes rule namespace reach: removing any _HOMES_REACH_ALLOWLIST row "
+                      "makes its allowlisted form a finding",
+                      bool(removal_red) and all(removal_red))
                 # An internal error inside the rule fails closed as a named cannot-evaluate
                 # finding, never a traceback: one helper at a time is replaced for one scan of
                 # a source no earlier row used (so no memoized result answers it). The binding-
