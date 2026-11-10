@@ -6513,49 +6513,68 @@ _DEADLINE_ALLOW_CASES = frozenset((
     ("orch_truncation_guard", "fg_quoted_heredoc_amps"),
     ("pgrep_self_match", "pgrep_distinct")))
 _DEADLINE_SIZES = (65536, 262144, 1048576)
-# CPU seconds one in-process handler call may use on a shape of that size (_cpu_seconds: this process's
-# CPU time, plus that of the child processes it reaped). Over two runs on a 24-core host with Python
-# 3.14.4 (2026-10-15) after the linear scans, the slowest case used at most 0.09 s of CPU at 64 KB, 0.40 s
-# at 256 KB and 1.83 s at 1 MB (on nest_parens, under git_discard or git_stash_ref), its wall-clock time
-# within 0.01 s of that; before them, five handlers took 15 to 39 s or more at 64 KB. A further run on a
-# 24-core host with Python 3.14.4 (2026-10-16) measured at most 0.10, 0.48 and 2.07 s of CPU (2.07 s on
-# nest_parens under git_stash_ref), each within 0.01 s of its wall-clock time. inline_errexit, timed on these
-# shapes later, costs more at 1 MB: at most 2.22 s of CPU on paren_hash4 (above), and a further run of it on a
-# 24-core host with Python 3.14.4 (2026-10-25) measured at most 0.10, 0.46 and 2.01 s of CPU, each on
-# paren_hash4. Every timed row, here and in
-# the lex-cost rows, compares the median of its _TIMED_RUNS (3) runs' CPU times (_judged, the
-# second-fastest) with its CPU bound and checks every run's outcome: one run slowed by a loaded host is
-# tolerated, while a slowdown on two of the three runs fails. Measured on one shared 80-CPU host
-# (2026-11-01, one-minute load average 38 to 44, no load added), as that median over 3 to 5 trials with
-# the handler's work done once (honest) and twice (doubled): cd_git_fetch_unbal under review_workdir_hold
-# at 256 KB, honest 0.861 to 0.947 s, doubled 1.801 to 1.908 s, so a 2.0 s bound would pass every doubled
-# trial and 256 KB keeps its 3.0 s bound; git_add_unbal under gate_weakening at 1 MB, honest 3.737 to
-# 3.868 s, doubled 7.925 to 8.709 s, each over the 7.0 s bound. The truncation guard on seps_hash_lines
-# with its '&' (_DEADLINE_HASH_DETACH_SHAPES) later measured about 2.9 to 3.2 s of CPU at 1 MB with Python
-# 3.14.4 (2026-11-02), which leaves the 1 MB bound a margin of about 2.2 times. These are measured bounds
-# on these cases, not a complexity guarantee: they fail a return of the growth the old scans had, but an
-# implementation whose super-linear cost is small enough on these sizes fits all three.
+# CPU seconds one in-process handler call may use on a shape of that size, judged on the calling thread's own
+# CPU clock (time.thread_time, read inside the call by _deadline_timed_call). The figures below were recorded
+# before these rows moved to that clock, on this process's CPU time plus that of the child processes it
+# reaped, which over the same span is never less than the calling thread's own. Over two runs on a 24-core
+# host with Python 3.14.4 (2026-10-15) after the linear scans, the slowest case used at most 0.09 s of CPU at
+# 64 KB, 0.40 s at 256 KB and 1.83 s at 1 MB (on nest_parens, under git_discard or git_stash_ref), its
+# wall-clock time within 0.01 s of that; before them, five handlers took 15 to 39 s or more at 64 KB. A
+# further run on a 24-core host with Python 3.14.4 (2026-10-16) measured at most 0.10, 0.48 and 2.07 s of CPU
+# (2.07 s on nest_parens under git_stash_ref), each within 0.01 s of its wall-clock time. inline_errexit,
+# timed on these shapes later, costs more at 1 MB: at most 2.22 s of CPU on paren_hash4 (above), and a further
+# run of it on a 24-core host with Python 3.14.4 (2026-10-25) measured at most 0.10, 0.46 and 2.01 s of CPU,
+# each on paren_hash4. Every timed row, here and in the lex-cost rows, compares the median of its _TIMED_RUNS
+# (3) runs' CPU times (_judged, the second-fastest) with its CPU bound and checks every run's outcome: one run
+# slowed by a loaded host is tolerated, while a slowdown on two of the three runs fails. Measured on one
+# shared 80-CPU host (2026-11-01, one-minute load average 38 to 44, no load added), as that median over 3 to 5
+# trials with the handler's work done once (honest) and twice (doubled): cd_git_fetch_unbal under
+# review_workdir_hold at 256 KB, honest 0.861 to 0.947 s, doubled 1.801 to 1.908 s, so a 2.0 s bound would
+# pass every doubled trial and 256 KB keeps its 3.0 s bound; git_add_unbal under gate_weakening at 1 MB,
+# honest 3.737 to 3.868 s, doubled 7.925 to 8.709 s, each over the 7.0 s bound. The truncation guard on
+# seps_hash_lines with its '&' (_DEADLINE_HASH_DETACH_SHAPES) later measured about 2.9 to 3.2 s of CPU at 1 MB
+# with Python 3.14.4 (2026-11-02), which leaves the 1 MB bound a margin of about 2.2 times. These are measured
+# bounds on these cases, not a complexity guarantee: they fail a return of the growth the old scans had, but
+# an implementation whose super-linear cost is small enough on these sizes fits all three.
 _DEADLINE_BOUNDS = {65536: 1.5, 262144: 3.0, 1048576: 7.0}
 _TIMED_RUNS = 3
-# Wall-clock seconds one such call may take on any size: PRETOOL_BUDGET_SECONDS, the deadline main() gives
-# the same call in production, so a regression whose time goes to waiting (a sleep, a lock, a slow
-# filesystem), which the CPU bounds do not see, fails here as that call would fail closed there. Against
-# the 2026-10-16 wall-clock times above at 64 KB and 256 KB (at most 0.10 and 0.49 s) the 8-second gate
-# leaves a margin of about 80 and 16 times; at 1 MB the truncation guard on seps_hash_lines with its '&'
-# (_DEADLINE_HASH_DETACH_SHAPES) measured about 2.9 to 3.2 s of CPU, its wall-clock time within 0.01 s of
-# that, a margin of about 2.5 times, and against the 2026-11-01 honest 1 MB runs above, whose wall-clock
-# medians were 3.738 to 3.869 s on the loaded host (the figures above are those runs' CPU medians), about
-# 2.1 times. inline_errexit's CPU time at 1 MB (at most 2.22 s, above; its wall-clock time was not
-# recorded) is under those 1 MB figures. Like the CPU bounds, this bound judges the median of the case's _TIMED_RUNS runs: a hang or
-# wait on two of the three runs fails, while one run stalled by a loaded host does not fail the case, so a
-# wait on only one run in three passes here. A case whose median wall-clock time is over it, with at least
-# one run reaching a decision, fails and is run once more only as a diagnostic, which never clears it; the
-# failure carries every run's wall-clock time, CPU time and outcome, and the diagnostic run's as well.
-_DEADLINE_WALL_BOUND = aiqt_hooks.PRETOOL_BUDGET_SECONDS
+# Seconds of its own work one such call may take on any size: PRETOOL_BUDGET_SECONDS, the deadline main()
+# gives the same call in production. A call whose own CPU time and own waits (a sleep, a lock, a slow
+# filesystem, a child or another thread it waits for) add up to more than that fails here in every mode. In
+# production the same overrun fails closed with exit 2 only in a mode that fails closed: a note-only
+# PreToolUse mode (NOTE_ONLY_PRETOOL_MODES) warns on exit 0 when its deadline passes, and a fail-open mode is
+# not held to that deadline. The two also measure differently: production's deadline is a wall-clock window
+# armed before the payload read, so it also charges reading the payload and any time queued for a CPU, while
+# this budget times only the handler call and judges the median of its runs' own work (below). Its own work is
+# its wall-clock time less the time its thread spent runnable but queued for a CPU (_deadline_run_own), read
+# as the second field (nanoseconds, converted to seconds) of the calling thread's /proc/thread-self/schedstat
+# before and after the call (_deadline_run_queue_seconds), so a loaded host's queueing of the calling thread
+# is not charged; time a child or thread the call waits for spends queued for a CPU is charged, since the
+# calling thread is then waiting, not queued. Where that file is missing, unreadable or all zeros (scheduler
+# statistics off), the case reports its own work as not evaluated rather than judging a guess. No reading is
+# scaled by a load factor. Own work is at most wall-clock time, so against the 2026-10-16 wall-clock times
+# above at 64 KB and 256 KB (at most 0.10 and 0.49 s) the 8-second budget leaves a margin of at least about 80
+# and 16 times; at 1 MB the truncation guard on seps_hash_lines with its '&' (_DEADLINE_HASH_DETACH_SHAPES)
+# measured about 2.9 to 3.2 s of CPU, its wall-clock time within 0.01 s of that, a margin of about 2.5 times,
+# and against the 2026-11-01 honest 1 MB runs above, whose wall-clock medians were 3.738 to 3.869 s on the
+# loaded host (the figures above are those runs' CPU medians), at least about 2.1 times. inline_errexit's CPU
+# time at 1 MB (at most 2.22 s, above; its wall-clock time was not recorded) is under those 1 MB figures. The
+# loaded-host truncation-guard runs that dl-shape-load-absorbed-wall starts from (3.9 s of CPU in 3.93, 8.47
+# and 8.92 s wall-clock, recorded on an 80-CPU host at a load of 30 to 40) recorded no run-queue delay, so how
+# much of their 4.57 and 5.02 s off the CPU was queueing is not known: had all of it been the call's own
+# waiting, their median, 8.47 s, would fail here. The CPU work is also bounded per size on the thread clock
+# (_DEADLINE_BOUNDS). Like the CPU bounds, this budget judges the median of the case's _TIMED_RUNS runs: own
+# work over it on two of the three runs fails, on only one run in three passes. A case whose median own work
+# is over it, with at least one run reaching a decision, fails and is run once more only as a diagnostic,
+# which never clears it; the failure carries every run's wall-clock time, CPU time, run-queue delay, own work
+# and outcome, and the diagnostic run's as well.
+_DEADLINE_OWN_WORK_BOUND = aiqt_hooks.PRETOOL_BUDGET_SECONDS
 # Each case runs under a _DeadlineWindow of this many wall-clock seconds, a hang guard only: it ends a case
-# that would run on for minutes, so the run reports it instead of stalling. The wall-clock gate is
-# _DEADLINE_WALL_BOUND, well below it.
+# that would run on for minutes, so the run reports it instead of stalling. The own-work gate is
+# _DEADLINE_OWN_WORK_BOUND, well below it.
 _DEADLINE_HANG_SECONDS = 60.0
+# The deadline child's fixed wall-clock limit (_deadline_child_wait): a child still running after it is
+# killed, whatever the load, and nothing is divided by anything.
 _DEADLINE_CHILD_TIMEOUT = 900
 
 
@@ -6580,12 +6599,6 @@ def _deadline_fixtures(tmp):
     (gensrc / ".aiqt" / "gensrc.json").write_text(
         json.dumps({"version": 1, "generated": entries}), encoding="utf-8")
     return plain, orch, gensrc
-
-
-def _cpu_seconds():
-    """CPU seconds this process has used (every thread), plus those of the child processes it reaped."""
-    children = os.times()
-    return time.process_time() + children.children_user + children.children_system
 
 
 def _hook_cpu_timed(call, bound=None, runs=3):
@@ -6615,10 +6628,10 @@ def _hook_cpu_timed(call, bound=None, runs=3):
     of CPU per call at 400 KB, so about five minutes), while the rows that time a small probe first
     fail on that probe; a call that keeps state between runs (a memoised quadratic helper, for example)
     can read low on its second and third runs, and its least reading then passes the bound. The
-    median-judged rows (_timed_runs over the
-    lex-cost and deadline-shape cases) keep their existing clocks, time.process_time in the lex-cost
-    rows and _cpu_seconds in the deadline-shape cases, and judge the median of three runs, which
-    already tolerates one slowed run."""
+    median-judged rows (_timed_runs over the lex-cost and deadline-shape cases) judge the median of
+    three runs, which already tolerates one slowed run: the lex-cost rows on time.process_time, the
+    deadline-shape cases on time.thread_time read inside the call (_deadline_timed_call), with no
+    collector hold."""
     import gc
     spent = None
     for _ in range(max(1, runs)):
@@ -6678,26 +6691,87 @@ def _lex_cost_problems(name, guard, length, cpu, runs, want):
     return out
 
 
+def _deadline_run_queue_seconds():
+    """The calling thread's run-queue delay so far, in seconds: the second field of
+    /proc/thread-self/schedstat (nanoseconds it spent runnable but waiting for a CPU), or None where that
+    cannot be read: no such file (not Linux, or a kernel before 3.17), an unreadable or malformed one, or
+    one whose first field (the thread's time on a CPU) is 0, which a kernel without scheduler statistics
+    reports for every thread."""
+    try:
+        with open("/proc/thread-self/schedstat", "rb") as handle:
+            fields = handle.read(256).split()
+        on_cpu, queued = int(fields[0]), int(fields[1])
+    except (OSError, ValueError, IndexError):
+        return None
+    if on_cpu <= 0 or queued < 0:
+        return None
+    return queued / 1e9
+
+
+def _deadline_timed_call(call):
+    """(cpu_seconds, wall_seconds, outcome, queued_seconds) for outcome = call(): cpu_seconds the CPU time
+    of the calling thread alone (time.thread_time, read inside the timed span), wall_seconds its
+    time.monotonic span, queued_seconds the calling thread's run-queue delay across the call
+    (_deadline_run_queue_seconds, read inside the span before and after it), or None where either reading
+    failed. Other threads' and children's CPU time is not directly charged to the thread clock, and time
+    the thread spent runnable but queued for a CPU is neither on that clock nor in the call's own work
+    (_deadline_run_own: wall-clock time less that delay), which is judged at full length against the
+    production budget."""
+    began = time.monotonic()
+    queued_began = _deadline_run_queue_seconds()
+    cpu_began = time.thread_time()
+    outcome = call()
+    cpu = time.thread_time() - cpu_began
+    queued_ended = _deadline_run_queue_seconds()
+    wall = time.monotonic() - began
+    if queued_began is None or queued_ended is None:
+        return cpu, wall, outcome, None
+    return cpu, wall, outcome, max(0.0, queued_ended - queued_began)
+
+
 def _deadline_shape_case(name, shape, size, cwd):
-    """One (handler, shape, size) case, in-process under a _DeadlineWindow of _DEADLINE_HANG_SECONDS:
-    (cpu_seconds, wall_seconds, outcome), the outcome being the reduced decision, "deadline" when the window
-    fired, "hard-block" for an exit 2, or "crash: <type>"."""
+    """One (handler, shape, size) case, in-process under a _DeadlineWindow of _DEADLINE_HANG_SECONDS and
+    timed by _deadline_timed_call: (cpu_seconds, wall_seconds, outcome, queued_seconds), the outcome being
+    the reduced decision, "deadline" when the window fired, "hard-block" for an exit 2, or "crash: <type>"."""
     tool, tool_input = _DEADLINE_HASH_DETACH_SHAPES.get((name, shape), _DEADLINE_SHAPES[shape])(size, cwd)
     data = {"hook_event_name": "PreToolUse", "tool_name": tool, "tool_input": tool_input,
             "cwd": cwd, "session_id": "deadline-session", "tool_use_id": "deadline-call"}
     window = aiqt_hooks._DeadlineWindow(_DEADLINE_HANG_SECONDS)
-    began, cpu_began = time.monotonic(), _cpu_seconds()
-    try:
-        with window:
-            code, stdout_obj, _stderr = aiqt_hooks.HANDLERS[name](data)
-        outcome = "hard-block" if code == 2 else _reduce_result(code, stdout_obj)
-    except aiqt_hooks._HookDeadline as exc:
-        if exc.args[:1] != (window,):
-            raise
-        outcome = "deadline"
-    except Exception as exc:
-        outcome = "crash: {}".format(type(exc).__name__)
-    return _cpu_seconds() - cpu_began, time.monotonic() - began, outcome
+
+    def call():
+        try:
+            with window:
+                code, stdout_obj, _stderr = aiqt_hooks.HANDLERS[name](data)
+            return "hard-block" if code == 2 else _reduce_result(code, stdout_obj)
+        except aiqt_hooks._HookDeadline as exc:
+            if exc.args[:1] != (window,):
+                raise
+            return "deadline"
+        except Exception as exc:
+            return "crash: {}".format(type(exc).__name__)
+    return _deadline_timed_call(call)
+
+
+def _deadline_run_own(run):
+    """The own work of one timed run (cpu_seconds, wall_seconds, outcome, queued_seconds)
+    (_deadline_timed_call): its wall-clock seconds less its run-queue delay, never under 0, so its own CPU
+    time plus every second it waited on a sleep, a lock, I/O, a child or another thread, at full length
+    (the time that child or thread spent queued for a CPU included); None when the run-queue delay could
+    not be read (never a guess). A recorded run given as (cpu_seconds, wall_seconds, outcome) is recorded
+    with no run-queue delay, its whole wall-clock time its own work."""
+    queued = run[3] if len(run) > 3 else 0.0
+    return None if queued is None else max(0.0, run[1] - queued)
+
+
+def _deadline_run_text(run):
+    """One run's account for a dl-shape line: its raw times, its run-queue delay, its own work and its
+    outcome."""
+    own = _deadline_run_own(run)
+    if own is None:
+        queued_text = "run-queue delay unread, own work not evaluated"
+    else:
+        queued_text = "{:.2f}s queued, {:.2f}s own work".format(run[3] if len(run) > 3 else 0.0, own)
+    return "{:.2f}s wall-clock, {:.2f}s of CPU time, {}, outcome {}".format(run[1], run[0], queued_text, run[2])
 
 
 def _deadline_shape_runs(tmp, sizes):
@@ -6744,10 +6818,10 @@ def _no_registry_above(root):
         aiqt_hooks._orch_dirfd_has_registry = probe
 
 
-def _deadline_shape_problems(name, shape, size, cpu, wall, outcome):
-    """What one run of a (handler, shape, size) case got wrong, cpu and wall being the CPU and wall-clock
-    times judged: the medians of the case's runs (_judged), or a diagnostic re-run's own, as a list of
-    phrases ([] for none)."""
+def _deadline_shape_problems(name, shape, size, cpu, own, outcome):
+    """What one run of a (handler, shape, size) case got wrong, cpu and own being the calling thread's CPU
+    time and the own work judged (_deadline_run_own, None when not evaluated): the medians of the case's
+    runs (_judged), or a diagnostic re-run's own, as a list of phrases ([] for none)."""
     if outcome == "deadline":
         return ["reached no decision within the {:g}-second hang guard".format(_DEADLINE_HANG_SECONDS)]
     problems = []
@@ -6755,9 +6829,12 @@ def _deadline_shape_problems(name, shape, size, cpu, wall, outcome):
         problems.append("a note-only mode must never deny, whatever its timing")
     if cpu > _DEADLINE_BOUNDS[size]:
         problems.append("used {:.2f}s of CPU time, over its {}s bound".format(cpu, _DEADLINE_BOUNDS[size]))
-    if wall > _DEADLINE_WALL_BOUND:
-        problems.append("took {:.2f}s wall-clock, over the {:g}s wall-clock bound".format(
-            wall, _DEADLINE_WALL_BOUND))
+    if own is None:
+        problems.append("own work not evaluated: the calling thread's run-queue delay "
+                        "(/proc/thread-self/schedstat) could not be read")
+    elif own > _DEADLINE_OWN_WORK_BOUND:
+        problems.append("took {:.2f}s of its own work (wall-clock time less its run-queue delay), over the "
+                        "{:g}s production budget".format(own, _DEADLINE_OWN_WORK_BOUND))
     if (name, shape) in _DEADLINE_DENY_CASES and outcome != "deny":
         problems.append("expected deny, got {}".format(outcome))
     elif (name, shape) in _DEADLINE_NOTE_CASES and outcome != "allow-note":
@@ -6772,46 +6849,66 @@ def _deadline_shape_problems(name, shape, size, cpu, wall, outcome):
 
 
 def _deadline_shape_verdicts(runs, retime):
-    """The dl-shape failures for runs [(handler, shape, size, cwd, (cpu_seconds, wall_seconds, outcome) for
-    each run...)]: one line for each case whose median CPU time (_judged) is over its CPU bound, whose median
-    wall-clock time is over the wall-clock bound, or any of whose runs fails another check. A case whose
-    median wall-clock time is over the wall-clock bound, with at least one run reaching a decision, is run
-    once more by retime(handler, shape, size, cwd) only as a diagnostic: the line still records the
-    failure, carries every run's wall-clock time, CPU time and outcome, and applies every check to the
-    diagnostic run as well."""
+    """The dl-shape failures for runs [(handler, shape, size, cwd, (cpu_seconds, wall_seconds, outcome,
+    queued_seconds) for each run...)] (_deadline_timed_call): one line for each case whose median CPU time
+    of the calling thread (_judged) is over its CPU bound, whose median own work (_deadline_run_own) is over
+    the production budget or could not be evaluated on some run, or any of whose runs fails another check.
+    A case whose median own work is over the budget, with at least one run reaching a decision, is run once
+    more by retime(handler, shape, size, cwd) only as a diagnostic: the line still records the failure,
+    carries every run's wall-clock time, CPU time, run-queue delay, own work and outcome, and applies every
+    check to the diagnostic run as well."""
     out = []
     for name, shape, size, cwd, *timed in runs:
-        cpu_judged = _judged([cpu for cpu, _wall, _outcome in timed])
-        wall_judged = _judged([wall for _cpu, wall, _outcome in timed])
+        cpu_judged = _judged([run[0] for run in timed])
+        owns = [_deadline_run_own(run) for run in timed]
+        own_judged = None if None in owns else _judged(owns)
         problems = []
-        for _cpu, _wall, outcome in timed:
+        for run in timed:
             problems += [problem for problem
-                         in _deadline_shape_problems(name, shape, size, cpu_judged, wall_judged, outcome)
+                         in _deadline_shape_problems(name, shape, size, cpu_judged, own_judged, run[2])
                          if problem not in problems]
         if not problems:
             continue
         line = "(dl-shape-{}-{}-{}) {} (median times judged; {})".format(
-            name, shape, size, "; ".join(problems), "; ".join(
-                "run: {:.2f}s wall-clock, {:.2f}s of CPU time, outcome {}".format(wall, cpu, outcome)
-                for cpu, wall, outcome in timed))
-        if wall_judged > _DEADLINE_WALL_BOUND and any(
-                outcome != "deadline" for _cpu, _wall, outcome in timed):
-            cpu_again, wall_again, outcome_again = retime(name, shape, size, cwd)
-            again = _deadline_shape_problems(name, shape, size, cpu_again, wall_again, outcome_again)
-            line += ("; a diagnostic re-run, which never clears the case's failure, took {:.2f}s "
-                     "wall-clock and {:.2f}s of CPU time with outcome {} ({})".format(
-                         wall_again, cpu_again, outcome_again, "; ".join(again) if again else "within every check"))
+            name, shape, size, "; ".join(problems), "; ".join("run: " + _deadline_run_text(run) for run in timed))
+        if (own_judged is not None and own_judged > _DEADLINE_OWN_WORK_BOUND
+                and any(run[2] != "deadline" for run in timed)):
+            again_run = retime(name, shape, size, cwd)
+            again = _deadline_shape_problems(name, shape, size, again_run[0], _deadline_run_own(again_run),
+                                             again_run[2])
+            line += ("; a diagnostic re-run, which never clears the case's failure, took {} ({})".format(
+                _deadline_run_text(again_run).replace(", outcome ", " with outcome ", 1),
+                "; ".join(again) if again else "within every check"))
         out.append(line)
     return out
 
 
 def _deadline_shape_failures(tmp):
     """(dl-shape) Every PreToolUse handler has shapes here, and on each shape at 64 KB, 256 KB and 1 MB it
-    reaches a decision within the hang guard, that size's CPU-time bound and the wall-clock bound, denying
-    where the case carries a hazard and reaching the pinned base commit's decision on each uncertain '#'
-    shape (_DEADLINE_HASH_SHAPES, which every handler runs) (_deadline_shape_verdicts: a case whose median
-    wall-clock time is over the wall-clock bound fails, and a diagnostic re-run is reported beside it, never
-    in its place)."""
+    reaches a decision within the hang guard, that size's CPU-time bound and the production budget on its
+    own work (below), denying where the case carries a hazard and reaching the pinned base commit's
+    decision on each uncertain '#' shape (_DEADLINE_HASH_SHAPES, which every handler runs)
+    (_deadline_shape_verdicts: a case whose median own work is over the budget fails, and a diagnostic
+    re-run is reported beside it, never in its place).
+
+    LOAD: the CPU bounds judge the calling thread's own CPU clock (time.thread_time read inside the call,
+    _deadline_timed_call), to which other threads' and children's CPU time is not directly charged. The
+    call's own work (_deadline_run_own: wall-clock time less the calling thread's run-queue delay from
+    /proc/thread-self/schedstat) is its CPU time plus its own waits, judged at full length against
+    PRETOOL_BUDGET_SECONDS, the budget the same call has in production (where an overrun fails closed only
+    in a mode that fails closed; see _DEADLINE_OWN_WORK_BOUND), while time the calling thread spent
+    runnable but queued for a CPU on a loaded host is not charged; no reading is scaled by a load factor.
+    Where the run-queue delay cannot be read, every case reports its own work as not evaluated, a failure
+    line, rather than judging a guess. Residual, exactly: (1) time the calling thread is queued for a CPU
+    is bounded only by the 60-second hang guard, a fixed wall-clock bound; (2) shared-cache,
+    memory-bandwidth and frequency effects of other work on the host still move the thread clock and the
+    own work somewhat, and no measurement here bounds how much; (3) CPU work the handler moves to another
+    thread or a child is not on the thread clock, so while the call waits for it it is judged only as own
+    work against the 8 s budget, that worker's own time queued for a CPU included, not the per-size CPU
+    bound, and work it leaves running after the call returns is not measured at all; (4) own work counts
+    the thread's waits on I/O and locks at full length, so a slow filesystem on the runner can fail an
+    honest case; and (5) as before, these are measured bounds, not a complexity guarantee: a super-linear
+    cost small enough on these sizes passes."""
     out = []
     missing = sorted(name for name, event in aiqt_hooks.HANDLER_EVENT.items()
                      if event == aiqt_hooks.PRETOOL and name not in _DEADLINE_CASES)
@@ -6822,23 +6919,24 @@ def _deadline_shape_failures(tmp):
 
 def _deadline_shape_rerun_failures():
     """(dl-shape-rerun-*) A failed case is never erased by its diagnostic re-run. _deadline_shape_verdicts
-    is given recorded runs and a re-run that returns a recorded result, with no handler run:
-    dl-shape-rerun-pass: a run over the wall-clock bound (9.25 s, 0.03 s of CPU, allow) whose re-run passes
+    is given recorded runs and a re-run that returns a recorded result, with no handler run. These
+    recorded runs carry no run-queue delay, so each one's own work is its whole wall-clock time.
+    dl-shape-rerun-pass: a run over the own-work budget (9.25 s, 0.03 s of CPU, allow) whose re-run passes
     (0.15 s, 0.02 s, allow) must still fail, with both runs' wall-clock times, CPU times and outcomes.
-    dl-shape-rerun-decision: a deny case run over the wall-clock bound that allowed (9.25 s, 0.03 s, allow)
+    dl-shape-rerun-decision: a deny case run over the own-work budget that allowed (9.25 s, 0.03 s, allow)
     and whose re-run denies in time (0.15 s, 0.02 s, deny) must fail on the allow as well as the time.
-    dl-shape-rerun-both: a deny case run over the bound that denied (9.25 s, 0.03 s, deny) and whose re-run
+    dl-shape-rerun-both: a deny case run over the budget that denied (9.25 s, 0.03 s, deny) and whose re-run
     allows (0.15 s, 0.02 s, allow) must fail with both outcomes and the re-run's wrong decision named.
     dl-shape-rerun-control, a control, which also passes on the pinned base commit: a run within every
     check gives no line and no re-run.
-    dl-shape-rerun-bounds: each bound at its edge, both inclusive. A run a microsecond inside or exactly at
-    the wall-clock bound (8 s) or the 64 KB CPU bound (1.5 s) gives no line and no re-run; one a microsecond
-    over the wall-clock bound whose re-run passes gives one line and one re-run; one a microsecond over the
-    CPU bound gives one line and no re-run (its time within the wall-clock bound). Both bounds judge the
-    median of a case's runs: three runs at 9 s, 5 s and 5 s wall-clock give no line and no re-run, three at
-    9 s, 9 s and 5 s give one line and one re-run. Three runs at 256 KB, one a second over its CPU bound
-    (3.0 s), one at 0.5 s and the median a microsecond inside or exactly at the bound, give no line; with
-    the median a microsecond over it, one line and no re-run.
+    dl-shape-rerun-bounds: each bound at its edge, both inclusive. A run with 0.5 s of CPU time whose own
+    work is a microsecond inside or exactly at the 8 s budget, or at the 64 KB CPU bound (1.5 s), gives no
+    line and no re-run; one a microsecond over the budget whose re-run passes gives one line and one
+    re-run; one a microsecond over the CPU bound gives one line and no re-run (its own work within the
+    budget). Both bounds judge the median of a case's runs: three runs at 9 s, 5 s and 5 s wall-clock give
+    no line and no re-run, three at 9 s, 9 s and 5 s give one line and one re-run. Three runs at 256 KB,
+    one a second over its CPU bound (3.0 s), one at 0.5 s and the median a microsecond inside or exactly
+    at the bound, give no line; with the median a microsecond over it, one line and no re-run.
     dl-shape-rerun-outcomes: every run's outcome is checked. A deny case whose three runs are within every
     bound and decide deny, allow and deny gives one line naming the allow, and none when all three deny.
     timed-runs-count and timed-runs-median: _timed_runs calls its timed function three times, whatever an
@@ -6869,7 +6967,7 @@ def _deadline_shape_rerun_failures():
         retimed.clear()
         lines = _deadline_shape_verdicts([run], recorded(result))
         if len(lines) != 1 or retimed != [run[:3]] or not all(want in lines[0] for want in wants):
-            out.append("(dl-shape-rerun-{}) a run over the wall-clock bound must stay a failure carrying both "
+            out.append("(dl-shape-rerun-{}) a run over the own-work budget must stay a failure carrying both "
                        "runs' times and outcomes {!r}, got {!r} with re-runs {!r}".format(
                            label, wants, lines, retimed))
     retimed.clear()
@@ -6877,12 +6975,12 @@ def _deadline_shape_rerun_failures():
     if lines or retimed:
         out.append("(dl-shape-rerun-control) a run within every check must give no line and no re-run, got "
                    "{!r} with re-runs {!r}".format(lines, retimed))
-    wall_bound, cpu_bound = float(_DEADLINE_WALL_BOUND), _DEADLINE_BOUNDS[65536]
+    own_bound, cpu_bound = float(_DEADLINE_OWN_WORK_BOUND), _DEADLINE_BOUNDS[65536]
     plain_256k, cpu_bound_256k = plain[:2] + (262144,) + plain[3:], 3.0
     for edge, run, want_lines, want_reruns in (
-            ("just inside the wall-clock bound", plain + ((0.03, wall_bound - 1e-6, "allow"),), 0, 0),
-            ("at the wall-clock bound", plain + ((0.03, wall_bound, "allow"),), 0, 0),
-            ("over the wall-clock bound", plain + ((0.03, wall_bound + 1e-6, "allow"),), 1, 1),
+            ("with own work just inside the budget", plain + ((0.5, own_bound - 1e-6, "allow"),), 0, 0),
+            ("with own work at the budget", plain + ((0.5, own_bound, "allow"),), 0, 0),
+            ("with own work over the budget", plain + ((0.5, own_bound + 1e-6, "allow"),), 1, 1),
             ("of three at 9 s, 5 s and 5 s wall-clock",
              plain + ((0.03, 9.0, "allow"), (0.03, 5.0, "allow"), (0.03, 5.0, "allow")), 0, 0),
             ("of three at 9 s, 9 s and 5 s wall-clock",
@@ -6926,6 +7024,255 @@ def _deadline_shape_rerun_failures():
             out.append("(lex-cost-runs) a lex-cost pair expecting deny whose runs decide {} must give {} "
                        "line(s), got {!r}".format(", ".join(decisions), want_lines, lines))
     return out
+
+
+def _deadline_load_judgement_failures(tmp):
+    """(dl-shape-load-*) The dl-shape bounds judge the calling thread's own CPU clock against the per-size CPU
+    bounds and each call's own work (wall-clock time less the thread's run-queue delay) at full length against
+    the production budget (_deadline_timed_call, _deadline_run_own); no reading is scaled by a load factor.
+    The rows feed _deadline_shape_verdicts recorded runs, except those marked real, which time a call: a
+    stand-in with no handler in each but dl-shape-load-real-case. Three of them, dl-shape-load-absorbed-cpu,
+    dl-shape-load-wait and dl-shape-load-thread, run hashing threads (_deadline_hashing_thread; hashlib
+    releases the interpreter lock on a 1 MB buffer, so a hashing thread computes beside the caller) on the
+    64 KB deny case, whose CPU bound is 1.5 s:
+    dl-shape-load-absorbed-cpu (real): a call that spends 0.3 s of CPU on its own thread while a worker it
+    starts hashes for 1.6 s, then joins it, gives no line: the worker's CPU time, which process CPU time
+    would add to the call's (about 1.7 to 1.9 s, over the bound), is not on the call's thread clock.
+    dl-shape-load-absorbed-wall: 1 MB truncation-guard runs of 3.9 s of CPU time in 3.93, 8.47 and 8.92 s
+    wall-clock (the wall-clock times a loaded 80-CPU host recorded) give no line when 0, 4.5 and 5.0 s of
+    each was queued for a CPU (own work 3.93, 3.97 and 3.92 s), and one line and one re-run when none of
+    it was (a median own work of 8.47 s).
+    dl-shape-load-regression: 40 s of the call's own CPU time at 1 MB gives one line naming 40.00 s.
+    dl-shape-load-bounds: each bound at its edge, both inclusive: 1 MB CPU time a microsecond under,
+    exactly at and ten microseconds over 7 s gives 0, 0 and 1 line; 3 s of CPU time with own work a
+    microsecond under, exactly at and ten microseconds over 8 s gives 0, 0 and 1 line (one re-run when
+    over), both with no time queued (a wall-clock time of 8 s at the edge) and with 3 s queued (11 s).
+    dl-shape-load-unread: a run whose run-queue delay could not be read gives one line saying its own
+    work was not evaluated, and no re-run.
+    dl-shape-load-wait (real): a call that sleeps 9.3 s while a hashing thread it starts runs for 9 s and
+    ends before the call returns gives one line on its own work and one re-run: the thread's CPU time does
+    not shorten the sleep.
+    dl-shape-load-thread (real): a call that leaves a busy hashing thread running, while a thread alive
+    before the call ends during it, and spends 1.5 times the 64 KB CPU bound (2.25 s) on its own thread
+    gives one line on its CPU time.
+    dl-shape-load-cpu-then-sleep (real, 1 MB case, CPU bound 7 s): a call that spends 4.0 s of its own CPU
+    and then sleeps 6.0 s gives one line on its own work and one re-run, as the production budget fails
+    it closed; judging only its wait (wall-clock time less CPU time, 6 s) would pass it.
+    dl-shape-load-induced (real, 1 MB case): an honest call spending 3.0 s of its own CPU while its thread
+    shares one CPU (os.sched_setaffinity) with _DEADLINE_LOAD_SPINNERS busy-loop children pinned there gives
+    no line, and the load must have pushed its wall-clock time over 8 s, or the row fails as not exercised;
+    judging its whole wall-clock time would fail it. A run over 8 s wall-clock for which schedstat reported no
+    run-queue delay at all fails the row as not evaluated, naming that, rather than as an over-budget call
+    (_deadline_induced_verdict). Each child is sys.executable -I -S -c over a loop that ends itself after
+    60 s, started in its own session and killed by its process group when the call ends; the loop opens no
+    file and makes no network call, but -I -S and a new session do not remove the environment or the account
+    credentials the child inherits. A platform without CPU affinity fails the row as not evaluated.
+    dl-shape-load-induced-verdicts: the induced row's judgement (_deadline_induced_verdict) on recorded runs
+    of 3.0 s of CPU time: 12 s wall-clock with 9 s queued gives no line; 12 s, and 8 s plus a microsecond,
+    each with nothing queued, give the not-evaluated line naming schedstat's missing delay; exactly 8 s and a
+    microsecond under it, nothing queued, give the not-exercised line.
+    dl-shape-load-real-case (real): one real handler case records its own thread's CPU time as a positive
+    number no greater than its wall-clock time."""
+    out = []
+    retimed = []
+
+    def retime(name, shape, size, cwd):
+        retimed.append((name, shape, size))
+        return 0.02, 0.15, "deny"
+    seps = ("orch_truncation_guard", "seps_hash_lines", 1048576, "/")
+    paren = ("orch_truncation_guard", "paren_hash4", 1048576, "/")
+    deny = ("protected_line", "push_force_after", 65536, "/")
+
+    def own_cpu(seconds):
+        began = time.thread_time()
+        while time.thread_time() - began < seconds:
+            pass
+
+    def absorbed_call():
+        worker = _deadline_hashing_thread("dl-shape-load-worker", 1.6)
+        own_cpu(0.3)
+        worker.join(30)
+        return "deny"
+    retimed.clear()
+    absorbed_run = _deadline_timed_call(absorbed_call)
+    lines = _deadline_shape_verdicts([deny + (absorbed_run,) * 3], retime)
+    if lines or retimed:
+        out.append("(dl-shape-load-absorbed-cpu) a call spending 0.3 s of its own CPU while a worker hashes for "
+                   "1.6 s must give no line, got {!r} with re-runs {!r} (the run {!r})".format(
+                       lines, retimed, absorbed_run))
+    for runs, want_lines, want_reruns in (
+            (((3.9, 3.93, "deny", 0.0), (3.9, 8.47, "deny", 4.5), (3.9, 8.92, "deny", 5.0)), 0, 0),
+            (((3.9, 3.93, "deny", 0.0), (3.9, 8.47, "deny", 0.0), (3.9, 8.92, "deny", 0.0)), 1, 1)):
+        retimed.clear()
+        lines = _deadline_shape_verdicts([paren + runs], retime)
+        if len(lines) != want_lines or len(retimed) != want_reruns:
+            out.append("(dl-shape-load-absorbed-wall) 1 MB runs {!r} must give {} line(s) and {} re-run(s), got "
+                       "{!r} with re-runs {!r}".format(runs, want_lines, want_reruns, lines, retimed))
+    retimed.clear()
+    lines = _deadline_shape_verdicts([seps + ((40.0, 40.15, "deny"),) * 3], retime)
+    if len(lines) != 1 or "40.00s of CPU" not in lines[0]:
+        out.append("(dl-shape-load-regression) 40 s of the call's own CPU time must give one line naming 40.00 "
+                   "s, got {!r}".format(lines))
+    cpu_bound, own_bound = _DEADLINE_BOUNDS[1048576], float(_DEADLINE_OWN_WORK_BOUND)
+    for edge, cpu, wall, queued, want_lines, want_reruns in (
+            ("CPU time just under its bound", cpu_bound - 1e-6, cpu_bound + 0.15, 0.0, 0, 0),
+            ("CPU time at its bound", cpu_bound, cpu_bound + 0.15, 0.0, 0, 0),
+            ("CPU time just over its bound", cpu_bound + 1e-5, cpu_bound + 0.15, 0.0, 1, 0),
+            ("3 s of CPU time and own work just under 8 s", 3.0, own_bound - 1e-6, 0.0, 0, 0),
+            ("3 s of CPU time and own work of 8 s", 3.0, own_bound, 0.0, 0, 0),
+            ("3 s of CPU time and own work just over 8 s", 3.0, own_bound + 1e-5, 0.0, 1, 1),
+            ("3 s queued and own work just under 8 s", 3.0, 3.0 + own_bound - 1e-6, 3.0, 0, 0),
+            ("3 s queued and own work of 8 s", 3.0, 3.0 + own_bound, 3.0, 0, 0),
+            ("3 s queued and own work just over 8 s", 3.0, 3.0 + own_bound + 1e-5, 3.0, 1, 1)):
+        retimed.clear()
+        lines = _deadline_shape_verdicts([seps + ((cpu, wall, "deny", queued),)], retime)
+        if len(lines) != want_lines or len(retimed) != want_reruns:
+            out.append("(dl-shape-load-bounds) {} must give {} line(s) and {} re-run(s), got {!r} with re-runs "
+                       "{!r}".format(edge, want_lines, want_reruns, lines, retimed))
+    retimed.clear()
+    lines = _deadline_shape_verdicts([seps + ((3.0, 3.1, "deny", None),) * 3], retime)
+    if len(lines) != 1 or retimed or "own work not evaluated" not in lines[0]:
+        out.append("(dl-shape-load-unread) a run whose run-queue delay could not be read must give one line "
+                   "saying its own work was not evaluated and no re-run, got {!r} with re-runs {!r}".format(
+                       lines, retimed))
+
+    def overlapped_wait_call():
+        worker = _deadline_hashing_thread("dl-shape-load-overlap", 9.0)
+        time.sleep(9.3)
+        worker.join(30)
+        return "deny"
+    retimed.clear()
+    wait_run = _deadline_timed_call(overlapped_wait_call)
+    lines = _deadline_shape_verdicts([deny + (wait_run,) * 3], retime)
+    if len(lines) != 1 or len(retimed) != 1 or "production budget" not in lines[0]:
+        out.append("(dl-shape-load-wait) a call sleeping 9.3 s beside a 9-second hashing thread must give one "
+                   "line on its own work and one re-run, got {!r} with re-runs {!r}".format(lines, retimed))
+    stop = threading.Event()
+    decoy = _deadline_hashing_thread("dl-shape-load-decoy", 0.5)
+    busy = []
+
+    def busy_thread_call():
+        busy.append(_deadline_hashing_thread("dl-shape-load-busy", 60.0, stop))
+        own_cpu(1.5 * _DEADLINE_BOUNDS[65536])
+        return "deny"
+    try:
+        thread_run = _deadline_timed_call(busy_thread_call)
+    finally:
+        stop.set()
+        for thread in busy + [decoy]:
+            thread.join(30)
+    retimed.clear()
+    lines = _deadline_shape_verdicts([deny + (thread_run,) * 3], retime)
+    if len(lines) != 1 or "of CPU time, over its 1.5s bound" not in lines[0]:
+        out.append("(dl-shape-load-thread) a call that leaves a busy thread running and spends 2.25 s of its own "
+                   "CPU must give one line on its CPU time, got {!r} (the run {!r})".format(lines, thread_run))
+
+    def cpu_then_sleep_call():
+        own_cpu(4.0)
+        time.sleep(6.0)
+        return "deny"
+    retimed.clear()
+    sleep_run = _deadline_timed_call(cpu_then_sleep_call)
+    lines = _deadline_shape_verdicts([seps + (sleep_run,) * 3], retime)
+    if (len(lines) != 1 or len(retimed) != 1 or "production budget" not in lines[0]
+            or "of CPU time, over" in lines[0]):
+        out.append("(dl-shape-load-cpu-then-sleep) a call spending 4.0 s of its own CPU and then sleeping 6.0 s "
+                   "must give one line on its own work and one re-run, got {!r} with re-runs {!r} (the run "
+                   "{!r})".format(lines, retimed, sleep_run))
+    out += _deadline_induced_load_failures(seps, retime, retimed, own_cpu)
+    no_delay = "not evaluated: schedstat reports no run-queue delay"
+    for wall, queued, want in ((12.0, 9.0, None), (12.0, 0.0, no_delay), (own_bound + 1e-6, 0.0, no_delay),
+                               (own_bound, 0.0, "not exercised"), (own_bound - 1e-6, 0.0, "not exercised")):
+        got = _deadline_induced_verdict(seps, (3.0, wall, "deny", queued), retime, retimed)
+        if (got != []) if want is None else (len(got) != 1 or want not in got[0]):
+            out.append("(dl-shape-load-induced-verdicts) a recorded induced run of 3.0 s of CPU time, {!r} s "
+                       "wall-clock and {!r} s queued must give {}, got {!r}".format(
+                           wall, queued, "no line" if want is None else "one line saying " + want, got))
+    plain = tmp / "load-reading"
+    plain.mkdir(parents=True, exist_ok=True)
+    real = _deadline_shape_case("orch_truncation_guard", "seps_hash", 65536, str(plain))
+    if len(real) != 4 or not (isinstance(real[0], float) and 0 < real[0] <= real[1]):
+        out.append("(dl-shape-load-real-case) a real case must record its own thread's CPU time as a positive "
+                   "number no greater than its wall-clock time, got {!r}".format(real))
+    return out
+
+
+# Busy-loop children the dl-shape-load-induced row pins to the calling thread's one CPU, so that thread
+# gets about a quarter of it and spends most of its call queued for it.
+_DEADLINE_LOAD_SPINNERS = 3
+_DEADLINE_LOAD_SPIN_SOURCE = "import time\nends = time.monotonic() + 60\nwhile time.monotonic() < ends:\n    pass\n"
+
+
+def _deadline_induced_load_failures(case, retime, retimed, own_cpu):
+    """(dl-shape-load-induced) The induced-load row of _deadline_load_judgement_failures, on case (a 1 MB
+    handler, shape, size and cwd): own_cpu(3.0) timed while _DEADLINE_LOAD_SPINNERS busy-loop children
+    share the calling thread's one CPU must give no line from _deadline_shape_verdicts, with the call's
+    wall-clock time over the production budget so the row exercises the load (_deadline_induced_verdict).
+    The calling thread's CPU affinity is restored and every child's process group killed and reaped before
+    it returns."""
+    label = "(dl-shape-load-induced)"
+    if not hasattr(os, "sched_setaffinity"):
+        return [label + " not evaluated: this platform has no os.sched_setaffinity to pin the load"]
+    saved = os.sched_getaffinity(0)
+    cpu = min(saved)
+    spinners = []
+    try:
+        os.sched_setaffinity(0, {cpu})
+        for _ in range(_DEADLINE_LOAD_SPINNERS):
+            spinners.append(subprocess.Popen(
+                [sys.executable, "-I", "-S", "-c", _DEADLINE_LOAD_SPIN_SOURCE], stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True))
+            os.sched_setaffinity(spinners[-1].pid, {cpu})
+        time.sleep(0.5)
+        run = _deadline_timed_call(lambda: (own_cpu(3.0), "deny")[1])
+    finally:
+        for proc in spinners:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            proc.wait(timeout=30)
+        os.sched_setaffinity(0, saved)
+    return _deadline_induced_verdict(case, run, retime, retimed)
+
+
+def _deadline_induced_verdict(case, run, retime, retimed):
+    """The dl-shape-load-induced lines for run, one timed run (cpu_seconds, wall_seconds, outcome,
+    queued_seconds) of the induced-load call on case: [] when _deadline_shape_verdicts gives three copies of
+    it no line and its wall-clock time is over the production budget; a not-evaluated line when that time is
+    over the budget but schedstat reported no run-queue delay at all, so its own work would be its whole
+    wall-clock time and the delay reading, not the call's cost, is in doubt; otherwise the verdict lines, or
+    a line saying the load was not exercised."""
+    label = "(dl-shape-load-induced)"
+    retimed.clear()
+    lines = _deadline_shape_verdicts([case + (run,) * 3], retime)
+    if run[3] == 0.0 and run[1] > _DEADLINE_OWN_WORK_BOUND:
+        return ["{} not evaluated: schedstat reports no run-queue delay, though the induced load left the call's "
+                "wall-clock time at {:.2f}s, over the {:g}s budget (the run {!r}, judged {!r})".format(
+                    label, run[1], _DEADLINE_OWN_WORK_BOUND, run, lines)]
+    if lines or retimed:
+        return ["{} an honest call spending 3.0 s of its own CPU under {} pinned busy-loop children must give no "
+                "line, got {!r} with re-runs {!r} (the run {!r})".format(
+                    label, _DEADLINE_LOAD_SPINNERS, lines, retimed, run)]
+    if run[1] <= _DEADLINE_OWN_WORK_BOUND:
+        return ["{} not exercised: the induced load left the call's wall-clock time at {:.2f}s, not over the "
+                "{:g}s budget (the run {!r})".format(label, run[1], _DEADLINE_OWN_WORK_BOUND, run)]
+    return []
+
+
+def _deadline_hashing_thread(name, seconds, stop=None):
+    """A started daemon thread named name that hashes a 1 MB buffer over and over for seconds of wall-clock
+    time, or until the event stop is set: real CPU work on another thread (hashlib releases the interpreter
+    lock on a buffer this size), for the rows that check that such work neither adds to nor hides the
+    calling thread's own CPU time or wait."""
+    def run():
+        block = b"\0" * (1 << 20)
+        ends = time.monotonic() + seconds
+        while time.monotonic() < ends and not (stop is not None and stop.is_set()):
+            hashlib.sha256(block)
+    thread = threading.Thread(target=run, name=name, daemon=True)
+    thread.start()
+    return thread
 
 
 def _deadline_note_only_deny_failures():
@@ -8738,7 +9085,7 @@ def _deadline_rearm_failures():
     scheduling delay at the exit, and fails if the window's own timer is armed for real again.
     Neither case shows that no delay can fail the run: two bounds remain that these checks do not remove,
     the 1 s allowed for the kernel to expire the re-armed timer and the deadline child's
-    _DEADLINE_CHILD_TIMEOUT (900 s)."""
+    _DEADLINE_CHILD_TIMEOUT (900 s of wall-clock time, _deadline_child_wait)."""
     out = []
     take = aiqt_hooks._DeadlineWindow._take.__code__
     twice = aiqt_hooks._DeadlineWindow._twice.__code__
@@ -10078,10 +10425,124 @@ def _deadline_relation_failures():
     return out
 
 
+# How long _deadline_child_wait waits for a child it killed to be reaped before it stops waiting.
+_DEADLINE_CHILD_REAP_SECONDS = 10.0
+
+
+def _deadline_child_within(waited, limit):
+    """Whether a child's wall-clock seconds (_deadline_child_wait) are within its limit, the limit included."""
+    return waited <= limit
+
+
+def _deadline_child_wait(code, args, limit):
+    """(subprocess.CompletedProcess with text stdout and stderr, or None when the child was stopped or
+    finished past its limit, and a phrase giving the wall-clock seconds waited) for a child running the
+    Python source code with the arguments args (sys.executable -I -B -c code args...), judged against limit
+    as a fixed wall-clock bound, nothing divided by anything: the child is accepted only if it has finished
+    and both pipes reached their end within limit seconds of its start (_deadline_child_within). A child
+    still running at limit is killed and waited for up to _DEADLINE_CHILD_REAP_SECONDS, and leaving the
+    with block closes both pipes without waiting for anything else that holds them (a grandchild the child
+    started), so a hang (a blocked wait or an endless loop) fails after about limit seconds, whatever
+    threads the child runs or however busy the host is. Residual: a killed child the kernel does not reap
+    within that bound (one in an uninterruptible sleep) still blocks leaving the with block, since
+    Popen's exit waits for it with no timeout."""
+    began = time.monotonic()
+    argv = [sys.executable, "-I", "-B", "-c", code] + list(args)
+    with subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                          text=True) as proc:
+        try:
+            stdout, stderr = proc.communicate(timeout=limit)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            try:
+                proc.wait(timeout=_DEADLINE_CHILD_REAP_SECONDS)
+            except subprocess.TimeoutExpired:
+                pass
+            return None, "stopped after {:.1f}s wall-clock".format(time.monotonic() - began)
+    waited = time.monotonic() - began
+    if not _deadline_child_within(waited, limit):
+        return None, "finished past its limit, after {:.1f}s wall-clock".format(waited)
+    return subprocess.CompletedProcess(argv, proc.returncode, stdout, stderr), "{:.1f}s wall-clock".format(waited)
+
+
+def _deadline_child_wait_failures(tmp):
+    """(dl-child-wait-*) _deadline_child_wait stops a child that outlives its wall-clock limit and returns
+    one that finishes within it:
+    dl-child-wait-hang: a child sleeping 600 s under a 1-second limit is stopped (None), and not before
+    that second of wall-clock time.
+    dl-child-wait-done: a child that prints and exits at once returns its exit status and output.
+    dl-child-wait-last-stretch: a child sleeping 1.3 s under a 1-second limit is refused (None).
+    dl-child-wait-edge: the acceptance at the limit's edge (_deadline_child_within), the limit included:
+    a wait a microsecond under and exactly at a 1-second limit is within it, a microsecond over is not.
+    dl-child-wait-busy-child: a child sleeping 6.2 s while its own thread hashes for 6 s, under a 4-second
+    limit, is stopped (None), within 4 s plus the reap bound: the child's CPU work does not shorten its
+    wait.
+    dl-child-wait-grandchild: a child that starts a grandchild sleeping 30 s on the same output pipes and
+    then sleeps 600 s, under a 1-second limit, is stopped within 15 s, not when the grandchild lets go of
+    the pipes; the grandchild, found by its pid and the marker path in its arguments, is then killed."""
+    out = []
+    began = time.monotonic()
+    proc, waited = _deadline_child_wait("import time; time.sleep(600)", (), 1.0)
+    spent = time.monotonic() - began
+    if proc is not None or spent < 1.0:
+        out.append("(dl-child-wait-hang) a child sleeping 600 s under a 1-second limit must be stopped, "
+                   "and not within 1 s, got {!r} after {:.1f}s ({})".format(proc, spent, waited))
+    proc, waited = _deadline_child_wait("print('done')", (), 900)
+    if proc is None or proc.returncode != 0 or proc.stdout != "done\n":
+        out.append("(dl-child-wait-done) a child that prints and exits must return exit 0 and its output, got "
+                   "{!r} ({})".format(proc, waited))
+    proc, waited = _deadline_child_wait("import time; time.sleep(1.3)", (), 1.0)
+    if proc is not None:
+        out.append("(dl-child-wait-last-stretch) a child sleeping 1.3 s under a 1-second limit must be "
+                   "refused, got {!r} ({})".format(proc, waited))
+    for waited, want in ((1.0 - 1e-6, True), (1.0, True), (1.0 + 1e-6, False)):
+        if _deadline_child_within(waited, 1.0) is not want:
+            out.append("(dl-child-wait-edge) {!r} s waited against a 1-second limit must read within: {}".format(
+                waited, want))
+    code = ("import hashlib, threading, time; block = b'\\0' * (1 << 20); ends = time.monotonic() + 6.0\n"
+            "def run():\n    while time.monotonic() < ends:\n        hashlib.sha256(block)\n"
+            "threading.Thread(target=run, daemon=True).start(); time.sleep(6.2)")
+    began = time.monotonic()
+    proc, waited = _deadline_child_wait(code, (), 4.0)
+    spent = time.monotonic() - began
+    if proc is not None or spent >= 4.0 + _DEADLINE_CHILD_REAP_SECONDS:
+        out.append("(dl-child-wait-busy-child) a child sleeping 6.2 s beside its own 6-second hashing thread must "
+                   "be stopped under a 4-second limit, got {!r} after {:.1f}s ({})".format(proc, spent, waited))
+    marker = Path(tmp) / "dl-child-wait-grandchild.pid"
+    code = ("import subprocess, sys, time; g = subprocess.Popen([sys.executable, '-I', '-S', '-c', "
+            "'import time; time.sleep(30)', sys.argv[1]]); open(sys.argv[1], 'w').write(str(g.pid)); "
+            "time.sleep(600)")
+    began = time.monotonic()
+    try:
+        proc, waited = _deadline_child_wait(code, (str(marker),), 1.0)
+        spent = time.monotonic() - began
+    finally:
+        _deadline_kill_marked(marker)
+    if proc is not None or spent >= 15.0:
+        out.append("(dl-child-wait-grandchild) a child whose grandchild holds its pipes must be stopped within "
+                   "15 s under a 1-second limit, got {!r} after {:.1f}s ({})".format(proc, spent, waited))
+    return out
+
+
+def _deadline_kill_marked(marker):
+    """Kill the process whose pid the file marker holds, only while /proc shows that pid running with the
+    marker's path among its arguments (so a reused pid is never signalled); nothing where there is no
+    marker, no /proc, or no such process."""
+    try:
+        pid = int(marker.read_text(encoding="ascii"))
+        with open("/proc/{}/cmdline".format(pid), "rb") as handle:
+            arguments = handle.read().split(b"\0")
+        if os.fsencode(str(marker)) in arguments:
+            os.kill(pid, signal.SIGKILL)
+    except (OSError, ValueError):
+        pass
+
+
 def _test_deadline_posture(failures, tmp):
     """(dl-*) The PreToolUse deadline posture; see the section comment above."""
     failures.extend(_deadline_relation_failures())
     failures.extend(_deadline_shape_rerun_failures())
+    failures.extend(_deadline_load_judgement_failures(Path(tmp)))
     failures.extend(_deadline_note_only_deny_failures())
     failures.extend(_raw_sequence_failures())
     failures.extend(_raw_mirror_failures())
@@ -10097,16 +10558,16 @@ def _test_deadline_posture(failures, tmp):
     failures.extend(_lex_repeats_failures())
     failures.extend(_lex_fork_failures())
     failures.extend(_errexit_runs_failures())
+    failures.extend(_deadline_child_wait_failures(tmp))
     child_tmp = tmp / "deadline"
     child_tmp.mkdir()
     code = ("import json, sys; sys.path.insert(0, sys.argv[1]); import selftest_aiqt_hooks as m; "
             "sys.stdout.write(json.dumps(m._deadline_child(sys.argv[2])))")
-    try:
-        proc = subprocess.run([sys.executable, "-I", "-B", "-c", code, str(Path(__file__).resolve().parent),
-                               str(child_tmp)], capture_output=True, text=True, timeout=_DEADLINE_CHILD_TIMEOUT)
-    except subprocess.TimeoutExpired:
-        failures.append("(dl-child-timeout) the deadline child did not finish within {}s".format(
-            _DEADLINE_CHILD_TIMEOUT))
+    proc, waited = _deadline_child_wait(code, (str(Path(__file__).resolve().parent), str(child_tmp)),
+                                        _DEADLINE_CHILD_TIMEOUT)
+    if proc is None:
+        failures.append("(dl-child-timeout) the deadline child did not finish within its {}s wall-clock limit ({})"
+                        .format(_DEADLINE_CHILD_TIMEOUT, waited))
         return
     try:
         found = json.loads(proc.stdout)
