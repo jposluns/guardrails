@@ -408,10 +408,12 @@ def _legacy_files(legacy_root):
     """Every legacy file beneath legacy_root, sorted. Each entry is classified explicitly instead of by
     rglob() and Path.is_file(), which skip a directory that cannot be listed and read an entry that cannot
     be inspected as not a file, so part of a legacy tree was silently left out of the archive. An absent
-    root, or an entry removed since its directory was listed, is absent. A real directory is walked. A
-    regular file, or a symlink to one (legacy trees may carry symlinked files, and the archive read follows
-    them), is a legacy file. Anything else (a listing or stat error, a dangling symlink, a symlink to a
-    directory, a FIFO, socket or device) is refused with an AdoptError naming the path."""
+    root, or an entry that its own lstat finds missing (removed after its directory was listed), is absent.
+    A real directory is walked. A regular file, or a symlink to one (legacy trees may carry symlinked
+    files, and the archive read follows them), is a legacy file. Anything else (a listing or stat error, a
+    dangling symlink, a symlink to a directory, a FIFO, socket or device) is refused with an AdoptError
+    naming the path. That includes a directory removed after its lstat but before its own listing, and a
+    symlink whose target is removed after its lstat: each is refused, not read as absent."""
     try:
         os.lstat(str(legacy_root))
     except FileNotFoundError:

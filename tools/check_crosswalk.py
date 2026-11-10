@@ -573,7 +573,8 @@ def check_unit_coverage(root, cw):
     journal_root = root / JOURNAL_REL
     # A no-follow lstat classifies the journal: only a genuinely absent journal (no cutover yet) yields no
     # findings. A symlink (dangling or not), a regular file, a FIFO, or a path that cannot be inspected is
-    # refused (GateError naming the path), never read as absent the way Path.is_dir() read it.
+    # refused (GateError naming the path). Path.is_dir() read each of these as absent, except a symlink to
+    # a directory, which it followed.
     if not _present_or_fail(journal_root, True):
         return []
     findings = []
@@ -591,10 +592,11 @@ def check_unit_coverage(root, cw):
         raise GateError("cannot open journal root ({})".format(exc))
     try:
         # Enumerate through the held journal-root descriptor with the engine's strict no-follow listing: a
-        # transaction directory is gated and the engine's own regular `lock` and `lock.break` files are
-        # skipped, while an entry that cannot be inspected, a symlink, or any other type is refused. A
-        # Path.is_dir() filter skipped all of these as if absent, so a journal that could be listed but not
-        # searched hid every transaction and the leg passed.
+        # transaction directory is gated and the engine's own singly linked regular `lock` and `lock.break`
+        # files are skipped, while an entry that cannot be inspected, a symlink, a multiply linked `lock`
+        # or `lock.break`, or any other type is refused. A Path.is_dir() filter skipped, as if absent,
+        # every entry it could not stat and every entry that was neither a directory nor a symlink to one,
+        # so a journal that could be listed but not searched hid every transaction and the leg passed.
         try:
             txn_dirs = _journal._journal_txn_dirs(jr_fd, journal_root, strict=True)
         except (_journal.JournalError, OSError) as exc:
