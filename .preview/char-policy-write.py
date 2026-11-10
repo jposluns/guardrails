@@ -1896,8 +1896,8 @@ def _self_test():
                 here, and return (rc, out, err) once the child exits. None of these launches can lose its input to
                 a child that has already exited. Without step, the pipe stays open until the child exits. With
                 step, step(p) runs first, while the child runs with the write end open; the write end is closed
-                once step returns. The child's stdout and stderr are unbuffered, so step can read stderr a line at
-                a time without taking in the bytes of the next line."""
+                once step returns. The pipes from the child's stdout and stderr are unbuffered here (bufsize=0), so
+                step can read stderr a line at a time without taking in the bytes of the next line."""
                 r, w = os.pipe()
                 fds = [r, w]
                 try:
@@ -1925,28 +1925,34 @@ def _self_test():
             # through the hook as launched: a complete payload on a pipe that stays open gets the late note. This
             # launch reads the real clock, so a hook that accepts a payload without its end of input would also
             # give this note if the OS held it past its 2 second deadline before its first read; the launch below,
-            # on a clock this test moves, is the one that tells the two apart
+            # on a clock this test moves, tells the two apart for the hooks its comment names
             rc, out, err = held(launch, good)
             self.assertEqual((rc, err), (0, b""))
             self.is_unchecked(json.loads(out), "did not end within the read deadline")
-            # the open pipe judged by order rather than by time: through main, with the deadline lowered to 0.5
-            # seconds after the import (so it must be read at call time) and a clock that reads 0 until this test
-            # moves it to 0.75 seconds, past the lowered deadline and inside the 2 second default. Every wait and
-            # read goes to the real one unchanged; the child says on stderr each read of its input, each wait once
-            # it holds the whole payload, and the clock reading it last took when main returned. While its clock
-            # reads 0 its deadline has not passed, so a hook that waits for the end of input cannot return: after
-            # three waits holding the whole payload it must still be running with nothing on stdout. A hook that
-            # accepts the payload without its end of input before that point, whether it polls, waits or reads,
-            # returns while its clock reads 0, and its last line says so however late this test runs. Only then
-            # does the clock move and the write end close, in that order: the hook must give the late note having
-            # read 0.75, and one that keeps the 2 second default reads the end of input and accepts it. A hook
-            # that accepts only after more than three such waits can still pass if the clock moves first
+            # the open pipe judged by the order of the reader's own steps rather than by time: through main, with
+            # the deadline lowered to 0.5 seconds after the import (so it must be read at call time) and a clock
+            # that only this test moves, from 0 to 0.45 and then to 0.75 seconds, past the lowered deadline and
+            # inside the 2 second default. Every wait and read goes to the real one unchanged; the child says on
+            # stderr each read of its input, each wait it enters once it holds the whole payload with the clock
+            # reading it last took, and the reading it last took when main returned. The clock moves to 0.45 only
+            # once the child has entered its fourth such wait at 0, and to 0.75 only once it has entered its
+            # second at 0.45. A wait it has entered is one it has already decided on, so its decision after its
+            # third wait at 0, and after its first wait at 0.45, is taken before the clock moves, however late the
+            # OS runs this test or the child; an announced wait alone would not show that. Before its deadline a
+            # hook that waits for the end of input cannot return, so at each move it must still be running with
+            # nothing on stdout. A hook that accepts the payload without its end of input before either of those
+            # waits, whether it polls, waits or reads, after a count of waits or after up to 0.45 seconds without
+            # input on its own clock, returns while its clock reads 0 or 0.45 and its last line says so. Once the
+            # clock reads 0.75 the write end closes: the hook must give the late note having read 0.75, and one
+            # that keeps the 2 second default reads the end of input and accepts it. A hook that accepts only at a
+            # later wait, or only after more than 0.45 seconds without input, can still pass if the clock moves
+            # first
             observed = ("import importlib.util, os, select, sys, types\n"
                         "spec = importlib.util.spec_from_file_location('observed_hook', sys.argv[1])\n"
                         "module = importlib.util.module_from_spec(spec)\n"
                         "spec.loader.exec_module(module)\n"
                         "module._READ_DEADLINE = 0.5\n"
-                        "size, clock, taken, now = int(sys.argv[2]), int(sys.argv[3]), [0], [0.0]\n"
+                        "size, clock, taken, moved, now = int(sys.argv[2]), int(sys.argv[3]), [0], [0], [0.0]\n"
                         "def say(line):\n"
                         "    sys.stderr.write(line + '\\n')\n"
                         "    sys.stderr.flush()\n"
@@ -1958,11 +1964,12 @@ def _self_test():
                         "    return chunk\n"
                         "def wait(rlist, wlist, xlist, timeout=None):\n"
                         "    if taken[0] >= size:\n"
-                        "        say('waiting')\n"
+                        "        say('waiting at %g' % now[0])\n"
                         "    return select.select(rlist, wlist, xlist, timeout)\n"
-                        "def monotonic():\n"
-                        "    if not now[0] and select.select([clock], [], [], 0)[0]:\n"
-                        "        now[0] = 0.75\n"
+                        "def monotonic(real=os.read):\n"
+                        "    if moved[0] < 2 and select.select([clock], [], [], 0)[0]:\n"
+                        "        moved[0] += len(real(clock, 2))\n"
+                        "        now[0] = (0.0, 0.45, 0.75)[min(moved[0], 2)]\n"
                         "    return now[0]\n"
                         "os.read = read\n"
                         "module.select = types.SimpleNamespace(select=wait)\n"
@@ -1970,16 +1977,26 @@ def _self_test():
                         "rc = module.main(['char-policy-write.py'])\n"
                         "say('returned at %g' % now[0])\n"
                         "sys.exit(rc)\n")
-            waiting = b"waiting\n"
+            at0, at45 = b"waiting at 0\n", b"waiting at 0.45\n"
 
             def before_deadline(p):
-                events = []
-                while len(events) < 4 and select.select([p.stderr], [], [], 60)[0]:
-                    line = p.stderr.readline()
-                    if not line:
-                        break
-                    events.append(line)
-                self.assertEqual(events, [b"read %d\n" % len(good)] + [waiting] * 3)
+                def lines(waiting, count):
+                    # the child's stderr lines through its count-th waiting line, or through its end of output or
+                    # a 60 second silence, whichever comes first
+                    got = []
+                    while got.count(waiting) < count and select.select([p.stderr], [], [], 60)[0]:
+                        got.append(p.stderr.readline())
+                        if not got[-1]:
+                            break
+                    return got
+
+                self.assertEqual(lines(at0, 4), [b"read %d\n" % len(good)] + [at0] * 4)
+                self.assertIsNone(p.poll())
+                self.assertEqual(select.select([p.stdout], [], [], 0)[0], [])
+                os.write(move, b"m")
+                # waits the child entered at 0 before it read the moved clock may come first
+                got = lines(at45, 2)
+                self.assertEqual(got, [at0] * (len(got) - 2) + [at45] * 2)
                 self.assertIsNone(p.poll())
                 self.assertEqual(select.select([p.stdout], [], [], 0)[0], [])
                 os.write(move, b"m")
@@ -1992,7 +2009,7 @@ def _self_test():
                 os.close(clock)
                 os.close(move)
             after = err.splitlines(keepends=True)
-            self.assertEqual((rc, after), (0, [waiting] * (len(after) - 1) + [b"returned at 0.75\n"]))
+            self.assertEqual((rc, after), (0, [at45] * (len(after) - 1) + [b"returned at 0.75\n"]))
             self.is_unchecked(json.loads(out), "ending within 0.5 seconds (ValueError: the hook payload did not "
                                                "end within the read deadline)")
 
