@@ -19,7 +19,7 @@ fix-id = 3
 
 [[path]]
 path = ".aiqt/core/hooks/scripts/aiqt_hooks.py"
-fix-id = 33
+fix-id = 32
 review-round = 1
 
 [[path]]
@@ -28,8 +28,8 @@ fix-id = 11
 
 [[path]]
 path = ".github/check_cited_standards_contract.py"
-review-round = 11
-reviewer-source = 11
+review-round = 10
+reviewer-source = 10
 
 [[path]]
 path = ".preview/char-policy-write.py"
@@ -207,7 +207,7 @@ fix-id = 2
 
 [[path]]
 path = "plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py"
-fix-id = 33
+fix-id = 32
 review-round = 1
 
 [[path]]

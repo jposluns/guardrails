@@ -1488,6 +1488,14 @@ jobs:
         shell: bash
         run: python3 -I -B tools/check_record_drift.py
 
+      - name: Record-reader inventory self-test (execution-reconciled)
+        shell: bash
+        run: python3 -I -B tools/check_selftest_execution.py --suite record-readers-selftest
+
+      - name: Record-reader inventory gate
+        shell: bash
+        run: python3 -I -B tools/check_record_readers.py
+
       - name: Record-section preservation self-test
         shell: bash
         run: python3 -I -B tools/check_record_sections.py --self-test

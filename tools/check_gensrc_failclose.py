@@ -110,6 +110,10 @@ tree, so it captures local uncommitted edits; on CI, HEAD equals the tree.
 
   check_gensrc_failclose.py             sweep the real registry (default)
   check_gensrc_failclose.py --self-test build synthetic mini-repos and assert this gate's own invariants
+  check_gensrc_failclose.py --measure-load-case N
+                                        run the self-test load case's slow and leaky lanes N times each
+                                        and print each probe's largest no-progress gap and the host
+                                        load (a re-measurement of the stall bound's sizing; asserts nothing)
 """
 import sys
 
@@ -175,6 +179,19 @@ PROBE_TIMEOUT = 120  # per --check; an own exit beside the stop stands, else can
 # silent; 60 s is far above that on a working host.
 PROBE_STALL_S = 60
 TOTAL_TIMEOUT = 1800  # backstop for the whole sweep; exceeding it is cannot-evaluate, never a hang
+# Wall-clock bound on EACH ONE setup step, per call: every template-setup git call (init, the real_root
+# ls-files, add, commit, the gc, the post-gc readbacks) and, in the self-test, every fixture build step
+# (a fixture git call or a generator write run). Deliberately NOT PROBE_TIMEOUT: the self-test cuts
+# PROBE_TIMEOUT to 1 s to exercise the probe bounds, and a setup call reading that bound could time out
+# on a loaded host and turn a vector's verdict into an unrelated cannot-evaluate. A setup call normally
+# takes seconds at most, so only a hung call reaches 600 s (then the setup fails closed, cannot-evaluate).
+# Inside the sweep each template-setup call is ALSO clamped to the time left before the sweep's
+# TOTAL_TIMEOUT deadline (_setup_timeout), so the setup as a whole never runs past that deadline.
+SETUP_CALL_TIMEOUT = 600
+# The template gc is an optimisation only (a gc that fails or overruns leaves the loose objects in
+# place). Its bound and its argv are module-level so the self-test can substitute a stand-in that hangs.
+TEMPLATE_GC_TIMEOUT = SETUP_CALL_TIMEOUT
+_TEMPLATE_GC_ARGS = ("gc", "--quiet")
 _O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)  # Linux/CI have it; degrade safely where the platform lacks it
 _load_factor = _load_bound.load_factor  # module-level indirection so the self-test can inject host load
 # The sweep clock: monotonic, load-adjusted; module-level so the self-test can inject a clock (deadline).
@@ -328,7 +345,38 @@ def _sanitized_env(overrides=None):
     return env
 
 
-def _materialize_git(template, real_root):
+def _setup_timeout(deadline, bound):
+    """The timeout for ONE template-setup call: bound, clamped to the time left before the sweep's
+    total-runtime deadline (deadline None: no sweep deadline applies, bound alone). Raises OSError (a
+    named setup failure, cannot-evaluate) when no time is left (remaining <= 0), so no setup call is
+    launched with a non-positive timeout and the setup never runs past the sweep deadline."""
+    if deadline is None:
+        return bound
+    remaining = deadline - _now()
+    if remaining <= 0:
+        raise OSError("the {} load-adjusted s total-runtime backstop elapsed during the template setup; "
+                      "fail-closed".format(TOTAL_TIMEOUT))
+    return min(bound, remaining)
+
+
+# Files an interrupted `git gc` can leave in a repository: its lock (gc.pid) and the partial pack and
+# index files pack-objects/index-pack write before renaming them into place. After a killed gc they are
+# removed from the template so no per-probe copy of the template carries them.
+_GC_DEBRIS_GLOBS = ("gc.pid", "objects/pack/tmp_pack_*", "objects/pack/tmp_idx_*")
+
+
+def _remove_gc_debris(git_dir):
+    """Remove every _GC_DEBRIS_GLOBS entry under git_dir (never following a symlink: the entry itself is
+    unlinked). Raises OSError (fail-closed) when an entry cannot be removed or is a directory."""
+    for pattern in _GC_DEBRIS_GLOBS:
+        for path in sorted(Path(git_dir).glob(pattern)):
+            if stat.S_ISDIR(os.lstat(str(path)).st_mode):
+                raise OSError("unexpected directory {} left by the killed template gc; fail-closed"
+                              .format(path))
+            os.unlink(str(path))
+
+
+def _materialize_git(template, real_root, deadline=None):
     """D6: materialize a REAL minimal git repository in the sandbox TEMPLATE so a git-reading generator
     (for example gen_manifest.py, whose `git ls-files` enumerates the tracked surface) runs its baseline
     --check under the sweep. Identity is pinned per-call with -c (never user config), the template dir is
@@ -359,19 +407,75 @@ def _materialize_git(template, real_root):
         # or auto-maintenance run that would repack/prune template/.git after this returns and race the
         # per-call copytree of the template. It hardens hermeticity only; it changes nothing the
         # gate certifies about a generator's --check.
-        return subprocess.run(
-            ["git", "-C", str(cwd), "-c", "user.name=aiqt-failclose",
-             "-c", "user.email=failclose@invalid", "-c", "commit.gpgsign=false",
-             "-c", "init.defaultBranch=main", *_TEMPLATE_GIT_NO_MAINTENANCE, *args],
-            capture_output=True, env=env, timeout=PROBE_TIMEOUT, shell=False)
+        # The bound is SETUP_CALL_TIMEOUT clamped to the sweep deadline (_setup_timeout), never
+        # PROBE_TIMEOUT; a hung call is a named setup failure (OSError, cannot-evaluate), not an
+        # unexpected error.
+        timeout = _setup_timeout(deadline, SETUP_CALL_TIMEOUT)
+        try:
+            return subprocess.run(
+                ["git", "-C", str(cwd), "-c", "user.name=aiqt-failclose",
+                 "-c", "user.email=failclose@invalid", "-c", "commit.gpgsign=false",
+                 "-c", "init.defaultBranch=main", *_TEMPLATE_GIT_NO_MAINTENANCE, *args],
+                capture_output=True, env=env, timeout=timeout, shell=False)
+        except subprocess.TimeoutExpired:
+            raise OSError("template `git {}` exceeded its {:g} s setup bound; fail-closed"
+                          .format(args[0], timeout)) from None
+
+    def gc():
+        # Foreground gc as the leader of its own process group: on an overrun the WHOLE group (gc and
+        # the repack/pack-objects/prune children it spawns) is killed while the leader is still
+        # unreaped, so no orphaned child keeps rewriting template/.git under a per-call copytree.
+        # Returns "" when gc completed with exit 0, else why it did not (non-fatal to the caller).
+        # The new session also keeps the terminal's SIGINT from reaching the group, so ANY exception
+        # out of the wait (a KeyboardInterrupt included) kills the group the same way before it
+        # propagates; Popen's own exit handling would only wait briefly on an interrupt, not kill.
+        # No parent-death signal is armed here: _load_bound.run (which arms one) refuses a git head,
+        # and that signal would reach the gc leader only, not the children in its group.
+        timeout = _setup_timeout(deadline, TEMPLATE_GC_TIMEOUT)
+        try:
+            proc = subprocess.Popen(
+                ["git", "-C", str(template), "-c", "user.name=aiqt-failclose",
+                 "-c", "user.email=failclose@invalid", "-c", "commit.gpgsign=false",
+                 "-c", "init.defaultBranch=main", *_TEMPLATE_GIT_NO_MAINTENANCE, *_TEMPLATE_GC_ARGS],
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                env=env, shell=False, start_new_session=True)
+        except OSError as exc:
+            return "gc could not be launched ({})".format(exc)
+        with proc:
+            try:
+                rc = proc.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                unsignalled = _load_bound._kill_group(proc, None)  # numeric group id, leader unreaped
+                if unsignalled:
+                    proc.kill()
+                    proc.wait()
+                    # A descendant may still be rewriting template/.git: the template cannot be trusted,
+                    # and that descendant can outlive this process (it is reported, not stopped).
+                    raise OSError("template gc overran its {:g} s bound and its process group could not "
+                                  "be stopped ({}); a gc descendant may still be running; fail-closed"
+                                  .format(timeout, unsignalled))
+                proc.wait()
+                _remove_gc_debris(template / ".git")
+                return "gc overran its {:g} s bound; its process group was killed".format(timeout)
+            except BaseException:
+                _load_bound._kill_group(proc, None)  # leader still unreaped: the group id names it
+                proc.kill()
+                proc.wait()
+                raise
+        return "" if rc == 0 else "gc exited {}".format(rc)
 
     if git(template, "init", "-q", "--template=").returncode != 0:
         raise OSError("cannot git-init the failclose sandbox template")
     # -c core.fsmonitor=false and --no-optional-locks (top-level, before the subcommand) override any
     # repo-local fsmonitor hook program in real_root and skip the optional index-lock refresh.
-    probe = subprocess.run(["git", "-C", str(real_root), "-c", "core.fsmonitor=false",
-                            "--no-optional-locks", "ls-files", "-z"],
-                           capture_output=True, env=env, timeout=PROBE_TIMEOUT, shell=False)
+    probe_timeout = _setup_timeout(deadline, SETUP_CALL_TIMEOUT)
+    try:
+        probe = subprocess.run(["git", "-C", str(real_root), "-c", "core.fsmonitor=false",
+                                "--no-optional-locks", "ls-files", "-z"],
+                               capture_output=True, env=env, timeout=probe_timeout, shell=False)
+    except subprocess.TimeoutExpired:
+        raise OSError("real_root `git ls-files` exceeded its {:g} s setup bound; fail-closed"
+                      .format(probe_timeout)) from None
     if probe.returncode != 0:
         raise OSError("cannot enumerate real_root's tracked set (git ls-files exit {}); fail-closed"
                       .format(probe.returncode))
@@ -388,6 +492,24 @@ def _materialize_git(template, real_root):
         raise OSError("cannot git-add the tracked set into the failclose template")
     if git(template, "commit", "-q", "-m", "failclose template", "--no-verify").returncode != 0:
         raise OSError("cannot commit the failclose sandbox template")
+    # Pack the loose objects into a single packfile so each per-probe copytree of the template copies a
+    # handful of .git files instead of one loose object per tracked blob (a large per-probe speed-up). This
+    # gc runs in the FOREGROUND; _TEMPLATE_GIT_NO_MAINTENANCE stops both this gc and the earlier commit
+    # from detaching a background auto-gc/auto-maintenance run that would keep repacking/pruning
+    # template/.git and race the per-call copytree. A gc failure or overrun is non-fatal: git writes a
+    # pack (and its index) before deleting the loose objects it holds, so a gc that fails or is killed
+    # leaves a repo that still works with loose objects, only slower. Two readbacks run AFTER the gc: the
+    # object-store walk below (every object reachable from every ref must be present and readable,
+    # whatever the gc did to the packs and loose objects) and the index readback after it (the gc never
+    # writes the index; that readback checks the tracked set).
+    gc_outcome = gc()
+    if gc_outcome:
+        print("note: template {} (non-fatal: the template keeps its loose objects)".format(gc_outcome),
+              file=sys.stderr)
+    walk = git(template, "rev-list", "--objects", "--all")
+    if walk.returncode != 0:
+        raise OSError("the template object store does not hold every reachable object after the gc "
+                      "(git rev-list --objects --all exit {}); fail-closed".format(walk.returncode))
     # The materialized index MUST equal real_root's tracked set: any missing member is fail-closed.
     readback = git(template, "ls-files", "-z")
     if readback.returncode != 0:
@@ -401,13 +523,6 @@ def _materialize_git(template, real_root):
         missing = sorted(set(tracked) - materialized)
         raise OSError("the materialized template index does not equal real_root's tracked set "
                       "({} member(s) missing, e.g. {}); fail-closed".format(len(missing), missing[:3]))
-    # Pack the loose objects into a single packfile so each per-probe copytree of the template copies a
-    # handful of .git files instead of one loose object per tracked blob (a large per-probe speed-up). This
-    # gc runs in the FOREGROUND; _TEMPLATE_GIT_NO_MAINTENANCE (carried by git() above) stops both this gc
-    # and the earlier commit from detaching a background auto-gc/auto-maintenance run that would keep
-    # repacking/pruning template/.git and race the per-call copytree. A gc failure is non-fatal:
-    # the repo still works with loose objects, only slower.
-    git(template, "gc", "--quiet")
 
 
 def _run_check(script_path, cwd, timeout=PROBE_TIMEOUT, env_overrides=None):
@@ -763,7 +878,8 @@ def sweep(real_root):
             work = Path(_mkdtemp(prefix="aiqt-gensrc-failclose-"))
             template = work / "template"
             shutil.copytree(real_root, template, symlinks=False, ignore=_copy_ignore)
-            _materialize_git(template, real_root)  # D6: a real repo so git-reading generators baseline
+            # D6: a real repo so git-reading generators baseline; each setup call is clamped to the deadline.
+            _materialize_git(template, real_root, deadline=deadline)
         except (OSError, shutil.Error) as exc:
             cannot.append("template sandbox setup failed ({})".format(exc))
         else:
@@ -841,8 +957,11 @@ def main() -> int:
     args = sys.argv[1:]
     if "--self-test" in args:
         return self_test_main()
+    if len(args) == 2 and args[0] == "--measure-load-case" and args[1].isdigit() and int(args[1]) > 0:
+        return _measure_load_case(int(args[1]))
     if args:
-        print("usage: check_gensrc_failclose.py [--self-test]; fail-closed", file=sys.stderr)
+        print("usage: check_gensrc_failclose.py [--self-test | --measure-load-case N]; fail-closed",
+              file=sys.stderr)
         return 2
     return sweep(repo_root())
 
@@ -1286,7 +1405,7 @@ def _run_write(root, stem):
     try:
         proc = subprocess.run([sys.executable, str(root / "tools" / "gen_{}.py".format(stem))],
                               cwd=str(root), env=_sanitized_env(), capture_output=True,
-                              timeout=PROBE_TIMEOUT, check=False)
+                              timeout=SETUP_CALL_TIMEOUT, check=False)
     except (OSError, subprocess.SubprocessError) as exc:
         raise _FixtureSetupError("gen_{}.py write run did not complete ({})".format(stem, exc)) from exc
     if proc.returncode != 0:
@@ -1306,7 +1425,7 @@ def _git_fixture(repo, *args):
             ["git", "-C", str(repo), "-c", "user.name=aiqt-failclose",
              "-c", "user.email=failclose@invalid", "-c", "commit.gpgsign=false",
              "-c", "init.defaultBranch=main", *args],
-            capture_output=True, env=env, timeout=PROBE_TIMEOUT, shell=False, check=True)
+            capture_output=True, env=env, timeout=SETUP_CALL_TIMEOUT, shell=False, check=True)
     except subprocess.CalledProcessError as exc:
         raise _FixtureSetupError("git {} exited {} ({})"
                                  .format(" ".join(args), exc.returncode, _tail(exc.stderr))) from exc
@@ -1527,6 +1646,14 @@ _SELF_TEST_VECTORS = (
     "forced probe failure",
     "tracked-set mismatch",
     "no-maintenance flags",
+    "template gc overrun",
+    "template object-store check",
+    "template gc debris",
+    "template gc unstoppable group",
+    "template gc launch failure",
+    "template gc nonzero exit",
+    "template gc interrupt",
+    "template setup deadline clamp",
     "injected setup vector",
     "injected None-fixture vector",
     "injected BaseException vector",
@@ -1668,6 +1795,237 @@ def _cleanup_leaked_descendant(leaked, failures, cannot_evaluate):
                                "evaluated (the disclosed platform limit)")
     for pid in (leaked_pids or ()):
         _load_bound._kill_pid(pid)
+
+
+def _load_case_hang_bound_problems(hang_budget_s, stall_s, margin_s=2.0, flip_stall_s=30.0):
+    """The load-tolerance self-test case's hang lane, checked against the poll loop of
+    _load_bound._watch at the injected maximum load factor: an empty list, or one line per bound
+    that fails. The stall fires at most 2 * (POLL_S + SCAN_S) + stall_s wall seconds after launch
+    (the first progress poll within POLL_S + SCAN_S, then idle time tested only at polls at most
+    POLL_S + SCAN_S apart), and that must come at least margin_s before the hang budget in wall
+    seconds, so the stall, not the budget, decides the hang row. The budget fires at the first poll
+    at or after it, at most POLL_S + SCAN_S late, and that must come before a flip_stall_s stall
+    bound could fire (never before POLL_S + flip_stall_s), so that flip still reads the budget."""
+    poll_and_scan = _load_bound.POLL_S + _load_bound.SCAN_S
+    latest_stall = 2 * poll_and_scan + stall_s
+    budget_wall = hang_budget_s * _load_bound.MAX_LOAD_FACTOR
+    problems = []
+    if latest_stall + margin_s > budget_wall:
+        problems.append("the hang's stall can fire as late as {:g} wall s, less than {:g} s before its "
+                        "{:g} wall s budget".format(latest_stall, margin_s, budget_wall))
+    if budget_wall + poll_and_scan >= _load_bound.POLL_S + flip_stall_s:
+        problems.append("the hang's {:g} wall s budget can fire as late as {:g} s, not before a {:g} s "
+                        "stall bound could ({:g} s)".format(budget_wall, budget_wall + poll_and_scan,
+                                                           flip_stall_s, _load_bound.POLL_S + flip_stall_s))
+    return problems
+
+
+# The load-tolerance self-test case's bounds (sizing notes beside the case in _self_test_main_isolated),
+# module-level so --measure-load-case runs the same lanes under the same bounds.
+_LOAD_CASE_BUDGET_S, _LOAD_CASE_STALL_S = 1, 3
+_LOAD_CASE_HANG_BUDGET_S = 1.25
+_LOAD_CASE_LEAKY_BUDGET_S = 2.125
+
+
+def _load_case_leaky_bound_problems(leaky_budget_s, exit_allowance_s, stall_s, margin_s=2.0):
+    """The load-tolerance self-test case's three leaky lanes, checked against the poll loop of
+    _load_bound._watch at the injected maximum load factor: an empty list, or one line per bound
+    that fails. A leaky generator makes CPU or output progress until its own exit (and its leaked
+    child's start-up), at X wall seconds after launch; X is ASSUMED to be at most exit_allowance_s
+    (the shared budget at the cap, which the slow lane's own exit must meet on the same host), not
+    measured on the leaky lanes. _watch samples progress while its process-table scan reads the
+    generator's CPU, but timestamps it (last_progress) only after that scan ends: a scan may read
+    just before X and take up to SCAN_S, the next poll waits POLL_S and its scan may read at its
+    own end, up to SCAN_S later, so the last progress timestamp is at most
+    X + POLL_S + 2 * SCAN_S. The stall itself can then fire as late as that timestamp plus stall_s
+    plus POLL_S + SCAN_S, which may pass the budget; what keeps the stall the stop is the order in
+    _watch: at every poll it tests the stall BEFORE the budget, so at the first poll at or after
+    the budget the stall fires instead if idle time has reached stall_s by then. The condition is
+    therefore that the last progress timestamp plus stall_s, plus margin_s, is at most the leaky
+    budget in wall seconds: exit_allowance_s + POLL_S + 2 * SCAN_S + stall_s + margin_s <=
+    leaky_budget_s * MAX_LOAD_FACTOR. A leaky generator whose X exceeds the assumption can only
+    let the budget stop it first, which the lane's ['stall'] stop-kind check turns red."""
+    latest_progress = exit_allowance_s + _load_bound.POLL_S + 2 * _load_bound.SCAN_S
+    budget_wall = leaky_budget_s * _load_bound.MAX_LOAD_FACTOR
+    if latest_progress + stall_s + margin_s > budget_wall:
+        return ["a leaky lane's last progress can be timestamped as late as {:g} wall s (progress until "
+                "{:g} s, plus POLL_S + 2 * SCAN_S), so its {:g} s stall bound is reached at {:g} wall s, "
+                "less than {:g} s before its {:g} wall s budget, which _load_bound._watch tests after "
+                "the stall at each poll".format(latest_progress, exit_allowance_s, stall_s,
+                                                latest_progress + stall_s, margin_s, budget_wall)]
+    return []
+
+
+def _load_case_fixtures(tmp, leaked):
+    """The load-tolerance case's five fixture repos under tmp: (slow, hang, leaky, leaky_reject,
+    leaky_reject_escape); the leaky ones leave a descendant whose command line carries leaked."""
+    slow_main = ("def main():\n    import time\n    for _ in range(8):\n"
+                 "        print(\"working\", flush=True)\n        time.sleep(0.25)\n")
+    slow = _build_repo(tmp / "slow", {"goodfile": _GOODFILE.replace("def main():\n", slow_main)})
+    hang = _build_repo(tmp / "hang", {"goodfile": _GOODFILE.replace(
+        "def main():\n", "def main():\n    import time\n    if \"--check\" in sys.argv[1:]:\n"
+        "        time.sleep(3600)\n")})  # hangs on --check only, so the fixture build still writes
+    # Exits 0 on a corrupt target (it does not reject it) while leaving a descendant on its
+    # output: the wrong result stands beside the stop, so the sweep is a violation (exit 1), not 2.
+    leaky = _build_repo(tmp / "leaky", {"goodfile": _GOODFILE.replace(
+        "def main():\n    return run(repo_root(), \"--check\" in sys.argv[1:])\n",
+        ("def main():\n    import subprocess\n    if \"--check\" in sys.argv[1:] and run(repo_root(), True):\n"
+         "        subprocess.Popen([sys.executable, \"-c\", \"import time; time.sleep(30)\", {!r}])\n"
+         "        return 0\n    return run(repo_root(), \"--check\" in sys.argv[1:])\n").format(leaked))})
+    # Rejects the corrupt target (exit 2) while leaving a descendant on its output: the nonzero own
+    # exit stands as the rejection beside the stop, so the sweep is exit 0, never cannot-evaluate.
+    leaky_reject = _build_repo(tmp / "leaky-reject", {"goodfile": _GOODFILE.replace(
+        "def main():\n    return run(repo_root(), \"--check\" in sys.argv[1:])\n",
+        ("def main():\n    import subprocess\n    if \"--check\" in sys.argv[1:] and run(repo_root(), True):\n"
+         "        subprocess.Popen([sys.executable, \"-c\", \"import time; time.sleep(30)\", {!r}])\n"
+         "        return 2\n    return run(repo_root(), \"--check\" in sys.argv[1:])\n").format(leaked))})
+    # Rejects the corrupt target (exit 2) beside the same leak, but FIRST swaps the target for a
+    # symlink escaping the sandbox: the stopped rejection must still run the post-probe containment
+    # validation, so the sweep is cannot-evaluate (exit 2), never an accepted rejection (exit 0).
+    leaky_reject_escape = _build_repo(tmp / "leaky-reject-escape", {"goodfile": _GOODFILE.replace(
+        "def main():\n    return run(repo_root(), \"--check\" in sys.argv[1:])\n",
+        ("def main():\n    import os, subprocess\n"
+         "    if \"--check\" in sys.argv[1:] and run(repo_root(), True):\n"
+         "        target = repo_root() / \"out\" / \"goodfile.txt\"\n"
+         "        os.unlink(target)\n        os.symlink(sys.executable, target)\n"
+         "        subprocess.Popen([sys.executable, \"-c\", \"import time; time.sleep(30)\", {!r}])\n"
+         "        return 2\n    return run(repo_root(), \"--check\" in sys.argv[1:])\n").format(leaked))})
+    return slow, hang, leaky, leaky_reject, leaky_reject_escape
+
+
+def _exited_unreaped(pid):
+    """True once pid has exited (reaped or not), False while it runs, None where waitid is missing;
+    WNOWAIT leaves the exit status for its owner to reap."""
+    if not hasattr(os, "waitid"):
+        return None
+    try:
+        return os.waitid(os.P_PID, pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is not None
+    except ChildProcessError:
+        return True
+
+
+def _measure_load_case(runs):
+    """--measure-load-case: run the load-tolerance case's slow lane and three leaky lanes runs times
+    each, under the case's own injection (load factor pinned at MAX_LOAD_FACTOR, the case's budgets
+    and stall bound), and print per probe the largest no-progress gap the poll loop tested while the
+    generator had not yet exited, the last progress poll, the stop, and the host's 1-minute load
+    average before and after. A re-measurement for a reviewer; it asserts nothing and exits 0 unless
+    the runs could not be made (2)."""
+    global _run_check, _load_factor, PROBE_STALL_S
+    import io
+    from contextlib import redirect_stdout, redirect_stderr
+    from _git_fixture_env import fixture_git_lifecycle
+    try:
+        tmp = Path(tempfile.mkdtemp(prefix="aiqt-gensrc-failclose-measure-"))
+    except OSError as exc:
+        print("MEASURE ERROR: no writable temporary directory: {}".format(exc), file=sys.stderr)
+        return 2
+    leaked = "gensrc-leaked-descendant-{}".format(os.getpid())
+    saved = (_run_check, _load_factor, PROBE_STALL_S, _load_bound._watch)
+    real_run_check, real_watch = _run_check, _load_bound._watch
+    lane = {"name": None, "polls": None}
+    records = []
+
+    def watching(proc, argv, pending, budget_s, stall_s, clock, start, wall_start, poll_s, cpu_seconds,
+                 held):
+        polls = []
+
+        def sampled(pid):
+            cpu = cpu_seconds(pid)
+            polls.append((time.monotonic() - wall_start, cpu, len(held[0] or b"") + len(held[1] or b""),
+                          _exited_unreaped(proc.pid)))
+            return cpu
+        outcome = "own exit"
+        try:
+            return real_watch(proc, argv, pending, budget_s, stall_s, clock, start, wall_start, poll_s,
+                              sampled, held)
+        except _load_bound.Hung as exc:
+            outcome = exc.kind
+            raise
+        finally:
+            records.append((lane["name"], budget_s, polls, outcome, time.monotonic() - wall_start))
+
+    def budgeted(script_path, cwd, timeout=PROBE_TIMEOUT, env_overrides=None):
+        return real_run_check(script_path, cwd, min(timeout, _LOAD_CASE_LEAKY_BUDGET_S if lane["name"]
+                                                    != "slow" else _LOAD_CASE_BUDGET_S), env_overrides)
+
+    rc = 0
+    with fixture_git_lifecycle():
+        try:
+            fixtures = _load_case_fixtures(tmp, leaked)
+            lanes = (("slow", fixtures[0]), ("leaky", fixtures[2]), ("leaky_reject", fixtures[3]),
+                     ("leaky_reject_escape", fixtures[4]))
+            print("measure-load-case: {} run(s) per lane, {} usable CPU(s), stall bound {} s, budgets "
+                  "slow {} s, leaky {} s, load factor pinned at {:g}".format(
+                      runs, len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity")
+                      else os.cpu_count(), _LOAD_CASE_STALL_S, _LOAD_CASE_BUDGET_S,
+                      _LOAD_CASE_LEAKY_BUDGET_S, _load_bound.MAX_LOAD_FACTOR))
+            _load_factor = lambda: _load_bound.MAX_LOAD_FACTOR  # noqa: E731
+            PROBE_STALL_S = _LOAD_CASE_STALL_S
+            _run_check = budgeted
+            _load_bound._watch = watching
+            for run_index in range(1, runs + 1):
+                for name, fixture in lanes:
+                    lane["name"] = name
+                    first = len(records)
+                    load_before = os.getloadavg()[0]
+                    with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                        sweep_rc = _gate_sweep(fixture)
+                    load_after = os.getloadavg()[0]
+                    for probe_index, (_, budget_s, polls, outcome, ended) in enumerate(records[first:], 1):
+                        gap, last_progress, exit_seen = _measured_gaps(polls)
+                        print("run {} lane {} probe {}: budget {:g} s, largest no-progress gap before own "
+                              "exit {:.3f} s, last progress poll {:.3f} s, own exit observed {}, stop {} "
+                              "at {:.3f} s, polls {}, sweep exit {}, load {:.1f} -> {:.1f}".format(
+                                  run_index, name, probe_index, budget_s, gap, last_progress,
+                                  "never" if exit_seen is None else "{:.3f} s".format(exit_seen), outcome,
+                                  ended, len(polls), sweep_rc, load_before, load_after))
+            lane["name"] = None
+        except Exception as exc:  # a run that could not be made is reported, never a traceback
+            print("MEASURE ERROR: {}: {}".format(type(exc).__name__, exc), file=sys.stderr)
+            rc = 2
+        finally:
+            _run_check, _load_factor, PROBE_STALL_S, _load_bound._watch = saved
+            failures, cannot = [], []
+            _cleanup_leaked_descendant(leaked, failures, cannot)
+            for line in failures + cannot:
+                print("MEASURE ERROR: " + line, file=sys.stderr)
+                rc = 2
+            try:
+                shutil.rmtree(tmp)
+            except OSError as exc:
+                print("MEASURE ERROR: cleanup of {}: {}".format(tmp, exc), file=sys.stderr)
+                rc = 2
+    gaps = [_measured_gaps(polls) for _, _, polls, _, _ in records]
+    if gaps:
+        print("measure-load-case: {} probe(s); worst no-progress gap before own exit {:.3f} s; latest "
+              "last progress poll {:.3f} s; latest stop {:.3f} s".format(
+                  len(gaps), max(g[0] for g in gaps), max(g[1] for g in gaps),
+                  max(r[4] for r in records)))
+    return rc
+
+
+def _measured_gaps(polls):
+    """From one probe's polls (seconds after launch, tree CPU, output bytes, exited), replaying the
+    progress rule of _load_bound._watch: (largest idle tested at a poll while the generator had not
+    exited, the last progress poll, the first poll that saw the exit or None)."""
+    seen_cpu, seen_output, last_progress = None, -1, 0.0
+    gap, exit_seen, readable = 0.0, None, True
+    for at, cpu, output, exited in polls:
+        real_cpu = isinstance(cpu, (int, float)) and cpu == cpu and cpu >= 0
+        if not real_cpu:
+            readable, seen_cpu = False, None
+        idle_before = at - last_progress
+        if seen_output < output or (readable and (seen_cpu is None or seen_cpu < cpu)):
+            last_progress = at
+        seen_output = max(seen_output, output)
+        if readable:
+            seen_cpu = cpu if seen_cpu is None else max(seen_cpu, cpu)
+        if exited and exit_seen is None:
+            exit_seen = at
+        if not exited and last_progress != at:
+            gap = max(gap, idle_before)
+    return gap, last_progress, exit_seen
 
 
 def self_test_main():
@@ -1873,7 +2231,8 @@ def _self_test_main_isolated():
 
         # (k) A total-runtime deadline overrun (injected monotonic clock) returns cannot-evaluate (exit 2),
         #     never a fail-open 0. The clock returns a base on the first read (deadline setup) then jumps
-        #     past the deadline, so the first baseline/probe deadline check fails closed.
+        #     past the deadline, so the first deadline check (the first template-setup call, clamped to the
+        #     sweep deadline) fails closed.
         def _evaluate_deadline(dline):
             global _now
             clock_calls = {"n": 0}
@@ -1900,8 +2259,11 @@ def _self_test_main_isolated():
         #     generator that takes about 2 s while printing progress passes every probe (a 1 s wall-clock
         #     bound would have made it cannot-evaluate); a generator that sleeps silently is still stopped
         #     by the stall bound (exit 2; a spy on _run_check requires the stop to be the stall bound's,
-        #     not the 16 s budget's); and on an idle host the same slow generator overruns the 1 s budget
-        #     (exit 2), so the pass is owed to the load adjustment; a generator exiting 0 on a corrupt target
+        #     not the budget's, and the hang lane's own 20 wall s budget leaves the derived stall bound a
+        #     margin of at least 2 s, checked as a row); and on an idle host the same slow generator
+        #     overruns the 1 s budget (exit 2, and the spy requires that stop to be the budget's, not any
+        #     other cannot-evaluate cause), so the pass is owed to the load adjustment. Under the same
+        #     injected cap, a generator exiting 0 on a corrupt target
         #     beside a leaked descendant is a violation (exit 1), and a generator REJECTING the corrupt
         #     target (nonzero) beside the same leak passes (exit 0): the own exit stands either way, never
         #     filed as cannot-evaluate, but only once the stopped probe passed the same post-probe
@@ -1911,83 +2273,208 @@ def _self_test_main_isolated():
         leaked = "gensrc-leaked-descendant-{}".format(os.getpid())
 
         def _load_fixtures():
-            slow_main = ("def main():\n    import time\n    for _ in range(8):\n"
-                         "        print(\"working\", flush=True)\n        time.sleep(0.25)\n")
-            slow = _build_repo(tmp / "slow", {"goodfile": _GOODFILE.replace("def main():\n", slow_main)})
-            hang = _build_repo(tmp / "hang", {"goodfile": _GOODFILE.replace(
-                "def main():\n", "def main():\n    import time\n    if \"--check\" in sys.argv[1:]:\n"
-                "        time.sleep(3600)\n")})  # hangs on --check only, so the fixture build still writes
-            # Exits 0 on a corrupt target (it does not reject it) while leaving a descendant on its
-            # output: the wrong result stands beside the stop, so the sweep is a violation (exit 1), not 2.
-            leaky = _build_repo(tmp / "leaky", {"goodfile": _GOODFILE.replace(
-                "def main():\n    return run(repo_root(), \"--check\" in sys.argv[1:])\n",
-                ("def main():\n    import subprocess\n    if \"--check\" in sys.argv[1:] and run(repo_root(), True):\n"
-                 "        subprocess.Popen([sys.executable, \"-c\", \"import time; time.sleep(30)\", {!r}])\n"
-                 "        return 0\n    return run(repo_root(), \"--check\" in sys.argv[1:])\n").format(leaked))})
-            # Rejects the corrupt target (exit 2) while leaving a descendant on its output: the nonzero own
-            # exit stands as the rejection beside the stop, so the sweep is exit 0, never cannot-evaluate.
-            leaky_reject = _build_repo(tmp / "leaky-reject", {"goodfile": _GOODFILE.replace(
-                "def main():\n    return run(repo_root(), \"--check\" in sys.argv[1:])\n",
-                ("def main():\n    import subprocess\n    if \"--check\" in sys.argv[1:] and run(repo_root(), True):\n"
-                 "        subprocess.Popen([sys.executable, \"-c\", \"import time; time.sleep(30)\", {!r}])\n"
-                 "        return 2\n    return run(repo_root(), \"--check\" in sys.argv[1:])\n").format(leaked))})
-            # Rejects the corrupt target (exit 2) beside the same leak, but FIRST swaps the target for a
-            # symlink escaping the sandbox: the stopped rejection must still run the post-probe containment
-            # validation, so the sweep is cannot-evaluate (exit 2), never an accepted rejection (exit 0).
-            leaky_reject_escape = _build_repo(tmp / "leaky-reject-escape", {"goodfile": _GOODFILE.replace(
-                "def main():\n    return run(repo_root(), \"--check\" in sys.argv[1:])\n",
-                ("def main():\n    import os, subprocess\n"
-                 "    if \"--check\" in sys.argv[1:] and run(repo_root(), True):\n"
-                 "        target = repo_root() / \"out\" / \"goodfile.txt\"\n"
-                 "        os.unlink(target)\n        os.symlink(sys.executable, target)\n"
-                 "        subprocess.Popen([sys.executable, \"-c\", \"import time; time.sleep(30)\", {!r}])\n"
-                 "        return 2\n    return run(repo_root(), \"--check\" in sys.argv[1:])\n").format(leaked))})
-            return slow, hang, leaky, leaky_reject, leaky_reject_escape
+            return _load_case_fixtures(tmp, leaked)
+
+        # Sizing, so each position is decided by the code under test and not by host speed:
+        #   * The 1 s per-probe budget is applied at the _run_check seam only. PROBE_TIMEOUT itself stays
+        #     at its gate value, because the sweep also uses it as the plain wall-clock timeout of every
+        #     template git command (_materialize_git); cut to 1 s, a git call slowed past 1 s by host load
+        #     ended the sweep cannot-evaluate (exit 2) before any probe ran, at whichever position it hit.
+        #   * The stall bound is 3 wall s. At 1 s, one poll in which a starved child showed no output and no
+        #     CPU tick already fired it, so a slow or leaky generator could be stopped before its own exit.
+        #     One host's observation, with no artefact kept (not a guarantee for another host or load):
+        #     measured on 2026-11-08, 12 runs each of the hang and the idle fixture, 4 of each beside 8
+        #     busy-loop processes, on an 80-CPU host whose 1-minute load average stayed between 39.5 and
+        #     45.4 throughout (other work; the 8 busy loops added little): launch to the first progress
+        #     poll took 1.04 to 1.07 s in every run of both fixtures; every hang run had exactly one
+        #     progress poll and its stall fired 3.12 to 3.18 s after it (4.17 to 4.23 s after launch);
+        #     every idle run was stopped by its 1 s budget 0.001 to 0.004 s after its only progress poll;
+        #     each process-table scan took about 0.05 s. The worst observed silence before the stall fired
+        #     (3.18 s) is the bound plus 0.18 s, the first poll at or after the bound. None of those
+        #     figures sizes the bound: the first poll always counts as progress, so launch to first poll
+        #     cannot move the stall. What the stall must never do is stop the slow or leaky generators
+        #     before their own exit, so the sizing figure is the longest gap with no CPU or output
+        #     progress any of them shows under the injected cap before that exit. To re-measure it, run
+        #     `python3 -I -B tools/check_gensrc_failclose.py --measure-load-case N` (_measure_load_case):
+        #     it runs the slow lane and the three leaky lanes N times each under this case's injection and
+        #     bounds and prints, per probe, the largest no-progress gap tested before the own exit, the
+        #     last progress poll, the stop, and the 1-minute load average before and after. The figures
+        #     that follow are one host's observation at one load, with no artefact kept, taken before
+        #     that mode existed with the same injection; they are not a guarantee for another host or
+        #     load. Measured on 2026-11-08,
+        #     12 runs each of the slow fixture and of the three leaky fixtures, the cap injected as this
+        #     case injects it (the budget clock's load factor pinned at MAX_LOAD_FACTOR; the children run
+        #     at real host speed, no extra load added), on an 80-CPU host whose 1-minute load average
+        #     read 26.1 at launch and 24.6 after the last run (other work): the slow generator exited
+        #     2.07 to 2.09 s after launch and every one of its polls saw output growth (worst tested idle
+        #     0.004 s); each leaky
+        #     generator's own exit was observed at the first poll, 1.03 to 1.06 s after launch, in 35 of
+        #     36 runs; the worst no-progress gap in all 48 runs was 1.04 s, in the one remaining run,
+        #     whose exit was observed only at the third poll after one poll with no progress. So 3 s
+        #     stays: it tolerates two consecutive no-progress polls where the worst observed run had one,
+        #     is about 2.9 times that worst observed gap, and is 12 times the slow generator's longest
+        #     deliberate silent wait (0.25 s). These figures come from that one host and load; on a more
+        #     starved host the derived bounds below cover the hang lane's and the leaky lanes' latest
+        #     stops against their budgets, not a false stall before a slow or leaky generator's own exit.
+        #   * The hang's bound, derived from the poll loop in _load_bound._watch: each poll waits POLL_S
+        #     (1 s) in communicate and then scans the process table; a scan that completes takes under
+        #     SCAN_S (5 s), and one cut short turns the stall test off for the rest of the run (the budget
+        #     then stops the hang and the hang row turns red, never a false pass). The first poll always
+        #     counts as progress (there is no earlier CPU reading), so the first progress poll lands at
+        #     most POLL_S + SCAN_S = 6 s after launch. Idle time is measured from the last progress poll
+        #     and tested only at poll times, at most POLL_S + SCAN_S apart, so the stall fires at most
+        #     3 + POLL_S + SCAN_S = 9 s after the last progress poll. With no progress after the first
+        #     poll (every measured run) the hang is stopped at most 6 + 9 = 15 s after launch, plus the
+        #     spawn time and any delay in scheduling this process; a child still starting up at a later
+        #     poll moves its last progress poll, and the bound, later by that much. At the injected cap
+        #     the shared 1 s budget is 16 wall s, a margin of only 1 s, so the hang lane has its own
+        #     budget of 1.25 s, 20 wall s at the cap: a margin of 5 s.
+        #   * A stall bound of 30 s (the flip that shows which bound stopped the hang) cannot fire before
+        #     POLL_S + 30 = 31 s after launch, while the 20 wall s hang budget fires at the first poll at or
+        #     after 20 s, at most 20 + POLL_S + SCAN_S = 26 s in: the budget stops the hang first and the
+        #     hang row reads ['budget'], red. A hang budget of 25 wall s or more would let that flip race
+        #     the stall. _load_case_hang_bound_problems checks both of these against the _load_bound
+        #     constants, as a row of this case.
+        #   * The three leaky fixtures run under the injected cap, and only the stall bound may stop each
+        #     on its leaked descendant: each leaky lane's stop kinds are recorded and required to be
+        #     exactly ['stall'], so a lane the budget stops is red. Unlike the hang, a leaky generator
+        #     does real work (CPU and output progress) until its own exit and its leaked child's
+        #     start-up, so its last progress can come late on a slow host. With that last progress X
+        #     wall s after launch: _load_bound._watch samples progress when its scan reads the
+        #     generator's CPU but timestamps it only after the scan ends, so a scan that read just
+        #     before X (up to SCAN_S long), the next poll's POLL_S wait and that poll's scan (up to
+        #     SCAN_S, reading at its end) put the last progress timestamp at most X + POLL_S + 2 * SCAN_S
+        #     = X + 11 s after launch. The stall itself can fire as late as that plus 3 + POLL_S + SCAN_S
+        #     (X + 20 s), which is NOT what keeps the lane safe: _watch tests the stall before the budget
+        #     at every poll, so at the first poll at or after the budget the stall fires instead once
+        #     the idle time since the last progress timestamp has reached 3 s. The condition is that
+        #     X + 11 + 3 s, plus a 2 s margin, is at most the budget in wall seconds. X is ASSUMED to be
+        #     at most the shared budget at the cap, 16 wall s (the bound the slow lane's own exit must
+        #     meet on the same host); it is not measured on the leaky lanes, and a later X can only let
+        #     the budget stop a leaky lane first, which the ['stall'] stop-kind check turns red. At
+        #     X = 16 the last progress timestamp is at most 27 s and the stall bound is reached by 30 s;
+        #     the leaky lanes' own budget of 2.125 s is 34 wall s at the cap, 4 s after that (the row
+        #     requires at least 2 s). The shared 16 wall s budget cannot meet this condition once
+        #     progress is allowed until 16 s. Every budget a leaky probe's _load_bound.run received is
+        #     recorded and required to equal that constant, and _load_case_leaky_bound_problems checks
+        #     this condition, fed the recorded budget, as a row.
+        #   * On the idle clock the budget is 1 wall s and the slow generator sleeps 2 s, so the budget
+        #     fires before it can exit; the stop kind is checked, so that position fails if anything
+        #     other than the budget ends the run.
+        #   (_LOAD_CASE_BUDGET_S, _LOAD_CASE_STALL_S, _LOAD_CASE_HANG_BUDGET_S and
+        #   _LOAD_CASE_LEAKY_BUDGET_S are module-level, shared with --measure-load-case.)
 
         def _evaluate_load_tolerance(fixtures):
-            global _run_check, _now, _load_factor, PROBE_TIMEOUT, PROBE_STALL_S
+            global _run_check, _now, _load_factor, PROBE_STALL_S
             slow, hang, leaky, leaky_reject, leaky_reject_escape = fixtures
-            stops = []
+            lane = {"name": None}
+            stops = {"hang": [], "idle": [], "leaky": [], "leaky_reject": [], "leaky_reject_escape": []}
+            # The budget each lane's probes handed to _load_bound.run, recorded INSIDE the saved
+            # _run_check call (from the budget_s the callee receives, not from what the wrapper
+            # computed), so a call site that passes another budget is recorded as passing it.
+            received = {"hang": [], "leaky": [], "leaky_reject": [], "leaky_reject_escape": []}
+            saved_bound_run = _load_bound.run
 
-            def _spy_run_check(script_path, cwd, timeout=PROBE_TIMEOUT, env_overrides=None):
+            def _recording_bound_run(*args, **kwargs):
+                if lane["name"] in received:
+                    received[lane["name"]].append(kwargs.get("budget_s"))
+                return saved_bound_run(*args, **kwargs)
+
+            def _budgeted_run_check(script_path, cwd, timeout=PROBE_TIMEOUT, env_overrides=None):
+                if lane["name"] == "hang":
+                    budget = _LOAD_CASE_HANG_BUDGET_S
+                elif lane["name"] in received:
+                    budget = _LOAD_CASE_LEAKY_BUDGET_S
+                else:
+                    budget = _LOAD_CASE_BUDGET_S
+                bounded = min(timeout, budget)
                 try:
-                    return saved_run_check(script_path, cwd, timeout, env_overrides)
+                    return saved_run_check(script_path, cwd, bounded, env_overrides)
                 except _load_bound.Hung as exc:
-                    stops.append(exc.kind)
+                    if lane["name"] in stops:
+                        stops[lane["name"]].append(exc.kind)
                     raise
 
-            PROBE_TIMEOUT, PROBE_STALL_S = 1, 1
+            PROBE_STALL_S = _LOAD_CASE_STALL_S
+            _run_check = _budgeted_run_check
+            _load_bound.run = _recording_bound_run
             try:
                 _load_factor = lambda: _load_bound.MAX_LOAD_FACTOR  # noqa: E731
                 _now = _load_bound.LoadClock(factor=lambda: _load_factor())
                 rc_slow = sweep_quiet(slow)
-                _run_check = _spy_run_check
+                lane["name"] = "hang"
                 rc_hang = sweep_quiet(hang)
-                _run_check = saved_run_check
+                lane["name"] = "leaky"
+                rc_leaky = sweep_quiet(leaky)
+                lane["name"] = "leaky_reject"
+                rc_leaky_reject = sweep_quiet(leaky_reject)
+                lane["name"] = "leaky_reject_escape"
+                rc_leaky_reject_escape, escape_out, escape_err = sweep_captured_streams(leaky_reject_escape)
                 _load_factor = lambda: 1.0  # noqa: E731
                 _now = _load_bound.LoadClock(factor=lambda: _load_factor())
+                lane["name"] = "idle"
                 rc_idle = sweep_quiet(slow)
-                rc_leaky = sweep_quiet(leaky)
-                rc_leaky_reject = sweep_quiet(leaky_reject)
-                rc_leaky_reject_escape, escape_out, escape_err = sweep_captured_streams(leaky_reject_escape)
+                lane["name"] = None
             finally:
-                _load_factor, PROBE_TIMEOUT, PROBE_STALL_S = saved_bounds
+                _load_factor, PROBE_STALL_S = saved_bounds[0], saved_bounds[2]
                 _now = saved_now
                 _run_check = saved_run_check
+                _load_bound.run = saved_bound_run
                 # The survivor scan's three distinct results: None on a host WITH /proc is a
                 # self-test failure, a host with NO /proc is a named cannot-evaluate (exit 2),
                 # and an observed list is killed; never a silent pass, never a false leak
                 # (_cleanup_leaked_descendant).
                 _cleanup_leaked_descendant(leaked, failures, cannot)
-            if (rc_slow, rc_hang, rc_idle, sorted(set(stops)), rc_leaky, rc_leaky_reject,
+            if (rc_slow, rc_hang, rc_idle, sorted(set(stops["hang"])), rc_leaky, rc_leaky_reject,
                     rc_leaky_reject_escape) != (0, 2, 2, ["stall"], 1, 0, 2):
                 failures.append("load tolerance: expected (slow under load, silent hang, slow on an idle host, "
                                 "the bound that stopped the hang, exit 0 on a corrupt target beside a leaked "
                                 "descendant, a nonzero rejection beside the same leak, a stopped rejection "
                                 "that left the target escaping) = "
                                 "(0, 2, 2, ['stall'], 1, 0, 2), got {!r}"
-                                .format((rc_slow, rc_hang, rc_idle, sorted(set(stops)), rc_leaky,
+                                .format((rc_slow, rc_hang, rc_idle, sorted(set(stops["hang"])), rc_leaky,
                                          rc_leaky_reject, rc_leaky_reject_escape)))
+            # The idle-host exit 2 must be the 1 s budget overrunning, not any other cannot-evaluate cause.
+            if sorted(set(stops["idle"])) != ["budget"]:
+                failures.append("load tolerance: expected the slow generator on an idle host to be stopped "
+                                "by the load-adjusted budget alone (['budget']), got {!r}"
+                                .format(sorted(set(stops["idle"]))))
+            # Only the stall bound may stop a leaky fixture on its leaked descendant (sizing notes
+            # above): a budget stop would mean the shared budget cut a generator short of its own exit.
+            for leaky_lane in ("leaky", "leaky_reject", "leaky_reject_escape"):
+                if sorted(set(stops[leaky_lane])) != ["stall"]:
+                    failures.append("load tolerance: expected the stall bound alone to stop the {} "
+                                    "fixture on its leaked descendant (['stall']), got {!r}"
+                                    .format(leaky_lane, sorted(set(stops[leaky_lane]))))
+            # The hang lane must have RUN under its own budget, not only been derived against it: every
+            # budget its probes' _load_bound.run received is recorded and required to equal the
+            # dedicated constant.
+            recorded_hang = sorted(set(received["hang"]))
+            if recorded_hang != [_LOAD_CASE_HANG_BUDGET_S]:
+                failures.append("load tolerance: expected every hang-lane probe to pass the hang lane's "
+                                "own budget ([{!r}]) to _load_bound.run, got {!r}"
+                                .format(_LOAD_CASE_HANG_BUDGET_S, recorded_hang))
+            # The hang lane's derived bound (sizing notes above), fed the budget the lane ACTUALLY
+            # passed down, so a lane put back onto the shared budget turns this row red as well: its
+            # stall must fire at least 2 s before its budget, and that budget must stop it before a
+            # 30 s stall bound could. (The constant stands in only when no hang probe ran at all,
+            # which the check above already made red.)
+            failures.extend("load tolerance: " + problem for problem in _load_case_hang_bound_problems(
+                recorded_hang[0] if recorded_hang else _LOAD_CASE_HANG_BUDGET_S, _LOAD_CASE_STALL_S))
+            # The same for the leaky lanes: each must have run under the leaky budget, and that
+            # recorded budget must be at least 2 s past the point where the stall bound is reached
+            # (the latest last-progress timestamp, with progress assumed until the shared budget at
+            # the cap, plus the stall bound), because _load_bound._watch tests the stall before the
+            # budget at each poll (sizing notes above).
+            for leaky_lane in ("leaky", "leaky_reject", "leaky_reject_escape"):
+                recorded_leaky = sorted(set(received[leaky_lane]))
+                if recorded_leaky != [_LOAD_CASE_LEAKY_BUDGET_S]:
+                    failures.append("load tolerance: expected every {} probe to pass the leaky lanes' "
+                                    "own budget ([{!r}]) to _load_bound.run, got {!r}"
+                                    .format(leaky_lane, _LOAD_CASE_LEAKY_BUDGET_S, recorded_leaky))
+                failures.extend("load tolerance: " + problem for problem in _load_case_leaky_bound_problems(
+                    recorded_leaky[0] if recorded_leaky else _LOAD_CASE_LEAKY_BUDGET_S,
+                    _LOAD_CASE_BUDGET_S * _load_bound.MAX_LOAD_FACTOR, _LOAD_CASE_STALL_S))
             # The escaping fixture's exit 2 must come from the stopped-path CONTAINMENT validation, not
             # from any other cannot-evaluate condition that shares the exit code: require the
             # containment diagnostic itself (printed in the sweep's CANNOT-EVALUATE report).
@@ -2138,7 +2625,8 @@ def _self_test_main_isolated():
         #     gc.autoDetach=false, maintenance.auto=false), so no detached auto-gc / auto-maintenance run can
         #     churn template/.git while a per-call copytree reads it (the intermittent hermeticity race). The
         #     template git invocations are CAPTURED during a REAL _materialize_git run over a small fixture
-        #     repo by wrapping the module's subprocess.run, then every template git command (init, add,
+        #     repo by wrapping subprocess.Popen (which subprocess.run also calls), then every template git
+        #     command (init, add,
         #     commit, ls-files, gc) is
         #     asserted to carry all three flags. The discriminating flip is removing
         #     _TEMPLATE_GIT_NO_MAINTENANCE from the git() helper: the captured argv would then lack the flags
@@ -2152,18 +2640,21 @@ def _self_test_main_isolated():
 
         def _check_no_maintenance(repo, record):
             captured = []
-            saved_subprocess_run = subprocess.run
+            saved_subprocess_popen = subprocess.Popen
 
-            def _recording_run(cmd, *a, **kw):
-                captured.append(list(cmd))  # record argv, then delegate to the real subprocess.run
-                return saved_subprocess_run(cmd, *a, **kw)
+            def _recording_popen(cmd, *a, **kw):
+                # Every template git launch goes through subprocess.Popen (subprocess.run calls it, and
+                # the template gc launches it directly in its own process group): record the argv, then
+                # delegate to the real Popen.
+                captured.append(list(cmd))
+                return saved_subprocess_popen(cmd, *a, **kw)
 
             template_str = str(no_maintenance_template)
             try:
-                subprocess.run = _recording_run
+                subprocess.Popen = _recording_popen
                 _materialize_git(no_maintenance_template, repo)
             finally:
-                subprocess.run = saved_subprocess_run
+                subprocess.Popen = saved_subprocess_popen
 
             def _top_c_values(cmd):
                 # The `-c key=value` top-level options git carries before its subcommand, plus that
@@ -2205,6 +2696,252 @@ def _self_test_main_isolated():
                         lambda repo: _check_no_maintenance(repo, failure_record))
 
         _no_maintenance_vector(cannot, failures, _no_maintenance)
+
+        # (r2) A template gc that overruns its bound is non-fatal and leaves nothing running: the gc argv
+        #     is replaced by a stand-in (a git shell alias whose child sleeps 60 s, carrying a unique token)
+        #     and its bound cut to 2 s. A conformant repo must still pass (exit 0) on the loose-object
+        #     template, an escaping symlink-swap generator must still be cannot-evaluate (exit 2) with the
+        #     containment diagnostic, the stderr must name the gc overrun, and no process carrying the
+        #     token may survive (the whole gc process group is killed, not just git). Flips: an unguarded
+        #     gc (its overrun raises out of the setup) turns the exit-0 leg into exit 2; a kill of the git
+        #     leader alone leaves the sleeping child alive and fails the survivor leg.
+        gc_standin_label = "gensrc-gc-standin-{}".format(os.getpid())
+
+        def _gc_overrun_fixtures():
+            return (_build_repo(tmp / "gc-overrun-good", {"goodfile": _GOODFILE}),
+                    _build_repo(tmp / "gc-overrun-swap", {"swap": _SYMLINK_SWAP}))
+
+        def _evaluate_gc_overrun(fixtures):
+            global TEMPLATE_GC_TIMEOUT, _TEMPLATE_GC_ARGS
+            good, swap = fixtures
+            saved_gc = (TEMPLATE_GC_TIMEOUT, _TEMPLATE_GC_ARGS)
+            standin = "!{} -c 'import time; time.sleep(60)' {}".format(sys.executable, gc_standin_label)
+            TEMPLATE_GC_TIMEOUT = 2
+            _TEMPLATE_GC_ARGS = ("-c", "alias.gcstandin=" + standin, "gcstandin")
+            try:
+                rc_good, good_out, good_err = sweep_captured_streams(good)
+                survivors = _load_bound._alive_with(gc_standin_label)
+                rc_swap, swap_out, swap_err = sweep_captured_streams(swap)
+            finally:
+                TEMPLATE_GC_TIMEOUT, _TEMPLATE_GC_ARGS = saved_gc
+                _cleanup_leaked_descendant(gc_standin_label, failures, cannot)
+            if rc_good != 0:
+                failures.append("template gc overrun: a conformant repo must still pass (exit 0) when the "
+                                "template gc overruns its bound, got exit {!r}, stdout {!r} stderr {!r}"
+                                .format(rc_good, good_out, good_err))
+            if "gc overran its 2 s bound" not in good_err:
+                failures.append("template gc overrun: expected the non-fatal gc overrun note on stderr, got "
+                                "{!r}".format(good_err))
+            if survivors != []:
+                failures.append("template gc overrun: the gc stand-in's child survived its stop (pids {!r}): "
+                                "the whole gc process group must be killed".format(survivors))
+            if rc_swap != 2 or "left the target uncontained" not in swap_out:
+                failures.append("template gc overrun: an escaping symlink-swap generator must still be "
+                                "cannot-evaluate (exit 2) with the containment diagnostic, got exit {!r}, "
+                                "stdout {!r} stderr {!r}".format(rc_swap, swap_out, swap_err))
+
+        _run_vector(cannot, failures, "template gc overrun", _gc_overrun_fixtures, _evaluate_gc_overrun)
+
+        #     The template gc's other branches and the post-gc checks, each through a REAL
+        #     _materialize_git over a fresh one-file template with the gc argv replaced by a stand-in
+        #     (a git shell alias run from the template's top level). Every stand-in that sleeps carries a
+        #     unique token, and the survivor scan and cleanup run on that token.
+        #     - object-store check: a stand-in that deletes every loose object and exits 0 must fail the
+        #       setup closed (the index readback alone reads the index, which still lists every path).
+        #     - gc debris: an overrunning stand-in that wrote gc.pid, tmp_pack_* and tmp_idx_* must leave
+        #       none of them in the template after the kill, and no survivor.
+        #     - unstoppable group: with _load_bound._kill_group refusing, an overrun fails the setup
+        #       closed and names the refusal (the descendant it could not stop is cleaned up here).
+        #     - launch failure: a Popen that raises for the gc is a non-fatal note and the setup passes.
+        #     - nonzero exit: a stand-in that exits 7 is a non-fatal "gc exited 7" note.
+        #     - interrupt: a KeyboardInterrupt out of the gc wait propagates, and no process of the gc
+        #       group survives it (Popen's exit handling alone would leave the group running).
+        #     - deadline clamp: _setup_timeout at each end of its interval, and a setup whose sweep
+        #       deadline has already elapsed fails closed before it launches anything.
+        gc_branch_label = "gensrc-gc-branch-{}".format(os.getpid())
+        gc_branch_runs = {"n": 0}
+
+        def _gc_branch_fixture(name):
+            def build():
+                repo = _build_repo(tmp / (name + "-repo"), {"goodfile": _GOODFILE})
+                template = tmp / (name + "-template")
+                shutil.copytree(repo, template, symlinks=False, ignore=_copy_ignore)
+                return repo, template
+            return build
+
+        def _gc_standin(code):
+            # The token rides the alias argv, so the git leader, its shell and the stand-in all carry it.
+            return ("-c", "alias.gcstandin=!{} -c '{}' {}".format(sys.executable, code, gc_branch_label),
+                    "gcstandin")
+
+        def _materialize_with_standin(fixture, gc_args, gc_timeout, deadline=None):
+            # Returns (the Exception the real _materialize_git raised or None, its stderr).
+            global TEMPLATE_GC_TIMEOUT, _TEMPLATE_GC_ARGS
+            repo, template = fixture
+            saved_gc = (TEMPLATE_GC_TIMEOUT, _TEMPLATE_GC_ARGS)
+            TEMPLATE_GC_TIMEOUT, _TEMPLATE_GC_ARGS = gc_timeout, gc_args
+            err, raised = io.StringIO(), None
+            try:
+                with redirect_stderr(err):
+                    _materialize_git(template, repo, deadline=deadline)
+            except Exception as exc:  # noqa: BLE001  the raised setup failure is what the vector asserts
+                raised = exc
+            finally:
+                TEMPLATE_GC_TIMEOUT, _TEMPLATE_GC_ARGS = saved_gc
+            return raised, err.getvalue()
+
+        def _evaluate_object_store(fixture):
+            standin = _gc_standin("import glob, os; [os.unlink(p) for p in glob.glob(\".git/objects/??/*\")]")
+            raised, err = _materialize_with_standin(fixture, standin, 60)
+            if not isinstance(raised, OSError) or "object store" not in str(raised):
+                failures.append("template object-store check: a gc that removed every reachable loose object "
+                                "must fail the setup closed (OSError naming the object store), got {!r}, "
+                                "stderr {!r}".format(raised, err))
+
+        _run_vector(cannot, failures, "template object-store check", _gc_branch_fixture("gc-objects"),
+                    _evaluate_object_store)
+
+        def _evaluate_gc_debris(fixture):
+            standin = _gc_standin(
+                "import os, time; open(\".git/gc.pid\", \"w\").write(\"1\"); "
+                "os.makedirs(\".git/objects/pack\", exist_ok=True); "
+                "open(\".git/objects/pack/tmp_pack_standin\", \"w\").write(\"x\"); "
+                "open(\".git/objects/pack/tmp_idx_standin\", \"w\").write(\"x\"); time.sleep(60)")
+            try:
+                raised, err = _materialize_with_standin(fixture, standin, 2)
+                survivors = _load_bound._alive_with(gc_branch_label)
+            finally:
+                _cleanup_leaked_descendant(gc_branch_label, failures, cannot)
+            git_dir = fixture[1] / ".git"
+            left = sorted(str(p.relative_to(git_dir)) for pattern in _GC_DEBRIS_GLOBS
+                          for p in git_dir.glob(pattern))
+            if raised is not None or "gc overran its 2 s bound" not in err:
+                failures.append("template gc debris: an overrunning gc must stay non-fatal with its overrun "
+                                "note, got {!r}, stderr {!r}".format(raised, err))
+            if left:
+                failures.append("template gc debris: the killed gc's debris must be removed from the "
+                                "template, found {!r}".format(left))
+            if survivors != []:
+                failures.append("template gc debris: the gc stand-in survived its stop (pids {!r})"
+                                .format(survivors))
+
+        _run_vector(cannot, failures, "template gc debris", _gc_branch_fixture("gc-debris"),
+                    _evaluate_gc_debris)
+
+        def _evaluate_unstoppable(fixture):
+            saved_kill_group = _load_bound._kill_group
+            _load_bound._kill_group = lambda proc, pidfd: "injected group-signal refusal"
+            try:
+                raised, err = _materialize_with_standin(fixture, _gc_standin("import time; time.sleep(60)"),
+                                                        2)
+            finally:
+                _load_bound._kill_group = saved_kill_group
+                _cleanup_leaked_descendant(gc_branch_label, failures, cannot)
+            if (not isinstance(raised, OSError) or "could not be stopped" not in str(raised)
+                    or "injected group-signal refusal" not in str(raised)):
+                failures.append("template gc unstoppable group: an overrun whose process group cannot be "
+                                "signalled must fail the setup closed naming the refusal, got {!r}, stderr "
+                                "{!r}".format(raised, err))
+
+        _run_vector(cannot, failures, "template gc unstoppable group", _gc_branch_fixture("gc-unstoppable"),
+                    _evaluate_unstoppable)
+
+        def _evaluate_launch_failure(fixture):
+            saved_popen = subprocess.Popen
+
+            def _refusing_popen(cmd, *a, **kw):
+                if kw.get("start_new_session"):  # only the template gc launches in its own session
+                    raise OSError("injected gc launch failure")
+                return saved_popen(cmd, *a, **kw)
+
+            subprocess.Popen = _refusing_popen
+            try:
+                raised, err = _materialize_with_standin(fixture, _TEMPLATE_GC_ARGS, TEMPLATE_GC_TIMEOUT)
+            finally:
+                subprocess.Popen = saved_popen
+            if raised is not None or "gc could not be launched (injected gc launch failure)" not in err:
+                failures.append("template gc launch failure: a gc that cannot be launched must be a "
+                                "non-fatal note, got {!r}, stderr {!r}".format(raised, err))
+
+        _run_vector(cannot, failures, "template gc launch failure", _gc_branch_fixture("gc-launch"),
+                    _evaluate_launch_failure)
+
+        def _evaluate_nonzero_exit(fixture):
+            raised, err = _materialize_with_standin(fixture, _gc_standin("import sys; sys.exit(7)"), 60)
+            if raised is not None or "template gc exited 7" not in err:
+                failures.append("template gc nonzero exit: a gc exiting 7 must be a non-fatal note naming "
+                                "the exit, got {!r}, stderr {!r}".format(raised, err))
+
+        _run_vector(cannot, failures, "template gc nonzero exit", _gc_branch_fixture("gc-exit7"),
+                    _evaluate_nonzero_exit)
+
+        def _evaluate_interrupt(fixture):
+            saved_popen = subprocess.Popen
+
+            class _InterruptedWait(saved_popen):
+                def wait(self, timeout=None):
+                    if timeout is not None and not gc_branch_runs["n"]:
+                        gc_branch_runs["n"] = 1
+                        time.sleep(0.5)  # the stand-in is launched by now; then the "terminal" interrupts
+                        raise KeyboardInterrupt()
+                    return super().wait(timeout)
+
+            def _interrupting_popen(cmd, *a, **kw):
+                if kw.get("start_new_session"):  # only the template gc launches in its own session
+                    return _InterruptedWait(cmd, *a, **kw)
+                return saved_popen(cmd, *a, **kw)
+
+            interrupted = False
+            subprocess.Popen = _interrupting_popen
+            try:
+                _materialize_with_standin(fixture, _gc_standin("import time; time.sleep(60)"), 60)
+            except KeyboardInterrupt:
+                interrupted = True
+            finally:
+                subprocess.Popen = saved_popen
+                survivors = _load_bound._alive_with(gc_branch_label)
+                _cleanup_leaked_descendant(gc_branch_label, failures, cannot)
+            if not interrupted:
+                failures.append("template gc interrupt: a KeyboardInterrupt out of the gc wait must "
+                                "propagate")
+            if survivors != []:
+                failures.append("template gc interrupt: the gc process group survived an interrupt (pids "
+                                "{!r}); it must be killed before the interrupt propagates".format(survivors))
+
+        _run_vector(cannot, failures, "template gc interrupt", _gc_branch_fixture("gc-interrupt"),
+                    _evaluate_interrupt)
+
+        def _evaluate_setup_clamp(fixture):
+            global _now
+            _now = lambda: 0.0  # noqa: E731  a fixed clock: remaining time == deadline
+            try:
+                cases = (("no deadline", None, SETUP_CALL_TIMEOUT),
+                         ("far deadline", SETUP_CALL_TIMEOUT + 1.0, SETUP_CALL_TIMEOUT),
+                         ("deadline exactly the bound", float(SETUP_CALL_TIMEOUT), SETUP_CALL_TIMEOUT),
+                         ("deadline just inside the bound", SETUP_CALL_TIMEOUT - 0.5, SETUP_CALL_TIMEOUT - 0.5),
+                         ("just inside the deadline", 0.001, 0.001),
+                         ("exactly at the deadline", 0.0, None),
+                         ("just past the deadline", -0.001, None))
+                for label, dline, want in cases:
+                    try:
+                        got = _setup_timeout(dline, SETUP_CALL_TIMEOUT)
+                    except OSError:
+                        got = None
+                    if got != want:
+                        failures.append("template setup deadline clamp: {} (deadline {!r}) expected {!r}, got "
+                                        "{!r}".format(label, dline, want, got))
+                raised, err = _materialize_with_standin(fixture, _TEMPLATE_GC_ARGS, TEMPLATE_GC_TIMEOUT,
+                                                        deadline=0.0)
+            finally:
+                _now = saved_now
+            if (not isinstance(raised, OSError) or "backstop elapsed" not in str(raised)
+                    or (fixture[1] / ".git").exists()):
+                failures.append("template setup deadline clamp: a setup whose sweep deadline has elapsed "
+                                "must fail closed before launching git, got {!r}, .git present {!r}"
+                                .format(raised, (fixture[1] / ".git").exists()))
+
+        _run_vector(cannot, failures, "template setup deadline clamp", _gc_branch_fixture("setup-clamp"),
+                    _evaluate_setup_clamp)
 
         # (s) The self-test verdict: a cannot-evaluate vector beside an assertion failure exits 2 (not 1)
         #     and names both; a cleanup or census error still prints every cannot line, before its own
@@ -2561,8 +3298,10 @@ def _self_test_main_isolated():
           "detected (exit 2); a decode-only generator is caught (exit 1) specifically by a "
           "valid-but-different / same-length content probe; a total-runtime deadline overrun returns exit "
           "2; a generator slower than the per-probe bound passes under host load while a silently sleeping "
-          "generator (stopped by the heuristic stall bound, not the budget) and the same slow generator on an "
-          "idle host each return exit 2, while one exiting 0 on a corrupt target beside a leaked descendant "
+          "generator (stopped by the heuristic stall bound, not the budget, whose derived latest stop is "
+          "at least 2 s before its own budget) and the same slow generator on an idle host (stopped by the "
+          "budget, not any other cause) each return exit 2, while, under the same injected load, one "
+          "exiting 0 on a corrupt target beside a leaked descendant "
           "(the leaky fixture) returns exit 1, one rejecting the corrupt target beside the same leak (the "
           "leaky_reject fixture) returns exit 0, and a stopped rejection that swapped its target for an "
           "escaping symlink (the leaky_reject_escape fixture) returns exit 2 with the containment "
@@ -2575,7 +3314,12 @@ def _self_test_main_isolated():
           "failure and a tracked-set mismatch each fail closed (exit 2) with no git add -A fallback; and "
           "every template git command carries the no-maintenance flags (gc.auto=0, gc.autoDetach="
           "false, maintenance.auto=false) so no detached auto-gc / auto-maintenance can race the per-call "
-          "copytree of the template; and the {} #378 close-vector runs pass, each flip leg red by its own "
+          "copytree of the template; a template gc that overruns its bound is non-fatal (a conformant repo "
+          "still passes, an escaping generator is still exit 2 with the containment diagnostic) and its "
+          "whole process group is killed (on an overrun, with its debris removed, or on an interrupt), a gc that "
+          "cannot be launched or exits nonzero is non-fatal, an unstoppable gc group or a gc that leaves "
+          "the object store incomplete fails closed, and each setup call is clamped to the sweep "
+          "deadline; and the {} #378 close-vector runs pass, each flip leg red by its own "
           "assertion; and the leaked-descendant cleanup caller probes drive its three distinct results "
           "(an observed scan, an unobservable-scan failure, and the no-/proc named cannot-evaluate, "
           "exit 2) through the real caller".format(census_matched, close_runs))

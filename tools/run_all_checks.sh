@@ -272,6 +272,8 @@ run_gate "opf-declaration-selftest" python3 -I -B tools/check_selftest_execution
 run_gate "opf-declaration" python3 -I -B tools/check_opf_declaration.py
 run_gate "record-drift-selftest" python3 -I -B tools/check_record_drift.py --self-test
 run_gate "record-drift"          python3 -I -B tools/check_record_drift.py
+run_gate "record-readers-selftest" python3 -I -B tools/check_selftest_execution.py --suite record-readers-selftest
+run_gate "record-readers" python3 -I -B tools/check_record_readers.py
 run_gate "record-sections-selftest" python3 -I -B tools/check_record_sections.py --self-test
 run_gate "mistakes-register-selftest" python3 -I -B tools/check_mistakes_register.py --self-test
 run_gate "mistakes-register"          python3 -I -B tools/check_mistakes_register.py
@@ -316,8 +318,9 @@ run_gate "applies"         python3 -I -B tools/check_applies.py
 run_gate "mappings-selftest" python3 -I -B tools/check_selftest_execution.py --suite mappings-selftest
 run_gate "mappings"       python3 -I -B tools/check_mappings.py
 # Repository-only assertion lives outside the shipped tooling: it pins the corpus below and the whole permitted
-# gate invocation in both runners (--config .aiqt/cited-standards.toml and nothing else, so an appended --root
-# is a finding), and validates pack.toml with its owning validator (opf/tools/check_opf_prompt_pack.py).
+# gate invocation in this runner, the only one it reads (--config .aiqt/cited-standards.toml and nothing else,
+# so an appended --root is a finding), and validates pack.toml with its owning validator
+# (opf/tools/check_opf_prompt_pack.py).
 run_gate "cited-standards-repo-contract-selftest" python3 -I -B .github/check_cited_standards_contract.py --self-test
 run_gate "cited-standards-repo-contract" python3 -I -B .github/check_cited_standards_contract.py
 run_gate "cited-standards-selftest" python3 -I -B tools/check_cited_standards.py --self-test
