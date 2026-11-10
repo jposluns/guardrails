@@ -3887,26 +3887,73 @@ _GSO_WRAPPERS = ("", "env ", "env A=1 ", "timeout 60 ", "nice ", "time ", "comma
 _GSO_GLOBALS = ("", "-C /abs/r ", "-c core.x=1 ", "-C /abs/r -c core.x=1 ", "-c core.x=1 -C /abs/r ",
                 "--no-pager ", "-C -h ", "-c alias.tag=push ", "--git-dir=/abs/r/.git ")
 _GSO_GIT_WORDS = ("git", "'git'", "\"git\"", "\\git", "g'i't", "$G", "/usr/bin/git")
-# Each verb's option words (one option, with its value where it takes one) and its operand lists.
-_GSO_OPTIONS = {
-    "tag": (("-a",), ("-s",), ("-f",), ("-d",), ("-m", "x"), ("-F", "/abs/m"), ("-l",), ("--list",), ("-n",),
-            ("-n5",), ("-v",), ("--verify",), ("--points-at", "HEAD"), ("--points-at=HEAD",),
-            ("--no-points-at",), ("--contains", "HEAD"), ("--no-contains", "HEAD"), ("--merged",),
-            ("--no-merged",), ("--sort=refname",), ("--format=%(refname)",), ("--column",), ("-i",),
-            ("--poi", "HEAD"), ("--no-po",), ("--cont", "HEAD"), ("--annotate",), ("--no-annotate",),
-            ("--force",), ("--no-force",), ("--sign",), ("--no-sign",), ("-u", "K"), ("--local-user=K",),
-            ("--delete",), ("--create-reflog",), ("-m", "-l"), ("--message=-l",), ("-al",), ("-la",), ("-ln",),
-            ("-fd",), ("--end-of-options",), ("--",), ("--help",), ("-h",), ("--no-verify",)),
-    "push": (("-n",), ("--dry-run",), ("--no-dry-run",), ("--dr",), ("--dry",), ("-f",), ("-nf",), ("-qn",),
-             ("-fn",), ("-on",), ("-o", "x"), ("-o", "-n"), ("--push-option=-n",), ("--push-option", "--dry-run"),
-             ("--tags",), ("--follow-tags",), ("--delete",), ("-d",), ("--mirror",), ("--all",),
-             ("--force-with-lease",), ("--no-verify",), ("--no-ver",), ("--verify",), ("--atomic",),
-             ("--porcelain",), ("-q",), ("-v",), ("--recurse-submodules=check",), ("--repo=origin",),
-             ("--receive-pack=x",), ("-u",), ("--set-upstream",), ("--no-thin",), ("--prune",),
-             ("--end-of-options",), ("--",), ("--help",), ("-h",)),
-}
+# The words git reads on every action, which no per-action table of the guard lists: the option terminators
+# and the help forms.
+_GSO_COMMON_WORDS = (("--end-of-options",), ("--",), ("--help",), ("-h",))
+# Each gated action's operand lists.
 _GSO_OPERANDS = {"tag": ((), ("v1",), ("v1", "HEAD")),
-                 "push": ((), ("origin",), ("origin", "main"), ("origin", "v1"))}
+                 "push": ((), ("origin",), ("origin", "main"), ("origin", "v1")),
+                 "commit": ((), ("f.txt",)), "merge": ((), ("topic",)), "am": ((), ("fix.patch",))}
+
+
+def _gso_options(hooks):
+    """{action: (core, extra)} option words (each a tuple: one option, then its value where it takes one) for
+    every gated action of hooks._GATE_GATED_GIT, built from the guard's own tables, never a hand-written list.
+    core: every long form of _GATE_GIT_LONG_FORMS, each name and each negation, with a value word after a
+    name _GATE_GATED_VALUE_OPTS lists as value-taking; every value-taking long option of that table; every
+    short letter of that table and of _GATE_GIT_EXEMPT (a mandatory-value letter with a value word, an
+    optional-value letter alone and with a value attached), and for tag the letters of _GATE_TAG_MAKES; and
+    _GSO_COMMON_WORDS. extra: every prefix of two or more letters of each exempt long name and of its
+    negation, each exempt short letter clustered before and after each other short letter, and each
+    value-taking option given an exempt flag as its value, the forms whose reading decides an exemption."""
+    out = {}
+    for verb in sorted(hooks._GATE_GATED_GIT):
+        forms = hooks._GATE_GIT_LONG_FORMS[verb]
+        shorts, stuck, longs = hooks._GATE_GATED_VALUE_OPTS[verb]
+        exempt_names = {name for names, _letters in hooks._GATE_GIT_EXEMPT[verb] for name in names}
+        exempt_shorts = "".join(letters for _names, letters in hooks._GATE_GIT_EXEMPT[verb])
+        core, extra = [], []
+        for word, (name, negated) in forms.items():
+            takes = not negated and "--" + word in longs
+            core.append(("--" + word, "x") if takes else ("--" + word,))
+            if name in exempt_names:
+                extra.extend(("--" + word[:k],) for k in range(2, len(word)))
+        core.extend(("--" + long[2:], "x") for long in sorted(longs) if long[2:] not in forms)
+        letters = set(shorts + stuck + exempt_shorts)
+        if verb == "tag":
+            letters.update(hooks._GATE_TAG_MAKES[0])
+        for letter in sorted(letters):
+            if letter in shorts:
+                core.append(("-" + letter, "x"))
+            elif letter in stuck:
+                core.extend((("-" + letter,), ("-" + letter + "5",)))
+            else:
+                core.append(("-" + letter,))
+            for exempt in exempt_shorts:
+                if exempt != letter:
+                    extra.extend((("-" + letter + exempt,), ("-" + exempt + letter,)))
+        core.extend(_GSO_COMMON_WORDS)
+        exempt_words = ["--" + word for word, (name, _neg) in forms.items() if name in exempt_names]
+        exempt_words += ["-" + letter for letter in exempt_shorts]
+        value_opts = ["-" + letter for letter in shorts] + sorted(longs)
+        extra.extend((opt, word) for opt in value_opts for word in exempt_words)
+        core = list(dict.fromkeys(core))
+        out[verb] = (tuple(core), tuple(opt for opt in dict.fromkeys(extra) if opt not in core))
+    return out
+
+
+def _gso_related(verb, opt, hooks):
+    """True when the option word opt of verb spells an exempt flag or its negation (_GATE_GIT_EXEMPT), or is
+    a value-taking option (_GATE_GATED_VALUE_OPTS): the words whose order against the others decides an
+    exemption, each paired in the corpus with every other core word."""
+    shorts, _stuck, longs = hooks._GATE_GATED_VALUE_OPTS[verb]
+    exempt_names = {name for names, _letters in hooks._GATE_GIT_EXEMPT[verb] for name in names}
+    exempt_shorts = "".join(letters for _names, letters in hooks._GATE_GIT_EXEMPT[verb])
+    head = opt[0]
+    if head.startswith("--"):
+        form = hooks._GATE_GIT_LONG_FORMS[verb].get(head[2:])
+        return (form is not None and form[0] in exempt_names) or head in longs
+    return len(head) == 2 and head[1:] in exempt_shorts + shorts
 
 
 def _gso_spellings(word):
@@ -3926,29 +3973,39 @@ def _gso_action(verb, opts, operands, operands_first, git="git", wrapper="", hea
     return " ".join([wrapper + git + " " + head + verb] + body)
 
 
-def _gso_corpus():
-    """The deduplicated, sorted corpus: the pinned forms; for each verb every ordered pair of its option
-    words with an operand list and placement chosen by the pair's index, every single option word with every
-    operand list in both placements, each single option word in every lead and before every trail, each
-    spelling of each option word, and a few actions under every wrapper, git spelling and global option
-    placement. The generation is deterministic, so the corpus is the same on every run."""
+def _gso_corpus(hooks=None):
+    """The deduplicated, sorted corpus, its option words generated from the guard tables of hooks (this
+    tree's aiqt_hooks by default) by _gso_options: the pinned forms; for each gated action each
+    exempt-related core word (_gso_related) followed by each other core word (so two exempt-related words
+    meet in both orders), with an operand list and placement chosen by the pair's index; every core word with every operand list in both placements, and
+    every extra word with one operand list chosen by its index; each core word before every trail, and each
+    exempt-related core word and every fourth other core word in every lead; each spelling of each
+    exempt-related core word; and a few actions under every wrapper, git spelling and global option
+    placement. The generation is deterministic, so the corpus is the same on every run of one tree."""
+    hooks = aiqt_hooks if hooks is None else hooks
     corpus = set(_GSO_PINNED) | set(_GSO_ANCHORS)
     corpus.update(lead + action for lead in _GSO_LEADS for action in _GSO_REPORTED_ACTIONS)
     main_lead = "pytest | tee /abs/l && "
-    for verb, pool in sorted(_GSO_OPTIONS.items()):
+    for verb, (pool, extra) in sorted(_gso_options(hooks).items()):
         operand_lists = _GSO_OPERANDS[verb]
-        for index, (first, second) in enumerate(itertools.permutations(pool, 2)):
+        related = [opt for opt in pool if _gso_related(verb, opt, hooks)]
+        pairs = [(a, b) for a in related for b in pool if a != b]
+        for index, (first, second) in enumerate(pairs):
             operands = operand_lists[index % len(operand_lists)]
             corpus.add(main_lead + _gso_action(verb, (first, second), operands, index % 2 == 1))
-        for index, opt in enumerate(pool):
+        for opt in pool:
             for operands in operand_lists:
                 for operands_first in (False, True):
                     corpus.add(main_lead + _gso_action(verb, (opt,), operands, operands_first))
+        for index, opt in enumerate(extra):
+            corpus.add(main_lead + _gso_action(verb, (opt,), operand_lists[index % len(operand_lists)], False))
+        for index, opt in enumerate(pool):
             action = _gso_action(verb, (opt,), operand_lists[index % len(operand_lists)], False)
-            for lead in _GSO_LEADS:
+            for lead in _GSO_LEADS if opt in related or index % 4 == 0 else ():
                 corpus.add(lead + action)
             for trail in _GSO_TRAILS:
                 corpus.add(main_lead + action + trail)
+        for opt in related:
             for spelling in _gso_spellings(opt[0]):
                 corpus.add(main_lead + _gso_action(verb, ((spelling,) + opt[1:],), operand_lists[-1], False))
         samples = [((), operand_lists[-1])] + [((pool[k],), operand_lists[-1]) for k in range(0, len(pool), 6)]
@@ -4038,15 +4095,48 @@ def _gso_oracle_failures(main_gate, tree_gate, corpus, cwd, allowlist, anchors):
     return failures
 
 
+def _gso_table_gaps(corpus, hooks):
+    """The (action, long word) pairs of hooks' _GATE_GIT_LONG_FORMS, over every gated action, that no corpus
+    command runs as its first option word right after the oracle's main lead."""
+    lead = "pytest | tee /abs/l && git "
+    seen = set()
+    for command in corpus:
+        if command.startswith(lead):
+            words = command[len(lead):].split()
+            if len(words) > 1:
+                seen.add((words[0], words[1]))
+    return [(verb, "--" + word) for verb in sorted(hooks._GATE_GATED_GIT) for word in hooks._GATE_GIT_LONG_FORMS[verb]
+            if (verb, "--" + word) not in seen]
+
+
+class _GsoTables:
+    """A stand-in holding the guard tables _gso_options reads, for the corpus derivation check."""
+
+
 def _test_gate_status_oracle(failures, tmp):
     """(gso-*) the differential oracle (comment above _GSO_BASE) over the generated corpus, then its mutation
     checks: main's guard compared with itself (this tree's change reverted) must be red, and a stand-in of
     this tree's guard that allows one command main denies must be red without an allowlist entry for it and
-    green with one, as must each real allowlist entry deleted in turn."""
+    green with one, as must each real allowlist entry deleted in turn. The corpus must run every long form
+    of every gated action in the guard's table, and a long form planted in a copy of that table must reach
+    the corpus generated from the copy, so the corpus follows the table rather than a hand-written list."""
     corpus = _gso_corpus()
     if len(corpus) < 5000:
         failures.append("(gso-corpus-size) the generated corpus holds {} commands, fewer than 5000"
                         .format(len(corpus)))
+    gaps = _gso_table_gaps(corpus, aiqt_hooks)
+    if gaps:
+        failures.append("(gso-corpus-table) the corpus runs {} long forms of the guard's table as no "
+                        "command's first option word, such as {!r}".format(len(gaps), gaps[:5]))
+    planted_tables = _GsoTables()
+    for name in ("_GATE_GATED_GIT", "_GATE_GIT_EXEMPT", "_GATE_GATED_VALUE_OPTS", "_GATE_TAG_MAKES"):
+        setattr(planted_tables, name, getattr(aiqt_hooks, name))
+    planted_forms = dict(aiqt_hooks._GATE_GIT_LONG_FORMS)
+    planted_forms["tag"] = dict(planted_forms["tag"], **{"zz-planted": ("zz-planted", False)})
+    planted_tables._GATE_GIT_LONG_FORMS = planted_forms
+    if _gso_table_gaps(_gso_corpus(planted_tables), planted_tables):
+        failures.append("(gso-corpus-derived) a long form planted in a copy of the guard's table does not "
+                        "reach the corpus generated from that copy")
     try:
         main_hooks, tree_hooks = _gso_load_hooks(tmp)
     except (OSError, subprocess.SubprocessError) as exc:
@@ -4093,6 +4183,34 @@ def _test_gate_status_oracle(failures, tmp):
                 os.environ.pop(key, None)
             else:
                 os.environ[key] = value
+
+
+def _test_gate_status_wording(failures):
+    """(gw-smw-*) the status tier's deny text says what the guard read: an action read fail-closed (a segment
+    the lexer stopped inside, or a word bash expands that alone keeps a listing gated) gets the fail-closed
+    text, never the finding that a failing check does not stop it, and an action read only as git before its
+    subcommand is named 'git command', never 'git git'; a fully read action keeps the finding text."""
+    rows = (
+        ("(gw-smw-1) git stopped before its subcommand is a fail-closed git command",
+         "pytest | tee /abs/l && git <<<x tag v1", ("fail-closed", "to a git command."), ("git git", "does not stop")),
+        ("(gw-smw-2) a tag listing the lexer stopped inside is fail-closed",
+         "pytest | tee /abs/l && git tag -l <<<x", ("fail-closed", "could not read that git tag"), ("does not stop",)),
+        ("(gw-smw-3) a tag listing with a glob is fail-closed",
+         "pytest | tee /abs/l && git tag -l v*", ("fail-closed", "a word bash expands"), ("does not stop",)),
+        ("(gw-smw-4) a tag listing with a parameter is fail-closed",
+         "pytest | tee /abs/l && git tag -l \"$p\"", ("fail-closed", "a word bash expands"), ("does not stop",)),
+        ("(gw-smw-5) a literal tag creation keeps the finding",
+         "pytest | tee /abs/l && git tag v1", ("does not stop the git tag",), ("fail-closed", "git git")),
+    )
+    for label, command, needles, absent in rows:
+        code, out, _err = aiqt_hooks.gate_weakening({"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                                                     "tool_input": {"command": command}})
+        spec = out.get("hookSpecificOutput", {}) if isinstance(out, dict) else {}
+        reason = spec.get("permissionDecisionReason", "")
+        if (spec.get("permissionDecision") != "deny" or any(n not in reason for n in needles)
+                or any(a in reason for a in absent)):
+            failures.append("{} on {!r}: got exit {} decision {!r}, reason {!r}".format(
+                label, command, code, spec.get("permissionDecision"), reason))
 
 # Foreground trkasy rows with no '&' byte anywhere: a quoted here-document write followed by another command
 # reads its body as code, so an apostrophe there left the scan open and the guard denied a detach the
@@ -30672,6 +30790,7 @@ def _main_isolated(monitor):
         _test_cannot_evaluate_paths(failures, tmp)
         _test_reset_ancestry(failures, tmp)
         _test_gate_status_oracle(failures, tmp)
+        _test_gate_status_wording(failures)
 
         # === write_scope_guard (wrtscp, EN-8): confine guarded-tool writes to a per-slice scope =========
         # declaration; hard-deny writes to the frozen floor and to other/nested repos as an un-lowerable

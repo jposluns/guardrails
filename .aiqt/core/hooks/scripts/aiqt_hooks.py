@@ -17148,7 +17148,7 @@ def _gate_words_expand(seg, argv):
     return any(flags[len(seg.argv) - len(argv):])
 
 
-def _gate_gated_git(seg):
+def _gate_gated_git(seg, read_expanding=False):
     """The gated git action (_GATE_GATED_GIT) a segment runs, read after its leading assignments and the env,
     nice, timeout and time wrappers (_gate_peel), or None; a form that records, marks or sends nothing (a tag
     listing or verify, a recovery option, a dry run, --help) is None. Those forms are read only from real
@@ -17156,14 +17156,17 @@ def _gate_gated_git(seg):
     subcommand's own option words read by _gate_git_opts, which skips every listed option's value and stops
     at a '--', so an option's value is never taken for one of those forms. They are read only from literal
     words too: when any word of the action is one bash expands (_gate_words_expand), no form exempts it and
-    the action is gated, a disclosed over-denial of a listing such as git tag -l v* or git tag -l "$p"."""
+    the action is gated, a disclosed over-denial of a listing such as git tag -l v* or git tag -l "$p".
+    read_expanding=True reads the exempt forms from such words' unexpanded text anyway; it never decides a
+    verdict, and only tells the status tier's message whether the action is gated because of that doubt
+    (_gate_status_masked)."""
     argv = _gate_peel(seg.argv) if seg.argv else None
     if not argv or _gate_word(argv[0]) != "git":
         return None
     sub, rest = _git_subcommand_rest(argv)
     if sub not in _GATE_GATED_GIT:
         return None
-    if _gate_words_expand(seg, argv):
+    if not read_expanding and _gate_words_expand(seg, argv):
         return sub
     head, k, end = [], _command_word_index(argv) + 1, len(argv) - len(rest) - 1
     while k < end:
@@ -17220,7 +17223,7 @@ def _gate_pipefail_set(seg):
 
 
 def _gate_status_masked(records, open_seg=None):
-    """gatdis status tier: (producer word, last stage word, join, git action, proven, pipefail) for the first
+    """gatdis status tier: (producer word, last stage word, join, git action, proven, pipefail, doubt) for the first
     known verification pipeline whose status cannot stop a gated git action after it, or None. The producer
     is held to the deny tier's producer shape (outside every case compound, _gate_simple, stdout not
     redirected, ending in '|' or '|&', a listed run form, _is_verification_run); its later stages are ANY
@@ -17235,8 +17238,11 @@ def _gate_status_masked(records, open_seg=None):
     (_gate_conditional_run): the caller denies then and notes otherwise. pipefail is True when a segment
     before the producer sets pipefail (_gate_pipefail_set), so the note can say so. open_seg, when given,
     is the last record, the segment a failed lex stopped inside: it counts as a gated action when its words
-    read so far name git and a gated subcommand or no subcommand yet (_gate_gated_verb), with no exempt
-    form, since its unread words can clear any exemption read before the stop."""
+    read so far name git and a gated subcommand or no subcommand yet (_gate_gated_verb, the action then 'git'),
+    with no exempt form, since its unread words can clear any exemption read before the stop. doubt says
+    whether the action is read fail-closed, so the message does not present a doubt as a finding: 'open' for
+    that stopped segment, 'expand' for an action gated only because a word of it is one bash expands (read
+    from that word's unexpanded text it is a form that records, marks or sends nothing), else None."""
     n = len(records)
     benign, pipefail = True, False
     for (i, seg), case_depth in zip(enumerate(records), _gate_case_depths(records)):
@@ -17261,22 +17267,60 @@ def _gate_status_masked(records, open_seg=None):
                 if nxt.sep_after != "":
                     break
                 continue
-            action = _gate_gated_verb(nxt) if nxt is open_seg else _gate_gated_git(nxt)
+            if nxt is open_seg:
+                action, doubt = _gate_gated_verb(nxt), "open"
+            else:
+                action = _gate_gated_git(nxt)
+                doubt = ("expand" if action is not None and _gate_gated_git(nxt, read_expanding=True) is None
+                         else None)
             if action is not None:
                 proven = benign and not _gate_conditional_run(records, i)
                 return (_gate_word(_gate_peel(seg.argv, producer=True)[0]),
-                        _gate_word(_command_word(last.argv) or last.argv[0]), join, action, proven, pipefail)
+                        _gate_word(_command_word(last.argv) or last.argv[0]), join, action, proven, pipefail,
+                        doubt)
             if not _gate_status_passthrough(nxt):
                 break
             sep = nxt.sep_after
     return None
 
 
+def _gate_status_action_words(action):
+    """The words naming a status-tier hit's git action: 'git <subcommand>', or 'git command' for an action
+    read only as git before its subcommand (_gate_gated_verb's 'git')."""
+    return "git command" if action == "git" else "git " + action
+
+
 def _gate_status_masked_message(hit):
     """The (reason, banner) of the deny for a proven _gate_status_masked hit: it names the check, the last
     stage whose status the pipeline takes, the join and the git action, and gives the same capture route as
-    the sink deny (_verification_sink_message)."""
-    word, last, _join, action, _proven, _pipefail = hit
+    the sink deny (_verification_sink_message). An action read fail-closed (the hit's doubt) gets a text
+    that says the guard could not read it and denies fail-closed, never one that states a failing check
+    does not stop it."""
+    word, last, _join, action, _proven, _pipefail, doubt = hit
+    if doubt is not None:
+        what = _gate_status_action_words(action)
+        if doubt == "open":
+            why = ("this guard could not read that {} to its end: the shell lexer stopped inside it (a "
+                   "here-string, a process substitution or other syntax it does not read), and its unread "
+                   "words could change what it does".format(what))
+        else:
+            why = ("that {} carries a word bash expands before git reads it (a parameter, a substitution, a "
+                   "glob or a brace); read from that word's unexpanded text it is a form that records, marks "
+                   "or sends nothing (a listing, a verify, a dry run or --help), but the expanded word could "
+                   "make it one that does".format(what))
+        return (
+            "AIQT rule gatdis (gate-discipline): this '{}' command is on the hook's list of known verification "
+            "runs, its output is piped into '{}', and the pipeline is joined by '&&' to a {}. {}, so this "
+            "guard cannot tell whether that action records, marks or sends anything; it is denied "
+            "fail-closed. If it does, the pipeline's exit status, by default that of its final stage '{}' "
+            "and not the check's, would not stop it. Run the check alone with its full output in a file at "
+            "an absolute path and no pipe after it, for example `<command> > /abs/path/check.log 2>&1`, take "
+            "the verdict from that command's own exit status, read the file, and only then run the git "
+            "action as a separate step, written with literal words and no here-string or process "
+            "substitution where it only lists or reads.".format(word, last, what, why[0].upper() + why[1:],
+                                                                 last),
+            "AIQT guardrail: denied a known verification run piped into '{}' ahead of a {} this guard could "
+            "not read in full (rule gatdis, fail-closed).".format(last, what))
     return (
         "AIQT rule gatdis (gate-discipline): this '{}' command is on the hook's list of known verification runs, "
         "its output is piped into '{}', and the pipeline is joined by '&&' to a git {}. By default a pipeline's "
@@ -17293,7 +17337,8 @@ def _gate_status_masked_message(hit):
 def _gate_status_masked_note(hit):
     """The note text for an unproven _gate_status_masked hit: an earlier command sets pipefail, or an earlier
     command or a '||' join leaves the shape unproven."""
-    word, last, _join, action, _proven, pipefail = hit
+    word, last, _join, action, _proven, pipefail, _doubt = hit
+    what = _gate_status_action_words(action)
     if pipefail:
         why = ("This command sets pipefail before it, so a failing check fails the pipeline (though not always "
                "with the check's own status); the hook does not prove the option is still in effect when the "
@@ -17302,10 +17347,10 @@ def _gate_status_masked_note(hit):
         why = ("An earlier command in this line, or a '||' before the pipeline, may change whether or how the "
                "check runs, so the hook does not prove the shape.")
     return ("AIQT guardrail (rule gatdis, gate-discipline): '{}' looks like a verification run, its output is piped "
-            "into '{}', and the pipeline is joined to a git {}; by default the pipeline's status is its last "
-            "stage's, not the check's. {} This is a note, not a refusal. If the check gates the git {}, run it "
+            "into '{}', and the pipeline is joined to a {}; by default the pipeline's status is its last "
+            "stage's, not the check's. {} This is a note, not a refusal. If the check gates the {}, run it "
             "alone with its full output in a file at an absolute path, take the verdict from its own exit status, "
-            "and run the git {} as a separate step.".format(word, last, action, why, action, action))
+            "and run the {} as a separate step.".format(word, last, what, why, what, what))
 
 
 # The note tier's view of a checker or a sink the canonical deny cannot prove: wrappers beyond the four the
