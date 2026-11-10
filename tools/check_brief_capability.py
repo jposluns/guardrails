@@ -4209,12 +4209,16 @@ def _run_cpu():
     """CPU seconds, user plus system, of this process and of every child process it has reaped: the clock
     LINEAR_CHILD reads around each evaluate() run, so every parse child a run starts and reaps (one from
     decode_brief, one from preflight, or both) is charged to that run. Counting this process alone would
-    miss whatever work the parse children do. A process the measuring child never reaps is not counted at
-    all: a grandchild a parse child started, or a process still running in a parse child's group when
-    _kill_group kills it, burns CPU this clock never sees. The reading kills that whole group right after
-    the child exits or at the parse deadline, whichever comes first, so a process still in the group burns
-    it for no longer than the parse deadline from the child's start; the measuring child's own
-    LINEAR_TIMEOUT stops only the measuring child, not a parse child's group."""
+    miss whatever work the parse children do. A reaped child's figure includes the CPU of every descendant
+    it waited for, since that usage passes up through each wait, so a grandchild a parse child waits for
+    is counted once the parse child is reaped. A process that nothing in the chain from the measuring
+    child down waits for is not counted at all: a grandchild a parse child leaves running, or a process
+    still running in a parse child's group when _kill_group kills it, burns CPU this clock never sees. The
+    reading kills that whole group from the measuring child when its wait for the parse child ends, at the
+    latest when the parse deadline expires (earlier once the parse child has exited and its output has
+    closed). That holds only while the measuring child survives to run that kill: LINEAR_TIMEOUT kills
+    only the measuring child, not a parse child's group, so when it fires during a parse nothing kills
+    that group, and a parse child then running can run on past the parse deadline."""
     own = resource.getrusage(resource.RUSAGE_SELF)
     reaped = resource.getrusage(resource.RUSAGE_CHILDREN)
     return own.ru_utime + own.ru_stime + reaped.ru_utime + reaped.ru_stime
