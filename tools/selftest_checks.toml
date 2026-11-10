@@ -1569,6 +1569,11 @@ expected-check-ids = [
   "nrd/oracle-corpus-pinned",
   "nrd/oracle-reference-live",
   "nrd/oracle-no-allowed-declared-run",
+  "nrd/oracle-cd-into-copy-denied-and-ran",
+  "nrd/oracle-flip-state-relative-only-red",
+  "nrd/oracle-flip-state-relative-head-only-red",
+  "nrd/oracle-unexercised-reported",
+  "nrd/oracle-unexercised-excludes-live",
   "nrd/oracle-mutant-core-disabled-red",
   "nrd/oracle-mutant-fixture-deleted-red",
   # ---------- Surface B: the validation membrane ----------

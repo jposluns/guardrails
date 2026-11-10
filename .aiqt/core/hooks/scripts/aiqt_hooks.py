@@ -27922,7 +27922,7 @@ def _nrd_shell_state(command, segments):
     that carries a redirect; or the text CDPATH or cdable_vars anywhere in the command. The guard never
     models what such a construct does (a cd that fails, is skipped, runs in a subshell, goes back with
     -, resolves through CDPATH or a cdable variable, or comes from an alias, an eval body or a sourced
-    file); the caller instead denies every segment _nrd_state_relative flags. A nested shell -c or
+    file); the caller instead denies every segment _nrd_state_denied flags. A nested shell -c or
     eval body is scanned under the enclosing command's flag as well (_nrd_nested_state)."""
     if any(t in command for t in _NRD_STATE_TEXT):
         return True
@@ -27952,30 +27952,19 @@ def _nrd_nested_state(state):
     return state
 
 
-def _nrd_state_relative(seg, interps):
-    """True when, in a command holding a shell-state construct (_nrd_shell_state), this segment holds a
-    shell or interpreter word (interps, from _nrd_interp_argvs) and any word after its first that is
-    not an absolute path (an option word such as -I included) or a relative file redirect target
-    (_nrd_relative_operand), or runs a relative path holding a slash as its command word: the caller
-    denies such a segment outright, since the directory that word resolves against is not known."""
-    if interps and _nrd_relative_operand(seg):
+def _nrd_state_denied(seg, interps):
+    """True when, in a command holding a directory-changing or shell-state construct (_nrd_shell_state),
+    this segment holds any shell or interpreter word (interps, from _nrd_interp_argvs) or runs a path
+    holding a slash as its command word, absolute or relative: the caller denies such a segment
+    outright. The working directory it runs in is not known, so even a script operand or an executable
+    that is a copy outside the declared directories can reach a declared file through a relative path
+    of its own (cd ..; cd stage; bash /abs/copy.sh, where copy.sh runs ./o.sh). The flag covers the
+    whole command, not only the segments after the construct, because a loop or a function can run an
+    earlier segment again after it."""
+    if interps:
         return True
     head = _nrd_command_word(seg.argv)
-    return bool(head) and "/" in head[0] and not os.path.isabs(head[0])
-
-
-def _nrd_relative_operand(seg):
-    """True when a segment carries a word or redirect target that a lost working directory could
-    resolve: any argument after the command word that is not an absolute path (options included, so an
-    attached option value is covered), a command word holding a slash but not absolute, or a file
-    redirect target (not a descriptor duplication or a here-document delimiter) that is not absolute."""
-    argv = seg.argv
-    if argv and "/" in argv[0] and not os.path.isabs(argv[0]):
-        return True
-    if any(tok and not os.path.isabs(tok) for tok in argv[1:]):
-        return True
-    return any(r.target_class != "descriptor" and not r.op.startswith("<<")
-               and not (isinstance(r.target, str) and os.path.isabs(r.target)) for r in seg.redirects)
+    return bool(head) and "/" in head[0]
 
 
 # The shell and interpreter words this guard knows by name: common shells (rbash and busybox among
@@ -28124,13 +28113,14 @@ def _nrd_scope_scan(command, cwd, dirs, _depth=0, _state=False):
     payload working directory; a directory change is never modelled), when the payload working
     directory itself resolves into one, or when a relative cd/pushd stands while CDPATH is set.
     Whenever any directory is declared and the command holds a directory-changing or shell-state
-    construct (_nrd_shell_state), a segment that holds a shell or interpreter word and any word that
-    is not an absolute path, or whose command word is a relative path, DENIES outright, in scope or
-    not (_nrd_state_relative). A segment holding a shell or interpreter word (_nrd_interp_argvs) is
-    in scope unless every such word's script operand is an existing regular file whose lexical form
-    and realpath lie outside every declared directory and outside /dev and /proc
-    (_nrd_script_proven), so a pipe, a here-document, /dev/stdin, a -c or -m program and source of
-    stdin all count. A nested shell -c or eval body (and the token a looser reading takes as the -c
+    construct (_nrd_shell_state), a segment that holds any shell or interpreter word, or whose command
+    word is a path (absolute or relative), DENIES outright, in scope or not (_nrd_state_denied), since
+    a copy run with only absolute words can still reach a declared file through a relative path of its
+    own once a cd has entered a declared directory. A segment holding a shell or interpreter word
+    (_nrd_interp_argvs) is in scope unless every such word's script operand is an existing regular
+    file whose lexical form and realpath lie outside every declared directory and outside /dev and
+    /proc (_nrd_script_proven), so a pipe, a here-document, /dev/stdin, a -c or -m program and source
+    of stdin all count. A nested shell -c or eval body (and the token a looser reading takes as the -c
     body) is classified recursively, to depth _NRD_MAX_C_DEPTH, from the payload working directory
     and under the enclosing command's shell-state flag (_nrd_nested_state), so a declared directory a
     quote splice hides from the raw text is still reached and a cd before an eval still governs the
@@ -28142,11 +28132,11 @@ def _nrd_scope_scan(command, cwd, dirs, _depth=0, _state=False):
     working directory and from every earlier listed cd target. The residuals are code written
     outside the declared directories (by an earlier tool call, or earlier in the same command over an
     existing file) and then run, and a program that executes files without being a listed shell or
-    interpreter word (make, a test runner, awk -f, an unlisted interpreter), including one run after
-    a directory change this guard does not follow (cd -; make). The over-deny is every shell or
-    interpreter word without such a script operand while any directory is declared, and every shell
-    or interpreter segment carrying a word that is not an absolute path beside a shell-state
-    construct (cd /x; python3 -I /abs/r.py denies on its -I)."""
+    interpreter word and not run by a path (make, a test runner, awk -f, an unlisted interpreter),
+    including one run after a directory change this guard does not follow (cd -; make). The
+    over-deny is every shell or interpreter word without such a script operand while any directory is
+    declared, and every shell or interpreter segment and every segment run by a path beside a
+    shell-state construct (cd /x; python3 -I /abs/r.py and cd /x; /usr/bin/true both deny)."""
     eff_cwd = cwd if isinstance(cwd, str) and os.path.isabs(cwd) and "\x00" not in cwd else None
     scope = (eff_cwd is not None and _nrd_match(eff_cwd, None, dirs) is True) \
         or _nrd_raw_names(command, dirs) \
@@ -28165,13 +28155,13 @@ def _nrd_scope_scan(command, cwd, dirs, _depth=0, _state=False):
         state = bool(dirs) and (bool(_state) or _nrd_shell_state(command, segments))
         for seg in segments:
             interps = _nrd_interp_argvs(seg) if dirs else []
-            if state and _nrd_state_relative(seg, interps):
-                # a directory-changing or shell-state construct stands in this command, so a relative
-                # word of a shell or interpreter segment, or a relative command path, may resolve
-                # inside a declared directory
+            if state and _nrd_state_denied(seg, interps):
+                # a directory-changing or shell-state construct stands in this command, so a shell,
+                # an interpreter or a program run by its path may run in a declared directory, where
+                # even a copy outside them reaches a declared file through a relative path of its own
                 return (seg.argv[0] if seg.argv else "a redirect with no command",
-                        "runs a shell, an interpreter or a relative path with a relative operand in "
-                        "a command that also holds a directory-changing or shell-state construct "
+                        "runs a shell, an interpreter or a program by its path in a command that "
+                        "also holds a directory-changing or shell-state construct "
                         "(cd, pushd, popd, dirs, alias, shopt, set with an option, eval, exec with a "
                         "redirect, source or the dot builtin, CDPATH or cdable_vars), whose effect "
                         "on the working directory this guard does not model; use absolute paths or "
@@ -28290,10 +28280,10 @@ def _nrd_deny_text(subject, why):
         "directory (this guard never follows a cd), its working directory is inside one, a shell or "
         "interpreter word runs no script operand that is an existing regular file outside them (a "
         "program from stdin, /dev/stdin, a pipe, a -c or -m program, or no operand at all), a shell "
-        "or interpreter segment carries a relative word beside a directory-changing or shell-state "
-        "construct (cd, pushd, popd, dirs, alias, shopt, set with an option, eval, exec with a "
-        "redirect, source or the dot builtin, CDPATH or cdable_vars), including inside an eval or "
-        "shell -c body, or this guard's lexer cannot read it. A worker-delivered file there is data "
+        "or interpreter segment, or a program run by its path, stands beside a directory-changing or "
+        "shell-state construct (cd, pushd, popd, dirs, alias, shopt, set with an option, eval, "
+        "exec with a redirect, source or the dot builtin, CDPATH or cdable_vars), including inside "
+        "an eval or shell -c body, or this guard's lexer cannot read it. A worker-delivered file there is data "
         "until it is applied, so in that scope ONLY "
         "a closed allowlist of read-only forms runs, each with its registered options: cat, wc, head, "
         "tail, ls, file, grep, diff, the coreutils hash tools, cp with the declared file only as a "

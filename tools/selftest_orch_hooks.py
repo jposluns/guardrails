@@ -12221,6 +12221,13 @@ _NRDO_FORMS = (
     ("fix/copy-rel-sh-cwd-st", "st", "bash @OUT@/rel.sh"),
     ("fix/copy-rel-py-cwd-st", "st", "python3 -I @OUT@/rel.py"),
     ("fix/copy-py-cwd-st", "st", "python3 @OUT@/copy.py"),
+    # a cd into a declared directory, then a copy outside it that runs a relative path of its own: the
+    # copy's words are all absolute, so only the directory change shows the run can reach a declared
+    # file (each is red when the shell-state rule is reverted to judging relative words only)
+    ("fix/cd-into-copy-rel-sh", "out", "cd ..; cd stage; bash @OUT@/rel.sh"),
+    ("fix/cd-into-copy-rel-py", "out", "cd ..; cd stage; python3 @OUT@/rel.py"),
+    ("fix/cd-base-into-copy-rel-sh", "out", "cd @BASE@; cd stage; bash @OUT@/rel.sh"),
+    ("fix/cd-into-copy-direct-exec", "out", "cd ..; cd stage; @OUT@/relx"),
     ("fix/inspect-stat", "out", "stat @ST@/o.sh"),
     ("fix/inspect-find", "out", "find @ST@ -type f"),
     ("fix/inspect-cmp", "out", "cmp @ST@/o.sh @OUT@/copy.sh"),
@@ -12350,10 +12357,11 @@ _NRDO_FORMS = (
 def _nrdo_generated(hooks):
     """The corpus rows generated from the guard's own declared vocabulary, as (id, cwd key, template):
     every shell and interpreter word it lists, run every way the fixture forms name (an absolute or
-    relative script, stdin, /dev/stdin and its aliases, -c, -s and -n +n); every wrapper and
-    indirection word around a shell and a python run; every shell-state word before a relative run;
-    every loader-environment name; and every allowlisted reader over a declared file. Words that change
-    privilege or repeat without bound (_NRDO_SKIPPED_WORDS) are not run."""
+    relative script, stdin, /dev/stdin and its aliases, -c, -s and -n +n, and a copy outside the
+    declared directories run after a cd into one); every wrapper and indirection word around a shell
+    and a python run; every shell-state word before a relative run; every loader-environment name; and
+    every allowlisted reader over a declared file. Words that change privilege or repeat without bound
+    (_NRDO_SKIPPED_WORDS) are not run."""
     out = []
     shells = sorted(w for w in (hooks._NRD_INTERP_WORDS | hooks._NRD_SHELL_WORDS)
                     if hooks._NRD_SH_SUFFIX_RE.match(w) or w == "posh")
@@ -12367,7 +12375,8 @@ def _nrdo_generated(hooks):
                    ("n-plus-n", "out", "@W@ -n +n @ST@/o.sh"), ("n-only", "out", "@W@ -n @ST@/o.sh"),
                    ("rel-base", "base", "@W@ stage/o.sh"), ("rel-st", "st", "@W@ o.sh"),
                    ("rel-dotdot", "out", "@W@ ../stage/o.sh"),
-                   ("copy-rel-cwd-st", "st", "@W@ @OUT@/rel.sh"))
+                   ("copy-rel-cwd-st", "st", "@W@ @OUT@/rel.sh"),
+                   ("cd-into-copy-rel", "out", "cd ..; cd stage; @W@ @OUT@/rel.sh"))
     for w in shells:
         for k, cwd, t in shell_forms:
             out.append(("gen/shell/%s/%s" % (w, k), cwd, t.replace("@W@", w)))
@@ -12385,7 +12394,8 @@ def _nrdo_generated(hooks):
                 ("c-runpy", "out", "@W@ -c \"import runpy; runpy.run_path('@ST@/o.py')\""),
                 ("m-cwd-st", "st", "@W@ -m o"), ("rel-st", "st", "@W@ o.py"),
                 ("rel-base", "base", "@W@ -I stage/o.py"),
-                ("copy-rel-cwd-st", "st", "@W@ -I @OUT@/rel.py"))
+                ("copy-rel-cwd-st", "st", "@W@ -I @OUT@/rel.py"),
+                ("cd-into-copy-rel", "out", "cd ..; cd stage; @W@ @OUT@/rel.py"))
     for w in pys:
         for k, cwd, t in py_forms:
             out.append(("gen/py/%s/%s" % (w, k), cwd, t.replace("@W@", w)))
@@ -12436,7 +12446,7 @@ def _nrdo_pin(corpus):
     return (len(corpus), digest.hexdigest())
 
 
-_NRDO_CORPUS_PIN = (593, "17f7c6a2abd0d39aaf25a73ecbd663da728f88943bb44318a195ebd42efd5757")
+_NRDO_CORPUS_PIN = (613, "03e2666b946749e1dda8abaa5b476feb2eb44bd655d27da4dda3fc88fff7d91e")
 
 
 def _nrdo_setup(base, fixture):
@@ -12477,6 +12487,9 @@ def _nrdo_setup(base, fixture):
     (hb / "ok.patch").write_text("", encoding="utf-8")
     (out / "reader.py").write_text("import sys\nprint(sys.argv)\n", encoding="utf-8")
     (out / "rel.sh").write_text("#!/bin/sh\n. ./o.sh\n", encoding="utf-8")
+    # run by its path, through bash so the sourced file's marker line names it
+    (out / "relx").write_text("#!/usr/bin/env bash\n. ./o.sh\n", encoding="utf-8")
+    (out / "relx").chmod(0o755)
     (out / "rel.py").write_text("import runpy\nrunpy.run_path('o.py')\n", encoding="utf-8")
     (out / "y.txt").write_text("y\n", encoding="utf-8")
     (out / "cdp.txt").write_text(str(root) + "\n", encoding="utf-8")
@@ -12631,6 +12644,48 @@ def _nrdo_judge(corpus, results):
         if verdict != "deny" and ran:
             bad.append(cid)
     return bad
+
+
+def _nrdo_unexercised(corpus, ran):
+    """The generated word groups (gen/shell/<word>, gen/interp/<word>, gen/py/<word> and
+    gen/wrap/<word>) none of whose rows ran declared code under real bash on this host, each as
+    (group, row count): the word is missing from PATH, or it cannot run the fixture's .sh and .py files
+    the way the rows call it. The oracle shows nothing about the guard's verdict on such rows, so they
+    are reported as not exercised rather than counted as passing."""
+    groups = {}
+    for (cid, _cwd, _tmpl), did_run in zip(corpus, ran):
+        parts = cid.split("/")
+        if len(parts) < 4 or parts[0] != "gen" or parts[1] not in ("shell", "interp", "py", "wrap"):
+            continue
+        key = "/".join(parts[:3])
+        count, any_ran = groups.get(key, (0, False))
+        groups[key] = (count + 1, any_ran or bool(did_run))
+    return sorted((key, count) for key, (count, any_ran) in groups.items() if not any_ran)
+
+
+def _nrdo_state_rule_relative_only(hooks):
+    """The shell-state rule with its shell and interpreter half reverted to the earlier reading: such a
+    segment denies only when it carries a word after its first, or a file redirect target, that is not
+    an absolute path. The path command word half stays as it is now."""
+    def rule(seg, interps):
+        argv = seg.argv
+        relative = bool(argv) and "/" in argv[0] and not os.path.isabs(argv[0])
+        relative = relative or any(tok and not os.path.isabs(tok) for tok in argv[1:])
+        relative = relative or any(
+            r.target_class != "descriptor" and not r.op.startswith("<<")
+            and not (isinstance(r.target, str) and os.path.isabs(r.target)) for r in seg.redirects)
+        head = hooks._nrd_command_word(argv)
+        return (bool(interps) and relative) or (bool(head) and "/" in head[0])
+    return rule
+
+
+def _nrdo_state_rule_relative_head_only(hooks):
+    """The shell-state rule with its path command word half reverted to the earlier reading: only a
+    relative command path denies. The shell and interpreter half stays as it is now."""
+    def rule(seg, interps):
+        head = hooks._nrd_command_word(seg.argv)
+        return bool(interps) or (bool(head) and "/" in head[0] and not os.path.isabs(head[0]))
+    return rule
 
 
 def main(report_path=None):
@@ -17912,6 +17967,46 @@ def _main_isolated(report_path=None):
               [nrdo_by_id[k][2] for k in ("fix/ctl-bash-abs", "fix/ctl-py-abs", "fix/ctl-cat")],
               [True, True, False])
         check("nrd/oracle-no-allowed-declared-run", _nrdo_judge(nrdo_corpus, nrdo_real), [])
+        # a cd into a declared directory, then a copy outside it run with only absolute words: real
+        # bash runs declared code for each row, and the guard denies each
+        nrdo_cd_ids = ("fix/cd-into-copy-rel-sh", "fix/cd-into-copy-rel-py",
+                       "fix/cd-base-into-copy-rel-sh", "fix/cd-into-copy-direct-exec")
+        check("nrd/oracle-cd-into-copy-denied-and-ran",
+              [(nrdo_by_id[k][0], nrdo_by_id[k][2]) for k in nrdo_cd_ids], [("deny", True)] * 4)
+
+        def _nrdo_flip_red(rule):
+            # the oracle's failures on the cd-into rows with the shell-state rule replaced by rule
+            real_rule = aiqt_hooks._nrd_state_denied
+            setattr(aiqt_hooks, "_nrd_state_denied", rule)
+            try:
+                return [cid for n, (cid, cwd_key, tmpl) in enumerate(nrdo_corpus)
+                        if cid in nrdo_cd_ids and nrdo_by_id[cid][2]
+                        and _nrdo_guard(aiqt_hooks, nrdo_fx, _nrdo_expand(tmpl, nrdo_fx, n),
+                                        nrdo_fx[cwd_key]) != "deny"]
+            finally:
+                setattr(aiqt_hooks, "_nrd_state_denied", real_rule)
+
+        # reverting the shell and interpreter half of the shell-state rule to relative words only lets
+        # the three copy runs through; reverting its path half to relative paths only lets the run by
+        # an absolute path through
+        check("nrd/oracle-flip-state-relative-only-red",
+              _nrdo_flip_red(_nrdo_state_rule_relative_only(aiqt_hooks)), list(nrdo_cd_ids[:3]))
+        check("nrd/oracle-flip-state-relative-head-only-red",
+              _nrdo_flip_red(_nrdo_state_rule_relative_head_only(aiqt_hooks)), [nrdo_cd_ids[3]])
+        # rows that never ran declared code on this host are reported as not exercised, not counted
+        nrdo_unex = _nrdo_unexercised(nrdo_corpus, [r for _v, _m, r in nrdo_rows])
+        # reported on standard output: the suite's error stream must stay empty
+        if nrdo_unex:
+            print("NOTE: oracle rows not exercised on this host (no row of the group ran declared "
+                  "code, so the oracle shows nothing for it): {}".format(
+                      ", ".join("%s (%d rows)" % g for g in nrdo_unex)))
+        check("nrd/oracle-unexercised-reported",
+              _nrdo_unexercised([("gen/shell/a/x", "out", "t"), ("gen/shell/a/y", "out", "t"),
+                                 ("gen/shell/b/x", "out", "t"), ("fix/z", "out", "t")],
+                                [False, False, True, False]),
+              [("gen/shell/a", 2)])
+        check("nrd/oracle-unexercised-excludes-live",
+              sorted({"gen/shell/bash", "gen/py/python3"} & {g for g, _n in nrdo_unex}), [])
         # mutation: with the core scope scan disabled, the oracle is red on real runs, not on the pin
         nrdo_mut = _nrdo_judge(nrdo_corpus, [(m, r) for _v, m, r in nrdo_rows])
         check("nrd/oracle-mutant-core-disabled-red",
