@@ -2512,15 +2512,81 @@ _CENSUS_MAPPINGS = (
     ("opf/tools/_journal.py", "_st_fd_table_eio", ("--self-test",)),      # the descriptor-helper clause
 )
 
+# A census run is a tool's whole self-test (the injected read fails only at its close vectors, near the
+# end), so its kill bound must outlive that self-test's own end-to-end budget. A tool listed in
+# _CENSUS_BUDGETED must declare that budget as a module-level SELF_TEST_BUDGET_S integer (load-adjusted
+# seconds), read from its source without importing it; its run is bounded at that budget plus
+# CENSUS_BOUND_MARGIN_S, never at a separately chosen number. Any other tool keeps TIMEOUT * 4. Every
+# bound runs on the load-adjusted clock of tools/_load_bound.py, the clock the child's own bounds use, so
+# host load stretches the parent's bound as it stretches the child's waits. A run that outlives its bound
+# is stopped (its whole process group) as _load_bound.Hung, a subprocess.TimeoutExpired, which main()
+# reports as cannot-evaluate (exit 2), never a pass.
+CENSUS_BOUND_MARGIN_S = TIMEOUT  # one parent call bound: interpreter start-up, the driver and the teardown
+_CENSUS_DEFAULT_BOUND_S = TIMEOUT * 4
+_CENSUS_BUDGETED = ("tools/check_gensrc_failclose.py",)
+_BUDGET_LINE = re.compile(r"^SELF_TEST_BUDGET_S = ([1-9][0-9]*)[ \t]*(?:#[^\n]*)?$", re.MULTILINE | re.ASCII)
+
+
+def _declared_budget(path):
+    """The SELF_TEST_BUDGET_S the tool at path declares on exactly one module-level line, as an int.
+    Anything else (no such line, more than one, or a name assigned on another line) is cannot-evaluate."""
+    source = path.read_text(encoding="utf-8")
+    found = _BUDGET_LINE.findall(source)
+    require(len(found) == 1 and len(re.findall(r"^SELF_TEST_BUDGET_S\b", source, re.MULTILINE)) == 1,
+            "{}: expected exactly one module-level SELF_TEST_BUDGET_S = <integer> line".format(path))
+    return int(found[0])
+
+
+def _census_bound(root, rel):
+    """(declared budget or None, kill bound in load-adjusted seconds) for the census run of rel."""
+    if rel in _CENSUS_BUDGETED:
+        budget = _declared_budget(root / rel)
+        return budget, budget + CENSUS_BOUND_MARGIN_S
+    return None, _CENSUS_DEFAULT_BOUND_S
+
+
+def _bound_outlives(bound, budget):
+    """True when a kill bound outlives the declared budget it waits on by at least the margin (no declared
+    budget: nothing to outlive)."""
+    return budget is None or bound >= budget + CENSUS_BOUND_MARGIN_S
+
+
+def _census_run(args, bound):
+    """Run one census child under bound: its load-adjusted budget and, as the stall bound, the same number
+    of wall seconds, so neither stop fires before an idle host has spent the whole bound."""
+    import _load_bound
+    return _load_bound.run(args, budget_s=bound, stall_s=bound)
+
+
+def _census_bound_checks(root):
+    """The bound checks of the census runs: each budgeted tool declares its budget, every run's bound
+    outlives the budget it waits on, the comparison holds at its edge, and a child that hangs past its
+    bound is still stopped as a subprocess.TimeoutExpired (main() maps it to exit 2)."""
+    margin = CENSUS_BOUND_MARGIN_S
+    bounds = {rel: _census_bound(root, rel) for rel, _target, _argv in _CENSUS_MAPPINGS}
+    check("census-bound-declared", all(bounds[rel][0] is not None for rel in _CENSUS_BUDGETED))
+    check("census-bound-outlives-budget",
+          all(_bound_outlives(bound, budget) for budget, bound in bounds.values()))
+    check("census-bound-edge", [_bound_outlives(600 + margin + delta, 600) for delta in (-0.001, 0, 0.001)]
+          + [_bound_outlives(TIMEOUT * 4, 600), _bound_outlives(600, 600)] == [False, True, True, False, False])
+    hung = None
+    try:
+        _census_run([sys.executable, "-I", "-B", "-c", "import time\ntime.sleep(3600)\n"], 2)
+    except subprocess.TimeoutExpired as exc:
+        hung = exc
+    check("census-bound-hang-stops", isinstance(hung, subprocess.SubprocessError))
+    for rel, (budget, bound) in sorted(bounds.items()):
+        print("PASS census-bound {} budget={} bound={}".format(rel, budget, bound))
+
 
 def _census_mapping_check(root):
     """Each self-test in _CENSUS_MAPPINGS, run under CENSUS_DRIVER, must end exit 2 with its cannot-evaluate
     report naming the held descriptor ("SELF-TEST ERROR: descriptor census cannot evaluate descriptor N:"),
-    never a traceback (exit 1) or a pass. Returns (failures, runs)."""
+    never a traceback (exit 1) or a pass. Each run is bounded by _census_bound. Returns (failures, runs)."""
     failures = []
     for rel, target, argv in _CENSUS_MAPPINGS:
-        result = subprocess.run([sys.executable, "-I", "-B", "-c", CENSUS_DRIVER, str(root / rel), target, *argv],
-                                capture_output=True, timeout=TIMEOUT * 4)
+        result = _census_run([sys.executable, "-I", "-B", "-c", CENSUS_DRIVER, str(root / rel), target, *argv],
+                             _census_bound(root, rel)[1])
         err = result.stderr.decode("utf-8", "replace")
         held = re.match(r"census-held (\d+)\n", err, re.ASCII)
         want = held and ("SELF-TEST ERROR: descriptor census cannot evaluate descriptor " + held.group(1)
@@ -2740,6 +2806,7 @@ def _self_test_isolated(red_on_revert):
         for failure in stage_failures:
             print("FAIL " + failure, file=sys.stderr)
         check("close-stage-census-mapping", not stage_failures)
+        _census_bound_checks(script.parents[1])
         mapping_failures, mapping_runs = _census_mapping_check(script.parents[1])
         for failure in mapping_failures:
             print("FAIL " + failure, file=sys.stderr)

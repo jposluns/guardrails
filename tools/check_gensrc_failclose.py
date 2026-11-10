@@ -175,6 +175,12 @@ PROBE_TIMEOUT = 120  # per --check; an own exit beside the stop stands, else can
 # silent; 60 s is far above that on a working host.
 PROBE_STALL_S = 60
 TOTAL_TIMEOUT = 1800  # backstop for the whole sweep; exceeding it is cannot-evaluate, never a hang
+# The end-to-end budget of this tool's own --self-test, in load-adjusted seconds. A caller that runs the
+# self-test as a child (tools/check_release_cut.py, under an injected census read failure) reads this
+# line and bounds that run at this budget plus its own stated margin, so its kill bound outlives the
+# whole self-test. Sized at about four times a run measured with no added load (about 150 s). The
+# self-test does not enforce it on itself; raise it here, never in a caller, when the self-test grows.
+SELF_TEST_BUDGET_S = 600
 # Wall-clock bound on EACH ONE setup step, per call: every template-setup git call (init, the real_root
 # ls-files, add, commit, the gc, the post-gc readbacks) and, in the self-test, every fixture build step
 # (a fixture git call or a generator write run). Deliberately NOT PROBE_TIMEOUT: the self-test cuts
