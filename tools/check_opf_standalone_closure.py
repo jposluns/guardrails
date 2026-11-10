@@ -1671,23 +1671,32 @@ def _tail(output, keep=3):
 
 # The failure evidence a launched leg that did not exit 0 keeps (_failure_evidence): a positive
 # status, a signal or a kill at its bound. It holds the lines of its output naming a failure, then its
-# last _EVIDENCE_TAIL_LINES lines, so a failing row inside a long leg is reported without a re-run.
-# The size is bounded: at most _EVIDENCE_MAX_FAILURE_LINES failure lines (the count left out is
-# stated), and each line clipped to _EVIDENCE_LINE_CHARS characters (the count clipped is stated), so
-# the whole evidence is at most _EVIDENCE_MAX_CHARS characters, whatever the leg wrote.
+# last _EVIDENCE_TAIL_LINES lines, so a failing row inside a long leg can be read without a re-run when
+# it is among the failure lines kept or in the last lines. The size is bounded: at most
+# _EVIDENCE_MAX_FAILURE_LINES failure lines (past the cap a line naming a failure is left out and only
+# the count left out is stated), and each line clipped to _EVIDENCE_LINE_CHARS characters (the count
+# clipped is stated), so the whole evidence is at most _EVIDENCE_MAX_CHARS characters, whatever the
+# leg wrote.
 _EVIDENCE_TAIL_LINES = 40
 _EVIDENCE_MAX_FAILURE_LINES = 60
 _EVIDENCE_LINE_CHARS = 400
-# A line names a failure when it carries FAIL (FAILED included) or CANNOT EVALUATE as a word,
-# AssertionError, or opens a traceback; the exception line that ends a traceback (its first unindented
-# line after the header) is kept too (_failure_evidence). The match is case-sensitive: lowercase prose
-# such as "fails closed" in a passing row's description is not a failure. A line that names FAIL only
-# inside a row whose own verdict is PASS (its last PASS or FAIL word is PASS, as in "FAIL vectors
-# rejected as designed: PASS") is ranked after every other failure line when the cap cuts, so such
-# passing rows cannot crowd the leg's real failure out; a word such as FAILSAFE still matches.
+# A line names a failure when it carries FAIL (FAILED included), CANNOT EVALUATE or CANNOT-EVALUATE,
+# DRIFT or ERROR as a word, AssertionError or "Failed to parse", or opens a traceback (its header at
+# any indent); the exception line that ends a traceback (its first nonblank line after the header
+# indented no deeper than the header) is kept too (_failure_evidence). The match is case-sensitive:
+# lowercase prose such as "fails closed" in a passing row's description is not a failure. A row's own
+# verdict is its FIRST verdict word (PASS, or a word naming a failure), as opf's self-test rows print
+# it ("opf cli self-test: PASS (...)"); a line whose first verdict word is PASS names a failure only
+# in its detail ("PASS (FAIL vectors rejected as designed)") and is ranked after every other failure
+# line when the cap cuts, so such passing rows cannot crowd the leg's real failure out, while a failing
+# row that names PASS later ("FAIL row 250: expected PASS") keeps its failure rank. A failing row
+# that names PASS before its failure word ("expected PASS, got FAIL") is ranked as passing, and a word
+# such as FAILSAFE still matches.
 _TRACEBACK_HEADER = "Traceback (most recent call last):"
-_FAILURE_LINE_RE = re.compile(r"\bFAIL|\bCANNOT EVALUATE\b|AssertionError|^" + re.escape(_TRACEBACK_HEADER))
-_VERDICT_WORD_RE = re.compile(r"\bPASS\b|\bFAIL")
+_FAILURE_WORDS = (r"\bFAIL|\bCANNOT[ -]EVALUATE\b|\bDRIFT\b|\bERROR\b|AssertionError|"
+                  r"Failed to parse")
+_FAILURE_LINE_RE = re.compile(_FAILURE_WORDS + r"|^\s*" + re.escape(_TRACEBACK_HEADER))
+_VERDICT_WORD_RE = re.compile(r"\bPASS\b|" + _FAILURE_WORDS)
 # Every evidence line is a two-space indent, a line number of at most 12 digits and ": " (16
 # characters), then at most _EVIDENCE_LINE_CHARS characters of the line and a clip note of at most
 # 48 characters; the evidence adds two header lines of at most 200 characters each (the bound counts
@@ -1723,6 +1732,14 @@ class _LegOutput(str):
         return value
 
 
+def _kept_output(output):
+    """The row text of a launched leg that did not exit 0, from its whole output (bytes): its final
+    lines (_tail) carrying its bounded failure evidence (_failure_evidence), a _LegOutput. _run_one
+    gives it for such a leg, and the negative leg, which _run_one runs raw, reports its caught flip
+    through it, so both keep the same evidence."""
+    return _LegOutput(_tail(output), _failure_evidence(output))
+
+
 def _clip_text(text, width):
     """text, clipped to width characters with the count clipped stated (the note adds at most 48)."""
     if len(text) > width:
@@ -1737,12 +1754,16 @@ def _evidence_line(number, text):
 
 
 def _passing_mention(text):
-    """Whether a line naming a failure names only FAIL, inside a row whose own verdict is PASS: no
-    CANNOT EVALUATE or AssertionError, and its last PASS or FAIL word is PASS."""
-    if "CANNOT EVALUATE" in text or "AssertionError" in text:
-        return False
-    words = _VERDICT_WORD_RE.findall(text)
-    return bool(words) and words[-1] == "PASS"
+    """Whether a line naming a failure is a row whose own verdict is PASS: its first verdict word (PASS
+    or a word naming a failure, _VERDICT_WORD_RE) is PASS, so the failure is named only in the row's
+    detail."""
+    first = _VERDICT_WORD_RE.search(text)
+    return first is not None and first.group() == "PASS"
+
+
+def _indent(text):
+    """The number of leading whitespace characters of text."""
+    return len(text) - len(text.lstrip())
 
 
 def _failure_evidence(output):
@@ -1750,30 +1771,33 @@ def _failure_evidence(output):
     output naming a failure (_FAILURE_LINE_RE, plus the exception line ending each traceback), in
     order and numbered, then its last _EVIDENCE_TAIL_LINES lines, numbered. Bounded: at most
     _EVIDENCE_MAX_FAILURE_LINES failure lines are kept, the lines whose own verdict is a failure
-    first (a line naming FAIL inside a row whose verdict is PASS, _passing_mention, only fills what is
-    left), and the number left out is stated; every line is clipped to _EVIDENCE_LINE_CHARS
-    characters with the number clipped stated, so the joined evidence is at most _EVIDENCE_MAX_CHARS
-    characters. Pure: it reads only output."""
+    first, earliest first (a row whose own verdict is PASS, _passing_mention, only fills what is
+    left), and the number left out is stated; past the cap a line naming a failure is not shown, even
+    one whose own verdict is a failure. Every line is clipped to _EVIDENCE_LINE_CHARS characters with
+    the number clipped stated, so the joined evidence is at most _EVIDENCE_MAX_CHARS characters. Pure:
+    it reads only output."""
     lines = (output or b"").decode("utf-8", "replace").splitlines()
     named = []
-    in_traceback = False
+    traceback_indent = None
     for number, text in enumerate(lines, 1):
-        if text.startswith(_TRACEBACK_HEADER):
-            in_traceback = True
+        if text.lstrip().startswith(_TRACEBACK_HEADER):
+            traceback_indent = _indent(text)
+            named.append((False, number, text))
+            continue
+        ends_traceback = (traceback_indent is not None and text.strip() != ""
+                          and _indent(text) <= traceback_indent)
+        if ends_traceback:
+            traceback_indent = None
             named.append((False, number, text))
         elif _FAILURE_LINE_RE.search(text):
             named.append((_passing_mention(text), number, text))
-            in_traceback = in_traceback and text[:1].isspace()
-        elif in_traceback and text and not text[:1].isspace():
-            named.append((False, number, text))
-            in_traceback = False
     kept = sorted(sorted(named)[:_EVIDENCE_MAX_FAILURE_LINES], key=lambda item: item[1])
     kept = [(number, text) for _passing, number, text in kept]
     passing = sum(1 for item in named if item[0])
     first_tail = max(1, len(lines) - _EVIDENCE_TAIL_LINES + 1)
     evidence = ["failure evidence: {} line(s) naming a failure{}:".format(
         len(named), "" if len(kept) == len(named) else
-        "; {} shown, {} more not shown ({} name FAIL only in a row whose verdict is PASS; those are "
+        "; {} shown, {} more not shown ({} name a failure only in a row whose verdict is PASS; those are "
         "ranked last)".format(len(kept), len(named) - len(kept), passing))]
     evidence.extend(_evidence_line(number, text) for number, text in kept)
     evidence.append("last {} of {} output line(s):".format(len(lines) - first_tail + 1, len(lines)))
@@ -1892,7 +1916,7 @@ def _run_one(opf_root, script, args, run_dir, env, bound_s, drain_s=_DRAIN_MARGI
     def kept(stdout):
         # A leg that did not exit 0 (a positive status, a signal, or a kill at its bound) keeps its
         # failure evidence beside the final lines, which stay the text the verdict reads (_LegOutput).
-        return (stdout or b"") if raw else _LegOutput(_tail(stdout), _failure_evidence(stdout))
+        return (stdout or b"") if raw else _kept_output(stdout)
 
     def harness(message):
         return message.encode("utf-8") if raw else message
@@ -1996,9 +2020,11 @@ def _report(results):
     pipe still held by an escaped descendant) is reported as CLEANUP INCOMPLETE by name, and never reads
     as clean either. The summary line of a leg that failed, declared cannot-evaluate, was ended by a
     signal or was killed at its bound is followed by the bounded failure evidence _run_one kept for it
-    (up to _EVIDENCE_MAX_FAILURE_LINES lines naming a failure, then its last lines; _failure_evidence),
-    so a failing row that the leg printed and the pattern names is reported without a re-run; a
-    passing leg's report is unchanged. The whole report is bounded: each shown line of a leg's final
+    (up to _EVIDENCE_MAX_FAILURE_LINES lines naming a failure, then its last lines; _failure_evidence).
+    A failing row that the leg printed and the pattern names is reported without a re-run only when
+    the cap keeps it (rows whose own verdict is a failure are kept first, earliest first) or it is
+    among the last lines; past the cap only the count left out is stated. A passing leg's report is
+    unchanged. The whole report is bounded: each shown line of a leg's final
     lines is clipped to _EVIDENCE_LINE_CHARS characters and every printed line to _REPORT_LINE_CHARS,
     each clip stated, so the report is at most _report_max_chars(len(results)) characters. A sweep that
     ran NO leg proves nothing: an empty results list is refused (2), and the OK line is printed only
@@ -3930,11 +3956,12 @@ def _closure_legs(root, required, run_closure=None, run_one=None, legs=None):
                         # The caught flip's REAL result also goes through _report: the upward edge must
                         # be reported as closure BROKEN with exit 1, never as closure-not-evaluated
                         # (the flip's bootstrap failure exits 2 with a lowercase "(cannot evaluate)",
-                        # which is not the marker).
+                        # which is not the marker). Its row keeps the failure evidence of its whole raw
+                        # output (_kept_output), as _run_one keeps it for a leg that did not exit 0.
                         out = io.StringIO()
                         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
-                            code = _report([(_FLIP_LEG, rc, _tail(output), elapsed, launched, bound,
-                                             cleanup)])
+                            code = _report([(_FLIP_LEG, rc, _kept_output(output), elapsed, launched,
+                                             bound, cleanup)])
                         said = out.getvalue()
                         if code != 1 or "STANDALONE CLOSURE: BROKEN" not in said:
                             found = [(1, "negative: a re-introduced upward edge (import check_versions) "
@@ -4183,16 +4210,19 @@ def _verdict_routing_self_test():
                                 "2; flips {!r}): {!r}".format(code, flips, said))
         # A flip caught as the exact bytes is also judged by _report (the module name _closure_legs
         # looks up rebound): a report of exit 2 (even one that says BROKEN) or of exit 1 without the
-        # BROKEN verdict is a failure (1), and _report must be given the flipped leg's own row.
+        # BROKEN verdict is a failure (1), and _report must be given the flipped leg's own row, carrying
+        # the failure evidence of its whole raw output (_kept_output), as the other legs' rows do.
         for label, report_code, report_said in (
                 ("flip-reported-as-exit-2", 2, "STANDALONE CLOSURE: BROKEN (injected)"),
                 ("flip-reported-without-broken", 1,
                  "STANDALONE CLOSURE: LEG CANNOT EVALUATE (injected)")):
             del flips[:]
             reported = []
+            evidence = []
 
             def report(results, report_code=report_code, report_said=report_said):
                 reported.append([tuple(row[:6]) for row in results])
+                evidence.append([getattr(row[2], "evidence", None) for row in results])
                 print(report_said)
                 return report_code
 
@@ -4206,6 +4236,7 @@ def _verdict_routing_self_test():
             said = out.getvalue()
             if (code != 1 or flips != flipped
                     or reported != [[(_FLIP_LEG, _FLIP_EXIT, _tail(_FLIP_BYTES), 0.1, True, 1458)]]
+                    or evidence != [[_failure_evidence(_FLIP_BYTES)]]
                     or "SELF-TEST FAIL: negative: a re-introduced upward edge (import check_versions) "
                        "was NOT reported as closure broken" not in said
                     or "_report returned {} on the leg's rc={!r}".format(report_code, _FLIP_EXIT)
@@ -5023,11 +5054,14 @@ def _evidence_sections(evidence):
 
 def _failure_evidence_self_test():
     """A launched leg that did not exit 0 keeps its failure evidence, bounded, the whole report is
-    bounded, and a passing leg's report is unchanged. Stub legs run through the real runner (_run_one:
-    sys.executable -I -B on a stub script in a temporary directory, the only executable reached; it
-    reads a data file there, writes it out, then exits with the status given, ends itself with the
-    signal given, or sleeps for at most 120 s until the runner kills it at its bound; no network,
-    nothing written outside that directory) and their rows go through _report. MIDDLE LINE: a leg
+    bounded, and a passing leg's report is unchanged. The MIDDLE LINE, TIMEOUT, SIGNAL, CANNOT EVALUATE
+    and PASSING rows, and the failed leg of REPORT BOUND, run stub legs through the real runner
+    (_run_one: sys.executable -I -B on a stub script in a temporary directory, the only executable
+    reached; it reads a data file there, writes it out, then exits with the status given, ends itself
+    with the signal given, or sleeps for at most 120 s until the runner kills it at its bound; no
+    network, nothing written outside that directory) and their rows go through _report; the other
+    rows call _failure_evidence directly, and REPORT BOUND builds its other four rows directly and
+    gives them to _report. MIDDLE LINE: a leg
     exiting 1 with its one failure line at line 250 of 500 is reported with that line, numbered, and
     its last 40 lines; the 3-line tail alone, the whole report before this evidence was kept, loses it
     (the red side, shown on the same row). TIMEOUT: a leg that prints a failure line, then 50 progress
@@ -5037,9 +5071,12 @@ def _failure_evidence_self_test():
     exiting 2 with the marker in its final lines shows its middle failure line under LEG CANNOT
     EVALUATE, and a leg exiting 2 with the marker only in the middle is still BROKEN (the marker is
     still read in the final lines alone). TRACEBACK: a traceback's header and its exception line are
-    kept, an AssertionError line is kept, and lowercase prose such as "fails closed" is not. RANKED:
-    with 500 passing rows that name FAIL inside a PASS verdict and the real failure at line 250, the
-    real failure is kept within the cap. PASSING: a passing leg's row is a plain str with no evidence,
+    kept, an AssertionError line is kept, and lowercase prose such as "fails closed" is not. FORMATS:
+    a DRIFT, a CANNOT-EVALUATE, an ERROR and a Failed to parse line are each kept, and so are an
+    indented traceback's header and its exception line. RANKED: with 500 passing rows that name FAIL
+    in the detail after their PASS verdict and the real failure at line 250, the real failure is kept
+    within the cap. OWN VERDICT: four failing rows whose last PASS or FAIL word is PASS (their first
+    is a failure word) among 496 such passing rows are all kept within the cap. PASSING: a passing leg's row is a plain str with no evidence,
     and its report is the OK row and OK line byte for byte. BOUND: failure lines at the cap less one,
     at the cap and one over it (the count left out stated only over it), a line at the clip length
     less one, at it and one over it (clipped, the count stated, only over it), outputs of 39, 40 and
@@ -5158,17 +5195,38 @@ def _failure_evidence_self_test():
         print("PASS closure/failure-evidence-traceback (the header and the exception line kept, "
               "AssertionError kept, lowercase prose not)")
 
-        crowd = ["opf case {}: FAIL vectors rejected as designed: PASS".format(number)
+        indented = ["opf adopt self-test: PASS", "  " + _TRACEBACK_HEADER, '    File "x.py", line 3, in run',
+                    "      raise ValueError('bad row')", "", "  ValueError: bad row", "opf case 7: PASS"]
+        for check, text, want_named in (
+                ("failure-evidence-format-drift", "opf render --check: DRIFT: views/index.md",
+                 ["  2: opf render --check: DRIFT: views/index.md"]),
+                ("failure-evidence-format-cannot-evaluate", "  CANNOT-EVALUATE: store unreadable",
+                 ["  2:   CANNOT-EVALUATE: store unreadable"]),
+                ("failure-evidence-format-error", "opf watchdog: ERROR:OSError on fork",
+                 ["  2: opf watchdog: ERROR:OSError on fork"]),
+                ("failure-evidence-format-failed-to-parse", "opf doctor: Failed to parse opf/manifest.toml",
+                 ["  2: opf doctor: Failed to parse opf/manifest.toml"]),
+                ("failure-evidence-format-indented-traceback", None,
+                 ["  2:   " + _TRACEBACK_HEADER, "  6:   ValueError: bad row"])):
+            output = indented if text is None else ["opf adopt self-test: PASS", text, "opf case 7: PASS"]
+            named, _tail_lines = _evidence_sections(_under_test(
+                check, _failure_evidence, "\n".join(output).encode("utf-8")))
+            if named != want_named:
+                raise _CheckFailure("closure/{}: {!r}".format(check, named))
+        print("RED a DRIFT, CANNOT-EVALUATE, ERROR or Failed to parse line, or an indented traceback -> "
+              "not matched as a failure before; each is now kept, the traceback with its exception line")
+
+        crowd = ["opf case {} self-test: PASS (FAIL vectors rejected as designed)".format(number)
                  for number in range(1, 501)]
         crowd[249] = middle
-        crowd[299] = "opf case 300: expected PASS, got FAIL"
+        crowd[299] = "opf case 300: FAIL: expected PASS, got FAIL"
         evidence = _under_test("failure-evidence-ranked", _failure_evidence,
                                "\n".join(crowd).encode("utf-8"))
         named, _tail_lines = _evidence_sections(evidence)
         first_cut = [number for number, text in enumerate(crowd, 1)
                      if _FAILURE_LINE_RE.search(text)][:_EVIDENCE_MAX_FAILURE_LINES]
         if (evidence[0] != "failure evidence: 500 line(s) naming a failure; {} shown, {} more not shown "
-                           "(498 name FAIL only in a row whose verdict is PASS; those are ranked "
+                           "(498 name a failure only in a row whose verdict is PASS; those are ranked "
                            "last):".format(_EVIDENCE_MAX_FAILURE_LINES, 500 - _EVIDENCE_MAX_FAILURE_LINES)
                 or len(named) != _EVIDENCE_MAX_FAILURE_LINES or named[0] != "  1: " + crowd[0]
                 or named[-2:] != ["  250: " + middle, "  300: " + crowd[299]] or 250 in first_cut):
@@ -5176,6 +5234,22 @@ def _failure_evidence_self_test():
         print("RED 500 passing rows naming FAIL inside a PASS verdict and the real failure at line 250 "
               "-> the first {} matches alone lose it; the ranked cap keeps it and a row whose verdict is "
               "FAIL".format(_EVIDENCE_MAX_FAILURE_LINES))
+
+        own = {250: "opf case 250: FAIL row 250: expected PASS", 300: "FAILED: test_status (wanted PASS)",
+               350: "opf case 350: FAIL: verdict should be PASS",
+               400: "SELF-TEST FAIL: 1 of 500 rows did not PASS"}
+        verdicts = list(crowd)
+        for number, text in own.items():
+            verdicts[number - 1] = text
+        evidence = _under_test("failure-evidence-own-verdict", _failure_evidence,
+                               "\n".join(verdicts).encode("utf-8"))
+        named, _tail_lines = _evidence_sections(evidence)
+        if (named[-4:] != ["  {}: {}".format(number, text) for number, text in sorted(own.items())]
+                or "(496 name a failure only in a row whose verdict is PASS" not in evidence[0]):
+            raise _CheckFailure("closure/failure-evidence-own-verdict: {!r}".format(evidence[:1] + named[-5:]))
+        print("RED a failing row whose last PASS or FAIL word is PASS, among 496 passing rows naming FAIL "
+              "in their detail -> ranked as passing by its last word and cut; ranked by its first verdict "
+              "word, it is kept")
 
         passing = ["opf case 1: FAIL vectors rejected as designed: PASS", "SELF-TEST PASS"]
         rc, tail, elapsed, launched, cleanup = leg("failure-evidence-passing-changed", passing, 0)
@@ -5192,7 +5266,7 @@ def _failure_evidence_self_test():
         for count, header in ((cap - 1, "failure evidence: {} line(s) naming a failure:".format(cap - 1)),
                               (cap, "failure evidence: {} line(s) naming a failure:".format(cap)),
                               (cap + 1, "failure evidence: {} line(s) naming a failure; {} shown, 1 "
-                                        "more not shown (0 name FAIL only in a row whose verdict is "
+                                        "more not shown (0 name a failure only in a row whose verdict is "
                                         "PASS; those are ranked last):".format(cap + 1, cap))):
             evidence = _under_test("failure-evidence-bound", _failure_evidence,
                                    "\n".join(["FAIL {}".format(n) for n in range(count)]).encode("utf-8"))
