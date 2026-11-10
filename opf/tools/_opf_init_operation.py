@@ -3302,14 +3302,16 @@ def _child_main(argv):
             return out
         _apply_dirs = apply_dirs
     elif name in ("attached", "detached"):
-        target = "attach_init_lease" if name == "attached" else "detach_init_lease"
-        real = getattr(_opf_oplock, target)
-
-        def wrapped(*a):
-            out = real(*a)
-            die()
-            return out
-        setattr(_opf_oplock, target, wrapped)
+        def dying(real):
+            def wrapped(*a):
+                out = real(*a)
+                die()
+                return out
+            return wrapped
+        if name == "attached":
+            _opf_oplock.attach_init_lease = dying(_opf_oplock.attach_init_lease)
+        else:
+            _opf_oplock.detach_init_lease = dying(_opf_oplock.detach_init_lease)
     elif name == "source":
         real_stage = _stage_and_publish
 
@@ -3377,8 +3379,15 @@ def _child_main(argv):
         raise SystemExit("unknown kill point {!r}".format(kill))
     res = run_init_operation(root, ancestral=None if seed == "-" else seed, recover=recover == "1",
                              operation_id=opid, homes2=_opf_store.init_writes_homes2())
-    print(json.dumps({_slot: getattr(res, _slot) for _slot in InitResult.__slots__},
-                     sort_keys=True))
+    # Every InitResult slot, each read by its own literal attribute name.
+    print(json.dumps({"status": res.status, "operation_id": res.operation_id,
+                      "plan_digest": res.plan_digest, "milestone": res.milestone,
+                      "created": res.created, "deduplicated": res.deduplicated,
+                      "conflicts": res.conflicts, "notes": res.notes,
+                      "primary_failure": res.primary_failure,
+                      "finalization_failures": res.finalization_failures,
+                      "phases": res.phases, "staging_removed": res.staging_removed,
+                      "recovered": res.recovered}, sort_keys=True))
     return 0
 
 
@@ -5591,8 +5600,10 @@ def _install_fault_hooks():
 
     # The modules that create a subinterpreter are made unimportable (an import is an ImportError the
     # gate's work fails on): a thread inside one reports its faults to that interpreter's own hooks.
-    for _name in ("_interpreters", "concurrent.interpreters", "_testinternalcapi", "_testcapi"):
-        sys.modules[_name] = None
+    sys.modules["_interpreters"] = None
+    sys.modules["concurrent.interpreters"] = None
+    sys.modules["_testinternalcapi"] = None
+    sys.modules["_testcapi"] = None
 
     previous_unraisable = sys.unraisablehook
     previous_thread = _threads.excepthook
@@ -5676,18 +5687,27 @@ def _install_fault_hooks():
             return result
         return _start
 
+    # Each low-level start entry the interpreter has is wrapped by its literal name, and so is
+    # threading's own module-level alias of one (_start_new_thread, or _start_joinable_thread
+    # from 3.13), each spelled out so no attribute name is computed.
     _wrapped = []
-    for _entry in ("start_new_thread", "start_new", "start_joinable_thread"):
-        if hasattr(_lowlevel, _entry):
-            _original = getattr(_lowlevel, _entry)
-            _replacement = _wrap_lowlevel(_original)
-            setattr(_lowlevel, _entry, _replacement)
-            _wrapped.append((_original, _replacement))
-    for _alias in dir(_threads):
-        _value = getattr(_threads, _alias)
-        for _original, _replacement in _wrapped:
-            if _value is _original:
-                setattr(_threads, _alias, _replacement)
+    if hasattr(_lowlevel, "start_new_thread"):
+        _original = _lowlevel.start_new_thread
+        _lowlevel.start_new_thread = _wrap_lowlevel(_original)
+        _wrapped.append((_original, _lowlevel.start_new_thread))
+    if hasattr(_lowlevel, "start_new"):
+        _original = _lowlevel.start_new
+        _lowlevel.start_new = _wrap_lowlevel(_original)
+        _wrapped.append((_original, _lowlevel.start_new))
+    if hasattr(_lowlevel, "start_joinable_thread"):
+        _original = _lowlevel.start_joinable_thread
+        _lowlevel.start_joinable_thread = _wrap_lowlevel(_original)
+        _wrapped.append((_original, _lowlevel.start_joinable_thread))
+    for _original, _replacement in _wrapped:
+        if getattr(_threads, "_start_new_thread", None) is _original:
+            _threads._start_new_thread = _replacement
+        if getattr(_threads, "_start_joinable_thread", None) is _original:
+            _threads._start_joinable_thread = _replacement
 
 
 # The OS's own list of this process's threads (Linux): it still shows a worker while the runtime clears

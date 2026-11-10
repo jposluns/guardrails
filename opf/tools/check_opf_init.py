@@ -688,7 +688,8 @@ _HOMES_READ_CONSUMERS = frozenset(["dict", "list", "tuple", "sorted", "len", "se
 _HOMES_READ_METHODS = frozenset(["get", "keys", "values", "items", "copy"])
 # The namespace-reach arm (_homes_namespace_reach_findings): in a guarded module every spelling
 # below is a finding wherever it appears, whatever object it reads from, unless the exact form
-# matches a row of _HOMES_REACH_ALLOWLIST. Nothing is resolved or classified.
+# matches a row of _HOMES_REACH_ALLOWLIST. The spellings themselves are matched by name alone;
+# only the allowlist rows read bindings, as each row states.
 _HOMES_REACH_NAMES = frozenset(["builtins", "__builtins__"])
 _HOMES_REACH_ATTRS = frozenset(["__globals__", "f_globals", "f_locals", "f_builtins", "__dict__",
                                 "__builtins__", "__getattribute__", "__code__", "__defaults__",
@@ -723,38 +724,12 @@ _HOMES_REACH_ALLOWLIST = (
      "file, is a plain assignment of an integer constant to that one name inside a function body",
      "the name then holds an integer wherever it is read, never the builtins module (an "
      "unimported builtins is not an interpreter builtin), and an integer has no namespace"),
-    ("ordinary-dict-copy",
-     "dict(<name>.__dict__) with one argument and no keywords, where dict is bound nowhere in the "
-     "file and every binding of <name>, anywhere in the file, is a plain assignment of "
-     "types.SimpleNamespace(...) to that one name, with types bound only by `import types`",
-     "the object is a fresh ordinary namespace object, never a module, function, frame or "
-     "class, and dict() returns a new mapping that no module namespace reads"),
-    ("string-bound-to-name",
-     "a string constant from the reach-string list that is the whole value of a plain "
-     "assignment to plain names (message = \"callbacks\")",
-     "a string held by a name reaches nothing by itself: every consumer that could turn it into "
-     "a reach (a non-literal getattr, setattr or delattr name, a subscript or method call on a "
-     "namespace mapping or a module object, getattr referenced other than as a callee, a call of "
-     "__import__) is itself a finding"),
-    ("literal-name-loop",
-     "a getattr, setattr or delattr whose name argument is a name every binding of which, "
-     "anywhere in the file, is a for-loop or comprehension target over a literal tuple or list "
-     "of string constants, or over <Class>.__slots__ of a class statement bound once whose "
-     "__slots__ is such a literal, where no constant is a reach string or a protected name",
-     "the name argument then takes only those listed constants, so the call is as static as "
-     "the same calls with each literal written out, which the literal-name checks read"),
-    ("foreign-module-lookup",
-     "a getattr, setattr or delattr whose first argument is a name every binding of which, "
-     "anywhere in the file, is an import of a module other than this module, the store and "
-     "init modules, sys, builtins and __main__ (_homes_foreign_module_names)",
-     "the lookup reads or writes that other module's namespace, never this module's or the "
-     "store's, and any further reach from the value it returns needs a listed spelling"),
-    ("safe-sys-modules-item",
-     "an item assignment sys.modules[<key>] = <value> whose key resolves to string constants "
-     "naming neither this module, the store or init module, __main__ nor a submodule of one "
-     "(_homes_sys_modules_key_ok, the form the binding arm already accepts)",
-     "the write replaces only an unrelated module's entry, never this module, the store or "
-     "the init module"),
+    ("blocked-sys-modules-item",
+     "a statement sys.modules[\"<key>\"] = None with one target, whose key is one string "
+     "constant naming neither this module, the store or init module, __main__ nor a submodule "
+     "of one (_homes_sys_modules_key_ok, the one sys.modules write the binding arm accepts)",
+     "the entry then holds None, so a later import of that key raises ImportError: the write "
+     "binds no object to any module name, and its key names no module the rule reads"),
 )
 
 
@@ -811,84 +786,38 @@ def _namespace_read_only(node, parent, grand, chains):
     return False
 
 
-_HOMES_UNFOREIGN_MODULES = frozenset(["_opf_store", "_opf_init_operation", "sys", "builtins",
-                                      "__main__"])
-
-
-def _homes_foreign_module_names(fname, tree):
-    """The names that are certainly ANOTHER module's object everywhere in this module: every
-    binding of the name anywhere in the file (any form _route_binding_names reads, or a
-    parameter) is an `import X [as name]` of a module X other than this module itself, the
-    store and init modules, sys, builtins and __main__. A setattr or delattr on such a name
-    writes that module's namespace, never this module's."""
-    stem = fname[:-3] if fname.endswith(".py") else fname
-    unforeign = _HOMES_UNFOREIGN_MODULES | {stem}
-    good = {}
-    bad = set()
-    for node in ast.walk(tree):
-        names = list(_route_binding_names(node))
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
-            args = node.args
-            names += [arg.arg for arg in (args.posonlyargs + args.args + args.kwonlyargs
-                                          + ([args.vararg] if args.vararg else [])
-                                          + ([args.kwarg] if args.kwarg else []))]
-        if isinstance(node, ast.Import):
-            for alias in node.names:
-                bound = alias.asname or alias.name.split(".")[0]
-                if alias.asname is not None and alias.name.split(".")[0] not in unforeign:
-                    good[bound] = True
-                elif alias.asname is None and "." not in alias.name and alias.name not in unforeign:
-                    good[bound] = True
-                else:
-                    bad.add(bound)
-            continue
-        bad.update(names)
-    return frozenset(name for name in good if name not in bad)
-
-
-def _homes_sys_modules_key_ok(sub, walked, forbidden):
-    """True when the write target `sub`, an item of sys.modules, has a key the rule resolves to
-    string constants none of which is in `forbidden` (this module, the store and init modules,
-    __main__, or a submodule of one): a string constant, or a name whose every binding in the
-    unit is a for-loop target over a literal tuple or list of string constants."""
+def _homes_sys_modules_key_ok(sub, parent, forbidden):
+    """True when the write target `sub`, an item of sys.modules, is the one target of the
+    statement `parent`, an assignment of the constant None, and its key is one string constant
+    that is not in `forbidden` (this module, the store and init modules, __main__) and names no
+    submodule of one. No name is resolved: a key held by a name, or any other value, is not
+    accepted, so the write can only make an unrelated module unimportable."""
     key = sub.slice
-    if isinstance(key, ast.Constant) and isinstance(key.value, str):
-        values = [key.value]
-    elif isinstance(key, ast.Name):
-        values = []
-        for node in walked:
-            if key.id not in _route_binding_names(node):
-                continue
-            if not (isinstance(node, (ast.For, ast.AsyncFor)) and isinstance(node.target, ast.Name)
-                    and isinstance(node.iter, (ast.Tuple, ast.List)) and node.iter.elts
-                    and all(isinstance(elt, ast.Constant) and isinstance(elt.value, str)
-                            for elt in node.iter.elts)):
-                return False
-            values += [elt.value for elt in node.iter.elts]
-        if not values:
-            return False
-    else:
-        return False
-    return not any(value.split(".")[0] in forbidden for value in values)
+    return (isinstance(parent, ast.Assign) and len(parent.targets) == 1
+            and parent.targets[0] is sub and isinstance(parent.value, ast.Constant)
+            and parent.value.value is None
+            and isinstance(key, ast.Constant) and isinstance(key.value, str)
+            and key.value.split(".")[0] not in forbidden)
 
 
 def _homes_dynamic_binding_findings(fname, label, walked, lines, protected, store_imports,
-                                    foreign, guarded, facts):
+                                    guarded, facts):
     """Findings for the binding forms the homes rule cannot resolve, over one scanned unit's
     nodes `walked`: the fail-closed arm of the rule. `protected` holds the module's store
     aliases, its run_init_operation import names and its _opf_init_operation aliases. Each of
     these is a finding, whatever object or string it names: (1) an assignment, del, loop, with
-    or comprehension target whose write position is an attribute named like a protected name,
-    on any object; (2) a setattr or delattr call, with any first argument, whose name argument
-    is a protected name or anything but one plain string constant; (3) any star import; (4) a
-    write through a live namespace mapping (globals(), locals(), vars(...), any .__dict__, any
+    or comprehension target whose write position is an attribute named like a protected name, on
+    any object; (2) a setattr or delattr call, with any first argument, whose name argument is a
+    protected name or anything but one plain string constant; (3) any star import; (4) a write
+    through a live namespace mapping (globals(), locals(), vars(...), any .__dict__, any
     .modules such as sys.modules), its item or attribute assigned or deleted, a method other
     than a read method called on it, or the mapping itself bound, passed or returned (only the
-    read-only positions _namespace_read_only lists are accepted); (5) a reference to setattr,
-    delattr, globals, locals, vars or __import__ other than as the direct callee of a call, and
-    any reference to __setattr__ or __delattr__; (6) an import form the rule does not resolve:
-    `import sys as <other name>`, `from sys import modules`, an import of a submodule of
-    _opf_store or _opf_init_operation, and an `import _opf_store` anywhere but a module-level
+    read-only positions _namespace_read_only lists are accepted, and the one statement
+    sys.modules["<key>"] = None that _homes_sys_modules_key_ok accepts); (5) a reference to
+    setattr, delattr, globals, locals, vars or __import__ other than as the direct callee of a
+    call, and any reference to __setattr__ or __delattr__; (6) an import form the rule does not
+    resolve: `import sys as <other name>`, `from sys import modules`, an import of a submodule
+    of _opf_store or _opf_init_operation, and an `import _opf_store` anywhere but a module-level
     statement (a function-local import binds a store handle the rule does not track); (7) every
     spelling the namespace-reach arm reports (_homes_namespace_reach_findings, which reads the
     whole file's bindings and store aliases from `facts`)."""
@@ -934,9 +863,7 @@ def _homes_dynamic_binding_findings(fname, label, walked, lines, protected, stor
         key = node.args[1] if len(node.args) > 1 else None
         resolved = (isinstance(key, ast.Constant) and isinstance(key.value, str)
                     and not any(isinstance(arg, ast.Starred) for arg in node.args[:2]))
-        foreign_target = (bool(node.args) and isinstance(node.args[0], ast.Name)
-                          and node.args[0].id in foreign)
-        if (not resolved and not foreign_target) or (resolved and key.value in protected):
+        if not resolved or key.value in protected:
             found.append(
                 "{}: {} calls {} with {} (line {}); a setattr or delattr may name only a "
                 "plain string constant that is not the store module alias, the callee's name "
@@ -985,7 +912,7 @@ def _homes_dynamic_binding_findings(fname, label, walked, lines, protected, stor
             if (isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name)
                     and node.value.id == "sys" and isinstance(parent, ast.Subscript)
                     and parent.value is node and isinstance(parent.ctx, ast.Store)
-                    and _homes_sys_modules_key_ok(parent, walked, forbidden)):
+                    and _homes_sys_modules_key_ok(parent, grand, forbidden)):
                 continue
             if not _namespace_read_only(node, parent, grand, chains):
                 found.append("{}: {} writes through, binds or passes a live namespace mapping "
@@ -1032,7 +959,8 @@ def _homes_local_ids(tree):
 
 def _homes_reach_allowed(key, node, parent, facts):
     """True when `node`, a listed spelling, matches the _HOMES_REACH_ALLOWLIST row `key` exactly
-    (the row's form, read over the whole file's bindings in facts["file_binds"])."""
+    (local-int-builtins reads the whole file's bindings in facts["file_binds"];
+    blocked-sys-modules-item reads the statement holding the item in facts["parents"])."""
     binds = facts["file_binds"]
     if key == "local-int-builtins":
         found = binds.get("builtins", ())
@@ -1041,110 +969,43 @@ def _homes_reach_allowed(key, node, parent, facts):
             and len(bind.targets) == 1 and isinstance(bind.targets[0], ast.Name)
             and isinstance(bind.value, ast.Constant) and type(bind.value.value) is int
             for bind in found)
-    if key == "ordinary-dict-copy":
-        if not (isinstance(parent, ast.Call) and isinstance(parent.func, ast.Name)
-                and parent.func.id == "dict" and len(parent.args) == 1
-                and parent.args[0] is node and not parent.keywords
-                and "dict" not in binds and isinstance(node.value, ast.Name)):
-            return False
-        types_binds = binds.get("types", ())
-        if not types_binds or not all(
-                isinstance(bind, ast.Import) and any(
-                    alias.name == "types" and alias.asname is None for alias in bind.names)
-                and not any(alias.asname == "types" for alias in bind.names)
-                for bind in types_binds):
-            return False
-        found = binds.get(node.value.id, ())
-        return bool(found) and all(
-            isinstance(bind, ast.Assign) and len(bind.targets) == 1
-            and isinstance(bind.targets[0], ast.Name)
-            and isinstance(bind.value, ast.Call) and isinstance(bind.value.func, ast.Attribute)
-            and bind.value.func.attr == "SimpleNamespace"
-            and isinstance(bind.value.func.value, ast.Name)
-            and bind.value.func.value.id == "types"
-            for bind in found)
-    if key == "string-bound-to-name":
-        return (isinstance(parent, ast.Assign) and parent.value is node
-                and all(isinstance(target, ast.Name) for target in parent.targets))
-    if key == "literal-name-loop":
-        name = node.args[1] if len(node.args) > 1 else None
-        if not isinstance(name, ast.Name):
-            return False
-        values = _homes_loop_literals(name.id, binds)
-        banned = (_HOMES_REACH_STRINGS | _HOMES_REACH_GC_NAMES | set(facts["store_aliases"])
-                  | set(facts["protected"]))
-        return bool(values) and not (values & banned)
-    if key == "foreign-module-lookup":
-        return (bool(node.args) and isinstance(node.args[0], ast.Name)
-                and node.args[0].id in facts["foreign"])
-    if key == "safe-sys-modules-item":
+    if key == "blocked-sys-modules-item":
         return (isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name)
                 and node.value.id == "sys" and isinstance(parent, ast.Subscript)
                 and parent.value is node and isinstance(parent.ctx, ast.Store)
-                and _homes_sys_modules_key_ok(parent, facts["walked"], facts["forbidden"]))
+                and _homes_sys_modules_key_ok(parent, facts["parents"].get(id(parent)),
+                                              facts["forbidden"]))
     return False
-
-
-def _homes_loop_literals(name, binds):
-    """The string constants `name` can hold when every binding of it in the file is a for-loop
-    or comprehension target over a literal tuple or list of string constants, or over
-    <Class>.__slots__ of a class statement bound once whose __slots__ is one such literal
-    assignment; otherwise the empty set."""
-    values = set()
-    found = binds.get(name, ())
-    for bind in found:
-        if not (isinstance(bind, (ast.For, ast.AsyncFor, ast.comprehension))
-                and isinstance(bind.target, ast.Name) and bind.target.id == name):
-            return set()
-        source = bind.iter
-        if (isinstance(source, ast.Attribute) and source.attr == "__slots__"
-                and isinstance(source.value, ast.Name)):
-            owners = binds.get(source.value.id, ())
-            if len(owners) != 1 or not isinstance(owners[0], ast.ClassDef):
-                return set()
-            slots = [stmt for stmt in owners[0].body
-                     if isinstance(stmt, ast.Assign) and any(
-                         isinstance(target, ast.Name) and target.id == "__slots__"
-                         for target in stmt.targets)]
-            if len(slots) != 1 or len(slots[0].targets) != 1:
-                return set()
-            source = slots[0].value
-        if not (isinstance(source, (ast.Tuple, ast.List)) and source.elts and all(
-                isinstance(elt, ast.Constant) and isinstance(elt.value, str)
-                for elt in source.elts)):
-            return set()
-        values.update(elt.value for elt in source.elts)
-    return values
 
 
 def _homes_namespace_reach_findings(fname, label, walked, lines, facts):
     """Findings for the namespace-reach arm, over one guarded unit's nodes `walked`. The arm is
-    bounded and fail-closed: it resolves no target and classifies no object; every spelling
-    below is a finding wherever it appears, unless its exact form is a row of
-    _HOMES_REACH_ALLOWLIST (_homes_reach_allowed). The spellings: (1) a getattr, setattr or
-    delattr call (by a name or an attribute) whose name argument is not one plain string
-    constant, and getattr referenced other than as the direct callee of a call; (2) a reference
-    to the name builtins or __builtins__; (3) an attribute __globals__, f_globals, f_locals,
-    f_builtins, __dict__, __builtins__, __getattribute__, __code__, __defaults__ or
-    __kwdefaults__, an attribute named globals, locals or vars, and a gc name that hands out
-    live objects (get_objects, get_referrers, get_referents, garbage, callbacks) as an
-    attribute, each on any object; (4) a subscript (read, item assignment or del) or a method
-    call or any other attribute on a call of globals, locals or vars or on a .modules attribute
-    (sys.modules), and a subscript of a name bound anywhere in the file by an import (a module
-    object); (5) a call of __import__; (6) a string constant equal to one of
-    _HOMES_REACH_STRINGS or a gc name in (3), in any position; (7) any import, plain or from,
-    of builtins, ctypes, inspect or operator (or a submodule of one), a from-import of a gc name
-    in (3), a from-import of the store module or of a name from it, and an import of the store
+    bounded and fail-closed: it matches each spelling below by name alone and reports it wherever
+    it appears, unless its exact form is a row of _HOMES_REACH_ALLOWLIST (_homes_reach_allowed,
+    which reads the whole file's bindings of builtins and the parent statement of a sys.modules
+    item, as each row states). The spellings: (1) a getattr, setattr or delattr call (by a name or
+    an attribute) whose name argument is not one plain string constant, and getattr referenced
+    other than as the direct callee of a call; (2) a reference to the name builtins or
+    __builtins__; (3) an attribute __globals__, f_globals, f_locals, f_builtins, __dict__,
+    __builtins__, __getattribute__, __code__, __defaults__ or __kwdefaults__, an attribute named
+    globals, locals or vars, and a gc name that hands out live objects (get_objects, get_referrers,
+    get_referents, garbage, callbacks) as an attribute, each on any object; (4) a subscript (read,
+    item assignment or del) or a method call or any other attribute on a call of globals, locals or
+    vars or on a .modules attribute (sys.modules), and a subscript of a name bound anywhere in the
+    file by an import (a module object); (5) a call of __import__; (6) a string constant equal to
+    one of _HOMES_REACH_STRINGS or a gc name in (3), in any position; (7) any import, plain or
+    from, of builtins, ctypes, inspect or operator (or a submodule of one), a from-import of a gc
+    name in (3), a from-import of the store module or of a name from it, and an import of the store
     module binding a name other than the module's first store alias. An import of gc itself and
     every other gc name are not reported by this arm."""
     found = []
     stem = fname[:-3] if fname.endswith(".py") else fname
-    facts = dict(facts, walked=walked, forbidden=frozenset(
-        ["_opf_store", "_opf_init_operation", "__main__", stem]))
     parents = {}
     for node in walked:
         for child in ast.iter_child_nodes(node):
             parents[id(child)] = node
+    facts = dict(facts, parents=parents, forbidden=frozenset(
+        ["_opf_store", "_opf_init_operation", "__main__", stem]))
     callees = set(id(node.func) for node in walked if isinstance(node, ast.Call))
     binds = facts["file_binds"]
     module_names = frozenset(
@@ -1167,7 +1028,6 @@ def _homes_namespace_reach_findings(fname, label, walked, lines, facts):
                         and not any(isinstance(arg, ast.Starred) for arg in node.args[:2])):
                     what.append("calls {} with a name argument that is not a string "
                                 "literal".format(name))
-                    allow = ["literal-name-loop", "foreign-module-lookup"]
             if name == "__import__":
                 what.append("calls __import__")
         if (isinstance(node, (ast.Name, ast.Attribute))
@@ -1181,8 +1041,6 @@ def _homes_namespace_reach_findings(fname, label, walked, lines, facts):
         if isinstance(node, ast.Attribute):
             if node.attr in _HOMES_REACH_ATTRS:
                 what.append("reads the attribute {}".format(node.attr))
-                if node.attr == "__dict__":
-                    allow = ["ordinary-dict-copy"]
             elif node.attr in _HOMES_REACH_ATTR_CALLS:
                 what.append("reaches {} through an attribute".format(node.attr))
             elif node.attr in _HOMES_REACH_GC_NAMES:
@@ -1194,7 +1052,7 @@ def _homes_namespace_reach_findings(fname, label, walked, lines, facts):
                 and parent.value is node):
             what.append("subscripts or calls a method of a namespace mapping ({})".format(
                 node.func.id + "()" if isinstance(node, ast.Call) else "." + node.attr))
-            allow = ["safe-sys-modules-item"]
+            allow = ["blocked-sys-modules-item"]
         if (isinstance(node, ast.Subscript) and isinstance(node.value, ast.Name)
                 and node.value.id in module_names):
             what.append("subscripts {}, a name an import binds (a module object)".format(
@@ -1204,7 +1062,6 @@ def _homes_namespace_reach_findings(fname, label, walked, lines, facts):
             what.append("carries the string {!r}{}".format(
                 node.value, ", a gc live-object accessor"
                 if node.value in _HOMES_REACH_GC_NAMES else ""))
-            allow = ["string-bound-to-name"]
         if isinstance(node, ast.Import):
             hits = sorted(alias.name for alias in node.names
                           if alias.name.split(".")[0] in _HOMES_REACH_MODULES)
@@ -1448,24 +1305,99 @@ def _homes_reach_rows(alias_store, init_import, alias_call):
         # Every allowlisted form scans clean; each turns red when its allowlist row is removed.
         ("allowlist local-int-builtins: a local integer named builtins",
          module("", "\n\ndef _unrelated():\n    builtins = 1\n    return builtins\n"), None),
-        ("allowlist ordinary-dict-copy: a copy of an ordinary object's __dict__",
-         module("box = types.SimpleNamespace(a=1)\n_copy = dict(box.__dict__)\n"), None),
-        ("allowlist string-bound-to-name: a string 'callbacks' bound to a name",
-         module("message = \"callbacks\"\n"), None),
-        ("allowlist string-bound-to-name: a string 'modules' bound to a name",
-         module("x = 'modules'\n"), None),
-        ("allowlist literal-name-loop: getattr over a literal tuple of names",
-         module("for _attr in ('version', 'platform'):\n    _v = getattr(sys, _attr)\n"), None),
-        ("allowlist literal-name-loop: getattr over a class's literal __slots__",
+        ("allowlist blocked-sys-modules-item: blocking unrelated modules by literal keys",
+         module("sys.modules['_testcapi'] = None\n"
+                "sys.modules['concurrent.interpreters'] = None\n"), None),
+        # Forms with no allowlist row: each is a finding, since each is or feeds a reach.
+        ("a copy of an ordinary object's __dict__",
+         module("box = types.SimpleNamespace(a=1)\n_copy = dict(box.__dict__)\n"),
+         reach("module-level code reads the attribute __dict__")),
+        ("a string 'callbacks' bound to a name",
+         module("message = \"callbacks\"\n"),
+         reach("module-level code carries the string 'callbacks', a gc live-object accessor")),
+        ("a string 'modules' bound to a name",
+         module("x = 'modules'\n"),
+         reach("module-level code carries the string 'modules'")),
+        ("getattr over a literal tuple of names",
+         module("for _attr in ('version', 'platform'):\n    _v = getattr(sys, _attr)\n"),
+         reach("module-level code calls getattr with a name argument that is not a string "
+               "literal")),
+        ("getattr over a class's literal __slots__",
          module("class _Rec:\n    __slots__ = ('a', 'b')\n\n\n"
                 "_row = {_slot: getattr(_Rec, _slot, None) for _slot in _Rec.__slots__}\n"),
-         None),
-        ("allowlist foreign-module-lookup: setattr on another module by a computed name",
+         reach("module-level code calls getattr with a name argument that is not a string "
+               "literal")),
+        ("setattr on another module by a computed name",
          module("import json as _json\n", "\n\ndef _patch(name, value):\n"
-                "    setattr(_json, name, value)\n"), None),
-        ("allowlist safe-sys-modules-item: blocking an unrelated module",
+                "    setattr(_json, name, value)\n"),
+         reach("_patch calls setattr with a name argument that is not a string literal")),
+        ("a sys.modules item blocked through a loop name",
          module("for _blocked in ('_testcapi', '_interpreters'):\n"
-                "    sys.modules[_blocked] = None\n"), None),
+                "    sys.modules[_blocked] = None\n"),
+         reach("module-level code subscripts or calls a method of a namespace mapping "
+               "(.modules)")),
+        ("a sys.modules item of an unrelated key bound to the store",
+         module("sys.modules['_zz_alias'] = _opf_store\n"),
+         reach("module-level code subscripts or calls a method of a namespace mapping "
+               "(.modules)")),
+        ("a blocked sys.modules item with a second target",
+         module("sys.modules['_testcapi'] = _spare = None\n"),
+         reach("module-level code subscripts or calls a method of a namespace mapping "
+               "(.modules)")),
+        # Escapes through allowlist rows this table no longer has: each must stay a finding.
+        ("another module's __builtins__ by a getattr of names holding strings",
+         module("import os\n_k = '__builtins__'\n_g = 'globals'\n_b = getattr(os, _k)\n"
+                "_b[_g]()['_opf_store'] = FAKE\n"),
+         reach("module-level code calls getattr with a name argument that is not a string "
+               "literal")),
+        ("the same inside a function with a function-local import",
+         module("def _swap(fake):\n    import os\n    _k = '__builtins__'\n    _g = 'globals'\n"
+                "    _b = getattr(os, _k)\n    _b[_g]()['_opf_store'] = fake\n"),
+         reach("_swap calls getattr with a name argument that is not a string literal")),
+        ("another module's __builtins__ by a getattr of a computed string",
+         module("import os\ngetattr(os, '__buil' + 'tins__')['glo' + 'bals']()"
+                "['_opf_' + 'store'] = FAKE\n"),
+         reach("module-level code calls getattr with a name argument that is not a string "
+               "literal")),
+        ("the store aliased under an unrelated sys.modules key, then setattr",
+         module("sys.modules['_zz_alias'] = _opf_store\nimport _zz_alias\n"
+                "_k = 'SUPPORTED_HOMES'\nsetattr(_zz_alias, _k, 2)\n"),
+         reach("module-level code calls setattr with a name argument that is not a string "
+               "literal")),
+        ("this module aliased under an unrelated sys.modules key, then setattr",
+         module("import importlib\nsys.modules['_zz_me'] = importlib.import_module(__name__)\n"
+                "import _zz_me\n_k = '_opf_store'\nsetattr(_zz_me, _k, FAKE)\n"),
+         reach("module-level code subscripts or calls a method of a namespace mapping "
+               "(.modules)")),
+        ("a class's __slots__ rebound after the class, then a getattr loop",
+         module("", "\n\nclass _Box:\n    __slots__ = ('alpha',)\n\n\n_key = '__globals__'\n"
+                "_Box.__slots__ = (_key,)\nfor _s in _Box.__slots__:\n"
+                "    _ns = getattr(_init_ok, _s)\n_ns['_opf_store'] = FAKE\n"),
+         reach("module-level code calls getattr with a name argument that is not a string "
+               "literal")),
+        ("a class's list __slots__ appended to, then a getattr loop",
+         module("", "\n\nclass _Rec:\n    __slots__ = ['a']\n\n\n"
+                "_Rec.__slots__.append('__glo' + 'bals__')\nfor _n in _Rec.__slots__:\n"
+                "    getattr(_init_ok, _n)['_opf_store'] = FAKE\n"),
+         reach("module-level code calls getattr with a name argument that is not a string "
+               "literal")),
+        ("a decorated class whose __slots__ the decorator replaces, then a getattr loop",
+         module("", "\n\ndef _deco(cls):\n"
+                "    return types.SimpleNamespace(__slots__=['__glo' + 'bals__'])\n\n\n"
+                "@_deco\nclass _Rec:\n    __slots__ = ('a',)\n\n\n"
+                "for _n in _Rec.__slots__:\n    getattr(_init_ok, _n)['_opf_store'] = FAKE\n"),
+         reach("module-level code calls getattr with a name argument that is not a string "
+               "literal")),
+        ("a patched SimpleNamespace, then a dict copy of its __dict__ subscripted",
+         module("_fake = FAKE\n_k = '__builtins__'\n_g = 'globals'\n"
+                "types.SimpleNamespace = lambda **kw: types\n_box = types.SimpleNamespace()\n"
+                "dict(_box.__dict__)[_k][_g]()['_opf_store'] = _fake\n"),
+         reach("module-level code reads the attribute __dict__")),
+        ("a sys.modules loop key rebound through a global declaration",
+         module("def _set():\n    global _k\n    _k = '_opf_store'\n\n\nfor _k in ('json',):\n"
+                "    _set()\n    sys.modules[_k] = FAKE\n"),
+         reach("module-level code subscripts or calls a method of a namespace mapping "
+               "(.modules)")),
         # The allowlist's exact forms: a near neighbour of each is a finding.
         ("a module-level integer named builtins (not local)",
          module("builtins = 1\n_v = builtins\n"),
@@ -1699,8 +1631,8 @@ def _homes_rule_unit_findings(fname, unit_name, nodes, store_aliases, direct_nam
                 found.append("{}: {} names SUPPORTED_HOMES (line {})".format(
                     fname, label, lines[id(node)]))
     found.extend(_homes_dynamic_binding_findings(
-        fname, label, walked, lines, rebind_names, facts["store_imports"], facts["foreign"],
-        facts["guarded"], facts))
+        fname, label, walked, lines, rebind_names, facts["store_imports"], facts["guarded"],
+        facts))
     for call in rule_calls.values():
         rule = [kw for kw in call.keywords if kw.arg == "homes2"]
         if (any(isinstance(arg, ast.Starred) for arg in call.args)
@@ -1833,10 +1765,11 @@ def _homes_rule_violations(sources):
 
     What it also CANNOT see: a call or reference assembled at runtime -- exec or eval on built
     text (refused by the maintenance-pin scan), a name spelled in pieces such as "run_init_" +
-    "operation", a sys.modules or importlib or globals() lookup with a computed string; code
-    never handed to it (modules outside opf/tools/*.py, extension modules, or a subprocess
-    running python built from strings). opf.py's own init path is held by the route roster
-    above, so the uncovered forms sit behind adjacent gates where they are covered at all.
+    "operation", an importlib lookup with a computed string, and in a module that is not guarded
+    a sys.modules or globals() lookup with a computed string; code never handed to it (modules
+    outside opf/tools/*.py, extension modules, or a subprocess running python built from
+    strings). opf.py's own init path is held by the route roster above, so the uncovered forms
+    sit behind adjacent gates where they are covered at all.
 
     Fail-closed binding arm (_homes_dynamic_binding_findings). In a guarded module (one that
     holds a run_init_operation call or a callee spelling) the protected names are its store
@@ -1847,53 +1780,55 @@ def _homes_rule_violations(sources):
     body binding, and a parameter of a unit that does not call the seam. These forms are
     findings whose text says to rewrite the binding in an accepted form: an attribute write or
     delete of a protected name on any object; a setattr or delattr naming a protected name, or
-    with a name argument other than one string constant unless its first argument is a name
-    bound only by imports of another module; a write through globals(), locals(), vars(),
-    __dict__ or sys.modules (an item or attribute assigned or deleted, a mutating method, the
-    mapping bound, passed or returned; only an item read, a copy, a read method, a membership
-    test or an iteration of globals(), locals(), vars() or sys.modules is accepted, and a
-    sys.modules item assignment whose key resolves to string constants naming no protected
-    module and not this module); a reference to setattr, delattr, globals, locals, vars or
-    __import__ other than as a callee, or to __setattr__ or __delattr__; `import sys as
-    <other>`, `from sys import modules`, an import of a submodule of the store or init module,
-    and a function-local `import _opf_store`. A star import is a finding in every module.
+    with a name argument other than one string constant, whatever its first argument; a write
+    through globals(), locals(), vars(), __dict__ or sys.modules (an item or attribute assigned
+    or deleted, a mutating method, the mapping bound, passed or returned; only an item read, a
+    copy, a read method, a membership test or an iteration of globals(), locals(), vars() or
+    sys.modules is accepted, and the one statement sys.modules["<key>"] = None whose key is a
+    string constant naming no protected module, not __main__ and not this module); a reference
+    to setattr, delattr, globals, locals, vars or __import__ other than as a callee, or to
+    __setattr__ or __delattr__; `import sys as <other>`, `from sys import modules`, an import of
+    a submodule of the store or init module, and a function-local `import _opf_store`. A star
+    import is a finding in every module.
 
-    Namespace-reach arm (_homes_namespace_reach_findings). In a guarded module the arm resolves
-    no target and classifies no object: every dynamic namespace reach it lists is a finding
-    wherever it appears. The list: a getattr, setattr or delattr whose name argument is not one
-    plain string constant, and getattr referenced other than as a callee; a reference to
-    builtins or __builtins__; an attribute __globals__, f_globals, f_locals, f_builtins,
-    __dict__, __builtins__, __getattribute__, __code__, __defaults__ or __kwdefaults__, an
-    attribute named globals, locals or vars, and a gc live-object accessor (get_objects,
-    get_referrers, get_referents, garbage, callbacks) as an attribute, on any object; any
-    subscript, item assignment or method call on globals(), locals(), vars(...) or a .modules
-    attribute (sys.modules), and a subscript of a name an import binds; a call of __import__; a
-    string constant naming any of these (or setattr, delattr, getattr, modules, builtins,
-    __setattr__, __delattr__ or __import__) in any position; an import of builtins, ctypes,
-    inspect or operator, a from-import of a gc live-object accessor, a from-import of the store
-    module, and an import of the store module under a name other than the module's first store
-    alias. The literal-name checks are kept: a literal getattr, setattr or delattr name is
-    reported when it is a reach string, and the binding arm's protected-name checks still
-    apply. An import of gc and its other names are not reported, since none returns a live
-    object.
+    Namespace-reach arm (_homes_namespace_reach_findings). In a guarded module the arm matches
+    each spelling by name alone, whatever object it reads from: every dynamic namespace reach it
+    lists is a finding wherever it appears, unless an allowlist row below accepts its exact form
+    (the rows are the only part of the arm that reads bindings). The list: a getattr, setattr or
+    delattr whose name argument is not one plain string constant, and getattr referenced other
+    than as a callee; a reference to builtins or __builtins__; an attribute __globals__,
+    f_globals, f_locals, f_builtins, __dict__, __builtins__, __getattribute__, __code__,
+    __defaults__ or __kwdefaults__, an attribute named globals, locals or vars, and a gc
+    live-object accessor (get_objects, get_referrers, get_referents, garbage, callbacks) as an
+    attribute, on any object; any subscript, item assignment or method call on globals(),
+    locals(), vars(...) or a .modules attribute (sys.modules), and a subscript of a name an
+    import binds; a call of __import__; a string constant naming any of these (or setattr,
+    delattr, getattr, modules, builtins, __setattr__, __delattr__ or __import__) in any
+    position; an import of builtins, ctypes, inspect or operator, a from-import of a gc
+    live-object accessor, a from-import of the store module, and an import of the store module
+    under a name other than the module's first store alias. The literal-name checks are kept: a
+    literal getattr, setattr or delattr name is reported when it is a reach string, and the
+    binding arm's protected-name checks still apply. An import of gc and its other names are not
+    reported, since none returns a live object.
 
-    Exceptions exist only through _HOMES_REACH_ALLOWLIST, a reviewed table of exact forms, each
-    with the reason it is safe: a read of builtins where every binding of it in the file is a
-    function-local integer; dict(<name>.__dict__) of a types.SimpleNamespace bound only so; a
-    reach string that is the whole value of a plain assignment to names; a getattr, setattr or
-    delattr whose name only ever takes literal non-reach, non-protected strings from a literal
-    loop or a class's literal __slots__; one whose first argument is only another module's
-    import; and a sys.modules item assignment naming an unrelated module.
+    Exceptions exist only through _HOMES_REACH_ALLOWLIST, a reviewed table of two exact forms,
+    each with the reason it is safe: a read of builtins where every binding of it in the file
+    is a function-local integer, and the statement sys.modules["<key>"] = None with one target
+    and a string-constant key naming no protected module, not __main__ and not this module. No
+    other form of a listed spelling is exempt: a reach string bound to a name, a dict copy of a
+    __dict__, a getattr, setattr or delattr whose name comes from a loop or a class's __slots__,
+    and one whose first argument is another module are each a finding.
 
-    Residual. In a guarded module a protected name can be rebound with no finding only through
-    (1) a form the allowlist accepts, exactly as its row states, and (2) anything not
-    statically visible in the scanned module's own source: code another module runs (a write
-    another module makes, a module that hands out a namespace or writer from inside a call,
-    such as importlib, types, copyreg or a deserializer acting on data), a replacement of the
-    store module in sys.modules by code that is not scanned before a module imports it, code
-    never handed to the scan, and the bodies and annotations of registered defs. Each can change
-    init_writes_homes2() for every fresh init, so this check guards against an accidental
-    non-compliant call, not a deliberate rewrite.
+    Residual. In a guarded module a protected name can be rebound, or the store's rule names
+    rewritten, with no finding only through (1) a form the allowlist accepts, exactly as its row
+    states, and (2) anything not statically visible in the scanned module's own source: code
+    another module runs (a write another module makes, a module that hands out a namespace or
+    writer from inside a call, such as importlib, types, copyreg, string.Formatter's field
+    lookup or a deserializer acting on data), a replacement of the store module in sys.modules
+    by code that is not scanned before a module imports it, code never handed to the scan, and
+    the bodies and annotations of registered defs. Each can change init_writes_homes2() for
+    every fresh init, so this check guards against an accidental non-compliant call, not a
+    deliberate rewrite.
     """
     found = []
     summaries = {}
@@ -1998,7 +1933,6 @@ def _homes_rule_violations(sources):
                 # in every module.
                 facts = dict(
                     store_imports=frozenset(map(id, _store_import_nodes(tree))),
-                    foreign=_homes_foreign_module_names(fname, tree),
                     file_binds=_homes_binding_index(list(ast.walk(tree))),
                     local_ids=_homes_local_ids(tree),
                     store_aliases=tuple(_store_import_aliases(tree)),
@@ -6281,9 +6215,9 @@ def _suite_isolated(invoke):
                               mutated and any(expect in row for row in mutant_rows))
                 # The namespace-reach arm: a row for each escape it closes, each with a
                 # compliant flip; one row per listed spelling (so dropping any one spelling
-                # turns a row red); the safe code it must not report; the cannot-classify rows;
-                # and the binding-arm findings no row above names. A tuple `expect` needs every
-                # one of its parts in one finding.
+                # turns a row red); the safe code it must not report; the allowlisted forms and
+                # their near neighbours; and the binding-arm findings no row above names. A tuple
+                # `expect` needs every one of its parts in one finding.
                 for mutant_label, new, expect in _homes_reach_rows(
                         alias_store, exempt_import.replace("\n\n", "\n"), alias_call):
                     mutated_sources = dict(rule_sources)
@@ -6302,12 +6236,12 @@ def _suite_isolated(invoke):
                 # finding, never a traceback: one helper at a time is replaced for one scan of
                 # a source no earlier row used (so no memoized result answers it). The binding-
                 # name function faults in the per-source summary; the alias and callee
-                # spellings and the foreign-name helper fault in the findings phase, so each
-                # catch has a row.
+                # spellings and the whole-file binding index fault in the findings phase, so
+                # each catch has a row.
                 this_module = sys.modules[__name__]
                 for probe, helper in enumerate(("_route_binding_names", "_store_import_aliases",
                                                 "_init_callee_spellings",
-                                                "_homes_foreign_module_names")):
+                                                "_homes_binding_index")):
                     real_helper = getattr(this_module, helper)
 
                     def _raising_helper(*args):

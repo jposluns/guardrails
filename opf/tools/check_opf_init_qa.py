@@ -234,9 +234,10 @@ class InitQA(unittest.TestCase):
     def test_completed_rerun_after_view_identity_bump(self):
         first = self.ready()
         recorded = op._read_plan(self.root)
-        for attr in ("GENERATOR_NAME", "GENERATOR_VERSION", "TRANSFORM_VOCAB_VERSION",
-                     "PROJECTION_SCHEMA"):
-            old = getattr(op._opf_views, attr)
+        for attr, old in (("GENERATOR_NAME", op._opf_views.GENERATOR_NAME),
+                          ("GENERATOR_VERSION", op._opf_views.GENERATOR_VERSION),
+                          ("TRANSFORM_VOCAB_VERSION", op._opf_views.TRANSFORM_VOCAB_VERSION),
+                          ("PROJECTION_SCHEMA", op._opf_views.PROJECTION_SCHEMA)):
             new = old + 1 if type(old) is int else old + "-changed"
             with self.subTest(attr=attr), mock.patch.object(op._opf_views, attr, new):
                 result = self.assert_rerun(op.ALREADY_INITIALIZED)
