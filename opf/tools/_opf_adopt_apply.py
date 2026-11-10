@@ -14314,7 +14314,7 @@ def _self_test_checks():
             return real_gather(source_members, product_root)
         # the REAL plant-governance handler end to end: run_apply gathers ONCE beside the (patched) release
         # root, both composition passes compose from those held bytes, and every planted path carries its
-        # own fixture payload byte-identically; the product root's decoy release stays unjudged and
+        # own fixture payload byte-identically; the product root's decoy manifest stays
         # untouched (red against a dropped pack= in the table, where the handler reports "carries no pack
         # manifest"; against a restored _DRIVER_UNSUPPLIED plant entry, which would refuse this plan;
         # against a product-root gather, which refuses while gathering, on a source member absent under the
