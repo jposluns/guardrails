@@ -9470,8 +9470,8 @@ def _oracle_compare(base, head, rows, sides, allowlist, base_cache=None):
             continue
         entry = _oracle_allowed(row, got, allowlist)
         if entry is None:
-            findings.append("(oracle) {} {!r} commit-ish {!r} from {}: main {}, this tree {}, and no allowlist "
-                            "entry admits it".format(handler, tmpl, commit, sk, got[0], got[1]))
+            findings.append("(oracle-unadmitted) {} {!r} commit-ish {!r} from {}: main {}, this tree {}, and no "
+                            "allowlist entry admits it".format(handler, tmpl, commit, sk, got[0], got[1]))
         else:
             used.add(entry[1])
             moved += 1
@@ -9511,13 +9511,13 @@ def _differential_oracle(failures, tmp):
             flip, _u, _c, _m = _oracle_compare(base, aiqt_hooks, br_rows, sides, _ORACLE_ALLOWLIST, br_cache)
         finally:
             aiqt_hooks._detach_pinned = saved
-        if not [f for f in flip if f.startswith("(oracle) ")]:
+        if not [f for f in flip if f.startswith("({}) ".format("oracle-unadmitted"))]:
             failures.append("(oracle-flip-redesign) reverting the exact-form gate must turn the oracle red")
         # Mutation: with any one allowlist entry deleted, the oracle must turn red.
         for drop in range(len(_ORACLE_ALLOWLIST)):
             fewer = _ORACLE_ALLOWLIST[:drop] + _ORACLE_ALLOWLIST[drop + 1:]
             flip, _u, _c, _m = _oracle_compare(base, aiqt_hooks, br_rows, sides, fewer, br_cache)
-            if not [f for f in flip if f.startswith("(oracle) ")]:
+            if not [f for f in flip if f.startswith("({}) ".format("oracle-unadmitted"))]:
                 failures.append("(oracle-flip-allowlist) deleting allowlist entry {!r} must turn the oracle "
                                 "red".format(_ORACLE_ALLOWLIST[drop][1]))
     finally:
