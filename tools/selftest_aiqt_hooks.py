@@ -6556,6 +6556,8 @@ _DEADLINE_WALL_BOUND = aiqt_hooks.PRETOOL_BUDGET_SECONDS
 # that would run on for minutes, so the run reports it instead of stalling. The wall-clock gate is
 # _DEADLINE_WALL_BOUND, well below it.
 _DEADLINE_HANG_SECONDS = 60.0
+# The deadline child's limit in uncontended-runner seconds: _deadline_child_wait judges the time waited for it
+# by the reference slowdown read in this process, so a loaded host stretches the wait rather than failing it.
 _DEADLINE_CHILD_TIMEOUT = 900
 # The fixed reference workload every dl-shape run is bracketed by (_load_reference_seconds): a pure-Python
 # character scan, the same kind of work the timed handlers do, over 524,288 characters, running none of the
@@ -7007,10 +7009,11 @@ def _deadline_load_judgement_failures(tmp):
     """(dl-shape-load-*) The dl-shape bounds judge each run's times divided by its reference slowdown
     (_deadline_run_judged). _deadline_shape_verdicts is given recorded runs, with no handler run, except in
     dl-shape-load-reading:
-    dl-shape-load-absorbed: the runs a loaded 80-CPU host recorded for the truncation guard at 1 MB (CPU
-    times 7.84, 5.63 and 7.41 s, median over the 7 s bound; wall-clock times 3.93, 8.47 and 8.92 s, median
-    over the 8 s bound) give no line with a slowdown of 2.5 recorded on each run, and one line (with one
-    re-run for the wall-clock case) with a slowdown of 1, so the judgement, not the bounds, absorbs the load.
+    dl-shape-load-absorbed-cpu and dl-shape-load-absorbed-wall: the runs a loaded 80-CPU host recorded for
+    the truncation guard at 1 MB (CPU times 7.84, 5.63 and 7.41 s, median over the 7 s bound; wall-clock
+    times 3.93, 8.47 and 8.92 s, median over the 8 s bound) give no line with a slowdown of 2.5 recorded on
+    each run, and one line (with one re-run for the wall-clock case) with a slowdown of 1, so the
+    judgement, not the bounds, absorbs the load.
     dl-shape-load-regression: a run that is over the bound once divided by its slowdown still fails: 40 s
     of CPU time at a slowdown of 2.5 (16 s judged) gives one line.
     dl-shape-load-floor: a slowdown under 1 never tightens a bound: at a slowdown of 0.5, 7.0 s of CPU time
@@ -7033,14 +7036,14 @@ def _deadline_load_judgement_failures(tmp):
         retimed.clear()
         lines = _deadline_shape_verdicts([seps + tuple(run + (slowdown, slowdown) for run in cpu_runs)], retime)
         if len(lines) != want_lines or len(retimed) != want_reruns:
-            out.append("(dl-shape-load-absorbed) the recorded 1 MB CPU times at a slowdown of {} must give {} "
+            out.append("(dl-shape-load-absorbed-cpu) the recorded 1 MB CPU times at a slowdown of {} must give {} "
                        "line(s) and {} re-run(s), got {!r} with re-runs {!r}".format(
                            slowdown, want_lines, want_reruns, lines, retimed))
     for slowdown, want_lines, want_reruns in ((2.5, 0, 0), (1.0, 1, 1)):
         retimed.clear()
         lines = _deadline_shape_verdicts([paren + tuple(run + (slowdown, slowdown) for run in wall_runs)], retime)
         if len(lines) != want_lines or len(retimed) != want_reruns:
-            out.append("(dl-shape-load-absorbed) the recorded 1 MB wall-clock times at a slowdown of {} must "
+            out.append("(dl-shape-load-absorbed-wall) the recorded 1 MB wall-clock times at a slowdown of {} must "
                        "give {} line(s) and {} re-run(s), got {!r} with re-runs {!r}".format(
                            slowdown, want_lines, want_reruns, lines, retimed))
     retimed.clear()
@@ -8764,7 +8767,7 @@ def _deadline_rearm_failures():
     scheduling delay at the exit, and fails if the window's own timer is armed for real again.
     Neither case shows that no delay can fail the run: two bounds remain that these checks do not remove,
     the 1 s allowed for the kernel to expire the re-armed timer and the deadline child's
-    _DEADLINE_CHILD_TIMEOUT (900 s)."""
+    _DEADLINE_CHILD_TIMEOUT (900 s, judged on load-normalised time by _deadline_child_wait)."""
     out = []
     take = aiqt_hooks._DeadlineWindow._take.__code__
     twice = aiqt_hooks._DeadlineWindow._twice.__code__
@@ -10098,6 +10101,64 @@ def _deadline_relation_failures():
     return out
 
 
+_DEADLINE_CHILD_POLL_SECONDS = 2.0
+
+
+def _deadline_child_wait(code, args, limit):
+    """(subprocess.CompletedProcess with text stdout and stderr, or None when the child was stopped, and a
+    phrase giving the raw and judged seconds waited) for a child running the Python source code with the
+    arguments args (sys.executable -I -B -c code args...), judged against limit on
+    load-normalised wall-clock time, the method of the dl-shape rows (_deadline_run_judged): every
+    _DEADLINE_CHILD_POLL_SECONDS the parent times the fixed reference workload (_load_reference_seconds) in
+    its own process, and each stretch waited counts divided by the wall-clock slowdown of the lesser of the
+    readings that bracket it (never by less than 1). The child is killed and reaped once the judged sum is
+    over limit, so a hang (a blocked wait or an endless loop) still fails, after about limit times the
+    slowdowns it ran under. Residual: the reference measures the parent's share of the host, not the
+    child's, so contention that slows the child more than the parent's readings still counts in full."""
+    judged = 0.0
+    began = mark = time.monotonic()
+    reading = _load_reference_seconds()[1]
+    argv = [sys.executable, "-I", "-B", "-c", code] + list(args)
+    with subprocess.Popen([sys.executable, "-I", "-B", "-c", code] + list(args), stdin=subprocess.DEVNULL,
+                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) as proc:
+        while True:
+            try:
+                stdout, stderr = proc.communicate(timeout=_DEADLINE_CHILD_POLL_SECONDS)
+                break
+            except subprocess.TimeoutExpired:
+                pass
+            after = _load_reference_seconds()[1]
+            now = time.monotonic()
+            judged += (now - mark) / max(1.0, min(reading, after) / _LOAD_REFERENCE_SECONDS)
+            reading, mark = after, now
+            if judged > limit:
+                proc.kill()
+                proc.communicate()
+                return None, "{:.1f}s wall-clock, {:.1f}s judged".format(now - began, judged)
+    now = time.monotonic()
+    return (subprocess.CompletedProcess(argv, proc.returncode, stdout, stderr),
+            "{:.1f}s wall-clock, {:.1f}s judged before the last stretch".format(now - began, judged))
+
+
+def _deadline_child_wait_failures():
+    """(dl-child-wait-hang, dl-child-wait-done) _deadline_child_wait stops a child that outlives its judged
+    limit and returns one that finishes: a child sleeping 600 s under a 1-second limit is stopped (None),
+    and not before that second of wall-clock time, and a child that prints and exits at once returns its
+    exit status and output."""
+    out = []
+    began = time.monotonic()
+    proc, waited = _deadline_child_wait("import time; time.sleep(600)", (), 1.0)
+    spent = time.monotonic() - began
+    if proc is not None or spent < 1.0:
+        out.append("(dl-child-wait-hang) a child sleeping 600 s under a 1-second judged limit must be stopped, "
+                   "and not within 1 s, got {!r} after {:.1f}s ({})".format(proc, spent, waited))
+    proc, waited = _deadline_child_wait("print('done')", (), 900)
+    if proc is None or proc.returncode != 0 or proc.stdout != "done\n":
+        out.append("(dl-child-wait-done) a child that prints and exits must return exit 0 and its output, got "
+                   "{!r} ({})".format(proc, waited))
+    return out
+
+
 def _test_deadline_posture(failures, tmp):
     """(dl-*) The PreToolUse deadline posture; see the section comment above."""
     failures.extend(_deadline_relation_failures())
@@ -10118,16 +10179,16 @@ def _test_deadline_posture(failures, tmp):
     failures.extend(_lex_repeats_failures())
     failures.extend(_lex_fork_failures())
     failures.extend(_errexit_runs_failures())
+    failures.extend(_deadline_child_wait_failures())
     child_tmp = tmp / "deadline"
     child_tmp.mkdir()
     code = ("import json, sys; sys.path.insert(0, sys.argv[1]); import selftest_aiqt_hooks as m; "
             "sys.stdout.write(json.dumps(m._deadline_child(sys.argv[2])))")
-    try:
-        proc = subprocess.run([sys.executable, "-I", "-B", "-c", code, str(Path(__file__).resolve().parent),
-                               str(child_tmp)], capture_output=True, text=True, timeout=_DEADLINE_CHILD_TIMEOUT)
-    except subprocess.TimeoutExpired:
-        failures.append("(dl-child-timeout) the deadline child did not finish within {}s".format(
-            _DEADLINE_CHILD_TIMEOUT))
+    proc, waited = _deadline_child_wait(code, (str(Path(__file__).resolve().parent), str(child_tmp)),
+                                        _DEADLINE_CHILD_TIMEOUT)
+    if proc is None:
+        failures.append("(dl-child-timeout) the deadline child did not finish within {}s judged ({})".format(
+            _DEADLINE_CHILD_TIMEOUT, waited))
         return
     try:
         found = json.loads(proc.stdout)

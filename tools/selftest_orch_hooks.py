@@ -339,9 +339,29 @@ import sys
 import time
 ctl = json.load(open(sys.argv[1]))
 time.sleep(ctl.get("sleep", 0))
+if ctl.get("done"):
+    open(ctl["done"], "w").close()
 sys.stdout.write(ctl.get("out", ""))
 sys.exit(ctl.get("exit", 0))
 """
+
+# A fixed reference workload, a pure-Python character scan over 524,288 characters that runs none of the
+# hook's code, and its wall-clock cost on an uncontended runner (the same workload and constant as the dl-shape
+# rows of selftest_aiqt_hooks.py, which give its measurement). _load_slowdown reads how much slower than that
+# the host runs fixed work at that moment, so a wall-clock row can judge its elapsed time in uncontended seconds.
+_LOAD_REFERENCE_TEXT = ("(" + ";" * 59 + " #a\n") * 8192
+_LOAD_REFERENCE_STOPS = frozenset("#&;\n(")
+_LOAD_REFERENCE_SECONDS = 0.028
+
+
+def _load_slowdown():
+    """One reading of the reference workload's wall-clock time over its uncontended cost, never under 1."""
+    began = time.monotonic()
+    stops = 0
+    for char in _LOAD_REFERENCE_TEXT:
+        if char in _LOAD_REFERENCE_STOPS:
+            stops += 1
+    return max(1.0, (time.monotonic() - began) / _LOAD_REFERENCE_SECONDS)
 
 
 def _rdp_git(root, *args):
@@ -406,8 +426,8 @@ class RdpFixture:
         exclude.parent.mkdir(parents=True, exist_ok=True)
         exclude.write_text("".join(p + "\n" for p in patterns), encoding="utf-8")
 
-    def authority(self, out, code=0, sleep=0):
-        self.ctl.write_text(json.dumps(dict(out=out, exit=code, sleep=sleep)), encoding="utf-8")
+    def authority(self, out, code=0, sleep=0, done=None):
+        self.ctl.write_text(json.dumps(dict(out=out, exit=code, sleep=sleep, done=done)), encoding="utf-8")
 
     def brief(self, lines, name="brief.txt"):
         path = self.briefs / name
@@ -819,16 +839,26 @@ def _rdp_cases(tmp):
     fm_kind = _rdp_kind(fm.dispatch(fm.good()))
     aiqt_hooks._review_git(str(fm.root), "status", "--porcelain")
     check("rdp/fsmonitor-never-runs", (fm_kind, marker.exists()), ("allow", False))
+    # The decision must not wait for the authority's 3-second sleep: the authority marks the end of its sleep in
+    # a file, which must not exist when the decision returns (a load cannot create it, since the deadline kills
+    # the authority), and the elapsed time, divided by the lesser reference slowdown read before and after
+    # (_load_slowdown), must be under 2.5 s. A wait that does not slow with the load is judged on that
+    # quotient too, so under a slowdown a wait shorter than the sleep but over 2.5 s can pass; the marker
+    # still fails a decision that waited for the authority whatever the load.
     saved_budget = aiqt_hooks._RDP_BUDGET
-    f.authority(f.pin + "\n", sleep=3)
+    authority_done = f.briefs / "authority-done"
+    f.authority(f.pin + "\n", sleep=3, done=str(authority_done))
     aiqt_hooks._RDP_BUDGET = 1.0
+    slowdown = _load_slowdown()
     started = aiqt_hooks.time.monotonic()
     try:
         budget_kind = _rdp_kind(f.dispatch(f.good()))
+        budget_spent, budget_outlived = aiqt_hooks.time.monotonic() - started, authority_done.exists()
     finally:
         aiqt_hooks._RDP_BUDGET = saved_budget
         f.authority(f.pin + "\n")
-    check("rdp/deadline-bounds-the-decision", (budget_kind, aiqt_hooks.time.monotonic() - started < 2.5),
+    slowdown = min(slowdown, _load_slowdown())
+    check("rdp/deadline-bounds-the-decision", (budget_kind, not budget_outlived and budget_spent / slowdown < 2.5),
           ("unverifiable", True))
     # Each content read and git probe refuses to start once the deadline has passed: a past deadline is set
     # directly, then each reader is called (a symlink entry exercises the walk without the blob hash).
@@ -989,21 +1019,28 @@ def _rdp_cases(tmp):
     check("rdp/symlink-target-compared", sl_got, ["deny", "allow"])
     # A read that blocks in the kernel (a hung filesystem; here a sleep that never checks the deadline) cannot
     # hold the hook past its budget.
+    # As in rdp/deadline-bounds-the-decision: the hung read records the end of its sleep, which must not have
+    # come when the decision returns, and the elapsed time over the lesser reference slowdown must be under 2 s.
     real_blob = aiqt_hooks._rdp_blob_id
+    hung_slept = []
 
     def _hung_blob(fmt, header_size, fd):
         aiqt_hooks.time.sleep(3)
+        hung_slept.append(True)
         return real_blob(fmt, header_size, fd)
     saved_budget = aiqt_hooks._RDP_BUDGET
     aiqt_hooks._RDP_BUDGET = 1.0
     aiqt_hooks._rdp_blob_id = _hung_blob
+    slowdown = _load_slowdown()
     started = aiqt_hooks.time.monotonic()
     try:
         hung_kind = _rdp_kind(f.dispatch(f.good()))
+        hung_spent, hung_outlived = aiqt_hooks.time.monotonic() - started, bool(hung_slept)
     finally:
         aiqt_hooks._rdp_blob_id = real_blob
         aiqt_hooks._RDP_BUDGET = saved_budget
-    check("rdp/hung-read-bounded-by-deadline", (hung_kind, aiqt_hooks.time.monotonic() - started < 2.0),
+    slowdown = min(slowdown, _load_slowdown())
+    check("rdp/hung-read-bounded-by-deadline", (hung_kind, not hung_outlived and hung_spent / slowdown < 2.0),
           ("unverifiable", True))
     aiqt_hooks.time.sleep(2.5)   # the abandoned worker finishes before the next vector uses f
     mf = RdpFixture(base, "mutants")
