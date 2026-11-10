@@ -173,6 +173,7 @@ import contextlib
 import datetime
 import dis
 import hashlib
+import importlib.util
 import io
 import json
 import os
@@ -9252,6 +9253,279 @@ def _selftest_exit_code(failures, cannot_evaluate):
     return 2 if cannot_evaluate else 0
 
 
+# The differential oracle for branch_root and git_discard. It loads main's hook at a pinned base revision
+# from git (replacement refs disabled) and this tree's hook as separate modules, runs both handlers on one
+# corpus in real scratch repositories, and fails on any decision that differs, unless the row is in
+# _ORACLE_ALLOWLIST: a closed list of exact literal forms this tree newly allows, each with its reason. The
+# corpus is generated from the base hook's own option and form tables, plus fixed rows for every spelling
+# that earlier reviews reproduced (a directory named '~', prefix spellings of GIT_DIR+=, the GIT_DIR= twins).
+_ORACLE_BASE = "189a280e388d6a2e6d3d1b59b3616d32dac3ad51"
+_ORACLE_HOOK = ".aiqt/core/hooks/scripts/aiqt_hooks.py"
+# (handler, command template, commit-ish class, session directories, reason). {w} is a plain absolute
+# worktree path and {c} a commit-ish spelled in plain words; a row matches only with these exact words.
+_ORACLE_ALLOWLIST = (
+    ("branch_root", "git worktree add --detach {w} {c}", "rooted", ("S", "S/sub", "L"),
+     "creates no branch; in this exact literal form, run alone from a session directory, git checks the "
+     "commit-ish out of the repository the ancestry probe reads, and the probe shows it rooted on a "
+     "protected line that resolves there, so no orphaned line can start"),
+    ("branch_root", "git worktree add -d {w} {c}", "rooted", ("S", "S/sub", "L"),
+     "the short spelling of --detach; the same exact literal form and the same reason"),
+)
+_ORACLE_ROOTED = ("main", "HEAD", "origin/HEAD", "origin/main", "v1", "feat", "{sha}", "HEAD~1", "HEAD^0", "@",
+                  "HEAD@{0}", ":/seed")
+
+
+def _oracle_load_base(scratch):
+    """(module, None) for the hook at _ORACLE_BASE, or (None, reason). The source comes from git show with
+    replacement refs disabled, is written under the self-test's scratch directory and is loaded from there
+    under a private name, never registered in sys.modules; no external input."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env["GIT_NO_REPLACE_OBJECTS"] = "1"
+    env["GIT_CONFIG_NOSYSTEM"] = "1"
+    proc = subprocess.run(["git", "--no-replace-objects", "-C", str(repo_root()), "show",
+                           "{}:{}".format(_ORACLE_BASE, _ORACLE_HOOK)],
+                          capture_output=True, timeout=120, env=env)
+    if proc.returncode != 0 or not proc.stdout:
+        return None, "git show {}:{} failed (rc={}): {}".format(
+            _ORACLE_BASE, _ORACLE_HOOK, proc.returncode, proc.stderr.decode("utf-8", "replace").strip())
+    path = scratch / "aiqt_hooks_oracle_base.py"
+    with open(path, "wb") as fh:
+        fh.write(proc.stdout)
+    spec = importlib.util.spec_from_file_location("aiqt_hooks_oracle_base", str(path))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module, None
+
+
+def _oracle_fixture(root):
+    """One side's scratch repositories under root: S (origin/HEAD, main, a tag, a rooted branch, an orphaned
+    branch, a subdirectory and a directory literally named '~'), L (a local main and no remote), N (no
+    protected line), P (a plain directory) and D (a dirty repository for git_discard, with a symlink to its
+    .git and a symlink named '~' to itself). Returns (substitutions, session directories)."""
+    s = _init_repo(root / "S")
+    _git(s, "update-ref", "refs/remotes/origin/main", "HEAD")
+    _git(s, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")
+    _git(s, "tag", "v1")
+    _git(s, "branch", "feat")
+    (s / "sub").mkdir()
+    (s / "~").mkdir()
+    env = git_fixture_env()
+    sha = subprocess.run(["git", "-C", str(s), "rev-parse", "HEAD"], check=True, capture_output=True,
+                         text=True, timeout=30, env=env).stdout.strip()
+    tree = subprocess.run(["git", "-C", str(s), "rev-parse", "HEAD^{tree}"], check=True, capture_output=True,
+                          text=True, timeout=30, env=env).stdout.strip()
+    orphan = subprocess.run(["git", "-C", str(s), "-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+                             "commit-tree", tree, "-m", "orphan"], check=True, capture_output=True, text=True,
+                            timeout=30, env=env).stdout.strip()
+    _git(s, "update-ref", "refs/heads/orph", orphan)
+    lrepo = _init_repo(root / "L")
+    nrepo = _init_repo(root / "N")
+    _git(nrepo, "branch", "-m", "main", "trunk")
+    plain = root / "P"
+    plain.mkdir()
+    d = _init_repo(root / "D")
+    (d / "sub").mkdir()
+    (d / "file.txt").write_text("changed line\n", encoding="utf-8")
+    (d / "list").write_text("file.txt\n", encoding="utf-8")
+    os.symlink(".git", str(d / "gd-link"))
+    os.symlink(".", str(d / "~"))
+    subst = {"{S}": str(s), "{D}": str(d), "{w}": str(root / "wt"), "{sha}": sha, "{Dname}": d.name}
+    cwds = {"S": str(s), "S/sub": str(s / "sub"), "L": str(lrepo), "N": str(nrepo), "P": str(plain),
+            "D": str(d), "none": None}
+    return subst, cwds
+
+
+def _oracle_corpus(base):
+    """The rows (handler, template, commit-ish key, commit-ish class, session key), generated from the
+    base hook's own tables: the worktree add option vocabulary (_CLEAN_LONG_BOOLEANS,
+    _CLEAN_SHORT_LETTERS, _WORKTREE_CREATE_SHORT, _EOO_TOKENS), the git target flags and assignments
+    (_GIT_TARGET_FLAGS, _GIT_TARGET_ASSIGN_RE), the wrapper words (_WRAPPER_WORDS), the discard verbs and
+    their options (_SNAPSHOTTABLE_VERBS, _DISCARD_VERB_OPTS, _DISCARD_STASH_OP_OPTS), plus the fixed
+    spellings earlier reviews reproduced."""
+    rows = []
+    shapes = ["{D} {w} {c}", "{w} {c} {D}", "{w} {D} {c}", "{D} {w} {c} --"]
+    for eoo in sorted(base._EOO_TOKENS):
+        shapes.append("{D} " + eoo + " {w} {c}")
+    for opt in sorted(base._CLEAN_LONG_BOOLEANS):
+        shapes += [opt + " {D} {w} {c}", "{D} {w} {c} " + opt]
+    for ch in sorted(base._CLEAN_SHORT_LETTERS):
+        shapes += ["-" + ch + " {D} {w} {c}", "{D} -" + ch + " {w} {c}"]
+    for ch in sorted(base._WORKTREE_CREATE_SHORT):
+        shapes.append("{D} -" + ch + " nb {w} {c}")
+    detach_args = []
+    for spelling in ("--detach", "-d"):
+        for shape in shapes:
+            detach_args.append(shape.replace("{D}", spelling))
+    for ch in sorted(base._CLEAN_SHORT_LETTERS):
+        detach_args += ["-" + ch + "d {w} {c}", "-d" + ch + " {w} {c}"]
+    commits = [(c, "rooted") for c in _ORACLE_ROOTED] + [("orph", "orphaned"), ("nosuch", "unresolvable")]
+    for args in detach_args:
+        for c, cls in commits:
+            rows.append(("branch_root", "git worktree add " + args, c, cls, "S"))
+    basic = ("git worktree add --detach {w} {c}", "git worktree add -d {w} {c}")
+    few = (("main", "rooted"), ("{sha}", "rooted"), ("orph", "orphaned"), ("nosuch", "unresolvable"))
+    for tmpl in basic:
+        for sk in ("S/sub", "L", "N", "P", "none"):
+            for c, cls in few + (("HEAD", "rooted"), ("trunk", "rooted")):
+                rows.append(("branch_root", tmpl, c, cls if sk in ("S/sub", "L") or cls != "rooted" else
+                             "no-protected-line" if sk == "N" else "no-repository", sk))
+    names = re.findall(r"[A-Z_]+", base._GIT_TARGET_ASSIGN_RE.pattern.split(")")[0])
+    contexts = [("git -C {S} ", "", "P"), ("git -C {S}/ ", "", "P"), ("git -C {S} -C . ", "", "P"),
+                ("git -C {S} -C sub ", "", "P"), ("git -C '' ", "", "S"), ('git -C "" ', "", "S"),
+                ("git -C ~ ", "", "S"), ("git -C ~/ ", "", "S"), ("git -C {S} -C ~ ", "", "P"),
+                ("git -C {S}/.git ", "", "S"), ("'git' ", "", "S"), ("git  ", "", "S"), ("git\t", "", "S"),
+                ("git ", " # c", "S"), ("git ", "\n", "S"), ("git ", "; true", "S"), ("true && git ", "", "S"),
+                ("cd {S} && git ", "", "P"), ("export GIT_DIR={S}/.git; git ", "", "S"),
+                ("/usr/bin/git ", "", "S"), ("git ", " > /dev/null", "S")]
+    for flag in sorted(base._GIT_TARGET_FLAGS):
+        contexts.append(("git " + flag + " ", "", "S"))
+    for name in names:
+        for op in ("=", "+="):
+            contexts.append((name + op + "{S}/.git git ", "", "S"))
+            contexts.append((name + op + "{S} git -C {S} ", "", "P"))
+    for word in sorted(base._WRAPPER_WORDS):
+        contexts.append((word + " git ", "", "S"))
+    for pre, post, sk in contexts:
+        for tmpl in basic:
+            for c, cls in few:
+                rows.append(("branch_root", pre + tmpl[len("git "):] + post, c, cls, sk))
+    for c, cls in commits:
+        for tmpl in ("git worktree add -d ~/wt {c}", "git worktree add --detach ~ {c}",
+                     "git worktree add -b nb {w} {c}", "git checkout -b nb {c}", "git switch -c nb {c}",
+                     "git branch nb {c}"):
+            rows.append(("branch_root", tmpl, c, cls, "S"))
+    values = {"-b": "nb", "-B": "nb", "-c": "nb", "-C": "nb", "--orphan": "nb", "-s": "HEAD", "--source": "HEAD",
+              "--conflict": "merge", "--pathspec-from-file": "list", "-e": "x", "--exclude": "x"}
+    tails = {"checkout": " -- file.txt", "restore": " file.txt", "rm": " file.txt", "reset": "", "switch": " other",
+             "clean": ""}
+    forms = []
+    for verb in sorted(base._SNAPSHOTTABLE_VERBS):
+        flags, valued = base._DISCARD_VERB_OPTS[verb]
+        tail = tails.get(verb, "")
+        forms.append(verb + tail)
+        for flag in sorted(flags):
+            forms.append(verb + " " + flag + tail)
+        for opt in sorted(valued):
+            val = values.get(opt, "x")
+            forms.append(verb + (" {}={}".format(opt, val) if opt.startswith("--") else " {} {}".format(opt, val))
+                         + tail)
+    for op in sorted(base._DISCARD_STASH_OP_OPTS):
+        forms.append("stash " + op)
+    forms += ["checkout -- .", "checkout .", "checkout other", "checkout -f HEAD~1", "checkout --merge file.txt",
+              "checkout -- file.txt clean.txt", "restore --source HEAD~1 file.txt", "reset --hard @",
+              "reset --hard HEAD", "reset --soft HEAD~1", "clean -fd -- d", "clean -f --end-of-options -x",
+              "clean -fdx", "clean -fX", "clean -f -d -x", "clean -qfx", "rm -r --cached sub", "checkout -p"]
+    prefixes = ["git ", "git -C '' ", "GIT_DIR=.git git -C '' ", "GIT_DIR+=.git git -C '' "]
+    reported = ["GIT_DIR+='.git' git -C '' ", "GIT_DIR+=.git/. git -C '' ", "GIT_DIR+=sub/../.git git -C '' ",
+                "GIT_DIR+=.git// git -C '' ", 'GIT_DIR+=.git git -C "" ', "GIT_DIR+={D}/.git git -C '' ",
+                "GIT_DIR+=./.git git -C '' -C '' ", "GIT_DIR+=.git/ git -C '' ", "GIT_DIR+=gd-link git -C '' ",
+                "GIT_DIR+=~/.git git -C '' ", "GIT_DIR+=.git git ", "GIT_DIR+=.git git -C '' -C '' -C '' ",
+                "GIT_DIR+=../{Dname}/.git git -C '' ", "GIT_DIR=~/.git git -C '' ", "GIT_DIR=.git/. git -C '' "]
+    reported_forms = ["checkout -- file.txt", "checkout -- .", "restore file.txt", "restore --staged file.txt",
+                      "reset --hard", "reset --hard HEAD", "clean -f", "clean -fdx", "rm file.txt",
+                      "checkout -f other", "stash drop", "stash clear"]
+    for pre in prefixes:
+        for form in forms:
+            rows.append(("git_discard", pre + form, "", "discard", "D"))
+    for pre in reported:
+        for form in reported_forms:
+            rows.append(("git_discard", pre + form, "", "discard", "D"))
+    return rows
+
+
+def _oracle_fill(text, subst, commit):
+    """text with {c} set to the commit-ish key and then every fixture placeholder substituted."""
+    text = text.replace("{c}", commit)
+    for key in sorted(subst, key=len, reverse=True):
+        text = text.replace(key, subst[key])
+    return text
+
+
+def _oracle_allowed(row, got, allowlist):
+    """The allowlist entry that admits this differing row, or None. An entry admits only a row whose
+    handler and template are the entry's exactly, whose commit-ish class and session directory are the
+    entry's, where main denies and this tree allows silently."""
+    handler, tmpl, _commit, cls, sk = row
+    for entry in allowlist:
+        if (entry[0], entry[1], entry[2]) == (handler, tmpl, cls) and sk in entry[3] and got == ("deny", "allow"):
+            return entry
+    return None
+
+
+def _oracle_compare(base, head, rows, sides, allowlist, base_cache=None):
+    """(findings, used, base_cache, moved): each row run through main's handler in side 0 and this tree's in
+    side 1. findings lists every differing row no entry admits and every entry no row exercised."""
+    findings = []
+    used = set()
+    moved = 0
+    cache = [] if base_cache is None else base_cache
+    for idx, row in enumerate(rows):
+        handler, tmpl, commit, _cls, sk = row
+        if base_cache is None:
+            cmd0 = _oracle_fill(tmpl, sides[0][0], commit)
+            cache.append(_decision(getattr(base, handler), cmd0, cwd=sides[0][1][sk]))
+        cmd1 = _oracle_fill(tmpl, sides[1][0], commit)
+        got = (cache[idx], _decision(getattr(head, handler), cmd1, cwd=sides[1][1][sk]))
+        if got[0] == got[1]:
+            continue
+        entry = _oracle_allowed(row, got, allowlist)
+        if entry is None:
+            findings.append("(oracle) {} {!r} commit-ish {!r} from {}: main {}, this tree {}, and no allowlist "
+                            "entry admits it".format(handler, tmpl, commit, sk, got[0], got[1]))
+        else:
+            used.add(entry[1])
+            moved += 1
+    for entry in allowlist:
+        if entry[1] not in used:
+            findings.append("(oracle-stale) allowlist entry {!r} admitted no row".format(entry[1]))
+    return findings, used, cache, moved
+
+
+def _differential_oracle(failures, tmp):
+    """Run the differential oracle and its two mutation checks, appending every finding to failures, and
+    return the corpus size (0 when the base hook cannot be loaded, which is itself a failure)."""
+    scratch = tmp / "oracle"
+    scratch.mkdir(parents=True, exist_ok=True)
+    base, why = _oracle_load_base(scratch)
+    if base is None:
+        failures.append("(oracle-base) the base hook could not be loaded: {}".format(why))
+        return 0
+    saved_env = {k: os.environ[k] for k in list(os.environ) if k.startswith("GIT_") or k == "HOME"}
+    home = scratch / "home"
+    home.mkdir()
+    for key in saved_env:
+        os.environ.pop(key, None)
+    os.environ["HOME"] = str(home)
+    try:
+        sides = (_oracle_fixture(scratch / "main-side"), _oracle_fixture(scratch / "head-side"))
+        rows = _oracle_corpus(base)
+        findings, _used, cache, _moved = _oracle_compare(base, aiqt_hooks, rows, sides, _ORACLE_ALLOWLIST)
+        failures.extend(findings)
+        # Mutation: with the redesign reverted (every detach the classifier reads is probed, the unbounded
+        # reading), the oracle must turn red.
+        br_rows = [r for r in rows if r[0] == "branch_root"]
+        br_cache = [cache[i] for i, r in enumerate(rows) if r[0] == "branch_root"]
+        saved = aiqt_hooks._detach_pinned
+        aiqt_hooks._detach_pinned = lambda command, segments, tokens, cwd: True
+        try:
+            flip, _u, _c, _m = _oracle_compare(base, aiqt_hooks, br_rows, sides, _ORACLE_ALLOWLIST, br_cache)
+        finally:
+            aiqt_hooks._detach_pinned = saved
+        if not [f for f in flip if f.startswith("(oracle) ")]:
+            failures.append("(oracle-flip-redesign) reverting the exact-form gate must turn the oracle red")
+        # Mutation: with any one allowlist entry deleted, the oracle must turn red.
+        for drop in range(len(_ORACLE_ALLOWLIST)):
+            fewer = _ORACLE_ALLOWLIST[:drop] + _ORACLE_ALLOWLIST[drop + 1:]
+            flip, _u, _c, _m = _oracle_compare(base, aiqt_hooks, br_rows, sides, fewer, br_cache)
+            if not [f for f in flip if f.startswith("(oracle) ")]:
+                failures.append("(oracle-flip-allowlist) deleting allowlist entry {!r} must turn the oracle "
+                                "red".format(_ORACLE_ALLOWLIST[drop][1]))
+    finally:
+        os.environ.pop("HOME", None)
+        os.environ.update(saved_env)
+    return len(rows)
+
+
 def _main_isolated(monitor):
     scrub_git_environment()
     handler = aiqt_hooks.git_discard
@@ -12463,30 +12737,26 @@ def _main_isolated(monitor):
         gdc("(gdc-env-gitdir-append-joined) two GIT_DIR+= assignments joined into one value DENY",
             "GIT_DIR+=.gi GIT_DIR+=t git restore file.txt", "deny", "clean", {"tgt": 0, "sess": 0},
             _gdc_keep_gitdir)
-        # A leading GIT_DIR+= naming the session directory's own .git beside an empty -C, in a pristine command,
-        # is read as GIT_DIR= (_gitdir_append_pinned): the base read without asking git is the session
-        # directory, so the scoped discard allows with a note, as its GIT_DIR= twin does. Beside -C <target>
-        # --work-tree=<target> the GIT_DIR+= is set aside, as it always was, so the -C target is the base and
-        # the discard allows with a note, while the GIT_DIR= twin denies (the worktree lies outside the session
-        # repository it reads).
+        # A leading GIT_DIR= naming the session directory's own .git beside an empty -C makes the session
+        # directory the base read without asking git, so the scoped discard allows with a note. A GIT_DIR+=
+        # there is set aside, as on main (the differential oracle pins every such spelling to main's
+        # decision). Beside -C <target> --work-tree=<target> the GIT_DIR+= is set aside too, so the -C target
+        # is the base and the discard allows with a note, while the GIT_DIR= twin denies (the worktree lies
+        # outside the session repository it reads).
+        gdc("(gdc-env-gitdir-set-emptyC-own) GIT_DIR=<session>/.git with -C '' on a scoped checkout allows "
+            "with a note", "GIT_DIR={S}/.git git -C '' checkout -- file.txt", "allow-note", "clean",
+            {"tgt": 0, "sess": 0})
+        gdc("(gdc-env-gitdir-set-emptyC-staged) GIT_DIR=.git with -C '' on restore --staged allows with a note",
+            "GIT_DIR=.git git -C '' restore --staged file.txt", "allow-note", "clean", {"tgt": 0, "sess": 0})
         for _gda_op in ("+=", "="):
             _gda_tag = "append" if _gda_op == "+=" else "set"
             _gda_wt_want = ("allow-note", None) if _gda_op == "+=" else ("deny", _gdc_keep_wt)
-            gdc("(gdc-env-gitdir-{}-emptyC-own) GIT_DIR{}<session>/.git with -C '' on a scoped checkout allows "
-                "with a note".format(_gda_tag, _gda_op),
-                "GIT_DIR" + _gda_op + "{S}/.git git -C '' checkout -- file.txt", "allow-note", "clean",
-                {"tgt": 0, "sess": 0})
-            gdc("(gdc-env-gitdir-{}-emptyC-staged) GIT_DIR{}.git with -C '' on restore --staged allows with a "
-                "note".format(_gda_tag, _gda_op),
-                "GIT_DIR" + _gda_op + ".git git -C '' restore --staged file.txt", "allow-note", "clean",
-                {"tgt": 0, "sess": 0})
             gdc("(gdc-env-gitdir-{}-C-worktree) GIT_DIR{}.git with -C <target> --work-tree=<target> from "
                 "another session repository decides {}".format(_gda_tag, _gda_op, _gda_wt_want[0]),
                 "GIT_DIR" + _gda_op + ".git git -C {T} --work-tree={T} checkout -- file.txt", _gda_wt_want[0],
                 "dirty", {"tgt": 1, "sess": 0}, _gda_wt_want[1])
         # A clean with -x or -X removes ignored files the recovery snapshot does not hold, so beside an empty -C
-        # it keeps the deny of an unresolvable -C even where GIT_DIR+= names the session's own .git. Flip: with
-        # GIT_DIR+= read as GIT_DIR= unconditionally (the gate removed), each must allow with a note instead.
+        # it keeps the deny of an unresolvable -C even where GIT_DIR+= names the session's own .git.
         _gdx_rows = (
             ("(gdc-env-gitdir-append-emptyC-clean-x) GIT_DIR+=<session>/.git with -C '' on clean -fdx DENIES",
              "GIT_DIR+={S}/.git git -C '' clean -fdx"),
@@ -12497,14 +12767,6 @@ def _main_isolated(monitor):
         )
         for _gdx_label, _gdx_cmd in _gdx_rows:
             gdc(_gdx_label, _gdx_cmd, "deny", "clean", {})
-        _gdx_gate = aiqt_hooks._gitdir_append_pinned
-        aiqt_hooks._gitdir_append_pinned = lambda tokens, cwd, sub, args: True
-        try:
-            for _gdx_label, _gdx_cmd in _gdx_rows:
-                gdc(_gdx_label.replace(") ", "-flip) ", 1).replace("DENIES", "allows with the gate removed"),
-                    _gdx_cmd, "allow-note", "clean", {})
-        finally:
-            aiqt_hooks._gitdir_append_pinned = _gdx_gate
         # A leading GIT_DIR+= on a stash drop/clear names the git dir just as GIT_DIR= does, so it DENIES
         # rather than preserve the -C repository's stash (here none, a silent allow on the unfixed guard)
         # while the command clears the stash of the repository GIT_DIR names.
@@ -17101,27 +17363,47 @@ def _main_isolated(monitor):
         # it, --orphan, an abbreviated or valued --detach, a detach word after -- (an operand to git), a git
         # alias, and the bare form without --detach still DENY.
         h33_allow = (
-            ("(H33a) worktree add --detach before the operands on a rooted start allows",
-             "git -C {} worktree add --detach /tmp/wt-h33a {}".format(brr, br_tip), str(_f12_plain)),
-            ("(H33b) worktree add --detach after the operands on a rooted start allows",
-             "git -C {} worktree add /tmp/wt-h33b {} --detach".format(brr, br_tip), str(_f12_plain)),
+            ("(H33a) the exact form worktree add --detach <path> <rooted> allows",
+             "git worktree add --detach /tmp/wt-h33a {}".format(br_tip), brr),
+            ("(H33b) the exact form worktree add --detach <path> origin/HEAD allows",
+             "git worktree add --detach /tmp/wt-h33b origin/HEAD", brr),
             ("(H33c) worktree add -d on a rooted start allows",
              "git worktree add -d /tmp/wt-h33c {}".format(br_tip), brr),
-            ("(H33d) worktree add -qd -- <path> <rooted> allows (operands after --)",
-             "git worktree add -qd -- /tmp/wt-h33d origin/HEAD", brr),
+            ("(H33d) the exact form worktree add -d <path> origin/HEAD allows",
+             "git worktree add -d /tmp/wt-h33d origin/HEAD", brr),
         )
         for label, command, cwd in h33_allow:
             got = _decision(brg, command, cwd=cwd)
             if got != "allow":
                 failures.append("{}: expected allow, got {}".format(label, got))
+        # Every other spelling of a rooted detach keeps main's deny: a -C target, the option after or between
+        # the operands, an option bundle, a trailing --, a quoted word, a doubled space, a '~' path or -C, and
+        # revision syntax in the commit-ish.
+        for label, command, cwd in (
+                ("(H33a2) worktree add --detach through -C <repo> on a rooted start denies",
+                 "git -C {} worktree add --detach /tmp/wt-h33a {}".format(brr, br_tip), str(_f12_plain)),
+                ("(H33b2) worktree add --detach after the operands denies",
+                 "git worktree add /tmp/wt-h33b {} --detach".format(br_tip), brr),
+                ("(H33d2) worktree add -qd -- <path> <rooted> denies",
+                 "git worktree add -qd -- /tmp/wt-h33d origin/HEAD", brr),
+                ("(H33d3) worktree add -d <path> <rooted> -- denies",
+                 "git worktree add -d /tmp/wt-h33d origin/HEAD --", brr),
+                ("(H33d4) a quoted command word denies", "'git' worktree add -d /tmp/wt-h33d origin/HEAD", brr),
+                ("(H33d5) a doubled space denies", "git worktree add -d  /tmp/wt-h33d origin/HEAD", brr),
+                ("(H33d6) a -C ~ target denies", "git -C ~ worktree add -d /tmp/wt-h33d origin/HEAD", brr),
+                ("(H33d7) a ~ worktree path denies", "git worktree add -d ~/wt-h33d origin/HEAD", brr),
+                ("(H33d8) HEAD~1 as the commit-ish denies", "git worktree add -d /tmp/wt-h33d HEAD~1", brr)):
+            got = _decision(brg, command, cwd=cwd)
+            if got != "deny":
+                failures.append("{}: expected deny, got {}".format(label, got))
         # The orphaned and unresolvable starts deny from the ancestry probe, so each names the probe's reason,
         # not the reason of a form this guard cannot classify.
         for label, command, fragment in (
                 ("(H33e) worktree add --detach on an orphaned start denies naming the missing merge base",
-                 "git -C {} worktree add /tmp/wt-h33e {} --detach".format(brr, br_orphan),
+                 "git worktree add --detach /tmp/wt-h33e {}".format(br_orphan),
                  "has no merge base with origin/HEAD"),
                 ("(H33f) worktree add --detach on an unresolvable start denies naming the unresolved start",
-                 "git -C {} worktree add --detach /tmp/wt-h33f no-such-ref-h33f".format(brr),
+                 "git worktree add --detach /tmp/wt-h33f no-such-ref-h33f",
                  "ancestry could not be evaluated (the branch start point")):
             _h33_code, _h33_out, _h33_err = brg({"hook_event_name": "PreToolUse", "tool_name": "Bash",
                                                  "tool_input": {"command": command}, "cwd": brr})
@@ -17194,7 +17476,7 @@ def _main_isolated(monitor):
                                                      **({"cwd": cwd} if cwd is not None else {})))
             _h33_got = _reduce_result(_h33_code, _h33_out)
             _h33_reason = ((_h33_out or {}).get("hookSpecificOutput") or {}).get("permissionDecisionReason", "")
-            if _h33_got != "deny" or "this detached worktree carries a command-local" not in _h33_reason:
+            if _h33_got != "deny" or "this detached worktree is not one of the two exact forms" not in _h33_reason:
                 failures.append("{}: expected deny naming the cannot-pin detach reason, got {} {!r}".format(
                     label, _h33_got, _h33_reason))
         # Flip: with the detach mark dropped and GIT_DIR+= read as GIT_DIR= (the reading that gave each of these
@@ -17259,7 +17541,7 @@ def _main_isolated(monitor):
                                                  "tool_input": {"command": command}, "cwd": brr})
             _h33_got = _reduce_result(_h33_code, _h33_out)
             _h33_reason = ((_h33_out or {}).get("hookSpecificOutput") or {}).get("permissionDecisionReason", "")
-            if _h33_got != "deny" or "this detached worktree carries a command-local" not in _h33_reason:
+            if _h33_got != "deny" or "this detached worktree is not one of the two exact forms" not in _h33_reason:
                 failures.append("{}: expected deny naming the cannot-pin detach reason, got {} {!r}".format(
                     label, _h33_got, _h33_reason))
         _h33_gate_saved = aiqt_hooks._detach_pinned
@@ -17283,8 +17565,8 @@ def _main_isolated(monitor):
         h36_deny = (
             ("(H36a) worktree add --detach in a repository with no protected line denies",
              "git worktree add --detach /tmp/wt-h36a HEAD", h36r),
-            ("(H36b) worktree add -d through -C <repo> with no protected line denies",
-             "git -C {} worktree add -d /tmp/wt-h36b trunk".format(h36r), str(_f12_plain)),
+            ("(H36b) worktree add -d on the only branch of a repository with no protected line denies",
+             "git worktree add -d /tmp/wt-h36b trunk", h36r),
         )
         for label, command, cwd in h36_deny:
             _h36_code, _h36_out, _h36_err = brg({"hook_event_name": "PreToolUse", "tool_name": "Bash",
@@ -17317,7 +17599,7 @@ def _main_isolated(monitor):
                                                  "tool_input": {"command": command}, "cwd": brr})
             _h33_got = _reduce_result(_h33_code, _h33_out)
             _h33_reason = ((_h33_out or {}).get("hookSpecificOutput") or {}).get("permissionDecisionReason", "")
-            if _h33_got != "deny" or "this detached worktree carries a command-local" not in _h33_reason:
+            if _h33_got != "deny" or "this detached worktree is not one of the two exact forms" not in _h33_reason:
                 failures.append("{}: expected deny naming the cannot-pin detach reason, got {} {!r}".format(
                     label, _h33_got, _h33_reason))
         # Flip: the old classifier, which returned _ASK_START at the first detach token its walk met (so
@@ -17362,6 +17644,10 @@ def _main_isolated(monitor):
                     failures.append("{} flip: the old detach deny must turn it red, got {}".format(label, got))
         finally:
             aiqt_hooks._worktree_creation_start = _h33_saved
+
+        # The differential oracle against main's hook (_differential_oracle): any decision that differs from
+        # main's outside the closed allowlist of exact forms fails, and so do its two mutation checks.
+        _differential_oracle(failures, tmp)
 
         # === L11: shared raw-aware tokenizer regression matrix (direct _lex_command assertions) =======
         # Assert the exact cleaned argv and the redirect metadata, BEFORE the handler-level vectors, so a
@@ -29926,8 +30212,7 @@ def _main_isolated(monitor):
           "--work-tree=/etc ALLOWS a rooted start and DENIES an orphaned one), treats a missing origin/HEAD "
           "as rooted and a CHECKOUT/SWITCH --track of a real rooted ref as a rooted creation (a git-branch "
           "--track is an unclassifiable form and DENIES), and ALLOWS-WITH-NOTE only a command whose "
-          "repository it cannot pin: a --git-dir/GIT_DIR form, a leading GIT_DIR+= read as GIT_DIR= "
-          "(with or without -C); a -c or other global "
+          "repository it cannot pin: a --git-dir or leading GIT_DIR= form; a -c or other global "
           "option (--no-pager) or a leading assignment other than GIT_WORK_TREE= and the removed "
           "GUARDRAIL_ALLOW_DISCARD prefix (FOO=, GIT_WORK_TREE+=) when the command carries no -C, "
           "--work-tree or GIT_WORK_TREE= (beside GIT_WORK_TREE= or --work-tree with a session directory, "
@@ -29935,8 +30220,9 @@ def _main_isolated(monitor):
           "-C; a -C chain whose first -C is relative with no session directory; or a --work-tree or "
           "GIT_WORK_TREE= with no -C and no session directory. Beside a leading GIT_DIR+= the -C target "
           "(or the session directory under --work-tree or GIT_WORK_TREE=) is still probed as a floor and "
-          "an orphaned or unresolvable start there DENIES; a worktree add --detach under any of those "
-          "cannot-pin forms DENIES. A rooted creation and non-creation commands ALLOW. "
+          "an orphaned or unresolvable start there DENIES. A worktree add --detach is probed only in the "
+          "exact literal form 'git worktree add --detach|-d <path> <commit-ish>' from a session directory, "
+          "and every other detach DENIES. A rooted creation and non-creation commands ALLOW. "
           "gatdis (gate_weakening) DENIES a --no-verify bypass (with a value-aware '--' boundary so a '--' "
           "eaten as an option value does not hide a following -n), any raw git naming whose segment the "
           "closed literal allowlist grammar refuses on a roster verb (an expansion, substitution, process "

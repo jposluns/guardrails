@@ -490,6 +490,10 @@ ALLOWLIST = (
     ("tools/check_python_floor.py", "_tomllib_catches", "code", 1,
      "static analysis: getattr(builtins, name) resolves an except-clause name in a scanned"
      " file's AST and accepts it only as an exception class for issubclass; never called"),
+    ("tools/selftest_aiqt_hooks.py", "_oracle_load_base", "code", 1,
+     "self-test oracle loader: exec_module of the repository's own hook at a pinned base revision (git"
+     " show with replacement refs disabled), written under the self-test's temporary directory and never"
+     " registered in sys.modules; no external input"),
     ("tools/check_python_floor.py", "_load_path", "code", 1,
      "self-test probe: exec_module of the repository's own NEWTAB contract script (a fixture"
      " copy of .github/check_newtab_contract.py), opf/enforcement/claude/pretooluse_deny.py or"
