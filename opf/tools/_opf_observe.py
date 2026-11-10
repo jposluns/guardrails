@@ -872,11 +872,14 @@ def _link_phrase(kind):
 
 
 def _ls_tree(git, store_root, treeish, notes, recursive=False, omitted=_HELD_OMITTED):
-    """The entries of one committed tree, `git ls-tree -z [-r] <treeish>`, as (mode, object type, name)
-    triples; a recursive listing names each blob by its path within the tree. The mode is kept because the
-    object type alone lists a symlink as a blob. Returns None (+ note) on any git error or an entry that
-    does not parse. `-z` names each entry unquoted, NUL-terminated. `omitted` names what the caller omits."""
-    out = _run_git(git, store_root, ["ls-tree", "-z"] + (["-r"] if recursive else []) + [treeish])
+    """The entries of one committed tree, `git ls-tree -z --full-tree [-r] <treeish>`, as (mode, object
+    type, name) triples; a recursive listing names each blob by its path within the tree. The mode is kept
+    because the object type alone lists a symlink as a blob. `--full-tree` is required: git runs from the
+    store root, and from a directory below the repository toplevel ls-tree otherwise keeps only the entries
+    under that directory's path, so a store that is not at the toplevel would list as empty and every file
+    of its prior would read as absent. Returns None (+ note) on any git error or an entry that does not
+    parse. `-z` names each entry unquoted, NUL-terminated. `omitted` names what the caller omits."""
+    out = _run_git(git, store_root, ["ls-tree", "-z", "--full-tree"] + (["-r"] if recursive else []) + [treeish])
     if not out.completed or out.rc != 0:
         notes.append("prior: could not list {} ({}); {}".format(
             treeish, out.err.strip() if not out.completed else "git ls-tree rc {}".format(out.rc), omitted))
@@ -1265,7 +1268,10 @@ def _observe_prior(git, store_root, machine_rel, notes):
         notes.append("prior: could not determine the store's path within the repository; the prior "
                      "committed snapshot is omitted")
         return None
-    prefix = pfx.out.decode("utf-8", "replace").strip()   # "" at the toplevel, else "<dir>/" with a trailing /
+    # "" at the toplevel, else "<dir>/" with a trailing /. Only git's line ending is removed: whitespace is
+    # significant in a path, and a store at " lead/" trimmed to "lead/" would read a sibling store's prior.
+    prefix = pfx.out.decode("utf-8", "replace")
+    prefix = prefix[:-1] if prefix.endswith("\n") else prefix
     return _reconstruct_prior(git, store_root, machine_rel, prefix, notes)
 
 
@@ -1753,9 +1759,9 @@ def self_test_isolated():
             _saved_run_git = globals()["_run_git"]
 
             def _fail_name_listing(git_bin, store_root, args, **kwargs):
-                if args == ["ls-tree", "-z", "HEAD:" + machine_rel]:
+                if args == ["ls-tree", "-z", "--full-tree", "HEAD:" + machine_rel]:
                     return _saved_run_git(git_bin, store_root,
-                                          ["ls-tree", "-z", "HEAD:no-such-tree"], **kwargs)
+                                          ["ls-tree", "-z", "--full-tree", "HEAD:no-such-tree"], **kwargs)
                 return _saved_run_git(git_bin, store_root, args, **kwargs)
 
             globals()["_run_git"] = _fail_name_listing
@@ -1871,10 +1877,14 @@ def self_test_isolated():
             ("worklog/WL-3.toml", 'id = "WL-3"\n'), ("worklog/WL-4.toml", 'id = "WL-4"\n'))
 
         def held_case(label, relpath=None, text=None, worklog=None, remove=None, symlink=None, gitlink=None,
-                      relink=None, executable=None, extra_type=None):
-            repo = base / ("held-" + label)
-            repo.mkdir()
-            _git_setup(repo, home, "init")
+                      relink=None, executable=None, extra_type=None, nest=None):
+            # `nest` places the store root at that path below the repository toplevel; the case's store is
+            # otherwise unchanged, and gather runs from the nested store root.
+            top_repo = base / ("held-" + label)
+            top_repo.mkdir()
+            _git_setup(top_repo, home, "init")
+            repo = top_repo if nest is None else top_repo / nest
+            in_repo = machine_rel if nest is None else "{}/{}".format(nest, machine_rel)
             _write_store(repo)
             if extra_type is not None:
                 manifest = repo / machine_rel / _MANIFEST_NAME
@@ -1907,19 +1917,19 @@ def self_test_isolated():
                 body = link.read_text(encoding="utf-8")
                 link.unlink()
                 os.symlink(body, str(link))
-            _git_setup(repo, home, "add", "-A")
+            _git_setup(top_repo, home, "add", "-A")
             if executable is not None:
-                _git_setup(repo, home, "update-index", "--chmod=+x", "{}/{}".format(machine_rel, executable))
+                _git_setup(top_repo, home, "update-index", "--chmod=+x", "{}/{}".format(in_repo, executable))
             if gitlink is not None:
-                _git_setup(repo, home, "update-index", "--add", "--cacheinfo",
-                           "160000,{},{}/{}".format("1" * 40, machine_rel, gitlink))
-            _git_setup(repo, home, "commit", "-m", "store with one held source changed")
+                _git_setup(top_repo, home, "update-index", "--add", "--cacheinfo",
+                           "160000,{},{}/{}".format("1" * 40, in_repo, gitlink))
+            _git_setup(top_repo, home, "commit", "-m", "store with one held source changed")
             if relpath is not None and text is None:
-                oid = _run_git(git, str(repo), ["rev-parse", "HEAD:{}/{}".format(machine_rel, relpath)])
+                oid = _run_git(git, str(top_repo), ["rev-parse", "HEAD:{}/{}".format(in_repo, relpath)])
                 if not oid.completed or oid.rc != 0:
                     raise OSError("could not resolve the HEAD object of {}".format(relpath))
                 name = oid.out.decode("ascii").strip()
-                os.unlink(str(repo / ".git" / "objects" / name[:2] / name[2:]))
+                os.unlink(str(top_repo / ".git" / "objects" / name[:2] / name[2:]))
             if worklog != 2:
                 return gather(_Res(repo, machine_rel))
             with patch.object(_opf_store, "SUPPORTED_WORKLOG", 2):
@@ -1961,8 +1971,11 @@ def self_test_isolated():
         # A source committed as a symlink lists as a blob, and git show returns its link target text, which
         # can parse as TOML with no rows; a gitlink lists as a commit. Each, at a source name, is the wrong
         # entry type and omits `held` with a note naming the path and mode, never a partial `held` read from
-        # the link text. The regular-file controls rewrite the same source as a plain file through the same
-        # removal route and keep `held` whole, so the omission is the mode's alone.
+        # the link text. The regular-file controls remove the same source and write it back as a plain file
+        # with its original content, through the same removal route, and keep `held` whole, so the removal
+        # route omits nothing. A control differs from its link case in content as well as in mode (the link
+        # text is not the file's content), so it shows a regular file there is read; that the refusal is for
+        # the entry type is shown by each link case's note, which names the mode.
         link_text = "schema = 1"
         for label, remove, link, sub, worklog, needle in (
                 ("symlink-active-worklog", _WORKLOG_NAME, (_WORKLOG_NAME, link_text), None, None,
@@ -2021,6 +2034,46 @@ def self_test_isolated():
                   and mode.out.startswith(b"100755 blob ")
                   and (obs.get("prior") or {}).get("records", {}).get("BI-1") == ("backlog_item", "open")
                   and (obs.get("prior") or {}).get("held") == held_all and not any("(mode " in n for n in notes))
+        # A store below the repository toplevel reads its whole prior. git runs from the nested store root,
+        # where a machine-tree listing filtered by that directory shows nothing, so every file would read as
+        # absent and the whole prior would be omitted (red when ls-tree runs without --full-tree). Each
+        # nested control is the case-8 store, archive included, at a path holding a space or two levels
+        # deep, once with a generation-2 worklog/ directory, and its records, digests, releases, counters
+        # and `held` match the toplevel store's, with no prior note. A symlinked type index in a nested
+        # store omits the whole prior with a note naming its mode, as at the toplevel.
+        nested_records = {"BI-1": ("backlog_item", "open"), "DN-1": ("done", "recorded")}
+        for label, nest, worklog in (("space", "sub dir", None), ("two-level", "product/store", None),
+                                     ("space-generation-2", "sub dir", 2)):
+            obs, notes = held_case("nested-" + label, worklog=worklog, nest=nest)
+            prior = obs.get("prior") or {}
+            check("prior-nested-store-whole-" + label, prior.get("records") == nested_records
+                  and set(prior.get("digests") or {}) == set(nested_records)
+                  and len(prior.get("releases") or []) == 1 and prior.get("counters_high", {}).get("BI") == 1
+                  and prior.get("held") == held_all and not any(n.startswith("prior:") for n in notes))
+        obs, notes = held_case("nested-symlink-type-index", relink=index_name, nest="sub dir")
+        check("prior-nested-store-omitted-symlink-type-index", "prior" not in obs and any(
+            "prior: HEAD {} is a symlink (mode 120000), not a blob".format(index_name) in n
+            and n.endswith(_PRIOR_OMITTED) for n in notes))
+        # The store's path within the repository keeps its leading whitespace: a store at " lead" beside a
+        # sibling store at "lead", whose index holds BI-2 in place of BI-1, reads its own prior and never
+        # the sibling's (red when the path is trimmed of more than git's line ending). The sibling read
+        # from its own root is the control that the two stores differ.
+        lead_repo = base / "lead-space"
+        lead_repo.mkdir()
+        _git_setup(lead_repo, home, "init")
+        _write_store(lead_repo / " lead")
+        _write_store(lead_repo / "lead")
+        sibling_index = lead_repo / "lead" / machine_rel / index_name
+        sibling_index.write_text(sibling_index.read_text(encoding="utf-8").replace(
+            'id = "BI-1"', 'id = "BI-2"'), encoding="utf-8")
+        _git_setup(lead_repo, home, "add", "-A")
+        _git_setup(lead_repo, home, "commit", "-m", "two stores whose paths differ by a leading space")
+        obs, notes = gather(_Res(lead_repo / " lead", machine_rel))
+        sibling_obs, _sibling_notes = gather(_Res(lead_repo / "lead", machine_rel))
+        check("prior-nested-store-leading-space-own-prior",
+              (obs.get("prior") or {}).get("records") == nested_records
+              and (sibling_obs.get("prior") or {}).get("records") == {
+                  "BI-2": ("backlog_item", "open"), "DN-1": ("done", "recorded")})
         # A type's index is read at <type>.index.toml in the machine tree, so a type name that is not a single
         # path component names no entry of its own there. Under a name holding `/` the index sits in a subtree
         # the one top-level listing does not show, so its kind was never checked: a symlink there was read as
@@ -2130,7 +2183,9 @@ def self_test_isolated():
           "baseline member; the ids HEAD held, worklog "
           "and archive included, and an unreadable or malformed archive or worklog omitting them alone; "
           "a symlinked manifest, ledger, type index or imported leaf, a gitlinked type index, and a type "
-          "name that is not a single path component omitting the whole prior; bounded stdin transport)")
+          "name that is not a single path component omitting the whole prior; a store below the repository "
+          "toplevel, a leading space in its path included, reading its own whole prior; bounded stdin "
+          "transport)")
     return 0
 
 
