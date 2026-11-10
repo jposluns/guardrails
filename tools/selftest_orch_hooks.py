@@ -12117,6 +12117,522 @@ def _named_text_cases(hooks):
     return table
 
 
+# ---------- the deliverable-exec guard's differential oracle ----------
+# The guard has no earlier copy on the main line to diff against, so the oracle judges it against a
+# real-bash reference instead. Every corpus command is put to the guard and then run under bash in a
+# hermetic fixture (an isolated HOME, a minimal environment, its own session and a timeout) whose files
+# record where they ran from. A command the guard ALLOWS that ran code from a declared directory, from
+# stdin or argument text, or from a .git directory, rather than from a copy outside them, fails the
+# oracle. The corpus is GENERATED from the guard's own declared vocabulary (its shell, interpreter,
+# wrapper, indirection, shell-state and loader-environment word sets and its read-only allowlist) and
+# joined with the pinned fixture forms below (bypass and control shapes reported against this guard).
+# The corpus size and digest are pinned, so deleting a fixture or shrinking the vocabulary turns the
+# oracle red. Placeholders: @ST@ and @HB@ are the declared directories, @BASE@ their parent, @OUT@ and
+# @OTHER@ undeclared directories (@OTHER@ a git repository), @REPO@ the session repository, @STDLIB@ the
+# running interpreter's standard library and @N@ the case index (unique file names per case).
+# Executables reached: bash runs each command; every program a command names (the shells, python3,
+# git, cp, cat and the rest) is the real one from PATH, isolated rather than substituted: HOME is a
+# fixture directory, the environment holds only PATH, HOME, LANG and TMPDIR, no network is used, and
+# every write lands inside the fixture tree.
+_NRDO_SKIPPED_WORDS = frozenset(("sudo", "su", "watch"))  # privilege change or an unbounded repeat
+_NRDO_P = "'bash @BASE@/sta\"\"ge/o.sh'"
+_NRDO_FORMS = (
+    ("fix/ctl-bash-abs", "out", "bash @ST@/o.sh"),
+    ("fix/ctl-py-abs", "out", "python3 -I -B @ST@/o.py"),
+    ("fix/ctl-handback-py", "out", "python3 -I @HB@/o.py"),
+    ("fix/ctl-direct-exec", "out", "@ST@/o.sh"),
+    ("fix/ctl-direct-exec-rel", "base", "stage/orun"),
+    ("fix/ctl-direct-exec-dot", "st", "./orun"),
+    ("fix/ctl-exec-peel", "out", "exec @ST@/o.sh"),
+    ("fix/ctl-dot", "out", ". @ST@/o.sh"),
+    ("fix/ctl-cat", "out", "cat @ST@/o.py"),
+    ("fix/ctl-cat-pipe-wc", "out", "cat @ST@/o.py | wc -l"),
+    ("fix/ctl-ls-cwd-st", "st", "ls -la"),
+    ("fix/ctl-grep-rn", "out", "grep -rn open @ST@"),
+    ("fix/ctl-hash-two", "out", "sha256sum @ST@/o.py @ST@/o.sh"),
+    ("fix/ctl-diff-r", "out", "diff -r @ST@ @OUT@"),
+    ("fix/ctl-git-apply-check", "out", "git -C @OTHER@ apply --check @HB@/ok.patch"),
+    ("fix/ctl-git-apply-stdin", "out", "git -C @OTHER@ apply --check < @HB@/ok.patch"),
+    ("fix/ctl-cp-out", "out", "cp @ST@/o.sh @OUT@/c@N@.sh"),
+    ("fix/ctl-cp-a-tree", "out", "cp -a @ST@/sub @OUT@/t@N@"),
+    ("fix/ctl-cp-then-run-and", "out", "cp @ST@/o.sh @OUT@/c@N@.sh && bash @OUT@/c@N@.sh"),
+    ("fix/ctl-cp-then-run-semi", "out", "cp @ST@/o.py @OUT@/c@N@.py; python3 -I @OUT@/c@N@.py"),
+    ("fix/ctl-reader", "out", "python3 -I @OUT@/reader.py @ST@/o.py"),
+    ("fix/ctl-run-copy", "out", "bash @OUT@/copy.sh"),
+    ("fix/ctl-run-copy-py", "out", "python3 -I @OUT@/copy.py"),
+    ("fix/n-plus-n", "out", "bash -n +n @ST@/o.sh"),
+    ("fix/n-plus-o-noexec", "out", "bash -n +o noexec @ST@/o.sh"),
+    ("fix/n-sh-plus-n", "out", "sh -n +n @ST@/o.sh"),
+    ("fix/n-dash-plus-n", "out", "dash -n +n @ST@/o.sh"),
+    ("fix/n-x", "out", "bash -n -x @ST@/o.sh"),
+    ("fix/n-bash-env", "out", "BASH_ENV=@ST@/o.sh bash -n @OUT@/y.txt"),
+    ("fix/py-dev-stdin", "out", "python3 -I /dev/stdin < @ST@/o.py"),
+    ("fix/py-dev-fd3", "out", "python3 -I /dev/fd/3 3< @ST@/o.py"),
+    ("fix/py-proc-fd0", "out", "python3 -I /proc/self/fd/0 < @ST@/o.py"),
+    ("fix/py-stdlib-cprofile", "out", "python3 -I @STDLIB@/cProfile.py @ST@/o.py"),
+    ("fix/py-stdlib-trace", "out", "python3 -I @STDLIB@/trace.py --count @ST@/o.py"),
+    ("fix/py-missing-reader", "out", "python3 -I @OUT@/nope.py @ST@/o.py"),
+    ("fix/py-stdlib-runpy", "out", "python3 -I @STDLIB@/runpy.py @ST@/o.py"),
+    ("fix/py-stdlib-timeit", "out",
+     "python3 -I @STDLIB@/timeit.py -n1 -r1 \"import runpy; runpy.run_path('@ST@/o.py')\""),
+    ("fix/py-stdlib-pydoc", "out", "python3 -I @STDLIB@/pydoc.py @ST@/o.py"),
+    ("fix/py-stdlib-code-stdin", "out", "python3 -I @STDLIB@/code.py < @ST@/o.py"),
+    ("fix/py-stdlib-pickle", "out", "python3 -I @STDLIB@/pickle.py @ST@/o.pkl"),
+    ("fix/py-stdlib-unittest", "out", "python3 -I @STDLIB@/unittest/__main__.py discover -s @ST@"),
+    ("fix/py-stdlib-asyncio", "out", "python3 -I @STDLIB@/asyncio/__main__.py < @ST@/o.py"),
+    ("fix/git-cwd-inside", "st", "git diff --no-index a.txt b.txt"),
+    ("fix/git-C-inside", "out", "git -C @ST@ diff --no-index @ST@/a.txt @ST@/b.txt"),
+    ("fix/git-noindex-outside", "out", "git diff --no-index @ST@/a.txt @ST@/b.txt"),
+    ("fix/git-noindex-U5", "out", "git diff --no-index -U5 -- @ST@/a.txt @ST@/b.txt"),
+    ("fix/git-noindex-color", "out", "git diff --no-index --color=never @ST@/a.txt @ST@/b.txt"),
+    ("fix/c-splice", "out", "bash -c 'cd @BASE@/sta\"\"ge; bash o.sh'"),
+    ("fix/c-splice-nested", "out", "sh -c \"bash -c 'cd @BASE@/sta\\\"\\\"ge; bash o.sh'\""),
+    ("fix/c-splice-path-shell", "out", "/bin/bash -c 'cd @BASE@/sta\"\"ge; bash o.sh'"),
+    ("fix/c-splice-env", "out", "env bash -c 'cd @BASE@/sta\"\"ge; bash o.sh'"),
+    ("fix/c-splice-shopt", "out", "bash -O extglob -c 'cd @BASE@/sta\"\"ge; bash o.sh'"),
+    ("fix/c-splice-eval", "out", "eval 'cd @BASE@/sta\"\"ge; bash o.sh'"),
+    ("fix/c-out-ls", "out", "bash -c 'cd @OUT@; ls'"),
+    ("fix/cdpath-export", "out", "export CDPATH=@BASE@; cd stage; bash o.sh"),
+    ("fix/cdpath-prefix", "out", "CDPATH=@BASE@ cd stage; bash o.sh"),
+    ("fix/cdpath-printf", "out", "printf -v CDPATH %s @BASE@; cd stage; bash o.sh"),
+    ("fix/cdpath-read", "out", "read -r CDPATH < @OUT@/cdp.txt; cd stage; bash o.sh"),
+    ("fix/cdable-vars", "out", "shopt -s cdable_vars; v=@BASE@; cd v; bash stage/o.sh"),
+    ("fix/ansi-c-path", "out", "bash $'@BASE@/sta\\x67e/o.sh'"),
+    ("fix/ansi-c-cd", "out", "cd $'@BASE@/st\\141ge'; bash o.sh"),
+    ("fix/ansi-c-cat", "out", "cat $'@OUT@/y.txt'"),
+    ("fix/cp-hook-then-checkout", "out",
+     "cp @ST@/post-checkout @OTHER@/.git/hooks/post-checkout; git -C @OTHER@ checkout -q -b t@N@"),
+    ("fix/redirect-hook-then-checkout", "out",
+     "cat @ST@/o.sh > @OTHER@/.git/hooks/post-checkout; chmod +x @OTHER@/.git/hooks/post-checkout; "
+     "git -C @OTHER@ checkout -q -b t@N@"),
+    ("fix/cp-registry", "out", "cp @ST@/reg.json @REPO@/.aiqt/orchestration.local.json"),
+    ("fix/cp-registry-dir", "out", "cp @ST@/orchestration.local.json @REPO@/.aiqt/"),
+    ("fix/cp-hook-dir", "out", "cp @ST@/post-checkout @OTHER@/.git/hooks/"),
+    ("fix/cp-r-hooks-merge", "out", "cp -r @ST@/hooks @OTHER@/.git; git -C @OTHER@ checkout -q -b t@N@"),
+    ("fix/cp-dotgit-git-C", "out",
+     "cp @ST@/dotgit @OUT@/gdA/.git; git -C @OUT@/gdA diff --no-index @ST@/a.txt @ST@/b.txt"),
+    ("fix/cp-r-git-git-C", "out",
+     "cp -r @ST@/.git @OUT@/gdB/.git; git -C @OUT@/gdB diff --no-index @ST@/a.txt @ST@/b.txt"),
+    ("fix/cp-dotgit-cd", "out",
+     "cp @ST@/dotgit @OUT@/gdC/.git; cd @OUT@/gdC; git diff --no-index @ST@/a.txt @ST@/b.txt"),
+    ("fix/cp-r-git-cd", "out",
+     "cp -r @ST@/.git @OUT@/gdD/.git; cd @OUT@/gdD; git diff --no-index @ST@/a.txt @ST@/b.txt"),
+    ("fix/git-apply-dir-hooks", "out", "git -C @OTHER@ apply --directory=.git/hooks @HB@/ok.patch"),
+    ("fix/copy-rel-sh-cwd-st", "st", "bash @OUT@/rel.sh"),
+    ("fix/copy-rel-py-cwd-st", "st", "python3 -I @OUT@/rel.py"),
+    ("fix/copy-py-cwd-st", "st", "python3 @OUT@/copy.py"),
+    ("fix/inspect-stat", "out", "stat @ST@/o.sh"),
+    ("fix/inspect-find", "out", "find @ST@ -type f"),
+    ("fix/inspect-cmp", "out", "cmp @ST@/o.sh @OUT@/copy.sh"),
+    ("fix/inspect-od", "out", "od -c @ST@/o.sh"),
+    ("fix/inspect-realpath", "out", "realpath @ST@/o.sh"),
+    ("fix/inspect-glob-hash", "out", "sha256sum @ST@/*"),
+    ("fix/inspect-cd-ls", "out", "cd @ST@; ls"),
+    ("fix/patch-tool", "out", "patch -p1 -d @OTHER@ < @HB@/ok.patch"),
+    ("fix/heredoc-param", "base", "echo ${x:-$(cat <<'EOF'\nhi\nEOF\n)}\nbash stage/o.sh"),
+    ("fix/heredoc-arith", "base", "(( a <<'EOF' ))\nbash stage/o.sh"),
+    ("fix/heredoc-array", "base", "a=( <<'EOF' )\nhi\nEOF\nbash stage/o.sh"),
+    ("fix/heredoc-dollar-bracket", "base", "echo $[ 1 <<'EOF' ]\nbash stage/o.sh"),
+    ("fix/heredoc-cmdsubst-word", "base", "cat <<'EOF' $(echo\nhi)\nEOF\nbash stage/o.sh"),
+    ("fix/heredoc-param-bare", "base", "echo ${x:-<<'EOF'}\nbash stage/o.sh"),
+    ("fix/heredoc-unquoted", "base", "cat <<EOF\nhi\nEOF\nbash stage/o.sh"),
+    ("fix/here-string", "out", "grep foo <<< \"foo bar\""),
+    ("fix/proc-subst-diff", "out", "diff <(ls @OUT@) <(ls @OTHER@)"),
+    ("fix/open-quote", "out", "echo \"it is"),
+    ("fix/fd-var-redirect", "out", "exec {fd}>@OUT@/fd@N@.log"),
+    ("fix/stdin-dev-stdin", "base", "echo " + _NRDO_P + " | bash /dev/stdin"),
+    ("fix/stdin-dev-fd0", "base", "echo " + _NRDO_P + " | bash /dev/fd/0"),
+    ("fix/stdin-proc-fd0", "base", "echo " + _NRDO_P + " | bash /proc/self/fd/0"),
+    ("fix/stdin-ddash-dev-stdin", "base", "echo " + _NRDO_P + " | bash -- /dev/stdin"),
+    ("fix/stdin-sh-dev-stdin", "base", "echo " + _NRDO_P + " | sh /dev/stdin"),
+    ("fix/stdin-e-dev-stdin", "base", "echo " + _NRDO_P + " | bash -e /dev/stdin"),
+    ("fix/stdin-nice-dev-stdin", "base", "echo " + _NRDO_P + " | nice -5 bash /dev/stdin"),
+    ("fix/stdin-timeout-dev-stdin", "base", "echo " + _NRDO_P + " | timeout 9 bash /dev/stdin"),
+    ("fix/stdin-py-dev-stdin", "out",
+     "echo \"import runpy; runpy.run_path('@ST@/o.py')\" | python3 /dev/stdin"),
+    ("fix/stdin-py-I-fd0", "out",
+     "echo \"import runpy; runpy.run_path('@ST@/o.py')\" | python3 -I /dev/fd/0"),
+    ("fix/stdin-heredoc-dev-stdin", "base", "bash /dev/stdin <<'EOF'\nbash sta\"\"ge/o.sh\nEOF\n"),
+    ("fix/stdin-nested-dev-stdin", "base",
+     "bash -c 'printf \"%s\\n\" \"bash sta\\\"\\\"ge/o.sh\" | bash /dev/stdin'"),
+    ("fix/stdin-brace", "base", "echo " + _NRDO_P + " | { bash; }"),
+    ("fix/stdin-if", "base", "echo " + _NRDO_P + " | if true; then bash; fi"),
+    ("fix/stdin-while", "base", "echo " + _NRDO_P + " | while true; do bash; break; done"),
+    ("fix/stdin-subshell", "base", "echo " + _NRDO_P + " | ( bash )"),
+    ("fix/stdin-case", "base", "echo " + _NRDO_P + " | case x in x) bash;; esac"),
+    ("fix/stdin-heredoc-brace", "base", "{ bash; } <<'EOF'\nbash sta\"\"ge/o.sh\nEOF\n"),
+    ("fix/stdin-heredoc-if-py", "out",
+     "if true; then python3; fi <<'EOF'\nimport runpy; runpy.run_path('@ST@/o.py')\nEOF\n"),
+    ("fix/stdin-heredoc-bang", "base", "! bash <<'EOF'\nbash sta\"\"ge/o.sh\nEOF\n"),
+    ("fix/stdin-dot-heredoc", "base", ". /dev/stdin <<'EOF'\nbash sta\"\"ge/o.sh\nEOF\n"),
+    ("fix/stdin-source-pipe", "base", "echo " + _NRDO_P + " | source /dev/stdin"),
+    ("fix/stdin-dot-pipe", "base", "echo " + _NRDO_P + " | . /dev/stdin"),
+    ("fix/stdin-source-heredoc", "base", "source /dev/stdin <<'EOF'\nbash sta\"\"ge/o.sh\nEOF\n"),
+    ("fix/stdin-rbash", "base", "echo " + _NRDO_P + " | rbash"),
+    ("fix/stdin-busybox-sh", "base", "echo " + _NRDO_P + " | busybox sh"),
+    ("fix/stdin-py-c-input", "out",
+     "echo \"import runpy; runpy.run_path('@ST@/o.py')\" | python3 -c 'exec(input())'"),
+    ("fix/stdin-py-c-system", "base",
+     "echo " + _NRDO_P + " | python3 -c 'import os,sys; os.system(sys.stdin.read())'"),
+    ("fix/stdin-nohup", "base", "echo " + _NRDO_P + " | nohup bash"),
+    ("fix/stdin-stdbuf", "base", "echo " + _NRDO_P + " | stdbuf -o0 bash"),
+    ("fix/stdin-xargs-c", "base", "echo " + _NRDO_P + " | xargs -I{} bash -c {}"),
+    ("fix/stdin-xargs-d", "base", "echo " + _NRDO_P + " | xargs -d '\\n' bash -c"),
+    ("fix/stdin-xargs-bash", "base", "printf 'sta\"\"ge/o.sh' | xargs bash"),
+    ("fix/stdin-c-eval-cat", "base", "echo " + _NRDO_P + " | bash -c 'eval \"$(cat)\"'"),
+    ("fix/stdin-bare", "base", "echo " + _NRDO_P + " | bash"),
+    ("fix/stdin-i", "base", "echo " + _NRDO_P + " | bash -i"),
+    ("fix/stdin-exec-a", "base", "echo " + _NRDO_P + " | exec -a foo bash"),
+    ("fix/stdin-time-p", "base", "echo " + _NRDO_P + " | time -p bash"),
+    ("fix/stdin-env-u", "base", "echo " + _NRDO_P + " | env -u FOO bash"),
+    ("fix/stdin-norc", "base", "echo " + _NRDO_P + " | bash --norc"),
+    ("fix/stdin-errexit", "base", "echo " + _NRDO_P + " | bash -o errexit"),
+    ("fix/stdin-py-I-E", "out", "echo \"import runpy; runpy.run_path('@ST@/o.py')\" | python3 -I -E"),
+    ("fix/stdin-py-X-dev", "out", "echo \"import runpy; runpy.run_path('@ST@/o.py')\" | python3 -X dev"),
+    ("fix/proc-subst-run", "out", "bash <(cat @ST@/o.sh)"),
+    ("fix/heredoc-pipe-bash", "base", "cat <<EOF | bash\nbash stage/o.sh\nEOF\n"),
+    ("fix/cwd-eval-cd-back", "out", "cd @BASE@; cd @OUT@; eval 'cd -'; bash stage/o.sh"),
+    ("fix/cwd-command-eval-cd-back", "out", "cd @BASE@; cd @OUT@; command eval 'cd -'; bash stage/o.sh"),
+    ("fix/cwd-dot-heredoc-cd-back", "out",
+     "cd @BASE@; cd @OUT@; . /dev/stdin <<'EOF'\ncd -\nEOF\nbash stage/o.sh"),
+    ("fix/cwd-sourced-file", "out",
+     "printf 'cd @BASE@\\n' > @OTHER@/c@N@.sh; . @OTHER@/c@N@.sh; bash stage/o.sh"),
+    ("fix/cwd-alias", "out",
+     "shopt -s expand_aliases; cd @BASE@; cd @OUT@; alias b='cd -'\nb; bash stage/o.sh"),
+    ("fix/cwd-function-cd-back", "out", "cd @BASE@; cd @OUT@; f() { cd -; }; f; bash stage/o.sh"),
+    ("fix/cwd-cd-back", "out", "cd @BASE@; cd @OUT@; cd -; bash stage/o.sh"),
+    ("fix/cwd-pushd-popd", "out", "pushd @BASE@; pushd @OUT@; popd; bash stage/o.sh"),
+    ("fix/write-then-run", "out", "echo 'bash @ST@/o.sh' > @OTHER@/c@N@.sh; bash @OTHER@/c@N@.sh"),
+    ("fix/symlink-made-then-run", "out", "ln -s @BASE@ @OTHER@/l@N@; bash @OTHER@/l@N@/stage/o.sh"),
+    ("fix/symlink-made-then-cd", "out", "ln -s @BASE@ @OTHER@/m@N@; cd @OTHER@/m@N@; bash stage/o.sh"),
+    ("fix/failed-cd-missing", "base", "cd /nonexistent-nrdo-dir; bash stage/o.sh"),
+    ("fix/failed-cd-notadir", "base", "cd @BASE@/notadir; bash stage/o.sh"),
+    ("fix/failed-cd-P", "base", "cd -P /nonexistent-nrdo-dir; bash stage/o.sh"),
+    ("fix/failed-cd-ddash", "base", "cd -- /nonexistent-nrdo-dir; bash stage/o.sh"),
+    ("fix/skipped-cd-and", "base", "false && cd @OUT@; bash stage/o.sh"),
+    ("fix/skipped-cd-or", "base", "true || cd @OUT@; bash stage/o.sh"),
+    ("fix/subshell-cd", "base", "(cd @OUT@); bash stage/o.sh"),
+    ("fix/pipeline-cd", "base", "cd @OUT@ | true; bash stage/o.sh"),
+    ("fix/background-cd", "base", "cd @OUT@ & wait; bash stage/o.sh"),
+    ("fix/symlink-dotdot", "base", "bash link/../o.sh"),
+    ("fix/pushd-link-dotdot", "base", "pushd link; bash ../o.sh"),
+    ("fix/cd-dotdot-unread", "base", "cd stage; bash o.sh"),
+    ("fix/over-command-v", "out", "command -v bash"),
+    ("fix/over-path-basename", "out", "ls @OUT@/dirs; echo done"),
+    ("fix/loader-path", "out", "PATH=@ST@:/usr/bin:/bin orun"),
+    ("fix/loader-pythonpath", "out", "PYTHONPATH=@ST@ python3 -c 'import o'"),
+    ("fix/loader-pythonstartup", "out", "PYTHONSTARTUP=@ST@/o.py python3 -i < /dev/null"),
+    ("fix/loader-bash-env", "out", "BASH_ENV=@ST@/o.sh bash -c :"),
+    ("fix/loader-bash-env-export", "out", "export BASH_ENV=@ST@/o.sh; bash -c :"),
+    ("fix/loader-env-sh-i", "out", "ENV=@ST@/o.sh sh -i -c :"),
+    ("fix/py-m-cwd-st", "st", "python3 -m o"),
+    ("fix/py-rel-cwd-st", "st", "python3 o.py"),
+    ("fix/py-c-runpy", "out", "python3 -I -c \"import runpy; runpy.run_path('@ST@/o.py')\""),
+    ("fix/env-split-string", "out", "env -S 'bash @ST@/o.sh'"),
+    ("fix/env-i", "out", "env -i bash @ST@/o.sh"),
+    ("fix/nice", "out", "nice bash @ST@/o.sh"),
+    ("fix/time", "out", "time bash @ST@/o.sh"),
+    ("fix/stdbuf", "out", "stdbuf -o0 bash @ST@/o.sh"),
+    ("fix/builtin-command", "out", "builtin command bash @ST@/o.sh"),
+    ("fix/bang", "out", "! bash @ST@/o.sh"),
+    ("fix/brace-group", "out", "{ bash @ST@/o.sh; }"),
+    ("fix/subshell", "out", "( bash @ST@/o.sh )"),
+    ("fix/backtick", "out", "echo `bash @ST@/o.sh`"),
+    ("fix/cmdsubst", "out", "echo $(bash @ST@/o.sh)"),
+    ("fix/glob-run", "out", "bash @ST@/o.s?"),
+    ("fix/var-run", "out", "d=@ST@; bash $d/o.sh"),
+    ("fix/find-exec", "out", "find @ST@ -name o.sh -exec bash {} \\;"),
+    ("fix/awk-system", "out", "awk 'BEGIN{system(\"bash @ST@/o.sh\")}'"),
+    ("fix/make-f", "out", "make -f @ST@/Makefile"),
+)
+
+
+def _nrdo_generated(hooks):
+    """The corpus rows generated from the guard's own declared vocabulary, as (id, cwd key, template):
+    every shell and interpreter word it lists, run every way the fixture forms name (an absolute or
+    relative script, stdin, /dev/stdin and its aliases, -c, -s and -n +n); every wrapper and
+    indirection word around a shell and a python run; every shell-state word before a relative run;
+    every loader-environment name; and every allowlisted reader over a declared file. Words that change
+    privilege or repeat without bound (_NRDO_SKIPPED_WORDS) are not run."""
+    out = []
+    shells = sorted(w for w in (hooks._NRD_INTERP_WORDS | hooks._NRD_SHELL_WORDS)
+                    if hooks._NRD_SH_SUFFIX_RE.match(w) or w == "posh")
+    shell_forms = (("abs", "out", "@W@ @ST@/o.sh"), ("stdin-redirect", "out", "@W@ < @ST@/o.sh"),
+                   ("stdin-pipe", "out", "cat @ST@/o.sh | @W@"),
+                   ("dev-stdin", "out", "@W@ /dev/stdin < @ST@/o.sh"),
+                   ("dev-fd0", "out", "@W@ /dev/fd/0 < @ST@/o.sh"),
+                   ("proc-fd0", "out", "@W@ /proc/self/fd/0 < @ST@/o.sh"),
+                   ("s-flag", "out", "@W@ -s < @ST@/o.sh"), ("c-dot", "out", "@W@ -c '. @ST@/o.sh'"),
+                   ("e-flag", "out", "@W@ -e @ST@/o.sh"), ("ddash", "out", "@W@ -- @ST@/o.sh"),
+                   ("n-plus-n", "out", "@W@ -n +n @ST@/o.sh"), ("n-only", "out", "@W@ -n @ST@/o.sh"),
+                   ("rel-base", "base", "@W@ stage/o.sh"), ("rel-st", "st", "@W@ o.sh"),
+                   ("rel-dotdot", "out", "@W@ ../stage/o.sh"),
+                   ("copy-rel-cwd-st", "st", "@W@ @OUT@/rel.sh"))
+    for w in shells:
+        for k, cwd, t in shell_forms:
+            out.append(("gen/shell/%s/%s" % (w, k), cwd, t.replace("@W@", w)))
+    for w in sorted(hooks._NRD_INTERP_WORDS - set(shells)):
+        for k, cwd, t in (("py-abs", "out", "@W@ @ST@/o.py"), ("sh-abs", "out", "@W@ @ST@/o.sh"),
+                          ("stdin-pipe", "out", "cat @ST@/o.sh | @W@")):
+            out.append(("gen/interp/%s/%s" % (w, k), cwd, t.replace("@W@", w)))
+    pys = [w for w in ("python3", "python", "pypy3") if hooks._NRD_PY_WORD_RE.match(w)]
+    py_forms = (("abs", "out", "@W@ @ST@/o.py"), ("I-abs", "out", "@W@ -I @ST@/o.py"),
+                ("stdin-redirect", "out", "@W@ < @ST@/o.py"), ("dash-stdin", "out", "@W@ - < @ST@/o.py"),
+                ("stdin-pipe", "out", "cat @ST@/o.py | @W@"),
+                ("dev-stdin", "out", "@W@ -I /dev/stdin < @ST@/o.py"),
+                ("dev-fd0", "out", "@W@ -I /dev/fd/0 < @ST@/o.py"),
+                ("proc-fd0", "out", "@W@ -I /proc/self/fd/0 < @ST@/o.py"),
+                ("c-runpy", "out", "@W@ -c \"import runpy; runpy.run_path('@ST@/o.py')\""),
+                ("m-cwd-st", "st", "@W@ -m o"), ("rel-st", "st", "@W@ o.py"),
+                ("rel-base", "base", "@W@ -I stage/o.py"),
+                ("copy-rel-cwd-st", "st", "@W@ -I @OUT@/rel.py"))
+    for w in pys:
+        for k, cwd, t in py_forms:
+            out.append(("gen/py/%s/%s" % (w, k), cwd, t.replace("@W@", w)))
+    for mod in ("cProfile", "profile", "trace", "pdb", "pydoc", "doctest", "runpy", "timeit", "code",
+                "pickle", "pickletools", "zipapp", "py_compile", "compileall", "tabnanny", "dis"):
+        out.append(("gen/stdlib/%s" % mod, "out", "python3 -I @STDLIB@/%s.py @ST@/o.py" % mod))
+        out.append(("gen/stdlib/%s-stdin" % mod, "out", "python3 -I @STDLIB@/%s.py < @ST@/o.py" % mod))
+    wrappers = sorted(hooks._NRD_C_WRAPPERS | (hooks._NRD_OPAQUE_WORDS - _NRDO_SKIPPED_WORDS))
+    for w in wrappers:
+        for k, cwd, t in (("bash", "out", "@W@ bash @ST@/o.sh"), ("py", "out", "@W@ python3 @ST@/o.py"),
+                          ("stdin", "out", "cat @ST@/o.sh | @W@ bash"),
+                          ("c", "out", "@W@ bash -c 'bash @ST@/o.sh'"),
+                          ("rel", "st", "@W@ bash o.sh")):
+            out.append(("gen/wrap/%s/%s" % (w, k), cwd, t.replace("@W@", w)))
+    for w in ("timeout 9", "timeout -s KILL 9", "env --", "env -u NRDO_X", "command -p", "nohup --"):
+        out.append(("gen/wrap-opt/%s" % w.replace(" ", "_"), "out", "%s bash @ST@/o.sh" % w))
+    state_forms = {"cd": "cd @ST@; bash o.sh", "pushd": "pushd @ST@; bash o.sh",
+                   "popd": "pushd @ST@; pushd @OUT@; popd; bash o.sh",
+                   "dirs": "pushd @ST@ >/dev/null; dirs; bash o.sh",
+                   "alias": "shopt -s expand_aliases; alias b='cd @ST@'\nb; bash o.sh",
+                   "unalias": "unalias -a; cd @ST@; bash o.sh",
+                   "shopt": "shopt -s cdable_vars; v=@ST@; cd v; bash o.sh",
+                   "eval": "eval 'cd @ST@'; bash o.sh", "source": "source @ST@/o.sh"}
+    for w in sorted(hooks._NRD_STATE_WORDS):
+        out.append(("gen/state/%s" % w, "out", state_forms.get(w, w + " @ST@; bash o.sh")))
+        out.append(("gen/state/%s-py" % w, "out",
+                    state_forms.get(w, w + " @ST@; bash o.sh").replace("bash o.sh", "python3 o.py")))
+    for name in sorted(hooks._NRD_ENV_NAMES):
+        out.append(("gen/env/%s/file" % name, "out", "%s=@ST@/o.sh bash -c :" % name))
+        out.append(("gen/env/%s/dir" % name, "out", "%s=@ST@ python3 -c 'import o'" % name))
+        out.append(("gen/env/%s/export" % name, "out", "export %s=@ST@/o.sh; sh -i -c :" % name))
+    for w in sorted(hooks._NRD_READ_FORMS):
+        out.append(("gen/read/%s" % w, "out",
+                    "%s @ST@/o.sh @ST@/o.py" % w if w == "diff" else "%s @ST@/o.sh" % w))
+    return out
+
+
+def _nrdo_corpus(hooks, forms=None):
+    """The whole oracle corpus: the generated rows, then the pinned fixture forms."""
+    return _nrdo_generated(hooks) + list(_NRDO_FORMS if forms is None else forms)
+
+
+def _nrdo_pin(corpus):
+    """(row count, sha256 over every row's id, cwd key and template) of a corpus."""
+    digest = hashlib.sha256()
+    for cid, cwd, tmpl in corpus:
+        digest.update((cid + "\0" + cwd + "\0" + tmpl + "\0\0").encode("utf-8"))
+    return (len(corpus), digest.hexdigest())
+
+
+_NRDO_CORPUS_PIN = (593, "17f7c6a2abd0d39aaf25a73ecbd663da728f88943bb44318a195ebd42efd5757")
+
+
+def _nrdo_setup(base, fixture):
+    """Build the oracle fixture under base: two declared directories (stage, handback) in a parent
+    directory, undeclared out and other directories, a git repository in stage with a marker-writing
+    diff.external, another repository in other, and a registry in the session repository declaring
+    stage and handback. Every runnable file writes one line to the marker naming the directory it ran
+    in and the file it ran from (a shell from BASH_SOURCE or $0, python from __file__); a copy keeps
+    that content, so a copy run outside reports its own location."""
+    root = base / "nrdo"
+    st, hb, out, other = root / "stage", root / "handback", root / "out", root / "other"
+    home = root / "home"
+    for d in (st / "sub", st / "hooks", hb, out, other, home):
+        d.mkdir(parents=True, exist_ok=True)
+    mark = base / "nrdo-mark"
+    sh_body = ("#!/bin/sh\nprintf '%s|%s\\n' \"$PWD\" \"${BASH_SOURCE:-$0}\" >> '" + str(mark) + "'\n")
+    py_body = ("import os\nopen(" + repr(str(mark)) + ", 'a').write(os.getcwd() + '|' + "
+               "globals().get('__file__', '<none>') + '\\n')\n")
+    for path in (st / "o.sh", st / "orun", st / "ext.sh", st / "post-checkout",
+                 st / "hooks" / "post-checkout", hb / "o.sh", out / "copy.sh"):
+        path.write_text(sh_body, encoding="utf-8")
+        path.chmod(0o755)
+    for path in (st / "o.py", hb / "o.py", out / "copy.py"):
+        path.write_text(py_body, encoding="utf-8")
+    (st / "Makefile").write_text("all:\n\tsh " + str(st / "o.sh") + "\n", encoding="utf-8")
+    pickled = ("cbuiltins\nexec\n(Vopen(" + repr(str(mark)) + ",'a').write('<pickle>|<pickle>')\ntR.")
+    (st / "o.pkl").write_bytes(pickled.encode("utf-8"))
+    for name, text in (("a.txt", "a\n"), ("b.txt", "b\n"), ("reg.json", '{"version": 1}'),
+                       ("orchestration.local.json", '{"version": 1}'), ("sub/keep.txt", "k\n")):
+        (st / name).write_text(text, encoding="utf-8")
+    subprocess.run(["git", "init", "-q", str(st)], check=True, capture_output=True, timeout=30)
+    subprocess.run(["git", "-C", str(st), "config", "diff.external", str(st / "ext.sh")],
+                   check=True, capture_output=True, timeout=30)
+    (st / ".git" / "hooks").mkdir(exist_ok=True)
+    (st / ".git" / "hooks" / "post-checkout").write_text(sh_body, encoding="utf-8")
+    (st / ".git" / "hooks" / "post-checkout").chmod(0o755)
+    (st / "dotgit").write_text("gitdir: {}\n".format(st / ".git"), encoding="utf-8")
+    (hb / "ok.patch").write_text("", encoding="utf-8")
+    (out / "reader.py").write_text("import sys\nprint(sys.argv)\n", encoding="utf-8")
+    (out / "rel.sh").write_text("#!/bin/sh\n. ./o.sh\n", encoding="utf-8")
+    (out / "rel.py").write_text("import runpy\nrunpy.run_path('o.py')\n", encoding="utf-8")
+    (out / "y.txt").write_text("y\n", encoding="utf-8")
+    (out / "cdp.txt").write_text(str(root) + "\n", encoding="utf-8")
+    (out / "dirs").mkdir()
+    for gd in ("gdA", "gdB", "gdC", "gdD"):
+        (out / gd).mkdir()
+    (root / "notadir").write_text("", encoding="utf-8")
+    (root / "link").symlink_to(st / "sub")
+    subprocess.run(["git", "init", "-q", str(other)], check=True, capture_output=True, timeout=30)
+    subprocess.run(["git", "-C", str(other), "-c", "user.name=T", "-c", "user.email=t@example.invalid",
+                    "-c", "commit.gpgsign=false", "commit", "-q", "--allow-empty", "-m", "seed"],
+                   check=True, capture_output=True, timeout=30)
+    reg_path = fixture.root / ".aiqt" / "orchestration.local.json"
+    reg = json.loads(reg_path.read_text(encoding="utf-8"))
+    reg["deliverable_dirs"] = [str(st), str(hb)]
+    reg_bytes = json.dumps(reg).encode("utf-8")
+    reg_path.write_bytes(reg_bytes)
+    env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(home), "LANG": "C"}
+    if os.environ.get("TMPDIR"):
+        env["TMPDIR"] = os.environ["TMPDIR"]
+    dirs = []
+    for d in (st, hb):
+        for form in (os.path.normpath(str(d)), os.path.realpath(str(d))):
+            if form not in dirs:
+                dirs.append(form)
+    return {"fixture": fixture, "mark": mark, "env": env, "dirs": tuple(dirs), "reg_path": reg_path,
+            "reg_bytes": reg_bytes, "@ST@": str(st), "@HB@": str(hb), "@OUT@": str(out),
+            "@BASE@": str(root), "@OTHER@": str(other), "@REPO@": str(fixture.root),
+            "@STDLIB@": os.path.dirname(os.__file__), "st": str(st), "out": str(out), "base": str(root)}
+
+
+def _nrdo_reset(fx):
+    """Undo what an earlier row may have left that a later row would run: the registry is rewritten,
+    the hook directories of the two repositories are emptied, the .git entries copied into the out
+    directories are removed, and the marker is cleared."""
+    fx["reg_path"].write_bytes(fx["reg_bytes"])
+    for hooks_dir in (Path(fx["@OTHER@"]) / ".git" / "hooks", Path(fx["@REPO@"]) / ".git" / "hooks"):
+        shutil.rmtree(hooks_dir, ignore_errors=True)
+        hooks_dir.mkdir(parents=True, exist_ok=True)
+    for gd in ("gdA", "gdB", "gdC", "gdD"):
+        dotgit = Path(fx["@OUT@"]) / gd / ".git"
+        if dotgit.is_dir() and not dotgit.is_symlink():
+            shutil.rmtree(dotgit, ignore_errors=True)
+        elif os.path.lexists(dotgit):
+            dotgit.unlink()
+    if os.path.lexists(fx["mark"]):
+        fx["mark"].unlink()
+
+
+def _nrdo_expand(tmpl, fx, n):
+    cmd = tmpl.replace("@N@", str(n))
+    for key in ("@ST@", "@HB@", "@OUT@", "@BASE@", "@OTHER@", "@REPO@", "@STDLIB@"):
+        cmd = cmd.replace(key, fx[key])
+    return cmd
+
+
+def _nrdo_guard(hooks, fx, cmd, cwd):
+    """The guard's verdict on cmd with the payload working directory cwd, rooted through the project
+    directory environment (restored afterwards)."""
+    prev = os.environ.get("CLAUDE_PROJECT_DIR")
+    os.environ["CLAUDE_PROJECT_DIR"] = fx["@REPO@"]
+    try:
+        return _verdict(hooks.orch_deliverable_exec_guard(fx["fixture"].payload(
+            "PreToolUse", "Bash", {"command": cmd}, extra={"cwd": cwd})))
+    finally:
+        if prev is None:
+            os.environ.pop("CLAUDE_PROJECT_DIR", None)
+        else:
+            os.environ["CLAUDE_PROJECT_DIR"] = prev
+
+
+def _nrdo_line_declared(line, dirs):
+    """True when one marker line shows code that did NOT run from a copy outside the declared
+    directories: the file it names resolves into a declared directory, under /dev or /proc (stdin),
+    into any .git directory, or to no regular file at all (stdin, -c or argument text)."""
+    pwd, sep, path = line.partition("|")
+    if not sep or not path:
+        return True
+    full = path if os.path.isabs(path) else os.path.join(pwd, path)
+    try:
+        real = os.path.realpath(full)
+    except (OSError, ValueError):
+        return True
+    for form in (os.path.normpath(full), real):
+        if form in ("/dev", "/proc") or form.startswith(("/dev/", "/proc/")):
+            return True
+        if ".git" in form.split("/"):
+            return True
+        if any(form == d or form.startswith(d + "/") for d in dirs):
+            return True
+    return not os.path.isfile(real)
+
+
+def _nrdo_ran(fx, cmd, cwd):
+    """Run cmd under real bash in its own session with a timeout, reap its whole process group, and
+    report whether any marker line shows declared-directory code (_nrdo_line_declared)."""
+    import signal as _nrdo_signal
+    try:
+        proc = subprocess.Popen(["bash", "-c", cmd], cwd=cwd, env=fx["env"], stdin=subprocess.DEVNULL,
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                start_new_session=True)
+    except OSError:
+        return False
+    try:
+        proc.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        pass
+    try:
+        os.killpg(proc.pid, _nrdo_signal.SIGKILL)
+    except OSError:
+        pass
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        pass
+    try:
+        lines = fx["mark"].read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return False
+    return any(_nrdo_line_declared(line, fx["dirs"]) for line in lines)
+
+
+def _nrdo_rows(hooks, fx, corpus):
+    """One (verdict, mutant verdict, ran) row per corpus row: the guard's verdict, its verdict with
+    the core scope scan disabled (the mutant), and whether real bash ran declared code. Both verdicts
+    are taken before the run, on the state the run starts from."""
+    rows = []
+    real_scan = hooks._nrd_scope_scan
+    for n, (_cid, cwd_key, tmpl) in enumerate(corpus):
+        cmd = _nrdo_expand(tmpl, fx, n)
+        cwd = fx[cwd_key]
+        _nrdo_reset(fx)
+        verdict = _nrdo_guard(hooks, fx, cmd, cwd)
+        setattr(hooks, "_nrd_scope_scan", lambda *_a, **_k: None)
+        try:
+            mutant = _nrdo_guard(hooks, fx, cmd, cwd)
+        finally:
+            setattr(hooks, "_nrd_scope_scan", real_scan)
+        _nrdo_reset(fx)
+        rows.append((verdict, mutant, _nrdo_ran(fx, cmd, cwd)))
+    _nrdo_reset(fx)
+    return rows
+
+
+def _nrdo_judge(corpus, results):
+    """The oracle's failures for (verdict, ran) results over a corpus: 'corpus-pin' when the corpus
+    is not the pinned one, and the id of every row the guard allowed that ran declared code."""
+    bad = []
+    if _nrdo_pin(corpus) != _NRDO_CORPUS_PIN:
+        bad.append("corpus-pin")
+    for (cid, _cwd, _tmpl), (verdict, ran) in zip(corpus, results):
+        if verdict != "deny" and ran:
+            bad.append(cid)
+    return bad
+
+
 def main(report_path=None):
     if report_path is not None:
         # The execution report is finalized at interpreter exit, after this run's cleanup
@@ -16191,7 +16707,7 @@ def _main_isolated(report_path=None):
         check("nrd/shared-prefix-sibling-allows",
               _verdict(nrd("python3 -I {}/x.py".format(nd_stage_x))), "allow")
         # out of scope entirely (names no declared directory): untouched
-        check("nrd/out-of-scope-allows", _verdict(nrd("python3 x.py")), "allow")
+        check("nrd/out-of-scope-allows", _verdict(nrd("python3 -I {}/r.py".format(nd.root))), "allow")
         check("nrd/symlink-out-allows",
               _verdict(nrd("python3 -I {}".format(nd.root / "link-plain.py"))), "allow")
 
@@ -16348,13 +16864,90 @@ def _main_isolated(report_path=None):
             check(cid, nrd_got(cmd), DENY_RAN)
         # the accepted over-denies of those two rules: an unrelated command after a lost working
         # directory, and an unrelated program fed to a shell or python on stdin, deny and run nothing
-        check("nrd/over-deny-cwd-lost-unrelated", nrd_got("cd -; make -s nrd-none"), DENY_INERT)
+        check("nrd/over-deny-cwd-lost-unrelated", nrd_got("cd -; python3 -I r.py"), DENY_INERT)
         check("nrd/over-deny-stdin-unrelated", nrd_got("echo 'echo hi' | bash"), DENY_INERT)
+        # every shell or interpreter word without a script operand that is an existing regular file
+        # outside the declared directories is in scope while any directory is declared, so these
+        # unrelated calls deny and run nothing (the accepted over-deny)
+        for cid, cmd in (("nrd/over-deny-python-c", "python3 -c 'print(1)'"),
+                         ("nrd/over-deny-python-version", "python3 --version"),
+                         ("nrd/over-deny-interp-missing-script", "python3 nrd-none.py")):
+            check(cid, nrd_got(cmd), DENY_INERT)
+        # --- the shapes the working-directory and stdin rules missed: each runs the declared file under
+        # real bash, and each is out of scope when the working directory is modelled and only a
+        # programless shell or python word counts (the reverted rules allow every one) ---
+        (nd_outside / "elink").symlink_to(nd_staging / "hooks")
+        _nrd_redesign_rows = (
+            # a cd that fails leaves bash in the payload working directory
+            "cd {}/missing; bash nrd-stage/x.sh".format(outd),
+            # a program a shell reads from /dev/stdin, from a pipe
+            "echo 'bash {}/x.sh' | bash /dev/stdin".format(_nrd_sp),
+            # source of /dev/stdin from a pipe
+            "echo 'bash {}/x.sh' | source /dev/stdin".format(_nrd_sp),
+            # a restricted shell reading its program from a pipe
+            "echo 'bash {}/x.sh' | rbash".format(_nrd_sp),
+            # a symlink followed by ..: the kernel resolves elink/.. inside the declared directory
+            "bash elink/../x.sh",
+            # cd - run by eval returns to the declared directory's parent
+            "cd {}; cd {}; eval 'cd -'; bash nrd-stage/x.sh".format(tmp, outd),
+            # a shell named behind an unpeeled wrapper, reading its program from -c
+            "echo x | xargs bash -c 'bash {}/x.sh'".format(_nrd_sp))
+        for cid, cmd, kw in (
+                ("nrd/failed-cd-rel-denies", _nrd_redesign_rows[0],
+                 {"run_cwd": str(tmp), "cwd": str(tmp), "project": str(nd.root)}),
+                ("nrd/pipe-bash-dev-stdin-denies", _nrd_redesign_rows[1], {}),
+                ("nrd/pipe-source-dev-stdin-denies", _nrd_redesign_rows[2], {}),
+                ("nrd/pipe-rbash-denies", _nrd_redesign_rows[3], {}),
+                ("nrd/symlink-dotdot-denies", _nrd_redesign_rows[4],
+                 {"run_cwd": outd, "cwd": outd, "project": str(nd.root)}),
+                ("nrd/eval-cd-minus-denies", _nrd_redesign_rows[5], {}),
+                ("nrd/xargs-bash-c-denies", _nrd_redesign_rows[6], {})):
+            check(cid, nrd_got(cmd, **kw), DENY_RAN)
+        # --- further stdin-program and lost-directory shapes: each runs the declared file under real
+        # bash, and each allows once both broad rules are reverted ---
+        _nrd_vector_rows = (
+            # a shell reading /dev/stdin from a quoted here-document
+            "bash /dev/stdin <<'EOF'\nbash {}/x.sh\nEOF\n".format(_nrd_sp),
+            # cd - read by the dot builtin from /dev/stdin, fed by a quoted here-document
+            "cd {}; cd {}; . /dev/stdin <<'EOF'\ncd -\nEOF\nbash nrd-stage/x.sh".format(tmp, outd),
+            # a file written and sourced in the same call moves the working directory
+            "printf 'cd {}\\n' > {}/src-cd.sh; . {}/src-cd.sh; bash nrd-stage/x.sh"
+            .format(tmp, outd, outd),
+            # an alias, expanded on a later line, that runs cd -
+            "shopt -s expand_aliases; cd {}; cd {}; alias b='cd -'\nb; bash nrd-stage/x.sh"
+            .format(tmp, outd),
+            # cdable_vars: cd v, with no directory v, changes to the directory the variable v holds
+            "shopt -s cdable_vars; v={}; cd v; bash nrd-stage/x.sh".format(tmp))
+        for cid, cmd in (("nrd/qheredoc-bash-dev-stdin-denies", _nrd_vector_rows[0]),
+                         ("nrd/dot-dev-stdin-cd-minus-denies", _nrd_vector_rows[1]),
+                         ("nrd/sourced-file-cd-denies", _nrd_vector_rows[2]),
+                         ("nrd/alias-cd-minus-denies", _nrd_vector_rows[3]),
+                         ("nrd/cdable-vars-cd-denies", _nrd_vector_rows[4])):
+            check(cid, nrd_got(cmd), DENY_RAN)
+        # --- a nested eval or shell -c body is scanned under the enclosing command's shell-state flag:
+        # after a cd to the declared directory's parent, a relative script operand in the body denies
+        # even though, from the payload working directory, it names an existing decoy file outside the
+        # declared directories. Real bash runs the declared file in both rows.
+        nd_decoy = tmp / "nrd-decoy"
+        (nd_decoy / "nrd-stage").mkdir(parents=True)
+        (nd_decoy / "nrd-stage" / "x.sh").write_text(":\n", encoding="utf-8")
+        _nrd_nested_rows = (
+            "cd {}; eval 'bash nrd-stage/x.sh'".format(tmp),
+            "cd {}; bash -c 'bash nrd-stage/x.sh'".format(tmp))
+        for cid, cmd in (("nrd/nested-eval-state-denies", _nrd_nested_rows[0]),
+                         ("nrd/nested-bash-c-state-denies", _nrd_nested_rows[1])):
+            check(cid, nrd_got(cmd, run_cwd=str(nd_decoy), cwd=str(nd_decoy), project=str(nd.root)),
+                  DENY_RAN)
+        # with a directory declared, commands that hold no shell or interpreter word stay allowed and
+        # run nothing, a failed or undone cd included
+        for cid, cmd in (("nrd/no-interp-failed-cd-allows", "cd {}/missing; ls -l".format(outd)),
+                         ("nrd/no-interp-cd-then-cat-allows",
+                          "cd {}; cat {}/cdp.txt".format(outd, outd)),
+                         ("nrd/no-interp-pipe-allows", "echo hi | wc -l")):
+            check(cid, nrd_got(cmd), ALLOW_INERT)
         # with a directory declared, commands that read no program from stdin and keep a known working
         # directory stay allowed and run nothing
         for cid, cmd in (("nrd/no-stdin-echo-allows", "echo hi"),
-                         ("nrd/no-stdin-python-c-allows", "python3 -c 'print(1)'"),
-                         ("nrd/no-stdin-python-version-allows", "python3 --version"),
                          ("nrd/no-stdin-cat-qheredoc-allows", "cat <<'EOF'\nhi\nEOF\n"),
                          ("nrd/no-stdin-bash-n-allows", "bash -n {}/copy.sh".format(outd)),
                          ("nrd/no-stdin-cd-abs-allows", "cd {}; echo hi".format(outd)),
@@ -16612,9 +17205,11 @@ def _main_isolated(report_path=None):
         # out-of-scope env forms stay allowed: a parsed value option running nothing from a declared
         # directory, and a -S call every word of which a plain reading (quote and backslash stripped)
         # shows outside the declared directories, so the unreadable-S denial does not fire
-        check("nrd/env-split-inert-allows", nrd_got("env -S'echo hi'"), ALLOW_INERT)
-        check("nrd/env-split-rest-inert-allows", nrd_got("env -S'bash -c' 'echo hi'"), ALLOW_INERT)
-        check("nrd/env-argv0-inert-allows", nrd_got("env -a foo echo hi"), ALLOW_INERT)
+        # (now an accepted over-deny: a wrapper option outside the peel hides the command word, so the
+        # call counts as running a program this guard cannot see, and these deny though nothing runs)
+        check("nrd/over-deny-env-split-inert", nrd_got("env -S'echo hi'"), DENY_INERT)
+        check("nrd/over-deny-env-split-rest-inert", nrd_got("env -S'bash -c' 'echo hi'"), DENY_INERT)
+        check("nrd/over-deny-env-argv0-inert", nrd_got("env -a foo echo hi"), DENY_INERT)
         # the disclosed command -v/-V over-deny, pinned: the wrapper peel reaches the -c body and
         # classifies it, though command -v/-V then only prints the operand's name and runs nothing
         check("nrd/command-v-denies",
@@ -16676,26 +17271,30 @@ def _main_isolated(report_path=None):
         # behaviour (a mutant), and shows the matching in-scope vector flips from deny to allow. The
         # real _nrd_scope_scan runs throughout, so these prove each fix is load-bearing, not a
         # stand-in. Each restores the helper in a finally so no mutant leaks into a later check.
-        def _flip_verdict(attr, repl, cmd, cwd=None, project=None):
-            # patch ONE real helper to its pre-fix behaviour, run the vector through the real guard,
-            # restore the helper, and return the verdict (the check id stays a literal at the call site)
-            real = getattr(aiqt_hooks, attr)
-            setattr(aiqt_hooks, attr, repl)
+        # Two broad rules refuse most of these vectors on their own: a relative shell or interpreter
+        # operand beside a shell-state construct (_nrd_shell_state), and a shell or interpreter word
+        # with no proven script operand (_nrd_script_proven). The flips of the older, narrower helpers
+        # hold both broad rules off (_nrd_flip_hold), so each still shows its own helper is
+        # load-bearing; the flips of the broad rules themselves pass hold=() and patch them directly.
+        _nrd_flip_hold = (("_nrd_shell_state", lambda command, segments: False),
+                          ("_nrd_script_proven", lambda argv, cwd, dirs: True))
+
+        def _flip_verdict_pair(patches, cmd, cwd=None, project=None, hold=_nrd_flip_hold):
+            # patch SEVERAL real helpers at once (a form two readings each refuse), run, restore all
+            allp = tuple(hold) + tuple(patches)
+            reals = [(attr, getattr(aiqt_hooks, attr)) for attr, _repl in allp]
             try:
+                for attr, repl in allp:
+                    setattr(aiqt_hooks, attr, repl)
                 return _verdict(nrd(cmd, cwd=cwd, project=project))
             finally:
-                setattr(aiqt_hooks, attr, real)
-
-        def _flip_verdict_pair(patches, cmd):
-            # patch SEVERAL real helpers at once (a form two readings each refuse), run, restore all
-            reals = [(attr, getattr(aiqt_hooks, attr)) for attr, _repl in patches]
-            try:
-                for attr, repl in patches:
-                    setattr(aiqt_hooks, attr, repl)
-                return _verdict(nrd(cmd))
-            finally:
-                for attr, real in reals:
+                for attr, real in reversed(reals):
                     setattr(aiqt_hooks, attr, real)
+
+        def _flip_verdict(attr, repl, cmd, cwd=None, project=None, hold=_nrd_flip_hold):
+            # patch ONE real helper to its pre-fix behaviour, run the vector through the real guard,
+            # restore the helper, and return the verdict (the check id stays a literal at the call site)
+            return _flip_verdict_pair(((attr, repl),), cmd, cwd=cwd, project=project, hold=hold)
 
         # the looser -c reading is classified as well (so nothing it refused is allowed); a flip of the
         # -c extraction removes it alongside
@@ -16753,15 +17352,44 @@ def _main_isolated(report_path=None):
               [_flip_verdict("_nrd_unread_in_scope", lambda d: False, c, cwd=str(tmp),
                              project=str(nd.root)) for c in _nrd_unread + (_nrd_rel,)],
               ["allow"] * 7 + ["deny"])
-        # keeping the last known working directory after cd -, a bare cd, an unreadable cd operand or a
-        # directory-stack builtin lets every lost-directory row above through again
+        # the lost-directory rows are refused by both broad rules: reverting only the script-operand
+        # rule leaves each denied by the shell-state rule, and reverting both lets every row through
+        _nrd_no_state = ("_nrd_shell_state", lambda command, segments: False)
+        _nrd_all_proven = ("_nrd_script_proven", lambda argv, cwd, dirs: True)
         check("nrd/flip-cwd-lost-allows",
-              [_flip_verdict("_nrd_cwd_lost", lambda seg, cwd: False, c) for c in _nrd_cwd_rows],
-              ["allow"] * 4)
-        # leaving a program a shell or python reads from stdin out of scope lets every stdin row through
+              [_flip_verdict_pair((_nrd_all_proven,), c, hold=()) for c in _nrd_cwd_rows]
+              + [_flip_verdict_pair((_nrd_no_state, _nrd_all_proven), c, hold=())
+                 for c in _nrd_cwd_rows],
+              ["deny"] * 4 + ["allow"] * 4)
+        # treating every shell or interpreter word as running a proven script lets every stdin row
+        # through (no shell-state construct stands in these rows)
         check("nrd/flip-stdin-program-allows",
-              [_flip_verdict("_nrd_stdin_program", lambda seg: False, c) for c in _nrd_stdin_rows],
+              [_flip_verdict_pair((_nrd_all_proven,), c, hold=()) for c in _nrd_stdin_rows],
               ["allow"] * 5)
+        # reverting both broad rules lets the /dev/stdin, source, rbash, eval and xargs rows through
+        # (the failed-cd row is refused because operands resolve against the payload working directory
+        # rather than a modelled cd, and the symlink row by the realpath comparison; neither is a helper
+        # this flip can revert)
+        check("nrd/flip-redesign-allows",
+              [_flip_verdict_pair((_nrd_no_state, _nrd_all_proven), c, hold=())
+               for c in _nrd_redesign_rows[1:4] + _nrd_redesign_rows[5:]],
+              ["allow"] * 5)
+        # reverting both broad rules lets every stdin-program and lost-directory vector row through
+        check("nrd/flip-broad-rules-vectors-allows",
+              [_flip_verdict_pair((_nrd_no_state, _nrd_all_proven), c, hold=())
+               for c in _nrd_vector_rows],
+              ["allow"] * 5)
+        # scanning a nested body without the enclosing command's shell-state flag lets the eval row
+        # through on the decoy file, while the shell -c row is still refused by its enclosing segment's
+        # relative -c operand; reverting both broad rules as well lets both rows through
+        _nrd_no_nested = ("_nrd_nested_state", lambda state: False)
+        check("nrd/flip-nested-state-allows",
+              [_flip_verdict_pair((_nrd_no_nested,), c, cwd=str(nd_decoy), project=str(nd.root),
+                                  hold=()) for c in _nrd_nested_rows]
+              + [_flip_verdict_pair((_nrd_no_nested, _nrd_no_state, _nrd_all_proven), c,
+                                    cwd=str(nd_decoy), project=str(nd.root), hold=())
+                 for c in _nrd_nested_rows],
+              ["allow", "deny", "allow", "allow"])
 
         # the pre-fix helper bodies the new flips restore (each shows its fix is load-bearing)
         def _nrd_old_cp_targets(operands, eff_cwd):
@@ -17207,6 +17835,13 @@ def _main_isolated(report_path=None):
               [_verdict(ni_guard(c)) for c in ("echo 'echo hi' | bash", "python3 - <<'EOF'\nprint(1)\nEOF\n",
                                                "bash -s", "cd -; make test", "pushd /tmp; popd; ls x")],
               ["allow"] * 5)
+        # with no directory declared, the shapes the working-directory and stdin rules now refuse stay
+        # allowed (guard-only: this fixture holds no deliverable for real bash to run)
+        check("nrd/inert-no-key-redesign-allows",
+              [_verdict(ni_guard(c)) for c in ("cd /nrd-missing; bash rel.sh", "echo hi | bash /dev/stdin",
+                                               "echo : | source /dev/stdin", "bash -c 'echo hi'",
+                                               "eval 'cd -'; python3 -c 1", "bash link/../x.sh")],
+              ["allow"] * 6)
         ni_reg_path = ni.root / ".aiqt" / "orchestration.local.json"
         ni_reg = json.loads(ni_reg_path.read_text(encoding="utf-8"))
         ni_reg["deliverable_dirs"] = [str(ni_staging)]
@@ -17264,6 +17899,29 @@ def _main_isolated(report_path=None):
             input=json.dumps(nd.payload("PreToolUse", "Bash", {"command": "git status"})),
             capture_output=True, text=True, timeout=60, env=_nrd_env)
         check("nrd/main-subprocess-allows", (_nrd_ok.returncode, _nrd_ok.stdout), (0, ""))
+
+        # --- the differential oracle (see _NRDO_FORMS): no allowed command runs declared code ---
+        nrdo_fx = _nrdo_setup(tmp, Fixture(tmp, "nrdo-repo"))
+        nrdo_corpus = _nrdo_corpus(aiqt_hooks)
+        nrdo_rows = _nrdo_rows(aiqt_hooks, nrdo_fx, nrdo_corpus)
+        nrdo_real = [(v, r) for v, _m, r in nrdo_rows]
+        nrdo_by_id = {c[0]: row for c, row in zip(nrdo_corpus, nrdo_rows)}
+        check("nrd/oracle-corpus-pinned", _nrdo_pin(nrdo_corpus), _NRDO_CORPUS_PIN)
+        # the reference is live: a declared script and a declared python file run, a reader does not
+        check("nrd/oracle-reference-live",
+              [nrdo_by_id[k][2] for k in ("fix/ctl-bash-abs", "fix/ctl-py-abs", "fix/ctl-cat")],
+              [True, True, False])
+        check("nrd/oracle-no-allowed-declared-run", _nrdo_judge(nrdo_corpus, nrdo_real), [])
+        # mutation: with the core scope scan disabled, the oracle is red on real runs, not on the pin
+        nrdo_mut = _nrdo_judge(nrdo_corpus, [(m, r) for _v, m, r in nrdo_rows])
+        check("nrd/oracle-mutant-core-disabled-red",
+              ("corpus-pin" not in nrdo_mut, len(nrdo_mut) > 0), (True, True))
+        # mutation: deleting any one pinned fixture turns the oracle red
+        nrdo_first = len(nrdo_corpus) - len(_NRDO_FORMS)
+        check("nrd/oracle-mutant-fixture-deleted-red",
+              [_nrdo_judge(nrdo_corpus[:k] + nrdo_corpus[k + 1:], nrdo_real[:k] + nrdo_real[k + 1:])
+               [:1] for k in range(nrdo_first, len(nrdo_corpus))],
+              [["corpus-pin"]] * len(_NRDO_FORMS))
 
 
 

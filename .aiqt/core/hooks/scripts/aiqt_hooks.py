@@ -26838,8 +26838,13 @@ _NRD_ANSI_C_RE = re.compile(r"\$'((?:[^'\\]|\\.)*)'")
 
 def _nrd_forms(path, eff_cwd):
     """The comparison forms of one path: its lexical normalization (joined onto eff_cwd when relative)
-    and that form's os.path.realpath, deduplicated; None for a relative path with no known working
-    directory (the caller falls back to the raw-text test) and for an unusable value."""
+    and the os.path.realpath of the joined path taken BEFORE any normalization, deduplicated, realpath
+    last; None for a relative path with no known working directory (the caller falls back to the
+    raw-text test) and for an unusable value. The realpath is taken from the joined text because the
+    kernel resolves a symlink before a later `..` (link/../x names the parent of the link's target), so
+    a normalized spelling can point somewhere the run never goes; _nrd_match judges a path outside the
+    declared directories only when both forms are, so the normalized text alone never clears one
+    (where realpath itself raises, the lexical form is the only one)."""
     if not isinstance(path, str) or not path or "\x00" in path:
         return None
     if not os.path.isabs(path):
@@ -26849,7 +26854,7 @@ def _nrd_forms(path, eff_cwd):
     lex = os.path.normpath(path)
     forms = [lex]
     try:
-        real = os.path.realpath(lex)
+        real = os.path.realpath(path)
     except (OSError, ValueError):
         real = None
     if real and real != lex:
@@ -27798,9 +27803,11 @@ def _nrd_segment_allowed(seg, eff_cwd, dirs, written):
     a reader inside a declared directory can never match; no assignment prefix, wrapper, builtin or
     reserved word, which are simply not listed); and the per-tool shape must hold. `written` holds the
     absolute paths this command's earlier segments create (cp targets, write redirects, mkdir), so a git
-    segment can refuse a repository the same call just built. The one segment that moves the effective
-    working directory is the listed cd: exactly one literal absolute operand resolving outside every
-    declared directory (the session's exit from a declared cwd; entering one with cd is not listed)."""
+    segment can refuse a repository the same call just built. The listed cd (exactly one literal
+    absolute operand resolving outside every declared directory) passes but never moves the effective
+    working directory, because a cd can fail or be skipped: it returns eff_cwd unchanged, and the
+    caller (_nrd_scope_scan) judges each later segment from the payload working directory and from
+    every earlier listed cd target."""
     if seg.opaque_shell or any(seg.argv_opaque):
         return (False, eff_cwd)
     if "$'" in seg.raw:
@@ -27824,9 +27831,10 @@ def _nrd_segment_allowed(seg, eff_cwd, dirs, written):
     if "/" in head or not head or _ENV_ASSIGN_RE.match(head):
         return (False, eff_cwd)
     if head == "cd":
+        # listed, but it never moves the effective working directory: a cd can fail or be skipped
         if len(argv) == 2 and "\x00" not in argv[1] and os.path.isabs(argv[1]) \
                 and _nrd_match(argv[1], None, dirs) is False:
-            return (True, os.path.normpath(argv[1]))
+            return (True, eff_cwd)
         return (False, eff_cwd)
     if head in _NRD_READ_FORMS:
         ok, _operands = _nrd_options_ok(argv[1:], _NRD_READ_FORMS[head])
@@ -27888,25 +27896,6 @@ def _nrd_segment_writes(seg, eff_cwd, dirs):
     return out
 
 
-def _nrd_next_cwd(seg, eff_cwd):
-    """The effective working directory after one segment, for the SCOPE walk only: a literal cd or
-    pushd destination moves it (absolute, or resolved against the current one), a non-literal one
-    makes it unknown (None), and every other segment leaves it unchanged. The allowlist pass tracks
-    its own cwd through the one listed cd shape; this looser reading only widens what the scope walk
-    can resolve, never what it allows."""
-    argv = seg.argv
-    if not argv:
-        return eff_cwd
-    if argv[0].rsplit("/", 1)[-1] not in ("cd", "pushd"):
-        return eff_cwd
-    dest = _rwh_cd_dest(argv)
-    if dest is None:
-        return None
-    if os.path.isabs(dest):
-        return os.path.normpath(dest)
-    return os.path.normpath(os.path.join(eff_cwd, dest)) if eff_cwd is not None else None
-
-
 def _nrd_unread_in_scope(dirs):
     """Whether a command the lexer cannot read is in scope: True whenever any directory is declared.
     Scope is never judged from such a command's raw text or its working directory alone, because with
@@ -27919,25 +27908,60 @@ def _nrd_unread_in_scope(dirs):
     return bool(dirs)
 
 
-_NRD_DIR_STACK_WORDS = frozenset(("pushd", "popd", "dirs"))
+_NRD_STATE_WORDS = frozenset(("cd", "pushd", "popd", "dirs", "alias", "unalias", "shopt", "eval",
+                               "source"))
+_NRD_STATE_TEXT = ("CDPATH", "cdable_vars")
 
 
-def _nrd_cwd_lost(seg, eff_cwd):
-    """True when, after this segment, the scope walk no longer knows the shell's working directory: a
-    directory-stack builtin (pushd, popd, dirs) appears anywhere in its words, or a cd word appears
-    anywhere other than as a command word whose one literal destination _nrd_next_cwd resolves (so cd
-    -, a bare cd to HOME, an expansion or tilde operand, and cd behind a prefix, builtin or command all
-    count). Any later relative operand could then resolve inside a declared directory, so the caller
-    puts it in scope (fail closed). A cd or stack word that is only an argument (echo cd) counts too:
-    the walk does not tell argument from command word behind every reserved word and wrapper."""
-    words = [tok.rsplit("/", 1)[-1] for tok in seg.argv]
-    if any(w in _NRD_DIR_STACK_WORDS for w in words):
+def _nrd_shell_state(command, segments):
+    """True when a command holds a directory-changing or shell-state construct, so this guard does not
+    know the working directory, the aliases or the options a later word runs under: a word whose last
+    path component is cd, pushd, popd, dirs, alias, unalias, shopt, eval or source (anywhere in a
+    segment, an argument included, as in echo cd or ls docs/dirs); the dot builtin as a command word;
+    a word set followed by a word beginning with - or + (set -o and the rest); a word exec in a segment
+    that carries a redirect; or the text CDPATH or cdable_vars anywhere in the command. The guard never
+    models what such a construct does (a cd that fails, is skipped, runs in a subshell, goes back with
+    -, resolves through CDPATH or a cdable variable, or comes from an alias, an eval body or a sourced
+    file); the caller instead denies every segment _nrd_state_relative flags. A nested shell -c or
+    eval body is scanned under the enclosing command's flag as well (_nrd_nested_state)."""
+    if any(t in command for t in _NRD_STATE_TEXT):
         return True
-    if "cd" not in words:
-        return False
-    if words.count("cd") == 1 and seg.argv[0] == "cd":
-        return _nrd_next_cwd(seg, eff_cwd) is None
-    return True
+    for seg in segments:
+        words = [tok.rsplit("/", 1)[-1] for tok in seg.argv]
+        if any(w in _NRD_STATE_WORDS for w in words):
+            return True
+        for j, w in enumerate(words):
+            if w == "set" and j + 1 < len(words) and words[j + 1][:1] in ("-", "+"):
+                return True
+            if w == "exec" and seg.redirects:
+                return True
+        head = _nrd_command_word(seg.argv)
+        if head and head[0] == ".":
+            return True
+    return False
+
+
+def _nrd_nested_state(state):
+    """The shell-state flag a nested command (a shell -c body or an eval body) is scanned under: the
+    enclosing command's own flag, which the scan of the body joins with the body's own. An eval body
+    runs in the working directory, and with the aliases and options, that the enclosing command left,
+    and a shell -c body starts in that working directory, so after a cd to a declared directory's
+    parent an eval of a shell with a relative script operand denies exactly as the same words would
+    outside the eval, even when that operand also names an existing file outside the declared
+    directories from the payload working directory."""
+    return state
+
+
+def _nrd_state_relative(seg, interps):
+    """True when, in a command holding a shell-state construct (_nrd_shell_state), this segment holds a
+    shell or interpreter word (interps, from _nrd_interp_argvs) and any word after its first that is
+    not an absolute path (an option word such as -I included) or a relative file redirect target
+    (_nrd_relative_operand), or runs a relative path holding a slash as its command word: the caller
+    denies such a segment outright, since the directory that word resolves against is not known."""
+    if interps and _nrd_relative_operand(seg):
+        return True
+    head = _nrd_command_word(seg.argv)
+    return bool(head) and "/" in head[0] and not os.path.isabs(head[0])
 
 
 def _nrd_relative_operand(seg):
@@ -27954,131 +27978,175 @@ def _nrd_relative_operand(seg):
                and not (isinstance(r.target, str) and os.path.isabs(r.target)) for r in seg.redirects)
 
 
-def _nrd_shell_reads_stdin(args):
-    """True when a shell given these arguments reads its program from standard input: -s in a
-    single-dash option cluster, or no script operand at all. False when a cluster holds c (the -c body
-    is classified on its own) or for --version and --help. Each o or O letter of a cluster takes the
-    next word, as do --rcfile and --init-file; other long options are flags; a lone - or -- ends the
-    options."""
-    i = 0
-    n = len(args)
-    while i < n:
-        tok = args[i]
-        if tok in ("-", "--"):
-            i += 1
-            break
-        if tok in ("--version", "--help"):
-            return False
-        if tok.startswith("--"):
-            i += 2 if tok in ("--rcfile", "--init-file") else 1
-            continue
-        if len(tok) > 1 and tok[0] in "-+":
-            letters = tok[1:]
-            if "c" in letters:
-                return False
-            if "s" in letters and tok[0] == "-":
-                return True
-            i += 1 + letters.count("o") + letters.count("O")
-            continue
-        break
-    return i >= n
+# The shell and interpreter words this guard knows by name: common shells (rbash and busybox among
+# them) and common script interpreters. A command word ending in sh (_NRD_SH_SUFFIX_RE) also counts,
+# as does the python family (_NRD_PY_WORD_RE).
+_NRD_INTERP_WORDS = frozenset(("sh", "bash", "rbash", "dash", "ash", "zsh", "ksh", "mksh", "yash",
+                               "posh", "fish", "csh", "tcsh", "busybox", "perl", "ruby", "node",
+                               "nodejs", "php", "lua"))
+_NRD_SH_SUFFIX_RE = re.compile(r"[A-Za-z0-9_+-]*sh\Z")
+# words that may stand before a command word in a lexed segment: braces, a subshell paren, negation and
+# the compound-command reserved words
+_NRD_PREFIX_WORDS = frozenset(("{", "(", "!", "if", "then", "else", "elif", "while", "until", "do",
+                               "coproc"))
 
 
-def _nrd_python_reads_stdin(args):
-    """True when a python-family interpreter given these arguments reads its program from standard
-    input: a - operand, or no script operand at all. False for -c and -m (a program in the argument or
-    a module) and for the help and version options. -W and -X take a value (attached, or the next word),
-    as does --check-hash-based-pycs; other long options are flags."""
-    i = 0
-    n = len(args)
-    while i < n:
-        tok = args[i]
-        if tok == "-":
-            return True
-        if tok == "--":
-            i += 1
-            break
-        if tok.startswith("--"):
-            if tok in ("--version", "--help", "--help-env", "--help-xoptions", "--help-all"):
-                return False
-            i += 2 if tok == "--check-hash-based-pycs" else 1
-            continue
-        if tok.startswith("-"):
-            skip = 0
-            for j, ch in enumerate(tok[1:], 1):
-                if ch in "cmhV?":
-                    return False
-                if ch in "WX":
-                    skip = 0 if j + 1 < len(tok) else 1
-                    break
-            i += 1 + skip
-            continue
-        break
-    return i >= n or args[i] == "-"
-
-
-def _nrd_stdin_program(seg):
-    """True when a segment runs a shell or python-family word that reads its program from standard
-    input (a pipe into bash, sh or python3, bash -s, python3 -, a quoted here-document or here-string
-    fed to one): its body is never in the call's lexed words, so the caller puts the call in scope
-    whenever any directory is declared. The command word is found after NAME=value prefixes, the env,
-    nice, timeout and time wrappers (_gate_peel), and exec, command or builtin with their options;
-    behind a wrapper carrying an option outside that grammar, the first shell or python-family word of
-    the segment is taken as the command word (fail closed: its own arguments decide)."""
-    eff = _gate_peel(seg.argv)
-    if eff is None:
-        eff = []
-        for k, tok in enumerate(seg.argv):
-            name = tok.rsplit("/", 1)[-1]
-            if name in _NRD_SHELL_WORDS or _NRD_PY_WORD_RE.match(name):
-                eff = seg.argv[k:]
-                break
+def _nrd_command_word(argv):
+    """The words from a segment's command word on: leading braces, a subshell paren, negation and
+    reserved words skipped, then NAME=value prefixes and the env, nice, timeout and time wrappers
+    (_gate_peel), then exec, command or builtin with their options. None when a wrapper carries an
+    option outside that grammar (the command word is then unknown); [] for no command word."""
+    k = 0
+    while k < len(argv) and argv[k] in _NRD_PREFIX_WORDS:
+        k += 1
+    eff = _gate_peel(argv[k:])
     for _round in range(8):
         if not eff or eff[0].rsplit("/", 1)[-1] not in ("exec", "command", "builtin"):
             break
         k = 1
         while k < len(eff) and eff[k].startswith("-") and eff[k] != "-":
             k += 2 if eff[0].rsplit("/", 1)[-1] == "exec" and eff[k] == "-a" else 1
-        nxt = _gate_peel(eff[k:])
-        if nxt is None:
-            return True
-        eff = nxt
-    if not eff:
-        return False
-    word = eff[0].rsplit("/", 1)[-1]
-    if word in _NRD_SHELL_WORDS:
-        return _nrd_shell_reads_stdin(eff[1:])
+        eff = _gate_peel(eff[k:])
+    return eff
+
+
+def _nrd_interp_argvs(seg):
+    """Every shell or interpreter invocation a segment may hold, each as its words from the shell or
+    interpreter word on: (1) the command word (_nrd_command_word) when it is a listed name
+    (_NRD_INTERP_WORDS), a python-family name, any word ending in sh, source, or the dot builtin; (2)
+    when the command word is unknown behind a wrapper option outside the peel, a stand-in with no
+    script operand, so the segment counts as running a program this guard cannot see; and (3) from
+    every word of the segment whose last path component is a listed or python-family name, that word
+    and the words after it, so a wrapper outside the peel (xargs, nohup, stdbuf, sudo) is covered. (3)
+    also counts a name that is only an argument (echo bash, command -v bash, type bash)."""
+    out = []
+    eff = _nrd_command_word(seg.argv)
+    if eff is None:
+        out.append(["sh"])
+    elif eff:
+        word = eff[0].rsplit("/", 1)[-1]
+        if word in _NRD_INTERP_WORDS or _NRD_PY_WORD_RE.match(word) or _NRD_SH_SUFFIX_RE.match(word) \
+                or eff[0] == "." or word == "source":
+            out.append(eff)
+    for j, tok in enumerate(seg.argv):
+        name = tok.rsplit("/", 1)[-1]
+        if name in _NRD_INTERP_WORDS or _NRD_PY_WORD_RE.match(name):
+            out.append(seg.argv[j:])
+    return out
+
+
+def _nrd_script_operand(argv):
+    """The script operand of one shell or interpreter invocation (argv from the shell or interpreter
+    word on), or None when there is none: no operand (the program comes from stdin), a c or s letter in
+    a shell's - or + option cluster, a shell's --version or --help, a python -c, -m, - or help or
+    version option, or a first argument beginning with - for every other listed word (perl, ruby,
+    node, nodejs, php, lua, fish, csh, tcsh, busybox: perl -e, ruby -e, node -e and php -r run
+    argument text, and these option grammars are not modelled). For source and the dot builtin it is
+    the first word after an optional --. A shell's o and O option letters take the next word, as do
+    --rcfile and --init-file; python's -W and -X take a value, as does --check-hash-based-pycs."""
+    word = argv[0].rsplit("/", 1)[-1]
+    args = argv[1:]
+    if argv[0] == "." or word == "source":
+        if args and args[0] == "--":
+            args = args[1:]
+        return args[0] if args else None
+    i = 0
+    n = len(args)
     if _NRD_PY_WORD_RE.match(word):
-        return _nrd_python_reads_stdin(eff[1:])
-    return False
+        while i < n:
+            tok = args[i]
+            if tok == "--":
+                i += 1
+                break
+            if tok == "-" or tok in ("--version", "--help", "--help-env", "--help-xoptions",
+                                     "--help-all"):
+                return None
+            if tok.startswith("--"):
+                i += 2 if tok == "--check-hash-based-pycs" else 1
+                continue
+            if tok.startswith("-"):
+                skip = 0
+                for j, ch in enumerate(tok[1:], 1):
+                    if ch in "cmhV?":
+                        return None
+                    if ch in "WX":
+                        skip = 0 if j + 1 < len(tok) else 1
+                        break
+                i += 1 + skip
+                continue
+            break
+    elif word in _NRD_SHELL_WORDS or word in ("rbash", "ash", "mksh", "yash", "posh") \
+            or (word not in _NRD_INTERP_WORDS and _NRD_SH_SUFFIX_RE.match(word)):
+        while i < n:
+            tok = args[i]
+            if tok in ("-", "--"):
+                i += 1
+                break
+            if tok.startswith("--"):
+                if tok in ("--version", "--help"):
+                    return None
+                i += 2 if tok in ("--rcfile", "--init-file") else 1
+                continue
+            if len(tok) > 1 and tok[0] in "-+":
+                letters = tok[1:]
+                if "c" in letters or "s" in letters:
+                    return None
+                i += 1 + letters.count("o") + letters.count("O")
+                continue
+            break
+    elif args and args[0].startswith("-"):
+        return None
+    if i >= n or args[i] == "-":
+        return None
+    return args[i]
 
 
-def _nrd_scope_scan(command, cwd, dirs, _depth=0):
+def _nrd_script_proven(argv, cwd, dirs):
+    """True only when one shell or interpreter invocation runs a script operand (_nrd_script_operand)
+    that is an existing regular file whose lexical form and realpath (_nrd_forms: the realpath taken
+    from the payload working directory before any normalization) both lie outside every declared
+    directory, outside /dev and /proc, and outside a Python standard-library directory
+    (_nrd_outside_regular_file: /dev/stdin, /dev/fd/N and /proc/self/fd/N count as stdin). Every
+    other invocation is treated as reading its program from stdin or argument text that the call's
+    lexed words do not show, so the caller puts the call in scope."""
+    script = _nrd_script_operand(argv)
+    if script is None or script.startswith("-"):
+        return False
+    return _nrd_outside_regular_file(script, cwd, dirs)
+
+
+def _nrd_scope_scan(command, cwd, dirs, _depth=0, _state=False):
     """The allowlist-by-construction judgement of one Bash command against the declared directories:
-    (subject, why) to refuse, None to pass. SCOPE first: the command is in scope when its raw text (or
-    a copy with each $'...' ANSI-C span decoded to bash's spelling) names a declared directory
-    (_nrd_raw_names: a directory spelling, or any literal absolute path resolving under one), when any
-    lexed argv token or redirect target resolves into one (relative tokens resolved against the
-    effective working directory, which follows literal cd/pushd), when the payload working directory
-    itself resolves into one, or when a relative cd/pushd stands while CDPATH is set (its destination
-    could be a declared directory through a CDPATH entry, so it is treated as in scope). Once the walk
-    loses the working directory (cd -, a bare cd, an unreadable cd operand, a cd it does not track, or
-    any pushd, popd or dirs word: _nrd_cwd_lost), every later segment with a relative operand is in
-    scope (_nrd_relative_operand). A segment whose shell or python-family word reads its program from
-    stdin (a pipe into one, bash -s, python3 -, a quoted heredoc fed to one: _nrd_stdin_program) is in
-    scope whenever any directory is declared. A nested shell -c body is classified recursively in the
-    parent's effective working directory, so a declared directory a quote splice hides from the raw
-    text is still reached. A command the lexer cannot read (an unquoted heredoc, a here-string, a
-    process substitution, an unbalanced quote, a quoted heredoc the lexer cannot place) is IN SCOPE
-    whenever any directory is declared (_nrd_unread_in_scope), and it has no segments to match, so it
-    refuses whole. Out of scope the command passes untouched. IN SCOPE the command passes only when
-    EVERY lexed segment matches the closed read-only allowlist (_nrd_segment_allowed). The residuals
-    are a command that reaches a declared file WITHOUT naming it or its directory and from an
-    undeclared working directory (a variable assigned in an earlier call, concatenation or an opaque
-    expansion, an alias file made elsewhere), a -c body behind a wrapper word the peel does not read,
-    and a program a non-shell, non-python interpreter or a wrapper outside the peel (xargs) reads from
-    stdin: nothing in such a call's text or payload distinguishes it (disclosed in the manifest residue
-    and ORCHESTRATION.md)."""
+    (subject, why) to refuse, None to pass. SCOPE first: the command is in scope when its raw text
+    (or a copy with each $'...' ANSI-C span decoded to bash's spelling) names a declared directory
+    (_nrd_raw_names: a directory spelling, or any literal absolute path resolving under one), when
+    any lexed argv token or redirect target resolves into one (relative tokens resolved against the
+    payload working directory; a directory change is never modelled), when the payload working
+    directory itself resolves into one, or when a relative cd/pushd stands while CDPATH is set.
+    Whenever any directory is declared and the command holds a directory-changing or shell-state
+    construct (_nrd_shell_state), a segment that holds a shell or interpreter word and any word that
+    is not an absolute path, or whose command word is a relative path, DENIES outright, in scope or
+    not (_nrd_state_relative). A segment holding a shell or interpreter word (_nrd_interp_argvs) is
+    in scope unless every such word's script operand is an existing regular file whose lexical form
+    and realpath lie outside every declared directory and outside /dev and /proc
+    (_nrd_script_proven), so a pipe, a here-document, /dev/stdin, a -c or -m program and source of
+    stdin all count. A nested shell -c or eval body (and the token a looser reading takes as the -c
+    body) is classified recursively, to depth _NRD_MAX_C_DEPTH, from the payload working directory
+    and under the enclosing command's shell-state flag (_nrd_nested_state), so a declared directory a
+    quote splice hides from the raw text is still reached and a cd before an eval still governs the
+    body. A command the lexer cannot read (an unquoted heredoc, a here-string, a process
+    substitution, an unbalanced quote, a quoted heredoc the lexer cannot place) is IN SCOPE whenever
+    any directory is declared (_nrd_unread_in_scope), and it has no segments to match, so it refuses
+    whole. Out of scope the command passes untouched. IN SCOPE the command passes only when EVERY
+    lexed segment matches the closed read-only allowlist (_nrd_segment_allowed) from the payload
+    working directory and from every earlier listed cd target. The residuals are code written
+    outside the declared directories (by an earlier tool call, or earlier in the same command over an
+    existing file) and then run, and a program that executes files without being a listed shell or
+    interpreter word (make, a test runner, awk -f, an unlisted interpreter), including one run after
+    a directory change this guard does not follow (cd -; make). The over-deny is every shell or
+    interpreter word without such a script operand while any directory is declared, and every shell
+    or interpreter segment carrying a word that is not an absolute path beside a shell-state
+    construct (cd /x; python3 -I /abs/r.py denies on its -I)."""
     eff_cwd = cwd if isinstance(cwd, str) and os.path.isabs(cwd) and "\x00" not in cwd else None
     scope = (eff_cwd is not None and _nrd_match(eff_cwd, None, dirs) is True) \
         or _nrd_raw_names(command, dirs) \
@@ -28091,25 +28159,35 @@ def _nrd_scope_scan(command, cwd, dirs, _depth=0):
             scope = True
     if segments is not None:
         cdpath = _nrd_cdpath_active(segments)
+        # the working directory is never modelled: every operand resolves against the payload cwd
         walk_cwd = eff_cwd
-        cwd_lost = False
+        # an enclosing command's shell-state construct governs a nested -c or eval body too
+        state = bool(dirs) and (bool(_state) or _nrd_shell_state(command, segments))
         for seg in segments:
-            if not scope and dirs and _nrd_stdin_program(seg):
-                # a shell or interpreter reading its program from stdin: the program is not in the
-                # lexed words, so nothing shows it names no declared directory (fail closed)
-                scope = True
-            if not scope and cwd_lost and _nrd_relative_operand(seg):
-                # the working directory is unknown after cd -, a bare cd, an unreadable cd operand or
-                # a directory-stack builtin, so a relative operand may resolve inside one (fail closed)
+            interps = _nrd_interp_argvs(seg) if dirs else []
+            if state and _nrd_state_relative(seg, interps):
+                # a directory-changing or shell-state construct stands in this command, so a relative
+                # word of a shell or interpreter segment, or a relative command path, may resolve
+                # inside a declared directory
+                return (seg.argv[0] if seg.argv else "a redirect with no command",
+                        "runs a shell, an interpreter or a relative path with a relative operand in "
+                        "a command that also holds a directory-changing or shell-state construct "
+                        "(cd, pushd, popd, dirs, alias, shopt, set with an option, eval, exec with a "
+                        "redirect, source or the dot builtin, CDPATH or cdable_vars), whose effect "
+                        "on the working directory this guard does not model; use absolute paths or "
+                        "split the directory change into its own call")
+            if not scope and any(not _nrd_script_proven(a, walk_cwd, dirs) for a in interps):
+                # a shell or interpreter whose program is not an existing regular file outside every
+                # declared directory reads it from stdin or argument text (fail closed)
                 scope = True
             body = _nrd_shell_c_body(seg)
             if body is not None and _depth < _NRD_MAX_C_DEPTH:
-                sub = _nrd_scope_scan(body, walk_cwd, dirs, _depth + 1)
+                sub = _nrd_scope_scan(body, walk_cwd, dirs, _depth + 1, _nrd_nested_state(state))
                 if sub is not None:
                     return sub
             prior = _nrd_shell_c_prior_body(seg)
             if prior is not None and prior != body and _depth < _NRD_MAX_C_DEPTH:
-                sub = _nrd_scope_scan(prior, walk_cwd, dirs, _depth + 1)
+                sub = _nrd_scope_scan(prior, walk_cwd, dirs, _depth + 1, _nrd_nested_state(state))
                 if sub is not None:
                     return sub
             if not scope and _nrd_env_opaque(seg, walk_cwd, dirs):
@@ -28130,8 +28208,6 @@ def _nrd_scope_scan(command, cwd, dirs, _depth=0):
                     dest = _rwh_cd_dest(seg.argv[w:])
                     if dest is not None and not os.path.isabs(dest):
                         scope = True
-            cwd_lost = cwd_lost or _nrd_cwd_lost(seg, walk_cwd)
-            walk_cwd = _nrd_next_cwd(seg, walk_cwd)
     if not scope:
         return None
     if segments is None:
@@ -28142,16 +28218,25 @@ def _nrd_scope_scan(command, cwd, dirs, _depth=0):
                                 "expansion or a quote splice cannot be ruled out, and no segment of it "
                                 "can be matched against the closed read-only allowlist; restate it in "
                                 "a form the lexer reads, or write file content with the Write tool")
+    # A listed cd may succeed or fail, so each later segment must pass from EVERY working directory
+    # the shell can be in: the payload working directory and each earlier listed cd target (any other
+    # directory change is not listed, so it denies above). A git segment after a cd into a directory
+    # this call gave a .git is therefore judged from that directory as well.
     written = set()
+    cwds = [eff_cwd]
     for seg in segments:
         if not seg.argv and not seg.redirects:
             continue
-        ok, eff_cwd = _nrd_segment_allowed(seg, eff_cwd, dirs, written)
-        if not ok:
-            return (seg.argv[0] if seg.argv else "a redirect with no command",
-                    "is not a closed-allowlist read-only form (or carries an option, operand shape, "
-                    "expansion or redirect outside the registered grammar)")
-        written |= _nrd_segment_writes(seg, eff_cwd, dirs)
+        for walk_cwd in cwds:
+            ok, _next = _nrd_segment_allowed(seg, walk_cwd, dirs, written)
+            if not ok:
+                return (seg.argv[0] if seg.argv else "a redirect with no command",
+                        "is not a closed-allowlist read-only form (or carries an option, operand "
+                        "shape, expansion or redirect outside the registered grammar)")
+        for walk_cwd in list(cwds):
+            written |= _nrd_segment_writes(seg, walk_cwd, dirs)
+        if len(seg.argv) == 2 and seg.argv[0] == "cd" and seg.argv[1] not in cwds:
+            cwds.append(seg.argv[1])
     return None
 
 
@@ -28201,10 +28286,15 @@ def _nrd_deny_text(subject, why):
     reason = (
         "AIQT rule wowo01 (workers produce inert data): {} {}. This command is in scope of a declared "
         "deliverable directory (the registry's deliverable_dirs: the draft staging and hand-back "
-        "directories): its text names one, an operand resolves into one, its working directory is "
-        "inside one, a relative operand follows a cd or directory-stack word that loses the working "
-        "directory, a shell or python reads its program from stdin, or this guard's lexer cannot read "
-        "it. A worker-delivered file there is data until it is applied, so in that scope ONLY "
+        "directories): its text names one, an operand resolves into one from the payload working "
+        "directory (this guard never follows a cd), its working directory is inside one, a shell or "
+        "interpreter word runs no script operand that is an existing regular file outside them (a "
+        "program from stdin, /dev/stdin, a pipe, a -c or -m program, or no operand at all), a shell "
+        "or interpreter segment carries a relative word beside a directory-changing or shell-state "
+        "construct (cd, pushd, popd, dirs, alias, shopt, set with an option, eval, exec with a "
+        "redirect, source or the dot builtin, CDPATH or cdable_vars), including inside an eval or "
+        "shell -c body, or this guard's lexer cannot read it. A worker-delivered file there is data "
+        "until it is applied, so in that scope ONLY "
         "a closed allowlist of read-only forms runs, each with its registered options: cat, wc, head, "
         "tail, ls, file, grep, diff, the coreutils hash tools, cp with the declared file only as a "
         "source and only where cp actually writes outside the declared directories, not under a "
