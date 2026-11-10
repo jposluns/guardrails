@@ -193,7 +193,46 @@ if tree_served is not None:
     else:
         print(json.dumps(entry["body"]))
     sys.exit(0)
-listing = "repos/" + os.environ["MOCK_GH_REPO"] + "/actions/runs"
+# A --pr case also serves "local": "pulls" (the replies to each read of pulls/NUMBER, in order, the last
+# repeating; the --wait probe's reads of that number take the same sequence), "statuses" and "status"
+# (the replies to each read of commits/SHA/statuses and commits/SHA/status with per_page=100 and
+# --paginate --slurp, in order, the last repeating) and "ref" (the reply to every read of
+# git/ref/heads/BRANCH). Each reply is {"body": JSON} or {"raw": text} or {"error": diagnostic}; a body or
+# raw reply may add "stderr", text written to stderr before the reply on a read that still succeeds. A
+# read's position is counted from the argv log, which already holds this read.
+with open(os.environ["MOCK_GH_RESPONSE"], "r", encoding="utf-8") as handle:
+    local_served = json.load(handle).get("local")
+if local_served is not None:
+    repo_prefix = "repos/" + os.environ["MOCK_GH_REPO"] + "/"
+    tail = endpoint[len(repo_prefix):] if endpoint.startswith(repo_prefix) else ""
+    paged = "--paginate" in args and "--slurp" in args
+    bare = "--paginate" not in args and "--slurp" not in args
+    key = None
+    if tail == "pulls/" + str(local_served["number"]) and bare:
+        key = "pulls"
+    elif tail.startswith("commits/") and tail.endswith("/statuses?per_page=100") and paged:
+        key = "statuses"
+    elif tail.startswith("commits/") and tail.endswith("/status?per_page=100") and paged:
+        key = "status"
+    elif tail.startswith("git/ref/heads/") and bare:
+        key = "ref"
+    if key is not None:
+        with open(os.environ["MOCK_GH_ARGV_LOG"], "r", encoding="utf-8") as handle:
+            seen = sum(1 for line in handle if json.loads(line) == args)
+        replies = [local_served["ref"]] if key == "ref" else local_served[key]
+        entry = replies[min(seen - 1, len(replies) - 1)]
+        if "error" in entry:
+            print(entry["error"], file=sys.stderr)
+            sys.exit(1)
+        if "stderr" in entry:
+            sys.stderr.write(entry["stderr"])
+            sys.stderr.flush()
+        if "raw" in entry:
+            sys.stdout.write(entry["raw"])
+        else:
+            print(json.dumps(entry["body"]))
+        sys.exit(0)
+listing ="repos/" + os.environ["MOCK_GH_REPO"] + "/actions/runs"
 scan_prefix = listing + "?per_page=100&page="
 pulls = "repos/" + os.environ["MOCK_GH_REPO"] + "/pulls"
 commits = "repos/" + os.environ["MOCK_GH_REPO"] + "/commits/"
@@ -494,6 +533,38 @@ def tree_listing(runs, commits, jobs=None):
     return {"runs": [{"body": page(runs)}], "commits": commits, "jobs": jobs or {}}
 
 
+# The account a --pr case pins as the status creator, through CI_STATUS_STATUS_CREATOR.
+STATUS_CREATOR = "fixture-poster"
+STATUS_CONTEXT = "local-quality"
+
+
+def status_entry(status_id, state, created=COMMIT_TIME + 900, login=STATUS_CREATOR,
+                 context=STATUS_CONTEXT):
+    # One commit status as the statuses listing and the combined status both serve it.
+    return {"id": status_id, "state": state, "context": context, "created_at": iso(created),
+            "creator": {"login": login}}
+
+
+def status_listing(*entries):
+    # The statuses listing read with --paginate --slurp: every entry on one page.
+    return {"body": [list(entries)]}
+
+
+def combined_status(sha, *entries):
+    # The combined status read with --paginate --slurp: one page naming sha. Its .state is "pending"
+    # whatever the entries say, so a case that passes proves the script never reads it.
+    return {"body": [{"sha": sha, "state": "pending", "total_count": len(entries),
+                      "statuses": list(entries)}]}
+
+
+def local_reads(number, pulls, listings, combined, tip):
+    # What gh serves the --pr reads (see FAKE_GH): pull request number's reads in order, the statuses
+    # listings and combined statuses in order, and the base branch's reference naming tip.
+    return {"number": number, "pulls": [{"body": item} for item in pulls], "statuses": listings,
+            "status": combined,
+            "ref": {"body": {"ref": "refs/heads/main", "object": {"type": "commit", "sha": tip}}}}
+
+
 def jq_program():
     source = SCRIPT.read_text(encoding="utf-8")
     prefix = "CI_STATUS_JQ='\n"
@@ -725,17 +796,21 @@ class Fixture:
 
     def invoke(self, polls, wait=False, timeout="900", clock=NOW, override=FIXTURE_REPO,
                served=FIXTURE_REPO, git_remote=None, extra_args=(), probes=None, tree=None,
-               rev="HEAD"):
+               rev="HEAD", local=None, creator=None):
         # override is CI_STATUS_REPO (None leaves it unset); served is the only repository gh answers for;
         # git_remote, when given, is the (stdout, exit status) the fixture git gives for the origin's URLs.
         # probes are the pull-request probe's reads (see FAKE_GH); by default every read finds one open
         # pull request at this head into main that GitHub reports MERGEABLE. tree, when given, is what gh
-        # serves a --match-tree read instead (see FAKE_GH); rev=None passes no positional rev.
+        # serves a --match-tree read instead (see FAKE_GH); rev=None passes no positional rev. local, when
+        # given, is what gh serves the --pr reads (see FAKE_GH); creator, when given, is the value of
+        # CI_STATUS_STATUS_CREATOR (None leaves it unset).
         if probes is None:
             probes = [probe_read(pull(1, self.head_sha))]
         response = {"polls": polls, "probes": probes}
         if tree is not None:
             response["tree"] = tree
+        if local is not None:
+            response["local"] = local
         self.response.write_text(json.dumps(response), encoding="utf-8")
         self.counter.write_text("0\n", encoding="utf-8")
         self.probe_counter.write_text("0\n", encoding="utf-8")
@@ -762,6 +837,8 @@ class Fixture:
             env["MOCK_GIT_REMOTE_RC"] = str(git_remote[1])
         if override is not None:
             env["CI_STATUS_REPO"] = override
+        if creator is not None:
+            env["CI_STATUS_STATUS_CREATOR"] = creator
         env["CI_STATUS_TIMEOUT"] = timeout
         command = [str(SCRIPT)] + ([] if rev is None else [rev])
         if wait:
@@ -3169,6 +3246,197 @@ def _run_checks():
                            fixture.gh_reads("actions/runs/704/jobs")))
         check("ci/match-tree-window-disclosed", window,
               [(0, True, [], 0, 0, 0)] * 3 + [(0, True, [], 0, 0, 1)] + [(1, True, [], 0, 0, 0)] * 5)
+
+        # THE STATUS REQUIREMENT (--pr N --require-status local-quality). Every case serves a green run
+        # set, so each verdict below is the status requirement's own.
+        green = [[page([success_a])]]
+        status_args = ("--pr", "7", "--require-status", STATUS_CONTEXT)
+        open_pull = pull(7, head_sha)
+        ok_status = status_entry(31, "success")
+
+        def local(listings, combined, pulls=(open_pull,), tip=head_sha):
+            return local_reads(7, list(pulls), listings, combined, tip)
+
+        def served_status(*entries):
+            return local([status_listing(*entries)], [combined_status(head_sha, *entries)])
+
+        def run_status(served, wait=False, timeout="900", creator=STATUS_CREATOR, extra=()):
+            return fixture.invoke(green, wait=wait, timeout=timeout, extra_args=status_args + extra,
+                                  local=served, creator=creator)
+
+        rc, output, _calls = run_status(served_status(ok_status))
+        repo_prefix = "repos/{}/".format(FIXTURE_REPO)
+        endpoints = [next((arg[len(repo_prefix):].split("?")[0] for arg in argv
+                           if arg.startswith(repo_prefix)), "") for argv in fixture.gh_argv]
+        check("ci/local-status-success-green",
+              (rc, output.splitlines()[-1:], endpoints,
+               any("merge" in arg for argv in fixture.gh_argv for arg in argv)),
+              (0, ["MERGE-SHA: " + head_sha],
+               ["pulls/7", "actions/runs", "actions/runs", "commits/{}/statuses".format(head_sha),
+                "commits/{}/status".format(head_sha), "git/ref/heads/main", "pulls/7"], False))
+
+        missing = served_status()
+        rc_once, output_once, _calls = run_status(missing)
+        missing_then_green = local([status_listing(), status_listing(ok_status)],
+                                   [combined_status(head_sha), combined_status(head_sha, ok_status)])
+        rc_wait, output_wait, _calls = run_status(missing_then_green, wait=True)
+        check("ci/local-status-missing-exit1",
+              (rc_once, "MERGE-SHA" in output_once, rc_wait, fixture.gh_reads(
+                  "commits/{}/statuses".format(head_sha)), "MERGE-SHA: " + head_sha in output_wait),
+              (1, False, 0, 2, True))
+
+        pending = served_status(status_entry(32, "pending"))
+        rc_once, output_once, _calls = run_status(pending)
+        rc_wait, output_wait, _calls = run_status(pending, wait=True, timeout="200")
+        check("ci/local-status-pending-not-green",
+              (rc_once, rc_wait, "TIMEOUT" in output_wait, "MERGE-SHA" in output_once + output_wait),
+              (1, 1, True, False))
+
+        rc_once, output_once, _calls = run_status(served_status(status_entry(33, "failure")))
+        rc_wait, _output, _calls = run_status(served_status(status_entry(33, "failure")), wait=True)
+        check("ci/local-status-failure-exit1",
+              (rc_once, rc_wait, fixture.gh_reads("commits/{}/statuses".format(head_sha)),
+               "MERGE-SHA" in output_once),
+              (1, 1, 1, False))
+
+        rc, output, _calls = run_status(served_status(status_entry(34, "error")))
+        check("ci/local-status-error-exit1", (rc, "is error" in output, "MERGE-SHA" in output),
+              (1, True, False))
+
+        sha_cases = []
+        for served in (local([status_listing(ok_status)], [combined_status(head_sha, ok_status)],
+                             pulls=(pull(7, "e" * 40),)),
+                       local([status_listing(ok_status)], [combined_status(head_sha, ok_status)],
+                             pulls=(pull(7, head_sha, base="develop"),)),
+                       local([status_listing(ok_status)], [combined_status(head_sha, ok_status)],
+                             pulls=(pull(7, head_sha, state="closed"),)),
+                       local([status_listing(ok_status)], [combined_status("e" * 40, ok_status)])):
+            rc, output, _calls = run_status(served)
+            sha_cases.append((rc, "MERGE-SHA" in output))
+        check("ci/local-status-sha-mismatch-exit2", sha_cases, [(2, False)] * 4)
+
+        rc, output, _calls = run_status(served_status(status_entry(35, "success", login="other-poster")))
+        check("ci/local-status-creator-refused-exit2", (rc, "other-poster" in output, "MERGE-SHA" in output),
+              (2, False, False))
+
+        unset_cases = []
+        for creator in (None, "", "two words"):
+            rc, output, _calls = run_status(served_status(ok_status), creator=creator)
+            unset_cases.append((rc, fixture.gh_argv, fixture.git_argv))
+        check("ci/local-status-creator-unset-exit2", unset_cases, [(2, [], [])] * 3)
+
+        older = status_entry(30, "success", created=COMMIT_TIME + 800)
+        disagree = local([status_listing(ok_status)], [combined_status(head_sha, older)])
+        rc_kept, output_kept, _calls = run_status(disagree)
+        kept = (rc_kept, fixture.gh_reads("commits/{}/statuses".format(head_sha)), fixture.sleeps)
+        settles = local([status_listing(ok_status)],
+                        [combined_status(head_sha, older), combined_status(head_sha, ok_status)])
+        rc_settled, _output, _calls = run_status(settles)
+        one_side = local([status_listing()], [combined_status(head_sha, ok_status)])
+        rc_one_side, _output, _calls = run_status(one_side)
+        check("ci/local-status-sources-disagree-exit2",
+              (kept, "MERGE-SHA" in output_kept, rc_settled, rc_one_side),
+              ((2, 2, [5]), False, 0, 2))
+
+        newer_failure = status_entry(36, "failure", created=COMMIT_TIME + 1000)
+        newer_success = status_entry(37, "success", created=COMMIT_TIME + 1100)
+        tied_failure = status_entry(40, "failure", created=COMMIT_TIME + 1200)
+        tied_success = status_entry(41, "success", created=COMMIT_TIME + 1200)
+        latest = []
+        for entries, newest in (((ok_status, newer_failure), newer_failure),
+                                ((newer_failure, ok_status, newer_success), newer_success),
+                                ((tied_success, tied_failure), tied_success),
+                                ((status_entry(42, "success", created=COMMIT_TIME + 1300),
+                                  dict(tied_failure, id=43)), None)):
+            if newest is None:
+                newest = entries[0]
+            served = local([status_listing(*entries)], [combined_status(head_sha, newest)])
+            rc, _output, _calls = run_status(served)
+            latest.append(rc)
+        check("ci/local-status-latest-wins", latest, [1, 0, 0, 0])
+
+        rc, output, _calls = run_status(local([status_listing(ok_status)],
+                                              [combined_status(head_sha, ok_status)],
+                                              pulls=(open_pull, pull(7, "e" * 40))))
+        check("ci/local-status-head-moved-exit2",
+              (rc, fixture.gh_reads("pulls/7"), "MERGE-SHA" in output), (2, 2, False))
+
+        behind, _tree = fixture.side_commit("base moved on")
+        rc_behind, output_behind, _calls = run_status(
+            local([status_listing(ok_status)], [combined_status(head_sha, ok_status)], tip=behind))
+        rc_absent, output_absent, _calls = run_status(
+            local([status_listing(ok_status)], [combined_status(head_sha, ok_status)], tip="a" * 40))
+        check("ci/local-status-behind-base-exit1",
+              (rc_behind, rc_absent, fixture.gh_reads("pulls/7"),
+               "MERGE-SHA" in output_behind + output_absent),
+              (1, 2, 1, False))
+
+        rc, output, _calls = run_status(served_status(status_entry(38, "queued")))
+        check("ci/local-status-unknown-state-exit2", (rc, "MERGE-SHA" in output), (2, False))
+
+        malformed = []
+        no_creator = dict(ok_status)
+        del no_creator["creator"]
+        for served in (local([{"raw": "not json"}], [combined_status(head_sha, ok_status)]),
+                       local([status_listing(dict(ok_status, created_at="2026-13-01T00:00:00Z"))],
+                             [combined_status(head_sha, ok_status)]),
+                       local([status_listing(no_creator)], [combined_status(head_sha, no_creator)]),
+                       local([status_listing(ok_status)],
+                             [combined_status(head_sha, ok_status, ok_status)]),
+                       dict(served_status(ok_status), pulls=[{"body": dict(open_pull, number=8)}]),
+                       dict(served_status(ok_status), ref={"body": {"ref": "refs/heads/other",
+                                                                    "object": {"type": "commit",
+                                                                               "sha": head_sha}}})):
+            rc, output, _calls = run_status(served)
+            malformed.append((rc, "MERGE-SHA" in output))
+        check("ci/local-status-malformed-exit2", malformed, [(2, False)] * 6)
+
+        # Each statuses reply must be exactly one JSON document before the two are combined: both
+        # documents in one reply beside an empty one (either way round, with or without a final
+        # newline), a reply of none and a reply of three are all cannot-evaluate.
+        listing_text = json.dumps(status_listing(ok_status)["body"])
+        combined_text = json.dumps(combined_status(head_sha, ok_status)["body"])
+        both = listing_text + "\n" + combined_text
+        documents = []
+        for listing_reply, combined_reply in (({"raw": both + "\n"}, {"raw": ""}),
+                                              ({"raw": ""}, {"raw": both + "\n"}),
+                                              ({"raw": both}, {"raw": ""}),
+                                              ({"raw": ""}, combined_status(head_sha, ok_status)),
+                                              ({"raw": listing_text + "\n" + both + "\n"}, {"raw": ""})):
+            rc, output, _calls = run_status(local([listing_reply], [combined_reply]))
+            documents.append((rc, "MERGE-SHA" in output))
+        check("ci/local-status-one-document-per-reply-exit2", documents, [(2, False)] * 5)
+
+        # A read that succeeds but writes to stderr is refused, and its stderr is never parsed as part
+        # of the reply: a status row, a pull-request record or a branch reference written to stderr
+        # beside an empty or harmless reply, a warning beside a green reply, and a stderr of one newline.
+        ref_body = {"ref": "refs/heads/main", "object": {"type": "commit", "sha": head_sha}}
+        green_reads = served_status(ok_status)
+        stderr_cases = []
+        for served in (local([dict(status_listing(), stderr="entry\tsuccess\t31\n")],
+                             [combined_status(head_sha)]),
+                       dict(green_reads, pulls=[{"raw": "", "stderr": json.dumps(open_pull) + "\n"}]),
+                       dict(green_reads, ref={"raw": "", "stderr": json.dumps(ref_body) + "\n"}),
+                       local([dict(status_listing(ok_status), stderr="warning: fixture notice\n")],
+                             [combined_status(head_sha, ok_status)]),
+                       dict(green_reads, pulls=[{"body": open_pull, "stderr": "\n"}])):
+            rc, output, _calls = run_status(served)
+            stderr_cases.append((rc, "gh wrote to stderr on a read that succeeded" in output,
+                                 "MERGE-SHA" in output))
+        check("ci/local-status-stderr-refused-exit2", stderr_cases, [(2, True, False)] * 5)
+
+        option_cases = []
+        for extra in (("--pr", "7"), ("--require-status", STATUS_CONTEXT),
+                      status_args + ("--pr", "7"), status_args + ("--require-status", STATUS_CONTEXT),
+                      ("--pr", "07", "--require-status", STATUS_CONTEXT),
+                      ("--pr", "1234567890", "--require-status", STATUS_CONTEXT)):
+            rc, _output, _calls = fixture.invoke(green, extra_args=extra, local=served_status(ok_status),
+                                                 creator=STATUS_CREATOR)
+            option_cases.append((rc, fixture.gh_argv))
+        rc, _output, _calls = fixture.invoke([], rev=None, extra_args=("--match-tree",) + status_args,
+                                             local=served_status(ok_status), creator=STATUS_CREATOR)
+        option_cases.append((rc, fixture.gh_argv))
+        check("ci/local-status-option-refusals", option_cases, [(2, [])] * 7)
 
     # Round 7: main() must print every collected failure and map the exit code by the module docstring's
     # rule on every path. Each case runs a nested main() on seeded state and restores the real state.
