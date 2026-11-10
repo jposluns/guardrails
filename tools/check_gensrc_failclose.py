@@ -180,9 +180,9 @@ TOTAL_TIMEOUT = 1800  # backstop for the whole sweep; exceeding it is cannot-eva
 # assignment from the parsed source and bounds that run at this budget plus its own stated margin, so
 # its kill bound outlives the whole self-test. Keep it the only binding of the name in this module, a
 # plain assignment of a positive int literal: the caller refuses any other form, or any second binding
-# anywhere in the module, as cannot-evaluate. Sized at about four times a run measured with no added
-# load (about 150 s). The self-test does not enforce it on itself; raise it here, never in a caller,
-# when the self-test grows.
+# anywhere in the module, as cannot-evaluate. Sized at about five times one measured run (112 s on
+# 2026-11-10, load average about 40 on 80 CPUs). The self-test does not enforce it on itself; raise it
+# here, never in a caller, when the self-test grows.
 SELF_TEST_BUDGET_S = 600
 # Wall-clock bound on EACH ONE setup step, per call: every template-setup git call (init, the real_root
 # ls-files, add, commit, the gc, the post-gc readbacks) and, in the self-test, every fixture build step

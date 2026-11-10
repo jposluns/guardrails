@@ -2521,8 +2521,11 @@ _CENSUS_MAPPINGS = (
 # run is bounded at that budget plus CENSUS_BOUND_MARGIN_S, never at a separately chosen number. Any
 # other tool keeps TIMEOUT * 4. Every bound runs on the load-adjusted clock of tools/_load_bound.py, the
 # clock the child's own bounds use, so host load stretches the parent's bound as it stretches the child's
-# waits. A run that outlives its bound is stopped (its whole process group) as _load_bound.Hung, a
-# subprocess.TimeoutExpired, which main() reports as cannot-evaluate (exit 2), never a pass. The self-test
+# waits. A child still running when _load_bound.run finds its kill bound spent is stopped (its whole
+# process group) as _load_bound.Hung, a subprocess.TimeoutExpired, which main() reports as
+# cannot-evaluate (exit 2), never a pass. That runner checks the bound only when a wait for the child
+# times out, so a child that exits after its budget is spent but before that check returns, and is judged
+# by, its own exit status; that residual is the runner's, left to tools/_load_bound.py. The self-test
 # judges the bounds each census run actually handed to that clock (_census_mapping_check records them),
 # not what _census_bound returns.
 CENSUS_BOUND_MARGIN_S = TIMEOUT  # one parent call bound: interpreter start-up, the driver and the teardown
@@ -2895,7 +2898,7 @@ def _census_bound_checks(root, red_on_revert, used):
     margin = CENSUS_BOUND_MARGIN_S
     _budget_reader_checks(red_on_revert)
     _source_gate_checks(red_on_revert)
-    bounds ={rel: _census_bound(root, rel) for rel, _target, _argv in _CENSUS_MAPPINGS}
+    bounds = {rel: _census_bound(root, rel) for rel, _target, _argv in _CENSUS_MAPPINGS}
     budgets = {rel: budget for rel, (budget, _bound) in bounds.items()}
     check("census-bound-declared", all(bounds[rel][0] is not None for rel in _CENSUS_BUDGETED))
     check("census-bound-outlives-budget", _census_used_outlive(used, budgets))
