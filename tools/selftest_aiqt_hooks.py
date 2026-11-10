@@ -10973,7 +10973,9 @@ def _cmo_load_base(tmp):
     """The hook module at _CMO_BASE, read with git show (replacement objects disabled) from this checkout and
     loaded under its own module name. Raises on a git or import failure."""
     root = str(repo_root())
-    shown = subprocess.run(["git", "--no-replace-objects", "-c", "safe.directory=" + root, "-C", root, "show",
+    # The -c value is an f-string with a literal "safe.directory=" head, so its config key is fixed in the
+    # source and the launch cannot define an alias (a concatenation onto an unread name would not fix it).
+    shown = subprocess.run(["git", "--no-replace-objects", "-c", f"safe.directory={root}", "-C", root, "show",
                             "{}:{}".format(_CMO_BASE, _CMO_HOOK_PATH)],
                            capture_output=True, timeout=60, env=git_fixture_env(GIT_NO_REPLACE_OBJECTS="1"))
     if shown.returncode != 0:
