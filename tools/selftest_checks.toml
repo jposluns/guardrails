@@ -3695,6 +3695,7 @@ expected-check-ids = [
   "parse/child-matches-in-process",
   "parse/deadline-held-at-old-ceiling",
   "parse/deadline-held-at-ceiling",
+  "parse/deadline-bound-boundary",
   "revert/parse-thread-join-red",
   "main/refuse-exit-1",
   "main/ok-exit-0",

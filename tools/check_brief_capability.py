@@ -3903,10 +3903,30 @@ LINEAR_FACTOR, LINEAR_SLACK, LINEAR_TIMEOUT = 16, 1.0, 120
 # start, the kill, the reap and the result decode measured 0.04 to 0.14 s past the deadline on the two
 # old-ceiling shapes (an 80-cpu host at one-minute load averages 35 to 43), so three seconds is wide
 DEADLINE_MARGIN_SECONDS = 3.0
+# The deadline rows judge a whole read() by wall clock, and wall clock is stretched by host load. Their
+# bound has two parts that load treats differently. PARSE_DEADLINE_SECONDS is a wall-clock count by
+# construction (the parent's communicate timeout), so load cannot lengthen it and it is never scaled.
+# DEADLINE_MARGIN_SECONDS covers work the parent must be scheduled to do around that wait (the child's
+# spawn, the wake-up at the timeout, the group kill, the reap, the result decode), and a loaded host
+# stretches that work the way it stretches any work this process does. So the margin is scaled by a
+# stretch factor read from a reference workload timed in this same process just before the measured
+# call and again just after it (a busy loop of DEADLINE_REFERENCE_CPU_SECONDS of thread CPU time; its
+# wall time over its CPU time is how far the host is stretching this process's work right then; the
+# larger of the two readings is used, so load that rises while the call waits is seen too). The factor
+# is at least 1, so an idle host keeps the measured three-second margin, and the margin is never raised
+# by hand. A parse that runs on past the deadline still fails: an in-process parse (the thread join the
+# flip restores) is stretched by the same factor as the margin, so it stays over the bound at any load;
+# and DEADLINE_STRETCH_CAP keeps the bound (10 + 3 * 4 = 22 s) under the shortest uncut parse of any
+# measured shape (the 100 KiB unclosed <? paragraph parsed for 25.3 s in a child with the deadline
+# lifted, the 100 KiB underscore-mark run for 37.5 s, the two old-ceiling shapes past 120 s), so even
+# a child that ran uncut at full speed while only this process was starved still fails its row.
+DEADLINE_REFERENCE_CPU_SECONDS = 0.1
+DEADLINE_STRETCH_CAP = 4.0
 # the probe child for revert/parse-thread-join-red: it runs the shared reading with the thread join
 # restored (PARSE_IN_CHILD=False) over one shape at the old ceiling and never returns within the
 # deadline (the join's timeout cannot fire while one regex match holds the GIL); the parent shows it
-# still running at the deadline plus DEADLINE_MARGIN_SECONDS and kills its process group
+# still running at the deadline bound (_deadline_bound, the same load-scaled bound the deadline rows
+# judge) and kills its process group
 THREAD_JOIN_PROBE = (
     "import sys\n"
     "sys.path.insert(0, sys.argv[1])\n"
@@ -3919,6 +3939,45 @@ THREAD_JOIN_PROBE = (
     "    m.read(text)\n"
     "except m.DeclarationError:\n"
     "    pass\n")
+
+
+def _stretch_of(wall, spent):
+    """The stretch factor a reference workload's times give: its wall seconds over the CPU seconds it
+    spent, never under 1 (an idle host keeps the measured margin) and never over DEADLINE_STRETCH_CAP
+    (see the cap's comment)."""
+    return min(DEADLINE_STRETCH_CAP, max(1.0, wall / spent))
+
+
+def _host_stretch():
+    """The stretch factor now: a busy loop of DEADLINE_REFERENCE_CPU_SECONDS of this thread's CPU time,
+    timed by wall clock and thread CPU time (_stretch_of). It spins until that much CPU is spent, so its
+    CPU reading is never zero."""
+    began, started = time.monotonic(), time.thread_time()
+    until = started + DEADLINE_REFERENCE_CPU_SECONDS
+    while time.thread_time() < until:
+        pass
+    return _stretch_of(time.monotonic() - began, time.thread_time() - started)
+
+
+def _deadline_bound(stretch):
+    """The wall seconds a read() through the parse deadline may take at a stretch factor: the deadline
+    itself, unscaled, plus the margin scaled by the factor (see DEADLINE_REFERENCE_CPU_SECONDS)."""
+    return _input_declarations.PARSE_DEADLINE_SECONDS + DEADLINE_MARGIN_SECONDS * stretch
+
+
+def _deadline_held(read, text):
+    """(how read(text) ended, "answered" or "refused", whether its wall time held _deadline_bound): the
+    reference workload is timed just before the call and again just after it, the larger factor taken,
+    and neither reading falls inside the timed span."""
+    before = _host_stretch()
+    began = time.monotonic()
+    try:
+        read(text)
+        ended = "answered"
+    except _input_declarations.DeclarationError:
+        ended = "refused"
+    elapsed = time.monotonic() - began
+    return ended, elapsed <= _deadline_bound(max(before, _host_stretch()))
 # a stand-in parse child: _CHILD_PATH is pointed at a script that opens with this prefix (the text read
 # from stdin, the script's own directory as `here`) and then runs one vector's body, so each way a child
 # can end is shown against the parent's reading of it
@@ -5341,8 +5400,9 @@ def self_test(report_path=None):
     # that held the in-process parse far past the deadline (a paragraph of unclosed inline-HTML openers,
     # held inside InlineHTML.pattern's lazy scans, and a line of fullwidth letters, held inside the GFM
     # bare-URL lookbehind's quadratic backtracking): with the ceiling patched up to admit them, read()
-    # answers or refuses within the deadline plus DEADLINE_MARGIN_SECONDS of measured wall clock, timed
-    # here in the parent around the call that waits on the killed child
+    # answers or refuses within the load-scaled deadline bound of measured wall clock (_deadline_held:
+    # the deadline plus DEADLINE_MARGIN_SECONDS scaled by a reference workload timed in this process
+    # around the call), timed here in the parent around the call that waits on the killed child
     old_ceiling = 1 << 19
     slow_shapes = (("x<!--" * (old_ceiling // 5))[:old_ceiling - 1] + "\n",
                    "Ａ" * ((old_ceiling - 1) // 3) + "\n")
@@ -5351,46 +5411,46 @@ def self_test(report_path=None):
     try:
         _input_declarations.MAX_TEXT_BYTES = old_ceiling
         for shape in slow_shapes:
-            began = time.monotonic()
-            try:
-                read_inputs(shape)
-                ended = "answered"
-            except _input_declarations.DeclarationError:
-                ended = "refused"
-            held.append((ended in ("answered", "refused"),
-                         time.monotonic() - began
-                         <= _input_declarations.PARSE_DEADLINE_SECONDS + DEADLINE_MARGIN_SECONDS))
+            ended, within = _deadline_held(read_inputs, shape)
+            held.append((ended in ("answered", "refused"), within))
     finally:
         _input_declarations.MAX_TEXT_BYTES = saved_ceiling
     check("parse/deadline-held-at-old-ceiling", held, [(True, True)] * 2)
     # and at the current ceiling, on the in-bound shapes measured slowest there (an underscore-mark run and
     # a paragraph of unclosed <? openers, each filled to the ceiling behind a parse-forcing lead): each is
-    # answered or refused within the deadline plus DEADLINE_MARGIN_SECONDS, timed in the parent the same way
+    # answered or refused within the same load-scaled bound, timed in the parent the same way
     ceiling = _input_declarations.MAX_TEXT_BYTES
     ceiling_shapes = [parse_lead + unit * ((ceiling - len(parse_lead) - 1) // len(unit)) + "\n"
                       for unit in ("_a", "x<?")]
     held = []
     for shape in ceiling_shapes:
-        began = time.monotonic()
-        try:
-            read_inputs(shape)
-        except _input_declarations.DeclarationError:
-            pass
-        held.append((len(shape.encode("utf-8")) <= ceiling, time.monotonic() - began
-                     <= _input_declarations.PARSE_DEADLINE_SECONDS + DEADLINE_MARGIN_SECONDS))
+        held.append((len(shape.encode("utf-8")) <= ceiling, _deadline_held(read_inputs, shape)[1]))
     check("parse/deadline-held-at-ceiling", held, [(True, True)] * 2)
+    # the bound itself at each end: the stretch factor is clamped to 1 just under, at and just over 1,
+    # and to the cap just under, at and just over it; and a read is held at the bound just inside it and
+    # exactly at it (the comparison is inclusive), and not held just outside it, at both clamp ends
+    cap, margin = DEADLINE_STRETCH_CAP, DEADLINE_MARGIN_SECONDS
+    deadline = _input_declarations.PARSE_DEADLINE_SECONDS
+    check("parse/deadline-bound-boundary",
+          ([_stretch_of(wall, 1.0) for wall in (0.999, 1.0, 1.001, cap - 0.001, cap, cap + 0.001)],
+           [(_deadline_bound(stretch), [elapsed <= _deadline_bound(stretch) for elapsed in (
+               deadline + margin * stretch - 0.001, deadline + margin * stretch,
+               deadline + margin * stretch + 0.001)]) for stretch in (1.0, cap)]),
+          ([1.0, 1.0, 1.001, cap - 0.001, cap, cap],
+           [(deadline + margin, [True, True, False]), (deadline + margin * cap, [True, True, False])]))
     # and shown red under the flip that restores the thread join: a probe child runs the flipped read on
-    # each shape, has NOT returned at the deadline plus the same margin (join cannot fire while one regex
-    # match holds the GIL), and its own process group is then killed, never left running
+    # each shape, has NOT returned at the same load-scaled bound, its reference workload timed just
+    # before the probe starts (join cannot fire while one regex match holds the GIL), and its own process
+    # group is then killed, never left running
     still_running = []
     for name in ("html-opener", "fullwidth"):
+        bound = _deadline_bound(_host_stretch())
         probe = subprocess.Popen([sys.executable, "-I", "-B", "-c", THREAD_JOIN_PROBE,
                                   str(Path(__file__).resolve().parent), name],
                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                  start_new_session=True)
         try:
-            probe.communicate(timeout=_input_declarations.PARSE_DEADLINE_SECONDS
-                              + DEADLINE_MARGIN_SECONDS)
+            probe.communicate(timeout=bound)
             still_running.append(False)
         except subprocess.TimeoutExpired:
             try:
