@@ -3727,6 +3727,491 @@ def _psm_oracle(failures, handler):
                                                  run.stdout[:200], run.stderr[:200]))
 
 
+# The gate-discipline differential oracle (gso): main's gate_weakening, read from git at the pinned base below,
+# and this tree's, each loaded as its own module, judge one generated corpus of git tag and git push commands
+# (and the pinned forms of the status tier's rows), each in a real scratch repository under an isolated HOME
+# with GIT_CONFIG_NOSYSTEM=1. Any command main's guard denies and this tree's allows (silently or with a note)
+# fails, unless _GSO_ALLOWLIST names that exact command with a reason. A handler that raises counts as a
+# deny, as the production dispatcher fails closed on a gate_weakening crash, and a crash in this tree's
+# guard is a failure of its own. The anchors are commands this tree denies and main allows: they keep the
+# comparison live, so a run that compares main with itself (this tree's change reverted) is red, and so is
+# an allowlist entry the corpus does not hold or that main does not deny and this tree allow.
+_GSO_BASE = "189a280e388d6a2e6d3d1b59b3616d32dac3ad51"
+_GSO_HOOK_PATH = ".aiqt/core/hooks/scripts/aiqt_hooks.py"
+# Exact newly allowed commands, each with the reason this tree may allow what main denies. Empty: the
+# corpus holds no command main denies and this tree allows.
+_GSO_ALLOWLIST = {}
+_GSO_ANCHORS = (
+    "pytest | tee /abs/l && git tag v1",
+    "pytest | cat && git push origin main",
+    "pytest | tee /abs/l && git tag --points-at HEAD --no-points-at{,} v1",
+    "pytest | tee /abs/l && git push -n --no-dry-run origin main",
+)
+# Commands the status tier's rows and the reviews of this guard name, pinned as they were written: tag and
+# push forms in every context those name, and the commit, merge and am forms of the same shape.
+_GSO_PINNED = (
+    "pytest | tee /abs/check.log && git tag v1",
+    "make check | cat; git tag v2",
+    "pytest | tee /abs/check.log && timeout 60 git push origin main",
+    "pytest | tee /abs/check.log &&\ngit push origin main",
+    "cd /abs && pytest | tee /abs/check.log && git push origin main",
+    "set -euo pipefail; pytest | cat; git push origin main",
+    "set -euo pipefail; pytest | cat && git push origin main",
+    "pytest | cat; git push origin main",
+    "pytest | tee /abs/check.log && sudo git push origin main",
+    "pytest | tee /abs/check.log && git commit -m x; cat <<<y",
+    "set -o pipefail; pytest | tee /abs/check.log && git commit -m x",
+    "export A=1; pytest | tee /abs/check.log && git commit -m x",
+    "false || pytest | tee /abs/check.log && git commit -m x",
+    "pytest | tee /abs/l && git tag -d v1",
+    "pytest | tee /abs/l && git push origin main; echo `#`",
+    "pytest | tee /abs/l; git push origin main; echo `#`",
+    "pytest | tee /abs/l && git tag -l",
+    "pytest | tee /abs/l && git tag --list 'v*'",
+    "pytest | tee /abs/l && git tag",
+    "pytest | tee /abs/l && git tag -v v1",
+    "pytest | tee /abs/l && git tag --contains HEAD",
+    "pytest | tee /abs/l && git tag -n5",
+    "pytest | tee /abs/l && git push --dry-run origin main",
+    "pytest | tee /abs/l && git push -n origin main",
+    "pytest | tee /abs/l && git push --help",
+    "pytest | tee /abs/l && exec git push origin main",
+    "pytest | tee /abs/l && nohup git push origin main",
+    "pytest | tee /abs/l && git tag -m -l v1",
+    "pytest | tee /abs/l && git tag -a v2 -m -n",
+    "pytest | tee /abs/l && git push -o -n origin main",
+    "pytest | tee /abs/l && git tag -m x -l",
+    "pytest | tee /abs/l && git push -o ci.skip -n origin main",
+    "pytest | tee /abs/l && git push -n --no-dry-run origin main",
+    "pytest | tee /abs/l && git push --no-dry-run -n origin main",
+    "pytest | tee /abs/l && git push -qn --no-dry-run origin main",
+    "pytest | tee /abs/l && git push -nf origin main",
+    "pytest | tee /abs/l && git push -on origin main",
+    "pytest | tee /abs/l && git push --dr origin main",
+    "pytest | tee /abs/l && git tag --sort=-v:refname",
+    "pytest | tee /abs/l && git tag -i",
+    "pytest | tee /abs/l && git tag --column",
+    "pytest | tee /abs/l && git tag --sort=refname v9",
+    "pytest | tee /abs/l && git tag --sort refname -- v9",
+    "pytest | tee /abs/l && git tag -m x",
+    "pytest | tee /abs/l && git tag --points-at HEAD --no-points-at v1",
+    "pytest | tee /abs/l && git tag --points-at=HEAD --no-po v1",
+    "pytest | tee /abs/l && git tag --points-at HEAD --no-points-at -a -m x v1",
+    "pytest | tee /abs/l && git tag --points-at HEAD --no-points-at v1 && git push origin v1",
+    "pytest | tee /abs/l && git tag --poi HEAD",
+    "pytest | tee /abs/l && git tag --no-points-at --points-at HEAD",
+    "pytest | tee /abs/l && git tag -l --points-at HEAD --no-points-at",
+    "pytest | tee /abs/l && git tag --cont HEAD",
+    "pytest | tee /abs/l && git tag -a v9 -F - <<<msg",
+    "pytest | tee /abs/l && git tag -a v9 -F <(echo msg)",
+    "pytest | tee /abs/l && git tag v9 2> >(cat)",
+    "pytest | tee /abs/l && git tag --points-at HEAD <<<x --no-points-at v1",
+    "export A=1; pytest | tee /abs/l && git tag v9 <<<x",
+    "pytest | tee /abs/l && git tag --points-at HEAD --no-points-at{,} v1",
+    "pytest | tee /abs/l && git tag --points-at HEAD --no-poi{nts-at,} v1",
+    "pytest | tee /abs/l && git tag --points-at HEAD --{no-points-at,no-points-at} v1",
+    "pytest | tee /abs/l && git tag --points-at HEAD --no-points-at$X v1",
+    "pytest | tee /abs/l && git tag --points-at HEAD --no-points-at${X} v1",
+    "pytest | tee /abs/l && git tag --points-at HEAD \"$(printf %s --no-points-at)\" v1",
+    "pytest | tee /abs/l && git tag --points-at HEAD `printf %s --no-points-at` v1",
+    "pytest | tee /abs/l && git tag --points-at HEAD \"$X\" v1",
+    "pytest | tee /abs/l && git tag --points-at HEAD --no-points-a? v1",
+    "pytest | tee /abs/l && git tag --points-at HEAD v1 --no-points-at{,}",
+    "pytest | tee /abs/l && git tag --points-at HEAD --no-points-at{,} v1 && git push origin v1",
+    "pytest | tee /abs/l && git tag --format=$(echo %s v1)",
+    "pytest | tee /abs/l && git tag -$(echo -end-of-options v1)",
+    "pytest | tee /abs/l && git tag --sort=refname$(echo ' v1')",
+    "pytest | tee /abs/l && git tag -i$(echo ' v1')",
+    "pytest | tee /abs/l && git tag --points-at 'HEAD'",
+    "pytest | tee /abs/l && git tag --contains \"HEAD\"",
+    "pytest | tee /abs/l && git tag -l 'v*'",
+    "pytest | tee /abs/l && git tag --points-at HEAD v1",
+    "pytest | tee /abs/check.log && git commit -m x",
+    "pytest | tee /abs/check.log && git merge topic",
+    "pytest | tee /abs/check.log; git am fix.patch",
+    "pytest | tee /abs/l && git commit -m --dry-run",
+    "pytest | tee /abs/l && git merge --abort --no-abort topic",
+    "pytest | tee /abs/l && git am --abo",
+    "pytest | tee /abs/l && git commit --short --no-short -m y",
+    "pytest | tee /abs/l && git -C -h commit -m x",
+    "git push --no-verify origin main",
+    "git push --no-ver origin main",
+    "git tag -a v1 -m x && git push --no-verify origin v1",
+    "pytest | tail -5 && git push origin main",
+    "pytest | head -1 && git tag v1",
+    "(pytest | tee /abs/l) && git tag v1",
+    "{ pytest | tee /abs/l; } && git push origin main",
+    "pytest | tee /abs/l || true && git push origin main",
+    "A=1 pytest | tee /abs/l && git tag v1",
+    "pytest <<<y | tee /abs/l && git push origin main",
+    "pytest | tee /abs/l && cat <<<done && git tag v1",
+    "sh -c 'pytest | tee /abs/l' && git push origin main",
+    "pytest | f && git push origin main",
+    "pytest | tee /abs/l; git push origin main || echo fail",
+    "pytest\ngit push origin main",
+    "pytest | awk '/failed/{f=1} {print} END{exit f}' && git tag v1",
+    "(cd tests && pytest -q) 2>&1 | tee LOG && git push origin main",
+    "pytest | tee /dev/null && git tag --points-at HEAD --no-points-at v1",
+    "pytest | tee l && git merge --abort && git merge side",
+    "git commit -m \"pytest | tee log && git push\"",
+    "echo hi | tee /abs/log && git push origin main",
+    "git add -A && git commit -m x && git push",
+)
+# Git actions the reviews of this guard name; each runs in every lead of _GSO_LEADS.
+_GSO_REPORTED_ACTIONS = (
+    "git tag -l v*", "git tag -l \"$p\"", "env $X git tag v1", "git -c a.b=$X tag -l v1",
+    "timeout 60 git tag --points-at HEAD --no-points-at{,} v1", "git tag --forc -m -l v2", "git tag --with HEAD",
+    "git tag --with HEAD v1", "git tag --with=HEAD", "git tag --with=HEAD v1", "git tag --lis", "git tag --lis v1",
+    "git tag --li v1", "git tag -ln v1", "git tag -il v1", "git tag -li v1", "git push --hel origin main",
+    "git tag -u", "git tag -s", "git tag -l{,} v1", "git tag -l v1 2> >(cat)", "git push --he origin main",
+    "git push --dry-r -u", "git push -fn", "git tag --no-column", "git push --dry-ru",
+    "git push --porcelain --dry-run", "git push origin main <<<x", "git tag v1;", "git tag v1\n",
+    "git push --dry origin main", "git tag --format='%(refname)'", "git tag -l --points-at HEAD --no-points-at v1",
+    "git tag --list 'v*' --sort=-v:refname", "git tag --verify v1", "git -C /abs/x tag", "git push -n -u",
+    "git tag -l --format=%(refname) v1", "git tag --no-points-at", "git tag -l v1", "git tag -l <<<x",
+    "git tag -a v9 -F - <<<\"msg\"", "git tag -l && git push origin main",
+    "git commit --dry-run -m x && git push origin main", "git push", "git tag v1", "git push origin v1",
+    "git push --tags", "git push --follow-tags origin main", "git push --delete origin v1",
+    "git tag -a v1 -m x", "git tag -f v1", "git tag -d v1", "git push --no-verify origin main",
+    "git push -f origin main", "git tag -s v1 -m x",
+)
+# The contexts a generated git action runs in: before it, then after it.
+_GSO_LEADS = (
+    "", "pytest | tee /abs/l && ", "pytest | cat && ", "pytest |& tee /abs/l && ", "make check | cat && ",
+    "python3 -I -B tools/selftest_x.py | tee /abs/l && ", "pytest | tee /abs/l; ", "pytest | tee /abs/l &&\n",
+    "set -o pipefail; pytest | tee /abs/l && ", "export A=1; pytest | tee /abs/l && ",
+    "false || pytest | tee /abs/l && ", "pytest | tail -5 && ", "pytest | tee /abs/l && git add -A && ",
+    "pytest | tee /abs/l || ", "pytest | tee /abs/l & ", "pytest | grep -v x | cat && ")
+_GSO_TRAILS = ("", "; cat <<<y", "; echo `#`", " && git push origin v1", " <<<x", " 2> >(cat)", " # c")
+_GSO_WRAPPERS = ("", "env ", "env A=1 ", "timeout 60 ", "nice ", "time ", "command ", "sudo ", "A=1 ")
+_GSO_GLOBALS = ("", "-C /abs/r ", "-c core.x=1 ", "-C /abs/r -c core.x=1 ", "-c core.x=1 -C /abs/r ",
+                "--no-pager ", "-C -h ", "-c alias.tag=push ", "--git-dir=/abs/r/.git ")
+_GSO_GIT_WORDS = ("git", "'git'", "\"git\"", "\\git", "g'i't", "$G", "/usr/bin/git")
+# The words git reads on every action, which no per-action table of the guard lists: the option terminators
+# and the help forms.
+_GSO_COMMON_WORDS = (("--end-of-options",), ("--",), ("--help",), ("-h",))
+# Each gated action's operand lists.
+_GSO_OPERANDS = {"tag": ((), ("v1",), ("v1", "HEAD")),
+                 "push": ((), ("origin",), ("origin", "main"), ("origin", "v1")),
+                 "commit": ((), ("f.txt",)), "merge": ((), ("topic",)), "am": ((), ("fix.patch",))}
+
+
+def _gso_options(hooks):
+    """{action: (core, extra)} option words (each a tuple: one option, then its value where it takes one) for
+    every gated action of hooks._GATE_GATED_GIT, built from the guard's own tables, never a hand-written list.
+    core: every long form of _GATE_GIT_LONG_FORMS, each name and each negation, with a value word after a
+    name _GATE_GATED_VALUE_OPTS lists as value-taking; every value-taking long option of that table; every
+    short letter of that table and of _GATE_GIT_EXEMPT (a mandatory-value letter with a value word, an
+    optional-value letter alone and with a value attached), and for tag the letters of _GATE_TAG_MAKES; and
+    _GSO_COMMON_WORDS. extra: every prefix of two or more letters of each exempt long name and of its
+    negation, each exempt short letter clustered before and after each other short letter, and each
+    value-taking option given an exempt flag as its value, the forms whose reading decides an exemption."""
+    out = {}
+    for verb in sorted(hooks._GATE_GATED_GIT):
+        forms = hooks._GATE_GIT_LONG_FORMS[verb]
+        shorts, stuck, longs = hooks._GATE_GATED_VALUE_OPTS[verb]
+        exempt_names = {name for names, _letters in hooks._GATE_GIT_EXEMPT[verb] for name in names}
+        exempt_shorts = "".join(letters for _names, letters in hooks._GATE_GIT_EXEMPT[verb])
+        core, extra = [], []
+        for word, (name, negated) in forms.items():
+            takes = not negated and "--" + word in longs
+            core.append(("--" + word, "x") if takes else ("--" + word,))
+            if name in exempt_names:
+                extra.extend(("--" + word[:k],) for k in range(2, len(word)))
+        core.extend(("--" + long[2:], "x") for long in sorted(longs) if long[2:] not in forms)
+        letters = set(shorts + stuck + exempt_shorts)
+        if verb == "tag":
+            letters.update(hooks._GATE_TAG_MAKES[0])
+        for letter in sorted(letters):
+            if letter in shorts:
+                core.append(("-" + letter, "x"))
+            elif letter in stuck:
+                core.extend((("-" + letter,), ("-" + letter + "5",)))
+            else:
+                core.append(("-" + letter,))
+            for exempt in exempt_shorts:
+                if exempt != letter:
+                    extra.extend((("-" + letter + exempt,), ("-" + exempt + letter,)))
+        core.extend(_GSO_COMMON_WORDS)
+        exempt_words = ["--" + word for word, (name, _neg) in forms.items() if name in exempt_names]
+        exempt_words += ["-" + letter for letter in exempt_shorts]
+        value_opts = ["-" + letter for letter in shorts] + sorted(longs)
+        extra.extend((opt, word) for opt in value_opts for word in exempt_words)
+        core = list(dict.fromkeys(core))
+        out[verb] = (tuple(core), tuple(opt for opt in dict.fromkeys(extra) if opt not in core))
+    return out
+
+
+def _gso_related(verb, opt, hooks):
+    """True when the option word opt of verb spells an exempt flag or its negation (_GATE_GIT_EXEMPT), or is
+    a value-taking option (_GATE_GATED_VALUE_OPTS): the words whose order against the others decides an
+    exemption, each paired in the corpus with every other core word."""
+    shorts, _stuck, longs = hooks._GATE_GATED_VALUE_OPTS[verb]
+    exempt_names = {name for names, _letters in hooks._GATE_GIT_EXEMPT[verb] for name in names}
+    exempt_shorts = "".join(letters for _names, letters in hooks._GATE_GIT_EXEMPT[verb])
+    head = opt[0]
+    if head.startswith("--"):
+        form = hooks._GATE_GIT_LONG_FORMS[verb].get(head[2:])
+        return (form is not None and form[0] in exempt_names) or head in longs
+    return len(head) == 2 and head[1:] in exempt_shorts + shorts
+
+
+def _gso_spellings(word):
+    """The spellings of one option word the corpus tries: quoted, escaped, and built by an expansion bash
+    performs (a parameter, a substitution, a brace or a glob), each of which a guard must not read as the
+    literal word."""
+    return (word, "'" + word + "'", "\"" + word + "\"", "\\" + word, word[:2] + "''" + word[2:],
+            word + "$X", word + "${X}", "\"$(printf %s " + word + ")\"", "`printf %s " + word + "`",
+            word + "{,}", word[:-1] + "?", "$'" + word + "'")
+
+
+def _gso_action(verb, opts, operands, operands_first, git="git", wrapper="", head=""):
+    """One git action's text: the wrapper, the git word, its global options, the verb, then its option words
+    and operands in the order asked."""
+    words = [w for opt in opts for w in opt]
+    body = list(operands) + words if operands_first else words + list(operands)
+    return " ".join([wrapper + git + " " + head + verb] + body)
+
+
+def _gso_corpus(hooks=None):
+    """The deduplicated, sorted corpus, its option words generated from the guard tables of hooks (this
+    tree's aiqt_hooks by default) by _gso_options: the pinned forms; for each gated action each
+    exempt-related core word (_gso_related) followed by each other core word (so two exempt-related words
+    meet in both orders), with an operand list and placement chosen by the pair's index; every core word with every operand list in both placements, and
+    every extra word with one operand list chosen by its index; each core word before every trail, and each
+    exempt-related core word and every fourth other core word in every lead; each spelling of each
+    exempt-related core word; and a few actions under every wrapper, git spelling and global option
+    placement. The generation is deterministic, so the corpus is the same on every run of one tree."""
+    hooks = aiqt_hooks if hooks is None else hooks
+    corpus = set(_GSO_PINNED) | set(_GSO_ANCHORS)
+    corpus.update(lead + action for lead in _GSO_LEADS for action in _GSO_REPORTED_ACTIONS)
+    main_lead = "pytest | tee /abs/l && "
+    for verb, (pool, extra) in sorted(_gso_options(hooks).items()):
+        operand_lists = _GSO_OPERANDS[verb]
+        related = [opt for opt in pool if _gso_related(verb, opt, hooks)]
+        pairs = [(a, b) for a in related for b in pool if a != b]
+        for index, (first, second) in enumerate(pairs):
+            operands = operand_lists[index % len(operand_lists)]
+            corpus.add(main_lead + _gso_action(verb, (first, second), operands, index % 2 == 1))
+        for opt in pool:
+            for operands in operand_lists:
+                for operands_first in (False, True):
+                    corpus.add(main_lead + _gso_action(verb, (opt,), operands, operands_first))
+        for index, opt in enumerate(extra):
+            corpus.add(main_lead + _gso_action(verb, (opt,), operand_lists[index % len(operand_lists)], False))
+        for index, opt in enumerate(pool):
+            action = _gso_action(verb, (opt,), operand_lists[index % len(operand_lists)], False)
+            for lead in _GSO_LEADS if opt in related or index % 4 == 0 else ():
+                corpus.add(lead + action)
+            for trail in _GSO_TRAILS:
+                corpus.add(main_lead + action + trail)
+        for opt in related:
+            for spelling in _gso_spellings(opt[0]):
+                corpus.add(main_lead + _gso_action(verb, ((spelling,) + opt[1:],), operand_lists[-1], False))
+        samples = [((), operand_lists[-1])] + [((pool[k],), operand_lists[-1]) for k in range(0, len(pool), 6)]
+        for opts, operands in samples:
+            for wrapper in _GSO_WRAPPERS:
+                for git in _GSO_GIT_WORDS:
+                    corpus.add(main_lead + _gso_action(verb, opts, operands, False, git=git, wrapper=wrapper))
+            for head in _GSO_GLOBALS:
+                for lead in _GSO_LEADS:
+                    corpus.add(lead + _gso_action(verb, opts, operands, False, head=head))
+    return tuple(sorted(corpus))
+
+
+def _gso_load_hooks(tmp):
+    """(main's module, this tree's module), each loaded from its own file under its own name: main's from the
+    hook source at _GSO_BASE, read with git show with replacement refs disabled, and this tree's from its
+    working copy. Raises OSError or subprocess.SubprocessError when the base cannot be read."""
+    root = repo_root()
+    out = subprocess.run(["git", "--no-replace-objects", "-C", str(root), "show",
+                          "{}:{}".format(_GSO_BASE, _GSO_HOOK_PATH)],
+                         capture_output=True, timeout=60, check=False,
+                         env=git_fixture_env(GIT_NO_REPLACE_OBJECTS="1"))
+    if out.returncode != 0 or not out.stdout:
+        raise subprocess.SubprocessError("git show {}:{} failed (exit {}): {}".format(
+            _GSO_BASE, _GSO_HOOK_PATH, out.returncode, out.stderr.decode("utf-8", "replace").strip()))
+    base = tmp / "gso-hooks"
+    base.mkdir()
+    main_path = base / "gso_main_aiqt_hooks.py"
+    main_path.write_bytes(out.stdout)
+    tree_path = base / "gso_tree_aiqt_hooks.py"
+    tree_path.write_bytes(Path(aiqt_hooks.__file__).read_bytes())
+    modules = []
+    for name, path in (("gso_main_aiqt_hooks", main_path), ("gso_tree_aiqt_hooks", tree_path)):
+        spec = importlib.util.spec_from_file_location(name, str(path))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        modules.append(module)
+    return modules[0], modules[1]
+
+
+def _gso_verdict(handler, command, cwd):
+    """The handler's reduced decision (_decision) on command, or 'error: <type>' when it raises."""
+    try:
+        return _decision(handler, command, cwd=cwd)
+    except Exception as exc:  # noqa: BLE001  a crash is recorded, and read as the deny it is in production
+        return "error: {}".format(type(exc).__name__)
+
+
+def _gso_compare(main_gate, tree_gate, corpus, cwd, allowlist):
+    """(regressions, crashes, newly denied, stale allowlist entries) over corpus: each command main's guard
+    denies (or crashes on) and this tree's allows outside allowlist; each command this tree's guard crashes
+    on; each command this tree's guard denies and main's allows; and each allowlist entry the corpus does not
+    hold or that is not a command main denies and this tree allows."""
+    regressions, crashes, newly_denied, allowed = [], [], [], set()
+    for command in corpus:
+        old = _gso_verdict(main_gate, command, cwd)
+        new = _gso_verdict(tree_gate, command, cwd)
+        if new.startswith("error"):
+            crashes.append((command, new))
+        old_denies = old == "deny" or old.startswith("error")
+        new_denies = new == "deny" or new.startswith("error")
+        if old_denies and not new_denies:
+            if command in allowlist:
+                allowed.add(command)
+            else:
+                regressions.append((command, old, new))
+        elif new_denies and not old_denies:
+            newly_denied.append(command)
+    stale = sorted(set(allowlist) - allowed)
+    return regressions, crashes, newly_denied, stale
+
+
+def _gso_oracle_failures(main_gate, tree_gate, corpus, cwd, allowlist, anchors):
+    """The oracle's failure lines for one comparison (_gso_compare), the anchors included: each anchor must
+    be in the corpus and denied by this tree's guard and not by main's."""
+    regressions, crashes, newly_denied, stale = _gso_compare(main_gate, tree_gate, corpus, cwd, allowlist)
+    failures = ["(gso-newly-allowed) main's guard gives {} and this tree's gives {} on {!r}, which no "
+                "allowlist entry names".format(old, new, command) for command, old, new in regressions]
+    failures += ["(gso-crash) this tree's guard raised {} on {!r}".format(what, command)
+                 for command, what in crashes]
+    failures += ["(gso-stale-allowlist) the allowlist entry {!r} is not a corpus command main's guard denies "
+                 "and this tree's allows".format(command) for command in stale]
+    held = set(newly_denied)
+    failures += ["(gso-anchor) the anchor {!r} is not a corpus command this tree's guard denies and main's "
+                 "allows, so the comparison is not live".format(command)
+                 for command in anchors if command not in held or command not in corpus]
+    return failures
+
+
+def _gso_table_gaps(corpus, hooks):
+    """The (action, long word) pairs of hooks' _GATE_GIT_LONG_FORMS, over every gated action, that no corpus
+    command runs as its first option word right after the oracle's main lead."""
+    lead = "pytest | tee /abs/l && git "
+    seen = set()
+    for command in corpus:
+        if command.startswith(lead):
+            words = command[len(lead):].split()
+            if len(words) > 1:
+                seen.add((words[0], words[1]))
+    return [(verb, "--" + word) for verb in sorted(hooks._GATE_GATED_GIT) for word in hooks._GATE_GIT_LONG_FORMS[verb]
+            if (verb, "--" + word) not in seen]
+
+
+class _GsoTables:
+    """A stand-in holding the guard tables _gso_options reads, for the corpus derivation check."""
+
+
+def _test_gate_status_oracle(failures, tmp):
+    """(gso-*) the differential oracle (comment above _GSO_BASE) over the generated corpus, then its mutation
+    checks: main's guard compared with itself (this tree's change reverted) must be red, and a stand-in of
+    this tree's guard that allows one command main denies must be red without an allowlist entry for it and
+    green with one, as must each real allowlist entry deleted in turn. The corpus must run every long form
+    of every gated action in the guard's table, and a long form planted in a copy of that table must reach
+    the corpus generated from the copy, so the corpus follows the table rather than a hand-written list."""
+    corpus = _gso_corpus()
+    if len(corpus) < 5000:
+        failures.append("(gso-corpus-size) the generated corpus holds {} commands, fewer than 5000"
+                        .format(len(corpus)))
+    gaps = _gso_table_gaps(corpus, aiqt_hooks)
+    if gaps:
+        failures.append("(gso-corpus-table) the corpus runs {} long forms of the guard's table as no "
+                        "command's first option word, such as {!r}".format(len(gaps), gaps[:5]))
+    planted_tables = _GsoTables()
+    for name in ("_GATE_GATED_GIT", "_GATE_GIT_EXEMPT", "_GATE_GATED_VALUE_OPTS", "_GATE_TAG_MAKES"):
+        setattr(planted_tables, name, getattr(aiqt_hooks, name))
+    planted_forms = dict(aiqt_hooks._GATE_GIT_LONG_FORMS)
+    planted_forms["tag"] = dict(planted_forms["tag"], **{"zz-planted": ("zz-planted", False)})
+    planted_tables._GATE_GIT_LONG_FORMS = planted_forms
+    if _gso_table_gaps(_gso_corpus(planted_tables), planted_tables):
+        failures.append("(gso-corpus-derived) a long form planted in a copy of the guard's table does not "
+                        "reach the corpus generated from that copy")
+    try:
+        main_hooks, tree_hooks = _gso_load_hooks(tmp)
+    except (OSError, subprocess.SubprocessError) as exc:
+        failures.append("(gso-load-base) main's hook at {} could not be loaded: {}".format(_GSO_BASE, exc))
+        return
+    if main_hooks is tree_hooks or main_hooks.gate_weakening is tree_hooks.gate_weakening:
+        failures.append("(gso-load-same) main's hook and this tree's are one module")
+        return
+    home = tmp / "gso-home"
+    home.mkdir()
+    repo = _init_repo(tmp / "gso-repo")
+    _git(repo, "tag", "v0")
+    saved = {key: os.environ.get(key) for key in ("HOME", "XDG_CONFIG_HOME", "GIT_CONFIG_NOSYSTEM")}
+    os.environ.update(HOME=str(home), XDG_CONFIG_HOME=str(home), GIT_CONFIG_NOSYSTEM="1")
+    try:
+        cwd = str(repo)
+        main_gate, tree_gate = main_hooks.gate_weakening, tree_hooks.gate_weakening
+        failures.extend(_gso_oracle_failures(main_gate, tree_gate, corpus, cwd, _GSO_ALLOWLIST, _GSO_ANCHORS))
+        reverted = _gso_oracle_failures(main_gate, main_gate, corpus, cwd, _GSO_ALLOWLIST, _GSO_ANCHORS)
+        if not any(line.startswith("(gso-anchor)") for line in reverted):
+            failures.append("(gso-mutant-revert) the oracle stays green with this tree's change reverted")
+        planted = "git push --no-verify origin main"
+
+        def planted_gate(data):
+            if (data.get("tool_input") or {}).get("command") == planted:
+                return tree_hooks._allow()
+            return tree_gate(data)
+        unlisted = {key: why for key, why in _GSO_ALLOWLIST.items() if key != planted}
+        mutant_red = _gso_oracle_failures(main_gate, planted_gate, corpus, cwd, unlisted, _GSO_ANCHORS)
+        listed = dict(unlisted, **{planted: "a planted entry for the mutation check"})
+        mutant_green = _gso_oracle_failures(main_gate, planted_gate, corpus, cwd, listed, _GSO_ANCHORS)
+        if not any(planted in line for line in mutant_red) or mutant_green:
+            failures.append("(gso-mutant-allowlist) a planted newly allowed command must turn the oracle red "
+                            "without its allowlist entry ({!r}) and green with it ({!r})"
+                            .format(mutant_red[:3], mutant_green[:3]))
+        for entry in sorted(_GSO_ALLOWLIST):
+            fewer = {key: why for key, why in _GSO_ALLOWLIST.items() if key != entry}
+            if not _gso_oracle_failures(main_gate, tree_gate, corpus, cwd, fewer, _GSO_ANCHORS):
+                failures.append("(gso-mutant-allowlist-entry) the oracle stays green with the allowlist entry "
+                                "{!r} deleted".format(entry))
+    finally:
+        for key, value in saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
+def _test_gate_status_wording(failures):
+    """(gw-smw-*) the status tier's deny text says what the guard read: an action read fail-closed (a segment
+    the lexer stopped inside, or a word bash expands that alone keeps a listing gated) gets the fail-closed
+    text, never the finding that a failing check does not stop it, and an action read only as git before its
+    subcommand is named 'git command', never 'git git'; a fully read action keeps the finding text."""
+    rows = (
+        ("(gw-smw-1) git stopped before its subcommand is a fail-closed git command",
+         "pytest | tee /abs/l && git <<<x tag v1", ("fail-closed", "to a git command."), ("git git", "does not stop")),
+        ("(gw-smw-2) a tag listing the lexer stopped inside is fail-closed",
+         "pytest | tee /abs/l && git tag -l <<<x", ("fail-closed", "could not read that git tag"), ("does not stop",)),
+        ("(gw-smw-3) a tag listing with a glob is fail-closed",
+         "pytest | tee /abs/l && git tag -l v*", ("fail-closed", "a word bash expands"), ("does not stop",)),
+        ("(gw-smw-4) a tag listing with a parameter is fail-closed",
+         "pytest | tee /abs/l && git tag -l \"$p\"", ("fail-closed", "a word bash expands"), ("does not stop",)),
+        ("(gw-smw-5) a literal tag creation keeps the finding",
+         "pytest | tee /abs/l && git tag v1", ("does not stop the git tag",), ("fail-closed", "git git")),
+    )
+    for label, command, needles, absent in rows:
+        code, out, _err = aiqt_hooks.gate_weakening({"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                                                     "tool_input": {"command": command}})
+        spec = out.get("hookSpecificOutput", {}) if isinstance(out, dict) else {}
+        reason = spec.get("permissionDecisionReason", "")
+        if (spec.get("permissionDecision") != "deny" or any(n not in reason for n in needles)
+                or any(a in reason for a in absent)):
+            failures.append("{} on {!r}: got exit {} decision {!r}, reason {!r}".format(
+                label, command, code, spec.get("permissionDecision"), reason))
+
 # Foreground trkasy rows with no '&' byte anywhere: a quoted here-document write followed by another command
 # reads its body as code, so an apostrophe there left the scan open and the guard denied a detach the
 # command cannot hold. The full row has the shape of a real markdown brief (quotes, backquotes, parentheses,
@@ -23916,6 +24401,387 @@ def _main_isolated(monitor):
         ]
         for _ct_label, _ct_cmd, _ct_want in _ct_r5:
             gexpect(_ct_label, _ct_cmd, _ct_want)
+        # The status tier (_gate_status_masked): a known verification run piped into ANY stage, pass-through
+        # stages included, and joined by '&&' to a gated git action (commit, push, merge, tag, am in a form
+        # that records, marks or sends) denies, since the pipeline's status is its last stage's and a failing
+        # check would not stop the action; with pipefail or another command set before it, or a '||' join
+        # before it, the shape only notes. A ';' or newline join runs the action whatever the status, piped or
+        # not, so it is left to the other tiers, and any command between the pipeline and the action other
+        # than the pass-through ones ends the walk, whether it gates the action on the check's status (a test
+        # of PIPESTATUS) or does not read that status (git diff --quiet, [ -s LOG ], grep -q PATTERN LOG, a
+        # second verification run: residual R5). The a-rows are controls, over-denial pins and residual R5
+        # pins; the k-rows keep the sink tier's verdicts. The rows pin the hook's decisions only; none runs its shape in bash.
+        _ct_sm = [
+            ('(gw-sm-d1) a check piped into tee, then && git commit, denies',
+             'pytest | tee /abs/check.log && git commit -m x', 'deny'),
+            ('(gw-sm-a12) a check piped into tee, then ; git commit, is left to the other tiers, allows',
+             'pytest | tee /abs/check.log; git commit -m x', 'allow'),
+            ('(gw-sm-d3) a check piped into plain cat, then && git commit, denies',
+             'pytest | cat && git commit -m x', 'deny'),
+            ('(gw-sm-a13) a check piped into cat, then ; git push, allows',
+             'pytest | cat; git push origin main', 'allow'),
+            ('(gw-sm-d5) a check piped into tee, then && git merge, denies',
+             'pytest | tee /abs/check.log && git merge topic', 'deny'),
+            ('(gw-sm-d6) a check piped into tee, then && git tag, denies',
+             'pytest | tee /abs/check.log && git tag v1', 'deny'),
+            ('(gw-sm-a14) a check piped into tee, then ; git am, allows',
+             'pytest | tee /abs/check.log; git am fix.patch', 'allow'),
+            ('(gw-sm-d8) a check piped into a grep filter, then && git commit, denies',
+             'pytest | grep -v DEBUG && git commit -m x', 'deny'),
+            ('(gw-sm-d9) a check piped into a second filter after a first, then && git commit, denies',
+             'pytest | sort | uniq && git commit -m x', 'deny'),
+            ('(gw-sm-a15) a newline join runs the action whatever the status, allows',
+             'pytest | tee /abs/check.log\ngit commit -m x', 'allow'),
+            ('(gw-sm-d11) a newline after && continues the list, denies',
+             'pytest | tee /abs/check.log &&\ngit push origin main', 'deny'),
+            ('(gw-sm-d12) a benign command between the pipeline and the git action, denies',
+             'pytest | tee /abs/check.log && cd /abs && git commit -m x', 'deny'),
+            ('(gw-sm-d13) a benign command before the check, denies',
+             'cd /abs && pytest | tee /abs/check.log && git push origin main', 'deny'),
+            ('(gw-sm-d14) a python self-test piped into tee, then && git commit, denies',
+             'python3 -I -B tools/selftest_x.py | tee /abs/check.log && git commit -m x', 'deny'),
+            ('(gw-sm-a16) make check piped into cat, then ; git tag, allows',
+             'make check | cat; git tag v2', 'allow'),
+            ('(gw-sm-d16) a |& pipe into tee, then && git commit, denies',
+             'pytest |& tee /abs/check.log && git commit -m x', 'deny'),
+            ('(gw-sm-d17) a git action behind a peeled wrapper, denies',
+             'pytest | tee /abs/check.log && timeout 60 git push origin main', 'deny'),
+            ('(gw-sm-d18) a recovered segment list on a parse error, denies',
+             'pytest | tee /abs/check.log && git commit -m x; cat <<<y', 'deny'),
+            ('(gw-sm-n1) set -o pipefail before it, notes',
+             'set -o pipefail; pytest | tee /abs/check.log && git commit -m x', 'allow-note'),
+            ('(gw-sm-a17) set -euo pipefail before a ; join, allows',
+             'set -euo pipefail; pytest | cat; git push origin main', 'allow'),
+            ('(gw-sm-n2) set -euo pipefail before an && join, notes',
+             'set -euo pipefail; pytest | cat && git push origin main', 'allow-note'),
+            ('(gw-sm-n3) another command that may set the environment before it, notes',
+             'export A=1; pytest | tee /abs/check.log && git commit -m x', 'allow-note'),
+            ('(gw-sm-n4) a pipeline joined by || to the command before it, notes',
+             'false || pytest | tee /abs/check.log && git commit -m x', 'allow-note'),
+            ('(gw-sm-n5) set -o pipefail before a truncating sink keeps the adjacent-sink note',
+             'set -o pipefail; pytest | tail -5 && git commit -m x', 'allow-note'),
+            ('(gw-sm-a1) no gated git action after it, allows',
+             'pytest | tee /abs/check.log && echo done', 'allow'),
+            ('(gw-sm-a2) git status after it is not a gated action, allows',
+             'pytest | tee /abs/check.log && git status', 'allow'),
+            ('(gw-sm-a3) git log after it is not a gated action, allows',
+             'pytest | tee /abs/check.log; git log -1', 'allow'),
+            ('(gw-sm-a4) the check not piped, allows',
+             'pytest && git commit -m x', 'allow'),
+            ('(gw-sm-a5) the check redirected to a file, not piped, allows',
+             'pytest > /abs/check.log 2>&1 && git commit -m x', 'allow'),
+            ('(gw-sm-a6) a || join runs the git action only on failure, allows',
+             'pytest | tee /abs/check.log || git commit -m x', 'allow'),
+            ('(gw-sm-a7) a & join is outside the shape (residual R5), allows',
+             'pytest | tee /abs/check.log & git commit -m x', 'allow'),
+            ('(gw-sm-a8) a producer off the verification list, allows',
+             'echo x | tee /abs/check.log && git commit -m x', 'allow'),
+            ('(gw-sm-a9) a git action reached only through another pipeline (residual R5), allows',
+             'pytest | tee /abs/check.log && echo a | cat && git commit -m x', 'allow'),
+            ('(gw-sm-a10) the gated git action before the check, allows',
+             'git commit -m x && pytest | tee /abs/check.log', 'allow'),
+            ('(gw-sm-a11) a gated git action behind sudo (residual R5), allows',
+             'pytest | tee /abs/check.log && sudo git push origin main', 'allow'),
+            ('(gw-sm-k1) a truncating sink then && git commit keeps the sink deny',
+             'pytest | tail -5 && git commit -m x', 'deny'),
+            ('(gw-sm-k2) a tee with no gated action keeps its allow',
+             'pytest | tee /abs/check.log', 'allow'),
+            # commands between the pipeline and the action that cannot gate it keep the deny
+            ('(gw-sm-d19) a plain echo between the pipeline and the git action, denies',
+             'pytest | tee /abs/l && echo done && git commit -m x', 'deny'),
+            ('(gw-sm-d20) git add between the pipeline and the git action, denies',
+             'pytest | tee /abs/l && git add -A && git commit -m x', 'deny'),
+            ('(gw-sm-d21) git status between the pipeline and the git action, denies',
+             'pytest | tee /abs/l && git status && git commit -m x', 'deny'),
+            ('(gw-sm-d22) two newlines after && continue the list, denies',
+             'pytest | tee /abs/l &&\n\ngit commit -m x', 'deny'),
+            ('(gw-sm-d23) git tag -d deletes a tag, still gated, denies',
+             'pytest | tee /abs/l && git tag -d v1', 'deny'),
+            ('(gw-sm-d24) --dry-run after -- is a pathspec, not an option, denies',
+             'pytest | tee /abs/l && git commit -m x -- --dry-run', 'deny'),
+            ('(gw-sm-d25) merge --continue records the merge, denies',
+             'pytest | tee /abs/l && git merge --continue', 'deny'),
+            ('(gw-sm-d26) the uncertain-# path reads the recovered && join, denies',
+             'pytest | tee /abs/l && git push origin main; echo `#`', 'deny'),
+            ('(gw-sm-n6) the uncertain-# path with a ; join keeps its doubt note',
+             'pytest | tee /abs/l; git push origin main; echo `#`', 'allow-note'),
+            # a command that gates the action on its own exit status ends the walk
+            ('(gw-sm-a18) ; test of PIPESTATUS gates the commit, allows',
+             'pytest | tee /abs/l; test "${PIPESTATUS[0]}" -eq 0 && git commit -m x', 'allow'),
+            ('(gw-sm-a19) ; [ of PIPESTATUS gates the commit, allows',
+             'pytest | tee /abs/l; [ "${PIPESTATUS[0]}" -eq 0 ] && git commit -m x', 'allow'),
+            ('(gw-sm-a20) && test of PIPESTATUS gates the commit, allows',
+             'pytest | tee /abs/l && test "${PIPESTATUS[0]}" -eq 0 && git commit -m x', 'allow'),
+            ('(gw-sm-a21) PIPESTATUS saved then tested gates the commit, allows',
+             'pytest | tee /abs/l; rc=${PIPESTATUS[0]}; test $rc -eq 0 && git commit -m x', 'allow'),
+            ('(gw-sm-a22) ; an unpiped verification run gates the commit, allows',
+             'pytest | tee /abs/l; pytest && git commit -m x', 'allow'),
+            ('(gw-sm-a23) ; make test gates the commit, allows',
+             'make lint | tee /abs/l; make test && git commit -m x', 'allow'),
+            ('(gw-sm-a24) ; git diff --quiet ends the walk, not reading the check status (residual R5), allows',
+             'pytest | tee /abs/l; git diff --quiet && git commit -m x', 'allow'),
+            ('(gw-sm-a25) && an unpiped verification run gates the commit, allows',
+             'pytest | tee /abs/l && pytest && git commit -m x', 'allow'),
+            ('(gw-sm-a26) && git diff --quiet ends the walk, not reading the check status (residual R5), allows',
+             'pytest | tee /abs/l && git diff --quiet && git commit -m x', 'allow'),
+            ('(gw-sm-a27) && [ -s of the log ends the walk, which a failing log passes (residual R5), allows',
+             'pytest | tee /abs/l && [ -s /abs/l ] && git commit -m x', 'allow'),
+            ('(gw-sm-a28) && grep -q of the log ends the walk, which a failing log can pass (residual R5), allows',
+             'pytest | tee /abs/l && grep -q passed /abs/l && git commit -m x', 'allow'),
+            ('(gw-sm-a29) && [[ -s of the log ends the walk, which a failing log passes (residual R5), allows',
+             'pytest | tee /abs/l && [[ -s /abs/l ]] && git commit -m x', 'allow'),
+            # git forms that record, mark or send nothing are not gated actions
+            ('(gw-sm-a30) git tag -l lists, allows', 'pytest | tee /abs/l && git tag -l', 'allow'),
+            ('(gw-sm-a31) git tag --list lists, allows', "pytest | tee /abs/l && git tag --list 'v*'", 'allow'),
+            ('(gw-sm-a32) a bare git tag lists, allows', 'pytest | tee /abs/l && git tag', 'allow'),
+            ('(gw-sm-a33) git tag -v verifies, allows', 'pytest | tee /abs/l && git tag -v v1', 'allow'),
+            ('(gw-sm-a34) git tag --contains lists, allows', 'pytest | tee /abs/l && git tag --contains HEAD', 'allow'),
+            ('(gw-sm-a35) git tag -n5 lists, allows', 'pytest | tee /abs/l && git tag -n5', 'allow'),
+            ('(gw-sm-a36) git merge --abort recovers, allows', 'pytest | tee /abs/l && git merge --abort', 'allow'),
+            ('(gw-sm-a37) git merge --quit recovers, allows', 'pytest | tee /abs/l && git merge --quit', 'allow'),
+            ('(gw-sm-a38) git am --abort recovers, allows', 'pytest | tee /abs/l && git am --abort', 'allow'),
+            ('(gw-sm-a39) git am --quit recovers, allows', 'pytest | tee /abs/l && git am --quit', 'allow'),
+            ('(gw-sm-a40) git am --show-current-patch reads, allows',
+             'pytest | tee /abs/l && git am --show-current-patch', 'allow'),
+            ('(gw-sm-a41) git push --dry-run sends nothing, allows',
+             'pytest | tee /abs/l && git push --dry-run origin main', 'allow'),
+            ('(gw-sm-a42) git push -n sends nothing, allows', 'pytest | tee /abs/l && git push -n origin main', 'allow'),
+            ('(gw-sm-a43) git commit --dry-run records nothing, allows',
+             'pytest | tee /abs/l && git commit --dry-run', 'allow'),
+            ('(gw-sm-a44) git commit --help, allows', 'pytest | tee /abs/l && git commit --help', 'allow'),
+            ('(gw-sm-a45) git push --help, allows', 'pytest | tee /abs/l && git push --help', 'allow'),
+            ('(gw-sm-a46) git commit -h, allows', 'pytest | tee /abs/l && git commit -h', 'allow'),
+            ('(gw-sm-a47) git --help commit, allows', 'pytest | tee /abs/l && git --help commit', 'allow'),
+            # masked shapes the status tier does not read (residual R5): each still runs the action after a
+            # failing check in bash
+            ('(gw-sm-a48) a ( ) group around the pipeline (residual R5), allows',
+             '(pytest | tee /abs/l) && git commit -m x', 'allow'),
+            ('(gw-sm-a49) a { } group around the pipeline (residual R5), allows',
+             '{ pytest | tee /abs/l; } && git commit -m x', 'allow'),
+            ('(gw-sm-a50) the pipeline and action inside one { } group (residual R5), allows',
+             '{ pytest | tee /abs/l && git commit -m x; }', 'allow'),
+            ('(gw-sm-a51) || true after the pipeline runs the action whatever the status (residual R5), allows',
+             'pytest | tee /abs/l || true && git commit -m x', 'allow'),
+            ('(gw-sm-a52) an assignment prefix on the producer (residual R5), allows',
+             'A=1 pytest | tee /abs/l && git commit -m x', 'allow'),
+            ('(gw-sm-a53) an env prefix on the producer (residual R5), allows',
+             'env A=1 pytest | tee /abs/l && git commit -m x', 'allow'),
+            ('(gw-sm-a54) a here-string on the producer (residual R5), allows',
+             'pytest <<<y | tee /abs/l && git commit -m x', 'allow'),
+            ('(gw-sm-a55) a here-string on the last stage (residual R5), allows',
+             'pytest | tee /abs/l <<<y && git commit -m x', 'allow'),
+            ('(gw-sm-a56) a process substitution in the last stage (residual R5), allows',
+             'pytest | tee >(cat) && git commit -m x', 'allow'),
+            ('(gw-sm-a57) a here-string between the pipeline and the action (residual R5), allows',
+             'pytest | tee /abs/l && cat <<<done && git commit -m x', 'allow'),
+            ('(gw-sm-a58) the pipeline inside sh -c (residual R1, R5), allows',
+             "sh -c 'pytest | tee /abs/l' && git commit -m x", 'allow'),
+            ('(gw-sm-a59) the pipeline inside bash -c (residual R1, R5), allows',
+             "bash -c 'pytest | tee /abs/l' && git commit -m x", 'allow'),
+            ('(gw-sm-a60) git behind command (residual R5), allows',
+             'pytest | tee /abs/l && command git commit -m x', 'allow'),
+            ('(gw-sm-a61) git behind exec (residual R5), allows',
+             'pytest | tee /abs/l && exec git push origin main', 'allow'),
+            ('(gw-sm-a62) git behind nohup (residual R5), allows',
+             'pytest | tee /abs/l && nohup git push origin main', 'allow'),
+            ('(gw-sm-a63) a command off the pass-through list between them (residual R5), allows',
+             'pytest | tee /abs/l && make clean && git commit -m x', 'allow'),
+            # an option's value is never read as a form that records nothing: each of these records
+            ('(gw-sm-d27) git commit -m --dry-run commits with that message, denies',
+             'pytest | tee /abs/l && git commit -m --dry-run', 'deny'),
+            ('(gw-sm-d28) git commit -m -h commits with that message, denies',
+             'pytest | tee /abs/l && git commit -m -h', 'deny'),
+            ('(gw-sm-d29) git commit -m --help commits with that message, denies',
+             'pytest | tee /abs/l && git commit -m --help', 'deny'),
+            ('(gw-sm-d30) git tag -m -l v1 creates the tag, denies',
+             'pytest | tee /abs/l && git tag -m -l v1', 'deny'),
+            ('(gw-sm-d31) git tag -a v2 -m -n creates the tag, denies',
+             'pytest | tee /abs/l && git tag -a v2 -m -n', 'deny'),
+            ('(gw-sm-d32) git merge -m --abort topic records the merge, denies',
+             'pytest | tee /abs/l && git merge --no-ff -m --abort topic', 'deny'),
+            ('(gw-sm-d33) git commit -F -h reads the message from a file named -h, denies',
+             'pytest | tee /abs/l && git commit -F -h', 'deny'),
+            ('(gw-sm-d34) git commit --author -h takes -h as the author, denies',
+             'pytest | tee /abs/l && git commit --author -h -m x', 'deny'),
+            ('(gw-sm-d35) git push -o -n sends with -n as a push option, denies',
+             'pytest | tee /abs/l && git push -o -n origin main', 'deny'),
+            ('(gw-sm-d36) a short cluster ending in m takes the next word, denies',
+             'pytest | tee /abs/l && git commit -am --dry-run', 'deny'),
+            ('(gw-sm-d37) an abbreviated --message takes the next word, denies',
+             'pytest | tee /abs/l && git commit --mess --dry-run', 'deny'),
+            ('(gw-sm-d38) a global -C takes -h as its directory, denies',
+             'pytest | tee /abs/l && git -C -h commit -m x', 'deny'),
+            ('(gw-sm-a64) --dry-run after a message value is an option, allows',
+             'pytest | tee /abs/l && git commit -m x --dry-run', 'allow'),
+            ('(gw-sm-a65) -m takes -- as its message, so the --dry-run after it is an option, allows',
+             'pytest | tee /abs/l && git commit -m -- --dry-run', 'allow'),
+            ('(gw-sm-a66) git tag -l after a message value lists, allows',
+             'pytest | tee /abs/l && git tag -m x -l', 'allow'),
+            ('(gw-sm-a67) git push -n after a push option value sends nothing, allows',
+             'pytest | tee /abs/l && git push -o ci.skip -n origin main', 'allow'),
+            # further masked shapes the status tier does not read (residual R5)
+            ('(gw-sm-a68) a producer with stdout redirected but piped (residual R5), allows',
+             'pytest > /abs/l 2>&1 | cat && git commit -m x', 'allow'),
+            ('(gw-sm-a69) a producer with stderr piped after stdout redirected (residual R5), allows',
+             'pytest 2>&1 >/abs/l | tee /abs/e && git commit -m x', 'allow'),
+            ('(gw-sm-a70) a ( ) group as the last stage (residual R5), allows',
+             'pytest | (cat) && git commit -m x', 'allow'),
+            ('(gw-sm-a71) a { } group as the last stage (residual R5), allows',
+             'pytest | { cat; } && git commit -m x', 'allow'),
+            ('(gw-sm-a72) the pipeline as an if condition (residual R5), allows',
+             'if pytest | tee /abs/l; then git commit -m x; fi', 'allow'),
+            ('(gw-sm-a73) the whole shape inside a then body (residual R5), allows',
+             'if true; then pytest | tee /abs/l && git commit -m x; fi', 'allow'),
+            ('(gw-sm-a74) the whole shape inside a do body (residual R5), allows',
+             'for i in 1; do pytest | tee /abs/l && git commit -m x; done', 'allow'),
+            ('(gw-sm-a75) an unproven shape on the parse-error path keeps the silent allow (residual R5), allows',
+             'export A=1; pytest | tee /abs/l && git commit -m x; cat <<<y', 'allow'),
+            ('(gw-sm-a76) set -o pipefail on the parse-error path keeps the silent allow (residual R5), allows',
+             'set -o pipefail; pytest | tee /abs/l && git commit -m x; cat <<<y', 'allow'),
+            # a dry run is read in order, the last word deciding, as git 2.53.0 reads it, and a git tag with no
+            # tag name and none of -a, -s, -u, -d, -f, -m or -F lists. In a scratch repository git 2.53.0
+            # recorded or sent nothing for each allow row's git command and recorded or sent for each deny
+            # row's, except d42 and d47: there git stopped (a remote without push options, a usage error),
+            # so those two pin the hook's reading only (git push -on sends the push option n)
+            ('(gw-sm-d39) a later --no-dry-run undoes --dry-run, so the commit records, denies',
+             'pytest | tee /abs/l && git commit --dry-run --no-dry-run -m y', 'deny'),
+            ('(gw-sm-a77) a later --dry-run undoes --no-dry-run, allows',
+             'pytest | tee /abs/l && git commit --no-dry-run --dry-run -m y', 'allow'),
+            ('(gw-sm-d40) a later --no-dry-run undoes push -n, so the push sends, denies',
+             'pytest | tee /abs/l && git push -n --no-dry-run origin main', 'deny'),
+            ('(gw-sm-a78) a later push -n undoes --no-dry-run, allows',
+             'pytest | tee /abs/l && git push --no-dry-run -n origin main', 'allow'),
+            ('(gw-sm-d41) a later --no-dry-run undoes the n of a push short cluster, denies',
+             'pytest | tee /abs/l && git push -qn --no-dry-run origin main', 'deny'),
+            ('(gw-sm-a79) the n of a push short cluster is a dry run, allows',
+             'pytest | tee /abs/l && git push -nf origin main', 'allow'),
+            ('(gw-sm-d42) push -on takes n as the push option, so the push sends, denies',
+             'pytest | tee /abs/l && git push -on origin main', 'deny'),
+            ('(gw-sm-a80) git commit --dry abbreviates --dry-run, allows',
+             'pytest | tee /abs/l && git commit --dry -m y', 'allow'),
+            ('(gw-sm-a81) git push --dr abbreviates --dry-run, allows',
+             'pytest | tee /abs/l && git push --dr origin main', 'allow'),
+            ('(gw-sm-d43) a later --no-dry abbreviates --no-dry-run, so the commit records, denies',
+             'pytest | tee /abs/l && git commit --dry-run --no-dry -m y', 'deny'),
+            ('(gw-sm-a82) git commit --short implies --dry-run, allows',
+             'pytest | tee /abs/l && git commit --short -m y', 'allow'),
+            ('(gw-sm-a83) git commit --porcelain implies --dry-run, allows',
+             'pytest | tee /abs/l && git commit --porcelain -m y', 'allow'),
+            ('(gw-sm-a84) git commit --long implies --dry-run, allows',
+             'pytest | tee /abs/l && git commit --long -m y', 'allow'),
+            ('(gw-sm-a85) --no-dry-run does not undo --short, allows',
+             'pytest | tee /abs/l && git commit --short --no-dry-run -m y', 'allow'),
+            ('(gw-sm-d44) a later --no-short undoes --short, so the commit records, denies',
+             'pytest | tee /abs/l && git commit --short --no-short -m y', 'deny'),
+            ('(gw-sm-a86) git tag --sort with no tag name lists, allows',
+             'pytest | tee /abs/l && git tag --sort=-v:refname', 'allow'),
+            ('(gw-sm-a87) git tag -i with no tag name lists, allows',
+             'pytest | tee /abs/l && git tag -i', 'allow'),
+            ('(gw-sm-a88) git tag --column with no tag name lists, allows',
+             'pytest | tee /abs/l && git tag --column', 'allow'),
+            ('(gw-sm-d45) git tag --sort with a tag name creates the tag, denies',
+             'pytest | tee /abs/l && git tag --sort=refname v9', 'deny'),
+            ('(gw-sm-d46) a tag name after -- creates the tag, denies',
+             'pytest | tee /abs/l && git tag --sort refname -- v9', 'deny'),
+            ('(gw-sm-d47) git tag -m with no tag name is not a listing, denies',
+             'pytest | tee /abs/l && git tag -m x', 'deny'),
+            # every exempt flag goes through one resolver over git 2.53.0's option table: the last of --flag
+            # and --no-flag decides where git negates the flag, an unambiguous abbreviation counts as its
+            # option, and an ambiguous or unknown word exempts nothing
+            ('(gw-sm-d48) merge --abort then --no-abort merges, denies',
+             'pytest | tee /abs/l && git merge --abort --no-abort topic', 'deny'),
+            ('(gw-sm-d49) merge --abort then --no-ab, an abbreviated --no-abort, merges, denies',
+             'pytest | tee /abs/l && git merge --abort --no-ab topic', 'deny'),
+            ('(gw-sm-d50) merge --abort then --no-abo with a message merges, denies',
+             'pytest | tee /abs/l && git merge --abort --no-abo -m x topic', 'deny'),
+            ('(gw-sm-d51) merge --quit then --no-quit merges, denies',
+             'pytest | tee /abs/l && git merge --no-edit --quit --no-quit topic', 'deny'),
+            ('(gw-sm-d52) tag --points-at then --no-points-at creates the tag, denies',
+             'pytest | tee /abs/l && git tag --points-at HEAD --no-points-at v1', 'deny'),
+            ('(gw-sm-d53) tag --points-at= then --no-po, an abbreviated --no-points-at, creates the tag, denies',
+             'pytest | tee /abs/l && git tag --points-at=HEAD --no-po v1', 'deny'),
+            ('(gw-sm-d54) tag --points-at then --no-points-at with -a -m creates an annotated tag, denies',
+             'pytest | tee /abs/l && git tag --points-at HEAD --no-points-at -a -m x v1', 'deny'),
+            ('(gw-sm-d55) tag --points-at then --no-points-at, then a push, denies',
+             'pytest | tee /abs/l && git tag --points-at HEAD --no-points-at v1 && git push origin v1', 'deny'),
+            ('(gw-sm-d56) commit --po is ambiguous in git (porcelain, post-rewrite) and exempts nothing, denies',
+             'pytest | tee /abs/l && git commit --po -m y', 'deny'),
+            ('(gw-sm-d57) merge has no --dry-run option and it exempts nothing, denies',
+             'pytest | tee /abs/l && git merge --dry-run topic', 'deny'),
+            ('(gw-sm-a89) merge --ab abbreviates --abort, allows', 'pytest | tee /abs/l && git merge --ab', 'allow'),
+            ('(gw-sm-a90) merge --no-abort then --abort aborts, allows',
+             'pytest | tee /abs/l && git merge --no-abort --abort', 'allow'),
+            ('(gw-sm-a91) merge --no-quit then --quit quits, allows',
+             'pytest | tee /abs/l && git merge --no-quit --quit', 'allow'),
+            ('(gw-sm-a92) tag --poi abbreviates --points-at and lists, allows',
+             'pytest | tee /abs/l && git tag --poi HEAD', 'allow'),
+            ('(gw-sm-a93) tag --no-points-at then --points-at lists, allows',
+             'pytest | tee /abs/l && git tag --no-points-at --points-at HEAD', 'allow'),
+            ('(gw-sm-a94) tag -l keeps list mode after --no-points-at, allows',
+             'pytest | tee /abs/l && git tag -l --points-at HEAD --no-points-at', 'allow'),
+            ('(gw-sm-a95) tag --cont abbreviates --contains and lists, allows',
+             'pytest | tee /abs/l && git tag --cont HEAD', 'allow'),
+            ('(gw-sm-a96) am --abo abbreviates --abort, allows', 'pytest | tee /abs/l && git am --abo', 'allow'),
+            # a git action the lexer stops inside (a here-string or process substitution in the action itself)
+            # is read fail-closed: its unread words could clear an exempt flag read before the stop
+            ('(gw-sm-d58) a tag message from a here-string inside the action, denies',
+             'pytest | tee /abs/l && git tag -a v9 -F - <<<msg', 'deny'),
+            ('(gw-sm-d59) a tag message from a process substitution inside the action, denies',
+             'pytest | tee /abs/l && git tag -a v9 -F <(echo msg)', 'deny'),
+            ('(gw-sm-d60) a tag with stderr into a process substitution, denies',
+             'pytest | tee /abs/l && git tag v9 2> >(cat)', 'deny'),
+            ('(gw-sm-d61) a tag listing the lexer stops inside is read fail-closed, denies',
+             'pytest | tee /abs/l && git tag --points-at HEAD <<<x --no-points-at v1', 'deny'),
+            ('(gw-sm-a97) a here-string inside a command that is not git after the pipeline, allows',
+             'pytest | tee /abs/l && echo x <<<y', 'allow'),
+            ('(gw-sm-a98) an unproven shape with a here-string inside the tag keeps the silent allow (residual R5), allows',
+             'export A=1; pytest | tee /abs/l && git tag v9 <<<x', 'allow'),
+            # an exempt form is read from literal words only: a word bash expands can become a negation or split
+            # into a tag name, so an action holding one is gated. In a scratch repository bash 5.3.9 and git
+            # 2.53.0 created tag v1 for each deny row's git command (X unset, except X=--no-points-at for d69,
+            # and d70 run beside a file named --no-points-at), and pushed it for d72; each allow row's git
+            # command created no tag
+            ('(gw-sm-d62) a brace word after --points-at expands to --no-points-at, denies',
+             'pytest | tee /abs/l && git tag --points-at HEAD --no-points-at{,} v1', 'deny'),
+            ('(gw-sm-d63) a brace word that completes an abbreviated --no-points-at, denies',
+             'pytest | tee /abs/l && git tag --points-at HEAD --no-poi{nts-at,} v1', 'deny'),
+            ('(gw-sm-d64) a brace alternation of --no-points-at, denies',
+             'pytest | tee /abs/l && git tag --points-at HEAD --{no-points-at,no-points-at} v1', 'deny'),
+            ('(gw-sm-d65) a parameter expansion glued to --no-points-at, denies',
+             'pytest | tee /abs/l && git tag --points-at HEAD --no-points-at$X v1', 'deny'),
+            ('(gw-sm-d66) a braced parameter expansion glued to --no-points-at, denies',
+             'pytest | tee /abs/l && git tag --points-at HEAD --no-points-at${X} v1', 'deny'),
+            ('(gw-sm-d67) a command substitution that prints --no-points-at, denies',
+             'pytest | tee /abs/l && git tag --points-at HEAD "$(printf %s --no-points-at)" v1', 'deny'),
+            ('(gw-sm-d68) a backquoted command that prints --no-points-at, denies',
+             'pytest | tee /abs/l && git tag --points-at HEAD `printf %s --no-points-at` v1', 'deny'),
+            ('(gw-sm-d69) a double-quoted parameter expansion after --points-at, denies',
+             'pytest | tee /abs/l && git tag --points-at HEAD "$X" v1', 'deny'),
+            ('(gw-sm-d70) a glob that can match a file named --no-points-at, denies',
+             'pytest | tee /abs/l && git tag --points-at HEAD --no-points-a? v1', 'deny'),
+            ('(gw-sm-d71) a brace word after the tag name, denies',
+             'pytest | tee /abs/l && git tag --points-at HEAD v1 --no-points-at{,}', 'deny'),
+            ('(gw-sm-d72) a brace word clears --points-at, then a push, denies',
+             'pytest | tee /abs/l && git tag --points-at HEAD --no-points-at{,} v1 && git push origin v1', 'deny'),
+            ('(gw-sm-d73) a substitution in a --format value splits off a tag name, denies',
+             'pytest | tee /abs/l && git tag --format=$(echo %s v1)', 'deny'),
+            ('(gw-sm-d74) a substitution spells --end-of-options and a tag name, denies',
+             'pytest | tee /abs/l && git tag -$(echo -end-of-options v1)', 'deny'),
+            ('(gw-sm-d75) a substitution in a --sort value splits off a tag name, denies',
+             'pytest | tee /abs/l && git tag --sort=refname$(echo \' v1\')', 'deny'),
+            ('(gw-sm-d76) a substitution glued to -i splits off a tag name, denies',
+             'pytest | tee /abs/l && git tag -i$(echo \' v1\')', 'deny'),
+            ('(gw-sm-a99) a single-quoted literal after --points-at keeps the listing, allows',
+             "pytest | tee /abs/l && git tag --points-at 'HEAD'", 'allow'),
+            ('(gw-sm-a100) a double-quoted literal after --contains keeps the listing, allows',
+             'pytest | tee /abs/l && git tag --contains "HEAD"', 'allow'),
+            ('(gw-sm-a101) a quoted pattern after -l keeps the listing, allows',
+             "pytest | tee /abs/l && git tag -l 'v*'", 'allow'),
+            ('(gw-sm-a102) a plain literal word after --points-at HEAD keeps the listing, allows',
+             'pytest | tee /abs/l && git tag --points-at HEAD v1', 'allow'),
+        ]
+        for _ct_label, _ct_cmd, _ct_want in _ct_sm:
+            gexpect(_ct_label, _ct_cmd, _ct_want)
         # Round 6: the sink end is a closed list of exact shapes too (head or tail with no option or one positive
         # line count; grep, egrep or fgrep with exactly one of -m N, -q, -c, -l or -L and one pattern; rg with -q,
         # -c or -l; never cut), and a producer whose environment or configuration the command sets only notes.
@@ -29923,6 +30789,8 @@ def _main_isolated(monitor):
         _test_deadline_posture(failures, tmp)
         _test_cannot_evaluate_paths(failures, tmp)
         _test_reset_ancestry(failures, tmp)
+        _test_gate_status_oracle(failures, tmp)
+        _test_gate_status_wording(failures)
 
         # === write_scope_guard (wrtscp, EN-8): confine guarded-tool writes to a per-slice scope =========
         # declaration; hard-deny writes to the frozen floor and to other/nested repos as an un-lowerable
@@ -30956,7 +31824,10 @@ def _main_isolated(monitor):
           "denies (a disclosed over-deny of text that merely names such a command); and it denies a known "
           "verification run whose output reaches "
           "a truncating sink on its allow-list (head or tail with one positive line count, grep -m N/-q/-c/-l/-L, "
-          "rg -q/-c/-l; cut, any other spelling and a sed or awk program only note), and "
+          "rg -q/-c/-l; cut, any other spelling and a sed or awk program only note), and one piped into any "
+          "stage and joined by && to a git commit, push, merge, tag or am that records, marks or sends "
+          "(directly or through cd, plain echo, true, pwd, git add or git status; a ; or newline join, or a "
+          "test, [, verification run or git diff --quiet between them, is not judged there), and "
           "ALLOWS-WITH-NOTE every other checker-shaped segment whose failure is swallowed (|| true) or "
           "truncated (| head/tail) - the broad heuristic is too broad to deny. sectvl "
           "(commit_msg_subst) DENIES-and-educates a backtick or $( command substitution in a git commit "

@@ -616,6 +616,11 @@ ALLOWLIST = (
      " directory, of the repository's own hook source (read from aiqt_hooks.__file__) with the"
      " reviewed literal substitutions of one _IE_MUTANTS entry, each anchor matched exactly once;"
      " no external input"),
+    ("tools/selftest_aiqt_hooks.py", "_gso_load_hooks", "code", 1,
+     "self-test differential oracle loader: exec_module of two copies, written under the self-test's"
+     " temporary directory, of the repository's own hook source: one read from aiqt_hooks.__file__,"
+     " one read by git show from the pinned base commit of this repository with replacement refs"
+     " disabled; no external input"),
     ("tools/_close_selftest.py", "_StCloseFault.__init__", "shell", 1,
      "self-test fault injector: wraps the os functions named in its own fixed _ST_WATCHED"
      " tuple (descriptor stat and seek calls) to count closes; never runs a shell"),
