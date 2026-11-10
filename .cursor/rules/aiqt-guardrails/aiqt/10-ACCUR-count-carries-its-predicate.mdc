@@ -5,7 +5,9 @@ alwaysApply: true
 # A count carries its predicate
 
 A reported count, size, or population is meaningful only together with the predicate that selected it:
-what was counted, over what set, under what filter, and as of when. Two counts of nominally the same
+what was counted, over what set, under what filter, and as of when. Where a figure depends on how it was
+obtained, its predicate includes every condition of the run that can change the result, such as the
+interpreter and its flags, the execution mode, and the host it ran on. Two counts of nominally the same
 thing produced by different predicates are different figures, and they are never quoted interchangeably,
 compared as though they measured one quantity, or carried forward as a single number. The same nominal
 population admitted under a structural definition and under a behavioural one, for instance, yields two

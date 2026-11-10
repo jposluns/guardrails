@@ -167,25 +167,34 @@ source-path = ".aiqt/core/rules/accur-count-carries-its-predicate.md"
 start-line = 13
 end-line = 14
 canonical-text = "A reported count, size, or population is meaningful only together with the predicate that selected it:\nwhat was counted, over what set, under what filter, and as of when."
-source-digest = "0acbd49e4173c33393cb9fd2e31b9e1665e425fd7b5442f7e2ed327daf7445aa"
+source-digest = "ae677e76bc2d693ab90a4a5de9d6023b270bb6640477b1606a47e84672993e1e"
 
 [[clause]]
 clause-id = "cntprd.2"
 corpus-id = "cntprd"
 source-path = ".aiqt/core/rules/accur-count-carries-its-predicate.md"
-start-line = 14
-end-line = 16
+start-line = 16
+end-line = 18
 canonical-text = "Two counts of nominally the same\nthing produced by different predicates are different figures, and they are never quoted interchangeably,\ncompared as though they measured one quantity, or carried forward as a single number."
-source-digest = "0acbd49e4173c33393cb9fd2e31b9e1665e425fd7b5442f7e2ed327daf7445aa"
+source-digest = "ae677e76bc2d693ab90a4a5de9d6023b270bb6640477b1606a47e84672993e1e"
 
 [[clause]]
 clause-id = "cntprd.3"
 corpus-id = "cntprd"
 source-path = ".aiqt/core/rules/accur-count-carries-its-predicate.md"
-start-line = 18
-end-line = 24
+start-line = 20
+end-line = 26
 canonical-text = "A count reused across statements is pinned to the recorded\npredicate that produced it and, where a reconcilable basis is available and its retention permitted, to\nthat basis, an authoritative snapshot or revision of the source or the identifiers the reading returned\nwhere that set is complete, so a later statement reconciles against the recorded figure rather than\nsilently re-deriving a different one; where no such basis is available, the statement records that the\nfigure cannot be reconciled and is re-measured under the same predicate rather than carried forward as\nthough it were."
-source-digest = "0acbd49e4173c33393cb9fd2e31b9e1665e425fd7b5442f7e2ed327daf7445aa"
+source-digest = "ae677e76bc2d693ab90a4a5de9d6023b270bb6640477b1606a47e84672993e1e"
+
+[[clause]]
+clause-id = "cntprd.4"
+corpus-id = "cntprd"
+source-path = ".aiqt/core/rules/accur-count-carries-its-predicate.md"
+start-line = 14
+end-line = 16
+canonical-text = "Where a figure depends on how it was\nobtained, its predicate includes every condition of the run that can change the result, such as the\ninterpreter and its flags, the execution mode, and the host it ran on."
+source-digest = "ae677e76bc2d693ab90a4a5de9d6023b270bb6640477b1606a47e84672993e1e"
 
 [[clause]]
 clause-id = "dscres.1"
