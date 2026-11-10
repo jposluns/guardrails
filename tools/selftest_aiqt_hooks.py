@@ -173,7 +173,9 @@ import contextlib
 import datetime
 import dis
 import hashlib
+import importlib
 import io
+import itertools
 import json
 import os
 import random
@@ -9250,6 +9252,230 @@ def _selftest_exit_code(failures, cannot_evaluate):
     if failures:
         return 1
     return 2 if cannot_evaluate else 0
+
+
+# --- differential commit oracle (pl-oracle-*) ---------------------------------------------------------------
+# The commit check of protected_line converges by a deterministic differential oracle: main's hook at a pinned
+# base commit, read from git with replacement refs disabled, and this tree's hook are loaded as two separate
+# modules and run over one corpus of commit commands in real scratch repositories. A command main denies and
+# this tree allows fails the oracle unless its exact form is listed in _ORACLE_NEWLY_ALLOWED with a reason.
+# Every fixture and base read runs git under git_fixture_env() (a scratch HOME and GIT_CONFIG_NOSYSTEM=1).
+# The hooks themselves run in this process, whose HOME is the suite's empty home: both versions read any
+# GIT_* variable in their own environment (GIT_CONFIG_NOSYSTEM included) as a non-cosmetic repository-view
+# override and deny every commit, which would leave nothing to compare, so none is set there.
+_ORACLE_BASE_COMMIT = "189a280e388d6a2e6d3d1b59b3616d32dac3ad51"  # main's hook the oracle compares against
+# The hook as it was before the timeout-wording change, loaded only by the revert control below.
+_ORACLE_REVERT_COMMIT = "8630735c4d805e28ced13083a49f1a93c4cbb475"
+_ORACLE_HOOK_PATH = ".aiqt/core/hooks/scripts/aiqt_hooks.py"
+# Exact forms this tree may allow where main denies: (fixture, command template, forced checkpoint) -> reason.
+# The timeout-wording change rewords denials and allows nothing new, so no form is listed.
+_ORACLE_NEWLY_ALLOWED = {}
+# The repositories each command runs against: a protected main with and without a remote, and a feature
+# branch with and without one. A command template names them as {P}, {PN}, {F} and {FN}.
+_ORACLE_FIXTURES = ("P", "PN", "F", "FN")
+# Every commit form an earlier review of this change exercised, as (cwd fixture, command template).
+_ORACLE_PINNED = (
+    ("P", "git commit -m a"),
+    ("PN", "git commit -m a"),
+    ("F", "git commit -m a"),
+    ("FN", "git commit -m a"),
+    ("F", "cd {PN} && git commit -m a"),
+    ("PN", "git commit -m a && cd /"),
+    ("P", "git commit -m a && git -C {F} commit -m b"),
+    ("F", "git commit -m a && git -C {P} commit -m b"),
+    ("FN", "git commit -m a && git -C {P} commit -m b"),
+    ("P", "git commit -m a && git commit -m b"),
+    ("PN", "git commit -m a && git commit -m b"),
+    ("F", "git -C {P} commit -m a && git -C {F} commit -m b && git -C {FN} commit -m c"),
+    ("P", "git switch -c oracle-new && git commit -m a"),
+    ("F", "git switch main && git commit -m a"),
+    ("F", "git -C {PN} commit -m a"),
+    ("P", "git -C {F} commit -m a"),
+)
+# The systematic part: every -C and -c placement before the verb, crossed with every order of every
+# non-empty subset of three commit options, in every fixture.
+_ORACLE_PREFIXES = ("", "-C {X} ", "-c core.quotepath=false ", "-C {X} -c core.quotepath=false ",
+                    "-c core.quotepath=false -C {X} ")
+_ORACLE_OPTIONS = ("-q", "--allow-empty", "-m a")
+_ORACLE_TIMEOUT_TEXT = "ran out of time on this host"
+
+
+def _oracle_corpus():
+    """The oracle corpus as (cwd fixture, command template, sweep) triples: sweep is True for a form whose
+    every commit deadline checkpoint is also forced (each pinned form, and the plain -m order of each
+    generated placement), else the form runs only unforced."""
+    corpus = [(fixture, template, True) for fixture, template in _ORACLE_PINNED]
+    orders = []
+    for size in range(1, len(_ORACLE_OPTIONS) + 1):
+        orders.extend(itertools.permutations(_ORACLE_OPTIONS, size))
+    for fixture in _ORACLE_FIXTURES:
+        for prefix in _ORACLE_PREFIXES:
+            for order in orders:
+                template = "git " + prefix.replace("{X}", "{" + fixture + "}") + "commit " + " ".join(order)
+                corpus.append((fixture, template, order == ("-m a",)))
+    return corpus
+
+
+def _oracle_git_source(commit):
+    """The bytes of the hook at commit, read with git show and replacement refs disabled, or None."""
+    env = git_fixture_env(GIT_NO_REPLACE_OBJECTS="1")
+    try:
+        proc = subprocess.run(["git", "--no-replace-objects", "-C", str(repo_root()), "show",
+                               "{}:{}".format(commit, _ORACLE_HOOK_PATH)], capture_output=True, timeout=60,
+                              env=env)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return proc.stdout if proc.returncode == 0 and proc.stdout else None
+
+
+def _oracle_load(directory, name, source):
+    """Import source (bytes) as a fresh module called name from directory, apart from aiqt_hooks."""
+    (directory / (name + ".py")).write_bytes(source)
+    sys.path.insert(0, str(directory))
+    try:
+        module = importlib.import_module(name)
+    finally:
+        sys.path.remove(str(directory))
+    module._COMMIT_SECONDS = aiqt_hooks._COMMIT_SECONDS * _load_bound.MAX_LOAD_FACTOR
+    module._COMMIT_PROBE_SECONDS = aiqt_hooks._COMMIT_PROBE_SECONDS * _load_bound.MAX_LOAD_FACTOR
+    return module
+
+
+def _oracle_run(module, command, cwd, at):
+    """(decision, reason, checkpoints) of module.protected_line on command from cwd, with the at-th call of
+    its commit deadline checkpoint forced to an exhausted deadline (0 forces none). The forced call runs the
+    module's own _commit_remaining against a deadline of minus infinity, so each version raises its own
+    deadline exception from its own code. checkpoints counts the calls made."""
+    original = module._commit_remaining
+    calls = [0]
+
+    def checkpoint(deadline):
+        calls[0] += 1
+        return original(float("-inf") if calls[0] == at else deadline)
+
+    module._commit_remaining = checkpoint
+    try:
+        code, obj, _err = module.protected_line({"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                                                 "tool_input": {"command": command}, "cwd": cwd})
+    finally:
+        module._commit_remaining = original
+    reason = (obj.get("hookSpecificOutput", {}).get("permissionDecisionReason", "")
+              if isinstance(obj, dict) else "")
+    return _reduce_result(code, obj), reason, calls[0]
+
+
+def _oracle_diff(base, tree, corpus, paths, allowlist):
+    """(newly, worded, runs) for tree against base over corpus: newly lists each (fixture, template, at) the
+    base denies and the tree allows that allowlist does not name, worded lists each forced run whose tree
+    denial does not carry the timeout wording, and runs counts the commands judged. A difference is judged
+    again once on both versions before it counts, so a real host timeout on one side alone is not read as
+    a change of decision."""
+    newly, worded, runs = [], [], 0
+    for fixture, template, sweep in corpus:
+        command = template.format(**paths)
+        cwd = paths[fixture]
+        _got, _reason, count = _oracle_run(base, command, cwd, 0)
+        points = range(0, count + 1) if sweep else (0,)
+        for at in points:
+            runs += 1
+            key = (fixture, template, at)
+            base_got, _r, base_count = _oracle_run(base, command, cwd, at)
+            tree_got, tree_reason, _c = _oracle_run(tree, command, cwd, at)
+            if base_got not in ("allow", "allow-note") and tree_got in ("allow", "allow-note"):
+                base_got = _oracle_run(base, command, cwd, at)[0]
+                tree_got, tree_reason, _c = _oracle_run(tree, command, cwd, at)
+                if (base_got not in ("allow", "allow-note") and tree_got in ("allow", "allow-note")
+                        and key not in allowlist):
+                    newly.append(key)
+            if at and at <= base_count and (tree_got != "deny" or _ORACLE_TIMEOUT_TEXT not in tree_reason):
+                worded.append((key, tree_got))
+    return newly, worded, runs
+
+
+def _oracle_fixtures(root):
+    """The four fixture repositories under root, by fixture name, as absolute path strings."""
+    paths = {}
+    for name in _ORACLE_FIXTURES:
+        repo = _init_repo(root / name.lower())
+        if name in ("P", "F"):
+            _git(repo, "remote", "add", "origin", str(root / (name.lower() + "-remote.git")))
+        if name in ("F", "FN"):
+            _git(repo, "switch", "-q", "other")
+        paths[name] = str(repo)
+    return paths
+
+
+def _commit_oracle_failures(tmp):
+    """(pl-oracle-*) The differential oracle for the commit check, with its two mutation controls: the hook
+    before the timeout-wording change must turn it red, and so must deleting an allowlist entry that a
+    leaking mutant (a timed-out check that allows) needs."""
+    out = []
+    root = tmp / "commit-oracle"
+    root.mkdir()
+    base_source = _oracle_git_source(_ORACLE_BASE_COMMIT)
+    revert_source = _oracle_git_source(_ORACLE_REVERT_COMMIT)
+    if base_source is None or revert_source is None:
+        return ["(pl-oracle-base) the oracle could not read the hook at {} and {} with git show; it needs "
+                "the full history (fetch-depth: 0)".format(_ORACLE_BASE_COMMIT, _ORACLE_REVERT_COMMIT)]
+    names = ("_aiqt_oracle_base", "_aiqt_oracle_tree", "_aiqt_oracle_revert")
+    try:
+        base = _oracle_load(root, names[0], base_source)
+        tree = _oracle_load(root, names[1], (repo_root() / _ORACLE_HOOK_PATH).read_bytes())
+        revert = _oracle_load(root, names[2], revert_source)
+        paths = _oracle_fixtures(root / "repos")
+        corpus = _oracle_corpus()
+        newly, worded, runs = _oracle_diff(base, tree, corpus, paths, _ORACLE_NEWLY_ALLOWED)
+        print("commit oracle: {} forms, {} runs, {} allowlisted".format(len(corpus), runs,
+                                                                     len(_ORACLE_NEWLY_ALLOWED)))
+        for key in newly:
+            out.append("(pl-oracle-newly-allowed) main denies and this tree allows {!r}, which "
+                       "_ORACLE_NEWLY_ALLOWED does not list".format(key))
+        for key, got in worded:
+            out.append("(pl-oracle-timeout-wording) forced checkpoint {!r} must deny with the timeout wording, "
+                       "got {}".format(key, got))
+        allows = sum(1 for fixture, template, _s in corpus
+                     if _oracle_run(tree, template.format(**paths), paths[fixture], 0)[0] == "allow")
+        if not allows:
+            out.append("(pl-oracle-nonvacuous) the corpus must hold forms this tree allows, got none")
+        # Revert control: the hook before the change keeps every decision but not the timeout wording.
+        sample = [entry for entry in corpus[:4]]
+        _n, revert_worded, _r = _oracle_diff(base, revert, sample, paths, {})
+        if not revert_worded:
+            out.append("(pl-oracle-revert-red) the hook before the timeout-wording change must turn the oracle "
+                       "red, it stayed green")
+        # Allowlist control: a mutant whose timed-out check allows is newly allowed on each forced
+        # checkpoint; listing exactly those forms turns it green, and deleting one entry turns it red.
+        leak_original = tree._commit_on_protected
+
+        def leaking(evidence):
+            if getattr(evidence, "state", None) == "timeout":
+                return None
+            return leak_original(evidence)
+
+        tree._commit_on_protected = leaking
+        try:
+            leak_sample = [corpus[0]]
+            leaked, _w, _r = _oracle_diff(base, tree, leak_sample, paths, {})
+            listed = {key: "a leaking mutant's forced timeout" for key in leaked}
+            green, _w, _r = _oracle_diff(base, tree, leak_sample, paths, listed)
+            trimmed = dict(listed)
+            if trimmed:
+                del trimmed[sorted(trimmed)[0]]
+            red, _w, _r = _oracle_diff(base, tree, leak_sample, paths, trimmed)
+        finally:
+            tree._commit_on_protected = leak_original
+        if not leaked:
+            out.append("(pl-oracle-leak-red) a mutant whose timed-out check allows must turn the oracle red")
+        if green:
+            out.append("(pl-oracle-allowlist-green) listing every form the leaking mutant allows must turn the "
+                       "oracle green, still found {!r}".format(green))
+        if len(red) != 1:
+            out.append("(pl-oracle-allowlist-red) deleting one allowlist entry must turn the oracle red on "
+                       "exactly that form, found {!r}".format(red))
+    finally:
+        for name in names:
+            sys.modules.pop(name, None)
+    return out
 
 
 def _main_isolated(monitor):
@@ -28938,6 +29164,7 @@ def _main_isolated(monitor):
         _test_stream_failure_exits(failures)
         _test_stop_field_claim_check(failures, tmp)
         _test_deadline_posture(failures, tmp)
+        failures.extend(_commit_oracle_failures(tmp))
         _test_cannot_evaluate_paths(failures, tmp)
         _test_reset_ancestry(failures, tmp)
 
