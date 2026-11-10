@@ -126,13 +126,17 @@ attribute named os or posix (os.path.os) or a literal sys.modules subscript (sys
 from os or posix; and any name, attribute or asyncio or concurrent.futures from-import spelled
 create_subprocess_exec, create_subprocess_shell, subprocess_exec, subprocess_shell (the asyncio loop methods)
 or ProcessPoolExecutor. Local imports are followed from the importing file's own directory, then tools/ and
-opf/tools/ (imports inside functions included; a package is read at its __init__.py only). A call that loads a
-module or code at run time (exec or eval as a name; __import__, import_module, spec_from_file_location,
-exec_module, load_module, run_path, run_module or the resolvers pkgutil.resolve_name and pydoc.locate as an
-attribute, a bare name or a from-import alias) in a file the scan would otherwise call NOT-APPLICABLE is
-cannot-evaluate, unless the file's row in DYNAMIC_LOADS_REVIEWED names every load call in it by its exact text
-(ast.unparse). That text pins a literal target, so a changed literal target unreviews the file; a target held
-in a variable or computed is pinned only by the expression the call spells (R13).
+opf/tools/ (imports inside functions included; a package is read at its __init__.py only). Each candidate path
+is looked up without following a symlink (_local_module): a missing component means the name is not local and
+the import is not followed, a regular file reached through real directories is read, and anything else (a
+symlink, a directory, a FIFO or other type, or an error such as an unsearchable directory) is cannot-evaluate
+naming the path, so a module that cannot be inspected never reads as absent and cuts the closure short. A call
+that loads a module or code at run time (exec or eval as a name; __import__, import_module,
+spec_from_file_location, exec_module, load_module, run_path, run_module or the resolvers pkgutil.resolve_name
+and pydoc.locate as an attribute, a bare name or a from-import alias) in a file the scan would otherwise call
+NOT-APPLICABLE is cannot-evaluate, unless the file's row in DYNAMIC_LOADS_REVIEWED names every load call in it
+by its exact text (ast.unparse). That text pins a literal target, so a changed literal target unreviews the
+file; a target held in a variable or computed is pinned only by the expression the call spells (R13).
 
   check_child_status_coverage.py                       check the repository
   check_child_status_coverage.py --self-test           the coverage vectors (suite child-status-coverage-selftest)
@@ -209,6 +213,7 @@ import os
 import posixpath
 import re
 import shutil
+import stat
 import tempfile
 import tomllib
 from pathlib import Path
@@ -1358,6 +1363,39 @@ def closure_reads(rel, load, exists, reviewed=None):
     return sorted(reads), sorted(dynamic)
 
 
+def _local_module(root, candidate, lstat=os.lstat):
+    """Whether candidate (a repository-relative .py path resolve_import tries) is a local module, each component
+    looked up with lstat, which follows no symlink: False when a component is absent (the name is not local), True
+    when every directory component is a real directory and the last is a regular file, and cannot-evaluate naming
+    the path for anything else (a symlink, a directory, a FIFO or other type, or an error such as an unsearchable
+    directory), which would otherwise read as absent and cut the closure short."""
+    parts = Path(candidate).parts
+    path = Path(root)
+    for index, part in enumerate(parts):
+        path = path / part
+        try:
+            mode = lstat(path).st_mode
+        except FileNotFoundError:
+            return False
+        except OSError as exc:
+            raise CannotEvaluate("{}: a local import candidate that cannot be inspected ({}: {})".format(
+                candidate, type(exc).__name__, path))
+        last = index == len(parts) - 1
+        if last and stat.S_ISREG(mode):
+            return True
+        if not last and stat.S_ISDIR(mode):
+            continue
+        raise CannotEvaluate("{}: a local import candidate where {} is not a {}".format(
+            candidate, path, "regular file" if last else "real directory"))
+    return False
+
+
+def _reads_of(root, load, reviewed, lstat=os.lstat):
+    """The reads_of classify takes: an entry's closure_reads, each local import candidate under root decided by
+    _local_module."""
+    return lambda rel: closure_reads(rel, load, lambda candidate: _local_module(root, candidate, lstat), reviewed)
+
+
 def classify(entries, launched, reads_of, residual, direct_check):
     """(classes, findings, cannot): classes maps each entry to SELF, NOT-APPLICABLE, LAUNCHER or RESIDUAL."""
     classes, findings, cannot = {}, [], []
@@ -1503,10 +1541,7 @@ def evaluate(root, residual=None, direct_check=None):
         findings.extend("{}: DYNAMIC_LOADS_REVIEWED names {}, which does not exist".format(rel, target)
                         for target in targets if not (root / target).is_file())
 
-    def reads_of(rel):
-        return closure_reads(rel, load, lambda candidate: (root / candidate).is_file(), reviewed)
-
-    classes, more, cannot = classify(entries, launched, reads_of, residual, direct_check)
+    classes, more, cannot = classify(entries, launched, _reads_of(root, load, reviewed), residual, direct_check)
     if cannot:
         raise CannotEvaluate("; ".join(cannot))
     return classes, findings + more
@@ -2182,6 +2217,68 @@ def _fake_fs(unreadable=False, unlistable=False, absent=()):
     return listdir, walk, lexists
 
 
+# The local-import presence cases, each a tree whose tools/entry.py imports helper, the helper one of: absent, a
+# regular helper.py, a regular package helper/__init__.py, a dangling symlink, a directory or a FIFO at helper.py,
+# a package directory that is a symlink, and a package directory with mode 000.
+PRESENCE_CASES = ("absent", "regular", "package", "dangling-symlink", "directory", "fifo", "symlinked-package",
+                  "unsearchable-package")
+
+
+def _presence_outcomes(module):
+    """{case: (reads, None) or (None, the cannot-evaluate reason)} for each PRESENCE_CASES tree, read through
+    module._reads_of; every tree is built in a temporary directory removed after. A privileged account searches a
+    mode 000 directory anyway, so there the lstat passed to _reads_of raises the permission error instead."""
+    out, locked = {}, []
+    with tempfile.TemporaryDirectory(prefix="child-status-presence-") as base:
+        base = Path(base)
+        try:
+            elsewhere = base / "elsewhere"
+            elsewhere.mkdir()
+            (elsewhere / "__init__.py").write_text("import subprocess\n", encoding="utf-8")
+            for case in PRESENCE_CASES:
+                root = base / case
+                tools = root / "tools"
+                tools.mkdir(parents=True)
+                (tools / "entry.py").write_text("import helper\n", encoding="utf-8")
+                helper = tools / "helper.py"
+                if case == "regular":
+                    helper.write_text("import subprocess\n", encoding="utf-8")
+                elif case in ("package", "unsearchable-package"):
+                    (tools / "helper").mkdir()
+                    (tools / "helper" / "__init__.py").write_text("import subprocess\n", encoding="utf-8")
+                elif case == "dangling-symlink":
+                    os.symlink(base / "nowhere.py", helper)
+                elif case == "directory":
+                    helper.mkdir()
+                elif case == "fifo":
+                    os.mkfifo(helper)
+                elif case == "symlinked-package":
+                    os.symlink(elsewhere, tools / "helper")
+                lstat = os.lstat
+                if case == "unsearchable-package":
+                    locked.append(tools / "helper")
+                    os.chmod(tools / "helper", 0)
+                    if os.geteuid() == 0:
+                        def lstat(path, denied=tools / "helper" / "__init__.py"):
+                            if Path(path) == denied:
+                                raise PermissionError(13, "Permission denied", str(path))
+                            return os.lstat(path)
+                trees = {}
+
+                def load(rel, root=root, trees=trees):
+                    if rel not in trees:
+                        trees[rel] = module._parse(module._read(root, rel), rel)
+                    return trees[rel]
+                try:
+                    out[case] = (module._reads_of(root, load, {}, lstat)("tools/entry.py"), None)
+                except module.CannotEvaluate as exc:
+                    out[case] = (None, str(exc))
+        finally:
+            for path in locked:
+                os.chmod(path, 0o700)
+    return out
+
+
 def _vectors(module, trees, texts, canonical_tree):
     """{vector id: ok} for every static vector, against module (this gate or a mutant of it); a vector whose
     evaluation raises is not ok."""
@@ -2246,6 +2343,16 @@ def _vectors(module, trees, texts, canonical_tree):
     # vector red; each id is held by the host-pin order under it, accepted in quality.yml only.
     host_jobs = ("opf-host-patch", "git-fixture-env-core-host-patch", "git-fixture-env-config-combined-host-patch",
                  "git-fixture-env-config-malformed-host-patch", "git-fixture-env-config-system-host-patch")
+
+    try:
+        presence = _presence_outcomes(m)
+    except Exception:
+        presence = {}
+
+    def refused(case, what):
+        """True when the case's helper is cannot-evaluate, the reason naming its candidate path and what."""
+        reads, reason = presence.get(case, ((), None))
+        return reads is None and reason.startswith("tools/helper") and what in reason
 
     def host_job_held(job):
         text = texts["host-pin-before-probe"].replace("opf-host-patch", job, 1)
@@ -2493,6 +2600,18 @@ def _vectors(module, trees, texts, canonical_tree):
         ("completeness/scan-follows-local-imports",
          lambda: reads_of("tools/new_reader.py")[0] == [("tools/helper_mod.py", "import subprocess")]),
         ("completeness/scan-clean-module", lambda: reads_of("tools/plain.py") == ([], [])),
+        ("completeness/local-import-absent-not-followed", lambda: presence["absent"] == (([], []), None)),
+        ("completeness/local-import-regular-followed", lambda: presence["regular"]
+         == (([("tools/helper.py", "import subprocess")], []), None)
+         and presence["package"] == (([("tools/helper/__init__.py", "import subprocess")], []), None)),
+        ("completeness/local-import-unsearchable-cannot-evaluate",
+         lambda: refused("unsearchable-package", "cannot be inspected (PermissionError")),
+        ("completeness/local-import-dangling-symlink-cannot-evaluate",
+         lambda: refused("dangling-symlink", "is not a regular file")),
+        ("completeness/local-import-directory-cannot-evaluate", lambda: refused("directory", "is not a regular file")),
+        ("completeness/local-import-fifo-cannot-evaluate", lambda: refused("fifo", "is not a regular file")),
+        ("completeness/local-import-symlinked-package-cannot-evaluate",
+         lambda: refused("symlinked-package", "is not a real directory")),
     )
 
     def rebound(form, named):
@@ -2783,6 +2902,15 @@ MUTANTS = (
      "completeness/reviewed-variable-target-limit"),
     ("scan-closure", "                stack.append(target)\n", "                pass\n",
      "completeness/scan-follows-local-imports"),
+    ("local-module-presence", "lambda candidate: _local_module(root, candidate, lstat)",
+     "lambda candidate: (Path(root) / candidate).is_file()", "completeness/local-import-unsearchable-cannot-evaluate"),
+    ("local-module-absent", "        except FileNotFoundError:\n            return False\n",
+     "        except FileNotFoundError:\n            raise CannotEvaluate(candidate)\n",
+     "completeness/local-import-absent-not-followed"),
+    ("local-module-regular", "        if last and stat.S_ISREG(mode):\n", "        if False:\n",
+     "completeness/local-import-regular-followed"),
+    ("local-module-real-directory", "        if not last and stat.S_ISDIR(mode):\n", "        if not last:\n",
+     "completeness/local-import-symlinked-package-cannot-evaluate"),
 )
 UNMUTATED = {"copies/real-copies-identical", "entries/real-entries-pass", "entries/entry-function-real-pass",
              "launchers/real-launchers-pass",
@@ -3185,7 +3313,14 @@ def self_test(lane, report_path=None):
                                 ("completeness/reviewed-load-target-pinned", 0),
                                 ("completeness/reviewed-variable-target-limit", 0),
                                 ("completeness/scan-follows-local-imports", 0),
-                                ("completeness/scan-clean-module", 0)):
+                                ("completeness/scan-clean-module", 0),
+                                ("completeness/local-import-absent-not-followed", 0),
+                                ("completeness/local-import-regular-followed", 0),
+                                ("completeness/local-import-unsearchable-cannot-evaluate", 0),
+                                ("completeness/local-import-dangling-symlink-cannot-evaluate", 0),
+                                ("completeness/local-import-directory-cannot-evaluate", 0),
+                                ("completeness/local-import-fifo-cannot-evaluate", 0),
+                                ("completeness/local-import-symlinked-package-cannot-evaluate", 0)):
             check(check_id, vectors.get(check_id), sorted(key for key, ok in vectors.items() if not ok))
         # One vector per REBINDINGS form for _entry and for the guard function, each id written out.
         for check_id, _kind in (("entries/entry-rebound-tuple", 0), ("copies/guard-rebound-tuple", 0),
