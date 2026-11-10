@@ -547,8 +547,16 @@ An artefact is never installed, published, or promoted to a live or otherwise co
 destination before the verification it must pass has passed. It is placed first in a staging area that is
 not that destination, verified there, and only then is that same verified artefact promoted to the live
 destination, on a recorded pass. Promotion that races ahead of verification, or that ships a different
-artefact than the one verified, is the failure this prevents. This governs an artefact reaching a runtime
-or distribution target, and is distinct from integrating a change into the protected line of development.
+artefact than the one verified, is the failure this prevents. This governs an artefact or a change
+reaching a runtime, distribution, or live target, not integrating a change into the protected line of
+development; when a merge into that line itself deploys, this rule governs the deployment it triggers,
+not the merge. In a change to a live system, one step or many, each tool's side effects are recorded
+from observing it first, either on a copy that shares no state with and cannot reach the live system, or
+as one canary step that other steps of the change follow, run only after the state it changes meets the
+bar the verified-restore-path rule (secrst) sets for a destructive operation, as if the step destroyed
+that state; a change of a single step is observed first on that copy; any unrecorded effect, harmless or
+not, halts the change; it resumes only once every tool's effects are re-observed in one of the same two
+ways and recorded; no check the change must pass is relaxed.
 
 ## A launched task stays observable
 

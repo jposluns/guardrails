@@ -2152,7 +2152,7 @@ nothing rotates, and the step 6 validator already refuses an archive it cannot r
   render and a final validation, with the lease held throughout, and the open point 20 refusal while
   an earlier status change is uncommitted. Unlike the writer, it stages its files as the bullet
   above says.
-- Section 13 (Tamper evidence) explains how history, frozen digests, index reconciliation and
+- Section 13 (Change evidence) explains how history, frozen digests, index reconciliation and
   archive enumeration combine.
 
 Acceptance checks:

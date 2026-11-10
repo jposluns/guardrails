@@ -1,0 +1,432 @@
+# The OPF consumer-switch list: every tool under tools/ that the static scan in
+# tools/check_record_readers.py detects as reading this project's records, each with the disposition it
+# takes when the project's records move into the OPF store. A detected reader that is not listed fails, and
+# a listed file that is gone or no longer detected fails. The scan sees only the forms its docstring names;
+# a read it cannot see (its docstring lists them) is not established by this list. A later switch flips one
+# entry's disposition.
+#
+# [detect] declares what the scan looks for (see the gate's docstring for each rule):
+#   names    record file names, matched as a whole string constant or as its end after "/", ":" or "}"
+#   keys     orchestration-registry keys that name a record, matched as subscript or .get reads or as an
+#            element of a literal collection a loop iterates; together with [detect.non-record-keys] it
+#            must hold every key the hook library (.aiqt/core/hooks/scripts/aiqt_hooks.py) derives: every
+#            registry access there must be an accepted read form (R.get(K), R.get(K, default), R[K],
+#            (R or {}).get(K) or (R or {})[K], K a string constant or a literal-loop variable bound in
+#            exactly the scope of the read and rebound by nothing, or the registry name handed to a
+#            module-level def whose matching parameter is itself a registry name) yielding its key, or
+#            be excused by a [[detect.registry-use]] entry below (a line-anchor of one or more whole
+#            source lines that matches the hook library exactly once, a reason, the keys-read the
+#            author asserts for that use, which join the derived set, and uses, the exact source text
+#            of each excused use on the anchored lines, so an extra or changed refused use there fails
+#            the gate naming its line and column); any other registry use fails the gate.
+#            [detect.non-record-keys] excludes, with a reason, each derived key that names no record
+#            path. The residual: a registry object reached under a name not in HOOK_REGISTRY_NAMES is
+#            not seen, a key used outside the hook library is not seen, and an allowlisted use is
+#            covered only by its asserted keys-read.
+#   flags    command-line flags that take a record path
+#   modules  record-reading modules; importing one (import, import_module or __import__), or naming its
+#            .py file, makes the file an indirect reader
+#
+# Each [[reader]] has path, records, disposition and reason. Dispositions:
+#   switch               reads records that move into the store; switched in a later step
+#   stays-outside-store  reads records that stay outside the store for the reason given
+#   fixture-only         only writes or names record fixtures in its own self-test
+#   not-a-reader         detected by a rule but reads no project record (the reason says why)
+#   indirect-via:<path>  reads only through another listed entry
+
+format-version = 1
+
+[detect]
+names = ["TODO.md", "changelog.toml", "roadmap.toml", "pending-fixes.toml", "orchestration.json", "orchestration.local.json"]
+keys = ["mistakes_register", "attestations", "pending_decisions", "handoff", "findings", "mode", "state_dir", "lease", "record"]
+flags = ["--backlog"]
+modules = ["aiqt_hooks", "check_mistakes_register"]
+
+[detect.non-record-keys]
+ts = "Read at the escape-spoof sentinel surface, where rec is the parsed sentinel object sharing a receiver name; a timestamp, not a record path."
+detail = "Read at the escape-spoof sentinel surface, where rec is the parsed sentinel object sharing a receiver name; a detail string, not a record path."
+escape = "The operator escape declaration block; its nested path names an escape sentinel the hooks probe, not a project record the switch would flip."
+enumerator = "The backlog enumerator declaration, an object with argv and timeout members, not a record path."
+staleness = "The staleness policy object (hour bounds), not a record path."
+yield_tools = "A list of tool names the yield guard scopes to, not a record path."
+dispatch_tools = "A list of tool names the dispatch ledger guard scopes to, not a record path."
+review_dispatch = "The review dispatch binding object, not a record path."
+companion_stores = "The declared companion store roots the write guard admits, not a project record the switch would flip."
+
+[[detect.registry-use]]
+line-anchor = "        if not rec or len(rec) < 3:"
+reason = "Here rec is one NUL-separated git status record, a str (the probe runs its subprocess with text=True and splits on the NUL separator); the truth and length tests read no key."
+keys-read = []
+uses = ["not rec", "len(rec)"]
+
+[[detect.registry-use]]
+line-anchor = "        xy, path = rec[:2], rec[3:]"
+reason = "Here rec is one NUL-separated git status record, a str (the probe runs its subprocess with text=True and splits on the NUL separator); slicing its status letters and path reads no registry key."
+keys-read = []
+uses = ["rec[:2]", "rec[3:]"]
+
+[[detect.registry-use]]
+line-anchor = "    return _state_dir_from_registry(root, reg if status == \"ok\" else None)"
+reason = "The registry reaches _state_dir_from_registry only inside a conditional expression, which the hand-off rule does not resolve; that helper's registry-named parameter is derived where it is read, and the conditional itself reads no key."
+keys-read = []
+uses = ["reg if status == \"ok\" else None"]
+
+[[detect.registry-use]]
+line-anchor = "                \"the registry declares no enumerator\" if \"enumerator\" not in reg"
+reason = "A key-presence test (in) that reads no value."
+keys-read = []
+uses = ["\"enumerator\" not in reg"]
+
+[[detect.registry-use]]
+line-anchor = "                          \"unreadable, writes NO guard-event (no record).\".format(reg,"
+reason = "Here reg holds the registry read-error detail string, not the registry; formatting it reads no key."
+keys-read = []
+uses = ["\"AIQT guardrail: the orchestration registry could not be read \"\n                          \"({}); the {} fails open on its own read error and, because the registry is \"\n                          \"unreadable, writes NO guard-event (no record).\".format(reg,\n                                                                                  event_name)"]
+
+[[detect.registry-use]]
+line-anchor = "            \"work rather than parking or stopping the run.\".format(reg),"
+reason = "Here reg holds the registry read-error detail string, not the registry; formatting it reads no key."
+keys-read = []
+uses = ["\"AIQT guardrail (setcmp/cntdef): the orchestration registry could not be read ({}); a \"\n            \"scheduling call that would park or end the run cannot be judged, so it is denied fail-closed \"\n            \"(ignorance refuses the wind-down). Fix the orchestration registry, or continue the actionable \"\n            \"work rather than parking or stopping the run.\".format(reg)"]
+
+[[detect.registry-use]]
+line-anchor = "    if \"enumerator\" not in reg:"
+reason = "A key-presence test (in) that reads no value."
+keys-read = []
+uses = ["\"enumerator\" not in reg"]
+
+[[detect.registry-use]]
+line-anchor = "    if \"review_dispatch\" not in reg:"
+reason = "A key-presence test (in) that reads no value."
+keys-read = []
+uses = ["\"review_dispatch\" not in reg"]
+
+[[detect.registry-use]]
+line-anchor = "    return [rec for rec in p.stdout.split(b\"\\0\") if rec]"
+reason = "Here rec is one NUL-separated git byte record in a comprehension over a probe's output, not the orchestration registry; no key is read."
+keys-read = []
+uses = ["[rec for rec in p.stdout.split(b\"\\0\") if rec]", "rec"]
+
+[[detect.registry-use]]
+line-anchor = "        meta, tab, name = rec.partition(b\"\\t\")"
+reason = "Here rec is one git ls-tree byte record; splitting it reads no registry key."
+keys-read = []
+uses = ["rec.partition"]
+
+[[detect.registry-use]]
+line-anchor = "            return (\"bad\", reg)"
+reason = "Here reg holds the registry read-error detail string, not the registry; returning it reads no key."
+keys-read = []
+uses = ["(\"bad\", reg)"]
+
+[[detect.registry-use]]
+line-anchor = "                    \"check records the binding then in force\".format(path, reg_dir, rec, path))"
+reason = "Here rec is the failure detail of a record read, not the orchestration registry; formatting it reads no key."
+keys-read = []
+uses = ["\"the review dispatch binding record {} of the registry at {} cannot \"\n                    \"be used: {}; an operator removes it outside the session (rm {}), and the next \"\n                    \"check records the binding then in force\".format(path, reg_dir, rec, path)"]
+
+[[detect.registry-use]]
+line-anchor = "        digest, rcfg = rec"
+reason = "Here rec is the (digest, config) pair a record read returned, not the orchestration registry; unpacking it reads no key."
+keys-read = []
+uses = ["digest, rcfg = rec"]
+
+[[detect.registry-use]]
+line-anchor = "        findings.append(\"the orchestration registry could not be read ({})\".format(reg))"
+reason = "Here reg holds the registry read-error detail string, not the registry; formatting it reads no key."
+keys-read = []
+uses = ["\"the orchestration registry could not be read ({})\".format(reg)"]
+
+[[detect.registry-use]]
+line-anchor = "    if \"record\" not in reg:"
+reason = "A key-presence test (in) that reads no value."
+keys-read = []
+uses = ["\"record\" not in reg"]
+
+[[detect.registry-use]]
+line-anchor = "    if isinstance(rec, dict):"
+reason = "A type test on the record table just read; it reads no key."
+keys-read = []
+uses = ["isinstance(rec, dict)"]
+
+[[detect.registry-use]]
+line-anchor = "        return (rec, None)"
+reason = "Returning the record table, which callers bind under the same receiver name; their reads are derived where they occur."
+keys-read = []
+uses = ["(rec, None)"]
+
+[[detect.registry-use]]
+line-anchor = "                \"probed: cannot-evaluate\".format(_orch_record_value_kind(rec)))"
+reason = "Formatting the kind of a malformed record block through a helper whose parameter is not registry-named; it reads no key."
+keys-read = []
+uses = ["_orch_record_value_kind(rec)"]
+
+[[detect.registry-use]]
+line-anchor = "        if key in rec and _orch_path(root, rec[key]) is None:"
+reason = "A key-presence test over the record table; the subscript read beside it is an accepted form and derives its keys."
+keys-read = []
+uses = ["key in rec"]
+
+[[detect.registry-use]]
+line-anchor = "            rec = rec if isinstance(rec, dict) else {}"
+reason = "Here rec is the parsed escape-spoof sentinel object, not the orchestration registry; the type test reads no registry key."
+keys-read = []
+uses = ["rec if isinstance(rec, dict) else {}", "isinstance(rec, dict)"]
+
+[[detect.registry-use]]
+line-anchor = "                       \"disarming confinement\".format(reg))"
+reason = "Here reg holds the registry read-error detail string, not the registry; formatting it reads no key."
+keys-read = []
+uses = ["\"{}: the orchestration registry that locates the write-scope declaration is \"\n                       \"unreadable or malformed, a cannot-evaluate that denies rather than silently \"\n                       \"disarming confinement\".format(reg)"]
+
+[[detect.registry-use]]
+line-anchor = "    if reg_status == \"ok\" and isinstance(reg, dict) and \"state_dir\" in reg \\"
+reason = "An isinstance and key-presence test that reads no value."
+keys-read = []
+uses = ["isinstance(reg, dict)", "\"state_dir\" in reg"]
+
+[[detect.registry-use]]
+line-anchor = "    state_dir = _state_dir_from_registry(root, reg if reg_status == \"ok\" else None)"
+reason = "The registry reaches _state_dir_from_registry only inside a conditional expression, which the hand-off rule does not resolve; that helper's registry-named parameter is derived where it is read, and the conditional itself reads no key."
+keys-read = []
+uses = ["reg if reg_status == \"ok\" else None"]
+
+[[detect.registry-use]]
+line-anchor = "    if reg_status != \"ok\" or not isinstance(reg, dict):"
+reason = "An isinstance test that reads no value."
+keys-read = []
+uses = ["isinstance(reg, dict)"]
+
+[[reader]]
+path = "tools/aei_backlog_md.py"
+records = ["backlog"]
+disposition = "switch"
+reason = "It parses the backlog file named by --backlog, and backlog items move into the store."
+
+[[reader]]
+path = "tools/orch_doctor.py"
+records = ["backlog", "mode record"]
+disposition = "switch"
+reason = "It reads the backlog and the mode record through the hook library, which finds them through the orchestration registry; backlog items move into the store."
+
+[[reader]]
+path = "tools/orch_preflight.py"
+records = ["backlog", "pending decisions", "attestations"]
+disposition = "switch"
+reason = "It reads what the stop guard reads, through the hook library, which finds each record through the orchestration registry; backlog items move into the store."
+
+[[reader]]
+path = "tools/_qa_adapter.py"
+records = ["backlog"]
+disposition = "switch"
+reason = "It checks that the backlog file exists and is readable, without parsing it; after the switch that file is the store's rendered backlog view."
+
+[[reader]]
+path = "tools/check_record_drift.py"
+records = ["findings register", "changelog refs"]
+disposition = "switch"
+reason = "It reads the findings register named in the orchestration registry, and findings move into the store."
+
+[[reader]]
+path = "tools/check_record_sections.py"
+records = ["none"]
+disposition = "not-a-reader"
+reason = "Its record reads are the [[record]] tables of an adopter's record-sections config, not the orchestration registry's record key."
+
+[[reader]]
+path = "tools/check_mistakes_register.py"
+records = ["mistakes register", "attestations"]
+disposition = "stays-outside-store"
+reason = "The OPF spec has no record type for a mistakes register or an attestation register."
+
+[[reader]]
+path = "tools/orch_register.py"
+records = ["mistakes register", "attestations"]
+disposition = "stays-outside-store"
+reason = "It appends to and projects the mistakes and attestation registers, and the OPF spec has no record type for either."
+
+[[reader]]
+path = "tools/gen_changelog.py"
+records = ["changelog.toml"]
+disposition = "stays-outside-store"
+reason = "It renders CHANGELOG.md from changelog.toml through the shared driver tools/opf_render.py, and where changelog.toml lives in OPF awaits the maintainer's ruling."
+
+[[reader]]
+path = "tools/gen_roadmap.py"
+records = ["roadmap.toml"]
+disposition = "stays-outside-store"
+reason = "It renders ROADMAP.md from roadmap.toml through the shared driver tools/opf_render.py, beside the changelog renderer, whose OPF home awaits the maintainer's ruling; no OPF home for roadmap.toml has been chosen."
+
+[[reader]]
+path = "tools/gen_draft_site.py"
+records = ["changelog.toml"]
+disposition = "stays-outside-store"
+reason = "It reads changelog.toml, and where changelog.toml lives in OPF awaits the maintainer's ruling."
+
+[[reader]]
+path = "tools/check_artifact_checksums.py"
+records = ["changelog.toml"]
+disposition = "stays-outside-store"
+reason = "It reads changelog.toml, and where changelog.toml lives in OPF awaits the maintainer's ruling."
+
+[[reader]]
+path = "tools/check_versions.py"
+records = ["changelog.toml"]
+disposition = "stays-outside-store"
+reason = "It reads changelog.toml, and where changelog.toml lives in OPF awaits the maintainer's ruling."
+
+[[reader]]
+path = "tools/check_site_versions.py"
+records = ["changelog.toml"]
+disposition = "stays-outside-store"
+reason = "It reads changelog.toml, and where changelog.toml lives in OPF awaits the maintainer's ruling."
+
+[[reader]]
+path = "tools/check_version_monotonicity.py"
+records = ["changelog.toml"]
+disposition = "stays-outside-store"
+reason = "It reads changelog.toml at the head, the base and each tag, and where changelog.toml lives in OPF awaits the maintainer's ruling."
+
+[[reader]]
+path = "tools/check_release_cut.py"
+records = ["changelog.toml", "pending-fixes.toml"]
+disposition = "stays-outside-store"
+reason = "It reads changelog.toml and the optional, untracked pending-fix list, and where changelog.toml lives in OPF awaits the maintainer's ruling."
+
+[[reader]]
+path = "tools/check_release_delta.py"
+records = ["changelog.toml"]
+disposition = "stays-outside-store"
+reason = "It reads changelog.toml, and where changelog.toml lives in OPF awaits the maintainer's ruling."
+
+[[reader]]
+path = "tools/check_release_build.py"
+records = ["changelog.toml"]
+disposition = "fixture-only"
+reason = "It writes changelog.toml only into the git fixtures its self-test builds; its live check reads no project record."
+
+[[reader]]
+path = "tools/gen_gensrc.py"
+records = ["backlog view"]
+disposition = "fixture-only"
+reason = "It names a backlog view path only as a self-test target, to prove a store working path is refused."
+
+[[reader]]
+path = "tools/selftest_aiqt_hooks.py"
+records = ["record fixtures"]
+disposition = "fixture-only"
+reason = "It is the hook library's self-test and reads only the record fixtures it writes."
+
+[[reader]]
+path = "tools/selftest_orch_hooks.py"
+records = ["record fixtures"]
+disposition = "fixture-only"
+reason = "It is the orchestration hooks' self-test and reads only the record fixtures it writes."
+
+[[reader]]
+path = "tools/check_relied_exit_pipes.py"
+records = ["none"]
+disposition = "not-a-reader"
+reason = "It imports the hook library only for its shell lexer and reads no project record."
+
+[[reader]]
+path = "tools/check_child_status_coverage.py"
+records = ["none"]
+disposition = "not-a-reader"
+reason = "It names the hook library's file and check_mistakes_register.py only as source paths in its child-status tables; the scan finds no record name, registry key or record-path flag in it."
+
+[[reader]]
+path = "tools/check_dangerous_api.py"
+records = ["none"]
+disposition = "not-a-reader"
+reason = "It names the hook library's file and check_mistakes_register.py only as paths in its reviewed-site tables; the scan finds no record name, registry key or record-path flag in it."
+
+[[reader]]
+path = "tools/check_gensrc_failclose.py"
+records = ["none"]
+disposition = "not-a-reader"
+reason = "The word mode is one of the fixture names its self-test iterates to build source files; it is not the registry's mode key."
+
+[[reader]]
+path = "tools/check_git_option_table.py"
+records = ["none"]
+disposition = "not-a-reader"
+reason = "It names the hook library's file as the source whose git option table it checks; the scan finds no record name, registry key or record-path flag in it."
+
+[[reader]]
+path = "tools/check_instruction_budget.py"
+records = ["none"]
+disposition = "not-a-reader"
+reason = "Its findings subscript reads its own measurement result, not the registry's findings key."
+
+[[reader]]
+path = "tools/check_python_floor.py"
+records = ["none"]
+disposition = "not-a-reader"
+reason = "It names the hook library's file as an interpreter-floor surface it checks; the scan finds no record name, registry key or record-path flag in it."
+
+[[reader]]
+path = "tools/check_python_launcher_isolation.py"
+records = ["none"]
+disposition = "not-a-reader"
+reason = "It names the hook script's plugin path to check how hooks are launched; the scan finds no record name, registry key or record-path flag in it."
+
+[[reader]]
+path = "tools/check_record_readers.py"
+records = ["none"]
+disposition = "not-a-reader"
+reason = "It parses the hook library's source to derive the registry keys the switch list must declare, and reads no project record."
+
+[[reader]]
+path = "tools/doctor.py"
+records = ["none"]
+disposition = "not-a-reader"
+reason = "Its mode reads are a file mode in a pin poststate, not the registry's mode key."
+
+[[reader]]
+path = "tools/gen_hooks.py"
+records = ["none"]
+disposition = "not-a-reader"
+reason = "It names the hook library's file to generate the plugin's hook copy; the scan finds no record name, registry key or record-path flag in it."
+
+[[reader]]
+path = "tools/gen_secret_patterns.py"
+records = ["none"]
+disposition = "not-a-reader"
+reason = "It names the hook library's file as the target it renders secret patterns into; the scan finds no record name, registry key or record-path flag in it."
+
+[[reader]]
+path = "tools/migrate.py"
+records = ["none"]
+disposition = "not-a-reader"
+reason = "Its mode reads are a file mode in a migration operation, not the registry's mode key."
+
+[[reader]]
+path = "tools/pin.py"
+records = ["none"]
+disposition = "not-a-reader"
+reason = "Its mode reads are a file mode in a pin operation, not the registry's mode key."
+
+[[reader]]
+path = "tools/selftest_git_fixture_env.py"
+records = ["none"]
+disposition = "not-a-reader"
+reason = "It names check_mistakes_register.py only in its table of self-tests to launch; the scan finds no record name, registry key or record-path flag in it."
+
+[[reader]]
+path = "tools/selftest_git_fixture_env_config_combined.py"
+records = ["none"]
+disposition = "not-a-reader"
+reason = "It names check_mistakes_register.py only in its table of self-tests to launch; the scan finds no record name, registry key or record-path flag in it."
+
+[[reader]]
+path = "tools/selftest_git_fixture_env_config_malformed.py"
+records = ["none"]
+disposition = "not-a-reader"
+reason = "It names check_mistakes_register.py only in its table of self-tests to launch; the scan finds no record name, registry key or record-path flag in it."
+
+[[reader]]
+path = "tools/selftest_git_fixture_env_core.py"
+records = ["none"]
+disposition = "not-a-reader"
+reason = "It names check_mistakes_register.py only in its table of self-tests to launch; the scan finds no record name, registry key or record-path flag in it."

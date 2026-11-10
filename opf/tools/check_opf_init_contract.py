@@ -9,7 +9,9 @@ Detection is SEMANTIC, never a bare substring: a constant is matched as a whole 
 (ignoring trailing comments); the pinned view tuple and the reserved-namespace set are parsed with
 comments stripped and compared by membership (so a commented-out literal does not count); the machine
 store path is checked against the store authority's DEFAULT_MACHINE_SUBDIR; and a roster registration
-must appear on an ACTIVE (non-comment) line, with the live gate present in the repo-root runner and CI.
+must appear on an ACTIVE (non-comment) line, with the live gate present in the repo-root runner. The CI
+workflow is not read, so the check holds whichever gates .github/workflows/quality.yml carries; that
+workflow's gate lines are reconciled against the repo-root runner by tools/check_ci_parity.py.
 """
 import sys
 
@@ -58,15 +60,16 @@ FROZEN_LINES = (
 # the view-tuple compare).
 RESERVED_MEMBERS = (".opf.toml", ".working/imports", ".working/archive")
 
-# Every roster surface that must register BOTH the validator self-test and the consistency gate.
+# Every roster surface that must register BOTH the validator self-test and the consistency gate: the two
+# local runners and the standalone-closure roster. The CI workflow is deliberately absent (see the module
+# docstring).
 ROSTER_FILES = (
     "tools/run_all_checks.sh",
     "opf/tools/run_all_checks.sh",
     "tools/check_opf_standalone_closure.py",
-    ".github/workflows/quality.yml",
 )
-# Surfaces where the LIVE consistency gate (invoked without --self-test) must run.
-LIVE_GATE_FILES = ("tools/run_all_checks.sh", ".github/workflows/quality.yml")
+# Surfaces where the LIVE consistency gate (invoked without --self-test) must run: the repo-root runner.
+LIVE_GATE_FILES = ("tools/run_all_checks.sh",)
 
 
 def _cant(msg):
@@ -522,6 +525,27 @@ def _active_line_matches(text, pattern):
     return any(rx.search(line) and not line.strip().startswith("#") for line in text.splitlines())
 
 
+def _runner_drifts(read):
+    """C-RUNNERS, lazily: yield one drift message per miss, in order, reading each roster file through
+    read(rel) only when it is reached. BOTH scripts must be registered on an ACTIVE (non-comment) line in
+    every ROSTER_FILES surface, and the LIVE consistency gate (no --self-test) in every LIVE_GATE_FILES
+    surface. The live gate passes _read; the self-test passes an in-memory map."""
+    for rel in ROSTER_FILES:
+        text = read(rel)
+        # The validator name is a substring of the gate name, so match it on a word boundary; the gate
+        # name is unique and matched as a plain active-line substring.
+        if not _active_line_matches(text, r"\b_opf_init_contract\.py"):
+            yield "_opf_init_contract.py not actively registered in {}".format(rel)
+        if not _active_line_has(text, "check_opf_init_contract.py"):
+            yield "check_opf_init_contract.py not actively registered in {}".format(rel)
+    for rel in LIVE_GATE_FILES:
+        text = read(rel)
+        live = any("check_opf_init_contract.py" in line and "--self-test" not in line
+                   and not line.strip().startswith("#") for line in text.splitlines())
+        if not live:
+            yield "live consistency gate (no --self-test) not registered in {}".format(rel)
+
+
 def _checks():
     contract = _read("opf/tools/_opf_init_contract.py")
     schema = _read("opf/tools/_opf_schema.py")
@@ -599,22 +623,10 @@ def _checks():
         if "F{:02d}".format(n) not in review:
             _drift("review register missing F{:02d}".format(n))
 
-    # C-RUNNERS: BOTH scripts registered on an ACTIVE (non-comment) line in every roster surface; and the
-    # LIVE consistency gate (no --self-test) present in the repo-root runner and the CI workflow.
-    for rel in ROSTER_FILES:
-        text = _read(rel)
-        # The validator name is a substring of the gate name, so match it on a word boundary; the gate
-        # name is unique and matched as a plain active-line substring.
-        if not _active_line_matches(text, r"\b_opf_init_contract\.py"):
-            _drift("_opf_init_contract.py not actively registered in {}".format(rel))
-        if not _active_line_has(text, "check_opf_init_contract.py"):
-            _drift("check_opf_init_contract.py not actively registered in {}".format(rel))
-    for rel in LIVE_GATE_FILES:
-        text = _read(rel)
-        live = any("check_opf_init_contract.py" in line and "--self-test" not in line
-                   and not line.strip().startswith("#") for line in text.splitlines())
-        if not live:
-            _drift("live consistency gate (no --self-test) not registered in {}".format(rel))
+    # C-RUNNERS: see _runner_drifts. The first drift ends the gate, so the reads and their order match a
+    # sequential check: a later roster file is never read once an earlier one has drifted.
+    for message in _runner_drifts(_read):
+        _drift(message)
 
     sys.stdout.write("PASS check_opf_init_contract: contract/source consistency\n")
     sys.exit(0)
@@ -1252,6 +1264,96 @@ def _self_test_loaded_exit_in_child():
                 child.returncode, child.stderr[-4000:]))
 
 
+# In-memory roster surfaces for the C-RUNNERS vectors, in the registration shapes the live files use.
+# There is no CI workflow entry: the check must pass without reading one.
+_RUNNER_FIXTURE = {
+    "tools/run_all_checks.sh": (
+        'run_gate "opf-init-contract-selftest" python3 -I -B opf/tools/_opf_init_contract.py --self-test\n'
+        'run_gate "opf-init-contract-check-selftest" python3 -I -B opf/tools/check_opf_init_contract.py'
+        ' --self-test\n'
+        'run_gate "opf-init-contract-check" python3 -I -B opf/tools/check_opf_init_contract.py\n'),
+    "opf/tools/run_all_checks.sh": (
+        'run_gate "opf-init-contract-selftest"  python3 -I -B "$here/_opf_init_contract.py" --self-test\n'
+        'run_gate "opf-init-contract-check-selftest" python3 -I -B "$here/check_opf_init_contract.py"'
+        ' --self-test\n'),
+    "tools/check_opf_standalone_closure.py": (
+        '    ("opf-init-contract-validator-selftest", "_opf_init_contract.py", ["--self-test"]),\n'
+        '    ("opf-init-contract-check-selftest", "check_opf_init_contract.py", ["--self-test"]),\n'),
+}
+_WORKFLOW = ".github/workflows/quality.yml"
+
+
+def _runner_case(files):
+    """(drift messages, the files read in order) for _runner_drifts over the in-memory map files. A read
+    of a file the map lacks is recorded and ends the case with one cannot-evaluate message, as the live
+    _read refuses a missing input."""
+    reads = []
+
+    def read(rel):
+        reads.append(rel)
+        if rel not in files:
+            raise LookupError(rel)
+        return files[rel]
+    try:
+        return list(_runner_drifts(read)), reads
+    except LookupError as exc:
+        return ["cannot evaluate: missing input: {}".format(exc.args[0])], reads
+
+
+def _self_test_runner_rosters():
+    """C-RUNNERS vectors over in-memory rosters: the CI workflow is never read (red when it is put back
+    in ROSTER_FILES or LIVE_GATE_FILES), and every local registration the check still guards is red when
+    it is missing, commented out, or (for the live gate) present only as its self-test."""
+    local_reads = list(ROSTER_FILES) + list(LIVE_GATE_FILES)
+    drifts, reads = _runner_case(_RUNNER_FIXTURE)
+    _expect(drifts == [], "runner rosters: a tree with no CI workflow must pass on the local rosters "
+            "alone: {}".format(drifts))
+    _expect(_WORKFLOW not in reads and reads == local_reads,
+            "runner rosters: reads were {}, expected {}".format(reads, local_reads))
+    with_workflow = dict(_RUNNER_FIXTURE)
+    with_workflow[_WORKFLOW] = "name: Quality\njobs: {}\n"
+    drifts, reads = _runner_case(with_workflow)
+    _expect(drifts == [] and _WORKFLOW not in reads,
+            "runner rosters: a CI workflow carrying neither script must not be read or reported: "
+            "{} (reads {})".format(drifts, reads))
+
+    no_live = dict(_RUNNER_FIXTURE)
+    no_live["tools/run_all_checks.sh"] = "".join(
+        _RUNNER_FIXTURE["tools/run_all_checks.sh"].splitlines(keepends=True)[:2])
+    drifts, _reads = _runner_case(no_live)
+    _expect(drifts == ["live consistency gate (no --self-test) not registered in tools/run_all_checks.sh"],
+            "runner rosters: a repo-root runner with only the self-test lines must drift once: "
+            "{}".format(drifts))
+
+    commented = dict(_RUNNER_FIXTURE)
+    commented["opf/tools/run_all_checks.sh"] = "# " + _RUNNER_FIXTURE["opf/tools/run_all_checks.sh"]
+    drifts, _reads = _runner_case(commented)
+    _expect(drifts == ["_opf_init_contract.py not actively registered in opf/tools/run_all_checks.sh"],
+            "runner rosters: a commented validator registration in the OPF runner must drift once: "
+            "{}".format(drifts))
+
+    closure = dict(_RUNNER_FIXTURE)
+    closure["tools/check_opf_standalone_closure.py"] = (
+        _RUNNER_FIXTURE["tools/check_opf_standalone_closure.py"].splitlines(keepends=True)[0])
+    drifts, _reads = _runner_case(closure)
+    _expect(drifts == ["check_opf_init_contract.py not actively registered in "
+                       "tools/check_opf_standalone_closure.py"],
+            "runner rosters: a closure roster without the gate must drift once: {}".format(drifts))
+
+    # Lazy order: the first drift is yielded before any later roster file is read, so the live gate's
+    # first _drift ends it exactly where a sequential check would.
+    reads = []
+
+    def read(rel):
+        reads.append(rel)
+        return no_live[rel] if rel != "tools/run_all_checks.sh" else ""
+    first = next(_runner_drifts(read), None)
+    _expect(first == "_opf_init_contract.py not actively registered in tools/run_all_checks.sh"
+            and reads == ["tools/run_all_checks.sh"],
+            "runner rosters: the first drift must come before any later read: {} (reads {})".format(
+                first, reads))
+
+
 def _self_test():
     # Git-free / source-free: exercise the matchers on in-memory text, including the comment-evasion cases.
     _expect(_has_line("KEEP_SCHEMA = 1  # comment", "KEEP_SCHEMA = 1"), "exact line ignores comment")
@@ -1273,6 +1375,7 @@ def _self_test():
     labels = ["F{:02d}".format(n) for n in range(1, 31)]
     _expect(labels[0] == "F01" and labels[-1] == "F30" and len(labels) == 30, "F-range")
     _expect(ACTOR_LINE.count('"') == 8, "actor line shape")
+    _self_test_runner_rosters()
     _self_test_census_errors()
     _self_test_loaded_exit_in_child()
     _self_test_fault_channels()
