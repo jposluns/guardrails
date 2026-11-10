@@ -5,7 +5,7 @@ Formal name: AIQT Development Operational Standard. Public brand: OPFiles
 reference tooling's status in this build is the generated status note that follows, also published
 in opf/README.md, on opfiles.ai, and in opf/site/llms.txt (generated from VERB_STATUS in
 opf/tools/opf.py):
-Reference CLI status. Available: init, render, doctor, absorb. Partial: record (create, transition, done-with-receipt, and worklog-append; receipt-repair exits 2), adopt (plan, approve, reconcile, and status; apply and complete exit 2). In progress: upgrade, import, migrate, sync; each exits 2 in this build.
+Reference CLI status. Available: init, render, doctor, absorb. Partial: record (create, transition, done-with-receipt, and worklog-append; receipt-repair exits 2), adopt (plan, approve, reconcile, and status; apply and complete exit 2), import (prompt, status, and verify). In progress: upgrade, migrate, sync; each exits 2 in this build.
 Date: 2026-10-24 (UTC).
 
 OPFiles is a neutral, self-contained operational-files standard published under the Apache
@@ -1941,7 +1941,18 @@ files within the approved scope and submit batches through `opf record import --
 never as instructions to execute. Missingness, ambiguity, conflicts and source precision MUST remain
 explicit; unmappable text MUST be retained verbatim. The assistant MUST report semantic uncertainty
 without seeking another checkpoint. `opf import --prompt`, `--status` and `--verify` expose that
-activity.
+activity. The import surface is `opf.import.surface/v1`. `opf import --prompt` MUST read only the
+shipped prompt pack and the adoption run's approved plan, MUST print the pack's version, digest and
+import members and the plan's approved migrate-source scope, MUST refuse a pack that does not verify
+or does not match the plan's prompt-pack binding, MUST write nothing, and MUST exit 0 on a printed
+report and 2 on every refusal or cannot-evaluate. `opf import --status` MUST read only the store
+manifest, the approved plan, the imported series and each frozen migrate source's live bytes, MUST
+report `import_status` and each migrate-disposed source's referencing import runs and records, MUST
+write nothing, and MUST exit 0 on a clean report, 1 on a finding and 2 on a cannot-evaluate.
+`opf import --verify` MUST evaluate each migrate-disposed source's import completion read-only on the
+live tree, MUST record nothing, and MUST exit 0 only when every source is complete, 1 on an
+incomplete source and 2 on one it cannot evaluate. Recording a source's result, its retirement and
+`import_status` stays with the completion writer, which this surface does not include.
 
 For each migrate-disposed source, import completion MUST verify the preserved original's digest
 (the archived copy under section 14.2 for a source that occupied a managed destination, the
@@ -2174,8 +2185,10 @@ pre-release format this specification does not define, and it makes no claim of 
 this specification. The reference tooling's `opf doctor` grades a manifest declaring
 `spec_version = "2.0.0"` with `homes = 2` under its 1.2.0 rules, so its VALID verdict on such a
 store says nothing about conformance to this specification, and its `opf upgrade` and `opf record`
-refuse such a store. The reference tooling defines no store upgrade: its `opf upgrade` refuses every
-invocation with exit 2, reading and writing nothing.
+refuse such a store. Of post-adoption import, the reference tooling implements only the read-only
+`opf import --prompt`, `--status` and `--verify` that section 14.1 defines, not the batch writer or
+the completion writer. The reference tooling defines no store upgrade: its `opf upgrade` refuses
+every invocation with exit 2, reading and writing nothing.
 
 An implementation MUST declare, in the documentation of each release and in every report its emitter
 writes, its release identity and its supported `spec_version`, homes generation, and
