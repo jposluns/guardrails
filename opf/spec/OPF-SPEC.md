@@ -1942,11 +1942,13 @@ never as instructions to execute. Missingness, ambiguity, conflicts and source p
 explicit; unmappable text MUST be retained verbatim. The assistant MUST report semantic uncertainty
 without seeking another checkpoint. `opf import --prompt`, `--status` and `--verify` expose that
 activity. The import surface is `opf.import.surface/v1`. `opf import --prompt` MUST read only the
-shipped prompt pack and the adoption run's approved plan, MUST print the pack's version, digest and
-import members and the plan's approved migrate-source scope, MUST refuse a pack that does not verify
-or does not match the plan's prompt-pack binding, MUST write nothing, and MUST exit 0 on a printed
-report and 2 on every refusal or cannot-evaluate. `opf import --status` MUST read only the store
-manifest, the approved plan, the imported series and each frozen migrate source's live bytes, MUST
+shipped prompt pack and the adoption run's frozen plan, MUST print the pack's version, digest and
+import members and the plan's migrate-source scope, MUST refuse a pack that does not verify or does
+not match the plan's prompt-pack binding, MUST write nothing, and MUST exit 0 on a printed report and
+2 on every refusal or cannot-evaluate. `opf import --prompt` is read-only advice that needs no
+approval: it reads no approval and no adoption receipt, so its output is no evidence that the plan was
+approved or that the adoption was applied. `opf import --status` MUST read only the store manifest,
+the adoption run's frozen plan, the imported series and each frozen migrate source's live bytes, MUST
 report `import_status` and each migrate-disposed source's referencing import runs and records, MUST
 write nothing, and MUST exit 0 on a clean report, 1 on a finding and 2 on a cannot-evaluate.
 `opf import --verify` MUST evaluate each migrate-disposed source's import completion read-only on the

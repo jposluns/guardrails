@@ -52,7 +52,7 @@ Three rules govern everything else:
 | Record a skip | no command | not yet executable: no command records an attributed skip in this build |
 | Import prompt | `opf import --prompt` | runs; writes nothing |
 | Import status | `opf import --status` | runs; writes nothing |
-| Verify completion | `opf import --verify` | runs; writes nothing and records nothing; on a real store its doctor leg reports cannot-evaluate until the imported-series roster is gradable |
+| Verify completion | `opf import --verify` | runs; records nothing and writes no store or repository content (its git observation can refresh a split index's modification time, as `opf doctor`'s does); on a real store its doctor leg reports cannot-evaluate until the imported-series roster is gradable |
 
 Import cannot start in this build. It needs the adoption receipt that `opf adopt apply` records
 (section 8.8), and `opf adopt apply` is not yet executable (`adopt/SKILL.md`, section 6), so no
@@ -104,11 +104,14 @@ run no step below.
    so stop at step 7 whatever it prints.
 2. **Check the pack binding (runs).** Run `opf import --prompt --root <product root>` and report
    what it prints: it verifies the pack that ships beside the tooling, compares its `version` and
-   `digest` with the approved plan's `prompt_pack.version` and `prompt_pack.digest`, and prints
-   the import members and the approved migrate-source scope. If it refuses the binding, stop and
-   report: this pack is not the one the adopter approved, and the remedy is a fresh plan with its
-   own single approval, never a reinterpreted approval (section 8.8). A pack you deployed
-   elsewhere is outside that check: compare its `pack.toml` with the plan by hand and say so.
+   `digest` with the adoption run's frozen plan's `prompt_pack.version` and `prompt_pack.digest`,
+   and prints the import members and the plan's migrate-source scope. It is read-only advice: it
+   reads no approval and no adoption receipt, so its output is no evidence that the plan was
+   approved or that the adoption was applied, and you never report it as such. If it refuses the
+   binding, stop and report: this pack is not the one the plan binds, and the remedy is a fresh
+   plan with its own single approval, never a reinterpreted approval (section 8.8). A pack you
+   deployed elsewhere is outside that check: compare its `pack.toml` with the plan by hand and
+   say so.
 3. **List the sources.** Read the plan's `import_policy`: `scope` lists the migrate sources in
    order, `skip` is the skip policy (`no-skip` or `attributed-skip`), `missingness` lists the
    closed reasons, and `unparsed` is `retain-verbatim`. For each source, read its `sources` row:
@@ -162,8 +165,9 @@ run no step below.
    command records an attributed skip in this build. Report the source as not imported and stop.
    Never write a skip event by hand.
 9. **Status and verification (run, read-only).** `opf import --prompt`, `--status` and
-   `--verify` expose this activity (section 14.1); each runs read-only and writes nothing.
-   `--status` reports `import_status` and, per migrate source, the import runs whose records
+   `--verify` expose this activity (section 14.1); each runs read-only and writes no store or
+   repository content (`--verify`'s git observation can refresh a split index's modification
+   time, as `opf doctor`'s does). `--status` reports `import_status` and, per migrate source, the import runs whose records
    reference it. For each migrate source, `--verify` evaluates the preserved original's digest,
    at least one imported record referencing the source or a recorded skip under the approved
    policy, and doctor VALID over both the strict store and the imported series on the live tree

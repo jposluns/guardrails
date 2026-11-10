@@ -308,7 +308,7 @@ rows = [
   ["<code>record</code>", "Authors 1 record change at a time and leaves it uncommitted for your review."],
   ["<code>adopt</code>", "Plan, approve, reconcile, and status run; apply and complete refuse with exit 2."],
   ["<code>upgrade</code>", "Refuses with exit 2 and writes nothing: the reference tooling defines no store upgrade."],
-  ["<code>import</code>", "Read-only: <code>--prompt</code>, <code>--status</code> and <code>--verify</code> run and write nothing; the batch writer is not offered, and clean-start adoption is the intake."],
+  ["<code>import</code>", "Read-only: <code>--prompt</code>, <code>--status</code> and <code>--verify</code> run and write no store or repository content (the git observation of <code>--verify</code> can refresh a split index's modification time, as <code>doctor</code>'s does); <code>--prompt</code> reads no approval or adoption receipt, so it is advice, not evidence of either; the batch writer is not offered, and clean-start adoption is the intake."],
   ["<code>migrate</code>", "In progress; exits 2 in this build. Relocates the whole store, keeping git history and the worklog."],
   ["<code>sync</code>", "In progress; exits 2 in this build. The pull and push step of the store consistency contract."],
 ]

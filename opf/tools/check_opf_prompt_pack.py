@@ -491,8 +491,9 @@ IMPORT_PINNED = (
     "| Record a skip | no command | not yet executable: no command records an attributed skip in this build |",
     "| Import prompt | `opf import --prompt` | runs; writes nothing |",
     "| Import status | `opf import --status` | runs; writes nothing |",
-    "| Verify completion | `opf import --verify` | runs; writes nothing and records nothing; on a real store "
-    "its doctor leg reports cannot-evaluate until the imported-series roster is gradable |",
+    "| Verify completion | `opf import --verify` | runs; records nothing and writes no store or repository "
+    "content (its git observation can refresh a split index's modification time, as `opf doctor`'s does); "
+    "on a real store its doctor leg reports cannot-evaluate until the imported-series roster is gradable |",
     "Report the source as not imported and stop.",
 )
 

@@ -38,13 +38,15 @@ is a recognized verb, but this tooling defines no store upgrade: `opf upgrade` r
 every root at exit 2, parsing no argument, resolving no root, reading nothing and writing nothing.
 `import` HAS landed as the
 READ-ONLY surface `opf.import.surface/v1` (spec 14.1): `opf import --prompt` prints the shipped prompt
-pack's version, digest and import members and the approved migrate-source scope once the plan's
-prompt-pack binding matches the verified pack; `opf import --status` reports `[opf].import_status` and
+pack's version, digest and import members and the plan's migrate-source scope once the frozen plan's
+prompt-pack binding matches the verified pack (read-only advice: it reads no approval or adoption
+receipt, so it shows neither); `opf import --status` reports `[opf].import_status` and
 each migrate-disposed source's referencing import runs and records; and `opf import --verify` grades each
 such source through the import-completion evaluator (_opf_import_complete). `--verify` is read-only and
 records nothing: no source result, retirement or import_status is recorded until the per-source result
-writer lands. Each verb writes nothing and exits 2 on every refusal or cannot-evaluate, a NOT-ADOPTED or
-runless root included (a requested operation). Each former mode prints a pointer to the command that
+writer lands. No verb writes store or repository content (--verify's git observation can refresh a
+split index's modification time, as doctor's does), and each exits 2 on every refusal or
+cannot-evaluate, a NOT-ADOPTED or runless root included (a requested operation). Each former mode prints a pointer to the command that
 replaced it and exits 2 (IMPORT_FORMER_MODES): --scan and --plan point to `opf adopt plan`, --review to
 `opf adopt approve` and --apply to `opf import --prompt`; any other unknown token gets the usage error.
 The batch writer `opf record import --batch` (spec 8.8) is not offered in this build.
@@ -19174,7 +19176,9 @@ def _import_select_run(root_abs, run_id):
 def _import_approved_plan(root_abs, run_id):
     """The approved plan the adoption run froze, read contained and no-follow from the run's evidence
     bundle and re-proven from its own bytes (_opf_adopt_apply.frozen_plan). Raises ValueError (the
-    caller's located cannot-evaluate) when the plan is absent, unreadable, unproven or another run's."""
+    caller's located cannot-evaluate) when the plan is absent, unreadable, unproven or another run's.
+    It checks the plan's schema, digest and run identity only: no approval, adoption receipt or bundle
+    inventory is read, so a plan it returns is not shown to be approved or applied."""
     rel = _opf_adopt_apply.plan_rel(run_id)
     root_fd = _opf_adopt_apply._open_product_root(root_abs)
     try:
@@ -19202,8 +19206,11 @@ def _import_migrate_rows(plan):
 
 
 def _import_prompt(root_abs, run_id):
-    """`opf import --prompt` (spec 14.1): print the approved import prompt surface, read-only. It reads
-    only the shipped prompt pack and the adoption run's approved plan. The pack's manifest is read once,
+    """`opf import --prompt` (spec 14.1): print the import prompt surface, read-only. It reads only the
+    shipped prompt pack and the adoption run's frozen plan. It is read-only advice that needs no
+    approval: it checks the plan's schema, digest and run identity (_import_approved_plan), never that
+    the plan was approved or that the adoption was applied (no approval or adoption receipt is read),
+    so its output is no evidence of either. The pack's manifest is read once,
     by the prompt-pack gate's own verified_pack (every member's bytes against the manifest, the manifest
     against the pack digest), which hands back the member rows it verified; the plan's prompt_pack
     {version, digest} binding must be exactly the verified pack. The printed roster is those verified
@@ -19366,8 +19373,10 @@ def _cmd_import(rest):
     --plan, --review, --apply) instead prints only its pointer to the command that replaced it and exits
     2, also before any read; tokens are taken in order, so the first refused token decides the message.
     `--verify` records nothing until the per-source result writer lands. Each verb's contract is its
-    own docstring (_import_prompt, _import_status, _import_verify); all three write nothing, and a NOT-ADOPTED or runless root is a located cannot-evaluate (exit 2),
-    import being a REQUESTED operation. Every residual escape fails closed to exit 2, the class-width
+    own docstring (_import_prompt, _import_status, _import_verify); none writes store or repository
+    content (--verify's git observation can refresh a split index's modification time, as doctor's
+    does), and a NOT-ADOPTED or runless root is a located cannot-evaluate (exit 2), import being a
+    REQUESTED operation. Every residual escape fails closed to exit 2, the class-width
     backstop record and doctor carry. The spec's 14.1 sentence naming these verbs and this surface is
     held to this dispatch by _import_surface_findings (the opf-import-surface self-test)."""
     try:
@@ -20533,10 +20542,13 @@ def _cli_self_test():
             migrate sources are both imported, naming both record ids and no INVALID, 1 over the
             default fixture whose occupying source has no record and no skip, naming it, and says it
             recorded nothing; an unknown --run exits 2. Every fixture tree is byte-identical after all
-            rows, so no verb wrote. Flips: rerouting the dispatch, dropping the surface line, a parser
-            check or the drift finding, mapping INVALID to 0 in --verify, skipping the pack-binding
-            comparison or the pack validation in --prompt, restoring a second read of pack.toml for the
-            --prompt roster, or adding any write turns its row red."""
+            rows, so no row left a file there added, removed or changed in content; the snapshot reads
+            file bytes only (no modification times or other metadata), covers only the fixture
+            directory, and cannot see a write undone before it is taken, so it is no proof that no verb
+            wrote. Flips: rerouting the dispatch, dropping the surface line, a parser check or the drift
+            finding, mapping INVALID to 0 in --verify, skipping the pack-binding comparison or the pack
+            validation in --prompt, or restoring a second read of pack.toml for the --prompt roster
+            turns its row red."""
             import tomllib
             from unittest import mock
             import _opf_import_complete as impc
