@@ -4474,10 +4474,11 @@ _SUB_SEP_VALUE_DEFAULT = (_SUB_SEP_VALUE_LONG, _SUB_SEP_VALUE_SHORT | {"n"})
 # Combined-diff options (and --diff-merges, inline or separated, whose c and cc values select one). Under git
 # 2.53.0, git diff and git diff-index given one with a single revision (git diff HEAD~1 --cc --output=x, git
 # diff-index -p HEAD --cc --output=x) created the --output file empty and printed the diff on stdout, so
-# under those subcommands such an option leaves no diversion. Under log, show and diff-tree git refused a
-# combined diff of a merge commit with --output (fatal: combined diff and '--output' cannot be used
-# together) and wrote an ordinary patch to the --output file for a commit that is not a merge, stash show
-# wrote an ordinary patch there, and format-patch reads --cc as a recipient.
+# under those subcommands such an option leaves no diversion. Any --diff-merges value counts, so git
+# diff-index -p HEAD --diff-merges=off --output=x, which git writes to x, denies, an over-deny. Under log,
+# show and diff-tree git refused a combined diff of a merge commit with --output (fatal: combined diff and
+# '--output' cannot be used together) and wrote an ordinary patch to the --output file for a commit that is
+# not a merge, stash show wrote an ordinary patch there, and format-patch reads --cc as a recipient.
 _COMBINED_DIFF_OPTS = frozenset(("-c", "--cc", "--combined-all-paths", "--diff-merges"))
 _COMBINED_DIFF_STDOUT_SUBS = frozenset(("diff", "diff-index"))
 # During an unresolved merge, git diff and git diff-files compare the working tree with an index that holds

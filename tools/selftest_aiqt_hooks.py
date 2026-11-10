@@ -10440,8 +10440,9 @@ def _heredoc_text_mark_failures():
 # each command).
 _CNSDIF_ORACLE_BASE = "189a280e388d6a2e6d3d1b59b3616d32dac3ad51"
 _CNSDIF_ORACLE_HOOK_PATH = ".aiqt/core/hooks/scripts/aiqt_hooks.py"
-# Every git command form named in the earlier reviews of this guard, pinned. A form whose text needs a
-# placeholder path (a repository given as <repo>) or an elision is not here.
+# Git command forms named in the earlier reviews of this guard, pinned. Not every form named there is
+# here: among those left out is any form whose text needs a placeholder path (a repository given as
+# <repo>) or an elision.
 _CNSDIF_ORACLE_FIXTURES = (
     "git --output=real.txt", "git -oreal.txt", "git --output=x diff", "git -C --output=x diff",
     "git diff --output=out.txt", "git --namespace ns diff --output=out.txt", "git -C . diff --output=out.txt",
@@ -20576,11 +20577,12 @@ def _main_isolated(monitor):
         dexpect("(qa-b4f) log separated --output realfile.txt allows with a note",
                 "git log -p -1 --output realfile.txt", "allow-note")
         # During an unresolved merge (git status shows UU f.txt), git 2.53.0 created x empty and printed a
-        # combined patch on stdout for each of um-1 to um-13, with or without a combined-diff option, and
-        # git diff-index printed a patch for um-14 to um-16 given -c or --cc with no -p. The guard cannot see
-        # whether the index holds unmerged entries, so under diff and diff-files a --output word never removes
-        # the stdout judgement, and under log, diff-tree, diff-index and diff-files -c and --cc count as a
-        # patch flag. Each of um-1 to um-16 was allowed with a note before that rule.
+        # combined patch on stdout for each of um-1 to um-11, with or without a combined-diff option, printed
+        # a patch for um-12 and um-13, which give no --output, and git diff-index printed a patch for um-14
+        # to um-16 given -c or --cc with no -p. The guard cannot see whether the index holds unmerged entries,
+        # so under diff and diff-files a --output word never removes the stdout judgement, and under log,
+        # diff-tree, diff-index and diff-files -c and --cc count as a patch flag. Each of um-1 to um-16 was
+        # allowed with a note before that rule.
         dexpect("(um-1) diff --output= during a merge prints a combined diff on stdout -> denies",
                 "git diff --output=x", "deny")
         dexpect("(um-2) diff separated --output during a merge prints on stdout -> denies",
@@ -20616,7 +20618,9 @@ def _main_isolated(monitor):
         # Sibling producers that print a patch with -c or --cc and no -p (git 2.53.0 printed one for each of
         # cp-1 to cp-3), and the over-denies the rule discloses: git diff --output= with a revision, --cached
         # or --no-index wrote x, and diff-tree -c with no -p printed no patch (cp-4 to cp-6). The controls
-        # show that a --output word still diverts under the other subcommands (git wrote x for each).
+        # show that under diff a --output word with stdout sent to a real file or a pager keeps the note
+        # (cp-7, cp-8), that a --output word still diverts under diff-index with no combined-diff option
+        # (cp-9, git wrote x), and that a global -c is not read as a combined-diff option (cp-10).
         dexpect("(cp-1) log -c with no -p prints a patch -> denies", "git log -c -1", "deny")
         dexpect("(cp-2) log --cc with no -p prints a patch -> denies", "git log --cc -1", "deny")
         dexpect("(cp-3) diff-tree --cc with no -p prints a patch -> denies", "git diff-tree --cc HEAD", "deny")
