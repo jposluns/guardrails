@@ -41,7 +41,7 @@ The full pack and per-assistant setup guides live at [aiqt.ai](https://aiqt.ai).
   run. The pack's tools and hooks require Python 3.14 or newer.
 - **In Claude Code**: install the opt-in hooks plugin, pinned to the release tag, with
   `claude plugin marketplace add https://github.com/jposluns/guardrails.git#v1.0.5 && claude plugin install aiqt-guardrails-hooks@aiqt-guardrails`.
-  The hooks need Python 3.14 or newer as `python3`.
+  The hooks run as `python3` and need the Python floor stated in the item above.
 
 ## 04. Keep what loads at session start small.
 

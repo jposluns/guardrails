@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "e0386cb1d47787545792c016219f5ea1764801d65794161e1aed7768cb996881"
+tree-sha256 = "1b3113ededc6e67c3038114e7577929d722ee0b3be9baa4a8f75ac1075b90a13"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -2421,8 +2421,8 @@ sha256 = "4e25f91d723d0b329a2af16a82abcc891ce6a506ff2874a149e6c4bf58d353db"
 
 [[sources]]
 path = "README.md"
-bytes = 5502
-sha256 = "1f5fa87443083ca039934e33f649ff4acabe22f791ac96fce9e7028fe323206b"
+bytes = 5531
+sha256 = "29c51983b08feed74c1e81b2bff139960678df997ec718ec660630d6c853dfc3"
 
 [[sources]]
 path = "RELEASING.md"
@@ -3641,8 +3641,8 @@ sha256 = "b6c52bd643fc8e4348951064e29cb977f5995959436406351e30f1c1b7f1979d"
 
 [[sources]]
 path = "site/draft-src/install-details.toml"
-bytes = 9998
-sha256 = "1e084c67ad92f5a4edf4870d7cade817d5ba575ba0aa84c815b3b431105cb2ca"
+bytes = 10072
+sha256 = "2ae3a3515fc427f33254a05dd81312c638479ba5d30c4963784badb6853feeb1"
 
 [[sources]]
 path = "site/draft-src/install.toml"
@@ -3981,8 +3981,8 @@ sha256 = "92616c43a59669c212928b7ccf5eb17bda48aa22377e016df898818f7bfa6bb9"
 
 [[sources]]
 path = "site/install/details/index.html"
-bytes = 17543
-sha256 = "fcf9f8e97da7495b93b28841248fd389f92c6e950c9b8919ca5b9f06e31998cb"
+bytes = 17617
+sha256 = "ac272b4408fe579dd7e043651e8e6a36a6f35e7713f697e51f5bd91b2c18a36b"
 
 [[sources]]
 path = "site/install/index.html"
