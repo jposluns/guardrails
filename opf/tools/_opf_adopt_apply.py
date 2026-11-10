@@ -5805,14 +5805,17 @@ def gather_release_pack(source_members, product_root):
     product path its create-only plant must find absent). An unopenable release root refuses naming the
     release root. Every read is contained, no-follow, regular and single-linked (_read_live), and an
     absent or unreadable file raises AdoptApplyError naming its path: there is no fallback location. This
-    gather makes NO trust decision: every returned byte is judged by verify_pack_member against the plan's
-    agreed ROOT, so a wrong or substituted release tree refuses there, never here. Disclosed: an opf-only
-    copy shipped without .aiqt/ beside opf/ cannot supply a plant-governance row (the absent manifest
-    refuses here, naming what an opf-only distribution must ship; a plan with no plant row never reads the
-    release); the manifest is the whole release's, so a source row outside the named members needs no file
-    present; root.txt sits in the same writable tree as the manifest, so it is no independent anchor
-    (independence is the plan's captured anchor_sha256, verify_pack_member's first gate); and each member
-    is read in full, bounded by the journal's contained-read cap, before any digest judges it."""
+    gather makes NO trust decision: no byte it returns is planted before verify_pack_member has judged it
+    against the plan's agreed ROOT. So a wrong or substituted release tree that lacks a file the gather
+    reads (the manifest, root.txt or a named member), or holds one _read_live refuses, refuses here, while
+    gathering, before verify_pack_member is reached; one whose files are all gathered refuses at
+    verify_pack_member when their bytes are not the agreed release's. Disclosed: an opf-only copy shipped
+    without .aiqt/ beside opf/ cannot supply a plant-governance row (the absent manifest refuses here,
+    naming what an opf-only distribution must ship; a plan with no plant row never reads the release); the
+    manifest is the whole release's, so a source row outside the named members needs no file present;
+    root.txt sits in the same writable tree as the manifest, so it is no independent anchor (independence
+    is the plan's captured anchor_sha256, verify_pack_member's first gate); and each member is read in
+    full, bounded by the journal's contained-read cap, before any digest judges it."""
     root_fd = _open_product_root(_RELEASE_ROOT, "release root")
     try:
         product_fd = _open_product_root(product_root)
