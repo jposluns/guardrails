@@ -151,12 +151,20 @@ raises Unarmed for each), the fail-closed direction, disclosed in the residuals 
 
 Completion. A completed wait shows only that the leader exited and both pipes closed, so run()
 checks two more things before it returns. First, the group the leader led (_sweep_group): a
-member still in it (a descendant started with its output redirected, no setsid or setpgid) is
-SIGKILLed through the leader's pidfd and waited out (at most REAP_S), and the run leaves as Hung
-kind "descendant", never as a pass; the leader's own exit status rides it as for every stop.
-Second, the budget: the watch reads it only when a poll times out, so a completion whose
-load-adjusted elapsed time exceeds budget_s (strictly: a completion exactly at the budget passes)
-leaves as Hung kind "budget". No caller relies on a late completion counting as a pass.
+member still RUNNING in it (a descendant started with its output redirected, no setsid or
+setpgid) makes the run leave as Hung kind "descendant", never as a pass, and the leader's own
+exit status rides it as for every stop. A member that has already exited but is not yet reaped
+(a zombie, or a task already exiting) is not running and does not count: this process is not
+its parent, cannot reap it, and leaves it to the parent it was re-parented to. The group is
+then sent SIGKILL through the leader's pidfd and polled, at most REAP_S, until no member is
+still running; the Hung reason says whether the SIGKILL was sent or failed and whether a member
+was still running at that bound. Second, the budget (_over_budget): the watch reads it only when
+a poll times out, so a completion whose load-adjusted elapsed time exceeds budget_s leaves as
+Hung kind "budget". The two ends differ by derivation: a child still running when the clock
+reads exactly the budget is stopped, and a child whose completion is read at exactly the budget
+passes. A descendant stop is judged first, so it takes precedence when both apply. An honest
+child that completes after its load-adjusted budget, under host load included, now fails as a
+budget stop where it used to pass; the callers' treatment of that stop is stated above.
 
 git. run() does not knowingly launch git (ValueError before any launch). It resolves the program the
 exec in the child would run, the way that exec looks it up: a head with a directory part relative to cwd,
@@ -190,6 +198,11 @@ load-adjusted budget alone bounds children; without POSIX process groups (Window
 direct child is killed, and without the pidfd group signal a stop that comes after Popen reaped the
 leader kills no group member (disclosed in the Hung reason), and a member left in the group of a
 leader that COMPLETED is neither found nor killed, so that run still returns as completed; the
+completion sweep tells a running member from an exited one by reading /proc, so where /proc
+cannot be read in full (no /proc, a scan cut short, an entry hidepid makes unreadable) any
+member counts as running and a leader that leaves only a zombie fails as "descendant", while a
+running member that /proc hides entirely (hidepid=invisible, a member under another user's
+credentials) beside an exited member it does show is missed and that run passes; the
 unreaped-leader premise behind
 the numeric killpg fallback assumes this process has no other reaper of the leader (no thread of
 it calling os.wait or os.waitpid(-1), and SIGCHLD not set to SIG_IGN): another reaper could free
@@ -264,6 +277,9 @@ except Exception:  # noqa: BLE001  any failure to bind libc prctl only disables 
 # pidfd_send_signal flag that signals the process group the pidfd's process leads; a kernel without
 # it refuses the flag with EINVAL and the stop falls back as _kill_group states.
 PIDFD_SIGNAL_PROCESS_GROUP = getattr(signal, "PIDFD_SIGNAL_PROCESS_GROUP", 1 << 2)
+# Linux's PF_EXITING (include/linux/sched.h), the flags field of /proc/<pid>/stat: set when a task
+# starts to exit, before its files close, so a task past the close but not yet a zombie shows it.
+_PF_EXITING = 0x4
 # Known spellings of heads run() refuses outright: each runs a program its arguments name, so git could
 # hide behind it. A list of spellings, not a proof: an interpreter head or an unlisted launcher can still
 # run git (see the module docstring).
@@ -467,7 +483,9 @@ class Hung(subprocess.TimeoutExpired):
     """A bounded child was stopped: kind "stall" (no CPU or output progress for stall_s, a heuristic that
     a correct silent wait also trips), "budget" (the load-adjusted budget was spent, also by a child
     that completed after it), "descendant" (the child completed but a member of its process group was
-    still running and was killed) or "monitor" (the monitoring itself failed). The stop is attributed to the bound, never proven a hang. returncode is the
+    still running, an exited member not yet reaped not counted; the reason says whether the SIGKILL
+    sent to the group then stopped it) or "monitor" (the monitoring itself failed). The stop is
+    attributed to the bound, never proven a hang. returncode is the
     exit status the child had already reached on its own before the stop (a descendant still held its
     output open, or the fault arrived only after a completed wait), or None when the stop ended it or
     the status could not be read: the caller judges a
@@ -577,23 +595,97 @@ def _kill_group(proc, pidfd):
     return ""
 
 
-def _sweep_group(pidfd, reap_s=None, sender=None):
-    """After the leader COMPLETED and Popen reaped it: find, kill and wait out every member still in
-    the group it led (a descendant started in that group that outlived the leader with its output
-    redirected, so the completed wait never saw it). The group is addressed only through the
-    leader's own pid record (pidfd_send_signal with PIDFD_SIGNAL_PROCESS_GROUP, exact after the
-    reap): signal 0 probes it, ESRCH means it is empty, and any other answer (delivered, or EPERM
-    for a member this user cannot signal) means a member remained; that group is then SIGKILLed and
-    probed again until it is empty, at most reap_s (REAP_S) seconds, since the members' new parent
-    reaps them. Returns (remained, note): True with "" or a note naming what failed, False for an
-    empty group, or None with the reason the group could not be checked (no pidfd, no
-    pidfd_send_signal, or a kernel refusing the group flag with EINVAL): the leader is reaped by
-    then, so nothing is signalled by number, the disclosed residual. sender stands in for
-    signal.pidfd_send_signal."""
+def _group_members(pgid, limit_s=None, names=None, clock=None, opener=None):
+    """(running, exited, complete) for the members of process group pgid, read from each
+    /proc/<pid>/stat: exited lists every member that has exited but is not yet reaped (state Z or
+    X, or flags carrying _PF_EXITING, the stretch between the start of its exit, which closes its
+    files and so its pipe ends, and its becoming a zombie), running every other member. A member
+    with more than one thread counts as running whatever its state (a main thread that exited
+    while other threads run shows Z). complete is judged exactly as _proc_table judges it: False
+    where the scan was cut short at limit_s (SCAN_S), /proc cannot be listed, or a present entry
+    could not be read or parsed. names, clock and opener stand in for the /proc listing,
+    time.monotonic and open."""
+    limit_s = SCAN_S if limit_s is None else limit_s
+    clock = time.monotonic if clock is None else clock
+    opener = open if opener is None else opener
+    if names is None:
+        try:
+            names = os.listdir("/proc")
+        except OSError:
+            return [], [], False
+    began = clock()
+    running, exited, complete = [], [], True
+    for name in names:
+        if clock() - began >= limit_s:
+            return running, exited, False
+        if not name.isdigit():
+            continue
+        try:
+            with opener("/proc/" + name + "/stat", "rb") as handle:
+                raw = handle.read()
+        except OSError as exc:
+            if exc.errno in (errno.ENOENT, errno.ESRCH):
+                continue  # gone between the listing and the read: not a member any more
+            complete = False
+            continue
+        fields = raw[raw.rfind(b")") + 2:].split()
+        try:
+            state, group = fields[0], int(fields[2])
+            flags, threads = int(fields[6]), int(fields[17])
+        except (IndexError, ValueError):
+            complete = False
+            continue
+        if group != pgid:
+            continue
+        if threads <= 1 and (state in (b"Z", b"X") or flags & _PF_EXITING):
+            exited.append(int(name))
+        else:
+            running.append(int(name))
+    return running, exited, complete
+
+
+def _sweep_group(pidfd, pgid, reap_s=None, sender=None, members=None):
+    """After the leader COMPLETED and Popen reaped it: find every member still RUNNING in the group
+    it led (a descendant started in that group that outlived the leader with its output
+    redirected, so the completed wait never saw it), SIGKILL the group and poll until no member is
+    still running. The group is addressed only through the leader's own pid record
+    (pidfd_send_signal with PIDFD_SIGNAL_PROCESS_GROUP, exact after the reap): signal 0 probes it,
+    and ESRCH means it is empty. The probe also answers for a member that has exited but is not
+    yet reaped (a zombie), which is not running: this process is not its parent and cannot reap
+    it, so a non-empty group is then read through /proc (members, _group_members, pgid being the
+    leader's pid number, which the kernel cannot hand to another process while the group still has
+    a member). The group counts as having a running member when that scan finds one, when the scan
+    is not complete, or when the scan finds no member at all while a second probe still finds the
+    group non-empty (a member the scan cannot see); every one of those is the fail-closed
+    direction. Returns (remained, note): False with "" when no member is running; True with a
+    note saying whether the SIGKILL was sent or failed and whether a member was still running
+    reap_s (REAP_S) seconds later (an exited member is left to the parent it was re-parented to);
+    or None with the reason the group could not be checked (no pidfd, no pidfd_send_signal, or a
+    kernel refusing the group flag with EINVAL): the leader is reaped by then, so nothing is
+    signalled by number, the disclosed residual. sender stands in for signal.pidfd_send_signal."""
     reap_s = REAP_S if reap_s is None else reap_s
     sender = getattr(signal, "pidfd_send_signal", None) if sender is None else sender
+    members = _group_members if members is None else members
     if pidfd is None or sender is None:
         return None, "no pidfd group signal was available after the leader reap"
+
+    def probe_empty():
+        try:
+            sender(pidfd, 0, None, PIDFD_SIGNAL_PROCESS_GROUP)
+        except ProcessLookupError:
+            return True
+        except OSError:
+            pass  # EPERM: a member this user cannot signal is still there
+        return False
+
+    def still_running():
+        if probe_empty():
+            return False
+        running, exited, complete = members(pgid)
+        if running or not complete:
+            return True
+        return not exited and not probe_empty()
+
     try:
         sender(pidfd, 0, None, PIDFD_SIGNAL_PROCESS_GROUP)
     except ProcessLookupError:
@@ -601,24 +693,33 @@ def _sweep_group(pidfd, reap_s=None, sender=None):
     except OSError as exc:
         if exc.errno == errno.EINVAL:
             return None, "this kernel refuses the pidfd group flag (EINVAL)"
-    note = ""
+    if not still_running():
+        return False, ""
     try:
         sender(pidfd, _KILL, None, PIDFD_SIGNAL_PROCESS_GROUP)
+        note = "; SIGKILL was sent to the group"
     except ProcessLookupError:
-        return True, ""  # the member left between the probe and the kill
+        return True, "; the group was empty before SIGKILL could be sent"
     except OSError as exc:
-        note = "; the group kill failed ({}: {})".format(type(exc).__name__, exc)
+        note = "; SIGKILL to the group failed ({}: {})".format(type(exc).__name__, exc)
     deadline = time.monotonic() + reap_s
-    while True:
-        try:
-            sender(pidfd, 0, None, PIDFD_SIGNAL_PROCESS_GROUP)
-        except ProcessLookupError:
-            return True, note
-        except OSError:
-            pass  # a member is still there (EPERM included); keep waiting until the deadline
+    while still_running():
         if time.monotonic() >= deadline:
-            return True, note + "; a member was still present {} s after SIGKILL".format(reap_s)
+            return True, note + "; a member was still running {} s later".format(reap_s)
         time.sleep(0.05)
+    return True, note + "; then no member was still running"
+
+
+def _over_budget(spent, budget_s, completed):
+    """The one budget test, for both ends of a run; spent is a load-adjusted reading taken AFTER
+    the state it judges. A child still RUNNING at that reading has not completed by then, so it
+    has overrun once spent >= budget_s: at exactly the budget it is still running, so it did not
+    complete within it (the watch's end). A child that COMPLETED before the reading completed at
+    or before spent, so the reading shows an overrun only once spent > budget_s: a completion read
+    at exactly the budget completed within it (run()'s end after a completed wait). The reading is
+    an upper bound on the completion, so a completion read late (the wait returned, then the clock
+    was read) is judged on the later reading, the conservative direction."""
+    return spent > budget_s if completed else spent >= budget_s
 
 
 def _group_signal_supported():
@@ -877,7 +978,7 @@ def _watch(proc, argv, pending, budget_s, stall_s, clock, start, wall_start, pol
                            "heuristic stall bound fired: no CPU or output progress for {:.1f} s (stall bound "
                            "{} s); silence is not proof of a hang".format(idle, stall_s),
                            held[0], held[1]) from None
-            if clock() - start >= budget_s:
+            if _over_budget(clock() - start, budget_s, completed=False):
                 raise Hung(argv, budget_s, "budget",
                            "load-adjusted budget of {} s spent after {:.1f} s of wall time (load factor now "
                            "{:.1f})".format(budget_s, time.monotonic() - wall_start, load_factor()),
@@ -1073,19 +1174,23 @@ def run(argv, *, budget_s, stall_s, input=None, cwd=None, env=None, text=False, 
                           and not _armed_byte(armed_read))
         if not refused_arming:
             # A completed wait proves only that the LEADER exited and both pipes closed: a member
-            # it started in its own group with its output redirected can still be running. Every
-            # such member is killed and waited out here, and the run cannot pass: it leaves as
-            # Hung kind "descendant" (the handler below adds the leader's own exit status).
-            remained, sweep_note = _sweep_group(group_fd)
+            # it started in its own group with its output redirected can still be running. A
+            # running member makes the run leave as Hung kind "descendant" (the handler below
+            # adds the leader's own exit status); the group is sent SIGKILL and polled until no
+            # member is still running, and the reason says how that went. An exited member not
+            # yet reaped is not running and does not count. Judged before the budget, so a
+            # descendant stop takes precedence when both apply.
+            remained, sweep_note = _sweep_group(group_fd, proc.pid)
             if remained:
                 raise Hung(argv, budget_s, "descendant",
-                           "the leader exited but a member of its process group was still running; "
-                           "it was killed{}".format(sweep_note), held[0], held[1])
+                           "the leader exited but a member of its process group was still "
+                           "running{}".format(sweep_note), held[0], held[1])
             # The watch reads the budget only when a poll times out, so a leader that completes
             # after its budget was spent (inside the last poll) is judged here: a completion
-            # whose load-adjusted elapsed time EXCEEDS budget_s is a budget overrun, not a pass.
+            # whose load-adjusted elapsed time EXCEEDS budget_s is a budget overrun, not a pass
+            # (_over_budget derives this end apart from the watch's end).
             spent = clock() - start
-            if spent > budget_s:
+            if _over_budget(spent, budget_s, completed=True):
                 raise Hung(argv, budget_s, "budget",
                            "the child completed after its load-adjusted budget of {} s was spent "
                            "({:.3f} s of load-adjusted time, {:.1f} s of wall time)"
@@ -2459,13 +2564,10 @@ def vector_failures(python):
                             "subprocess.Popen([sys.executable, \"-I\", \"-c\","
                             " \"import time; time.sleep(30)\", sys.argv[1]])\n"
                             "sys.exit(7)\n", vector_tag], budget_s=3600, stall_s=3600, poll_s=0.2)
+                # The member the watchdog killed can still be in the group (exited, not yet
+                # reaped by its new parent) when the completed wait is swept; it is not running,
+                # so the run completes with the leader's own 7, and any stop fails this vector.
                 got = done.returncode
-            except Hung as exc:
-                # The member the watchdog killed can still be in the group (not yet reaped by its
-                # new parent) when the completed wait is swept: a descendant stop carrying the
-                # leader's own 7 is the same outcome; any other stop is this vector failing.
-                got = exc.returncode if exc.kind == "descendant" else "{}: {}".format(
-                    type(exc).__name__, exc)
             except Exception as exc:  # noqa: BLE001  any escape is this vector failing
                 got = "{}: {}".format(type(exc).__name__, exc)
         finally:
@@ -3302,13 +3404,17 @@ def vector_failures(python):
 
     # A completed leader proves nothing about the members it left in its own group: a leader that
     # starts a member with its output redirected (no setsid or setpgid) and exits must not pass,
-    # whatever its own status, and the member is gone before run() leaves. A completion after the
-    # load-adjusted budget was spent is a budget overrun, checked on each side of the bound with
-    # an injected clock and once for real (a 0.3 s child under a 0.001 s budget, finishing inside
-    # its first poll, so the in-flight budget check never runs).
+    # whatever its own status, and the member is no longer running when run() leaves. A leader
+    # that leaves only an exited, unreaped child (a zombie) leaves nothing running, so it passes.
+    # A completion after the load-adjusted budget was spent is a budget overrun, checked on each
+    # side of the bound with an injected clock and once for real (a 0.3 s child under a 0.001 s
+    # budget, finishing inside its first poll, so the in-flight budget check never runs); the
+    # watch's own end, for a child still running at the reading, is checked the same way.
     sweep_dir = tempfile.mkdtemp(prefix="load-bound-vector-sweep-")
     try:
         leader_path = os.path.join(sweep_dir, "leader.py")
+        zombie_path = os.path.join(sweep_dir, "zombie.py")
+        fixture_path = os.path.join(sweep_dir, "subreaper.py")
         quick_path = os.path.join(sweep_dir, "quick.py")
         late_path = os.path.join(sweep_dir, "late.py")
         for path, body in ((leader_path, "import subprocess, sys\n"
@@ -3316,6 +3422,24 @@ def vector_failures(python):
                                          "time; time.sleep(600)\", sys.argv[2]], "
                                          "stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, "
                                          "stderr=subprocess.DEVNULL)\nsys.exit(int(sys.argv[1]))\n"),
+                           (zombie_path, "import os, sys\n"
+                                         "pid = os.posix_spawn(sys.executable, [sys.executable, "
+                                         "\"-I\", \"-c\", \"pass\"], os.environ)\n"
+                                         "os.waitid(os.P_PID, pid, os.WEXITED | os.WNOWAIT)\n"
+                                         "sys.exit(0)\n"),
+                           (fixture_path, "import ctypes, sys\n"
+                                          "if ctypes.CDLL(None).prctl(36, 1, 0, 0, 0) != 0:\n"
+                                          "    print(\"no subreaper\")\n"
+                                          "    sys.exit(0)\n"
+                                          "sys.path.insert(0, sys.argv[1])\n"
+                                          "import _load_bound\n"
+                                          "try:\n"
+                                          "    done = _load_bound.run([sys.executable, \"-I\", "
+                                          "\"-B\", sys.argv[2], sys.argv[3]], budget_s=60, "
+                                          "stall_s=60)\n"
+                                          "    print(\"returned\", done.returncode)\n"
+                                          "except _load_bound.Hung as exc:\n"
+                                          "    print(exc.kind, exc.returncode)\n"),
                            (quick_path, "pass\n"), (late_path, "import time\ntime.sleep(0.3)\n")):
             with open(path, "w", encoding="utf-8") as handle:
                 handle.write(body)
@@ -3339,6 +3463,22 @@ def vector_failures(python):
                                     "in its group cannot pass, and the member is killed): expected "
                                     "('descendant', {}) and no member left, got {!r}, left alive {!r}"
                                     .format(status, status, got, left))
+            # The leader waits (WNOWAIT, so without reaping) until its child has exited, then
+            # exits itself. The run is made from a fixture process that is a child subreaper and
+            # never reaps an orphan, so the exited child is re-parented to the fixture and stays a
+            # zombie in the group when the sweep runs, every time (a reaping new parent would
+            # usually free it first and hide the case).
+            try:
+                done = run([python, "-I", "-B", fixture_path,
+                            os.path.dirname(os.path.abspath(__file__)), zombie_path, vector_tag],
+                           budget_s=120, stall_s=120, text=True)
+                got = (done.returncode, done.stdout.strip())
+            except Exception as exc:  # noqa: BLE001  an escape is this vector's failure
+                got = "{}: {}".format(type(exc).__name__, exc)
+            if got != (0, "returned 0"):
+                failures.append("_load_bound vector (a leader leaving only an exited, unreaped "
+                                "child is not stopped, under a subreaper that does not reap it): "
+                                "expected (0, 'returned 0'), got {!r}".format(got))
 
         def fixed_clock(value):
             readings = iter((0.0,))
@@ -3368,8 +3508,119 @@ def vector_failures(python):
         if got != ("budget", 0):
             failures.append("_load_bound vector (a child completing after its budget is a budget "
                             "overrun): expected ('budget', 0), got {!r}".format(got))
+        # The watch's end: a child still running when the clock reads exactly the budget is
+        # stopped; one reading just inside keeps running and then completes inside the budget.
+        below, above = math.nextafter(5.0, 0.0), math.nextafter(5.0, 6.0)
+        for label, spent, want in (("just inside", below, ("returned", 0)),
+                                   ("exactly at", 5.0, ("budget", None)),
+                                   ("just outside", above, ("budget", None))):
+            try:
+                done = run([python, "-I", "-B", late_path, vector_tag], budget_s=5.0, stall_s=60,
+                           poll_s=0.05, clock=fixed_clock(spent))
+                got = ("returned", done.returncode)
+            except Hung as exc:
+                got = (exc.kind, exc.returncode)
+            except Exception as exc:  # noqa: BLE001  an escape is this vector's failure
+                got = "{}: {}".format(type(exc).__name__, exc)
+            if got != want:
+                failures.append("_load_bound vector (a child still running {} its budget, {!r} of "
+                                "5.0 s): expected {!r}, got {!r}".format(label, spent, want, got))
+        for spent, completed, want in ((below, False, False), (5.0, False, True),
+                                       (above, False, True), (below, True, False),
+                                       (5.0, True, False), (above, True, True)):
+            if _over_budget(spent, 5.0, completed) is not want:
+                failures.append("_load_bound vector (_over_budget({!r}, 5.0, completed={}) is {})"
+                                .format(spent, completed, want))
     finally:
         shutil.rmtree(sweep_dir)
+
+    # The sweep counts only RUNNING members, read through injected /proc entries: a zombie, a
+    # dead task and a single-threaded task already exiting are exited; a multi-threaded task
+    # showing Z (its main thread gone) is running; another group's task is not a member; an
+    # entry gone mid-scan is skipped; an unreadable or unparseable entry, or a scan cut short,
+    # leaves the answer incomplete.
+    def stat_line(pid, state, group, flags=0, threads=1):
+        return ("{} (a) b) {} 1 {} 1 0 -1 {} 0 0 0 0 0 0 0 0 20 0 {} 0 100\n"
+                .format(pid, state, group, flags, threads)).encode("ascii")
+    entries = {"10": stat_line(10, "R", 50), "11": stat_line(11, "Z", 50),
+               "12": stat_line(12, "S", 50, flags=_PF_EXITING | 0x400000),
+               "13": stat_line(13, "Z", 50, threads=3), "14": stat_line(14, "R", 99),
+               "15": FileNotFoundError(errno.ENOENT, "gone"), "18": stat_line(18, "X", 50)}
+
+    def table_opener(table):
+        def opener(path, mode):
+            entry = table[path.split("/")[2]]
+            if isinstance(entry, Exception):
+                raise entry
+            return io.BytesIO(entry)
+        return opener
+    for label, extra, clock_values, want in (
+            ("complete", {}, None, ([10, 13], [11, 12, 18], True)),
+            ("unreadable entry", {"16": PermissionError(errno.EACCES, "hidden")}, None,
+             ([10, 13], [11, 12, 18], False)),
+            ("unparseable entry", {"17": b"17 (a) R 1\n"}, None, ([10, 13], [11, 12, 18], False)),
+            ("cut short", {}, (0.0, 0.0, 0.0, 0.0, 99.0), ([10], [11], False))):
+        table = dict(entries, **extra)
+        names = ["self"] + sorted(table, key=int)
+        scan_clock = None if clock_values is None else iter(clock_values).__next__
+        got = _group_members(50, limit_s=5.0, names=names, clock=scan_clock,
+                             opener=table_opener(table))
+        if got != want:
+            failures.append("_load_bound vector (group member scan, {}): expected {!r}, got {!r}"
+                            .format(label, want, got))
+
+    # The sweep's outcomes and its words, with an injected sender and scan: the run fails only
+    # for a running member, and the note says whether SIGKILL was sent or failed, never that a
+    # member was killed when the kill failed.
+    def scripted(probes, kill_error=None):
+        sent = []
+
+        def sender(fd, sig, info, flags):
+            sent.append(sig)
+            if sig == _KILL:
+                if kill_error is not None:
+                    raise kill_error
+                return
+            outcome = probes.pop(0) if len(probes) > 1 else probes[0]
+            if outcome is not None:
+                raise outcome
+        return sender, sent
+
+    def scans(*answers):
+        answers = list(answers)
+        return lambda pgid: answers.pop(0) if len(answers) > 1 else answers[0]
+    gone = ProcessLookupError(errno.ESRCH, "no such process")
+    for label, probes, kill_error, members, want, words, absent in (
+            ("empty group", [gone], None, scans(([], [], True)), (False, ""), (), ()),
+            ("flag refused", [OSError(errno.EINVAL, "invalid")], None, scans(([], [], True)),
+             (None, "this kernel refuses the pidfd group flag (EINVAL)"), (), ()),
+            ("zombie only", [None], None, scans(([], [11], True)), (False, ""), (), ()),
+            ("scan sees none, group empty since", [None, None, gone], None, scans(([], [], True)),
+             (False, ""), (), ()),
+            ("running, then stopped", [None], None, scans(([10], [], True), ([], [10], True)),
+             True, ("SIGKILL was sent to the group", "then no member was still running"),
+             ("failed",)),
+            ("kill refused", [None], PermissionError(errno.EPERM, "not permitted"),
+             scans(([10], [], True)), True,
+             ("SIGKILL to the group failed (PermissionError", "still running 0.2 s later"),
+             ("was sent", "no member was still running")),
+            ("incomplete scan", [None], None, scans(([], [], False)), True,
+             ("SIGKILL was sent to the group", "still running 0.2 s later"), ())):
+        sender, sent = scripted(list(probes), kill_error)
+        got = _sweep_group(-1, 50, reap_s=0.2, sender=sender, members=members)
+        killed = sent.count(_KILL)
+        if want is True:
+            fine = (got[0] is True and killed == 1 and all(word in got[1] for word in words)
+                    and not any(word in got[1] for word in absent))
+        else:
+            fine = got == want and killed == 0
+        if not fine:
+            failures.append("_load_bound vector (group sweep, {}): expected {!r} with {!r} and "
+                            "not {!r}, got {!r} after {} SIGKILL".format(label, want, words, absent,
+                                                                        got, killed))
+    if _sweep_group(None, 50, sender=scripted([None])[0]) != (
+            None, "no pidfd group signal was available after the leader reap"):
+        failures.append("_load_bound vector (group sweep without a pidfd checks nothing)")
 
     clock = LoadClock(wall=iter((0.0, 10.0, 20.0)).__next__, factor=iter((1.0, 3.0, 1.0)).__next__)
     readings = (clock(), clock())
