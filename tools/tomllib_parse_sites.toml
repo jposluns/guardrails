@@ -794,7 +794,7 @@ reason = "test-code"
 path = "opf/tools/_opf_views.py"
 function = "_self_test"
 form = "call"
-count = 10
+count = 11
 class = "EXEMPT"
 reason = "test-code"
 
