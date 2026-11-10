@@ -2279,6 +2279,63 @@ def _presence_outcomes(module):
     return out
 
 
+# The presence cases evaluate() itself reads, with its own defaults, so its call into _reads_of is pinned too.
+EVALUATE_PRESENCE_CASES = ("absent", "regular", "dangling-symlink", "unsearchable-package")
+
+
+def _evaluate_outcomes(module):
+    """({case: (the class of tools/entry.py, None) or (None, the cannot-evaluate reason)}, searchable) for each
+    EVALUATE_PRESENCE_CASES helper, read through module.evaluate with no lstat passed, over one fixture repository
+    in a temporary directory removed after. The fixture holds every file evaluate() reads, copied from this tree,
+    each Python one but the canonical file emptied (the hook copies keep empty HANDLERS and HANDLER_EVENT tables),
+    so evaluate() reaches classify() with findings and no early cannot-evaluate; tools/entry.py, its one tracked
+    entry point, imports helper. git runs in the fixture only, under check_python_floor's private configuration.
+    searchable is True when this account looks inside the mode 000 package directory anyway (a privileged
+    account), where that package is inspectable and is read."""
+    rels = [CANONICAL_REL, LOCAL_RUNNER, OPF_RUNNER, HOOKS_JSON_REL, check_entry_guard.REGISTRY_REL]
+    rels.extend(rel for rel, _name in CLI_COPIES + ENTRY_COPIES + SELF_TEST_FIRST_COPIES)
+    rels.extend(HOOK_COPIES)
+    rels.extend(WORKFLOWS_REL + "/" + name for name in sorted(os.listdir(ROOT / WORKFLOWS_REL))
+                if name.endswith((".yml", ".yaml")))
+    out, searchable, locked = {}, False, None
+    with tempfile.TemporaryDirectory(prefix="child-status-evaluate-") as base:
+        root = Path(base) / "tree"
+        helper = root / "tools" / "helper.py"
+        try:
+            for rel in sorted(set(rels)):
+                if rel in HOOK_COPIES:
+                    _copy(rel, root, "HANDLERS = {}\nHANDLER_EVENT = {}\n")
+                else:
+                    _copy(rel, root, "" if rel.endswith(".py") and rel != CANONICAL_REL else None)
+            _copy("tools/entry.py", root, "import helper\n\nif __name__ == \"__main__\":\n    pass\n")
+            check_python_floor._track(root)
+            for case in EVALUATE_PRESENCE_CASES:
+                if case == "regular":
+                    helper.write_text("import subprocess\n", encoding="utf-8")
+                elif case == "dangling-symlink":
+                    os.symlink(Path(base) / "nowhere.py", helper)
+                elif case == "unsearchable-package":
+                    locked = root / "tools" / "helper"
+                    locked.mkdir()
+                    (locked / "__init__.py").write_text("import subprocess\n", encoding="utf-8")
+                    os.chmod(locked, 0)
+                    try:
+                        os.lstat(locked / "__init__.py")
+                        searchable = True
+                    except OSError:
+                        pass
+                try:
+                    out[case] = (module.evaluate(root)[0].get("tools/entry.py"), None)
+                except module.CannotEvaluate as exc:
+                    out[case] = (None, str(exc))
+                if case in ("regular", "dangling-symlink"):
+                    helper.unlink()
+        finally:
+            if locked is not None:
+                os.chmod(locked, 0o700)
+    return out, searchable
+
+
 def _vectors(module, trees, texts, canonical_tree):
     """{vector id: ok} for every static vector, against module (this gate or a mutant of it); a vector whose
     evaluation raises is not ok."""
@@ -2353,6 +2410,17 @@ def _vectors(module, trees, texts, canonical_tree):
         """True when the case's helper is cannot-evaluate, the reason naming its candidate path and what."""
         reads, reason = presence.get(case, ((), None))
         return reads is None and reason.startswith("tools/helper") and what in reason
+
+    try:
+        evaluated, searchable = _evaluate_outcomes(m)
+    except Exception:
+        evaluated, searchable = {}, False
+
+    def evaluate_refused(case, candidate, what):
+        """True when evaluate() is cannot-evaluate for the case, the reason opening with the candidate path and
+        naming what."""
+        kind, reason = evaluated.get(case, ("", None))
+        return kind is None and reason.startswith(candidate) and what in reason
 
     def host_job_held(job):
         text = texts["host-pin-before-probe"].replace("opf-host-patch", job, 1)
@@ -2612,6 +2680,14 @@ def _vectors(module, trees, texts, canonical_tree):
         ("completeness/local-import-fifo-cannot-evaluate", lambda: refused("fifo", "is not a regular file")),
         ("completeness/local-import-symlinked-package-cannot-evaluate",
          lambda: refused("symlinked-package", "is not a real directory")),
+        ("completeness/evaluate-local-import-followed", lambda: evaluated["absent"] == ("NOT-APPLICABLE", None)
+         and evaluated["regular"] == ("RESIDUAL", None)),
+        ("completeness/evaluate-dangling-symlink-cannot-evaluate",
+         lambda: evaluate_refused("dangling-symlink", "tools/helper.py: ", "is not a regular file")),
+        # Where this account can look inside a mode 000 directory, the package is inspectable and is read.
+        ("completeness/evaluate-unsearchable-cannot-evaluate",
+         lambda: evaluated["unsearchable-package"] == ("RESIDUAL", None) if searchable else evaluate_refused(
+             "unsearchable-package", "tools/helper/__init__.py: ", "cannot be inspected (PermissionError")),
     )
 
     def rebound(form, named):
@@ -2911,6 +2987,14 @@ MUTANTS = (
      "completeness/local-import-regular-followed"),
     ("local-module-real-directory", "        if not last and stat.S_ISDIR(mode):\n", "        if not last:\n",
      "completeness/local-import-symlinked-package-cannot-evaluate"),
+    # evaluate()'s own call back to the presence test it used before _local_module, and _reads_of's default
+    # weakened to a lookup that follows a symlink: the rows above pass their own lstat, so only the evaluate()
+    # rows see these.
+    ("evaluate-presence", "classify(entries, launched, _reads_of(root, load, reviewed), residual, direct_check)",
+     "classify(entries, launched, lambda rel: closure_reads(rel, load, lambda candidate: (root / candidate).is_file(), "
+     "reviewed), residual, direct_check)", "completeness/evaluate-dangling-symlink-cannot-evaluate"),
+    ("reads-of-default", "def _reads_of(root, load, reviewed, lstat=os.lstat):",
+     "def _reads_of(root, load, reviewed, lstat=os.stat):", "completeness/evaluate-dangling-symlink-cannot-evaluate"),
 )
 UNMUTATED = {"copies/real-copies-identical", "entries/real-entries-pass", "entries/entry-function-real-pass",
              "launchers/real-launchers-pass",
@@ -3320,7 +3404,10 @@ def self_test(lane, report_path=None):
                                 ("completeness/local-import-dangling-symlink-cannot-evaluate", 0),
                                 ("completeness/local-import-directory-cannot-evaluate", 0),
                                 ("completeness/local-import-fifo-cannot-evaluate", 0),
-                                ("completeness/local-import-symlinked-package-cannot-evaluate", 0)):
+                                ("completeness/local-import-symlinked-package-cannot-evaluate", 0),
+                                ("completeness/evaluate-local-import-followed", 0),
+                                ("completeness/evaluate-dangling-symlink-cannot-evaluate", 0),
+                                ("completeness/evaluate-unsearchable-cannot-evaluate", 0)):
             check(check_id, vectors.get(check_id), sorted(key for key, ok in vectors.items() if not ok))
         # One vector per REBINDINGS form for _entry and for the guard function, each id written out.
         for check_id, _kind in (("entries/entry-rebound-tuple", 0), ("copies/guard-rebound-tuple", 0),
