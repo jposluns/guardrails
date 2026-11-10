@@ -10423,6 +10423,310 @@ def _heredoc_text_mark_failures():
     return out
 
 
+# --- cnsdif differential oracle --------------------------------------------------------------------
+# The console-diff guard (diff_source_pretool) is judged against the guard on main at a pinned base commit
+# and against real git. A corpus of git diff-family commands, generated from this guard's own option
+# tables plus the pinned fixture forms below, is judged by both guards (each loaded from its own file as a
+# separate module) and run under bash in three scratch repositories (one with a clean linear history, one
+# whose HEAD is a merge commit, one with an unresolved merge), with an isolated HOME and
+# GIT_CONFIG_NOSYSTEM=1, recording whether a patch reached stdout. The oracle fails on a command main
+# denies that this guard does not deny, and on a command this guard allows that printed a patch on stdout
+# in any repository, unless it is one of the under-denies the cnsdif residue names
+# (_CNSDIF_ORACLE_DISCLOSED, each of which must appear word for word in that residue).
+# Executables the oracle reaches: git and bash by bare name on the inherited PATH, and the bare commands a
+# fixture pipes into (cat, less); none is substituted. They are isolated instead: an empty HOME and
+# XDG_CONFIG_HOME, no system config, GIT_PAGER and PAGER set to cat, no remote and no credentials, and
+# every write lands in a repository under the fixture directory (new top-level entries are removed after
+# each command).
+_CNSDIF_ORACLE_BASE = "189a280e388d6a2e6d3d1b59b3616d32dac3ad51"
+_CNSDIF_ORACLE_HOOK_PATH = ".aiqt/core/hooks/scripts/aiqt_hooks.py"
+# Every git command form named in the earlier reviews of this guard, pinned. A form whose text needs a
+# placeholder path (a repository given as <repo>) or an elision is not here.
+_CNSDIF_ORACLE_FIXTURES = (
+    "git --output=real.txt", "git -oreal.txt", "git --output=x diff", "git -C --output=x diff",
+    "git diff --output=out.txt", "git --namespace ns diff --output=out.txt", "git -C . diff --output=out.txt",
+    "git -c core.pager=cat diff --output=out.txt", "git --git-dir=.git --work-tree=. diff --output=out.txt",
+    "git --namespace --output=x diff --output=out.txt", "git stash show -p", "git diff > out.txt",
+    "git -C . diff > out.txt", "git --namespace ns diff > out.txt", "git -C . diff | less", "git -c -ox diff",
+    "git -c -oreal.txt diff", "git log -p -1 --grep --output=x", "git -c --output=x diff",
+    "git --git-dir --output=x diff", "git --config-env --output=x diff", "git --attr-source --output=x diff",
+    "git --exec-path --output=x diff", "git log -p -n --output=x", "git --namespace --output real.txt diff",
+    "git log -p -1 --gre --output=x", "git format-patch --stdout -1 --subject-pre --output=x",
+    "git format-patch --stdout -1 --subj --output=x", "git diff --src-pre --output=x",
+    "git log -p -1 HEAD --default --output=x", "git show HEAD --default --output=x",
+    "git diff HEAD --default --output=x", "git format-patch --stdout -1 HEAD --default --output=x",
+    "git stash show -p 'stash@{0}' --default --output=x", "git show -Rn --output=x",
+    "git diff --output=x --output=/dev/stderr", "git log -1 -pS --output=x", "git diff --no-index",
+    "git --namespace --stat diff HEAD~1", "git --namespace --numstat show HEAD",
+    "git -c stash.showPatch=true stash show", "git -p diff --stat", "git -p log --oneline -1",
+    "git -p stash show", "git --namespace -p log -1", "git --namespace --stdout format-patch -1",
+    "git --version diff HEAD~1", "git --namespace -- diff HEAD~1 --cc --output=x --output=/dev/stdout",
+    "git --namespace --end-of-options log -p -1 --output=x --output=/dev/stdout | cat",
+    "git --namespace --output=/dev/stdout diff HEAD~1 --default -ox",
+    "git --namespace --output=/dev/stdout diff HEAD~1 --output=x",
+    "git log -p -1 --grep --output=/dev/stdout --output=x", "git diff --stat", "git show HEAD:f.txt",
+    "git diff --stat > out.txt", "git diff HEAD~1 | less", "git diff HEAD~1 > out.txt", "git show --stat HEAD",
+    "git stash show --stat", "git log --oneline -5", "git show -s HEAD", "git diff HEAD~1 --output=out.patch",
+    "git log -p -1 --grep=foo --output=x", "git -C . diff --stat", "git -c color.ui=never diff --stat",
+    "git --no-pager diff --name-only", "git format-patch -1", "git log -1 --format=%s", "git stash show",
+    "git --paginate diff --stat HEAD~1", "git -P diff --stat HEAD~1", "git log -p -1 --author --output=x",
+    "git --namespace --output=x diff > out.txt", "git stash show -p --line-prefix --output=x",
+    "git diff HEAD~1 --cc --output=real.txt", "git diff HEAD~1 -c --output=real.txt",
+    "git --namespace --output=x diff HEAD~1", "git --namespace -ox diff HEAD~1", "git -c -oreal.txt diff HEAD~1",
+    "git --shallow-file --output=x diff", "git --exec-path=/usr/lib/git-core -C sub log -p -1 --grep --output=x",
+    "git -C . diff HEAD --cc --output=real.txt", "git --no-pager diff --cc HEAD --output=real.txt",
+    "git diff HEAD~1 --combined-all-paths -c --output=real.txt", "git diff HEAD~1 --output={x,/dev/stdout}",
+    "git -c alias.dd=diff dd HEAD~1", "git -C '' diff HEAD~1 | less", "git --namespace -- diff HEAD~1 --cc --output=x",
+    "git -C sub diff --stat", "git --no-pager diff --stat", "git -C . log --oneline -5", "git --no-pager log --oneline",
+    "git -C sub log --oneline", "git -c color.ui=never diff --name-only", "git -C . show HEAD:f.txt",
+    "git --no-pager show --stat HEAD", "git -C . stash show --stat", "git -C . diff --name-status HEAD~1",
+    "git -c core.quotepath=off diff --numstat", "git --namespace ns log --oneline", "git -C . diff HEAD~1 --output=out.txt",
+    "git -C . format-patch -1 -o outdir", "git --no-pager diff HEAD~1 > out.txt", "git -C . log -1 --format=%H",
+    "git --git-dir=.git log --oneline", "git -P log --oneline -3", "git -c log.showSignature=false log --oneline",
+    "git --work-tree=. --git-dir=.git diff --shortstat", "git --no-pager diff --quiet", "git --version diff",
+    "git --list-cmds=main diff HEAD~1", "git --work-tree --output=x diff", "git diff --output=x",
+    "git diff-files -p --output=x", "git diff --output=x -- f.txt", "git diff-files -p -c --output=x",
+    "git diff-files -p --cc --output=x", "git -c alias.d=diff d HEAD~1", "git log -p -1 --default --output=x HEAD",
+    "git diff HEAD~1 --output=x --output=/dev/stdout", "git diff", "git show HEAD~1", "git show -c HEAD~1",
+    "git log -p -c -1 HEAD~1", "git diff-tree -p -c HEAD~1", "git diff-index -p HEAD --cc",
+    "git diff HEAD~1 --output=out.txt", "git log -p -1 --grep foo --output=x", "git diff HEAD~1 --cc --stat",
+    "git --no-pager diff --name-only HEAD~1", "git format-patch -1 -o outdir", "git diff -c --output=x",
+    "git diff HEAD~1 --diff-merges=first-parent --output=x", "git diff --cached --cc --output=x", "git show -RS",
+    "git diff --cc --output=x", "git diff-index -c HEAD --output=x", "git diff-index --cc HEAD~1 --output=x",
+    "git diff-index --cc HEAD", "git diff --output x", "git diff -p --output=x", "git -C . diff --output=x",
+    "git diff-files -c", "git diff-files --cc", "git diff | less", "git show HEAD~1:f.txt",
+    "git diff --cc HEAD~1 > out.txt", "git diff HEAD~1 --cc --output=out.txt > out2.txt",
+    "git diff -c HEAD~2 HEAD~1 --output=out.txt", "git diff-index -p --combined-all-paths HEAD --output=x",
+    "git log -p -1 --cc --output=x HEAD", "git show --cc --output=x HEAD", "git show --output=x HEAD",
+    "git diff-tree -p --cc --output=x HEAD", "git -c k=v log", "git diff-index -p HEAD --output=x",
+    "git diff-index -c HEAD", "git log -c -1", "git log --cc -1", "git diff-tree --cc HEAD",
+    "git diff --output=x | less", "git diff --output=x > out.txt", "git show --default --output=x HEAD",
+    "git diff-index -p --default --output=x HEAD", "git log -p -1 --output=x --output=/dev/stdout",
+    "git diff HEAD --output=x", "git diff HEAD~1 --output=x", "git diff --cached --output=x",
+    "git diff --no-index --output=x g.txt f.txt", "git diff-tree -c HEAD", "git show --cc", "git log -p --cc -1",
+    "git diff-tree -p --cc", "git stash show --cc", "git diff --output=file", "git log",
+)
+# The fixture list is pinned by its size and digest, so deleting or editing a fixture turns the oracle red.
+_CNSDIF_ORACLE_FIXTURE_COUNT = 176
+_CNSDIF_ORACLE_FIXTURE_SHA256 = "3fed786b73a994fa72bb58c0918c7f19c3358be5b39481c42d393f37e10142b0"
+# Forms the cnsdif residue names as allowed although git prints a patch on stdout (disclosed under-denies
+# and the pager form). Each must appear word for word in the residue text, and only these are excused.
+_CNSDIF_ORACLE_DISCLOSED = (
+    "git log -p -1 --default --output=x HEAD",
+    "git show --default --output=x HEAD",
+    "git diff-index -p --default --output=x HEAD",
+    "git log -p -1 --output=x --output=/dev/stdout",
+    "git diff --output=x | less",
+    "git log -p -1 HEAD --default --output=x",
+    "git show HEAD --default --output=x",
+    "git format-patch --stdout -1 HEAD --default --output=x",
+    "git -c stash.showPatch=true stash show",
+    "git -c alias.dd=diff dd HEAD~1",
+    "git -c alias.d=diff d HEAD~1",
+)
+# A pipeline into one bare pager word is the residue's proof D, an allowed form whose patch reaches a pager
+# on a terminal; bash under the oracle has no terminal, so the pager copies the patch to stdout. Such a
+# command is excused only while the residue still states that proof.
+_CNSDIF_ORACLE_PAGER_PROOF = "(D) EXACT terminal pager pipeline"
+_CNSDIF_ORACLE_PAGER_WORDS = ("less", "more", "most", "pager")
+_CNSDIF_ORACLE_PATCH = re.compile(r"^(?:diff --git |diff --cc |diff --combined |@@ |@@@ )", re.M)
+
+
+def _cnsdif_oracle_fixture_digest(fixtures):
+    """(count, sha256) of a fixture tuple, each form followed by a newline."""
+    return len(fixtures), hashlib.sha256("".join(f + "\n" for f in fixtures).encode("utf-8")).hexdigest()
+
+
+def _cnsdif_oracle_generated(hook):
+    """The generated corpus: every diff-family subcommand the guard handles (diff, show, log, diff-tree,
+    diff-index, diff-files, format-patch --stdout, stash show, range-diff) with its revision shapes, crossed
+    with no option and each patch and combined-diff option the guard's tables hold (_PATCH_FLAGS, --patch,
+    _COMBINED_PATCH_FLAGS, and -p with each combined option in both orders), with no --output or one in
+    each spelling (--output=x, --output x) before the options and after the revisions, under no git global
+    option, a global -C . or a global -c k=v."""
+    subs = (("diff", ("", "HEAD~1", "--cached", "HEAD~1 HEAD")), ("show", ("HEAD",)), ("log", ("-1",)),
+            ("diff-tree", ("HEAD",)), ("diff-index", ("HEAD", "HEAD~1")), ("diff-files", ("",)),
+            ("format-patch", ("--stdout -1",)), ("stash show", ("",)), ("range-diff", ("HEAD~2..HEAD~1 HEAD~1..HEAD",)))
+    combined = sorted(hook._COMBINED_PATCH_FLAGS)
+    opts = [""] + sorted(hook._PATCH_FLAGS) + ["--patch"] + combined
+    opts += ["-p " + c for c in combined] + [c + " -p" for c in combined]
+    outputs = ("", "--output=x", "--output x")
+    globals_ = ("", "-C .", "-c core.quotepath=false")
+    corpus = []
+    for sub, revs in subs:
+        for rev in revs:
+            for opt in opts:
+                for out in outputs:
+                    for where in (("before", "after") if out else ("",)):
+                        for glob in globals_:
+                            words = ["git", glob, sub]
+                            words += [out, opt, rev] if where == "before" else [opt, rev, out]
+                            corpus.append(" ".join(w for w in words if w))
+    return corpus
+
+
+def _cnsdif_oracle_env(home):
+    env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(home),
+           "XDG_CONFIG_HOME": str(home / "xdg"), "GIT_CONFIG_NOSYSTEM": "1", "GIT_PAGER": "cat",
+           "PAGER": "cat", "LC_ALL": "C", "TZ": "UTC", "GIT_NO_REPLACE_OBJECTS": "1",
+           "GIT_AUTHOR_NAME": "Oracle", "GIT_AUTHOR_EMAIL": "oracle@example.invalid",
+           "GIT_COMMITTER_NAME": "Oracle", "GIT_COMMITTER_EMAIL": "oracle@example.invalid",
+           "GIT_AUTHOR_DATE": "2026-01-01T00:00:00Z", "GIT_COMMITTER_DATE": "2026-01-01T00:00:00Z"}
+    return env
+
+
+def _cnsdif_oracle_bash(command, cwd, env, timeout=30):
+    """(returncode, stdout) of command run by bash in cwd, in its own session, its group killed after."""
+    proc = subprocess.Popen(["bash", "--noprofile", "--norc", "-c", command], cwd=str(cwd), env=env,
+                            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                            start_new_session=True)
+    try:
+        out, _err = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        os.killpg(proc.pid, signal.SIGKILL)
+        out, _err = proc.communicate()
+        return None, out.decode("utf-8", "replace")
+    finally:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+    return proc.returncode, out.decode("utf-8", "replace")
+
+
+def _cnsdif_oracle_repos(root, env):
+    """Build the three scratch repositories under root; returns {name: path}."""
+    steps = {
+        "clean": ("git init -q -b main . && printf 'a\\nb\\nc\\n' > f.txt && printf 'g\\n' > g.txt && git add . "
+                  "&& git commit -q -m one && printf 'a\\nB\\nc\\n' > f.txt && git commit -q -am two "
+                  "&& printf 'a\\nB\\nC\\n' > f.txt && git commit -q -am three && printf 'z\\n' >> f.txt "
+                  "&& git stash -q"),
+        "merge": ("git init -q -b main . && printf 'a\\nb\\nc\\n' > f.txt && printf 'g\\n' > g.txt && git add . "
+                  "&& git commit -q -m one && git branch side && printf 'a\\nM\\nc\\n' > f.txt "
+                  "&& git commit -q -am main && git checkout -q side && printf 'a\\nS\\nc\\n' > f.txt "
+                  "&& git commit -q -am side && git checkout -q main && { git merge -q side >/dev/null 2>&1; true; } "
+                  "&& printf 'a\\nR\\nc\\n' > f.txt && git add f.txt && git commit -q --no-edit"),
+        "unmerged": ("git init -q -b main . && printf 'a\\nb\\nc\\n' > f.txt && printf 'g\\n' > g.txt && git add . "
+                     "&& git commit -q -m one && git branch side && printf 'a\\nM\\nc\\n' > f.txt "
+                     "&& git commit -q -am main && git checkout -q side && printf 'a\\nS\\nc\\n' > f.txt "
+                     "&& git commit -q -am side && git checkout -q main && { git merge -q side >/dev/null 2>&1; true; }"),
+    }
+    repos = {}
+    for name, script in steps.items():
+        path = root / name
+        path.mkdir(parents=True)
+        code, _out = _cnsdif_oracle_bash(script, path, env)
+        if code != 0:
+            raise OSError("could not build the {} oracle repository (exit {!r})".format(name, code))
+        repos[name] = path
+    return repos
+
+
+def _cnsdif_oracle_run(commands, repos, env):
+    """{command: [names of the repositories where a patch reached stdout]}; each command runs in each
+    repository in turn and every new top-level entry it leaves is removed before the next."""
+    seen = {command: [] for command in commands}
+
+    def one_repo(name, path):
+        before = set(os.listdir(path))
+        for command in commands:
+            _code, out = _cnsdif_oracle_bash(command, path, env)
+            if _CNSDIF_ORACLE_PATCH.search(out):
+                seen[command].append(name)
+            for entry in set(os.listdir(path)) - before:
+                target = path / entry
+                if target.is_dir() and not target.is_symlink():
+                    shutil.rmtree(target, ignore_errors=True)
+                else:
+                    try:
+                        target.unlink()
+                    except FileNotFoundError:
+                        pass
+    threads = [threading.Thread(target=one_repo, args=item) for item in repos.items()]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    return seen
+
+
+def _cnsdif_oracle_load(path, name):
+    spec = importlib.util.spec_from_file_location(name, str(path))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _cnsdif_oracle_judge(base_hook, tree_hook, commands, patches, disclosed, pager_proof):
+    """The oracle's failures for commands judged by base_hook (main) and tree_hook, given patches (the
+    repositories where each printed a patch on stdout), disclosed (the forms the residue excuses) and
+    pager_proof (the residue states proof D, so a pipeline into one bare pager word is excused)."""
+    failures = []
+    for command in commands:
+        base = _decision(base_hook.diff_source_pretool, command)
+        tree = _decision(tree_hook.diff_source_pretool, command)
+        if base == "deny" and tree != "deny":
+            failures.append("(cnsdif-oracle-regress) main denies {!r} but this guard gives {}".format(command, tree))
+        pager = pager_proof and command.rsplit("|", 1)[-1].strip() in _CNSDIF_ORACLE_PAGER_WORDS
+        if tree in ("allow", "allow-note") and patches.get(command) and command not in disclosed and not pager:
+            failures.append("(cnsdif-oracle-stdout) this guard gives {} for {!r}, which printed a patch on stdout "
+                            "in the {} repository".format(tree, command, ", ".join(patches[command])))
+    return failures
+
+
+def _cnsdif_differential_oracle(tmp):
+    """Run the cnsdif differential oracle and its mutation checks under tmp; returns (failures, corpus size)."""
+    failures = []
+    root = tmp / "cnsdif-oracle"
+    home = root / "home"
+    (home / "xdg").mkdir(parents=True)
+    env = _cnsdif_oracle_env(home)
+    count, digest = _cnsdif_oracle_fixture_digest(_CNSDIF_ORACLE_FIXTURES)
+    if (count, digest) != (_CNSDIF_ORACLE_FIXTURE_COUNT, _CNSDIF_ORACLE_FIXTURE_SHA256):
+        failures.append("(cnsdif-oracle-fixtures) the pinned fixture list changed: {} forms, sha256 {}"
+                        .format(count, digest))
+    residue = ""
+    for hook in load_toml(repo_root() / ".aiqt" / "core" / "hooks" / "manifest.toml").get("hook", []):
+        if hook.get("id") == "diff-source":
+            residue = " ".join(str(hook.get("residue", "")).split())
+    for form in _CNSDIF_ORACLE_DISCLOSED:
+        if form not in residue:
+            failures.append("(cnsdif-oracle-disclosed) {!r} is excused but the cnsdif residue does not name it"
+                            .format(form))
+    pager_proof = _CNSDIF_ORACLE_PAGER_PROOF in residue
+    shown = subprocess.run(["git", "-C", str(repo_root()), "--no-replace-objects", "show",
+                            "{}:{}".format(_CNSDIF_ORACLE_BASE, _CNSDIF_ORACLE_HOOK_PATH)],
+                           capture_output=True, env=dict(env, GIT_NO_REPLACE_OBJECTS="1"), timeout=60)
+    if shown.returncode != 0 or not shown.stdout:
+        failures.append("(cnsdif-oracle-base) could not read main's hook at {} (exit {})"
+                        .format(_CNSDIF_ORACLE_BASE, shown.returncode))
+        return failures, 0
+    (root / "base").mkdir()
+    (root / "base" / "aiqt_hooks_base.py").write_bytes(shown.stdout)
+    base_hook = _cnsdif_oracle_load(root / "base" / "aiqt_hooks_base.py", "cnsdif_oracle_base_hook")
+    tree_path = repo_root() / ".aiqt" / "core" / "hooks" / "scripts" / "aiqt_hooks.py"
+    tree_hook = _cnsdif_oracle_load(tree_path, "cnsdif_oracle_tree_hook")
+    corpus = list(dict.fromkeys(_cnsdif_oracle_generated(tree_hook) + list(_CNSDIF_ORACLE_FIXTURES)))
+    repos = _cnsdif_oracle_repos(root / "repos", env)
+    patches = _cnsdif_oracle_run(corpus, repos, env)
+    failures.extend(_cnsdif_oracle_judge(base_hook, tree_hook, corpus, patches, _CNSDIF_ORACLE_DISCLOSED,
+                                         pager_proof))
+    # Mutation: this guard with the unresolved-merge stdout rule and the -c/--cc patch flag reverted must
+    # turn the oracle red.
+    reverted = _cnsdif_oracle_load(tree_path, "cnsdif_oracle_reverted_hook")
+    reverted._UNMERGED_DIFF_STDOUT_SUBS = frozenset()
+    reverted._has_combined_patch_flag = lambda rest: False
+    if not _cnsdif_oracle_judge(base_hook, reverted, corpus, patches, _CNSDIF_ORACLE_DISCLOSED, pager_proof):
+        failures.append("(cnsdif-oracle-mutant-revert) the oracle stayed green with the guard change reverted")
+    # Mutation: deleting any one fixture must turn the fixture pin red.
+    for index in range(len(_CNSDIF_ORACLE_FIXTURES)):
+        trimmed = _CNSDIF_ORACLE_FIXTURES[:index] + _CNSDIF_ORACLE_FIXTURES[index + 1:]
+        if _cnsdif_oracle_fixture_digest(trimmed) == (_CNSDIF_ORACLE_FIXTURE_COUNT, _CNSDIF_ORACLE_FIXTURE_SHA256):
+            failures.append("(cnsdif-oracle-mutant-fixture) deleting fixture {!r} left the pin green"
+                            .format(_CNSDIF_ORACLE_FIXTURES[index]))
+    return failures, len(corpus)
+
+
 def main():
     # The lifecycle applies the git fixture scrub itself after saving the caller's environment; a
     # scrub before it would make it save, and so restore, the already scrubbed values.
@@ -20239,7 +20543,7 @@ def _main_isolated(monitor):
         dexpect("(qa-b2b) '#'-commented pipe does not earn proof D -> console dump denies",
                 "git diff # | less", "deny")
         dexpect("(qa-b2c) a mid-word '#' is still literal, not a comment (regression lock)",
-                "git diff --output=out#1.txt", "allow-note")
+                "git log -p -1 --output=out#1.txt", "allow-note")
         # COMPOSITION (backslash-newline + '#'): after a continuation join, a '#' now at a word boundary
         # must be re-recognized as a comment, so the commented-out redirect/pipe earns no proof C/D.
         dexpect("(qa-b2d) continuation then word-boundary '#' comments out the redirect -> console dump denies",
@@ -20267,9 +20571,69 @@ def _main_isolated(monitor):
         dexpect("(qa-b4c) --output=/dev/tty piped to less denies (pager decoy)",
                 "git diff --output=/dev/tty | less", "deny")
         dexpect("(qa-b4d) bare --output=/dev/tty denies (console)", "git diff --output=/dev/tty", "deny")
-        dexpect("(qa-b4e) --output=realfile.txt allows with a note (diverted to a file, not a proof-C shell redirect)",
-                "git diff --output=realfile.txt", "allow-note")
-        dexpect("(qa-b4f) separated --output realfile.txt allows with a note", "git diff --output realfile.txt", "allow-note")
+        dexpect("(qa-b4e) log --output=realfile.txt allows with a note (diverted to a file, not a proof-C shell redirect)",
+                "git log -p -1 --output=realfile.txt", "allow-note")
+        dexpect("(qa-b4f) log separated --output realfile.txt allows with a note",
+                "git log -p -1 --output realfile.txt", "allow-note")
+        # During an unresolved merge (git status shows UU f.txt), git 2.53.0 created x empty and printed a
+        # combined patch on stdout for each of um-1 to um-13, with or without a combined-diff option, and
+        # git diff-index printed a patch for um-14 to um-16 given -c or --cc with no -p. The guard cannot see
+        # whether the index holds unmerged entries, so under diff and diff-files a --output word never removes
+        # the stdout judgement, and under log, diff-tree, diff-index and diff-files -c and --cc count as a
+        # patch flag. Each of um-1 to um-16 was allowed with a note before that rule.
+        dexpect("(um-1) diff --output= during a merge prints a combined diff on stdout -> denies",
+                "git diff --output=x", "deny")
+        dexpect("(um-2) diff separated --output during a merge prints on stdout -> denies",
+                "git diff --output x", "deny")
+        dexpect("(um-3) diff -p --output= during a merge prints on stdout -> denies",
+                "git diff -p --output=x", "deny")
+        dexpect("(um-4) diff --output= after a global -C during a merge prints on stdout -> denies",
+                "git -C . diff --output=x", "deny")
+        dexpect("(um-5) diff --output= with a pathspec during a merge prints on stdout -> denies",
+                "git diff --output=x -- f.txt", "deny")
+        dexpect("(um-6) diff --output= piped to cat during a merge prints on stdout -> denies",
+                "git diff --output=x | cat", "deny")
+        dexpect("(um-7) diff-files -p --output= during a merge prints on stdout -> denies",
+                "git diff-files -p --output=x", "deny")
+        dexpect("(um-8) diff-files -p -c --output= during a merge prints on stdout -> denies",
+                "git diff-files -p -c --output=x", "deny")
+        dexpect("(um-9) diff-files -c -p --output= during a merge prints on stdout -> denies",
+                "git diff-files -c -p --output=x", "deny")
+        dexpect("(um-10) diff-files --cc --output= during a merge prints on stdout -> denies",
+                "git diff-files --cc --output=x", "deny")
+        dexpect("(um-11) diff-files -p --cc --output= during a merge prints on stdout -> denies",
+                "git diff-files -p --cc --output=x", "deny")
+        dexpect("(um-12) diff-files -c with no -p during a merge prints a patch -> denies",
+                "git diff-files -c", "deny")
+        dexpect("(um-13) diff-files --cc with no -p prints a patch -> denies",
+                "git diff-files --cc", "deny")
+        dexpect("(um-14) diff-index -c with no -p prints a patch and leaves --output= empty -> denies",
+                "git diff-index -c HEAD --output=x", "deny")
+        dexpect("(um-15) diff-index --cc with no -p prints a patch and leaves --output= empty -> denies",
+                "git diff-index --cc HEAD~1 --output=x", "deny")
+        dexpect("(um-16) diff-index --cc with no -p prints a patch -> denies",
+                "git diff-index --cc HEAD", "deny")
+        # Sibling producers that print a patch with -c or --cc and no -p (git 2.53.0 printed one for each of
+        # cp-1 to cp-3), and the over-denies the rule discloses: git diff --output= with a revision, --cached
+        # or --no-index wrote x, and diff-tree -c with no -p printed no patch (cp-4 to cp-6). The controls
+        # show that a --output word still diverts under the other subcommands (git wrote x for each).
+        dexpect("(cp-1) log -c with no -p prints a patch -> denies", "git log -c -1", "deny")
+        dexpect("(cp-2) log --cc with no -p prints a patch -> denies", "git log --cc -1", "deny")
+        dexpect("(cp-3) diff-tree --cc with no -p prints a patch -> denies", "git diff-tree --cc HEAD", "deny")
+        dexpect("(cp-4) diff --output= with a revision denies though git writes x (a disclosed over-deny)",
+                "git diff HEAD~1 --output=x", "deny")
+        dexpect("(cp-5) diff --cached --output= denies though git writes x (a disclosed over-deny)",
+                "git diff --cached --output=x", "deny")
+        dexpect("(cp-6) diff-tree -c with no -p denies though git prints no patch (a disclosed over-deny)",
+                "git diff-tree -c HEAD", "deny")
+        dexpect("(cp-7) diff --output= with a real-file redirect allows with a note",
+                "git diff --output=x > out.txt", "allow-note")
+        dexpect("(cp-8) diff --output= piped to a pager allows with a note (a pager form, never a deny)",
+                "git diff --output=x | less", "allow-note")
+        dexpect("(cp-9) diff-index -p with no combined-diff option still diverts -> allows with a note",
+                "git diff-index -p HEAD --output=x", "allow-note")
+        dexpect("(cp-10) a global -c is not a combined-diff option -> log listing allows with a note",
+                "git -c core.pager=cat log --oneline -1", "allow-note")
         # A --output-shaped word BEFORE the subcommand is a git global option's value, not a diversion: git
         # 2.53.0 printed the patch on stdout and wrote no real.txt for each of qa-b4g to qa-b4k (the diff
         # forms given HEAD~1 as their revision), so each is a console dump. Only the subcommand's own
@@ -20285,7 +20649,7 @@ def _main_isolated(monitor):
         dexpect("(qa-b4k) a --namespace value shaped like --output= before stash show -p -> denies",
                 "git --namespace --output=real.txt stash show -p", "deny")
         dexpect("(qa-b4l) an inline --output after a --namespace value still diverts to a file -> allows with a note",
-                "git --namespace ns diff --output=real.txt", "allow-note")
+                "git --namespace ns log -p -1 --output=real.txt", "allow-note")
         dexpect("(qa-b4m) a global value shaped like --output= with a real-file redirect earns no plain allow",
                 "git --namespace --output=x diff > out.txt", "allow-note")
         dexpect("(qa-b4n) a global value shaped like --output= piped to less earns no plain allow",
@@ -20299,8 +20663,8 @@ def _main_isolated(monitor):
         # file, with the same words in the HEAD commit message, git 2.53.0 printed the patch on stdout and
         # wrote no x for each of qa-b4q to qa-b4y (qa-b4v given HEAD~1 as its revision). The controls show
         # a value given to the option, or an option that takes none, still leaves a real --output diversion
-        # (git created x for each of qa-b4z to qa-b4ad, qa-b4ac given HEAD~1), and --cc, -n and -v count
-        # only for the subcommands that read a value after them.
+        # (git created x for each of qa-b4z to qa-b4ad), and --cc, -n and -v count only for the subcommands
+        # that read a value after them.
         dexpect("(qa-b4q) --output= as the separated value of log --grep is no diversion -> denies",
                 "git log -p -1 --grep --output=x", "deny")
         dexpect("(qa-b4r) --output= as the separated value of log -S is no diversion -> denies",
@@ -20325,8 +20689,8 @@ def _main_isolated(monitor):
                 "git show --cc --output=x", "allow-note")
         dexpect("(qa-b4ab) log -n given its own count leaves --output= a real diversion -> allows with a note",
                 "git log -p -1 -n 1 --output=x", "allow-note")
-        dexpect("(qa-b4ac) diff -U takes only an attached value, so --output= still diverts -> allows with a note",
-                "git diff -U --output=x", "allow-note")
+        dexpect("(qa-b4ac) log -U takes only an attached value, so --output= still diverts -> allows with a note",
+                "git log -p -1 -U --output=x", "allow-note")
         dexpect("(qa-b4ad) log -v takes no value, so --output= still diverts -> allows with a note",
                 "git log -p -1 -v --output=x", "allow-note")
         # The first --output-shaped word of the whole segment is judged too, and a dump either reading confirms
@@ -20343,9 +20707,10 @@ def _main_isolated(monitor):
                 "git --namespace --output=/dev/stdout diff HEAD~1 --output=x", "deny")
         # A combined diff under diff or diff-index with a single revision: git 2.53.0 created x empty and
         # printed the diff on stdout for each of dg-5 to dg-11, so a combined-diff option there leaves no
-        # diversion. The guard does not count revisions, so dg-12, where git wrote the diff to x, denies too.
-        # The controls show -c taken as an option's value, and diff-tree and stash show, which wrote the
-        # combined diff to x, still divert.
+        # diversion. The guard does not count revisions, so dg-12, where git wrote the diff to x, denies too
+        # (and under diff every --output form is judged by stdout as well, see um-1). The controls show -c
+        # taken as an option's value under diff-index, and diff-tree on a commit that is not a merge and
+        # stash show, which wrote an ordinary patch to x, still divert.
         dexpect("(dg-5) diff --cc with one revision prints on stdout -> denies",
                 "git diff HEAD~1 --cc --output=x", "deny")
         dexpect("(dg-6) diff -c with one revision prints on stdout -> denies",
@@ -20362,12 +20727,14 @@ def _main_isolated(monitor):
                 "git --namespace -- diff HEAD~1 --cc --output=x", "deny")
         dexpect("(dg-12) diff --cc with two revisions denies though git writes x (a disclosed over-deny)",
                 "git diff HEAD~1 HEAD --cc --output=x", "deny")
-        dexpect("(dg-13) -c as the value of diff --src-prefix leaves --output= a real diversion -> allows with a note",
-                "git diff HEAD~1 --src-prefix -c --output=x", "allow-note")
-        dexpect("(dg-14) diff-tree --cc writes to the --output file -> allows with a note",
+        dexpect("(dg-13) -c as the value of diff-index --src-prefix leaves --output= a real diversion -> allows with a note",
+                "git diff-index -p HEAD --src-prefix -c --output=x", "allow-note")
+        dexpect("(dg-14) diff-tree --cc on a commit that is not a merge writes to the --output file -> allows with a note",
                 "git diff-tree -p HEAD --cc --output=x", "allow-note")
         dexpect("(dg-15) stash show --cc writes to the --output file -> allows with a note",
                 "git stash show -p --cc --output=x", "allow-note")
+        # The differential oracle against main's guard and real git (_cnsdif_differential_oracle).
+        failures.extend(_cnsdif_differential_oracle(tmp)[0])
         # BLOCKER 5: a redirect target that resolves to a device via '..' or a relative path must NOT earn
         # proof C; a genuine plain-file redirect still ALLOWs.
         dexpect("(qa-b5a) '> /tmp/../dev/stdout' normalizes to a device -> denies",
