@@ -144,6 +144,7 @@ guarded-surfaces = [
     "tools/check_python_host_pin.py",
     "tools/check_python_launcher_isolation.py",
     "tools/check_record_drift.py",
+    "tools/check_record_readers.py",
     "tools/check_record_sections.py",
     "tools/check_reference_facts.py",
     "tools/check_release_build.py",
