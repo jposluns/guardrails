@@ -1121,9 +1121,11 @@ def _swap_after_exists(real_exists, target):
 
 class _fifo_unblocker:
     """Bound a self-test row that meets a FIFO. After delay seconds a helper thread keeps opening each FIFO
-    in paths for writing with O_NONBLOCK, which succeeds only while a reader is waiting in its open, and
-    closes it at once, so that reader's open returns and it reads nothing. A read that never blocks is
-    unaffected. The context value lists each FIFO a waiting reader was released from."""
+    in paths for writing with O_NONBLOCK and closes it at once. That open succeeds whenever any reader has
+    the FIFO open, a reader waiting in its own open included, so such a reader's open returns and it reads
+    nothing. A read that never blocks is unaffected. The context value lists each FIFO the helper opened.
+    An entry is not proof that a read blocked: a reader that opened without blocking also holds the FIFO
+    open for a moment, and a helper open landing then fails the row spuriously; it never passes one."""
 
     def __init__(self, paths, delay=3.0):
         import threading
@@ -1864,26 +1866,36 @@ def self_test_main():
                 failures.append("dir_chain_or_absent on a path {} expected a refusal, got {!r}".format(label, got))
 
         # 20. A FIFO at an input conformance reads (GEMINI.md, the Copilot instructions, a generated Claude
-        #     or Cursor rule, a rule source under the core rules, AGENTS.md, or AGENTS.md swapped for a FIFO
-        #     after an exists() check of it) is MALFORMED (exit 2) naming it as not a regular file: the read
-        #     opens without blocking and checks the opened descriptor, so it never waits for a writer. Each
-        #     row is bounded by _fifo_unblocker, so a read that does block fails the row, never hangs the run.
-        fifo_rows = (("gemini", "GEMINI.md", False),
-                     ("copilot", ".github/copilot-instructions.md", False),
-                     ("claude-rule", ".claude/rules/security/SECI-input-validation.md", False),
+        #     or Cursor rule, a rule source under the core rules, AGENTS.md, AGENTS.md swapped for a FIFO
+        #     after an exists() check of it, the chat skill's standalone instructions, download zip or
+        #     reserved SKILL.md, or a generated hooks plugin surface file) is MALFORMED (exit 2) naming it as
+        #     not a regular file: the read opens without blocking and checks the opened descriptor, so it
+        #     never waits for a writer. Each row is bounded by _fifo_unblocker, so a read that does block
+        #     fails the row, never hangs the run.
+        hooks_json = "/".join(gen_hooks.PLUGIN_ROOT_PARTS + ("hooks", "hooks.json"))
+        fifo_rows = (("gemini", "GEMINI.md", False, None),
+                     ("copilot", ".github/copilot-instructions.md", False, None),
+                     ("claude-rule", ".claude/rules/security/SECI-input-validation.md", False, None),
                      ("cursor-rule", ".cursor/rules/aiqt-guardrails/aiqt/10-ACCUR-read-before-characterizing.mdc",
-                      False),
-                     ("rule-source", ".aiqt/core/rules/security/input-validation.md", False),
-                     ("agents", "AGENTS.md", False),
-                     ("agents-swapped-after-exists", "AGENTS.md", True))
+                      False, None),
+                     ("rule-source", ".aiqt/core/rules/security/input-validation.md", False, None),
+                     ("agents", "AGENTS.md", False, None),
+                     ("agents-swapped-after-exists", "AGENTS.md", True, None),
+                     ("skill-instructions", "/".join(gen_skill.INSTRUCTIONS_PARTS), False, _add_skill_surface),
+                     ("skill-zip", "/".join(gen_skill.ZIP_PARTS), False, _add_skill_surface),
+                     ("skill-reserved", "/".join(gen_skill.RESERVED_PARTS + ("SKILL.md",)), False,
+                      _add_skill_surface),
+                     ("hook-surface", hooks_json, False, _build_hooks))
         if not hasattr(os, "mkfifo"):
             failures.append("NOT RUN: the FIFO input cases (no os.mkfifo here); coverage that did not run "
                             "fails the self-test")
         else:
-            for label, rel, swap in fifo_rows:
+            for label, rel, swap, add_surface in fifo_rows:
                 ftree = tmp / ("fifo-" + label)
                 ftree.mkdir()
                 _build_conformant(ftree)
+                if add_surface is not None:
+                    add_surface(ftree)
                 fifo = ftree.joinpath(*rel.split("/"))
                 real_exists = Path.exists
                 if swap:
@@ -1901,6 +1913,24 @@ def self_test_main():
                     failures.append("a FIFO at {} ({}) expected exit 2 naming it as not a regular file, got {} "
                                     "(a blocked read released: {}):\n{}".format(rel, label, code, bool(released),
                                                                                 out))
+
+            # 20b. _claude_drift reads each rule source again, by path, after C1 loaded the corpus. A source
+            #      swapped for a FIFO after that load is MALFORMED naming it as not a regular file, without
+            #      blocking. Called directly: in a full run the Cursor renderer reads the same source by path
+            #      inside gen_cursor, a read this tool does not make.
+            ctree = tmp / "fifo-claude-source"
+            ctree.mkdir()
+            ccorpus = _build_conformant(ctree)
+            csrc = next(s for s, _fm, _rel in ccorpus if s.name == "input-validation.md")
+            csrc.unlink()
+            os.mkfifo(csrc)
+            with _fifo_unblocker([csrc]) as released:
+                got = _claude_drift(ctree.resolve(), ccorpus)
+            if (got[0] != MALFORMED or released or "{} is not a regular file".format(csrc) not in got[1]
+                    or not stat.S_ISFIFO(os.lstat(csrc).st_mode)):
+                failures.append("a rule source swapped for a FIFO after the corpus loaded expected _claude_drift "
+                                "MALFORMED naming it as not a regular file, got {!r} (a blocked read released: "
+                                "{})".format(got, bool(released)))
 
         # 5. A --root that does not exist fails closed (exit 2), never a hollow all-absent pass.
         code, out = run_capture(tmp / "does-not-exist")
@@ -1943,7 +1973,9 @@ def self_test_main():
           "site/ or .github/ (an empty "
           "one at .cursor/ or plugin/ included), a FIFO at GEMINI.md, the Copilot instructions, a generated "
           "Claude or Cursor rule, a rule source or AGENTS.md (one swapped in after an exists() check "
-          "included), and a bad --root fail closed; a symlink there to a directory "
+          "included), at a chat-skill output (the standalone instructions, the download zip or the reserved "
+          "SKILL.md) or at a generated hooks plugin surface file, a rule source swapped for a FIFO before "
+          "_claude_drift reads it, and a bad --root fail closed; a symlink there to a directory "
           "inside the root is read and passes, a family directory below .claude/rules symlinked inside the "
           "root included, and that family's violation is still found with .claude/rules swapped after C3's "
           "open; the every-component probe refuses a path outside the root or "
