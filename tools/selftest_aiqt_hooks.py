@@ -866,6 +866,63 @@ _STOP_FIELD_CLAIM_GLOBS = (".preview/*.py", ".preview/*.md")
 _STOP_FIELD_CLAIM_PENDING = ()
 
 
+# The refusal wording that tells the assistant a route which relaxes a guard (ending a review hold early,
+# unsetting registry-required mode, committing or removing a scope record, removing the authoring marker,
+# setting an attended operating mode) is the operator's step, pinned in both hook copies. Each phrase is
+# counted across the string constants of the parsed source (adjacent literals are joined by the parser,
+# so a phrase wrapped across source lines still counts), and each retired phrasing that offered such a
+# route to the assistant must be absent, so restoring the earlier wording in either copy fails here even
+# when the copies agree and the manifest is regenerated.
+_OPERATOR_STEP_FILES = (
+    ".aiqt/core/hooks/scripts/aiqt_hooks.py",
+    "plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py",
+)
+_OPERATOR_STEP_COUNTS = (
+    ("ending the hold first is the operator's step, not the assistant's", 17),
+    ("the operator's step, not the assistant's", 23),
+    ("(removing it is the operator's step)", 2),
+    ("changes this guard's scope and is the operator's step", 2),
+    ("restore its committed bytes", 5),
+)
+_OPERATOR_STEP_RETIRED = (
+    "or end the hold first",
+    "Repair or regenerate the registry",
+    "regenerate or repair",
+    "Regenerate or repair",
+    "or remove it if this is not the pack authoring",
+    "repair or remove the marker",
+    "set an attended operating-mode in",
+    "Commit the orchestration registry at the repository root, run from",
+    "remove the stray .aiqt entry, or unset",
+    "run from a directory under the orchestrated tree, or unset",
+)
+
+
+def _operator_step_wording_failures(root=None):
+    """(operator-step-wording) The relaxing-route refusal texts in both hook copies carry the operator's-step
+    wording at the pinned counts, and no retired phrasing that offered such a route to the assistant
+    remains. A copy that is missing, unreadable or does not parse is a failure, never a clean result."""
+    base = Path(root) if root is not None else repo_root()
+    out = []
+    for rel in _OPERATOR_STEP_FILES:
+        try:
+            tree = ast.parse((base / rel).read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, SyntaxError, ValueError, RecursionError, MemoryError) as exc:
+            out.append("(operator-step-wording) {}: cannot read or parse: {}".format(rel, exc))
+            continue
+        texts = [node.value for node in ast.walk(tree)
+                 if isinstance(node, ast.Constant) and isinstance(node.value, str)]
+        for phrase, want in _OPERATOR_STEP_COUNTS:
+            got = sum(text.count(phrase) for text in texts)
+            if got != want:
+                out.append("(operator-step-wording) {}: {!r} occurs {} times in string constants, expected {}"
+                           .format(rel, phrase, got, want))
+        for phrase in _OPERATOR_STEP_RETIRED:
+            if any(phrase in text for text in texts):
+                out.append("(operator-step-wording) {}: retired phrasing {!r} is back".format(rel, phrase))
+    return out
+
+
 def _stop_field_claim_failures(root=None, pending=_STOP_FIELD_CLAIM_PENDING):
     """(stop-field-claim) A bounded regression check: no hook source comment, docstring or residue carries
     one of the absence phrasings about stop_hook_active (or the "no documented loop bound" wording) that
@@ -30856,12 +30913,14 @@ def _main_isolated(monitor):
     # `return <constructor>(...)` site in the hook source ran at least once above, and
     # (label-unique) no case label names two cases, and (stop-field-claim) a bounded regression check:
     # no hook prose carries one of the absence phrasings about stop_hook_active (or the loop bound) that
-    # this repository carried.
+    # this repository carried, and (operator-step-wording) both hook copies keep the operator's-step wording
+    # on every relaxing-route refusal text.
     failures.extend(_note_constructor_shape_failures())
     failures.extend(_note_site_coverage_failures(monitor))
     failures.extend(_ask_label_failures())
     failures.extend(_duplicate_label_failures())
     failures.extend(_stop_field_claim_failures())
+    failures.extend(_operator_step_wording_failures())
     # An in-process call of main() hands the caller's environment back exactly (HOME,
     # XDG_CONFIG_HOME, the GIT_CONFIG_* pins and the caller's own GIT_* variables), with the git
     # fixture scrub in effect inside: the entry point is run in a child around a stand-in main.

@@ -428,8 +428,12 @@ the guard itself, by changing a setting, record, or marker that decides whether 
 enforces (its mode variable, its operating-mode record, a marker that puts a tree in or out of its scope) so
 the same refused call is allowed, is not a compliant route for the assistant, even where it also corrects
 the state the guard checks or the guard's message names it: only the operator, the person who runs the
-assistant and owns the guard's configuration, makes that change. The assistant refers a block it believes is
-a false positive, with no compliant route, to the operator.
+assistant and owns the guard's configuration, makes that change. Restoring a malformed or unreadable record
+or marker to the valid form the guard expects, by regenerating it from its source or restoring its committed
+bytes, corrects the state the guard checks and does not relax the guard; creating, removing, or narrowing one
+is not restoring it. Abandoning a running review through its dispatch tool to end its hold is the operator's
+step; the tool removing that hold once the review has returned or failed is the hold's normal end. The
+assistant refers a block it believes is a false positive, with no compliant route, to the operator.
 
 Replacing or removing a control, a gate, a check, a hook, a validator, or another guard, is a set operation,
 so a replacement is treated as a reduction until its coverage is shown. Before such a change is dispatched

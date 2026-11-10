@@ -1279,10 +1279,13 @@ The adopter's steps:
 
 1. The dispatch tool writes the marker atomically (write a temporary file elsewhere in
    `GIT_COMMON_DIR/aiqt/`, then rename it into `review-holds/`) before the reviewer starts, and
-   removes it when the review returns or is abandoned. Never write the temporary file inside
-   `review-holds/` itself: every entry there is read as a marker, so a partial or oddly named file
-   reads as malformed state and withholds git commands outside the read-only grammar
-   repository-wide until it is renamed into place or removed.
+   removes it when the review returns or is abandoned. Removing it once the review has returned or
+   failed is the hold's normal end; abandoning a running review through the dispatch tool to end its
+   hold is the operator's step, not the assistant's (rule gatdis), so an orchestrating assistant does
+   it only on the operator's instruction. Never write the temporary file inside `review-holds/`
+   itself: every entry there is read as a marker, so a partial or oddly named file reads as
+   malformed state and withholds git commands outside the read-only grammar repository-wide until
+   it is renamed into place or removed.
 2. The resync or fast-forward tool runs the preflight before it moves any worktree: pipe the
    PreToolUse payload (`tool_name` `Bash`, an absolute `cwd`, and `tool_input.command`) to
    `aiqt_hooks.py review_workdir_hold`, and withhold the move on exit 2 or a printed `deny`

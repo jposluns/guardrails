@@ -21336,12 +21336,12 @@ def _gensrc_bash(data):
                         "{}, whose .aiqt/gensrc.json registry is PRESENT but could not be read ({}), so this "
                         "guard cannot tell whether the target is a generated artefact. It fails closed and "
                         "denies the command rather than let a corrupted or unreadable registry silently disable "
-                        "the generated-artefact protection. Repair or regenerate the registry first: python3 "
-                        "tools/gen_gensrc.py and a git restore of .aiqt/gensrc.json spell no judged sink and "
-                        "stay allowed.".format(sink[1], sink[0].word, root_c, payload),
+                        "the generated-artefact protection. Regenerate the registry or restore its committed "
+                        "bytes first: python3 tools/gen_gensrc.py and a git restore of .aiqt/gensrc.json spell "
+                        "no judged sink and stay allowed.".format(sink[1], sink[0].word, root_c, payload),
                         "AIQT guardrail: denied a Bash write because {}/.aiqt/gensrc.json is present but "
-                        "unreadable/malformed, a fail-closed cannot-evaluate (rule gensrc); regenerate or repair "
-                        "the registry, then retry.".format(root_c))
+                        "unreadable/malformed, a fail-closed cannot-evaluate (rule gensrc); regenerate the "
+                        "registry or restore its committed bytes, then retry.".format(root_c))
             cache = {}
             for eff, real in items:
                 if _gensrc_within_real(real, root_c) != "in":
@@ -21374,11 +21374,14 @@ def _gensrc_bash(data):
                             "and the authoring marker .aiqt/authoring.toml is PRESENT but malformed ({}), so this "
                             "guard cannot tell the pack authoring tree from an adopter tree. It fails closed and "
                             "denies the command. Repair .aiqt/authoring.toml (exactly format-version = 1 and role "
-                            "= pack-authoring-repository), or remove it if this is not the pack authoring "
-                            "repository, then retry.".format(real, eff.word, entry_target, root_c, marker[1]),
+                            "= pack-authoring-repository), then retry; removing it, if this is not the pack "
+                            "authoring repository, takes the tree out of the authoring scope and is the "
+                            "operator's step, not the assistant's.".format(
+                                real, eff.word, entry_target, root_c, marker[1]),
                             "AIQT guardrail: denied a Bash write to the authoring-only artefact {} because "
                             ".aiqt/authoring.toml is present but malformed, a fail-closed cannot-evaluate (rule "
-                            "gensrc); repair or remove the marker, then retry.".format(entry_target))
+                            "gensrc); repair the marker, then retry (removing it is the operator's step)."
+                            .format(entry_target))
                 return ("deny",
                         "AIQT rule gensrc (generated-artefact-source-only): this Bash command writes {} ({}), which "
                         "is the generated artefact {} of {}/.aiqt/gensrc.json or lies inside it; it is changed only "
@@ -21398,9 +21401,10 @@ def _gensrc_bash(data):
                         "AIQT rule gensrc (generated-artefact-source-only): the guard could not clear every "
                         "write this Bash command makes ({}), and the .aiqt/gensrc.json registry of the session "
                         "repository {} is PRESENT but could not be read ({}), so it cannot tell whether such a "
-                        "write lands on a generated artefact. It fails closed and denies the command. Repair or "
-                        "regenerate the registry first (python3 tools/gen_gensrc.py, or a git restore of "
-                        ".aiqt/gensrc.json), then retry.".format(reasons, session_c, session_registry[1]),
+                        "write lands on a generated artefact. It fails closed and denies the command. Regenerate "
+                        "the registry or restore its committed bytes first (python3 tools/gen_gensrc.py, or a "
+                        "git restore of .aiqt/gensrc.json), then retry.".format(
+                            reasons, session_c, session_registry[1]),
                         "AIQT guardrail: denied a Bash command with an uncleared write because "
                         ".aiqt/gensrc.json is present but unreadable/malformed (rule gensrc, fail-closed).")
             for root_c, (status, payload) in loaded.items():
@@ -21569,12 +21573,13 @@ def gensrc_guard(data):
                 "AIQT rule gensrc (generated-artefact-source-only): the .aiqt/gensrc.json registry of {} is "
                 "PRESENT but could not be read ({}), so this guard cannot tell whether the target is a "
                 "generated artefact. It fails closed and denies the edit rather than let a corrupted or "
-                "unreadable registry silently disable the generated-artefact protection. Regenerate or repair "
-                ".aiqt/gensrc.json (python3 tools/gen_gensrc.py, or a git restore of it, through Bash: neither "
-                "spells a sink this guard judges), then retry.".format(root_c, payload),
+                "unreadable registry silently disable the generated-artefact protection. Regenerate "
+                ".aiqt/gensrc.json or restore its committed bytes (python3 tools/gen_gensrc.py, or a git "
+                "restore of it, through Bash: neither spells a sink this guard judges), then retry."
+                .format(root_c, payload),
                 "AIQT guardrail: denied a {} because .aiqt/gensrc.json is present but unreadable/malformed, a "
-                "fail-closed cannot-evaluate (rule gensrc); regenerate or repair the registry, then retry."
-                .format(tool_name))
+                "fail-closed cannot-evaluate (rule gensrc); regenerate the registry or restore its committed "
+                "bytes, then retry.".format(tool_name))
         entries = payload
         if not entries:
             continue  # a registry of only block entries has nothing this path guard can match
@@ -21605,12 +21610,13 @@ def gensrc_guard(data):
             "({} in .aiqt/gensrc.json, scope authoring), and the authoring marker .aiqt/authoring.toml is "
             "PRESENT but malformed ({}), so this guard cannot tell the pack authoring tree from an adopter "
             "tree. It fails closed and denies the edit. Repair .aiqt/authoring.toml (exactly format-version = "
-            "1 and role = \"pack-authoring-repository\"), or remove it if this is not the pack authoring "
-            "repository (removing or rewriting the marker spells no sink this guard judges), then retry."
+            "1 and role = \"pack-authoring-repository\"; rewriting the marker spells no sink this guard "
+            "judges), then retry; removing it, if this is not the pack authoring repository, takes the tree "
+            "out of the authoring scope and is the operator's step, not the assistant's."
             .format(file_path, entry_target, marker[1]),
             "AIQT guardrail: denied a {} to the authoring-only artefact {} because .aiqt/authoring.toml is "
-            "present but malformed, a fail-closed cannot-evaluate (rule gensrc); repair or remove the marker, "
-            "then retry.".format(tool_name, entry_target))
+            "present but malformed, a fail-closed cannot-evaluate (rule gensrc); repair the marker, then "
+            "retry (removing it is the operator's step).".format(tool_name, entry_target))
     reason = ("AIQT rule gensrc (generated-artefact-source-only): {} is a generated artefact ({} in "
               ".aiqt/gensrc.json); it is changed only through its source, so a hand-edit is denied. Edit {} "
               "and regenerate with '{}' instead; source and derivative land in the same change."
@@ -23839,8 +23845,8 @@ def orch_ask_guard(data):
               "rationale, then CONTINUE with the next authorized independent item. If the decision "
               "sits at the human-oversight threshold (high-consequence, irreversible, or "
               "outward-facing), record it and HOLD that item; the hold never licenses acting without "
-              "the answer. If the maintainer is in fact present, set an attended operating-mode in "
-              "the mode record first, then re-issue.")
+              "the answer. If the maintainer is in fact present, setting an attended operating-mode "
+              "in the mode record before re-issuing is the operator's step, not the assistant's.")
     if unread:
         # a mode file the reader cannot read as text fails closed to unattended; the deny names why
         reason += " The mode record reads as unattended because {} (it fails closed).".format(unread)
@@ -26004,9 +26010,11 @@ def orch_truncation_guard(data):
                 "instead of the default, in which this guard denies nothing, and no "
                 ".aiqt/orchestration.local.json or "
                 ".aiqt/orchestration.json was found on this cwd's ancestor chain or at a git-resolved "
-                "toplevel. Commit the orchestration registry at the repository root, run from a "
-                "directory under the orchestrated tree, or unset AIQT_ORCH_REQUIRE_REGISTRY to "
-                "restore the default scoping (with no registry this guard denies nothing and allows).",
+                "toplevel. Run from a directory under the orchestrated tree. Committing an "
+                "orchestration registry at the repository root, or unsetting "
+                "AIQT_ORCH_REQUIRE_REGISTRY, changes this guard's scope and is the operator's step, not "
+                "the assistant's; unsetting it would restore the default scoping (with no registry this "
+                "guard denies nothing and allows).",
                 "AIQT guardrail: denied a Bash call in registry-required mode with no orchestration "
                 "registry found (rule trkasy, fail-closed).")
         # Not an orchestrated session: no registry on the chain or at a git toplevel. A call whose input this
@@ -26125,11 +26133,11 @@ def orch_truncation_guard(data):
             "open without following a symlink and search, or its first present registry name "
             "(orchestration.local.json, then orchestration.json) is not a regular file or cannot be "
             "examined. A registry this guard cannot evaluate is not a registry, so the call is denied "
-            "rather than read as registry-present (check-fails-closed-on-unreadable). Make that .aiqt a "
-            "real directory with search (execute) permission holding a regular registry file, remove the "
-            "stray .aiqt entry, or unset "
+            "rather than read as registry-present (check-fails-closed-on-unreadable). Restore that .aiqt "
+            "and its registry to their committed form (a real directory with search (execute) permission "
+            "holding a regular registry file). Removing the stray .aiqt entry, or unsetting "
             "AIQT_ORCH_REQUIRE_REGISTRY to restore the default scoping (where such an entry keeps this "
-            "guard active).",
+            "guard active), changes this guard's scope and is the operator's step, not the assistant's.",
             "AIQT guardrail: denied a Bash call in registry-required mode whose orchestration registry "
             "could not be evaluated (rule trkasy, fail-closed).")
     if scope == "toplevel-unopenable" and _orch_registry_required():
@@ -26143,9 +26151,9 @@ def orch_truncation_guard(data):
             "opened as a directory, so its registry could not be looked up. A registry this guard cannot "
             "reach is not a registry, so the call is denied rather than read as registry-present "
             "(check-fails-closed-on-unreadable). Make the git toplevel (core.worktree) an existing "
-            "directory this process can open, run from a directory under the orchestrated tree, or unset "
-            "AIQT_ORCH_REQUIRE_REGISTRY to restore the default scoping (where such a toplevel keeps this "
-            "guard active).",
+            "directory this process can open, or run from a directory under the orchestrated tree. "
+            "Unsetting AIQT_ORCH_REQUIRE_REGISTRY to restore the default scoping (where such a toplevel "
+            "keeps this guard active) is the operator's step, not the assistant's.",
             "AIQT guardrail: denied a Bash call in registry-required mode whose git toplevel could not be "
             "opened for the orchestration registry (rule trkasy, fail-closed).")
     tool_input = data.get("tool_input")
@@ -30759,10 +30767,9 @@ def _rwh_ref_writer_text(sub, marker, path):
             "refusal to update a checked-out branch can be lifted by an option such as "
             "--update-head-ok or relaxed by the receiving side's configuration), and that "
             "repository has a live review hold (dispatch {}, worktree {} held at {}, marker {}). "
-            "Run it from a "
-            "separate clone; ending the hold first is the operator's step, not the assistant's, "
-            "and the dispatcher removes the marker when the review ends.".format(sub, marker["dispatch_id"], marker["workdir"],
-                                  marker["head"][:12], path))
+            "Run it from a separate clone; ending the hold first is the operator's step, not the "
+            "assistant's, and the dispatcher removes the marker when the review ends.".format(
+                sub, marker["dispatch_id"], marker["workdir"], marker["head"][:12], path))
 
 
 def _rwh_repo_hold_text(marker, path):
@@ -30774,8 +30781,8 @@ def _rwh_repo_hold_text(marker, path):
             "path, so every such command is withheld, a stated over-refusal for the forms that "
             "cannot reach it. Run one plain read-only git command, or make the change in a "
             "repository the hold does not pin; ending the hold first is the operator's step, not "
-            "the assistant's, and the dispatcher removes the marker when the review ends.".format(marker["dispatch_id"], marker["workdir"],
-                                      marker["head"][:12], path))
+            "the assistant's, and the dispatcher removes the marker when the review ends.".format(
+                marker["dispatch_id"], marker["workdir"], marker["head"][:12], path))
 
 
 def _rwh_program_text(word, marker, path):
@@ -30810,8 +30817,8 @@ def _rwh_held_path_text(word, marker, path):
             "file the command creates or rewrites there, so it is refused while the hold is live, "
             "a stated over-refusal for the spellings that only read. Name a path outside the held "
             "worktree; ending the hold first is the operator's step, not the assistant's, and the "
-            "dispatcher removes the marker when the review ends.".format(word, marker["workdir"], marker["dispatch_id"], marker["head"][:12],
-                           path))
+            "dispatcher removes the marker when the review ends.".format(
+                word, marker["workdir"], marker["dispatch_id"], marker["head"][:12], path))
 
 
 def _rwh_program_word(eff):
