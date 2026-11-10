@@ -59,9 +59,30 @@ never importing or running the file, and reports:
                spread hides; and any of these referenced without a call (an alias);
   code         any reference to eval or exec (builtins included),
                types.FunctionType, and the runpy, timeit, cProfile, profile, pdb and code
-               runners, and any call of, or reference to, a method named exec_module or
+               runners, any call of, or reference to, a method named exec_module or
                load_module (an importlib loader running a module's code, whatever object it is
-               called on);
+               called on), a call of importlib.import_module, importlib.__import__ or the
+               builtin __import__ whose module is anything but a literal name of a
+               standard-library module (by its top-level name) or of a module file the scanned
+               tree holds (by its stem): importing a freshly written source file runs that
+               file's code, so a computed name, a name a * spread hides, an absent name and a
+               literal the scan cannot place are each counted (fail closed), while a literal
+               import of a repository or standard-library module is not, and an importer
+               reached through a literal getattr in the call position (getattr(importlib,
+               "import_module")(n), getattr(builtins, "__import__")(n)) is judged as the
+               direct spelling is; a __import__ spelling (the builtin, builtins.__import__ or
+               importlib.__import__) whose fromlist is given and is not a literal list or
+               tuple display of string constants, whose level is given and is not the literal
+               int 0, or whose fromlist or level a * or an unreadable ** spread may hide (a
+               fromlist can import a submodule, and a level other than 0 a relative module,
+               that the literal name does not place); every call of pkgutil.resolve_name,
+               pydoc.locate or importlib.reload, whatever the argument (pkgutil.resolve_name
+               imports the module a dotted or colon-separated name names, pydoc.locate the
+               module a dotted name names, and importlib.reload runs a module's code again);
+               and a sys.path.insert
+               or sys.path.append whose path is not a string literal, in a scope that also
+               calls one of those importers (it can make a directory the same code wrote
+               importable there, or shadow a known module name);
   regex        a str regular expression whose pattern holds \\d or \\w read as Unicode (without
                re.ASCII they match every Unicode digit and word character, so an id validator
                admits Arabic-Indic or fullwidth digits) and is anchored (starts with ^ or \\A and
@@ -178,9 +199,10 @@ included; only the vendored opf/tools/_vendor tree is excluded.
 
 Out of scope: this lint guards against ACCIDENTAL use of a dangerous API in the repository's
 own code written the ordinary way, so code deliberately built to hide a sink is not claimed:
-a string-assembled or string-literal module name (importlib or __import__ with a computed
-name, sys.modules[...]; a literal import of a sink module is a finding, but the module it
-returns is not followed), getattr with a computed name or a sink module followed by an
+a string-assembled or string-literal module name is not followed to a SINK (sys.modules[...];
+a literal import of a sink module is a finding, and a computed or unknown module name is a
+code site of its own as above, but the module an importer returns is never followed to the
+sinks it holds), getattr with a computed name or a sink module followed by an
 adjacent string literal (f(os, "x") and (pickle, "x")[0] read the module as an attribute base,
 not an escape, and getattr(shutil, "os") is not read as the os module), __builtins__ aliasing
 (m = __builtins__, __builtins__[...]; __builtins__.exec is builtins.exec), a rewritten module
@@ -194,7 +216,39 @@ not an import binding (a parameter, self, a call result or a subscript, so self.
 sys.modules["os"].system are not resolved), and a sink module re-exported under a name other
 than its own (a module that binds pickle as _p, reached as mod._p.loads); a sink function (not
 module) obtained from such an object or from a call; a method run on a profiler, debugger or
-trace object (cProfile.Profile().run, bdb.Bdb.run); a shell launched through an argv list
+trace object (cProfile.Profile().run, bdb.Bdb.run); for the import check: an importer held
+uncalled or reached through an object the scan cannot name (r = importlib.import_module, a
+sys.modules read), sys.path made importable from other than by an insert or append call
+resolved from an import binding (extend, sys.path += [...], a slice or whole-list assignment,
+a copy such as p = sys.path then p.insert, site.addsitedir, sys.meta_path or sys.path_hooks,
+the PYTHONPATH environment), a
+sys.path.insert or append whose path is a string literal, and one in a scope with no importer
+call (the mutation runs nothing by itself, though any import evaluated after it, a plain
+import statement in the same scope included, can then load from the mutated path; pairing is
+by the dotted name of the enclosing def, async def or class, not by the true Python scope: a
+lambda or comprehension shares the name of the function, class or module around it, and two
+scopes with one dotted name, such as a function defined twice, one name in both branches of an
+if, or a class and a function of one name, are paired, which errs toward reporting; an insert
+in one function and the importer in a function of another name, and a mutation whose importer
+is in a nested function, are not paired); a plain
+import statement after a sys.path insert or append in the same scope (not counted because it
+matches about 160 live scopes, most of them a tool importing its own directory, so counting
+it would over-fire); a literal module name for a file the code itself writes under a name the
+tree or the standard library already holds (the literal is read as known), a dotted name
+whose first part is a standard-library name included; importlib.util.find_spec of a dotted
+name (it imports the parent packages of that name); any API other than the importers named
+above (importlib.import_module, the __import__ spellings, pkgutil.resolve_name, pydoc.locate
+and importlib.reload) that imports a module by name or from a path is not counted either
+(among those reviewed: pkgutil.walk_packages, pkgutil.get_data, importlib.resources.files, a
+string target of mock.patch, and unittest's TestLoader loadTestsFromName and discover); an
+importer reached
+through an alias of getattr (g = getattr, then g(importlib, "import_module")(n)) is not
+followed, since only a getattr called directly in the call position is; while a
+repository module is known only by the stem of a scanned *.py file, so a literal dotted
+package name from the repository, or a repository module outside the scanned roots, is
+counted (fail closed, a conservative false report), and so is a __import__ whose fromlist is
+the literal None (fromlist=None or a fourth positional None, which imports no submodule); a
+shell launched through an argv list
 naming a shell (["sh", "-c", text]) or a Python interpreter given code (sys.executable with -c
 or -m), an executable= override, or os.exec*, os.spawn* or pty.spawn of a shell; a verify,
 verify_ssl, ssl, check_hostname, server_hostname, verify_mode, cert_reqs or allow_pickle value
@@ -424,7 +478,26 @@ _SETATTR = frozenset({"setattr", "builtins.setattr"})
 # A mock patch of one literal attribute names that attribute (patch.object(os, "kill") is os.kill)
 # and leaves the module itself in place, so its target is an attribute base like getattr's.
 _PATCH_OBJECT = frozenset({"unittest.mock.patch.object", "mock.patch.object"})
-_IMPORTERS = frozenset({"importlib.import_module", "__import__", "builtins.__import__"})
+# The __import__ spellings, whose fromlist and level (a submodule or relative import the
+# literal name does not place) are judged besides the name; import_module takes neither.
+_IMPORT_DUNDERS = frozenset({"importlib.__import__", "__import__", "builtins.__import__"})
+_IMPORTERS = _IMPORT_DUNDERS | frozenset({"importlib.import_module"})
+# Importers judged by the call alone: pkgutil.resolve_name imports the module a dotted or
+# colon-separated name names, pydoc.locate the module a dotted name names, and importlib.reload
+# runs a module's code again, so every call of any of them is a code site (fail closed,
+# whatever the argument).
+_REIMPORTERS = frozenset({"pkgutil.resolve_name", "pydoc.locate", "importlib.reload"})
+# Every importer whose call makes its scope one a non-literal sys.path mutation pairs with:
+# a resolve_name, locate or reload call after the mutation imports from (or reloads over) the
+# mutated path just as import_module or __import__ does.
+_SCOPE_IMPORTERS = _IMPORTERS | _REIMPORTERS
+# The sys.path mutators that can make a directory the code wrote importable (or shadow a
+# known module name), with the positional index of the path each takes.
+_SYS_PATH_MUTATORS = {"sys.path.insert": 1, "sys.path.append": 0}
+# The module names an importer call may name without being a code site: the standard library
+# (judged by the top-level name, so a stdlib submodule passes too); the scanned tree's own
+# module files are the other known set, built per tree in scan_tree.
+_STDLIB_MODULES = frozenset(sys.stdlib_module_names)
 
 # Every detector the scan runs; the self-test disables each in turn to prove its vectors
 # depend on it. "alias" is import-alias resolution, "scope" its per-scope binding (off, it
@@ -437,7 +510,8 @@ _IMPORTERS = frozenset({"importlib.import_module", "__import__", "builtins.__imp
 # allowlist legs of the tree scan.
 CHECKS = ("alias", "scope", "chain", "star-import", "module-escape", "dsz-ref", "dsz-yaml",
           "dsz-numpy", "tls-verify", "tls-ref", "tls-hostname", "tls-verify-mode", "tls-context",
-          "shell-subprocess", "shell-always", "code-ref", "code-loader", "regex-ascii",
+          "shell-subprocess", "shell-always", "code-ref", "code-loader", "code-import",
+          "code-syspath", "regex-ascii",
           "regex-lines", "regex-stores", "regex-pattern", "fail-encoding", "fail-read",
           "fail-parse", "fail-nonregular", "fail-symlink", "fail-walk", "fail-root",
           "allowlist-stale", "allowlist-shape", "site-column", "site-end")
@@ -459,6 +533,23 @@ _GIT_WORD = (_WORD + " (_GIT_WORD_RE reads git as a word with the same Unicode \
 _LIST_DIGIT = ("Unicode on purpose: the list-marker \\d is read as a renderer that takes a non-ASCII"
                " digit for a list number reads it, and the wider read is the fail-closed side")
 ALLOWLIST = (
+    ("tools/_entry_restore_selftest.py", "_import_tool", "code", 2,
+     "self-test import harness: appends the given tool file's own directory to the module path"
+     " and imports it by its validated NAME.py stem (an identifier, not a keyword, not already"
+     " loaded); its callers pass a repository tool's own file or a synthetic tool a self-test"
+     " writes from its own fixed literal source into its own fixture directory (the tools"
+     " tools/selftest_git_fixture_env_core.py writes), so no outside data names or supplies"
+     " the module; the module-path comparison after the import detects a shadowing module only"
+     " after the loaded module's code has run"),
+    ("opf/tools/_opf_emit.py", "_fixture_preload", "code", 1,
+     "fixture preload: imports each name of the fixed literal _FIXTURE_GUARDIAN_MODULES tuple"
+     " of standard-library modules before any fork, so every guardian-side import is a"
+     " lock-free sys.modules hit; the loop variable is what the scan cannot see; no external"
+     " input"),
+    ("opf/tools/opf.py", "_verb_status_self_test.imports_helper", "code", 1,
+     "self-test probe: imports one fixed literal module name that exists nowhere on purpose,"
+     " so the probe proves the dispatch import gate fails with ModuleNotFoundError before"
+     " anything runs; no external input"),
     ("tools/check_footer.py", "_close_vectors", "code", 1,
      _MUTANT + " (the _read_regular_page close revert, loaded by exec_module from a scratch file)"),
     ("tools/check_release_cut.py", "_close_vectors", "code", 1,
@@ -849,6 +940,24 @@ def _literal_command(node):
     if isinstance(node, (ast.List, ast.Tuple)):
         return all(_is_str(e) for e in node.elts)
     return False
+
+
+def _import_arguments_unplaced(call, pairs):
+    """Whether a __import__ call's later arguments make the import one the literal name does not
+    place: a fromlist that is given and is not a literal list or tuple display of string
+    constants, a level that is given and is not the literal int 0 (a bool or float is not), or
+    a * or an unreadable ** spread that may hide either."""
+    fromlist = _first(_kw(pairs, "fromlist", True), _positional(call, 3))
+    if fromlist is not None and not (isinstance(fromlist, (ast.List, ast.Tuple)) and all(
+            isinstance(elt, ast.Constant) and isinstance(elt.value, str)
+            for elt in fromlist.elts)):
+        return True
+    level = _first(_kw(pairs, "level", True), _positional(call, 4))
+    if level is not None and not (isinstance(level, ast.Constant)
+                                  and type(level.value) is int and level.value == 0):
+        return True
+    return (any(isinstance(arg, ast.Starred) for arg in call.args)
+            or any(key is None for key, _value in pairs))
 
 
 def _is_true(node):
@@ -1321,11 +1430,18 @@ def _reads(tree, binder):
 
 
 class _Scanner(ast.NodeVisitor):
-    def __init__(self, disabled, binder, flat, tree=None):
+    def __init__(self, disabled, binder, flat, tree=None, modules=None):
         self.disabled = frozenset(disabled)
         self.binder = binder
         self.flat = flat
         self.tree = tree
+        # The scanned tree's own module names (file stems), or None outside a tree scan, where
+        # only the standard library is known (fail closed).
+        self.modules = modules
+        # The non-literal sys.path mutations seen, with their enclosing scope, and every scope
+        # that calls an importer: paired after the walk, since either may come first.
+        self.syspath_pending = []
+        self.importer_scopes = set()
         # The uses of every compiled pattern, built once per file when a line scan is first
         # judged, and whether each line scan judged so far is used only as one.
         self.uses = None
@@ -1341,8 +1457,9 @@ class _Scanner(ast.NodeVisitor):
     def on(self, check):
         return check not in self.disabled
 
-    def add(self, node, kind, check, detail):
-        qual = ".".join(self.qual) if self.qual else "<module>"
+    def add(self, node, kind, check, detail, qual=None):
+        if qual is None:
+            qual = ".".join(self.qual) if self.qual else "<module>"
         # The column keeps two sites on one line apart, and the end position two chained calls
         # that start at one place (x.f(a).f(b)), so each call site counts once.
         column = getattr(node, "col_offset", 0) if self.on("site-column") else 0
@@ -1793,6 +1910,13 @@ class _Scanner(ast.NodeVisitor):
         self.called.add(id(node.func))
         pairs = _effective_keywords(node, self.candidates("dict") == {"dict"})
         names = self.resolve(node.func)
+        if isinstance(node.func, ast.Call):
+            # An importer reached through a literal getattr in the call position, such as
+            # getattr(importlib, "import_module")(n), is judged as the direct spelling is.
+            method, receiver = self._method(node.func)
+            if method is not None:
+                names |= {base + "." + method for base in self.resolve(receiver)} \
+                    & (_IMPORTERS | _REIMPORTERS)
         # A store, delete, patch or test of a literal attribute reads no sink (judged below).
         if not names & (_SETATTR | _DELATTR | _PATCH_OBJECT | _HASATTR):
             self._pairs(node.args)
@@ -1893,12 +2017,57 @@ class _Scanner(ast.NodeVisitor):
                 self.based.add(id(target))
                 if name in _SETATTR:
                     self._check_store(attr.value, _positional(node, 2), node, True)
-        if name in _IMPORTERS and self.on("module-escape"):
+        if name in _SCOPE_IMPORTERS:
+            self.importer_scopes.add(".".join(self.qual) if self.qual else "<module>")
+        if name in _IMPORTERS:
             target = _first(_positional(node, 0), _kw(pairs, "name"))
-            if isinstance(target, ast.Constant) and isinstance(target.value, str) \
+            if self.on("module-escape") and isinstance(target, ast.Constant) \
+                    and isinstance(target.value, str) \
                     and target.value.split(".")[0] in STAR_MODULES:
                 self.add(node, STAR_MODULES[target.value.split(".")[0]], "module-escape",
                          "dynamic import of sink module " + target.value)
+            if self.on("code-import") and not self._known_module(target):
+                self.add(node, "code", "code-import",
+                         name + " of a module that is not a literal standard-library or"
+                         " repository module name (importing a written file runs its code)")
+            elif name in _IMPORT_DUNDERS and self.on("code-import") \
+                    and _import_arguments_unplaced(node, pairs):
+                self.add(node, "code", "code-import",
+                         name + " with a fromlist that is not a literal list or tuple of string"
+                         " constants, a level other than the literal 0, or a spread that may"
+                         " hide either (a submodule or relative import the literal name does"
+                         " not place)")
+        if name in _REIMPORTERS and self.on("code-import"):
+            self.add(node, "code", "code-import",
+                     name + (" runs a module's code again" if name == "importlib.reload"
+                             else " imports the module its dotted name names")
+                     + ", so every call is counted")
+        if name in _SYS_PATH_MUTATORS and self.on("code-syspath"):
+            path = _positional(node, _SYS_PATH_MUTATORS[name])
+            if not (isinstance(path, ast.Constant) and isinstance(path.value, str)):
+                self.syspath_pending.append(
+                    (node, ".".join(self.qual) if self.qual else "<module>", name))
+
+    def _known_module(self, node):
+        """True only for a literal module name the scan can place: a standard-library module
+        (by its top-level name) or a module file the scanned tree holds (by stem; outside a
+        tree scan no repository module is known). Anything else, a computed name, a name a
+        spread hides and an absent name included, is unknown, so it is counted (fail closed)."""
+        if not (isinstance(node, ast.Constant) and isinstance(node.value, str)):
+            return False
+        if node.value.split(".")[0] in _STDLIB_MODULES:
+            return True
+        return self.modules is not None and "." not in node.value and node.value in self.modules
+
+    def finish(self):
+        """Emit the deferred sys.path findings: a non-literal insert or append is a code site
+        only in a scope that also calls an importer (there the mutated path can be imported
+        from), and either may come first, so the pairing runs after the walk."""
+        for node, qual, name in self.syspath_pending:
+            if qual in self.importer_scopes:
+                self.add(node, "code", "code-syspath",
+                         name + " of a non-literal path in a scope that also imports by name"
+                         " (a written directory becomes importable)", qual=qual)
 
     def _judge_keywords(self, node, pairs):
         if self.on("tls-verify"):
@@ -2058,14 +2227,16 @@ def _flat_aliases(tree):
     return aliases
 
 
-def scan_source(source, filename="<source>", disabled=()):
+def scan_source(source, filename="<source>", disabled=(), modules=None):
     """Return the sorted findings for one source text (str, or bytes parsed as Python decodes
-    them); SyntaxError, ValueError and RecursionError propagate."""
+    them); SyntaxError, ValueError and RecursionError propagate. modules is the scanned tree's
+    own module-name set, or None where only the standard library is known."""
     tree = ast.parse(source, filename=filename)
     binder = _Binder()
     binder.visit(tree)
-    scanner = _Scanner(disabled, binder, _flat_aliases(tree), tree)
+    scanner = _Scanner(disabled, binder, _flat_aliases(tree), tree, modules)
     scanner.visit(tree)
+    scanner.finish()
     return sorted(set(scanner.findings))
 
 
@@ -2180,6 +2351,9 @@ def scan_tree(root, allowlist=ALLOWLIST, disabled=()):
         paths = _python_files(root, disabled)
     except OSError as exc:
         raise CannotEvaluate("cannot walk the scan roots: " + str(exc))
+    # The tree's own module names: a literal import of one is the ordinary way to reach the
+    # repository's code, so it is not a code site (an unknown literal still is).
+    modules = frozenset(path.stem for path in paths)
     for path in paths:
         rel = path.relative_to(root).as_posix()
         try:
@@ -2197,7 +2371,7 @@ def scan_tree(root, allowlist=ALLOWLIST, disabled=()):
                 continue
             raise CannotEvaluate("cannot read " + rel + ": " + str(exc))
         try:
-            found = scan_source(source, rel, disabled)
+            found = scan_source(source, rel, disabled, modules)
         except (SyntaxError, ValueError, RecursionError) as exc:
             if "fail-parse" in disabled:
                 continue
@@ -2558,6 +2732,66 @@ POSITIVE_VECTORS = (
     ("run = spec.loader.exec_module\n", ("code-loader",)),
     ("run = loader.load_module\n", ("code-loader",)),
     ("getattr(spec.loader, 'exec_module')(module)\n", ("code-loader",)),
+    # A dynamic import of a module the scan cannot place: a computed name (the written-then-
+    # imported probe), each importer spelling, a keyword name, a spread-hidden name, and a
+    # literal that is neither a standard-library nor a repository module.
+    ("import importlib, pathlib\ndef probe(td, name, body):\n"
+     "    pathlib.Path(td, name + '.py').write_text(body)\n"
+     "    return importlib.import_module(name)\n", ("code-import",)),
+    ("def load(name):\n    return __import__(name)\n", ("code-import",)),
+    ("import builtins\nbuiltins.__import__(name)\n", ("code-import",)),
+    ("import importlib\nimportlib.__import__(name)\n", ("code-import",)),
+    ("from importlib import import_module\nimport_module(name)\n", ("alias", "code-import")),
+    ("import importlib\nimportlib.import_module(name=chosen)\n", ("code-import",)),
+    ("import importlib\nimportlib.import_module(*names)\n", ("code-import",)),
+    ("import importlib\nimportlib.import_module('no_such_module_here')\n", ("code-import",)),
+    # An importer reached through a literal getattr in the call position is judged as the
+    # direct spelling is: a computed name is counted, and a sink-module name escapes.
+    ("import importlib\ngetattr(importlib, 'import_module')(name)\n", ("code-import",)),
+    ("import builtins\ngetattr(builtins, '__import__')(name)\n", ("code-import",)),
+    ("import importlib\ngetattr(importlib, 'import_module')('pickle')\n", ("module-escape",)),
+    # A __import__ whose later arguments the literal name does not place: a fromlist that is
+    # not a literal list or tuple of string constants (keyword or fourth positional), a level
+    # other than the literal int 0 (a bool is not that int), and a spread that may hide either.
+    ("__import__('json', fromlist=[name])\n", ("code-import",)),
+    ("__import__('json', None, None, modules)\n", ("code-import",)),
+    ("__import__('json', level=1)\n", ("code-import",)),
+    ("__import__('json', level=False)\n", ("code-import",)),
+    ("__import__('json', *rest)\n", ("code-import",)),
+    ("__import__('json', **options)\n", ("code-import",)),
+    ("import importlib\nimportlib.__import__('json', fromlist=[name])\n", ("code-import",)),
+    # Every pkgutil.resolve_name, pydoc.locate and importlib.reload call is counted, whatever
+    # the argument.
+    ("import pkgutil\npkgutil.resolve_name(spec)\n", ("code-import",)),
+    ("import pkgutil\npkgutil.resolve_name('a.b:c')\n", ("code-import",)),
+    ("import pydoc\npydoc.locate(spec)\n", ("code-import",)),
+    ("import pydoc\npydoc.locate('json')\n", ("code-import",)),
+    ("import importlib\nimportlib.reload(mod)\n", ("code-import",)),
+    ("import importlib\ngetattr(importlib, 'reload')(mod)\n", ("code-import",)),
+    # The non-direct pydoc.locate spellings are counted as the direct one is.
+    ("from pydoc import locate\nlocate(spec)\n", ("alias", "code-import")),
+    ("from pydoc import locate as L\nL(spec)\n", ("alias", "code-import")),
+    ("import pydoc as p\np.locate(spec)\n", ("alias", "code-import")),
+    ("import pydoc\ngetattr(pydoc, 'locate')(spec)\n", ("code-import",)),
+    # A non-literal sys.path mutation in a scope that also imports by name (the import itself
+    # is a literal standard-library module, so only the mutation is the site), in either order.
+    ("import importlib, sys\ndef load(td):\n    sys.path.insert(0, str(td))\n"
+     "    return importlib.import_module('json')\n", ("code-syspath",)),
+    ("import importlib, sys\ndef load(td):\n    sys.path.append(str(td))\n"
+     "    return importlib.import_module('json')\n", ("code-syspath",)),
+    ("import importlib, sys\ndef load(td):\n    m = importlib.import_module('json')\n"
+     "    sys.path.insert(0, str(td))\n    return m\n", ("code-syspath",)),
+    ("import sys\nfrom importlib import import_module\ndef load(td):\n"
+     "    sys.path.insert(0, td)\n    return import_module('json')\n",
+     ("alias", "code-syspath")),
+    ("import importlib, sys\nsys.path.insert(0, str(td))\nimportlib.import_module('json')\n",
+     ("code-syspath",)),
+    ("import importlib, sys\ndef load(td):\n    sys.path.insert(0, *rest)\n"
+     "    return importlib.import_module('json')\n", ("code-syspath",)),
+    # An importer reached through a literal getattr in the call position pairs with the
+    # mutation as the direct spelling does.
+    ("import importlib, sys\ndef load(td):\n    sys.path.insert(0, str(td))\n"
+     "    return getattr(importlib, 'import_module')('json')\n", ("code-syspath",)),
     ("from logging.handlers import pickle\npickle.loads(data)\n", ("chain", "dsz-ref")),
     ("from pickle import *\nloads(b'')\n", ("star-import",)),
     ("import subprocess\nm = subprocess\nm.run(cmd, shell=True)\n", ("module-escape",)),
@@ -2730,6 +2964,37 @@ POSITIVE_VECTORS = (
      "ok = (A if strict else B).match(text)\n", ("regex-ascii",)),
 )
 
+# The literal standard-library imports the import check leaves alone; the self-test also reads
+# them with the stdlib roster emptied, where each must be counted (the fail-closed side).
+_IMPORT_STDLIB = (
+    "import importlib\nimportlib.import_module('json')\n"
+    "importlib.import_module('xml.etree.ElementTree')\n",
+    "__import__('hashlib')\n",
+)
+# A literal import of a module file the tree holds is not a code site; the same literal with
+# no such file is (the flip), and is admitted by an allowlist entry like any other site.
+_IMPORT_REPO = b"import importlib\nimportlib.import_module('helper')\n"
+
+# A non-literal sys.path mutation beside each importer judged by its call alone: the scope of
+# a pkgutil.resolve_name, pydoc.locate or importlib.reload call pairs with the mutation as an
+# import_module or __import__ scope does. The self-test also reads these with the reimporters
+# dropped from the scope registration (only that registration removed, each call still
+# counted), where none may report code-syspath.
+_SYSPATH_REIMPORTERS = (
+    "import pkgutil, sys\ndef load(td):\n    sys.path.insert(0, str(td))\n"
+    "    return pkgutil.resolve_name('a.b:c')\n",
+    "import pkgutil, sys\ndef load(td):\n    sys.path.append(str(td))\n"
+    "    return pkgutil.resolve_name('a.b:c')\n",
+    "import pydoc, sys\ndef load(td):\n    sys.path.insert(0, str(td))\n"
+    "    return pydoc.locate('json')\n",
+    "import pydoc, sys\ndef load(td):\n    sys.path.append(str(td))\n"
+    "    return pydoc.locate('json')\n",
+    "import importlib, sys\ndef load(td, mod):\n    sys.path.insert(0, str(td))\n"
+    "    return importlib.reload(mod)\n",
+    "import importlib, sys\ndef load(td, mod):\n    sys.path.append(str(td))\n"
+    "    return importlib.reload(mod)\n",
+)
+
 # Negative vectors: the safe spellings each check must leave alone.
 NEGATIVE_VECTORS = (
     "import yaml\nyaml.load(text, Loader=yaml.SafeLoader)\nyaml.safe_load(text)\n"
@@ -2742,6 +3007,9 @@ NEGATIVE_VECTORS = (
     "subprocess.run(cmd, **{'shell': False})\nsubprocess.run(cmd, **dict(shell=False))\n",
     "import os\nos.system('true')\n",
     "import os, subprocess\nflag = getattr(os, 'O_NOFOLLOW', 0)\nok = hasattr(subprocess, 'run')\n",
+    "import importlib\ngetattr(importlib, 'import_module')('json')\n",
+    "__import__('json', fromlist=['loads'], level=0)\n__import__('json', None, None, ())\n"
+    "__import__('json', None, None, ('a', 'b'), 0)\n",
     "import requests\nrequests.get(url, verify=True)\nrequests.get(url, verify='/ca.pem')\n"
     "requests.get(url, **{'verify': True})\nsession.verify = '/ca.pem'\n",
     "import ssl\nctx.check_hostname = True\nctx.verify_mode = ssl.CERT_REQUIRED\n"
@@ -2886,6 +3154,14 @@ NEGATIVE_VECTORS = (
     # that holds only part of the pattern, (?u:...) closed before the \d.
     *_REGEX_LEADING_ASCII,
     "import re\nre.compile(r'^(?a:\\d+)$')\nre.compile(r'(?a:^(?u:[a-z]+)\\d+$)')\n",
+    # Literal standard-library imports, a sys.path mutation with no importer call in its
+    # scope (or in another function's), and a literal-path insert beside a stdlib import.
+    *_IMPORT_STDLIB,
+    "import sys\nsys.path.insert(0, str(root))\nsys.path.append(found)\n",
+    "import importlib, sys\ndef add(p):\n    sys.path.insert(0, p)\n"
+    "def load():\n    return importlib.import_module('json')\n",
+    "import importlib, sys\ndef f():\n    sys.path.insert(0, '/usr/share/stubs')\n"
+    "    return importlib.import_module('json')\n",
 )
 
 
@@ -3090,7 +3366,7 @@ def _parse_raises(exc_type):
         module = sys.modules[__name__]
         real = module.scan_source
 
-        def refuse(source, filename="<source>", disabled=()):
+        def refuse(source, filename="<source>", disabled=(), modules=None):
             raise exc_type("parser refused " + filename)
         module.scan_source = refuse
 
@@ -3200,6 +3476,16 @@ TREE_VECTORS = (
     # A site fixed with re.ASCII leaves its entry stale, which is itself a finding.
     ("regex allowlist entry stale after a fix", {"tools/a.py": _REGEX_FIXED}, (_REGEX_ENTRY,),
      None, 1, "allowlist-stale", 0),
+    # A literal import of a module no file in the tree supplies is counted (fail closed).
+    ("unknown literal module import", {"tools/a.py": _IMPORT_REPO}, (), None, 1,
+     "code-import", 0),
+    # A written-then-imported probe in a tree: the temporary-directory insert and the computed
+    # import are two code sites in one function, so a one-site allowance reports all three lines.
+    ("written module import probe",
+     {"tools/a.py": b"import importlib, sys\ndef probe(td, name):\n"
+                    b"    sys.path.insert(0, str(td))\n"
+                    b"    return importlib.import_module(name)\n"},
+     (("tools/a.py", "probe", "code", 1, _REASON),), None, 3, "code-syspath", 0),
 )
 
 
@@ -3238,6 +3524,37 @@ def self_test():
         failures.append("tree: the vendored tree is not excluded")
     if _tree_outcome({"tools/a.py": _SITE}) != 1:
         failures.append("tree: an unreviewed site passes")
+    # A literal import of a module file the tree holds is the ordinary way to reach the
+    # repository's code; the same literal with no such file is counted (the flip above in
+    # TREE_VECTORS proves the check carries it).
+    if _tree_outcome({"tools/helper.py": b"x = 1\n", "tools/a.py": _IMPORT_REPO}) != 0:
+        failures.append("tree: a literal import of a repository module is counted")
+    if _tree_outcome({"tools/a.py": _IMPORT_REPO}) != 1:
+        failures.append("tree: a literal import with no such module file is not counted")
+    # The stdlib reading flipped: with the roster emptied, each literal stdlib import counts.
+    global _STDLIB_MODULES
+    stdlib, _STDLIB_MODULES = _STDLIB_MODULES, frozenset()
+    try:
+        for source in _IMPORT_STDLIB:
+            if not any(item[4] == "code-import" for item in scan_source(source)):
+                failures.append("not counted with the stdlib roster emptied: " + repr(source))
+    finally:
+        _STDLIB_MODULES = stdlib
+    # A non-literal sys.path mutation pairs with a reimporter call as it does with a direct
+    # importer; with the reimporters dropped from the scope registration (only the
+    # registration removed, each call still counted), no vector reports code-syspath.
+    for source in _SYSPATH_REIMPORTERS:
+        if not any(item[4] == "code-syspath" for item in scan_source(source)):
+            failures.append("sys.path mutation beside a reimporter not counted: " + repr(source))
+    global _SCOPE_IMPORTERS
+    scope_importers, _SCOPE_IMPORTERS = _SCOPE_IMPORTERS, _IMPORTERS
+    try:
+        for source in _SYSPATH_REIMPORTERS:
+            if any(item[4] == "code-syspath" for item in scan_source(source)):
+                failures.append("code-syspath with the reimporters not registering their scope: "
+                                + repr(source))
+    finally:
+        _SCOPE_IMPORTERS = scope_importers
     # \z is read as an end anchor: with it dropped from the end anchors, its vectors pass.
     global _REGEX_ENDS
     ends, _REGEX_ENDS = _REGEX_ENDS, tuple(end for end in _REGEX_ENDS if end != "\\z")
@@ -3306,12 +3623,16 @@ def self_test():
         return 1
     print("SELF-TEST PASS: dangerous-api: {} positive vectors and {} generated sink-set vectors"
           " (each fails without its check), {} negatives, {} fail-closed and allowlist tree"
-          " vectors (each changes outcome without its check), 4 admission vectors, {} \\z vectors"
+          " vectors (each changes outcome without its check), 4 admission vectors, {} literal-"
+          "import vectors (the repository module file and the emptied stdlib roster flip"
+          " them), {} reimporter sys.path vectors (each loses its code-syspath with the"
+          " reimporters dropped from the scope registration), {} \\z vectors"
           " that pass without \\z as an end anchor, {} leading comment-group vectors that flip"
           " with only flag groups read as leading, {} scoped u vectors that pass with u not"
           " clearing ASCII, {} getattr(x, \"getattr\") and {} __builtins__ vectors that pass"
           " without that reading.".format(
               len(POSITIVE_VECTORS), len(generated), len(NEGATIVE_VECTORS), len(TREE_VECTORS),
+              2 + len(_IMPORT_STDLIB), len(_SYSPATH_REIMPORTERS),
               len(_REGEX_END_Z), len(_REGEX_LEADING_COMMENT) + len(_REGEX_LEADING_ASCII),
               len(_REGEX_SCOPE_U), len(_GETATTR_BY_NAME),
               len(_BUILTINS_DUNDER) + len(_BUILTINS_BOUND)))
