@@ -2514,27 +2514,82 @@ _CENSUS_MAPPINGS = (
 
 # A census run is a tool's whole self-test (the injected read fails only at its close vectors, near the
 # end), so its kill bound must outlive that self-test's own end-to-end budget. A tool listed in
-# _CENSUS_BUDGETED must declare that budget as a module-level SELF_TEST_BUDGET_S integer (load-adjusted
-# seconds), read from its source without importing it; its run is bounded at that budget plus
+# _CENSUS_BUDGETED must declare that budget (load-adjusted seconds) as the only binding of
+# SELF_TEST_BUDGET_S in its module, a module-level plain assignment of a positive int literal, read from
+# its parsed source without importing it (_declared_budget); its run is bounded at that budget plus
 # CENSUS_BOUND_MARGIN_S, never at a separately chosen number. Any other tool keeps TIMEOUT * 4. Every
 # bound runs on the load-adjusted clock of tools/_load_bound.py, the clock the child's own bounds use, so
 # host load stretches the parent's bound as it stretches the child's waits. A run that outlives its bound
 # is stopped (its whole process group) as _load_bound.Hung, a subprocess.TimeoutExpired, which main()
-# reports as cannot-evaluate (exit 2), never a pass.
+# reports as cannot-evaluate (exit 2), never a pass. The self-test judges the bounds each census run
+# actually handed to that clock (_census_mapping_check records them), not what _census_bound returns.
 CENSUS_BOUND_MARGIN_S = TIMEOUT  # one parent call bound: interpreter start-up, the driver and the teardown
 _CENSUS_DEFAULT_BOUND_S = TIMEOUT * 4
 _CENSUS_BUDGETED = ("tools/check_gensrc_failclose.py",)
-_BUDGET_LINE = re.compile(r"^SELF_TEST_BUDGET_S = ([1-9][0-9]*)[ \t]*(?:#[^\n]*)?$", re.MULTILINE | re.ASCII)
+_BUDGET_NAME = "SELF_TEST_BUDGET_S"
+
+
+def _name_bindings(tree, name):
+    """Every node of the parsed module tree that binds, rebinds or deletes name, at any depth: a Name
+    stored or deleted (plain, augmented, annotated, tuple or starred target, for target, with target,
+    walrus, comprehension variable, type alias), a def or class name, a parameter, an import alias, an
+    except name, a global or nonlocal declaration, a match capture, a type parameter, an attribute
+    stored or deleted under that name (a module can rebind its own global through a reference to
+    itself), and every star import (which can bind any name). A binding made from a string at run time
+    (setattr, globals()) is not seen in the tree."""
+    import ast
+    found = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name):
+            names = () if isinstance(node.ctx, ast.Load) else (node.id,)
+        elif isinstance(node, ast.Attribute):
+            names = () if isinstance(node.ctx, ast.Load) else (node.attr,)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.ExceptHandler,
+                               ast.MatchAs, ast.MatchStar, ast.TypeVar, ast.ParamSpec, ast.TypeVarTuple)):
+            names = (node.name,)
+        elif isinstance(node, ast.MatchMapping):
+            names = (node.rest,)
+        elif isinstance(node, ast.arg):
+            names = (node.arg,)
+        elif isinstance(node, (ast.Global, ast.Nonlocal)):
+            names = tuple(node.names)
+        elif isinstance(node, ast.alias):
+            names = (name,) if node.name == "*" else (node.asname or node.name.split(".")[0],)
+        else:
+            names = ()
+        if name in names:
+            found.append(node)
+    return found
+
+
+def _budget_from_source(source, label):
+    """The SELF_TEST_BUDGET_S that source declares, read from its syntax tree (the module is never
+    imported or run): the name's only binding anywhere in the module must be one module-level plain
+    assignment (a single Name target) of a positive int literal. Anything else is cannot-evaluate: no
+    such assignment or more than one, any other binding of the name at any depth (_name_bindings), a
+    value that is not a positive int literal (a bool, a float, an expression), or a source that does
+    not parse."""
+    import ast
+    try:
+        tree = ast.parse(source, filename=label)
+    except (SyntaxError, ValueError, RecursionError, MemoryError) as exc:
+        raise CannotEvaluate("{}: cannot parse to read {}: {}: {}".format(
+            label, _BUDGET_NAME, type(exc).__name__, exc)) from exc
+    declared = [node for node in tree.body if isinstance(node, ast.Assign) and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name) and node.targets[0].id == _BUDGET_NAME]
+    bindings = _name_bindings(tree, _BUDGET_NAME)
+    value = declared[0].value if len(declared) == 1 else None
+    require(len(declared) == 1 and len(bindings) == 1 and bindings[0] is declared[0].targets[0]
+            and isinstance(value, ast.Constant) and type(value.value) is int and value.value > 0,
+            "{}: expected {} bound exactly once, by a module-level plain assignment of a positive int "
+            "literal, and nowhere else in the module".format(label, _BUDGET_NAME))
+    return value.value
 
 
 def _declared_budget(path):
-    """The SELF_TEST_BUDGET_S the tool at path declares on exactly one module-level line, as an int.
-    Anything else (no such line, more than one, or a name assigned on another line) is cannot-evaluate."""
-    source = path.read_text(encoding="utf-8")
-    found = _BUDGET_LINE.findall(source)
-    require(len(found) == 1 and len(re.findall(r"^SELF_TEST_BUDGET_S\b", source, re.MULTILINE)) == 1,
-            "{}: expected exactly one module-level SELF_TEST_BUDGET_S = <integer> line".format(path))
-    return int(found[0])
+    """The SELF_TEST_BUDGET_S the tool at path declares, as an int (_budget_from_source); a source
+    that cannot be read as UTF-8 raises OSError or ValueError, which main() reports as cannot-evaluate."""
+    return _budget_from_source(path.read_text(encoding="utf-8"), str(path))
 
 
 def _census_bound(root, rel):
@@ -2558,43 +2613,245 @@ def _census_run(args, bound):
     return _load_bound.run(args, budget_s=bound, stall_s=bound)
 
 
-def _census_bound_checks(root):
-    """The bound checks of the census runs: each budgeted tool declares its budget, every run's bound
-    outlives the budget it waits on, the comparison holds at its edge, and a child that hangs past its
-    bound is still stopped as a subprocess.TimeoutExpired (main() maps it to exit 2)."""
-    margin = CENSUS_BOUND_MARGIN_S
-    bounds = {rel: _census_bound(root, rel) for rel, _target, _argv in _CENSUS_MAPPINGS}
-    check("census-bound-declared", all(bounds[rel][0] is not None for rel in _CENSUS_BUDGETED))
-    check("census-bound-outlives-budget",
-          all(_bound_outlives(bound, budget) for budget, bound in bounds.values()))
-    check("census-bound-edge", [_bound_outlives(600 + margin + delta, 600) for delta in (-0.001, 0, 0.001)]
-          + [_bound_outlives(TIMEOUT * 4, 600), _bound_outlives(600, 600)] == [False, True, True, False, False])
+# Sources for _budget_from_source: (name, source, the budget it must read, or None where it must refuse).
+# The first four are each accepted, at 600, by the line reader this module used before (one column-0
+# "SELF_TEST_BUDGET_S = <digits>" line, _retired_line_budget), so each is red against that reader.
+_BUDGET_FIXTURES = (
+    ("docstring", '"""\nSELF_TEST_BUDGET_S = 600\n"""\n', None),
+    ("if-block-reassign", "SELF_TEST_BUDGET_S = 600\nif True:\n    SELF_TEST_BUDGET_S = 900\n", None),
+    ("augmented", "SELF_TEST_BUDGET_S = 600\n_x = 0; SELF_TEST_BUDGET_S += 300\n", None),
+    ("annotated", "SELF_TEST_BUDGET_S = 600\ntry:\n    SELF_TEST_BUDGET_S: int = 900\nexcept ImportError:\n"
+     "    pass\n", None),
+    ("tuple-target", "SELF_TEST_BUDGET_S = 600\n(SELF_TEST_BUDGET_S, _y) = (900, 0)\n", None),
+    ("global", "SELF_TEST_BUDGET_S = 600\ndef _f():\n    global SELF_TEST_BUDGET_S\n", None),
+    ("nested-local", "SELF_TEST_BUDGET_S = 600\ndef _f():\n    SELF_TEST_BUDGET_S = 900\n", None),
+    ("walrus", "SELF_TEST_BUDGET_S = 600\nif (SELF_TEST_BUDGET_S := 900):\n    pass\n", None),
+    ("for-target", "SELF_TEST_BUDGET_S = 600\nfor SELF_TEST_BUDGET_S in (900,):\n    pass\n", None),
+    ("import-alias", "SELF_TEST_BUDGET_S = 600\nfrom os import sep as SELF_TEST_BUDGET_S\n", None),
+    ("star-import", "SELF_TEST_BUDGET_S = 600\nfrom os import *\n", None),
+    ("def-name", "SELF_TEST_BUDGET_S = 600\ndef SELF_TEST_BUDGET_S():\n    pass\n", None),
+    ("parameter", "SELF_TEST_BUDGET_S = 600\ndef _f(SELF_TEST_BUDGET_S=900):\n    pass\n", None),
+    ("except-name", "SELF_TEST_BUDGET_S = 600\ntry:\n    pass\nexcept OSError as SELF_TEST_BUDGET_S:\n"
+     "    pass\n", None),
+    ("match-capture", "SELF_TEST_BUDGET_S = 600\nmatch 0:\n    case SELF_TEST_BUDGET_S:\n        pass\n", None),
+    ("attribute-store", "import sys\nSELF_TEST_BUDGET_S = 600\nsys.modules[__name__].SELF_TEST_BUDGET_S = 900\n",
+     None),
+    ("delete", "SELF_TEST_BUDGET_S = 600\ndel SELF_TEST_BUDGET_S\n", None),
+    ("two-assignments", "SELF_TEST_BUDGET_S = 600\nSELF_TEST_BUDGET_S = 900\n", None),
+    ("chained", "SELF_TEST_BUDGET_S = _OTHER = 600\n", None),
+    ("annotated-only", "SELF_TEST_BUDGET_S: int = 600\n", None),
+    ("missing", "OTHER = 600\n", None),
+    ("zero", "SELF_TEST_BUDGET_S = 0\n", None),
+    ("negative", "SELF_TEST_BUDGET_S = -600\n", None),
+    ("bool", "SELF_TEST_BUDGET_S = True\n", None),
+    ("float", "SELF_TEST_BUDGET_S = 600.0\n", None),
+    ("string", "SELF_TEST_BUDGET_S = '600'\n", None),
+    ("expression", "SELF_TEST_BUDGET_S = 600 + 0\n", None),
+    ("syntax-error", "SELF_TEST_BUDGET_S = 600\ndef (\n", None),
+    ("null-byte", "SELF_TEST_BUDGET_S = 600\n\x00\n", None),
+    ("plain", "SELF_TEST_BUDGET_S = 600  # seconds\n", 600),
+    ("one", "SELF_TEST_BUDGET_S = 1\n", 1),
+    ("reads-and-text", 'SELF_TEST_BUDGET_S = 600\n"""SELF_TEST_BUDGET_S = 900"""\nOTHER = SELF_TEST_BUDGET_S + 1\n'
+     "print(SELF_TEST_BUDGET_S)\n", 600),
+)
+_BUDGET_LINE_READER_RED = ("docstring", "if-block-reassign", "augmented", "annotated")
+
+
+def _retired_line_budget(source):
+    """The line reader _budget_from_source replaced, kept only so the self-test can show its regression
+    fixtures red against it: the value on exactly one column-0 SELF_TEST_BUDGET_S line, or None."""
+    found = re.findall(r"^SELF_TEST_BUDGET_S = ([1-9][0-9]*)[ \t]*(?:#[^\n]*)?$", source, re.MULTILINE | re.ASCII)
+    if len(found) == 1 and len(re.findall(r"^SELF_TEST_BUDGET_S\b", source, re.MULTILINE)) == 1:
+        return int(found[0])
+    return None
+
+
+def _budget_reader_checks(red_on_revert):
+    """Each _BUDGET_FIXTURES source reads as its stated budget or is refused as cannot-evaluate; with
+    red_on_revert, each regression fixture is shown accepted by the retired line reader."""
+    for name, source, want in _BUDGET_FIXTURES:
+        try:
+            got = _budget_from_source(source, "fixture " + name)
+        except CannotEvaluate:
+            got = None
+        check("census-budget-reader-" + name, got == want)
+        print("PASS census-budget-reader-" + name)
+    if red_on_revert:
+        sources = {name: source for name, source, _want in _BUDGET_FIXTURES}
+        for name in _BUDGET_LINE_READER_RED:
+            check("census-budget-reader-" + name + "-red", _retired_line_budget(sources[name]) == 600)
+            print("RED census-budget-reader-" + name + " at the retired line reader")
+
+
+_CENSUS_HANG_BOUND_S = 5
+# The hang fixture: a child that starts one grandchild (a plain Popen, so it stays in the child's process
+# group), reports its own pid, the grandchild's pid and the grandchild's group id on stdout, then sleeps.
+# Both carry the run's token (sys.argv[1]) on their command lines, so the survivor scan names them alone.
+_CENSUS_HANG_CHILD = (
+    "import os, subprocess, sys, time\n"
+    "grandchild = subprocess.Popen([sys.executable, '-I', '-B', '-c', 'import time; time.sleep(3600)', sys.argv[1]])\n"
+    "print('census-hang', os.getpid(), grandchild.pid, os.getpgid(grandchild.pid), flush=True)\n"
+    "time.sleep(3600)\n")
+
+
+def _census_hang_check():
+    """A child that hangs past its census bound must leave as a subprocess.TimeoutExpired (main() maps it
+    to exit 2) with the child and its whole process group gone: the grandchild it started in its group
+    (shown in the group by its reported group id) must die with it, and no process carrying the run's
+    token may remain once the helper's reap wait (_load_bound.REAP_S) has passed.
+
+    Scope, within what _load_bound.run guarantees: it stops the child's process group on POSIX, through
+    the pidfd group signal (Linux 6.9 and later) or else by group id while the leader is unreaped, which
+    holds here because the leader is still running at the stop; a descendant that leaves the group
+    (setsid or setpgid) is not stopped by the helper and is not exercised here. Platform limits: without
+    POSIX process groups (Windows) the helper kills only the direct child, so the grandchild survives and
+    this check fails; the survivor scan reads /proc command lines (Linux), so a /proc that exists but
+    cannot be read fails the check, and a host with no /proc raises cannot-evaluate (exit 2), never a
+    pass. A survivor the scan finds is killed only when it is one of the two reported pids."""
+    import secrets
+    import time
+    import _load_bound
+    token = "census-hang-" + secrets.token_hex(16)
     hung = None
     try:
-        _census_run([sys.executable, "-I", "-B", "-c", "import time\ntime.sleep(3600)\n"], 2)
+        _census_run([sys.executable, "-I", "-B", "-c", _CENSUS_HANG_CHILD, token], _CENSUS_HANG_BOUND_S)
     except subprocess.TimeoutExpired as exc:
         hung = exc
-    check("census-bound-hang-stops", isinstance(hung, subprocess.SubprocessError))
-    for rel, (budget, bound) in sorted(bounds.items()):
-        print("PASS census-bound {} budget={} bound={}".format(rel, budget, bound))
+    check("census-bound-hang-stops", isinstance(hung, subprocess.TimeoutExpired))
+    output = hung.output if isinstance(hung.output, bytes) else b""
+    started = re.search(rb"^census-hang (\d+) (\d+) (\d+)$", output, re.MULTILINE | re.ASCII)
+    pids = (int(started.group(1)), int(started.group(2))) if started else ()
+    in_group = bool(started) and int(started.group(3)) == pids[0]
+    deadline = time.monotonic() + _load_bound.REAP_S
+    survivors = _load_bound._alive_with(token)
+    while survivors and time.monotonic() < deadline:
+        time.sleep(0.2)
+        survivors = _load_bound._alive_with(token)
+    outcome = _load_bound._leak_cleanup_outcome(survivors, os.path.isdir("/proc"))
+    require(outcome != "cannot-evaluate",
+            "census-bound-hang-group-gone: this host has no /proc, so no survivor can be ruled out")
+    failures = []
+    if not in_group:
+        failures.append("the hang fixture did not report a grandchild in its own process group before the "
+                        "stop (output {!r})".format(output[-400:]))
+    if outcome == "failure":
+        failures.append("/proc exists but the survivor scan could not read it")
+    elif survivors:
+        failures.append("still running {} s after the stop: pids {}".format(_load_bound.REAP_S, survivors))
+        for pid in survivors:
+            if pid in pids:
+                _load_bound._kill_pid(pid)
+    for failure in failures:
+        print("FAIL census-bound-hang-group-gone: " + failure, file=sys.stderr)
+    check("census-bound-hang-group-gone", not failures)
+    print("PASS census-bound-hang-group-gone child={} grandchild={} stop={}".format(
+        pids[0], pids[1], getattr(hung, "kind", "timeout")))
+
+
+_CENSUS_CLOCK = "load-adjusted"
+
+
+def _census_used_outlive(used, budgets):
+    """True when used (from _census_mapping_check) holds one row per _CENSUS_MAPPINGS entry, in order,
+    and each row made exactly one call to _load_bound.run, on the load-adjusted clock, whose
+    load-adjusted bound and stall bound each outlive its tool's declared budget (_bound_outlives;
+    budgets maps a path to its declared budget or None). A run that never reached that runner (a plain
+    subprocess call with its own fixed timeout) has no call and fails."""
+    return ([(rel, target) for rel, target, _calls in used]
+            == [(rel, target) for rel, target, _argv in _CENSUS_MAPPINGS]
+            and all(len(calls) == 1 and calls[0][2] == _CENSUS_CLOCK
+                    and all(isinstance(bound, (int, float)) and not isinstance(bound, bool)
+                            and _bound_outlives(bound, budgets[rel]) for bound in calls[0][:2])
+                    for rel, _target, calls in used))
+
+
+def _census_bound_checks(root, red_on_revert, used):
+    """The bound checks of the census runs: the budget reader's fixtures, each budgeted tool declares
+    its budget, the bounds every census run actually used (used, recorded by _census_mapping_check)
+    outlive the budget it waits on on the load-adjusted clock, the comparison holds at its edge, and a
+    child that hangs past its bound is stopped with its process group (_census_hang_check). With
+    red_on_revert, the judgment is shown red on the recorded rows with the budgeted tool's call
+    replaced by what each revert would record: the default bound at the call site, no call at all (a
+    fixed timeout outside the load-adjusted runner), and a call on another clock."""
+    margin = CENSUS_BOUND_MARGIN_S
+    _budget_reader_checks(red_on_revert)
+    bounds = {rel: _census_bound(root, rel) for rel, _target, _argv in _CENSUS_MAPPINGS}
+    budgets = {rel: budget for rel, (budget, _bound) in bounds.items()}
+    check("census-bound-declared", all(bounds[rel][0] is not None for rel in _CENSUS_BUDGETED))
+    check("census-bound-outlives-budget", _census_used_outlive(used, budgets))
+    check("census-bound-edge", [_bound_outlives(600 + margin + delta, 600) for delta in (-0.001, 0, 0.001)]
+          + [_bound_outlives(TIMEOUT * 4, 600), _bound_outlives(600, 600)] == [False, True, True, False, False])
+
+    def replaced(calls):
+        """The recorded rows with each budgeted tool's calls replaced by calls."""
+        return [(rel, target, calls if rel in _CENSUS_BUDGETED else row) for rel, target, row in used]
+
+    def at(load_over, stall_over):
+        """The judgment with each budgeted tool's one call bounded at its budget plus these amounts."""
+        return _census_used_outlive([
+            (rel, target, ((budgets[rel] + load_over, budgets[rel] + stall_over, _CENSUS_CLOCK),)
+             if rel in _CENSUS_BUDGETED else row) for rel, target, row in used], budgets)
+    # Each of the two recorded bounds just inside, exactly at and just outside the budget plus the margin,
+    # the other held at the edge.
+    edges = [(margin + delta, margin) for delta in (-0.001, 0, 0.001)] + [
+        (margin, margin + delta) for delta in (-0.001, 0, 0.001)]
+    check("census-bound-used-edge", [at(load, stall) for load, stall in edges]
+          == [False, True, True, False, True, True])
+    if red_on_revert:
+        reverts = (
+            ("call-site", ((_CENSUS_DEFAULT_BOUND_S, _CENSUS_DEFAULT_BOUND_S, _CENSUS_CLOCK),)),
+            ("fixed-run", ()),
+            ("other-clock", ((10 ** 6, 10 ** 6, "wall"),)),
+        )
+        for name, calls in reverts:
+            check("census-bound-outlives-budget-red-" + name, not _census_used_outlive(replaced(calls), budgets))
+            print("RED census-bound-outlives-budget at the " + name + " revert")
+    _census_hang_check()
+    for rel, target, calls in used:
+        print("PASS census-bound {} ({}) budget={} used={}".format(rel, target, budgets[rel], list(calls)))
 
 
 def _census_mapping_check(root):
     """Each self-test in _CENSUS_MAPPINGS, run under CENSUS_DRIVER, must end exit 2 with its cannot-evaluate
     report naming the held descriptor ("SELF-TEST ERROR: descriptor census cannot evaluate descriptor N:"),
-    never a traceback (exit 1) or a pass. Each run is bounded by _census_bound. Returns (failures, runs)."""
+    never a traceback (exit 1) or a pass. Each run is bounded by _census_bound.
+
+    While the runs go, _load_bound.run is wrapped (and restored afterwards) so that every call reaching
+    it records the load-adjusted bound, the stall bound and the clock it was given: the default clock or
+    a _load_bound.LoadClock is the load-adjusted clock, anything else is named by its type. The calls of
+    each run are kept against its mapping, so census-bound-outlives-budget judges the bounds the runs
+    actually used: a call site that passes another bound, or a run made outside that runner, shows up
+    there. Returns (failures, runs, used), used holding (path, census caller, calls) per mapping."""
+    import _load_bound
     failures = []
-    for rel, target, argv in _CENSUS_MAPPINGS:
-        result = _census_run([sys.executable, "-I", "-B", "-c", CENSUS_DRIVER, str(root / rel), target, *argv],
-                             _census_bound(root, rel)[1])
-        err = result.stderr.decode("utf-8", "replace")
-        held = re.match(r"census-held (\d+)\n", err, re.ASCII)
-        want = held and ("SELF-TEST ERROR: descriptor census cannot evaluate descriptor " + held.group(1)
-                         + ": OSError(5, 'injected census read failure')")
-        if result.returncode != 2 or not want or want not in err or "Traceback" in err:
-            failures.append("%s (census under %s): expected exit 2 with its cannot-evaluate report, got exit %d: %s"
-                            % (rel, target, result.returncode, err.strip().splitlines()[-1:]))
-    return failures, len(_CENSUS_MAPPINGS)
+    calls = []
+    used = []
+    real_run = _load_bound.run
+
+    def recording_run(argv, **kwargs):
+        clock = kwargs.get("clock")
+        calls.append((kwargs.get("budget_s"), kwargs.get("stall_s"),
+                      _CENSUS_CLOCK if clock is None or isinstance(clock, _load_bound.LoadClock)
+                      else type(clock).__name__))
+        return real_run(argv, **kwargs)
+
+    _load_bound.run = recording_run
+    try:
+        for rel, target, argv in _CENSUS_MAPPINGS:
+            first = len(calls)
+            result = _census_run([sys.executable, "-I", "-B", "-c", CENSUS_DRIVER, str(root / rel), target, *argv],
+                                 _census_bound(root, rel)[1])
+            used.append((rel, target, tuple(calls[first:])))
+            err = result.stderr.decode("utf-8", "replace")
+            held = re.match(r"census-held (\d+)\n", err, re.ASCII)
+            want = held and ("SELF-TEST ERROR: descriptor census cannot evaluate descriptor " + held.group(1)
+                             + ": OSError(5, 'injected census read failure')")
+            if result.returncode != 2 or not want or want not in err or "Traceback" in err:
+                failures.append("%s (census under %s): expected exit 2 with its cannot-evaluate report, got exit "
+                                "%d: %s" % (rel, target, result.returncode, err.strip().splitlines()[-1:]))
+    finally:
+        _load_bound.run = real_run
+    return failures, len(_CENSUS_MAPPINGS), used
 
 
 def _close_harness_checks(parent, script):
@@ -2806,8 +3063,8 @@ def _self_test_isolated(red_on_revert):
         for failure in stage_failures:
             print("FAIL " + failure, file=sys.stderr)
         check("close-stage-census-mapping", not stage_failures)
-        _census_bound_checks(script.parents[1])
-        mapping_failures, mapping_runs = _census_mapping_check(script.parents[1])
+        mapping_failures, mapping_runs, used = _census_mapping_check(script.parents[1])
+        _census_bound_checks(script.parents[1], red_on_revert, used)
         for failure in mapping_failures:
             print("FAIL " + failure, file=sys.stderr)
         check("census-mapping", not mapping_failures)
