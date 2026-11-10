@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "d8c6e2d1cd4207836cd30b1febfd76a2393099c956a49f542efd32b6f3f624ea"
+tree-sha256 = "629f7b43c2d7b528370414bae20f0c87113d0135f5df5efda32e9c6cf58137aa"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -41,8 +41,8 @@ sha256 = "94fcfd97b61926c28fd2e548d158000394965230bdfba9e20706dc9883a6a8bb"
 
 [[sources]]
 path = ".aiqt/core/clauses.toml"
-bytes = 315923
-sha256 = "cab8986b321d8d8c7fd106d2520f1a854f0ad47bcde686a94b0c086d1ae25da4"
+bytes = 317167
+sha256 = "b9d93fa0dda3420b2cf74c9f4a73fbd426c6c855c8e12ed91f819671b678c02f"
 
 [[sources]]
 path = ".aiqt/core/conformance/behaviour-checklist.md"
@@ -96,13 +96,13 @@ sha256 = "b8d02451c808defefad5462a05f78e04409408b238883d8384fe68badd05497f"
 
 [[sources]]
 path = ".aiqt/core/id-history.toml"
-bytes = 39409
-sha256 = "355751ebcd67ac92230317f3dba2600bc0ad16d88996bf8097f6eb38d6747b56"
+bytes = 39558
+sha256 = "069aa63092908bacb3847a687428a11460efcbf0ab1617dde32d9ceb8921edc1"
 
 [[sources]]
 path = ".aiqt/core/instruction-budget.toml"
-bytes = 11325
-sha256 = "85e95279ae612dec87941675bd2024a6c430c6766632fa6c5921455cd1b8ecd0"
+bytes = 12560
+sha256 = "2d7fc2ba47a8d98ecbe05c34fb725e26c566c96380e4370e267995d7f9a733cc"
 
 [[sources]]
 path = ".aiqt/core/migration/crosswalk-schema.toml"
@@ -186,8 +186,8 @@ sha256 = "651255b4c0eca59ba33666d95e24fa37f2fad318091dbfe6c5e724b5b26d14e8"
 
 [[sources]]
 path = ".aiqt/core/rules/accur-evidence-grounded-completion.md"
-bytes = 4342
-sha256 = "3550444e0122d5ca683c921040aa575f5c5d3d62dcf9d5ee0c0c87b1e1741802"
+bytes = 4643
+sha256 = "5157476e70a6125ccbee03dc05be18b6715712702c49dc6f94472cad41f0fe2a"
 
 [[sources]]
 path = ".aiqt/core/rules/accur-guard-input-soundness.md"
@@ -356,8 +356,8 @@ sha256 = "ac0e2ddcdb71b71a963989ef0be72381fffcac02116739870940e14b5d9855e8"
 
 [[sources]]
 path = ".aiqt/core/rules/integ-validation-gates-apply.md"
-bytes = 451
-sha256 = "6e5b8be0330b60fbccc002bf93f87d03716b51a2849b3949e66c8ebd72396400"
+bytes = 617
+sha256 = "b5ce28cc5e05e5ec7de7d1981af3155f879872d9ff742a49dbdac50cb48a4b7b"
 
 [[sources]]
 path = ".aiqt/core/rules/integ-workers-produce-inert-data.md"
@@ -846,8 +846,8 @@ sha256 = "0fca72838333bd7d207d0430cbd416691e3dcd23dd71cb9fe9d0eed0da7d6608"
 
 [[sources]]
 path = ".aiqt/release/first-pin-demonstration.toml"
-bytes = 1104
-sha256 = "63d14c2d8d8e9d9c1f1aafc35ef66623652a3f42c385fe55a3191d69e86cf9c0"
+bytes = 1056
+sha256 = "788da3bf3b3a257fd71cf3a4b61bb2897ab068963fa9fb0c7e20fa27904555f9"
 
 [[sources]]
 path = ".aiqt/standards/README.md"
@@ -1006,8 +1006,8 @@ sha256 = "651255b4c0eca59ba33666d95e24fa37f2fad318091dbfe6c5e724b5b26d14e8"
 
 [[sources]]
 path = ".claude/rules/aiqt/10-ACCUR-evidence-grounded-completion.md"
-bytes = 4342
-sha256 = "3550444e0122d5ca683c921040aa575f5c5d3d62dcf9d5ee0c0c87b1e1741802"
+bytes = 4643
+sha256 = "5157476e70a6125ccbee03dc05be18b6715712702c49dc6f94472cad41f0fe2a"
 
 [[sources]]
 path = ".claude/rules/aiqt/10-ACCUR-guard-input-soundness.md"
@@ -1171,8 +1171,8 @@ sha256 = "ac0e2ddcdb71b71a963989ef0be72381fffcac02116739870940e14b5d9855e8"
 
 [[sources]]
 path = ".claude/rules/aiqt/10-INTEG-validation-gates-apply.md"
-bytes = 451
-sha256 = "6e5b8be0330b60fbccc002bf93f87d03716b51a2849b3949e66c8ebd72396400"
+bytes = 617
+sha256 = "b5ce28cc5e05e5ec7de7d1981af3155f879872d9ff742a49dbdac50cb48a4b7b"
 
 [[sources]]
 path = ".claude/rules/aiqt/10-INTEG-workers-produce-inert-data.md"
@@ -1676,8 +1676,8 @@ sha256 = "e6e5e6c473c05b9f5b6412c30763c8529c08cdeafc1ca75fac57aa3395246333"
 
 [[sources]]
 path = ".cursor/rules/aiqt-guardrails/aiqt/10-ACCUR-evidence-grounded-completion.mdc"
-bytes = 4170
-sha256 = "a1a0be86792a8b0e3f5d60cc27995a91e5654ab8c77dbc0568e55373b2f2e749"
+bytes = 4471
+sha256 = "e91245b97ae4444fc4feef1d2c59ae6347ef6b67106c8b6086ae8d221f65d077"
 
 [[sources]]
 path = ".cursor/rules/aiqt-guardrails/aiqt/10-ACCUR-guard-input-soundness.mdc"
@@ -1841,8 +1841,8 @@ sha256 = "9244cd31eb0a13977b2d45964a62c79c4cbc09f3ebbdcd35cea0141d55cf0a32"
 
 [[sources]]
 path = ".cursor/rules/aiqt-guardrails/aiqt/10-INTEG-validation-gates-apply.mdc"
-bytes = 215
-sha256 = "10cdc2c6335cb684fed54357a747fedcf670df806da75f18feae2fac6ef1dc35"
+bytes = 381
+sha256 = "647e6263cbaeba95fae00c3517d001639ee5b2687989ed0f080c54e419d6a84a"
 
 [[sources]]
 path = ".cursor/rules/aiqt-guardrails/aiqt/10-INTEG-workers-produce-inert-data.mdc"
@@ -2311,8 +2311,8 @@ sha256 = "4030055c571dba037d9beaeff8a7e14a032502c882e41f96b0f3ea7c7f62f5db"
 
 [[sources]]
 path = ".github/copilot-instructions.md"
-bytes = 119119
-sha256 = "ebd407f48eef8c2d5dea31824e6fefca7a946814dfdd762da7740c1a4a746159"
+bytes = 119586
+sha256 = "6ac10abf1740ab76d51b61e7c63d3443dbf28dc7ca682b2402164290fd680c71"
 
 [[sources]]
 path = ".preview/README.md"
@@ -2376,8 +2376,8 @@ sha256 = "35c65369b1609683e09b784681a23fab80a05e047c5f36abe5311f100b4f9394"
 
 [[sources]]
 path = "AGENTS.md"
-bytes = 119080
-sha256 = "53f4a23828c9900724e401b8a90feeb845f1005b926a7f20883e09f27d670d88"
+bytes = 119547
+sha256 = "96a158e01f4273938e2e62ea0d44d042284bdfd6e07330243c65b393c6858bca"
 
 [[sources]]
 path = "CHANGELOG.md"
@@ -2396,13 +2396,13 @@ sha256 = "636289d2618ab81a04d89c076eaa912459862557fff4e75012c5f7096a994224"
 
 [[sources]]
 path = "GEMINI.md"
-bytes = 119115
-sha256 = "e82b868d627650c82d5dab0bf1c729cd10636707a24cf4b0075cec561c7df0d7"
+bytes = 119582
+sha256 = "47ef07858e5b7f7e2cc10e643be977dee38dd09bfecd8ba11c2ac901883fe571"
 
 [[sources]]
 path = "INSTRUCTION-BUDGET.md"
 bytes = 3839
-sha256 = "ca2f12e038b33a0c7c397eab65c18e766764dfe23760ab6e5dc69b1cf96b7f51"
+sha256 = "27e8db252db1bd6f13b550758cce0d83d8aa71b3ca8547472279ec714fd3a19e"
 
 [[sources]]
 path = "LICENSE"
@@ -2417,7 +2417,7 @@ sha256 = "4e25f91d723d0b329a2af16a82abcc891ce6a506ff2874a149e6c4bf58d353db"
 [[sources]]
 path = "README.md"
 bytes = 5215
-sha256 = "f6b36880769ad59525481bd3fb9af95f780ac8a846916243853d5ce40ff4420e"
+sha256 = "18899f90d8f81f0446ee4d4037393cd5a8ddf920b73bf29c868e57775e422690"
 
 [[sources]]
 path = "RELEASING.md"
@@ -3597,12 +3597,12 @@ sha256 = "02833e4ed8c6d11f75f9e8511a524927f4d64859e4003c59f325706d000297bc"
 [[sources]]
 path = "site/downloads/aiqt/manifest.json"
 bytes = 820
-sha256 = "2dec4f1760fa880134632fe721cdb9a2281204b53c7212989b192d508815a7f4"
+sha256 = "5d7e1565d21e7d2b042b89056e1e5fdce162afb4d4ad09c3596e3e76118e04e2"
 
 [[sources]]
 path = "site/downloads/aiqt/provenance.md"
 bytes = 1079
-sha256 = "bac47d1a3f4543cb63b8d74d99823cf93caaf303e17648c67810189d4c884702"
+sha256 = "6a6c2985bb8cec7ad01926fa9ed5fdd1f7f5bb8dbf8980b43e8e363e972665c8"
 
 [[sources]]
 path = "site/downloads/mappings.csv"
@@ -4776,7 +4776,7 @@ sha256 = "651255b4c0eca59ba33666d95e24fa37f2fad318091dbfe6c5e724b5b26d14e8"
 artifact-id = "rules:.claude/rules/aiqt/10-ACCUR-evidence-grounded-completion.md"
 path = ".claude/rules/aiqt/10-ACCUR-evidence-grounded-completion.md"
 kind = "file"
-sha256 = "3550444e0122d5ca683c921040aa575f5c5d3d62dcf9d5ee0c0c87b1e1741802"
+sha256 = "5157476e70a6125ccbee03dc05be18b6715712702c49dc6f94472cad41f0fe2a"
 
 [[artifacts]]
 artifact-id = "rules:.claude/rules/aiqt/10-ACCUR-guard-input-soundness.md"
@@ -4974,7 +4974,7 @@ sha256 = "ac0e2ddcdb71b71a963989ef0be72381fffcac02116739870940e14b5d9855e8"
 artifact-id = "rules:.claude/rules/aiqt/10-INTEG-validation-gates-apply.md"
 path = ".claude/rules/aiqt/10-INTEG-validation-gates-apply.md"
 kind = "file"
-sha256 = "6e5b8be0330b60fbccc002bf93f87d03716b51a2849b3949e66c8ebd72396400"
+sha256 = "b5ce28cc5e05e5ec7de7d1981af3155f879872d9ff742a49dbdac50cb48a4b7b"
 
 [[artifacts]]
 artifact-id = "rules:.claude/rules/aiqt/10-INTEG-workers-produce-inert-data.md"
@@ -5580,7 +5580,7 @@ sha256 = "e6e5e6c473c05b9f5b6412c30763c8529c08cdeafc1ca75fac57aa3395246333"
 artifact-id = "cursor:.cursor/rules/aiqt-guardrails/aiqt/10-ACCUR-evidence-grounded-completion.mdc"
 path = ".cursor/rules/aiqt-guardrails/aiqt/10-ACCUR-evidence-grounded-completion.mdc"
 kind = "file"
-sha256 = "a1a0be86792a8b0e3f5d60cc27995a91e5654ab8c77dbc0568e55373b2f2e749"
+sha256 = "e91245b97ae4444fc4feef1d2c59ae6347ef6b67106c8b6086ae8d221f65d077"
 
 [[artifacts]]
 artifact-id = "cursor:.cursor/rules/aiqt-guardrails/aiqt/10-ACCUR-guard-input-soundness.mdc"
@@ -5778,7 +5778,7 @@ sha256 = "9244cd31eb0a13977b2d45964a62c79c4cbc09f3ebbdcd35cea0141d55cf0a32"
 artifact-id = "cursor:.cursor/rules/aiqt-guardrails/aiqt/10-INTEG-validation-gates-apply.mdc"
 path = ".cursor/rules/aiqt-guardrails/aiqt/10-INTEG-validation-gates-apply.mdc"
 kind = "file"
-sha256 = "10cdc2c6335cb684fed54357a747fedcf670df806da75f18feae2fac6ef1dc35"
+sha256 = "647e6263cbaeba95fae00c3517d001639ee5b2687989ed0f080c54e419d6a84a"
 
 [[artifacts]]
 artifact-id = "cursor:.cursor/rules/aiqt-guardrails/aiqt/10-INTEG-workers-produce-inert-data.mdc"
@@ -6336,13 +6336,13 @@ sha256 = "9e0e365fb1e2813246c724267ec062310de3be1c5ca4ad9cba37fa0ce5691af4"
 artifact-id = "adapters:.github/copilot-instructions.md"
 path = ".github/copilot-instructions.md"
 kind = "file"
-sha256 = "ebd407f48eef8c2d5dea31824e6fefca7a946814dfdd762da7740c1a4a746159"
+sha256 = "6ac10abf1740ab76d51b61e7c63d3443dbf28dc7ca682b2402164290fd680c71"
 
 [[artifacts]]
 artifact-id = "agents:AGENTS.md"
 path = "AGENTS.md"
 kind = "file"
-sha256 = "53f4a23828c9900724e401b8a90feeb845f1005b926a7f20883e09f27d670d88"
+sha256 = "96a158e01f4273938e2e62ea0d44d042284bdfd6e07330243c65b393c6858bca"
 
 [[artifacts]]
 artifact-id = "claude:CLAUDE.md#RULES-INDEX"
@@ -6355,7 +6355,7 @@ sha256 = "69fa723a2b2d476a15abfc4466eba99040bfaed3f0d990b265ca60d8fe184013"
 artifact-id = "adapters:GEMINI.md"
 path = "GEMINI.md"
 kind = "file"
-sha256 = "e82b868d627650c82d5dab0bf1c729cd10636707a24cf4b0075cec561c7df0d7"
+sha256 = "47ef07858e5b7f7e2cc10e643be977dee38dd09bfecd8ba11c2ac901883fe571"
 
 [[artifacts]]
 artifact-id = "skill:site/downloads/aiqt-instructions.txt"
@@ -6385,10 +6385,10 @@ sha256 = "02833e4ed8c6d11f75f9e8511a524927f4d64859e4003c59f325706d000297bc"
 artifact-id = "skill:site/downloads/aiqt/manifest.json"
 path = "site/downloads/aiqt/manifest.json"
 kind = "file"
-sha256 = "2dec4f1760fa880134632fe721cdb9a2281204b53c7212989b192d508815a7f4"
+sha256 = "5d7e1565d21e7d2b042b89056e1e5fdce162afb4d4ad09c3596e3e76118e04e2"
 
 [[artifacts]]
 artifact-id = "skill:site/downloads/aiqt/provenance.md"
 path = "site/downloads/aiqt/provenance.md"
 kind = "file"
-sha256 = "bac47d1a3f4543cb63b8d74d99823cf93caaf303e17648c67810189d4c884702"
+sha256 = "6a6c2985bb8cec7ad01926fa9ed5fdd1f7f5bb8dbf8980b43e8e363e972665c8"

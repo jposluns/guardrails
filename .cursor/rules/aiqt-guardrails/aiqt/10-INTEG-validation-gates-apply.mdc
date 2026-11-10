@@ -5,4 +5,5 @@ alwaysApply: true
 # Validation is a gate on apply
 
 There is no trusted-worker fast path: every candidate change is validated before it lands, no matter its
-source. Trust is never a substitute for the gate.
+source. Trust is never a substitute for the gate. A hand edit widening a scoped claim into a general one is
+a candidate change, reviewed for every case it newly covers, including the one its subject exists to catch.
