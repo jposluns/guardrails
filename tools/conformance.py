@@ -52,6 +52,7 @@ if tuple(sys.version_info[:2]) < (3, 14):
     os._exit(2)
 
 import os
+import stat
 from pathlib import Path
 
 # Sibling-import idiom, identical to check_rule_placement.py / check_mappings.py: this file lives in
@@ -94,6 +95,27 @@ def _walk_raise(exc):
     """os.walk onerror callback that re-raises, so an unreadable dir at any depth fails closed instead
     of being silently skipped (os.walk, like rglob, ignores traversal errors by default)."""
     raise exc
+
+
+def _read_regular(path, text=False):
+    """Read the file at path through one descriptor opened with O_NONBLOCK and checked with fstat to be a
+    regular file before any read; text=True decodes it as Path.read_text(encoding="utf-8") does. A plain
+    open of a FIFO blocks until a writer appears, so a FIFO (or a socket, device or directory) here is
+    refused with an OSError naming the path, which every caller already reports as MALFORMED. The check
+    is on the opened descriptor, so a FIFO swapped in after an earlier exists() or lstat of the path is
+    refused too. An absent path raises FileNotFoundError, as a plain open does. The file object is made
+    with closefd=False, so the finally's close is the one close of fd on every path."""
+    fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError("{} is not a regular file".format(path))
+        if text:
+            with os.fdopen(fd, "r", encoding="utf-8", closefd=False) as fh:
+                return fh.read()
+        with os.fdopen(fd, "rb", closefd=False) as fh:
+            return fh.read()
+    finally:
+        os.close(fd)
 
 
 def _corpus_src(root):
@@ -158,6 +180,13 @@ def check_c1(root, cache):
     if not present:
         return Result("C1", "corpus-loads", NA, "no .aiqt/core/rules/ installed")
     try:
+        # Every rule source is first opened by _read_regular, so a FIFO there is refused (MALFORMED) before
+        # gen_rules.load_corpus, which opens each source by path, could block on it. The sources are read
+        # again by path afterwards (load_corpus, and the C2 renderers), so one swapped for a FIFO after this
+        # pass is not covered here.
+        for dirpath, _dirs, filenames in os.walk(src, onerror=_walk_raise):
+            for fn in sorted(f for f in filenames if f.endswith(".md")):
+                _read_regular(Path(dirpath) / fn)
         cache["corpus"] = gen_rules.load_corpus(src)
     except (ValueError, OSError) as exc:
         cache["corpus_error"] = True
@@ -194,14 +223,14 @@ def _claude_drift(root, corpus):
     desired = {}
     try:
         for src, _fm, rel in corpus:
-            desired[rel] = src.read_text(encoding="utf-8")
+            desired[rel] = _read_regular(src, text=True)
     except OSError as exc:
         return (MALFORMED, "cannot read a source rule: {}".format(exc))
     drift = []
     try:
         for rel, content in sorted(desired.items()):
             target = claude_dir / rel
-            current = target.read_text(encoding="utf-8") if target.exists() else None
+            current = _read_regular(target, text=True) if target.exists() else None
             if current != content:
                 drift.append(rel)
         for family in ("aiqt", "security"):
@@ -242,7 +271,7 @@ def _agents_drift(root, corpus):
         registry = adapter_compose.load_registry(root, absent_is_legacy=True)
         content = adapter_compose.compose(gen_agents.AGENTS_REL, gen_agents.HEADER,
                                           gen_agents.ordered_bodies(corpus), registry).data
-        current = out.read_bytes()
+        current = _read_regular(out)
         current.decode("utf-8")  # an undecodable AGENTS.md is MALFORMED, as before the raw-byte compare
     except (ValueError, OSError) as exc:
         return (MALFORMED, "cannot render/read AGENTS.md: {}".format(exc))
@@ -267,11 +296,11 @@ def _adapter_drift(root, corpus, adapter):
         return (label, MALFORMED, err)
     # Probe by READING, not Path.exists(): on Python 3.12 exists() returns False on EACCES (an unreadable
     # .github/ parent for the nested copilot surface) rather than raising, which would mask a present-but-
-    # unreadable surface as a false NOT APPLICABLE. read_bytes distinguishes FileNotFoundError (the adopter
-    # did not install this surface -> NA) from any other OSError (present but unreadable -> MALFORMED,
-    # fail closed), independent of the Python version.
+    # unreadable surface as a false NOT APPLICABLE. The read distinguishes FileNotFoundError (the adopter
+    # did not install this surface -> NA) from any other OSError (present but unreadable, or not a regular
+    # file such as a FIFO -> MALFORMED, fail closed), independent of the Python version.
     try:
-        current = out.read_bytes()
+        current = _read_regular(out)
         current.decode("utf-8")  # an undecodable adapter is MALFORMED, as before the raw-byte compare
     except FileNotFoundError:
         return (label, NA, "no {} surface installed".format(parts))
@@ -317,7 +346,7 @@ def _cursor_drift(root, corpus):
     try:
         for rel, content in sorted(desired.items()):
             target = cursor_dir / rel
-            current = target.read_text(encoding="utf-8") if target.exists() else None
+            current = _read_regular(target, text=True) if target.exists() else None
             if current != content:
                 drift.append(rel)
         for dirpath, _dirs, filenames in os.walk(cursor_dir, onerror=_walk_raise):
@@ -357,16 +386,16 @@ def _skill_drift(root, corpus):
     drift = []
     try:
         for path, content in standalone:
-            current = path.read_text(encoding="utf-8") if path.exists() else None
+            current = _read_regular(path, text=True) if path.exists() else None
             if current != content:
                 drift.append(path.relative_to(root).as_posix())
         for path, content in binary:
-            current = path.read_bytes() if path.exists() else None
+            current = _read_regular(path) if path.exists() else None
             if current != content:
                 drift.append(path.relative_to(root).as_posix())
         for name, content in sorted(reserved_map.items()):
             target = reserved_dir / name
-            current = target.read_text(encoding="utf-8") if target.exists() else None
+            current = _read_regular(target, text=True) if target.exists() else None
             if current != content:
                 drift.append((reserved_dir / name).relative_to(root).as_posix())
         # Orphan scan over the reserved subtree (100% generated); os.walk(onerror=raise), not rglob.
@@ -584,7 +613,7 @@ def check_c5(root, cache):
         for rel, content in sorted(desired.items()):
             target = root / rel
             try:
-                current = target.read_text(encoding="utf-8")
+                current = _read_regular(target, text=True)
             except FileNotFoundError:
                 drift.append("missing " + rel)
                 continue
@@ -1075,6 +1104,56 @@ def _build_hooks(base):
         target = base / rel
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content, encoding="utf-8")
+
+
+def _swap_after_exists(real_exists, target):
+    """A Path.exists replacement for the self-test: the first exists() of target that finds it present
+    replaces it with a FIFO before returning True, so the read that follows meets a FIFO the check did not
+    see."""
+    def exists(self, *args, **kwargs):
+        present = real_exists(self, *args, **kwargs)
+        if present and self == target and not stat.S_ISFIFO(os.lstat(target).st_mode):
+            os.unlink(target)
+            os.mkfifo(target)
+        return present
+    return exists
+
+
+class _fifo_unblocker:
+    """Bound a self-test row that meets a FIFO. After delay seconds a helper thread keeps opening each FIFO
+    in paths for writing with O_NONBLOCK, which succeeds only while a reader is waiting in its open, and
+    closes it at once, so that reader's open returns and it reads nothing. A read that never blocks is
+    unaffected. The context value lists each FIFO a waiting reader was released from."""
+
+    def __init__(self, paths, delay=3.0):
+        import threading
+        self.paths = list(paths)
+        self.delay = delay
+        self.released = []
+        self.stop = threading.Event()
+        self.thread = threading.Thread(target=self._release, daemon=True)
+
+    def _release(self):
+        if self.stop.wait(self.delay):
+            return
+        while not self.stop.is_set():
+            for path in self.paths:
+                try:
+                    fd = os.open(path, os.O_WRONLY | os.O_NONBLOCK | os.O_CLOEXEC)
+                except OSError:
+                    continue
+                os.close(fd)
+                self.released.append(path)
+            self.stop.wait(0.05)
+
+    def __enter__(self):
+        self.thread.start()
+        return self.released
+
+    def __exit__(self, *_exc):
+        self.stop.set()
+        self.thread.join()
+        return False
 
 
 def self_test_main():
@@ -1784,6 +1863,45 @@ def self_test_main():
             if not (isinstance(got, tuple) and got[0] is False and got[1]):
                 failures.append("dir_chain_or_absent on a path {} expected a refusal, got {!r}".format(label, got))
 
+        # 20. A FIFO at an input conformance reads (GEMINI.md, the Copilot instructions, a generated Claude
+        #     or Cursor rule, a rule source under the core rules, AGENTS.md, or AGENTS.md swapped for a FIFO
+        #     after an exists() check of it) is MALFORMED (exit 2) naming it as not a regular file: the read
+        #     opens without blocking and checks the opened descriptor, so it never waits for a writer. Each
+        #     row is bounded by _fifo_unblocker, so a read that does block fails the row, never hangs the run.
+        fifo_rows = (("gemini", "GEMINI.md", False),
+                     ("copilot", ".github/copilot-instructions.md", False),
+                     ("claude-rule", ".claude/rules/security/SECI-input-validation.md", False),
+                     ("cursor-rule", ".cursor/rules/aiqt-guardrails/aiqt/10-ACCUR-read-before-characterizing.mdc",
+                      False),
+                     ("rule-source", ".aiqt/core/rules/security/input-validation.md", False),
+                     ("agents", "AGENTS.md", False),
+                     ("agents-swapped-after-exists", "AGENTS.md", True))
+        if not hasattr(os, "mkfifo"):
+            failures.append("NOT RUN: the FIFO input cases (no os.mkfifo here); coverage that did not run "
+                            "fails the self-test")
+        else:
+            for label, rel, swap in fifo_rows:
+                ftree = tmp / ("fifo-" + label)
+                ftree.mkdir()
+                _build_conformant(ftree)
+                fifo = ftree.joinpath(*rel.split("/"))
+                real_exists = Path.exists
+                if swap:
+                    Path.exists = _swap_after_exists(real_exists, fifo)
+                else:
+                    fifo.unlink()
+                    os.mkfifo(fifo)
+                try:
+                    with _fifo_unblocker([fifo]) as released:
+                        code, out = run_capture(ftree)
+                finally:
+                    Path.exists = real_exists
+                if (code != 2 or released or "{} is not a regular file".format(fifo) not in out
+                        or not stat.S_ISFIFO(os.lstat(fifo).st_mode)):
+                    failures.append("a FIFO at {} ({}) expected exit 2 naming it as not a regular file, got {} "
+                                    "(a blocked read released: {}):\n{}".format(rel, label, code, bool(released),
+                                                                                out))
+
         # 5. A --root that does not exist fails closed (exit 2), never a hollow all-absent pass.
         code, out = run_capture(tmp / "does-not-exist")
         if code != 2:
@@ -1823,7 +1941,9 @@ def self_test_main():
           "outside the root at the core rules, .claude/rules or a generated family, a symlink to a directory "
           "outside the root at .cursor/, a Cursor family, plugin/, hooks/scripts/, .claude-plugin/, .claude/, "
           "site/ or .github/ (an empty "
-          "one at .cursor/ or plugin/ included), and a bad --root fail closed; a symlink there to a directory "
+          "one at .cursor/ or plugin/ included), a FIFO at GEMINI.md, the Copilot instructions, a generated "
+          "Claude or Cursor rule, a rule source or AGENTS.md (one swapped in after an exists() check "
+          "included), and a bad --root fail closed; a symlink there to a directory "
           "inside the root is read and passes, a family directory below .claude/rules symlinked inside the "
           "root included, and that family's violation is still found with .claude/rules swapped after C3's "
           "open; the every-component probe refuses a path outside the root or "
