@@ -3273,7 +3273,8 @@ def _child_main(argv):
     opid = argv[5] if len(argv) > 5 and argv[5] != "-" else None
     if umask != "-":
         os.umask(int(umask, 8))
-    this = sys.modules[__name__]
+    # The kill hooks below replace this module's own helpers for this one child run.
+    global _apply_dirs, _stage_and_publish, read_ancestral_counter_seed
 
     def die():
         sys.stdout.flush()
@@ -3293,13 +3294,13 @@ def _child_main(argv):
                 die()
         _journal.publish = publish
     elif name == "dirs-applied":
-        real_dirs = this._apply_dirs
+        real_dirs = _apply_dirs
 
         def apply_dirs(*a):
             out = real_dirs(*a)
             die()
             return out
-        this._apply_dirs = apply_dirs
+        _apply_dirs = apply_dirs
     elif name in ("attached", "detached"):
         target = "attach_init_lease" if name == "attached" else "detach_init_lease"
         real = getattr(_opf_oplock, target)
@@ -3310,7 +3311,7 @@ def _child_main(argv):
             return out
         setattr(_opf_oplock, target, wrapped)
     elif name == "source":
-        real_stage = this._stage_and_publish
+        real_stage = _stage_and_publish
 
         def stage(*a):
             out = real_stage(*a)
@@ -3318,7 +3319,7 @@ def _child_main(argv):
             if counter["n"] == int(arg):
                 die()
             return out
-        this._stage_and_publish = stage
+        _stage_and_publish = stage
     elif name in ("prelink", "postlink", "planlink"):
         real_link = os.link
 
@@ -3338,7 +3339,7 @@ def _child_main(argv):
                 die()
         os.link = link
     elif name == "view":
-        real_stage = this._stage_and_publish
+        real_stage = _stage_and_publish
 
         def stage(*a):
             out = real_stage(*a)
@@ -3347,7 +3348,7 @@ def _child_main(argv):
                 if counter["n"] == int(arg):
                     die()
             return out
-        this._stage_and_publish = stage
+        _stage_and_publish = stage
     elif name in ("ready", "phase"):
         real_record = _opf_init_substrate.record_phase
         target_phase = PHASES[-1] if name == "ready" else arg
@@ -3367,7 +3368,7 @@ def _child_main(argv):
     elif name == "noreseed":
         def refuse(*_a, **_k):
             raise AssertionError("the ancestral history was read again on resume")
-        this.read_ancestral_counter_seed = refuse
+        read_ancestral_counter_seed = refuse
     elif name == "norecover":
         def refuse(*_a, **_k):
             raise AssertionError("a rollback path was invoked on an init journal")
@@ -3376,7 +3377,8 @@ def _child_main(argv):
         raise SystemExit("unknown kill point {!r}".format(kill))
     res = run_init_operation(root, ancestral=None if seed == "-" else seed, recover=recover == "1",
                              operation_id=opid, homes2=_opf_store.init_writes_homes2())
-    print(json.dumps({s: getattr(res, s) for s in InitResult.__slots__}, sort_keys=True))
+    print(json.dumps({_slot: getattr(res, _slot) for _slot in InitResult.__slots__},
+                     sort_keys=True))
     return 0
 
 

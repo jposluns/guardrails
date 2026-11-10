@@ -534,6 +534,7 @@ _HOMES_SELFTEST_EXEMPT = (
     "_close_class_sweep_checks",
     "_committed_base_binding_self_test",
     "_eventfd_skip_call_sites",
+    "_finish_ops_self_test",
     "_function_level_sweep_suite_calls",
     "_init_store_child_main",
     "_init_store_git_checks",
