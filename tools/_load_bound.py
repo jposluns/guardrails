@@ -149,6 +149,15 @@ host refuses the prctl itself (a seccomp or LSM policy can return nonzero withou
 such a host every bounded child exits UNARMED_EXIT rather than running unprotected (run()
 raises Unarmed for each), the fail-closed direction, disclosed in the residuals below.
 
+Completion. A completed wait shows only that the leader exited and both pipes closed, so run()
+checks two more things before it returns. First, the group the leader led (_sweep_group): a
+member still in it (a descendant started with its output redirected, no setsid or setpgid) is
+SIGKILLed through the leader's pidfd and waited out (at most REAP_S), and the run leaves as Hung
+kind "descendant", never as a pass; the leader's own exit status rides it as for every stop.
+Second, the budget: the watch reads it only when a poll times out, so a completion whose
+load-adjusted elapsed time exceeds budget_s (strictly: a completion exactly at the budget passes)
+leaves as Hung kind "budget". No caller relies on a late completion counting as a pass.
+
 git. run() does not knowingly launch git (ValueError before any launch). It resolves the program the
 exec in the child would run, the way that exec looks it up: a head with a directory part relative to cwd,
 a bare head through each PATH entry of env in order, a relative or empty entry taken relative to cwd. It
@@ -179,7 +188,9 @@ test is off, and a /proc mounted with hidepid (other processes' entries present 
 this user) marks every scan incomplete, so the stall test is off for EVERY run there and the
 load-adjusted budget alone bounds children; without POSIX process groups (Windows, where start_new_session is ignored) only the
 direct child is killed, and without the pidfd group signal a stop that comes after Popen reaped the
-leader kills no group member (disclosed in the Hung reason); the unreaped-leader premise behind
+leader kills no group member (disclosed in the Hung reason), and a member left in the group of a
+leader that COMPLETED is neither found nor killed, so that run still returns as completed; the
+unreaped-leader premise behind
 the numeric killpg fallback assumes this process has no other reaper of the leader (no thread of
 it calling os.wait or os.waitpid(-1), and SIGCHLD not set to SIG_IGN): another reaper could free
 the leader's pid, and with it the group id, while Popen still shows the leader unreaped; without os.waitid the exit status a child reached
@@ -454,8 +465,9 @@ def tree_cpu_seconds(pid, table=None, limit_s=None):
 
 class Hung(subprocess.TimeoutExpired):
     """A bounded child was stopped: kind "stall" (no CPU or output progress for stall_s, a heuristic that
-    a correct silent wait also trips), "budget" (the load-adjusted budget was spent) or "monitor" (the
-    monitoring itself failed). The stop is attributed to the bound, never proven a hang. returncode is the
+    a correct silent wait also trips), "budget" (the load-adjusted budget was spent, also by a child
+    that completed after it), "descendant" (the child completed but a member of its process group was
+    still running and was killed) or "monitor" (the monitoring itself failed). The stop is attributed to the bound, never proven a hang. returncode is the
     exit status the child had already reached on its own before the stop (a descendant still held its
     output open, or the fault arrived only after a completed wait), or None when the stop ended it or
     the status could not be read: the caller judges a
@@ -563,6 +575,50 @@ def _kill_group(proc, pidfd):
     except OSError as exc:
         return "killpg failed ({}: {})".format(type(exc).__name__, exc)
     return ""
+
+
+def _sweep_group(pidfd, reap_s=None, sender=None):
+    """After the leader COMPLETED and Popen reaped it: find, kill and wait out every member still in
+    the group it led (a descendant started in that group that outlived the leader with its output
+    redirected, so the completed wait never saw it). The group is addressed only through the
+    leader's own pid record (pidfd_send_signal with PIDFD_SIGNAL_PROCESS_GROUP, exact after the
+    reap): signal 0 probes it, ESRCH means it is empty, and any other answer (delivered, or EPERM
+    for a member this user cannot signal) means a member remained; that group is then SIGKILLed and
+    probed again until it is empty, at most reap_s (REAP_S) seconds, since the members' new parent
+    reaps them. Returns (remained, note): True with "" or a note naming what failed, False for an
+    empty group, or None with the reason the group could not be checked (no pidfd, no
+    pidfd_send_signal, or a kernel refusing the group flag with EINVAL): the leader is reaped by
+    then, so nothing is signalled by number, the disclosed residual. sender stands in for
+    signal.pidfd_send_signal."""
+    reap_s = REAP_S if reap_s is None else reap_s
+    sender = getattr(signal, "pidfd_send_signal", None) if sender is None else sender
+    if pidfd is None or sender is None:
+        return None, "no pidfd group signal was available after the leader reap"
+    try:
+        sender(pidfd, 0, None, PIDFD_SIGNAL_PROCESS_GROUP)
+    except ProcessLookupError:
+        return False, ""
+    except OSError as exc:
+        if exc.errno == errno.EINVAL:
+            return None, "this kernel refuses the pidfd group flag (EINVAL)"
+    note = ""
+    try:
+        sender(pidfd, _KILL, None, PIDFD_SIGNAL_PROCESS_GROUP)
+    except ProcessLookupError:
+        return True, ""  # the member left between the probe and the kill
+    except OSError as exc:
+        note = "; the group kill failed ({}: {})".format(type(exc).__name__, exc)
+    deadline = time.monotonic() + reap_s
+    while True:
+        try:
+            sender(pidfd, 0, None, PIDFD_SIGNAL_PROCESS_GROUP)
+        except ProcessLookupError:
+            return True, note
+        except OSError:
+            pass  # a member is still there (EPERM included); keep waiting until the deadline
+        if time.monotonic() >= deadline:
+            return True, note + "; a member was still present {} s after SIGKILL".format(reap_s)
+        time.sleep(0.05)
 
 
 def _group_signal_supported():
@@ -1015,6 +1071,26 @@ def run(argv, *, budget_s, stall_s, input=None, cwd=None, env=None, text=False, 
         # named refusal is raised AFTER the finally, outside this handler.
         refused_arming = (proc.returncode == UNARMED_EXIT and armed_read is not None
                           and not _armed_byte(armed_read))
+        if not refused_arming:
+            # A completed wait proves only that the LEADER exited and both pipes closed: a member
+            # it started in its own group with its output redirected can still be running. Every
+            # such member is killed and waited out here, and the run cannot pass: it leaves as
+            # Hung kind "descendant" (the handler below adds the leader's own exit status).
+            remained, sweep_note = _sweep_group(group_fd)
+            if remained:
+                raise Hung(argv, budget_s, "descendant",
+                           "the leader exited but a member of its process group was still running; "
+                           "it was killed{}".format(sweep_note), held[0], held[1])
+            # The watch reads the budget only when a poll times out, so a leader that completes
+            # after its budget was spent (inside the last poll) is judged here: a completion
+            # whose load-adjusted elapsed time EXCEEDS budget_s is a budget overrun, not a pass.
+            spent = clock() - start
+            if spent > budget_s:
+                raise Hung(argv, budget_s, "budget",
+                           "the child completed after its load-adjusted budget of {} s was spent "
+                           "({:.3f} s of load-adjusted time, {:.1f} s of wall time)"
+                           .format(budget_s, spent, time.monotonic() - wall_start),
+                           held[0], held[1])
     except BaseException as exc:
         if proc is None and owned:
             proc = _partial_child(owned[-1])  # acquired before the fork; the binding never ran
@@ -2384,6 +2460,12 @@ def vector_failures(python):
                             " \"import time; time.sleep(30)\", sys.argv[1]])\n"
                             "sys.exit(7)\n", vector_tag], budget_s=3600, stall_s=3600, poll_s=0.2)
                 got = done.returncode
+            except Hung as exc:
+                # The member the watchdog killed can still be in the group (not yet reaped by its
+                # new parent) when the completed wait is swept: a descendant stop carrying the
+                # leader's own 7 is the same outcome; any other stop is this vector failing.
+                got = exc.returncode if exc.kind == "descendant" else "{}: {}".format(
+                    type(exc).__name__, exc)
             except Exception as exc:  # noqa: BLE001  any escape is this vector failing
                 got = "{}: {}".format(type(exc).__name__, exc)
         finally:
@@ -3217,6 +3299,77 @@ def vector_failures(python):
         if got != ("stall", 3, True):
             failures.append("_load_bound vector (a nonzero exit beside a leaked descendant keeps its status, as "
                             "text): expected (stall, 3, True), got {!r}".format(got))
+
+    # A completed leader proves nothing about the members it left in its own group: a leader that
+    # starts a member with its output redirected (no setsid or setpgid) and exits must not pass,
+    # whatever its own status, and the member is gone before run() leaves. A completion after the
+    # load-adjusted budget was spent is a budget overrun, checked on each side of the bound with
+    # an injected clock and once for real (a 0.3 s child under a 0.001 s budget, finishing inside
+    # its first poll, so the in-flight budget check never runs).
+    sweep_dir = tempfile.mkdtemp(prefix="load-bound-vector-sweep-")
+    try:
+        leader_path = os.path.join(sweep_dir, "leader.py")
+        quick_path = os.path.join(sweep_dir, "quick.py")
+        late_path = os.path.join(sweep_dir, "late.py")
+        for path, body in ((leader_path, "import subprocess, sys\n"
+                                         "subprocess.Popen([sys.executable, \"-I\", \"-c\", \"import "
+                                         "time; time.sleep(600)\", sys.argv[2]], "
+                                         "stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, "
+                                         "stderr=subprocess.DEVNULL)\nsys.exit(int(sys.argv[1]))\n"),
+                           (quick_path, "pass\n"), (late_path, "import time\ntime.sleep(0.3)\n")):
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write(body)
+            os.chmod(path, 0o755)
+        if _group_signal_supported():
+            for status in (0, 3):
+                member_tag = "load-bound-swept-member-{}-{}".format(os.getpid(), status)
+                try:
+                    run([python, "-I", "-B", leader_path, str(status), member_tag], budget_s=60,
+                        stall_s=60)
+                    got = "returned"
+                except Hung as exc:
+                    got = (exc.kind, exc.returncode)
+                except Exception as exc:  # noqa: BLE001  an escape is this vector's failure
+                    got = "{}: {}".format(type(exc).__name__, exc)
+                left = alive(member_tag)
+                for pid in left:
+                    _kill_pid(pid)
+                if got != ("descendant", status) or left:
+                    failures.append("_load_bound vector (a leader exiting {} beside a member still "
+                                    "in its group cannot pass, and the member is killed): expected "
+                                    "('descendant', {}) and no member left, got {!r}, left alive {!r}"
+                                    .format(status, status, got, left))
+
+        def fixed_clock(value):
+            readings = iter((0.0,))
+            return lambda: next(readings, value)
+        for label, spent, want in (("just inside", 5.0 - 1e-6, ("returned", 0)),
+                                   ("exactly at", 5.0, ("returned", 0)),
+                                   ("just outside", 5.0 + 1e-6, ("budget", 0))):
+            try:
+                done = run([python, "-I", "-B", quick_path, vector_tag], budget_s=5.0, stall_s=60,
+                           poll_s=60, clock=fixed_clock(spent))
+                got = ("returned", done.returncode)
+            except Hung as exc:
+                got = (exc.kind, exc.returncode)
+            except Exception as exc:  # noqa: BLE001  an escape is this vector's failure
+                got = "{}: {}".format(type(exc).__name__, exc)
+            if got != want:
+                failures.append("_load_bound vector (a completion {} its budget, {} of 5.0 s): "
+                                "expected {!r}, got {!r}".format(label, spent, want, got))
+        try:
+            done = run([python, "-I", "-B", late_path, vector_tag], budget_s=0.001, stall_s=60,
+                       poll_s=5.0)
+            got = ("returned", done.returncode)
+        except Hung as exc:
+            got = (exc.kind, exc.returncode)
+        except Exception as exc:  # noqa: BLE001  an escape is this vector's failure
+            got = "{}: {}".format(type(exc).__name__, exc)
+        if got != ("budget", 0):
+            failures.append("_load_bound vector (a child completing after its budget is a budget "
+                            "overrun): expected ('budget', 0), got {!r}".format(got))
+    finally:
+        shutil.rmtree(sweep_dir)
 
     clock = LoadClock(wall=iter((0.0, 10.0, 20.0)).__next__, factor=iter((1.0, 3.0, 1.0)).__next__)
     readings = (clock(), clock())
