@@ -621,19 +621,44 @@ number of git or python options; a closed shape is matched once per sentence at 
 command line is split on whitespace once and its tokens classified by a plain predicate (argument_token), once per
 command line end; per opener, R6 measures its subject's length before reading it; and every word-run, command and
 file-name pattern is anchored at a token start. THE MEASURED SHAPES: in a child process capped at 1 GiB of address
-space (RLIMIT_AS) with a LINEAR_TIMEOUT-second timeout, which must exit 0 and print two finite, nonnegative times,
-each shape at 64 KiB must take at most LINEAR_FACTOR times as long as at 8 KiB plus LINEAR_SLACK seconds
-(the input is eight times larger; a pass whose time grows with the square of the input takes about 64 times as
-long). Every shape carries a lead that holds "nput", so each runs through the shared parsed-document reading, never
-the ASCII fast path, and the larger size sits exactly at that reading's text ceiling; a shape the reading's own
-bounds refuse (the whitespace-run shapes hit the whitespace-run prescan, the markup-run shape the nesting prescan)
-is timed through its refusal, which is the bounded behaviour an oversized or pathological brief gets. A shape is
-evidence only for the text it repeats. On the previous revision, with a 1 MiB size, a 60-second timeout and the
-parse-free fast path (measured to 60 s, not to completion), the three argument-tail shapes with a failing suffix
-(" -x.y" repeated then "!", " -x/y" repeated with no stop, " --a=b" repeated then " x") did not finish within 60 s;
-the whitespace-run shapes (whitespace-run-linear and item-list-whitespace-linear) were added when an earlier
-revision did not finish 128 KiB within 60 s, and some others when an earlier revision exceeded the bound, each
-measured only to a 60-second timeout.
+space (RLIMIT_AS) with a LINEAR_TIMEOUT-second timeout, which must exit 0 and print LINEAR_RUNS quadruples of finite,
+nonnegative times, each shape is evaluated LINEAR_RUNS times at each of four sizes (1 KiB, 8 KiB, 32 KiB and
+64 KiB), every brief built afresh, each run timed in CPU seconds of the child and of the processes it reaped (every
+parse child among them), so a busy host's wait for a CPU is not counted; growth is judged on the raw medians over
+two spans, each bound's factor exactly that span's size ratio: the 32 KiB median must be at most 4 times the 8 KiB
+median plus LINEAR_SLACK seconds, and the 64 KiB median at most 2 times the 32 KiB median plus LINEAR_SLACK seconds.
+A cost that is a fixed launch cost plus a linear term meets both bounds with the whole fixed cost plus LINEAR_SLACK
+to spare, whatever its slope, while a pass whose time grows with the square of the input quadruples over the top
+span and so fails it once its 64 KiB squared-growth cost exceeds twice the sum of the fixed cost and LINEAR_SLACK.
+The 1 KiB median is measured and reported for diagnosis only and never judged: its value enters neither bound, so,
+high or low, it cannot loosen the verdict. The 1 KiB runs can still fail the shape, as any run can: a 1 KiB run that
+reaches the parse deadline fails it, as does one that ends the child with an uncaught error (the child must exit 0),
+and the wall clock of the 1 KiB runs counts, with that of every other run, toward the whole child's LINEAR_TIMEOUT,
+so 1 KiB runs slow enough to carry the child past that timeout fail it too. A run in which a parse child is killed
+at the reading's parse deadline fails the shape whatever CPU time it was charged (a killed child is charged only the
+CPU time it used before the kill), as does a child stopped at the timeout. Every shape carries a lead that holds
+"nput", so each runs through the shared parsed-document reading, never the ASCII fast path. The largest size,
+64 KiB, is a former text ceiling of the reading and sits below its current one (MAX_TEXT_BYTES, 102,400 bytes,
+1.5625 times 64 KiB): the rule judges the shape of the growth, which the two spans read at any size, and a
+squared-growth cost at or under the top span's threshold at 64 KiB is at most about 2.44 times (1.5625 squared) that
+threshold at the ceiling. The parse deadline does not bound that cost: it bounds only the shared reading's parse
+children, each started by _child_parse (tools/_input_declarations.py) through _parse, which an evaluate() run
+reaches in two places: decode_brief, whose forbidden_text parses a non-ASCII brief that holds a format character and
+passes its earlier checks, to place that character against the parsed document's code, and preflight, whose
+PreflightText reads the INPUT declarations with read_inputs from a brief the reading's ASCII fast path does not
+answer. The rest of evaluate() (the preflight rules, the block split and every lint pass) runs in the calling
+process with no deadline, apart from the git reads rules P3, P5 and P7 start when given a repository, each bounded by
+GIT_READ_TIMEOUT, so a slow lint pass on a brief at the ceiling is neither cut off nor refused. A shape the
+reading's own bounds refuse (the whitespace-run shapes hit the whitespace-run prescan, the markup-run shape the
+nesting prescan) is timed through its refusal, which is the bounded behaviour an oversized or pathological brief
+gets; that prescan refusal, told by the prescan attribute decode_brief sets on its cannot-evaluate, is the only one
+timed, and any other cannot-evaluate (the vendored parser failing to import, say) fails the shape, since a run that
+could not be evaluated measured nothing. A shape is evidence only for the text it repeats. On the previous revision,
+with a 1 MiB size, a 60-second timeout and the parse-free fast path (measured to 60 s, not to completion), the three
+argument-tail shapes with a failing suffix (" -x.y" repeated then "!", " -x/y" repeated with no stop, " --a=b"
+repeated then " x") did not finish within 60 s; the whitespace-run shapes (whitespace-run-linear and
+item-list-whitespace-linear) were added when an earlier revision did not finish 128 KiB within 60 s, and some others
+when an earlier revision exceeded the bound, each measured only to a 60-second timeout.
 
 Usage:
   check_brief_capability.py                (no brief: validate the shipped capability table, exit 0 or 2)
@@ -667,11 +692,13 @@ import os
 import posixpath
 import random
 import re
+import resource
 import selectors
 import shlex
 import shutil
 import signal
 import stat
+import statistics
 import subprocess
 import tempfile
 import time
@@ -725,7 +752,10 @@ EXCERPT_CHARS = 120
 
 
 class CannotEvaluate(Exception):
-    pass
+    # True only on decode_brief's refusal of a brief that a structural prescan of the shared reading (its
+    # whitespace-run or nesting bound) refuses: the one cannot-evaluate the measured shapes time as a
+    # bounded evaluation (LINEAR_CHILD); every other cannot-evaluate keeps False
+    prescan = False
 
 
 class Block:
@@ -819,7 +849,7 @@ def decode_brief(data):
     hide or split a declaration, so it is refused, never removed silently, and a brief the shared
     reading's vendored parser cannot read (DeclarationError) is CannotEvaluate too. A format character
     inside code is still removed for the rules that read fence content (the P5 cure alone reads each
-    cure line as written)."""
+    cure line as written). The refusal of a line a structural prescan refuses carries prescan True."""
     try:
         text = data.decode("utf-8")
     except UnicodeDecodeError as exc:
@@ -829,7 +859,13 @@ def decode_brief(data):
     except _input_declarations.DeclarationError as exc:
         raise CannotEvaluate("brief: {}".format(exc))
     if found is not None:
-        raise CannotEvaluate("brief: line {}: {}".format(*found))
+        refused = CannotEvaluate("brief: line {}: {}".format(*found))
+        # a structural prescan's refusal is told from a line separator or format character refusal by
+        # the prescans' own verdicts on the same text (forbidden_text returns a prescan's verdict as it
+        # stands), never by the message
+        refused.prescan = found in [prescan(text) for prescan in (_input_declarations._whitespace_refused,
+                                                                   _input_declarations._nesting_refused)]
+        raise refused
     # A byte order mark, a zero-width or a bidirectional control is invisible and can split a word; only
     # code of the parsed document (a fenced or indented block's body, a code span) can still hold one here.
     text = "".join(ch for ch in text if unicodedata.category(ch) != "Cf")
@@ -4236,7 +4272,19 @@ P5_GOVERNING_PIN = (P5_PIN + "Use `git -C w fetch <url> refs/dispatch/1/b2 && gi
 P5_CLONE_REVISION = (P5_PIN + "Use `git clone --revision={0} <url> w` and review w.\n",
                      P5_PIN + "Use `git clone --revision {0} <url> w` and review w.\n",
                      P5_PIN + "Use `git clone --revision=main <url> w` and review w.\n")
-LINEAR_FACTOR, LINEAR_SLACK, LINEAR_TIMEOUT = 16, 1.0, 120
+# the slack over each span bound of the linear judgement (seconds, exact in binary so the self-test's
+# at-the-bound rows read back exactly) and the whole measuring child's timeout
+LINEAR_SLACK, LINEAR_TIMEOUT = 0.25, 120
+# fresh evaluations per size whose median CPU time is judged. Wall clock measured the host, not the work:
+# with eight busy loops sharing the measuring CPU in a square wave, one 64 KiB run of "git -c " took
+# 4.185 s of wall clock against 0.191 s for 8 KiB (ratio 21.9, far past the 8 times between those two
+# sizes) while its CPU time was 0.496 s against 0.190 s (ratio 2.6). CPU time alone also strayed: under
+# the same load 2 of 50 single runs were charged 1.9 s and 3.3 s against a usual 0.2 to 0.6 s, so the
+# verdict reads the median of five at each judged size, not one run's time. One or two stray runs at a
+# size can move that size's median, but only within the range of its other runs; three, a majority,
+# can carry it past them. A run that reaches the parse deadline is the exception: the child exits
+# non-zero at once and the shape is red whatever the other runs show
+LINEAR_RUNS = 5
 # the measured slack over the parse deadline for one whole read() through the killed child: the child
 # start, the kill, the reap and the result decode measured 0.04 to 0.14 s past the deadline on the two
 # old-ceiling shapes (an 80-cpu host at one-minute load averages 35 to 43), so three seconds is wide
@@ -4859,12 +4907,24 @@ def _p7_repo(base):
             for message, tree in (("genuine paths", trees[0]), ("replacement paths", trees[1]))]
     subprocess.run(git + ["replace", made[0], made[1]], check=True, capture_output=True, timeout=60, env=env)
     return repo, commits, tags[0], made[0]
-# The child caps its address space at 1 GiB, then times evaluate() on 8 KiB and 64 KiB briefs (the
-# larger exactly at the shared reading's text ceiling), each a lead that forces the parsed-document path
-# (it holds "nput", so the ASCII fast path never answers it), a prefix, one unit repeated, and a suffix.
-# A refusal (a prescan or deadline cannot-evaluate) is still a bounded evaluation and is timed as one.
+# The child caps its address space at 1 GiB, then evaluates 1 KiB, 8 KiB, 32 KiB and 64 KiB briefs (the
+# largest is a former text ceiling of the shared reading, below its current 102,400-byte one) in turn,
+# LINEAR_RUNS times each, every brief built afresh: a lead that forces the parsed-document path (it holds
+# "nput", so the ASCII fast path never answers it), a prefix, one unit repeated, and a suffix. The
+# verdict reads only the 8, 32 and 64 KiB medians; the 1 KiB time is reported for diagnosis (it shows the
+# fixed cost, for a shape whose 1 KiB brief is parsed, mostly the parse child's launch) and never judged,
+# though the 1 KiB runs, like every run, count toward LINEAR_TIMEOUT over the whole child. A prescan
+# refusal (a cannot-evaluate whose prescan attribute decode_brief set) is still a bounded evaluation and
+# is timed as one. No other cannot-evaluate is: in a run in which a parse child was killed at the parse
+# deadline, the killed child is charged only the CPU time it used before the kill, and a run the reading
+# could not evaluate for any other cause (the vendored parser failing to import, say) measured nothing, so
+# the child stops at either and exits non-zero naming the size, and for the second the cannot-evaluate
+# itself (the row is red whatever CPU time the run took). Each run is timed by _run_cpu(), CPU seconds of
+# this process and of the children it reaped during the run (every parse child the run started among
+# them), so time the measured work spends waiting for a busy host's CPUs is not counted. One line per run:
+# the 1 KiB, the 8 KiB, the 32 KiB, then the 64 KiB CPU time.
 LINEAR_CHILD = (
-    "import resource, sys, time\n"
+    "import resource, sys\n"
     "hard = resource.getrlimit(resource.RLIMIT_AS)[1]\n"
     "soft = 1 << 30 if hard == resource.RLIM_INFINITY else min(1 << 30, hard)\n"
     "resource.setrlimit(resource.RLIMIT_AS, (soft, hard))\n"
@@ -4873,36 +4933,96 @@ LINEAR_CHILD = (
     "table = m.parse_table(m.TABLE_FIXTURE.encode('utf-8'))\n"
     "prefix, unit, suffix = sys.argv[2:5]\n"
     "lead = 'Input notes.\\n\\n'\n"
-    "for size in (1 << 13, 1 << 16):\n"
-    "    body = size - len(lead) - len(prefix) - len(suffix)\n"
-    "    data = (lead + prefix + (unit * (body // len(unit) + 1))[:body] + suffix).encode('utf-8')\n"
-    "    began = time.perf_counter()\n"
-    "    try:\n"
-    "        m.evaluate(data, 'gamma', table)\n"
-    "    except m.CannotEvaluate:\n"
-    "        pass\n"
-    "    print(time.perf_counter() - began)\n")
+    "for _ in range(int(sys.argv[5])):\n"
+    "    times = []\n"
+    "    for size in (1 << 10, 1 << 13, 1 << 15, 1 << 16):\n"
+    "        body = size - len(lead) - len(prefix) - len(suffix)\n"
+    "        data = (lead + prefix + (unit * (body // len(unit) + 1))[:body] + suffix).encode('utf-8')\n"
+    "        began = m._run_cpu()\n"
+    "        try:\n"
+    "            m.evaluate(data, 'gamma', table)\n"
+    "        except m.CannotEvaluate as exc:\n"
+    "            if m._parse_deadline_hit(exc):\n"
+    "                sys.exit('a {} KiB run reached the parse deadline'.format(size >> 10))\n"
+    "            if not exc.prescan:\n"
+    "                sys.exit('{} (a {} KiB run could not be evaluated)'.format(exc, size >> 10))\n"
+    "        times.append(m._run_cpu() - began)\n"
+    "    print(*times, flush=True)\n")
+
+
+def _run_cpu():
+    """CPU seconds, user plus system, of this process and of every child process it has reaped: the clock
+    LINEAR_CHILD reads around each evaluate() run, so every parse child a run starts and reaps (one from
+    decode_brief, one from preflight, or both) is charged to that run. Counting this process alone would
+    miss whatever work the parse children do. A reaped child's figure includes the CPU of every descendant
+    it waited for, since that usage passes up through each wait, so a grandchild a parse child waits for
+    is counted once the parse child is reaped. A process that nothing in the chain from the measuring
+    child down waits for is not counted at all: a grandchild a parse child leaves running, or a process
+    still running in a parse child's group when _kill_group kills it, burns CPU this clock never sees. The
+    reading kills that whole group from the measuring child when its wait for the parse child ends, at the
+    latest when the parse deadline expires (earlier once the parse child has exited and its output has
+    closed). That holds only while the measuring child survives to run that kill: LINEAR_TIMEOUT kills
+    only the measuring child, not a parse child's group, so when it fires during a parse nothing kills
+    that group, and a parse child then running can run on past the parse deadline."""
+    own = resource.getrusage(resource.RUSAGE_SELF)
+    reaped = resource.getrusage(resource.RUSAGE_CHILDREN)
+    return own.ru_utime + own.ru_stime + reaped.ru_utime + reaped.ru_stime
+
+
+def _parse_deadline_hit(exc):
+    """True when `exc` (the CannotEvaluate an evaluate() run raised) was raised from or while handling a
+    subprocess.TimeoutExpired, which is how a parse child of the shared reading (decode_brief's or
+    preflight's) is killed at the parse deadline; every exception on the chain is visited once. The walk
+    follows __cause__ whenever it is set and reads __context__ only when it is not, so a TimeoutExpired
+    reachable only through the __context__ of an exception raised with an explicit cause is not seen."""
+    seen = set()
+    while exc is not None and id(exc) not in seen:
+        if isinstance(exc, subprocess.TimeoutExpired):
+            return True
+        seen.add(id(exc))
+        exc = exc.__cause__ if exc.__cause__ is not None else exc.__context__
+    return False
 
 
 def _linear(unit, prefix="", suffix=""):
-    """True when evaluate() on a 64 KiB brief (a parse-forcing lead, `prefix`, `unit` repeated, `suffix`)
-    takes at most LINEAR_FACTOR times as long as on the 8 KiB one plus LINEAR_SLACK seconds, both timed
-    in a child capped at 1 GiB (RLIMIT_AS) and stopped after LINEAR_TIMEOUT seconds; otherwise what went
-    wrong. The child must exit 0 and print exactly two finite, nonnegative times."""
+    """True when, over LINEAR_RUNS fresh evaluate() runs at each of four sizes of one brief shape (a
+    parse-forcing lead, `prefix`, `unit` repeated, `suffix`), the median CPU times grow no faster than the
+    input over each judged span: the 32 KiB median is at most 4 times the 8 KiB median plus LINEAR_SLACK
+    seconds, and the 64 KiB median at most 2 times the 32 KiB median plus LINEAR_SLACK seconds, each
+    factor exactly that span's size ratio, so a fixed-plus-linear cost passes both spans with the whole
+    fixed cost plus LINEAR_SLACK as margin whatever its slope. The 1 KiB median is reported for diagnosis
+    and never judged, so its value enters neither bound and cannot loosen one. The 8 and 32 KiB medians do
+    enter them (4 * small + LINEAR_SLACK and 2 * mid + LINEAR_SLACK), so noise that raises either median
+    raises the bound built on it by 4 or 2 times that excess and can turn a red shape green; stray runs short
+    of a majority move a median only within the range of the other runs at that size. A 1 KiB run that
+    reaches the parse deadline still makes the child exit non-zero, and the 1 KiB runs, like every run,
+    count toward LINEAR_TIMEOUT. All timed in one child capped at 1 GiB (RLIMIT_AS) and stopped after
+    LINEAR_TIMEOUT seconds; otherwise what went wrong. The child must exit 0 and print exactly LINEAR_RUNS
+    lines of four finite, nonnegative times each; a child that times out, or that exits non-zero because a
+    run reached the parse deadline or raised any other cannot-evaluate but a prescan refusal, is what went
+    wrong whatever it printed."""
     try:
         done = subprocess.run([sys.executable, "-I", "-B", "-c", LINEAR_CHILD, str(Path(__file__).resolve().parent),
-                               prefix, unit, suffix], capture_output=True, text=True, timeout=LINEAR_TIMEOUT)
+                               prefix, unit, suffix, str(LINEAR_RUNS)], capture_output=True, text=True,
+                              timeout=LINEAR_TIMEOUT)
     except subprocess.TimeoutExpired:
         return "timed out after {} s".format(LINEAR_TIMEOUT)
     try:
-        small, large = (float(value) for value in done.stdout.split())
+        quads = [tuple(float(value) for value in line.split()) for line in done.stdout.splitlines()]
     except ValueError:
-        small = large = float("nan")
-    if done.returncode != 0 or not all(0.0 <= value < float("inf") for value in (small, large)):
+        quads = []
+    if (done.returncode != 0 or len(quads) != LINEAR_RUNS or any(len(quad) != 4 for quad in quads)
+            or not all(0.0 <= value < float("inf") for quad in quads for value in quad)):
         return "child exit {}, output {!r}: {}".format(done.returncode, done.stdout.strip()[-80:],
                                                       done.stderr.strip()[-200:])
-    return large <= LINEAR_FACTOR * small + LINEAR_SLACK or "64 KiB took {:.3f} s, 8 KiB {:.3f} s".format(
-        large, small)
+    base = statistics.median(quad[0] for quad in quads)
+    small = statistics.median(quad[1] for quad in quads)
+    mid = statistics.median(quad[2] for quad in quads)
+    large = statistics.median(quad[3] for quad in quads)
+    return (mid <= 4.0 * small + LINEAR_SLACK and large <= 2.0 * mid + LINEAR_SLACK) or (
+        "64 KiB median {:.3f} CPU s, 32 KiB {:.3f}, 8 KiB {:.3f}, 1 KiB {:.3f} (diagnostic, not judged) "
+        "over {} runs each (64 KiB runs {})".format(
+            large, mid, small, base, LINEAR_RUNS, ", ".join("{:.3f}".format(quad[3]) for quad in quads)))
 
 
 # THE REGEX AUDIT. Each compiled pattern reachable from this module's namespace (a global, an item of a tuple, list,
@@ -5691,11 +5811,156 @@ def self_test(report_path=None):
         probed = sorted(name for name in regex_audit()[1] if name.startswith("_AUDIT_PROBE"))
     check("perf/regex-audit-reads-containers", probed, ["_AUDIT_PROBE[0]", "_AUDIT_PROBE_CLASS.X",
                                                         "_AUDIT_PROBE_MAP['k'][0]", "_AUDIT_PROBE_SET{0}"])
-    with _patched(LINEAR_CHILD="import sys\nprint(0.1)\nprint(0.2)\nsys.exit(9)\n"):
+    def judged(*quads):
+        """_linear()'s verdict on a stand-in child that prints `quads` (1 KiB, 8 KiB, 32 KiB, 64 KiB CPU
+        times), one per line, and exits 0."""
+        with _patched(LINEAR_CHILD="".join("print({!r})\n".format(" ".join(quad)) for quad in quads)):
+            return _linear("a")
+
+    with _patched(LINEAR_CHILD="import sys\n" + "print('0.1 0.1 0.15 0.2')\n" * LINEAR_RUNS + "sys.exit(9)\n"):
         failed_child = _linear("a")
-    with _patched(LINEAR_CHILD="print('nan')\nprint('nan')\n"):
+    with _patched(LINEAR_CHILD="print('nan nan nan nan')\n" * LINEAR_RUNS):
         nan_child = _linear("a")
-    check("perf/failed-child-not-linear", (failed_child is True, nan_child is True), (False, False))
+    check("perf/failed-child-not-linear", (failed_child is True, nan_child is True,
+                                           judged(*[("0.1", "0.1", "0.15", "0.2")] * (LINEAR_RUNS - 1)) is True,
+                                           judged(*[("0.1", "0.1", "0.15", "0.2")] * (LINEAR_RUNS + 1)) is True,
+                                           judged(*[("0.1", "0.1", "0.2")] * LINEAR_RUNS) is True,
+                                           judged(*[("0.1", "0.1", "0.15", "0.2", "0.3")] * LINEAR_RUNS) is True),
+          (False,) * 6)
+    # the verdict is the median at each judged size: stray 64 KiB runs short of a majority do not turn a
+    # linear shape red; a majority of over-the-bound 64 KiB runs is red; stray high 32 KiB runs short of
+    # a majority lift the top span's bound no further than the other 32 KiB runs allow, here not at all
+    # (large 1.0 against a 0.25 median of the 32 KiB runs stays red, where the mean 1.35 or the largest
+    # 3.0 of those runs would pass it); stray high 8 KiB runs likewise leave the small span's bound at the
+    # other 8 KiB runs' 0.1; and stray 1 KiB times, high or low, leave the judged medians alone, since the
+    # 1 KiB median is never judged (a 1 KiB run that reaches the parse deadline is red, as
+    # perf/linear-deadline-not-linear shows, and 1 KiB runs count toward LINEAR_TIMEOUT like any run)
+    stray = LINEAR_RUNS // 2
+    check("perf/linear-median-not-one-run", (
+        judged(*[("0.05", "0.2", "0.4", "0.7")] * (LINEAR_RUNS - stray)
+               + [("0.05", "0.2", "0.4", "40.0")] * stray),
+        judged(*[("0.05", "0.2", "0.4", "0.7")] * (LINEAR_RUNS - stray - 1)
+               + [("0.05", "0.2", "0.4", "40.0")] * (stray + 1)) is True,
+        judged(*[("0.05", "0.8", "0.25", "1.0")] * (LINEAR_RUNS - stray)
+               + [("0.05", "0.8", "3.0", "1.0")] * stray) is True,
+        judged(*[("0.05", "0.1", "1.0", "1.5")] * (LINEAR_RUNS - stray)
+               + [("0.05", "3.0", "1.0", "1.5")] * stray) is True,
+        judged(*[("0.05", "0.2", "0.4", "0.7")] * (LINEAR_RUNS - stray) + [("9.9", "0.2", "0.4", "0.7")] * stray),
+        judged(*[("0.05", "0.2", "0.4", "0.7")] * (LINEAR_RUNS - stray) + [("0.0", "0.2", "0.4", "0.7")] * stray)),
+          (True, False, False, False, True, True))
+    # the motivating squared-growth pass measured through the fixed launch cost: 8 KiB at 0.25, 32 KiB at
+    # 0.8 and 64 KiB at 2.4 CPU s more than doubles over the top span (2.4 > 2 * 0.8 + 0.25), red; so is
+    # the same 64 KiB total grown from a small fixed cost (a squared-growth profile is red whatever
+    # baseline it claims); a linear shape reaching the same 64 KiB total (0.18, 0.43, 1.28 and 2.4: a
+    # fixed cost near 0.15 plus about 0.035 CPU s per KiB) grows about 2.98 times over the 8-to-32 KiB
+    # span (1.28 within 4 * 0.43 + 0.25 = 1.97) and about 1.88 times over the top span (2.4 within
+    # 2 * 1.28 + 0.25 = 2.81) and stays green: the rule separates the growth's shape, not its size
+    check("perf/linear-quadratic-red",
+          (judged(*[("0.18", "0.25", "0.8", "2.4")] * LINEAR_RUNS) is True,
+           judged(*[("0.01", "0.05", "0.61", "2.41")] * LINEAR_RUNS) is True,
+           judged(*[("0.18", "0.43", "1.28", "2.4")] * LINEAR_RUNS)),
+          (False, False, True))
+    # the 1 KiB time is diagnostic only: a linear shape whose 1 KiB median lands above its 8 KiB median
+    # (a real prescan can) stays green, as does one whose baseline dwarfs every size; and a zero baseline
+    # cannot excuse squared growth
+    check("perf/linear-baseline-ignored",
+          (judged(*[("0.31", "0.30", "0.55", "0.9")] * LINEAR_RUNS),
+           judged(*[("5.0", "0.3", "0.55", "0.9")] * LINEAR_RUNS),
+           judged(*[("0.0", "0.21", "0.8", "2.4")] * LINEAR_RUNS) is True),
+          (True, True, False))
+    # a high 1 KiB median cannot loosen the small span's bound: 32 KiB at 1.0 over 8 KiB at 0.1 is red
+    # (1.0 > 4 * 0.1 + 0.25) whatever the 1 KiB median (0.6 here), and 32 KiB at 1.26 over 8 KiB at 0.25
+    # is red just past the edge (1.26 > 1.25) with a 1 KiB median of 0.3; a bound built on the larger of
+    # the 8 KiB and 1 KiB medians would pass both (2.65 and 1.45)
+    check("perf/linear-baseline-cannot-loosen",
+          (judged(*[("0.6", "0.1", "1.0", "1.9")] * LINEAR_RUNS) is True,
+           judged(*[("0.3", "0.25", "1.26", "2.0")] * LINEAR_RUNS) is True),
+          (False, False))
+    # the 1 KiB median is not judged as a 1-to-8 KiB span either: a linear shape stays green with a
+    # 1 KiB median above its 8 KiB median (0.5 against 0.3), and with one far below it (0.002 against
+    # 0.3), where a span bound of 8 times the 1 KiB median plus LINEAR_SLACK (0.266) would put the 8 KiB
+    # median (0.3) over it
+    check("perf/linear-baseline-not-a-span",
+          (judged(*[("0.5", "0.3", "0.42", "0.58")] * LINEAR_RUNS),
+           judged(*[("0.002", "0.3", "0.42", "0.58")] * LINEAR_RUNS)),
+          (True, True))
+    # each run's clock counts the CPU of the children the run reaped, every parse child among them: reaping a
+    # child that burned at least 0.5 CPU s moves _run_cpu() by at least 0.45 s, which this process's own
+    # time (it only waits) cannot cover; and the measuring child reads that clock around each run
+    burner = "import time\nwhile time.process_time() < 0.5:\n    pass\n"
+    before = _run_cpu()
+    burned = subprocess.run([sys.executable, "-I", "-B", "-c", burner], capture_output=True, timeout=60)
+    moved = _run_cpu() - before
+    check("perf/linear-cpu-counts-reaped", (burned.returncode, moved >= 0.45, LINEAR_CHILD.count("m._run_cpu()")),
+          (0, True, 2))
+    # the clock's other half: CPU this process burns itself, with no child reaped in between, moves
+    # _run_cpu() by about the burn, which the reaped-children half alone cannot see
+    before = _run_cpu()
+    begun = time.process_time()
+    while time.process_time() - begun < 0.4:
+        pass
+    check("perf/linear-cpu-counts-own", _run_cpu() - before >= 0.35, True)
+    # a run whose parse child is killed at the parse deadline (the child's deadline set to zero, so every
+    # parse is killed) is red whatever CPU time it was charged, naming the deadline; so is a child stopped at
+    # the row's timeout after printing a full set of linear times
+    deadline_child = LINEAR_CHILD.replace(
+        "table = ", "m._input_declarations.PARSE_DEADLINE_SECONDS = 0.0\ntable = ", 1)
+    with _patched(LINEAR_CHILD=deadline_child):
+        at_deadline = _linear("a")
+    with _patched(LINEAR_TIMEOUT=2, LINEAR_CHILD="import time\n"
+                  + "print('0.1 0.1 0.15 0.2', flush=True)\n" * LINEAR_RUNS + "time.sleep(30)\n"):
+        at_timeout = _linear("a")
+    check("perf/linear-deadline-not-linear", (deadline_child != LINEAR_CHILD, at_deadline is True,
+                                              "parse deadline" in str(at_deadline), at_timeout is True),
+          (True, False, True, False))
+    # a run the reading cannot evaluate for any cause but a prescan refusal measured nothing, so it is red,
+    # naming the failure: here each parse child runs from a copy of the shared reading's two files with no
+    # vendored parser beside them, so the parser's import fails and every parsed run is a cannot-evaluate
+    # (timed as a refusal, every run would pass with nothing measured)
+    bare = tempfile.mkdtemp(prefix="aiqt-brief-capability-no-parser-")
+    try:
+        copied = os.path.join(bare, "tools")
+        os.makedirs(copied)
+        here = os.path.dirname(os.path.abspath(_input_declarations.__file__))
+        for name in ("_input_declarations.py", "_input_declarations_child.py"):
+            shutil.copyfile(os.path.join(here, name), os.path.join(copied, name))
+        no_parser_child = LINEAR_CHILD.replace("table = ", "m._input_declarations._CHILD_PATH = {!r}\ntable = "
+                                               .format(os.path.join(copied, "_input_declarations_child.py")), 1)
+        with _patched(LINEAR_CHILD=no_parser_child):
+            no_parser = _linear("a")
+    finally:
+        shutil.rmtree(bare, ignore_errors=True)
+    check("perf/linear-cannot-evaluate-not-linear", (
+        no_parser_child != LINEAR_CHILD, no_parser is True, "marko" in str(no_parser),
+        str(no_parser).endswith("(a 1 KiB run could not be evaluated)")), (True, False, True, True))
+    # a prescan refusal is still timed: decode_brief marks the refusals of the whitespace-run and nesting
+    # prescans, and only those (a line separator, a format character outside code and a blank brief are
+    # refused unmarked), and a shape refused by a prescan at every size is timed through each refusal
+    def prescan_mark(text):
+        try:
+            decode_brief(text.encode("utf-8"))
+        except CannotEvaluate as caught:
+            return caught.prescan
+        return None
+
+    lead = "Input notes.\n\n"
+    check("perf/linear-prescan-refusal-timed", (
+        [prescan_mark(text) for text in (lead + " " * 2001 + "x\n", lead + "1) " * 40 + "x\n",
+                                         lead + "x" + chr(0x2028) + "y\n", lead + "a" + chr(0x200B) + "b\n",
+                                         " \n")], _linear("1) ")), ([True, True, False, False, False], True))
+    # the top span's end: the 64 KiB median at 2 times the 32 KiB median (0.5) plus LINEAR_SLACK
+    # (1.25 CPU s, every term exact in binary, and repr() reads back exactly): just inside, exactly at,
+    # and just outside it
+    edge = 2.0 * 0.5 + LINEAR_SLACK
+    check("perf/linear-bound-edges", [judged(*[("0.05", "0.2", "0.5", repr(large))] * LINEAR_RUNS) is True
+                                      for large in (edge - 0.001, edge, edge + 0.001)], [True, True, False])
+    # the small span's end: the 32 KiB median at 4 times the 8 KiB median (0.25) plus LINEAR_SLACK
+    # (1.25 CPU s, every term exact in binary), with the 64 KiB median low enough (2.0) to keep the top
+    # span green at each of the three 32 KiB values: just inside, exactly at, and just outside it, so a
+    # blow-up confined to the 8-to-32 KiB span is caught on its own
+    edge = 4.0 * 0.25 + LINEAR_SLACK
+    check("perf/linear-small-span-edges", [judged(*[("0.05", "0.25", repr(mid), "2.0")] * LINEAR_RUNS) is True
+                                           for mid in (edge - 0.001, edge, edge + 0.001)], [True, True, False])
     for check_id, unit, prefix, suffix in (
             ("perf/single-word-linear", "a", "", ""),
             ("perf/noun-run-linear", "a, ", "", ""),
@@ -7999,7 +8264,9 @@ def self_test(report_path=None):
           "the regex audit reads the module-level patterns and COMMAND_FORMS (and, without claiming completeness, "
           "container and class globals and the production source's re calls), flags no pattern, "
           "detects the previous revisions' and loses its canary with each guard patched out; 37 repeated shapes "
-          "each evaluate within the linear growth bound at 64 KiB, through the parsed-document reading "
+          "each evaluate within the linear growth bounds on the raw medians of the CPU times of fresh runs, over "
+          "the 8-to-32 KiB and 32-to-64 KiB spans at each span's size ratio plus slack (the 1 KiB median reported, "
+          "never judged), through the parsed-document reading "
           "with its size, whitespace-run and nesting bounds and its killed-at-the-deadline parse child, "
           "in a capped child that must exit 0; the parse child's process group is killed after a normal "
           "exit too, a non-zero or signalled child and a result of the wrong shape or depth are refused, "
