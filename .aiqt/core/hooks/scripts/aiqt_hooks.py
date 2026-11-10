@@ -16927,7 +16927,8 @@ def _verification_sink_message(hit):
 # --no-contains, --merged, --no-merged or a --points-at no later --no-points-at clears), a merge abort or
 # quit no later --no-abort or --no-quit clears, an am abort, quit or --show-current-patch, a dry run
 # (_gate_git_dry_run) and a --help or -h. Every one of those flags is read by one resolver
-# (_gate_flag_last) over git's own option table, its abbreviations and negations included.
+# (_gate_flag_last) over git's own option table, its abbreviations and negations included, and none is read
+# from an action that holds a word bash expands (_gate_words_expand): that word could spell a negation.
 _GATE_GATED_GIT = frozenset(("commit", "push", "merge", "tag", "am"))
 # git 2.53.0's long options of each gated action, as 'git <verb> --git-completion-helper-all' prints them:
 # the options first, then '--', then the negations git accepts (the options 'git <verb> -h' marks
@@ -17075,7 +17076,8 @@ def _gate_git_long(sub, tok):
     action sub to (_GATE_GIT_LONG_FORMS), or None when git has no such option or the word is ambiguous: an
     exact name or negation first, else the one name or negation the word is a prefix of. git stops on an
     unknown or ambiguous word and records nothing (merge --qu, commit --d, push --d), so None never reads
-    a word that runs as an exempt flag or its negation."""
+    a literal word that runs as an exempt flag or its negation; a word bash expands is never read here, as
+    _gate_gated_git gates an action carrying one (_gate_words_expand)."""
     forms = _GATE_GIT_LONG_FORMS.get(sub, {})
     word = tok[2:]
     if word in forms:
@@ -17133,19 +17135,36 @@ def _gate_tag_listing(opts, operands):
     return True
 
 
+def _gate_words_expand(seg, argv):
+    """True when a word of the git action argv (the suffix of seg.argv that _gate_peel leaves) carries an
+    unquoted or double-quoted expansion, substitution, backquote, glob or brace (its argv_opaque flag), or
+    when those flags do not run parallel to seg.argv. bash expands such a word before git reads it, so it can
+    become a negation that clears an exempt flag (--no-points-at{,}, --no-points-at$X, "$(printf %s
+    --no-points-at)") or split into a tag name (git tag --format=$(echo %s v1)); the lexer keeps only its
+    unexpanded text, which the exempt forms must not be read from."""
+    flags = seg.argv_opaque
+    if len(flags) != len(seg.argv):
+        return True
+    return any(flags[len(seg.argv) - len(argv):])
+
+
 def _gate_gated_git(seg):
     """The gated git action (_GATE_GATED_GIT) a segment runs, read after its leading assignments and the env,
     nice, timeout and time wrappers (_gate_peel), or None; a form that records, marks or sends nothing (a tag
     listing or verify, a recovery option, a dry run, --help) is None. Those forms are read only from real
     option words: a -h or --help among git's global options (each value of _GIT_ARG_OPTS skipped), and the
     subcommand's own option words read by _gate_git_opts, which skips every listed option's value and stops
-    at a '--', so an option's value is never taken for one of those forms."""
+    at a '--', so an option's value is never taken for one of those forms. They are read only from literal
+    words too: when any word of the action is one bash expands (_gate_words_expand), no form exempts it and
+    the action is gated, a disclosed over-denial of a listing such as git tag -l v* or git tag -l "$p"."""
     argv = _gate_peel(seg.argv) if seg.argv else None
     if not argv or _gate_word(argv[0]) != "git":
         return None
     sub, rest = _git_subcommand_rest(argv)
     if sub not in _GATE_GATED_GIT:
         return None
+    if _gate_words_expand(seg, argv):
+        return sub
     head, k, end = [], _command_word_index(argv) + 1, len(argv) - len(rest) - 1
     while k < end:
         head.append(argv[k])
