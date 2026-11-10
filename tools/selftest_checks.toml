@@ -5254,6 +5254,15 @@ expected-check-ids = [
   "declaration/full-entry-list-target-scan-exits-2",
   "declaration/full-entry-int-target-refused",
   "declaration/full-entry-int-target-scan-exits-2",
+  "root-state/absent-roots-pass",
+  "root-state/absent-opf-site-skipped",
+  "root-state/unsearchable-parent-exits-2",
+  "root-state/regular-file-root-exits-2",
+  "root-state/regular-file-parent-exits-2",
+  "root-state/symlink-root-exits-2",
+  "root-state/symlink-site-root-exits-2",
+  "root-state/symlink-parent-exits-2",
+  "root-state/dangling-symlink-root-exits-2",
 ]
 
 [[suite]]
