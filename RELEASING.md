@@ -102,13 +102,21 @@ pull request (CLAUDE.md, Gates and CI).
 
    OPF declaration checklist (OPF-SPEC section 16.1). The reference tooling's declaration file is
    `opf/tools/opf-declaration.toml`, and the shipped-file digest is carried in
-   `opf/tools/_opf_declaration.py` as `SHIPPED_DECLARATION_SHA256`. Its `release` is the pack release
-   version, so each release cut sets, in one change: `release` in that file;
+   `opf/tools/_opf_declaration.py` as `SHIPPED_DECLARATION_SHA256`. Its `release` is OPF's own release
+   version in `opf/VERSION`, which moves independently of the pack release version in `VERSION`, so each
+   change of OPF's version sets, in one change: `opf/VERSION`; `release` in that file;
    `RELEASE_IDENTITY`, `SHIPPED_DECLARATION_BYTES` and `SHIPPED_DECLARATION_SHA256` in
    `_opf_declaration.py`; and the restatement below and in `opf/spec/OPF-QUICKSTART.md`. A change of the supported `spec_version`, homes generation or worklog
-   storage generation (`_opf_store.py`) changes the same places. `python3 -I -B
+   storage generation changes its value in `_opf_store.py`, the matching field in
+   `opf/tools/opf-declaration.toml`, `SHIPPED_DECLARATION_BYTES` and `SHIPPED_DECLARATION_SHA256` in
+   `_opf_declaration.py`, and the restatement below and in `opf/spec/OPF-QUICKSTART.md`; it does not by
+   itself touch `opf/VERSION` or `release`. `python3 -I -B
    tools/check_opf_declaration.py` must then exit 0. It refuses a restatement that differs from the file
-   and a release other than `VERSION`. This release declares:
+   and a release other than the version in `opf/VERSION`; a pack release that leaves OPF's version
+   unchanged changes none of these places. Adoption is not yet bound to OPF's own version: the `opf adopt`
+   trust gate still checks the plan's release version against the pack manifest's `release-version`, which
+   is taken from the pack release version in the root `VERSION`; moving that binding to OPF's own version
+   in `opf/VERSION` is a later step of the version split. This release declares:
 
    ```toml opf-declaration
    release = "1.0.5"
