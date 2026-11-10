@@ -2414,6 +2414,23 @@ _LOAD_SENSITIVE_ROWS = ("TG-11/slow-drip", "TG-11/read-inactivity",
                         "TG-11/tls-timeout")
 _LOAD_SENSITIVE_VECTORS = ("resolver-vector/blocked-timing",)
 
+# The self-test's local TLS fixture server: the per-operation timeout of a
+# served connection (handshake, recv, send and unwrap), and how long
+# Server.close() waits for the server thread. close() shuts the served
+# connection down first, so a blocked operation returns at once; the join
+# bound is derived from the socket timeout and kept above it, so even an
+# operation close() could not interrupt ends inside the join. The stop check
+# waits up to the reach bound for the server to reach its recv (or its
+# handshake) before it closes; a server that does not get there in time
+# leaves the check unable to evaluate, so the bound is generous and only
+# delays that outcome. A server call that ran out its socket timeout fails
+# the stop check only when close() issued its shutdown at least the margin
+# before that call's own deadline.
+_TLS_FIXTURE_SOCKET_SECONDS = 2.0
+_TLS_FIXTURE_STOP_JOIN_SECONDS = 2 * _TLS_FIXTURE_SOCKET_SECONDS
+_TLS_FIXTURE_REACH_SECONDS = 10 * _TLS_FIXTURE_SOCKET_SECONDS
+_TLS_FIXTURE_STOP_MARGIN_SECONDS = _TLS_FIXTURE_SOCKET_SECONDS / 10
+
 
 def _runner_launch_entry(expected):
     # The positive registration's own call, run for real: the runner-launched
@@ -2630,7 +2647,7 @@ exit 0
         # them: each row run's 30 s watchdog and its deadlines scaled to
         # connect 2.0 s, inactivity 1.5 s, request 8.0 s and gather 16.0 s;
         # the TLS fixture's 2.0 s socket timeout (raw.settimeout) and its
-        # 1.0 s stop join; the 2.0 s join of a run's resolver workers (a
+        # 4.0 s stop join; the 2.0 s join of a run's resolver workers (a
         # straggler fails the row INVALID); the 1.0 s resolver-slot acquire
         # after a run and in the held-slot queue; the 10 s HELD_JOIN of
         # resolver-vector/positive-held-slot; the 5.0 s resolver join of
@@ -3325,6 +3342,154 @@ def _failure_lines_self_test():
         print("RED forced-{} -> named {}".format(label, wanted[0].split(" ", 1)[1].split(":")[0]))
 
 
+def _exception_text(exc):
+    """str(exc), or a stand-in naming why it could not be rendered: an
+    exception whose str() raises must still be reported, not replace the
+    report with its own traceback."""
+    try:
+        return str(exc)
+    except Exception as failure:
+        return "<message not rendered: str() raised {}>".format(type(failure).__name__)
+
+
+def _setup_or_teardown_row(exc):
+    """The row for an exception that stopped the self-test outside any row:
+    the exception's type and its message, so the report says what failed."""
+    return {
+        "id": "fixture/setup-or-teardown",
+        "test_status": CANNOT_EVALUATE,
+        "exception": type(exc).__name__,
+        "message": _exception_text(exc),
+    }
+
+
+def _interrupted_run(executed, exc, failures, unevaluated, vector_results=()):
+    """Report a self-test that exc stopped outside any row, and return its
+    exit status: 1 when a definite failure was recorded before exc (a FAIL
+    line in failures, an INVALID row in executed, or a vector failure that
+    is not "cannot evaluate"), 2 (cannot evaluate) only when none was.
+    Appends the setup-or-teardown row to executed and names every row that
+    is not VALID, and every failed vector, on one FAIL line each."""
+    vector_failures = [text for _, texts in vector_results for text in texts]
+    definite = (bool(failures)
+                or any(row.get("test_status") == INVALID for row in executed)
+                or not all(text.startswith("cannot evaluate") for text in vector_failures))
+    lines = _roster_failures(executed)
+    lines.extend("FAIL " + name + ": " + "; ".join(texts)
+                 for name, texts in vector_results if texts)
+    row = _setup_or_teardown_row(exc)
+    executed.append(row)
+    print(_report_line(executed))
+    _print_failures(lines + ["FAIL {}: {}: {}: {}".format(
+        row["id"], row["test_status"], row["exception"], row["message"])]
+                    + failures + unevaluated)
+    return 1 if definite else 2
+
+
+def _setup_row_self_test():
+    # The setup-or-teardown row must carry the exception's message, not only
+    # its type name: "AssertionError" alone does not say which fixture failed.
+    identity = "self-test/setup-or-teardown-message"
+    row = _setup_or_teardown_row(AssertionError("local TLS fixture did not stop"))
+    if (row.get("exception") != "AssertionError"
+            or row.get("message") != "local TLS fixture did not stop"
+            or "local TLS fixture did not stop" not in _report_line([row])):
+        raise AssertionError(identity)
+    print("PASS " + identity)
+    # An exception whose str() raises is still reported, by type, with a
+    # stand-in for its message.
+    identity = "self-test/setup-or-teardown-unrendered-message"
+
+    class Unrendered(Exception):
+        def __str__(self):
+            raise ValueError("message cannot be rendered")
+    row = _setup_or_teardown_row(Unrendered())
+    if (row.get("exception") != "Unrendered"
+            or row.get("message") != "<message not rendered: str() raised ValueError>"):
+        raise AssertionError(identity)
+    print("PASS " + identity)
+
+
+def _interrupted_run_self_test():
+    # A definite failure recorded before a setup or teardown exception still
+    # fails the run (exit 1); only a run that recorded none is cannot
+    # evaluate (exit 2). Each case names the setup-or-teardown row on
+    # exactly one FAIL line, with its message, and keeps the earlier lines.
+    import io
+    failure = "FAIL self-test/forced-stop: close() raised: forced"
+    unevaluated = "FAIL self-test/forced-unevaluated: cannot evaluate: forced"
+    valid = {"id": "positive/forced", "test_status": VALID}
+    invalid = {"id": "TG-forced/invalid", "test_status": INVALID}
+    unknown = {"id": "TG-forced/unknown", "test_status": CANNOT_EVALUATE}
+    setup = "FAIL fixture/setup-or-teardown: {}: RuntimeError: forced setup".format(
+        CANNOT_EVALUATE)
+    missed = [("vector/forced-missed", ["the forced vector missed"])]
+    unknowable = [("vector/forced-unknown", ["cannot evaluate: forced"])]
+    for label, executed, failures, vectors, wanted_code, wanted in (
+            ("fixture-failure", [valid], [failure], [], 1, [setup, failure]),
+            ("invalid-row", [valid, invalid], [], [], 1,
+             ["FAIL TG-forced/invalid: " + INVALID, setup]),
+            ("vector-failure", [valid], [], unknowable + missed, 1,
+             ["FAIL vector/forced-missed: the forced vector missed", setup]),
+            ("none", [valid, unknown], [], unknowable, 2,
+             ["FAIL TG-forced/unknown: " + CANNOT_EVALUATE,
+              "FAIL vector/forced-unknown: cannot evaluate: forced", setup, unevaluated])):
+        identity = "self-test/setup-raise-after-" + label
+        out, err = io.StringIO(), io.StringIO()
+        rows, recorded, results = [], [], []
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            try:
+                # Record the rows, the fixture failure and the vectors, then
+                # raise in setup, as the self-test's own steps would.
+                rows.extend(executed)
+                recorded.extend(failures)
+                results.extend(vectors)
+                raise RuntimeError("forced setup")
+            except RuntimeError as exc:
+                code = _interrupted_run(rows, exc, recorded, [unevaluated], results)
+        said = err.getvalue().splitlines()
+        named = [line for line in said if line.startswith("FAIL fixture/setup-or-teardown")]
+        if (code != wanted_code or not all(line in said for line in wanted)
+                or named != [setup] or rows[-1].get("id") != "fixture/setup-or-teardown"
+                or out.getvalue().splitlines() != [_report_line(rows)]):
+            raise AssertionError(identity)
+        print("PASS " + identity)
+
+
+def _collect_rows(steps, executed):
+    """Call each step and add the rows it returns to executed as it returns,
+    so a step that raises leaves every earlier step's rows, an INVALID one
+    too, for the setup-or-teardown report to count. Returns the rows."""
+    collected = []
+    for step in steps:
+        rows = step()
+        collected.extend(rows)
+        executed.extend(rows)
+    return collected
+
+
+def _collect_rows_self_test():
+    # An INVALID row from one guard function, then an exception from the
+    # next, still fails the run (exit 1) and keeps that row in the roster.
+    import io
+    identity = "self-test/guard-rows-kept-after-raise"
+    invalid = {"id": "TG-forced/guard-invalid", "test_status": INVALID}
+
+    def raising():
+        raise RuntimeError("forced guard exception")
+    executed = [{"id": "positive/forced", "test_status": VALID}]
+    out, err = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        try:
+            _collect_rows((lambda: [invalid], raising), executed)
+            code = None
+        except RuntimeError as exc:
+            code = _interrupted_run(executed, exc, [], [])
+    if code != 1 or invalid not in executed:
+        raise AssertionError(identity)
+    print("PASS " + identity)
+
+
 def _resolver_stub_bound(function):
     # A resolver worker reads _lookup only when it runs. One that outlives
     # settle_resolvers' bound can run after its case has unwound the fixture
@@ -3347,8 +3512,8 @@ def _resolver_stub_bound(function):
         except BaseException as exc:
             # A traceback alone names no failed check: say what stopped it.
             sys.stdout.flush()
-            print("FAIL self-test/uncaught-exception: {}: {}".format(type(exc).__name__, exc),
-                  file=sys.stderr)
+            print("FAIL self-test/uncaught-exception: {}: {}".format(
+                type(exc).__name__, _exception_text(exc)), file=sys.stderr)
             raise
         finally:
             end = time.monotonic() + 2.0
@@ -3408,6 +3573,7 @@ def self_test(vectors_only=False, steady_only=False):
     SELF_TEST_ROSTER = ()
     executed = []
     vector_results = []
+    fixture_failures, fixture_unevaluated = [], []
     module = sys.modules[__name__]
     original_context = ssl.create_default_context
     original_fetch = _fetch
@@ -3495,6 +3661,18 @@ def self_test(vectors_only=False, steady_only=False):
             headers = b"Content-Length: " + str(len(body)).encode("ascii") + b"\r\n"
         return b"HTTP/1.1 " + status + b"\r\n" + headers + extra + b"\r\n" + body
 
+    def stop_missed(began, issued):
+        # Whether a server call that ran out its socket timeout did so
+        # although close() had issued its shutdown at least the margin
+        # before the call's own deadline: close() did not interrupt it.
+        # began is read before the call and issued after the shutdown, so
+        # neither reading makes the shutdown look earlier than it was. A
+        # missing reading cannot show that order.
+        if began is None or issued is None:
+            return False
+        return issued < (began + _TLS_FIXTURE_SOCKET_SECONDS
+                         - _TLS_FIXTURE_STOP_MARGIN_SECONDS)
+
     class Server:
         def __init__(self, context, archive_body, anchor_response, mode="normal"):
             self.context = context
@@ -3504,6 +3682,26 @@ def self_test(vectors_only=False, steady_only=False):
             self.requests = []
             self.errors = []
             self.stop = threading.Event()
+            self.guard = threading.Lock()
+            self.connection = None
+            # Set just before the server calls recv for a request, just
+            # before it wraps a connection for its handshake, and once the
+            # wrapped socket is published, just before do_handshake(). Each
+            # shows the server got that far, not that the call has blocked
+            # yet; close() ends the call either way, since recv or a
+            # handshake on a connection already shut down returns at once.
+            self.in_recv = threading.Event()
+            self.in_handshake = threading.Event()
+            self.handshaking = threading.Event()
+            # A served connection whose blocking call ran out its socket
+            # timeout although close() issued its shutdown clearly before
+            # that call's own deadline (close() did not interrupt it), or
+            # one whose call ran out with no such shutdown (close() had no
+            # call to interrupt in time, or the timing cannot tell). issued
+            # is when halt() issued its shutdown, read after that step.
+            self.timed_out = []
+            self.expired = threading.Event()
+            self.issued = None
             self.listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.listener.bind(("127.0.0.1", 0))
             self.listener.listen(8)
@@ -3521,14 +3719,37 @@ def self_test(vectors_only=False, steady_only=False):
                 except OSError:
                     break
                 secured = None
+                # When the current blocking call started, read before the
+                # signal that names it, so the call's own deadline is never
+                # earlier than this reading plus the socket timeout.
+                began = None
                 try:
-                    raw.settimeout(2.0)
+                    raw.settimeout(_TLS_FIXTURE_SOCKET_SECONDS)
+                    if not self.serving(raw):
+                        continue
                     if self.mode == "tls-stall":
                         self.stop.wait(1.10)
                         continue
-                    secured = self.context.wrap_socket(raw, server_side=True)
+                    began = time.monotonic()
+                    self.in_handshake.set()
+                    # Wrap without the handshake, so the wrapped socket is
+                    # published for close() before any blocking operation.
+                    secured = self.context.wrap_socket(
+                        raw, server_side=True, do_handshake_on_connect=False)
+                    if not self.serving(secured):
+                        continue
+                    began = time.monotonic()
+                    self.handshaking.set()
+                    secured.do_handshake()
+                    if self.mode == "quiet":
+                        # Never reaches recv: the stop check's unmet
+                        # precondition.
+                        self.stop.wait(_TLS_FIXTURE_SOCKET_SECONDS)
+                        continue
                     request = bytearray()
                     while not request.endswith(b"\r\n\r\n"):
+                        began = time.monotonic()
+                        self.in_recv.set()
                         block = secured.recv(4096)
                         if not block:
                             break
@@ -3559,22 +3780,513 @@ def self_test(vectors_only=False, steady_only=False):
                         secured.unwrap().close()
                     except (OSError, ssl.SSLError):
                         pass
+                except socket.timeout:
+                    # Expected for deadline cases. The stop flag alone cannot
+                    # say whether close() came before the call ran out: a
+                    # call that ran out on its own near its deadline can be
+                    # handled only after close() has set the flag. So the
+                    # stop check is given a failure only when the shutdown
+                    # clearly preceded the call's deadline, and otherwise
+                    # the expiry it cannot evaluate.
+                    if stop_missed(began, self.issued):
+                        self.timed_out.append(True)
+                    else:
+                        self.expired.set()
                 except (OSError, ssl.SSLError):
                     # Expected for wrong-chain/name and deadline cases.
                     pass
                 except Exception as exc:
                     self.errors.append(type(exc).__name__)
                 finally:
+                    with self.guard:
+                        self.connection = None
                     if secured is not None:
                         secured.close()
                     raw.close()
 
-        def close(self):
+        def serving(self, connection):
+            # Publish the connection close() shuts down, or refuse it once
+            # close() has begun. The lock orders the two: a stop set before
+            # this check is seen here, and a close() after it finds this
+            # connection.
+            with self.guard:
+                if self.stop.is_set():
+                    return False
+                self.connection = connection
+                return True
+
+        def halt(self):
             self.stop.set()
+            with self.guard:
+                connection = self.connection
+            if connection is not None:
+                try:
+                    # The plain socket shutdown, not SSLSocket.shutdown, which
+                    # would drop the TLS state the server thread still uses.
+                    socket.socket.shutdown(connection, socket.SHUT_RDWR)
+                except OSError:
+                    pass
+            # Read after the shutdown step, so it is never earlier than the
+            # shutdown itself.
+            self.issued = time.monotonic()
             self.listener.close()
-            self.thread.join(timeout=1.0)
+
+        def close(self):
+            self.halt()
+            self.thread.join(timeout=_TLS_FIXTURE_STOP_JOIN_SECONDS)
             if self.thread.is_alive():
                 raise AssertionError("local TLS fixture did not stop")
+
+    class LingeringServer(Server):
+        # Its thread outlives a close() that returns without joining it: the
+        # stop check must fail a thread still alive after close().
+        def __init__(self, *args, **kwargs):
+            self.release = threading.Event()
+            Server.__init__(self, *args, **kwargs)
+
+        def serve(self):
+            Server.serve(self)
+            self.release.wait(_TLS_FIXTURE_REACH_SECONDS)
+
+        def close(self):
+            self.halt()
+
+    class RaisingServer(Server):
+        # Stops as Server does, then raises: a close() failure the stop
+        # check must report wherever close() runs.
+        def close(self):
+            Server.close(self)
+            raise RuntimeError("forced close failure")
+
+    class LateShutdownServer(Server):
+        # Sets the stop flag, then waits for the server thread to end before
+        # it issues its shutdown, so the served call runs out its socket
+        # timeout on its own and is handled with the flag already set: a
+        # host that stalled close() between the two steps. The stop check
+        # must not charge that timeout to close().
+        def halt(self):
+            self.stop.set()
+            self.thread.join(_TLS_FIXTURE_REACH_SECONDS)
+            Server.halt(self)
+
+    STOP_PASS, STOP_FAIL, STOP_UNEVALUATED = "pass", "fail", "cannot evaluate"
+
+    def tls_fixture_stop_check(context, cadata, shown, server_class=None, mode="normal",
+                               clock=time.monotonic, pause=None,
+                               reach_seconds=_TLS_FIXTURE_REACH_SECONDS, stage="recv",
+                               connect=socket.create_connection):
+        # A served connection whose peer goes quiet leaves the server thread
+        # blocked in recv for up to the socket timeout, longer than close()
+        # used to join it. close() must make that thread return at once.
+        # stage "handshake" stops it in its handshake instead: the client
+        # opens the connection and never sends its hello. Returns (outcome,
+        # reason, detail). A close() that raises any exception (in the
+        # cleanup after an unmet precondition too) fails. A server that never
+        # signalled its stage within reach_seconds (or a client that could
+        # not get there) is a precondition this run did not establish:
+        # cannot evaluate, returned before the thread is looked at; so is a
+        # clock() that raised on its first reading, since close() then never
+        # ran (the cleanup runs it). Once close() ran, a thread still alive
+        # after it returned fails, and so does a server call that ran out
+        # its socket timeout although close() issued its shutdown clearly
+        # before that call's own deadline (close() did not interrupt it),
+        # whatever close() took. Otherwise a server with no blocking call
+        # for close() to interrupt is cannot evaluate: its call ran out its
+        # socket timeout with no such shutdown before its deadline (close()
+        # came too late, or too near the deadline for timing to tell), or
+        # (stage "handshake") it had not published its wrapped socket and
+        # started do_handshake() when close() began. An exception after
+        # close() raised, or after it returned with the thread still alive,
+        # is dropped and that failure is returned. After a server call that
+        # close() did not interrupt, the failure is handed to shown and then
+        # the exception propagates, so the caller can record both. Any other
+        # exception propagates. connect opens the client's
+        # connection, a seam for a row that opens no socket. Only the close()
+        # call is timed, from clock(), so a delay before it (pause, the seam
+        # a test uses to stand for one) is never charged to it; a close()
+        # that still took the socket timeout with no call timed out is
+        # cannot evaluate too, since timing alone cannot tell one that
+        # waited the timeout out from a host that stalled it.
+        def raised_text(exc):
+            # The message alone for the fixture's own AssertionError, which
+            # names what failed; the type too for any other exception.
+            if type(exc) is AssertionError:
+                return _exception_text(exc)
+            return "{}: {}".format(type(exc).__name__, _exception_text(exc))
+
+        server = (server_class or Server)(context, b"", b"", mode=mode)
+        closed = False
+        engaged = True
+        raised = None
+        unmet = None
+        pending = None
+        try:
+            with connect(("127.0.0.1", server.port), timeout=reach_seconds) as raw:
+                if stage == "handshake":
+                    reached = server.in_handshake
+                    client = contextlib.nullcontext()
+                else:
+                    # The server finishes its handshake after this one, then
+                    # calls recv for a request this client never sends.
+                    reached = server.in_recv
+                    client = original_context(cadata=cadata).wrap_socket(
+                        raw, server_hostname="codeload.github.com")
+                with client:
+                    if reached.wait(reach_seconds):
+                        if stage == "handshake":
+                            # Bounded well under the socket timeout, so a
+                            # server that blocks before it publishes (its
+                            # handshake inside wrap_socket) is still in that
+                            # call when close() begins.
+                            server.handshaking.wait(_TLS_FIXTURE_SOCKET_SECONDS / 2)
+                        if pause is not None:
+                            pause()
+                        engaged = stage != "handshake" or server.handshaking.is_set()
+                        try:
+                            began = clock()
+                        except Exception as exc:
+                            # close() has not run: the cleanup below runs it.
+                            unmet = "close() never ran: the clock raised {}".format(
+                                raised_text(exc))
+                        else:
+                            closed = True
+                            try:
+                                server.close()
+                            except Exception as exc:
+                                raised = raised_text(exc)
+                            took = clock() - began
+                    else:
+                        unmet = ("the server did not reach its {} within "
+                                 "{} s".format(stage, reach_seconds))
+        except Exception as exc:
+            # ssl.SSLError is an OSError. One raised before close() is the
+            # client failing to establish the precondition. Any other
+            # exception is held until close()'s own outcome is settled below.
+            if closed or not isinstance(exc, OSError):
+                pending = exc
+            else:
+                unmet = "the client could not reach the server: {}: {}".format(
+                    type(exc).__name__, _exception_text(exc))
+        finally:
+            if not closed:
+                try:
+                    server.close()
+                except Exception as exc:
+                    raised = raised_text(exc)
+        if raised is not None:
+            return STOP_FAIL, "raised", "close() raised: " + raised
+        if closed and server.thread.is_alive():
+            return STOP_FAIL, "alive", "the server thread is alive after close() returned"
+        if closed and server.timed_out:
+            result = (STOP_FAIL, "timed-out", "a server call ran out its socket timeout "
+                      "although close() issued its shutdown clearly before the call's "
+                      "deadline: close() did not interrupt it")
+            if pending is None:
+                return result
+            # Handed over before the exception propagates, so the caller
+            # records this failure and the exception both.
+            shown(result)
+        if pending is not None:
+            raise pending
+        if unmet is not None:
+            return STOP_UNEVALUATED, "precondition", unmet
+        if server.expired.is_set():
+            return (STOP_UNEVALUATED, "precondition", "a server call ran out its socket "
+                    "timeout before close() clearly issued its shutdown: close() had no "
+                    "call to interrupt, or timing cannot tell")
+        if not engaged:
+            return (STOP_UNEVALUATED, "precondition", "the server had not started its "
+                    "handshake when close() began")
+        if took >= _TLS_FIXTURE_SOCKET_SECONDS:
+            return (STOP_UNEVALUATED, "slow-close",
+                    "close() took {:.2f} s, not under the {} s socket timeout".format(
+                        took, _TLS_FIXTURE_SOCKET_SECONDS))
+        return STOP_PASS, "prompt", "close() took {:.2f} s".format(took)
+
+    def tls_fixture_stop_rows(context, cadata, failures, unevaluated,
+                              check=tls_fixture_stop_check):
+        # The stop check on the real fixture, then the rows that pin its
+        # outcomes. Appends to the caller's lists as each row ends: FAIL
+        # lines for definite failures to failures, and lines for checks that
+        # could not be evaluated to unevaluated, so a row that raises leaves
+        # every earlier row's line for the caller to report.
+
+        def judge(identity, wanted=None, **options):
+            # Runs one check and records its result. The same recorder is the
+            # check's shown, so a failure the check hands over before an
+            # exception propagates is recorded first. wanted None is the
+            # plain row: any definite failure fails it as it is. A row that
+            # wants a pass records any cannot-evaluate result (a slow close
+            # too) as not evaluated; any other row does so for an unmet
+            # precondition only.
+            def settle(result):
+                outcome, reason, detail = result
+                if wanted is None and outcome == STOP_FAIL:
+                    failures.append("FAIL " + identity + ": " + detail)
+                elif (outcome, reason) == (wanted or (STOP_PASS, reason)):
+                    print("PASS " + identity)
+                elif outcome == STOP_UNEVALUATED and (wanted is None
+                                                      or wanted[0] == STOP_PASS
+                                                      or reason == "precondition"):
+                    unevaluated.append("FAIL " + identity + ": cannot evaluate: " + detail)
+                else:
+                    failures.append("FAIL {}: expected {} ({}), got {} ({}): {}".format(
+                        identity, wanted[0], wanted[1], outcome, reason, detail))
+            settle(check(context, cadata, settle, **options))
+
+        identity = "self-test/tls-fixture-stop-while-served"
+        judge(identity)
+        # An operation close() cannot interrupt still ends inside the join.
+        if not _TLS_FIXTURE_STOP_JOIN_SECONDS > _TLS_FIXTURE_SOCKET_SECONDS:
+            failures.append("FAIL " + identity + ": the stop join bound is not above "
+                            "the socket timeout")
+        # A server in its handshake stops promptly too: the wrapped socket is
+        # published before the handshake, so close() shuts down the socket
+        # that call uses. The check waits for the server to signal it has
+        # published that socket and is starting do_handshake().
+        judge("self-test/tls-fixture-stop-in-handshake", (STOP_PASS, "prompt"),
+              stage="handshake")
+
+        def stand_in(handshaking=True, timed_out=False, expired=False):
+            # A server_class that opens no socket: its stage is reached at
+            # once (do_handshake() started only when handshaking), its thread
+            # is never started, so never alive, and its close() records a
+            # call that close() did not interrupt (timed_out) or one that
+            # ran out with no shutdown before its deadline (expired), and
+            # counts its calls.
+            class StandIn:
+                port = 0
+
+                def __init__(self, *args, **kwargs):
+                    self.in_recv, self.in_handshake = threading.Event(), threading.Event()
+                    self.handshaking, self.expired = threading.Event(), threading.Event()
+                    self.in_recv.set()
+                    self.in_handshake.set()
+                    if handshaking:
+                        self.handshaking.set()
+                    self.timed_out = []
+                    self.closes = 0
+                    self.thread = threading.Thread(target=lambda: None)
+
+                def close(self):
+                    self.closes += 1
+                    if timed_out:
+                        self.timed_out.append(True)
+                    if expired:
+                        self.expired.set()
+            return StandIn
+
+        def unconnected(address, timeout):
+            return contextlib.nullcontext()
+        # A server that had not started do_handshake() when close() began,
+        # or whose call had run out its socket timeout by then, gave close()
+        # nothing to interrupt: cannot evaluate, not a pass. Both open no
+        # socket; the real server's expiry is the after-expiry row below.
+        judge("self-test/tls-fixture-stop-handshake-not-started",
+              (STOP_UNEVALUATED, "precondition"), server_class=stand_in(handshaking=False),
+              stage="handshake", connect=unconnected)
+        judge("self-test/tls-fixture-stop-expired-before-close",
+              (STOP_UNEVALUATED, "precondition"), server_class=stand_in(expired=True),
+              stage="handshake", connect=unconnected)
+        served = []
+
+        def kept_server(*args, **kwargs):
+            served.append(Server(*args, **kwargs))
+            return served[-1]
+
+        def until_expired():
+            # Holds close() back until the real server's recv has run out
+            # its socket timeout, bounded as the stage wait is.
+            served[-1].expired.wait(_TLS_FIXTURE_REACH_SECONDS)
+        judge("self-test/tls-fixture-stop-after-expiry", (STOP_UNEVALUATED, "precondition"),
+              server_class=kept_server, pause=until_expired)
+
+        # A scheduling delay between reaching recv and close() is not
+        # close() time: a clock that jumps well past the socket timeout
+        # before close(), and not during it, still passes.
+        now = [0.0]
+
+        def delayed():
+            now[0] += 10 * _TLS_FIXTURE_SOCKET_SECONDS
+        judge("self-test/tls-fixture-stop-after-delay", (STOP_PASS, "prompt"),
+              clock=lambda: now[0], pause=delayed)
+        # A server that never reaches its recv cannot evaluate the stop:
+        # neither a pass nor a definite failure.
+        judge("self-test/tls-fixture-stop-never-in-recv", (STOP_UNEVALUATED, "precondition"),
+              mode="quiet", reach_seconds=0.5)
+        # A close() that raises in the cleanup after that unmet precondition
+        # still fails: the precondition does not hide it.
+        judge("self-test/tls-fixture-stop-cleanup-raised", (STOP_FAIL, "raised"),
+              server_class=RaisingServer, mode="quiet", reach_seconds=0.5)
+
+        def failing_after_close():
+            # A clock whose second reading, the one just after close(),
+            # raises an OSError: an error after close() that must not hide
+            # a failure close() already showed.
+            readings = []
+
+            def clock():
+                readings.append(None)
+                if len(readings) > 1:
+                    raise OSError("forced error after close()")
+                return time.monotonic()
+            return clock
+
+        def failing_before_close():
+            raise RuntimeError("forced error before close()")
+        # A close() that raised still fails when an error follows it, and
+        # when the cleanup close() raises after an error before close().
+        judge("self-test/tls-fixture-stop-raised-then-error", (STOP_FAIL, "raised"),
+              server_class=RaisingServer, clock=failing_after_close())
+        judge("self-test/tls-fixture-stop-error-then-cleanup-raised", (STOP_FAIL, "raised"),
+              server_class=RaisingServer, pause=failing_before_close)
+        # A server call that close() did not interrupt, then an error after
+        # close(): the failure is handed to shown before the error
+        # propagates, so the caller gets both. No socket is opened.
+        identity = "self-test/tls-fixture-stop-timed-out-then-error"
+        seen = []
+        try:
+            result = check(context, cadata, seen.append, server_class=stand_in(timed_out=True),
+                           stage="handshake", connect=unconnected, clock=failing_after_close())
+            outcome = "returned {} ({})".format(result[0], result[1])
+        except OSError as exc:
+            outcome = "raised " + _exception_text(exc)
+        shown = [entry[:2] for entry in seen]
+        if outcome != "raised forced error after close()" or shown != [(STOP_FAIL, "timed-out")]:
+            failures.append("FAIL {}: the timed-out failure and the later error did not both "
+                            "reach the caller ({}; shown {})".format(identity, outcome, shown))
+        else:
+            print("PASS " + identity)
+        # A server thread still alive after close() returned fails, and
+        # still fails when an error follows close().
+        lingering = []
+
+        def lingering_server(*args, **kwargs):
+            lingering.append(LingeringServer(*args, **kwargs))
+            return lingering[-1]
+        try:
+            judge("self-test/tls-fixture-stop-thread-alive", (STOP_FAIL, "alive"),
+                  server_class=lingering_server)
+            judge("self-test/tls-fixture-stop-alive-then-error", (STOP_FAIL, "alive"),
+                  server_class=lingering_server, clock=failing_after_close())
+        finally:
+            for server in lingering:
+                server.release.set()
+                server.thread.join(_TLS_FIXTURE_STOP_JOIN_SECONDS)
+                if server.thread.is_alive():
+                    failures.append("FAIL self-test/tls-fixture-stop-thread-alive: the "
+                                    "lingering server thread outlived its release")
+        # A clock() that raises on its first reading leaves close() unrun:
+        # cannot evaluate, saying so, and the cleanup still closes the
+        # server. No socket is opened.
+        identity = "self-test/tls-fixture-stop-clock-raised-first"
+        made = []
+
+        def kept_stand_in(*args, **kwargs):
+            made.append(stand_in()(*args, **kwargs))
+            return made[-1]
+
+        def failing_first():
+            raise OSError("forced clock error")
+        try:
+            result = check(context, cadata, seen.append, server_class=kept_stand_in,
+                           stage="handshake", connect=unconnected, clock=failing_first)
+        except Exception as exc:
+            result = ("raised", type(exc).__name__, _exception_text(exc))
+        closes = [server.closes for server in made]
+        if (result[:2] != (STOP_UNEVALUATED, "precondition")
+                or not result[2].startswith("close() never ran: ") or closes != [1]):
+            failures.append("FAIL {}: a clock that raised before close() was not "
+                            "reported as close() never ran ({} ({}): {}; closes {})".format(
+                                identity, result[0], result[1], result[2], closes))
+        else:
+            print("PASS " + identity)
+        # A server call that ran out its socket timeout on its own and was
+        # handled only once close() had set the stop flag, with the shutdown
+        # issued after the call's deadline: cannot evaluate, not a failure
+        # charged to close(). Busy threads contend for the interpreter lock
+        # meanwhile, the load under which that order arises.
+        contending = threading.Event()
+
+        def contend():
+            while not contending.is_set():
+                pass
+        busy = [threading.Thread(target=contend, daemon=True) for _ in range(4)]
+        for thread in busy:
+            thread.start()
+        try:
+            judge("self-test/tls-fixture-stop-timeout-at-deadline-under-load",
+                  (STOP_UNEVALUATED, "precondition"), server_class=LateShutdownServer)
+        finally:
+            contending.set()
+            for thread in busy:
+                thread.join(_TLS_FIXTURE_STOP_JOIN_SECONDS)
+
+    def tls_fixture_stop_rows_self_test(failures):
+        # A stop row that raises must leave every earlier row's FAIL line in
+        # the caller's list, for the setup-or-teardown report to count, and
+        # its own failure when the check handed that to shown before it
+        # raised. A check that fails its first row, then hands a timed-out
+        # failure to shown and raises on its second, stands for the real
+        # one; no server is started.
+        identity = "self-test/tls-fixture-stop-rows-kept"
+        calls, kept = [], []
+
+        def failing_then_raising(context, cadata, shown, **options):
+            calls.append(options)
+            if len(calls) > 1:
+                shown((STOP_FAIL, "timed-out", "forced timeout"))
+                raise RuntimeError("forced stop row exception")
+            return STOP_FAIL, "raised", "close() raised: forced"
+        try:
+            tls_fixture_stop_rows(None, None, kept, [], check=failing_then_raising)
+        except RuntimeError:
+            pass
+        if (len(calls) != 2 or kept != [
+                "FAIL self-test/tls-fixture-stop-while-served: close() raised: forced",
+                "FAIL self-test/tls-fixture-stop-in-handshake: expected pass (prompt), got "
+                "fail (timed-out): forced timeout"]):
+            failures.append("FAIL " + identity + ": a stop row that raised lost a FAIL "
+                            "line recorded before it raised")
+        else:
+            print("PASS " + identity)
+        # A close() that took the socket timeout is cannot evaluate in every
+        # row that wants a pass, the plain row and the in-handshake row
+        # alike: timing alone cannot charge it to close(). A check that
+        # reports a slow close for every row stands for the real one.
+        identity = "self-test/tls-fixture-stop-slow-close-unevaluated"
+        slow_failures, slow_unevaluated = [], []
+
+        def slow_closing(context, cadata, shown, **options):
+            return STOP_UNEVALUATED, "slow-close", "close() took 2.50 s, forced"
+        tls_fixture_stop_rows(None, None, slow_failures, slow_unevaluated, check=slow_closing)
+        misrouted = [name for name in (
+            "self-test/tls-fixture-stop-while-served",
+            "self-test/tls-fixture-stop-in-handshake",
+            "self-test/tls-fixture-stop-after-delay",
+        ) if any(line.startswith("FAIL " + name + ":") for line in slow_failures)
+            or ("FAIL " + name + ": cannot evaluate: close() took 2.50 s, forced"
+                not in slow_unevaluated)]
+        if misrouted:
+            failures.append("FAIL " + identity + ": a slow close was not recorded as "
+                            "not evaluated in " + ", ".join(misrouted))
+        else:
+            print("PASS " + identity)
+        # A shutdown fails a timed-out call only when it came at least the
+        # margin before the call's own deadline: just inside that bound, at
+        # it and just outside it, and with either reading missing.
+        identity = "self-test/tls-fixture-stop-deadline-margin"
+        began = 100.0
+        edge = began + _TLS_FIXTURE_SOCKET_SECONDS - _TLS_FIXTURE_STOP_MARGIN_SECONDS
+        got = [stop_missed(began, edge - 0.001), stop_missed(began, edge),
+               stop_missed(began, edge + 0.001), stop_missed(began, None),
+               stop_missed(None, began)]
+        if got != [True, False, False, False, False]:
+            failures.append("FAIL {}: the shutdown margin decided {} for just inside, "
+                            "at, just outside, no shutdown and no call start".format(
+                                identity, got))
+        else:
+            print("PASS " + identity)
 
     def snapshot(root):
         result = {}
@@ -3959,7 +4671,10 @@ def self_test(vectors_only=False, steady_only=False):
     BLOCKED_SWEEP = "not evaluated: not run while a resolver straggler was alive, started by "
     LEAKED = "resolver slot held with no live resolver worker"
 
-    def run_case(base, contexts, case, mutated):
+    def run_case(base, contexts, case, mutated, ended=None):
+        # ended, when given, receives this run's result once it is judged:
+        # on return, and also when the teardown then raises, so the caller
+        # can still report a failure the run had already shown.
         identifier, expected, mutation, config = case
         label = identifier + (" (mutant)" if mutated else "")
         # No earlier run's resolver worker may reach this case. Each place a
@@ -3993,7 +4708,8 @@ def self_test(vectors_only=False, steady_only=False):
             "anchors": [config.get("anchor_url", ANCHOR_URL)],
         }
         archive_body = config.get("archive", baseline_archive)
-        server = Server(
+        judged = False
+        server = config.get("server_class", Server)(
             contexts[bool(config.get("wrong_hostname"))],
             archive_body, config.get("response", reply(baseline_anchor)),
             config.get("mode", "normal"),
@@ -4563,22 +5279,31 @@ def self_test(vectors_only=False, steady_only=False):
                      lambda: "fetch_bound" not in config or bounded()),
                 ) if not check()]
                 passed = not unmet
+            judged = True
         finally:
-            if resolver_sockets is not None:
-                resolver_sockets[1].close()
-                resolver_sockets[0].close()
-            for client in backlog_clients:
-                client.close()
-            if backlog is not None:
-                backlog.close()
-            server.close()
-            alive, leaked = settle_resolvers(2.0)
-            if leaked:
-                leaks.append("teardown")
-            if alive - inherited:
-                stragglers.append("teardown")
-                for thread in alive - inherited:
-                    straggler_runs.setdefault(thread, label)
+            try:
+                if resolver_sockets is not None:
+                    resolver_sockets[1].close()
+                    resolver_sockets[0].close()
+                for client in backlog_clients:
+                    client.close()
+                if backlog is not None:
+                    backlog.close()
+                server.close()
+                alive, leaked = settle_resolvers(2.0)
+                if leaked:
+                    leaks.append("teardown")
+                if alive - inherited:
+                    stragglers.append("teardown")
+                    for thread in alive - inherited:
+                        straggler_runs.setdefault(thread, label)
+            except Exception:
+                # The teardown raised after the run was judged: the result
+                # so far goes to the caller before the exception does.
+                if judged and ended is not None:
+                    ended.append((passed, status, elapsed, fetch_guards, leaks, stragglers,
+                                  blocked, retained, unmet))
+                raise
         # passed is main's verdict on this run, leaks the resolver slots found
         # leaked, stragglers where a worker this run started outlived the
         # join, blocked the runs whose live straggler refused this run the
@@ -4591,8 +5316,11 @@ def self_test(vectors_only=False, steady_only=False):
         # it records a blocked unmutated run as not evaluated, or INVALID when
         # it failed a check, and a blocked mutant run as not evaluated (its
         # result is ignored); none of them counts as the mutant's detection.
-        return (passed, status, elapsed, fetch_guards, leaks, stragglers, blocked,
-                retained, unmet)
+        result = (passed, status, elapsed, fetch_guards, leaks, stragglers, blocked,
+                  retained, unmet)
+        if ended is not None:
+            ended.append(result)
+        return result
 
     def add_detail(row, text):
         # Append, so a row keeps any detail it already has.
@@ -4675,6 +5403,126 @@ def self_test(vectors_only=False, steady_only=False):
             add_detail(row, RETAINED)
         return row
 
+    def positive_row(case, run):
+        # The positive control's row: INVALID when the run failed its own
+        # checks, or on a leak, straggler, blocked run or retained slot.
+        (passed, status, elapsed, _, leaks, stragglers, blocked, retained, _) = run
+        passed = (passed and not leaks and not stragglers and not blocked
+                  and not retained)
+        row = {
+            "id": case[0], "expected": VALID, "observed": status,
+            "test_status": VALID if passed else INVALID,
+            "elapsed_seconds": elapsed,
+        }
+        if leaks:
+            row["resolver_slot_leaked"] = leaks
+            add_detail(row, LEAKED)
+        if retained:
+            row["resolver_slot_retained"] = retained
+            add_detail(row, RETAINED)
+        if stragglers:
+            row["resolver_straggler"] = stragglers
+            add_detail(row, STRAGGLER)
+        return row
+
+    INTERRUPTED = "not completed: a run of this row raised after the runs recorded here were judged"
+
+    def interrupted_row(case, ended, control=False):
+        # The row of a case whose run raised after the runs in ended were
+        # judged: their verdict, so a failure they already showed stays
+        # INVALID. A mutant run that was not judged is not a detection. A
+        # row they show no failure for is CANNOT-EVALUATE, not VALID, since
+        # the run that raised was not judged to its end.
+        if control:
+            row = positive_row(case, ended[0])
+        else:
+            row = record_row(case, ended[0], ended[1] if len(ended) > 1 else detected)
+            if len(ended) < 2:
+                row.update(mutant_observed="NOT-JUDGED", mutant_test_status=CANNOT_EVALUATE,
+                           mutation_detected=False, mutant_elapsed_seconds=None)
+        if row["test_status"] == VALID:
+            row["test_status"] = CANNOT_EVALUATE
+        add_detail(row, INTERRUPTED)
+        return row
+
+    def control_row(base, contexts, case, rows, runner=None):
+        # Runs the positive control and adds its row to rows; returns
+        # whether the run failed its own checks. A run that raises after it
+        # was judged still adds its row, then the exception propagates.
+        ended = []
+        try:
+            run = (runner or run_case)(base, contexts, case, False, ended)
+        except Exception:
+            if ended:
+                rows.append(interrupted_row(case, ended, control=True))
+            raise
+        rows.append(positive_row(case, run))
+        return not run[0]
+
+    def case_row(base, contexts, case, rows, runner=None):
+        # Runs a case and its mutant and adds main's row to rows. When the
+        # mutant run, or either run's teardown, raises, the row from the
+        # runs judged so far is added first, so a failed normal run stays
+        # INVALID, then the exception propagates.
+        ended = []
+        try:
+            run = (runner or run_case)(base, contexts, case, False, ended)
+            mutant_run = (runner or run_case)(base, contexts, case, True, ended)
+        except Exception:
+            if ended:
+                rows.append(interrupted_row(case, ended))
+            raise
+        rows.append(record_row(case, run, mutant_run))
+
+    def kept_runs_self_test(base, contexts, failures):
+        # A run judged failed, then an exception, still leaves its row
+        # INVALID in the roster: a case whose mutant run raises, a positive
+        # control whose teardown raises, and run_case handing over the
+        # verdict of a run whose real fixture's close() raised.
+        failed = (False, "fixture: failed", 0.0, [], [], [], [], [], [])
+
+        def mutant_raises(base, contexts, case, mutated, ended):
+            if mutated:
+                raise RuntimeError("forced mutant run exception")
+            ended.append(failed)
+            return failed
+
+        def teardown_raises(base, contexts, case, mutated, ended):
+            ended.append(failed)
+            raise RuntimeError("forced teardown exception")
+        for identity, call, case in (
+                ("self-test/case-row-kept-after-mutant-raised", case_row,
+                 ("self-test/forced-case", VALID, "archive", {})),
+                ("self-test/control-row-kept-after-teardown-raised", control_row,
+                 ("self-test/forced-control", VALID, "archive", {}))):
+            rows = []
+            try:
+                call(base, contexts, case, rows,
+                     mutant_raises if call is case_row else teardown_raises)
+            except RuntimeError:
+                pass
+            if [(row.get("id"), row.get("test_status")) for row in rows] != [(case[0], INVALID)]:
+                failures.append("FAIL " + identity + ": a failed run's row was lost to a later "
+                                "exception")
+            else:
+                print("PASS " + identity)
+        identity = "self-test/run-case-hands-over-before-teardown-raised"
+        # Expecting INVALID of a run that is VALID fails it; the fixture's
+        # close() then raises in the teardown.
+        ended = []
+        try:
+            run_case(base, contexts, ("self-test/forced-teardown", INVALID, "archive",
+                                      {"server_class": RaisingServer}), False, ended)
+            outcome = "no exception"
+        except Exception as exc:
+            outcome = type(exc).__name__ + ": " + _exception_text(exc)
+        if (outcome != "RuntimeError: forced close failure"
+                or [run[0] for run in ended] != [False]):
+            failures.append("FAIL " + identity + ": the run's verdict was not handed over "
+                            "before its teardown exception ({})".format(outcome))
+        else:
+            print("PASS " + identity)
+
     def cancellation_rows(sweep):
         # The cancellation sweep runs the production resolver worker against
         # the real _RESOLVER_SLOT, so it depends on the resolver as a case run
@@ -4747,7 +5595,7 @@ def self_test(vectors_only=False, steady_only=False):
         source = ("vector/straggler", CANNOT_EVALUATE, "resolver-deadline",
                   {"hold_lookup": gate})
         try:
-            failures = []
+            failures = vector_failures(VECTOR_NAMES[0])
             run = run_case(base, contexts, source, False)
             row = record_row(source, run, detected)
             if (run[:2] != (True, CANNOT_EVALUATE)
@@ -4776,7 +5624,7 @@ def self_test(vectors_only=False, steady_only=False):
                     raise AssertionError("the load-sensitive vectors depart from the timing configs")
                 if steady_only and name in _LOAD_SENSITIVE_VECTORS:
                     continue
-                failures = []
+                failures = vector_failures(name)
                 case = (name.replace("resolver-vector/", "vector/"), VALID, "archive", config)
                 run = run_case(base, contexts, case, False)
                 blocked_runs.append(run)
@@ -4796,7 +5644,7 @@ def self_test(vectors_only=False, steady_only=False):
                 results.append((name, failures))
             # A blocked mutant run, with or without a failed check, is not a
             # detection: the row is CANNOT-EVALUATE beside an evaluated run.
-            failures = []
+            failures = vector_failures(VECTOR_NAMES[7])
             if len(blocked_runs) < 2:
                 failures.append("cannot evaluate: fewer than two blocked runs")
             case = ("vector/blocked-mutant", VALID, "archive", dict())
@@ -4821,7 +5669,7 @@ def self_test(vectors_only=False, steady_only=False):
         case = ("vector/retained-slot", CANNOT_EVALUATE, "resolver-deadline",
                 {"stalled_resolver": True, "hold_lookup": gate})
         try:
-            failures = []
+            failures = vector_failures(VECTOR_NAMES[8])
             with mock.patch.object(module, "_RESOLVER_SLOT", SlotProbe(_RESOLVER_SLOT, gate)):
                 run = run_case(base, contexts, case, False)
             row = record_row(case, run, detected)
@@ -4860,7 +5708,7 @@ def self_test(vectors_only=False, steady_only=False):
         # the slot, so the run is CANNOT-EVALUATE as expected and the leak
         # alone fails the row.
         case = ("vector/leaked-slot", CANNOT_EVALUATE, "resolver-deadline", {})
-        failures = []
+        failures = vector_failures(VECTOR_NAMES[9])
         probe = LeakProbe(_RESOLVER_SLOT)
         with mock.patch.object(module, "_RESOLVER_SLOT", probe):
             run = run_case(base, contexts, case, False)
@@ -4889,7 +5737,7 @@ def self_test(vectors_only=False, steady_only=False):
         # also covers a host that stalls it for several seconds.
         gate = threading.Event()
         case = ("vector/positive-held-slot", VALID, "archive", {"hold_after_publish": gate})
-        failures = []
+        failures = vector_failures(VECTOR_NAMES[10])
         try:
             run = run_case(base, contexts, case, False)
             if run[:2] != (True, VALID) or run[4:] != ([], ["after", "teardown"], [], [], []):
@@ -4932,7 +5780,7 @@ def self_test(vectors_only=False, steady_only=False):
             if swept[0]:
                 _RESOLVER_SLOT.release()
             return [{"id": _CANCELLATION_ROW, "test_status": VALID}]
-        failures = []
+        failures = vector_failures(VECTOR_NAMES[11])
         try:
             rows = cancellation_rows(sweep)
         finally:
@@ -4946,52 +5794,118 @@ def self_test(vectors_only=False, steady_only=False):
             failures.append("the leaked slot did not fail the sweep's row INVALID")
         results.append((VECTOR_NAMES[11], failures))
 
+    # Each vector's failure list from when the vector starts filling it, by
+    # name, so a vector that raises before it reports that list still has
+    # the failures it recorded reported.
+    vectors_started = {}
+
+    def vector_failures(name):
+        vectors_started[name] = []
+        return vectors_started[name]
+
     def run_vector(vector, names, base, contexts, results):
         # A vector that raises reports each of its names not yet reported as
         # "cannot evaluate", naming the exception and its message, so the
-        # report says what could not be evaluated.
+        # report says what could not be evaluated, after any failure the
+        # vector had already recorded for that name, so that failure still
+        # fails the run.
         try:
             vector(base, contexts, results)
         except Exception as exc:
             done = {name for name, _ in results}
-            reason = type(exc).__name__ + (": " + str(exc) if str(exc) else "")
-            results.extend((name, ["cannot evaluate: " + reason])
+            text = _exception_text(exc)
+            reason = type(exc).__name__ + (": " + text if text else "")
+            results.extend((name, vectors_started.get(name, []) + ["cannot evaluate: " + reason])
                            for name in names if name not in done)
 
-    def resolver_vectors(base, contexts):
-        # Returns (name, failures) per vector; a vector that raises reports
-        # "cannot evaluate". Every vector releases its hold, then all workers
-        # are joined, and the cleanup vector requires none alive, the self-test
-        # lookup and the real slot still bound, the slot free, and a raising
-        # vector's report to carry its exception's message.
-        results = []
+    def resolver_vectors(base, contexts, results, vectors=None, join=join_resolvers):
+        # Appends (name, failures) per vector to results as each ends, so an
+        # exception here keeps the earlier vectors' results for the caller;
+        # a vector that raises reports "cannot evaluate", after the failures
+        # it had recorded. Every vector releases its hold, then all workers
+        # are joined, and the cleanup vector requires none alive, the
+        # self-test lookup and the real slot still bound, the slot free, and
+        # a raising vector's report to carry its exception's message and
+        # the failure it recorded before it raised. The cleanup vector runs
+        # last, after vectors (the resolver vectors when None), and joins
+        # the workers with join.
         lookup_before = module._lookup
         slot_before = module._RESOLVER_SLOT
-        for vector, names in ((straggler_vectors, VECTOR_NAMES[:8]),
-                              (retained_vector, VECTOR_NAMES[8:9]),
-                              (leaked_vector, VECTOR_NAMES[9:10]),
-                              (held_slot_vector, VECTOR_NAMES[10:11]),
-                              (sweep_leaked_vector, VECTOR_NAMES[11:12])):
-            run_vector(vector, names, base, contexts, results)
-        failures = []
 
-        def raising(base, contexts, results):
-            raise AssertionError("the probe precondition does not hold")
-        probe = []
-        run_vector(raising, ("vector/raising",), base, contexts, probe)
-        if probe != [("vector/raising", ["cannot evaluate: AssertionError: "
-                                         "the probe precondition does not hold"])]:
-            failures.append("a raising vector's report did not name what it could not evaluate")
-        if join_resolvers(5.0):
-            failures.append("a resolver worker outlived the vectors")
-        if module._lookup is not lookup_before or module._RESOLVER_SLOT is not slot_before:
-            failures.append("the vectors left a fixture bound")
-        elif not _RESOLVER_SLOT.acquire(blocking=False):
-            failures.append("the vectors left the resolver slot held")
+        def cleanup(base, contexts, results):
+            failures = vector_failures(VECTOR_NAMES[12])
+
+            def raising(base, contexts, results):
+                raise AssertionError("the probe precondition does not hold")
+            probe = []
+            run_vector(raising, ("vector/raising",), base, contexts, probe)
+            if probe != [("vector/raising", ["cannot evaluate: AssertionError: "
+                                             "the probe precondition does not hold"])]:
+                failures.append("a raising vector's report did not name what it could not "
+                                "evaluate")
+
+            def failing_then_raising(base, contexts, results):
+                vector_failures("vector/failing-then-raising").append("the forced failure")
+                raise AssertionError("the forced exception")
+            probe = []
+            run_vector(failing_then_raising, ("vector/failing-then-raising",), base, contexts,
+                       probe)
+            if probe != [("vector/failing-then-raising", [
+                    "the forced failure", "cannot evaluate: AssertionError: the forced exception"])]:
+                failures.append("a vector that raised lost the failure it had recorded")
+            if join(5.0):
+                failures.append("a resolver worker outlived the vectors")
+            if module._lookup is not lookup_before or module._RESOLVER_SLOT is not slot_before:
+                failures.append("the vectors left a fixture bound")
+            elif not _RESOLVER_SLOT.acquire(blocking=False):
+                failures.append("the vectors left the resolver slot held")
+            else:
+                _RESOLVER_SLOT.release()
+            results.append((VECTOR_NAMES[12], failures))
+        if vectors is None:
+            vectors = ((straggler_vectors, VECTOR_NAMES[:8]),
+                       (retained_vector, VECTOR_NAMES[8:9]),
+                       (leaked_vector, VECTOR_NAMES[9:10]),
+                       (held_slot_vector, VECTOR_NAMES[10:11]),
+                       (sweep_leaked_vector, VECTOR_NAMES[11:12]))
+        for vector, names in tuple(vectors) + ((cleanup, VECTOR_NAMES[12:]),):
+            run_vector(vector, names, base, contexts, results)
+
+    class RaisingSlot:
+        # A resolver slot whose acquire raises: an exception in the cleanup
+        # vector after it recorded a failure.
+        def acquire(self, blocking=True, timeout=None):
+            raise RuntimeError("forced slot exception")
+
+        def release(self):
+            pass
+
+    def cleanup_vector_self_test(base, contexts, failures, unevaluated):
+        # The cleanup vector itself records a failure (a join that reports a
+        # worker alive), then raises (a slot whose acquire raises): its
+        # report still carries that failure beside its cannot-evaluate line,
+        # and resolver_vectors returns instead of raising. No vector runs
+        # before it and no resolver worker is started.
+        identity = "self-test/cleanup-vector-failure-kept-after-raise"
+        if join_resolvers(2.0):
+            unevaluated.append("FAIL " + identity + ": cannot evaluate: a resolver worker "
+                               "is alive")
+            return
+        results = []
+        try:
+            with mock.patch.object(module, "_RESOLVER_SLOT", RaisingSlot()):
+                resolver_vectors(base, contexts, results, vectors=(),
+                                 join=lambda seconds: {"forced worker"})
+            outcome = "returned"
+        except Exception as exc:
+            outcome = type(exc).__name__ + ": " + _exception_text(exc)
+        if outcome != "returned" or results != [(VECTOR_NAMES[12], [
+                "a resolver worker outlived the vectors",
+                "cannot evaluate: RuntimeError: forced slot exception"])]:
+            failures.append("FAIL " + identity + ": the cleanup vector's failure was lost "
+                            "to its later exception ({})".format(outcome))
         else:
-            _RESOLVER_SLOT.release()
-        results.append((VECTOR_NAMES[12], failures))
-        return results
+            print("PASS " + identity)
 
     try:
         if tuple(case[0] for case in cases if "fetch_bound" in case[3]) != _LOAD_SENSITIVE_ROWS:
@@ -5032,6 +5946,22 @@ def self_test(vectors_only=False, steady_only=False):
                 context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
                 context.load_cert_chain(str(cert), str(key))
                 contexts.append(context)
+            # Named after the roster: a close() that raised or left the server
+            # thread alive, a server call that ran out its socket timeout
+            # although close() issued its shutdown clearly before the call's
+            # deadline, or a stop row that missed its outcome, fails the run
+            # (exit 1), even when a later step raises; a stop check that
+            # could not be evaluated (the server never reached its stage, had
+            # no blocking call for close() to interrupt in time, close()
+            # never ran, or close() took the socket timeout, which timing
+            # alone cannot charge to close()) exits 2 unless something
+            # failed, in a row that wants a pass too. The rows fill these
+            # lists in place, so a row that raises keeps the lines recorded
+            # before it.
+            tls_fixture_stop_rows_self_test(fixture_failures)
+            tls_fixture_stop_rows(contexts[0], fixture_certificates,
+                                  fixture_failures, fixture_unevaluated)
+            cleanup_vector_self_test(base, contexts, fixture_failures, fixture_unevaluated)
 
             git_commit, git_archive = _git_archive_fixture(base)
             add("positive/git-archive", VALID, "reject-git-comment",
@@ -5043,25 +5973,7 @@ def self_test(vectors_only=False, steady_only=False):
                 raise AssertionError("resolver worker alive before any case")
             # Establish an actual positive TLS/quarantine fixture before negatives.
             positive = ("positive/local-tls-quarantine", VALID, "archive", {})
-            (passed, status, elapsed, _, leaks, stragglers, blocked, retained,
-             _) = run_case(base, contexts, positive, False)
-            main_failed = not passed
-            passed = (passed and not leaks and not stragglers and not blocked
-                      and not retained)
-            executed.append({
-                "id": positive[0], "expected": VALID, "observed": status,
-                "test_status": VALID if passed else INVALID,
-                "elapsed_seconds": elapsed,
-            })
-            if leaks:
-                executed[-1]["resolver_slot_leaked"] = leaks
-                add_detail(executed[-1], LEAKED)
-            if retained:
-                executed[-1]["resolver_slot_retained"] = retained
-                add_detail(executed[-1], RETAINED)
-            if stragglers:
-                executed[-1]["resolver_straggler"] = stragglers
-                add_detail(executed[-1], STRAGGLER)
+            main_failed = control_row(base, contexts, positive, executed)
             # Main returned here when the positive run failed its own checks,
             # and so does this. A leak, straggler or retained slot fails only
             # this row: it stays INVALID and the run continues. While its
@@ -5073,28 +5985,28 @@ def self_test(vectors_only=False, steady_only=False):
                 SELF_TEST_ROSTER = tuple(executed)
                 print(_report_line(executed))
                 _print_failures(_roster_failures(executed)
-                                + ["FAIL roster/rows: the run stopped after its positive control"])
+                                + ["FAIL roster/rows: the run stopped after its positive control"]
+                                + fixture_failures + fixture_unevaluated)
                 return 1
 
-            guard_rows = (_guard_self_test() + _ownership_self_test()
-                          + cancellation_rows(_cancellation_self_test))
-            executed.extend(guard_rows)
+            kept_runs_self_test(base, contexts, fixture_failures)
+            # Each guard function's rows are recorded as it returns, and each
+            # case's row as its runs end (or as soon as a run of it raises),
+            # so an exception leaves every row that already failed.
+            guard_rows = _collect_rows((
+                _guard_self_test, _ownership_self_test,
+                functools.partial(cancellation_rows, _cancellation_self_test)), executed)
             for case in cases:
-                run = run_case(base, contexts, case, False)
-                executed.append(record_row(case, run, run_case(base, contexts, case, True)))
-            vector_results = resolver_vectors(base, contexts)
+                case_row(base, contexts, case, executed)
+            resolver_vectors(base, contexts, vector_results)
     except Exception as exc:
-        executed.append({
-            "id": "fixture/setup-or-teardown",
-            "test_status": CANNOT_EVALUATE,
-            "exception": type(exc).__name__,
-        })
+        # Exit 1 when a definite failure was recorded before exc, else 2
+        # (cannot evaluate); every row that is not VALID is named, the
+        # setup-or-teardown row once, with its message.
+        rc = _interrupted_run(executed, exc, fixture_failures, fixture_unevaluated,
+                              vector_results)
         SELF_TEST_ROSTER = tuple(executed)
-        print(_report_line(executed))
-        # Exit 2 (cannot evaluate), but still name every row that is not
-        # VALID, the setup-or-teardown row included.
-        _print_failures(_roster_failures(executed))
-        return 2
+        return rc
 
     # Every exit-code departure from main; all concern resolver workers:
     # - A stalled-resolver run whose slot is not back within 1.0 s of the
@@ -5126,6 +6038,10 @@ def self_test(vectors_only=False, steady_only=False):
     #   that run beside the live worker.
     # - A resolver worker alive before the first case is a setup
     #   CANNOT-EVALUATE: exit 2. Main had no such check.
+    # - A case whose normal run failed, then whose mutant run (or either
+    #   run's teardown) raises, keeps its row INVALID: exit 1. Main lost
+    #   that row and exited 2. So does a guard function's INVALID row when
+    #   a later guard function raises.
     # - _resolver_stub_bound turns exit 0 into 2 when a resolver worker
     #   outlives the self-test. Main had no such check.
     # - A resolver vector that fails exits 1, or 2 when every failure is a
@@ -5149,26 +6065,38 @@ def self_test(vectors_only=False, steady_only=False):
     # and the real roster is judged and named whatever its outcome.
     try:
         _failure_lines_self_test()
+        _setup_row_self_test()
+        _interrupted_run_self_test()
+        _collect_rows_self_test()
         red_failure = None
     except AssertionError as exc:
         red_failure = "FAIL " + str(exc)
     rc = _judge_roster(executed, expected_ids, vector_results, tuple(
         name for name in VECTOR_NAMES if not (steady_only and name in _LOAD_SENSITIVE_VECTORS)))
-    if red_failure is not None:
-        _print_failures([red_failure])
+    if red_failure is not None or fixture_failures:
+        _print_failures(([red_failure] if red_failure else []) + fixture_failures
+                        + fixture_unevaluated)
         return 1
     if rc:
+        _print_failures(fixture_unevaluated)
         return rc
     if not vectors_only:
         try:
             _runner_registration_test(expected_ids, VECTOR_NAMES)
         except AssertionError as exc:
-            _print_failures(["FAIL " + str(exc)])
+            _print_failures(["FAIL " + str(exc)] + fixture_unevaluated)
             return 1
         except Exception as exc:
             _print_failures(["FAIL runner/adopt-observe-registration: registration cannot "
-                             "evaluate: {}: {}".format(type(exc).__name__, exc)])
+                             "evaluate: {}: {}".format(type(exc).__name__,
+                                                       _exception_text(exc))]
+                            + fixture_unevaluated)
             return 2
+    # A stop check that could not be evaluated is neither a pass nor a
+    # definite failure.
+    if fixture_unevaluated:
+        _print_failures(fixture_unevaluated)
+        return 2
     return 0
 
 
