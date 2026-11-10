@@ -200,7 +200,8 @@ class PresenceRefusalTests(unittest.TestCase):
     corpus and passed. Genuine absence still skips; everything else raises
     OSError naming the path. The absent and followed-symlink rows hold before
     and after the fix; every refusal row fails against the old is_file()/is_dir()
-    and rglob code.
+    and rglob code. The exempt-directory rows check that iter_targets neither
+    enters nor refuses on a directory no target can live under.
     """
 
     def setUp(self):
@@ -246,6 +247,30 @@ class PresenceRefusalTests(unittest.TestCase):
         sub = self._docs("docs", "sub")
         with _denied(sub):
             self._refused(lambda: iter_targets([self.root / "docs"]), sub)
+
+    def test_targets_unlistable_dir_under_exempt_dir_skipped(self):
+        # Nothing under an exempt directory can be a target, so the walk does
+        # not enter one and a directory there it cannot list is no refusal.
+        self._docs("proj")
+        pkg = self._docs("proj", "node_modules", "pkg")
+        objects = self._docs("proj", ".git", "objects")
+        with _denied(pkg), _denied(objects):
+            got = iter_targets([self.root / "proj"])
+        self.assertEqual([p.name for p in got], ["a.md"])
+
+    def test_targets_unlistable_dir_under_caller_exempt_dir_skipped(self):
+        self._docs("proj")
+        lock = self._docs("proj", "vendor", "lock")
+        with _denied(lock):
+            got = iter_targets([self.root / "proj"], exempt_dirs={"vendor"})
+            self.assertEqual([p.name for p in got], ["a.md"])
+            # Without the caller's exemption the same directory is required.
+            self._refused(lambda: iter_targets([self.root / "proj"]), lock)
+
+    def test_targets_exempt_root_not_walked(self):
+        deep = self._docs("node_modules", "deep")
+        with _denied(deep):
+            self.assertEqual(iter_targets([self.root / "node_modules"]), [])
 
     def test_targets_uninspectable_entry_refused(self):
         docs = self._docs("docs")

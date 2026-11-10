@@ -231,11 +231,17 @@ def iter_targets(
     Paths are resolved before deduplication. Order across the input is
     preserved.
 
-    An entry that does not exist is skipped. An entry, or a target-named entry
-    found while walking a directory, that is present but cannot be inspected or
-    listed (a permission error, a dangling or looping symlink, a FIFO or other
-    non-regular type) raises OSError naming the path instead of being dropped,
-    so an unreadable input never reads as an empty or partial corpus.
+    An entry missing under a usable directory is skipped. An entry, or a
+    target-named entry found while walking a directory, that is present but
+    cannot be inspected or listed (a permission error, a dangling or looping
+    symlink, a FIFO or other non-regular type) raises OSError naming the path
+    instead of being dropped, so an unreadable input never reads as an empty or
+    partial corpus.
+
+    The walk does not enter a directory named in ``exempt_dirs``, and a
+    directory entry with an exempt part in its resolved path is not walked at
+    all: nothing there can be a target, so a directory there that cannot be
+    listed does not refuse the scan.
     """
     targets: list[Path] = []
     seen: set[Path] = set()
@@ -258,8 +264,13 @@ def iter_targets(
                 if p not in seen:
                     targets.append(p)
                     seen.add(p)
-        else:
-            for dirpath, _dirnames, filenames in p.walk(on_error=_walk_error):
+        elif not any(part in exempt_dirs_set for part in p.parts):
+            # No file under an exempt directory can pass is_target, so the
+            # walk never enters one: a directory it cannot list there is not
+            # part of the corpus and must not refuse the scan. A root whose
+            # resolved path has an exempt part is not walked at all.
+            for dirpath, dirnames, filenames in p.walk(on_error=_walk_error):
+                dirnames[:] = [d for d in dirnames if d not in exempt_dirs_set]
                 for name in filenames:
                     f = dirpath / name
                     if not is_target(
@@ -319,10 +330,12 @@ def iter_scan_roots_markdown(
     so a caller (including one whose ``--root`` flag rebinds its own root) always
     passes the root explicitly.
 
-    A scan root that does not exist is skipped. A scan root that is present but
-    cannot be inspected (a permission error, a dangling or looping symlink, a
-    FIFO or other non-regular type), or a directory under it that cannot be
-    listed, raises OSError naming the path instead of being dropped.
+    A scan root missing under a usable directory is skipped. A scan root that
+    is present but cannot be inspected (a permission error, a dangling or
+    looping symlink, a FIFO or other non-regular type), or a directory under it
+    that cannot be listed, raises OSError naming the path instead of being
+    dropped. Exempt directories are not pruned here either: a scan root covers
+    every directory beneath it, so one it cannot list refuses the scan.
     """
     files: set[Path] = set()
     for p in paths:
