@@ -4932,12 +4932,12 @@ def diff_source_pretool(data):
 # command line of its own (_cmtidn_run_lines). The read-side forms that still trip are the disclosed over-denies at
 # _CMTIDN_GIT_WRAPPERS: a wrapped git word right after a wrapper option, which the finder cannot tell from that
 # option's value (sudo -E git log --grep git commit --author=Claude), and a wrapped git command whose
-# subcommand is not a git command name (an alias). Separately, an identity
-# ASSIGNMENT (a git-identity env var, or a user.name/user.email config value) is a violation on ANY
-# segment, to harden the common 'set the identity then commit' form. Because the tokens are quote-aware,
-# a trailer hiding inside a quoted -m message (e.g. -m "fix; Co-authored-by: Claude", which the old
-# whitespace split broke at the ';') now lives intact in the single message token, and a substring scan
-# on that token catches it.
+# subcommand is not a git command name (an alias). Separately, an identity ASSIGNMENT (a git-identity env
+# var, an EMAIL assignment the shell runs, or a user, author or committer name or email config value set by -c
+# or by git config; _identity_assignment_ai) is a violation on ANY segment, to harden the common 'set the
+# identity then commit' form. Because the tokens are quote-aware, a trailer hiding inside a quoted -m
+# message (e.g. -m "fix; Co-authored-by: Claude", which the old whitespace split broke at the ';') now lives
+# intact in the single message token, and a substring scan on that token catches it.
 AI_IDENTITY_RE = re.compile(
     r"(?i)\b(claude|anthropic|openai|chatgpt|codex|copilot|gemini|gpt-?[0-9o][a-z0-9.-]*)\b"
     r"|@anthropic\.com|@openai\.com")
@@ -4957,10 +4957,20 @@ COMMIT_VERBS = ("commit", "merge", "cherry-pick", "am", "rebase", "revert", "com
 # identities. The whitespace runs after a name end before the next name starts, so a token costs time linear in
 # its length.
 CO_AUTHOR_RE = re.compile(r"(?i)co[- ]?authored[- ]?by(?=\s*+:?\s*+([^\n]{1,160}))")
-# Identity-assignment tokens (any segment): a git-identity env var, or a user.name/user.email config
-# value in the '-c user.name=VALUE' inline shape.
-GIT_ENV_RE = re.compile(r"(?is)^GIT_(?:AUTHOR|COMMITTER)_(?:NAME|EMAIL)=(.*)$")
+# Identity-assignment tokens (any segment): a git-identity env var, the EMAIL variable where the shell runs it
+# as an assignment, or an identity config value in the '-c user.name=VALUE' inline shape, the author and
+# committer names only right after a -c word (_identity_assignment_ai). git 2.53.0 takes the author from author.name and
+# author.email, the committer from committer.name and committer.email, each ahead of user.name and user.email,
+# and the address of both from EMAIL when no user.email is set; config keys are read in any case, so the
+# config names match in any case, while EMAIL, an environment variable name, matches only as spelled. An
+# assignment by '+=' (EMAIL+=x git commit) sets the variable too, so it counts as '=' does.
+GIT_ENV_RE = re.compile(r"(?is)^GIT_(?:AUTHOR|COMMITTER)_(?:NAME|EMAIL)\+?=(.*)$")
+EMAIL_ENV_RE = re.compile(r"(?s)^EMAIL\+?=(.*)$")
 USER_CONF_EQ_RE = re.compile(r"(?is)^user\.(?:name|email)=(.*)$")
+ROLE_CONF_EQ_RE = re.compile(r"(?is)^(?:author|committer)\.(?:name|email)=(.*)$")
+# An identity config name standing alone as a word, the NAME of a 'git config NAME VALUE' command that sets a
+# value (_cmtidn_config_setting).
+IDENTITY_CONF_NAME_RE = re.compile(r"(?i)(?:user|author|committer)\.(?:name|email)")
 # Fallback-only raw-string contexts, used when the shared tokenizer cannot parse the command, when a command
 # line that git runs from its operands is left unread, because the tokenizer cannot parse it or it is past the
 # run-line bounds, and when the command is too long to read and holds no word that can record an identity (see
@@ -4981,16 +4991,23 @@ USER_CONF_EQ_RE = re.compile(r"(?is)^user\.(?:name|email)=(.*)$")
 # followed by a whitespace run, '=' and a whitespace run, or else by a whitespace run that holds a space (the
 # lookahead). No value starts with whitespace, so either way a value starts after the whole run, where it started
 # when the run was split, and when no value starts after the '=', the '=' itself is the value, as it was when a
-# space before it was taken for the separator: the context finds the same values. The identity variable and
-# user.name contexts judge a command too long to read only when it holds none of their names
+# space before it was taken for the separator: the context finds the same values. The author.name context (the
+# author and committer config names) has the same shape for the same reason. Both also start right after a git
+# clone -c word or a short option cluster ending in it (-cauthor.name=X, -qcuser.name=X; CONFIG_SHORT_RE), where
+# no word boundary stands; that letter is read in lower case only. The identity variable, EMAIL, user.name and
+# author.name contexts judge a command too long to read only when it holds none of their names
 # (_cmtidn_identity_word), so there they find no place to start.
 _VALUE = r"(\"[^\"]*\"|'[^']*'|[^\s\"';|&]+)"
 _RAW_IDENTITY_CONTEXTS = (
     (re.compile(r"(?i)co[- ]?authored[- ]?by(?=\s*+:?\s*+([^\n\"']{1,160}))"), "co-author trailer"),
     (re.compile(r"(?i)--au(?:t(?:h(?:o(?:r)?)?)?)?[=\s]\s*" + _VALUE), "--author value"),
-    (re.compile(r"(?i)\bGIT_(?:AUTHOR|COMMITTER)_(?:NAME|EMAIL)\s*=\s*" + _VALUE), "git identity variable"),
-    (re.compile(r"(?i)\buser\.(?:name|email)(?:\s*+=\s*+|(?=[^\S ]*+ )\s*+)" + _VALUE),
+    (re.compile(r"(?i)\bGIT_(?:AUTHOR|COMMITTER)_(?:NAME|EMAIL)\s*\+?=\s*" + _VALUE), "git identity variable"),
+    (re.compile(r"\bEMAIL\s*\+?=\s*" + _VALUE), "EMAIL variable"),
+    (re.compile(r"(?i)(?:\b|(?-i:(?<=[-vqnls46]c)))user\.(?:name|email)(?:\s*+=\s*+|(?=[^\S ]*+ )\s*+)" + _VALUE),
      "user.name/user.email value"),
+    (re.compile(r"(?i)(?:\b|(?-i:(?<=[-vqnls46]c)))(?:author|committer)\.(?:name|email)"
+                r"(?:\s*+=\s*+|(?=[^\S ]*+ )\s*+)" + _VALUE),
+     "author/committer config value"),
 )
 
 
@@ -5162,20 +5179,286 @@ def _commit_message_and_author_ai(tokens, judged):
 
 
 def _identity_assignment_ai(tokens):
-    """A hit label if any token of this segment ASSIGNS an AI identity: a git-identity env var
-    (GIT_AUTHOR_NAME=..., ...), a '-c user.name=VALUE' config inline value, or a 'config user.name VALUE'
-    /'config user.name=VALUE' pair. Judged on EVERY segment, so setting the identity in a prior segment
-    before the commit is caught too."""
+    """A hit label if any token of this segment ASSIGNS an AI identity. Judged on EVERY segment, so setting the
+    identity in a prior segment before the commit is caught too. A hit is:
+    - a git-identity env var (GIT_AUTHOR_NAME=..., ...) by '=' or '+=' in any word, as before EMAIL was read;
+    - the EMAIL variable by '=' or '+=' only where the shell or a wrapper runs the word as an assignment
+      (_cmtidn_assignment_words), so EMAIL=... in a commit message or another program's operand is not one;
+    - a user.name=VALUE or user.email=VALUE word (any case) anywhere, and an exact-case user.name or user.email
+      word followed by a value, on any segment, as before author and committer were read;
+    - an author.name=VALUE, author.email=VALUE, committer.name=VALUE or committer.email=VALUE word (any case)
+      right after a -c word, the git -c inline form (a git alias or function standing for git included), or
+      after a git clone --config word or a git clone short option cluster ending in c (-qc), and any of the six
+      in a git clone --config=NAME=VALUE word or in the rest of a git clone -c word or cluster
+      (-cauthor.name=VALUE, -qcauthor.name=VALUE: CONFIG_SHORT_RE);
+    - a git alias definition whose value holds an identity config assignment (-c author.name=VALUE), given
+      by -c alias.NAME=VALUE, git clone --config, or a git config command that sets a value
+      (_alias_identity_ai);
+    - one of the six config names (any case) followed by a value, on a git config command that sets a value
+      (_cmtidn_config_setting), so a read-only command that merely names one (grep, rg, git config
+      --get-regexp, git log) is not one."""
     n = len(tokens)
+    assigned = frozenset(_cmtidn_assignment_words(tokens))
     for i, tok in enumerate(tokens):
         m = GIT_ENV_RE.match(tok)
         if m and AI_IDENTITY_RE.search(m.group(1)):
             return "git identity variable {!r}".format(tok.strip()[:80])
+        m = EMAIL_ENV_RE.match(tok)
+        if m and i in assigned and AI_IDENTITY_RE.search(m.group(1)):
+            return "EMAIL variable {!r}".format(tok.strip()[:80])
         m = USER_CONF_EQ_RE.match(tok)
         if m and AI_IDENTITY_RE.search(m.group(1)):
             return "user.name/user.email value {!r}".format(tok.strip()[:80])
+        pairs = []
+        if i > 0:
+            prev = tokens[i - 1]
+            m = CONFIG_SHORT_RE.match(prev)
+            if prev in _CMTIDN_CONFIG_OPTS or (m and not m.group(1)):
+                pairs.append(tok)  # the pair in the word after -c, --config or a cluster ending in c (-qc)
+        m = CONFIG_OPT_EQ_RE.match(tok) or CONFIG_SHORT_RE.match(tok)
+        if m and m.group(1):
+            pairs.append(m.group(1))  # the pair in the same word: --config=NAME=VALUE, -cNAME=VALUE, -qcNAME=VALUE
+        for pair in pairs:
+            hit = _identity_inline_config_ai(pair)
+            if hit is not None:
+                return hit
         if tok in ("user.name", "user.email") and i + 1 < n and AI_IDENTITY_RE.search(tokens[i + 1]):
             return "user.name/user.email value {!r}".format(tokens[i + 1].strip()[:80])
+    start = _cmtidn_config_setting(tokens)
+    for i in range(n - 1 if start is None else start, n - 1):
+        tok = tokens[i]
+        if IDENTITY_CONF_NAME_RE.fullmatch(tok) and AI_IDENTITY_RE.search(tokens[i + 1]):
+            label = "user.name/user.email" if tok[:1] in "uU" else "author/committer config"
+            return "{} value {!r}".format(label, tokens[i + 1].strip()[:80])
+        if ALIAS_CONF_NAME_RE.fullmatch(tok):
+            hit = _alias_identity_ai(tokens[i + 1])
+            if hit is not None:
+                return hit
+    return None
+
+
+# The words that give git a NAME=VALUE config pair in the next word: the git -c global option (and the -c
+# option of git clone), and git clone --config with the prefixes git reads as it (git clone has no other long
+# option starting with 'co'). A prefix shared with another option is refused by git, so reading it here is a
+# safe-direction over-deny.
+_CMTIDN_CONFIG_OPTS = frozenset(("-c", "--co", "--con", "--conf", "--confi", "--config"))
+CONFIG_OPT_EQ_RE = re.compile(r"(?s)^--co(?:n(?:f(?:i(?:g)?)?)?)?=(.*)$")
+# The -c option of git clone, which git 2.53.0 reads as other short options are: its NAME=VALUE pair is the
+# rest of its word (-cauthor.name=X) or else the next word, and it may end a cluster of the git clone short
+# options that take no value (-v, -q, -n, -l, -s, -4, -6: -qcauthor.name=X, -qc author.name=X). A letter that
+# takes a value (-o, -b, -u, -j) takes the rest of the word, c included, so it is not read as part of a cluster.
+# The word is read so on any segment, as a separate -c word is; git refuses the attached form as a git global
+# option, and git commit reads -cVALUE as a commit, so reading it there is a safe-direction over-deny.
+CONFIG_SHORT_RE = re.compile(r"(?s)^-[vqnls46]*c(.*)$")
+# A git alias definition: its key (any case) and, in the NAME=VALUE form, its value. git runs an alias value
+# that does not start with '!' as git options and a subcommand, so a '-c author.name=X' inside it sets the
+# identity of the command the alias runs (git config alias.ci '-c author.name=X commit'; git ci).
+ALIAS_CONF_NAME_RE = re.compile(r"(?is)alias\..+")
+ALIAS_CONF_EQ_RE = re.compile(r"(?is)^alias\.[^=]*=(.*)$")
+# An identity config assignment inside an alias value, read as raw text: a user, author or committer name or
+# email (any case), '=' and a value (a quoted string or a word).
+_ALIAS_IDENTITY_RE = re.compile(r"(?i)(?:user|author|committer)\.(?:name|email)\s*+=\s*+" + _VALUE)
+# An identity name in an assignment or default-value form, sought in the raw command text: EMAIL (as spelled)
+# or a GIT_AUTHOR_ or GIT_COMMITTER_ name or email variable with no letter, digit or underscore before it, or a
+# user, author or committer name or email config key (any case, anywhere in a word, so -cauthor.name=X counts),
+# followed by '=', '+=' or ':=' (EMAIL=X, EMAIL+=X, ${EMAIL=X}, ${EMAIL:=X}, -c author.name=X). bash assigns
+# a default-value expansion wherever it stands (a redirect target, a here-string, an unquoted heredoc body, or
+# behind a nested expansion in its own value), and an assignment to a variable already exported, or under set
+# -a, reaches git, so the form is sought in the whole text rather than in the words the tokenizer keeps.
+_CMTIDN_IDENTITY_SET_RE = re.compile(r"(?<![A-Za-z0-9_])(?:EMAIL|(?i:GIT_(?:AUTHOR|COMMITTER)_(?:NAME|EMAIL)))"
+                                     r"[+:]?=|(?i:(?:user|author|committer)\.(?:name|email))[+:]?=")
+# The characters dropped from the text before the second search for an identity name and an AI name: quotes,
+# backslashes and '$' (a backslash-newline is dropped first), so a name or value that quoting splits
+# (export 'EM''AIL=X', -c author.na"me"=X, Cl"au"de) is found joined. A newline is kept as a word boundary.
+_CMTIDN_SET_UNREAD_RE = re.compile(r"[\\\"'$]")
+
+
+def _cmtidn_identity_set_ai(command):
+    """A hit label when the raw command text, heredoc bodies, redirect words and here-strings included, names an
+    identity in an assignment or default-value form (_CMTIDN_IDENTITY_SET_RE) and also names an AI identity
+    (AI_IDENTITY_RE) anywhere, each sought in the text as written and once the characters of
+    _CMTIDN_SET_UNREAD_RE are dropped; else None. The two need not stand together: a value the shell builds
+    from a nested expansion (${EMAIL:=${USER:-u}@anthropic.com}) or from another word cannot be told from a
+    value that names no AI, so the rule fails closed. The cost is a disclosed over-deny of a command that
+    names both for another reason (a commit message that mentions EMAIL=X and an AI product, an echo, a
+    quoted heredoc that writes such text). Bounded: a command longer than _CMTIDN_READ_LIMIT is not searched
+    here, since the too-long fallback already denies one that names an AI and holds any of these names
+    (_commit_identity_fallback), and each search is one pass of a regex over the text."""
+    if len(command) > _CMTIDN_READ_LIMIT:
+        return None
+    text = _CMTIDN_SET_UNREAD_RE.sub("", command.replace("\\\n", ""))
+    named = _CMTIDN_IDENTITY_SET_RE.search(command) or _CMTIDN_IDENTITY_SET_RE.search(text)
+    if named is None:
+        return None
+    ai = AI_IDENTITY_RE.search(command) or AI_IDENTITY_RE.search(text)
+    if ai is None:
+        return None
+    return "identity assignment {!r} in a command that names an AI identity ({!r})".format(named.group(0),
+                                                                                           ai.group(0))
+
+
+def _alias_identity_ai(value):
+    """A hit label when the git alias value names an AI identity in an identity config assignment it holds
+    (_ALIAS_IDENTITY_RE: -c author.name=X, a quoted value included), else None."""
+    for m in _ALIAS_IDENTITY_RE.finditer(value):
+        if AI_IDENTITY_RE.search(m.group(1)):
+            return "git alias identity config {!r}".format(m.group(0).strip()[:80])
+    return None
+
+
+def _identity_inline_config_ai(pair):
+    """A hit label when the NAME=VALUE config pair that a -c or git clone --config word gives sets an AI
+    identity: an author.* or committer.* name (any case) with an AI value, a user.* one the same way (any
+    case, so the --config=user.name=X word is read too), or an alias whose value holds such an assignment
+    (_alias_identity_ai); else None."""
+    m = ROLE_CONF_EQ_RE.match(pair)
+    if m and AI_IDENTITY_RE.search(m.group(1)):
+        return "author/committer config value {!r}".format(pair.strip()[:80])
+    m = USER_CONF_EQ_RE.match(pair)
+    if m and AI_IDENTITY_RE.search(m.group(1)):
+        return "user.name/user.email value {!r}".format(pair.strip()[:80])
+    m = ALIAS_CONF_EQ_RE.match(pair)
+    if m:
+        return _alias_identity_ai(m.group(1))
+    return None
+
+
+# The declaration builtins whose VAR=value operands the shell assigns (export EMAIL=x, declare -x EMAIL=x).
+_CMTIDN_DECLARE_WORDS = frozenset(("export", "declare", "typeset", "local", "readonly"))
+
+
+def _cmtidn_assignment_words(tokens):
+    """Yield the index of each word of one segment that the shell or a wrapper runs as a variable assignment:
+    the VAR=value (or VAR+=value) words before the command word, past leading reserved words
+    (_CMTIDN_RESERVED) as _cmtidn_git_commands passes over them; every VAR=value operand of a declaration
+    builtin command word (_CMTIDN_DECLARE_WORDS); and, when the command word is a wrapper
+    (_CMTIDN_GIT_WRAPPERS), every VAR=value word after it up to its first git word (env EMAIL=x git commit,
+    sudo -u ci EMAIL=x git commit, env -S 'EMAIL=x' git commit), whatever the wrapper's options, the same
+    bounded rule the git command finder uses. A VAR=value word in any other place (a commit message, an echo
+    operand, an argument of python3 -c) is an operand, not an assignment. Not read: a variable set by a for
+    loop, read, printf -v or another builtin that is not an assignment word, and an assignment inside a string
+    a shell parses at run time (bash -c, eval, env -S'...' attached to its option)."""
+    n = len(tokens)
+    i = 0
+    while i < n and tokens[i] in _CMTIDN_RESERVED:
+        named = tokens[i] in ("function", "coproc")
+        i += 1
+        if named and i + 1 < n and tokens[i + 1] in _CMTIDN_COMPOUND_OPENERS:
+            i += 1  # the NAME of a function definition or a named coprocess, before its compound body
+    while i < n and _ENV_ASSIGN_RE.match(tokens[i]):
+        yield i
+        i += 1
+    if i >= n:
+        return
+    word = tokens[i].rsplit("/", 1)[-1]
+    declare = word in _CMTIDN_DECLARE_WORDS
+    if not declare and word not in _CMTIDN_GIT_WRAPPERS:
+        return
+    for j in range(i + 1, n):
+        if not declare and tokens[j].rsplit("/", 1)[-1] == "git":
+            return
+        if _ENV_ASSIGN_RE.match(tokens[j]):
+            yield j
+
+
+# git config reads or edits rather than sets a value under these options and subcommands. A long option is
+# also read by any prefix of at least three characters that one of these names starts with (git accepts an
+# unambiguous prefix, and refuses an ambiguous one, so no prefix that only names one of these sets a value).
+_GIT_CONFIG_READ_LONG = ("--get", "--get-all", "--get-regexp", "--get-urlmatch", "--get-color",
+                         "--get-colorbool", "--list", "--unset", "--unset-all", "--rename-section",
+                         "--remove-section", "--edit")
+_GIT_CONFIG_READ_SHORT = frozenset("le")  # -l (--list) and -e (--edit), alone or in a short option cluster
+_GIT_CONFIG_READ_SUBS = frozenset(("get", "list", "unset", "rename-section", "remove-section", "edit"))
+# git config options that take a value (git 2.53.0 git config set -h and git config get -h): the long names,
+# also read by any prefix, and the short letters -f (--file) and -t (--type), which take the rest of their word
+# or else the next word. A value given in the next word is that option's value, never a mode or a subcommand,
+# so 'git config --comment -l author.name X' sets author.name with the comment '-l'.
+_GIT_CONFIG_VALUE_LONG = ("file", "blob", "type", "default", "comment", "value", "url")
+_GIT_CONFIG_VALUE_SHORT = frozenset("ft")
+
+
+def _cmtidn_config_read_option(tok):
+    """True when one word after git config, read as an option, selects a mode that reads or edits rather than
+    sets a value."""
+    if tok.startswith("--"):
+        return len(tok) >= 3 and "=" not in tok and any(name.startswith(tok) for name in _GIT_CONFIG_READ_LONG)
+    if tok.startswith("-") and len(tok) > 1:
+        for letter in tok[1:]:
+            if letter in _GIT_CONFIG_READ_SHORT:
+                return True
+            if letter in _GIT_CONFIG_VALUE_SHORT:
+                return False  # -f and -t take the rest of their word or the next word as their value
+    return False
+
+
+def _cmtidn_config_value_option(tok):
+    """True when one word after git config, read as an option, takes the next word as its value: a long
+    value option, or a prefix of one, with no '=' and no 'no-' (--comment, --comm, --file), or a short option
+    cluster whose first value letter is its last letter (-f, -zf, -t). A word that git takes for another
+    option is so read only where it is a prefix of a value option too, and skipping its next word can only
+    pass over a read or edit option or a subcommand, so the command is then judged as one that sets a
+    value, a safe-direction over-deny."""
+    if tok.startswith("--"):
+        name = tok[2:]
+        return (bool(name) and "=" not in name and not name.startswith("no-")
+                and any(full.startswith(name) for full in _GIT_CONFIG_VALUE_LONG))
+    if tok.startswith("-") and len(tok) > 1:
+        for k in range(1, len(tok)):
+            if tok[k] in _GIT_CONFIG_READ_SHORT:
+                return False
+            if tok[k] in _GIT_CONFIG_VALUE_SHORT:
+                return k == len(tok) - 1
+    return False
+
+
+def _cmtidn_config_setting(tokens):
+    """The index of the first word after the earliest 'config' word of one segment that a git config command
+    reads as its arguments when that command sets a value, or None when there is none. A config word counts
+    when it is the subcommand of a git command the finder reads (_cmtidn_git_commands: git config, sudo git
+    config, git -C dir config) or stands right after a command word that is not git (a git alias or function
+    standing for git, g config author.name ...). The command sets a value unless one of its options selects a
+    read or edit mode (_cmtidn_config_read_option: --get, --get-regexp, --list, --unset and the rest) or its
+    first word that is not an option is a read or edit subcommand (git config get, list, unset,
+    rename-section, remove-section, edit); git config set and the NAME VALUE form, with any scope, file,
+    type, comment, value pattern, --add or --replace-all option, set one. Its options are read as git 2.53.0
+    reads them: from the word after config up to its first word that is neither an option nor the value of
+    the option before it (_cmtidn_config_value_option), or up to a '--' word. So an option value spelled as a
+    read option (--comment -l, --value -e, -f -l) selects no mode, and neither does a word after the NAME
+    (git config author.name X -l and git config author.name X --get set author.name). One backward pass
+    marks, for each word read as an option and for each word read as an option value, whether the options
+    from there select a read or edit mode, so a segment of many config words costs time linear in its
+    length."""
+    n = len(tokens)
+    starts = [k for k in _cmtidn_git_commands(tokens) if tokens[k] == "config"]
+    k = 0
+    while k < n and tokens[k] in _CMTIDN_RESERVED:
+        k += 1
+    while k < n and _ENV_ASSIGN_RE.match(tokens[k]):
+        k += 1
+    if k + 1 < n and tokens[k + 1] == "config" and tokens[k].rsplit("/", 1)[-1] != "git":
+        starts.append(k + 1)
+    if not starts:
+        return None
+    # read_opt[i]: a git config command whose options start at word i reads or edits; read_val[i]: the same when
+    # word i is the value of the option before it, never a mode or a subcommand.
+    read_opt = [False] * (n + 1)
+    read_val = [False] * (n + 1)
+    for i in range(n - 1, -1, -1):
+        tok = tokens[i]
+        read_val[i] = read_opt[i + 1]
+        if tok == "--":
+            read_opt[i] = False
+        elif _cmtidn_config_read_option(tok):
+            read_opt[i] = True
+        elif _cmtidn_config_value_option(tok):
+            read_opt[i] = read_val[i + 1]
+        elif not tok.startswith("-"):
+            read_opt[i] = tok in _GIT_CONFIG_READ_SUBS  # the first word that is not an option ends the options
+        else:
+            read_opt[i] = read_opt[i + 1]
+    for k in sorted(starts):
+        if not read_opt[k + 1]:
+            return k + 1
     return None
 
 
@@ -5392,17 +5675,20 @@ _CMTIDN_UNREAD_CHARS_RE = re.compile(r"[\\\"'$\n]")
 # The words that can record an identity, which a command too long to read must also hold before its AI name
 # denies it (_cmtidn_identity_word): the reader judges an --author value or a trailer only on a segment whose
 # git command it finds by a word that is git or a path ending in /git, and a run line only under such a git
-# command, and it judges an identity assignment only in a word that starts with a GIT_AUTHOR_ or GIT_COMMITTER_
-# variable name, or with user.name or user.email. Each such word holds its letters in the command with only the
-# characters of _CMTIDN_UNREAD_CHARS_RE between them, so the variable and config names are sought in the command
-# once those characters are dropped, as the AI name is. git is sought as a whole word: its letters with only
-# those characters between them (g$'i't), and no letter, digit or underscore directly before or after it in the
-# command as written, so a dropped character counts as a word boundary too. A word of the command starts after
-# a space, a tab, a newline or an operator, and git in a path follows a '/', so a git at the start of a line,
-# whose newline the dropping removes (EOF, a newline, then git commit ...), is still found. A command that runs
-# git under another name (a variable, a function, an alias) is outside the reader too.
+# command, and it judges an identity assignment only in a word that holds a GIT_AUTHOR_ or GIT_COMMITTER_
+# variable name or EMAIL, or user.name, user.email, author.name, author.email, committer.name or
+# committer.email (EMAIL as spelled, the others in any case), as the raw-text rule (_cmtidn_identity_set_ai)
+# judges one only in text that holds such a name. Each such word holds its letters in the command
+# with only the characters of _CMTIDN_UNREAD_CHARS_RE between them, so the variable and config names are sought
+# in the command once those characters are dropped, as the AI name is. git is sought as a whole word: its
+# letters with only those characters between them (g$'i't), and no letter, digit or underscore directly before
+# or after it in the command as written, so a dropped character counts as a word boundary too. A word of the
+# command starts after a space, a tab, a newline or an operator, and git in a path follows a '/', so a git at
+# the start of a line, whose newline the dropping removes (EOF, a newline, then git commit ...), is still found.
+# A command that runs git under another name (a variable, a function, an alias) is outside the reader too.
 _CMTIDN_GIT_WORD_RE = re.compile(r"(?<!\w)g[\\\"'$\n]*i[\\\"'$\n]*t(?!\w)")
-_CMTIDN_IDENTITY_NAME_RE = re.compile(r"(?i)GIT_(?:AUTHOR|COMMITTER)_|user\.(?:name|email)")
+_CMTIDN_IDENTITY_NAME_RE = re.compile(r"(?i)GIT_(?:AUTHOR|COMMITTER)_|(?:user|author|committer)\.(?:name|email)"
+                                      r"|(?-i:EMAIL)")
 
 
 def _cmtidn_run_lines(tokens, k, stop):
@@ -5591,8 +5877,9 @@ def _cmtidn_line_ai(command, depth, budgets, unread, paths, judged, from_env=Fal
 
 def _cmtidn_identity_word(command):
     """A word of command that can record an identity, as a match object: its first git word
-    (_CMTIDN_GIT_WORD_RE), else its first GIT_AUTHOR_, GIT_COMMITTER_, user.name or user.email name once the
-    characters of _CMTIDN_UNREAD_CHARS_RE are dropped (_CMTIDN_IDENTITY_NAME_RE); None when it holds neither."""
+    (_CMTIDN_GIT_WORD_RE), else its first GIT_AUTHOR_, GIT_COMMITTER_ or EMAIL variable name or user, author
+    or committer config name once the characters of _CMTIDN_UNREAD_CHARS_RE are dropped
+    (_CMTIDN_IDENTITY_NAME_RE); None when it holds neither."""
     return (_CMTIDN_GIT_WORD_RE.search(command)
             or _CMTIDN_IDENTITY_NAME_RE.search(_CMTIDN_UNREAD_CHARS_RE.sub("", command)))
 
@@ -5605,7 +5892,8 @@ def _commit_identity_fallback(command, error):
     (_CMTIDN_RUN_BOUNDS), or the command is longer than the check reads within the hook timeout
     (_CMTIDN_TOO_LONG). Unless a check below decides first, it scans the RAW string of the whole command for an
     AI identity in a Co-Authored-By trailer, an --author value (any prefix git reads as --author), a
-    git-identity env var, or a user.name/user.email value (_RAW_IDENTITY_CONTEXTS), and denies on a hit.
+    git-identity env var or EMAIL, or a user, author or committer name or email config value
+    (_RAW_IDENTITY_CONTEXTS), and denies on a hit.
     A command too long to read is first denied when an AI name appears ANYWHERE in it once every quote,
     backslash, '$' and newline is removed, with no word boundary needed around the name (_AI_NAME_ANYWHERE_RE),
     and it also holds a word that can record an identity (_cmtidn_identity_word), so a command that the reader
@@ -5705,14 +5993,15 @@ def commit_identity(data):
             "so the commit-identity check could not run; failing closed.",
             "AIQT guardrail: denied a Bash call with no readable command (rule cmtidn, fail-closed).")
     reads = _SubstHeredocs.reads
+    raw = False  # True when the hit comes from the raw-text rule rather than the word reader
     try:
         hit = find_ai_authorship(command)
     except _ReadingLimitError:
         # The command reading spent its body budget: the raw fallback below can allow an identity that main's
         # reading finds, so it denies (COST above _COMMAND_LEAD_WORDS).
         return _reading_limit_deny("cmtidn (commit-identity)", "a git command recording an AI identity (a "
-                                   "co-author trailer, an --author value, a git identity variable or a "
-                                   "user.name or user.email value)")
+                                   "co-author trailer, an --author value, a git identity variable, EMAIL, or "
+                                   "a user, author or committer name or email value)")
     except _UncertainHashError as exc:
         # A '#' the lexer could not judge under both readings, in the command itself under each locale
         # reading: the raw scan also reads the text with its backslash-newlines, quote characters and
@@ -5721,14 +6010,38 @@ def commit_identity(data):
         if _hash_doubt_opaque(command):
             return _hash_doubt_opaque_deny("cmtidn (commit-identity)", "a git command recording an AI "
                                            "identity (a co-author trailer, an --author value, a git identity "
-                                           "variable or a user.name or user.email value)")
-        return _commit_identity_fallback(_hash_doubt_scan(command), str(exc))
+                                           "variable, EMAIL, or a user, author or committer name or email "
+                                           "value)")
+        hit = _cmtidn_identity_set_ai(command)
+        if hit is None:
+            return _commit_identity_fallback(_hash_doubt_scan(command), str(exc))
+        raw = True
     except ValueError as exc:
-        return _commit_identity_fallback(command, str(exc))
+        hit = _cmtidn_identity_set_ai(command)
+        if hit is None:
+            return _commit_identity_fallback(command, str(exc))
+        raw = True
+    if hit is None:
+        # Nothing the reader judges sets an AI identity: the raw text decides next, failing closed when it
+        # names an identity in an assignment or default-value form and an AI anywhere (_cmtidn_identity_set_ai).
+        hit = _cmtidn_identity_set_ai(command)
+        raw = hit is not None
     if hit is None:
         if _SubstHeredocs.reads != reads:
             return _commit_identity_fallback(command, _SUBST_HEREDOC_MAIN_FAILS)  # main's fallback, in place
         return _allow()
+    if raw:
+        # The raw-text rule finds only that the text names an identity assignment form and an AI identity, not
+        # that a git command sets one (the command may run no git, set a human identity, or be one the reader
+        # could not parse), so its reason says that and that the check fails closed.
+        reason = ("AIQT rule cmtidn (commit-identity): a recorded change carries the human maintainer's own "
+                  "identity, with no AI as author, committer, or co-author. This command's text names an "
+                  "identity assignment form and an AI identity ({}); whether it sets an AI identity could not "
+                  "be ruled out, so the check fails closed, which may over-deny a command that only quotes "
+                  "such text. Remove the AI identity, or the assignment text, and commit as the "
+                  "maintainer.".format(hit))
+        return _deny(reason, "AIQT guardrail: denied a command naming an identity assignment and an AI "
+                     "identity (rule cmtidn, fail-closed).")
     reason = ("AIQT rule cmtidn (commit-identity): a recorded change carries the human maintainer's "
               "own identity, with no AI as author, committer, or co-author; this git command sets an "
               "AI identity ({}). Remove it and commit as the maintainer.".format(hit))
