@@ -2036,6 +2036,9 @@ _CLOSE_SWEEP_DISPOSITIONS = (
     ("tools/check_release_cut.py", "working_blob", "TRY", "parent", "directory", 1,
      _CS_P1.format("parent, directory = directory, child runs before the close of parent, so the finally closes "
                    "child, never parent")),
+    ("tools/check_release_cut.py", "_budget_source", "TRY", "parent", "directory", 1,
+     _CS_P1.format("parent, directory = directory, child runs before the close of parent, so the finally closes "
+                   "child, never parent")),
     ("tools/_adapter_compose.py", "_target_dir_fd", "TRY", "parent", "directory", 1,
      _CS_P1.format("parent, directory = directory, child runs before the close of parent, so the finally (guarded "
                    "by handed, which a successful hand-over sets) closes child, never parent")),
@@ -2697,17 +2700,59 @@ def _budget_from_bytes(data, label):
     return _budget_from_source(data, label)
 
 
-def _declared_budget(path):
-    """The SELF_TEST_BUDGET_S the tool at path declares, as an int (_budget_from_bytes); a source that
-    cannot be read raises OSError, which main() reports as cannot-evaluate."""
-    return _budget_from_bytes(path.read_bytes(), str(path))
+# The most bytes _budget_source reads from a budgeted tool's source: 4 MiB, some 20 times the largest
+# such source at this commit (tools/check_gensrc_failclose.py, about 206 KB). A longer source is refused.
+_BUDGET_SOURCE_CAP = 4 * 1024 * 1024
+
+
+def _budget_source(root, path):
+    """The bytes of the tool source at path (a repository-relative path, split at "/") beneath root, read
+    as working_blob reads a working input: a descriptor-relative walk that follows no symlink at any
+    component (O_NOFOLLOW), the final component opened with O_NONBLOCK so a FIFO cannot block the open,
+    and an S_ISREG check on the opened descriptor before any read, so a FIFO, a device or a directory is
+    refused unread. At most _BUDGET_SOURCE_CAP + 1 bytes are read, and a source longer than
+    _BUDGET_SOURCE_CAP bytes is refused, so no source can exhaust memory. A symlink or a missing entry at
+    any component raises OSError, as does a directory at the final component (os.fdopen refuses it); any
+    other final component that is not a regular file, or a source over the cap, raises CannotEvaluate.
+    Each descriptor is closed once, in its finally."""
+    require(hasattr(os, "O_NOFOLLOW") and hasattr(os, "O_DIRECTORY")
+            and os.open in os.supports_dir_fd, "safe filesystem traversal unavailable")
+    directory = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        components = path.split("/")
+        for component in components[:-1]:
+            child = os.open(component, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory)
+            parent, directory = directory, child   # held first: a raising close cannot strand child
+            _close_fd_propagating(parent)
+        fd = os.open(components[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
+        try:
+            with os.fdopen(fd, "rb", closefd=False) as stream:
+                require(stat.S_ISREG(os.fstat(stream.fileno()).st_mode),
+                        path + ": budgeted tool source is not a regular file")
+                data = stream.read(_BUDGET_SOURCE_CAP + 1)
+        finally:
+            _close_fd_yielding(fd)
+    finally:
+        _close_fd_yielding(directory)
+    require(len(data) <= _BUDGET_SOURCE_CAP,
+            "{}: budgeted tool source is longer than the {} byte cap".format(path, _BUDGET_SOURCE_CAP))
+    return data
+
+
+def _declared_budget(root, path):
+    """The SELF_TEST_BUDGET_S the tool at path (repository-relative) beneath root declares, as an int
+    (_budget_from_bytes), from the bytes _budget_source reads. A source that cannot be opened (missing, a
+    symlink at any component, or a directory) raises OSError; one that is any other kind of non-regular
+    file, is longer than _BUDGET_SOURCE_CAP bytes, fails the source gate or declares no budget in the one
+    accepted form raises CannotEvaluate. main() reports either as cannot-evaluate (exit 2)."""
+    return _budget_from_bytes(_budget_source(root, path), path)
 
 
 def _census_budgets(root, mappings):
     """{path: declared budget} for every row of mappings whose path is in _CENSUS_BUDGETED, each read from
-    root / path by _declared_budget. A source that cannot be read, fails the source gate or declares no
+    beneath root by _declared_budget. A source that cannot be read, fails the source gate or declares no
     budget in the one accepted form raises, and main() reports that as cannot-evaluate (exit 2)."""
-    return {row[0]: _declared_budget(root / row[0]) for row in mappings if row[0] in _CENSUS_BUDGETED}
+    return {row[0]: _declared_budget(root, row[0]) for row in mappings if row[0] in _CENSUS_BUDGETED}
 
 
 def _census_table_failures(mappings, budgets=None):
@@ -2723,14 +2768,19 @@ def _census_table_failures(mappings, budgets=None):
     maps a path to the self-test budget its tool declares (_census_budgets; None is an empty map), a row
     whose path is in _CENSUS_BUDGETED but not in budgets is refused, and a row whose path is in budgets is
     refused when its bound is below that budget plus CENSUS_BOUND_MARGIN_S (a bound exactly at that sum
-    passes). Returns [] when the table may run."""
+    passes). Both lookups match the path string exactly, so a row whose path is not in normal form (an
+    empty, "." or ".." component: a leading "./" or "/", a doubled "/", a trailing "/", a "tools/../tools/"
+    detour) is refused before any other test of that row, since such a path could name a budgeted tool
+    without matching it. Returns [] when the table may run."""
     budgets = {} if budgets is None else budgets
     failures = []
     if not mappings:
         failures.append("census-mapping table: it is empty")
     for rel, target, _, bound in mappings:
         label = "%s (census under %s)" % (rel, target)
-        if type(bound) is not int:
+        if any(part in ("", ".", "..") for part in rel.split("/")):
+            failures.append("%s: its path is not in normal form (an empty, . or .. component)" % label)
+        elif type(bound) is not int:
             failures.append("%s: its bound is a %s, not a plain int number of seconds" % (label, type(bound).__name__))
         elif not bound > 0:
             shown = str(bound) if bound >= -10 ** 9 else "below -1000000000"
@@ -3312,7 +3362,9 @@ def _census_budget_cases(table_failures, real):
     1 s below that budget plus CENSUS_BOUND_MARGIN_S is refused, and one bounded exactly at it or 1 s above
     it passes; the real table with no budget read is refused, naming the gensrc row; the real table with
     the gensrc row's bound put 1 s below its budget plus the margin is refused, naming that row; the real
-    table with the real budgets passes."""
+    table with the real budgets passes; and a row for the gensrc tool under a path alias not in normal
+    form (a leading "./", every "/" doubled, a "tools/../" detour, a trailing "/"), bounded at 30 s, far
+    below its budget plus the margin, is refused for its path form."""
     rel = "census-budget-standin/standin.py"
     margin = CENSUS_BOUND_MARGIN_S
     gensrc = "tools/check_gensrc_failclose.py"
@@ -3330,7 +3382,70 @@ def _census_budget_cases(table_failures, real):
     cases.append(("real-row-below", table_failures(lowered, real),
                   [below % (gensrc, real[gensrc] + margin - 1, real[gensrc], margin)]))
     cases.append(("real", table_failures(_CENSUS_MAPPINGS, real), []))
+    for name, alias in (("alias-dot", "./" + gensrc), ("alias-double-slash", gensrc.replace("/", "//")),
+                        ("alias-detour", "tools/../" + gensrc), ("alias-trailing-slash", gensrc + "/")):
+        cases.append((name, table_failures(((alias, "*", ("0",), 30),), real),
+                      [alias + " (census under *): its path is not in normal form (an empty, . or .. component)"
+                       "; nothing run"]))
     return cases
+
+
+# The _budget_source cases, each an entry _budget_source_tree makes: (name, the path _declared_budget reads
+# beneath the tree, the budget it must read, or None where it must be refused). The three cap rows hold the
+# same 600 s declaration padded by a comment to 1 byte under, exactly at and 1 byte over
+# _BUDGET_SOURCE_CAP. A read that follows symlinks reads the two regular-file symlink rows at 600, one that
+# reads with no size bound reads over-cap at 600, and one that opens without O_NONBLOCK or reads before
+# the S_ISREG check blocks on the FIFO or reads /dev/zero until memory runs out.
+_BUDGET_SOURCE_CASES = (
+    ("regular", "tools/regular.py", 600),
+    ("below-cap", "tools/below-cap.py", 600),
+    ("at-cap", "tools/at-cap.py", 600),
+    ("over-cap", "tools/over-cap.py", None),
+    ("fifo", "tools/fifo.py", None),
+    ("symlink-dev-zero", "tools/symlink-dev-zero.py", None),
+    ("symlink-regular", "tools/symlink-regular.py", None),
+    ("symlinked-directory", "linked/regular.py", None),
+    ("directory", "tools/directory.py", None),
+    ("missing", "tools/missing.py", None),
+)
+
+
+def _budget_source_tree(parent):
+    """The tree beneath parent that _BUDGET_SOURCE_CASES read: regular sources, a FIFO, a symlink to
+    /dev/zero, a symlink to a regular source, a symlinked directory over that source and a directory.
+    Returns its root."""
+    tree = parent / "census-budget-source"
+    tools = tree / "tools"
+    tools.mkdir(parents=True)
+    plain = b"SELF_TEST_BUDGET_S = 600\n"
+    (tools / "regular.py").write_bytes(plain)
+    for name, size in (("below-cap", _BUDGET_SOURCE_CAP - 1), ("at-cap", _BUDGET_SOURCE_CAP),
+                       ("over-cap", _BUDGET_SOURCE_CAP + 1)):
+        (tools / (name + ".py")).write_bytes(plain + b"#" + b"x" * (size - len(plain) - 2) + b"\n")
+    os.mkfifo(tools / "fifo.py")
+    os.symlink("/dev/zero", tools / "symlink-dev-zero.py")
+    os.symlink("regular.py", tools / "symlink-regular.py")
+    os.symlink("tools", tree / "linked")
+    (tools / "directory.py").mkdir()
+    return tree
+
+
+def _budget_source_checks(parent):
+    """Each _BUDGET_SOURCE_CASES entry, read by _declared_budget from the tree _budget_source_tree makes
+    under parent, reads as its stated budget or is refused (CannotEvaluate or OSError, each cannot-evaluate
+    in main()). The cap rows first confirm their own sizes."""
+    tree = _budget_source_tree(parent)
+    sizes = {name: (tree / path).stat().st_size for name, path, _want in _BUDGET_SOURCE_CASES if "cap" in name}
+    check("census-budget-source-cap-sizes", sizes == {"below-cap": _BUDGET_SOURCE_CAP - 1,
+                                                      "at-cap": _BUDGET_SOURCE_CAP,
+                                                      "over-cap": _BUDGET_SOURCE_CAP + 1})
+    for name, path, want in _BUDGET_SOURCE_CASES:
+        try:
+            got = _declared_budget(tree, path)
+        except (CannotEvaluate, OSError):
+            got = None
+        check("census-budget-source-" + name, got == want)
+        print("PASS census-budget-source-" + name)
 
 
 def _census_budget_rows(parent, root):
@@ -3388,7 +3503,7 @@ def _census_table_flipped(parent, script, name, old, new):
         + "CENSUS_BOUND_MARGIN_S = " + repr(CENSUS_BOUND_MARGIN_S) + "\n"
         + "_CENSUS_BUDGETED = " + repr(_CENSUS_BUDGETED) + "\n"
         + body.replace(old, new, 1), encoding="utf-8")
-    spec = importlib.util.spec_from_file_location("check_release_cut_" + name.replace("-", "_"), location)
+    spec = importlib.util.spec_from_file_location("check_release_cut_" + name.replace(" ", "_"), location)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module._census_table_failures
@@ -3401,6 +3516,8 @@ _CENSUS_BUDGET_FLIPS = (
      ("budget-1-edge--1", "real-row-below")),
     ("unread", "rel in _CENSUS_BUDGETED and rel not in budgets", "False",
      ("unread-empty", "unread-none")),
+    ("path-form", 'any(part in ("", ".", "..") for part in rel.split("/"))', "False",
+     ("alias-dot", "alias-double-slash", "alias-detour", "alias-trailing-slash")),
 )
 
 
@@ -4634,6 +4751,7 @@ def _self_test_isolated(red_on_revert):
               + " bound-sum=" + str(sum(row[3] for row in _CENSUS_MAPPINGS)))
         _budget_reader_checks(red_on_revert)
         _source_gate_checks(red_on_revert)
+        _budget_source_checks(parent)
         budget_failures, budget_rows = _census_budget_rows(parent, script.parents[1])
         for failure in budget_failures:
             print("FAIL " + failure, file=sys.stderr)
@@ -4641,7 +4759,7 @@ def _self_test_isolated(red_on_revert):
         print("PASS census-budget-cross-check rows=" + str(budget_rows) + " budgets="
               + repr(_census_budgets(script.parents[1], _CENSUS_MAPPINGS)) + " margin=" + str(CENSUS_BOUND_MARGIN_S))
         if red_on_revert:
-            for flip in ("comparison", "unread"):
+            for flip in ("comparison", "unread", "path-form"):
                 flip_failures = _census_budget_flip_red(parent / ("census-budget-flip-" + flip), script, flip,
                                                         script.parents[1])
                 for failure in flip_failures:
