@@ -12894,6 +12894,17 @@ _RAW_COMMIT_RE = _RawSequence(r"(?i)\bgit\b", r"(?i)\bcommit\b")
 _COMMIT_CERTIFICATE_SHAPES = frozenset(("A", "B", "C", "D"))
 _COMMIT_MAX_COMMAND = 65536
 _COMMIT_MAX_SEGMENTS = 64
+# The finite grammar the commit check admits, as tables the recognizer below reads (and the self-test's
+# differential oracle builds its corpus from): the Git verbs after "git" or "git -C <absolute>", the
+# verb and flag pairs that create and switch to a branch, the words of an admitted cd step, the
+# one-word inert steps and the inert printf prefix (followed by one argument), and the path components
+# that leave a cd operand unresolved.
+_COMMIT_VERBS = ("commit", "switch", "checkout")
+_COMMIT_CREATE_FORMS = (("switch", "-c"), ("checkout", "-b"))
+_COMMIT_CD_WORDS = ("cd", "pushd")
+_COMMIT_INERT_WORDS = (":", "true", "false")
+_COMMIT_INERT_PRINTF = ("printf", "%s")
+_COMMIT_DOTTED_PARTS = (".", "..")
 
 # For a "cd" step (an admitted cd or pushd), target is its absolute operand, where
 # later plain steps run. For a Git step, target is None without -C (it runs in the
@@ -13010,12 +13021,11 @@ def _commit_exact_prefix(tokens):
     No wrapper peeling, assignment skipping, option abbreviation, or generic Git
     option parser is an authorization input. Options after the verb remain arguments.
     """
-    if len(tokens) >= 2 and tokens[0] == "git" and tokens[1] in (
-            "commit", "switch", "checkout"):
+    if len(tokens) >= 2 and tokens[0] == "git" and tokens[1] in _COMMIT_VERBS:
         return None, tokens[1], tuple(tokens[2:])
     if (len(tokens) >= 4 and tokens[:2] == ["git", "-C"]
             and tokens[2] and os.path.isabs(tokens[2])
-            and tokens[3] in ("commit", "switch", "checkout")):
+            and tokens[3] in _COMMIT_VERBS):
         return tokens[2], tokens[3], tuple(tokens[4:])
     return None
 
@@ -13025,11 +13035,11 @@ def _commit_syntax_step(seg):
     if not _commit_literal_segment(seg):
         return None
     tokens = seg.argv
-    if len(tokens) == 1 and tokens[0] in (":", "true", "false"):
+    if len(tokens) == 1 and tokens[0] in _COMMIT_INERT_WORDS:
         return _CommitStep("inert", None, None, seg)
-    if len(tokens) == 3 and tokens[:2] == ["printf", "%s"]:
+    if len(tokens) == 3 and tuple(tokens[:2]) == _COMMIT_INERT_PRINTF:
         return _CommitStep("inert", None, None, seg)
-    if (len(tokens) == 2 and tokens[0] in ("cd", "pushd")
+    if (len(tokens) == 2 and tokens[0] in _COMMIT_CD_WORDS
             and tokens[1] and os.path.isabs(tokens[1])):
         # Later plain segments of the && chain run in this directory (see _commit_evaluate).
         return _CommitStep("cd", tokens[1], None, seg)
@@ -13041,9 +13051,7 @@ def _commit_syntax_step(seg):
         return _CommitStep("commit", target, None, seg)
     if verb == "switch" and len(args) == 1:
         kind, branch = "switch-existing", args[0]
-    elif verb == "switch" and len(args) == 2 and args[0] == "-c":
-        kind, branch = "switch-create", args[1]
-    elif verb == "checkout" and len(args) == 2 and args[0] == "-b":
+    elif len(args) == 2 and (verb, args[0]) in _COMMIT_CREATE_FORMS:
         kind, branch = "switch-create", args[1]
     else:
         return None
@@ -13898,7 +13906,7 @@ def _commit_evaluate(syntax, cwd, deadline):
             if step.kind == "inert":
                 continue
             if step.kind == "cd":
-                dotted = any(part in (".", "..") for part in step.target.split("/"))
+                dotted = any(part in _COMMIT_DOTTED_PARTS for part in step.target.split("/"))
                 current = None if dotted else step.target
                 continue
             directory = step.target

@@ -175,7 +175,6 @@ import dis
 import hashlib
 import importlib
 import io
-import itertools
 import json
 import os
 import random
@@ -9255,10 +9254,12 @@ def _selftest_exit_code(failures, cannot_evaluate):
 
 
 # --- differential commit oracle (pl-oracle-*) ---------------------------------------------------------------
-# The commit check of protected_line converges by a deterministic differential oracle: main's hook at a pinned
-# base commit, read from git with replacement refs disabled, and this tree's hook are loaded as two separate
-# modules and run over one corpus of commit commands in real scratch repositories. A command main denies and
-# this tree allows fails the oracle unless its exact form is listed in _ORACLE_NEWLY_ALLOWED with a reason.
+# The commit check of protected_line is compared by a differential oracle: main's hook at a pinned base
+# commit, read from git with replacement refs disabled, and this tree's hook are loaded as two separate
+# modules and run over one corpus of commit commands in real scratch repositories. A command main denies
+# where this tree gives any other result (a silent allow, an allow with a note, an explicit allow, an exit 0
+# with no decision object, or any other shape) fails the oracle unless its exact form is listed in
+# _ORACLE_NEWLY_ALLOWED with a reason.
 # Every fixture and base read runs git under git_fixture_env() (a scratch HOME and GIT_CONFIG_NOSYSTEM=1).
 # The hooks themselves run in this process, whose HOME is the suite's empty home: both versions read any
 # GIT_* variable in their own environment (GIT_CONFIG_NOSYSTEM included) as a non-cosmetic repository-view
@@ -9270,50 +9271,114 @@ _ORACLE_HOOK_PATH = ".aiqt/core/hooks/scripts/aiqt_hooks.py"
 # Exact forms this tree may allow where main denies: (fixture, command template, forced checkpoint) -> reason.
 # The timeout-wording change rewords denials and allows nothing new, so no form is listed.
 _ORACLE_NEWLY_ALLOWED = {}
-# The repositories each command runs against: a protected main with and without a remote, and a feature
-# branch with and without one. A command template names them as {P}, {PN}, {F} and {FN}.
-_ORACLE_FIXTURES = ("P", "PN", "F", "FN")
-# Every commit form an earlier review of this change exercised, as (cwd fixture, command template).
+# The branch every feature fixture is on (_init_repo makes it), which the hook does not protect.
+_ORACLE_FEATURE = "other"
+# Hand-picked commit forms (chains of several commits, a cd or a switch before the commit), run beside
+# the generated ones, as (cwd fixture, command template); fixture names are _oracle_fixture_specs's.
 _ORACLE_PINNED = (
-    ("P", "git commit -m a"),
-    ("PN", "git commit -m a"),
+    ("P_main", "git commit -m a"),
+    ("PN_main", "git commit -m a"),
     ("F", "git commit -m a"),
     ("FN", "git commit -m a"),
-    ("F", "cd {PN} && git commit -m a"),
-    ("PN", "git commit -m a && cd /"),
-    ("P", "git commit -m a && git -C {F} commit -m b"),
-    ("F", "git commit -m a && git -C {P} commit -m b"),
-    ("FN", "git commit -m a && git -C {P} commit -m b"),
-    ("P", "git commit -m a && git commit -m b"),
-    ("PN", "git commit -m a && git commit -m b"),
-    ("F", "git -C {P} commit -m a && git -C {F} commit -m b && git -C {FN} commit -m c"),
-    ("P", "git switch -c oracle-new && git commit -m a"),
+    ("F", "cd {PN_main} && git commit -m a"),
+    ("PN_main", "git commit -m a && cd /"),
+    ("P_main", "git commit -m a && git -C {F} commit -m b"),
+    ("F", "git commit -m a && git -C {P_main} commit -m b"),
+    ("FN", "git commit -m a && git -C {P_main} commit -m b"),
+    ("P_main", "git commit -m a && git commit -m b"),
+    ("PN_main", "git commit -m a && git commit -m b"),
+    ("F", "git -C {P_main} commit -m a && git -C {F} commit -m b && git -C {FN} commit -m c"),
+    ("P_main", "git switch -c oracle-new && git commit -m a"),
     ("F", "git switch main && git commit -m a"),
-    ("F", "git -C {PN} commit -m a"),
-    ("P", "git -C {F} commit -m a"),
+    ("F", "git -C {PN_main} commit -m a"),
+    ("P_main", "git -C {F} commit -m a"),
 )
-# The systematic part: every -C and -c placement before the verb, crossed with every order of every
-# non-empty subset of three commit options, in every fixture.
-_ORACLE_PREFIXES = ("", "-C {X} ", "-c core.quotepath=false ", "-C {X} -c core.quotepath=false ",
-                    "-c core.quotepath=false -C {X} ")
-_ORACLE_OPTIONS = ("-q", "--allow-empty", "-m a")
 _ORACLE_TIMEOUT_TEXT = "ran out of time on this host"
 
 
-def _oracle_corpus():
-    """The oracle corpus as (cwd fixture, command template, sweep) triples: sweep is True for a form whose
-    every commit deadline checkpoint is also forced (each pinned form, and the plain -m order of each
-    generated placement), else the form runs only unforced."""
+def _oracle_fixture_specs(hook):
+    """The fixture repositories as (name, branch, has remote) triples, from the hook's own _PROTECTED: each
+    protected branch with a remote (P_<branch>) and without one (PN_<branch>), and the feature branch with
+    (F) and without (FN) one. A command template names a fixture's path as {name}."""
+    specs = []
+    for branch in sorted(hook._PROTECTED):
+        specs.append(("P_" + branch, branch, True))
+        specs.append(("PN_" + branch, branch, False))
+    specs.append(("F", _ORACLE_FEATURE, True))
+    specs.append(("FN", _ORACLE_FEATURE, False))
+    return tuple(specs)
+
+
+def _oracle_tables(hook):
+    """The commit grammar tables of hook the generated corpus is built from, by name."""
+    return {"protected": tuple(sorted(hook._PROTECTED)), "verbs": hook._COMMIT_VERBS,
+            "create": hook._COMMIT_CREATE_FORMS, "cd": hook._COMMIT_CD_WORDS,
+            "inert": tuple(hook._COMMIT_INERT_WORDS) + (" ".join(hook._COMMIT_INERT_PRINTF + ("a",)),),
+            "dotted": hook._COMMIT_DOTTED_PARTS}
+
+
+def _oracle_corpus(hook):
+    """The oracle corpus as (cwd fixture, command template, sweep) triples: the pinned forms, then forms
+    generated from hook's own grammar tables (_oracle_tables) in every fixture: a plain commit and a -C
+    commit into every fixture, an admitted cd step (each cd word) into every fixture with and without each
+    dotted component, each non-commit verb onto each protected branch and the feature branch, each
+    create-and-switch form with and without -C, and each inert step before and after the commit. sweep is
+    True for a form whose every commit deadline checkpoint is also forced (each pinned form, and the plain
+    and -C-into-itself commit of each fixture), else the form runs only unforced."""
+    tables = _oracle_tables(hook)
+    names = [name for name, _branch, _remote in _oracle_fixture_specs(hook)]
     corpus = [(fixture, template, True) for fixture, template in _ORACLE_PINNED]
-    orders = []
-    for size in range(1, len(_ORACLE_OPTIONS) + 1):
-        orders.extend(itertools.permutations(_ORACLE_OPTIONS, size))
-    for fixture in _ORACLE_FIXTURES:
-        for prefix in _ORACLE_PREFIXES:
-            for order in orders:
-                template = "git " + prefix.replace("{X}", "{" + fixture + "}") + "commit " + " ".join(order)
-                corpus.append((fixture, template, order == ("-m a",)))
+    for here in names:
+        corpus.append((here, "git commit -m a", True))
+        for there in names:
+            corpus.append((here, "git -C {%s} commit -m a" % there, there == here))
+            for word in tables["cd"]:
+                corpus.append((here, "%s {%s} && git commit -m a" % (word, there), False))
+                for part in tables["dotted"]:
+                    corpus.append((here, "%s {%s}/%s && git commit -m a" % (word, there, part), False))
+        for verb in tables["verbs"]:
+            if verb == "commit":
+                continue
+            for branch in tables["protected"] + (_ORACLE_FEATURE,):
+                corpus.append((here, "git %s %s && git commit -m a" % (verb, branch), False))
+        for verb, flag in tables["create"]:
+            corpus.append((here, "git %s %s oracle-new && git commit -m a" % (verb, flag), False))
+            corpus.append((here, "git -C {%s} %s %s oracle-new && git -C {%s} commit -m a"
+                           % (here, verb, flag, here), False))
+        for step in tables["inert"]:
+            corpus.append((here, "%s && git commit -m a" % step, False))
+            corpus.append((here, "git commit -m a && %s" % step, False))
     return corpus
+
+
+def _oracle_coverage_gaps(hook, corpus):
+    """Each entry of hook's grammar tables (_oracle_tables) no form of corpus exercises, as readable
+    strings: a protected branch as a cwd fixture, a verb, a create form, a cd word, an inert step, and a
+    dotted cd operand component."""
+    tables = _oracle_tables(hook)
+    words = [template.split() for _fixture, template, _sweep in corpus]
+    texts = [" ".join(form) for form in words]
+    cwds = {fixture for fixture, _template, _sweep in corpus}
+    gaps = []
+    for branch in tables["protected"]:
+        if "P_" + branch not in cwds or "PN_" + branch not in cwds:
+            gaps.append("protected branch " + branch)
+    for verb in tables["verbs"]:
+        if not any(verb in form for form in words):
+            gaps.append("verb " + verb)
+    for verb, flag in tables["create"]:
+        if not any(" %s %s " % (verb, flag) in " %s " % text for text in texts):
+            gaps.append("create form %s %s" % (verb, flag))
+    for word in tables["cd"]:
+        if not any(form[:1] == [word] for form in words):
+            gaps.append("cd word " + word)
+        for part in tables["dotted"]:
+            if not any(form[:1] == [word] and form[1:2] and form[1].split("/")[-1] == part for form in words):
+                gaps.append("dotted operand %s .../%s" % (word, part))
+    for step in tables["inert"]:
+        if not any(text.startswith(step + " && ") or text.endswith(" && " + step) for text in texts):
+            gaps.append("inert step " + step)
+    return gaps
 
 
 def _oracle_git_source(commit):
@@ -9364,12 +9429,18 @@ def _oracle_run(module, command, cwd, at):
     return _reduce_result(code, obj), reason, calls[0]
 
 
+def _oracle_loosened(base_got, tree_got):
+    """True when base denies and tree gives any other reduced result: a silent allow, an allow with a note,
+    an explicit allow, an ask, or an unexpected shape such as exit 0 with no decision object."""
+    return base_got == "deny" and tree_got != "deny"
+
+
 def _oracle_diff(base, tree, corpus, paths, allowlist):
     """(newly, worded, runs) for tree against base over corpus: newly lists each (fixture, template, at) the
-    base denies and the tree allows that allowlist does not name, worded lists each forced run whose tree
-    denial does not carry the timeout wording, and runs counts the commands judged. A difference is judged
-    again once on both versions before it counts, so a real host timeout on one side alone is not read as
-    a change of decision."""
+    base denies where the tree gives any result other than a deny (_oracle_loosened) that allowlist does
+    not name, worded lists each forced run whose tree denial does not carry the timeout wording, and runs
+    counts the commands judged. A difference is judged again once on both versions before it counts, so a
+    real host timeout on one side alone is not read as a change of decision."""
     newly, worded, runs = [], [], 0
     for fixture, template, sweep in corpus:
         command = template.format(**paths)
@@ -9381,26 +9452,28 @@ def _oracle_diff(base, tree, corpus, paths, allowlist):
             key = (fixture, template, at)
             base_got, _r, base_count = _oracle_run(base, command, cwd, at)
             tree_got, tree_reason, _c = _oracle_run(tree, command, cwd, at)
-            if base_got not in ("allow", "allow-note") and tree_got in ("allow", "allow-note"):
+            if _oracle_loosened(base_got, tree_got):
                 base_got = _oracle_run(base, command, cwd, at)[0]
                 tree_got, tree_reason, _c = _oracle_run(tree, command, cwd, at)
-                if (base_got not in ("allow", "allow-note") and tree_got in ("allow", "allow-note")
-                        and key not in allowlist):
+                if _oracle_loosened(base_got, tree_got) and key not in allowlist:
                     newly.append(key)
             if at and at <= base_count and (tree_got != "deny" or _ORACLE_TIMEOUT_TEXT not in tree_reason):
                 worded.append((key, tree_got))
     return newly, worded, runs
 
 
-def _oracle_fixtures(root):
-    """The four fixture repositories under root, by fixture name, as absolute path strings."""
+def _oracle_fixtures(root, hook):
+    """The fixture repositories of _oracle_fixture_specs(hook) under root, by fixture name, as absolute
+    path strings, each on its branch and with an origin remote where its spec says so."""
     paths = {}
-    for name in _ORACLE_FIXTURES:
+    for name, branch, remote in _oracle_fixture_specs(hook):
         repo = _init_repo(root / name.lower())
-        if name in ("P", "F"):
+        if remote:
             _git(repo, "remote", "add", "origin", str(root / (name.lower() + "-remote.git")))
-        if name in ("F", "FN"):
-            _git(repo, "switch", "-q", "other")
+        if branch not in ("main", "other"):
+            _git(repo, "branch", branch)
+        if branch != "main":
+            _git(repo, "switch", "-q", branch)
         paths[name] = str(repo)
     return paths
 
@@ -9422,8 +9495,15 @@ def _commit_oracle_failures(tmp):
         base = _oracle_load(root, names[0], base_source)
         tree = _oracle_load(root, names[1], (repo_root() / _ORACLE_HOOK_PATH).read_bytes())
         revert = _oracle_load(root, names[2], revert_source)
-        paths = _oracle_fixtures(root / "repos")
-        corpus = _oracle_corpus()
+        paths = _oracle_fixtures(root / "repos", tree)
+        corpus = _oracle_corpus(tree)
+        # The generated corpus must exercise every entry of the hook's grammar tables, and the check must
+        # find gaps in the hand-picked forms alone, which name no master, pushd, checkout -b or inert step.
+        for gap in _oracle_coverage_gaps(tree, corpus):
+            out.append("(pl-oracle-coverage) no corpus form exercises the hook's {}".format(gap))
+        if not _oracle_coverage_gaps(tree, [(f, t, True) for f, t in _ORACLE_PINNED]):
+            out.append("(pl-oracle-coverage-red) the coverage check must find gaps in the hand-picked forms "
+                       "alone, it found none")
         newly, worded, runs = _oracle_diff(base, tree, corpus, paths, _ORACLE_NEWLY_ALLOWED)
         print("commit oracle: {} forms, {} runs, {} allowlisted".format(len(corpus), runs,
                                                                      len(_ORACLE_NEWLY_ALLOWED)))
@@ -9472,6 +9552,28 @@ def _commit_oracle_failures(tmp):
         if len(red) != 1:
             out.append("(pl-oracle-allowlist-red) deleting one allowlist entry must turn the oracle red on "
                        "exactly that form, found {!r}".format(red))
+        # Comparator controls: where main denies, a tree that answers with an explicit allow, or with exit 0
+        # and a stdout object that holds no decision, must turn the oracle red on exactly that form.
+        planted_form = ("P_main", "git commit -m a", False)
+        planted_key = (planted_form[0], planted_form[1], 0)
+        planted = (("explicit-allow", {"hookSpecificOutput": {"hookEventName": "PreToolUse",
+                                                              "permissionDecision": "allow"}}),
+                   ("no-decision", {"continue": True}))
+        line_original = tree.protected_line
+        for label, obj in planted:
+            def planting(payload, _obj=obj):
+                if payload.get("tool_input", {}).get("command") == planted_form[1]:
+                    return 0, _obj, None
+                return line_original(payload)
+
+            tree.protected_line = planting
+            try:
+                found, _w, _r = _oracle_diff(base, tree, [planted_form], paths, {})
+            finally:
+                tree.protected_line = line_original
+            if found != [planted_key]:
+                out.append("(pl-oracle-{}-red) a tree that answers {!r} where main denies must turn the oracle "
+                           "red on exactly {!r}, found {!r}".format(label, obj, planted_key, found))
     finally:
         for name in names:
             sys.modules.pop(name, None)
