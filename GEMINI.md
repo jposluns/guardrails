@@ -277,7 +277,8 @@ a platform, version, or condition qualifier is neither dropped nor added.
 When a claim rests on an external source, or an artefact is derived from one, the specific reference, a
 file path and line, a URL, or a document and section, is captured and attached to it at the moment it is
 produced, not reconstructed later from memory. A claim or artefact with no captured reference is treated as
-unsourced, whatever confidence backs it.
+unsourced, whatever confidence backs it. A count or code identifier, such as a function name, written into
+a brief or change description is copied from the run output or source line that produced it.
 
 ## Reproduce a defect before fixing it
 
