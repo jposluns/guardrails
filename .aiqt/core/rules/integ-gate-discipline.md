@@ -19,9 +19,12 @@ truncating sink, no `|| true`, no deleted tests, no lowered thresholds. A failin
 understand why it failed before considering any override. A security floor, a deny list, a permission
 floor, or a required-check set, never shrinks silently: any reduction, whatever motivated it, lands only
 through the maintainer's explicit, recorded authorization. A guard that blocks the assistant's own action
-is a gate too: the assistant stops and reports the block, and never re-encodes, splits, substitutes, or
-reframes the blocked input or reaches the blocked outcome another way, even when benign; a block the
-assistant believes is a false positive goes to the guard's owner.
+is a gate too: the assistant stops that action and reports the block, and never gets the same refused
+action past the guard by re-encoding, splitting, substituting, or reframing the refused input, or by
+reaching its effect through another tool, even when benign. Fixing the artefact, or following the route
+the guard's own message names where that route satisfies the rule the guard enforces, is the compliant
+route, not a way past the guard; the assistant refers a block it believes is a false positive, with no
+compliant route, to the guard's owner.
 
 Replacing or removing a control, a gate, a check, a hook, a validator, or another guard, is a set operation,
 so a replacement is treated as a reduction until its coverage is shown. Before such a change is dispatched
