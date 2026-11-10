@@ -39,7 +39,8 @@ validated against the authoritative source that defines the class, per the guard
 never an ad-hoc pattern a surviving sibling can fall outside. An independent verifier first confirms the
 probe is adequate against that authoritative source, then reproduces it rather than re-judging relatedness
 from its own reading of the finding, and treats a live result exceeding the recorded one as a fresh,
-unaddressed finding. This is the completeness-claim-enumerates-its-set discipline applied to a defect class
+unaddressed finding. Fixing only the cited instance while a sibling of the same class survives unaddressed
+is an incomplete fix, the completeness-claim-enumerates-its-set discipline applied to a defect class
 standing in for the registry that class otherwise lacks. For example, a wording fix is a defect class whose
 probe is derived from and validated against the correction that names the superseded wording, and matches
 that wording across line wraps and escapes. Each instance the probe finds is fixed or carries one of exactly

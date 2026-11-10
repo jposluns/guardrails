@@ -36,8 +36,9 @@ while a step can still proceed or a sanctioned path is not yet completed or obse
 This governs completion-class quantifiers over an open or indexed set. A partial statement scoped to what was
 actually examined, such as that the files that were checked are clean, and an explicitly bounded claim over a
 named, closed set, such as that all three of the listed modules pass, are not completeness claims and carry no
-added burden. Retiring, splitting, merging, or trimming a multi-item record is not such a bounded claim and
-carries the burden the first paragraph sets for it. The higher bar attaches only to a claim that reduces work.
+added burden. Retiring, splitting, merging, or removing items from a record that names more than one item is
+not such a bounded claim and carries the burden the first paragraph sets for it. The higher bar attaches only
+to a claim that reduces work.
 
 Ending a turn, scheduling an idle wake, or declaring a work queue drained or all blocked is such a
 completion-class claim over the backlog, and it carries the same enumeration burden.

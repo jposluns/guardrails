@@ -20,7 +20,7 @@ reason = "Scope note on the rule itself; no obligation of its own."
 [[exempt]]
 corpus-id = "citint"
 text = "This rule narrows the reference-capture rule (refcap)."
-reason = "Cross-reference explaining how citint.1 to citint.3 narrow the reference-capture rule (refcap); no obligation of its own."
+reason = "Cross-reference naming the reference-capture rule (refcap), which citint.1 to citint.3 narrow; no obligation of its own."
 
 [[exempt]]
 corpus-id = "setcmp"
@@ -34,8 +34,8 @@ reason = "Scope carve-out bounding setcmp.1; a permission, not an obligation."
 
 [[exempt]]
 corpus-id = "setcmp"
-text = "The higher bar attaches only to a claim that reduces work."
-reason = "Scope note restating where setcmp.1 and setcmp.4 apply; it adds no obligation."
+text = "The higher bar attaches only\nto a claim that reduces work."
+reason = "Scope note restating where the higher evidence bar of setcmp.4 applies; it adds no obligation."
 
 [[exempt]]
 corpus-id = "cntprd"
@@ -156,7 +156,6 @@ reason = "Opens the disclosed-residual paragraph of vfxcmt.3 to vfxcmt.11; no ob
 corpus-id = "vfxcmt"
 text = "It does not catch the under-scoped-declaration residual (a planned-but-uncommitted path absent from both the commit and the declaration leaves the equality check no divergence to surface), an undeclared context file, a submodule whose working tree diverges behind a clean gitlink, content a checkout filter materializes differently from the committed bytes, a merge reviewed by a combined or non-first-parent diff, which can present a different path set than intended, or a later commit that supersedes the reviewed revision; and a review of an older revision is sound only when the verifier reads a checkout or snapshot bound to it."
 reason = "Disclosed residuals of vfxcmt.3 to vfxcmt.11; the closing clause restates vfxcmt.10 (the verifier reads the declared revision)."
-
 
 [[exempt]]
 corpus-id = "vfxcmt"
