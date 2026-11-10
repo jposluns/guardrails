@@ -10614,6 +10614,434 @@ def _pl239_launch_failures():
     return failures
 
 
+# === cmtidn differential oracle (cmo) ===
+# The commit_identity guard of this tree against the same guard at the base its identity-assignment change
+# starts from, decided side by side in one process. The base is read from git at _CMO_BASE (git show, with
+# replacement objects disabled) and loaded under its own module name. The corpus is built from the guard's
+# own tables (the identity variables, the identity config keys, the -c and --config words, the declaration
+# and wrapper words) crossed with -c placements, environment prefixes, wrapper words and quoting, plus the
+# pinned forms of _CMO_PINNED; a core of those is also judged where the reader cannot parse it (an
+# unbalanced quote) and where it is too long to read (past _CMTIDN_READ_LIMIT). Every command is judged with
+# the payload cwd in a real scratch repository, one per module, under the fixture HOME and
+# GIT_CONFIG_NOSYSTEM=1 that the fixture lifecycle sets. A command the base denies (or raises on) that this
+# tree does not deny is a failure unless _CMO_NEWLY_ALLOWED names that exact command with its reason; an
+# entry the corpus does not hold, or one that no longer differs, is a stale failure. The forms the change
+# exists to deny (_CMO_NEW_DENIES) must deny here, so a revert of the change turns the oracle red, and so
+# does deleting an allowlist entry (the cmo-mutant checks).
+_CMO_BASE = "189a280e388d6a2e6d3d1b59b3616d32dac3ad51"
+_CMO_HOOK_PATH = ".aiqt/core/hooks/scripts/aiqt_hooks.py"
+# AI identity values: a name, an address, a two-word name (always quoted) and a model name.
+_CMO_AI_VALUES = ("Claude", "noreply@anthropic.com", "Codex Bot", "gpt-4o")
+# The fewest commands the generated corpus may hold, so a table read that went empty cannot pass vacuously.
+_CMO_MIN_CORPUS = 3000
+# Commands this tree allows that the base denies: each an exact command and the reason it is safe to allow.
+# Empty: the corpus holds no command that the base denies and this tree allows.
+_CMO_NEWLY_ALLOWED = {}
+# The forms the change exists to deny, which the base allows: author.* and committer.* config pairs (by -c,
+# git config and git clone --config or -c), EMAIL and += assignments, an alias that carries -c, a
+# default-value expansion and an option value spelled as a read option.
+_CMO_NEW_DENIES = (
+    "git -c author.name=Claude commit -m x",
+    "git -c committer.email=noreply@anthropic.com commit -m x",
+    "git -c Author.Name=Claude commit -m x",
+    "EMAIL=noreply@anthropic.com git commit -m x",
+    "export EMAIL=noreply@anthropic.com; git commit -m x",
+    "GIT_AUTHOR_NAME+=Claude git commit -m x",
+    "git config author.name Claude; git commit -m x",
+    "git config set committer.name Claude",
+    "git clone --config author.name=Claude . c2",
+    "git clone -qcauthor.name=Claude . c2",
+    "git config alias.ci '-c author.name=Claude commit'; git ci",
+    ': "${EMAIL:=noreply@anthropic.com}"; export EMAIL; git commit -m x',
+    "git config --comment -l author.name Claude",
+)
+# Forms that set, or look as if they set, an identity through git or the shell, pinned exactly: the -c,
+# --config-env, GIT_CONFIG_* and include forms, git config with scopes, options and option values spelled as
+# read options, git clone config words and short option clusters, git aliases (git-quoted values included),
+# EMAIL and identity variables by assignment, declaration, nameref, default-value expansion (in a word, a
+# redirect target, a here-string, a heredoc body, nested), wrappers, functions and reserved words, run lines,
+# substitutions and fast-import, and read-only controls that only name an identity.
+_CMO_PINNED = (
+    "V=Claude git --config-env=author.name=V commit -m x",
+    "V=Claude git --config-env author.name=V commit -m x",
+    "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=author.name GIT_CONFIG_VALUE_0=Claude git commit -m x",
+    "GIT_CONFIG_PARAMETERS=\"'author.name'='Claude'\" git commit -m x",
+    "printf '[author]\\n\\tname = Claude\\n' >> .git/config; git commit -m x",
+    "env -S'GIT_AUTHOR_NAME=Claude' git commit -m x",
+    "env -S'EMAIL=noreply@anthropic.com' git commit -m x",
+    "env -S\"EMAIL=claude@anthropic.com\" git commit -m x",
+    "env -S 'EMAIL=noreply@anthropic.com' git commit -m x",
+    "env -S 'GIT_AUTHOR_NAME=Claude' git commit -m x",
+    "env --split-string 'EMAIL=noreply@anthropic.com' git commit -m x",
+    "env --split-string='EMAIL=noreply@anthropic.com' git commit -m x",
+    "env -S 'git -c author.name=Claude commit -m x'",
+    "for EMAIL in noreply@anthropic.com; do export EMAIL; git commit -m x; done",
+    "read EMAIL <<< noreply@anthropic.com; export EMAIL; git commit -m x",
+    "printf -v EMAIL noreply@anthropic.com; export EMAIL; git commit -m x",
+    "bash -c 'git -c author.name=Claude commit -m x'",
+    "eval 'git -c author.name=Claude commit -m x'",
+    "git -cauthor.name=Claude commit -m x",
+    "EMAIL[0]=noreply@anthropic.com git commit -m x",
+    "EMAIL[0]=noreply@anthropic.com; export EMAIL; git commit -m x",
+    "declare -x EMAIL[0]=noreply@anthropic.com; git commit -m x",
+    "git config author.name --comment hi Claude",
+    "git config set author.name --comment=hi Claude",
+    "git config set author.name --comment hi Claude",
+    "git config author.name --global Claude",
+    "git -c committer.name = Claude commit -m x",
+    "f() { git \"$@\"; }; f -c author.name=Claude commit -m x",
+    "f() { git \"$@\"; }; f config author.name Claude",
+    "g() { git \"$@\"; }; g -C . config author.name Claude",
+    "alias g=git; g -c committer.name=Claude commit -m x",
+    "git -c user.name=Other -c author.name=Claude commit -m x",
+    "git -c 'author'.name=Claude commit -m x",
+    "git -c AUTHOR.NAME=Claude commit -m x",
+    "git config --global author.name Claude; git commit -m x",
+    "git config --file .git/config author.name Claude",
+    "git config --file=.git/config author.name Claude",
+    "git config -f.git/config author.name Claude",
+    "git config --local author.name Claude",
+    "git config --system author.name Claude",
+    "git config --worktree author.name Claude",
+    "git config --add author.name Claude",
+    "git config --replace-all Author.Name Claude",
+    "git config set --global author.name Claude",
+    "git config set -- author.name Claude",
+    "git -C . config author.name Claude",
+    "git -P config author.name Claude",
+    "git --no-pager config author.name Claude",
+    "/usr/bin/git config author.name Claude",
+    "sudo git config author.name Claude",
+    "git config set --comment -e author.name Claude",
+    "git config set --comment --list author.name Claude",
+    "git config set --value -l author.name Claude",
+    "git config set --all --value=x --comment -e author.name Claude",
+    "git config --comment -l User.Name Claude",
+    "git config --comm -e User.Name Claude",
+    "git config --co -l author.name Claude",
+    "git config set --v -l author.name Claude",
+    "git config -zf -l author.name Claude",
+    "git config -f -l author.name Claude",
+    "git config author.name Claude -l",
+    "git config author.name Claude --get",
+    "git config author.name Claude -- -l",
+    "git config --type -l author.name Claude",
+    "git config --default --get author.name Claude",
+    "git config foo.name Claude; git config --rename-section foo author",
+    "git config foo.name Claude; git config rename-section foo author",
+    "git config alias.ci '-c user.name=Claude commit'; git ci",
+    "git -c alias.ci='-c author.name=Claude commit' ci",
+    "git -c alias.ci='-c user.name=Claude commit' ci",
+    "git config alias.ci '-c author.\"name\"=Claude commit'; git ci",
+    "git config alias.ci '-c author.name=Cl\"au\"de commit'; git ci",
+    "git -c 'alias.ci=-c author.name=Cl\\aude commit' ci",
+    "git -c alias.ci='-c user.\"email\"=claude@anthropic.com commit' ci",
+    "git clone -c 'alias.ci=-c author.\"name\"=Claude commit' . cl; git -C cl ci",
+    "git clone --config alias.ci='-c author.name=Claude commit' . c2",
+    "git -c alias.cfg=config cfg author.name Claude",
+    "git config alias.ci 'commit --author=\"Claude <c@x>\"'; git ci",
+    "git config alias.who \"log --author=Claude\"",
+    "git clone --config=author.name=Claude . c2",
+    "git clone --conf author.name=Claude . c2",
+    "git clone --confi=Author.Email=noreply@anthropic.com . c2",
+    "git clone --config user.name=Claude . c2",
+    "git clone -c author.name=Claude . c2",
+    "git clone -c Author.Name=Claude . c2",
+    "git clone -q -cauthor.name=Claude . c2; git -C c2 commit -m x",
+    "git clone -cuser.name=Claude . c2",
+    "git clone -q4cauthor.name=Claude . c2",
+    "git clone -6qcauthor.name=Claude . c2",
+    "git clone -ocauthor.name=Claude . c2",
+    "git clone --c=author.name=Claude . c2",
+    "git clone -qcCommitter.Email=noreply@anthropic.com . c2",
+    "git clone -c core.autocrlf=false . c2",
+    "git rebase -x 'git clone -cauthor.name=Claude . c2' HEAD",
+    "git rebase -x 'EMAIL=noreply@anthropic.com git commit --amend --no-edit' HEAD~1",
+    "git submodule foreach 'git -c author.name=Claude commit -m x'",
+    "git bisect run sh -c 'EMAIL=noreply@anthropic.com git commit -m x'",
+    "declare -n R=EMAIL; export R=noreply@anthropic.com; git commit -m x",
+    "declare -n R=GIT_AUTHOR_NAME; export R=Claude; git commit -m x",
+    "builtin export EMAIL=noreply@anthropic.com; git commit -m x",
+    "command export EMAIL=noreply@anthropic.com; git commit -m x",
+    "set -a; EMAIL=noreply@anthropic.com; git commit -m x",
+    "time -p EMAIL=noreply@anthropic.com git commit -m x",
+    "f() { local -x EMAIL=noreply@anthropic.com; git commit -m x; }; f",
+    "echo $(EMAIL=noreply@anthropic.com git commit -m x)",
+    "echo `EMAIL=noreply@anthropic.com git commit -m x`",
+    "cat <(EMAIL=noreply@anthropic.com git commit -m x)",
+    "case x in x) EMAIL=noreply@anthropic.com git commit -m x;; esac",
+    "function f { EMAIL=noreply@anthropic.com git commit -m x; }",
+    "{ EMAIL=noreply@anthropic.com git commit -m x; }",
+    "! EMAIL=noreply@anthropic.com git commit -m x",
+    "sudo -u ci EMAIL=noreply@anthropic.com git commit -m x",
+    "typeset -x EMAIL=noreply@anthropic.com; git commit -m x",
+    "declare -gx EMAIL=noreply@anthropic.com; git commit -m x",
+    "readonly EMAIL=noreply@anthropic.com; git commit -m x",
+    "export -- EMAIL=noreply@anthropic.com; git commit -m x",
+    "env -- EMAIL=noreply@anthropic.com git commit -m x",
+    "EMAIL=${USER:-u}@anthropic.com git commit -m x",
+    ': "${GIT_AUTHOR_NAME=Claude}"; export GIT_AUTHOR_NAME; git commit -m x',
+    ': "${GIT_COMMITTER_EMAIL:=noreply@anthropic.com}"; git commit -m x',
+    'set -a; : > "${EMAIL:=noreply@anthropic.com}.txt"; git commit -m x',
+    'export GIT_AUTHOR_NAME=; : 2> "${GIT_AUTHOR_NAME:=Claude}.log"; git commit -m x',
+    '{ :; } 2>"${GIT_AUTHOR_EMAIL:=noreply@anthropic.com}"; git commit -m x',
+    'exec 3> "${EMAIL:=noreply@anthropic.com}.log"; git commit -m x',
+    ': <<< "${EMAIL:=noreply@anthropic.com}"; git commit -m x',
+    ": <<EOF\n${EMAIL:=noreply@anthropic.com}\nEOF\ngit commit -m x",
+    ": <<EOF\n${GIT_COMMITTER_NAME:=Claude}\nEOF\ngit commit -m x",
+    ': "${EMAIL:=${USER:-u}@anthropic.com}"; git commit -m x',
+    ': "${GIT_AUTHOR_NAME:=${X-}Claude}"; git commit -m x',
+    'for w in "${EMAIL:=noreply@anthropic.com}"; do git commit -m x; done',
+    '[[ -n "${EMAIL:=noreply@anthropic.com}" ]]; git commit -m x',
+    ': > "$(git -c author.name=Claude commit -m x)x.log"',
+    ': > "$(git commit --author="Claude <c@x>" -m x)x.log"',
+    "printf 'commit refs/heads/main\\ncommitter Claude <c@x> 0 +0000\\n' | git fast-import",
+    "git -c $'author.name=Cl\\x61ude' commit -m x",
+    "cat <<EOF > env.sh\nexport EMAIL=noreply@anthropic.com\nEOF",
+    "cat <<'EOF' > env.sh\nexport EMAIL=noreply@anthropic.com\nEOF",
+    "git commit -m 'EMAIL=noreply@anthropic.com is the bot address'",
+    "git commit -m 'author.name=Claude'",
+    "git commit -m 'set author.name Claude'",
+    "git tag -m 'EMAIL=noreply@anthropic.com' v1",
+    "git notes add -m 'author.name=Claude'",
+    "echo EMAIL=noreply@anthropic.com",
+    "python3 -c 'print(1)' EMAIL=noreply@anthropic.com",
+    "grep -rn author.name .claude/",
+    "grep -rln Author.Email .claude/settings.json",
+    "rg -n committer.email CLAUDE.md AGENTS.md",
+    "grep user.email CLAUDE.md",
+    "grep config author.name Claude",
+    "grep -c author.name=Claude commits.log",
+    "grep -lc 'author.email=claude@anthropic.com' docs/x.md",
+    "wc -c author.name=Claude",
+    "ls -lc author.name=Claude.txt",
+    "git config --get-regexp author.name claude",
+    "git config get --all author.name claude",
+    "git config list --show-origin author.name claude",
+    "git log -1 --format='%an' -- author.email claude.txt",
+    "git log --author=Claude -1",
+    "git shortlog --author=Claude",
+    "git var GIT_AUTHOR_IDENT",
+    "printenv EMAIL",
+    "echo ${EMAIL:-noreply@anthropic.com}",
+)
+
+
+def _cmo_quotings(value):
+    """The quoting forms of one shell word holding value: bare when it holds no space, then single- and
+    double-quoted."""
+    forms = ["'{}'".format(value), '"{}"'.format(value)]
+    return forms if " " in value else [value] + forms
+
+
+def _cmo_table_failures(mod):
+    """Failures when a name the corpus derives is not one the guard tables of mod read."""
+    out = []
+    for role in ("AUTHOR", "COMMITTER"):
+        for part in ("NAME", "EMAIL"):
+            if not mod.GIT_ENV_RE.match("GIT_{}_{}=x".format(role, part)):
+                out.append("(cmo-table-var) GIT_{}_{} is not an identity variable of GIT_ENV_RE".format(role, part))
+    if not mod.EMAIL_ENV_RE.match("EMAIL=x"):
+        out.append("(cmo-table-email) EMAIL is not read by EMAIL_ENV_RE")
+    for scope in ("user", "author", "committer"):
+        for part in ("name", "email"):
+            if not mod.IDENTITY_CONF_NAME_RE.fullmatch("{}.{}".format(scope, part)):
+                out.append("(cmo-table-key) {}.{} is not an IDENTITY_CONF_NAME_RE name".format(scope, part))
+    for name in ("_CMTIDN_GIT_WRAPPERS", "_CMTIDN_DECLARE_WORDS", "_CMTIDN_CONFIG_OPTS"):
+        if not getattr(mod, name, None):
+            out.append("(cmo-table-words) the guard table {} is missing or empty".format(name))
+    return out
+
+
+def _cmo_corpus(mod):
+    """(corpus, core): the sorted distinct oracle commands built from the guard tables of mod (this tree's
+    hook) and the pinned forms, and the core subset that is also judged unparsed and past the read limit."""
+    commit = "git commit -m x"
+    variables = ["GIT_{}_{}".format(role, part) for role in ("AUTHOR", "COMMITTER")
+                 for part in ("NAME", "EMAIL")] + ["EMAIL"]
+    keys = ["{}.{}".format(scope, part) for scope in ("user", "author", "committer") for part in ("name", "email")]
+    wrappers = sorted(mod._CMTIDN_GIT_WRAPPERS)
+    declares = sorted(mod._CMTIDN_DECLARE_WORDS)
+    config_opts = sorted(mod._CMTIDN_CONFIG_OPTS)
+    forms = set(_CMO_PINNED) | set(_CMO_NEW_DENIES)
+    core = []
+    for value in _CMO_AI_VALUES:
+        quoted = _cmo_quotings(value)
+        for var in variables:
+            for q in quoted:
+                assign = "{}={}".format(var, q)
+                shaped = ["{} {}".format(assign, commit), "{}+={} {}".format(var, q, commit),
+                          "export {}; {}".format(assign, commit), "{}; export {}; {}".format(assign, var, commit),
+                          "{} git -C . commit -m x".format(assign), "( {} {} )".format(assign, commit),
+                          "if true; then {} {}; fi".format(assign, commit), "true && {} {}".format(assign, commit)]
+                shaped += ["{} {}; {}".format(word, assign, commit) for word in declares]
+                shaped += ["{} {} {}".format(word, assign, commit) for word in wrappers]
+                forms.update(shaped)
+                if q is quoted[0] and value in _CMO_AI_VALUES[:2]:
+                    core.extend(shaped[:3])
+            forms.add(': "${{{}:={}}}"; export {}; {}'.format(var, value, var, commit))
+        for key in keys:
+            scope, part = key.split(".")
+            for spelled in (key, "{}.{}".format(scope.capitalize(), part.capitalize()), key.upper()):
+                for q in quoted:
+                    pair = "{}={}".format(spelled, q)
+                    shaped = ["git -c {} commit -m x".format(pair), "git -C . -c {} commit -m x".format(pair),
+                              "git -c commit.gpgsign=false -c {} commit -m x".format(pair),
+                              "git config {} {}; {}".format(spelled, q, commit),
+                              "git config --global {} {}".format(spelled, q),
+                              "git config set {} {}".format(spelled, q), "git config --add {} {}".format(spelled, q),
+                              "git config --file .git/config {} {}".format(spelled, q),
+                              "git config {}".format(pair), "echo {} {}".format(spelled, q),
+                              "git clone --config={} . c2".format(pair), "git clone -c{} . c2".format(pair),
+                              "git clone -qc{} . c2".format(pair)]
+                    shaped += ["git clone {} {} . c2".format(opt, pair) for opt in config_opts]
+                    shaped += ["{} git -c {} commit -m x".format(word, pair) for word in wrappers]
+                    shaped += ["{} git config {} {}".format(word, spelled, q) for word in wrappers]
+                    forms.update(shaped)
+                    if spelled == key and q is quoted[0] and value in _CMO_AI_VALUES[:2]:
+                        core.extend(shaped[:4])
+                forms.add("git -c '{}={}' commit -m x".format(spelled, value))
+                forms.add('git -c "{}={}" commit -m x'.format(spelled, value))
+                if " " not in value:
+                    forms.add("git -c 'alias.ci=-c {}={} commit' ci".format(spelled, value))
+                    forms.add("git config alias.ci '-c {}={} commit'; git ci".format(spelled, value))
+        ident = "Bot <{}>".format(value) if "@" in value else "{} <c@example.invalid>".format(value)
+        for q in _cmo_quotings(ident):
+            for prefix in ("--author", "--autho", "--auth", "--aut", "--au"):
+                forms.add("git commit {}={} -m x".format(prefix, q))
+                forms.add("git commit {} {} -m x".format(prefix, q))
+            forms.update("{} git commit --author={} -m x".format(word, q) for word in wrappers)
+        trailer = ['git commit -m fix -m "Co-Authored-By: {}"'.format(ident),
+                   "git commit -m 'fix\n\nCo-authored-by: {}'".format(ident),
+                   "git commit --author='{}' -m x".format(ident)]
+        forms.update(trailer)
+        if value in _CMO_AI_VALUES[:2]:
+            core.extend(trailer)
+    for command in list(core):
+        forms.add(command + " '")  # an unbalanced quote: the reader cannot parse it and the fallback decides
+        forms.add("cat <<'EOF'\nnote\nEOF\n" + command)
+        forms.add(command + "; echo done")
+    return sorted(forms), sorted(set(core))
+
+
+def _cmo_decider(handler, cwd):
+    """A memoised decide(command) for one commit_identity handler with the payload cwd at cwd: the
+    _decision value, or 'raised NAME' when the handler raises (never read as an allow)."""
+    cache = {}
+
+    def decide(command):
+        if command not in cache:
+            try:
+                cache[command] = _decision(handler, command, cwd=cwd)
+            except Exception as exc:  # the oracle reports a raise; it never reads one as a decision
+                cache[command] = "raised {}".format(type(exc).__name__)
+        return cache[command]
+    return decide
+
+
+def _cmo_findings(base_decide, tree_decide, corpus, allowed, must_deny):
+    """The oracle's failure messages: a corpus command the base denies (or raises on) that the tree does not
+    deny and that allowed does not name; an allowed entry the corpus does not hold or that no longer differs;
+    a must_deny form the tree does not deny."""
+    out = []
+    differ = set()
+    for command in corpus:
+        base = base_decide(command)
+        tree = tree_decide(command)
+        if (base == "deny" or base.startswith("raised")) and tree != "deny":
+            differ.add(command)
+            if command not in allowed:
+                out.append("(cmo-newly-allowed) the base decides {} and this tree decides {} for {!r}"
+                           .format(base, tree, command[:300]))
+    for command in sorted(allowed):
+        if command not in differ:
+            out.append("(cmo-allow-stale) the allowlist entry {!r} is not a corpus command that the base denies "
+                       "and this tree allows; remove it".format(command[:300]))
+    for command in must_deny:
+        tree = tree_decide(command)
+        if tree != "deny":
+            out.append("(cmo-new-deny) this tree decides {} for {!r}, a form the change exists to deny"
+                       .format(tree, command))
+    return out
+
+
+def _cmo_load_base(tmp):
+    """The hook module at _CMO_BASE, read with git show (replacement objects disabled) from this checkout and
+    loaded under its own module name. Raises on a git or import failure."""
+    root = str(repo_root())
+    shown = subprocess.run(["git", "--no-replace-objects", "-c", "safe.directory=" + root, "-C", root, "show",
+                            "{}:{}".format(_CMO_BASE, _CMO_HOOK_PATH)],
+                           capture_output=True, timeout=60, env=git_fixture_env(GIT_NO_REPLACE_OBJECTS="1"))
+    if shown.returncode != 0:
+        raise RuntimeError("git show {}:{} failed (rc={}): {}".format(
+            _CMO_BASE, _CMO_HOOK_PATH, shown.returncode, shown.stderr.decode("utf-8", "replace").strip()))
+    path = tmp / "cmo_base_hooks.py"
+    path.write_bytes(shown.stdout)
+    spec = importlib.util.spec_from_file_location("cmo_base_hooks", str(path))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _test_cmtidn_oracle(failures, tmp):
+    """(cmo-*) The commit_identity differential oracle (see the cmo comment above) and its mutation checks: a
+    revert of the change (the base decides as the tree) and a deleted allowlist entry each turn it red."""
+    try:
+        base_mod = _cmo_load_base(tmp)
+    except (OSError, RuntimeError, SyntaxError, ImportError, subprocess.SubprocessError) as exc:
+        failures.append("(cmo-load) could not load the base hook: {}: {}".format(type(exc).__name__, exc))
+        return
+    table = _cmo_table_failures(aiqt_hooks)
+    if table:
+        failures.extend(table)
+        return
+    corpus, core = _cmo_corpus(aiqt_hooks)
+    if len(corpus) < _CMO_MIN_CORPUS or not core:
+        failures.append("(cmo-corpus-size) the corpus holds {} commands and its core {}, fewer than {} and 1"
+                        .format(len(corpus), len(core), _CMO_MIN_CORPUS))
+        return
+    base_decide = _cmo_decider(base_mod.commit_identity, str(_init_repo(tmp / "cmo-base-repo")))
+    tree_decide = _cmo_decider(aiqt_hooks.commit_identity, str(_init_repo(tmp / "cmo-tree-repo")))
+    found = _cmo_findings(base_decide, tree_decide, corpus, _CMO_NEWLY_ALLOWED, _CMO_NEW_DENIES)
+    failures.extend(found)
+    # Past the read limit: each core command padded to one character more than the tree reads.
+    limit = aiqt_hooks._CMTIDN_READ_LIMIT
+    padded = [command + " " * (limit + 1 - len(command)) for command in core]
+    for command in padded:
+        base, tree = base_decide(command), tree_decide(command)
+        if (base == "deny" or base.startswith("raised")) and tree != "deny":
+            failures.append("(cmo-too-long) the base decides {} and this tree decides {} for {!r} padded past the "
+                            "read limit".format(base, tree, command.rstrip()))
+    # Mutation: a revert of the change, the base deciding in the tree's place, must turn the oracle red.
+    if not _cmo_findings(base_decide, base_decide, corpus, _CMO_NEWLY_ALLOWED, _CMO_NEW_DENIES):
+        failures.append("(cmo-mutant-revert) the oracle stays green when the base decides in the tree's place")
+    # Mutation: deleting an allowlist entry must turn the oracle red. Each real entry is deleted in turn, and a
+    # synthetic entry pins the mechanism while the allowlist is empty: a tree that newly allows the first
+    # command the base denies is green with that command allowlisted and red without it.
+    for command in sorted(_CMO_NEWLY_ALLOWED):
+        rest = {k: v for k, v in _CMO_NEWLY_ALLOWED.items() if k != command}
+        if not any(repr(command[:300]) in line
+                   for line in _cmo_findings(base_decide, tree_decide, corpus, rest, _CMO_NEW_DENIES)):
+            failures.append("(cmo-mutant-allow-entry) deleting the allowlist entry {!r} leaves the oracle green"
+                            .format(command[:300]))
+    victim = next((c for c in corpus if base_decide(c) == "deny" and c not in _CMO_NEW_DENIES), None)
+    if victim is None:
+        failures.append("(cmo-mutant-victim) the corpus holds no command the base denies")
+        return
+
+    def loosened(command):
+        return "allow" if command == victim else tree_decide(command)
+    with_entry = dict(_CMO_NEWLY_ALLOWED)
+    with_entry[victim] = "synthetic entry for the deletion mutant"
+    kept = _cmo_findings(base_decide, loosened, corpus, with_entry, _CMO_NEW_DENIES)
+    dropped = _cmo_findings(base_decide, loosened, corpus, _CMO_NEWLY_ALLOWED, _CMO_NEW_DENIES)
+    if any(repr(victim[:300]) in line for line in kept):
+        failures.append("(cmo-mutant-entry-kept) a newly allowed command named in the allowlist is still reported")
+    if not any(repr(victim[:300]) in line for line in dropped):
+        failures.append("(cmo-mutant-entry-dropped) deleting the allowlist entry of a newly allowed command "
+                        "leaves the oracle green")
+
+
 def _selftest_exit_code(failures, cannot_evaluate):
     """1 for any real failure, else 2 when a case could not be evaluated (a bound fired), else 0."""
     if failures:
@@ -30176,6 +30604,7 @@ def _main_isolated(monitor):
         _test_deadline_posture(failures, tmp)
         _test_cannot_evaluate_paths(failures, tmp)
         _test_reset_ancestry(failures, tmp)
+        _test_cmtidn_oracle(failures, tmp)
 
         # === write_scope_guard (wrtscp, EN-8): confine guarded-tool writes to a per-slice scope =========
         # declaration; hard-deny writes to the frozen floor and to other/nested repos as an un-lowerable
