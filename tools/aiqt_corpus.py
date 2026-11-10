@@ -50,6 +50,7 @@ if tuple(sys.version_info[:2]) < (3, 14):
 
 import datetime
 import re
+import stat
 import subprocess
 from collections.abc import Iterable, Iterator
 from pathlib import Path
@@ -154,6 +155,65 @@ def is_markdown_target(
     )
 
 
+def _cannot_evaluate(path: Path | str, exc: OSError) -> OSError:
+    """Return a plain OSError naming ``path`` and the reason from ``exc``.
+
+    Deliberately not a FileNotFoundError subclass, even for a dangling symlink,
+    so a caller that treats FileNotFoundError as absence cannot mistake this
+    refusal for a missing input.
+    """
+    return OSError("cannot evaluate %s: %s" % (path, exc.strerror or exc))
+
+
+def _walk_error(exc: OSError) -> None:
+    """``Path.walk`` error hook: an unreadable directory refuses the whole walk."""
+    raise _cannot_evaluate(exc.filename or "a directory in the walk", exc) from exc
+
+
+def _input_kind(path: Path) -> str | None:
+    """Classify a declared input: ``None`` (absent), ``"file"`` or ``"dir"``.
+
+    Path.is_file() and is_dir() return False on a permission error, a dangling
+    symlink or a symlink loop, so an input that is present but cannot be
+    inspected used to read as absent and was silently dropped. The first look
+    is a no-follow lstat: a missing path under an existing directory is absent;
+    a regular file or a directory, reached directly or through a symlink that
+    resolves, is that type; anything else (any other OSError, a dangling or
+    looping symlink, a FIFO, socket or device) raises OSError naming the path.
+    """
+    try:
+        st = path.lstat()
+    except FileNotFoundError as exc:
+        # A missing component is absent only when the nearest existing
+        # ancestor is a usable directory, not a dangling symlink.
+        for parent in path.parents:
+            try:
+                parent_st = parent.lstat()
+            except FileNotFoundError:
+                continue
+            except OSError as parent_exc:
+                raise _cannot_evaluate(path, parent_exc) from exc
+            if stat.S_ISLNK(parent_st.st_mode):
+                try:
+                    parent.stat()
+                except OSError as parent_exc:
+                    raise _cannot_evaluate(path, parent_exc) from exc
+            break
+        return None
+    except OSError as exc:
+        raise _cannot_evaluate(path, exc) from exc
+    if stat.S_ISLNK(st.st_mode):
+        try:
+            st = path.stat()
+        except OSError as exc:
+            raise _cannot_evaluate(path, exc) from exc
+    if stat.S_ISREG(st.st_mode):
+        return "file"
+    if stat.S_ISDIR(st.st_mode):
+        return "dir"
+    raise OSError("cannot evaluate %s: not a regular file or directory" % path)
+
+
 def iter_targets(
     paths: Iterable[str | Path],
     *,
@@ -170,6 +230,18 @@ def iter_targets(
 
     Paths are resolved before deduplication. Order across the input is
     preserved.
+
+    An entry missing under a usable directory is skipped. An entry, or a
+    target-named entry found while walking a directory, that is present but
+    cannot be inspected or listed (a permission error, a dangling or looping
+    symlink, a FIFO or other non-regular type) raises OSError naming the path
+    instead of being dropped, so an unreadable input never reads as an empty or
+    partial corpus.
+
+    The walk does not enter a directory named in ``exempt_dirs``, and a
+    directory entry with an exempt part in its resolved path is not walked at
+    all: nothing there can be a target, so a directory there that cannot be
+    listed does not refuse the scan.
     """
     targets: list[Path] = []
     seen: set[Path] = set()
@@ -178,8 +250,11 @@ def iter_targets(
     exempt_files_set = set(exempt_files)
 
     for raw in paths:
+        kind = _input_kind(Path(raw))
+        if kind is None:
+            continue
         p = Path(raw).resolve()
-        if p.is_file():
+        if kind == "file":
             if is_target(
                 p,
                 suffixes=suffixes_set,
@@ -189,16 +264,24 @@ def iter_targets(
                 if p not in seen:
                     targets.append(p)
                     seen.add(p)
-        elif p.is_dir():
-            for f in p.rglob("*"):
-                if not f.is_file():
-                    continue
-                if is_target(
-                    f,
-                    suffixes=suffixes_set,
-                    exempt_dirs=exempt_dirs_set,
-                    exempt_files=exempt_files_set,
-                ):
+        elif not any(part in exempt_dirs_set for part in p.parts):
+            # No file under an exempt directory can pass is_target, so the
+            # walk never enters one: a directory it cannot list there is not
+            # part of the corpus and must not refuse the scan. A root whose
+            # resolved path has an exempt part is not walked at all.
+            for dirpath, dirnames, filenames in p.walk(on_error=_walk_error):
+                dirnames[:] = [d for d in dirnames if d not in exempt_dirs_set]
+                for name in filenames:
+                    f = dirpath / name
+                    if not is_target(
+                        f,
+                        suffixes=suffixes_set,
+                        exempt_dirs=exempt_dirs_set,
+                        exempt_files=exempt_files_set,
+                    ):
+                        continue
+                    if _input_kind(f) != "file":
+                        continue
                     if f not in seen:
                         targets.append(f)
                         seen.add(f)
@@ -246,14 +329,26 @@ def iter_scan_roots_markdown(
     ``repo_root`` is required: this helper carries no module-level root default,
     so a caller (including one whose ``--root`` flag rebinds its own root) always
     passes the root explicitly.
+
+    A scan root missing under a usable directory is skipped. A scan root that
+    is present but cannot be inspected (a permission error, a dangling or
+    looping symlink, a FIFO or other non-regular type), or a directory under it
+    that cannot be listed, raises OSError naming the path instead of being
+    dropped. Exempt directories are not pruned here either: a scan root covers
+    every directory beneath it, so one it cannot list refuses the scan.
     """
     files: set[Path] = set()
     for p in paths:
         path = repo_root / p
-        if path.is_file() and path.suffix == ".md":
+        kind = _input_kind(path)
+        if kind == "file" and path.suffix == ".md":
             files.add(path)
-        elif path.is_dir():
-            files.update(path.rglob("*.md"))
+        elif kind == "dir":
+            # Every entry named *.md, as the former rglob("*.md") listed them.
+            for dirpath, dirnames, filenames in path.walk(on_error=_walk_error):
+                for name in (*dirnames, *filenames):
+                    if name.endswith(".md"):
+                        files.add(dirpath / name)
     return sorted(files)
 
 
