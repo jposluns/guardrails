@@ -2147,7 +2147,7 @@ source-path = ".aiqt/core/rules/quali-findings-are-fixed-not-argued.md"
 start-line = 17
 end-line = 17
 canonical-text = "A finding raised by an adversarial verification pass is fixed, not argued away."
-source-digest = "cb878ce64e396647e5d8d7a3c7a882106ff6800fdbcdef900900d68a95091ab4"
+source-digest = "b6b539ab65757b9374193e5a7a8d016c7b7e31c4d88445a07969bab8ecc9f595"
 
 [[clause]]
 clause-id = "fndfix.2"
@@ -2156,7 +2156,7 @@ source-path = ".aiqt/core/rules/quali-findings-are-fixed-not-argued.md"
 start-line = 17
 end-line = 19
 canonical-text = "A real blocker or major\nfinding from any independent verifier blocks the change, fail-closed, until it is fixed or the maintainer\nexplicitly reclassifies it with a recorded rationale."
-source-digest = "cb878ce64e396647e5d8d7a3c7a882106ff6800fdbcdef900900d68a95091ab4"
+source-digest = "b6b539ab65757b9374193e5a7a8d016c7b7e31c4d88445a07969bab8ecc9f595"
 
 [[clause]]
 clause-id = "fndfix.3"
@@ -2165,7 +2165,7 @@ source-path = ".aiqt/core/rules/quali-findings-are-fixed-not-argued.md"
 start-line = 17
 end-line = 19
 canonical-text = "A real blocker or major\nfinding from any independent verifier blocks the change, fail-closed, until it is fixed or the maintainer\nexplicitly reclassifies it with a recorded rationale."
-source-digest = "cb878ce64e396647e5d8d7a3c7a882106ff6800fdbcdef900900d68a95091ab4"
+source-digest = "b6b539ab65757b9374193e5a7a8d016c7b7e31c4d88445a07969bab8ecc9f595"
 
 [[clause]]
 clause-id = "fndfix.4"
@@ -2174,7 +2174,16 @@ source-path = ".aiqt/core/rules/quali-findings-are-fixed-not-argued.md"
 start-line = 17
 end-line = 19
 canonical-text = "A real blocker or major\nfinding from any independent verifier blocks the change, fail-closed, until it is fixed or the maintainer\nexplicitly reclassifies it with a recorded rationale."
-source-digest = "cb878ce64e396647e5d8d7a3c7a882106ff6800fdbcdef900900d68a95091ab4"
+source-digest = "b6b539ab65757b9374193e5a7a8d016c7b7e31c4d88445a07969bab8ecc9f595"
+
+[[clause]]
+clause-id = "fndfix.5"
+corpus-id = "fndfix"
+source-path = ".aiqt/core/rules/quali-findings-are-fixed-not-argued.md"
+start-line = 19
+end-line = 22
+canonical-text = "A verifier finding may be dismissed as a duplicate\nof another only when the dismissal names the kept finding and shows that every line and claim the\ndismissed finding cites is covered by the kept one; otherwise the dismissal is refused and the finding\nstays open."
+source-digest = "b6b539ab65757b9374193e5a7a8d016c7b7e31c4d88445a07969bab8ecc9f595"
 
 [[clause]]
 clause-id = "goalfd.1"
