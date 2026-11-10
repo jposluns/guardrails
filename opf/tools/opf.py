@@ -2902,73 +2902,89 @@ def _watchdog_real_sigint_call(label, body):
 
     Nothing is changed before the try, so an exception at any point of the
     setup still reaches the restore. The setup blocks SIGINT before it swaps
-    the handler, so no SIGINT reaches a half-made state. The restore
-    (_watchdog_restore_sigint) blocks SIGINT before it puts the handler back
-    and redoes both steps if a KeyboardInterrupt arrives first, so a SIGINT
-    arriving during the restore is held until the handler is the caller's
-    again; only then does the caller's mask come back."""
+    the handler, so no SIGINT reaches a half-made state.
+
+    The restore runs in this function's own finally, never in a function it
+    calls: Python handles a pending signal at a function's entry, before any
+    try in that function is entered, so a SIGINT handled at the entry of a
+    separate restore function would raise a KeyboardInterrupt that no
+    restore catches, and leave Python's handler installed. Python's handler
+    stays installed until the handler is put back, so a SIGINT that arrives
+    once the body is done and before then raises a KeyboardInterrupt out of
+    one of the restore's calls (signal.signal checks for a pending signal
+    before it changes anything). Each attempt therefore blocks SIGINT first
+    and is redone when a KeyboardInterrupt ends it early; once the block has
+    taken effect in this thread a further SIGINT sent to this thread stays
+    pending instead, so the redo is needed at most once for it. Restoring
+    the mask last releases a held SIGINT to the caller's own handler (or
+    discards it, when that handler is SIG_IGN). The mask restore is redone
+    the same way: a SIGINT another thread receives is still handled in this
+    one, under the caller's handler once that is back, and when that handler
+    is Python's it can raise a KeyboardInterrupt at the mask restore's entry,
+    before the mask changes. A KeyboardInterrupt caught on the way is raised
+    again once both are back. Stated limit: a second SIGINT handled in the
+    few bytecodes between catching the first KeyboardInterrupt and the
+    redo's call (the except clause and the loop's jump back) still escapes
+    the restore."""
     import signal
     prior = signal.getsignal(signal.SIGINT)
     assert prior is not None, (
         "SIGINT carries a handler Python did not install and cannot restore: " + label)
     prior_mask = signal.pthread_sigmask(signal.SIG_BLOCK, ())
+    interrupted = None
     try:
         signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT})
         signal.signal(signal.SIGINT, signal.default_int_handler)
         signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGINT})
         return body()
     finally:
-        _watchdog_restore_sigint(prior, prior_mask)
-
-
-def _watchdog_restore_sigint(prior, prior_mask):
-    """Put back the SIGINT handler `prior`, then the signal mask `prior_mask`.
-
-    Python's KeyboardInterrupt handler stays installed until the handler is
-    put back, so a SIGINT arriving before then raises a KeyboardInterrupt at
-    the next bytecode boundary, out of either call here included
-    (signal.signal checks for a pending signal before it changes anything).
-    Each attempt therefore blocks SIGINT first and is redone when a
-    KeyboardInterrupt ends it early; once the block has taken effect in this
-    thread a further SIGINT stays pending instead, so the redo is needed at
-    most once for a SIGINT sent to this thread. Restoring the mask last
-    releases a held SIGINT to the caller's own handler (or discards it, when
-    that handler is SIG_IGN), and a KeyboardInterrupt caught on the way is
-    raised again once both are back. Stated limit: a second SIGINT handled
-    in the few bytecodes between catching the first KeyboardInterrupt and
-    the redo's call (the except clause and the loop's jump back) still
-    escapes the restore; one SIGINT at any point does not."""
-    import signal
-    interrupted = None
-    while True:
-        try:
-            signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT})
-            signal.signal(signal.SIGINT, prior)
-            break
-        except KeyboardInterrupt as exc:
-            interrupted = exc
-    signal.pthread_sigmask(signal.SIG_SETMASK, prior_mask)
-    if interrupted is not None:
-        raise interrupted
+        while True:
+            try:
+                signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT})
+                signal.signal(signal.SIGINT, prior)
+                break
+            except KeyboardInterrupt as exc:
+                interrupted = exc
+        while True:
+            try:
+                signal.pthread_sigmask(signal.SIG_SETMASK, prior_mask)
+                break
+            except KeyboardInterrupt as exc:
+                interrupted = exc
+        if interrupted is not None:
+            raise interrupted
 
 
 def _watchdog_sigint_restore_case():
     """Compare the SIGINT handler and signal mask on entry to and on exit from
     _watchdog_real_sigint_call, for each entry state (Python's handler, SIG_IGN
     or a Python function, with SIGINT unblocked, blocked, or blocked and
-    pending), each way the body ends (it returns 0, returns a failure, raises,
-    or is ended by a real SIGINT) and, separately, with one SIGINT sent to
-    this thread just before each signal.signal or signal.pthread_sigmask call
-    the setup and the restore make, a SIGINT arriving just before the handler
-    restore included. Runs in its own fixture process: it replaces those two
-    functions on the signal module while it runs and puts them back after.
-    Returns EXIT_OK when every exit state matches its entry state, every
-    uninterrupted run returns or raises what its body did, and every run whose
-    injected SIGINT raised a KeyboardInterrupt ends in one, else EXIT_FINDING."""
+    pending) and each way the body ends (it returns 0, returns a failure,
+    raises, or is ended by a real SIGINT): once with no SIGINT sent, then with
+    one SIGINT at one point of each run, in three passes. The first pass
+    sends it to this thread just before the Nth signal.signal or
+    signal.pthread_sigmask call the setup and the restore make. The second
+    sends it to this thread from a profile hook at the Nth profile event of
+    the call (the entry and return of each Python function, and the start
+    and end of each builtin call, in every frame from the call's own entry to
+    its return), so it also lands after the body has ended and before the
+    restore's first call, and at the entry of every function the call makes.
+    The third runs the installed Python handler itself at the Nth profile
+    event, as a SIGINT another thread receives is handled, whatever this
+    thread's mask holds. Each pass raises N until a run sends no SIGINT, so
+    every later N runs as the run with none sent did. Runs in its own
+    fixture process: it replaces those two functions on the signal module
+    and installs the profile hook while it runs, and puts them back after.
+    Returns EXIT_OK when every exit state matches its entry state, every run
+    that sent no SIGINT returns or raises what its body did, every run whose
+    SIGINT raised a KeyboardInterrupt ends in one, and every other run ends
+    in its body's outcome or a KeyboardInterrupt; else EXIT_FINDING, with a
+    failure line that counts each kind of fault."""
     import signal
     real_signal = signal.signal
     real_mask = signal.pthread_sigmask
     raise_sigint = signal.raise_signal
+    own_code = _watchdog_sigint_restore_case.__code__
 
     def custom(signum, frame):
         return None
@@ -2991,71 +3007,125 @@ def _watchdog_sigint_restore_case():
         return "returned after its own SIGINT"
 
     expected = {"pass": EXIT_OK, "fail": EXIT_FINDING}
-    # [calls made, the call to send the SIGINT before, whether that SIGINT
-    # raised a KeyboardInterrupt]: one that did must end the run, never be
-    # swallowed by the restore.
-    calls = [0, None, False]
+    # The current run's injection: its pass, the signal calls or profile
+    # events counted so far, the one to send the SIGINT at (None sends none),
+    # whether it was sent, and whether it raised a KeyboardInterrupt there:
+    # one that did must end the run, never be swallowed by the restore.
+    shot = {"pass": None, "count": 0, "at": None, "sent": False, "raised": False}
+
+    def fire():
+        shot["count"] += 1
+        if shot["count"] == shot["at"]:
+            shot["sent"] = True
+            try:
+                if shot["pass"] != "handler":
+                    raise_sigint(signal.SIGINT)
+                elif callable(signal.getsignal(signal.SIGINT)):
+                    # A SIGINT another thread receives: its Python handler
+                    # runs here whatever this thread's mask holds.
+                    signal.getsignal(signal.SIGINT)(signal.SIGINT, None)
+            except KeyboardInterrupt:
+                shot["raised"] = True
+                raise
 
     def counting(real):
         def call(*args):
-            calls[0] += 1
-            if calls[0] == calls[1]:
-                try:
-                    raise_sigint(signal.SIGINT)
-                except KeyboardInterrupt:
-                    calls[2] = True
-                    raise
+            if shot["pass"] == "call":
+                fire()
             return real(*args)
         return call
 
-    faults = []
+    def profile(frame, event, arg):
+        # The case's own frame installs and removes this hook; every other
+        # frame it sees belongs to the call under test.
+        if frame.f_code is not own_code:
+            fire()
+
+    # Each kind of fault, with the runs that showed it in the order found.
+    faults = {}
+    runs = 0
+    # A bound on N far above what any pass reaches (Python 3.14.4 needed 8
+    # signal calls and 133 profile events at most), so a pass that never
+    # stops sending ends as a fault instead of looping.
+    limit = {"call": 64, "profile": 2048, "handler": 2048}
+    sends = {"call": "SIGINT before signal call", "profile": "SIGINT at profile event",
+             "handler": "handler run at profile event"}
+    prior_profile = sys.getprofile()
     try:
         signal.signal = counting(real_signal)
         signal.pthread_sigmask = counting(real_mask)
-        # Index 0 is the uninjected run; 1 to 13 cover the setup's four
-        # calls, the restore's three, and a redo of the restore, with room.
-        for name, handler, blocked, pending in entries:
-            for ending in ("pass", "fail", "raise", "interrupt"):
-                for inject in range(14):
-                    real_mask(signal.SIG_BLOCK, {signal.SIGINT})
-                    real_signal(signal.SIGINT, signal.SIG_IGN)
-                    real_signal(signal.SIGINT, handler)
-                    if pending:
-                        raise_sigint(signal.SIGINT)
-                    if not blocked:
-                        real_mask(signal.SIG_UNBLOCK, {signal.SIGINT})
-                    entry = (signal.getsignal(signal.SIGINT),
-                             signal.SIGINT in real_mask(signal.SIG_BLOCK, ()))
-                    if entry != (handler, blocked) or pending != (
-                            signal.SIGINT in signal.sigpending()):
-                        faults.append("%s entry state not established: %r" % (name, entry))
-                        continue
-                    calls[:] = [0, inject or None, False]
-                    try:
-                        outcome = _watchdog_real_sigint_call(
-                            name, lambda: body(ending))
-                    except KeyboardInterrupt:
-                        outcome = "KeyboardInterrupt"
-                    except RuntimeError:
-                        outcome = "RuntimeError"
-                    calls[1] = None
-                    after = (signal.getsignal(signal.SIGINT),
-                             signal.SIGINT in real_mask(signal.SIG_BLOCK, ()))
-                    want = ("KeyboardInterrupt" if pending or ending == "interrupt"
-                            else "RuntimeError" if ending == "raise" else expected[ending])
-                    if after != entry:
-                        faults.append("%s entry, body %s, SIGINT before call %s: handler"
-                                      " and blocked %r on exit, %r on entry (outcome %r)"
-                                      % (name, ending, inject or "none", after, entry,
-                                         outcome))
-                    elif not inject and outcome != want:
-                        faults.append("%s entry, body %s: outcome %r, wanted %r"
-                                      % (name, ending, outcome, want))
-                    elif calls[2] and outcome != "KeyboardInterrupt":
-                        faults.append("%s entry, body %s, SIGINT before call %s: its"
-                                      " KeyboardInterrupt was swallowed (outcome %r)"
-                                      % (name, ending, inject, outcome))
+        for kind in ("call", "profile", "handler"):
+            point = sends[kind]
+            for name, handler, blocked, pending in entries:
+                for ending in ("pass", "fail", "raise", "interrupt"):
+                    inject = 0
+                    while True:
+                        real_mask(signal.SIG_BLOCK, {signal.SIGINT})
+                        real_signal(signal.SIGINT, signal.SIG_IGN)
+                        real_signal(signal.SIGINT, handler)
+                        if pending:
+                            raise_sigint(signal.SIGINT)
+                        if not blocked:
+                            real_mask(signal.SIG_UNBLOCK, {signal.SIGINT})
+                        entry = (signal.getsignal(signal.SIGINT),
+                                 signal.SIGINT in real_mask(signal.SIG_BLOCK, ()))
+                        if entry != (handler, blocked) or pending != (
+                                signal.SIGINT in signal.sigpending()):
+                            faults.setdefault("entry state not established", []).append(
+                                "%s entry: %r" % (name, entry))
+                            break
+                        shot.update({"pass": kind, "count": 0, "at": inject or None,
+                                     "sent": False, "raised": False})
+                        runs += 1
+                        try:
+                            if kind != "call":
+                                sys.setprofile(profile)
+                            try:
+                                outcome = _watchdog_real_sigint_call(
+                                    name, lambda: body(ending))
+                            finally:
+                                sys.setprofile(prior_profile)
+                        except KeyboardInterrupt:
+                            outcome = "KeyboardInterrupt"
+                        except RuntimeError:
+                            outcome = "RuntimeError"
+                        shot["at"] = None
+                        after = (signal.getsignal(signal.SIGINT),
+                                 signal.SIGINT in real_mask(signal.SIG_BLOCK, ()))
+                        want = ("KeyboardInterrupt" if pending or ending == "interrupt"
+                                else "RuntimeError" if ending == "raise"
+                                else expected[ending])
+                        where = "%s entry, body %s, %s" % (
+                            name, ending, "%s %d" % (point, inject) if shot["sent"]
+                            else "no SIGINT sent (N %d)" % inject if inject
+                            else "no SIGINT sent")
+                        if after != entry:
+                            faults.setdefault("handler or mask not restored", []).append(
+                                "%s: handler and blocked %r on exit, %r on entry"
+                                " (outcome %r)" % (where, after, entry, outcome))
+                        if not shot["sent"]:
+                            if outcome != want:
+                                faults.setdefault("wrong outcome", []).append(
+                                    "%s: outcome %r, wanted %r" % (where, outcome, want))
+                        elif shot["raised"]:
+                            if outcome != "KeyboardInterrupt":
+                                faults.setdefault("KeyboardInterrupt swallowed", []).append(
+                                    "%s: its KeyboardInterrupt was swallowed (outcome %r)"
+                                    % (where, outcome))
+                        elif outcome not in (want, "KeyboardInterrupt"):
+                            faults.setdefault("wrong outcome", []).append(
+                                "%s: outcome %r, wanted %r or a KeyboardInterrupt"
+                                % (where, outcome, want))
+                        if inject and not shot["sent"]:
+                            break
+                        inject += 1
+                        if inject > limit[kind]:
+                            faults.setdefault("SIGINT still sent at the bound", []).append(
+                                "%s entry, body %s: %s %d still sent one"
+                                % (name, ending, point, limit[kind]))
+                            break
     finally:
+        sys.setprofile(prior_profile)
         signal.signal = real_signal
         signal.pthread_sigmask = real_mask
         real_mask(signal.SIG_BLOCK, {signal.SIGINT})
@@ -3063,8 +3133,10 @@ def _watchdog_sigint_restore_case():
         real_signal(signal.SIGINT, signal.default_int_handler)
         real_mask(signal.SIG_UNBLOCK, {signal.SIGINT})
     if faults:
-        print("opf watchdog leg: FAIL (SIGINT state not restored: %d of %d runs; %s)"
-              % (len(faults), len(entries) * 4 * 14, "; ".join(faults[:6])))
+        print("opf watchdog leg: FAIL (sigint-restore, %d runs: %s; %s)"
+              % (runs, ", ".join("%d %s" % (len(found), label)
+                                 for label, found in faults.items()),
+                 "; ".join([text for found in faults.values() for text in found[:2]][:6])))
         return EXIT_FINDING
     return EXIT_OK
 
@@ -5686,12 +5758,14 @@ def _watchdog_completion_case(mode, tree=None):
         # signal mask keeps it blocked, so the signal stays pending and is
         # never delivered. In both states no KeyboardInterrupt arrives and
         # the leg fails at its own delivery check: launch-cancel with "the
-        # cancellation was swallowed", close-cancel and poll-masked with "the
-        # pending interrupt was never delivered", census-exception with "the
-        # real SIGINT was not delivered outward". The leg installs the
-        # handler and unblocks SIGINT in its own process before relying on
-        # them, so neither the inherited disposition nor the inherited mask
-        # decides its verdict, and puts both back when it returns or raises
+        # cancellation was swallowed", close-cancel with "the pending
+        # interrupt was never delivered", census-exception with "the real
+        # SIGINT was not delivered outward". poll-masked has the same
+        # delivery check as close-cancel, but its failure in these states
+        # has not been run end to end. The leg installs the handler and
+        # unblocks SIGINT in its own process before relying on them, so
+        # neither the inherited disposition nor the inherited mask decides
+        # its verdict, and puts both back when it returns or raises
         # (_watchdog_real_sigint_call states what that restore holds against
         # a SIGINT arriving during it). The mask is read before any change
         # and the unblock runs inside the block that restores it: a SIGINT
@@ -16421,7 +16495,8 @@ def _watchdog_regression_self_test():
                   bound("completion-launch-cancel-sigint-pending")))
     # The install and restore those legs share, run with stand-in bodies for
     # every entry state and ending, and with a SIGINT sent just before each
-    # call they make (see _watchdog_sigint_restore_case).
+    # signal call they make and at each function entry and return and each
+    # builtin call's start and end (see _watchdog_sigint_restore_case).
     cases.append(("sigint-restore", prefix + "return opf._watchdog_leg_entry("
                   + repr(budgets.get("sigint-restore"))
                   + ", opf._watchdog_sigint_restore_case)",
