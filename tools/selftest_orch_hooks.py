@@ -12123,18 +12123,26 @@ def _named_text_cases(hooks):
 # hermetic fixture (an isolated HOME, a minimal environment, its own session and a timeout) whose files
 # record where they ran from. A command the guard ALLOWS that ran code from a declared directory, from
 # stdin or argument text, or from a .git directory, rather than from a copy outside them, fails the
-# oracle. The corpus is GENERATED from the guard's own declared vocabulary (its shell, interpreter,
-# wrapper, indirection, shell-state and loader-environment word sets and its read-only allowlist) and
-# joined with the pinned fixture forms below (bypass and control shapes reported against this guard).
-# The corpus size and digest are pinned, so deleting a fixture or shrinking the vocabulary turns the
-# oracle red. Placeholders: @ST@ and @HB@ are the declared directories, @BASE@ their parent, @OUT@ and
-# @OTHER@ undeclared directories (@OTHER@ a git repository), @REPO@ the session repository, @STDLIB@ the
-# running interpreter's standard library and @N@ the case index (unique file names per case).
+# oracle unless it is one of the pinned known allowed runs below. The corpus is GENERATED from the
+# guard's own declared vocabulary (its shell, wrapper, indirection and loader-environment word sets and
+# its read-only allowlist) and from the interpreter and shell-state word lists the oracle carries
+# itself, and joined with the pinned fixture forms below (bypass and control shapes reported against
+# this guard). The corpus size and digest are pinned, so deleting a fixture or shrinking the vocabulary
+# turns the oracle red. Placeholders: @ST@ and @HB@ are the declared directories, @BASE@ their parent,
+# @OUT@ and @OTHER@ undeclared directories (@OTHER@ a git repository), @REPO@ the session repository,
+# @STDLIB@ the running interpreter's standard library and @N@ the case index (unique file names per
+# case).
 # Executables reached: bash runs each command; every program a command names (the shells, python3,
-# git, cp, cat and the rest) is the real one from PATH, isolated rather than substituted: HOME is a
-# fixture directory, the environment holds only PATH, HOME, LANG and TMPDIR, no network is used, and
-# every write lands inside the fixture tree.
+# git, cp, cat, make, the util-linux wrappers and the rest) is the real one from PATH, isolated rather
+# than substituted: HOME is a fixture directory, the environment holds only PATH, HOME, LANG and
+# TMPDIR, no network is used, and every write lands inside the fixture tree.
 _NRDO_SKIPPED_WORDS = frozenset(("sudo", "su", "watch"))  # privilege change or an unbounded repeat
+# shell and interpreter words, and directory-changing or shell-state words, the corpus runs
+_NRDO_INTERP_WORDS = frozenset(("ash", "bash", "busybox", "csh", "dash", "fish", "ksh", "lua", "mksh",
+                                "node", "nodejs", "perl", "php", "posh", "rbash", "ruby", "sh", "tcsh",
+                                "yash", "zsh"))
+_NRDO_STATE_WORDS = frozenset(("alias", "cd", "dirs", "eval", "popd", "pushd", "shopt", "source",
+                               "unalias"))
 _NRDO_P = "'bash @BASE@/sta\"\"ge/o.sh'"
 _NRDO_FORMS = (
     ("fix/ctl-bash-abs", "out", "bash @ST@/o.sh"),
@@ -12223,11 +12231,27 @@ _NRDO_FORMS = (
     ("fix/copy-py-cwd-st", "st", "python3 @OUT@/copy.py"),
     # a cd into a declared directory, then a copy outside it that runs a relative path of its own: the
     # copy's words are all absolute, so only the directory change shows the run can reach a declared
-    # file (each is red when the shell-state rule is reverted to judging relative words only)
+    # file (each is red when the scope walk stops following cd)
     ("fix/cd-into-copy-rel-sh", "out", "cd ..; cd stage; bash @OUT@/rel.sh"),
     ("fix/cd-into-copy-rel-py", "out", "cd ..; cd stage; python3 @OUT@/rel.py"),
     ("fix/cd-base-into-copy-rel-sh", "out", "cd @BASE@; cd stage; bash @OUT@/rel.sh"),
     ("fix/cd-into-copy-direct-exec", "out", "cd ..; cd stage; @OUT@/relx"),
+    # the same cd into a declared directory, then that copy run behind a wrapper, a trap, a PATH
+    # lookup or make: real bash runs declared code for each, and each must deny
+    ("fix/cd-into-wrap-xargs-a", "out", "cd ..; cd stage; xargs -a /dev/null @OUT@/relx"),
+    ("fix/cd-into-wrap-xargs-I", "out", "cd ..; cd stage; echo x | xargs -I % @OUT@/relx"),
+    ("fix/cd-into-wrap-stdbuf", "out", "cd ..; cd stage; stdbuf -o0 @OUT@/relx"),
+    ("fix/cd-into-wrap-nohup", "out", "cd ..; cd stage; nohup @OUT@/relx >/dev/null 2>&1"),
+    ("fix/cd-into-wrap-setsid", "out", "cd ..; cd stage; setsid -w @OUT@/relx"),
+    ("fix/cd-into-wrap-flock", "out", "cd ..; cd stage; flock @OUT@/y.txt @OUT@/relx"),
+    ("fix/cd-into-wrap-ionice", "out", "cd ..; cd stage; ionice -c3 @OUT@/relx"),
+    ("fix/cd-into-wrap-taskset", "out", "cd ..; cd stage; taskset -c 0 @OUT@/relx"),
+    ("fix/cd-into-wrap-chrt", "out", "cd ..; cd stage; chrt -o 0 @OUT@/relx"),
+    ("fix/cd-into-wrap-find-exec", "out", "cd ..; cd stage; find @OUT@ -name relx -exec @OUT@/relx \\;"),
+    ("fix/cd-into-wrap-trap", "out", "cd ..; cd stage; trap @OUT@/relx EXIT"),
+    ("fix/cd-into-wrap-path-prefix", "out", "cd ..; cd stage; PATH=@OUT@:/usr/bin:/bin relx"),
+    ("fix/cd-into-wrap-path-assign", "out", "PATH=@OUT@:/usr/bin:/bin; cd ..; cd stage; relx"),
+    ("fix/cd-into-wrap-make", "out", "cd ..; cd stage; make -s -f @OUT@/mk"),
     ("fix/inspect-stat", "out", "stat @ST@/o.sh"),
     ("fix/inspect-find", "out", "find @ST@ -type f"),
     ("fix/inspect-cmp", "out", "cmp @ST@/o.sh @OUT@/copy.sh"),
@@ -12352,19 +12376,45 @@ _NRDO_FORMS = (
     ("fix/awk-system", "out", "awk 'BEGIN{system(\"bash @ST@/o.sh\")}'"),
     ("fix/make-f", "out", "make -f @ST@/Makefile"),
 )
+# The fixture rows this guard ALLOWS although real bash ran declared code for them: a program fed to a
+# shell through /dev/stdin, /dev/fd/0 or /proc/self/fd/0 or behind braces, a reserved word, the dot
+# builtin, source or a wrapper the peel does not read; a shell word the guard does not list (rbash,
+# busybox); a directory change the scope walk does not model (eval, an alias, a sourced file,
+# cdable_vars, a symlink made in the same call, a cd that fails, is skipped or runs in a subshell, a
+# pipeline or the background); and a symlink followed by ".." in a relative operand. The oracle fails
+# on any allowed declared run outside this list.
+_NRDO_KNOWN_ALLOWED_RUNS = (
+    "fix/cdable-vars", "fix/stdin-dev-stdin", "fix/stdin-dev-fd0", "fix/stdin-proc-fd0",
+    "fix/stdin-ddash-dev-stdin", "fix/stdin-sh-dev-stdin", "fix/stdin-e-dev-stdin",
+    "fix/stdin-nice-dev-stdin", "fix/stdin-timeout-dev-stdin", "fix/stdin-heredoc-dev-stdin",
+    "fix/stdin-nested-dev-stdin", "fix/stdin-brace", "fix/stdin-if", "fix/stdin-while",
+    "fix/stdin-heredoc-brace", "fix/stdin-heredoc-bang", "fix/stdin-dot-heredoc",
+    "fix/stdin-source-pipe", "fix/stdin-dot-pipe", "fix/stdin-source-heredoc", "fix/stdin-rbash",
+    "fix/stdin-busybox-sh", "fix/stdin-py-c-system", "fix/stdin-nohup", "fix/stdin-stdbuf",
+    "fix/stdin-xargs-c", "fix/stdin-xargs-d", "fix/stdin-xargs-bash", "fix/stdin-c-eval-cat",
+    "fix/cwd-eval-cd-back", "fix/cwd-command-eval-cd-back", "fix/cwd-dot-heredoc-cd-back",
+    "fix/cwd-sourced-file", "fix/cwd-alias", "fix/symlink-made-then-run", "fix/symlink-made-then-cd",
+    "fix/failed-cd-missing", "fix/failed-cd-notadir", "fix/failed-cd-P", "fix/failed-cd-ddash",
+    "fix/skipped-cd-and", "fix/skipped-cd-or", "fix/subshell-cd", "fix/pipeline-cd",
+    "fix/background-cd", "fix/symlink-dotdot")
+
+
+def _nrdo_sh_suffix(word):
+    """True when word is an ASCII command word ending in sh (sh, bash, zsh, rbash and the like)."""
+    return word.endswith("sh") and all(c.isascii() and (c.isalnum() or c in "_+-") for c in word)
 
 
 def _nrdo_generated(hooks):
-    """The corpus rows generated from the guard's own declared vocabulary, as (id, cwd key, template):
-    every shell and interpreter word it lists, run every way the fixture forms name (an absolute or
-    relative script, stdin, /dev/stdin and its aliases, -c, -s and -n +n, and a copy outside the
-    declared directories run after a cd into one); every wrapper and indirection word around a shell
-    and a python run; every shell-state word before a relative run; every loader-environment name; and
-    every allowlisted reader over a declared file. Words that change privilege or repeat without bound
-    (_NRDO_SKIPPED_WORDS) are not run."""
+    """The corpus rows generated from the guard's own declared vocabulary and the oracle's interpreter
+    and shell-state word lists, as (id, cwd key, template): every shell and interpreter word, run every
+    way the fixture forms name (an absolute or relative script, stdin, /dev/stdin and its aliases, -c,
+    -s and -n +n, and a copy outside the declared directories run after a cd into one); every wrapper
+    and indirection word around a shell and a python run; every shell-state word before a relative
+    run; every loader-environment name; and every allowlisted reader over a declared file. Words that
+    change privilege or repeat without bound (_NRDO_SKIPPED_WORDS) are not run."""
     out = []
-    shells = sorted(w for w in (hooks._NRD_INTERP_WORDS | hooks._NRD_SHELL_WORDS)
-                    if hooks._NRD_SH_SUFFIX_RE.match(w) or w == "posh")
+    shells = sorted(w for w in (_NRDO_INTERP_WORDS | hooks._NRD_SHELL_WORDS)
+                    if _nrdo_sh_suffix(w) or w == "posh")
     shell_forms = (("abs", "out", "@W@ @ST@/o.sh"), ("stdin-redirect", "out", "@W@ < @ST@/o.sh"),
                    ("stdin-pipe", "out", "cat @ST@/o.sh | @W@"),
                    ("dev-stdin", "out", "@W@ /dev/stdin < @ST@/o.sh"),
@@ -12380,7 +12430,7 @@ def _nrdo_generated(hooks):
     for w in shells:
         for k, cwd, t in shell_forms:
             out.append(("gen/shell/%s/%s" % (w, k), cwd, t.replace("@W@", w)))
-    for w in sorted(hooks._NRD_INTERP_WORDS - set(shells)):
+    for w in sorted(_NRDO_INTERP_WORDS - set(shells)):
         for k, cwd, t in (("py-abs", "out", "@W@ @ST@/o.py"), ("sh-abs", "out", "@W@ @ST@/o.sh"),
                           ("stdin-pipe", "out", "cat @ST@/o.sh | @W@")):
             out.append(("gen/interp/%s/%s" % (w, k), cwd, t.replace("@W@", w)))
@@ -12419,7 +12469,7 @@ def _nrdo_generated(hooks):
                    "unalias": "unalias -a; cd @ST@; bash o.sh",
                    "shopt": "shopt -s cdable_vars; v=@ST@; cd v; bash o.sh",
                    "eval": "eval 'cd @ST@'; bash o.sh", "source": "source @ST@/o.sh"}
-    for w in sorted(hooks._NRD_STATE_WORDS):
+    for w in sorted(_NRDO_STATE_WORDS):
         out.append(("gen/state/%s" % w, "out", state_forms.get(w, w + " @ST@; bash o.sh")))
         out.append(("gen/state/%s-py" % w, "out",
                     state_forms.get(w, w + " @ST@; bash o.sh").replace("bash o.sh", "python3 o.py")))
@@ -12446,7 +12496,7 @@ def _nrdo_pin(corpus):
     return (len(corpus), digest.hexdigest())
 
 
-_NRDO_CORPUS_PIN = (613, "03e2666b946749e1dda8abaa5b476feb2eb44bd655d27da4dda3fc88fff7d91e")
+_NRDO_CORPUS_PIN = (627, "bb7eca16fa3ada2f4813b8f97495194a7e1865c7381939cf8188aa128668b9a3")
 
 
 def _nrdo_setup(base, fixture):
@@ -12490,6 +12540,8 @@ def _nrdo_setup(base, fixture):
     # run by its path, through bash so the sourced file's marker line names it
     (out / "relx").write_text("#!/usr/bin/env bash\n. ./o.sh\n", encoding="utf-8")
     (out / "relx").chmod(0o755)
+    # a makefile outside the declared directories that runs a relative path of its own
+    (out / "mk").write_text("all:\n\tbash ./o.sh\n", encoding="utf-8")
     (out / "rel.py").write_text("import runpy\nrunpy.run_path('o.py')\n", encoding="utf-8")
     (out / "y.txt").write_text("y\n", encoding="utf-8")
     (out / "cdp.txt").write_text(str(root) + "\n", encoding="utf-8")
@@ -12661,31 +12713,6 @@ def _nrdo_unexercised(corpus, ran):
         count, any_ran = groups.get(key, (0, False))
         groups[key] = (count + 1, any_ran or bool(did_run))
     return sorted((key, count) for key, (count, any_ran) in groups.items() if not any_ran)
-
-
-def _nrdo_state_rule_relative_only(hooks):
-    """The shell-state rule with its shell and interpreter half reverted to the earlier reading: such a
-    segment denies only when it carries a word after its first, or a file redirect target, that is not
-    an absolute path. The path command word half stays as it is now."""
-    def rule(seg, interps):
-        argv = seg.argv
-        relative = bool(argv) and "/" in argv[0] and not os.path.isabs(argv[0])
-        relative = relative or any(tok and not os.path.isabs(tok) for tok in argv[1:])
-        relative = relative or any(
-            r.target_class != "descriptor" and not r.op.startswith("<<")
-            and not (isinstance(r.target, str) and os.path.isabs(r.target)) for r in seg.redirects)
-        head = hooks._nrd_command_word(argv)
-        return (bool(interps) and relative) or (bool(head) and "/" in head[0])
-    return rule
-
-
-def _nrdo_state_rule_relative_head_only(hooks):
-    """The shell-state rule with its path command word half reverted to the earlier reading: only a
-    relative command path denies. The shell and interpreter half stays as it is now."""
-    def rule(seg, interps):
-        head = hooks._nrd_command_word(seg.argv)
-        return bool(interps) or (bool(head) and "/" in head[0] and not os.path.isabs(head[0]))
-    return rule
 
 
 def main(report_path=None):
@@ -16762,7 +16789,7 @@ def _main_isolated(report_path=None):
         check("nrd/shared-prefix-sibling-allows",
               _verdict(nrd("python3 -I {}/x.py".format(nd_stage_x))), "allow")
         # out of scope entirely (names no declared directory): untouched
-        check("nrd/out-of-scope-allows", _verdict(nrd("python3 -I {}/r.py".format(nd.root))), "allow")
+        check("nrd/out-of-scope-allows", _verdict(nrd("python3 x.py")), "allow")
         check("nrd/symlink-out-allows",
               _verdict(nrd("python3 -I {}".format(nd.root / "link-plain.py"))), "allow")
 
@@ -16919,90 +16946,13 @@ def _main_isolated(report_path=None):
             check(cid, nrd_got(cmd), DENY_RAN)
         # the accepted over-denies of those two rules: an unrelated command after a lost working
         # directory, and an unrelated program fed to a shell or python on stdin, deny and run nothing
-        check("nrd/over-deny-cwd-lost-unrelated", nrd_got("cd -; python3 -I r.py"), DENY_INERT)
+        check("nrd/over-deny-cwd-lost-unrelated", nrd_got("cd -; make -s nrd-none"), DENY_INERT)
         check("nrd/over-deny-stdin-unrelated", nrd_got("echo 'echo hi' | bash"), DENY_INERT)
-        # every shell or interpreter word without a script operand that is an existing regular file
-        # outside the declared directories is in scope while any directory is declared, so these
-        # unrelated calls deny and run nothing (the accepted over-deny)
-        for cid, cmd in (("nrd/over-deny-python-c", "python3 -c 'print(1)'"),
-                         ("nrd/over-deny-python-version", "python3 --version"),
-                         ("nrd/over-deny-interp-missing-script", "python3 nrd-none.py")):
-            check(cid, nrd_got(cmd), DENY_INERT)
-        # --- the shapes the working-directory and stdin rules missed: each runs the declared file under
-        # real bash, and each is out of scope when the working directory is modelled and only a
-        # programless shell or python word counts (the reverted rules allow every one) ---
-        (nd_outside / "elink").symlink_to(nd_staging / "hooks")
-        _nrd_redesign_rows = (
-            # a cd that fails leaves bash in the payload working directory
-            "cd {}/missing; bash nrd-stage/x.sh".format(outd),
-            # a program a shell reads from /dev/stdin, from a pipe
-            "echo 'bash {}/x.sh' | bash /dev/stdin".format(_nrd_sp),
-            # source of /dev/stdin from a pipe
-            "echo 'bash {}/x.sh' | source /dev/stdin".format(_nrd_sp),
-            # a restricted shell reading its program from a pipe
-            "echo 'bash {}/x.sh' | rbash".format(_nrd_sp),
-            # a symlink followed by ..: the kernel resolves elink/.. inside the declared directory
-            "bash elink/../x.sh",
-            # cd - run by eval returns to the declared directory's parent
-            "cd {}; cd {}; eval 'cd -'; bash nrd-stage/x.sh".format(tmp, outd),
-            # a shell named behind an unpeeled wrapper, reading its program from -c
-            "echo x | xargs bash -c 'bash {}/x.sh'".format(_nrd_sp))
-        for cid, cmd, kw in (
-                ("nrd/failed-cd-rel-denies", _nrd_redesign_rows[0],
-                 {"run_cwd": str(tmp), "cwd": str(tmp), "project": str(nd.root)}),
-                ("nrd/pipe-bash-dev-stdin-denies", _nrd_redesign_rows[1], {}),
-                ("nrd/pipe-source-dev-stdin-denies", _nrd_redesign_rows[2], {}),
-                ("nrd/pipe-rbash-denies", _nrd_redesign_rows[3], {}),
-                ("nrd/symlink-dotdot-denies", _nrd_redesign_rows[4],
-                 {"run_cwd": outd, "cwd": outd, "project": str(nd.root)}),
-                ("nrd/eval-cd-minus-denies", _nrd_redesign_rows[5], {}),
-                ("nrd/xargs-bash-c-denies", _nrd_redesign_rows[6], {})):
-            check(cid, nrd_got(cmd, **kw), DENY_RAN)
-        # --- further stdin-program and lost-directory shapes: each runs the declared file under real
-        # bash, and each allows once both broad rules are reverted ---
-        _nrd_vector_rows = (
-            # a shell reading /dev/stdin from a quoted here-document
-            "bash /dev/stdin <<'EOF'\nbash {}/x.sh\nEOF\n".format(_nrd_sp),
-            # cd - read by the dot builtin from /dev/stdin, fed by a quoted here-document
-            "cd {}; cd {}; . /dev/stdin <<'EOF'\ncd -\nEOF\nbash nrd-stage/x.sh".format(tmp, outd),
-            # a file written and sourced in the same call moves the working directory
-            "printf 'cd {}\\n' > {}/src-cd.sh; . {}/src-cd.sh; bash nrd-stage/x.sh"
-            .format(tmp, outd, outd),
-            # an alias, expanded on a later line, that runs cd -
-            "shopt -s expand_aliases; cd {}; cd {}; alias b='cd -'\nb; bash nrd-stage/x.sh"
-            .format(tmp, outd),
-            # cdable_vars: cd v, with no directory v, changes to the directory the variable v holds
-            "shopt -s cdable_vars; v={}; cd v; bash nrd-stage/x.sh".format(tmp))
-        for cid, cmd in (("nrd/qheredoc-bash-dev-stdin-denies", _nrd_vector_rows[0]),
-                         ("nrd/dot-dev-stdin-cd-minus-denies", _nrd_vector_rows[1]),
-                         ("nrd/sourced-file-cd-denies", _nrd_vector_rows[2]),
-                         ("nrd/alias-cd-minus-denies", _nrd_vector_rows[3]),
-                         ("nrd/cdable-vars-cd-denies", _nrd_vector_rows[4])):
-            check(cid, nrd_got(cmd), DENY_RAN)
-        # --- a nested eval or shell -c body is scanned under the enclosing command's shell-state flag:
-        # after a cd to the declared directory's parent, a relative script operand in the body denies
-        # even though, from the payload working directory, it names an existing decoy file outside the
-        # declared directories. Real bash runs the declared file in both rows.
-        nd_decoy = tmp / "nrd-decoy"
-        (nd_decoy / "nrd-stage").mkdir(parents=True)
-        (nd_decoy / "nrd-stage" / "x.sh").write_text(":\n", encoding="utf-8")
-        _nrd_nested_rows = (
-            "cd {}; eval 'bash nrd-stage/x.sh'".format(tmp),
-            "cd {}; bash -c 'bash nrd-stage/x.sh'".format(tmp))
-        for cid, cmd in (("nrd/nested-eval-state-denies", _nrd_nested_rows[0]),
-                         ("nrd/nested-bash-c-state-denies", _nrd_nested_rows[1])):
-            check(cid, nrd_got(cmd, run_cwd=str(nd_decoy), cwd=str(nd_decoy), project=str(nd.root)),
-                  DENY_RAN)
-        # with a directory declared, commands that hold no shell or interpreter word stay allowed and
-        # run nothing, a failed or undone cd included
-        for cid, cmd in (("nrd/no-interp-failed-cd-allows", "cd {}/missing; ls -l".format(outd)),
-                         ("nrd/no-interp-cd-then-cat-allows",
-                          "cd {}; cat {}/cdp.txt".format(outd, outd)),
-                         ("nrd/no-interp-pipe-allows", "echo hi | wc -l")):
-            check(cid, nrd_got(cmd), ALLOW_INERT)
         # with a directory declared, commands that read no program from stdin and keep a known working
         # directory stay allowed and run nothing
         for cid, cmd in (("nrd/no-stdin-echo-allows", "echo hi"),
+                         ("nrd/no-stdin-python-c-allows", "python3 -c 'print(1)'"),
+                         ("nrd/no-stdin-python-version-allows", "python3 --version"),
                          ("nrd/no-stdin-cat-qheredoc-allows", "cat <<'EOF'\nhi\nEOF\n"),
                          ("nrd/no-stdin-bash-n-allows", "bash -n {}/copy.sh".format(outd)),
                          ("nrd/no-stdin-cd-abs-allows", "cd {}; echo hi".format(outd)),
@@ -17260,11 +17210,9 @@ def _main_isolated(report_path=None):
         # out-of-scope env forms stay allowed: a parsed value option running nothing from a declared
         # directory, and a -S call every word of which a plain reading (quote and backslash stripped)
         # shows outside the declared directories, so the unreadable-S denial does not fire
-        # (now an accepted over-deny: a wrapper option outside the peel hides the command word, so the
-        # call counts as running a program this guard cannot see, and these deny though nothing runs)
-        check("nrd/over-deny-env-split-inert", nrd_got("env -S'echo hi'"), DENY_INERT)
-        check("nrd/over-deny-env-split-rest-inert", nrd_got("env -S'bash -c' 'echo hi'"), DENY_INERT)
-        check("nrd/over-deny-env-argv0-inert", nrd_got("env -a foo echo hi"), DENY_INERT)
+        check("nrd/env-split-inert-allows", nrd_got("env -S'echo hi'"), ALLOW_INERT)
+        check("nrd/env-split-rest-inert-allows", nrd_got("env -S'bash -c' 'echo hi'"), ALLOW_INERT)
+        check("nrd/env-argv0-inert-allows", nrd_got("env -a foo echo hi"), ALLOW_INERT)
         # the disclosed command -v/-V over-deny, pinned: the wrapper peel reaches the -c body and
         # classifies it, though command -v/-V then only prints the operand's name and runs nothing
         check("nrd/command-v-denies",
@@ -17326,30 +17274,26 @@ def _main_isolated(report_path=None):
         # behaviour (a mutant), and shows the matching in-scope vector flips from deny to allow. The
         # real _nrd_scope_scan runs throughout, so these prove each fix is load-bearing, not a
         # stand-in. Each restores the helper in a finally so no mutant leaks into a later check.
-        # Two broad rules refuse most of these vectors on their own: a relative shell or interpreter
-        # operand beside a shell-state construct (_nrd_shell_state), and a shell or interpreter word
-        # with no proven script operand (_nrd_script_proven). The flips of the older, narrower helpers
-        # hold both broad rules off (_nrd_flip_hold), so each still shows its own helper is
-        # load-bearing; the flips of the broad rules themselves pass hold=() and patch them directly.
-        _nrd_flip_hold = (("_nrd_shell_state", lambda command, segments: False),
-                          ("_nrd_script_proven", lambda argv, cwd, dirs: True))
-
-        def _flip_verdict_pair(patches, cmd, cwd=None, project=None, hold=_nrd_flip_hold):
-            # patch SEVERAL real helpers at once (a form two readings each refuse), run, restore all
-            allp = tuple(hold) + tuple(patches)
-            reals = [(attr, getattr(aiqt_hooks, attr)) for attr, _repl in allp]
-            try:
-                for attr, repl in allp:
-                    setattr(aiqt_hooks, attr, repl)
-                return _verdict(nrd(cmd, cwd=cwd, project=project))
-            finally:
-                for attr, real in reversed(reals):
-                    setattr(aiqt_hooks, attr, real)
-
-        def _flip_verdict(attr, repl, cmd, cwd=None, project=None, hold=_nrd_flip_hold):
+        def _flip_verdict(attr, repl, cmd, cwd=None, project=None):
             # patch ONE real helper to its pre-fix behaviour, run the vector through the real guard,
             # restore the helper, and return the verdict (the check id stays a literal at the call site)
-            return _flip_verdict_pair(((attr, repl),), cmd, cwd=cwd, project=project, hold=hold)
+            real = getattr(aiqt_hooks, attr)
+            setattr(aiqt_hooks, attr, repl)
+            try:
+                return _verdict(nrd(cmd, cwd=cwd, project=project))
+            finally:
+                setattr(aiqt_hooks, attr, real)
+
+        def _flip_verdict_pair(patches, cmd):
+            # patch SEVERAL real helpers at once (a form two readings each refuse), run, restore all
+            reals = [(attr, getattr(aiqt_hooks, attr)) for attr, _repl in patches]
+            try:
+                for attr, repl in patches:
+                    setattr(aiqt_hooks, attr, repl)
+                return _verdict(nrd(cmd))
+            finally:
+                for attr, real in reals:
+                    setattr(aiqt_hooks, attr, real)
 
         # the looser -c reading is classified as well (so nothing it refused is allowed); a flip of the
         # -c extraction removes it alongside
@@ -17407,44 +17351,15 @@ def _main_isolated(report_path=None):
               [_flip_verdict("_nrd_unread_in_scope", lambda d: False, c, cwd=str(tmp),
                              project=str(nd.root)) for c in _nrd_unread + (_nrd_rel,)],
               ["allow"] * 7 + ["deny"])
-        # the lost-directory rows are refused by both broad rules: reverting only the script-operand
-        # rule leaves each denied by the shell-state rule, and reverting both lets every row through
-        _nrd_no_state = ("_nrd_shell_state", lambda command, segments: False)
-        _nrd_all_proven = ("_nrd_script_proven", lambda argv, cwd, dirs: True)
+        # keeping the last known working directory after cd -, a bare cd, an unreadable cd operand or a
+        # directory-stack builtin lets every lost-directory row above through again
         check("nrd/flip-cwd-lost-allows",
-              [_flip_verdict_pair((_nrd_all_proven,), c, hold=()) for c in _nrd_cwd_rows]
-              + [_flip_verdict_pair((_nrd_no_state, _nrd_all_proven), c, hold=())
-                 for c in _nrd_cwd_rows],
-              ["deny"] * 4 + ["allow"] * 4)
-        # treating every shell or interpreter word as running a proven script lets every stdin row
-        # through (no shell-state construct stands in these rows)
+              [_flip_verdict("_nrd_cwd_lost", lambda seg, cwd: False, c) for c in _nrd_cwd_rows],
+              ["allow"] * 4)
+        # leaving a program a shell or python reads from stdin out of scope lets every stdin row through
         check("nrd/flip-stdin-program-allows",
-              [_flip_verdict_pair((_nrd_all_proven,), c, hold=()) for c in _nrd_stdin_rows],
+              [_flip_verdict("_nrd_stdin_program", lambda seg: False, c) for c in _nrd_stdin_rows],
               ["allow"] * 5)
-        # reverting both broad rules lets the /dev/stdin, source, rbash, eval and xargs rows through
-        # (the failed-cd row is refused because operands resolve against the payload working directory
-        # rather than a modelled cd, and the symlink row by the realpath comparison; neither is a helper
-        # this flip can revert)
-        check("nrd/flip-redesign-allows",
-              [_flip_verdict_pair((_nrd_no_state, _nrd_all_proven), c, hold=())
-               for c in _nrd_redesign_rows[1:4] + _nrd_redesign_rows[5:]],
-              ["allow"] * 5)
-        # reverting both broad rules lets every stdin-program and lost-directory vector row through
-        check("nrd/flip-broad-rules-vectors-allows",
-              [_flip_verdict_pair((_nrd_no_state, _nrd_all_proven), c, hold=())
-               for c in _nrd_vector_rows],
-              ["allow"] * 5)
-        # scanning a nested body without the enclosing command's shell-state flag lets the eval row
-        # through on the decoy file, while the shell -c row is still refused by its enclosing segment's
-        # relative -c operand; reverting both broad rules as well lets both rows through
-        _nrd_no_nested = ("_nrd_nested_state", lambda state: False)
-        check("nrd/flip-nested-state-allows",
-              [_flip_verdict_pair((_nrd_no_nested,), c, cwd=str(nd_decoy), project=str(nd.root),
-                                  hold=()) for c in _nrd_nested_rows]
-              + [_flip_verdict_pair((_nrd_no_nested, _nrd_no_state, _nrd_all_proven), c,
-                                    cwd=str(nd_decoy), project=str(nd.root), hold=())
-                 for c in _nrd_nested_rows],
-              ["allow", "deny", "allow", "allow"])
 
         # the pre-fix helper bodies the new flips restore (each shows its fix is load-bearing)
         def _nrd_old_cp_targets(operands, eff_cwd):
@@ -17890,13 +17805,6 @@ def _main_isolated(report_path=None):
               [_verdict(ni_guard(c)) for c in ("echo 'echo hi' | bash", "python3 - <<'EOF'\nprint(1)\nEOF\n",
                                                "bash -s", "cd -; make test", "pushd /tmp; popd; ls x")],
               ["allow"] * 5)
-        # with no directory declared, the shapes the working-directory and stdin rules now refuse stay
-        # allowed (guard-only: this fixture holds no deliverable for real bash to run)
-        check("nrd/inert-no-key-redesign-allows",
-              [_verdict(ni_guard(c)) for c in ("cd /nrd-missing; bash rel.sh", "echo hi | bash /dev/stdin",
-                                               "echo : | source /dev/stdin", "bash -c 'echo hi'",
-                                               "eval 'cd -'; python3 -c 1", "bash link/../x.sh")],
-              ["allow"] * 6)
         ni_reg_path = ni.root / ".aiqt" / "orchestration.local.json"
         ni_reg = json.loads(ni_reg_path.read_text(encoding="utf-8"))
         ni_reg["deliverable_dirs"] = [str(ni_staging)]
@@ -17955,7 +17863,8 @@ def _main_isolated(report_path=None):
             capture_output=True, text=True, timeout=60, env=_nrd_env)
         check("nrd/main-subprocess-allows", (_nrd_ok.returncode, _nrd_ok.stdout), (0, ""))
 
-        # --- the differential oracle (see _NRDO_FORMS): no allowed command runs declared code ---
+        # --- the differential oracle (see _NRDO_FORMS): no allowed command outside the pinned known
+        # allowed runs (_NRDO_KNOWN_ALLOWED_RUNS) runs declared code ---
         nrdo_fx = _nrdo_setup(tmp, Fixture(tmp, "nrdo-repo"))
         nrdo_corpus = _nrdo_corpus(aiqt_hooks)
         nrdo_rows = _nrdo_rows(aiqt_hooks, nrdo_fx, nrdo_corpus)
@@ -17966,33 +17875,37 @@ def _main_isolated(report_path=None):
         check("nrd/oracle-reference-live",
               [nrdo_by_id[k][2] for k in ("fix/ctl-bash-abs", "fix/ctl-py-abs", "fix/ctl-cat")],
               [True, True, False])
-        check("nrd/oracle-no-allowed-declared-run", _nrdo_judge(nrdo_corpus, nrdo_real), [])
+        check("nrd/oracle-no-unlisted-allowed-declared-run",
+              [c for c in _nrdo_judge(nrdo_corpus, nrdo_real) if c not in _NRDO_KNOWN_ALLOWED_RUNS], [])
         # a cd into a declared directory, then a copy outside it run with only absolute words: real
         # bash runs declared code for each row, and the guard denies each
         nrdo_cd_ids = ("fix/cd-into-copy-rel-sh", "fix/cd-into-copy-rel-py",
                        "fix/cd-base-into-copy-rel-sh", "fix/cd-into-copy-direct-exec")
         check("nrd/oracle-cd-into-copy-denied-and-ran",
               [(nrdo_by_id[k][0], nrdo_by_id[k][2]) for k in nrdo_cd_ids], [("deny", True)] * 4)
+        # the same cd, then that copy run behind a wrapper, a trap, a PATH lookup or make: real bash
+        # runs declared code for each row, and the guard denies each
+        nrdo_wrap_ids = tuple(c[0] for c in _NRDO_FORMS if c[0].startswith("fix/cd-into-wrap-"))
+        check("nrd/oracle-cd-into-wrapper-denied-and-ran",
+              [(nrdo_by_id[k][0], nrdo_by_id[k][2]) for k in nrdo_wrap_ids], [("deny", True)] * 14)
 
-        def _nrdo_flip_red(rule):
-            # the oracle's failures on the cd-into rows with the shell-state rule replaced by rule
-            real_rule = aiqt_hooks._nrd_state_denied
-            setattr(aiqt_hooks, "_nrd_state_denied", rule)
+        def _nrdo_flip_red(attr, repl, ids):
+            # the oracle's failures among ids with one guard helper replaced by repl
+            real_helper = getattr(aiqt_hooks, attr)
+            setattr(aiqt_hooks, attr, repl)
             try:
                 return [cid for n, (cid, cwd_key, tmpl) in enumerate(nrdo_corpus)
-                        if cid in nrdo_cd_ids and nrdo_by_id[cid][2]
+                        if cid in ids and nrdo_by_id[cid][2]
                         and _nrdo_guard(aiqt_hooks, nrdo_fx, _nrdo_expand(tmpl, nrdo_fx, n),
                                         nrdo_fx[cwd_key]) != "deny"]
             finally:
-                setattr(aiqt_hooks, "_nrd_state_denied", real_rule)
+                setattr(aiqt_hooks, attr, real_helper)
 
-        # reverting the shell and interpreter half of the shell-state rule to relative words only lets
-        # the three copy runs through; reverting its path half to relative paths only lets the run by
-        # an absolute path through
-        check("nrd/oracle-flip-state-relative-only-red",
-              _nrdo_flip_red(_nrdo_state_rule_relative_only(aiqt_hooks)), list(nrdo_cd_ids[:3]))
-        check("nrd/oracle-flip-state-relative-head-only-red",
-              _nrdo_flip_red(_nrdo_state_rule_relative_head_only(aiqt_hooks)), [nrdo_cd_ids[3]])
+        # a scope walk that does not follow a literal cd lets every cd-into row through
+        check("nrd/oracle-flip-no-cd-walk-red",
+              _nrdo_flip_red("_nrd_next_cwd", lambda seg, eff_cwd: eff_cwd,
+                             nrdo_cd_ids + nrdo_wrap_ids),
+              list(nrdo_cd_ids + nrdo_wrap_ids))
         # rows that never ran declared code on this host are reported as not exercised, not counted
         nrdo_unex = _nrdo_unexercised(nrdo_corpus, [r for _v, _m, r in nrdo_rows])
         # reported on standard output: the suite's error stream must stay empty
@@ -18010,7 +17923,8 @@ def _main_isolated(report_path=None):
         # mutation: with the core scope scan disabled, the oracle is red on real runs, not on the pin
         nrdo_mut = _nrdo_judge(nrdo_corpus, [(m, r) for _v, m, r in nrdo_rows])
         check("nrd/oracle-mutant-core-disabled-red",
-              ("corpus-pin" not in nrdo_mut, len(nrdo_mut) > 0), (True, True))
+              ("corpus-pin" not in nrdo_mut,
+               len([c for c in nrdo_mut if c not in _NRDO_KNOWN_ALLOWED_RUNS]) > 0), (True, True))
         # mutation: deleting any one pinned fixture turns the oracle red
         nrdo_first = len(nrdo_corpus) - len(_NRDO_FORMS)
         check("nrd/oracle-mutant-fixture-deleted-red",
