@@ -671,7 +671,7 @@ source-path = ".aiqt/core/rules/accur-reference-capture.md"
 start-line = 14
 end-line = 16
 canonical-text = "When a claim rests on an external source, or an artefact is derived from one, the specific reference, a\nfile path and line, a URL, or a document and section, is captured and attached to it at the moment it is\nproduced, not reconstructed later from memory."
-source-digest = "4d45e16e1508cb2daa42f6265d987e86075ad21f50b609e99bc3f3bb63f60b3e"
+source-digest = "20a080dc13c927a3fff8163a62a1c514380f02e209912b629ae5569dc9313e4a"
 
 [[clause]]
 clause-id = "refcap.2"
@@ -680,7 +680,7 @@ source-path = ".aiqt/core/rules/accur-reference-capture.md"
 start-line = 14
 end-line = 16
 canonical-text = "When a claim rests on an external source, or an artefact is derived from one, the specific reference, a\nfile path and line, a URL, or a document and section, is captured and attached to it at the moment it is\nproduced, not reconstructed later from memory."
-source-digest = "4d45e16e1508cb2daa42f6265d987e86075ad21f50b609e99bc3f3bb63f60b3e"
+source-digest = "20a080dc13c927a3fff8163a62a1c514380f02e209912b629ae5569dc9313e4a"
 
 [[clause]]
 clause-id = "refcap.3"
@@ -689,7 +689,16 @@ source-path = ".aiqt/core/rules/accur-reference-capture.md"
 start-line = 16
 end-line = 17
 canonical-text = "A claim or artefact with no captured reference is treated as\nunsourced, whatever confidence backs it."
-source-digest = "4d45e16e1508cb2daa42f6265d987e86075ad21f50b609e99bc3f3bb63f60b3e"
+source-digest = "20a080dc13c927a3fff8163a62a1c514380f02e209912b629ae5569dc9313e4a"
+
+[[clause]]
+clause-id = "refcap.4"
+corpus-id = "refcap"
+source-path = ".aiqt/core/rules/accur-reference-capture.md"
+start-line = 17
+end-line = 18
+canonical-text = "A count or code identifier, such as a function name, written into\na brief or change description is copied from the run output or source line that produced it."
+source-digest = "20a080dc13c927a3fff8163a62a1c514380f02e209912b629ae5569dc9313e4a"
 
 [[clause]]
 clause-id = "reprod.1"
