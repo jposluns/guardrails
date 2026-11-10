@@ -2516,13 +2516,14 @@ _CENSUS_MAPPINGS = (
 # end), so its kill bound must outlive that self-test's own end-to-end budget. A tool listed in
 # _CENSUS_BUDGETED must declare that budget (load-adjusted seconds) as the only binding of
 # SELF_TEST_BUDGET_S in its module, a module-level plain assignment of a positive int literal, read from
-# its parsed source without importing it (_declared_budget); its run is bounded at that budget plus
-# CENSUS_BOUND_MARGIN_S, never at a separately chosen number. Any other tool keeps TIMEOUT * 4. Every
-# bound runs on the load-adjusted clock of tools/_load_bound.py, the clock the child's own bounds use, so
-# host load stretches the parent's bound as it stretches the child's waits. A run that outlives its bound
-# is stopped (its whole process group) as _load_bound.Hung, a subprocess.TimeoutExpired, which main()
-# reports as cannot-evaluate (exit 2), never a pass. The self-test judges the bounds each census run
-# actually handed to that clock (_census_mapping_check records them), not what _census_bound returns.
+# its source bytes, parsed as the interpreter decodes them (a utf-8 source only), without importing it
+# (_declared_budget); its run is bounded at that budget plus CENSUS_BOUND_MARGIN_S, never at a separately
+# chosen number. Any other tool keeps TIMEOUT * 4. Every bound runs on the load-adjusted clock of
+# tools/_load_bound.py, the clock the child's own bounds use, so host load stretches the parent's bound
+# as it stretches the child's waits. A run that outlives its bound is stopped (its whole process group)
+# as _load_bound.Hung, a subprocess.TimeoutExpired, which main() reports as cannot-evaluate (exit 2),
+# never a pass. The self-test judges the bounds each census run actually handed to that clock
+# (_census_mapping_check records them), not what _census_bound returns.
 CENSUS_BOUND_MARGIN_S = TIMEOUT  # one parent call bound: interpreter start-up, the driver and the teardown
 _CENSUS_DEFAULT_BOUND_S = TIMEOUT * 4
 _CENSUS_BUDGETED = ("tools/check_gensrc_failclose.py",)
@@ -2586,10 +2587,28 @@ def _budget_from_source(source, label):
     return value.value
 
 
+def _budget_from_bytes(data, label):
+    """The SELF_TEST_BUDGET_S that the module bytes data declare (_budget_from_source), parsed from the
+    bytes as the interpreter compiles them, so a PEP 263 coding cookie decodes the source as a run of the
+    module does (a UTF-8 text read of a file declaring utf-7 or unicode_escape parses other statements
+    than the module runs). A declared encoding other than utf-8 (tokenize.detect_encoding, so a BOM reads
+    as utf-8-sig and stays refused as before) or an undetectable one is cannot-evaluate."""
+    import io
+    import tokenize
+    try:
+        encoding, _lines = tokenize.detect_encoding(io.BytesIO(data).readline)
+    except SyntaxError as exc:
+        raise CannotEvaluate("{}: cannot detect the source encoding to read {}: {}".format(
+            label, _BUDGET_NAME, exc)) from exc
+    require(encoding == "utf-8", "{}: declares source encoding {}; {} is read only from a utf-8 "
+            "source".format(label, encoding, _BUDGET_NAME))
+    return _budget_from_source(data, label)
+
+
 def _declared_budget(path):
-    """The SELF_TEST_BUDGET_S the tool at path declares, as an int (_budget_from_source); a source
-    that cannot be read as UTF-8 raises OSError or ValueError, which main() reports as cannot-evaluate."""
-    return _budget_from_source(path.read_text(encoding="utf-8"), str(path))
+    """The SELF_TEST_BUDGET_S the tool at path declares, as an int (_budget_from_bytes); a source that
+    cannot be read raises OSError, which main() reports as cannot-evaluate."""
+    return _budget_from_bytes(path.read_bytes(), str(path))
 
 
 def _census_bound(root, rel):
@@ -2613,7 +2632,8 @@ def _census_run(args, bound):
     return _load_bound.run(args, budget_s=bound, stall_s=bound)
 
 
-# Sources for _budget_from_source: (name, source, the budget it must read, or None where it must refuse).
+# Sources for _budget_from_bytes, each read as its UTF-8 bytes: (name, source, the budget it must read, or
+# None where it must refuse).
 # The first four are each accepted, at 600, by the line reader this module used before (one column-0
 # "SELF_TEST_BUDGET_S = <digits>" line, _retired_line_budget), so each is red against that reader.
 _BUDGET_FIXTURES = (
@@ -2649,12 +2669,19 @@ _BUDGET_FIXTURES = (
     ("expression", "SELF_TEST_BUDGET_S = 600 + 0\n", None),
     ("syntax-error", "SELF_TEST_BUDGET_S = 600\ndef (\n", None),
     ("null-byte", "SELF_TEST_BUDGET_S = 600\n\x00\n", None),
+    ("cookie-unicode-escape", "# -*- coding: unicode_escape -*-\nSELF_TEST_BUDGET_S = 600  # seconds\\n"
+     "SELF_TEST_BUDGET_S = 5\n", None),
+    ("cookie-utf-7", "# -*- coding: utf-7 -*-\nSELF_TEST_BUDGET_S = 600\n# note +AAo-SELF_TEST_BUDGET_S = 5\n",
+     None),
     ("plain", "SELF_TEST_BUDGET_S = 600  # seconds\n", 600),
     ("one", "SELF_TEST_BUDGET_S = 1\n", 1),
     ("reads-and-text", 'SELF_TEST_BUDGET_S = 600\n"""SELF_TEST_BUDGET_S = 900"""\nOTHER = SELF_TEST_BUDGET_S + 1\n'
      "print(SELF_TEST_BUDGET_S)\n", 600),
 )
 _BUDGET_LINE_READER_RED = ("docstring", "if-block-reassign", "augmented", "annotated")
+# Each of these declares a non-UTF-8 coding cookie under which the interpreter binds the name a second
+# time (to 5), so each is accepted, at 600, by a read that parses the UTF-8 text instead of the bytes.
+_BUDGET_TEXT_READ_RED = ("cookie-unicode-escape", "cookie-utf-7")
 
 
 def _retired_line_budget(source):
@@ -2667,11 +2694,12 @@ def _retired_line_budget(source):
 
 
 def _budget_reader_checks(red_on_revert):
-    """Each _BUDGET_FIXTURES source reads as its stated budget or is refused as cannot-evaluate; with
-    red_on_revert, each regression fixture is shown accepted by the retired line reader."""
+    """Each _BUDGET_FIXTURES source, as UTF-8 bytes, reads as its stated budget or is refused as
+    cannot-evaluate; with red_on_revert, each regression fixture is shown accepted by the retired line
+    reader, and each cookie fixture by a parse of its UTF-8 text."""
     for name, source, want in _BUDGET_FIXTURES:
         try:
-            got = _budget_from_source(source, "fixture " + name)
+            got = _budget_from_bytes(source.encode("utf-8"), "fixture " + name)
         except CannotEvaluate:
             got = None
         check("census-budget-reader-" + name, got == want)
@@ -2681,6 +2709,10 @@ def _budget_reader_checks(red_on_revert):
         for name in _BUDGET_LINE_READER_RED:
             check("census-budget-reader-" + name + "-red", _retired_line_budget(sources[name]) == 600)
             print("RED census-budget-reader-" + name + " at the retired line reader")
+        for name in _BUDGET_TEXT_READ_RED:
+            check("census-budget-reader-" + name + "-red",
+                  _budget_from_source(sources[name], "fixture " + name) == 600)
+            print("RED census-budget-reader-" + name + " at a parse of the UTF-8 text")
 
 
 _CENSUS_HANG_BOUND_S = 5
