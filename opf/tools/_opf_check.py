@@ -2654,8 +2654,12 @@ def archive_read(root_fd, machine_rel, enabled_types, registered_vendors, import
     is a C-ID-SPACE message, which the doctor reports under C-ID-SPACE in its own wording. archive_read
     reads no active records, so an archived id that repeats an active one is reported by the doctor
     alone, and since it passes the walk no active locations, a destination naming one leaves `complete`
-    False where the doctor counts it. A caller relies on the result only when `problems` is empty and
-    `complete` is True."""
+    False where the doctor counts it. A caller relies on the result only when `complete` is True and
+    every message in `problems` is one it has shown cannot change the records it reads. The two
+    C-ROTATION messages above are appended to the rotation list alone, never to the report or the unread
+    or unconfirmed sets, so neither changes which records the walk seats or `complete`. The decision
+    views (_opf_views._decision_neutral_problem) rely on the result when every problem is one of those
+    two messages and no non-terminal record named is a pending_decision; any other problem refuses them."""
     rep = _Report()
     rep.ran("C-ARCHIVE-ENUM")
     unread, unconfirmed, walk = set(), set(), {}

@@ -5609,12 +5609,60 @@ def _self_test():
         _ad_pd_arm = _ad_forced(lambda: _ad_outcome(_ad_pr_root), (_ad_ho_rot, _ad_pd_rot), True)
         check("archive-non-terminal-pending-decision-refused",
               _ad_pd_arm[0] == "refused" and _ad_pd_rot in _ad_pd_arm[1] and _ad_ho_rot not in _ad_pd_arm[1])
-        for _ad_odd_id, _ad_odd in (
-                ("archive-rotation-lookalike-suffix-refused", _ad_ho_rot + " (forced)"),
-                ("archive-rotation-lookalike-other-refused", "C-ROTATION: forced"),
-                ("archive-rotation-lookalike-count-refused", _ad_unbound.replace("1 record", "a record"))):
-            _ad_odd_arm = _ad_forced(lambda: _ad_outcome(_ad_pr_root), (_ad_odd,), True)
-            check(_ad_odd_id, _ad_odd_arm[0] == "refused" and _ad_odd in _ad_odd_arm[1])
+
+        # The three lookalike rows below and the real-walk open pending decision row further on pass with
+        # or without the narrowing, so each has a companion that reruns the row's own predicate with
+        # _decision_neutral_problem swapped for an over-narrowing mutant and requires the row to turn red:
+        # the end of a pattern left unanchored, any C-ROTATION message taken as neutral, any count taken
+        # as a number, and the pending_decision type check dropped. A faithful copy built the same way
+        # must keep every one of those rows green, so the red comes from the one change in each mutant. A
+        # row that stops reaching the classification it guards then fails its companion.
+        def _ad_lookalike_refused(odd):
+            arm = _ad_forced(lambda: _ad_outcome(_ad_pr_root), (odd,), True)
+            return arm[0] == "refused" and odd in arm[1]
+
+        def _ad_neutral_mutant(unbound, not_terminal, type_checked=True):
+            def _mutant(problem):
+                if not isinstance(problem, str):
+                    return False
+                if unbound(problem):
+                    return True
+                m = not_terminal(problem)
+                return m is not None and (not type_checked or m.group(1) != "pending_decision")
+            return _mutant
+
+        def _ad_with_neutral(mutant, fn):
+            real = globals()["_decision_neutral_problem"]
+            globals()["_decision_neutral_problem"] = mutant
+            try:
+                return fn()
+            finally:
+                globals()["_decision_neutral_problem"] = real
+
+        _ad_copy = _ad_neutral_mutant(_ROTATION_UNBOUND.fullmatch, _ROTATION_NOT_TERMINAL.fullmatch)
+        _ad_unanchored = _ad_neutral_mutant(_ROTATION_UNBOUND.match, _ROTATION_NOT_TERMINAL.match)
+        _ad_any_rotation = _ad_neutral_mutant(lambda p: p.startswith("C-ROTATION: "),
+                                              _ROTATION_NOT_TERMINAL.fullmatch)
+        _ad_any_count = _ad_neutral_mutant(
+            re.compile(_ROTATION_UNBOUND.pattern.replace("[0-9]+", ".+"), re.ASCII).fullmatch,
+            _ROTATION_NOT_TERMINAL.fullmatch)
+        _ad_untyped = _ad_neutral_mutant(_ROTATION_UNBOUND.fullmatch, _ROTATION_NOT_TERMINAL.fullmatch,
+                                         type_checked=False)
+        _ad_copy_green = True
+        for _ad_odd_id, _ad_red_id, _ad_odd, _ad_mut in (
+                ("archive-rotation-lookalike-suffix-refused",
+                 "archive-rotation-lookalike-suffix-red-when-unanchored",
+                 _ad_ho_rot + " (forced)", _ad_unanchored),
+                ("archive-rotation-lookalike-other-refused",
+                 "archive-rotation-lookalike-other-red-when-any-rotation",
+                 "C-ROTATION: forced", _ad_any_rotation),
+                ("archive-rotation-lookalike-count-refused",
+                 "archive-rotation-lookalike-count-red-when-any-count",
+                 _ad_unbound.replace("1 record", "a record"), _ad_any_count)):
+            check(_ad_odd_id, _ad_lookalike_refused(_ad_odd))
+            check(_ad_red_id, not _ad_with_neutral(_ad_mut, lambda: _ad_lookalike_refused(_ad_odd)))
+            _ad_copy_green = (_ad_copy_green
+                              and _ad_with_neutral(_ad_copy, lambda: _ad_lookalike_refused(_ad_odd)))
 
         # The same over the real walk's own wording: a store that rotates PD-1 with no worklog span and no
         # archived worklog renders both outputs, while the doctor reports the C-ROTATION finding and still
@@ -5665,12 +5713,19 @@ def _self_test():
         _ad_open = {k: v for k, v in _ad_pd(1).items() if k not in ("decision", "decided_at", "decided_by")}
         _ad_open["status"] = "open"
         _ad_op_root, _ad_op_obs = _ad_rotation_store(_ad_open, worklog_span=True)
-        _ad_op, _ad_op_seen = _ad_walk_problems(lambda: _ad_outcome(_ad_op_root))
-        _ad_op_rot = [p for p in _ad_op_seen if _ROTATION_NOT_TERMINAL.fullmatch(p) is not None]
-        check("archive-open-pending-decision-real-walk-refused",
-              _ad_op[0] == "refused" and len(_ad_op_rot) == 1 and _ad_op_rot[0] in _ad_op[1]
-              and _ROTATION_NOT_TERMINAL.fullmatch(_ad_op_rot[0]).group(1) == "pending_decision"
-              and _decision_neutral_problem(_ad_op_rot[0].replace("(pending_decision)", "(handoff)")))
+
+        def _ad_open_refused():
+            op, op_seen = _ad_walk_problems(lambda: _ad_outcome(_ad_op_root))
+            op_rot = [p for p in op_seen if _ROTATION_NOT_TERMINAL.fullmatch(p) is not None]
+            return (op[0] == "refused" and len(op_rot) == 1 and op_rot[0] in op[1]
+                    and _ROTATION_NOT_TERMINAL.fullmatch(op_rot[0]).group(1) == "pending_decision"
+                    and _decision_neutral_problem(op_rot[0].replace("(pending_decision)", "(handoff)")))
+
+        check("archive-open-pending-decision-real-walk-refused", _ad_open_refused())
+        check("archive-open-pending-decision-red-when-type-ignored",
+              not _ad_with_neutral(_ad_untyped, _ad_open_refused))
+        check("archive-neutral-mutant-copy-keeps-guards-green",
+              _ad_copy_green and _ad_with_neutral(_ad_copy, _ad_open_refused))
 
         # An archived pending decision repeating an active one's id refuses both outputs (the walk alone
         # does not report it, since it reads no active records).
