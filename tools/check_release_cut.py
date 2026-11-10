@@ -2515,15 +2515,16 @@ _CENSUS_MAPPINGS = (
 # A census run is a tool's whole self-test (the injected read fails only at its close vectors, near the
 # end), so its kill bound must outlive that self-test's own end-to-end budget. A tool listed in
 # _CENSUS_BUDGETED must declare that budget (load-adjusted seconds) as the only binding of
-# SELF_TEST_BUDGET_S in its module, a module-level plain assignment of a positive int literal, read from
-# its source bytes, parsed as the interpreter decodes them (a utf-8 source only), without importing it
-# (_declared_budget); its run is bounded at that budget plus CENSUS_BOUND_MARGIN_S, never at a separately
-# chosen number. Any other tool keeps TIMEOUT * 4. Every bound runs on the load-adjusted clock of
-# tools/_load_bound.py, the clock the child's own bounds use, so host load stretches the parent's bound
-# as it stretches the child's waits. A run that outlives its bound is stopped (its whole process group)
-# as _load_bound.Hung, a subprocess.TimeoutExpired, which main() reports as cannot-evaluate (exit 2),
-# never a pass. The self-test judges the bounds each census run actually handed to that clock
-# (_census_mapping_check records them), not what _census_bound returns.
+# SELF_TEST_BUDGET_S in its module, a module-level plain assignment of a positive int literal, parsed
+# from its source bytes without importing it (_declared_budget); a source that is not strict UTF-8 or
+# holds a CR byte, a byte-order mark or a coding declaration is cannot-evaluate (_source_refusals). Its
+# run is bounded at that budget plus CENSUS_BOUND_MARGIN_S, never at a separately chosen number. Any
+# other tool keeps TIMEOUT * 4. Every bound runs on the load-adjusted clock of tools/_load_bound.py, the
+# clock the child's own bounds use, so host load stretches the parent's bound as it stretches the child's
+# waits. A run that outlives its bound is stopped (its whole process group) as _load_bound.Hung, a
+# subprocess.TimeoutExpired, which main() reports as cannot-evaluate (exit 2), never a pass. The self-test
+# judges the bounds each census run actually handed to that clock (_census_mapping_check records them),
+# not what _census_bound returns.
 CENSUS_BOUND_MARGIN_S = TIMEOUT  # one parent call bound: interpreter start-up, the driver and the teardown
 _CENSUS_DEFAULT_BOUND_S = TIMEOUT * 4
 _CENSUS_BUDGETED = ("tools/check_gensrc_failclose.py",)
@@ -2587,21 +2588,42 @@ def _budget_from_source(source, label):
     return value.value
 
 
+# Any PEP 263 coding declaration, whatever encoding it names (the interpreter honours one on either of
+# the first two lines; the encoding name is never read here).
+_CODING_DECLARATION = re.compile(rb"^[ \t\f]*#.*?coding[:=]", re.ASCII)
+
+
+def _source_refusals(data):
+    """Each rule of the source gate that the module bytes data break, as (rule, reason) pairs; the gate
+    passes only when the list is empty. The rules need no coding-cookie parsing: the bytes decode as
+    strict UTF-8 ("utf-8"), hold no carriage return byte at all ("cr"), hold no UTF-8 byte-order mark
+    anywhere ("bom"), and neither of the first two lines, split at LF only, matches the PEP 263 coding
+    pattern in any form, a utf-8 declaration included ("coding"). With no CR byte, the LF split is the
+    interpreter's own line split, so a declaration it would honour on line one or two is always seen."""
+    import codecs
+    refusals = []
+    try:
+        data.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        refusals.append(("utf-8", "is not strict UTF-8 ({})".format(exc)))
+    if b"\r" in data:
+        refusals.append(("cr", "holds a carriage return byte"))
+    if codecs.BOM_UTF8 in data:
+        refusals.append(("bom", "holds a UTF-8 byte-order mark"))
+    if any(_CODING_DECLARATION.match(line) for line in data.split(b"\n", 2)[:2]):
+        refusals.append(("coding", "declares a source encoding on its first or second line"))
+    return refusals
+
+
 def _budget_from_bytes(data, label):
     """The SELF_TEST_BUDGET_S that the module bytes data declare (_budget_from_source), parsed from the
-    bytes as the interpreter compiles them, so a PEP 263 coding cookie decodes the source as a run of the
-    module does (a UTF-8 text read of a file declaring utf-7 or unicode_escape parses other statements
-    than the module runs). A declared encoding other than utf-8 (tokenize.detect_encoding, so a BOM reads
-    as utf-8-sig and stays refused as before) or an undetectable one is cannot-evaluate."""
-    import io
-    import tokenize
-    try:
-        encoding, _lines = tokenize.detect_encoding(io.BytesIO(data).readline)
-    except SyntaxError as exc:
-        raise CannotEvaluate("{}: cannot detect the source encoding to read {}: {}".format(
-            label, _BUDGET_NAME, exc)) from exc
-    require(encoding == "utf-8", "{}: declares source encoding {}; {} is read only from a utf-8 "
-            "source".format(label, encoding, _BUDGET_NAME))
+    bytes only after the source gate passes (_source_refusals: strict UTF-8, no CR byte, no byte-order
+    mark, no coding declaration on line one or two). Any broken rule is cannot-evaluate, so the bytes the
+    interpreter would decode and the UTF-8 text parsed here are the same source."""
+    refusals = _source_refusals(data)
+    require(not refusals, "{}: {} is read only from strict UTF-8 with LF line ends, no byte-order mark "
+            "and no coding declaration; this source {}".format(
+                label, _BUDGET_NAME, "; ".join(reason for _rule, reason in refusals)))
     return _budget_from_source(data, label)
 
 
@@ -2683,6 +2705,46 @@ _BUDGET_LINE_READER_RED = ("docstring", "if-block-reassign", "augmented", "annot
 # time (to 5), so each is accepted, at 600, by a read that parses the UTF-8 text instead of the bytes.
 _BUDGET_TEXT_READ_RED = ("cookie-unicode-escape", "cookie-utf-7")
 
+# Sources for the source gate (_source_refusals), each as raw bytes: (name, bytes, the budget it must
+# read, or None where it must refuse). The interpreter runs each as 600, and each refused one is read, at
+# 600, by the bytes parse with the gate removed: a bare CR ends a line for the interpreter (the cr-only
+# and mixed rows end their coding line with one, which an LF split does not see), the utf-7 and
+# unicode_escape rows decode under that cookie (the lf-indented one too: blanks may lead the comment),
+# and the invalid-utf-8 row is latin-1 under its cookie. The line-3-coding row is accepted: the
+# interpreter reads a declaration on line one or two only.
+_SOURCE_GATE_FIXTURES = (
+    ("cr-only-utf-7", b"\r# -*- coding: utf-7 -*-\rSELF_TEST_BUDGET_S = 600\r", None),
+    ("cr-only-unicode-escape", b"\r# -*- coding: unicode_escape -*-\rSELF_TEST_BUDGET_S = 600\r", None),
+    ("cr-only-utf-8", b"\r# -*- coding: utf-8 -*-\rSELF_TEST_BUDGET_S = 600\r", None),
+    ("crlf-utf-7", b"# -*- coding: utf-7 -*-\r\nSELF_TEST_BUDGET_S = 600\r\n", None),
+    ("crlf-unicode-escape", b"# -*- coding: unicode_escape -*-\r\nSELF_TEST_BUDGET_S = 600\r\n", None),
+    ("crlf-utf-8", b"# -*- coding: utf-8 -*-\r\nSELF_TEST_BUDGET_S = 600\r\n", None),
+    ("mixed-utf-7", b"\n# -*- coding: utf-7 -*-\rSELF_TEST_BUDGET_S = 600\r\n", None),
+    ("mixed-unicode-escape", b"\n# -*- coding: unicode_escape -*-\rSELF_TEST_BUDGET_S = 600\r\n", None),
+    ("mixed-utf-8", b"\n# -*- coding: utf-8 -*-\rSELF_TEST_BUDGET_S = 600\r\n", None),
+    ("bom", b"\xef\xbb\xbfSELF_TEST_BUDGET_S = 600\n", None),
+    ("invalid-utf-8", b"# -*- coding: latin-1 -*-\nSELF_TEST_BUDGET_S = 600  # caf\xe9\n", None),
+    ("lf-utf-8", b"# -*- coding: utf-8 -*-\nSELF_TEST_BUDGET_S = 600\n", None),
+    ("lf-indented-utf-7", b" \t\f# -*- coding: utf-7 -*-\nSELF_TEST_BUDGET_S = 600\n", None),
+    ("lf-line-2-fileencoding", b"#!/usr/bin/env python3\n# vim: set fileencoding=utf-8 :\nSELF_TEST_BUDGET_S = 600\n",
+     None),
+    ("line-3-coding", b'#!/usr/bin/env python3\n"""Doc."""\n# -*- coding: latin-1 -*-\nSELF_TEST_BUDGET_S = 600\n',
+     600),
+    ("lf-plain", b"SELF_TEST_BUDGET_S = 600  # seconds\n", 600),
+)
+# (rule, fixture): the fixture breaks that one rule alone, so the gate with only that rule removed reads
+# it, at 600. The utf-8 rule has no such row: with no coding declaration and no byte-order mark the
+# interpreter, and so the bytes parse, already refuse a source that is not UTF-8.
+_SOURCE_GATE_ONE_RULE = (
+    ("cr", "cr-only-utf-7"),
+    ("cr", "cr-only-unicode-escape"),
+    ("cr", "cr-only-utf-8"),
+    ("bom", "bom"),
+    ("coding", "lf-utf-8"),
+    ("coding", "lf-indented-utf-7"),
+    ("coding", "lf-line-2-fileencoding"),
+)
+
 
 def _retired_line_budget(source):
     """The line reader _budget_from_source replaced, kept only so the self-test can show its regression
@@ -2713,6 +2775,31 @@ def _budget_reader_checks(red_on_revert):
             check("census-budget-reader-" + name + "-red",
                   _budget_from_source(sources[name], "fixture " + name) == 600)
             print("RED census-budget-reader-" + name + " at a parse of the UTF-8 text")
+
+
+def _source_gate_checks(red_on_revert):
+    """Each _SOURCE_GATE_FIXTURES source reads as its stated budget or is refused as cannot-evaluate; with
+    red_on_revert, each refused one is shown read, at 600, by the bytes parse with the whole gate removed,
+    and each _SOURCE_GATE_ONE_RULE row shown broken by its one rule alone, so the gate with only that rule
+    removed reads it, at 600."""
+    for name, data, want in _SOURCE_GATE_FIXTURES:
+        try:
+            got = _budget_from_bytes(data, "fixture " + name)
+        except CannotEvaluate:
+            got = None
+        check("census-source-gate-" + name, got == want)
+        print("PASS census-source-gate-" + name)
+    if red_on_revert:
+        sources = {name: data for name, data, _want in _SOURCE_GATE_FIXTURES}
+        for name, data, want in _SOURCE_GATE_FIXTURES:
+            if want is None:
+                check("census-source-gate-" + name + "-red", _budget_from_source(data, "fixture " + name) == 600)
+                print("RED census-source-gate-" + name + " with the source gate removed")
+        for rule, name in _SOURCE_GATE_ONE_RULE:
+            broken = [found for found, _reason in _source_refusals(sources[name])]
+            check("census-source-gate-" + name + "-only-" + rule + "-red",
+                  broken == [rule] and _budget_from_source(sources[name], "fixture " + name) == 600)
+            print("RED census-source-gate-" + name + " with only the " + rule + " rule removed")
 
 
 _CENSUS_HANG_BOUND_S = 5
@@ -2807,7 +2894,8 @@ def _census_bound_checks(root, red_on_revert, used):
     fixed timeout outside the load-adjusted runner), and a call on another clock."""
     margin = CENSUS_BOUND_MARGIN_S
     _budget_reader_checks(red_on_revert)
-    bounds = {rel: _census_bound(root, rel) for rel, _target, _argv in _CENSUS_MAPPINGS}
+    _source_gate_checks(red_on_revert)
+    bounds ={rel: _census_bound(root, rel) for rel, _target, _argv in _CENSUS_MAPPINGS}
     budgets = {rel: budget for rel, (budget, _bound) in bounds.items()}
     check("census-bound-declared", all(bounds[rel][0] is not None for rel in _CENSUS_BUDGETED))
     check("census-bound-outlives-budget", _census_used_outlive(used, budgets))
