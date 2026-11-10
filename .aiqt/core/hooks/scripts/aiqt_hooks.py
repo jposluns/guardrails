@@ -5993,6 +5993,7 @@ def commit_identity(data):
             "so the commit-identity check could not run; failing closed.",
             "AIQT guardrail: denied a Bash call with no readable command (rule cmtidn, fail-closed).")
     reads = _SubstHeredocs.reads
+    raw = False  # True when the hit comes from the raw-text rule rather than the word reader
     try:
         hit = find_ai_authorship(command)
     except _ReadingLimitError:
@@ -6014,18 +6015,33 @@ def commit_identity(data):
         hit = _cmtidn_identity_set_ai(command)
         if hit is None:
             return _commit_identity_fallback(_hash_doubt_scan(command), str(exc))
+        raw = True
     except ValueError as exc:
         hit = _cmtidn_identity_set_ai(command)
         if hit is None:
             return _commit_identity_fallback(command, str(exc))
+        raw = True
     if hit is None:
         # Nothing the reader judges sets an AI identity: the raw text decides next, failing closed when it
         # names an identity in an assignment or default-value form and an AI anywhere (_cmtidn_identity_set_ai).
         hit = _cmtidn_identity_set_ai(command)
+        raw = hit is not None
     if hit is None:
         if _SubstHeredocs.reads != reads:
             return _commit_identity_fallback(command, _SUBST_HEREDOC_MAIN_FAILS)  # main's fallback, in place
         return _allow()
+    if raw:
+        # The raw-text rule finds only that the text names an identity assignment form and an AI identity, not
+        # that a git command sets one (the command may run no git, set a human identity, or be one the reader
+        # could not parse), so its reason says that and that the check fails closed.
+        reason = ("AIQT rule cmtidn (commit-identity): a recorded change carries the human maintainer's own "
+                  "identity, with no AI as author, committer, or co-author. This command's text names an "
+                  "identity assignment form and an AI identity ({}); whether it sets an AI identity could not "
+                  "be ruled out, so the check fails closed, which may over-deny a command that only quotes "
+                  "such text. Remove the AI identity, or the assignment text, and commit as the "
+                  "maintainer.".format(hit))
+        return _deny(reason, "AIQT guardrail: denied a command naming an identity assignment and an AI "
+                     "identity (rule cmtidn, fail-closed).")
     reason = ("AIQT rule cmtidn (commit-identity): a recorded change carries the human maintainer's "
               "own identity, with no AI as author, committer, or co-author; this git command sets an "
               "AI identity ({}). Remove it and commit as the maintainer.".format(hit))

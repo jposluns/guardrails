@@ -10617,17 +10617,20 @@ def _pl239_launch_failures():
 # === cmtidn differential oracle (cmo) ===
 # The commit_identity guard of this tree against the same guard at the base its identity-assignment change
 # starts from, decided side by side in one process. The base is read from git at _CMO_BASE (git show, with
-# replacement objects disabled) and loaded under its own module name. The corpus is built from the guard's
-# own tables (the identity variables, the identity config keys, the -c and --config words, the declaration
-# and wrapper words) crossed with -c placements, environment prefixes, wrapper words and quoting, plus the
-# pinned forms of _CMO_PINNED; a core of those is also judged where the reader cannot parse it (an
-# unbalanced quote) and where it is too long to read (past _CMTIDN_READ_LIMIT). Every command is judged with
-# the payload cwd in a real scratch repository, one per module, under the fixture HOME and
-# GIT_CONFIG_NOSYSTEM=1 that the fixture lifecycle sets. A command the base denies (or raises on) that this
-# tree does not deny is a failure unless _CMO_NEWLY_ALLOWED names that exact command with its reason; an
-# entry the corpus does not hold, or one that no longer differs, is a stale failure. The forms the change
-# exists to deny (_CMO_NEW_DENIES) must deny here, so a revert of the change turns the oracle red, and so
-# does deleting an allowlist entry (the cmo-mutant checks).
+# replacement objects disabled) and loaded under its own module name. The corpus takes the -c and --config
+# words, the declaration words and the wrapper words from the guard's own tables, and the identity variables
+# and identity config keys from lists written here, each of which must match the guard's regexes (a name
+# added to those regexes later does not reach the corpus); these are crossed with -c placements,
+# environment prefixes, wrapper words and quoting, plus the pinned forms of _CMO_PINNED; a core of those is
+# also judged where the reader cannot parse it (an unbalanced quote) and where it is too long to read (past
+# _CMTIDN_READ_LIMIT). Every command is judged with the payload cwd in a real scratch repository, one per
+# module, under the empty HOME that _main_isolated sets; _main_isolated also removes GIT_CONFIG_NOSYSTEM
+# from the environment, which the decisions do not depend on, since the check does not read the git
+# configuration. A command the base denies (or raises on) that this tree does not deny is a failure unless
+# _CMO_NEWLY_ALLOWED names that exact command with its reason; an entry the corpus does not hold, or one
+# that no longer differs, is a stale failure. The forms the change exists to deny (_CMO_NEW_DENIES) must
+# deny here, so a revert of the change turns the oracle red, and so does deleting an allowlist entry (the
+# cmo-mutant checks).
 _CMO_BASE = "189a280e388d6a2e6d3d1b59b3616d32dac3ad51"
 _CMO_HOOK_PATH = ".aiqt/core/hooks/scripts/aiqt_hooks.py"
 # AI identity values: a name, an address, a two-word name (always quoted) and a model name.
@@ -10854,8 +10857,9 @@ def _cmo_table_failures(mod):
 
 
 def _cmo_corpus(mod):
-    """(corpus, core): the sorted distinct oracle commands built from the guard tables of mod (this tree's
-    hook) and the pinned forms, and the core subset that is also judged unparsed and past the read limit."""
+    """(corpus, core): the sorted distinct oracle commands built from the wrapper, declaration and config
+    option tables of mod (this tree's hook), the identity variables and config keys listed here, and the
+    pinned forms, and the core subset that is also judged unparsed and past the read limit."""
     commit = "git commit -m x"
     variables = ["GIT_{}_{}".format(role, part) for role in ("AUTHOR", "COMMITTER")
                  for part in ("NAME", "EMAIL")] + ["EMAIL"]
@@ -25718,6 +25722,36 @@ def _main_isolated(monitor):
                 ("(ci-idc-o7) a commit message that names an AI beside a human EMAIL assignment denies (over-deny)",
                  "EMAIL=alice@example.com git commit -m 'fix the claude adapter'")):
             ciexpect(_ci_label, _ci_cmd, "deny")
+        # The raw-text rule finds only that the text names an identity assignment form and an AI identity, so its
+        # deny says that and that it fails closed, never that a git command sets an AI identity: on a command
+        # that runs no git (ci-idc-m1), one that sets a human identity (ci-idc-m2) and one the reader cannot
+        # parse (ci-idc-m3). A hit of the word reader keeps the message that a git command sets one (ci-idc-m4).
+        _ci_raw_wants = ("names an identity assignment form and an AI identity", "fails closed",
+                         "identity assignment 'EMAIL=")
+        _ci_raw_banner = "denied a command naming an identity assignment and an AI identity"
+        for _ci_label, _ci_cmd, _ci_wants, _ci_banner, _ci_unwanted in (
+                ("(ci-idc-m1) an AI EMAIL that echo only prints denies with the fail-closed raw-text message",
+                 "echo EMAIL=noreply@anthropic.com", _ci_raw_wants, _ci_raw_banner, "this git command sets"),
+                ("(ci-idc-m2) a human EMAIL assignment beside an AI product name denies with the fail-closed "
+                 "raw-text message", "EMAIL=alice@example.com git commit -m 'fix the claude adapter'",
+                 _ci_raw_wants, _ci_raw_banner, "this git command sets"),
+                ("(ci-idc-m3) an AI EMAIL assignment in a command the reader cannot parse denies with the "
+                 "fail-closed raw-text message", "EMAIL=noreply@anthropic.com git commit -m 'x",
+                 _ci_raw_wants, _ci_raw_banner, "this git command sets"),
+                ("(ci-idc-m4) an AI EMAIL assignment the word reader reads denies with the message that the git "
+                 "command sets an AI identity", "EMAIL=noreply@anthropic.com git commit -m x",
+                 ("this git command sets an AI identity",), "denied a git command recording an AI commit identity",
+                 "fails closed")):
+            _ci_code, _ci_out = cig({"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                                     "tool_input": {"command": _ci_cmd}})[:2]
+            _ci_got = _reduce_result(_ci_code, _ci_out)
+            _ci_reason = ((_ci_out or {}).get("hookSpecificOutput") or {}).get("permissionDecisionReason", "")
+            _ci_sys = (_ci_out or {}).get("systemMessage", "")
+            if (_ci_got != "deny" or not all(_ci_w in _ci_reason for _ci_w in _ci_wants)
+                    or _ci_banner not in _ci_sys or _ci_unwanted in _ci_reason):
+                failures.append("{}: expected deny with a reason holding {!r} and not {!r} and a banner holding {!r}, "
+                                "got {} with the reason {!r} and the banner {!r}".format(
+                                    _ci_label, _ci_wants, _ci_unwanted, _ci_banner, _ci_got, _ci_reason, _ci_sys))
         # git config reads its options only up to its first word that is neither an option nor an option's
         # value, so a read option spelled as an option value or after the NAME selects no mode and the command
         # still sets the value; each deny vector below set the identity on git 2.53.0 (with a stand-in name).
