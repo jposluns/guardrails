@@ -1755,6 +1755,31 @@ def _registered_vendors_and_kinds(manifest):
 # active ones (spec 8.5, 8.8, 12): the doctor's decision_chains reads that population, so these views do too.
 _ARCHIVE_DECISION_VIEWS = frozenset(("DECISIONS.md", "DECISIONS.toml"))
 
+# The two C-ROTATION messages the archive walk raises (_opf_check._validate_archive). The walk appends each
+# to its rotation list alone, never to its report or its unread or unconfirmed sets, so neither changes
+# which archived records it seats or whether it read them in full, and the doctor still evaluates
+# C-DECISION-CHAINS over the same population beside either finding. A bucket that rotates records with no
+# worklog span therefore leaves the decision outputs readable, and so does a non-terminal archived record of
+# another type; a non-terminal archived pending decision is a fault in the population the join reads, so it
+# still refuses. Each pattern is matched whole, so a message in any other wording refuses (fail-closed).
+_ROTATION_UNBOUND = re.compile(r"C-ROTATION: [0-9]+ record\(s\) are rotated to bucket '[^']*' with no "
+                               r"archived worklog span to bind them to a released period \(spec 12\)", re.ASCII)
+_ROTATION_NOT_TERMINAL = re.compile(r"C-ROTATION: archived record '[^']*' \(([a-z_]+)\) is not in an "
+                                    r"unqualified terminal state and must never rotate \(spec 12:972-979\)",
+                                    re.ASCII)
+
+
+def _decision_neutral_problem(problem):
+    """True when `problem`, one archive_read problem, cannot change the decision outputs: one of the two
+    rotation findings above, a non-terminal record naming a type other than pending_decision. Every other
+    problem, a message in any other wording included, can hide or duplicate a chain member and refuses."""
+    if not isinstance(problem, str):
+        return False
+    if _ROTATION_UNBOUND.fullmatch(problem):
+        return True
+    m = _ROTATION_NOT_TERMINAL.fullmatch(problem)
+    return m is not None and m.group(1) != "pending_decision"
+
 
 def _archived_decisions(store_root_fd, machine_rel, manifest, registered_vendors, active_decisions):
     """The archived pending decisions the two decision outputs join beside the active ones, read through
@@ -1767,16 +1792,20 @@ def _archived_decisions(store_root_fd, machine_rel, manifest, registered_vendors
     manifest-derived arguments opf record passes it.
 
     Refuses (ViewsError, a cannot-evaluate) rather than render over a partial population: when the walk
-    reports any problem (a missing, unreadable or malformed archive input, a C-ROTATION message, an
-    archived id seated twice), when it could not read or confirm a population in full (`complete` False),
-    when an archived pending decision is not a valid record or repeats an active decision's id, or when a
-    parsed path is also a declared active source read with different bytes. Each of those can hide or
-    duplicate a chain member, and a view cannot render part of a graph it cannot evaluate. A store with no
-    archive tree has rotated nothing: ([], {}). The refusal is conservative where the walk is: an archive
-    fault in another record type also refuses, and a moved row whose declared destination is an active
-    location leaves `complete` False here (archive_read is passed no active locations) where the doctor
-    counts it. The import is call-time, as render's is, since _opf_check imports this module at its top;
-    archive_read runs no validate_store, so the doctor's C-VIEW-DRIFT call into plan_views does not recur."""
+    reports a problem that can change the decision outputs (a missing, unreadable or malformed archive
+    input, a non-terminal archived pending decision, an archived id seated twice; every problem except the
+    two rotation findings _decision_neutral_problem names), when it could not read or confirm a population
+    in full (`complete` False), when an archived pending decision is not a valid record or repeats an
+    active decision's id, or when a parsed path is also a declared active source read with different
+    bytes. Each of those can hide or duplicate a chain member, and a view cannot render part of a graph it
+    cannot evaluate. Those two rotation findings change neither the records the walk seats nor whether it
+    read them in full, so they stay plain doctor findings and never turn C-VIEW-DRIFT into a
+    cannot-evaluate. A store with no archive tree has rotated nothing: ([], {}). The refusal is otherwise
+    conservative where the walk is: any other archive fault in another record type also refuses, and a
+    moved row whose declared destination is an active location leaves `complete` False here (archive_read
+    is passed no active locations) where the doctor counts it. The import is call-time, as render's is,
+    since _opf_check imports this module at its top; archive_read runs no validate_store, so the doctor's
+    C-VIEW-DRIFT call into plan_views does not recur."""
     import _opf_check
     base = manifest.get("opf")
     import_status = base.get("import_status") if isinstance(base, dict) else None
@@ -1784,8 +1813,9 @@ def _archived_decisions(store_root_fd, machine_rel, manifest, registered_vendors
                                                     manifest.get("types"))
     read = _opf_check.archive_read(store_root_fd, machine_rel, enabled_types, registered_vendors,
                                    import_status, homes=_opf_store.homes_generation(manifest))
-    if read.problems or not read.complete:
-        causes = list(read.problems)
+    blocking = [p for p in read.problems if not _decision_neutral_problem(p)]
+    if blocking or not read.complete:
+        causes = blocking
         if not read.complete:
             causes.append("the archive's record population could not all be read or confirmed")
         raise ViewsError("the archive does not pass the doctor's own archive walk ({}), so the decision "
@@ -5564,6 +5594,83 @@ def _self_test():
               _ad_arm_problem[0] == "refused" and "C-ARCHIVE-ENUM: forced" in _ad_arm_problem[1])
         _ad_in_flip = _ad_forced(lambda: _ad_outcome(_ad_in_root), (), True)
         check("archive-incomplete-red-when-walk-verdict-ignored", _ad_in_flip[0] == "rendered")
+
+        # The two rotation findings that change neither the seated records nor the walk's completeness
+        # leave both outputs rendering exactly as over a clean archive: a bucket with no worklog span, and
+        # a non-terminal archived record of another type. A non-terminal archived pending decision still
+        # refuses, and so does a message in any other wording. Red when every problem refuses.
+        _ad_unbound = ("C-ROTATION: 1 record(s) are rotated to bucket 'archive/2026' with no archived worklog "
+                       "span to bind them to a released period (spec 12)")
+        _ad_ho_rot = ("C-ROTATION: archived record 'HO-1' (handoff) is not in an unqualified terminal state "
+                      "and must never rotate (spec 12:972-979)")
+        _ad_pd_rot = _ad_ho_rot.replace("'HO-1' (handoff)", "'PD-1' (pending_decision)")
+        _ad_neutral = _ad_forced(lambda: _ad_outcome(_ad_pr_root), (_ad_unbound, _ad_ho_rot), True)
+        check("archive-rotation-findings-outside-decisions-render", _ad_pr_ok and _ad_neutral == _ad_pr)
+        _ad_pd_arm = _ad_forced(lambda: _ad_outcome(_ad_pr_root), (_ad_ho_rot, _ad_pd_rot), True)
+        check("archive-non-terminal-pending-decision-refused",
+              _ad_pd_arm[0] == "refused" and _ad_pd_rot in _ad_pd_arm[1] and _ad_ho_rot not in _ad_pd_arm[1])
+        for _ad_odd_id, _ad_odd in (
+                ("archive-rotation-lookalike-suffix-refused", _ad_ho_rot + " (forced)"),
+                ("archive-rotation-lookalike-other-refused", "C-ROTATION: forced"),
+                ("archive-rotation-lookalike-count-refused", _ad_unbound.replace("1 record", "a record"))):
+            _ad_odd_arm = _ad_forced(lambda: _ad_outcome(_ad_pr_root), (_ad_odd,), True)
+            check(_ad_odd_id, _ad_odd_arm[0] == "refused" and _ad_odd in _ad_odd_arm[1])
+
+        # The same over the real walk's own wording: a store that rotates PD-1 with no worklog span and no
+        # archived worklog renders both outputs, while the doctor reports the C-ROTATION finding and still
+        # evaluates C-VIEW-DRIFT; an archived PD-1 left open refuses, naming the walk's message. Red when
+        # the rotation finding refuses, or when the walk's wording drifts from the patterns.
+        def _ad_walk_problems(fn):
+            seen = []
+
+            def _spy(*args, **kwargs):
+                r = _ad_real_read(*args, **kwargs)
+                seen.extend(r.problems)
+                return r
+
+            _ad_check.archive_read = _spy
+            try:
+                return fn(), seen
+            finally:
+                _ad_check.archive_read = _ad_real_read
+
+        def _ad_rotation_store(archived_pd, worklog_span):
+            def _mut(root, _bi):
+                _ad_put(root, "pending_decision.index.toml",
+                        {"schema": 1, "record": [_ad_pd(2, supersedes="PD-1")]})
+                manifest = {"schema": 1, "moved": [
+                    {"id": "PD-1", "type": "pending_decision", "destination": _ad_pd_index}]}
+                if worklog_span:
+                    manifest["worklog_moved"] = [{"span": ["WL-1", "WL-2"],
+                                                  "destination": "archive/2026/worklog.toml"}]
+                else:
+                    (root / WORKING_DIRNAME / "toml" / "archive/2026/worklog.toml").unlink()
+                _ad_put(root, "archive/2026/archive.toml", manifest)
+                _ad_put(root, _ad_pd_index, {"schema": 1, "record": [archived_pd]})
+                _ad_put(root, "counters.toml", {"schema": 1, "counters": {
+                    "BI": 2, "DN": 1, "WL": 4, "FN": 0, "PD": 2, "AD": 0, "BL": 0, "HO": 1, "RF": 0,
+                    "CN": 0, "MD": 0, "PP": 0}})
+            return _gate_store(mutate=_mut)
+
+        _ad_ub_root, _ad_ub_obs = _ad_rotation_store(_ad_pd(1), worklog_span=False)
+        _ad_ub, _ad_ub_seen = _ad_walk_problems(lambda: _ad_outcome(_ad_ub_root))
+        _ad_ub_doc = _ad_check.validate_store(_ad_resolve(_ad_ub_root), observations=_ad_ub_obs)
+        check("archive-unbound-rotation-real-walk-renders",
+              _ad_ub[0] == "rendered" and len(_ad_ub_seen) == 1
+              and _ROTATION_UNBOUND.fullmatch(_ad_ub_seen[0]) is not None
+              and "## Superseded resolutions\n- PD-1 t\n" in _ad_ub[1].get("DECISIONS.md", ""))
+        check("archive-unbound-rotation-doctor-evaluates-view-drift",
+              _ad_ub_doc.checks.get("C-ROTATION") == "FINDING"
+              and _ad_ub_doc.checks.get("C-VIEW-DRIFT") not in (None, "CANNOT-EVALUATE"))
+        _ad_open = {k: v for k, v in _ad_pd(1).items() if k not in ("decision", "decided_at", "decided_by")}
+        _ad_open["status"] = "open"
+        _ad_op_root, _ad_op_obs = _ad_rotation_store(_ad_open, worklog_span=True)
+        _ad_op, _ad_op_seen = _ad_walk_problems(lambda: _ad_outcome(_ad_op_root))
+        _ad_op_rot = [p for p in _ad_op_seen if _ROTATION_NOT_TERMINAL.fullmatch(p) is not None]
+        check("archive-open-pending-decision-real-walk-refused",
+              _ad_op[0] == "refused" and len(_ad_op_rot) == 1 and _ad_op_rot[0] in _ad_op[1]
+              and _ROTATION_NOT_TERMINAL.fullmatch(_ad_op_rot[0]).group(1) == "pending_decision"
+              and _decision_neutral_problem(_ad_op_rot[0].replace("(pending_decision)", "(handoff)")))
 
         # An archived pending decision repeating an active one's id refuses both outputs (the walk alone
         # does not report it, since it reads no active records).
