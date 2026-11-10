@@ -5798,7 +5798,8 @@ def gather_release_pack(source_members, product_root):
     release manifest (RELEASE_MANIFEST_REL) and root.txt (RELEASE_ROOT_TXT_REL) under _RELEASE_ROOT, and
     the bytes of exactly the named `source_members`, each read at its own source path under that same
     root, nothing else. A release root that is the directory `product_root` names (compared by device and
-    inode of the two held descriptors, so no path spelling or alias can pass) refuses before any file is
+    inode of the two held descriptors, so no path spelling or alias reaching that same device and inode
+    can pass; a view of it under another device and inode is not recognised) refuses before any file is
     read: the opf/ being run is then the mirror installed inside the product, and no supported flow reads
     the release from there (a mirror path is its own pack source, so its plant row would read the very
     product path its create-only plant must find absent). An unopenable release root refuses naming the
@@ -14215,8 +14216,10 @@ def _self_test_checks():
         (root / preg_rel).parent.mkdir()
         (root / preg_rel).write_bytes(preg_old)
         # the product root's own decoy release: present before the plan freezes, internally consistent,
-        # and at ANOTHER ROOT than the plan's agreed one, so a gather reading under the product root
-        # would refuse at verify_pack_member rather than commit (red for a product-root gather).
+        # and at ANOTHER ROOT than the plan's agreed one. The product root holds no opf/ and so none of the
+        # plant rows' source members: a gather reading under the product root refuses while gathering, on
+        # an absent member, before verify_pack_member is reached (red for a product-root gather); the
+        # commit vector below also requires this decoy manifest left untouched.
         decoy_manifest = b"# the product root's own manifest, never the release's\n"
         (root / ".aiqt/release").mkdir(parents=True)
         (root / RELEASE_MANIFEST_REL).write_bytes(decoy_manifest)
@@ -14311,8 +14314,8 @@ def _self_test_checks():
         # own fixture payload byte-identically; the product root's decoy release stays unjudged and
         # untouched (red against a dropped pack= in the table, where the handler reports "carries no pack
         # manifest"; against a restored _DRIVER_UNSUPPLIED plant entry, which would refuse this plan;
-        # against a product-root gather, whose decoy ROOT verify_pack_member refuses; and against a
-        # per-composition-pass gather, which counts 2).
+        # against a product-root gather, which refuses while gathering, on a source member absent under the
+        # product root; and against a per-composition-pass gather, which counts 2).
         with plant_driver(), mock.patch.object(here, "_RELEASE_ROOT", release_root), \
                 mock.patch.dict(globals(), dict(gather_release_pack=counting_gather)):
             ptxn, perr = attempt(run_apply, root, plant_plan, plant_approval, sheet)
