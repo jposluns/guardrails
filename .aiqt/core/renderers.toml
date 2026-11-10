@@ -68,4 +68,4 @@ entrypoint = "tools/gen_hooks.py"
 semantics-revision = 1
 targets = ["plugin/aiqt-guardrails-hooks/hooks/", "plugin/aiqt-guardrails-hooks/.claude-plugin/plugin.json", ".claude-plugin/marketplace.json"]
 closure = ["tools/gen_hooks.py", "tools/_gen_common.py", "tools/_standards.py", "tools/gen_rules.py"]
-code-digest = "62fcef5d3ece5839561be777cb935481772ab2cab6b109296877a3055a302596"
+code-digest = "c2d9baa95ac5a57cfccd998f244868286392a2da77cd5f690ececa76a0ff8e76"

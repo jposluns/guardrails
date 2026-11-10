@@ -39,9 +39,12 @@ The full pack and per-assistant setup guides live at [aiqt.ai](https://aiqt.ai).
 - **In a repository**: clone this repository and read the governance core under `.aiqt/core/`; the
   rules are plain Markdown, and the controls are Python scripts under `tools/` that you can read and
   run. The pack's tools and hooks require Python 3.14 or newer.
-- **In Claude Code**: install the opt-in hooks plugin, pinned to the release tag, with
-  `claude plugin marketplace add https://github.com/jposluns/guardrails.git#v1.0.5 && claude plugin install aiqt-guardrails-hooks@aiqt-guardrails`.
+<!-- PLUGIN-INSTALL:BEGIN (generated) -->
+- **In Claude Code**: the opt-in hooks plugin, `aiqt-guardrails-hooks`, installs from this repository's plugin
+  marketplace, `aiqt-guardrails`, from the first release after 1.0.5; no release cut so far carries the
+  marketplace file, so there is no release tag to install from yet.
   The hooks run as `python3` and need the Python floor stated in the item above.
+<!-- PLUGIN-INSTALL:END -->
 
 ## 04. Keep what loads at session start small.
 

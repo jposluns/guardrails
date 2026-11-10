@@ -229,6 +229,17 @@ def _exists(path):
     return True
 
 
+def _absent_or_regular(path):
+    """True when path is absent or a regular file, judged by lstat so a symlink is never followed; False
+    for anything else there (a symlink, dangling or not, a directory, a FIFO). An unreadable parent
+    raises OSError, which the caller's fail-closed try turns into exit 2."""
+    try:
+        st = os.lstat(path)
+    except FileNotFoundError:
+        return True
+    return stat.S_ISREG(st.st_mode)
+
+
 def _req_str(table, key, where):
     value = table.get(key)
     if not isinstance(value, str) or not value:
@@ -357,7 +368,9 @@ def _check_marketplace(data, name):
     m_extra = set(market) - set(MARKETPLACE_KEYS)
     if m_extra:
         raise ValueError("{}: unknown [marketplace] key(s): {}".format(name, ", ".join(sorted(m_extra))))
-    if not ID_RE.match(_req_str(market, "name", "{}: [marketplace]".format(name))):
+    # fullmatch, not match: ID_RE ends in $, which also matches before a final newline, so a name with a
+    # trailing newline would pass match and render the newline into the marketplace file.
+    if not ID_RE.fullmatch(_req_str(market, "name", "{}: [marketplace]".format(name))):
         raise ValueError("{}: [marketplace] name must match ^[a-z][a-z0-9-]*$ (kebab-case)".format(name))
     return market
 
@@ -690,9 +703,11 @@ def run(root, check, project_ids=PROJECT_HOOK_IDS):
         if problem is not None:
             print("error: {} {} (cannot evaluate)".format(src_dir, problem))
             return 2
+        # The authoring test does not depend on the hooks source: with the source directory removed from
+        # the authoring tree, the marketplace file it rendered is still reconciled below as an orphan.
+        authoring = authoring_tree(root)
         if dir_present(src_dir, root=root):
             desired = build_desired(root, src_dir)
-            authoring = authoring_tree(root)
             if project_ids and authoring:
                 _plugin, hooks = load_manifest(src_dir / "manifest.toml")
                 desired[PROJECT_SETTINGS_REL] = render_project_settings(hooks, project_ids)
@@ -737,6 +752,12 @@ def run(root, check, project_ids=PROJECT_HOOK_IDS):
                 return 2
         for rel, content in sorted(desired.items()):
             target = root / rel
+            # A generated target that is there but is not a regular file (a symlink, wherever it points,
+            # a directory or a FIFO) fails closed before it is read: a symlink would otherwise be read
+            # through for the drift comparison and written through on regeneration.
+            if not _absent_or_regular(target):
+                print("error: {} is not a regular file (cannot evaluate)".format(rel))
+                return 2
             current = target.read_text(encoding="utf-8") if _exists(target) else None
             if current != content:
                 drift.append(rel)
@@ -922,7 +943,10 @@ def main():
 #  36. the [marketplace] table renders .claude-plugin/marketplace.json in the authoring tree only, to
 #      spelled-out expected bytes with a relative plugin source and no ref, sha, branch or tag key;
 #      drift, a hand-added key, deletion and an undeclared leftover file exit 1, a malformed table
-#      exits 2, build_desired() never carries it, and an adopter tree is never given or changed one.
+#      (a trailing-newline name included) exits 2, a symlinked marketplace.json or plugin.json exits 2
+#      in both modes with the file it points to untouched, a leftover file is still an orphan once the
+#      hooks source directory is removed, build_desired() never carries it, and an adopter tree is never
+#      given or changed one.
 # Every vector that removes the entries its own faults caused (cases 20b, 21b, 27 and 28)
 # does so by PROVENANCE, never by message text: each named entry from the staged cleanup,
 # the removal and absence helpers and the launch diagnostic carries its stage and the
@@ -2012,7 +2036,8 @@ def self_test_main(_nested=False):
         # 36. The marketplace file: rendered in the authoring tree to spelled-out expected bytes (a relative
         #     plugin source, no ref, branch or tag key), drift-clean on regeneration, drift and deletion exit 1,
         #     a hand-added key exit 1, an orphan once the table is removed exit 1, a malformed table exit 2,
-        #     never carried by build_desired(), and never written in a tree without the authoring marker.
+        #     a symlinked target exit 2, an orphan once the hooks source is removed exit 1, never carried by
+        #     build_desired(), and never written in a tree without the authoring marker.
         market_tail = '\n[marketplace]\nname = "selftest-market"\n'
         want_market = ('{\n  "name": "selftest-market",\n  "owner": {\n    "name": "Self Test",\n'
                        '    "email": "selftest@example.invalid"\n  },\n  "plugins": [\n    {\n'
@@ -2050,6 +2075,7 @@ def self_test_main(_nested=False):
             for label, tail in (("unknown key", market_tail + 'ref = "main"\n'),
                                 ("non-kebab name", '\n[marketplace]\nname = "Self_Market"\n'),
                                 ("missing name", '\n[marketplace]\n'),
+                                ("trailing-newline name", '\n[marketplace]\nname = "selftest-market\\n"\n'),
                                 ("not a table", '\nmarketplace = "selftest-market"\n')):
                 text = base_manifest + tail
                 if label == "not a table":
@@ -2062,6 +2088,34 @@ def self_test_main(_nested=False):
                 failures.append("a marketplace.json the manifest no longer declares expected exit 1 (orphan)")
             if run_project(mkt, check=False) != 0 or mkt_file.exists():
                 failures.append("regeneration must remove the orphan marketplace.json")
+            # A generated target that is a symlink to a file holding the expected bytes fails closed in
+            # both modes, the file it points to untouched: the marketplace file and, through the same
+            # drift loop, plugin.json.
+            mkt_manifest.write_text(base_manifest + market_tail, encoding="utf-8")
+            if run_project(mkt, check=False) != 0:
+                failures.append("marketplace tree: regeneration before the symlink cases expected exit 0")
+            for rel, want in ((MARKETPLACE_JSON_REL, want_market),
+                              (PLUGIN_JSON_REL, (mkt / PLUGIN_JSON_REL).read_text(encoding="utf-8"))):
+                outside = tmp / ("market-outside-" + Path(rel).name)
+                outside.write_text(want, encoding="utf-8")
+                (mkt / rel).unlink()
+                os.symlink(outside, mkt / rel)
+                for check in (True, False):
+                    if run_project(mkt, check=check) != 2:
+                        failures.append("a symlinked {} expected exit 2 (check={})".format(rel, check))
+                if not (mkt / rel).is_symlink() or outside.read_text(encoding="utf-8") != want:
+                    failures.append("a refused symlinked {} must be left as it was".format(rel))
+                (mkt / rel).unlink()
+                (mkt / rel).write_text(want, encoding="utf-8")
+            if run_project(mkt, check=True) != 0:
+                failures.append("marketplace tree after the symlink cases: check expected exit 0")
+            # The hooks source directory removed from the authoring tree: the marketplace file it
+            # rendered is an orphan, reported by the check and removed by regeneration.
+            shutil.rmtree(mkt / ".aiqt" / "core" / "hooks")
+            if run_project(mkt, check=True) != 1:
+                failures.append("an orphan marketplace.json with no hooks source expected exit 1")
+            if run_project(mkt, check=False) != 0 or mkt_file.exists():
+                failures.append("regeneration with no hooks source must remove the orphan marketplace.json")
             adopt = tmp / "market-adopter"
             adopt.mkdir()
             _build_project_tree(adopt, authoring=False)
@@ -4197,6 +4251,12 @@ def self_test_main(_nested=False):
           "in the authoring tree only: an adopter-shaped tree never gets, loses or changes a "
           ".claude/settings.json whatever the cwd, and a malformed authoring marker (a FIFO, an empty, a non-UTF-8 "
           "and a one-byte-oversize one included) fails closed while one of exactly the size bound is accepted; "
+          "the [marketplace] table renders .claude-plugin/marketplace.json in the authoring tree only, to "
+          "spelled-out bytes with a relative plugin source and no ref, drift-checked, pruned as an orphan "
+          "once undeclared (the hooks source directory removed included), refused when malformed (a "
+          "trailing-newline name included), never carried by build_desired() and never given to an adopter "
+          "tree; a generated target that is a symlink (marketplace.json and plugin.json shown) fails closed "
+          "in both modes with the file it points to untouched; "
           "a marker fixture that cannot be planted is a named NOT RUN failure" + proof + ", and the "
           "FIFO case is time-bounded so a blocking regression is a reported failure, never a hang; an "
           "authored per-hook timeout is accepted only as an integer from TIMEOUT_MIN to TIMEOUT_MAX "

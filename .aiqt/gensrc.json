@@ -256,7 +256,9 @@
         ".aiqt/core/gates/manifest.toml",
         ".aiqt/core/hooks/manifest.toml",
         ".aiqt/standards/",
-        "ENFORCEMENT.md"
+        "ENFORCEMENT.md",
+        "VERSION",
+        "changelog.toml"
       ],
       "target": "README.md"
     },

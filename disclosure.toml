@@ -173,6 +173,9 @@ prefix = ".baseline/opfiles-pin.toml"
 prefix = ".baseline/pin.toml"
 
 [[noncode]]
+prefix = ".claude-plugin/"
+
+[[noncode]]
 prefix = ".claude/"
 
 [[noncode]]
