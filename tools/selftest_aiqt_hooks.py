@@ -6557,6 +6557,15 @@ _DEADLINE_WALL_BOUND = aiqt_hooks.PRETOOL_BUDGET_SECONDS
 # _DEADLINE_WALL_BOUND, well below it.
 _DEADLINE_HANG_SECONDS = 60.0
 _DEADLINE_CHILD_TIMEOUT = 900
+# The fixed reference workload every dl-shape run is bracketed by (_load_reference_seconds): a pure-Python
+# character scan, the same kind of work the timed handlers do, over 524,288 characters, running none of the
+# hooks' code. _LOAD_REFERENCE_SECONDS is its cost on an uncontended runner: on one shared 80-CPU host with
+# Python 3.14.4 (2026-11-09) the least of 200 readings of half this text was 0.0134 s of CPU and wall-clock
+# time, so about 0.027 s for the whole; the constant is set a little above that, so an uncontended reading
+# on that host gives a slowdown of 1 and leaves every bound as written.
+_LOAD_REFERENCE_TEXT = ("(" + ";" * 59 + " #a\n") * 8192
+_LOAD_REFERENCE_STOPS = frozenset("#&;\n(")
+_LOAD_REFERENCE_SECONDS = 0.028
 
 
 def _deadline_fixtures(tmp):
@@ -6618,7 +6627,8 @@ def _hook_cpu_timed(call, bound=None, runs=3):
     median-judged rows (_timed_runs over the
     lex-cost and deadline-shape cases) keep their existing clocks, time.process_time in the lex-cost
     rows and _cpu_seconds in the deadline-shape cases, and judge the median of three runs, which
-    already tolerates one slowed run."""
+    already tolerates one slowed run; the deadline-shape cases also divide each run's times by a
+    reference slowdown read beside it (_deadline_run_judged)."""
     import gc
     spent = None
     for _ in range(max(1, runs)):
@@ -6678,14 +6688,31 @@ def _lex_cost_problems(name, guard, length, cpu, runs, want):
     return out
 
 
+def _load_reference_seconds():
+    """(cpu_seconds, wall_seconds) of one pass of the fixed reference workload (_LOAD_REFERENCE_TEXT), timed
+    with the clocks a dl-shape case uses (_cpu_seconds and time.monotonic). It runs none of the hooks' code
+    and allocates nothing that outlives it, so a change to a handler cannot change what it measures; only
+    the host's speed and the contention on it at that moment can."""
+    began, cpu_began = time.monotonic(), _cpu_seconds()
+    stops = 0
+    for char in _LOAD_REFERENCE_TEXT:
+        if char in _LOAD_REFERENCE_STOPS:
+            stops += 1
+    return _cpu_seconds() - cpu_began, time.monotonic() - began
+
+
 def _deadline_shape_case(name, shape, size, cwd):
     """One (handler, shape, size) case, in-process under a _DeadlineWindow of _DEADLINE_HANG_SECONDS:
-    (cpu_seconds, wall_seconds, outcome), the outcome being the reduced decision, "deadline" when the window
-    fired, "hard-block" for an exit 2, or "crash: <type>"."""
+    (cpu_seconds, wall_seconds, outcome, cpu_slowdown, wall_slowdown), the outcome being the reduced
+    decision, "deadline" when the window fired, "hard-block" for an exit 2, or "crash: <type>". Each
+    slowdown is the lesser of the two reference readings (_load_reference_seconds) taken immediately before
+    and after the call, on that clock, divided by _LOAD_REFERENCE_SECONDS: how much slower than an
+    uncontended runner the host ran fixed work at the time of the call (_deadline_run_judged)."""
     tool, tool_input = _DEADLINE_HASH_DETACH_SHAPES.get((name, shape), _DEADLINE_SHAPES[shape])(size, cwd)
     data = {"hook_event_name": "PreToolUse", "tool_name": tool, "tool_input": tool_input,
             "cwd": cwd, "session_id": "deadline-session", "tool_use_id": "deadline-call"}
     window = aiqt_hooks._DeadlineWindow(_DEADLINE_HANG_SECONDS)
+    reference_before = _load_reference_seconds()
     began, cpu_began = time.monotonic(), _cpu_seconds()
     try:
         with window:
@@ -6697,7 +6724,31 @@ def _deadline_shape_case(name, shape, size, cwd):
         outcome = "deadline"
     except Exception as exc:
         outcome = "crash: {}".format(type(exc).__name__)
-    return _cpu_seconds() - cpu_began, time.monotonic() - began, outcome
+    cpu, wall = _cpu_seconds() - cpu_began, time.monotonic() - began
+    reference_after = _load_reference_seconds()
+    return (cpu, wall, outcome, min(reference_before[0], reference_after[0]) / _LOAD_REFERENCE_SECONDS,
+            min(reference_before[1], reference_after[1]) / _LOAD_REFERENCE_SECONDS)
+
+
+def _deadline_run_judged(run):
+    """(cpu, wall) as judged for one dl-shape run, run being (cpu_seconds, wall_seconds, outcome) or
+    (cpu_seconds, wall_seconds, outcome, cpu_slowdown, wall_slowdown) (_deadline_shape_case): each time
+    divided by its slowdown, a slowdown under 1 (or none recorded) taken as 1, so a time is only ever scaled
+    down to what the call would have taken on an uncontended runner, never up on a faster one."""
+    cpu, wall = run[0], run[1]
+    cpu_slowdown, wall_slowdown = (run[3], run[4]) if len(run) > 3 else (1.0, 1.0)
+    return cpu / max(1.0, cpu_slowdown), wall / max(1.0, wall_slowdown)
+
+
+def _deadline_run_text(run):
+    """One run's account for a dl-shape line: its raw times and outcome, and, where it recorded them, its
+    slowdowns and the times judged."""
+    text = "{:.2f}s wall-clock, {:.2f}s of CPU time, outcome {}".format(run[1], run[0], run[2])
+    if len(run) > 3:
+        cpu, wall = _deadline_run_judged(run)
+        text += (" (reference slowdown {:.2f} on CPU time and {:.2f} on wall-clock, judged {:.2f}s of CPU "
+                 "time and {:.2f}s wall-clock)".format(run[3], run[4], cpu, wall))
+    return text
 
 
 def _deadline_shape_runs(tmp, sizes):
@@ -6746,8 +6797,8 @@ def _no_registry_above(root):
 
 def _deadline_shape_problems(name, shape, size, cpu, wall, outcome):
     """What one run of a (handler, shape, size) case got wrong, cpu and wall being the CPU and wall-clock
-    times judged: the medians of the case's runs (_judged), or a diagnostic re-run's own, as a list of
-    phrases ([] for none)."""
+    times judged: the medians of the case's runs' judged times (_judged over _deadline_run_judged), or a
+    diagnostic re-run's own judged times, as a list of phrases ([] for none)."""
     if outcome == "deadline":
         return ["reached no decision within the {:g}-second hang guard".format(_DEADLINE_HANG_SECONDS)]
     problems = []
@@ -6772,46 +6823,70 @@ def _deadline_shape_problems(name, shape, size, cpu, wall, outcome):
 
 
 def _deadline_shape_verdicts(runs, retime):
-    """The dl-shape failures for runs [(handler, shape, size, cwd, (cpu_seconds, wall_seconds, outcome) for
-    each run...)]: one line for each case whose median CPU time (_judged) is over its CPU bound, whose median
-    wall-clock time is over the wall-clock bound, or any of whose runs fails another check. A case whose
-    median wall-clock time is over the wall-clock bound, with at least one run reaching a decision, is run
-    once more by retime(handler, shape, size, cwd) only as a diagnostic: the line still records the
-    failure, carries every run's wall-clock time, CPU time and outcome, and applies every check to the
-    diagnostic run as well."""
+    """The dl-shape failures for runs [(handler, shape, size, cwd, (cpu_seconds, wall_seconds, outcome[,
+    cpu_slowdown, wall_slowdown]) for each run...)]: one line for each case whose median judged CPU time
+    (_judged over _deadline_run_judged) is over its CPU bound, whose median judged wall-clock time is over
+    the wall-clock bound, or any of whose runs fails another check. A case whose median judged wall-clock
+    time is over the wall-clock bound, with at least one run reaching a decision, is run once more by
+    retime(handler, shape, size, cwd) only as a diagnostic: the line still records the failure, carries
+    every run's wall-clock time, CPU time, outcome and any slowdowns, and applies every check to the
+    diagnostic run's judged times as well."""
     out = []
     for name, shape, size, cwd, *timed in runs:
-        cpu_judged = _judged([cpu for cpu, _wall, _outcome in timed])
-        wall_judged = _judged([wall for _cpu, wall, _outcome in timed])
+        judged = [_deadline_run_judged(run) for run in timed]
+        cpu_judged = _judged([cpu for cpu, _wall in judged])
+        wall_judged = _judged([wall for _cpu, wall in judged])
         problems = []
-        for _cpu, _wall, outcome in timed:
+        for run in timed:
             problems += [problem for problem
-                         in _deadline_shape_problems(name, shape, size, cpu_judged, wall_judged, outcome)
+                         in _deadline_shape_problems(name, shape, size, cpu_judged, wall_judged, run[2])
                          if problem not in problems]
         if not problems:
             continue
-        line = "(dl-shape-{}-{}-{}) {} (median times judged; {})".format(
-            name, shape, size, "; ".join(problems), "; ".join(
-                "run: {:.2f}s wall-clock, {:.2f}s of CPU time, outcome {}".format(wall, cpu, outcome)
-                for cpu, wall, outcome in timed))
-        if wall_judged > _DEADLINE_WALL_BOUND and any(
-                outcome != "deadline" for _cpu, _wall, outcome in timed):
-            cpu_again, wall_again, outcome_again = retime(name, shape, size, cwd)
-            again = _deadline_shape_problems(name, shape, size, cpu_again, wall_again, outcome_again)
-            line += ("; a diagnostic re-run, which never clears the case's failure, took {:.2f}s "
-                     "wall-clock and {:.2f}s of CPU time with outcome {} ({})".format(
-                         wall_again, cpu_again, outcome_again, "; ".join(again) if again else "within every check"))
+        line = "(dl-shape-{}-{}-{}) {} (median judged times; {})".format(
+            name, shape, size, "; ".join(problems), "; ".join("run: " + _deadline_run_text(run) for run in timed))
+        if wall_judged > _DEADLINE_WALL_BOUND and any(run[2] != "deadline" for run in timed):
+            again_run = retime(name, shape, size, cwd)
+            again = _deadline_shape_problems(name, shape, size, *_deadline_run_judged(again_run), again_run[2])
+            line += ("; a diagnostic re-run, which never clears the case's failure, took {} ({})".format(
+                _deadline_run_text(again_run).replace(", outcome ", " with outcome ", 1),
+                "; ".join(again) if again else "within every check"))
         out.append(line)
     return out
 
 
 def _deadline_shape_failures(tmp):
     """(dl-shape) Every PreToolUse handler has shapes here, and on each shape at 64 KB, 256 KB and 1 MB it
-    reaches a decision within the hang guard, that size's CPU-time bound and the wall-clock bound, denying
-    where the case carries a hazard and reaching the pinned base commit's decision on each uncertain '#'
-    shape (_DEADLINE_HASH_SHAPES, which every handler runs) (_deadline_shape_verdicts: a case whose median
-    wall-clock time is over the wall-clock bound fails, and a diagnostic re-run is reported beside it, never
-    in its place)."""
+    reaches a decision within the hang guard, that size's CPU-time bound and the wall-clock bound (each
+    judged on load-normalised times, below), denying where the case carries a hazard and reaching the
+    pinned base commit's decision on each uncertain '#' shape (_DEADLINE_HASH_SHAPES, which every handler
+    runs) (_deadline_shape_verdicts: a case whose median judged wall-clock time is over the wall-clock bound
+    fails, and a diagnostic re-run is reported beside it, never in its place).
+
+    LOAD: the bounds judge each run's times divided by that run's reference slowdown (_deadline_shape_case,
+    _deadline_run_judged): a fixed reference workload is timed immediately before and after the call, and
+    the lesser reading over its uncontended cost says how much slower the host ran fixed work at that
+    moment. Contention on a shared runner inflates CPU time as well as wall-clock time (one 80-CPU host at
+    a load of 30 to 40 recorded medians of 7.41 s of CPU and 8.47 s wall-clock at 1 MB for calls an idle
+    run timed near 3.6 s), so the median of three runs cannot absorb it, while the slowdown inflates with
+    it. This keeps every per-size bound, and with it the strongest regression signal: a constant-factor
+    slowdown of a handler (twice its work, for example) still fails where it did on an uncontended runner,
+    which a judgement of growth between sizes alone would pass, and a growth judgement would also ride on
+    the 64 KB times, where fixed overhead and clock resolution dominate. A handler regression cannot loosen
+    its own bound, since the reference runs none of the hooks' code. Residual, exactly: (1) contention that
+    slows the call more than both bracketing readings (a burst confined to the call, or pressure on a
+    resource the reference does not use, such as memory bandwidth, since its text fits in a core's cache)
+    still inflates the judged time, and fails a case when it does so on two of three runs; (2) the bounds
+    are in uncontended-runner seconds, so a slowdown loosens the raw CPU and wall-clock bounds by the same
+    factor, and a wait (a sleep, a lock) must exceed the wall-clock bound times the slowdown to fail; (3)
+    the 60-second hang guard is not scaled, so on a host slowed more than about 8.5 times an honest 1 MB
+    case can end at that guard and fail; (4) a slowdown under 1 is taken as 1, so a faster runner keeps the
+    raw bounds and is never tightened; (5) the uncontended cost (_LOAD_REFERENCE_SECONDS) was measured on
+    one host, so a runner slower than it when idle also reads a slowdown above 1 and is judged in that
+    host's seconds; (6) a regression that leaves state behind (heap growth that slows the next reading)
+    could inflate a later reading; the lesser of the two readings bounds that to calls after the first; and
+    (7) as before, these are measured bounds, not a complexity guarantee: a super-linear cost small enough
+    on these sizes passes."""
     out = []
     missing = sorted(name for name, event in aiqt_hooks.HANDLER_EVENT.items()
                      if event == aiqt_hooks.PRETOOL and name not in _DEADLINE_CASES)
@@ -6925,6 +7000,79 @@ def _deadline_shape_rerun_failures():
         if len(lines) != want_lines:
             out.append("(lex-cost-runs) a lex-cost pair expecting deny whose runs decide {} must give {} "
                        "line(s), got {!r}".format(", ".join(decisions), want_lines, lines))
+    return out
+
+
+def _deadline_load_judgement_failures(tmp):
+    """(dl-shape-load-*) The dl-shape bounds judge each run's times divided by its reference slowdown
+    (_deadline_run_judged). _deadline_shape_verdicts is given recorded runs, with no handler run, except in
+    dl-shape-load-reading:
+    dl-shape-load-absorbed: the runs a loaded 80-CPU host recorded for the truncation guard at 1 MB (CPU
+    times 7.84, 5.63 and 7.41 s, median over the 7 s bound; wall-clock times 3.93, 8.47 and 8.92 s, median
+    over the 8 s bound) give no line with a slowdown of 2.5 recorded on each run, and one line (with one
+    re-run for the wall-clock case) with a slowdown of 1, so the judgement, not the bounds, absorbs the load.
+    dl-shape-load-regression: a run that is over the bound once divided by its slowdown still fails: 40 s
+    of CPU time at a slowdown of 2.5 (16 s judged) gives one line.
+    dl-shape-load-floor: a slowdown under 1 never tightens a bound: at a slowdown of 0.5, 7.0 s of CPU time
+    at 1 MB gives no line and 7.000001 s gives one.
+    dl-shape-load-bounds: the judged time at its bound's edge, both inclusive: at a slowdown of 2, CPU time
+    a microsecond under, exactly at and a microsecond over twice the 1 MB bound gives 0, 0 and 1 line, and
+    the same for wall-clock time against twice the wall-clock bound (one re-run when over).
+    dl-shape-load-reading: one real case records both slowdowns as positive numbers."""
+    out = []
+    retimed = []
+
+    def retime(name, shape, size, cwd):
+        retimed.append((name, shape, size))
+        return 0.02, 0.15, "deny", 1.0, 1.0
+    seps = ("orch_truncation_guard", "seps_hash_lines", 1048576, "/")
+    paren = ("orch_truncation_guard", "paren_hash4", 1048576, "/")
+    cpu_runs, wall_runs = ((7.84, 7.9, "deny"), (5.63, 5.7, "deny"), (7.41, 7.5, "deny")), (
+        (3.9, 3.93, "deny"), (3.9, 8.47, "deny"), (3.9, 8.92, "deny"))
+    for slowdown, want_lines, want_reruns in ((2.5, 0, 0), (1.0, 1, 0)):
+        retimed.clear()
+        lines = _deadline_shape_verdicts([seps + tuple(run + (slowdown, slowdown) for run in cpu_runs)], retime)
+        if len(lines) != want_lines or len(retimed) != want_reruns:
+            out.append("(dl-shape-load-absorbed) the recorded 1 MB CPU times at a slowdown of {} must give {} "
+                       "line(s) and {} re-run(s), got {!r} with re-runs {!r}".format(
+                           slowdown, want_lines, want_reruns, lines, retimed))
+    for slowdown, want_lines, want_reruns in ((2.5, 0, 0), (1.0, 1, 1)):
+        retimed.clear()
+        lines = _deadline_shape_verdicts([paren + tuple(run + (slowdown, slowdown) for run in wall_runs)], retime)
+        if len(lines) != want_lines or len(retimed) != want_reruns:
+            out.append("(dl-shape-load-absorbed) the recorded 1 MB wall-clock times at a slowdown of {} must "
+                       "give {} line(s) and {} re-run(s), got {!r} with re-runs {!r}".format(
+                           slowdown, want_lines, want_reruns, lines, retimed))
+    retimed.clear()
+    lines = _deadline_shape_verdicts([seps + ((40.0, 40.0, "deny", 2.5, 2.5),) * 3], retime)
+    if len(lines) != 1 or "16.00s of CPU" not in lines[0]:
+        out.append("(dl-shape-load-regression) 40 s of CPU time at a slowdown of 2.5 must give one line judging "
+                   "16.00 s, got {!r}".format(lines))
+    cpu_bound, wall_bound = _DEADLINE_BOUNDS[1048576], float(_DEADLINE_WALL_BOUND)
+    for cpu, want_lines in ((cpu_bound, 0), (cpu_bound + 1e-6, 1)):
+        retimed.clear()
+        lines = _deadline_shape_verdicts([seps + ((cpu, 0.15, "deny", 0.5, 0.5),)], retime)
+        if len(lines) != want_lines or retimed:
+            out.append("(dl-shape-load-floor) {} s of CPU time at a slowdown of 0.5 must give {} line(s) and no "
+                       "re-run, got {!r} with re-runs {!r}".format(cpu, want_lines, lines, retimed))
+    for edge, cpu, wall, want_lines, want_reruns in (
+            ("CPU time just under twice its bound", 2 * cpu_bound - 1e-6, 0.15, 0, 0),
+            ("CPU time at twice its bound", 2 * cpu_bound, 0.15, 0, 0),
+            ("CPU time just over twice its bound", 2 * cpu_bound + 1e-5, 0.15, 1, 0),
+            ("wall-clock time just under twice its bound", 0.03, 2 * wall_bound - 1e-6, 0, 0),
+            ("wall-clock time at twice its bound", 0.03, 2 * wall_bound, 0, 0),
+            ("wall-clock time just over twice its bound", 0.03, 2 * wall_bound + 1e-5, 1, 1)):
+        retimed.clear()
+        lines = _deadline_shape_verdicts([seps + ((cpu, wall, "deny", 2.0, 2.0),)], retime)
+        if len(lines) != want_lines or len(retimed) != want_reruns:
+            out.append("(dl-shape-load-bounds) {} at a slowdown of 2 must give {} line(s) and {} re-run(s), got "
+                       "{!r} with re-runs {!r}".format(edge, want_lines, want_reruns, lines, retimed))
+    plain = tmp / "load-reading"
+    plain.mkdir(parents=True, exist_ok=True)
+    reading = _deadline_shape_case("orch_truncation_guard", "seps_hash", 65536, str(plain))
+    if len(reading) != 5 or not all(isinstance(x, float) and x > 0 for x in reading[3:]):
+        out.append("(dl-shape-load-reading) a real case must record two positive slowdowns, got {!r}".format(
+            reading))
     return out
 
 
@@ -9954,6 +10102,7 @@ def _test_deadline_posture(failures, tmp):
     """(dl-*) The PreToolUse deadline posture; see the section comment above."""
     failures.extend(_deadline_relation_failures())
     failures.extend(_deadline_shape_rerun_failures())
+    failures.extend(_deadline_load_judgement_failures(Path(tmp)))
     failures.extend(_deadline_note_only_deny_failures())
     failures.extend(_raw_sequence_failures())
     failures.extend(_raw_mirror_failures())
