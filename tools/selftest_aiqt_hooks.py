@@ -4050,10 +4050,10 @@ def _test_gate_status_oracle(failures, tmp):
     try:
         main_hooks, tree_hooks = _gso_load_hooks(tmp)
     except (OSError, subprocess.SubprocessError) as exc:
-        failures.append("(gso-load) main's hook at {} could not be loaded: {}".format(_GSO_BASE, exc))
+        failures.append("(gso-load-base) main's hook at {} could not be loaded: {}".format(_GSO_BASE, exc))
         return
     if main_hooks is tree_hooks or main_hooks.gate_weakening is tree_hooks.gate_weakening:
-        failures.append("(gso-load) main's hook and this tree's are one module")
+        failures.append("(gso-load-same) main's hook and this tree's are one module")
         return
     home = tmp / "gso-home"
     home.mkdir()
