@@ -591,7 +591,7 @@ command line end; per opener, R6 measures its subject's length before reading it
 file-name pattern is anchored at a token start. THE MEASURED SHAPES: in a child process capped at 1 GiB of address
 space (RLIMIT_AS) with a LINEAR_TIMEOUT-second timeout, which must exit 0 and print LINEAR_RUNS quadruples of finite,
 nonnegative times, each shape is evaluated LINEAR_RUNS times at each of four sizes (1 KiB, 8 KiB, 32 KiB and
-64 KiB), every brief built afresh, each run timed in CPU seconds of the child and of the processes it reaped (the
+64 KiB), every brief built afresh, each run timed in CPU seconds of the child and of the processes it reaped (every
 parse child among them), so a busy host's wait for a CPU is not counted; growth is judged on the raw medians over
 two spans, each bound's factor exactly that span's size ratio: the 32 KiB median must be at most 4 times the 8 KiB
 median plus LINEAR_SLACK seconds, and the 64 KiB median at most 2 times the 32 KiB median plus LINEAR_SLACK seconds.
@@ -619,12 +619,14 @@ process with no deadline, apart from the git reads rules P3 and P5 start when gi
 GIT_READ_TIMEOUT, so a slow lint pass on a brief at the ceiling is neither cut off nor refused. A shape the
 reading's own bounds refuse (the whitespace-run shapes hit the whitespace-run prescan, the markup-run shape the
 nesting prescan) is timed through its refusal, which is the bounded behaviour an oversized or pathological brief
-gets. A shape is evidence only for the text it repeats. On the previous revision, with a 1 MiB size, a 60-second
-timeout and the parse-free fast path (measured to 60 s, not to completion), the three argument-tail shapes with a
-failing suffix (" -x.y" repeated then "!", " -x/y" repeated with no stop, " --a=b" repeated then " x") did not
-finish within 60 s; the whitespace-run shapes (whitespace-run-linear and item-list-whitespace-linear) were added
-when an earlier revision did not finish 128 KiB within 60 s, and some others when an earlier revision exceeded the
-bound, each measured only to a 60-second timeout.
+gets; that prescan refusal, told by the prescan attribute decode_brief sets on its cannot-evaluate, is the only one
+timed, and any other cannot-evaluate (the vendored parser failing to import, say) fails the shape, since a run that
+could not be evaluated measured nothing. A shape is evidence only for the text it repeats. On the previous revision,
+with a 1 MiB size, a 60-second timeout and the parse-free fast path (measured to 60 s, not to completion), the three
+argument-tail shapes with a failing suffix (" -x.y" repeated then "!", " -x/y" repeated with no stop, " --a=b"
+repeated then " x") did not finish within 60 s; the whitespace-run shapes (whitespace-run-linear and
+item-list-whitespace-linear) were added when an earlier revision did not finish 128 KiB within 60 s, and some others
+when an earlier revision exceeded the bound, each measured only to a 60-second timeout.
 
 Usage:
   check_brief_capability.py                (no brief: validate the shipped capability table, exit 0 or 2)
@@ -715,7 +717,10 @@ EXCERPT_CHARS = 120
 
 
 class CannotEvaluate(Exception):
-    pass
+    # True only on decode_brief's refusal of a brief that a structural prescan of the shared reading (its
+    # whitespace-run or nesting bound) refuses: the one cannot-evaluate the measured shapes time as a
+    # bounded evaluation (LINEAR_CHILD); every other cannot-evaluate keeps False
+    prescan = False
 
 
 class Block:
@@ -809,7 +814,7 @@ def decode_brief(data):
     hide or split a declaration, so it is refused, never removed silently, and a brief the shared
     reading's vendored parser cannot read (DeclarationError) is CannotEvaluate too. A format character
     inside code is still removed for the rules that read fence content (the P5 cure alone reads each
-    cure line as written)."""
+    cure line as written). The refusal of a line a structural prescan refuses carries prescan True."""
     try:
         text = data.decode("utf-8")
     except UnicodeDecodeError as exc:
@@ -819,7 +824,13 @@ def decode_brief(data):
     except _input_declarations.DeclarationError as exc:
         raise CannotEvaluate("brief: {}".format(exc))
     if found is not None:
-        raise CannotEvaluate("brief: line {}: {}".format(*found))
+        refused = CannotEvaluate("brief: line {}: {}".format(*found))
+        # a structural prescan's refusal is told from a line separator or format character refusal by
+        # the prescans' own verdicts on the same text (forbidden_text returns a prescan's verdict as it
+        # stands), never by the message
+        refused.prescan = found in [prescan(text) for prescan in (_input_declarations._whitespace_refused,
+                                                                   _input_declarations._nesting_refused)]
+        raise refused
     # A byte order mark, a zero-width or a bidirectional control is invisible and can split a word; only
     # code of the parsed document (a fenced or indented block's body, a code span) can still hold one here.
     text = "".join(ch for ch in text if unicodedata.category(ch) != "Cf")
@@ -4171,15 +4182,17 @@ def _child_commit(repo, commit):
 # LINEAR_RUNS times each, every brief built afresh: a lead that forces the parsed-document path (it holds
 # "nput", so the ASCII fast path never answers it), a prefix, one unit repeated, and a suffix. The
 # verdict reads only the 8, 32 and 64 KiB medians; the 1 KiB time is reported for diagnosis (it shows the
-# fixed cost, for a shape whose 1 KiB brief is parsed mostly the parse child's launch) and never judged,
+# fixed cost, for a shape whose 1 KiB brief is parsed, mostly the parse child's launch) and never judged,
 # though the 1 KiB runs, like every run, count toward LINEAR_TIMEOUT over the whole child. A prescan
-# refusal (a cannot-evaluate) is still a bounded evaluation and is timed as one; a run in which a parse
-# child was killed at the parse deadline is not, since the killed child is charged only the CPU time it
-# used before the kill, so the child stops there and exits non-zero naming the size (the row is red
-# whatever CPU time the run took). Each run is timed by _run_cpu(), CPU seconds of this process and of the
-# children it reaped during the run (every parse child the run started among them), so time the measured
-# work spends waiting for a busy host's CPUs is not counted. One line per run: the 1 KiB, the 8 KiB, the
-# 32 KiB, then the 64 KiB CPU time.
+# refusal (a cannot-evaluate whose prescan attribute decode_brief set) is still a bounded evaluation and
+# is timed as one. No other cannot-evaluate is: in a run in which a parse child was killed at the parse
+# deadline, the killed child is charged only the CPU time it used before the kill, and a run the reading
+# could not evaluate for any other cause (the vendored parser failing to import, say) measured nothing, so
+# the child stops at either and exits non-zero naming the size, and for the second the cannot-evaluate
+# itself (the row is red whatever CPU time the run took). Each run is timed by _run_cpu(), CPU seconds of
+# this process and of the children it reaped during the run (every parse child the run started among
+# them), so time the measured work spends waiting for a busy host's CPUs is not counted. One line per run:
+# the 1 KiB, the 8 KiB, the 32 KiB, then the 64 KiB CPU time.
 LINEAR_CHILD = (
     "import resource, sys\n"
     "hard = resource.getrlimit(resource.RLIMIT_AS)[1]\n"
@@ -4201,6 +4214,8 @@ LINEAR_CHILD = (
     "        except m.CannotEvaluate as exc:\n"
     "            if m._parse_deadline_hit(exc):\n"
     "                sys.exit('a {} KiB run reached the parse deadline'.format(size >> 10))\n"
+    "            if not exc.prescan:\n"
+    "                sys.exit('{} (a {} KiB run could not be evaluated)'.format(exc, size >> 10))\n"
     "        times.append(m._run_cpu() - began)\n"
     "    print(*times, flush=True)\n")
 
@@ -4254,7 +4269,8 @@ def _linear(unit, prefix="", suffix=""):
     count toward LINEAR_TIMEOUT. All timed in one child capped at 1 GiB (RLIMIT_AS) and stopped after
     LINEAR_TIMEOUT seconds; otherwise what went wrong. The child must exit 0 and print exactly LINEAR_RUNS
     lines of four finite, nonnegative times each; a child that times out, or that exits non-zero because a
-    run reached the parse deadline, is what went wrong whatever it printed."""
+    run reached the parse deadline or raised any other cannot-evaluate but a prescan refusal, is what went
+    wrong whatever it printed."""
     try:
         done = subprocess.run([sys.executable, "-I", "-B", "-c", LINEAR_CHILD, str(Path(__file__).resolve().parent),
                                prefix, unit, suffix, str(LINEAR_RUNS)], capture_output=True, text=True,
@@ -5138,7 +5154,7 @@ def self_test(report_path=None):
           (judged(*[("0.5", "0.3", "0.42", "0.58")] * LINEAR_RUNS),
            judged(*[("0.002", "0.3", "0.42", "0.58")] * LINEAR_RUNS)),
           (True, True))
-    # each run's clock counts the CPU of the children the run reaped, the parse child among them: reaping a
+    # each run's clock counts the CPU of the children the run reaped, every parse child among them: reaping a
     # child that burned at least 0.5 CPU s moves _run_cpu() by at least 0.45 s, which this process's own
     # time (it only waits) cannot cover; and the measuring child reads that clock around each run
     burner = "import time\nwhile time.process_time() < 0.5:\n    pass\n"
@@ -5167,6 +5183,41 @@ def self_test(report_path=None):
     check("perf/linear-deadline-not-linear", (deadline_child != LINEAR_CHILD, at_deadline is True,
                                               "parse deadline" in str(at_deadline), at_timeout is True),
           (True, False, True, False))
+    # a run the reading cannot evaluate for any cause but a prescan refusal measured nothing, so it is red,
+    # naming the failure: here each parse child runs from a copy of the shared reading's two files with no
+    # vendored parser beside them, so the parser's import fails and every parsed run is a cannot-evaluate
+    # (timed as a refusal, every run would pass with nothing measured)
+    bare = tempfile.mkdtemp(prefix="aiqt-brief-capability-no-parser-")
+    try:
+        copied = os.path.join(bare, "tools")
+        os.makedirs(copied)
+        here = os.path.dirname(os.path.abspath(_input_declarations.__file__))
+        for name in ("_input_declarations.py", "_input_declarations_child.py"):
+            shutil.copyfile(os.path.join(here, name), os.path.join(copied, name))
+        no_parser_child = LINEAR_CHILD.replace("table = ", "m._input_declarations._CHILD_PATH = {!r}\ntable = "
+                                               .format(os.path.join(copied, "_input_declarations_child.py")), 1)
+        with _patched(LINEAR_CHILD=no_parser_child):
+            no_parser = _linear("a")
+    finally:
+        shutil.rmtree(bare, ignore_errors=True)
+    check("perf/linear-cannot-evaluate-not-linear", (
+        no_parser_child != LINEAR_CHILD, no_parser is True, "marko" in str(no_parser),
+        str(no_parser).endswith("(a 1 KiB run could not be evaluated)")), (True, False, True, True))
+    # a prescan refusal is still timed: decode_brief marks the refusals of the whitespace-run and nesting
+    # prescans, and only those (a line separator, a format character outside code and a blank brief are
+    # refused unmarked), and a shape refused by a prescan at every size is timed through each refusal
+    def prescan_mark(text):
+        try:
+            decode_brief(text.encode("utf-8"))
+        except CannotEvaluate as caught:
+            return caught.prescan
+        return None
+
+    lead = "Input notes.\n\n"
+    check("perf/linear-prescan-refusal-timed", (
+        [prescan_mark(text) for text in (lead + " " * 2001 + "x\n", lead + "1) " * 40 + "x\n",
+                                         lead + "x" + chr(0x2028) + "y\n", lead + "a" + chr(0x200B) + "b\n",
+                                         " \n")], _linear("1) ")), ([True, True, False, False, False], True))
     # the top span's end: the 64 KiB median at 2 times the 32 KiB median (0.5) plus LINEAR_SLACK
     # (1.25 CPU s, every term exact in binary, and repr() reads back exactly): just inside, exactly at,
     # and just outside it

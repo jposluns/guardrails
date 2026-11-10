@@ -3590,6 +3590,8 @@ expected-check-ids = [
   "perf/linear-cpu-counts-reaped",
   "perf/linear-cpu-counts-own",
   "perf/linear-deadline-not-linear",
+  "perf/linear-cannot-evaluate-not-linear",
+  "perf/linear-prescan-refusal-timed",
   "perf/single-word-linear",
   "perf/noun-run-linear",
   "perf/git-options-linear",
