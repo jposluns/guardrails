@@ -1261,8 +1261,8 @@ def self_test_main():
         #     surfaces still judged). A dangling or self-looping symlink there is C2 MALFORMED (exit 2),
         #     never an uninstalled surface, and so is a symlink to a matching rendering outside the root,
         #     never read through and passed. A FIFO there and an AGENTS.md under a directory that cannot
-        #     be searched are refused by the classification itself (a FIFO is never opened, as a read
-        #     would block on it).
+        #     be searched are refused by the classification itself (a FIFO found by the lstat is never
+        #     opened, as a read would block on it; one swapped in after the lstat is still read).
         def _agents_link(target):
             def mutate(b):
                 dest = target(b)

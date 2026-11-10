@@ -447,10 +447,11 @@ def config_present(root):
     file). False when a component is genuinely absent (the NOT APPLICABLE case); True when .aiqt is a real
     directory and the configuration a regular file. Anything else is a GateError naming the path: a
     component that cannot be inspected (a permission or other OSError), a symlink at either component, a
-    .aiqt that is not a directory, or a configuration that is not a regular file (a FIFO is refused here,
-    before any open could block on it). Path.exists() follows links and returns False on any OSError, so an
-    unsearchable .aiqt/, a .aiqt that is a regular file, or a dangling link would read as absent and pass;
-    and a symlink has no containment guarantee (load_config would open whatever it points at)."""
+    .aiqt that is not a directory, or a configuration that is not a regular file (a FIFO there when this
+    lstat runs is refused before load_config opens it; one swapped in after the lstat is still opened, and
+    that open can block). Path.exists() follows links and returns False on any OSError, so an unsearchable
+    .aiqt/, a .aiqt that is a regular file, or a dangling link would read as absent and pass; and a symlink
+    has no containment guarantee (load_config would open whatever it points at)."""
     parts = CONFIG_REL.split("/")
     path = root
     for i, part in enumerate(parts):
@@ -951,7 +952,7 @@ def self_test_main(_mkdtemp=None, _symlink=None, _vectors=True):  # noqa: C901  
                     continue
                 if _run_quiet(r) != 2:
                     failures.append("e2e: a {} .aiqt expected fail-closed exit 2".format(tag))
-            # A FIFO configuration is refused by the classification itself, before any open could block.
+            # A FIFO configuration is refused by the classification itself, before load_config opens it.
             r = base_tmp / "fifo-config"
             (r / ".aiqt").mkdir(parents=True, exist_ok=True)
             if hasattr(os, "mkfifo"):
