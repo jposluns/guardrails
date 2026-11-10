@@ -94,24 +94,25 @@
 #                        files 117926 -> 118464; managed block 360 and file headers 16136 unchanged. This queued
 #                        seed fold measured 538 units against the 559-unit estimate. The ratchet rises by the
 #                        measured delta, 134991 + 538 = 135529, rather than drawing on the estimate.
-#                        Raised 135529 -> 136516 on 2026-11-10 under the maintainer's recorded decision of
+#                        Raised 135529 -> 136995 on 2026-11-10 under the maintainer's recorded decision of
 #                        2026-10-31 to raise the ratchet by exactly the measured delta, when gate-discipline
 #                        gained its sentences that a guard blocking the assistant's own action is a gate too,
-#                        never to be got past by another route, while fixing the artefact or following the
-#                        guard's own compliant route is permitted, and that a route changing the guard's own
-#                        configuration, environment, or operating-mode record is compliant only when the
-#                        operator makes that change (gatdis.22, gatdis.23), and required-step-remains-required
-#                        its sentence that a route getting a refused action past its guard is not a recovery
-#                        path (reqstp.13): measured PACK 135159 at the base 189a280e -> 136146 (+987 units);
-#                        rule files 118536 -> 119523; managed block 360 and file headers 16263 unchanged. The
-#                        ratchet rises by the measured delta, 135529 + 987 = 136516, keeping the 370-unit
-#                        headroom at the base.
+#                        never to be got past by another route, while fixing the artefact, following the
+#                        guard's own compliant route, or correcting the state the guard checks is permitted,
+#                        and that a route relaxing the guard itself (its mode variable, its operating-mode
+#                        record, a scope marker) is the operator's alone (gatdis.22, gatdis.23), and
+#                        required-step-remains-required its sentence that neither a route getting a refused
+#                        action past its guard nor one relaxing the guard is a recovery path (reqstp.13):
+#                        measured PACK 135159 at the base 189a280e -> 136625 (+1466 units); rule files
+#                        118536 -> 120002; managed block 360 and file headers 16263 unchanged. The ratchet
+#                        rises by the measured delta, 135529 + 1466 = 136995, keeping the 370-unit headroom
+#                        at the base.
 #   ceiling              a reported PACK figure; not enforced, and PACK currently exceeds it. Its value
 #                        predates header counting, which added 16136 units to PACK at the 112222 ->
 #                        128358 ratchet raise; it was not raised with it.
 #   claude-code-version  the Claude Code build whose loading behaviour the gate models.
 #   binary-sha256        the SHA-256 of that build's binary.
-ratchet = 136516
+ratchet = 136995
 ceiling = 90000
 claude-code-version = "2.1.287"
 binary-sha256 = "3920489a5109cff5786a1a392c25277408ff22bc796d5edb9c16a60e5a1718f0"
