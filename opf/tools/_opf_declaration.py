@@ -25,11 +25,11 @@ runtime_check(path) is the runtime check. It reads the installed copy at `path` 
                    SUPPORTED_WORKLOG
   ok               none of the above                                                 authorizes, digest
 
-opf.py runs it before dispatching every verb that can touch a store (render, doctor, init, absorb, record and
-adopt); a state other than ok refuses that verb at exit 2 before it resolves any store. upgrade, import and the
-not-yet-implemented verbs read and write nothing and are not gated. The malformed and contradictory states are
-reachable only on bytes whose digest equals the shipped one, so for a released build they are fixed when the
-release is cut; the vectors below reach them by patching the digest.
+opf.py runs it before dispatching render, doctor, init, absorb, record or adopt; a state other than ok refuses
+that verb at exit 2 before it resolves any store. upgrade and the not-yet-implemented verbs read and write
+nothing, and import's read-only verbs read but write no store or repository content; none of them is gated.
+The malformed and contradictory states are reachable only on bytes whose digest equals the shipped one, so for
+a released build they are fixed when the release is cut; the vectors below reach them by patching the digest.
 
 emit_report(check, store_operations_performed, stream) is the emitter: it writes the four parts spec 16.1
 compares, the restatement (SHIPPED_DECLARATION_BYTES verbatim, never the installed copy, so it equals the file

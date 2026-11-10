@@ -169,7 +169,7 @@ run no step below.
    repository content (`--verify`'s git observation can refresh a split index's modification
    time, as `opf doctor`'s does). `--status` reports `import_status` and, per migrate source, the import runs whose records
    reference it. For each migrate source, `--verify` evaluates the preserved original's digest,
-   at least one imported record referencing the source or a recorded skip under the approved
+   at least one imported record referencing the source or a recorded skip under the plan's skip
    policy, and doctor VALID over both the strict store and the imported series on the live tree
    (section 14.1), and records nothing: recording the result, the retirement and `import_status`
    stays with the completion writer, which this build does not have. A green result proves

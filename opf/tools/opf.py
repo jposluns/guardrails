@@ -10,7 +10,8 @@ Spec 16.1: before it dispatches render, doctor, init, absorb, record or adopt, t
 check of the declaration file opf-declaration.toml installed beside it (_opf_declaration.runtime_check); an
 installed copy that is absent, unreadable, not the shipped bytes (the shipped-file digest is
 _opf_declaration.SHIPPED_DECLARATION_SHA256), malformed or contradictory refuses the verb at exit 2 before any
-store is resolved. upgrade, import and the not-yet-implemented verbs read and write nothing and are not gated.
+store is resolved. upgrade and the not-yet-implemented verbs read and write nothing, and import's verbs read
+but write no store or repository content (--verify's git observation aside, below); none of them is gated.
 `--declaration` and doctor write the spec 16.1 report (the declaration restated as shipped, both digests and
 the runtime result) on stdout.
 
@@ -19114,7 +19115,7 @@ IMPORT_FORMER_MODES = {
                  "--plan FILE --actor NAME`, the one approval of the whole plan, with no per-fragment "
                  "review (spec 14.1); nothing was read or written"),
     "--apply": ("opf import: the former --apply mode was replaced by `opf import --prompt`, which prints "
-                "the approved prompt pack that post-adoption import follows (spec 14.1); its batch writer "
+                "the shipped prompt pack that post-adoption import follows (spec 14.1); its batch writer "
                 "`opf record import --batch` is not offered in this build; nothing was read or written"),
 }
 
@@ -19165,8 +19166,8 @@ def _import_select_run(root_abs, run_id):
                 run_id, ", ".join(runs) or "none"))
         return run_id
     if not runs:
-        raise ValueError("no adoption run exists at this root; import is a requested operation and runs "
-                         "only after an applied adoption (spec 14.1)")
+        raise ValueError("no adoption run exists at this root; import is a requested operation and needs "
+                         "an adoption run's frozen plan (spec 14.1)")
     if len(runs) > 1:
         raise ValueError("{} adoption runs exist ({}); give --run RUN_ID".format(
             len(runs), ", ".join(runs)))
@@ -19174,7 +19175,7 @@ def _import_select_run(root_abs, run_id):
 
 
 def _import_approved_plan(root_abs, run_id):
-    """The approved plan the adoption run froze, read contained and no-follow from the run's evidence
+    """The plan the adoption run froze, read contained and no-follow from the run's evidence
     bundle and re-proven from its own bytes (_opf_adopt_apply.frozen_plan). Raises ValueError (the
     caller's located cannot-evaluate) when the plan is absent, unreadable, unproven or another run's.
     It checks the plan's schema, digest and run identity only: no approval, adoption receipt or bundle
@@ -19187,7 +19188,7 @@ def _import_approved_plan(root_abs, run_id):
         except _opf_adopt_apply.AdoptApplyError as exc:
             raise ValueError(str(exc))
         if data is None:
-            raise ValueError("no approved plan in the run's evidence bundle ({})".format(rel))
+            raise ValueError("no frozen plan in the run's evidence bundle ({})".format(rel))
         try:
             plan = _opf_adopt_apply.frozen_plan(data)
         except _opf_adopt_apply.AdoptApplyError as exc:
@@ -19207,17 +19208,17 @@ def _import_migrate_rows(plan):
 
 def _import_prompt(root_abs, run_id):
     """`opf import --prompt` (spec 14.1): print the import prompt surface, read-only. It reads only the
-    shipped prompt pack and the adoption run's frozen plan. It is read-only advice that needs no
-    approval: it checks the plan's schema, digest and run identity (_import_approved_plan), never that
-    the plan was approved or that the adoption was applied (no approval or adoption receipt is read),
-    so its output is no evidence of either. The pack's manifest is read once,
-    by the prompt-pack gate's own verified_pack (every member's bytes against the manifest, the manifest
-    against the pack digest), which hands back the member rows it verified; the plan's prompt_pack
-    {version, digest} binding must be exactly the verified pack. The printed roster is those verified
-    rows, never a second read of pack.toml, so a manifest changed after verification cannot reach the
-    output, and nothing prints until every check has passed. Prints the pack version and digest, each
-    import member's path and sha256, and the approved migrate-source scope (path, plan digest, archived
-    or frozen). Writes nothing. Exit 0 printed; exit 2 every refusal or cannot-evaluate (an unverifiable
+    shipped prompt pack, the adoption evidence home's run directories (to select the run) and the
+    adoption run's frozen plan. It is read-only advice that needs no approval: it checks the plan's
+    schema, digest and run identity (_import_approved_plan), never that the plan was approved or that
+    the adoption was applied (no approval or adoption receipt is read), so its output is no evidence of
+    either. The pack's manifest is read once, by the prompt-pack gate's own verified_pack (every
+    member's bytes against the manifest, the manifest against the pack digest), which hands back the
+    member rows it verified; the plan's prompt_pack {version, digest} binding must be exactly the
+    verified pack. The printed roster is those verified rows, never a second read of pack.toml, so a
+    manifest changed after verification cannot reach the output, and nothing prints until every check
+    has passed. Prints the pack version and digest, each import member's path and sha256, and the
+    frozen plan's migrate-source scope (path, plan digest, archived or frozen). Writes nothing. Exit 0 printed; exit 2 every refusal or cannot-evaluate (an unverifiable
     pack, a binding mismatch, no adoption run, an unreadable plan)."""
     import check_opf_prompt_pack as pack_gate
     run = _import_select_run(root_abs, run_id)
@@ -19231,8 +19232,8 @@ def _import_prompt(root_abs, run_id):
     bound = plan["prompt_pack"]
     if bound["version"] != version or bound["digest"] != digest:
         print("opf import --prompt: cannot evaluate: the shipped prompt pack (version {} digest {}) is "
-              "not the plan's prompt_pack binding (version {} digest {}); import uses only the approved, "
-              "versioned pack (spec 14.1)".format(version, digest, bound["version"], bound["digest"]),
+              "not the plan's prompt_pack binding (version {} digest {}); import uses only the versioned "
+              "pack the plan binds (spec 14.1)".format(version, digest, bound["version"], bound["digest"]),
               file=sys.stderr)
         return EXIT_MALFORMED
     lines = ["opf import: surface {}".format(IMPORT_SURFACE),
@@ -19250,9 +19251,11 @@ def _import_prompt(root_abs, run_id):
 
 def _import_status(root_abs, run_id):
     """`opf import --status` (spec 14.1): report the post-adoption import state, read-only. It reads
-    only the store manifest (through store resolution and the manifest validator), the adoption run's
-    approved plan, the imported series leaves, and each frozen (non-occupying) migrate source's live
-    bytes, every store read contained and no-follow. It reports `[opf].import_status` and, per
+    only the adoption evidence home's run directories (to select the run), the store resolution inputs
+    (the pointer files and, without them, the default location's discovery) and the store manifest
+    (through store resolution and the manifest validator), the adoption run's frozen plan, the imported
+    series leaves, and each frozen (non-occupying) migrate source's live bytes, every store read
+    contained and no-follow. It reports `[opf].import_status` and, per
     migrate-disposed source, the import runs whose records reference it (by import.source under their
     own run, the evaluator's own matching) with their record ids. A frozen source absent from the live
     tree or no longer at its plan digest is a FINDING (spec 14.1: a drifted source is never complete).
@@ -19316,7 +19319,7 @@ def _import_status(root_abs, run_id):
 
 def _import_verify(root_abs, run_id):
     """`opf import --verify` (spec 14.1): the read-only per-source import-completion evaluation. For
-    each migrate-disposed source of the approved plan it runs the completion evaluator
+    each migrate-disposed source of the frozen plan it runs the completion evaluator
     (_opf_import_complete.evaluate_source) with a doctor built the sanctioned way (store_doctor over
     this verb's own _opf_observe.gather observations, the doctor verb's seam), and reports each
     source's verdict, import run, record ids, recorded-skip standing and findings. It RECORDS NOTHING:
@@ -20750,7 +20753,7 @@ def _cli_self_test():
                         failures.append("import --status --run among two runs: rc={!r} stdout={!r}".format(
                             rc, out))
                     rc, _out, err = run_cli(["--status", "--root", green, "--run", other_rid])
-                    if rc != EXIT_MALFORMED or "no approved plan" not in err:
+                    if rc != EXIT_MALFORMED or "no frozen plan" not in err:
                         failures.append("import --status --run (planless run): rc={!r} stderr={!r}".format(
                             rc, err))
                 finally:
@@ -23892,10 +23895,12 @@ def _close_exc_safe_vectors_self_test():
     return EXIT_OK
 
 
-# Spec 16.1: main() runs the declaration's runtime check (_opf_declaration.runtime_check) before it dispatches any
-# verb that can touch a store, and a state other than ok refuses that verb at exit 2 before it resolves a store.
-# upgrade, import and the not-yet-implemented verbs read and write nothing, so they are not gated; nor are the
-# --self-test legs, which run over their own fixtures. Doctor also writes the spec 16.1 report on stdout.
+# Spec 16.1: main() runs the declaration's runtime check (_opf_declaration.runtime_check) before it dispatches a
+# verb listed below, and a state other than ok refuses that verb at exit 2 before it resolves a store. upgrade
+# and the not-yet-implemented verbs read and write nothing, and import's verbs read but write no store or
+# repository content (--verify's git observation can refresh a split index's modification time, as doctor's
+# does); none of them is gated, nor are the --self-test legs, which run over their own fixtures. Doctor also
+# writes the spec 16.1 report on stdout.
 _DECLARATION_GATED = ("render", "doctor", "init", "absorb", "record", "adopt")
 _DECLARATION_REPORTING = ("doctor",)
 
