@@ -826,11 +826,12 @@ def _observe_remote(git, store_root, notes):
 
 def _show_toml(git, store_root, prefix, relpath, disp, notes, omitted="the prior committed snapshot is omitted"):
     """Read and parse one committed TOML file from HEAD via `git show HEAD:<prefix><relpath>`. `prefix` is
-    the store root's path from the repository toplevel (from `git rev-parse --show-prefix`), so the object
-    path is unambiguous whether or not the store sits at the toplevel. Returns the parsed dict, or None (omit
-    prior + note) on any git error, absent object, or parse failure. A bare ValueError from tomllib (an
-    oversized base-10 integer literal, which is not a TOMLDecodeError) is caught too, so a hostile committed
-    file fails SAFE rather than escaping (guard-input-soundness). `omitted` names what the caller omits."""
+    the store root's path from the repository toplevel (from `git rev-parse --show-prefix`, decoded with
+    os.fsdecode so a byte that is not UTF-8 reaches git unchanged), so the object path names this store
+    whether or not it sits at the toplevel. Returns the parsed dict, or None (omit prior + note) on any git
+    error, absent object, or parse failure. A bare ValueError from tomllib (an oversized base-10 integer
+    literal, which is not a TOMLDecodeError) is caught too, so a hostile committed file fails SAFE rather
+    than escaping (guard-input-soundness). `omitted` names what the caller omits."""
     out = _run_git(git, store_root, ["show", "HEAD:{}{}".format(prefix, relpath)])
     if not out.completed:
         notes.append("prior: could not read {} at HEAD ({}); {}".format(disp, out.err.strip(), omitted))
@@ -871,6 +872,18 @@ def _link_phrase(kind):
     return "a {}".format(kind) if kind not in ("blob", "tree") else ""
 
 
+def _shown_path(path):
+    """`path` as a note shows it. A store path from `git rev-parse --show-prefix` is decoded with
+    os.fsdecode, so a byte that is not UTF-8 is held as a lone surrogate, which round-trips to the same
+    byte in a git argument but cannot be written as UTF-8 text; a note shows each such byte as \\xNN
+    instead. Every other character is shown as it is, except a surrogate os.fsencode cannot carry, which
+    is shown as \\uNNNN."""
+    try:
+        return os.fsencode(path).decode("utf-8", "backslashreplace")
+    except UnicodeEncodeError:
+        return path.encode("utf-8", "backslashreplace").decode("utf-8")
+
+
 def _ls_tree(git, store_root, treeish, notes, recursive=False, omitted=_HELD_OMITTED):
     """The entries of one committed tree, `git ls-tree -z --full-tree [-r] <treeish>`, as (mode, object
     type, name) triples; a recursive listing names each blob by its path within the tree. The mode is kept
@@ -878,11 +891,13 @@ def _ls_tree(git, store_root, treeish, notes, recursive=False, omitted=_HELD_OMI
     store root, and from a directory below the repository toplevel ls-tree otherwise keeps only the entries
     under that directory's path, so a store that is not at the toplevel would list as empty and every file
     of its prior would read as absent. Returns None (+ note) on any git error or an entry that does not
-    parse. `-z` names each entry unquoted, NUL-terminated. `omitted` names what the caller omits."""
+    parse; a note shows `treeish` through _shown_path. `-z` names each entry unquoted, NUL-terminated.
+    `omitted` names what the caller omits."""
     out = _run_git(git, store_root, ["ls-tree", "-z", "--full-tree"] + (["-r"] if recursive else []) + [treeish])
     if not out.completed or out.rc != 0:
         notes.append("prior: could not list {} ({}); {}".format(
-            treeish, out.err.strip() if not out.completed else "git ls-tree rc {}".format(out.rc), omitted))
+            _shown_path(treeish), out.err.strip() if not out.completed else "git ls-tree rc {}".format(out.rc),
+            omitted))
         return None
     entries = []
     for row in out.out.split(b"\0"):
@@ -896,7 +911,7 @@ def _ls_tree(git, store_root, treeish, notes, recursive=False, omitted=_HELD_OMI
         except UnicodeDecodeError:
             name = mode = otype = ""
         if not tab or not mode or not otype or not name:
-            notes.append("prior: an entry of {} does not parse; {}".format(treeish, omitted))
+            notes.append("prior: an entry of {} does not parse; {}".format(_shown_path(treeish), omitted))
             return None
         entries.append((mode, otype, name))
     return entries
@@ -1084,10 +1099,10 @@ def _reconstruct_prior(git, store_root, machine_rel, prefix, notes):
     The HEAD machine tree is listed once, before any file is read, and each file is read only where that
     listing shows it as a regular file (_show_listed): a manifest, version, counters, type-index or
     imported-leaf file committed as a symlink, a gitlink or a directory omits the whole prior with a note
-    naming the file and its kind. A declared type name that is not a single path component (empty, `.`,
-    `..`, or holding `/` or NUL) has no index entry of its own in that listing, so it omits the whole prior
-    with a note naming it before any ledger or index is read. The same listing feeds _held_ids and the
-    imported baseline. Returns the dict or None."""
+    naming the file and its kind. A declared type name is restricted to a single path component: one that
+    is empty, `.` or `..`, or holds `/` or NUL, is refused and omits the whole prior with a note naming it
+    before any ledger or index is read. The same listing feeds _held_ids and the imported baseline. Returns
+    the dict or None."""
     listed = _ls_tree(git, store_root, "HEAD:{}{}".format(prefix, machine_rel), notes, omitted=_PRIOR_OMITTED)
     if listed is None:
         return None
@@ -1105,14 +1120,17 @@ def _reconstruct_prior(git, store_root, machine_rel, prefix, notes):
     if not isinstance(types_tbl, dict):
         notes.append("prior: HEAD manifest carries no [types] table; the prior committed snapshot is omitted")
         return None
-    # A type's index is read at <type>.index.toml in the machine tree. A type name that is not a single
-    # path component (empty, `.`, `..`, or holding `/` or NUL) names no entry of its own there: its index
-    # would be read from a subtree, or not at all, past the listed-kind check, so `records` and `held` would
-    # come out partial with no note. Such a name omits the whole prior before any ledger or index is read.
+    # A type's index is read at <type>.index.toml in the machine tree, and a type name is restricted to a
+    # single path component (_single_component). A name holding `/` would put its index in a subtree the one
+    # top-level listing does not show, past the listed-kind check, so `records` and `held` could come out
+    # partial with no note; a name holding NUL cannot reach git at all. An empty, `.` or `..` name gives an
+    # ordinary top-level entry (.index.toml, ..index.toml or ...index.toml) whose kind the listing would
+    # check, but the restriction refuses it too, so every such name is refused the same way. A refused name
+    # omits the whole prior before any ledger or index is read.
     bad_types = sorted(tname for tname in types_tbl if not _single_component(tname))
     if bad_types:
-        notes.append("prior: HEAD manifest declares a type name that is not a single path component ({}), so "
-                     "its index is no entry of its own in the machine tree; {}".format(
+        notes.append("prior: HEAD manifest declares a refused type name ({}): a type name must be a single "
+                     "path component, not empty, . or .., and holding no / or NUL; {}".format(
                          ", ".join(repr(t) for t in bad_types), _PRIOR_OMITTED))
         return None
 
@@ -1270,7 +1288,11 @@ def _observe_prior(git, store_root, machine_rel, notes):
         return None
     # "" at the toplevel, else "<dir>/" with a trailing /. Only git's line ending is removed: whitespace is
     # significant in a path, and a store at " lead/" trimmed to "lead/" would read a sibling store's prior.
-    prefix = pfx.out.decode("utf-8", "replace")
+    # The bytes are decoded with os.fsdecode, which keeps a byte that is not UTF-8 as a lone surrogate that
+    # a git argument turns back into the same byte. Decoding with "replace" would turn a store at b"\xff/"
+    # into "�/", the path of another store, and read that store's prior. A note shows the prefix
+    # through _shown_path.
+    prefix = os.fsdecode(pfx.out)
     prefix = prefix[:-1] if prefix.endswith("\n") else prefix
     return _reconstruct_prior(git, store_root, machine_rel, prefix, notes)
 
@@ -1355,10 +1377,14 @@ def self_test_isolated():
     declared type name holds `/` (its index a symlink or a regular file), is empty, `.` or `..`, or holds
     NUL, beside a single-component type read whole, and _show_listed starting no git read for a name that
     is no single component or that its listing lacks; a regular file of mode 100755 at a worklog, archive,
-    manifest or index name read whole; and the bounded capture feeding 128 KiB of stdin to a child that
-    first writes 128 KiB, without deadlock, run in a separate interpreter under a 30 s deadline so a
-    deadlocking transport is red rather than a hang. Judged ONLY on gather's RETURNED structure (never by
-    grepping git's stdout for verdicts), except the _show_listed rows, which call it directly.
+    manifest or index name read whole; a store below the repository toplevel (under a space, two levels
+    deep, or at generation 2) whose whole prior equals the toplevel store's and the expected prior, a
+    symlinked index there omitting the whole prior, and a store under " lead" or the non-UTF-8 b"\\xff"
+    reading its own whole prior beside a sibling under "lead" or "\\ufffd", a note showing a non-UTF-8 store
+    path escaped; and the bounded capture feeding 128 KiB of stdin to a child that first writes 128 KiB,
+    without deadlock, run in a separate interpreter under a 30 s deadline so a deadlocking transport is red
+    rather than a hang. Judged ONLY on gather's RETURNED structure (never by grepping git's stdout for
+    verdicts), except the _show_listed rows, which call it directly.
     Returns 0 clean, 1 on a failed check, 2 on a harness error or when git is not on PATH: every vector
     gathers from a git fixture, so without git none of them runs, which is cannot-evaluate, never a
     clean exit a gate would read as the vectors having passed."""
@@ -1937,9 +1963,11 @@ def self_test_isolated():
 
         held_all = {"BI": [[1, 1], [7, 7], [9, 9]], "DN": [[1, 1]], "WL": [[1, 4], [6, 6]]}
         obs, notes = held_case("control")
-        check("prior-held-case-control", (obs.get("prior") or {}).get("held") == held_all)
+        control_prior = obs.get("prior") or {}
+        check("prior-held-case-control", control_prior.get("held") == held_all)
         obs, notes = held_case("control-generation-2", worklog=2)
-        check("prior-held-case-control-generation-2", (obs.get("prior") or {}).get("held") == held_all)
+        control_gen2_prior = obs.get("prior") or {}
+        check("prior-held-case-control-generation-2", control_gen2_prior.get("held") == held_all)
         bucket = "archive/2026/"
         unlisted = "prior: could not list HEAD:{}/".format(machine_rel)
         for label, relpath, text, worklog, needle in (
@@ -2038,49 +2066,93 @@ def self_test_isolated():
         # where a machine-tree listing filtered by that directory shows nothing, so every file would read as
         # absent and the whole prior would be omitted (red when ls-tree runs without --full-tree). Each
         # nested control is the case-8 store, archive included, at a path holding a space or two levels
-        # deep, once with a generation-2 worklog/ directory, and its records, digests, releases, counters
-        # and `held` match the toplevel store's, with no prior note. A symlinked type index in a nested
-        # store omits the whole prior with a note naming its mode, as at the toplevel.
+        # deep, once with a generation-2 worklog/ directory. Its whole prior is asserted: it equals, member
+        # for member, the prior the same store gives at the toplevel, and that equals the expected prior
+        # written out here (records, each digest value, the release rows, every counter and `held`), with
+        # no prior note. Each digest is the engine's _record_digest of the index row the fixture writes. A
+        # symlinked type index in a nested store omits the whole prior with a note naming its mode, as at the
+        # toplevel.
         nested_records = {"BI-1": ("backlog_item", "open"), "DN-1": ("done", "recorded")}
-        for label, nest, worklog in (("space", "sub dir", None), ("two-level", "product/store", None),
-                                     ("space-generation-2", "sub dir", 2)):
+
+        def store_prior(records, held):
+            # The whole prior of a _write_store store holding `records`: the release row and counters it
+            # writes, each record's digest the engine's _record_digest of the index row it writes for that
+            # record (the row written out here as _write_store writes it), and `held`.
+            def row(rid, tname, status):
+                return {"id": rid, "type": tname, "status": status, "title": "t",
+                        "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
+                        "actor": {"kind": "maintainer"}}
+            return {"releases": [{"version": "0.1.0", "date": "2026-01-01T00:00:00Z", "worklog_span": [],
+                                  "coverage_digest": "sha256:" + "0" * 64}],
+                    "counters_high": {"BI": 1, "DN": 1, "WL": 0}, "records": records,
+                    "digests": {rid: _opf_check._record_digest(row(rid, *rec)) for rid, rec in records.items()},
+                    "held": held}
+
+        whole_prior = store_prior(nested_records, held_all)
+        for label, nest, worklog, toplevel in (
+                ("space", "sub dir", None, control_prior), ("two-level", "product/store", None, control_prior),
+                ("space-generation-2", "sub dir", 2, control_gen2_prior)):
             obs, notes = held_case("nested-" + label, worklog=worklog, nest=nest)
-            prior = obs.get("prior") or {}
-            check("prior-nested-store-whole-" + label, prior.get("records") == nested_records
-                  and set(prior.get("digests") or {}) == set(nested_records)
-                  and len(prior.get("releases") or []) == 1 and prior.get("counters_high", {}).get("BI") == 1
-                  and prior.get("held") == held_all and not any(n.startswith("prior:") for n in notes))
+            check("prior-nested-store-whole-" + label, obs.get("prior") == toplevel == whole_prior
+                  and not any(n.startswith("prior:") for n in notes))
         obs, notes = held_case("nested-symlink-type-index", relink=index_name, nest="sub dir")
         check("prior-nested-store-omitted-symlink-type-index", "prior" not in obs and any(
             "prior: HEAD {} is a symlink (mode 120000), not a blob".format(index_name) in n
             and n.endswith(_PRIOR_OMITTED) for n in notes))
-        # The store's path within the repository keeps its leading whitespace: a store at " lead" beside a
-        # sibling store at "lead", whose index holds BI-2 in place of BI-1, reads its own prior and never
-        # the sibling's (red when the path is trimmed of more than git's line ending). The sibling read
-        # from its own root is the control that the two stores differ.
-        lead_repo = base / "lead-space"
-        lead_repo.mkdir()
-        _git_setup(lead_repo, home, "init")
-        _write_store(lead_repo / " lead")
-        _write_store(lead_repo / "lead")
-        sibling_index = lead_repo / "lead" / machine_rel / index_name
-        sibling_index.write_text(sibling_index.read_text(encoding="utf-8").replace(
-            'id = "BI-1"', 'id = "BI-2"'), encoding="utf-8")
-        _git_setup(lead_repo, home, "add", "-A")
-        _git_setup(lead_repo, home, "commit", "-m", "two stores whose paths differ by a leading space")
-        obs, notes = gather(_Res(lead_repo / " lead", machine_rel))
-        sibling_obs, _sibling_notes = gather(_Res(lead_repo / "lead", machine_rel))
-        check("prior-nested-store-leading-space-own-prior",
-              (obs.get("prior") or {}).get("records") == nested_records
-              and (sibling_obs.get("prior") or {}).get("records") == {
-                  "BI-2": ("backlog_item", "open"), "DN-1": ("done", "recorded")})
-        # A type's index is read at <type>.index.toml in the machine tree, so a type name that is not a single
-        # path component names no entry of its own there. Under a name holding `/` the index sits in a subtree
-        # the one top-level listing does not show, so its kind was never checked: a symlink there was read as
-        # its link text and left `records` and `held` partial with no note. Each such name (holding `/`, empty,
-        # `.`, `..`, or holding NUL) omits the whole prior with a note naming it, whatever is committed at the
-        # index path, a regular file included. The control declares a single-component type on the same
-        # namespace with a regular index, read whole, so each omission is the name's alone.
+        # A store reads its own prior beside a sibling store whose path a lossy reading of its own would turn
+        # into. The sibling's index holds BI-2 in place of BI-1, and each store's whole prior is asserted
+        # (records, each digest value, the release rows, every counter and `held`), the sibling's read from
+        # its own root being the control that the two stores differ. A store at " lead" beside "lead" keeps
+        # its leading whitespace (red when the path is trimmed of more than git's line ending). A store under
+        # the non-UTF-8 directory b"\xff" beside one under "�" keeps that byte (red when the path is
+        # decoded with "replace", which turns b"\xff" into "�"). A store under b"\xfe", alone in its
+        # repository, holds a machine-tree entry named by the non-UTF-8 byte b"\xfd", so its listing does not
+        # parse and the whole prior is omitted with a note that shows its path with the byte escaped as \xfe,
+        # which is UTF-8 text (red when the note shows the raw path or the path is decoded with "replace").
+        sibling_prior = {"BI-2": ("backlog_item", "open"), "DN-1": ("done", "recorded")}
+
+        def own_prior_read(label, own, sibling):
+            # Commit a store at `own` and one at `sibling` whose index holds BI-2 in one repository; True when
+            # each reads exactly its own expected whole prior, with no prior note, and the two differ.
+            repo = base / label
+            repo.mkdir()
+            _git_setup(repo, home, "init")
+            _write_store(repo / own)
+            _write_store(repo / sibling)
+            sibling_index = repo / sibling / machine_rel / index_name
+            sibling_index.write_text(sibling_index.read_text(encoding="utf-8").replace(
+                'id = "BI-1"', 'id = "BI-2"'), encoding="utf-8")
+            _git_setup(repo, home, "add", "-A")
+            _git_setup(repo, home, "commit", "-m", "two stores at paths a lossy reading would confuse")
+            own_obs, own_notes = gather(_Res(repo / own, machine_rel))
+            sib_obs, sib_notes = gather(_Res(repo / sibling, machine_rel))
+            own_whole = store_prior(nested_records, {"BI": [[1, 1]], "DN": [[1, 1]]})
+            sib_whole = store_prior(sibling_prior, {"BI": [[2, 2]], "DN": [[1, 1]]})
+            return (own_obs.get("prior") == own_whole and sib_obs.get("prior") == sib_whole
+                    and own_whole["digests"]["BI-1"] != sib_whole["digests"]["BI-2"]
+                    and not any(n.startswith("prior:") for n in own_notes + sib_notes))
+
+        check("prior-nested-store-leading-space-own-prior", own_prior_read("lead-space", " lead", "lead"))
+        check("prior-nested-store-non-utf8-own-prior", own_prior_read("non-utf8", os.fsdecode(b"\xff"), "�"))
+        byte_repo = base / "non-utf8-note"
+        byte_repo.mkdir()
+        _git_setup(byte_repo, home, "init")
+        _write_store(byte_repo / os.fsdecode(b"\xfe"))
+        _write(byte_repo / os.fsdecode(b"\xfe"), "{}/{}".format(machine_rel, os.fsdecode(b"\xfd")), "x\n")
+        _git_setup(byte_repo, home, "add", "-A")
+        _git_setup(byte_repo, home, "commit", "-m", "a store under a directory that is not UTF-8")
+        obs, notes = gather(_Res(byte_repo / os.fsdecode(b"\xfe"), machine_rel))
+        check("prior-nested-store-non-utf8-note-escaped", "prior" not in obs and notes.count(
+            "prior: an entry of HEAD:\\xfe/{} does not parse; {}".format(machine_rel, _PRIOR_OMITTED)) == 1)
+        # A type's index is read at <type>.index.toml in the machine tree, and a type name is restricted to a
+        # single path component. Under a name holding `/` the index sits in a subtree the one top-level
+        # listing does not show, so its kind was never checked: a symlink there was read as its link text and
+        # left `records` and `held` partial with no note. An empty, `.` or `..` name gives an ordinary
+        # top-level entry (.index.toml, ..index.toml, ...index.toml), committed here as a regular file, and
+        # the restriction refuses it all the same. Each refused name (holding `/`, empty, `.`, `..`, or
+        # holding NUL) omits the whole prior with a note naming it, whatever is committed at the index path.
+        # The control declares a single-component type on the same namespace with a regular index, read
+        # whole, so each omission is the name's alone.
         extra_index = 'schema = 1\n\n[[record]]\nid = "BI-5"\ntype = "extra"\nstatus = "open"\n'
         for label, key, link, rel, shown in (
                 ("slash-symlinked-index", '"sub/extra"', ("sub/extra" + _INDEX_SUFFIX, "schema = 1\n"), None,
@@ -2092,9 +2164,13 @@ def self_test_isolated():
                 ("nul", '"sub\\u0000extra"', None, None, "'sub\\x00extra'")):
             obs, notes = held_case("type-name-" + label, rel, None if rel is None else extra_index, symlink=link,
                                    extra_type=key)
-            check("prior-omitted-type-name-" + label, "prior" not in obs and notes.count(
-                "prior: HEAD manifest declares a type name that is not a single path component ({}), so its "
-                "index is no entry of its own in the machine tree; {}".format(shown, _PRIOR_OMITTED)) == 1)
+            entry = None if rel is None else _run_git(git, str(base / ("held-type-name-" + label)),
+                                                      ["ls-tree", "HEAD", "{}/{}".format(machine_rel, rel)])
+            index_listed = entry is None or (entry.completed and entry.rc == 0
+                                             and entry.out.startswith(b"100644 blob "))
+            check("prior-omitted-type-name-" + label, index_listed and "prior" not in obs and notes.count(
+                "prior: HEAD manifest declares a refused type name ({}): a type name must be a single path "
+                "component, not empty, . or .., and holding no / or NUL; {}".format(shown, _PRIOR_OMITTED)) == 1)
         obs, notes = held_case("type-name-single-component", "extra" + _INDEX_SUFFIX, extra_index,
                                extra_type="extra")
         prior = obs.get("prior") or {}
@@ -2184,8 +2260,8 @@ def self_test_isolated():
           "and archive included, and an unreadable or malformed archive or worklog omitting them alone; "
           "a symlinked manifest, ledger, type index or imported leaf, a gitlinked type index, and a type "
           "name that is not a single path component omitting the whole prior; a store below the repository "
-          "toplevel, a leading space in its path included, reading its own whole prior; bounded stdin "
-          "transport)")
+          "toplevel, a leading space or a non-UTF-8 byte in its path included, reading its own whole prior; "
+          "bounded stdin transport)")
     return 0
 
 
