@@ -345,53 +345,44 @@ sys.stdout.write(ctl.get("out", ""))
 sys.exit(ctl.get("exit", 0))
 """
 
-# The review dispatch deadline rows run the decision under a budget of _RDP_ROW_BUDGET seconds and judge it
-# with the dl-shape timing of selftest_aiqt_hooks.py (_rdp_deadline_run): the reference workload runs in its
-# own Python process (_load_reference), a reading taken while this process has more live threads than when
-# the reference was opened fails the run closed, and only CPU work is divided by the reference slowdown,
-# every other second of the decision (a sleep, a blocked read, a wait for a child) counting at full length
-# (_deadline_run_judged). A decision that waits past its bound therefore fails at any load.
+# The review dispatch deadline rows run the decision under a budget of _RDP_ROW_BUDGET seconds and judge
+# its raw wall-clock time against a fixed bound, nothing divided by anything: the decision is a wait (for
+# the authority child, or a blocked read) that the hook cuts off at its deadline, so a decision over the
+# bound fails whatever the load and whatever other threads or children compute meanwhile. The bounds are
+# the budget plus _RDP_DECISION_SLACK (2.5 s) and plus _RDP_HUNG_READ_SLACK (2.0 s). Honest decisions
+# measured on one 80-CPU host at a load average of 40.5 to 43.5 (2026-11-10, 12 runs each): 1.0034 to
+# 1.0085 s for the authority row and 1.2505 to 1.2519 s for the hung-read row, so the bounds leave margins
+# of 1.49 s and 0.75 s over the largest honest decision.
 _RDP_ROW_BUDGET = 1.0
-# The worker thread the hook abandons at its deadline (_rdp_decide), and how long a row waits for it to
-# end before the second reference reading, which then counts it as a thread left running if it is alive.
-_RDP_WORKER_NAME = "review-dispatch-pin"
-_RDP_WORKER_SETTLE = 10.0
-
-
-def _aiqt_selftest():
-    """The selftest_aiqt_hooks module, imported on first use: the one home of the reference workload and of
-    the dl-shape timing rule the review dispatch deadline rows reuse."""
-    import selftest_aiqt_hooks
-    return selftest_aiqt_hooks
-
-
-def _rdp_worker_settle():
-    """Wait, at most _RDP_WORKER_SETTLE seconds in all, for every live thread named _RDP_WORKER_NAME (the
-    hook's abandoned decision worker) to end. Any other thread, and a worker still alive at the end, is left
-    for the second reference reading's thread count, which fails the run closed."""
-    ends = time.monotonic() + _RDP_WORKER_SETTLE
-    for thread in threading.enumerate():
-        if thread.name == _RDP_WORKER_NAME and thread is not threading.current_thread():
-            thread.join(max(0.0, ends - time.monotonic()))
+_RDP_DECISION_SLACK = 1.5
+_RDP_HUNG_READ_SLACK = 1.0
 
 
 def _rdp_deadline_run(call):
-    """call() timed between two readings of a reference workload in its own process (_deadline_timed_call
-    of selftest_aiqt_hooks.py, with _rdp_worker_settle before the second reading): (cpu_seconds,
-    wall_seconds, outcome, cpu_slowdown, wall_slowdown, note)."""
-    aiqt_selftest = _aiqt_selftest()
-    with aiqt_selftest._load_reference() as reference:
-        return aiqt_selftest._deadline_timed_call(call, reference, settle=_rdp_worker_settle)
+    """(wall_seconds, outcome) for outcome = call(), timed with time.monotonic."""
+    began = time.monotonic()
+    outcome = call()
+    return time.monotonic() - began, outcome
 
 
-def _rdp_deadline_verdict(run, outlived, bound):
-    """(passed, judged wall-clock seconds, note) for a review dispatch deadline run (_rdp_deadline_run):
-    passed only when the guarded sleep had not finished when the decision returned (outlived False), both
-    reference readings could be used (note None) and the judged wall-clock time (_deadline_run_judged: CPU
-    work over the CPU slowdown, the rest at full length, never over the raw time) is under bound."""
-    _cpu, wall = _aiqt_selftest()._deadline_run_judged(run)
-    note = run[5] if len(run) > 5 else None
-    return (not outlived and note is None and wall < bound), wall, note
+def _rdp_deadline_verdict(wall, outlived, bound):
+    """Whether a review dispatch deadline run passes: the guarded sleep had not finished when the decision
+    returned (outlived False) and its raw wall-clock seconds are under bound (the bound itself fails)."""
+    return not outlived and wall < bound
+
+
+def _rdp_hashing_thread(seconds, stop=None):
+    """A started daemon thread that hashes a 1 MB buffer for seconds of wall-clock time or until the event
+    stop is set: real CPU work beside the caller (hashlib releases the interpreter lock on a buffer this
+    size), for the planted rows that check such work cannot shorten a decision's judged time."""
+    def run():
+        block = b"\0" * (1 << 20)
+        ends = time.monotonic() + seconds
+        while time.monotonic() < ends and not (stop is not None and stop.is_set()):
+            hashlib.sha256(block)
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    return thread
 
 
 def _rdp_git(root, *args):
@@ -871,10 +862,8 @@ def _rdp_cases(tmp):
     check("rdp/fsmonitor-never-runs", (fm_kind, marker.exists()), ("allow", False))
     # The decision must not wait for the authority's 3-second sleep: the authority marks the end of its sleep in
     # a file, which must not exist when the decision returns (a load cannot create it, since the deadline kills
-    # the authority), and the decision, judged as _rdp_deadline_verdict states (CPU work over the reference
-    # slowdown, every wait at full length, a thread left running failing closed), must take under the budget
-    # plus 1.5 s. A wait over that bound fails at any load, so no slowdown passes a wait between 2.5 s and the
-    # 3-second sleep.
+    # the authority), and the decision's raw wall-clock time must be under the budget plus 1.5 s
+    # (_rdp_deadline_verdict), so a wait between 2.5 s and the 3-second sleep fails at any load.
     saved_budget = aiqt_hooks._RDP_BUDGET
     authority_done = f.briefs / "authority-done"
     f.authority(f.pin + "\n", sleep=3, done=str(authority_done))
@@ -884,8 +873,8 @@ def _rdp_cases(tmp):
     finally:
         aiqt_hooks._RDP_BUDGET = saved_budget
         f.authority(f.pin + "\n")
-    check("rdp/deadline-bounds-the-decision", (budget_run[2][0], _rdp_deadline_verdict(
-        budget_run, budget_run[2][1], _RDP_ROW_BUDGET + 1.5)[0]), ("unverifiable", True))
+    check("rdp/deadline-bounds-the-decision", (budget_run[1][0], _rdp_deadline_verdict(
+        budget_run[0], budget_run[1][1], _RDP_ROW_BUDGET + _RDP_DECISION_SLACK)), ("unverifiable", True))
     # Each content read and git probe refuses to start once the deadline has passed: a past deadline is set
     # directly, then each reader is called (a symlink entry exercises the walk without the blob hash).
     (f.root / "rdp-link").symlink_to("seed.txt")
@@ -1046,9 +1035,8 @@ def _rdp_cases(tmp):
     # A read that blocks in the kernel (a hung filesystem; here a sleep that never checks the deadline) cannot
     # hold the hook past its budget.
     # As in rdp/deadline-bounds-the-decision: the hung read records the end of its sleep, which must not have
-    # come when the decision returns, and the decision, judged the same way, must take under the budget plus
-    # 1 s, so a wait over 2 s fails at any load. The abandoned worker sleeps on past the decision; the second
-    # reference reading waits for it (_rdp_worker_settle).
+    # come when the decision returns, and the decision's raw wall-clock time must be under the budget plus 1 s,
+    # so a wait over 2 s fails at any load.
     real_blob = aiqt_hooks._rdp_blob_id
     hung_slept = []
 
@@ -1064,26 +1052,40 @@ def _rdp_cases(tmp):
     finally:
         aiqt_hooks._rdp_blob_id = real_blob
         aiqt_hooks._RDP_BUDGET = saved_budget
-    check("rdp/hung-read-bounded-by-deadline", (hung_run[2][0], _rdp_deadline_verdict(
-        hung_run, hung_run[2][1], _RDP_ROW_BUDGET + 1.0)[0]), ("unverifiable", True))
+    check("rdp/hung-read-bounded-by-deadline", (hung_run[1][0], _rdp_deadline_verdict(
+        hung_run[0], hung_run[1][1], _RDP_ROW_BUDGET + _RDP_HUNG_READ_SLACK)), ("unverifiable", True))
     aiqt_hooks.time.sleep(2.5)   # the abandoned worker finishes before the next vector uses f
-    # Two planted decisions the rule above must fail, each a stand-in for the dispatch that returns the
-    # expected UNVERIFIABLE without finishing the sleep the marker guards, timed between real reference
-    # readings and then judged as if the host ran 4 times slower than an uncontended runner. The first leaves
-    # a busy thread running (hashing, which runs outside the interpreter lock), whose CPU time would cover
-    # the decision's wall-clock time and so be divided by the slowdown: it must fail closed on the thread
-    # count. The second waits 2.7 s, between the 2.5 s bound and the 3-second sleep: it must fail on that
-    # wait, counted at full length, under both rows' bounds.
-    stop_busy, busy_threads = threading.Event(), []
+    # Three planted decisions the rule above must fail under both rows' bounds, each a stand-in for the
+    # dispatch that returns the expected UNVERIFIABLE without finishing the sleep the marker guards, after
+    # 2.7 s, between the 2.5 s bound and the 3-second sleep, while other threads compute (hashing, which runs
+    # outside the interpreter lock): a hashing thread started before the call and running through the wait;
+    # two short-lived hashing workers the call starts and joins before it returns; and a busy hashing thread
+    # the call leaves running, while a thread alive before the call ends during it.
+    overlap_stop = threading.Event()
+    overlap = _rdp_hashing_thread(30.0, overlap_stop)
+    try:
+        overlap_run = _rdp_deadline_run(lambda: (aiqt_hooks.time.sleep(2.7), ("unverifiable", False))[1])
+    finally:
+        overlap_stop.set()
+        overlap.join(10)
+    check("rdp/deadline-planted-wait-overrun-fails", [
+        _rdp_deadline_verdict(overlap_run[0], False, _RDP_ROW_BUDGET + slack)
+        for slack in (_RDP_DECISION_SLACK, _RDP_HUNG_READ_SLACK)], [False, False])
 
-    def _busy():
-        block = b"\0" * (1 << 20)
-        while not stop_busy.is_set():
-            hashlib.sha256(block)
+    def _short_lived_workers():
+        workers = [_rdp_hashing_thread(2.6) for _ in range(2)]
+        aiqt_hooks.time.sleep(2.7)
+        for worker in workers:
+            worker.join(10)
+        return ("unverifiable", False)
+    worker_run = _rdp_deadline_run(_short_lived_workers)
+    check("rdp/deadline-planted-short-lived-worker-fails", [
+        _rdp_deadline_verdict(worker_run[0], False, _RDP_ROW_BUDGET + slack)
+        for slack in (_RDP_DECISION_SLACK, _RDP_HUNG_READ_SLACK)], [False, False])
+    stop_busy, busy_threads = threading.Event(), [_rdp_hashing_thread(1.0)]
 
     def _leaves_busy_thread():
-        busy_threads.append(threading.Thread(target=_busy, name="planted-busy", daemon=True))
-        busy_threads[0].start()
+        busy_threads.append(_rdp_hashing_thread(60.0, stop_busy))
         aiqt_hooks.time.sleep(2.7)
         return ("unverifiable", False)
     try:
@@ -1092,22 +1094,13 @@ def _rdp_cases(tmp):
         stop_busy.set()
         for thread in busy_threads:
             thread.join(10)
-    busy_passed, _wall, busy_note = _rdp_deadline_verdict(busy_run[:3] + (4.0, 4.0) + busy_run[5:], False,
-                                                          _RDP_ROW_BUDGET + 1.5)
-    check("rdp/deadline-planted-busy-thread-fails-closed",
-          (busy_passed, bool(busy_note) and "live threads" in busy_note), (False, True))
-    wait_run = _rdp_deadline_run(lambda: (aiqt_hooks.time.sleep(2.7), ("unverifiable", False))[1])
-    check("rdp/deadline-planted-wait-overrun-fails", [
-        _rdp_deadline_verdict(wait_run[:3] + (4.0, 4.0) + wait_run[5:], False, _RDP_ROW_BUDGET + slack)[0]
-        for slack in (1.5, 1.0)] + [wait_run[5] if len(wait_run) > 5 else None], [False, False, None])
-    # The bound's edges, on recorded runs of pure waiting (no CPU time) at a slowdown of 4: just under the
-    # 2.5 s bound passes, exactly at it and just over it fail, as does an outlived sleep or an unusable
-    # reading; CPU work alone is divided by the slowdown, so 2 s of CPU in 2.6 s judges 1.1 s and passes.
-    check("rdp/deadline-verdict-edges", [_rdp_deadline_verdict(run, outlived, 2.5)[0] for run, outlived in (
-        ((0.0, 2.5 - 1e-6, "x", 4.0, 4.0, None), False), ((0.0, 2.5, "x", 4.0, 4.0, None), False),
-        ((0.0, 2.5 + 1e-6, "x", 4.0, 4.0, None), False), ((0.0, 1.0, "x", 4.0, 4.0, None), True),
-        ((0.0, 1.0, "x", 1.0, 1.0, "after the call: 2 live threads against a baseline of 1"), False),
-        ((2.0, 2.6, "x", 4.0, 4.0, None), False))], [True, False, False, False, False, True])
+    check("rdp/deadline-planted-busy-thread-fails", [
+        _rdp_deadline_verdict(busy_run[0], False, _RDP_ROW_BUDGET + slack)
+        for slack in (_RDP_DECISION_SLACK, _RDP_HUNG_READ_SLACK)], [False, False])
+    # The bound's edges: just under the 2.5 s bound passes, exactly at it and just over it fail, as does an
+    # outlived sleep well under it.
+    check("rdp/deadline-verdict-edges", [_rdp_deadline_verdict(wall, outlived, 2.5) for wall, outlived in (
+        (2.5 - 1e-6, False), (2.5, False), (2.5 + 1e-6, False), (1.0, True))], [True, False, False, False])
     mf = RdpFixture(base, "mutants")
     check("rdp/duplicate-repo-or-branch-unverifiable", [_rdp_kind(mf.dispatch(mf.good(extra=[
         lab + " " + v, lab + " " + v]))) for lab, v in (("Review-repo:", str(mf.root)), ("Review-branch:", "main"))],
