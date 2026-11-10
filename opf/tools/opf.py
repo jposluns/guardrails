@@ -5509,16 +5509,19 @@ def _watchdog_completion_case(mode, tree=None):
         # noninteractive shell, some launchers) keeps it ignored, so the
         # kernel would discard the signal; one started with SIGINT in its
         # signal mask keeps it blocked, so the signal stays pending and is
-        # never delivered. Either way the leg would read a swallowed
-        # cancellation. The leg installs the handler and unblocks SIGINT in
-        # its own process before relying on them, so neither the inherited
-        # disposition nor the inherited mask decides its verdict, and puts
-        # both back however the leg ends, the mask first so that no SIGINT
-        # reaches the restored disposition while it is still unblocked. The
-        # mask is read before the unblock and the unblock runs inside the
-        # block that restores it: a SIGINT already pending is delivered by
-        # the unblock itself, as a KeyboardInterrupt out of that call, and
-        # must still find the mask restored behind it.
+        # never delivered. In both states no KeyboardInterrupt arrives and
+        # the leg fails at its own delivery check: launch-cancel with "the
+        # cancellation was swallowed", close-cancel and poll-masked with "the
+        # pending interrupt was never delivered", census-exception with "the
+        # real SIGINT was not delivered outward". The leg installs the
+        # handler and unblocks SIGINT in its own process before relying on
+        # them, so neither the inherited disposition nor the inherited mask
+        # decides its verdict, and puts both back however the leg ends, the
+        # mask first so that no SIGINT reaches the restored disposition while
+        # it is still unblocked. The mask is read before the unblock and the
+        # unblock runs inside the block that restores it: a SIGINT already
+        # pending is delivered by the unblock itself, as a KeyboardInterrupt
+        # out of that call, and must still find the mask restored behind it.
         prior = signal.getsignal(signal.SIGINT)
         assert prior is not None, (
             "SIGINT carries a handler Python did not install and cannot restore: " + mode)
@@ -16187,9 +16190,11 @@ def _watchdog_regression_self_test():
                   + ", opf._watchdog_completion_case, 'launch-cancel')",
                   bound("completion-launch-cancel-sigint-blocked")))
     # The same leg entered with SIGINT blocked AND already pending: the leg's
-    # own unblock delivers it as a KeyboardInterrupt, and the SIGINT handler
-    # and signal mask must match their entry state afterwards, or a mask
-    # restore placed after the unblock is skipped and SIGINT is left
+    # own unblock delivers it as a KeyboardInterrupt before the leg body
+    # runs, so the leg must end in that KeyboardInterrupt (a leg that returns
+    # instead, passing or failing, lost the pending SIGINT), and the SIGINT
+    # handler and signal mask must match their entry state afterwards, or a
+    # mask restore placed after the unblock is skipped and SIGINT is left
     # unblocked behind the leg.
     cases.append(("completion-launch-cancel-sigint-pending",
                   "import signal\n"
@@ -16201,17 +16206,22 @@ def _watchdog_regression_self_test():
                   "if signal.SIGINT not in entry[1] or signal.SIGINT not in signal.sigpending():\n"
                   "    print('opf watchdog leg: FAIL (SIGINT not blocked and pending at entry)')\n"
                   "    return 3\n"
+                  "interrupted = False\n"
                   "try:\n"
                   "    outcome = opf._watchdog_leg_entry("
                   + repr(budgets.get("completion-launch-cancel-sigint-pending"))
                   + ", opf._watchdog_completion_case, 'launch-cancel')\n"
                   "except KeyboardInterrupt:\n"
-                  "    outcome = 'KeyboardInterrupt'\n"
+                  "    interrupted, outcome = True, 'KeyboardInterrupt'\n"
                   "after = (signal.getsignal(signal.SIGINT),"
                   " signal.pthread_sigmask(signal.SIG_BLOCK, ()))\n"
                   "if after != entry:\n"
                   "    print('opf watchdog leg: FAIL (SIGINT handler and mask %r after the leg"
                   " (%r), %r at entry)' % (after, outcome, entry))\n"
+                  "    return 3\n"
+                  "if not interrupted:\n"
+                  "    print('opf watchdog leg: FAIL (the pending SIGINT did not end the leg as a"
+                  " KeyboardInterrupt; the leg returned %r)' % (outcome,))\n"
                   "    return 3\n"
                   "return 0",
                   bound("completion-launch-cancel-sigint-pending")))
