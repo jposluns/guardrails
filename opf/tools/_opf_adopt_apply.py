@@ -5786,8 +5786,8 @@ def _context_plan(context):
 # mirror plant rows install inside a product, _RELEASE_ROOT IS that product root, so the gather compares
 # the two directory identities and refuses when they are one directory. Only that equal case is refused:
 # a release root nested inside the product, or a product nested inside the release root, is read as any
-# other release root, and verify_pack_member still judges every byte. Only the self-test redirects the
-# root, by patching this module attribute over a fixture release tree.
+# other release root, and no gathered byte is planted before verify_pack_member has passed it. Only the
+# self-test redirects the root, by patching this module attribute over a fixture release tree.
 RELEASE_MANIFEST_REL = ".aiqt/manifest.toml"
 RELEASE_ROOT_TXT_REL = ".aiqt/release/root.txt"
 _RELEASE_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -6986,11 +6986,11 @@ def run_apply(product_root, plan_bytes, approval_bytes, worksheet):
     sequencing), naming it, never composing the row over a default. A plan with a plant-governance row then
     takes ONE release-pack gather (gather_release_pack, after that refusal and before any composition): the
     release manifest, root.txt and exactly the plant rows' source members, read beside the running opf/ and
-    held in memory, so the preflight and the transaction compose from the same bytes and a release tree
-    swapped mid-run changes nothing planted; a gather refusal (an absent or unreadable file, named, or a
-    release root that is the product root itself) also precedes the journal, so it writes nothing, and a
-    plan with no plant-governance row reads no release at all. The gathered bytes carry no trust of their
-    own: verify_pack_member alone judges them, against the plan's agreed ROOT.
+    held in memory, so the preflight and the transaction compose from the same bytes and a change to the
+    release tree after the gather changes nothing planted; a gather refusal (an absent or unreadable file,
+    named, or a release root that is the product root itself) also precedes the journal, so it writes
+    nothing, and a plan with no plant-governance row reads no release at all. The gathered bytes carry no
+    trust of their own: verify_pack_member alone judges them, against the plan's agreed ROOT.
 
     Composition is the driver's, and so are its rules. One compose function stages the plan, approval and
     sealed planning-inventory bytes (the inventory rederive_bound_or_refuse returned, proved to seal to the
