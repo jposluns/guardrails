@@ -908,18 +908,19 @@ def _operator_step_wording_failures(root=None):
         try:
             tree = ast.parse((base / rel).read_text(encoding="utf-8"))
         except (OSError, UnicodeDecodeError, SyntaxError, ValueError, RecursionError, MemoryError) as exc:
-            out.append("(operator-step-wording) {}: cannot read or parse: {}".format(rel, exc))
+            out.append("(operator-step-wording-read) {}: cannot read or parse: {}".format(rel, exc))
             continue
         texts = [node.value for node in ast.walk(tree)
                  if isinstance(node, ast.Constant) and isinstance(node.value, str)]
         for phrase, want in _OPERATOR_STEP_COUNTS:
             got = sum(text.count(phrase) for text in texts)
             if got != want:
-                out.append("(operator-step-wording) {}: {!r} occurs {} times in string constants, expected {}"
-                           .format(rel, phrase, got, want))
+                out.append("(operator-step-wording-count) {}: {!r} occurs {} times in string constants, "
+                           "expected {}".format(rel, phrase, got, want))
         for phrase in _OPERATOR_STEP_RETIRED:
             if any(phrase in text for text in texts):
-                out.append("(operator-step-wording) {}: retired phrasing {!r} is back".format(rel, phrase))
+                out.append("(operator-step-wording-retired) {}: retired phrasing {!r} is back"
+                           .format(rel, phrase))
     return out
 
 
