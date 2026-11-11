@@ -1914,10 +1914,12 @@ def self_test_main():
                                     "(a blocked read released: {}):\n{}".format(rel, label, code, bool(released),
                                                                                 out))
 
-            # 20b. _claude_drift reads each rule source again, by path, after C1 loaded the corpus. A source
-            #      swapped for a FIFO after that load is MALFORMED naming it as not a regular file, without
-            #      blocking. Called directly: in a full run the Cursor renderer reads the same source by path
-            #      inside gen_cursor, a read this tool does not make.
+            # 20b. _claude_drift reads each rule source again, through _read_regular, after C1 loaded the
+            #      corpus. A source swapped for a FIFO after that load is MALFORMED naming it as not a regular
+            #      file, without blocking. Called directly: in a full run over a tree with AGENTS.md, as here,
+            #      gen_agents.body_of (reached from _agents_drift) reads the same source by path next and blocks
+            #      there, before gen_cursor's renderer reads it; both reads are made inside generator modules,
+            #      not by this tool.
             ctree = tmp / "fifo-claude-source"
             ctree.mkdir()
             ccorpus = _build_conformant(ctree)

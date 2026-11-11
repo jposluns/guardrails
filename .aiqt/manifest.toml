@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "39a79c9a0532137d1fb9c4380656ac0b70b6910fab8fae5f06179719cc1c2f3c"
+tree-sha256 = "8b1fd0003c43aa0a7af13afeeca5a35f20f94246c7074b9ede374f38beb8752d"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -4451,8 +4451,8 @@ sha256 = "5c11ec76c34975264d4070560859c8d77d451af47eb2ca655cb24a5a6d25b94d"
 
 [[sources]]
 path = "tools/conformance.py"
-bytes = 107589
-sha256 = "b38160b765476759421065bf95506b5ac4ecc31513165857847e77bf8759ec03"
+bytes = 107781
+sha256 = "885117d423791b7df3f3296181de81853c731e4f7dae233cda1bc5fe32814de6"
 
 [[sources]]
 path = "tools/doctor.py"
