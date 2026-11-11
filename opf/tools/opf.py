@@ -2923,18 +2923,25 @@ def _watchdog_real_sigint_call(label, body):
     mask restore's entry, before the mask changes. The caller's handler may
     raise anything (SystemExit from sys.exit, say), so both redos follow any
     exception, not only a KeyboardInterrupt. Short of memory running out, a
-    redo cannot spin on a failure of the calls themselves: the handler is
-    put back only while it differs from the caller's, which means the
-    setup's own signal.signal ran in this thread, and the mask calls take
-    SIGINT or the mask read at entry, which pthread_sigmask accepts in any
-    thread. The first exception caught on the way is raised again once both
-    are back: it is the one the interruption raised, and keeping it makes
-    what the caller sees independent of how many more SIGINTs arrive while
-    the restore finishes. A later one is dropped; an exception the body
-    raised stays attached as its __context__. Stated limit: a second
-    exception from a SIGINT handled in the few bytecodes between catching
-    the first and the redo's call (the except clause and the loop's jump
-    back) still escapes the restore.
+    redo cannot spin on a failure of the calls themselves: the thread guard
+    below keeps the call in the main thread, where signal.signal accepts the
+    handler getsignal read at entry (a handler Python installed, as the
+    assert below requires), and the mask calls take SIGINT or the mask read
+    at entry, which pthread_sigmask accepts in any thread. The handler is
+    put back only while it differs from the caller's, so a setup that fails
+    before its swap leaves nothing to put back and makes no further
+    signal.signal call. It can differ without that swap too: the caller's
+    own handler, run by a SIGINT while it is installed (before the swap, or
+    once the restore has put it back), may change the handler itself, and
+    the restore then puts the entry handler back over that change. The first
+    exception caught on the way is raised again once both are back: it is
+    the one the interruption raised, and keeping it makes what the caller
+    sees independent of how many more SIGINTs arrive while the restore
+    finishes. A later one is dropped; an exception the body raised stays
+    attached as its __context__. Stated limit: a second exception from a
+    SIGINT handled in the few bytecodes between catching the first and the
+    redo's call (the except clause and the loop's jump back) still escapes
+    the restore.
 
     signal.signal works only in the main thread, so a call from any other
     thread raises ValueError before it changes the handler or the mask."""
@@ -2994,16 +3001,19 @@ def _watchdog_sigint_restore_case():
     handled, whatever this thread's mask holds; where SIG_IGN is installed
     nothing runs, and the run counts as one with no SIGINT sent. Each pass
     raises N until a run no longer reaches its Nth point, so every later N
-    runs as the run with none sent did. Runs in its own fixture process: it
-    replaces those two functions on the signal module and installs the
-    profile hook while it runs, and puts them back after. Returns EXIT_OK
-    when every exit state matches its entry state, every run that sent no
-    SIGINT returns or raises what its body did, every run whose SIGINT
-    raised an exception (a KeyboardInterrupt, or SystemExit from the
-    raising handler) ends in that exception, and every other run ends in its
-    body's outcome or a KeyboardInterrupt (or SystemExit, under the raising
-    handler, which a held SIGINT runs at the mask restore); else
-    EXIT_FINDING, with a failure line that counts each kind of fault."""
+    runs as the run with none sent did. Then come the four direct runs of
+    _watchdog_sigint_restore_probes: a call from a worker thread, two
+    exceptions in the restore (twice), and an install the setup cannot make.
+    Runs in its own fixture process: it replaces those two functions on the
+    signal module and installs the profile hook while it runs, and puts them
+    back after. Returns EXIT_OK when every exit state matches its entry
+    state, every run that sent no SIGINT returns or raises what its body
+    did, every run whose SIGINT raised an exception (a KeyboardInterrupt, or
+    SystemExit from the raising handler) ends in that exception, every other
+    run ends in its body's outcome or a KeyboardInterrupt (or SystemExit,
+    under the raising handler, which a held SIGINT runs at the mask
+    restore), and the direct runs find nothing; else EXIT_FINDING, with a
+    failure line that counts each kind of fault."""
     import signal
     real_signal = signal.signal
     real_mask = signal.pthread_sigmask
@@ -3171,6 +3181,7 @@ def _watchdog_sigint_restore_case():
                                 "%s entry, body %s: %s %d still reached"
                                 % (name, ending, point, limit[kind]))
                             break
+        runs += _watchdog_sigint_restore_probes(faults, real_signal, real_mask)
     finally:
         sys.setprofile(prior_profile)
         signal.signal = real_signal
@@ -3186,6 +3197,152 @@ def _watchdog_sigint_restore_case():
                  "; ".join([text for found in faults.values() for text in found[:2]][:6])))
         return EXIT_FINDING
     return EXIT_OK
+
+
+def _watchdog_sigint_restore_probes(faults, real_signal, real_mask):
+    """Four direct runs of _watchdog_real_sigint_call that the injection
+    passes of _watchdog_sigint_restore_case cannot tell apart from a weaker
+    restore, each adding what it finds to faults; returns the number of runs.
+    It replaces signal.signal and signal.pthread_sigmask with stand-ins that
+    log every call and leaves the case to put the real ones back. A stand-in
+    stops calling through once it has logged 64 calls, so a restore that
+    keeps redoing a failing call ends as a fault instead of spinning.
+
+    A call from a worker thread must raise the thread guard's ValueError
+    with no signal call and without running its body. With the guard gone
+    the setup still fails at signal.signal and the restore puts the mask
+    back, so the end state alone cannot show it: the logged calls do. Two
+    exceptions raised in the restore (both while the handler is put back, or
+    one there and one at the mask restore) must end the call as the first,
+    the same object with its payload (SystemExit(130)'s code) and the body's
+    exception as its __context__. An install refused in the setup leaves
+    the handler as the caller had it, so the restore must make no
+    signal.signal call of its own: a stand-in that refuses every install
+    must see the setup's one call and no more."""
+    import signal
+    import threading
+    log = []
+    plan = {"refuse": False, "mark": None, "raise": {}}
+
+    def stand_in(real, name):
+        def call(*args):
+            log.append(name)
+            if len(log) > 64:
+                faults.setdefault("redo still running at the bound", []).append(
+                    "%s called past the 64-call bound" % name)
+                return None
+            if plan["mark"] is not None:
+                step = len(log) - plan["mark"]
+                if step in plan["raise"]:
+                    # As a SIGINT handled at this call's entry would raise.
+                    raise plan["raise"].pop(step)
+            if name == "signal.signal" and plan["refuse"]:
+                raise ValueError("stand-in refuses the install")
+            return real(*args)
+        return call
+
+    def caller_handler(signum, frame):
+        return None
+
+    def state():
+        return (signal.getsignal(signal.SIGINT),
+                signal.SIGINT in real_mask(signal.SIG_BLOCK, ()))
+
+    def enter():
+        real_mask(signal.SIG_BLOCK, {signal.SIGINT})
+        real_signal(signal.SIGINT, caller_handler)
+        real_mask(signal.SIG_UNBLOCK, {signal.SIGINT})
+        del log[:]
+        return state()
+
+    def restored(probe, entry):
+        after = state()
+        if after != entry:
+            faults.setdefault("handler or mask not restored", []).append(
+                "%s probe: handler and blocked %r on exit, %r on entry"
+                % (probe, after, entry))
+
+    signal.signal = stand_in(real_signal, "signal.signal")
+    signal.pthread_sigmask = stand_in(real_mask, "signal.pthread_sigmask")
+
+    entry = enter()
+    ran = []
+    seen = {}
+
+    def worker():
+        try:
+            _watchdog_real_sigint_call("worker-thread probe", lambda: ran.append(True))
+        except BaseException as exc:
+            seen["exception"] = exc
+
+    thread = threading.Thread(target=worker, name="sigint-restore-probe", daemon=True)
+    thread.start()
+    # Untimed: the stand-ins end any redo at their bound, and the leg's own
+    # process bound covers the rest.
+    thread.join()
+    rejected = seen.get("exception")
+    if (type(rejected) is not ValueError
+            or "only from the main thread" not in str(rejected) or ran or log):
+        faults.setdefault("worker-thread call not rejected first", []).append(
+            "worker-thread probe: raised %r, body ran %s, %d signal calls %r"
+            % (rejected, bool(ran), len(log), log[:5]))
+    restored("worker-thread", entry)
+
+    for probe, steps in (("two exceptions while the handler is put back", (1, 2)),
+                         ("one exception there and one at the mask restore", (1, 4))):
+        first = SystemExit(130)
+        later = KeyboardInterrupt()
+        failure = RuntimeError("leg body raised")
+        entry = enter()
+        # Counted from the body's end, the restore calls block, then
+        # signal.signal, then setmask, and redoes a loop's calls after an
+        # exception: steps 1 and 2 are both the handler loop's block, and
+        # when only step 1 raises, step 4 is the mask restore's first call.
+        plan.update({"mark": None, "raise": {steps[0]: first, steps[1]: later}})
+
+        def ending():
+            plan["mark"] = len(log)
+            raise failure
+
+        outcome = None
+        try:
+            _watchdog_real_sigint_call(probe, ending)
+        except BaseException as exc:
+            outcome = exc
+        plan["mark"] = None
+        if plan["raise"]:
+            faults.setdefault("probe point not reached", []).append(
+                "%s probe: steps %r never ran" % (probe, sorted(plan["raise"])))
+        if outcome is later or isinstance(outcome, KeyboardInterrupt):
+            faults.setdefault("first exception not kept", []).append(
+                "%s probe: raised the later %r" % (probe, outcome))
+        elif outcome is not first:
+            faults.setdefault("caught exception not raised as itself", []).append(
+                "%s probe: raised %r (code %r), not the caught SystemExit(130)"
+                % (probe, outcome, getattr(outcome, "code", None)))
+        elif outcome.code != 130 or outcome.__context__ is not failure:
+            faults.setdefault("caught exception not raised as itself", []).append(
+                "%s probe: code %r, context %r" % (probe, outcome.code, outcome.__context__))
+        restored(probe, entry)
+
+    entry = enter()
+    ran = []
+    plan["refuse"] = True
+    outcome = None
+    try:
+        _watchdog_real_sigint_call("refused-install probe", lambda: ran.append(True))
+    except BaseException as exc:
+        outcome = exc
+    finally:
+        plan["refuse"] = False
+    installs = log.count("signal.signal")
+    if (installs != 1 or ran or type(outcome) is not ValueError
+            or str(outcome) != "stand-in refuses the install"):
+        faults.setdefault("signal.signal called with nothing to put back", []).append(
+            "refused-install probe: %d signal.signal calls, body ran %s, raised %r"
+            % (installs, bool(ran), outcome))
+    restored("refused-install", entry)
+    return 4
 
 
 def _watchdog_leg_entry(budget, case, *args):
@@ -16541,9 +16698,12 @@ def _watchdog_regression_self_test():
                   "return 0",
                   bound("completion-launch-cancel-sigint-pending")))
     # The install and restore those legs share, run with stand-in bodies for
-    # every entry state and ending, and with a SIGINT sent just before each
+    # every entry state and ending: with a SIGINT sent just before each
     # signal call they make and at each function entry and return and each
-    # builtin call's start and end (see _watchdog_sigint_restore_case).
+    # builtin call's start and end, with the installed handler run directly
+    # at each of those events, and in four direct runs (a worker-thread call,
+    # two exceptions in the restore, twice, and a refused install; see
+    # _watchdog_sigint_restore_case).
     cases.append(("sigint-restore", prefix + "return opf._watchdog_leg_entry("
                   + repr(budgets.get("sigint-restore"))
                   + ", opf._watchdog_sigint_restore_case)",
