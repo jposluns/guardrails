@@ -1772,7 +1772,8 @@ _ROTATION_NOT_TERMINAL = re.compile(r"C-ROTATION: archived record '[^']*' \(([a-
 def _decision_neutral_problem(problem):
     """True when `problem`, one archive_read problem, cannot change the decision outputs: one of the two
     rotation findings above, a non-terminal record naming a type other than pending_decision. Every other
-    problem, a message in any other wording included, can hide or duplicate a chain member and refuses."""
+    problem, a message in any other wording included, is refused conservatively, whether or not it affects
+    the decision population."""
     if not isinstance(problem, str):
         return False
     if _ROTATION_UNBOUND.fullmatch(problem):
@@ -1792,20 +1793,20 @@ def _archived_decisions(store_root_fd, machine_rel, manifest, registered_vendors
     manifest-derived arguments opf record passes it.
 
     Refuses (ViewsError, a cannot-evaluate) rather than render over a partial population: when the walk
-    reports a problem that can change the decision outputs (a missing, unreadable or malformed archive
-    input, a non-terminal archived pending decision, an archived id seated twice; every problem except the
-    two rotation findings _decision_neutral_problem names), when it could not read or confirm a population
-    in full (`complete` False), when an archived pending decision is not a valid record or repeats an
-    active decision's id, or when a parsed path is also a declared active source read with different
-    bytes. Each of those can hide or duplicate a chain member, and a view cannot render part of a graph it
-    cannot evaluate. Those two rotation findings change neither the records the walk seats nor whether it
-    read them in full, so they stay plain doctor findings and never turn C-VIEW-DRIFT into a
-    cannot-evaluate. A store with no archive tree has rotated nothing: ([], {}). The refusal is otherwise
-    conservative where the walk is: any other archive fault in another record type also refuses, and a
-    moved row whose declared destination is an active location leaves `complete` False here (archive_read
-    is passed no active locations) where the doctor counts it. The import is call-time, as render's is,
-    since _opf_check imports this module at its top; archive_read runs no validate_store, so the doctor's
-    C-VIEW-DRIFT call into plan_views does not recur."""
+    reports any problem except the two rotation findings _decision_neutral_problem names (a missing,
+    unreadable or malformed archive input, a non-terminal archived pending decision, an archived id seated
+    twice, or any other archive fault), when it could not read or confirm a population in full (`complete`
+    False), when an archived pending decision is not a valid record or repeats an active decision's id, or
+    when a parsed path is also a declared active source read with different bytes. Those walk problems are
+    refused conservatively, whether or not they affect the decision population; each of the other causes can
+    hide or duplicate a chain member, and a view cannot render part of a graph it cannot evaluate. Those two
+    rotation findings change neither the records the walk seats nor whether it read them in full, so they
+    stay plain doctor findings and never turn C-VIEW-DRIFT into a cannot-evaluate. A store with no archive
+    tree has rotated nothing: ([], {}). The refusal is conservative where the walk is, too: an archive fault
+    in another record type refuses, and a moved row whose declared destination is an active location leaves
+    `complete` False here (archive_read is passed no active locations) where the doctor counts it. The
+    import is call-time, as render's is, since _opf_check imports this module at its top; archive_read runs
+    no validate_store, so the doctor's C-VIEW-DRIFT call into plan_views does not recur."""
     import _opf_check
     base = manifest.get("opf")
     import_status = base.get("import_status") if isinstance(base, dict) else None
