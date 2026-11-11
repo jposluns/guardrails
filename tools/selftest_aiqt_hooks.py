@@ -4026,11 +4026,15 @@ def _wait_loop_deny_text_faults(reason, banner):
     return faults
 
 
-def _wait_loop_deny_faults(handler, root, command=_WAIT_LOOP_DENY_COMMAND):
-    """handler's deny on command, _WAIT_LOOP_DENY_COMMAND unless given (a foreground call in registry scope
-    at root), judged by _wait_loop_deny_text_faults; a call that does not deny is itself the fault."""
+def _wait_loop_deny_faults(handler, root, command=_WAIT_LOOP_DENY_COMMAND, background=False):
+    """handler's deny on command, _WAIT_LOOP_DENY_COMMAND unless given (a call in registry scope at root, a
+    foreground one unless background is True, which sends run_in_background true), judged by
+    _wait_loop_deny_text_faults; a call that does not deny is itself the fault."""
+    tool_input = {"command": command}
+    if background:
+        tool_input["run_in_background"] = True
     code, stdout_obj, _stderr = handler({"hook_event_name": aiqt_hooks.PRETOOL, "tool_name": "Bash",
-                                         "cwd": str(root), "tool_input": {"command": command}})
+                                         "cwd": str(root), "tool_input": tool_input})
     if _reduce_result(code, stdout_obj) != "deny":
         return ["the poll loop did not deny ({})".format(_reduce_result(code, stdout_obj))]
     reason = (stdout_obj or {}).get("hookSpecificOutput", {}).get("permissionDecisionReason", "")
@@ -4110,6 +4114,26 @@ def _test_wait_loop_deny_text(failures, tmp):
         aiqt_hooks._orch_bg_poll_loop = saved_bg
     if not any("generic detach advice" in fault for fault in flipped):
         failures.append("(wl-deny-text-truncation-guard-flip) with the truncation guard's generic detach text "
+                        "restored for the poll loop the row must go red, got {!r}".format(flipped))
+    # The same poll loop sent as a BACKGROUND dispatch (run_in_background true): the wait-loop hook denies it
+    # whatever run_in_background is, so both handlers must deny it with texts that pass the same check; the
+    # truncation guard's background detach advice (drop the '&' so the tracked dispatch runs the work) would
+    # resubmit the loop the wait-loop exits forbid. Its flip is the same pair of patches as above, which
+    # restores the background detach text for this command, and the row must then go red.
+    for label, handler_bg in (("wait-loop", handler), ("truncation-guard", guard)):
+        faults = _wait_loop_deny_faults(handler_bg, root, background=True)
+        if faults:
+            failures.append("(wl-deny-text-background) the {} deny of a background dispatch that backgrounds the "
+                            "poll loop gives contradictory advice: {}".format(label, "; ".join(faults)))
+    aiqt_hooks._orch_detach_poll_loop = lambda command: False
+    aiqt_hooks._orch_bg_poll_loop = lambda command: "none"
+    try:
+        flipped = _wait_loop_deny_faults(guard, root, background=True)
+    finally:
+        aiqt_hooks._orch_detach_poll_loop = saved_poll
+        aiqt_hooks._orch_bg_poll_loop = saved_bg
+    if not any("resubmit" in fault or "run the loop again" in fault for fault in flipped):
+        failures.append("(wl-deny-text-background-flip) with the truncation guard's background detach text "
                         "restored for the poll loop the row must go red, got {!r}".format(flipped))
     _wait_loop_overmatch_rows(failures, root)
     _wait_loop_fallback_rows(failures, root)
@@ -6292,8 +6316,14 @@ _DEADLINE_SHAPES = {
                                                + ")" * (n // 3 - 3)}),
     "nest_cmdsubst_background": lambda n, base: ("Bash", {"command": "echo " + "$(" * (n // 3 - 3) + "true"
                                                           + ")" * (n // 3 - 3), "run_in_background": True}),
-    # A background dispatch of repeated bare-'&' detaches: the sink read and the detach detector each lex it.
+    # A background dispatch of repeated bare-'&' detaches: the sink read lexes it once and the detach detector
+    # reads that lex's segments.
     "amp_background": lambda n, base: ("Bash", {"command": _repeat("true & ", n), "run_in_background": True}),
+    # Nested command substitutions with a trailing bare '&' in a background dispatch: the costliest lex shape
+    # this guard meets, which the sink read and the detach detector would each lex without the shared lex.
+    "nest_cmdsubst_amp_background": lambda n, base: ("Bash", {"command": "echo " + "$(" * (n // 3 - 4) + "true"
+                                                              + ")" * (n // 3 - 4) + " &",
+                                                              "run_in_background": True}),
     "errexit_guarded": lambda n, base: ("Bash", {"command": "set -e\n" + _repeat("a || exit 1\n", n - 7)}),
     "errexit_nest_parens": lambda n, base: ("Bash", {"command": "set -e; " + "(" * (n // 2 - 6) + "true"
                                                      + ")" * (n // 2 - 6)}),
@@ -6458,7 +6488,8 @@ _DEADLINE_CASES = {
                        "errexit_nest_parens", "errexit_case_arms", "errexit_note_after", "errexit_unread_after"),
     "orch_ask_guard": ("ask_long",),
     "orch_resume_barrier": ("git_words", "write_content"),
-    "orch_truncation_guard": ("nest_cmdsubst_background", "amp_background", "git_words"),
+    "orch_truncation_guard": ("nest_cmdsubst_background", "amp_background", "nest_cmdsubst_amp_background",
+                              "git_words"),
     "orch_untracked_wait_loop": ("git_words", "nest_cmdsubst"),
     "orch_yield_tool": ("wakeup_long",),
     "pgrep_self_match": ("git_words", "nest_parens", "pgrep_distinct", "pgrep_self_after"),
@@ -6484,7 +6515,8 @@ _DEADLINE_DENY_CASES = frozenset((
     ("gate_weakening", "noverify_after"), ("gate_weakening", "ansi_c_noverify_after"),
     ("git_explicit_binding", "breadth_push_after_unbal"), ("pgrep_self_match", "pgrep_self_after"),
     ("protected_line", "push_force_after"), ("protected_line", "mirror_cfg_run_after"),
-    ("protected_line", "procsubst_run_after"), ("orch_truncation_guard", "amp_background")))
+    ("protected_line", "procsubst_run_after"), ("orch_truncation_guard", "amp_background"),
+    ("orch_truncation_guard", "nest_cmdsubst_amp_background")))
 # The (handler, shape) cases whose note must still arrive, each within its bound. For inline_errexit: on
 # errexit_note_after errexit is on for the whole long prefix and the hazard is at its end, and on
 # errexit_unread_after the set -e is in the rest past the long prefix that the lexer did not read. For
