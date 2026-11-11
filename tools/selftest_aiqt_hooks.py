@@ -26363,6 +26363,359 @@ def _main_isolated(monitor):
         ciexpect("(ci-wr-c44) a command that only the literal reading can parse, with a run line left unread, that "
                  "names no AI identity allows",
                  'echo {$"x"}>/dev/null; git submodule foreach "echo \'x"; git commit -m x', "allow")
+        # An AI credit line (_AI_CREDIT_LINE_RE) and the commit message files and pull-request bodies the check
+        # reads (ci-cr rows). Each credit line is assembled here from parts, so no source file holds one. The rows
+        # call the handler in process (_decision) and never run git, gh or a shell; their files live under tmp.
+        _cr_gen = "Gene" + "rated"
+        _cr_ai = "Cl" + "aude"
+        _cr_credit = "\U0001f916 " + _cr_gen + " with [" + _cr_ai + " Code](https://example.invalid/code)"
+        _cr_dir = tmp / "ci-credit"
+        _cr_dir.mkdir()
+        (_cr_dir / "sub").mkdir()
+        _cr_files = {"credit.txt": "fix: parser\n\n" + _cr_credit + "\n",
+                     "trailer.txt": "fix: parser\n\nCo-" + "authored-by: " + _cr_ai + " <c@x>\n",
+                     "clean.txt": "fix: parser\n\nNo credit here.\n",
+                     "quoted.txt": "docs: the rule bans the line '" + _cr_gen + " with " + _cr_ai + "' mid-sentence\n",
+                     "sub/credit.txt": "fix\n\n" + _cr_credit + "\n"}
+        for _cr_name, _cr_text in _cr_files.items():
+            (_cr_dir / _cr_name).write_text(_cr_text, encoding="utf-8")
+        _cr_p = {name: str(_cr_dir / name) for name in _cr_files}
+        _cr_denied = []  # (label, command, cwd) of each file or gh row that wants deny, for the revert swaps
+
+        def crexpect(label, command, want, cwd=None):
+            got = _decision(cig, command, cwd=cwd)
+            if got != want:
+                failures.append("{}: expected {}, got {}".format(label, want, got))
+            if want == "deny":
+                _cr_denied.append((label, command, cwd))
+
+        ciexpect("(ci-cr1) a git commit -m message ending in an AI credit line denies",
+                 "git commit -m " + shlex.quote("fix: parser\n\n" + _cr_credit), "deny")
+        ciexpect("(ci-cr16) git commit -F - with an AI credit line in its here-document denies",
+                 "git commit -F - <<'EOF'\nfix\n\n" + _cr_credit + "\nEOF", "deny")
+        ciexpect("(ci-cr17) git commit -m with a command substitution whose here-document holds an AI credit "
+                 "line denies", "git commit -m \"$(cat <<'EOF'\nfix\n\n" + _cr_credit + "\nEOF\n)\"", "deny")
+        crexpect("(ci-cr2) git commit -F on an absolute file holding an AI credit line denies",
+                 "git commit -F " + _cr_p["credit.txt"], "deny")
+        crexpect("(ci-cr3) git commit --file= on such a file denies", "git commit --file=" + _cr_p["credit.txt"],
+                 "deny")
+        crexpect("(ci-cr4) git commit -F on a relative name resolved against the payload cwd denies",
+                 "git commit -F credit.txt", "deny", cwd=str(_cr_dir))
+        crexpect("(ci-cr5) an -aF cluster takes the file, which is read, and denies",
+                 "git commit -aF " + _cr_p["credit.txt"], "deny")
+        crexpect("(ci-cr6) git commit -t on a template holding an AI credit line denies",
+                 "git commit -t " + _cr_p["credit.txt"], "deny")
+        crexpect("(ci-cr7) git commit --template= on such a template denies",
+                 "git commit --template=" + _cr_p["credit.txt"], "deny")
+        crexpect("(ci-cr8) git commit -F on a file holding an AI co-author trailer denies",
+                 "git commit -F " + _cr_p["trailer.txt"], "deny")
+        crexpect("(ci-cr9) gh pr create --body with an AI credit last line denies",
+                 "gh pr create --title t --body " + shlex.quote("Summary\n\n" + _cr_credit), "deny")
+        crexpect("(ci-cr10) gh pr edit -b with an AI credit line denies",
+                 "gh pr edit 12 -b " + shlex.quote(_cr_credit), "deny")
+        crexpect("(ci-cr11) gh pr create --body= with an AI credit line denies",
+                 "gh pr create --body=" + shlex.quote(_cr_credit), "deny")
+        crexpect("(ci-cr12) gh pr create -F on a body file holding an AI credit line denies",
+                 "gh pr create -t x -F " + _cr_p["credit.txt"], "deny")
+        crexpect("(ci-cr13) gh pr create --body-file= on such a file denies",
+                 "gh pr create --body-file=" + _cr_p["credit.txt"], "deny")
+        crexpect("(ci-cr14) env before gh pr create --body does not hide an AI credit line, denies",
+                 "env GH_HOST=x gh pr create --body " + shlex.quote(_cr_credit), "deny")
+        crexpect("(ci-cr15) gh pr create --body-file - with an AI credit line in its here-document denies",
+                 "gh pr create --body-file - <<'EOF'\nSummary\n\n" + _cr_credit + "\nEOF", "deny")
+        crexpect("(ci-cr-o1) a bare line-start quote of the credit in a pull-request body denies (disclosed "
+                 "over-deny)", "gh pr create --body " + shlex.quote(_cr_gen + " with " + _cr_ai), "deny")
+        # Fail closed: a file the check cannot resolve or read in full denies.
+        _cr_fifo = _cr_dir / "fifo"
+        os.mkfifo(str(_cr_fifo))
+        crexpect("(ci-cr-fc1) a missing absolute message file fails closed", "git commit -F " + str(_cr_dir / "none"),
+                 "deny")
+        crexpect("(ci-cr-fc2) a message file that is a directory fails closed", "git commit -F " + str(_cr_dir),
+                 "deny")
+        _cr_t0 = time.monotonic()
+        crexpect("(ci-cr-fc3) a message file that is a FIFO fails closed without blocking",
+                 "git commit -F " + str(_cr_fifo), "deny")
+        if time.monotonic() - _cr_t0 > 1.0:
+            failures.append("(ci-cr-fc3-time) the FIFO row took more than 1 s")
+        crexpect("(ci-cr-fc5) a relative message file with no cwd in the payload fails closed",
+                 "git commit -F credit.txt", "deny")
+        crexpect("(ci-cr-fc6) a relative message file after a cd fails closed",
+                 "cd \"$d\"; git commit -F clean.txt", "deny", cwd=str(_cr_dir))
+        # fc8 and fc15 name a clean file the check could read, so only their own rule decides them.
+        (_cr_dir / "glob[1].txt").write_text("fix\n", encoding="utf-8")
+        crexpect("(ci-cr-fc8) an absolute name of a clean file holding a glob character fails closed",
+                 "git commit -F " + shlex.quote(str(_cr_dir / "glob[1].txt")), "deny")
+        crexpect("(ci-cr-fc9) gh pr create -F on a missing file fails closed",
+                 "gh pr create -F " + str(_cr_dir / "none"), "deny")
+        crexpect("(ci-cr-fc14) a relative message file in a foreach run line fails closed",
+                 "git submodule foreach 'git commit -F clean.txt'", "deny", cwd=str(_cr_dir))
+        crexpect("(ci-cr-fc15) a relative message file after git -C fails closed",
+                 "git -C sub commit -F clean.txt", "deny", cwd=str(_cr_dir))
+        if os.geteuid() != 0:
+            (_cr_dir / "locked.txt").write_text("x\n")
+            os.chmod(str(_cr_dir / "locked.txt"), 0)
+            crexpect("(ci-cr-fc7) an unreadable message file fails closed",
+                     "git commit -F " + str(_cr_dir / "locked.txt"), "deny")
+        else:
+            print("ci-cr-fc7 skipped: running as root, so a mode-000 file stays readable")
+        # Size bound: a file of exactly _CMTIDN_FILE_LIMIT bytes is read and judged on its content, one byte more
+        # fails closed.
+        _cr_limit = aiqt_hooks._CMTIDN_FILE_LIMIT
+        for _cr_name, _cr_size, _cr_tail, _cr_want in (("under", _cr_limit - 1, "", "allow"),
+                                                        ("at", _cr_limit, "", "allow"),
+                                                        ("at-credit", _cr_limit, "\n" + _cr_credit + "\n", "deny"),
+                                                        ("over", _cr_limit + 1, "", "deny")):
+            _cr_blob = "x" * (_cr_size - len(_cr_tail.encode("utf-8"))) + _cr_tail
+            (_cr_dir / ("size-" + _cr_name)).write_text(_cr_blob, encoding="utf-8")
+            crexpect("(ci-cr-size-{}) a message file of {} bytes gives {}".format(_cr_name, _cr_size, _cr_want),
+                     "git commit -F " + str(_cr_dir / ("size-" + _cr_name)), _cr_want)
+        # Count bound: 32 distinct files are read, a 33rd fails closed.
+        for _cr_k in range(33):
+            (_cr_dir / "n{}.txt".format(_cr_k)).write_text("fix\n")
+        _cr_many = "; ".join("git commit -F " + str(_cr_dir / "n{}.txt".format(_cr_k)) for _cr_k in range(32))
+        crexpect("(ci-cr-count-32) 32 distinct clean message files allow", _cr_many, "allow")
+        crexpect("(ci-cr-count-33) a 33rd distinct message file fails closed",
+                 _cr_many + "; git commit -F " + str(_cr_dir / "n32.txt"), "deny")
+        # Decoration and value window boundaries of the credit line.
+        crexpect("(ci-cr-dec8) 8 decoration characters before the credit deny",
+                 "gh pr create --body " + shlex.quote("-" * 8 + _cr_gen + " with " + _cr_ai), "deny")
+        crexpect("(ci-cr-dec9) 9 decoration characters before the credit allow",
+                 "gh pr create --body " + shlex.quote("-" * 9 + _cr_gen + " with " + _cr_ai), "allow")
+        crexpect("(ci-cr-win200) an AI name ending at the 200th character of the value denies",
+                 "gh pr create --body " + shlex.quote(_cr_gen + " with" + " " * (200 - 1 - len(_cr_ai)) + " "
+                                                      + _cr_ai), "deny")
+        crexpect("(ci-cr-win201) an AI name starting at the 201st character of the value allows",
+                 "gh pr create --body " + shlex.quote(_cr_gen + " with" + " " * 200 + _cr_ai), "allow")
+        # Preserved siblings.
+        crexpect("(ci-cr-c1) git commit -F on a clean file allows", "git commit -F " + _cr_p["clean.txt"], "allow")
+        crexpect("(ci-cr-c2) gh pr create -F on a clean file allows", "gh pr create -F " + _cr_p["clean.txt"], "allow")
+        crexpect("(ci-cr-c3) a pull-request body that only mentions an AI product allows",
+                 "gh pr create --body 'fix " + _cr_ai.lower() + " adapter'", "allow")
+        crexpect("(ci-cr-c4) a message file quoting the credit mid-sentence allows",
+                 "git commit -F " + _cr_p["quoted.txt"], "allow")
+        crexpect("(ci-cr-c5) a credit line wrapped in backquotes at a line start allows",
+                 "gh pr create --body " + shlex.quote("`" + _cr_gen + " with " + _cr_ai + "`"), "allow")
+        crexpect("(ci-cr-c6) a credit line that names no AI allows",
+                 "gh pr create --body " + shlex.quote(_cr_gen + " with make docs"), "allow")
+        crexpect("(ci-cr-c7) gh pr view and gh pr list allow", "gh pr view 12; gh pr list", "allow")
+        crexpect("(ci-cr-c8) grep -F with no git or gh command allows", "grep -F " + _cr_gen + " notes.md", "allow")
+        ciexpect("(ci-cr-c9) a commit from a message file the same command writes by printf fails closed",
+                 "printf x > " + str(_cr_dir / "made.txt") + "; git commit -F " + str(_cr_dir / "made.txt"),
+                 "deny")
+        ciexpect("(ci-cr-c12) a commit from a message file the same command writes from a quoted here-document "
+                 "with no credit allows", "cat > " + str(_cr_dir / "made2.txt") + " <<'EOF'\nfix: parser\nEOF\n"
+                 "git commit -F " + str(_cr_dir / "made2.txt"), "allow")
+        ciexpect("(ci-cr-g7) a git -c commit.template value naming a template that holds an AI credit line denies",
+                 "git -c commit.template=" + _cr_p["credit.txt"] + " commit", "deny")
+        crexpect("(ci-cr-c10) git commit -C HEAD allows", "git commit -C HEAD", "allow")
+        crexpect("(ci-cr-c11) a relative clean message file resolved against the payload cwd allows",
+                 "git commit -F clean.txt", "allow", cwd=str(_cr_dir))
+
+        def cr2expect(label, command, want, cwd=None):
+            # A row kept out of the revert swaps below: another rule than the swapped one decides it.
+            got = _decision(cig, command, cwd=cwd)
+            if got != want:
+                failures.append("{}: expected {}, got {}".format(label, want, got))
+
+        _cr_cline = _cr_gen + " with " + _cr_ai
+        # A file option whose value the check cannot see, or a file the same command writes, fails closed.
+        cr2expect("(ci-cr-w6) a message file option with no value word fails closed", "git commit -F", "deny")
+        cr2expect("(ci-cr-w7) a body file option with no value word fails closed", "gh pr create --body-file",
+                  "deny")
+        cr2expect("(ci-cr-w1) a process substitution as the message file fails closed",
+                  "git commit -F <(printf x)", "deny")
+        cr2expect("(ci-cr-w2) a process substitution as the body file fails closed",
+                  "gh pr create --body-file <(printf x)", "deny")
+        cr2expect("(ci-cr-w3) a clean message file that tee writes in the same command fails closed",
+                  "echo x | tee " + _cr_p["clean.txt"] + "; git commit -F " + _cr_p["clean.txt"], "deny")
+        cr2expect("(ci-cr-w4) a missing message file that printf writes in the same command fails closed",
+                  "printf " + shlex.quote("x\\n" + _cr_cline + "\\n") + " > " + str(_cr_dir / "none2") +
+                  "; gh pr create -F " + str(_cr_dir / "none2"), "deny")
+        cr2expect("(ci-cr-w5) a quoted here-document that writes a credit line into the message file denies",
+                  "cat > " + str(_cr_dir / "made3.txt") + " <<'EOF'\nfix\n\n" + _cr_credit + "\nEOF\n"
+                  "git commit -F " + str(_cr_dir / "made3.txt"), "deny")
+        # The fallback: a command the tokenizer cannot parse, or one too long to read.
+        cr2expect("(ci-cr-fb1) an unparseable git command naming a message file fails closed",
+                  "git commit -F " + _cr_p["clean.txt"] + "; echo \"x", "deny")
+        cr2expect("(ci-cr-fb2) an unparseable command with an inline AI credit line denies",
+                  "git commit -m " + shlex.quote("fix\n\n" + _cr_credit) + "; echo \"x", "deny")
+        cr2expect("(ci-cr-fb3) an unparseable git command with no file option and no credit allows",
+                  "git commit -m fix; echo \"x", "allow")
+        cr2expect("(ci-cr-fb4) a pull-request body past the read bound with an AI credit line denies",
+                  "gh pr create --body " + shlex.quote("x" * (aiqt_hooks._CMTIDN_READ_LIMIT + 8) + "\n"
+                                                       + _cr_credit), "deny")
+        cr2expect("(ci-cr-fb5) an unparseable git command with a -c commit.template value fails closed",
+                  "git -c commit.template=" + _cr_p["clean.txt"] + " commit; echo \"x", "deny")
+        cr2expect("(ci-cr-fb6) an unparseable git command that only mentions commit.template fails closed (the "
+                  "disclosed over-deny)", "git config --get commit.template; echo \"x", "deny")
+        cr2expect("(ci-cr-fb7) a command past the read bound that names commit.template and runs no git or gh "
+                  "allows", "echo commit.template" + " " * aiqt_hooks._CMTIDN_READ_LIMIT, "allow")
+        # A short option cluster of 5 or 8 letters before F or t: the fallback's earlier pattern read at most 4
+        # letters before the F or t and allowed these; the swap below puts it back and requires each to allow.
+        _cr_clusters = [
+            ("(ci-cr-fb8)", "git commit -asnqvF " + _cr_p["clean.txt"] + "; echo \"x"),
+            ("(ci-cr-fb9)", "git commit -asnqvesvF " + _cr_p["clean.txt"] + "; echo \"x"),
+            ("(ci-cr-fb10)", "git commit -asnqvt " + _cr_p["clean.txt"] + " " * aiqt_hooks._CMTIDN_READ_LIMIT)]
+        for _cr_label, _cr_command in _cr_clusters:
+            cr2expect(_cr_label + " a git command the check cannot read whose short option cluster ends in F or t "
+                      "after 5 or more letters fails closed", _cr_command, "deny")
+        _cr_saved_fo = aiqt_hooks._CMTIDN_FALLBACK_FILE_OPTION_RE
+        try:
+            aiqt_hooks._CMTIDN_FALLBACK_FILE_OPTION_RE = re.compile(
+                r"(?<![^\s\"'=;&|()])(?:-[A-Za-z]{0,4}[Ft]|--(?:fil|te|body-f)[a-z-]*)|(?i:commit\.template)")
+            _cr_kept = [label for label, command in _cr_clusters if _decision(cig, command) != "allow"]
+        finally:
+            aiqt_hooks._CMTIDN_FALLBACK_FILE_OPTION_RE = _cr_saved_fo
+        if _cr_kept:
+            failures.append("(ci-cr-fb-cluster-revert) with the 4-letter cluster pattern put back, {} still deny "
+                            "(want allow, the earlier gap)".format(_cr_kept))
+        # A relative git -c commit.template value fails closed: git resolves it against the repository top, the
+        # check would join it to the payload cwd. An absolute clean template still allows.
+        cr2expect("(ci-cr-g8) git -c commit.template with a relative name fails closed",
+                  "git -c commit.template=clean.txt commit", "deny", cwd=str(_cr_dir))
+        cr2expect("(ci-cr-g9) git -c commit.template with an absolute clean template allows",
+                  "git -c commit.template=" + _cr_p["clean.txt"] + " commit", "allow")
+        # A GIT_DIR or GIT_WORK_TREE assignment (inline, behind env, or exported earlier in the command) moves the
+        # directory git reads a relative -F or -t file from, so a relative clean file in the payload cwd fails
+        # closed; the swap below makes the assignment unseen again and requires each to allow. An absolute clean
+        # file still allows.
+        _cr_repo = str(_cr_dir / "repo")
+        _cr_git_env = [
+            ("(ci-cr-ge1)", "GIT_DIR=" + _cr_repo + "/.git GIT_WORK_TREE=" + _cr_repo + " git commit -F clean.txt"),
+            ("(ci-cr-ge2)", "env GIT_WORK_TREE=" + _cr_repo + " git commit -F clean.txt"),
+            ("(ci-cr-ge3)", "export GIT_DIR=" + _cr_repo + "/.git; git commit -t clean.txt")]
+        for _cr_label, _cr_command in _cr_git_env:
+            cr2expect(_cr_label + " a relative clean message or template file after a GIT_DIR or GIT_WORK_TREE "
+                      "assignment fails closed", _cr_command, "deny", cwd=str(_cr_dir))
+        cr2expect("(ci-cr-ge4) an absolute clean message file after GIT_DIR and GIT_WORK_TREE assignments allows",
+                  "GIT_DIR=" + _cr_repo + "/.git GIT_WORK_TREE=" + _cr_repo + " git commit -F " + _cr_p["clean.txt"],
+                  "allow", cwd=str(_cr_dir))
+        _cr_saved_ge = aiqt_hooks._CMTIDN_GIT_DIR_ENV_RE
+        try:
+            aiqt_hooks._CMTIDN_GIT_DIR_ENV_RE = re.compile(r"[^\s\S]")
+            _cr_kept = [label for label, command in _cr_git_env if _decision(cig, command, cwd=str(_cr_dir)) != "allow"]
+        finally:
+            aiqt_hooks._CMTIDN_GIT_DIR_ENV_RE = _cr_saved_ge
+        if _cr_kept:
+            failures.append("(ci-cr-ge-revert) with GIT_DIR and GIT_WORK_TREE assignments unseen, {} still deny "
+                            "(want allow, the earlier gap)".format(_cr_kept))
+        # A word that names GIT_DIR or GIT_WORK_TREE with no assignment in it (a for loop variable, a default-value
+        # expansion, the bare name after export or read, a nameref) can set the variable too, and so can a
+        # core.worktree word; each fails closed for a relative clean file. Each allowed before those words were
+        # read.
+        for _cr_label, _cr_command in [
+                ("(ci-cr-ge5) a for loop over GIT_DIR", "for GIT_DIR in " + _cr_repo + "/.git; do git commit -F "
+                 "clean.txt; done"),
+                ("(ci-cr-ge6) a GIT_DIR default-value expansion", ': "${GIT_DIR:=' + _cr_repo + '/.git}"; git '
+                 "commit -F clean.txt"),
+                ("(ci-cr-ge7) GIT_WORK_TREE exported by its bare name", "export GIT_WORK_TREE; git commit -t "
+                 "clean.txt"),
+                ("(ci-cr-ge8) GIT_DIR set by read", "read GIT_DIR < paths.txt; git commit -F clean.txt"),
+                ("(ci-cr-ge9) a nameref to GIT_DIR", "declare -n _r=GIT_DIR; _r=" + _cr_repo + "/.git; git commit "
+                 "-F clean.txt"),
+                ("(ci-cr-wt1) git config core.worktree", "git config core.worktree " + _cr_repo + "; git commit -F "
+                 "clean.txt"),
+                ("(ci-cr-wt2) git -c CORE.WORKTREE in any letter case", "git -c CORE.WORKTREE=" + _cr_repo
+                 + " commit -F clean.txt")]:
+            cr2expect(_cr_label + " before a relative clean message file fails closed", _cr_command, "deny",
+                      cwd=str(_cr_dir))
+        # The match is anchored at the start of a word: a quoted message that holds GIT_DIR= or core.worktree
+        # after other text is not a directory change, so a relative clean file still allows.
+        cr2expect("(ci-cr-ge-anchor) a message holding GIT_DIR= and core.worktree mid-word allows",
+                  'git commit -m "set GIT_DIR=x and core.worktree here" -F clean.txt', "allow", cwd=str(_cr_dir))
+        # A trailer.<token>.key setting (-c, GIT_CONFIG_COUNT or --config-env) makes --trailer <token>=VALUE or
+        # <token>: VALUE a trailer of that key, so an AI named there denies; an AI-free value still allows.
+        _cr_tv = shlex.quote("cab=" + _cr_ai + " <c@x>")
+        for _cr_label, _cr_command in [
+                ("(ci-cr-ta1) -c trailer.cab.key", "git -c trailer.cab.key=Co-authored-by commit -m x --trailer "
+                 + _cr_tv),
+                ("(ci-cr-ta2) the token: form", "git -c trailer.cab.key=Co-authored-by commit -m x --trailer "
+                 + shlex.quote("cab: " + _cr_ai + " <c@x>")),
+                ("(ci-cr-ta3) GIT_CONFIG_COUNT", "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=trailer.cab.key "
+                 "GIT_CONFIG_VALUE_0=Co-authored-by git commit -m x --trailer " + _cr_tv),
+                ("(ci-cr-ta4) --config-env", "git --config-env=trailer.cab.key=K commit -m x --trailer=" + _cr_tv)]:
+            cr2expect(_cr_label + " aliasing a co-author trailer key, with an AI in the --trailer value, denies",
+                      _cr_command, "deny")
+        cr2expect("(ci-cr-ta5) a trailer.cab.key alias with an AI-free --trailer value allows",
+                  "git -c trailer.cab.key=Co-authored-by commit -m x --trailer " + shlex.quote("cab=Ada <a@x>"),
+                  "allow")
+        # The credit line's separator class holds a no-break space, written as an escape in the source.
+        cr2expect("(ci-cr-nbsp) a credit line whose words a no-break space separates denies",
+                  "gh pr create --body " + shlex.quote(_cr_gen + " with " + _cr_ai), "deny")
+        # gh options before the pr word and the verb, gh pr merge, and git -c commit.template.
+        cr2expect("(ci-cr-g1) gh -R before pr does not hide an AI credit line, denies",
+                  "gh -R o/r pr create --body " + shlex.quote(_cr_credit), "deny")
+        cr2expect("(ci-cr-g2) gh pr --repo before the verb does not hide a body file, denies",
+                  "gh pr --repo o/r create --body-file " + _cr_p["credit.txt"], "deny")
+        cr2expect("(ci-cr-g3) gh pr merge --body with an AI credit line denies",
+                  "gh pr merge 12 --squash --body " + shlex.quote(_cr_credit), "deny")
+        cr2expect("(ci-cr-g4) gh pr merge -s -F on a credit file denies",
+                  "gh pr merge 12 -s -F " + _cr_p["credit.txt"], "deny")
+        cr2expect("(ci-cr-g5) gh pr merge with a clean body allows", "gh pr merge 12 --squash --body fix", "allow")
+        cr2expect("(ci-cr-g6) git -c commit.template= on a credit file denies",
+                  "git -c commit.template=" + _cr_p["credit.txt"] + " commit", "deny")
+        # Decoration and ANSI-C quoting.
+        cr2expect("(ci-cr-d1) a credit line in Markdown italics denies",
+                  "gh pr create --body " + shlex.quote("_" + _cr_cline + " Code_"), "deny")
+        cr2expect("(ci-cr-d2) a credit line inside an HTML tag denies",
+                  "gh pr create --body " + shlex.quote("<sub>" + _cr_cline + " Code</sub>"), "deny")
+        cr2expect("(ci-cr-d3) an ANSI-C quoted message with a credit line after an escaped newline denies",
+                  "git commit -m $'fix\\n\\n" + _cr_cline + "'", "deny")
+        # Over-denies closed: a quoted word cd and a wrapper's -t.
+        cr2expect("(ci-cr-o2) a quoted message holding the word cd does not block a relative clean file, allows",
+                  "git commit -m 'fix cd handling' -F clean.txt", "allow", cwd=str(_cr_dir))
+        cr2expect("(ci-cr-o3) a wrapper's -t before git commit is not read as a template, allows",
+                  "sudo -t unconfined_t git commit -m x", "allow")
+        # Budget bound: four files of _CMTIDN_FILE_LIMIT bytes spend _CMTIDN_FILE_BUDGET, so a 1-byte fifth file
+        # fails closed and an empty fifth file allows.
+        for _cr_k in range(4):
+            (_cr_dir / "b{}.txt".format(_cr_k)).write_text("x" * aiqt_hooks._CMTIDN_FILE_LIMIT, encoding="utf-8")
+        (_cr_dir / "b-one.txt").write_text("x", encoding="utf-8")
+        (_cr_dir / "b-empty.txt").write_text("", encoding="utf-8")
+        _cr_four = "; ".join("git commit -F " + str(_cr_dir / "b{}.txt".format(_cr_k)) for _cr_k in range(4))
+        cr2expect("(ci-cr-budget-empty) four full files and an empty fifth allow",
+                  _cr_four + "; git commit -F " + str(_cr_dir / "b-empty.txt"), "allow")
+        cr2expect("(ci-cr-budget-over) four full files and a 1-byte fifth fail closed",
+                  _cr_four + "; git commit -F " + str(_cr_dir / "b-one.txt"), "deny")
+        # Revert swaps: each puts back the earlier behaviour of one part, every deny row that part decides must
+        # then allow, and once the swap is undone a row denies again. Attributes are patched and restored; no
+        # code is built from text.
+        _cr_inline = [("(ci-cr1)", "git commit -m " + shlex.quote("fix: parser\n\n" + _cr_credit), None)]
+        _cr_gh = [row for row in _cr_denied if "gh pr" in row[1]]
+        _cr_git_files = [row for row in _cr_denied if "gh pr" not in row[1]]
+        _cr_templates = [row for row in _cr_denied if row[0].startswith(("(ci-cr6)", "(ci-cr7)"))]
+        _cr_credit_rows = _cr_inline + [row for row in _cr_denied
+                                        if row[0].startswith(("(ci-cr2)", "(ci-cr9)", "(ci-cr12)"))]
+        _cr_short = dict(aiqt_hooks._CMTIDN_COMMIT_SHORT)
+        _cr_long = dict(aiqt_hooks._CMTIDN_COMMIT_LONG)
+        _cr_short["t"], _cr_long["template"] = "value", "value"
+        for _cr_swap, _cr_attr, _cr_value, _cr_rows in (
+                ("rv1", "_AI_CREDIT_LINE_RE", re.compile(r"[^\s\S]"), _cr_credit_rows),
+                ("rv2", "_cmtidn_read_named_file", lambda path, limit: ("", None, 0),
+                 [row for row in _cr_git_files if "-F -" not in row[1] and "$HOME" not in row[1]
+                  and "cd " not in row[1] and "foreach" not in row[1] and "-C sub" not in row[1]
+                  and "glob[1]" not in row[1]
+                  and "no cwd" not in row[0] and "count-33" not in row[0]]),
+                ("rv3", "_cmtidn_gh_pr", lambda tokens: None, _cr_gh),
+                ("rv4", "_CMTIDN_COMMIT_SHORT", _cr_short, _cr_templates)):
+            _cr_saved = [getattr(aiqt_hooks, _cr_attr)]
+            if _cr_swap == "rv4":
+                _cr_saved.append(aiqt_hooks._CMTIDN_COMMIT_LONG)
+            try:
+                setattr(aiqt_hooks, _cr_attr, _cr_value)
+                if _cr_swap == "rv4":
+                    aiqt_hooks._CMTIDN_COMMIT_LONG = _cr_long
+                _cr_kept = [label for label, command, cwd in _cr_rows if _decision(cig, command, cwd=cwd) != "allow"]
+            finally:
+                setattr(aiqt_hooks, _cr_attr, _cr_saved[0])
+                if _cr_swap == "rv4":
+                    aiqt_hooks._CMTIDN_COMMIT_LONG = _cr_saved[1]
+            if not _cr_rows or _cr_kept:
+                failures.append("(ci-cr-{}) with {} reverted, {} of {} deny rows still deny: {!r}".format(
+                    _cr_swap, _cr_attr, len(_cr_kept), len(_cr_rows), _cr_kept[:5]))
+            if _cr_rows and _decision(cig, _cr_rows[0][1], cwd=_cr_rows[0][2]) != "deny":
+                failures.append("(ci-cr-{}-restore) {} no longer denies once the swap is undone".format(
+                    _cr_swap, _cr_rows[0][0]))
         # ci-wr116 is denied by the reader itself: find_ai_authorship returns the --author hit of the segment after
         # the unparseable line rather than leaving the command to the fallback, whose scan for an AI identity
         # anywhere would deny it as well.
@@ -26678,7 +27031,7 @@ def _main_isolated(monitor):
                 ("(ci-wr172) an AI co-author trailer after a commit message of a co-author name and a run of "
                  "newlines, which the reader reads, denies", 'git commit -m "co-authored-by', "\n",
                  '" -m "Co-authored-by: Claude <c@x>"',
-                 ("this git command sets an AI identity (co-author trailer 'Claude <c@x>')",)),
+                 ("this command records an AI identity (co-author trailer 'Claude <c@x>')",)),
                 ("(ci-wr173) an AI user.name value after user.name, a run of spaces and a quote that does not "
                  "close, in a command the tokenizer cannot parse, denies", "git config user.name", " ",
                  "' user.name Claude", ("could not be read in full", "(user.name/user.email value 'Claude')"))):
@@ -26706,7 +27059,9 @@ def _main_isolated(monitor):
         # the tokenizer cannot parse (ci-wr177), and given to a git spelled gi? and padded with spaces past the read
         # limit (ci-wr178) deny through the raw-string scan, with a reason that names the second trailer's value.
         # Each of the five deny vectors allowed while the reader read only the first trailer name of a word and the
-        # raw-string scan resumed after each value.
+        # raw-string scan resumed after each value. The -F of ci-wr177 also meets the fallback's file-option rule,
+        # which fails closed on a file the fallback cannot read; that rule runs after the identity scans, so the
+        # command still denies and its reason names the AI identity found in its own text.
         _ci_overlap = "-m 'co-authored-by: " + "x" * 140 + " co-authored-by: Claude <c@x>'"
         for _ci_label, _ci_cmd in (
                 ("(ci-wr174) an AI co-author trailer inside the 160-character value of an earlier trailer on the "
@@ -27056,12 +27411,16 @@ def _main_isolated(monitor):
         # time, an AI co-author trailer still denies within 1 s, in a command the tokenizer cannot parse and in a
         # heredoc past the limit (ci-wr170, ci-wr171; the first was denied only after that time, the second allowed
         # while that scan was not run past the limit). Both scans for a command too long to read find what they seek
-        # in every command that a vector of this section denies through the reader, among them a git commit on the
-        # line after a word (ci-wr164), and every command that the fallback denies at a length the reader reads, on
-        # a parse error or with a run line left unread, each such vector of this section and the forms of ci-wr167
-        # to ci-wr169 with a one-line body, still denies when spaces pad it past the limit (ci-wr-long-superset), so
-        # a command past the limit that the reader or the fallback would deny at a length the reader reads is
-        # denied.
+        # in every command that a vector of this section denies through the reader for an AI identity in its own
+        # text, among them a git commit on the line after a word (ci-wr164). Those scans look only for an identity
+        # in the command text, so they are not held to a command the reader denies for a message, template or body
+        # file: one it cannot read or that the command may write (ci-cr-c9), or a template whose text holds an AI
+        # credit line (ci-cr-g7). Each such command instead meets the fallback's file-option rule and denies at its
+        # length and when spaces pad it past the limit. Every command that the fallback denies at a length the
+        # reader reads, on a parse error or with a run line left unread, each such vector of this section and the
+        # forms of ci-wr167 to ci-wr169 with a one-line body, still denies when spaces pad it past the limit
+        # (ci-wr-long-superset), so a command past the limit that the reader or the fallback would deny at a length
+        # the reader reads is denied.
         ciexpect("(ci-wr164) a git commit on the line after a word, which dropping the newline joins to it, denies",
                  'cat notes.txt\ngit commit --author="Claude <c@x>" -m x', "deny")
         _ci_limit = aiqt_hooks._CMTIDN_READ_LIMIT
@@ -27163,7 +27522,19 @@ def _main_isolated(monitor):
                             "(want one that names its length, the AI identity 'Claude' and the word 'git')"
                             .format(_ci_reason))
         _ci_found = [(_ci_c, _ci_find(_ci_c)) for _ci_c in _ci_denies]
-        _ci_read = [_ci_c for _ci_c, _ci_hit in _ci_found if isinstance(_ci_hit, str)]
+        # The two scans look for an AI identity in the command's own text, so they are held to the reader's
+        # identity hits. A deny the reader gives for a message, template or body file (a file it cannot resolve,
+        # one the command may write, or an AI credit line or trailer in the file's text) has no such identity in
+        # the command text; the fallback's file-option rule must match each of those and deny it at its length and
+        # once spaces pad it past the read limit.
+        _ci_files = ("commit message file", "commit template", "pull-request body file")
+        _ci_filed = [_ci_c for _ci_c, _ci_hit in _ci_found
+                     if isinstance(_ci_hit, str) and any(_ci_k in _ci_hit for _ci_k in _ci_files)]
+        _ci_read = [_ci_c for _ci_c, _ci_hit in _ci_found if isinstance(_ci_hit, str) and _ci_c not in _ci_filed]
+        _ci_file_kept = [_ci_c for _ci_c in _ci_filed
+                         if not aiqt_hooks._CMTIDN_FALLBACK_FILE_OPTION_RE.search(_ci_c)
+                         or not aiqt_hooks._CMTIDN_FALLBACK_TOOL_RE.search(_ci_c) or _decision(cig, _ci_c) != "deny"
+                         or _decision(cig, _ci_c + " " * max(0, _ci_limit + 1 - len(_ci_c))) != "deny"]
         _ci_missed = [_ci_c for _ci_c in _ci_read if not aiqt_hooks._AI_NAME_ANYWHERE_RE.search(
             aiqt_hooks._CMTIDN_UNREAD_CHARS_RE.sub("", _ci_c))]
         _ci_wordless = [_ci_c for _ci_c in _ci_read if aiqt_hooks._cmtidn_identity_word(_ci_c) is None]
@@ -27172,13 +27543,17 @@ def _main_isolated(monitor):
                     if _ci_hit is not None and not isinstance(_ci_hit, str)]
         _ci_kept = [_ci_c for _ci_c in _ci_fell if _decision(cig, _ci_c) != "deny"
                     or _decision(cig, _ci_c + " " * max(0, _ci_limit + 1 - len(_ci_c))) != "deny"]
-        if len(_ci_read) < 100 or _ci_missed or _ci_wordless or len(_ci_fell) < 20 or _ci_kept:
-            failures.append("(ci-wr-long-superset) of {} commands the reader denies, the scans for a command too long "
-                            "to read find no AI name in {!r} and no word that can record an identity in {!r}, and of "
-                            "{} commands the fallback denies, {!r} allow at their length or once spaces pad them past "
-                            "the read limit (want both scans to find what they seek in each of at least 100, and each "
-                            "of at least 20 denied at both lengths)".format(
-                                len(_ci_read), _ci_missed[:5], _ci_wordless[:5], len(_ci_fell), _ci_kept[:5]))
+        if (len(_ci_read) < 100 or _ci_missed or _ci_wordless or len(_ci_fell) < 20 or _ci_kept
+                or len(_ci_filed) < 2 or _ci_file_kept):
+            failures.append("(ci-wr-long-superset) of {} commands the reader denies for an identity in their text, "
+                            "the scans for a command too long to read find no AI name in {!r} and no word that can "
+                            "record an identity in {!r}; of {} commands the fallback denies, {!r} allow at their "
+                            "length or once spaces pad them past the read limit; and of {} commands the reader denies "
+                            "for a file, {!r} miss the fallback's file-option rule or allow at either length (want "
+                            "both scans to find what they seek in each of at least 100, each of at least 20 denied at "
+                            "both lengths, and each of at least 2 file denies matched and denied at both "
+                            "lengths)".format(len(_ci_read), _ci_missed[:5], _ci_wordless[:5], len(_ci_fell),
+                                              _ci_kept[:5], len(_ci_filed), _ci_file_kept[:5]))
 
         # secsec (EN-5 PR-C): decision-signal battery for the secrets-shift-left guard.
         # === secrets_shift_left (secsec): an obvious hardcoded secret in a Write/Edit/Bash write-form ==

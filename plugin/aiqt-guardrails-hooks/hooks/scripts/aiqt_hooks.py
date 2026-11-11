@@ -4998,8 +4998,9 @@ _RAW_IDENTITY_CONTEXTS = (
 # the commit-message reader reads a value-taking option's value word as that value and never as an --author
 # option ('git commit -m --author=X' records the message '--author=X' and no author). Each short letter and
 # long name maps to the kind of value the option takes: 'author' is judged; 'message' (-m) and 'trailer' are
-# message text, which a co-author trailer can live in, so it is scanned for one; 'file' (-F) is the name of the
-# file git reads the message from; 'value' (a commit, a template, a date, a mode or a number) is passed over;
+# message text, which a co-author trailer or an AI credit line can live in, so it is scanned for both; 'file'
+# (-F, --file, -t, --template) names a file git reads the message or its template from, which is read and scanned
+# the same way (_cmtidn_message_file_ai); 'value' (a commit, a date, a mode or a number) is passed over;
 # None takes no value from the next word (a flag, or -S, -u, --gpg-sign and --untracked-files, whose optional
 # value can only share their own word). A next-word value of any value-taking option that has the form
 # --author=VALUE is still judged as an --author value, and so is the word after a next-word value that is
@@ -5008,12 +5009,12 @@ _RAW_IDENTITY_CONTEXTS = (
 # (_commit_message_and_author_ai). 'verify' and 'post-rewrite' are the positive spellings git also accepts for
 # --no-verify and --no-post-rewrite. Every long name is listed, since git reads a prefix that only one long name
 # starts with as that option (_cmtidn_option).
-_CMTIDN_COMMIT_SHORT = {"m": "message", "F": "file", "C": "value", "c": "value", "t": "value", "U": "value",
+_CMTIDN_COMMIT_SHORT = {"m": "message", "F": "file", "C": "value", "c": "value", "t": "file", "U": "value",
                         "S": None, "u": None}
 _CMTIDN_COMMIT_LONG = {
     "author": "author", "message": "message", "trailer": "trailer", "file": "file", "reedit-message": "value",
     "reuse-message": "value", "fixup": "value", "squash": "value", "date": "value", "cleanup": "value",
-    "template": "value", "pathspec-from-file": "value", "unified": "value", "inter-hunk-context": "value",
+    "template": "file", "pathspec-from-file": "value", "unified": "value", "inter-hunk-context": "value",
     "quiet": None, "verbose": None, "reset-author": None, "signoff": None, "edit": None, "status": None,
     "gpg-sign": None, "all": None, "include": None, "interactive": None, "patch": None, "only": None,
     "verify": None, "dry-run": None, "short": None, "branch": None, "ahead-behind": None, "porcelain": None,
@@ -5120,7 +5121,352 @@ def _co_author_ai(tok, judged):
     return hit
 
 
-def _commit_message_and_author_ai(tokens, judged):
+# An AI credit line, as a tool that writes a commit message or a pull-request body adds one: a line that starts,
+# after at most 8 pieces of decoration (indentation, a list or quote marker, '#', an emoji, a Markdown '_' or an
+# HTML tag such as <sub> of up to 40 characters) that are not other word characters, backquotes or quote marks,
+# with 'generated' and then 'with', 'by', 'using' or 'via', separated by blanks or no-break spaces. The rest of
+# the line, up to 200 characters, is its value, and the line denies only when that value names an AI identity
+# (AI_IDENTITY_RE). A sentence that quotes the credit mid-line, or a line that starts with a backquote or a quote
+# mark, is not read as one; a bare line that quotes it is, a disclosed over-deny. Matches start at line starts and
+# never overlap, and each piece of decoration is bounded, so a text costs time linear in its length. Other credit
+# wording, and an AI named outside AI_IDENTITY_RE, are outside it (the residue lists them).
+_AI_CREDIT_LINE_RE = re.compile(
+    r"(?im)^(?:[^\w\n`'\"<]|_|<[^<>\n]{0,40}>){0,8}generated[ \t\u00a0]+(?:with|by|using|via)\b([^\n]{0,200})")
+
+
+def _credit_line_ai(text, judged, decode=False):
+    """A hit label for the first AI credit line in text (_AI_CREDIT_LINE_RE) whose value names an AI identity,
+    else None. With decode, a text holding an ANSI-C $'...' quote (raw command text) is also read with each such
+    quote's body decoded the way bash decodes it (_ansi_c_decoded), so $'fix\\n\\nGenerated ...' has its credit
+    line at a line start. judged caches the result for each text under a key of its own, beside
+    _co_author_ai's."""
+    key = ("credit", decode, text)
+    if key in judged:
+        return judged[key]
+    texts = [text]
+    if decode and "$'" in text:
+        texts.append(_ansi_c_decoded(text))
+    hit = None
+    for each in texts:
+        for m in _AI_CREDIT_LINE_RE.finditer(each):
+            if AI_IDENTITY_RE.search(m.group(1)):
+                hit = "AI credit line {!r}".format(m.group(0).strip()[:80])
+                break
+        if hit is not None:
+            break
+    judged[key] = hit
+    return hit
+
+
+def _message_text_ai(text, judged, decode=True):
+    """A hit label for an AI co-author trailer or an AI credit line in message text, else None. decode reads
+    ANSI-C quotes in the text for the credit line (_credit_line_ai); a file's text is read as it stands."""
+    return _co_author_ai(text, judged) or _credit_line_ai(text, judged, decode)
+
+
+def _cmtidn_ansi_c_credit_ai(command, judged):
+    """A hit label for an AI credit line in the decoded body of an ANSI-C $'...' quote of the command text
+    (_ANSI_C_QUOTE_RE, _ansi_c_body), else None. The shell lexer keeps such a body's escapes undecoded (it reads
+    \\n as n), so a message or body value given as $'fix\\n\\nGenerated with ...' has no line start for the
+    credit line in its word; each quote of the command is read instead, a safe-direction over-read of a quote
+    that is not the value. Linear in the command's length."""
+    if "$'" not in command:
+        return None
+    for m in _ANSI_C_QUOTE_RE.finditer(command):
+        hit = _credit_line_ai(_ansi_c_body(m), judged)
+        if hit is not None:
+            return hit
+    return None
+
+
+# The files one command can make the commit-identity check read (a commit message file, a commit template, a
+# pull-request body file): at most _CMTIDN_FILE_LIMIT bytes each, _CMTIDN_FILE_COUNT distinct names and
+# _CMTIDN_FILE_BUDGET bytes in all, so the scans of their text stay inside the hook's deadline. A file the check
+# cannot resolve or read in full fails closed: a file option whose value the check cannot see (the shell lexer
+# drops a process substitution such as -F <(...), so the option has no value word), a name holding a character
+# the shell expands or a '~', a relative name whose base directory the check cannot know (no cwd in the payload, a
+# cd, pushd or popd word, a word that names GIT_DIR or GIT_WORK_TREE or a core.worktree word anywhere in the
+# command, a directory option before the git command, or a command line git runs from its operands), a file the
+# same command may write (_cmtidn_written), a missing file, one that is not a regular file, one past a bound, or
+# any other error opening or reading it. The open does not block on a FIFO or a device (_RDP_OPEN_FLAGS) and
+# follows a symlink, as git and gh do. Each of those fail-closed labels is a _CmtidnUnread, so the deny reason
+# says the file could not be read rather than that it records an AI identity.
+_CMTIDN_FILE_LIMIT = 1 << 20
+_CMTIDN_FILE_COUNT = 32
+_CMTIDN_FILE_BUDGET = 4 << 20
+_CMTIDN_PATH_UNSAFE_RE = re.compile(r"[$`*?\[\](){}<>|;&\\]")
+_CMTIDN_CHDIR_WORDS = frozenset(("cd", "pushd", "popd"))
+# A directory option of a wrapper or of git before the command's subcommand (env -C, env --chdir, sudo -D, git -C,
+# git --git-dir, git --work-tree), so a relative file name there is not resolved against the payload's cwd.
+_CMTIDN_DIR_OPTION_RE = re.compile(r"^-(?:[A-Za-z]*[CD]|-(?:chdir|directory|git-dir|work-tree))")
+# A word that names GIT_DIR or GIT_WORK_TREE. Like --git-dir and --work-tree, either variable can move the
+# directory git reads a relative message or template file from away from the cwd the check reads, so its
+# relative names are not resolved there. A shell sets a variable in more ways than a list of forms can cover, as
+# with GIT_CONFIG_* (_git_config_env_named), so a word counts when it starts with the name followed by its end,
+# '=' or '+=' (an assignment inline, behind env or after export, declare or readonly, and the bare name of a for
+# or select loop, read, printf -v, getopts, mapfile or export), when it holds a ${NAME expansion (a ${NAME:=...}
+# default sets it) or when it ends in =NAME (a nameref, declare -n ref=NAME). The match is anchored at the start
+# of the word, so a quoted message that only holds the name after other text (-m "set GIT_DIR=x here") does not
+# count.
+_CMTIDN_GIT_DIR_ENV_RE = re.compile(
+    r"^(?:GIT_DIR|GIT_WORK_TREE)(?:\+?=|$)|\$\{(?:GIT_DIR|GIT_WORK_TREE)(?![A-Za-z0-9_])"
+    r"|^[A-Za-z_][A-Za-z0-9_]*=(?:GIT_DIR|GIT_WORK_TREE)$")
+# A core.worktree word (git config core.worktree DIR, git -c core.worktree=DIR), in any letter case as git reads
+# a configuration name: the work tree it sets can move the directory git reads a relative file from. A
+# core.worktree already persisted in the repository's configuration is not seen (the residue says so).
+_CMTIDN_WORKTREE_KEY_RE = re.compile(r"(?i)^core\.worktree(?:=|$)")
+# A trailer.<token>.key setting in the command (-c, --config-env, GIT_CONFIG_COUNT with GIT_CONFIG_KEY_n, or
+# GIT_CONFIG_PARAMETERS) makes --trailer <token>=VALUE record a trailer of that key, a co-author trailer
+# included, and a key set through the environment holds a value the check cannot read. So when the command
+# text, once every quote, backslash, '$' and newline is dropped, holds both 'trailer.' and '.key' in any letter
+# case, each --trailer value of a commit-family command that names an AI identity denies (_CmtidnFiles). Two
+# substring tests, linear in the command's length; the cost is a safe-direction over-deny of a command that holds
+# both pieces of text for another reason and names an AI in a --trailer value.
+_CMTIDN_TRAILER_KEY_PARTS = ("trailer.", ".key")
+
+
+class _CmtidnUnread(str):
+    """A hit label for a message, template or body file the check cannot resolve or read in full, which fails
+    closed: commit_identity words its deny reason as a file it could not read, not as a recorded AI identity."""
+
+
+class _CmtidnFiles:
+    """The state of the named-file reads for one command: the command text (scanned in place of a file read
+    from stdin, '-', and of a file the command writes from a quoted here-document, _cmtidn_written), the
+    payload's cwd when it is an absolute path, whether a word of the command is cd, pushd or popd, names GIT_DIR
+    or GIT_WORK_TREE or is a core.worktree word (set by _cmtidn_line_ai from the segments of the command, before
+    any of them is judged), whether the command may set a trailer.<token>.key (_CMTIDN_TRAILER_KEY_PARTS), and
+    the files read so far."""
+
+    def __init__(self, command, cwd):
+        self.command = command
+        self.cwd = cwd if isinstance(cwd, str) and os.path.isabs(cwd) else None
+        self.chdir = False
+        plain = _CMTIDN_UNREAD_CHARS_RE.sub("", command).lower()
+        self.trailer_key = all(part in plain for part in _CMTIDN_TRAILER_KEY_PARTS)
+        self.read = {}
+        self.spent = 0
+        self.mentions = {}
+
+
+def _cmtidn_read_named_file(path, limit):
+    """(text, None, size) for a regular file of at most limit bytes, read once on one open descriptor, or
+    (None, reason, 0) when it cannot be read in full. The descriptor is closed once on every path."""
+    try:
+        fd = os.open(path, _RDP_OPEN_FLAGS)
+    except FileNotFoundError:
+        return None, "it does not exist", 0
+    except (OSError, ValueError) as exc:
+        return None, "it cannot be opened ({})".format(exc), 0
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None, "it is not a regular file", 0
+        blob = _rdp_read_fd(fd, limit + 1)
+    except OSError as exc:
+        return None, "it cannot be read ({})".format(exc), 0
+    finally:
+        os.close(fd)
+    if len(blob) > limit:
+        return None, "it is larger than the {} bytes the check reads".format(limit), 0
+    return blob.decode("utf-8", "replace"), None, len(blob)
+
+
+def _cmtidn_written(files, name):
+    """None when the command text names the file name only once (the option value being read), True when every
+    other mention of it is the target of a cat redirect fed by a here-document with a quoted delimiter (cat >
+    NAME <<'EOF' or cat <<'EOF' > NAME), whose literal body stands in the command text, and False otherwise.
+    A mention is the last part of name, after its last '/', standing alone or after a '/', a quote, '=' or an
+    option letter F or t, so another spelling of the same path (a relative and an absolute one) counts. False
+    fails closed in _cmtidn_message_file_ai: the command may write the file (a redirect, tee, cp, mv, dd, a cat
+    into it) after the check reads it, or names it twice; the cost is a disclosed over-deny of a command that
+    names the file again only to read it. Each name costs two scans of the command, linear in its length."""
+    if name in files.mentions:
+        return files.mentions[name]
+    base = re.escape(name.rsplit("/", 1)[-1])
+    mentions = len(re.findall(r"(?:(?<![\w.~-])|(?<=[=Ft]))" + base + r"(?![\w.~-])", files.command))
+    target = r"([\"']?)(?:[^\s\"'<>;&|()]*/)?" + base + r"\1(?![^\s;&|)])"
+    heredoc = r"<<-?[ \t]*([\"'])\w+\{}"
+    writes = len(re.findall(r"(?:^|[\n;&|(])[ \t]*cat[ \t]+(?:>>?|>\|)[ \t]*" + target + r"[ \t]+"
+                            + heredoc.format(2), files.command))
+    writes += len(re.findall(r"(?:^|[\n;&|(])[ \t]*cat[ \t]+" + heredoc.format(1) + r"[ \t]*(?:>>?|>\|)[ \t]*"
+                             + target.replace(r"\1", r"\2"), files.command))
+    if mentions <= 1:
+        result = None
+    else:
+        result = mentions - 1 - writes <= 0
+    files.mentions[name] = result
+    return result
+
+
+def _cmtidn_message_file_ai(name, files, judged, relative_ok, what):
+    """A hit label for an AI co-author trailer or AI credit line in the file named name, or for a file the
+    check cannot resolve or read in full (fail closed, _CMTIDN_FILE_LIMIT), else None. what names the file in
+    the label. A name of None is a file option whose value the shell lexer dropped (a process substitution),
+    which fails closed. A name of '-' is stdin, so the command text, a here-document or here-string included,
+    is scanned in its place. A file the command also names elsewhere fails closed unless each other mention
+    writes it from a quoted here-document (_cmtidn_written), whose text is then scanned with the command, beside
+    the file when it exists and alone when it does not. relative_ok is False where a relative name's base
+    directory is not the payload's cwd. Each fail-closed label is a _CmtidnUnread."""
+    if name is None:
+        return _CmtidnUnread("{} option with no value the check can see (a process substitution or another word "
+                             "the shell lexer drops)".format(what))
+    if name == "-":
+        return _message_text_ai(files.command, judged)
+    if _CMTIDN_PATH_UNSAFE_RE.search(name) or name.startswith("~") or not name:
+        return _CmtidnUnread("{} {!r} whose name holds a character the check does not resolve".format(what, name))
+    path = name
+    if not os.path.isabs(name):
+        if not relative_ok or files.cwd is None or files.chdir:
+            return _CmtidnUnread("{} {!r}, a relative name whose base directory the check cannot know"
+                                 .format(what, name))
+        path = os.path.join(files.cwd, name)
+    written = _cmtidn_written(files, name)
+    if written is False:
+        return _CmtidnUnread("{} {!r} that the command also names elsewhere, where it may write it after the "
+                             "check reads it".format(what, name))
+    if written:
+        hit = _message_text_ai(files.command, judged)
+        if hit is not None:
+            return hit
+    if path not in files.read:
+        if len(files.read) >= _CMTIDN_FILE_COUNT:
+            files.read[path] = (None, "the command names more than {} files to read".format(_CMTIDN_FILE_COUNT))
+        else:
+            text, reason, size = _cmtidn_read_named_file(
+                path, min(_CMTIDN_FILE_LIMIT, max(0, _CMTIDN_FILE_BUDGET - files.spent)))
+            files.spent += size
+            files.read[path] = (text, reason)
+    text, reason = files.read[path]
+    if text is None:
+        if written and reason == "it does not exist":
+            return None  # the command writes the file from a quoted here-document, scanned above
+        return _CmtidnUnread("{} {!r} that the check could not read: {}".format(what, name, reason))
+    hit = _message_text_ai(text, judged, False)
+    return None if hit is None else "{} in {} {!r}".format(hit, what, name)
+
+
+def _cmtidn_relative_ok(tokens, k, depth):
+    """Whether a relative file name in the command whose subcommand is the word at index k resolves against
+    the payload's cwd: a top-level line (depth 0) with no directory option before that word."""
+    return depth == 0 and not any(_CMTIDN_DIR_OPTION_RE.match(tok) for tok in tokens[:k])
+
+
+# The options of gh pr create and gh pr edit (gh pr create --help, gh pr edit --help; not verified against a
+# running gh), read like _CMTIDN_COMMIT_SHORT: 'message' is the body text, 'file' the body file, 'value' another
+# option's value, None a flag. gh's flag parser refuses an abbreviated long option, so _cmtidn_option's prefix
+# reading only reads more than gh does.
+_CMTIDN_GH_PR_SHORT = {"b": "message", "F": "file", "t": "value", "B": "value", "H": "value", "a": "value",
+                       "l": "value", "m": "value", "p": "value", "r": "value", "T": "value", "R": "value"}
+_CMTIDN_GH_PR_LONG = {
+    "body": "message", "body-file": "file", "title": "value", "base": "value", "head": "value",
+    "assignee": "value", "label": "value", "milestone": "value", "project": "value", "reviewer": "value",
+    "template": "value", "repo": "value", "recover": "value", "add-assignee": "value", "add-label": "value",
+    "add-project": "value", "add-reviewer": "value", "remove-assignee": "value", "remove-label": "value",
+    "remove-project": "value", "remove-reviewer": "value", "draft": None, "dry-run": None, "editor": None,
+    "fill": None, "fill-first": None, "fill-verbose": None, "web": None, "remove-milestone": None,
+    "subject": "value", "match-head-commit": "value", "author-email": "value", "squash": None, "merge": None,
+    "rebase": None, "auto": None, "disable-auto": None, "delete-branch": None, "admin": None}
+# gh pr merge records its --body or --body-file text (and its --subject or -t title) as the merge commit's message.
+_CMTIDN_GH_PR_VERBS = frozenset(("create", "new", "edit", "merge"))
+# The options gh reads before the pr verb or before the pr word itself that take the next word as their value.
+_CMTIDN_GH_VALUE_OPTS = frozenset(("-R", "--repo"))
+
+
+def _cmtidn_gh_pr(tokens):
+    """The index of the subcommand word (create, new, edit or merge) of a gh pr command this segment runs,
+    else None. Leading reserved words and VAR=value words are passed over to the command word; when it is gh
+    (a path to gh included) that gh is read, and when it is a wrapper (_CMTIDN_GIT_WRAPPERS) the first later
+    word that is gh is, a safe-direction over-read of a gh-named operand. Option words before the pr word and
+    between it and the verb are passed over, -R and --repo with the word after them (gh -R o/r pr create, gh
+    pr --repo o/r create)."""
+    n = len(tokens)
+    i = 0
+    while i < n and tokens[i] in _CMTIDN_RESERVED:
+        i += 1
+    while i < n and _ENV_ASSIGN_RE.match(tokens[i]):
+        i += 1
+    if i >= n:
+        return None
+    word = tokens[i].rsplit("/", 1)[-1]
+    if word in _CMTIDN_GIT_WRAPPERS:
+        i = next((j for j in range(i + 1, n) if tokens[j].rsplit("/", 1)[-1] == "gh"), n)
+    elif word != "gh":
+        return None
+    seen_pr = False
+    j = i + 1
+    while j < n:
+        tok = tokens[j]
+        if tok in _CMTIDN_GH_VALUE_OPTS:
+            j += 2
+            continue
+        if tok.startswith("-") and tok != "-" and tok != "--":
+            j += 1
+            continue
+        if not seen_pr:
+            if tok != "pr":
+                return None
+            seen_pr = True
+            j += 1
+            continue
+        return j if tok in _CMTIDN_GH_PR_VERBS else None
+    return None
+
+
+def _gh_pr_body_ai(tokens, k, judged, files, relative_ok):
+    """A hit label for an AI co-author trailer or AI credit line in the body of the gh pr command whose
+    subcommand is the word at index k: a --body or -b value, and the file a --body-file or -F value names
+    (_cmtidn_message_file_ai; '-' is stdin, whose here-document text is in the command), else None; for gh
+    pr merge, whose -t is --subject, the subject is read as message text too. A body value holding a command
+    substitution is scanned with the whole command text, where a here-document in it stands. A file option
+    with no value word (one the shell lexer dropped) fails closed."""
+    n = len(tokens)
+    short, long_ = _CMTIDN_GH_PR_SHORT, _CMTIDN_GH_PR_LONG
+    if tokens[k] == "merge":
+        short = dict(short, t="message", m=None, r=None, s=None, d=None, A="value")
+        long_ = dict(long_, subject="message")
+    j = k + 1
+    while j < n and tokens[j] != "--":
+        kind, value = _cmtidn_option(tokens[j], short, long_)
+        if kind is not None and value is None and j + 1 < n:
+            j += 1
+            value = tokens[j]  # the option's value word, never read as an option
+        if kind == "file" and value is None:
+            return _cmtidn_message_file_ai(None, files, judged, relative_ok, "pull-request body file")
+        if kind == "message" and value is not None:
+            hit = _message_text_ai(value, judged) or _cmtidn_ansi_c_credit_ai(files.command, judged)
+            if hit is None and ("$(" in value or "`" in value):
+                hit = _message_text_ai(files.command, judged)
+            if hit is not None:
+                return "{} in a pull-request body".format(hit)
+        elif kind == "file" and value is not None:
+            hit = _cmtidn_message_file_ai(value, files, judged, relative_ok, "pull-request body file")
+            if hit is not None:
+                return hit
+        j += 1
+    return None
+
+
+def _commit_message_value_ai(kind, value, judged, files, relative_ok):
+    """A hit label for a commit option's value read with the command's file state (files, None outside
+    find_ai_authorship): a message or trailer value holding a command substitution is judged with the whole
+    command text, and a message file or template is read (_cmtidn_message_file_ai), one with no value word (a
+    process substitution the shell lexer drops) failing closed; else None."""
+    if files is None:
+        return None
+    if kind == "file" and value is None:
+        return _cmtidn_message_file_ai(None, files, judged, relative_ok, "commit message file")
+    if value is None:
+        return None
+    if kind in ("message", "trailer") and ("$(" in value or "`" in value):
+        return _message_text_ai(files.command, judged)
+    if kind in ("message", "trailer"):
+        return _cmtidn_ansi_c_credit_ai(files.command, judged)
+    if kind == "file":
+        return _cmtidn_message_file_ai(value, files, judged, relative_ok, "commit message file")
+    return None
+
+
+def _commit_message_and_author_ai(tokens, judged, files=None, relative_ok=False, start=-1):
     """A hit label if this git commit segment names an AI identity in an --author value or in a
     Co-Authored-By trailer (scanned as a substring of a token, so the trailer that lives inside the
     single quoted -m message token is caught), else None. Each word is read as a git commit option
@@ -5134,22 +5480,62 @@ def _commit_message_and_author_ai(tokens, judged):
     -m --author X), a safe-direction over-deny that the maintainer chose to keep. The bare message body is
     deliberately NOT matched against the identity set: a legitimate message that merely mentions an AI product
     name (e.g. -m 'fix claude adapter') is not a recorded AI identity, and denying it would be a false positive;
-    only a trailer or an --author value records identity. judged holds the trailer results of the words already
-    judged for the command (_co_author_ai)."""
+    only a trailer, an AI credit line (_AI_CREDIT_LINE_RE) or an --author value records identity. A message
+    file or template (-F, --file, -t, --template) is read and scanned the same way, and one the check cannot
+    read fails closed (_cmtidn_message_file_ai, files; relative_ok as there). A message value holding a command
+    substitution is scanned with the whole command text, where a here-document in it stands. judged holds the
+    results of the words already judged for the command (_co_author_ai). start is the index of the commit
+    subcommand word: every word is scanned for a trailer and a credit line, but only the words after start are
+    read with the git commit option table, so a wrapper's own option before the git command (sudo -t, xargs -t)
+    is not taken for a template; before it, a git -c commit.template=FILE value names a template that is read
+    the same way when FILE is an absolute path, and fails closed otherwise, since git resolves a relative one
+    against the repository top, not the cwd."""
     n = len(tokens)
-    i = 0
+    for i in range(min(start, n)):
+        tok = tokens[i]
+        hit = _message_text_ai(tok, judged)
+        if hit is not None:
+            return hit
+        if tok == "-c" and i + 1 < start:
+            setting = tokens[i + 1]
+        elif tok.startswith("-c") and tok != "-c":
+            setting = tok[2:]
+        else:
+            continue
+        key, eq, value = setting.partition("=")
+        if eq and key.lower() == "commit.template" and files is not None:
+            if not os.path.isabs(value):
+                # git reads a relative commit.template from the repository top, not from the cwd the check would
+                # join it to, so the check cannot know which file git reads; '-' and an empty value included.
+                return _CmtidnUnread("commit template {!r}, not an absolute path: git resolves a relative "
+                                     "commit.template against the repository top, not the cwd the check reads "
+                                     "from".format(value))
+            hit = _cmtidn_message_file_ai(value, files, judged, relative_ok, "commit template")
+            if hit is not None:
+                return hit
+    i = min(start, n - 1) + 1 if n else 0
     while i < n:
         tok = tokens[i]
-        hit = _co_author_ai(tok, judged)
+        hit = _message_text_ai(tok, judged)
         if hit is not None:
             return hit
         kind, value = _cmtidn_option(tok, _CMTIDN_COMMIT_SHORT, _CMTIDN_COMMIT_LONG)
-        if kind is not None and value is None and i + 1 < n:
+        next_word = kind is not None and value is None and i + 1 < n
+        if next_word:
             i += 1
             value = tokens[i]  # the option's value word, never read as an option
-            hit = _co_author_ai(value, judged) if kind in ("message", "trailer") else None
+            hit = _message_text_ai(value, judged) if kind in ("message", "trailer") else None
             if hit is not None:
                 return hit
+        hit = _commit_message_value_ai(kind, value, judged, files, relative_ok)
+        if hit is not None:
+            return hit
+        if (kind == "trailer" and value is not None and files is not None and files.trailer_key
+                and AI_IDENTITY_RE.search(value)):
+            # The command may set trailer.<token>.key, which records this value as a trailer of that key, a
+            # co-author trailer included (_CMTIDN_TRAILER_KEY_PARTS).
+            return "--trailer value {!r} under a trailer.<token>.key setting".format(value.strip()[:80])
+        if next_word:
             if value.startswith("--author="):
                 kind, value = "author", value[len("--author="):]  # the over-deny kept above
             elif (i + 1 < n and _cmtidn_option(value, {}, _CMTIDN_COMMIT_LONG) == ("author", None)
@@ -5380,6 +5766,21 @@ _CMTIDN_RUN_BOUNDS = ("git runs a command line that could not be parsed, or comm
 # timeout, and on a slower host a shorter one can (_commit_identity_fallback).
 _CMTIDN_READ_LIMIT = 128 << 10
 _CMTIDN_TOO_LONG = "the command is longer than the commit-identity check reads within the hook timeout"
+# In a command the fallback judges: a message, template or body file option as git commit and gh pr spell it (a
+# short cluster of letters of any length ending in F or t, its value attached or not, or --file, --template or
+# --body-file, a prefix of each included), the commit.template configuration name in any letter case, as a git
+# -c value names a template the reader reads, wherever it stands (a quoted or attached -c value included, and a
+# mention of the name only, a disclosed over-deny), and git or gh as a word (a path to either included). Any
+# other dash word whose leading letters hold an F or t matches too, a disclosed over-deny: one of another program
+# (sort -t, find -type), one of git or gh's own options (git log -Stest, gh pr create -t TITLE), and one inside a
+# message (-m "fix -Wformat warnings"). Both are raw scans, linear in the command's length: a cluster can start
+# only at the start of the command or at a '-' after a blank, a quote, '=', ';', '&', '|', '(' or ')' (not after
+# '<', '>', '{' or a backquote), so each run of letters is scanned from one start only. Being raw scans, they do
+# not see an option or configuration name that quoting or escaping splits (-\F, commit.temp\late), which the
+# residue discloses.
+_CMTIDN_FALLBACK_FILE_OPTION_RE = re.compile(
+    r"(?<![^\s\"'=;&|()])(?:-[A-Za-z]*[Ft]|--(?:fil|te|body-f)[a-z-]*)|(?i:commit\.template)")
+_CMTIDN_FALLBACK_TOOL_RE = re.compile(r"(?<![\w.-])(?:git|gh)(?![\w.-])")
 # An AI name as AI_IDENTITY_RE spells it but with no word boundary, so that a name the reader would find in a
 # command too long to read is found by the fallback as well. Each word the reader judges, a word of a run line
 # included, holds the command's characters in order less only quotes, backslashes, the newline of a
@@ -5448,7 +5849,7 @@ def _cmtidn_run_lines(tokens, k, stop):
             j += 1
 
 
-def find_ai_authorship(command):
+def find_ai_authorship(command, base=None):
     """Return '<context> <value>' when a segment sets an AI identity for a recorded change, else None:
     an identity-assignment (env var / git config) on ANY segment, or a commit-message context (co-author
     trailer, --author value) on a segment that runs a git commit-family command, found by
@@ -5469,14 +5870,17 @@ def find_ai_authorship(command):
     nothing read sets an AI identity, and ValueError(_CMTIDN_TOO_LONG) at once, before any reading, when the
     command is longer than _CMTIDN_READ_LIMIT characters; the handler turns each into the conservative
     fallback. Raises _ReadingLimitError when the command reading of the command or of any run line spends its
-    body budget (COST above _COMMAND_LEAD_WORDS), never a line left unread, so the handler denies it."""
+    body budget (COST above _COMMAND_LEAD_WORDS), never a line left unread, so the handler denies it. base is
+    the payload's cwd, against which a relative message or body file name resolves (_CmtidnFiles). The same
+    contexts and an AI credit line are also read in the body of a gh pr create, new, edit or merge command
+    (_cmtidn_gh_pr), and in the commit message files and pull-request body files the command names."""
     if len(command) > _CMTIDN_READ_LIMIT:
         raise ValueError(_CMTIDN_TOO_LONG)
     bound = _CMTIDN_RUN_SCALE * len(command) + _CMTIDN_RUN_FLOOR
     unread = [False]
     try:
         hit = _cmtidn_line_ai(command, 0, {True: [bound], False: [bound], None: [bound]}, unread, [True, False],
-                              {})
+                              {}, files=_CmtidnFiles(command, base))
     except _ReadingLimitError:
         raise
     except ValueError:
@@ -5488,7 +5892,7 @@ def find_ai_authorship(command):
     return hit
 
 
-def _cmtidn_line_ai(command, depth, budgets, unread, paths, judged, from_env=False):
+def _cmtidn_line_ai(command, depth, budgets, unread, paths, judged, from_env=False, files=None):
     """find_ai_authorship over one command line at a run-line nesting depth. The line is judged under both
     readings, the locale reading and the literal '$' reading (the locale flag of _segments True and False),
     once when they agree, which they do on a line holding no $". paths lists the readings whose own reading of
@@ -5508,7 +5912,10 @@ def _cmtidn_line_ai(command, depth, budgets, unread, paths, judged, from_env=Fal
     configuration variable the text of a line that encloses this one names (_git_config_env_named) or the hook's
     environment carries (_git_alias_inherited), applies to every git command of that line, which this one runs
     under. A parse error in the command itself (depth 0) raises: at once when neither reading parses
-    it, and otherwise after the other reading has found nothing."""
+    it, and otherwise after the other reading has found nothing. files is the command's named-file state
+    (_CmtidnFiles), shared by every line of the command."""
+    if files is None:
+        files = _CmtidnFiles(command, None)
     readings = []  # (the readings that read the line so, its segments)
     error = None
     for locale in (True, False):
@@ -5539,6 +5946,15 @@ def _cmtidn_line_ai(command, depth, budgets, unread, paths, judged, from_env=Fal
         unread[0] = True  # a run line that a reading cannot parse is left unread, like one past the bounds
     elif error is not None and not readings:
         raise error
+    if depth == 0:
+        # A cd, pushd or popd WORD, a word that names GIT_DIR or GIT_WORK_TREE (_CMTIDN_GIT_DIR_ENV_RE) or a
+        # core.worktree word (_CMTIDN_WORKTREE_KEY_RE), in any segment of the command, under either reading,
+        # leaves a relative file name's base directory unknown (_cmtidn_message_file_ai); a quoted message that
+        # holds the letters 'cd' is one word and does not count. A run line's relative names never resolve
+        # (relative_ok).
+        files.chdir = files.chdir or any(
+            tok in _CMTIDN_CHDIR_WORDS or _CMTIDN_GIT_DIR_ENV_RE.search(tok) or _CMTIDN_WORKTREE_KEY_RE.match(tok)
+            for _same, segments in readings for tokens, _sep in segments for tok in tokens)
     line_env = None  # read at the first segment that runs git (below)
     for same, segments in readings:
         keys = [reading for reading in paths if reading in same] or [None]
@@ -5546,6 +5962,11 @@ def _cmtidn_line_ai(command, depth, budgets, unread, paths, judged, from_env=Fal
             hit = _identity_assignment_ai(tokens)
             if hit is not None:
                 return hit
+            gh_at = _cmtidn_gh_pr(tokens)
+            if gh_at is not None:
+                hit = _gh_pr_body_ai(tokens, gh_at, judged, files, _cmtidn_relative_ok(tokens, gh_at, depth))
+                if hit is not None:
+                    return hit
             subs = list(_cmtidn_git_commands(tokens))
             if not subs:
                 continue  # no git command: no commit to read and no run line to build
@@ -5563,8 +5984,10 @@ def _cmtidn_line_ai(command, depth, budgets, unread, paths, judged, from_env=Fal
                 alias_at = next((j for j in range(len(tokens)) if _git_alias_defined_at(tokens, j)), len(tokens))
             else:
                 alias_at = len(tokens)
-            if any(tokens[k] in COMMIT_VERBS or alias_at < k for k in subs):
-                hit = _commit_message_and_author_ai(tokens, judged)
+            commits = [k for k in subs if tokens[k] in COMMIT_VERBS or alias_at < k]
+            if commits:
+                hit = _commit_message_and_author_ai(tokens, judged, files,
+                                                    _cmtidn_relative_ok(tokens, min(subs), depth), min(commits))
                 if hit is not None:
                     return hit
             rebases = [k for k in subs if tokens[k] == "rebase"]
@@ -5581,7 +6004,7 @@ def _cmtidn_line_ai(command, depth, budgets, unread, paths, judged, from_env=Fal
                         if depth >= _CMTIDN_RUN_DEPTH or all(spent):
                             break
                     hit = _cmtidn_line_ai(line, depth + 1, budgets, unread, [key for key in keys if key is not None],
-                                          judged, line_env)
+                                          judged, line_env, files)
                     if hit is not None:
                         return hit
     if error is not None and depth == 0:
@@ -5612,20 +6035,20 @@ def _commit_identity_fallback(command, error):
     would deny is denied; the cost is a disclosed over-deny of such a command whose text merely names an AI
     product or holds a name inside a longer word (Claudette) and that holds git as a word or an identity
     variable or config name, a heredoc body included. One that names no AI anywhere is allowed at once, since no
-    raw-string context can find an AI identity in it either. One that names an AI but holds none of those words
-    is judged by the raw-string contexts, as a command the tokenizer cannot parse is, so an AI --author value or
-    co-author trailer in it denies when git runs under another name (gi?, "$G"); a heredoc that writes a file
-    naming an AI product, with no trailer, --author value or identity assignment in it, is allowed. This
-    judgement has no length bound, so its cost grows with the command's length. The costliest shapes measured
-    are commands made of repeated co-author trailer names, since the co-author context reads each name with its
-    own value of up to 160 characters, though the AI identity search reads only the part of each value past the
-    end of the one before it, less _AI_NAME_LONGEST - 1 characters (_ai_value_match): the highest of three
-    single runs on one host took about 0.26 s of CPU time at 1,048,576 characters, 4.0 s at 16,777,216 and 6.3 s
-    at 25,165,824 (with each value searched whole, 0.59 s, 8.7 s and 14.0 s on the same host), and 7.3 s at
-    33,554,432, 8.9 s at 41,943,040 and 10.3 s at 50,331,648, so on the measuring host a command of about 40 to
-    48 MiB or longer can outlast the 10-second hook timeout, and on a slower host a shorter one can. The platform
-    contract this file records (the module docstring) does not say that a hook stopped at its timeout refuses the
-    call, so such a command may run with no deny from this check.
+    raw-string context can find an AI identity in it either, unless the file-option rule below denies it. One that
+    names an AI but holds none of those words is judged by the raw-string contexts, as a command the tokenizer
+    cannot parse is, so an AI --author value or co-author trailer in it denies when git runs under another name
+    (gi?, "$G"); a heredoc that writes a file naming an AI product, with no trailer, --author value or identity
+    assignment in it, is allowed. This judgement has no length bound, so its cost grows with the command's length.
+    The costliest shapes measured are commands made of repeated co-author trailer names, since the co-author
+    context reads each name with its own value of up to 160 characters, though the AI identity search reads only
+    the part of each value past the end of the one before it, less _AI_NAME_LONGEST - 1 characters
+    (_ai_value_match): the highest of three single runs on one host took about 0.26 s of CPU time at 1,048,576
+    characters, 4.0 s at 16,777,216 and 6.3 s at 25,165,824 (with each value searched whole, 0.59 s, 8.7 s and
+    14.0 s on the same host), and 7.3 s at 33,554,432, 8.9 s at 41,943,040 and 10.3 s at 50,331,648, so on the
+    measuring host a command of about 40 to 48 MiB or longer can outlast the 10-second hook timeout, and on a
+    slower host a shorter one can. The platform contract this file records (the module docstring) does not say
+    that a hook stopped at its timeout refuses the call, so such a command may run with no deny from this check.
     With a run line left unread it first denies when an AI identity appears ANYWHERE in the
     command once every backslash-newline, backslash and quote is removed, since quoting or escaping in the
     unread line can split or build an option name or value that no raw-string context sees (--"auth"=...,
@@ -5635,11 +6058,26 @@ def _commit_identity_fallback(command, error):
     the text around a '$' that bash keeps (one inside double quotes, or one escaped), the same safe direction.
     None of these scans reads the git subcommand, so a git command that runs under a git alias the command defines
     (the reader's _git_config_env_named and _git_alias_defined_at) is judged here as a commit-family one is.
+    After the raw-string contexts, an AI credit line (_AI_CREDIT_LINE_RE, ANSI-C escapes decoded as
+    _credit_line_ai does) anywhere in the raw text denies, a quoted heredoc body that writes some other file
+    included. Every path to an allow, the early one for a command too long to read that names no AI included,
+    first passes the file-option rule (_cmtidn_fallback_file_deny): a command left unread this way that holds git
+    or gh as a word and names a message, template or body file option fails closed, since the file is not read
+    here; the cost is a disclosed over-deny of such a command whose option is another program's (as in sort -t
+    or grep -F). The rule runs after the identity scans, so a command they deny keeps the reason that names the
+    AI identity, and the rule never turns a deny into an allow.
     Never silent-allow a plausibly-violating command the check could not read in full."""
     if error == _CMTIDN_TOO_LONG:
         match = _AI_NAME_ANYWHERE_RE.search(_CMTIDN_UNREAD_CHARS_RE.sub("", command))
         if match is None:
-            return _allow()  # no AI name, so no raw-string context below can find one either
+            # No AI name, so no raw-string context or credit line below can find one either; only the
+            # file-option rule can still deny.
+            reason = _cmtidn_fallback_file_deny(command, error)
+            if reason is None:
+                return _allow()
+            return _deny(reason,
+                         "AIQT guardrail: denied a git or gh command the commit-identity check could not read in "
+                         "full that names a message or body file (rule cmtidn, fail-safe).")
         word = _cmtidn_identity_word(command)
         if word is not None:
             reason = ("AIQT rule cmtidn (commit-identity): the command is {} characters long, more than the {} "
@@ -5678,7 +6116,41 @@ def _commit_identity_fallback(command, error):
             return _deny(reason,
                          "AIQT guardrail: denied a git command the check could not read in full that "
                          "appears to record an AI commit identity (rule cmtidn, fail-safe).")
-    return _allow()
+    hit = None if error == _SUBST_HEREDOC_MAIN_FAILS else _credit_line_ai(command, {}, True)
+    if hit is not None:
+        reason = ("AIQT rule cmtidn (commit-identity): the command could not be read in full (a shell parse error, "
+                  "a construct the tokenizer does not read, a run line left unread, or a command longer than the "
+                  "check reads within the hook timeout) and its text holds an {}; failing closed. Remove it and "
+                  "commit as the maintainer.".format(hit))
+        return _deny(reason,
+                     "AIQT guardrail: denied a command the check could not read in full that holds an AI credit "
+                     "line (rule cmtidn, fail-safe).")
+    reason = _cmtidn_fallback_file_deny(command, error)
+    if reason is None:
+        return _allow()
+    return _deny(reason,
+                 "AIQT guardrail: denied a git or gh command the commit-identity check could not read in full that "
+                 "names a message or body file (rule cmtidn, fail-safe).")
+
+
+def _cmtidn_fallback_file_deny(command, error):
+    """The reason for the fail-closed deny of _commit_identity_fallback for a command left unread (any cause but
+    _SUBST_HEREDOC_MAIN_FAILS, after which the full reading has already read every file) that holds git or gh as
+    a word and names a message, template or body file option (_CMTIDN_FALLBACK_FILE_OPTION_RE), whose file the
+    fallback cannot read; else None. The fallback consults it on each of its paths to an allow, after every
+    identity scan, so a command that both names such an option and carries an AI identity the scans find is
+    denied with that identity as its reason, and no command this rule matches is allowed."""
+    if error == _SUBST_HEREDOC_MAIN_FAILS:
+        return None
+    option = _CMTIDN_FALLBACK_FILE_OPTION_RE.search(command)
+    if option is None or not _CMTIDN_FALLBACK_TOOL_RE.search(command):
+        return None
+    return ("AIQT rule cmtidn (commit-identity): the command could not be read in full (a shell parse error, a "
+            "process substitution or another construct the tokenizer does not read, a run line left unread, or a "
+            "command longer than the check reads within the hook timeout), it runs git or gh, and it names a "
+            "message, template or body file option ({!r}) whose file the check cannot read here; failing closed, "
+            "since that file can carry an AI co-author trailer or credit line. Write the message to a regular file "
+            "in a command of its own and name it by an absolute path.".format(option.group(0)[:40]))
 
 
 def commit_identity(data):
@@ -5706,7 +6178,7 @@ def commit_identity(data):
             "AIQT guardrail: denied a Bash call with no readable command (rule cmtidn, fail-closed).")
     reads = _SubstHeredocs.reads
     try:
-        hit = find_ai_authorship(command)
+        hit = find_ai_authorship(command, base=data.get("cwd"))
     except _ReadingLimitError:
         # The command reading spent its body budget: the raw fallback below can allow an identity that main's
         # reading finds, so it denies (COST above _COMMAND_LEAD_WORDS).
@@ -5729,11 +6201,22 @@ def commit_identity(data):
         if _SubstHeredocs.reads != reads:
             return _commit_identity_fallback(command, _SUBST_HEREDOC_MAIN_FAILS)  # main's fallback, in place
         return _allow()
+    if isinstance(hit, _CmtidnUnread):
+        return _deny(
+            "AIQT rule cmtidn (commit-identity): this command names a commit message, template or body file "
+            "the check cannot read here ({}); failing closed, since that file can carry an AI co-author trailer "
+            "or credit line. Name it by an absolute path to a readable regular file, in a command with no cd, "
+            "pushd, popd, GIT_DIR, GIT_WORK_TREE or core.worktree word, and name a commit.template by an absolute "
+            "path.".format(hit),
+            "AIQT guardrail: denied a command naming a message or body file the check cannot read (rule cmtidn, "
+            "fail-closed).")
     reason = ("AIQT rule cmtidn (commit-identity): a recorded change carries the human maintainer's "
-              "own identity, with no AI as author, committer, or co-author; this git command sets an "
-              "AI identity ({}). Remove it and commit as the maintainer.".format(hit))
+              "own identity, with no AI as author, committer, co-author or credit in a commit or a "
+              "pull-request body; this command records an AI identity ({}). Remove it and commit as the "
+              "maintainer; a message or body file is read, so name it by an absolute path to a readable "
+              "regular file.".format(hit))
     return _deny(reason,
-                 "AIQT guardrail: denied a git command recording an AI commit identity (rule cmtidn).")
+                 "AIQT guardrail: denied a command recording an AI commit identity or credit (rule cmtidn).")
 
 
 # --- abspth: relative path where the tool requires absolute ------------------------------------------
