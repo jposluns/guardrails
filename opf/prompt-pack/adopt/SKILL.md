@@ -278,7 +278,7 @@ revision = "<git rev-parse HEAD of the product repository>"
 skip_policy = "no-skip"
 
 [bindings.release]
-version = "<pack release version: the release-version the release manifest records>"
+version = "<OPF's own release version: the opf-version the release manifest records>"
 manifest_sha256 = "<release manifest digest>"
 anchor = "<where you checked it, for example release-tag>"
 anchor_sha256 = "<digest the anchor shows>"

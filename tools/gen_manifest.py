@@ -109,6 +109,9 @@ RELEASES_REL = ".aiqt/core/releases.toml"
 RENDERERS_REL = ".aiqt/core/renderers.toml"
 VERSION_REL = "VERSION"
 OPF_VERSION_REL = "opf/VERSION"        # OPF's own release version -> the manifest's opf-version
+# The most bytes opf/VERSION may hold: opf/tools/_opf_declaration.py's MAX_OPF_VERSION_BYTES, the one cap every
+# reader of that file applies (check_manifest's self-test holds the two equal).
+OPF_VERSION_MAX_BYTES = 64
 FROZEN_REL = ".aiqt/frozen.json"       # EN-8 write-scope frozen floor; a fifth generated, drift-gated output
 FROZEN_VERSION = 1
 OWN_OUTPUTS_REL = (ATTRIBUTES_REL, MANIFEST_REL, ROOT_REL, SNIPPET_REL)
@@ -561,13 +564,18 @@ def read_version(root):
 
 def read_opf_version(root, classes):
     """OPF's own release version, the manifest's opf-version: the text of opf/VERSION, held to the same raw
-    grammar as read_version (exactly `X.Y.Z` and one trailing LF, the shared ASCII SemVer validator). None
-    where the pack does not classify opf/VERSION (a pack without OPF states no opf-version); a classified file
-    that is unreadable or malformed is GateError, never an omitted key."""
+    grammar as read_version (exactly `X.Y.Z` and one trailing LF, the shared ASCII SemVer validator) and to at
+    most OPF_VERSION_MAX_BYTES bytes. None where the pack does not classify opf/VERSION (a pack without OPF
+    states no opf-version); a classified file that is unreadable, oversized or malformed is GateError, never an
+    omitted key."""
     if OPF_VERSION_REL not in classes:
         return None
     try:
-        raw = (root / OPF_VERSION_REL).read_bytes().decode("utf-8")
+        with open(root / OPF_VERSION_REL, "rb") as handle:
+            data = handle.read(OPF_VERSION_MAX_BYTES + 1)
+        if len(data) > OPF_VERSION_MAX_BYTES:
+            raise GateError("{} is over {} bytes; fail-closed".format(OPF_VERSION_REL, OPF_VERSION_MAX_BYTES))
+        raw = data.decode("utf-8")
     except (OSError, UnicodeDecodeError) as exc:
         raise GateError("{} cannot be read as UTF-8 ({}); fail-closed".format(OPF_VERSION_REL, exc))
     if not raw.endswith("\n") or raw.count("\n") != 1 or check_versions._parse(raw[:-1]) is None:

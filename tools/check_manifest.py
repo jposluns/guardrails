@@ -500,6 +500,59 @@ def _self_test_main_isolated():
                 else:
                     failures.append("TG-24: consumer did not wrap " + refusal)
 
+        # (m) opf-version, OPF's own release version. The tools-side grammar (_release_schema.strict_manifest)
+        #     admits a bare SemVer or no key and refuses any other value; check_manifest holds the key equal to
+        #     what gen_manifest reads from opf/VERSION, so a differing, missing or unexpected key is exit 1; and
+        #     that read admits a file up to the one cap every reader of opf/VERSION shares and refuses one byte
+        #     more. Each case is red with its check removed.
+        import _release_schema
+        import _opf_declaration
+        document = tomllib.loads(generated_raw.decode("utf-8"))
+        try:
+            _release_schema.strict_manifest(dict(document, **{"opf-version": "2.0.0"}), "fixture")
+            _release_schema.strict_manifest(document, "fixture")
+        except _release_schema.SchemaError as exc:
+            failures.append("opf-version: the tools-side grammar refused a bare SemVer or no key ({})".format(exc))
+        for value in ("01.0.0", "2.0.0-beta", "2.0.0+b", "2.0", "2.0.0\n", " 2.0.0", "", 2, True, ["2.0.0"]):
+            try:
+                _release_schema.strict_manifest(dict(document, **{"opf-version": value}), "fixture")
+                failures.append("opf-version: the tools-side grammar admitted {!r}".format(value))
+            except _release_schema.SchemaError as exc:
+                if "opf-version" not in str(exc):
+                    failures.append("opf-version: {!r} refused for another reason ({})".format(value, exc))
+
+        def opf_version_read_as(value):
+            return patch.object(gm, "read_opf_version", lambda root, classes: value)
+        stated = _fresh("opf-version")
+        with opf_version_read_as("2.0.0"):
+            gen_quiet(stated)
+            equal = check_quiet(stated)
+        with opf_version_read_as("2.0.1"):
+            differing = check_quiet(stated)
+        unexpected = check_quiet(stated)   # this fixture classifies no opf/VERSION, so it expects no key
+        with opf_version_read_as("2.0.0"):
+            missing = check_quiet(clean)
+        if (equal, differing, unexpected, missing) != (0, 1, 1, 1):
+            failures.append("opf-version: check_manifest equality expected exits (0, 1, 1, 1) for an equal, "
+                            "differing, unexpected and missing key, got {}".format((equal, differing, unexpected,
+                                                                                    missing)))
+
+        cap_root = Path(tmp) / "opf-version-cap"
+        (cap_root / "opf").mkdir(parents=True)
+        cap_classes = {gm.OPF_VERSION_REL: "pack-immutable"}
+        cap_results = []
+        for ones in (gm.OPF_VERSION_MAX_BYTES - 6, gm.OPF_VERSION_MAX_BYTES - 5, gm.OPF_VERSION_MAX_BYTES - 4):
+            text = "1.0." + "1" * ones   # 63, 64 and 65 bytes with its line feed
+            (cap_root / gm.OPF_VERSION_REL).write_bytes(text.encode("ascii") + b"\n")
+            try:
+                cap_results.append(gm.read_opf_version(cap_root, cap_classes) == text)
+            except gm.GateError as exc:
+                cap_results.append("over {} bytes".format(gm.OPF_VERSION_MAX_BYTES) in str(exc) and "over")
+        if cap_results != [True, True, "over"] or not (
+                gm.OPF_VERSION_MAX_BYTES == _opf_declaration.MAX_OPF_VERSION_BYTES == 64):
+            failures.append("opf-version: gen_manifest's opf/VERSION cap is not the shared 64 bytes (inside, "
+                            "at and over the cap gave {})".format(cap_results))
+
         # (b) a wrong SOURCES byte on disk -> exit 1 (bytes/sha256 disagree).
         b = _fresh("badbyte")
         (b / "src.txt").write_text("MUTATED source\n", encoding="utf-8")

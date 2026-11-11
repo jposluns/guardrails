@@ -105,8 +105,8 @@ pull request (CLAUDE.md, Gates and CI).
    `opf/tools/_opf_declaration.py` as `SHIPPED_DECLARATION_SHA256`. Its `release` is OPF's own release
    version in `opf/VERSION`, which moves independently of the pack release version in `VERSION`, so each
    change of OPF's version sets, in one change: `opf/VERSION`; `release` in that file;
-   `RELEASE_IDENTITY`, `SHIPPED_DECLARATION_BYTES` and `SHIPPED_DECLARATION_SHA256` in
-   `_opf_declaration.py`; and the restatement below and in `opf/spec/OPF-QUICKSTART.md`. A change of the supported `spec_version`, homes generation or worklog
+   `SHIPPED_DECLARATION_BYTES` and `SHIPPED_DECLARATION_SHA256` in `_opf_declaration.py`; and the
+   restatement below and in `opf/spec/OPF-QUICKSTART.md`. A change of the supported `spec_version`, homes generation or worklog
    storage generation changes its value in `_opf_store.py`, the matching field in
    `opf/tools/opf-declaration.toml`, `SHIPPED_DECLARATION_BYTES` and `SHIPPED_DECLARATION_SHA256` in
    `_opf_declaration.py`, and the restatement below and in `opf/spec/OPF-QUICKSTART.md`; it does not by

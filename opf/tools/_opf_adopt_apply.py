@@ -23556,6 +23556,13 @@ def _finish_ops_self_test(check):
           refuses(plant_outcome(*pack_only), "not the approved release version"))
     check("plant-manifest-without-opf-version-refused",
           refuses(plant_outcome(*unstated), "states no opf-version"))
+    # a plan with no release.version over a manifest with no opf-version: the two absent values would compare
+    # equal, so only the gate's own refusal of a manifest stating no opf-version stops it (red without it).
+    unversioned = dict(base_plan, release=dict((key, value) for key, value in base_plan["release"].items()
+                                               if key != "version"))
+    check("plant-plan-without-release-version-refused",
+          refuses(plant_outcome(*release(manifest_bytes(member, opf=None), plan=unversioned)),
+                  "states no opf-version"))
     from unittest.mock import patch as _patch
     with _patch.object(sys.modules[verify_pack_member.__module__], "_GATE_VERSION_KEY", "release-version"):
         check("revert/gate-binds-pack-version-opf-row-red", not commits(plant_outcome(*opf_only)))
