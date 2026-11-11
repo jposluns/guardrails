@@ -2913,20 +2913,35 @@ def _watchdog_real_sigint_call(label, body):
     once the body is done and before then raises a KeyboardInterrupt out of
     one of the restore's calls (signal.signal checks for a pending signal
     before it changes anything). Each attempt therefore blocks SIGINT first
-    and is redone when a KeyboardInterrupt ends it early; once the block has
-    taken effect in this thread a further SIGINT sent to this thread stays
-    pending instead, so the redo is needed at most once for it. Restoring
-    the mask last releases a held SIGINT to the caller's own handler (or
-    discards it, when that handler is SIG_IGN). The mask restore is redone
-    the same way: a SIGINT another thread receives is still handled in this
-    one, under the caller's handler once that is back, and when that handler
-    is Python's it can raise a KeyboardInterrupt at the mask restore's entry,
-    before the mask changes. A KeyboardInterrupt caught on the way is raised
-    again once both are back. Stated limit: a second SIGINT handled in the
-    few bytecodes between catching the first KeyboardInterrupt and the
-    redo's call (the except clause and the loop's jump back) still escapes
-    the restore."""
+    and is redone when an exception ends it early; once the block has taken
+    effect in this thread a further SIGINT sent to this thread stays pending
+    instead, so the redo is needed at most once for it. Restoring the mask
+    last releases a held SIGINT to the caller's own handler (or discards it,
+    when that handler is SIG_IGN). The mask restore is redone the same way:
+    a SIGINT another thread receives is still handled in this one, under the
+    caller's handler once that is back, and that handler can raise at the
+    mask restore's entry, before the mask changes. The caller's handler may
+    raise anything (SystemExit from sys.exit, say), so both redos follow any
+    exception, not only a KeyboardInterrupt. Short of memory running out, a
+    redo cannot spin on a failure of the calls themselves: the handler is
+    put back only while it differs from the caller's, which means the
+    setup's own signal.signal ran in this thread, and the mask calls take
+    SIGINT or the mask read at entry, which pthread_sigmask accepts in any
+    thread. The first exception caught on the way is raised again once both
+    are back: it is the one the interruption raised, and keeping it makes
+    what the caller sees independent of how many more SIGINTs arrive while
+    the restore finishes. A later one is dropped; an exception the body
+    raised stays attached as its __context__. Stated limit: a second
+    exception from a SIGINT handled in the few bytecodes between catching
+    the first and the redo's call (the except clause and the loop's jump
+    back) still escapes the restore.
+
+    signal.signal works only in the main thread, so a call from any other
+    thread raises ValueError before it changes the handler or the mask."""
     import signal
+    import threading
+    if threading.current_thread() is not threading.main_thread():
+        raise ValueError("SIGINT can be installed only from the main thread: " + label)
     prior = signal.getsignal(signal.SIGINT)
     assert prior is not None, (
         "SIGINT carries a handler Python did not install and cannot restore: " + label)
@@ -2941,45 +2956,54 @@ def _watchdog_real_sigint_call(label, body):
         while True:
             try:
                 signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT})
-                signal.signal(signal.SIGINT, prior)
+                if signal.getsignal(signal.SIGINT) is not prior:
+                    signal.signal(signal.SIGINT, prior)
                 break
-            except KeyboardInterrupt as exc:
-                interrupted = exc
+            except BaseException as exc:
+                if interrupted is None:
+                    interrupted = exc
         while True:
             try:
                 signal.pthread_sigmask(signal.SIG_SETMASK, prior_mask)
                 break
-            except KeyboardInterrupt as exc:
-                interrupted = exc
+            except BaseException as exc:
+                if interrupted is None:
+                    interrupted = exc
         if interrupted is not None:
             raise interrupted
 
 
 def _watchdog_sigint_restore_case():
     """Compare the SIGINT handler and signal mask on entry to and on exit from
-    _watchdog_real_sigint_call, for each entry state (Python's handler, SIG_IGN
-    or a Python function, with SIGINT unblocked, blocked, or blocked and
-    pending) and each way the body ends (it returns 0, returns a failure,
-    raises, or is ended by a real SIGINT): once with no SIGINT sent, then with
-    one SIGINT at one point of each run, in three passes. The first pass
-    sends it to this thread just before the Nth signal.signal or
-    signal.pthread_sigmask call the setup and the restore make. The second
-    sends it to this thread from a profile hook at the Nth profile event of
-    the call (the entry and return of each Python function, and the start
-    and end of each builtin call, in every frame from the call's own entry to
-    its return), so it also lands after the body has ended and before the
-    restore's first call, and at the entry of every function the call makes.
-    The third runs the installed Python handler itself at the Nth profile
-    event, as a SIGINT another thread receives is handled, whatever this
-    thread's mask holds. Each pass raises N until a run sends no SIGINT, so
-    every later N runs as the run with none sent did. Runs in its own
-    fixture process: it replaces those two functions on the signal module
-    and installs the profile hook while it runs, and puts them back after.
-    Returns EXIT_OK when every exit state matches its entry state, every run
-    that sent no SIGINT returns or raises what its body did, every run whose
-    SIGINT raised a KeyboardInterrupt ends in one, and every other run ends
-    in its body's outcome or a KeyboardInterrupt; else EXIT_FINDING, with a
-    failure line that counts each kind of fault."""
+    _watchdog_real_sigint_call, for seven entry states (Python's handler,
+    SIG_IGN and a Python function that returns, each with SIGINT unblocked,
+    the first two also with it blocked, that function with SIGINT blocked
+    and pending, and a Python function that raises SystemExit, as sys.exit
+    does, with SIGINT unblocked) and each way the body ends (it returns 0,
+    returns a failure, raises, or is ended by a real SIGINT): once with no
+    SIGINT sent, then with one SIGINT at one point of each run, in three
+    passes. The first pass sends it to this thread just before the Nth
+    signal.signal or signal.pthread_sigmask call the setup and the restore
+    make. The second sends it to this thread from a profile hook at the Nth
+    profile event of the call (the entry and return of each Python function,
+    and the start and end of each builtin call, in every frame from the
+    call's own entry to its return), so it also lands after the body has
+    ended and before the restore's first call, and at the entry of every
+    function the call makes. The third runs the installed Python handler
+    itself at the Nth profile event, as a SIGINT another thread receives is
+    handled, whatever this thread's mask holds; where SIG_IGN is installed
+    nothing runs, and the run counts as one with no SIGINT sent. Each pass
+    raises N until a run no longer reaches its Nth point, so every later N
+    runs as the run with none sent did. Runs in its own fixture process: it
+    replaces those two functions on the signal module and installs the
+    profile hook while it runs, and puts them back after. Returns EXIT_OK
+    when every exit state matches its entry state, every run that sent no
+    SIGINT returns or raises what its body did, every run whose SIGINT
+    raised an exception (a KeyboardInterrupt, or SystemExit from the
+    raising handler) ends in that exception, and every other run ends in its
+    body's outcome or a KeyboardInterrupt (or SystemExit, under the raising
+    handler, which a held SIGINT runs at the mask restore); else
+    EXIT_FINDING, with a failure line that counts each kind of fault."""
     import signal
     real_signal = signal.signal
     real_mask = signal.pthread_sigmask
@@ -2989,9 +3013,13 @@ def _watchdog_sigint_restore_case():
     def custom(signum, frame):
         return None
 
+    def exiting(signum, frame):
+        raise SystemExit(130)
+
     entries = (("python-handler", signal.default_int_handler, False, False),
                ("ignored", signal.SIG_IGN, False, False),
                ("custom", custom, False, False),
+               ("exiting", exiting, False, False),
                ("blocked", signal.default_int_handler, True, False),
                ("ignored-blocked", signal.SIG_IGN, True, False),
                ("pending", custom, True, True))
@@ -3009,23 +3037,33 @@ def _watchdog_sigint_restore_case():
     expected = {"pass": EXIT_OK, "fail": EXIT_FINDING}
     # The current run's injection: its pass, the signal calls or profile
     # events counted so far, the one to send the SIGINT at (None sends none),
-    # whether it was sent, and whether it raised a KeyboardInterrupt there:
-    # one that did must end the run, never be swallowed by the restore.
-    shot = {"pass": None, "count": 0, "at": None, "sent": False, "raised": False}
+    # whether the run reached it, whether a SIGINT was sent or a handler run
+    # there, and the name of the exception that raised there, if any: one
+    # that did must end the run, never be swallowed by the restore.
+    shot = {"pass": None, "count": 0, "at": None, "reached": False, "sent": False,
+            "raised": None}
 
     def fire():
         shot["count"] += 1
         if shot["count"] == shot["at"]:
+            shot["reached"] = True
+            handler = None
+            if shot["pass"] == "handler":
+                handler = signal.getsignal(signal.SIGINT)
+                if not callable(handler):
+                    # SIG_IGN is installed here: no handler runs, so nothing
+                    # is sent and the run must keep its body's own outcome.
+                    return
             shot["sent"] = True
             try:
-                if shot["pass"] != "handler":
+                if handler is None:
                     raise_sigint(signal.SIGINT)
-                elif callable(signal.getsignal(signal.SIGINT)):
+                else:
                     # A SIGINT another thread receives: its Python handler
                     # runs here whatever this thread's mask holds.
-                    signal.getsignal(signal.SIGINT)(signal.SIGINT, None)
-            except KeyboardInterrupt:
-                shot["raised"] = True
+                    handler(signal.SIGINT, None)
+            except BaseException as exc:
+                shot["raised"] = type(exc).__name__
                 raise
 
     def counting(real):
@@ -3044,9 +3082,10 @@ def _watchdog_sigint_restore_case():
     # Each kind of fault, with the runs that showed it in the order found.
     faults = {}
     runs = 0
-    # A bound on N far above what any pass reaches (Python 3.14.4 needed 8
-    # signal calls and 133 profile events at most), so a pass that never
-    # stops sending ends as a fault instead of looping.
+    # A bound on N far above what any pass reaches (under Python 3.14.4 the
+    # last N any run reached was 7 signal calls and 146 profile events), so
+    # a pass that never stops reaching its point ends as a fault instead of
+    # looping.
     limit = {"call": 64, "profile": 2048, "handler": 2048}
     sends = {"call": "SIGINT before signal call", "profile": "SIGINT at profile event",
              "handler": "handler run at profile event"}
@@ -3075,7 +3114,7 @@ def _watchdog_sigint_restore_case():
                                 "%s entry: %r" % (name, entry))
                             break
                         shot.update({"pass": kind, "count": 0, "at": inject or None,
-                                     "sent": False, "raised": False})
+                                     "reached": False, "sent": False, "raised": None})
                         runs += 1
                         try:
                             if kind != "call":
@@ -3087,6 +3126,8 @@ def _watchdog_sigint_restore_case():
                                 sys.setprofile(prior_profile)
                         except KeyboardInterrupt:
                             outcome = "KeyboardInterrupt"
+                        except SystemExit:
+                            outcome = "SystemExit"
                         except RuntimeError:
                             outcome = "RuntimeError"
                         shot["at"] = None
@@ -3095,8 +3136,14 @@ def _watchdog_sigint_restore_case():
                         want = ("KeyboardInterrupt" if pending or ending == "interrupt"
                                 else "RuntimeError" if ending == "raise"
                                 else expected[ending])
+                        # A SIGINT held until the mask restore runs the entry
+                        # handler, which raises SystemExit under "exiting".
+                        interruptions = (("KeyboardInterrupt", "SystemExit")
+                                         if handler is exiting else ("KeyboardInterrupt",))
                         where = "%s entry, body %s, %s" % (
                             name, ending, "%s %d" % (point, inject) if shot["sent"]
+                            else "no handler to run at profile event %d" % inject
+                            if shot["reached"]
                             else "no SIGINT sent (N %d)" % inject if inject
                             else "no SIGINT sent")
                         if after != entry:
@@ -3108,20 +3155,20 @@ def _watchdog_sigint_restore_case():
                                 faults.setdefault("wrong outcome", []).append(
                                     "%s: outcome %r, wanted %r" % (where, outcome, want))
                         elif shot["raised"]:
-                            if outcome != "KeyboardInterrupt":
-                                faults.setdefault("KeyboardInterrupt swallowed", []).append(
-                                    "%s: its KeyboardInterrupt was swallowed (outcome %r)"
-                                    % (where, outcome))
-                        elif outcome not in (want, "KeyboardInterrupt"):
+                            if outcome != shot["raised"]:
+                                faults.setdefault("exception swallowed", []).append(
+                                    "%s: its %s was swallowed (outcome %r)"
+                                    % (where, shot["raised"], outcome))
+                        elif outcome not in (want,) + interruptions:
                             faults.setdefault("wrong outcome", []).append(
-                                "%s: outcome %r, wanted %r or a KeyboardInterrupt"
-                                % (where, outcome, want))
-                        if inject and not shot["sent"]:
+                                "%s: outcome %r, wanted %r or one of %r"
+                                % (where, outcome, want, interruptions))
+                        if inject and not shot["reached"]:
                             break
                         inject += 1
                         if inject > limit[kind]:
-                            faults.setdefault("SIGINT still sent at the bound", []).append(
-                                "%s entry, body %s: %s %d still sent one"
+                            faults.setdefault("point still reached at the bound", []).append(
+                                "%s entry, body %s: %s %d still reached"
                                 % (name, ending, point, limit[kind]))
                             break
     finally:
