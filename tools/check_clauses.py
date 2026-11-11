@@ -165,6 +165,11 @@ LEGS (all run at the default step-1 invocation; none needs a manifest):
                         register) strictly EXCEEDS the cumulative maximum ordinal EVER used for that
                         corpus-id, taken from the register's born rows (which persist for dead ids too), so
                         a dead ordinal's gap can never be refilled below the historical maximum (m-A).
+  BORN ORDER (7.1):     each born clause-id's ordinal strictly EXCEEDS every ordinal a born row for the
+                        same corpus-id used EARLIER in the register's row order, whatever the releases, so
+                        a new row cannot take a never-used number below a higher one born at the same
+                        release (which CUMULATIVE-MAX, comparing only earlier releases, cannot see). A gap
+                        stays valid; only a number at or below an earlier one is refused.
   RESURRECTION (7.3):   the cumulative ever-retired id set is built FROM THE REGISTER; no id the inventory
                         asserts live (a clause-id or its corpus-id) equals any tombstoned or retired id.
   COMPLETENESS (7.3):   every id the inventory introduces has a born row; every retirement row's id has a
@@ -283,9 +288,9 @@ in-file legs alone; the cross-history and manifest legs cover it at the release 
 
 Exit convention (matches the repo's gates):
   0  clean, or a printed NOT APPLICABLE
-  1  a real finding (a scheme, per-row, cumulative-max, resurrection, completeness, or text-coverage
-     violation, including an uncovered rule sentence and a bad exemption, or an inventory row naming a
-     missing or non-UTF-8 source file, which is exactly what this gate asserts against)
+  1  a real finding (a scheme, per-row, cumulative-max, born-order, resurrection, completeness, or
+     text-coverage violation, including an uncovered rule sentence and a bad exemption, or an inventory
+     row naming a missing or non-UTF-8 source file, which is exactly what this gate asserts against)
   2  malformed or unreadable required input (the inventory, the register, the rules dir, the exemptions
      file, an unparseable or unreadable source, rule text the coverage splitter cannot classify, or a
      permission error), fail-closed: an input the gate cannot read never reads as clean.
@@ -457,6 +462,31 @@ def check_cumulative_max(born_clause_ids):
                             "ever used for corpus-id {!r} before its born-release (a dead ordinal's gap "
                             "must not be refilled below the historical maximum)".format(
                                 clause_id, ordinal, ceiling, corpus))
+    return findings
+
+
+def check_born_order(born_clause_ids):
+    """BORN ORDER (7.1 / 7.3). born_clause_ids is the list of (clause-id, born-release-tuple) pairs in the
+    register's own row order. Each born clause-id's ordinal must strictly exceed every ordinal a born row
+    for the same corpus-id used EARLIER in the register, whatever either row's release. CUMULATIVE-MAX
+    compares only rows born at an earlier release, so it cannot see a new row that takes a never-used
+    number below a higher one born at the same release (every row of an unreleased register shares one
+    born-release). The register is append-only, so a newly assigned number always comes after every number
+    its corpus-id already used. A gap (a number never assigned, such as an allocation withdrawn before
+    release) stays valid: only a number at or below an earlier one is refused. Ordinals are compared
+    NUMERICALLY. Returns a list of finding strings."""
+    findings = []
+    ceiling = {}
+    for clause_id, _born in born_clause_ids:
+        corpus, ordinal = split_clause_id(clause_id)
+        prior = ceiling.get(corpus)
+        if prior is not None and ordinal <= prior:
+            findings.append("clause-id {!r} (ordinal {}) is born after a born row for corpus-id {!r} that "
+                            "already used ordinal {} (a new number must exceed every number its corpus-id "
+                            "used earlier in the id-history register)".format(
+                                clause_id, ordinal, corpus, prior))
+        else:
+            ceiling[corpus] = ordinal
     return findings
 
 
@@ -1430,6 +1460,7 @@ def run(root, rules_dir, inventory_path, register_path, prev_inventory_path=None
         row_spans = {}
         findings += check_rows(root, rows, manifest_sources, rule_corpus_ids, rules_dir, row_spans)
         findings += check_cumulative_max(born_clause_ids)
+        findings += check_born_order(born_clause_ids)
         findings += check_register_integrity(born, retirements, successors)
         findings += check_resurrection(inventory_ids, retired_ids)
         completeness, na = check_completeness(inventory_ids, set(born), retired_rows, live_ids, prev_ids)
@@ -1451,8 +1482,8 @@ def run(root, rules_dir, inventory_path, register_path, prev_inventory_path=None
         for finding in sorted(set(findings)):
             print("  " + finding)
         return 1
-    print("PASS: clause-id scheme, per-row span/text/digest, cumulative-max ordinal, resurrection, "
-          "completeness, and text coverage all hold")
+    print("PASS: clause-id scheme, per-row span/text/digest, cumulative-max ordinal, born order, "
+          "resurrection, completeness, and text coverage all hold")
     return 0
 
 
@@ -1666,6 +1697,24 @@ def self_test_main(_mkdtemp=None, _vectors=True):  # noqa: C901  a flat sequence
     if not check_cumulative_max([("calpha.10", (1, 0, 0)), ("calpha.2", (1, 5, 0))]):
         failures.append("cumulative-max missed a later-release ordinal 2 below historical max 10 "
                         "(release-agnostic)")
+
+    # Born order: within one release a born row's ordinal must exceed every ordinal its corpus-id used
+    # earlier in the register. Boundary at the earlier maximum 19: 20 (just above) is clean, 19 (equal)
+    # and 18 (just below, a never-used number in a gap) are findings. A gap and another corpus-id's
+    # higher ordinal are clean, and the comparison is numeric (10 after 9).
+    same = (1, 1, 0)
+    if check_born_order([("calpha.17", same), ("calpha.19", same), ("calpha.20", same)]):
+        failures.append("born-order wrongly flagged ordinal 20 born after 19 (just above the maximum)")
+    if not check_born_order([("calpha.17", same), ("calpha.19", same), ("calpha.19", same)]):
+        failures.append("born-order missed ordinal 19 born after 19 (equal to the maximum)")
+    if not check_born_order([("calpha.17", same), ("calpha.19", same), ("calpha.18", same)]):
+        failures.append("born-order missed never-used ordinal 18 born after 19 (below the maximum)")
+    if check_born_order([("calpha.17", same), ("calpha.19", same), ("cbeta1.1", same), ("cbeta1.18", same)]):
+        failures.append("born-order wrongly flagged a gap, or compared across corpus-ids")
+    if check_born_order([("calpha.9", same), ("calpha.10", same)]):
+        failures.append("born-order wrongly flagged ordinal 10 after 9 (lexicographic trap)")
+    if not check_born_order([("calpha.10", same), ("calpha.2", same)]):
+        failures.append("born-order missed ordinal 2 after 10 (numeric compare)")
 
     if check_resurrection({"calpha", "calpha.1"}, {"cbeta1.9"}):
         failures.append("resurrection wrongly flagged a disjoint retired set")
@@ -2889,6 +2938,33 @@ def self_test_main(_mkdtemp=None, _vectors=True):  # noqa: C901  a flat sequence
             base = _fresh(rules, rows, born3, tombstones=tombs3, successors=succs3)
             if _run_quiet(**_paths(base)) != 0:
                 failures.append("same-release pass-through fold: expected exit 0")
+
+            # (55) born order, refused form: every row is born at 1.1.0, so CUMULATIVE-MAX has no earlier
+            # release to compare with. calpha.18 is appended after calpha.19 (a never-used number in a gap,
+            # below a number its corpus-id already used) -> exit 1 with a born-order finding.
+            lines, line_of = _rule_lines("calpha", ["ob seventeen", "ob nineteen", "ob new"])
+            digest = _sha_of(lines)
+            sp = ".aiqt/core/rules/calpha.md"
+
+            def _order_rows(new_id):
+                return [{"clause-id": cid, "corpus-id": "calpha", "source-path": sp,
+                         "start-line": line_of[k], "end-line": line_of[k], "canonical-text": text,
+                         "source-digest": digest}
+                        for k, (cid, text) in enumerate([("calpha.17", "ob seventeen"),
+                                                          ("calpha.19", "ob nineteen"), (new_id, "ob new")])]
+            born = [("calpha", "1.1.0"), ("calpha.17", "1.1.0"), ("calpha.19", "1.1.0"), ("calpha.18", "1.1.0")]
+            base = _fresh({"calpha": lines}, _order_rows("calpha.18"), born)
+            code, out = _run_capture(**_paths(base, genesis=True))
+            if code != 1 or "'calpha.18' (ordinal 18) is born after a born row" not in out:
+                failures.append("born order: a never-used ordinal 18 born after 19 at the same release "
+                                "expected exit 1 with a born-order finding, got {}".format(code))
+
+            # (56) born order, accepted form: the same corpus with the new row numbered 20 (above every
+            # earlier number) passes, and the gap at 18 left by a number never assigned stays valid.
+            born = [("calpha", "1.1.0"), ("calpha.17", "1.1.0"), ("calpha.19", "1.1.0"), ("calpha.20", "1.1.0")]
+            base = _fresh({"calpha": lines}, _order_rows("calpha.20"), born)
+            if _run_quiet(**_paths(base, genesis=True)) != 0:
+                failures.append("born order: ordinal 20 born after 19 with a gap at 18 expected exit 0")
             # (54) TEXT COVERAGE: every sentence or clause of a rule body lies inside a clause row or a
             # recorded exemption. _cover builds a one-rule corpus whose rows cover the listed (line index,
             # text) pairs, each with its born row, optionally writes an exemptions file, and returns
@@ -3153,7 +3229,8 @@ def self_test_main(_mkdtemp=None, _vectors=True):  # noqa: C901  a flat sequence
           "manifest leg, padded-ordinal fail-closed, duplicate id, missing corpus-id, span out of "
           "range (the span diagnostic itself, alone and beside a valid covering row), text mismatch, "
           "digest mismatch, missing born row, resurrected id, cumulative-max "
-          "fail, lexicographic-trap pass, unexplained disappearance, the fail-closed register cases, "
+          "fail, lexicographic-trap pass, born-order fail (a never-used number below an earlier one "
+          "at the same release) and gap pass, unexplained disappearance, the fail-closed register cases, "
           "the Model C sub-line pass, multi-line embedded-LF pass, absent-text fail, twice-in-window "
           "fail, untight-window fail, and empty-canonical-text fail; and the round-2 fixes: "
           "cumulative-max unrelated-tombstone bypass fail, leading/trailing-newline tightness fails, "
