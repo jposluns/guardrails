@@ -5234,8 +5234,8 @@ def _watchdog_tree_vectors():
     NEVER pass, each run through the real completion case and the runner's
     own verdict mapping. Each vector names a predicate over the facts the
     exercise recorded that says whether its forced schedule was ESTABLISHED
-    on this host. Raises AssertionError when a schedule was accepted or
-    refused for the wrong reason, and when a schedule that WAS established
+    on this host. Raises AssertionError when a schedule was refused for the
+    wrong reason, and when a schedule that WAS established was accepted or
     drew another cause (a code regression, never read as host scheduling).
     Returns False (after printing the _WATCHDOG_CANNOT_EVALUATE marker)
     only when a vector's schedule was not established on this host."""
@@ -5279,12 +5279,17 @@ def _watchdog_tree_vectors():
                              "leg reported %s)" % (label, facts, got))
 
     def expect_unevaluated(label, phrase, established, mode, **tree):
+        # A pass, a failure or a CANNOT-EVALUATE for another cause is a code
+        # regression only when the vector's schedule was established;
+        # otherwise the schedule was not established on this host, and the
+        # vector holds no verdict.
         facts = {}
         verdict, out = run(mode, tree, facts)
         if verdict != "cannot-evaluate":
-            raise AssertionError("tree vector %s: %s, not CANNOT-EVALUATE: %r" % (label, verdict, out))
-        if phrase not in out:
-            unexplained(label, established, facts, repr(out.strip()))
+            out = "%s, not CANNOT-EVALUATE: %s" % (verdict, out)
+        elif phrase in out:
+            return
+        unexplained(label, established, facts, repr(out.strip()))
 
     def expect_failure(label, phrase, established, mode, **tree):
         # A pass or a CANNOT-EVALUATE is a code regression only when the
@@ -5478,6 +5483,59 @@ def _watchdog_tree_vectors():
               + "; ".join(unestablished) + ")")
         return False
     return True
+
+
+def _watchdog_tree_vector_mapping():
+    """Red-on-revert pins for how _watchdog_tree_vectors maps a vector that
+    must be CANNOT-EVALUATE, with every completion case scripted (no
+    fixture is launched). A scripted case that records no facts and ends in
+    a pass or a failure, so that no schedule was established, leaves the
+    leg with no verdict (the marker names the vector), never a definite
+    failure; the same pass or failure once that vector's schedule WAS
+    established stays a definite failure naming the established schedule.
+    The failure input is scripted only: the tree modes return EXIT_OK (a
+    pass or the CANNOT-EVALUATE marker) or raise, so a real run never hands
+    this mapping a failure. Returns a list of the discrepancies."""
+    import contextlib
+    import io
+    from unittest.mock import patch
+    misses = []
+
+    def scripted(rc, established_order):
+        # Records the eof-after-snapshot/timeout vector's established
+        # schedule (its predicate's three facts) only for that order; every
+        # other case records nothing, so no other schedule is established.
+        def case(mode, tree=None):
+            if established_order and tree.get("order") == established_order:
+                tree["facts"].update({"snapshot": True, "receipt-timed-out": False,
+                                      "collected-early": False})
+            return rc
+        return case
+
+    for rc in (EXIT_OK, EXIT_FINDING):
+        for established_order in (None, "eof-after-snapshot"):
+            buffer = io.StringIO()
+            with patch.object(sys.modules[__name__], "_watchdog_completion_case",
+                              scripted(rc, established_order)), \
+                    contextlib.redirect_stdout(buffer):
+                try:
+                    got = _watchdog_tree_vectors()
+                except AssertionError as exc:
+                    got = str(exc)
+            out = buffer.getvalue()
+            if established_order is None:
+                if got is not False or not out.startswith(_WATCHDOG_CANNOT_EVALUATE) \
+                        or "cleanup-first/timeout: schedule not established" not in out:
+                    misses.append("tree vectors with no facts recorded (exit %r, nothing "
+                                  "established) -> %r, printed %r, want no verdict"
+                                  % (rc, got, out))
+            elif not (isinstance(got, str)
+                      and "eof-after-snapshot/timeout: its schedule was established" in got
+                      and "not CANNOT-EVALUATE" in got):
+                misses.append("tree vectors with the eof-after-snapshot/timeout schedule "
+                              "established and exit %r -> %r, want its definite failure"
+                              % (rc, got))
+    return misses
 
 
 def _watchdog_completion_case(mode, tree=None):
@@ -16809,6 +16867,7 @@ def _watchdog_regression_self_test():
     flip_missed.extend(_watchdog_closeout_vectors())
     flip_missed.extend("startup diagnosis %r -> %r, want %r" % miss
                        for miss in _watchdog_startup_vectors())
+    flip_missed.extend(_watchdog_tree_vector_mapping())
     floor = _watchdog_bound_faults(live, budgets)
     if floor or flip_missed:
         print("opf watchdog regressions: FAIL (process bound below a leg's own budget: %s; "
