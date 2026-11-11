@@ -4137,6 +4137,109 @@ def _test_wait_loop_deny_text(failures, tmp):
                         "restored for the poll loop the row must go red, got {!r}".format(flipped))
     _wait_loop_overmatch_rows(failures, root)
     _wait_loop_fallback_rows(failures, root)
+    _wait_loop_background_rows(failures, root, tmp)
+
+
+# A background poll loop whose probe is piped into a truncating sink: the truncating-sink deny (run it
+# foreground) would offer the loop again, so the guard must give the wait-loop exits before that deny.
+_WAIT_LOOP_HEAD_PIPE_COMMAND = "while true; do gh run view 1 | head -n 5; sleep 30; done &"
+
+
+def _guard_background_reason(root, command):
+    """orch_truncation_guard's (verdict, reason) on command sent as a background dispatch with cwd root."""
+    code, stdout_obj, _stderr = aiqt_hooks.orch_truncation_guard(
+        {"hook_event_name": aiqt_hooks.PRETOOL, "tool_name": "Bash", "cwd": str(root),
+         "tool_input": {"command": command, "run_in_background": True}})
+    out = stdout_obj or {}
+    reason = out.get("hookSpecificOutput", {}).get("permissionDecisionReason") or out.get("systemMessage") or ""
+    return _reduce_result(code, stdout_obj), " ".join(str(reason).split()).lower()
+
+
+def _background_lex_count(root, command):
+    """How many times orch_truncation_guard calls _lex_readings on command sent as a background dispatch."""
+    saved = aiqt_hooks._lex_readings
+    calls = []
+
+    def counted(*args, **kwargs):
+        calls.append(1)
+        return saved(*args, **kwargs)
+    aiqt_hooks._lex_readings = counted
+    try:
+        _guard_background_reason(root, command)
+    finally:
+        aiqt_hooks._lex_readings = saved
+    return len(calls)
+
+
+def _wait_loop_background_rows(failures, root, tmp):
+    """orch_truncation_guard on background dispatches (run_in_background true) in registry scope at root.
+
+    (1) Each _WAIT_LOOP_FALLBACK_LOOP_ROWS command (a poll loop with a '#' the lexer cannot judge, which the
+    wait-loop hook denies with its exits through its text-scan fallback) must take the hedged uncertain-'#'
+    deny: _wait_loop_deny_text_faults finds nothing and the reason carries the hedge. Its flip reads the
+    fallback as 'none', which restores the unhedged uncertain-'#' text, and the row must go red.
+    (2) A poll loop whose probe is piped into head must take the wait-loop exits, not the truncating-sink
+    deny; its flip finds no lexed loop, which restores the sink deny, and the row must go red.
+    (3) One lex: the nest_cmdsubst_amp_background shape (alone, and with the poll shape's words appended)
+    is lexed once, so a revert of the shared lex (two lexes) goes red; a matching poll loop is lexed twice.
+    (4) The background detach deny, and the no-registry note, say that unless the command waits for the
+    child it can run on untracked, and that this guard does not read whether a wait follows."""
+    guard = aiqt_hooks.orch_truncation_guard
+    for label, command in _WAIT_LOOP_FALLBACK_LOOP_ROWS:
+        faults = _wait_loop_deny_faults(guard, root, command, background=True)
+        if _WAIT_LOOP_HEDGE_PHRASE not in _guard_background_reason(root, command)[1]:
+            faults.append("the reason lacks the hedge ({!r})".format(_WAIT_LOOP_HEDGE_PHRASE))
+        if faults:
+            failures.append("(wl-deny-text-background-hash-{}) the truncation guard's background deny of a poll "
+                            "loop with a '#' the lexer cannot judge is wrong: {}".format(label, "; ".join(faults)))
+        saved_bg = aiqt_hooks._orch_bg_poll_loop
+        aiqt_hooks._orch_bg_poll_loop = lambda cmd: "none"
+        try:
+            flipped = _wait_loop_deny_faults(guard, root, command, background=True)
+        finally:
+            aiqt_hooks._orch_bg_poll_loop = saved_bg
+        if not any("do not resubmit the loop" in fault for fault in flipped):
+            failures.append("(wl-deny-text-background-hash-{}-flip) with the unhedged uncertain-'#' text "
+                            "restored the row must go red, got {!r}".format(label, flipped))
+    command = _WAIT_LOOP_HEAD_PIPE_COMMAND
+    if not aiqt_hooks._orch_detach_poll_loop(command):
+        failures.append("(wl-deny-text-background-head-cannot-evaluate) the lexer no longer reads the piped "
+                        "poll loop as one, so the row below tests nothing")
+    else:
+        for label, handler in (("wait-loop", aiqt_hooks.orch_untracked_wait_loop), ("truncation-guard", guard)):
+            faults = _wait_loop_deny_faults(handler, root, command, background=True)
+            if faults:
+                failures.append("(wl-deny-text-background-head) the {} deny of a background poll loop piped "
+                                "into head is wrong: {}".format(label, "; ".join(faults)))
+        saved_poll = aiqt_hooks._orch_detach_poll_loop
+        aiqt_hooks._orch_detach_poll_loop = lambda cmd: False
+        try:
+            flipped = _wait_loop_deny_faults(guard, root, command, background=True)
+        finally:
+            aiqt_hooks._orch_detach_poll_loop = saved_poll
+        if not any("generic detach advice" in fault for fault in flipped):
+            failures.append("(wl-deny-text-background-head-flip) with the truncating-sink deny restored for the "
+                            "piped poll loop the row must go red, got {!r}".format(flipped))
+    nest = _DEADLINE_SHAPES["nest_cmdsubst_amp_background"](3000, root)[1]["command"]
+    for label, command, expected in (("nest", nest, 1), ("nest-poll-words", nest + " sleep 1 # while done", 1),
+                                     ("poll-loop", _WAIT_LOOP_DENY_COMMAND, 2)):
+        count = _background_lex_count(root, command)
+        if count != expected:
+            failures.append("(bg-lex-count-{}) the truncation guard lexed the background command {} time(s), "
+                            "expected {}".format(label, count, expected))
+    verdict, reason = _guard_background_reason(root, "sleep 5 &")
+    for phrase in ("unless the command waits for the child", "does not read whether a wait follows"):
+        if verdict != "deny" or phrase not in reason:
+            failures.append("(bg-detach-wording) the background detach deny must deny and say {!r}, got {} "
+                            "{!r}".format(phrase, verdict, reason[:200]))
+    bare = tmp / "bg-detach-no-registry"
+    bare.mkdir(parents=True, exist_ok=True)
+    verdict, reason = _guard_background_reason(bare, "sleep 5 &")
+    for phrase in ("unless the command waits for the child", "does not read whether a wait follows",
+                   "no orchestration registry was found"):
+        if verdict != "allow-note" or phrase not in reason:
+            failures.append("(bg-detach-note-wording) the no-registry background detach note must allow with a "
+                            "note saying {!r}, got {} {!r}".format(phrase, verdict, reason[:200]))
 
 
 # A detach whose '#' the shared lexer cannot judge under both readings, with the poll shape's words only in
@@ -6319,8 +6422,8 @@ _DEADLINE_SHAPES = {
     # A background dispatch of repeated bare-'&' detaches: the sink read lexes it once and the detach detector
     # reads that lex's segments.
     "amp_background": lambda n, base: ("Bash", {"command": _repeat("true & ", n), "run_in_background": True}),
-    # Nested command substitutions with a trailing bare '&' in a background dispatch: the costliest lex shape
-    # this guard meets, which the sink read and the detach detector would each lex without the shared lex.
+    # Nested command substitutions with a trailing bare '&' in a background dispatch, which the sink read and
+    # the detach detector would each lex without the shared lex (bg-lex-count-nest pins the one lex).
     "nest_cmdsubst_amp_background": lambda n, base: ("Bash", {"command": "echo " + "$(" * (n // 3 - 4) + "true"
                                                               + ")" * (n // 3 - 4) + " &",
                                                               "run_in_background": True}),
