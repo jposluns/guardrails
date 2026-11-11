@@ -18226,6 +18226,12 @@ _RECORDS_WRITERS_MAX_BYTES = 65536
 _RECORDS_WRITERS_MAX_DEPTH = 256
 _RECORDS_WRITER_SINKS = frozenset(("head", "tail"))
 _RECORDS_WRITER_SINK_RE = re.compile(r"(?<![A-Za-z0-9_.-])(?:head|tail)(?![A-Za-z0-9_.-])")
+# A sink stage run under a wrapper (| command head, | stdbuf -oL head, | sudo head, | exec head, | xargs head):
+# the note tier's wrapper list and xargs, which runs its operand command on the piped text.
+_RECORDS_WRITER_SINK_WRAPPERS = frozenset(_GATE_NOTE_WRAPPERS | {"xargs"})
+# The bounds of the substitution-body reading (_records_writer_subst_readings): nesting depth and body count.
+_RECORDS_WRITER_SUBST_DEPTH = 4
+_RECORDS_WRITER_SUBST_BODIES = 64
 
 
 def _records_writers_validate(data):
@@ -18341,10 +18347,15 @@ def _records_writers_load(data):
 
 
 def _records_writer_match(argv, writers):
-    """The declared writer prefix the command of a segment's argv begins with, or None. Leading assignments
-    and the env, nice, timeout and time wrappers are peeled (_gate_peel, ordinary mode); where a wrapper option
-    is outside that grammar the command word cannot be placed, so a prefix starting at ANY word counts (a
-    disclosed over-block). Words are compared exactly as the lexer decoded them, case-sensitively."""
+    """The declared writer prefix the command of a segment's argv begins with, or None. Leading reserved words
+    that a command follows (_COMMAND_LEAD_WORDS: !, {, if, then, elif, else, do, while, until), then leading
+    assignments and the env, nice, timeout and time wrappers are peeled (_gate_peel, ordinary mode); where a
+    wrapper option is outside that grammar the command word cannot be placed, so a prefix starting at ANY word
+    counts (a disclosed over-block). Words are compared exactly as the lexer decoded them, case-sensitively."""
+    lead = 0
+    while lead < len(argv) and argv[lead] in _COMMAND_LEAD_WORDS:
+        lead += 1
+    argv = argv[lead:]
     peeled = _gate_peel(argv)
     candidates = [peeled] if peeled is not None else [argv[k:] for k in range(len(argv))]
     for words in candidates:
@@ -18357,10 +18368,13 @@ def _records_writer_match(argv, writers):
 def _records_writer_sink(records, writers):
     """(writer prefix, sink word) for the first segment that runs a declared writer and pipes ('|' or '|&') its
     output, directly or through pass-through stages (_gate_plain_filter: cat, tee, tr, uniq; a tee does not
-    exempt), into a stage whose command word is head or tail, whatever its options or operands; else None. An
-    empty segment a line continuation leaves after a pipe is skipped. Redirections are not read: a head with
-    a file operand or a stdin redirection, or a writer whose stdout is redirected, still denies (a disclosed
-    over-block where the sink does not read the writer's output). Any other stage ends the walk."""
+    exempt), into a stage whose command word is head or tail, whatever its options or operands; else None. A
+    stage whose command word is a wrapper (_RECORDS_WRITER_SINK_WRAPPERS: command, exec, stdbuf, sudo, xargs
+    and the like) counts as a sink when any later word of it is head or tail, an operand included (a
+    disclosed over-block: xargs grep head denies). An empty segment a line continuation leaves after a pipe is
+    skipped. Redirections are not read: a head with a file operand or a stdin redirection, or a writer whose
+    stdout is redirected, still denies (a disclosed over-block where the sink does not read the writer's
+    output). Any other stage ends the walk."""
     n = len(records)
     for i, seg in enumerate(records):
         if not seg.argv or seg.sep_after not in _GATE_PIPES:
@@ -18379,6 +18393,11 @@ def _records_writer_sink(records, writers):
                 argv = stage.argv[_command_word_index(stage.argv):]
             if argv and _gate_word(argv[0]) in _RECORDS_WRITER_SINKS:
                 return writer, _gate_word(argv[0])
+            if argv and _gate_word(argv[0]) in _RECORDS_WRITER_SINK_WRAPPERS:
+                sink = next((_gate_word(word) for word in argv[1:] if _gate_word(word) in _RECORDS_WRITER_SINKS),
+                            None)
+                if sink is not None:
+                    return writer, sink
             if stage.sep_after not in _GATE_PIPES or not _gate_plain_filter(stage.argv):
                 break
     return None
@@ -18408,10 +18427,43 @@ def _records_writer_deny(writer, sink, path):
         "exit status and re-read the record.".format(sink))
 
 
+def _records_writer_subst_readings(command, readings):
+    """The readings of the command substitution bodies a parsed command's lex keeps inside one word (a
+    double-quoted "$(...)" or a backquoted body, which the lexer does not split into segments), each body
+    lexed on its own (_lex_readings), read to _RECORDS_WRITER_SUBST_DEPTH levels of nesting and at most
+    _RECORDS_WRITER_SUBST_BODIES bodies. A body the lexer cannot read is returned as text (a str) for the
+    raw-text test. A single-quoted word spelling '$(' is read the same way (a disclosed over-block)."""
+    out = []
+    work = [(body, 1) for _start, body in _backquote_bodies(command)]
+    work += [(word, 0) for reading in readings for seg in reading for word in seg.argv if "$(" in word]
+    seen = 0
+    while work and seen < _RECORDS_WRITER_SUBST_BODIES:
+        text, depth = work.pop()
+        seen += 1
+        bodies = [text] if depth else []
+        at = text.find("$(")
+        while at >= 0:
+            bodies.append(text[at + 2:])
+            at = text.find("$(", at + 2)
+        for body in bodies:
+            try:
+                lexed = _lex_readings(body)
+            except ValueError:
+                out.append(body)
+                continue
+            out.extend(lexed)
+            if depth < _RECORDS_WRITER_SUBST_DEPTH:
+                work += [(word, depth + 1) for reading in lexed for seg in reading for word in seg.argv
+                         if "$(" in word or "`" in word]
+                work += [(inner, depth + 1) for _start, inner in _backquote_bodies(body)]
+    return out
+
+
 def _records_writer_unreadable_deny(command_doubt, detail, path):
-    """The fail-closed deny when the records-writer check cannot be evaluated: the declaration (or the cwd
-    that locates it) cannot be read, or, with writers declared, the command cannot be lexed and its text names
-    a writer and a head or tail word."""
+    """The fail-closed deny when the records-writer check cannot be evaluated: the declaration found at path
+    cannot be read (a cwd from which none can be looked for never reaches here; _records_writers_load), or,
+    with writers declared, the command or a substitution body cannot be lexed and its text names a writer and
+    a head or tail word."""
     if command_doubt:
         return _deny(
             "AIQT rule gatdis (gate-discipline): records writers are declared in {}, and this command could not "
@@ -18421,34 +18473,42 @@ def _records_writer_unreadable_deny(command_doubt, detail, path):
                 path, _RECORDS_WRITER_GUIDANCE),
             "AIQT guardrail: denied an unparseable command naming a declared records writer and head or tail "
             "(rule gatdis, fail-closed).")
-    where = path if path is not None else "the session's working directory"
     return _deny(
         "AIQT rule gatdis (gate-discipline): the records-writer declaration check could not be evaluated: {} "
         "({}). Every Bash call is denied fail-closed until it can be. Repair or remove the file with the Edit or "
         "Write tool: it must be a regular UTF-8 TOML file of at most {} bytes holding exactly version = 1 and "
         "writers = [[\"word\", ...], ...] (each entry a nonempty array of nonempty literal words, no "
-        "duplicates); writers = [] declares none.".format(where, detail, _RECORDS_WRITERS_MAX_BYTES),
+        "duplicates); writers = [] declares none.".format(path, detail, _RECORDS_WRITERS_MAX_BYTES),
         "AIQT guardrail: denied a Bash call because the records-writer declaration could not be read (rule "
         "gatdis, fail-closed).")
 
 
-def _records_writer_verdict(data, readings, command=None):
+def _records_writer_verdict(data, readings, command=None, parsed=None):
     """The records-writer outcome gate_weakening decides only after every other deny it holds, or None: ("bad",
     detail, path) when the governing declaration is found but cannot be read; ("deny", writer, sink, path) when
-    a declared writer is piped into head or tail in any of readings (each a list of segment records); ("doubt",
-    path) when command, the raw text of an unparseable command (None on a parsed one), names a writer's command
-    word and head or tail; else None, which includes no declaration, an empty one, and an unlocatable one
+    a declared writer is piped into head or tail in any of readings (each a list of segment records) or, on a
+    parsed command (parsed, its raw text), in a substitution body its lex keeps inside one word
+    (_records_writer_subst_readings); ("doubt", path) when command, the raw text of an unparseable command
+    (None on a parsed one), or a substitution body the lexer cannot read, names a writer's command word and
+    head or tail; else None, which includes no declaration, an empty one, and an unlocatable one
     (_records_writers_load), so an adopter with no declaration sees no change."""
     state, value, path = _records_writers_load(data)
     if state == "bad":
         return ("bad", value, path)
     if state != "ok" or not value:
         return None
+    unread = []
+    if parsed is not None:
+        extra = _records_writer_subst_readings(parsed, readings)
+        unread = [body for body in extra if isinstance(body, str)]
+        readings = list(readings) + [body for body in extra if not isinstance(body, str)]
     for records in readings:
         hit = _records_writer_sink(records, value)
         if hit is not None:
             return ("deny", hit[0], hit[1], path)
     if command is not None and _records_writer_named(command, value):
+        return ("doubt", path)
+    if any(_records_writer_named(body, value) for body in unread):
         return ("doubt", path)
     return None
 
@@ -19038,8 +19098,9 @@ def gate_weakening(data):
     # After every other deny, the records-writer check (_records_writer_verdict): a declared records writer
     # piped into head or tail denies on any reading (each reading of an uncertain '#' is judged on its own),
     # foreground or background alike, before any note or allow; a declaration found but unreadable denies
-    # fail-closed here too, so no existing deny's reason changes.
-    rw = _records_writer_verdict(data, readings)
+    # fail-closed here too, so no existing deny's reason changes. The substitution bodies the lex keeps inside
+    # one word ("$(...)", a backquoted body) are lexed and read too.
+    rw = _records_writer_verdict(data, readings, parsed=command)
     if rw is not None:
         return _records_writer_verdict_deny(rw)
     if pending_note is not None:

@@ -11238,6 +11238,26 @@ _RW_DENY_ROWS = (
     ("rw-d-uniq", "recordctl write | uniq | head"),
     ("rw-d-file-operand", "recordctl write | head /abs/other"),
     ("rw-d-stdout-redirected", "recordctl write > /abs/log | head"),
+    # Behind a reserved word, inside a compound command, and inside a substitution body the lex keeps in one
+    # word: a conditional or loop gives no exemption.
+    ("rw-d-if", "if recordctl write | head; then :; fi"),
+    ("rw-d-bang", "! recordctl write | head"),
+    ("rw-d-while", "while recordctl write | head; do :; done"),
+    ("rw-d-until", "until recordctl write | head; do :; done"),
+    ("rw-d-for-do", "for i in 1; do recordctl write | head; done"),
+    ("rw-d-then", "if true; then recordctl write | head; fi"),
+    ("rw-d-group", "{ recordctl write | head; }"),
+    ("rw-d-subst-dquoted", "echo \"$(recordctl write | head)\""),
+    ("rw-d-subst-backquoted", "echo `recordctl write | head`"),
+    ("rw-d-subst-backquoted-dquoted", "echo \"a `recordctl write | tail` b\""),
+    ("rw-d-subst-nested", "echo \"$(echo \"$(recordctl write | head)\")\""),
+    ("rw-d-subst-unquoted", "x=$(recordctl write | head)"),
+    # A sink stage under a wrapper.
+    ("rw-d-sink-command", "recordctl write | command head"),
+    ("rw-d-sink-stdbuf", "recordctl write | stdbuf -oL head -n 1"),
+    ("rw-d-sink-sudo", "recordctl write | sudo -u x head"),
+    ("rw-d-sink-exec", "recordctl write | exec head"),
+    ("rw-d-sink-xargs", "recordctl write | xargs tail"),
 )
 # Commands the lexer cannot read: a complete offending pipeline before the failure denies, and text naming a
 # writer's command word with head or tail denies as cannot-evaluate.
@@ -11262,6 +11282,9 @@ _RW_ALLOW_ROWS = (
     ("rw-a-separate-and", "recordctl write && tail -n 5 /abs/record"),
     ("rw-a-unknown-filter", "recordctl write | grep x | head"),
     ("rw-a-unparsed-unnamed", "echo \"x; ls | head"),
+    ("rw-a-echo-if", "echo if recordctl write | head"),
+    ("rw-a-subst-other", "echo \"$(recordctl read | head)\""),
+    ("rw-a-sink-wrapper-other", "recordctl write | stdbuf -oL wc -l"),
 )
 _RW_DECLARATION = 'version = 1\nwriters = [["recordctl", "write"], ["python3", "/abs/tools/update_records.py"]]\n'
 
@@ -11269,11 +11292,14 @@ _RW_DECLARATION = 'version = 1\nwriters = [["recordctl", "write"], ["python3", "
 def _test_records_writers(failures, tmp):
     """(rw-*) The records-writer check of gate_weakening: the deny matrix (both sinks, '|' and '|&', options,
     absolute sink paths, foreground flag absent, false and true, wrappers, assignments, quoting, pass-through
-    stages, earlier commands), each deny row red with the check removed (the pipeline walk and the
-    unparsed-text test patched to find nothing), the false-positive controls and allowed routes, the
-    declaration's discovery and its fail-closed reads (malformed, invalid UTF-8, wrong types, unknown keys,
-    duplicate or empty entries, oversized, symlink, directory, unreadable via an injected read fault, a cwd
-    that is relative, missing or not a directory), nested precedence, and the dispatcher path."""
+    stages, earlier commands, reserved words and compound commands, substitution bodies, wrapped sinks), each
+    deny row red with the check removed (the pipeline walk and the unparsed-text test patched to find
+    nothing), the false-positive controls and allowed routes, the declaration's discovery and its fail-closed
+    reads (malformed, invalid UTF-8, wrong types, unknown keys, duplicate or empty entries, oversized,
+    symlink, directory, unreadable via an injected read fault), the cwds from which no declaration can be
+    looked for (not a string, empty, relative, an lstat fault on a candidate), which decide as with no cwd,
+    the missing or non-directory absolute cwd walked from its existing ancestors, nested precedence, and the
+    dispatcher path."""
     base = tmp / "records-writers"
     proj = base / "proj"
     (proj / ".aiqt").mkdir(parents=True, exist_ok=True)
@@ -11482,17 +11508,55 @@ def _test_records_writers(failures, tmp):
 
 # (rw-k-*) Existing gate_weakening denies whose reason the records-writer check must never change: each command
 # is judged with no cwd key (the baseline, which looks for no declaration) and under each cwd the rows name, and
-# the decision must equal the baseline exactly. They cover the parsed path, the ordinary parse failure (a
-# here-string), the bypass the unread text names, and the uncertain '#' path.
+# the decision must equal the baseline exactly. They cover the parsed path (a run-time word included), the
+# ordinary parse failure (a here-string or a process substitution, with a run-time word or a closed-grammar
+# refusal beside a declared writer), the bypass the unread text names, and the uncertain '#' path (the
+# rw-k-hash-* rows; rw-k-hash itself fails as an ordinary parse error and denies as a git alias, and
+# rw-k-hash-named-grammar names a writer and head with no pipe, so of that branch's denies only the closed
+# grammar's decides it ahead of the check).
 _RW_KEEP_COMMANDS = (
     ("rw-k-noverify", "git commit --no-verify -m x"),
     ("rw-k-alias", "git -c alias.l=log l"),
     ("rw-k-sink", "pytest | head"),
     ("rw-k-writer-noverify", "recordctl write | head; git commit --no-verify -m x"),
+    ("rw-k-runtime", "recordctl write | head; $G commit -nv"),
     ("rw-k-unparsed-noverify", "git commit --no-verify -m x <<<y"),
     ("rw-k-unparsed-alias", "git <<<x -c alias.l=log l"),
     ("rw-k-unparsed-unread", "recordctl write | head; cat <<<x; git commit --no-verify -m y"),
+    ("rw-k-unparsed-runtime", "recordctl write | head; $G commit -nv <<<x"),
+    ("rw-k-unparsed-grammar", "recordctl write | head; git push origin \"$b\" <<<x"),
     ("rw-k-hash", "cat <(a)#; git -C \"a b\" $X l"),
+    ("rw-k-hash-writer", "ls `#x`; recordctl write | head"),
+    ("rw-k-hash-grammar", "ls `#x`; git push origin \"$b\""),
+    ("rw-k-hash-named-grammar", "ls `#x`; recordctl write; head x; git push origin $b"),
+)
+# The '#' rows that must reach the uncertain '#' branch: the lex raises _UncertainHashError on each.
+_RW_KEEP_HASH_LABELS = ("rw-k-hash-writer", "rw-k-hash-grammar", "rw-k-hash-named-grammar")
+# Source mutants of the hook, each moving or loosening one placement of the records-writer check, and the
+# rw-k row that must change its decision under the declared cwd when that mutant is loaded: (name, row label,
+# ((anchor, replacement), ...)). Each anchor must occur exactly once in the live hook source.
+_RW_PLACEMENT_MUTANTS = (
+    ("parsed-before-runtime", "rw-k-runtime", (
+        ("    runtime_hit = _gate_runtime_bypass(command)\n    if runtime_hit is not None:\n",
+         "    rw = _records_writer_verdict(data, readings, parsed=command)\n    if rw is not None:\n"
+         "        return _records_writer_verdict_deny(rw)\n"
+         "    runtime_hit = _gate_runtime_bypass(command)\n    if runtime_hit is not None:\n"),)),
+    ("unparsed-no-runtime-guard", "rw-k-unparsed-runtime", (
+        (" and _gate_runtime_bypass(command) is None):\n                return _records_writer_verdict_deny(rw)",
+         "):\n                return _records_writer_verdict_deny(rw)"),)),
+    ("unparsed-no-grammar-guard", "rw-k-unparsed-grammar", (
+        ("\n                    and _gate_closed_grammar_scan(command) is None and _gate_runtime_bypass",
+         "\n                    and _gate_runtime_bypass"),)),
+    ("hash-first", "rw-k-hash-writer", (
+        ("        if _hash_doubt_opaque(command):\n            return _hash_doubt_opaque_deny(\"gatdis",
+         "        rw = _records_writer_verdict(data, [recovered], command)\n        if rw is not None:\n"
+         "            return _records_writer_verdict_deny(rw)\n"
+         "        if _hash_doubt_opaque(command):\n            return _hash_doubt_opaque_deny(\"gatdis"),)),
+    ("hash-before-grammar", "rw-k-hash-named-grammar", (
+        ("        # The closed literal grammar reads the raw text and needs no lex, so it judges this command as it\n",
+         "        rw = _records_writer_verdict(data, [recovered], command)\n        if rw is not None:\n"
+         "            return _records_writer_verdict_deny(rw)\n"
+         "        # The closed literal grammar reads the raw text and needs no lex, so it judges this command as it\n"),)),
 )
 
 
@@ -11558,6 +11622,40 @@ def _test_records_writers_existing(failures, proj, sub, bad_dir, bad, decl):
     if not any(line.startswith("(rw-k-unparsed-unread-declared)") for line in flipped):
         failures.append("(rw-k-flip-unparsed) the pinned check order keeps the unread-text bypass deny under a "
                         "valid declaration, so the rw-k rows do not prove the unparsed placement")
+    for label, command in _RW_KEEP_COMMANDS:
+        if label not in _RW_KEEP_HASH_LABELS:
+            continue
+        try:
+            aiqt_hooks._lex_readings(command)
+            raised = None
+        except ValueError as exc:
+            raised = exc
+        if not isinstance(raised, aiqt_hooks._UncertainHashError):
+            failures.append("({}-reach) {!r} must raise _UncertainHashError so the row reaches the uncertain '#' "
+                            "branch; got {!r}".format(label, command, raised))
+    # Each placement mutant changes the decision of its own row, so the rows pin every placement.
+    source = Path(aiqt_hooks.__file__).read_text(encoding="utf-8")
+    base = proj.parent / "rw-mutants"
+    base.mkdir(exist_ok=True)
+    for name, label, edits in _RW_PLACEMENT_MUTANTS:
+        text = source
+        for anchor, replacement in edits:
+            if text.count(anchor) != 1:
+                failures.append("(rw-k-mutant-anchor-{}) the mutant anchor {!r} occurs {} times in the hook "
+                                "source, expected once".format(name, anchor, text.count(anchor)))
+                break
+            text = text.replace(anchor, replacement)
+        else:
+            module_name = "rw_mutant_" + name.replace("-", "_")
+            path = base / (module_name + ".py")
+            path.write_text(text, encoding="utf-8")
+            spec = importlib.util.spec_from_file_location(module_name, str(path))
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            mutated = rows(module.gate_weakening)
+            if not any(line.startswith("({}-".format(label)) for line in mutated):
+                failures.append("(rw-k-mutant-{}) the hook mutant {} changes no decision of the {} row, so the "
+                                "rw-k rows do not pin that placement".format(name, name, label))
     bad.write_text(_RW_DECLARATION, encoding="utf-8")
 
 
