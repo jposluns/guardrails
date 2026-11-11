@@ -4263,8 +4263,8 @@ def _test_pgrep_self_match(failures):
         got, spent = _hook_cpu_timed(lambda command=command: _decision(handler, command),
                                      bound=_PSM_TIMED_BOUND)
         if got != want or spent > _PSM_TIMED_BOUND:
-            failures.append("{}: expected {} within {} s of CPU, got {} in {:.3f} s".format(
-                label, want, _PSM_TIMED_BOUND, got, spent))
+            failures.append("{}: expected {} within {} s of CPU, got {} in {:.3f} s{}".format(
+                label, want, _PSM_TIMED_BOUND, got, spent, _hook_cpu_text()))
     _psm_oracle(failures, handler)
     for label, command in _PSM_DENY_ROWS:
         got = _decision(handler, command)
@@ -6601,9 +6601,12 @@ def _deadline_fixtures(tmp):
     return plain, orch, gensrc
 
 
-def _hook_cpu_timed(call, bound=None, runs=3):
-    """(the last call()'s result, the least CPU seconds the calling thread spent in one call()): the
-    clock of every row that holds one in-process handler call to a fixed absolute CPU bound. It charges
+def _hook_cpu_timed(call, bound, runs=3):
+    """(the last call()'s result, the judged CPU seconds of call() on the calling thread: the first
+    reading, or a reading corrected for host load by _cpu_bound_judge, whose retimings and reference
+    factors _hook_cpu_text then gives for the row's failure line): the clock of every row that holds
+    one in-process handler call to a fixed absolute CPU bound. bound must be a number and runs at least
+    2 (a ValueError otherwise), so no call is timed without a bound or without a retiming. It charges
     the call only for its own work, which a fixed bound can judge, where one process-CPU reading also
     charges it for work it did not do (a commit-identity row so charged measured 2.43 s inside the full
     suite on a host at a load near half its CPUs, against at most 0.03 s for the same call alone, about
@@ -6614,23 +6617,28 @@ def _hook_cpu_timed(call, bound=None, runs=3):
     call, the prior state restored after the second clock reading, so a collection that the call's own
     allocations tip over a generation threshold cannot bill a pass over the whole suite heap, which a
     hook process at its production size never carries, to the one call that tipped it (the deferred
-    collection runs outside every timed region, charged to no row); and with a bound a first reading
-    at or over it is judged by _cpu_bound_judge, which times the call again, up to runs times in all,
-    each time bracketed by a fixed reference workload, and returns the least reading corrected for how
-    much slower that workload ran than its quiet baseline. The call's own work, its reference counting
-    included, is always charged. The re-timed call must be deterministic: same input, same decision,
-    no state carried across runs (a counting shim is reset inside the call). Disclosed limit: a real
-    super-linear regression of the measured path still fails only in a call that meets that
-    precondition, and then only after up to runs timed calls of the regressed path, so in about runs
-    times its own cost: the psm-t rows, which time one call at about 400 KB with no smaller probe
-    first, are the worst recorded case (about 104 s of CPU per call at 400 KB, so about five minutes),
-    while the rows that time a small probe first fail on that probe; a call that keeps state between
-    runs (a memoised quadratic helper, for example) can read low on its second and third runs, and its
-    least reading then passes the bound. The median-judged rows (_timed_runs over the lex-cost and
-    deadline-shape cases) judge the median of three runs first and pass a median over the bound to the
-    same judge: the lex-cost rows on time.process_time, the deadline-shape cases on time.thread_time
-    read inside the call (_deadline_timed_call), with no collector hold."""
+    collection runs outside every timed region, charged to no row); and a first reading at or over the
+    bound is judged by _cpu_bound_judge, which times the call again, up to runs times in all, each time
+    bracketed by a fixed reference workload, and clears the row only on a retiming under the bound,
+    taken as it is when that workload ran no slower than its margin allows and corrected for how much
+    slower it ran otherwise. The call's own work, its reference counting included, is always charged.
+    The re-timed call must be deterministic: same input, same decision, no state carried across runs
+    (a counting shim is reset inside the call). Disclosed limit: a real super-linear regression of the
+    measured path still fails only in a call that meets that precondition, and then only after up to
+    runs timed calls of the regressed path, so in about runs times its own cost: the psm-t rows, which
+    time one call at about 400 KB with no smaller probe first, are the worst recorded case (about 104 s
+    of CPU per call at 400 KB, so about five minutes), while the rows that time a small probe first
+    fail on that probe; a call that keeps state between runs (a memoised quadratic helper, for example)
+    can read low on its second and third runs, and that reading then passes the bound. The
+    median-judged rows (_timed_runs over the lex-cost and deadline-shape cases) judge the median of
+    three runs first and pass a median over the bound to the same judge with median=True: the lex-cost
+    rows on time.process_time, the deadline-shape cases on time.thread_time read inside the call
+    (_deadline_timed_call), with no collector hold."""
     import gc
+    if isinstance(bound, bool) or not isinstance(bound, (int, float)):
+        raise ValueError("_hook_cpu_timed needs a numeric bound, got {!r}".format(bound))
+    if isinstance(runs, bool) or not isinstance(runs, int) or runs < 2:
+        raise ValueError("_hook_cpu_timed needs runs of at least 2, got {!r}".format(runs))
 
     def once():
         enabled = gc.isenabled()
@@ -6642,38 +6650,58 @@ def _hook_cpu_timed(call, bound=None, runs=3):
         finally:
             if enabled:
                 gc.enable()
+    _hook_cpu_last[:] = []
     spent, result = once()
-    if bound is None:
-        return result, spent
     last = [result]
 
     def retime():
         seconds, last[0] = once()
         return seconds
-    spent, _readings = _cpu_bound_judge(spent, bound, retime, retimes=max(1, runs) - 1)
+    spent, readings = _cpu_bound_judge(spent, bound, retime, retimes=runs - 1)
+    _hook_cpu_last[:] = readings
     return last[0], spent
+
+
+# The retimings and reference factors of the latest _hook_cpu_timed call, for its row's failure line.
+_hook_cpu_last = []
+
+
+def _hook_cpu_text():
+    """The judging of the latest _hook_cpu_timed call for its row's failure line: empty when its first
+    reading was judged as it is, otherwise that the time given is the judged one and every retiming
+    with its reference factor."""
+    if not _hook_cpu_last:
+        return ""
+    return " (the time given is the judged time{})".format(_cpu_judge_text(_hook_cpu_last))
 
 
 # The shared judge of every row that holds a CPU time to a fixed absolute bound (_cpu_bound_judge):
 # a first reading under the bound passes at no added cost; one at or over it is timed again up to
 # _CPU_RETIMES times, each retiming bracketed by one run of a fixed pure-Python reference workload
 # (_cpu_reference_seconds) before and after it. A host whose load slows the processor for everyone
-# (shared caches, memory bandwidth, frequency) slows that workload as well, so the retiming is divided
-# by how much slower the bracketing reference ran than its quiet baseline (the least reference reading
-# this process has made), never by less than 1 (a fast reference never inflates a reading) and never
-# by more than _CPU_REFERENCE_CAP, so no reading is forgiven more than that whatever the reference
-# shows. The least corrected reading is judged against the row's own bound with the row's own
-# inclusiveness. A real slowdown of the timed code is slow on every retiming and slows the row, not
-# the reference, so it still fails, while a reading inflated by load passes. The bounds are unchanged.
-# The cap is the most any reading is forgiven, so it is also the residual: a row whose own work grew
-# to just under _CPU_REFERENCE_CAP times its bound can pass on a retiming whose reference ran that much
-# slower, and a row at or over that multiple fails under any load (1.6 times its bound always fails).
-# It is 1.5, not 2: on an 80-CPU host already near half load, the reference ran a median 1.1 and at
-# most about 2 times its baseline, so the cap covers the load inflation seen on every row near its
-# bound (1.07 and 1.01 times it) and forgives a single retiming at most half its bound.
+# (shared caches, memory bandwidth, frequency) slows that workload as well. The reference factor of a
+# retiming is the bracketing readings' mean over the quiet baseline, the MEDIAN of
+# _CPU_REFERENCE_WARMUP readings made at the first call and never lowered afterwards, so on a quiet
+# host the factor scatters around 1 rather than sitting above it (a least-ever baseline put it at a
+# median of about 1.13 on a quiet host, which forgave a code slowdown of that size). A factor no more
+# than 1 + _CPU_LOAD_MARGIN is quiet and counts as exactly 1: such a retiming forgives nothing. Over
+# that margin the factor is the measured one, at most _CPU_REFERENCE_CAP. A retiming clears the row
+# only when its reading divided by its factor is STRICTLY under the bound, whatever the row's own
+# comparison, so a retiming at exactly _CPU_REFERENCE_CAP times the bound never clears a row of
+# either kind; a row that is not cleared is judged on its uncorrected readings with its own
+# inclusiveness. Residual, exactly: a code slowdown fails whenever the reference shows no load past
+# the margin (a call 1.2 times its bound on every run fails on a quiet host); a retiming whose
+# reference ran more than 1 + _CPU_LOAD_MARGIN times its baseline forgives up to that factor, so a
+# slowdown under _CPU_REFERENCE_CAP times the bound can pass during measured load, while one at or
+# over that multiple never passes on a retiming. The median-judged rows (median=True) add one rule:
+# a quiet retiming never clears a median over the bound, and a quiet retiming at or over the bound
+# ends the judging as a confirmed failure, so a median that main failed (two slow runs of three) still
+# fails unless a retiming under measured load clears it. A row that was slow only under load that
+# has ended by its retiming fails as before. The bounds are unchanged.
 _CPU_RETIMES = 2
 _CPU_REFERENCE_CAP = 1.5
-_CPU_REFERENCE_WARMUP = 5
+_CPU_LOAD_MARGIN = 0.25
+_CPU_REFERENCE_WARMUP = 7
 _cpu_reference_floor = []
 
 
@@ -6694,22 +6722,37 @@ def _cpu_reference_seconds():
             gc.enable()
 
 
-def _cpu_reference_baseline(readings=()):
-    """The quiet baseline of the reference workload: the least of _CPU_REFERENCE_WARMUP readings made at
-    the first call and every later reading passed in, since load only ever adds time to it."""
+def _cpu_reference_baseline():
+    """The quiet baseline of the reference workload: the median of _CPU_REFERENCE_WARMUP readings made at
+    the first call, kept for the rest of the process. A later reading never lowers it, so the baseline
+    carries no bias towards a factor over 1; a warm-up taken under load raises it, which lowers every
+    factor and so forgives less, never more."""
     if not _cpu_reference_floor:
-        _cpu_reference_floor.append(min(_cpu_reference_seconds() for _ in range(_CPU_REFERENCE_WARMUP)))
-    _cpu_reference_floor[0] = min([_cpu_reference_floor[0]] + list(readings))
+        _cpu_reference_floor.append(sorted(_cpu_reference_seconds()
+                                           for _ in range(_CPU_REFERENCE_WARMUP))[_CPU_REFERENCE_WARMUP // 2])
     return _cpu_reference_floor[0]
 
 
-def _cpu_bound_judge(first, bound, retime, retimes=_CPU_RETIMES, reference=None, baseline=None):
+def _cpu_reference_factor(before, after, base):
+    """The reference factor of one retiming: 1 when base is not positive or the bracketing readings'
+    mean over base is at most 1 + _CPU_LOAD_MARGIN (a quiet reference), otherwise that ratio, at most
+    _CPU_REFERENCE_CAP."""
+    if not base > 0:
+        return 1.0
+    ratio = (before + after) / 2.0 / base
+    return 1.0 if ratio <= 1.0 + _CPU_LOAD_MARGIN else min(_CPU_REFERENCE_CAP, ratio)
+
+
+def _cpu_bound_judge(first, bound, retime, retimes=_CPU_RETIMES, reference=None, baseline=None, median=False):
     """(judged seconds, [(seconds, reference factor) for each retiming]) for a row whose first CPU reading
-    (or median of readings) is first and whose bound is bound: first itself, with no retiming, when it is
-    under the bound or retime is None; otherwise the least of first and each retiming divided by its
-    reference factor, the bracketing reference readings' mean over the baseline, clamped to 1 and
-    _CPU_REFERENCE_CAP. Retiming stops at the first corrected reading under the bound. reference and
-    baseline replace the live workload and its baseline for recorded vectors (cpu-judge-vectors)."""
+    (or, with median=True, median of readings) is first and whose bound is bound. first itself, with no
+    retiming, when it is under the bound or retime is None. Otherwise up to retimes retimings, each with
+    its factor (_cpu_reference_factor), stopping at the first that clears: one whose reading over its
+    factor is strictly under the bound, where with median=True a quiet retiming (factor 1) never clears
+    and one at or over the bound stops the retiming. The judged seconds are the clearing retiming's
+    corrected reading; with none, the least of first and every retiming's uncorrected reading, or
+    first itself with median=True. reference and baseline replace the live workload and its baseline for
+    recorded vectors (cpu-judge-vectors)."""
     if first < bound or retime is None:
         return first, []
     readings = []
@@ -6717,12 +6760,18 @@ def _cpu_bound_judge(first, bound, retime, retimes=_CPU_RETIMES, reference=None,
         before = (reference or _cpu_reference_seconds)()
         spent = retime()
         after = (reference or _cpu_reference_seconds)()
-        base = baseline if baseline is not None else _cpu_reference_baseline((before, after))
-        factor = min(_CPU_REFERENCE_CAP, max(1.0, (before + after) / 2.0 / base)) if base > 0 else 1.0
+        factor = _cpu_reference_factor(before, after, baseline if baseline is not None else
+                                       _cpu_reference_baseline())
         readings.append((spent, factor))
+        if median and factor == 1.0:
+            if spent >= bound:
+                break
+            continue
         if spent / factor < bound:
-            break
-    return min([first] + [spent / factor for spent, factor in readings]), readings
+            return spent / factor, readings
+    if median:
+        return first, readings
+    return min([first] + [spent for spent, _factor in readings]), readings
 
 
 def _cpu_judge_text(readings):
@@ -6753,9 +6802,10 @@ def _judged_half_fails(times):
 def _timed_runs(timed):
     """timed() called _TIMED_RUNS times, every call made whatever an earlier one gave, each returning a
     tuple that starts with its CPU seconds: (the median of the calls' CPU seconds (_judged), [every call's
-    tuple]). Every timed row compares only that median with its bound and checks the outcome of every call,
-    so no call's outcome clears another's failure; times are judged together, so a time over the bound on
-    fewer than half of the calls does not fail the row."""
+    tuple]). Every timed row judges that median with _cpu_bound_judge (median=True), which compares the
+    median itself with the bound unless a retiming under load past the margin clears it, and checks the
+    outcome of every call, so no call's outcome clears another's failure; times are judged together, so a
+    time over the bound on fewer than half of the calls does not fail the row."""
     results = [timed() for _ in range(_TIMED_RUNS)]
     return _judged([result[0] for result in results]), results
 
@@ -6765,7 +6815,7 @@ def _lex_cost_problems(name, guard, length, cpu, runs, want, retime=None):
     (_timed_runs), judged by _cpu_bound_judge with retime (a call giving one more run's CPU seconds),
     runs [(cpu_seconds, decision)] for every run, want the decision every run must reach."""
     out = []
-    cpu, readings = _cpu_bound_judge(cpu, 1.0, retime)
+    cpu, readings = _cpu_bound_judge(cpu, 1.0, retime, median=True)
     if cpu >= 1.0:
         out.append("(lex-cost-{}) {} took {:.2f} s of CPU on a {}-character command as the median of {} runs; "
                    "the bound is 1 s{}".format(name, guard, cpu, length, len(runs), _cpu_judge_text(readings)))
@@ -6859,9 +6909,13 @@ def _deadline_run_text(run):
     return "{:.2f}s wall-clock, {:.2f}s of CPU time, {}, outcome {}".format(run[1], run[0], queued_text, run[2])
 
 
-def _deadline_shape_runs(tmp, sizes):
-    """Every (handler, shape, size) case _TIMED_RUNS times (_timed_runs over _deadline_shape_case):
-    [(handler, shape, size, cwd, (cpu_seconds, wall_seconds, outcome) for each run...)]."""
+def _deadline_shape_runs(tmp, sizes, contexts=None, case=None):
+    """Every (handler, shape, size) case _TIMED_RUNS times (_timed_runs over case, by default
+    _deadline_shape_case): [(handler, shape, size, cwd, (cpu_seconds, wall_seconds, outcome) for each
+    run...)]. contexts, when given, is a dict that gets (handler, shape, size, cwd) -> fixture root for
+    every case whose runs are made under _no_registry_above(root), so a later run of that case
+    (_deadline_case_in_context) is made under the same context as its first runs."""
+    case = case or _deadline_shape_case
     plain, orch, gensrc = _deadline_fixtures(tmp)
     runs = []
     for name, shapes in sorted(_DEADLINE_CASES.items()):
@@ -6870,14 +6924,31 @@ def _deadline_shape_runs(tmp, sizes):
         for shape in shapes + _DEADLINE_HASH_SHAPES:
             for size in sorted(sizes):
                 runs.append((name, shape, size, cwd) + tuple(_timed_runs(
-                    lambda: _deadline_shape_case(name, shape, size, cwd))[1]))
+                    lambda: case(name, shape, size, cwd))[1]))
     with _no_registry_above(plain):
         for name, shapes in sorted(_DEADLINE_PLAIN_CASES.items()):
             for shape in shapes:
                 for size in sorted(sizes):
                     runs.append((name, shape, size, str(plain)) + tuple(_timed_runs(
-                        lambda: _deadline_shape_case(name, shape, size, str(plain)))[1]))
+                        lambda: case(name, shape, size, str(plain)))[1]))
+                    if contexts is not None:
+                        contexts[(name, shape, size, str(plain))] = plain
     return runs
+
+
+def _deadline_case_in_context(contexts, case=None):
+    """case (by default _deadline_shape_case) as a later run of a timed case (the CPU retiming and the
+    diagnostic re-run of _deadline_shape_verdicts): a case that contexts (_deadline_shape_runs) maps to
+    a fixture root runs under _no_registry_above(root), as its first runs did; any other runs plainly."""
+    case = case or _deadline_shape_case
+
+    def run(name, shape, size, cwd):
+        root = contexts.get((name, shape, size, cwd))
+        if root is None:
+            return case(name, shape, size, cwd)
+        with _no_registry_above(root):
+            return case(name, shape, size, cwd)
+    return run
 
 
 @contextlib.contextmanager
@@ -6948,7 +7019,7 @@ def _deadline_shape_verdicts(runs, retime, cpu_retime=None):
     for name, shape, size, cwd, *timed in runs:
         cpu_judged, cpu_readings = _cpu_bound_judge(
             _judged([run[0] for run in timed]), _DEADLINE_BOUNDS[size],
-            None if cpu_retime is None else (lambda: cpu_retime(name, shape, size, cwd)[0]))
+            None if cpu_retime is None else (lambda: cpu_retime(name, shape, size, cwd)[0]), median=True)
         owns = [_deadline_run_own(run) for run in timed]
         own_judged = None if None in owns else _judged(owns)
         problems = []
@@ -7004,8 +7075,10 @@ def _deadline_shape_failures(tmp):
                      if event == aiqt_hooks.PRETOOL and name not in _DEADLINE_CASES)
     if missing:
         out.append("(dl-shape-coverage) PreToolUse handlers with no timed shape: {}".format(", ".join(missing)))
-    return out + _deadline_shape_verdicts(_deadline_shape_runs(tmp, _DEADLINE_SIZES), _deadline_shape_case,
-                                          cpu_retime=_deadline_shape_case)
+    contexts = {}
+    runs = _deadline_shape_runs(tmp, _DEADLINE_SIZES, contexts)
+    in_context = _deadline_case_in_context(contexts)
+    return out + _deadline_shape_verdicts(runs, in_context, cpu_retime=in_context)
 
 
 def _deadline_shape_rerun_failures():
@@ -7117,9 +7190,10 @@ def _deadline_shape_rerun_failures():
     return out
 
 
-# Every site in this file that reads a CPU clock, by its innermost function and its stripped line, with what
-# it is (cpu-judge-coverage). A row that times a call itself and holds it to an absolute bound outside
-# _cpu_bound_judge adds a site that is not listed here, and fails.
+# Every site in this file that names a CPU clock, by its dotted enclosing function and its stripped line,
+# with what it is (cpu-judge-coverage). A row that reads a CPU clock by name at a site not listed here, or
+# reuses a listed line in another function, fails; the forms that check does not close are listed in
+# _cpu_judge_coverage_problems.
 _CPU_CLOCK_SITES = {
     ("_gate_runtime_cost_failures", "t0 = time.process_time()"): "gw-rt-cost ratio row, no absolute bound",
     ("_gate_runtime_cost_failures", "lex = time.process_time() - t0"): "gw-rt-cost ratio row",
@@ -7127,73 +7201,169 @@ _CPU_CLOCK_SITES = {
     ("_gw_usage", "rusage = resource.getrusage(resource.RUSAGE_SELF)"): "gw-lin diagnostic reading",
     ("_gw_scan_once", "t0 = time.process_time()"): "gw-lin ratio row, no absolute bound",
     ("_gw_scan_once", "t = time.process_time() - t0"): "gw-lin ratio row",
-    ("scan", "until = time.process_time() + 1.2 * _GW_FLOOR * (len(cmd) / 4000) ** power"): "gw-lin stand-in",
-    ("scan", "while time.process_time() < until:"): "gw-lin stand-in",
-    ("scan", "until = time.process_time() + 2 * _GW_FLOOR"): "gw-lin stand-in",
-    ("rusage_without_nivcsw",
+    ("_gw_spin_scan.scan", "until = time.process_time() + 1.2 * _GW_FLOOR * (len(cmd) / 4000) ** power"):
+        "gw-lin stand-in",
+    ("_gw_spin_scan.scan", "while time.process_time() < until:"): "gw-lin stand-in",
+    ("_gw_slow_once_scan.scan", "until = time.process_time() + 2 * _GW_FLOOR"): "gw-lin stand-in",
+    ("_gw_slow_once_scan.scan", "while time.process_time() < until:"): "gw-lin stand-in",
+    ("_gw_lin_usage_failures.rusage_without_nivcsw",
      "return types.SimpleNamespace(ru_utime=time.process_time(), ru_stime=0.0, ru_minflt=0)"): "gw-lin stand-in",
-    ("once", "started = time.thread_time()"): "_hook_cpu_timed, judged by _cpu_bound_judge",
-    ("once", "return time.thread_time() - started, got"): "_hook_cpu_timed, judged by _cpu_bound_judge",
+    ("_hook_cpu_timed.once", "started = time.thread_time()"): "_hook_cpu_timed, judged by _cpu_bound_judge",
+    ("_hook_cpu_timed.once", "return time.thread_time() - started, got"):
+        "_hook_cpu_timed, judged by _cpu_bound_judge",
     ("_cpu_reference_seconds", "started = time.thread_time()"): "the judge's reference workload",
     ("_cpu_reference_seconds", "return time.thread_time() - started"): "the judge's reference workload",
     ("_deadline_timed_call", "cpu_began = time.thread_time()"): "dl-shape, judged by _cpu_bound_judge",
     ("_deadline_timed_call", "cpu = time.thread_time() - cpu_began"): "dl-shape, judged by _cpu_bound_judge",
-    ("own_cpu", "began = time.thread_time()"): "dl-shape load stand-in",
-    ("own_cpu", "while time.thread_time() - began < seconds:"): "dl-shape load stand-in",
-    ("spin", "began = time.thread_time()"): "cpu-judge-live stand-in",
-    ("spin", "while time.thread_time() - began < seconds:"): "cpu-judge-live stand-in",
-    ("_cost_timed", "t0 = time.process_time()"): "lex-cost, judged by _cpu_bound_judge",
-    ("_cost_timed", "return time.process_time() - t0, got"): "lex-cost, judged by _cpu_bound_judge",
+    ("_deadline_load_judgement_failures.own_cpu", "began = time.thread_time()"): "dl-shape load stand-in",
+    ("_deadline_load_judgement_failures.own_cpu", "while time.thread_time() - began < seconds:"):
+        "dl-shape load stand-in",
+    ("_cpu_judge_failures.spin", "began = time.thread_time()"): "cpu-judge-live stand-in",
+    ("_cpu_judge_failures.spin", "while time.thread_time() - began < seconds:"): "cpu-judge-live stand-in",
+    ("_main_isolated._cost_timed", "t0 = time.process_time()"): "lex-cost, judged by _cpu_bound_judge",
+    ("_main_isolated._cost_timed", "return time.process_time() - t0, got"): "lex-cost, judged by _cpu_bound_judge",
     ("_main_isolated", "_rd_t0 = time.process_time()"): "gw-read-cost ratio row, no absolute bound",
     ("_main_isolated", "_rd_lex = time.process_time() - _rd_t0"): "gw-read-cost ratio row",
     ("_main_isolated", "_rd_read = time.process_time() - _rd_t0"): "gw-read-cost ratio row"}
+# The listed sites whose line occurs more than once in its function, with how often; every other listed
+# site occurs exactly once.
+_CPU_CLOCK_SITE_REPEATS = {("_gate_runtime_cost_failures", "t0 = time.process_time()"): 2,
+                           ("_main_isolated", "_rd_t0 = time.process_time()"): 2}
 _CPU_CLOCK_NAMES = frozenset(("process_time", "thread_time", "process_time_ns", "thread_time_ns", "getrusage",
-                              "times"))
-# The functions that judge an absolute-bound row's CPU time, each of which must call _cpu_bound_judge.
+                              "times", "clock_gettime", "clock_gettime_ns", "CLOCK_THREAD_CPUTIME_ID",
+                              "CLOCK_PROCESS_CPUTIME_ID"))
+# The functions that judge an absolute-bound row's CPU time, each of which must call _cpu_bound_judge, and
+# those of them that judge a median, whose call must pass median=True.
 _CPU_JUDGED_HELPERS = ("_hook_cpu_timed", "_lex_cost_problems", "_deadline_shape_verdicts")
+_CPU_MEDIAN_HELPERS = ("_lex_cost_problems", "_deadline_shape_verdicts")
 
 
 def _cpu_judge_coverage_problems(source):
-    """What keeps an absolute-bound CPU row in source from being judged by _cpu_bound_judge, as phrases:
-    a CPU clock read at a site not in _CPU_CLOCK_SITES, a _hook_cpu_timed call with no bound, a judging
-    helper (_CPU_JUDGED_HELPERS) that does not call _cpu_bound_judge, a live lex-cost row (its CPU argument
-    not a recorded constant) given no retime, or a live dl-shape verdict (over _deadline_shape_runs) given
-    no cpu_retime."""
+    """What keeps an absolute-bound CPU row in source from being judged by _cpu_bound_judge, as phrases.
+    Closed: any reference to a CPU clock name (_CPU_CLOCK_NAMES, called or not, so an alias such as
+    clock = time.thread_time is caught where it is taken, and time.clock_gettime with a CPU clock id)
+    whose (dotted enclosing function, stripped line) is not in _CPU_CLOCK_SITES; a listed site met other
+    than its listed count, once unless _CPU_CLOCK_SITE_REPEATS says otherwise (so a second function of
+    the same dotted name is caught, and a site's line copied into another function is unlisted); a
+    from-import of a CPU clock name from time, resource or os; a _hook_cpu_timed call with no bound (by
+    keyword or position) or with a constant runs under 2, or whose result is not unpacked into a pair whose time the first later if-statement naming
+    it compares with exactly the bound expression passed (outside _cpu_judge_failures, whose rows test
+    the judge itself); a judging helper (_CPU_JUDGED_HELPERS) that does not call _cpu_bound_judge, or a
+    median helper (_CPU_MEDIAN_HELPERS) that does not pass median=True; a live lex-cost row (its CPU
+    argument not a recorded constant) given no retime; and _deadline_shape_failures not passing a
+    cpu_retime built by _deadline_case_in_context over the contexts _deadline_shape_runs filled.
+    NOT closed, disclosed: a clock reached without its name in the source (getattr with a computed
+    string, a clock passed in from another module, or a clock read in a child process); a bound given
+    as a name whose runtime value is None or a runs value held in a name (both refused at run time by
+    _hook_cpu_timed with a ValueError, not by this check); and a comparison of the time made somewhere
+    other than the first later if-statement naming it."""
     import ast
     lines = source.splitlines()
     out = []
     calls_judge = set()
+    median_judge = set()
+    seen = {}
+    in_context = set()
+    rows = []
 
     def callee(node):
         func = node.func
         return func.attr if isinstance(func, ast.Attribute) else func.id if isinstance(func, ast.Name) else ""
 
+    def text(node):
+        return lines[node.lineno - 1].strip()
+
     def visit(node, func):
         for child in ast.iter_child_nodes(node):
-            inner = child.name if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)) else func
+            inner = func
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                inner = child.name if func == "<module>" else func + "." + child.name
+            if isinstance(child, ast.ImportFrom) and child.module in ("time", "resource", "os") and any(
+                    alias.name in _CPU_CLOCK_NAMES or alias.name == "*" for alias in child.names):
+                out.append("line {}: a CPU clock imported by name in {}: {}".format(child.lineno, inner,
+                                                                                    text(child)))
+            if isinstance(child, ast.Attribute) and child.attr in _CPU_CLOCK_NAMES and (
+                    child.attr != "times" or (isinstance(child.value, ast.Name) and child.value.id == "os")):
+                key = (inner, text(child))
+                seen[key] = seen.get(key, 0) + 1
+                if key not in _CPU_CLOCK_SITES:
+                    out.append("line {}: a CPU clock read in {} outside the shared judge: {}".format(
+                        child.lineno, inner, text(child)))
             if isinstance(child, ast.Call):
                 name, keywords = callee(child), {kw.arg: kw.value for kw in child.keywords}
-                if (isinstance(child.func, ast.Attribute) and name in _CPU_CLOCK_NAMES
-                        and (inner, lines[child.lineno - 1].strip()) not in _CPU_CLOCK_SITES):
-                    out.append("line {}: a CPU clock read in {} outside the shared judge: {}".format(
-                        child.lineno, inner, lines[child.lineno - 1].strip()))
-                if name == "_hook_cpu_timed" and (
-                        "bound" not in keywords or (isinstance(keywords["bound"], ast.Constant)
-                                                    and keywords["bound"].value is None)):
-                    out.append("line {}: a _hook_cpu_timed call with no bound is not judged".format(child.lineno))
+                if name == "_hook_cpu_timed":
+                    if not inner.startswith("_cpu_judge_failures"):
+                        rows.append(child)
+                    bound = keywords.get("bound", child.args[1] if len(child.args) > 1 else None)
+                    runs = keywords.get("runs", child.args[2] if len(child.args) > 2 else None)
+                    if bound is None or (isinstance(bound, ast.Constant) and bound.value is None):
+                        out.append("line {}: a _hook_cpu_timed call with no bound is not judged".format(
+                            child.lineno))
+                    if isinstance(runs, ast.Constant) and not (isinstance(runs.value, int)
+                                                               and not isinstance(runs.value, bool)
+                                                               and runs.value >= 2):
+                        out.append("line {}: a _hook_cpu_timed call with runs under 2 is never re-timed".format(
+                            child.lineno))
                 if name == "_cpu_bound_judge":
                     calls_judge.add(func)
+                    if isinstance(keywords.get("median"), ast.Constant) and keywords["median"].value is True:
+                        median_judge.add(func)
                 if (name == "_lex_cost_problems" and len(child.args) > 3
                         and not isinstance(child.args[3], ast.Constant) and "retime" not in keywords):
                     out.append("line {}: a live lex-cost row given no retime".format(child.lineno))
-                if (name == "_deadline_shape_verdicts" and child.args and isinstance(child.args[0], ast.Call)
-                        and callee(child.args[0]) == "_deadline_shape_runs" and "cpu_retime" not in keywords):
-                    out.append("line {}: live dl-shape verdicts given no cpu_retime".format(child.lineno))
+                if func == "_deadline_shape_failures" and name == "_deadline_case_in_context":
+                    in_context.add("built")
+                if (func == "_deadline_shape_failures" and name == "_deadline_shape_runs"
+                        and len(child.args) > 2):
+                    in_context.add("filled")
+                if func == "_deadline_shape_failures" and name == "_deadline_shape_verdicts":
+                    in_context.add("verdicts")
+                    if "cpu_retime" not in keywords:
+                        out.append("line {}: live dl-shape verdicts given no cpu_retime".format(child.lineno))
             visit(child, inner)
-    visit(ast.parse(source), "<module>")
+    tree = ast.parse(source)
+    visit(tree, "<module>")
+    for key, count in sorted(seen.items()):
+        if key in _CPU_CLOCK_SITES and count != _CPU_CLOCK_SITE_REPEATS.get(key, 1):
+            out.append("the listed CPU clock site {} {!r} occurs {} times, not {}".format(
+                key[0], key[1], count, _CPU_CLOCK_SITE_REPEATS.get(key, 1)))
+    for key in sorted(set(_CPU_CLOCK_SITES) - set(seen)):
+        out.append("the listed CPU clock site {} {!r} no longer occurs".format(key[0], key[1]))
     for helper in _CPU_JUDGED_HELPERS:
         if helper not in calls_judge:
             out.append("{} does not call _cpu_bound_judge".format(helper))
+    for helper in _CPU_MEDIAN_HELPERS:
+        if helper in calls_judge and helper not in median_judge:
+            out.append("{} judges a median without median=True".format(helper))
+    if in_context != {"built", "filled", "verdicts"}:
+        out.append("_deadline_shape_failures does not retime each case under the context of its first runs "
+                   "(_deadline_case_in_context over the contexts _deadline_shape_runs fills)")
+    paired = set()
+    for node in ast.walk(tree):
+        for field in ("body", "orelse", "finalbody"):
+            body = getattr(node, field, None)
+            for index, stmt in enumerate(body if isinstance(body, list) else ()):
+                call = stmt.value if isinstance(stmt, ast.Assign) else None
+                if not (isinstance(call, ast.Call) and any(call is row for row in rows)
+                        and len(stmt.targets) == 1 and isinstance(stmt.targets[0], ast.Tuple)
+                        and len(stmt.targets[0].elts) == 2 and isinstance(stmt.targets[0].elts[1], ast.Name)):
+                    continue
+                paired.add(id(call))
+                bound = {kw.arg: kw.value for kw in call.keywords}.get(
+                    "bound", call.args[1] if len(call.args) > 1 else None)
+                spent = stmt.targets[0].elts[1].id
+                test = next((later.test for later in body[index + 1:] if isinstance(later, ast.If) and any(
+                    isinstance(sub, ast.Name) and sub.id == spent for sub in ast.walk(later.test))), None)
+                sides = [] if test is None else [
+                    side for compare in ast.walk(test) if isinstance(compare, ast.Compare)
+                    for pair in [(compare.left, compare.comparators[-1])]
+                    for one, side in (pair, pair[::-1]) if isinstance(one, ast.Name) and one.id == spent]
+                if bound is None or not sides or any(ast.dump(side) != ast.dump(bound) for side in sides):
+                    out.append("line {}: a _hook_cpu_timed row that does not compare its time with the bound "
+                               "it passed".format(call.lineno))
+    for row in rows:
+        if id(row) not in paired:
+            out.append("line {}: a _hook_cpu_timed row whose time is not unpacked into a pair".format(row.lineno))
     return out
 
 
@@ -7221,54 +7391,121 @@ def _cpu_judge_failures():
     dropped, the dl-shape cpu_retime dropped, and _lex_cost_problems no longer calling _cpu_bound_judge;
     cpu-judge-coverage-mutants-apply: each mutant's text occurs exactly once in the source."""
     out = []
-    bound, base = 1.0, 0.03
+    bound, base = 1.0, 0.03125
+    margin = 1.0 + _CPU_LOAD_MARGIN
 
-    def judged(first, retimes, references, cap_baseline=base):
-        refs, times, calls = iter(references), iter(retimes), []
+    def judged(first, retimes, references, median=False):
+        refs, times, calls, overrun = iter(references), iter(retimes), [], []
 
         def retime():
             calls.append(1)
-            return next(times)
-        got, readings = _cpu_bound_judge(first, bound, retime, reference=lambda: next(refs),
-                                         baseline=cap_baseline)
-        return got, len(calls)
-    for label, first, retimes, references, want, want_calls in (
-            ("first just under the bound", bound - 1e-6, (), (), bound - 1e-6, 0),
-            ("first at the bound", bound, (0.5,), (base, base), 0.5, 1),
-            ("first just over the bound", bound + 1e-6, (0.5,), (base, base), 0.5, 1),
-            ("slow on every retiming, quiet reference", 3.0, (3.0, 3.0), (base,) * 4, 3.0, 2),
-            ("slow on every retiming, reference 1.5 times slower", 3.0, (4.5, 4.5), (1.5 * base,) * 4, 3.0, 2),
-            ("load-inflated, reference 1.5 times slower", 1.07, (1.2,), (1.5 * base,) * 2, 0.8, 1),
-            ("correction capped", 2.5, (2.5, 2.5), (4 * base,) * 4, 2.5 / _CPU_REFERENCE_CAP, 2),
-            ("1.6 times the bound, reference 4 times slower", 1.6, (1.6, 1.6), (4 * base,) * 4,
-             1.6 / _CPU_REFERENCE_CAP, 2),
-            ("just under the cap times the bound", 1.6, (1.5 - 1e-6,), (4 * base,) * 2, (1.5 - 1e-6) / 1.5, 1),
-            ("exactly the cap times the bound", 1.6, (1.5, 1.5), (4 * base,) * 4, 1.0, 2),
-            ("just over the cap times the bound", 1.6, (1.5 + 1e-6,) * 2, (4 * base,) * 4, (1.5 + 1e-6) / 1.5, 2),
-            ("fast reference never inflates", 1.5, (0.9,), (0.5 * base,) * 2, 0.9, 1),
-            ("corrected retiming at the bound", 1.5, (bound, bound), (base,) * 4, bound, 2),
-            ("corrected retiming just over the bound", 1.5, (bound + 1e-6,) * 2, (base,) * 4, bound + 1e-6, 2),
-            ("lex-cost 1.07 s, reference 1.2 times slower", 1.07, (1.07,), (1.2 * base,) * 2, 1.07 / 1.2, 1)):
-        got, calls = judged(first, retimes, references)
-        if abs(got - want) > 1e-9 or calls != want_calls:
-            out.append("(cpu-judge-vectors) {} must judge {!r} after {} retiming(s), got {!r} after {}".format(
-                label, want, want_calls, got, calls))
-    got, readings = _cpu_bound_judge(7.08, 7.0, lambda: 7.08, reference=lambda: 1.1 * base, baseline=base)
+            got = next(times, None)
+            if got is None:
+                overrun.append("retiming")
+                return 100.0
+            return got
+
+        def reference():
+            got = next(refs, None)
+            if got is None:
+                overrun.append("reference")
+                return base
+            return got
+        got, _readings = _cpu_bound_judge(first, bound, retime, reference=reference, baseline=base, median=median)
+        return got, len(calls), overrun
+    for label, median, first, retimes, references, want, want_calls in (
+            ("first just under the bound", False, bound - 1e-6, (), (), bound - 1e-6, 0),
+            ("first at the bound", False, bound, (0.5,), (base, base), 0.5, 1),
+            ("first just over the bound", False, bound + 1e-6, (0.5,), (base, base), 0.5, 1),
+            ("slow on every retiming, quiet reference", False, 3.0, (3.0, 3.0), (base,) * 4, 3.0, 2),
+            ("slow on every retiming, reference 1.5 times slower", False, 3.0, (4.5, 4.5), (1.5 * base,) * 4,
+             3.0, 2),
+            ("load-inflated, reference 1.5 times slower", False, 1.07, (1.2,), (1.5 * base,) * 2, 0.8, 1),
+            ("correction capped", False, 2.5, (2.5, 2.5), (4 * base,) * 4, 2.5, 2),
+            ("1.6 times the bound, reference 4 times slower", False, 1.6, (1.6, 1.6), (4 * base,) * 4, 1.6, 2),
+            ("just under the cap times the bound", False, 1.6, (1.5 - 1e-6,), (4 * base,) * 2,
+             (1.5 - 1e-6) / 1.5, 1),
+            ("exactly the cap times the bound", False, 1.6, (1.5, 1.5), (4 * base,) * 4, 1.5, 2),
+            ("just over the cap times the bound", False, 1.6, (1.5 + 1e-6,) * 2, (4 * base,) * 4, 1.5 + 1e-6, 2),
+            ("fast reference never inflates", False, 1.5, (0.9,), (0.5 * base,) * 2, 0.9, 1),
+            ("quiet retiming at the bound", False, 1.5, (bound, bound), (base,) * 4, bound, 2),
+            ("quiet retiming just over the bound", False, 1.5, (bound + 1e-6,) * 2, (base,) * 4, bound + 1e-6, 2),
+            ("1.2 times the bound on every call, quiet reference", False, 1.2, (1.2, 1.2), (base,) * 4, 1.2, 2),
+            ("1.2 times the bound on every call, reference exactly at the margin", False, 1.2, (1.2, 1.2),
+             (margin * base,) * 4, 1.2, 2),
+            ("1.2 times the bound on every call, reference just under the margin", False, 1.2, (1.2, 1.2),
+             ((margin - 1e-6) * base,) * 4, 1.2, 2),
+            ("1.2 times the bound on every call, reference just over the margin", False, 1.2, (1.2,),
+             ((margin + 1e-6) * base,) * 2, 1.2 / (margin + 1e-6), 1),
+            ("lex-cost 1.07 s, reference 1.2 times slower (inside the margin)", False, 1.07, (1.07, 1.07),
+             (1.2 * base,) * 4, 1.07, 2),
+            ("lex-cost 1.07 s, reference 1.3 times slower", False, 1.07, (1.07,), (1.3 * base,) * 2, 1.07 / 1.3, 1),
+            ("median 1.6, quiet retimings 0.4 then 1.6", True, 1.6, (0.4, 1.6), (base,) * 4, 1.6, 2),
+            ("median 1.6, quiet retimings 1.6 then 0.4", True, 1.6, (1.6, 0.4), (base,) * 2, 1.6, 1),
+            ("median 1.2, quiet retimings 0.5 and 0.5", True, 1.2, (0.5, 0.5), (base,) * 4, 1.2, 2),
+            ("median 1.07, retiming 1.07 at a reference 1.5 times slower", True, 1.07, (1.07,), (1.5 * base,) * 2,
+             1.07 / 1.5, 1),
+            ("median 1.6, quiet 0.4 then 1.2 at a reference 1.5 times slower", True, 1.6, (0.4, 1.2),
+             (base, base, 1.5 * base, 1.5 * base), 0.8, 2),
+            ("median 1.6, exactly the cap times the bound at the cap", True, 1.6, (1.5, 1.5), (4 * base,) * 4, 1.6, 2)):
+        got, calls, overrun = judged(first, retimes, references, median=median)
+        if abs(got - want) > 1e-9 or calls != want_calls or overrun:
+            out.append("(cpu-judge-vectors) {} must judge {!r} after {} retiming(s), got {!r} after {}{}".format(
+                label, want, want_calls, got, calls,
+                "; it asked for more {} readings than were recorded".format(" and ".join(sorted(set(overrun))))
+                if overrun else ""))
+    got, readings = _cpu_bound_judge(7.08, 7.0, lambda: 7.08, reference=lambda: 1.3 * base, baseline=base,
+                                     median=True)
     if not got < 7.0 or len(readings) != 1:
-        out.append("(cpu-judge-vectors-dl-shape) dl-shape 7.08 s against 7 s with a reference 1.1 times slower "
+        out.append("(cpu-judge-vectors-dl-shape) dl-shape 7.08 s against 7 s with a reference 1.3 times slower "
                    "must judge under 7 s after one retiming, got {!r} with {!r}".format(got, readings))
     if _cpu_bound_judge(3.0, bound, None) != (3.0, []):
         out.append("(cpu-judge-vectors-no-retime) no retime must judge the first reading as it is")
+    # A lex-cost median over the bound with one fast retiming and a quiet reference fails, as on main: the
+    # reference workload and its baseline are replaced by constants for the call, then restored.
+    saved_reference, saved_floor = _cpu_reference_seconds, list(_cpu_reference_floor)
+    globals()["_cpu_reference_seconds"] = lambda: base
+    _cpu_reference_floor[:] = [base]
+    try:
+        quiet = _lex_cost_problems("quiet-retime", "guard", 10, 1.6, [(1.6, "allow")] * 3, "allow",
+                                   retime=lambda: 0.4)
+    finally:
+        globals()["_cpu_reference_seconds"] = saved_reference
+        _cpu_reference_floor[:] = saved_floor
+    if len(quiet) != 1 or not quiet[0].startswith("(lex-cost-quiet-retime) guard took 1.60 s"):
+        out.append("(cpu-judge-quiet-retime-median) a lex-cost median of 1.6 s with a fast retiming under a quiet "
+                   "reference must fail on its median, got {!r}".format(quiet))
+    no_bound, one = None, 1
+    try:
+        _hook_cpu_timed(lambda: "done", no_bound)
+        none_bound = "no error"
+    except ValueError:
+        none_bound = "ValueError"
+    try:
+        _hook_cpu_timed(lambda: "done", 1.0, runs=one)
+        one_run = "no error"
+    except ValueError:
+        one_run = "ValueError"
+    if (none_bound, one_run) != ("ValueError", "ValueError"):
+        out.append("(cpu-judge-hook-arguments) _hook_cpu_timed must refuse a bound of None and runs=1 with a "
+                   "ValueError, got {} and {}".format(none_bound, one_run))
 
     def spin(seconds):
         began = time.thread_time()
         while time.thread_time() - began < seconds:
             pass
         return "done"
-    slow = _hook_cpu_timed(lambda: spin(0.15), bound=0.05)
-    if slow[0] != "done" or slow[1] < 0.075:
-        out.append("(cpu-judge-live-slow) a call spending 3 times its 0.05 s bound must judge at least 0.075 s, "
-                   "got {!r}".format(slow))
+    slow = _hook_cpu_timed(lambda: spin(0.08), bound=0.05)
+    if slow[0] != "done" or slow[1] < 0.08:
+        out.append("(cpu-judge-live-slow) a call spending 1.6 times its 0.05 s bound, over the 1.5 cap, must judge "
+                   "at least 0.08 s whatever the reference shows, got {!r}{}".format(slow, _hook_cpu_text()))
+    unloaded = _hook_cpu_timed(lambda: spin(0.06), bound=0.05)
+    unloaded_readings = list(_hook_cpu_last)
+    if unloaded[0] != "done" or not unloaded_readings or (
+            all(factor == 1.0 for _spent, factor in unloaded_readings) and unloaded[1] < 0.05):
+        out.append("(cpu-judge-live-unloaded) a call spending 1.2 times its 0.05 s bound on every call must be "
+                   "re-timed and, with every reference quiet, judge at least 0.05 s, got {!r}{}".format(
+                       unloaded, _hook_cpu_text()))
     quick = _hook_cpu_timed(lambda: spin(0.01), bound=0.05)
     if quick[0] != "done" or quick[1] >= 0.05:
         out.append("(cpu-judge-live-quick) a call spending 0.01 s must judge under its 0.05 s bound, got "
@@ -7290,16 +7527,77 @@ def _cpu_judge_failures():
             ("ap-c95e with no bound", c95e, c95e.replace(", bound=1.0)", ")", 1)),
             ("lex-cost with no retime", ", _cost_want,\n                    retime=lambda: _cost_timed("
              "_cost_guard, _cost_cmd)[0]))", ", _cost_want))"),
-            ("dl-shape with no cpu_retime", "_deadline_shape_case,\n"
-             "                                          cpu_retime=_deadline_shape_case)", "_deadline_shape_case)"),
-            ("_lex_cost_problems off the judge", "    cpu, readings = _cpu_bound_judge(cpu, 1.0, retime)\n",
-             "    readings = []\n")):
+            ("dl-shape with no cpu_retime", "_deadline_shape_verdicts(runs, in_context, " "cpu_retime=in_context)",
+             "_deadline_shape_verdicts(runs, in_context)"),
+            ("dl-shape retimed outside its context", "in_context = _deadline_case_" "in_context(contexts)",
+             "in_context = _deadline_shape_case"),
+            ("_lex_cost_problems off the judge", "    cpu, readings = _cpu_bound_judge(cpu, 1.0, retime, " "median=True)\n",
+             "    readings = []\n"),
+            ("_lex_cost_problems judging its median as one reading",
+             "readings = _cpu_bound_judge(cpu, 1.0, " "retime, median=True)",
+             "readings = _cpu_bound_judge(cpu, 1.0, retime)"),
+            ("ap-c95e with runs=1", c95e, c95e.replace(", bound=1.0)", ", bound=1.0, runs=1)", 1)),
+            ("ap-c95e with a bound other than its comparison", c95e, c95e.replace(", bound=1.0)", ", bound=9.0)", 1)),
+            ("a thread clock read through clock_gettime", "\n\ndef _cpu_judge_failures():",
+             "\n\ndef _mutant_row():\n    return time.clock_gettime(time.CLOCK_THREAD_CPUTIME_ID)\n\n\n"
+             "def _cpu_judge_failures():"),
+            ("a clock imported by name", "\n\ndef _cpu_judge_failures():",
+             "\n\nfrom time import process_time as _mutant_clock\n\n\ndef _cpu_judge_failures():"),
+            ("a clock alias", "\n\ndef _cpu_judge_failures():",
+             "\n\ndef _mutant_row():\n    clock = time.thread_time\n    return clock()\n\n\n"
+             "def _cpu_judge_failures():"),
+            ("a listed site's line reused in a new local helper", "\n\ndef _cpu_judge_failures():",
+             "\n\ndef _mutant_row():\n    def once():\n        started = time.thread_time()\n"
+             "        return time.thread_time() - started, got\n    return once\n\n\ndef _cpu_judge_failures():")):
         if source.count(old) != 1:
             out.append("(cpu-judge-coverage-mutants-apply) the {} mutant no longer applies: its text occurs {} "
                        "times".format(label, source.count(old)))
         elif not _cpu_judge_coverage_problems(source.replace(old, new, 1)):
             out.append("(cpu-judge-coverage-mutants-caught) the {} mutant must give a coverage problem".format(
                 label))
+    positional = _cpu_judge_coverage_problems(source.replace(c95e, c95e.replace(", bound=1.0)", ", 1.0)", 1), 1))
+    if source.count(c95e) != 1 or positional:
+        out.append("(cpu-judge-coverage-positional) ap-c95e with its bound passed by position must give no coverage "
+                   "problem, got {!r}".format(positional))
+    return out
+
+
+def _deadline_retime_context_failures(tmp):
+    """(cpu-judge-retime-context) A spy in place of _deadline_shape_case, run through _deadline_shape_runs
+    and _deadline_shape_verdicts as _deadline_shape_failures wires them, records for every call whether
+    the registry probe was replaced by _no_registry_above: every CPU retiming of a case runs under the
+    same context as that case's first runs, and the cases so run are exactly the _DEADLINE_PLAIN_CASES
+    cases, one per shape and size."""
+    probe = aiqt_hooks._orch_dirfd_has_registry
+    calls = []
+
+    def spy(name, shape, size, cwd):
+        calls.append(((name, shape, size, cwd), aiqt_hooks._orch_dirfd_has_registry is not probe))
+        return (100.0, 0.1, "allow", 0.0)
+    contexts = {}
+    runs = _deadline_shape_runs(tmp / "retime-context", _DEADLINE_SIZES, contexts, case=spy)
+    first = {}
+    for key, ceiling in calls:
+        first.setdefault(key, set()).add(ceiling)
+    plain = [run for run in runs if tuple(run[:4]) in contexts]
+    other = [run for run in runs if tuple(run[:4]) not in contexts][:3]
+    del calls[:]
+    in_context = _deadline_case_in_context(contexts, case=spy)
+    _deadline_shape_verdicts(plain + other, in_context, cpu_retime=in_context)
+    out = []
+    want = sum(len(shapes) for shapes in _DEADLINE_PLAIN_CASES.values()) * len(_DEADLINE_SIZES)
+    under = sorted(key for key, ceilings in first.items() if ceilings == {True})
+    if len(under) != want or any(first[key] not in ({True}, {False}) for key in first):
+        out.append("(cpu-judge-retime-context) {} cases ran their first runs under _no_registry_above, want {}"
+                   .format(len(under), want))
+    retimed = {}
+    for key, ceiling in calls:
+        retimed.setdefault(key, set()).add(ceiling)
+    wrong = sorted(key for key in retimed if retimed[key] != first.get(key))
+    if len(retimed) != len(plain) + len(other) or wrong:
+        out.append("(cpu-judge-retime-context) every retimed case must run under its first runs' context: {} of "
+                   "{} cases retimed, under another context: {!r}".format(len(retimed), len(plain) + len(other),
+                                                                         wrong[:3]))
     return out
 
 
@@ -10820,6 +11118,7 @@ def _test_deadline_posture(failures, tmp):
     failures.extend(_deadline_relation_failures())
     failures.extend(_deadline_shape_rerun_failures())
     failures.extend(_cpu_judge_failures())
+    failures.extend(_deadline_retime_context_failures(Path(tmp)))
     failures.extend(_deadline_load_judgement_failures(Path(tmp)))
     failures.extend(_deadline_note_only_deny_failures())
     failures.extend(_raw_sequence_failures())
@@ -26936,7 +27235,8 @@ def _main_isolated(monitor):
                                         "{} rebase reads and {} run lines){}".format(
                                             len(_ci_cmd), _ci_unit, _ci_got, _ci_spent, _ci_counts[0],
                                             _ci_counts[1], _ci_cap, _ci_want[0], _ci_want[1],
-                                            "; the longer command was not run" if _ci_size == 64 << 10 else ""))
+                                            "; the longer command was not run" if _ci_size == 64 << 10 else "")
+                                        + _hook_cpu_text())
                         break
         finally:
             aiqt_hooks._cmtidn_run_lines = _ci_saved
@@ -26974,7 +27274,8 @@ def _main_isolated(monitor):
                                     "holding {!r}, got {} after {:.2f} s with the reason {!r}{}".format(
                                         _ci_label, len(_ci_cmd), _ci_cap, _ci_wants, _ci_got, _ci_spent,
                                         _ci_reason[-200:],
-                                        "; the longer command was not run" if _ci_size == 16 << 10 else ""))
+                                        "; the longer command was not run" if _ci_size == 16 << 10 else "")
+                                    + _hook_cpu_text())
                     break
         # Every co-author trailer name in a word is read, each with its own value of up to 160 characters, where the
         # reader read only the first trailer name of a word and the raw-string scan resumed its search after each
@@ -27391,8 +27692,9 @@ def _main_isolated(monitor):
             _ci_got, _ci_spent = _hook_cpu_timed(
                 lambda _cmd=_ci_wide + _ci_tail: _decision(cig, _cmd), bound=1.0)
             if _ci_got != _ci_want or _ci_spent > 1.0:
-                failures.append("{}: over {} characters expected {} within 1 s of CPU time, got {} after {:.2f} s"
-                                .format(_ci_label, len(_ci_wide + _ci_tail), _ci_want, _ci_got, _ci_spent))
+                failures.append("{}: over {} characters expected {} within 1 s of CPU time, got {} after {:.2f} s{}"
+                                .format(_ci_label, len(_ci_wide + _ci_tail), _ci_want, _ci_got, _ci_spent,
+                                        _hook_cpu_text()))
         _ci_body = "cat > notes.txt <<'EOF'\n" + "the claude adapter notes\n" * ((1 << 20) // 25) + "EOF"
         _ci_heredoc = "\ncat > notes.txt <<EOF\n{}EOF"
         _ci_unparsed = ('/usr/bin/gi? commit --author="Claude <c@x>" -m x' + _ci_heredoc,
@@ -27431,8 +27733,8 @@ def _main_isolated(monitor):
                  "word, past the read limit, denies", _ci_body + "\ngit_committer_email=claude@x make", "deny")):
             _ci_got, _ci_spent = _hook_cpu_timed(lambda _cmd=_ci_long: _decision(cig, _cmd), bound=1.0)
             if _ci_got != _ci_want or _ci_spent > 1.0:
-                failures.append("{}: over {} characters expected {} within 1 s of CPU time, got {} after {:.2f} s"
-                                .format(_ci_label, len(_ci_long), _ci_want, _ci_got, _ci_spent))
+                failures.append("{}: over {} characters expected {} within 1 s of CPU time, got {} after {:.2f} s{}"
+                                .format(_ci_label, len(_ci_long), _ci_want, _ci_got, _ci_spent, _hook_cpu_text()))
         _ci_out = cig({"hook_event_name": "PreToolUse", "tool_name": "Bash",
                        "tool_input": {"command": _ci_cmd + " " * _ci_limit}})[1]
         _ci_reason = ((_ci_out or {}).get("hookSpecificOutput") or {}).get("permissionDecisionReason", "")
@@ -30210,8 +30512,8 @@ def _main_isolated(monitor):
         _ut_cost_got, _ut_cpu = _hook_cpu_timed(
             lambda _cmd=_ut_cost_cmd: _decision(aiqt_hooks.bash_absolute_paths, _cmd), bound=1.0)
         if _ut_cpu >= 1.0 or _ut_cost_got != "allow":
-            failures.append("(ap-c95e) the escaped-'>' run must allow in under 1 s of CPU; got {} in {:.2f} s"
-                            .format(_ut_cost_got, _ut_cpu))
+            failures.append("(ap-c95e) the escaped-'>' run must allow in under 1 s of CPU; got {} in {:.2f} s{}"
+                            .format(_ut_cost_got, _ut_cpu, _hook_cpu_text()))
         # the second reading a backquote starts cuts each run to two, so each '>' it reads ends the word before
         # it and the reads stay linear in the command's length.
         _ut_cost_cmd = "echo `true`; cat <<<y > /" + "\\\\\\>/" * 8000
@@ -30219,7 +30521,7 @@ def _main_isolated(monitor):
             lambda _cmd=_ut_cost_cmd: _decision(aiqt_hooks.bash_absolute_paths, _cmd), bound=1.0)
         if _ut_cpu >= 1.0 or _ut_cost_got != "allow":
             failures.append("(ap-c95f) the odd backslash runs after a backquote must allow in under 1 s of CPU; "
-                            "got {} in {:.2f} s".format(_ut_cost_got, _ut_cpu))
+                            "got {} in {:.2f} s{}".format(_ut_cost_got, _ut_cpu, _hook_cpu_text()))
         # malformed / out-of-scope payloads for the Bash floor
         _bap = aiqt_hooks.bash_absolute_paths
         if _reduce(_bap, {"hook_event_name": "PreToolUse", "tool_name": "Bash",
