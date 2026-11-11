@@ -6292,6 +6292,8 @@ _DEADLINE_SHAPES = {
                                                + ")" * (n // 3 - 3)}),
     "nest_cmdsubst_background": lambda n, base: ("Bash", {"command": "echo " + "$(" * (n // 3 - 3) + "true"
                                                           + ")" * (n // 3 - 3), "run_in_background": True}),
+    # A background dispatch of repeated bare-'&' detaches: the sink read and the detach detector each lex it.
+    "amp_background": lambda n, base: ("Bash", {"command": _repeat("true & ", n), "run_in_background": True}),
     "errexit_guarded": lambda n, base: ("Bash", {"command": "set -e\n" + _repeat("a || exit 1\n", n - 7)}),
     "errexit_nest_parens": lambda n, base: ("Bash", {"command": "set -e; " + "(" * (n // 2 - 6) + "true"
                                                      + ")" * (n // 2 - 6)}),
@@ -6456,7 +6458,7 @@ _DEADLINE_CASES = {
                        "errexit_nest_parens", "errexit_case_arms", "errexit_note_after", "errexit_unread_after"),
     "orch_ask_guard": ("ask_long",),
     "orch_resume_barrier": ("git_words", "write_content"),
-    "orch_truncation_guard": ("nest_cmdsubst_background", "git_words"),
+    "orch_truncation_guard": ("nest_cmdsubst_background", "amp_background", "git_words"),
     "orch_untracked_wait_loop": ("git_words", "nest_cmdsubst"),
     "orch_yield_tool": ("wakeup_long",),
     "pgrep_self_match": ("git_words", "nest_parens", "pgrep_distinct", "pgrep_self_after"),
@@ -6482,7 +6484,7 @@ _DEADLINE_DENY_CASES = frozenset((
     ("gate_weakening", "noverify_after"), ("gate_weakening", "ansi_c_noverify_after"),
     ("git_explicit_binding", "breadth_push_after_unbal"), ("pgrep_self_match", "pgrep_self_after"),
     ("protected_line", "push_force_after"), ("protected_line", "mirror_cfg_run_after"),
-    ("protected_line", "procsubst_run_after")))
+    ("protected_line", "procsubst_run_after"), ("orch_truncation_guard", "amp_background")))
 # The (handler, shape) cases whose note must still arrive, each within its bound. For inline_errexit: on
 # errexit_note_after errexit is on for the whole long prefix and the hazard is at its end, and on
 # errexit_unread_after the set -e is in the rest past the long prefix that the lexer did not read. For
@@ -31383,6 +31385,17 @@ def _main_isolated(monitor):
             failures.append("(noask-trunc-sink-deny) orch_truncation_guard must DENY a background producer "
                             "piped into a truncating sink on a real repo; got {}"
                             .format(_f18_sink))
+        # (noask-trunc-bg-detach) a background dispatch whose command detaches a child with a bare '&', on the
+        # same real repo + registry, DENIES (the dispatch tracks only the launching shell), never asks.
+        # Falsifiable: without the background detach check it reaches the final note, "allow-note".
+        _f18_bgamp = _f18_trunc("long_job > out.log 2>&1 &", True)
+        if _f18_bgamp == "ask":
+            failures.append("(noask-trunc-bg-detach) orch_truncation_guard returned 'ask' on a background "
+                            "bare-& detach")
+        elif _f18_bgamp != "deny":
+            failures.append("(noask-trunc-bg-detach-deny) orch_truncation_guard must DENY a background "
+                            "dispatch that detaches a child with a bare '&' on a real repo; got {}"
+                            .format(_f18_bgamp))
         # (noask-trunc-note) a background dispatch with shell syntax (a redirect) but no truncating sink, on
         # the same real repo + registry, reaches orch_truncation_guard's final allow-with-note. Falsifiable:
         # a silent allow there reads "allow"; an explicit permissionDecision "allow" reads "explicit-allow".
@@ -31403,6 +31416,17 @@ def _main_isolated(monitor):
             failures.append("(noask-trunc-out-of-scope-note) orch_truncation_guard must ALLOW WITH A NOTE a "
                             "foreground bare-& detach where no orchestration registry is found; got {}"
                             .format(_f18_oos))
+        # (noask-trunc-oos-bg-detach-note) with NO orchestration registry, a background dispatch that detaches
+        # a child with a bare '&' reaches the background detach note. Falsifiable: without that note it is
+        # the silent allow, "allow"; a deny reads "deny".
+        with _no_registry_above(_f18_plain):
+            _f18_oos_bg = _decision_any(aiqt_hooks.orch_truncation_guard, {
+                "hook_event_name": "PreToolUse", "tool_name": "Bash",
+                "tool_input": {"command": "sleep 1 &", "run_in_background": True}, "cwd": str(_f18_plain)})
+        if _f18_oos_bg != "allow-note":
+            failures.append("(noask-trunc-oos-bg-detach-note) orch_truncation_guard must ALLOW WITH A NOTE a "
+                            "background dispatch that detaches a child with a bare '&' where no orchestration "
+                            "registry is found; got {}".format(_f18_oos_bg))
         # (noask-trunc-oos-unreadable-input) with NO orchestration registry, input the guard cannot read
         # draws the unreadable-input note naming the field, never the silent allow it was and never ask
         # or deny: a tool_input that is not an object, a command that is not a string, and a

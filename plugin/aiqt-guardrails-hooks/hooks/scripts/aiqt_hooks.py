@@ -25873,7 +25873,12 @@ def orch_truncation_guard(data):
     is lifted ONLY where every `&` it reads lies, as the lexer places it, in a quoted here-document body, a
     single- or double-quoted string, or a comment. Every other foreground call in registry scope remains
     out of scope (the harness returns its
-    output directly; in registry-required mode a cwd with no registry is denied before this point).
+    output directly; in registry-required mode a cwd with no registry is denied before this point). A
+    readable BACKGROUND dispatch whose command the same detector reads as a "detach" DENIES too (trkasy): the
+    dispatch tracks only the shell that launched it, which can finish while the child runs on untracked. That
+    check runs last, after the truncating-sink deny and just before the generic note, so every earlier deny
+    reason stands; its reason steers to dropping the `&` (one tracked dispatch per worker), never back to
+    run_in_background, and a background "unbalanced" read keeps the generic note (a disclosed residual).
 
     MALFORMED INPUT FAILS CLOSED (check-fails-closed-on-unreadable): a tool_input that is missing, null, or
     not a JSON object, a run_in_background that is present but not a real boolean (the string "true" is
@@ -25915,8 +25920,10 @@ def orch_truncation_guard(data):
     object, a command that is missing or not a string, or a run_in_background that is present but not a
     real boolean) is allowed WITH A NOTE naming the field this guard could not read
     (_orch_oos_unreadable_input_note), never silently and never a deny; a readable background dispatch
-    (run_in_background exactly true) and a readable foreground command neither reader flags are the
-    silent allow. REGISTRY-REQUIRED MODE (opt-in, default
+    (run_in_background exactly true) whose command the first reader reads as a "detach" is allowed WITH the
+    registry scope's background detach reason as a note (saying no registry was found, in place of the
+    deny); every other readable background dispatch and a readable foreground command neither reader flags
+    are the silent allow. REGISTRY-REQUIRED MODE (opt-in, default
     unchanged): with the environment variable AIQT_ORCH_REQUIRE_REGISTRY set to anything but an explicit
     off value ('', '0', 'false', 'no', 'off', ASCII case-insensitive, matched exactly with nothing
     stripped, so a padded off word reads as ON), an ABSENT registry DENIES instead of
@@ -26015,7 +26022,8 @@ def orch_truncation_guard(data):
         # note naming the field it could not read, never silently (a detach such an input carries is never
         # scanned, so silence would read ignorance as clean) and never a deny (no fail-closed case outside
         # registry scope); a readable background dispatch (run_in_background exactly true) keeps the silent
-        # allow. A readable foreground command gets ONE note when either reader finds work that may detach:
+        # allow unless the detector reads a bare-'&' detach in it, which gets the background detach note. A
+        # readable foreground command gets ONE note when either reader finds work that may detach:
         # the detector the registry scope denies on (a bare-& detach, or quoting or comments it cannot read
         # to the end, where a later '&' can be a hidden detach) gives its own note, and otherwise the note
         # scan's detach, detacher word or unreadable span gives that scan's note. Where the detector lifts
@@ -26040,6 +26048,21 @@ def orch_truncation_guard(data):
         if out_rib is True:
             # A readable background dispatch: not a foreground call, so the foreground detach note does
             # not apply, and outside registry scope the background capture rules do not run (disclosed).
+            # A bare '&' inside it still detaches a child the dispatch does not track, so a command the
+            # registry scope's detector reads as a "detach" gets that deny's reason as a note; an
+            # "unbalanced" read and every other command keep the silent allow.
+            if _orch_foreground_detach_lexed(out_command) == "detach":
+                return _allow_note(
+                    "AIQT rule trkasy (track-launched-work): this background dispatch detaches a child with a "
+                    "bare '&', so the dispatch tracks only the shell that launched it; that shell can finish "
+                    "while the child runs on untracked, and the child's result and failure are lost. No "
+                    "orchestration registry was found for this cwd, so this release allows it with this "
+                    "warning. Drop the '&' so the tracked dispatch runs the work itself and collect its "
+                    "completion; for several workers, issue one tracked background dispatch per worker. If "
+                    "this '&' is not a detach at all (a bitwise AND in an arithmetic expansion, an '&' in the "
+                    "body of a here-document whose delimiter is unquoted, or one inside a substitution in a "
+                    "double-quoted string), quote the here-document delimiter (<<'EOF') where its body needs "
+                    "no expansion, or write the text to a file and pass the file instead.")
             return _allow()
         if out_rib is not False:
             return _orch_oos_unreadable_input_note(
@@ -26325,6 +26348,24 @@ def orch_truncation_guard(data):
                     "AIQT guardrail: denied a background dispatch piped into a truncating sink ({}) that "
                     "discards the producer's output and failure (rules trkasy/vrfdlv); capture the full "
                     "output to a real file, or run it foreground.".format(_cw))
+    # A bare '&' inside a background dispatch detaches a child from the tracked shell: the dispatch tracks
+    # only that shell, which can finish while the child runs on, so the child's result and failure are lost
+    # (trkasy). Same reader and lifts as the foreground branch; checked last, so it reaches only a command
+    # that would otherwise get the note below and every earlier deny reason stands. An "unbalanced" read
+    # keeps that note (a disclosed residual).
+    if _orch_foreground_detach_lexed(command) == "detach":
+        return _deny(
+            "AIQT rule trkasy (track-launched-work): this background dispatch detaches a child with a bare "
+            "'&', so the dispatch tracks only the shell that launched it; that shell can finish while the "
+            "child runs on untracked, and the child's result and failure are lost. It is denied. Drop the "
+            "'&' so the tracked dispatch runs the work itself and collect its completion; for several "
+            "workers, issue one tracked background dispatch per worker. If this '&' is not a detach at all "
+            "(a bitwise AND in an arithmetic expansion, an '&' in the body of a here-document whose "
+            "delimiter is unquoted, or one inside a substitution in a double-quoted string), quote the "
+            "here-document delimiter (<<'EOF') where its body needs no expansion, or write the text to a "
+            "file and pass the file instead.",
+            "AIQT guardrail: denied a background dispatch that detaches a child with a bare '&' (untracked "
+            "asynchronous work, rule trkasy); drop the '&', or issue one tracked dispatch per worker.")
     return _allow_note(
         "AIQT guardrail (rules trkasy/vrfdlv): this background dispatch uses shell syntax (a pipe, redirect, "
         "separator, quote, expansion, or grouping), so this guard does not parse it to prove the full output "
@@ -26647,8 +26688,10 @@ def orch_untracked_wait_loop(data):
     unbalanced quote, or subshell-grouped detach classifies 'indeterminate' and emits nothing, deferring to
     the truncation guard's generic bare-`&` DENY-and-educate (or its open-quote deny) on the same event.
     Only a positive 'match' DENIES here. This is a specific companion to that generic deny, defence in
-    depth on the same event: the truncation guard denies any bare-`&` detach it can read, this denies the
-    specific untracked poll loop with a reason about the stranded poll."""
+    depth on the same event: the truncation guard denies any bare-`&` detach it can read, in a foreground
+    call or inside a background dispatch (the background one after its truncating-sink deny; with no
+    registry that guard only notes), this denies the specific untracked poll loop with a reason about the
+    stranded poll."""
     tool_name = data.get("tool_name")
     if tool_name is None:
         # A missing tool_name is a malformed payload, not another tool: it is denied before the registry
