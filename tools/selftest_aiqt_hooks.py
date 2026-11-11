@@ -6574,8 +6574,16 @@ _DEADLINE_OWN_WORK_BOUND = aiqt_hooks.PRETOOL_BUDGET_SECONDS
 # _DEADLINE_OWN_WORK_BOUND, well below it.
 _DEADLINE_HANG_SECONDS = 60.0
 # The deadline child's fixed wall-clock limit (_deadline_child_wait): a child still running after it is
-# killed, whatever the load, and nothing is divided by anything.
-_DEADLINE_CHILD_TIMEOUT = 900
+# killed, whatever the load, and nothing is divided by anything. Sized from measured costs on an 80-CPU host:
+# the whole child took about 774 s (about 86 percent of an earlier 900 s limit) at a one-minute load of 34 to
+# 40 (2026-11-09) and ran past 900 s three times at a load of 45 to 80; timed part by part (2026-11-11, load
+# 33 to 36), its 22 timer and disposition parts took 63.8 s together and the shape timings
+# (_deadline_shape_failures) more than 536 s, stopped there unfinished, so the shape timings are most of its
+# cost. 1300 s is about 1.7 times the 774 s run, a margin meant for the loads up to 50 to 53 that this file
+# records (_deadline_cut_problems), and it stays under a 1500 s bound on a whole run of this suite with about
+# 200 s left for the rest of it. A load past that band can still exceed it: the child then fails as
+# dl-child-timeout and every one of its parts is reported as not run (dl-child-not-run).
+_DEADLINE_CHILD_TIMEOUT = 1300
 
 
 def _deadline_fixtures(tmp):
@@ -9119,7 +9127,7 @@ def _deadline_rearm_failures():
     scheduling delay at the exit, and fails if the window's own timer is armed for real again.
     Neither case shows that no delay can fail the run: two bounds remain that these checks do not remove,
     the 1 s allowed for the kernel to expire the re-armed timer and the deadline child's
-    _DEADLINE_CHILD_TIMEOUT (900 s of wall-clock time, _deadline_child_wait)."""
+    _DEADLINE_CHILD_TIMEOUT (1300 s of wall-clock time, _deadline_child_wait)."""
     out = []
     take = aiqt_hooks._DeadlineWindow._take.__code__
     twice = aiqt_hooks._DeadlineWindow._twice.__code__
@@ -10450,19 +10458,42 @@ def _deadline_entry_message_failures():
     return out
 
 
+def _deadline_child_parts(tmp):
+    """(name, call) for each part of the deadline child, in the order _deadline_child runs them; each call
+    returns that part's failures. The names are what a stopped or failed child reports as not run
+    (_deadline_child_not_run)."""
+    return (("_deadline_path_failures", _deadline_path_failures),
+            ("_deadline_restore_failures", _deadline_restore_failures),
+            ("_deadline_race_failures", _deadline_race_failures),
+            ("_deadline_take_failures", _deadline_take_failures),
+            ("_deadline_defer_failures", _deadline_defer_failures),
+            ("_deadline_defer_countdown_failures", _deadline_defer_countdown_failures),
+            ("_deadline_defer_countdown_failures(1.0)", lambda: _deadline_defer_countdown_failures(1.0)),
+            ("_deadline_defer_countdown_judging_failures", _deadline_defer_countdown_judging_failures),
+            ("_deadline_enclosing_restore_failures", _deadline_enclosing_restore_failures),
+            ("_deadline_rearm_failures", _deadline_rearm_failures),
+            ("_deadline_discard_failures", _deadline_discard_failures),
+            ("_deadline_alarm_failures", _deadline_alarm_failures),
+            ("_deadline_mask_failures", _deadline_mask_failures),
+            ("_deadline_mask_thread_failures", _deadline_mask_thread_failures),
+            ("_deadline_no_c_mask_failures", _deadline_no_c_mask_failures),
+            ("_deadline_outer_deadline_failures", _deadline_outer_deadline_failures),
+            ("_deadline_restore_fault_failures", _deadline_restore_fault_failures),
+            ("_deadline_unknown_failures", _deadline_unknown_failures),
+            ("_deadline_fire_take_failures", _deadline_fire_take_failures),
+            ("_deadline_window_error_failures", _deadline_window_error_failures),
+            ("_deadline_result_failures", _deadline_result_failures),
+            ("_deadline_entry_message_failures", _deadline_entry_message_failures),
+            ("_deadline_shape_failures", lambda: _deadline_shape_failures(Path(tmp))))
+
+
 def _deadline_child(tmp):
     """The deadline checks that set timers and dispositions, plus the shape timings, in this (child)
-    process; returns their failures."""
-    return (_deadline_path_failures() + _deadline_restore_failures() + _deadline_race_failures()
-            + _deadline_take_failures() + _deadline_defer_failures() + _deadline_defer_countdown_failures()
-            + _deadline_defer_countdown_failures(1.0) + _deadline_defer_countdown_judging_failures()
-            + _deadline_enclosing_restore_failures()
-            + _deadline_rearm_failures() + _deadline_discard_failures() + _deadline_alarm_failures()
-            + _deadline_mask_failures() + _deadline_mask_thread_failures() + _deadline_no_c_mask_failures()
-            + _deadline_outer_deadline_failures() + _deadline_restore_fault_failures()
-            + _deadline_unknown_failures() + _deadline_fire_take_failures() + _deadline_window_error_failures()
-            + _deadline_result_failures()
-            + _deadline_entry_message_failures() + _deadline_shape_failures(Path(tmp)))
+    process, one part after another (_deadline_child_parts); returns their failures."""
+    out = []
+    for _name, call in _deadline_child_parts(tmp):
+        out.extend(call())
+    return out
 
 
 def _deadline_relation_failures():
@@ -10616,25 +10647,66 @@ def _test_deadline_posture(failures, tmp):
     failures.extend(_lex_fork_failures())
     failures.extend(_errexit_runs_failures())
     failures.extend(_deadline_child_wait_failures(tmp))
+    failures.extend(_deadline_child_not_run_failures(tmp))
     child_tmp = tmp / "deadline"
     child_tmp.mkdir()
+    failures.extend(_deadline_child_verdicts(child_tmp, _deadline_child_wait))
+
+
+def _deadline_child_not_run(why):
+    """(dl-child-not-run) One cannot-evaluate failure for each part of the deadline child
+    (_deadline_child_parts), each naming the part and why it has no verdict: a child that was stopped or
+    failed reports none of its checks, and none of them is skipped silently."""
+    return ["(dl-child-not-run) {} was not run to a verdict (cannot evaluate): {}".format(name, why)
+            for name, _call in _deadline_child_parts(".")]
+
+
+def _deadline_child_verdicts(child_tmp, wait):
+    """The failures of the deadline child run in child_tmp through wait (_deadline_child_wait, or a stand-in
+    with its signature): the child's own failures when it finishes in time with a JSON list; otherwise
+    dl-child-timeout or dl-child-failed, followed by every part of the child as not run
+    (_deadline_child_not_run)."""
     code = ("import json, sys; sys.path.insert(0, sys.argv[1]); import selftest_aiqt_hooks as m; "
             "sys.stdout.write(json.dumps(m._deadline_child(sys.argv[2])))")
-    proc, waited = _deadline_child_wait(code, (str(Path(__file__).resolve().parent), str(child_tmp)),
-                                        _DEADLINE_CHILD_TIMEOUT)
+    proc, waited = wait(code, (str(Path(__file__).resolve().parent), str(child_tmp)), _DEADLINE_CHILD_TIMEOUT)
     if proc is None:
-        failures.append("(dl-child-timeout) the deadline child did not finish within its {}s wall-clock limit ({})"
-                        .format(_DEADLINE_CHILD_TIMEOUT, waited))
-        return
+        return (["(dl-child-timeout) the deadline child did not finish within its {}s wall-clock limit ({})"
+                 .format(_DEADLINE_CHILD_TIMEOUT, waited)]
+                + _deadline_child_not_run("the deadline child was stopped at its wall-clock limit"))
     try:
         found = json.loads(proc.stdout)
     except ValueError:
         found = None
     if proc.returncode != 0 or not isinstance(found, list):
-        failures.append("(dl-child-failed) the deadline child failed (exit {}): {}".format(
-            proc.returncode, (proc.stdout + proc.stderr)[-2000:]))
-        return
-    failures.extend(found)
+        return (["(dl-child-failed) the deadline child failed (exit {}): {}".format(
+                    proc.returncode, (proc.stdout + proc.stderr)[-2000:])]
+                + _deadline_child_not_run("the deadline child failed before it reported its verdicts"))
+    return found
+
+
+def _deadline_child_not_run_failures(tmp):
+    """(dl-child-not-run-reported) _deadline_child_verdicts, given a stand-in for _deadline_child_wait (no
+    child is started), reports each part of the deadline child as not run, by name, after dl-child-timeout
+    when the child is stopped and after dl-child-failed when it exits nonzero, and passes a finished child's
+    failures through unchanged with nothing added."""
+    out = []
+    names = [name for name, _call in _deadline_child_parts(".")]
+    for label, result, lead in (
+            ("stopped", None, "(dl-child-timeout) "),
+            ("failed", subprocess.CompletedProcess([], 1, "", "boom"), "(dl-child-failed) ")):
+        got = _deadline_child_verdicts(tmp, lambda code, args, limit, result=result: (result, "simulated"))
+        rest = got[1:]
+        if (not got or not got[0].startswith(lead) or len(rest) != len(names)
+                or any(not line.startswith("(dl-child-not-run) {} ".format(name))
+                       for line, name in zip(rest, names))):
+            out.append("(dl-child-not-run-reported) a {} deadline child must report {!r} and then each of its {} "
+                       "parts as not run, by name, got {!r}".format(label, lead.strip(), len(names), got))
+    done = subprocess.CompletedProcess([], 0, json.dumps(["(dl-x) kept"]), "")
+    got = _deadline_child_verdicts(tmp, lambda code, args, limit: (done, "simulated"))
+    if got != ["(dl-x) kept"]:
+        out.append("(dl-child-verdicts-kept) a finished deadline child's failures must pass through "
+                   "unchanged, got {!r}".format(got))
+    return out
 
 
 # THE BOUNDED HERE-DOCUMENT END (_heredoc_body_ends_early and the span comment in _lex_pass). Each row hides
