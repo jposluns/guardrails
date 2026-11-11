@@ -4085,6 +4085,18 @@ def _watchdog_ledger_case(mode, budget):
     raise ValueError("unknown runtime ledger vector %r" % (mode,))
 
 
+def _deadline_started_reached(started_r):
+    """Whether the deadline fixture's subject wrote its start token to the
+    pipe read end `started_r`. The read never blocks: a pipe with nothing in
+    it (the subject never reached its stimulus) is "not reached", never an
+    exception, and so is a pipe closed with nothing in it."""
+    os.set_blocking(started_r, False)
+    try:
+        return os.read(started_r, 200) == b"started"
+    except BlockingIOError:
+        return False
+
+
 def _watchdog_deadline_case(mode):
     """Private subprocess: at-fork hooks cannot be unregistered, so never install them in the runner."""
     import signal
@@ -4201,8 +4213,7 @@ def _watchdog_deadline_case(mode):
             assert elapsed > 1.5 and drains, (elapsed, rows)
         # The helper owns cleanup. A diagnostic never sends another signal.
         reaped = _opf_emit._fixture_child_reaped(child[0])
-        os.set_blocking(started_r, False)
-        reached = os.read(started_r, 200) == b"started"
+        reached = _deadline_started_reached(started_r)
         ok = (result == "TIMEOUT" and execution_ok and cleanup_ok
               and reached and reaped)
     finally:
@@ -15671,6 +15682,21 @@ def _watchdog_completion_case(mode, tree=None):
         os.close(subject_fd)
         control.close()
         peer.close()
+    elif mode == "started-empty":
+        # The deadline fixture's start check: an empty pipe is "not reached"
+        # (the old blocking-flag read raised BlockingIOError here), the start
+        # token is "reached", and a pipe closed empty is "not reached".
+        started_r, started_w = os.pipe()
+        try:
+            try:
+                assert _deadline_started_reached(started_r) is False, "empty pipe was reached"
+                os.write(started_w, b"started")
+                assert _deadline_started_reached(started_r) is True, "start token was lost"
+            finally:
+                os.close(started_w)
+            assert _deadline_started_reached(started_r) is False, "closed pipe was reached"
+        finally:
+            os.close(started_r)
     else:
         raise AssertionError("unknown completion fixture: " + mode)
     print("opf completion:", mode, "PASS")
@@ -15947,7 +15973,7 @@ def _watchdog_regression_self_test():
                         "poll-collected", "close-cancel",
                         "escalate-degraded", "poll-masked",
                         "unpinned-kill", "census-verify",
-                        "census-exception", "receipt-high-fd")
+                        "census-exception", "receipt-high-fd", "started-empty")
     # Each launcher case's bound DERIVES from its nested callee's sanctioned
     # budget, following the blocked-isolation convention below: with
     # _run_fixture_process patched, every nested
@@ -16079,7 +16105,9 @@ def _watchdog_regression_self_test():
         ("pdeathsig", 32), ("escalation-subject", 884 + 6), ("escalate-reaped", 784),
         ("poll-collected", 1266), ("close-cancel", 1014), ("escalate-degraded", 784),
         ("poll-masked", 2954), ("unpinned-kill", 600), ("census-verify", 630),
-        ("census-exception", 780), ("receipt-high-fd", 10)))
+        ("census-exception", 780), ("receipt-high-fd", 10),
+        # started-empty makes no bounded wait: its reads never block.
+        ("started-empty", 1)))
     # The isolation matrix in this leg: 31 timer cases, each one 180 s
     # fixture call, charged its allowance by the leg's ledger. A call that
     # overruns that allowance overruns the leg, which its process bound then
