@@ -11252,6 +11252,11 @@ _RW_DENY_ROWS = (
     ("rw-d-subst-backquoted-dquoted", "echo \"a `recordctl write | tail` b\""),
     ("rw-d-subst-nested", "echo \"$(echo \"$(recordctl write | head)\")\""),
     ("rw-d-subst-unquoted", "x=$(recordctl write | head)"),
+    ("rw-d-subst-redirect-out", "echo hi > \"$(recordctl write | head)\""),
+    ("rw-d-subst-redirect-in", "cat < \"$(recordctl write | head)\""),
+    ("rw-d-subst-in-arith", "echo \"$(( $(recordctl write | head) ))\""),
+    ("rw-d-subst-quoted-paren", "echo \"$(echo \")\"; recordctl write | head)\""),
+    ("rw-d-subst-padded-after", "echo \"$(recordctl write | head)\"" + " \"$(:)\"" * 80),
     # A sink stage under a wrapper.
     ("rw-d-sink-command", "recordctl write | command head"),
     ("rw-d-sink-stdbuf", "recordctl write | stdbuf -oL head -n 1"),
@@ -11265,6 +11270,23 @@ _RW_DENY_UNPARSED_ROWS = (
     ("rw-u-complete-before", "recordctl write | head; cat <<<x"),
     ("rw-u-unbalanced", "echo \"x; recordctl write | head"),
 )
+# Substitution bodies the reading cannot cover (a body the lexer cannot read, one cut short at a case
+# pattern's ')', one past the count bound, one past the depth bound): text naming a writer's command word with
+# head or tail denies as cannot-evaluate, and each row allows with that test patched to find nothing.
+_RW_DENY_UNREAD_ROWS = (
+    ("rw-u-subst-herestring", "echo \"$(recordctl write | head <<<x)\""),
+    ("rw-u-subst-herestring-before", "echo \"$(cat <<<x; recordctl write | head)\""),
+    ("rw-u-subst-case", "echo \"$(case x in x) recordctl write | head;; esac)\""),
+    ("rw-u-subst-past-count", "echo" + " \"$(:)\"" * 80 + " \"$(recordctl write | head)\""),
+    ("rw-u-subst-past-depth", "echo " + "\"$(echo " * 6 + "\"$(recordctl write | head)\"" + ")\"" * 6),
+)
+# A pull-request body in a quoted here-document holding 800 '$(' spellings: read in linear time, it allows.
+_RW_PR_BODY = ("gh pr create --title t --body \"$(cat <<'EOF'\n"
+               + "- run x=$(foo) and check it\n" * 800 + "EOF\n)\"")
+# Seconds of this thread's CPU one decision on a timed row may take: far above the linear reading's cost (a
+# few hundredths of a second) and far below the reading that lexed each '$(' to the end of its word (about
+# 7 s on the many-substitution row).
+_RW_TIMED_SECONDS = 2.0
 # False-positive controls and allowed routes: no deny from this check under the same declaration.
 _RW_ALLOW_ROWS = (
     ("rw-a-read", "recordctl read | head"),
@@ -11285,6 +11307,9 @@ _RW_ALLOW_ROWS = (
     ("rw-a-echo-if", "echo if recordctl write | head"),
     ("rw-a-subst-other", "echo \"$(recordctl read | head)\""),
     ("rw-a-sink-wrapper-other", "recordctl write | stdbuf -oL wc -l"),
+    ("rw-a-subst-text-after", "echo \"$(date) recordctl write | tail\""),
+    ("rw-a-subst-arith", "echo \"$((1)) recordctl write | head\""),
+    ("rw-a-subst-padding", "echo" + " \"$(:)\"" * 80),
 )
 _RW_DECLARATION = 'version = 1\nwriters = [["recordctl", "write"], ["python3", "/abs/tools/update_records.py"]]\n'
 
@@ -11292,9 +11317,11 @@ _RW_DECLARATION = 'version = 1\nwriters = [["recordctl", "write"], ["python3", "
 def _test_records_writers(failures, tmp):
     """(rw-*) The records-writer check of gate_weakening: the deny matrix (both sinks, '|' and '|&', options,
     absolute sink paths, foreground flag absent, false and true, wrappers, assignments, quoting, pass-through
-    stages, earlier commands, reserved words and compound commands, substitution bodies, wrapped sinks), each
-    deny row red with the check removed (the pipeline walk and the unparsed-text test patched to find
-    nothing), the false-positive controls and allowed routes, the declaration's discovery and its fail-closed
+    stages, earlier commands, reserved words and compound commands, substitution bodies in a word or a redirect
+    target, wrapped sinks), each deny row red with the check removed (the pipeline walk and the unparsed-text
+    test patched to find nothing), the substitution text the reading cannot cover (each such row red with its
+    test patched out), the timed rows (many '$(' and a long pull-request body under a declaration), the
+    false-positive controls and allowed routes, the declaration's discovery and its fail-closed
     reads (malformed, invalid UTF-8, wrong types, unknown keys, duplicate or empty entries, oversized,
     symlink, directory, unreadable via an injected read fault), the cwds from which no declaration can be
     looked for (not a string, empty, relative, an lstat fault on a candidate), which decide as with no cwd,
@@ -11334,6 +11361,32 @@ def _test_records_writers(failures, tmp):
                                                                          str(decl)))
     for label, command in _RW_DENY_UNPARSED_ROWS:
         expect(label, command, "deny", needles=("Run the writer alone",))
+    for label, command in _RW_DENY_UNREAD_ROWS:
+        expect(label, command, "deny", needles=("Run the writer alone", "denied fail-closed"))
+    # The unread-text test is the only deny of each unread row: patched to find nothing, every one allows.
+    saved_unread = aiqt_hooks._records_writer_unread_named
+    try:
+        aiqt_hooks._records_writer_unread_named = lambda unread, writers: False
+        for label, command in _RW_DENY_UNREAD_ROWS:
+            if decide(command, sub)[0] == "deny":
+                failures.append("({}-red) {!r} still denies with the unread-text test removed, so the row does not "
+                                "prove it".format(label, command))
+    finally:
+        aiqt_hooks._records_writer_unread_named = saved_unread
+    # The reading is linear in the command: many '$(' under a declaration, and a long pull-request body, each
+    # decide within _RW_TIMED_SECONDS of CPU, and the writer past the padding still denies.
+    timed = (("rw-t-many-subst", "echo \"" + "$(:)" * 1000 + "\"", "allow"),
+             ("rw-t-many-subst-writer", "echo \"" + "$(:)" * 1000 + "\" \"$(recordctl write | head)\"", "deny"),
+             ("rw-t-pr-body", _RW_PR_BODY, "allow"))
+    for label, command, want in timed:
+        start = time.thread_time()
+        got, obj = decide(command, sub)
+        took = time.thread_time() - start
+        if got != want:
+            failures.append("({}) expected {}, got {}: {}".format(label, want, got, json.dumps(obj)[:400]))
+        if took > _RW_TIMED_SECONDS:
+            failures.append("({}-time) the decision took {:.2f} s of CPU, over the {} s bound".format(
+                label, took, _RW_TIMED_SECONDS))
     for label, command in _RW_ALLOW_ROWS:
         got, obj = decide(command, sub)
         if got == "deny":
@@ -11349,7 +11402,7 @@ def _test_records_writers(failures, tmp):
     try:
         aiqt_hooks._records_writer_sink = lambda records, writers: None
         aiqt_hooks._records_writer_named = lambda command, writers: False
-        for label, command in _RW_DENY_ROWS + _RW_DENY_UNPARSED_ROWS:
+        for label, command in _RW_DENY_ROWS + _RW_DENY_UNPARSED_ROWS + _RW_DENY_UNREAD_ROWS:
             got, _obj = decide(command, sub)
             if got == "deny" and label != "rw-u-unbalanced":
                 failures.append("({}-red) {!r} still denies with the records-writer check removed, so the row "

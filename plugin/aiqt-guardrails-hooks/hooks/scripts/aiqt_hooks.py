@@ -18229,7 +18229,8 @@ _RECORDS_WRITER_SINK_RE = re.compile(r"(?<![A-Za-z0-9_.-])(?:head|tail)(?![A-Za-
 # A sink stage run under a wrapper (| command head, | stdbuf -oL head, | sudo head, | exec head, | xargs head):
 # the note tier's wrapper list and xargs, which runs its operand command on the piped text.
 _RECORDS_WRITER_SINK_WRAPPERS = frozenset(_GATE_NOTE_WRAPPERS | {"xargs"})
-# The bounds of the substitution-body reading (_records_writer_subst_readings): nesting depth and body count.
+# The bounds of the substitution-body reading (_records_writer_subst_readings): nesting depth and the count
+# of bodies lexed; a body past either is not lexed and denies as cannot-evaluate when it names a writer.
 _RECORDS_WRITER_SUBST_DEPTH = 4
 _RECORDS_WRITER_SUBST_BODIES = 64
 
@@ -18427,43 +18428,122 @@ def _records_writer_deny(writer, sink, path):
         "exit status and re-read the record.".format(sink))
 
 
-def _records_writer_subst_readings(command, readings):
-    """The readings of the command substitution bodies a parsed command's lex keeps inside one word (a
-    double-quoted "$(...)" or a backquoted body, which the lexer does not split into segments), each body
-    lexed on its own (_lex_readings), read to _RECORDS_WRITER_SUBST_DEPTH levels of nesting and at most
-    _RECORDS_WRITER_SUBST_BODIES bodies. A body the lexer cannot read is returned as text (a str) for the
-    raw-text test. A single-quoted word spelling '$(' is read the same way (a disclosed over-block)."""
-    out = []
-    work = [(body, 1) for _start, body in _backquote_bodies(command)]
-    work += [(word, 0) for reading in readings for seg in reading for word in seg.argv if "$(" in word]
-    seen = 0
-    while work and seen < _RECORDS_WRITER_SUBST_BODIES:
-        text, depth = work.pop()
-        seen += 1
-        bodies = [text] if depth else []
-        at = text.find("$(")
-        while at >= 0:
-            bodies.append(text[at + 2:])
-            at = text.find("$(", at + 2)
-        for body in bodies:
-            try:
-                lexed = _lex_readings(body)
-            except ValueError:
-                out.append(body)
+def _records_writer_subst_bodies(word):
+    """The outermost '$(' substitution bodies of one decoded word, in text order, and the text a body may have
+    been cut short in: (bodies, doubt), doubt None or a str. Outside any body the word is decoded text, so
+    only '$(' counts there; inside one a single-quoted string, a double-quoted string (in which a '$(' opens a
+    body of its own), a backslash and a parenthesis are followed, and a body ends at the ')' that closes its
+    '$(' or at the end of the word. So each character of the word is scanned once and lies in at most one
+    returned body: the text read grows linearly with the word. A '$((' arithmetic expansion is read as a body
+    holding a subshell. A ')' outside every body after a body closed (a case pattern's ')' or a backquote in
+    a body can close it early) makes doubt the text from that body's start to the end of the word."""
+    bodies = []
+    doubt = None
+    stack = []
+    begin = last = 0
+    i, n = 0, len(word)
+    while i < n:
+        ch = word[i]
+        if not stack:
+            if word.startswith("$(", i):
+                stack.append(")")
+                begin = i + 2
+                i += 2
                 continue
-            out.extend(lexed)
-            if depth < _RECORDS_WRITER_SUBST_DEPTH:
-                work += [(word, depth + 1) for reading in lexed for seg in reading for word in seg.argv
-                         if "$(" in word or "`" in word]
-                work += [(inner, depth + 1) for _start, inner in _backquote_bodies(body)]
-    return out
+            if ch == ")" and bodies and doubt is None:
+                doubt = word[last:]
+            i += 1
+            continue
+        if ch == "\\":
+            i += 2
+            continue
+        if stack[-1] == '"':
+            if ch == '"':
+                stack.pop()
+            elif word.startswith("$(", i):
+                stack.append(")")
+                i += 2
+                continue
+            i += 1
+            continue
+        if ch == "'":
+            close = word.find("'", i + 1)
+            i = n if close < 0 else close + 1
+            continue
+        if ch == '"':
+            stack.append('"')
+        elif word.startswith("$(", i):
+            stack.append(")")
+            i += 1
+        elif ch == "(":
+            stack.append(")")
+        elif ch == ")":
+            stack.pop()
+            if not stack:
+                bodies.append(word[begin:i])
+                last = begin
+        i += 1
+    if stack:
+        bodies.append(word[begin:])
+    return bodies, doubt
+
+
+def _records_writer_subst_readings(command, readings):
+    """(out, unread): out holds the readings of the command substitution bodies a parsed command's lex keeps
+    inside one word (a double-quoted "$(...)" or a backquoted body, which the lexer does not split into
+    segments), in an argv word or a redirect target, each body lexed on its own (_lex_readings); unread holds
+    the text the readings could not cover. Each '$(' body ends at its matching ')' (_records_writer_subst_bodies),
+    so the text lexed grows linearly with the command: the bodies of one level lie inside the words of the level
+    above, and nesting is read to _RECORDS_WRITER_SUBST_DEPTH levels. Bodies are lexed in text order, and every
+    body lexed counts against _RECORDS_WRITER_SUBST_BODIES; past that bound, and past the depth bound, each
+    body left unlexed is put in unread. A body the lexer cannot read is put in unread too, with the text a body
+    may have been cut short in. A single-quoted or backslash-escaped '$(' spelling is read the same way, since
+    the lexer has decoded the word (a disclosed over-block)."""
+    out = []
+    unread = []
+    work = collections.deque((body, 1) for _start, body in _backquote_bodies(command))
+
+    def words_of(reading_list, depth):
+        for reading in reading_list:
+            for seg in reading:
+                texts = list(seg.argv) + [redirect.target for redirect in seg.redirects]
+                for word in texts:
+                    if "$(" not in word:
+                        continue
+                    bodies, doubt = _records_writer_subst_bodies(word)
+                    work.extend((body, depth) for body in bodies)
+                    if doubt is not None:
+                        unread.append(doubt)
+
+    words_of(readings, 1)
+    lexed_count = 0
+    while work:
+        body, depth = work.popleft()
+        if lexed_count >= _RECORDS_WRITER_SUBST_BODIES or depth > _RECORDS_WRITER_SUBST_DEPTH:
+            unread.append(body)
+            continue
+        lexed_count += 1
+        try:
+            lexed = _lex_readings(body)
+        except ValueError:
+            unread.append(body)
+            continue
+        out.extend(lexed)
+        words_of(lexed, depth + 1)
+        work.extend((inner, depth + 1) for _start, inner in _backquote_bodies(body))
+    return out, unread
+
+
+def _records_writer_unread_named(unread, writers):
+    """True when any text the substitution reading could not cover names a writer and head or tail."""
+    return any(_records_writer_named(text, writers) for text in unread)
 
 
 def _records_writer_unreadable_deny(command_doubt, detail, path):
     """The fail-closed deny when the records-writer check cannot be evaluated: the declaration found at path
     cannot be read (a cwd from which none can be looked for never reaches here; _records_writers_load), or,
-    with writers declared, the command or a substitution body cannot be lexed and its text names a writer and
-    a head or tail word."""
+    with writers declared, the command or a substitution body cannot be lexed, or a body lies past the reading's
+    count or depth bound, and its text names a writer and a head or tail word."""
     if command_doubt:
         return _deny(
             "AIQT rule gatdis (gate-discipline): records writers are declared in {}, and this command could not "
@@ -18489,8 +18569,8 @@ def _records_writer_verdict(data, readings, command=None, parsed=None):
     a declared writer is piped into head or tail in any of readings (each a list of segment records) or, on a
     parsed command (parsed, its raw text), in a substitution body its lex keeps inside one word
     (_records_writer_subst_readings); ("doubt", path) when command, the raw text of an unparseable command
-    (None on a parsed one), or a substitution body the lexer cannot read, names a writer's command word and
-    head or tail; else None, which includes no declaration, an empty one, and an unlocatable one
+    (None on a parsed one), or text the substitution reading could not cover (a body the lexer cannot read,
+    one past the count or depth bound), names a writer's command word and head or tail; else None, which includes no declaration, an empty one, and an unlocatable one
     (_records_writers_load), so an adopter with no declaration sees no change."""
     state, value, path = _records_writers_load(data)
     if state == "bad":
@@ -18499,16 +18579,15 @@ def _records_writer_verdict(data, readings, command=None, parsed=None):
         return None
     unread = []
     if parsed is not None:
-        extra = _records_writer_subst_readings(parsed, readings)
-        unread = [body for body in extra if isinstance(body, str)]
-        readings = list(readings) + [body for body in extra if not isinstance(body, str)]
+        extra, unread = _records_writer_subst_readings(parsed, readings)
+        readings = list(readings) + extra
     for records in readings:
         hit = _records_writer_sink(records, value)
         if hit is not None:
             return ("deny", hit[0], hit[1], path)
     if command is not None and _records_writer_named(command, value):
         return ("doubt", path)
-    if any(_records_writer_named(body, value) for body in unread):
+    if _records_writer_unread_named(unread, value):
         return ("doubt", path)
     return None
 
