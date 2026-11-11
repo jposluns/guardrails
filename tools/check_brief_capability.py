@@ -4245,41 +4245,45 @@ DEADLINE_MARGIN_SECONDS = 3.0
 # PARSE_DEADLINE_SECONDS, a wall-clock count by construction (the parent's communicate timeout), plus
 # DEADLINE_MARGIN_SECONDS for the parent's own work around that wait (the child's spawn, the wake-up at
 # the timeout, the group kill, the reap, the result decode). Neither part is scaled by any reading of
-# host load. A parse that runs on past the deadline still fails its row, because a parse takes no less
-# wall time than the CPU time it spends, and the parse of each ceiling shape needs more CPU time than
-# the bound: parse/deadline-cap-under-uncut-parse runs each one with the deadline lifted under a CPU
-# timer armed at the bound and requires the timer to cut it inside the parse (_cap_probe_held). The
-# timer is armed at the bound itself, with no margin above it (parse/deadline-cap-armed-at-bound reads
-# it back), because a margin above the bound would only add a band of parse costs that needed the bound
-# yet ended before the cut and read False. Arming at the bound narrows that band but does not close it:
-# the kernel can deliver the timer's signal some time after the bound, and Python runs the handler only
-# when the main thread's interpreter next checks for signals, so a parse that ends just past the bound
-# can still return, or leave the parser, before the cut lands and read False although it needed the
-# bound. That residual is not removed here. The two old-ceiling shapes are shown past the bound by
-# revert/parse-thread-join-red.
+# host load. How much CPU time one parse of a ceiling shape needs is a fact about the host (its CPU
+# speed and its Python build), not something this code can hold, so no row requires one parse of a
+# fixed text to outlast the bound: a runner fast enough parses a ceiling shape in less. What
+# parse/deadline-cap-under-uncut-parse holds on any host is the cut itself: with the deadline lifted, its
+# probe parses each ceiling shape again and again until a CPU timer armed at the bound cuts it, and
+# requires that cut to land inside the parser after the bound (_cap_probe_held), so a parse still running
+# at the bound is ended only by the timer and only once the bound is spent. With the timer removed the
+# repeated parse never ends and the row reads False. A cut that lands in read()'s own work around a
+# parse, between two parses, still reads False; that span is short beside one parse of these shapes
+# and is not removed here. The timer is armed at the bound itself, with no margin above it
+# (parse/deadline-cap-armed-at-bound reads it back). The two old-ceiling shapes are shown past the bound
+# by revert/parse-thread-join-red.
 # the probe child for parse/deadline-cap-under-uncut-parse: it builds one ceiling shape (argv[2] its
 # repeated unit, behind the self-test's parse-forcing lead), loads the vendored parser, replaces the
 # thread join with a direct call (so the parse runs in this main thread with no deadline), turns core
 # files off, sets a SIGPROF handler that raises Cut, writes UNCUT_PARSE_MARKER, reads its own thread's
 # CPU clock and then the process's, arms the one-shot ITIMER_PROF CPU timer at argv[3] seconds and makes
-# the call UNCUT_PARSE_CALL. Without nohz_full the kernel fires that timer on CPU time it charges a
-# whole clock tick at a time, which can reach argv[3] while the exact CPU clocks read just under it, so
-# the handler raises Cut only once the process's exact CPU clock shows argv[3] seconds since its
-# reading: a timer that fired, and so stands disarmed, while that clock is still short is armed again
-# for the rest and the call goes on. A SIGPROF that arrives while the timer is still armed is not that
-# timer's own and raises Cut at once, whatever the clock shows; several stand-ins in CAP_STANDINS send
-# one on purpose while the timer is armed, and their cuts report less than argv[3]. Apart from such a
-# SIGPROF sent within about one clock tick after argv[3], while Linux still holds the timer armed, only
-# a cut raised because the process's clock showed argv[3] reports at least argv[3]: both clocks are read
-# before the timer is armed, the thread's first, in a process that runs only this thread, so when that
-# Cut ends the call the thread has spent at least argv[3] seconds since its reading. When the timer cuts
-# the call, Cut ends it; the child then reads, after the call, the CPU time its own thread spent inside
-# the call and how far the parse got (how many frames of the vendored parser's code were on the stack
-# where the cut landed), writes both as one report line, and ends itself by the signal that cut it at
-# that signal's default action, so its exit status names that signal. A call that returns or is refused
-# writes no report and exits 0.
+# the call UNCUT_PARSE_CALL, which reads the text again and again until something ends it, so on any
+# host the parse is still running when the timer reaches argv[3]. Without nohz_full the kernel fires
+# that timer on CPU time it charges a whole clock tick at a time, which can reach argv[3] while the
+# exact CPU clocks read just under it, so the handler raises Cut only once the process's exact CPU clock
+# shows argv[3] seconds since its reading: a timer that fired, and so stands disarmed, while that clock
+# is still short is armed again for the rest and the call goes on. A SIGPROF that arrives while the
+# timer is still armed is not that timer's own and raises Cut at once, whatever the clock shows; several
+# stand-ins in CAP_STANDINS send one on purpose while the timer is armed, and their cuts report less
+# than argv[3]. Apart from such a SIGPROF sent within about one clock tick after argv[3], while Linux
+# still holds the timer armed, only a cut raised because the process's clock showed argv[3] reports at
+# least argv[3]: both clocks are read before the timer is armed, the thread's first, in a process that
+# runs only this thread, so when that Cut ends the call the thread has spent at least argv[3] seconds
+# since its reading. When the timer cuts the call, Cut ends it; the child then reads, after the call,
+# the CPU time its own thread spent inside the call and how far the parse got (how many frames of the
+# vendored parser's code were on the stack where the cut landed), writes both as one report line, and
+# ends itself by the signal that cut it at that signal's default action, so its exit status names that
+# signal. A call that returns or is refused writes no report and exits 0.
 UNCUT_PARSE_MARKER = b"parsing\n"
-UNCUT_PARSE_CALL = "    m.read(text)\n"
+UNCUT_PARSE_CALL = ("    while True:\n"
+                    "        m.read(text)\n")
+# the one-parse call of CAP_ONE_PARSE_PROBE, which returns when its single parse ends
+CAP_ONE_PARSE_CALL = "    m.read(text)\n"
 UNCUT_PARSE_PROBE = (
     "import os, resource, signal, sys, time, traceback\n"
     "sys.path.insert(0, sys.argv[1])\n"
@@ -4319,6 +4323,10 @@ UNCUT_PARSE_PROBE = (
     "    signal.signal(stop.args[0], signal.SIG_DFL)\n"
     "    os.kill(os.getpid(), stop.args[0])\n"
     "    time.sleep(5)\n")
+# UNCUT_PARSE_PROBE with its repeated call replaced by one parse (CAP_ONE_PARSE_CALL), for
+# parse/deadline-cap-refuses-parse-under-bound: a parse that ends before the timer reaches the bound
+# returns, and the child exits 0 with no report
+CAP_ONE_PARSE_PROBE = UNCUT_PARSE_PROBE.replace(UNCUT_PARSE_CALL, CAP_ONE_PARSE_CALL)
 # the probe's whole output when the timer cut its parse: the marker, then one report line of the CPU
 # seconds its thread spent inside the call and the parser frames on the cut's stack; the parent keeps
 # at most CAP_OUTPUT_LIMIT bytes of it, more than any output this pattern can match
@@ -4641,12 +4649,13 @@ def _cap_probe_readings(runs, timeout=600, held=_cap_probe_held):
     return readings
 
 
-def _cap_under_uncut_parse(units=("_a", "x<?"), timeout=600):
+def _cap_under_uncut_parse(units=("_a", "x<?"), timeout=600, source=UNCUT_PARSE_PROBE):
     """For each ceiling shape of parse/deadline-held-at-ceiling (by default the underscore-mark run and
-    the <? opener paragraph, each given by its repeated unit), whether UNCUT_PARSE_PROBE shows its parse
-    cut by a CPU timer of exactly _deadline_bound() after spending at least _deadline_bound() of its own
-    thread's CPU time inside the parser (_cap_probe_held)."""
-    return _cap_probe_readings([(UNCUT_PARSE_PROBE, unit, lambda: None) for unit in units], timeout)
+    the <? opener paragraph, each given by its repeated unit), whether the probe `source` (by default
+    UNCUT_PARSE_PROBE, which parses the shape again and again until it is cut) shows its parse cut by a
+    CPU timer of exactly _deadline_bound() after spending at least _deadline_bound() of its own thread's
+    CPU time inside the parser (_cap_probe_held)."""
+    return _cap_probe_readings([(source, unit, lambda: None) for unit in units], timeout)
 # a stand-in parse child: _CHILD_PATH is pointed at a script that opens with this prefix (the text read
 # from stdin, the script's own directory as `here`) and then runs one vector's body, so each way a child
 # can end is shown against the parent's reading of it
@@ -6255,10 +6264,12 @@ def self_test(report_path=None):
     # end by SIGKILL, by SIGXCPU or by a normal exit, no marker, or a second report line each refuse
     check("parse/deadline-cap-report-boundary", _cap_report_boundary_reading(),
           [False, True, True, False, False, False, False, False, False])
-    # and the bound is under each ceiling shape's parse: with the deadline lifted, the parse running in
-    # the probe's main thread is cut by a CPU timer of exactly the bound, and the probe reports, after
-    # the cut, at least the bound of its own thread's CPU spent inside the call and the cut landing
-    # inside the vendored parser, so a read whose child was never killed would stay over the bound
+    # and a parse still running at the bound is ended only by the CPU timer and only once the bound is
+    # spent: with the deadline lifted, the probe's main thread parses each ceiling shape again and again
+    # (so on any host it is still parsing at the bound), is cut by a CPU timer of exactly the bound, and
+    # reports, after the cut, at least the bound of its own thread's CPU spent inside the call and the
+    # cut landing inside the vendored parser; with the timer removed the parse never ends and this reads
+    # False
     check("parse/deadline-cap-under-uncut-parse", _cap_under_uncut_parse(), [True, True])
     # and that timer is armed at the bound itself, with no margin above it: a probe child whose parse call
     # is replaced by a read-back of the timer it has just armed (CAP_ARMED_PROBE), started through the
@@ -6270,11 +6281,12 @@ def self_test(report_path=None):
           (_cap_probe_readings([(CAP_ARMED_PROBE, "_a", lambda: None)], held=_cap_armed_held),
            _cap_armed_boundary_reading()),
           ([True], [False, True, True, True, True, True, False, False]))
-    # and the same probe on a shape whose whole parse needs far less CPU than the bound (plain prose
-    # filled to the ceiling behind the same parse-forcing lead, about half a second) is not cut: its
-    # parse returns, and the row reads False, as it would for a ceiling shape on a runner fast enough
-    # that the deadline no longer cuts its parse
-    check("parse/deadline-cap-refuses-parse-under-bound", _cap_under_uncut_parse(("ab ",)), [False])
+    # and the probe with one parse in place of the repeated one (CAP_ONE_PARSE_PROBE), on a shape whose
+    # whole parse needs far less CPU than the bound (plain prose filled to the ceiling behind the same
+    # parse-forcing lead, about half a second), is not cut: its parse returns, and the row reads False,
+    # as one parse of a ceiling shape would on a runner fast enough to end it before the bound
+    check("parse/deadline-cap-refuses-parse-under-bound",
+          _cap_under_uncut_parse(("ab ",), source=CAP_ONE_PARSE_PROBE), [False])
     # and a probe child whose parse the CPU timer did not end does not pass for one it did (CAP_STANDINS,
     # all at once on the underscore-mark shape): a child that kills itself with SIGKILL before any marker
     # or sends itself SIGPROF at once; a child that sleeps for its CPU budget and then sends itself
