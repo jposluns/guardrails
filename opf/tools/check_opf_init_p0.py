@@ -38,6 +38,15 @@ import _opf_init_p0 as p0  # noqa: E402
 
 OP_ID = "abcdef01-2345-4678-9abc-def012345678"
 
+# Homes-rule scan exemptions (checked by check_opf_init.py): this gate's test-only code, whose
+# bodies that gate does not scan. red_on_revert runs each reverted copy of _opf_init_p0's source
+# with exec and compile in a fresh dict of its own, which that gate's namespace-reach arm reports
+# by name. Registering a function asserts it is test-only; the gate trusts that and does not
+# check reachability.
+_HOMES_SELFTEST_EXEMPT = (
+    "red_on_revert",
+)
+
 
 def check(condition, identity):
     if not condition:
