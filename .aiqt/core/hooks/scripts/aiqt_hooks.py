@@ -5131,7 +5131,7 @@ def _co_author_ai(tok, judged):
 # never overlap, and each piece of decoration is bounded, so a text costs time linear in its length. Other credit
 # wording, and an AI named outside AI_IDENTITY_RE, are outside it (the residue lists them).
 _AI_CREDIT_LINE_RE = re.compile(
-    r"(?im)^(?:[^\w\n`'\"<]|_|<[^<>\n]{0,40}>){0,8}generated[ \t ]+(?:with|by|using|via)\b([^\n]{0,200})")
+    r"(?im)^(?:[^\w\n`'\"<]|_|<[^<>\n]{0,40}>){0,8}generated[ \t\u00a0]+(?:with|by|using|via)\b([^\n]{0,200})")
 
 
 def _credit_line_ai(text, judged, decode=False):
@@ -5185,8 +5185,8 @@ def _cmtidn_ansi_c_credit_ai(command, judged):
 # cannot resolve or read in full fails closed: a file option whose value the check cannot see (the shell lexer
 # drops a process substitution such as -F <(...), so the option has no value word), a name holding a character
 # the shell expands or a '~', a relative name whose base directory the check cannot know (no cwd in the payload, a
-# cd, pushd or popd word anywhere in the command, a directory option before the git command, or a command line git
-# runs from its operands), a file the same command may write (_cmtidn_written), a missing file, one that is not a
+# cd, pushd or popd word or a GIT_DIR or GIT_WORK_TREE assignment anywhere in the command, a directory option
+# before the git command, or a command line git runs from its operands), a file the same command may write (_cmtidn_written), a missing file, one that is not a
 # regular file, one past a bound, or any other error opening or reading it. The open does not block on a FIFO or a
 # device (_RDP_OPEN_FLAGS) and follows a symlink, as git and gh do.
 _CMTIDN_FILE_LIMIT = 1 << 20
@@ -5197,14 +5197,18 @@ _CMTIDN_CHDIR_WORDS = frozenset(("cd", "pushd", "popd"))
 # A directory option of a wrapper or of git before the command's subcommand (env -C, env --chdir, sudo -D, git -C,
 # git --git-dir, git --work-tree), so a relative file name there is not resolved against the payload's cwd.
 _CMTIDN_DIR_OPTION_RE = re.compile(r"^-(?:[A-Za-z]*[CD]|-(?:chdir|directory|git-dir|work-tree))")
+# A word that assigns GIT_DIR or GIT_WORK_TREE ('=' or '+='): inline before git, behind env, or exported earlier
+# in the command. Like --git-dir and --work-tree, it can move the directory git reads a relative message or
+# template file from away from the cwd the check reads, so its relative names are not resolved there.
+_CMTIDN_GIT_DIR_ENV_RE = re.compile(r"(?:GIT_DIR|GIT_WORK_TREE)\+?=")
 
 
 class _CmtidnFiles:
     """The state of the named-file reads for one command: the command text (scanned in place of a file read
     from stdin, '-', and of a file the command writes from a quoted here-document, _cmtidn_written), the
-    payload's cwd when it is an absolute path, whether a word of the command is cd, pushd or popd (set by
-    _cmtidn_line_ai from the segments of the command, before any of them is judged), and the files read so
-    far."""
+    payload's cwd when it is an absolute path, whether a word of the command is cd, pushd or popd or assigns
+    GIT_DIR or GIT_WORK_TREE (set by _cmtidn_line_ai from the segments of the command, before any of them is
+    judged), and the files read so far."""
 
     def __init__(self, command, cwd):
         self.command = command
@@ -5904,11 +5908,13 @@ def _cmtidn_line_ai(command, depth, budgets, unread, paths, judged, from_env=Fal
     elif error is not None and not readings:
         raise error
     if depth == 0:
-        # A cd, pushd or popd WORD in any segment of the command, under either reading, leaves a relative file
-        # name's base directory unknown (_cmtidn_message_file_ai); a quoted message that holds the letters
-        # 'cd' is one word and does not count. A run line's relative names never resolve (relative_ok).
-        files.chdir = files.chdir or any(tok in _CMTIDN_CHDIR_WORDS for _same, segments in readings
-                                         for tokens, _sep in segments for tok in tokens)
+        # A cd, pushd or popd WORD, or a word that assigns GIT_DIR or GIT_WORK_TREE (_CMTIDN_GIT_DIR_ENV_RE), in
+        # any segment of the command, under either reading, leaves a relative file name's base directory
+        # unknown (_cmtidn_message_file_ai); a quoted message that holds the letters 'cd' is one word and does
+        # not count. A run line's relative names never resolve (relative_ok).
+        files.chdir = files.chdir or any(tok in _CMTIDN_CHDIR_WORDS or _CMTIDN_GIT_DIR_ENV_RE.match(tok)
+                                         for _same, segments in readings for tokens, _sep in segments
+                                         for tok in tokens)
     line_env = None  # read at the first segment that runs git (below)
     for same, segments in readings:
         keys = [reading for reading in paths if reading in same] or [None]

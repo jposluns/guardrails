@@ -26575,6 +26575,33 @@ def _main_isolated(monitor):
                   "git -c commit.template=clean.txt commit", "deny", cwd=str(_cr_dir))
         cr2expect("(ci-cr-g9) git -c commit.template with an absolute clean template allows",
                   "git -c commit.template=" + _cr_p["clean.txt"] + " commit", "allow")
+        # A GIT_DIR or GIT_WORK_TREE assignment (inline, behind env, or exported earlier in the command) moves the
+        # directory git reads a relative -F or -t file from, so a relative clean file in the payload cwd fails
+        # closed; the swap below makes the assignment unseen again and requires each to allow. An absolute clean
+        # file still allows.
+        _cr_repo = str(_cr_dir / "repo")
+        _cr_git_env = [
+            ("(ci-cr-ge1)", "GIT_DIR=" + _cr_repo + "/.git GIT_WORK_TREE=" + _cr_repo + " git commit -F clean.txt"),
+            ("(ci-cr-ge2)", "env GIT_WORK_TREE=" + _cr_repo + " git commit -F clean.txt"),
+            ("(ci-cr-ge3)", "export GIT_DIR=" + _cr_repo + "/.git; git commit -t clean.txt")]
+        for _cr_label, _cr_command in _cr_git_env:
+            cr2expect(_cr_label + " a relative clean message or template file after a GIT_DIR or GIT_WORK_TREE "
+                      "assignment fails closed", _cr_command, "deny", cwd=str(_cr_dir))
+        cr2expect("(ci-cr-ge4) an absolute clean message file after GIT_DIR and GIT_WORK_TREE assignments allows",
+                  "GIT_DIR=" + _cr_repo + "/.git GIT_WORK_TREE=" + _cr_repo + " git commit -F " + _cr_p["clean.txt"],
+                  "allow", cwd=str(_cr_dir))
+        _cr_saved_ge = aiqt_hooks._CMTIDN_GIT_DIR_ENV_RE
+        try:
+            aiqt_hooks._CMTIDN_GIT_DIR_ENV_RE = re.compile(r"[^\s\S]")
+            _cr_kept = [label for label, command in _cr_git_env if _decision(cig, command, cwd=str(_cr_dir)) != "allow"]
+        finally:
+            aiqt_hooks._CMTIDN_GIT_DIR_ENV_RE = _cr_saved_ge
+        if _cr_kept:
+            failures.append("(ci-cr-ge-revert) with GIT_DIR and GIT_WORK_TREE assignments unseen, {} still deny "
+                            "(want allow, the earlier gap)".format(_cr_kept))
+        # The credit line's separator class holds a no-break space, written as an escape in the source.
+        cr2expect("(ci-cr-nbsp) a credit line whose words a no-break space separates denies",
+                  "gh pr create --body " + shlex.quote(_cr_gen + " with " + _cr_ai), "deny")
         # gh options before the pr word and the verb, gh pr merge, and git -c commit.template.
         cr2expect("(ci-cr-g1) gh -R before pr does not hide an AI credit line, denies",
                   "gh -R o/r pr create --body " + shlex.quote(_cr_credit), "deny")
