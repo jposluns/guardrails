@@ -274,6 +274,10 @@ def run(root, anchored=False):
         if manifest["release-version"] != version:
             findings.append("manifest release-version {!r} does not equal VERSION {!r}".format(
                 manifest["release-version"], version))
+        opf_version = gen_manifest.read_opf_version(root, classes)
+        if manifest.get("opf-version") != opf_version:
+            findings.append("manifest opf-version {!r} does not equal {} {!r}".format(
+                manifest.get("opf-version"), gen_manifest.OPF_VERSION_REL, opf_version))
         if manifest["genesis"] != gen_manifest.read_genesis(root):
             raise gen_manifest.GateError("manifest genesis flag disagrees with the releases.toml row "
                                          "count (2.5); a genesis manifest requires a zero-row record")

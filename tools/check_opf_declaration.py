@@ -711,6 +711,7 @@ def self_test(report_path=None):
         ("runtime/report-restates-shipped-on-mismatch", "report-restates-shipped-on-mismatch"),
         ("runtime/report-digest-form", "report-digest-form"),
         ("runtime/declaration-tracks-constants", "declaration-tracks-constants"),
+        ("runtime/opf-version-fail-closed", "opf-version-fail-closed"),
     ):
         check(check_id, *_opf_declaration.run_vector(vector))
         covered.add(vector)
@@ -722,6 +723,8 @@ def self_test(report_path=None):
     expected_line = '        ("{}", {}),\n'
     reverted = set()
     tmp = tempfile.mkdtemp(prefix="opf-declaration-selftest-")
+    # Each mutant reads its release identity from VERSION one directory above it, as the module reads opf/VERSION.
+    (Path(tmp) / "VERSION").write_bytes((OPF_TOOLS.parent / "VERSION").read_bytes())
     number = 0
     for check_id, vector, old, new in (
         ("revert/shipped-digest-constant-alone-red", "shipped-digest-matches-file", digest_line,
@@ -780,6 +783,8 @@ def self_test(report_path=None):
          '    stream.write("[declaration]\\n" + (check.data or SHIPPED_DECLARATION_BYTES).decode("ascii")'),
         ("revert/digest-form-unchecked-red", "report-digest-form", '_DIGEST_RE = re.compile(r"[0-9a-f]{64}\\Z")',
          '_DIGEST_RE = re.compile(r".*")'),
+        ("revert/opf-version-grammar-dropped-red", "opf-version-fail-closed",
+         "    if _parse_version(text) is None:", "    if False:"),
     ):
         number += 1
         try:

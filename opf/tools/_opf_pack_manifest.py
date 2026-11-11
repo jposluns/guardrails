@@ -50,6 +50,9 @@ MANIFEST_TOP_KEYS = frozenset({
     "format-version", "release-version", "genesis", "tree-sha256",
     "sources", "artifacts",
 })
+# OPF's own release version (opf/VERSION), present where the pack carries OPF; a bare SemVer when present.
+# The adopt apply gate refuses a manifest without it, so it binds only manifests that state it.
+MANIFEST_OPTIONAL_KEYS = frozenset({"opf-version"})
 SOURCE_ROW_KEYS = frozenset({"path", "bytes", "sha256"})
 ARTIFACT_KINDS = ("file", "managed-block")
 _ARTIFACT_REQUIRED = frozenset({"artifact-id", "path", "kind", "sha256"})
@@ -132,7 +135,8 @@ def _parse_manifest(raw):
         raise _Refusal(CANNOT_EVALUATE, "manifest-unparseable") from exc
 
     _require(type(document) is dict, "manifest-table", CANNOT_EVALUATE)
-    _require(set(document) == MANIFEST_TOP_KEYS, "manifest-keys")
+    _require(MANIFEST_TOP_KEYS <= set(document) <= MANIFEST_TOP_KEYS | MANIFEST_OPTIONAL_KEYS,
+             "manifest-keys")
     _require(type(document["format-version"]) is int, "format-type")
     _require(document["format-version"] == 1, "format-vocabulary", CANNOT_EVALUATE)
     _require(type(document["genesis"]) is bool, "genesis-type")
@@ -140,6 +144,12 @@ def _parse_manifest(raw):
         type(document["release-version"]) is str
         and _parse_version(document["release-version"]) is not None,
         "release-version",
+    )
+    _require(
+        "opf-version" not in document
+        or (type(document["opf-version"]) is str
+            and _parse_version(document["opf-version"]) is not None),
+        "opf-version",
     )
     _require(_hex_ok(document["tree-sha256"]), "tree-digest")
 
@@ -289,6 +299,11 @@ def _test_vectors():
     for value in (b'"01.0.0"', b'"1.0.0\\n"', b'"1.0.0-beta"', b"1"):
         flip("version-" + value.decode(), base, b'release-version = "1.0.0"',
              b"release-version = " + value)
+    with_opf = b'release-version = "1.0.0"\nopf-version = "2.0.0"'
+    flip("opf-version", base, b'release-version = "1.0.0"', with_opf, VALID)
+    for value in (b'"01.0.0"', b'"2.0.0\\n"', b'"2.0.0-beta"', b'"2.0"', b"2", b"true"):
+        flip("opf-version-" + value.decode(), base, b'release-version = "1.0.0"',
+             b'release-version = "1.0.0"\nopf-version = ' + value)
     flip("tree-digest", base, b'tree-sha256 = "70dd', b'tree-sha256 = "G0dd')
     for value in (b"true", b"-1", b"0.0", b'"0"'):
         source_flip("size-" + value.decode(), b"bytes = 0", b"bytes = " + value)
@@ -1203,6 +1218,7 @@ def self_test(vectors_only=False):
         # fixture must now yield VALID AND its original discriminator go red.
         mutations = (
             ("manifest-keys", "unknown-top"),
+            ("opf-version", "opf-version-\"2.0\""),
             ("format-vocabulary", "format-2"),
             ("source-size", "size-true"),
             ("source-unique", "duplicate-source"),

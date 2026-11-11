@@ -113,10 +113,12 @@ pull request (CLAUDE.md, Gates and CI).
    itself touch `opf/VERSION` or `release`. `python3 -I -B
    tools/check_opf_declaration.py` must then exit 0. It refuses a restatement that differs from the file
    and a release other than the version in `opf/VERSION`; a pack release that leaves OPF's version
-   unchanged changes none of these places. Adoption is not yet bound to OPF's own version: the `opf adopt`
-   trust gate still checks the plan's release version against the pack manifest's `release-version`, which
-   is taken from the pack release version in the root `VERSION`; moving that binding to OPF's own version
-   in `opf/VERSION` is a later step of the version split. This release declares:
+   unchanged changes none of these places. `RELEASE_IDENTITY` is read from `opf/VERSION` when the module
+   loads, and a missing or malformed `opf/VERSION` leaves the build without one, so every gated verb
+   refuses. Adoption is bound to OPF's own version: `python3 tools/gen_manifest.py` records `opf/VERSION`
+   as the release manifest's `opf-version`, and the `opf adopt` trust gate checks the plan's release
+   version against that `opf-version`, never the pack manifest's `release-version` (taken from the root
+   `VERSION`), refusing a manifest that records none. This release declares:
 
    ```toml opf-declaration
    release = "1.0.5"
