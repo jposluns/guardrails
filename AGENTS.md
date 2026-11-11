@@ -117,7 +117,10 @@ write to any of the set's inputs, and a later write to such an input invalidates
 an immutable revision remains evidence about that revision. A review carried to a rebased or replayed
 revision transfers only if the replayed diff is byte-identical to the reviewed diff, and even then review
 reopens wherever the change interacts with a file that differs between the reviewed and new bases, whether
-one it relies on or one that calls or consumes what it changes; any other diff needs a new review.
+one it relies on or one that calls or consumes what it changes; any other diff needs a new review. A claim
+reworded by hand that rests on a reproduction stands only once that reproduction is rerun as worded, under
+every condition it states or implies; a run covering only part of it does not support it. The exact reworded
+sentence, the command, its conditions, the revision, and the observed result are recorded beside the edit.
 
 A fix claim scoped to a defect class, not merely the cited instance, is complete only when it
 also accounts for every sibling instance of that class. Such a claim carries either a recorded,
@@ -581,7 +584,8 @@ not needed, detaching it is a deliberate, recorded choice, not a reflex.
 ## Validation is a gate on apply
 
 There is no trusted-worker fast path: every candidate change is validated before it lands, no matter its
-source. Trust is never a substitute for the gate.
+source. Trust is never a substitute for the gate. A hand edit widening a scoped claim into a general one is
+a candidate change, reviewed for every case it newly covers, including the one its subject exists to catch.
 
 ## Workers produce inert data
 

@@ -106,12 +106,25 @@
 #                        delta, 135529 + 775 = 136304, leaving the 370 units that remain of the headroom
 #                        recorded in the 2026-10-29 entry, within the maintainer's authorization of 2026-11-08
 #                        for raises up to 148000.
+#                        Raised 136304 -> 136801 on 2026-11-10 under the maintainer's recorded decision of
+#                        2026-10-31 to raise the ratchet by exactly the measured delta, when
+#                        evidence-grounded-completion gained its sentences that a claim reworded by hand that
+#                        rests on a reproduction stands only once that reproduction is rerun as worded, and
+#                        that the reworded sentence, the command, its conditions, the revision, and the
+#                        observed result are recorded beside the edit (evgcmp.18, evgcmp.19), and
+#                        validation-gates-apply gained its sentence that a hand edit widening a scoped claim
+#                        into a general one is a candidate change (valgat.2): measured PACK 135934 at the PR
+#                        base a1c8d6fe -> 136431 (+497 units); rule files 119311 -> 119808; managed block 360
+#                        and file headers 16263 unchanged. The ratchet rises by the measured delta, 136304 +
+#                        497 = 136801, leaving the 370 units that remain of the headroom recorded in the
+#                        2026-10-29 entry, within the maintainer's authorization of 2026-11-08 for raises up to
+#                        148000.
 #   ceiling              a reported PACK figure; not enforced, and PACK currently exceeds it. Its value
 #                        predates header counting, which added 16136 units to PACK at the 112222 ->
 #                        128358 ratchet raise; it was not raised with it.
 #   claude-code-version  the Claude Code build whose loading behaviour the gate models.
 #   binary-sha256        the SHA-256 of that build's binary.
-ratchet = 136304
+ratchet = 136801
 ceiling = 90000
 claude-code-version = "2.1.287"
 binary-sha256 = "3920489a5109cff5786a1a392c25277408ff22bc796d5edb9c16a60e5a1718f0"
