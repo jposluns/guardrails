@@ -264,6 +264,12 @@ disposition = "stays-outside-store"
 reason = "It reads changelog.toml, and where changelog.toml lives in OPF awaits the maintainer's ruling."
 
 [[reader]]
+path = "tools/gen_reference_facts.py"
+records = ["changelog.toml"]
+disposition = "stays-outside-store"
+reason = "It reads changelog.toml for the README's plugin install item, and where changelog.toml lives in OPF awaits the maintainer's ruling."
+
+[[reader]]
 path = "tools/check_artifact_checksums.py"
 records = ["changelog.toml"]
 disposition = "stays-outside-store"

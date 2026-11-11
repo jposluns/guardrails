@@ -66,7 +66,7 @@ MARKETPLACE_REPO_URL = "https://github.com/jposluns/guardrails.git"
 # renders the file from the hooks manifest's [marketplace] table and its --check fails while the file is
 # missing or stale, this generator fails closed on a manifest without that table, and RELEASING.md tags
 # only a step 5 merge commit on which the full check run, both gates included, is green. It must itself
-# be a recorded release (checked), so a typing slip cannot move it; a release cut before the marketplace
+# be a recorded release (checked), so a slip naming no release fails; a release cut before the marketplace
 # file first lands would have to become the anchor instead.
 MARKETPLACE_ABSENT_THROUGH = "1.0.5"
 
@@ -160,7 +160,7 @@ def render_plugin_install(root):
     install command pinned to that tag; while no recorded release qualifies it names no tag or command.
 
     The release that VERSION names is never a candidate. RELEASING.md adds that release's artifact table in
-    step 5, its attestation row (a file this generator does not read) in step 6a, and its tag key in step
+    step 3, its attestation row (a file this generator does not read) in step 6a, and its tag key in step
     6b, and the release-delta gate refuses any README.md change in steps 6a and 6b. The item therefore
     depends only on older entries, so it stays byte-identical through steps 5, 6a and 6b, and a release's
     tag first appears in the item with the next version. ValueError on any missing or malformed input:
