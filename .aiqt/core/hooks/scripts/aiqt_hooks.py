@@ -5721,12 +5721,13 @@ _CMTIDN_READ_LIMIT = 128 << 10
 _CMTIDN_TOO_LONG = "the command is longer than the commit-identity check reads within the hook timeout"
 # In a command the fallback judges: a message, template or body file option as git commit and gh pr spell it (a
 # short cluster of up to 4 letters ending in F or t, its value attached or not, or --file, --template or
-# --body-file, a prefix of each included), and git or gh as a word (a path to either included). Both are raw
-# scans, linear in the command's length.
+# --body-file, a prefix of each included), the commit.template configuration name in any letter case, as a git
+# -c value names a template the reader reads, wherever it stands (a quoted or attached -c value included, and a
+# mention of the name only, a disclosed over-deny), and git or gh as a word (a path to either included). Both
+# are raw scans, linear in the command's length.
 _CMTIDN_FALLBACK_FILE_OPTION_RE = re.compile(
-    r"(?<![^\s\"'=;&|()])(?:-[A-Za-z]{0,4}[Ft]|--(?:fil|te|body-f)[a-z-]*)")
-_CMTIDN_FALLBACK_TOOL_RE = re.compile(r"(?<![\w.-])(?:git|gh)(?![\w.-])")
-# An AI name as AI_IDENTITY_RE spells it but with no word boundary, so that a name the reader would find in a
+    r"(?<![^\s\"'=;&|()])(?:-[A-Za-z]{0,4}[Ft]|--(?:fil|te|body-f)[a-z-]*)|(?i:commit\.template)")
+_CMTIDN_FALLBACK_TOOL_RE = re.compile(r"(?<![\w.-])(?:git|gh)(?![\w.-])")# An AI name as AI_IDENTITY_RE spells it but with no word boundary, so that a name the reader would find in a
 # command too long to read is found by the fallback as well. Each word the reader judges, a word of a run line
 # included, holds the command's characters in order less only quotes, backslashes, the newline of a
 # backslash-newline and the '$' before a quote (a run line adds quotes and backslashes that its own reading drops
@@ -5977,20 +5978,20 @@ def _commit_identity_fallback(command, error):
     would deny is denied; the cost is a disclosed over-deny of such a command whose text merely names an AI
     product or holds a name inside a longer word (Claudette) and that holds git as a word or an identity
     variable or config name, a heredoc body included. One that names no AI anywhere is allowed at once, since no
-    raw-string context can find an AI identity in it either. One that names an AI but holds none of those words
-    is judged by the raw-string contexts, as a command the tokenizer cannot parse is, so an AI --author value or
-    co-author trailer in it denies when git runs under another name (gi?, "$G"); a heredoc that writes a file
-    naming an AI product, with no trailer, --author value or identity assignment in it, is allowed. This
-    judgement has no length bound, so its cost grows with the command's length. The costliest shapes measured
-    are commands made of repeated co-author trailer names, since the co-author context reads each name with its
-    own value of up to 160 characters, though the AI identity search reads only the part of each value past the
-    end of the one before it, less _AI_NAME_LONGEST - 1 characters (_ai_value_match): the highest of three
-    single runs on one host took about 0.26 s of CPU time at 1,048,576 characters, 4.0 s at 16,777,216 and 6.3 s
-    at 25,165,824 (with each value searched whole, 0.59 s, 8.7 s and 14.0 s on the same host), and 7.3 s at
-    33,554,432, 8.9 s at 41,943,040 and 10.3 s at 50,331,648, so on the measuring host a command of about 40 to
-    48 MiB or longer can outlast the 10-second hook timeout, and on a slower host a shorter one can. The platform
-    contract this file records (the module docstring) does not say that a hook stopped at its timeout refuses the
-    call, so such a command may run with no deny from this check.
+    raw-string context can find an AI identity in it either, unless the file-option rule below denies it. One that
+    names an AI but holds none of those words is judged by the raw-string contexts, as a command the tokenizer
+    cannot parse is, so an AI --author value or co-author trailer in it denies when git runs under another name
+    (gi?, "$G"); a heredoc that writes a file naming an AI product, with no trailer, --author value or identity
+    assignment in it, is allowed. This judgement has no length bound, so its cost grows with the command's length.
+    The costliest shapes measured are commands made of repeated co-author trailer names, since the co-author
+    context reads each name with its own value of up to 160 characters, though the AI identity search reads only
+    the part of each value past the end of the one before it, less _AI_NAME_LONGEST - 1 characters
+    (_ai_value_match): the highest of three single runs on one host took about 0.26 s of CPU time at 1,048,576
+    characters, 4.0 s at 16,777,216 and 6.3 s at 25,165,824 (with each value searched whole, 0.59 s, 8.7 s and
+    14.0 s on the same host), and 7.3 s at 33,554,432, 8.9 s at 41,943,040 and 10.3 s at 50,331,648, so on the
+    measuring host a command of about 40 to 48 MiB or longer can outlast the 10-second hook timeout, and on a
+    slower host a shorter one can. The platform contract this file records (the module docstring) does not say
+    that a hook stopped at its timeout refuses the call, so such a command may run with no deny from this check.
     With a run line left unread it first denies when an AI identity appears ANYWHERE in the
     command once every backslash-newline, backslash and quote is removed, since quoting or escaping in the
     unread line can split or build an option name or value that no raw-string context sees (--"auth"=...,
@@ -6000,30 +6001,26 @@ def _commit_identity_fallback(command, error):
     the text around a '$' that bash keeps (one inside double quotes, or one escaped), the same safe direction.
     None of these scans reads the git subcommand, so a git command that runs under a git alias the command defines
     (the reader's _git_config_env_named and _git_alias_defined_at) is judged here as a commit-family one is.
-    Before any of these, a command left unread this way (any cause but _SUBST_HEREDOC_MAIN_FAILS, after which
-    the full reading has already read every file) that holds git or gh as a word and names a message, template
-    or body file option (_CMTIDN_FALLBACK_FILE_OPTION_RE) fails closed, since the file is not read here; the cost
-    is a disclosed over-deny of such a command whose option is another program's (sort -t, grep -F). After the
-    raw-string contexts, an AI credit line (_AI_CREDIT_LINE_RE, ANSI-C escapes decoded as _credit_line_ai does)
-    anywhere in the raw text denies, a quoted heredoc body that writes some other file included.
+    After the raw-string contexts, an AI credit line (_AI_CREDIT_LINE_RE, ANSI-C escapes decoded as
+    _credit_line_ai does) anywhere in the raw text denies, a quoted heredoc body that writes some other file
+    included. Every path to an allow, the early one for a command too long to read that names no AI included,
+    first passes the file-option rule (_cmtidn_fallback_file_deny): a command left unread this way that holds git
+    or gh as a word and names a message, template or body file option fails closed, since the file is not read
+    here; the cost is a disclosed over-deny of such a command whose option is another program's (as in sort -t
+    or grep -F). The rule runs after the identity scans, so a command they deny keeps the reason that names the
+    AI identity, and the rule never turns a deny into an allow.
     Never silent-allow a plausibly-violating command the check could not read in full."""
-    if error != _SUBST_HEREDOC_MAIN_FAILS:
-        option = _CMTIDN_FALLBACK_FILE_OPTION_RE.search(command)
-        if option is not None and _CMTIDN_FALLBACK_TOOL_RE.search(command):
-            reason = ("AIQT rule cmtidn (commit-identity): the command could not be read in full (a shell parse "
-                      "error, a process substitution or another construct the tokenizer does not read, a run line "
-                      "left unread, or a command longer than the check reads within the hook timeout), it runs git "
-                      "or gh, and it names a message, template or body file option ({!r}) whose file the check "
-                      "cannot read here; failing closed, since that file can carry an AI co-author trailer or "
-                      "credit line. Write the message to a regular file in a command of its own and name it by an "
-                      "absolute path.".format(option.group(0)[:40]))
-            return _deny(reason,
-                         "AIQT guardrail: denied a git or gh command the commit-identity check could not read in "
-                         "full that names a message or body file (rule cmtidn, fail-safe).")
     if error == _CMTIDN_TOO_LONG:
         match = _AI_NAME_ANYWHERE_RE.search(_CMTIDN_UNREAD_CHARS_RE.sub("", command))
         if match is None:
-            return _allow()  # no AI name, so no raw-string context below can find one either
+            # No AI name, so no raw-string context or credit line below can find one either; only the
+            # file-option rule can still deny.
+            reason = _cmtidn_fallback_file_deny(command, error)
+            if reason is None:
+                return _allow()
+            return _deny(reason,
+                         "AIQT guardrail: denied a git or gh command the commit-identity check could not read in "
+                         "full that names a message or body file (rule cmtidn, fail-safe).")
         word = _cmtidn_identity_word(command)
         if word is not None:
             reason = ("AIQT rule cmtidn (commit-identity): the command is {} characters long, more than the {} "
@@ -6071,7 +6068,32 @@ def _commit_identity_fallback(command, error):
         return _deny(reason,
                      "AIQT guardrail: denied a command the check could not read in full that holds an AI credit "
                      "line (rule cmtidn, fail-safe).")
-    return _allow()
+    reason = _cmtidn_fallback_file_deny(command, error)
+    if reason is None:
+        return _allow()
+    return _deny(reason,
+                 "AIQT guardrail: denied a git or gh command the commit-identity check could not read in full that "
+                 "names a message or body file (rule cmtidn, fail-safe).")
+
+
+def _cmtidn_fallback_file_deny(command, error):
+    """The reason for the fail-closed deny of _commit_identity_fallback for a command left unread (any cause but
+    _SUBST_HEREDOC_MAIN_FAILS, after which the full reading has already read every file) that holds git or gh as
+    a word and names a message, template or body file option (_CMTIDN_FALLBACK_FILE_OPTION_RE), whose file the
+    fallback cannot read; else None. The fallback consults it on each of its paths to an allow, after every
+    identity scan, so a command that both names such an option and carries an AI identity the scans find is
+    denied with that identity as its reason, and no command this rule matches is allowed."""
+    if error == _SUBST_HEREDOC_MAIN_FAILS:
+        return None
+    option = _CMTIDN_FALLBACK_FILE_OPTION_RE.search(command)
+    if option is None or not _CMTIDN_FALLBACK_TOOL_RE.search(command):
+        return None
+    return ("AIQT rule cmtidn (commit-identity): the command could not be read in full (a shell parse error, a "
+            "process substitution or another construct the tokenizer does not read, a run line left unread, or a "
+            "command longer than the check reads within the hook timeout), it runs git or gh, and it names a "
+            "message, template or body file option ({!r}) whose file the check cannot read here; failing closed, "
+            "since that file can carry an AI co-author trailer or credit line. Write the message to a regular file "
+            "in a command of its own and name it by an absolute path.".format(option.group(0)[:40]))
 
 
 def commit_identity(data):

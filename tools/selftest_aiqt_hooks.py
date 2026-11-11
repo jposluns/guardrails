@@ -26505,6 +26505,8 @@ def _main_isolated(monitor):
         ciexpect("(ci-cr-c12) a commit from a message file the same command writes from a quoted here-document "
                  "with no credit allows", "cat > " + str(_cr_dir / "made2.txt") + " <<'EOF'\nfix: parser\nEOF\n"
                  "git commit -F " + str(_cr_dir / "made2.txt"), "allow")
+        ciexpect("(ci-cr-g7) a git -c commit.template value naming a template that holds an AI credit line denies",
+                 "git -c commit.template=" + _cr_p["credit.txt"] + " commit", "deny")
         crexpect("(ci-cr-c10) git commit -C HEAD allows", "git commit -C HEAD", "allow")
         crexpect("(ci-cr-c11) a relative clean message file resolved against the payload cwd allows",
                  "git commit -F clean.txt", "allow", cwd=str(_cr_dir))
@@ -26542,6 +26544,12 @@ def _main_isolated(monitor):
         cr2expect("(ci-cr-fb4) a pull-request body past the read bound with an AI credit line denies",
                   "gh pr create --body " + shlex.quote("x" * (aiqt_hooks._CMTIDN_READ_LIMIT + 8) + "\n"
                                                        + _cr_credit), "deny")
+        cr2expect("(ci-cr-fb5) an unparseable git command with a -c commit.template value fails closed",
+                  "git -c commit.template=" + _cr_p["clean.txt"] + " commit; echo \"x", "deny")
+        cr2expect("(ci-cr-fb6) an unparseable git command that only mentions commit.template fails closed (the "
+                  "disclosed over-deny)", "git config --get commit.template; echo \"x", "deny")
+        cr2expect("(ci-cr-fb7) a command past the read bound that names commit.template and runs no git or gh "
+                  "allows", "echo commit.template" + " " * aiqt_hooks._CMTIDN_READ_LIMIT, "allow")
         # gh options before the pr word and the verb, gh pr merge, and git -c commit.template.
         cr2expect("(ci-cr-g1) gh -R before pr does not hide an AI credit line, denies",
                   "gh -R o/r pr create --body " + shlex.quote(_cr_credit), "deny")
@@ -26959,7 +26967,9 @@ def _main_isolated(monitor):
         # the tokenizer cannot parse (ci-wr177), and given to a git spelled gi? and padded with spaces past the read
         # limit (ci-wr178) deny through the raw-string scan, with a reason that names the second trailer's value.
         # Each of the five deny vectors allowed while the reader read only the first trailer name of a word and the
-        # raw-string scan resumed after each value.
+        # raw-string scan resumed after each value. The -F of ci-wr177 also meets the fallback's file-option rule,
+        # which fails closed on a file the fallback cannot read; that rule runs after the identity scans, so the
+        # command still denies and its reason names the AI identity found in its own text.
         _ci_overlap = "-m 'co-authored-by: " + "x" * 140 + " co-authored-by: Claude <c@x>'"
         for _ci_label, _ci_cmd in (
                 ("(ci-wr174) an AI co-author trailer inside the 160-character value of an earlier trailer on the "
@@ -27309,12 +27319,16 @@ def _main_isolated(monitor):
         # time, an AI co-author trailer still denies within 1 s, in a command the tokenizer cannot parse and in a
         # heredoc past the limit (ci-wr170, ci-wr171; the first was denied only after that time, the second allowed
         # while that scan was not run past the limit). Both scans for a command too long to read find what they seek
-        # in every command that a vector of this section denies through the reader, among them a git commit on the
-        # line after a word (ci-wr164), and every command that the fallback denies at a length the reader reads, on
-        # a parse error or with a run line left unread, each such vector of this section and the forms of ci-wr167
-        # to ci-wr169 with a one-line body, still denies when spaces pad it past the limit (ci-wr-long-superset), so
-        # a command past the limit that the reader or the fallback would deny at a length the reader reads is
-        # denied.
+        # in every command that a vector of this section denies through the reader for an AI identity in its own
+        # text, among them a git commit on the line after a word (ci-wr164). Those scans look only for an identity
+        # in the command text, so they are not held to a command the reader denies for a message, template or body
+        # file: one it cannot read or that the command may write (ci-cr-c9), or a template whose text holds an AI
+        # credit line (ci-cr-g7). Each such command instead meets the fallback's file-option rule and denies at its
+        # length and when spaces pad it past the limit. Every command that the fallback denies at a length the
+        # reader reads, on a parse error or with a run line left unread, each such vector of this section and the
+        # forms of ci-wr167 to ci-wr169 with a one-line body, still denies when spaces pad it past the limit
+        # (ci-wr-long-superset), so a command past the limit that the reader or the fallback would deny at a length
+        # the reader reads is denied.
         ciexpect("(ci-wr164) a git commit on the line after a word, which dropping the newline joins to it, denies",
                  'cat notes.txt\ngit commit --author="Claude <c@x>" -m x', "deny")
         _ci_limit = aiqt_hooks._CMTIDN_READ_LIMIT
@@ -27416,7 +27430,19 @@ def _main_isolated(monitor):
                             "(want one that names its length, the AI identity 'Claude' and the word 'git')"
                             .format(_ci_reason))
         _ci_found = [(_ci_c, _ci_find(_ci_c)) for _ci_c in _ci_denies]
-        _ci_read = [_ci_c for _ci_c, _ci_hit in _ci_found if isinstance(_ci_hit, str)]
+        # The two scans look for an AI identity in the command's own text, so they are held to the reader's
+        # identity hits. A deny the reader gives for a message, template or body file (a file it cannot resolve,
+        # one the command may write, or an AI credit line or trailer in the file's text) has no such identity in
+        # the command text; the fallback's file-option rule must match each of those and deny it at its length and
+        # once spaces pad it past the read limit.
+        _ci_files = ("commit message file", "commit template", "pull-request body file")
+        _ci_filed = [_ci_c for _ci_c, _ci_hit in _ci_found
+                     if isinstance(_ci_hit, str) and any(_ci_k in _ci_hit for _ci_k in _ci_files)]
+        _ci_read = [_ci_c for _ci_c, _ci_hit in _ci_found if isinstance(_ci_hit, str) and _ci_c not in _ci_filed]
+        _ci_file_kept = [_ci_c for _ci_c in _ci_filed
+                         if not aiqt_hooks._CMTIDN_FALLBACK_FILE_OPTION_RE.search(_ci_c)
+                         or not aiqt_hooks._CMTIDN_FALLBACK_TOOL_RE.search(_ci_c) or _decision(cig, _ci_c) != "deny"
+                         or _decision(cig, _ci_c + " " * max(0, _ci_limit + 1 - len(_ci_c))) != "deny"]
         _ci_missed = [_ci_c for _ci_c in _ci_read if not aiqt_hooks._AI_NAME_ANYWHERE_RE.search(
             aiqt_hooks._CMTIDN_UNREAD_CHARS_RE.sub("", _ci_c))]
         _ci_wordless = [_ci_c for _ci_c in _ci_read if aiqt_hooks._cmtidn_identity_word(_ci_c) is None]
@@ -27425,13 +27451,17 @@ def _main_isolated(monitor):
                     if _ci_hit is not None and not isinstance(_ci_hit, str)]
         _ci_kept = [_ci_c for _ci_c in _ci_fell if _decision(cig, _ci_c) != "deny"
                     or _decision(cig, _ci_c + " " * max(0, _ci_limit + 1 - len(_ci_c))) != "deny"]
-        if len(_ci_read) < 100 or _ci_missed or _ci_wordless or len(_ci_fell) < 20 or _ci_kept:
-            failures.append("(ci-wr-long-superset) of {} commands the reader denies, the scans for a command too long "
-                            "to read find no AI name in {!r} and no word that can record an identity in {!r}, and of "
-                            "{} commands the fallback denies, {!r} allow at their length or once spaces pad them past "
-                            "the read limit (want both scans to find what they seek in each of at least 100, and each "
-                            "of at least 20 denied at both lengths)".format(
-                                len(_ci_read), _ci_missed[:5], _ci_wordless[:5], len(_ci_fell), _ci_kept[:5]))
+        if (len(_ci_read) < 100 or _ci_missed or _ci_wordless or len(_ci_fell) < 20 or _ci_kept
+                or len(_ci_filed) < 2 or _ci_file_kept):
+            failures.append("(ci-wr-long-superset) of {} commands the reader denies for an identity in their text, "
+                            "the scans for a command too long to read find no AI name in {!r} and no word that can "
+                            "record an identity in {!r}; of {} commands the fallback denies, {!r} allow at their "
+                            "length or once spaces pad them past the read limit; and of {} commands the reader denies "
+                            "for a file, {!r} miss the fallback's file-option rule or allow at either length (want "
+                            "both scans to find what they seek in each of at least 100, each of at least 20 denied at "
+                            "both lengths, and each of at least 2 file denies matched and denied at both "
+                            "lengths)".format(len(_ci_read), _ci_missed[:5], _ci_wordless[:5], len(_ci_fell),
+                                              _ci_kept[:5], len(_ci_filed), _ci_file_kept[:5]))
 
         # secsec (EN-5 PR-C): decision-signal battery for the secrets-shift-left guard.
         # === secrets_shift_left (secsec): an obvious hardcoded secret in a Write/Edit/Bash write-form ==
