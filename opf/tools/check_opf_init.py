@@ -689,10 +689,10 @@ _HOMES_READ_METHODS = frozenset(["get", "keys", "values", "items", "copy"])
 # The namespace-reach arm (_homes_namespace_reach_findings): in a guarded module every spelling
 # below is a finding wherever it appears, whatever object it reads from, unless the exact form
 # matches a row of _HOMES_REACH_ALLOWLIST. Two spellings also read the file's bindings, and only
-# to add findings: a subscript of a name that an import anywhere in the file binds, and an
-# import of the store module under a name other than its first store alias. No part of the arm
-# reads name bindings to exempt a form; the allowlist row reads only the statement holding the
-# item.
+# to add findings: a subscript of a name that a plain import (import x, import x as y) anywhere
+# in the file binds, where a name a from-import binds is not matched, and an import of the store
+# module under a name other than its first store alias. No part of the arm reads name bindings
+# to exempt a form; the allowlist row reads only the statement holding the item.
 _HOMES_REACH_NAMES = frozenset(["builtins", "__builtins__"])
 _HOMES_REACH_ATTRS = frozenset(["__globals__", "f_globals", "f_locals", "f_builtins", "__dict__",
                                 "__builtins__", "__getattribute__", "__code__", "__defaults__",
@@ -703,7 +703,8 @@ _HOMES_REACH_STRINGS = frozenset(["setattr", "delattr", "getattr", "globals", "l
                                   "f_globals", "f_locals", "f_builtins", "modules",
                                   "__getattribute__", "__setattr__", "__delattr__", "__import__",
                                   "__code__", "__defaults__", "__kwdefaults__"])
-_HOMES_REACH_MODULES = frozenset(["builtins", "ctypes", "inspect", "operator"])
+_HOMES_REACH_MODULES = frozenset(["builtins", "ctypes", "_ctypes", "inspect", "operator",
+                                  "_operator"])
 # The gc names that hand out live objects (and so any namespace dict or function among them):
 # get_objects, get_referrers and get_referents return lists of live objects, garbage is a list of
 # live objects the collector kept, and callbacks is a list of live callables. Every other gc name
@@ -728,7 +729,8 @@ _HOMES_REACH_ALLOWLIST = (
     ("blocked-sys-modules-item",
      "a statement sys.modules[\"<key>\"] = None with one target, whose key is one string "
      "constant naming neither this module, the store or init module, __main__ nor a submodule "
-     "of one (_homes_sys_modules_key_ok, the one sys.modules write the binding arm accepts)",
+     "of one (_homes_sys_modules_key_ok; the binding arm accepts this statement and the same "
+     "statement on sys.__dict__, which this arm reports as a __dict__ read)",
      "the statement can only store the constant None under one string-constant key in the "
      "mapping that sys.modules names at that point; sys is matched by its spelling and not "
      "resolved, so where the name is not the sys module the write lands in another object or "
@@ -818,12 +820,13 @@ def _homes_dynamic_binding_findings(fname, label, walked, lines, protected, stor
     through a live namespace mapping (globals(), locals(), vars(...), any .__dict__, any
     .modules such as sys.modules), its item or attribute assigned or deleted, a method other
     than a read method called on it, or the mapping itself bound, passed or returned (only the
-    read-only positions _namespace_read_only lists are accepted, and the one statement
-    sys.modules["<key>"] = None that _homes_sys_modules_key_ok accepts); (5) a reference to
-    setattr, delattr, globals, locals, vars or __import__ other than as the direct callee of a
-    call, and any reference to __setattr__ or __delattr__; (6) an import form the rule does not
-    resolve: `import sys as <other name>`, `from sys import modules`, an import of a submodule
-    of _opf_store or _opf_init_operation, and an `import _opf_store` anywhere but a module-level
+    read-only positions _namespace_read_only lists are accepted, and the statement
+    sys.modules["<key>"] = None or sys.__dict__["<key>"] = None that _homes_sys_modules_key_ok
+    accepts, the second of which the namespace-reach arm reports); (5) a reference to setattr,
+    delattr, globals, locals, vars or __import__ other than as the direct callee of a call, and
+    any reference to __setattr__ or __delattr__; (6) an import form the rule does not resolve:
+    `import sys as <other name>`, `from sys import modules`, an import of a submodule of
+    _opf_store or _opf_init_operation, and an `import _opf_store` anywhere but a module-level
     statement (a function-local import binds a store handle the rule does not track); (7) every
     spelling the namespace-reach arm reports (_homes_namespace_reach_findings, which reads the
     whole file's bindings and store aliases from `facts`)."""
@@ -971,7 +974,7 @@ def _homes_namespace_reach_findings(fname, label, walked, lines, facts):
     tries each through _homes_reach_allowed, which reads the parent statement of a sys.modules
     item, as the row states, and no name binding. Two spellings also read bindings, and only to
     add findings: the subscript in (4) reads the whole file's binding index in facts["file_binds"]
-    to find the names an import binds, and the second-name store import in (7) reads
+    to find the names a plain import binds, and the second-name store import in (7) reads
     facts["store_aliases"]. The spellings: (1) a getattr, setattr or delattr call (by a name or
     an attribute) whose name argument is not one plain string constant, and getattr referenced
     other than as the direct callee of a call; (2) a reference to the name builtins or
@@ -981,12 +984,13 @@ def _homes_namespace_reach_findings(fname, label, walked, lines, facts):
     get_referents, garbage, callbacks) as an attribute, each on any object; (4) a subscript (read,
     item assignment or del) or a method call or any other attribute on a call of globals, locals or
     vars or on a .modules attribute (sys.modules), and a subscript of a name bound anywhere in the
-    file by an import (a module object); (5) a call of __import__; (6) a string constant equal to
-    one of _HOMES_REACH_STRINGS or a gc name in (3), in any position; (7) any import, plain or
-    from, of builtins, ctypes, inspect or operator (or a submodule of one), a from-import of a gc
-    name in (3), a from-import of the store module or of a name from it, and an import of the store
-    module binding a name other than the module's first store alias. An import of gc itself and
-    every other gc name are not reported by this arm."""
+    file by a plain import (import x or import x as y, a module object; a name a from-import binds
+    is not matched); (5) a call of __import__; (6) a string constant equal to one of
+    _HOMES_REACH_STRINGS or a gc name in (3), in any position; (7) any import, plain or from, of
+    builtins, ctypes, _ctypes, inspect, operator or _operator (or a submodule of one), a
+    from-import of a gc name in (3), a from-import of the store module or of a name from it, and an
+    import of the store module binding a name other than the module's first store alias. An import
+    of gc itself and every other gc name are not reported by this arm."""
     found = []
     stem = fname[:-3] if fname.endswith(".py") else fname
     parents = {}
@@ -1130,6 +1134,15 @@ def _homes_reach_rows(alias_store, init_import, alias_call):
          module("import operator\noperator.setitem(getattr(sys.modules[__name__], '__dict__'), "
                 "'_opf_store', FAKE)\n"),
          reach("module-level code imports operator")),
+        ("_operator.setitem into an attrgetter __globals__ built at runtime",
+         module("import _operator\n", "\n_k = '__glob' + 'als__'\n"
+                "_operator.setitem(_operator.attrgetter(_k)(_init_ok), '_opf_store', FAKE)\n"),
+         reach("module-level code imports _operator")),
+        ("an item write through a function's globals read by _ctypes.PyObj_FromPtr",
+         module("import _ctypes\n", "\n\nclass _P(_ctypes._SimpleCData):\n    _type_ = 'P'\n\n\n"
+                "_g = _ctypes.PyObj_FromPtr(_P.from_address(id(_init_ok) + 16).value)\n"
+                "_g['_opf_store'] = FAKE\n"),
+         reach("module-level code imports _ctypes")),
         ("an item write through a frame's f_globals",
          module("sys._getframe().f_globals['_opf_store'] = FAKE\n"),
          reach("module-level code reads the attribute f_globals")),
@@ -1785,36 +1798,37 @@ def _homes_rule_violations(sources):
     through globals(), locals(), vars(), __dict__ or sys.modules (an item or attribute assigned
     or deleted, a mutating method, the mapping bound, passed or returned; only an item read, a
     copy, a read method, a membership test or an iteration of globals(), locals(), vars() or
-    sys.modules is accepted, and the one statement sys.modules["<key>"] = None whose key is a
-    string constant naming no protected module, not __main__ and not this module); a reference
-    to setattr, delattr, globals, locals, vars or __import__ other than as a callee, or to
-    __setattr__ or __delattr__; `import sys as <other>`, `from sys import modules`, an import of
-    a submodule of the store or init module, and a function-local `import _opf_store`. A star
-    import is a finding in every module.
+    sys.modules is accepted, and the statement sys.modules["<key>"] = None whose key is a string
+    constant naming no protected module, not __main__ and not this module, and the same statement
+    on sys.__dict__, which the namespace-reach arm reports); a reference to setattr, delattr,
+    globals, locals, vars or __import__ other than as a callee, or to __setattr__ or __delattr__;
+    `import sys as <other>`, `from sys import modules`, an import of a submodule of the store or
+    init module, and a function-local `import _opf_store`. A star import is a finding in every
+    module.
 
     Namespace-reach arm (_homes_namespace_reach_findings). In a guarded module the arm matches
     each spelling by its spelled name, whatever object it reads from: every dynamic namespace
     reach it lists is a finding wherever it appears, unless the allowlist row below accepts its
-    exact form. Two spellings also read the file's bindings, and only to add findings: a
-    subscript is matched when an import anywhere in the file binds the subscripted name, and an
-    import of the store module when it binds a name other than the first store alias. No part of
-    the arm reads name bindings to exempt a form; the allowlist row reads only the statement
-    holding the item. The list: a getattr, setattr or delattr whose name argument is not one
-    plain string constant, and getattr referenced other than as a callee; a reference to
-    builtins or __builtins__, however the name is bound; an attribute __globals__, f_globals,
-    f_locals, f_builtins, __dict__, __builtins__, __getattribute__, __code__, __defaults__ or
-    __kwdefaults__, an attribute named globals, locals or vars, and a gc live-object accessor
-    (get_objects, get_referrers, get_referents, garbage, callbacks) as an attribute, on any
-    object; any subscript, item assignment or method call on globals(), locals(), vars(...) or a
-    .modules attribute (sys.modules), and a subscript of a name an import binds; a call of
-    __import__; a string constant naming any of these (or setattr, delattr, getattr, modules,
-    builtins, __setattr__, __delattr__ or __import__) in any position; an import of builtins,
-    ctypes, inspect or operator, a from-import of a gc live-object accessor, a from-import of
-    the store module, and an import of the store module under a name other than the module's
-    first store alias. The literal-name checks are kept: a literal getattr, setattr or delattr
-    name is reported when it is a reach string, and the binding arm's protected-name checks
-    still apply. An import of gc and its other names are not reported, since none returns a live
-    object.
+    exact form. Two spellings also read the file's bindings, and only to add findings: a subscript
+    is matched when a plain import (import x, import x as y) anywhere in the file binds the
+    subscripted name, while a name a from-import binds is not matched, and an import of the store
+    module when it binds a name other than the first store alias. No part of the arm reads name
+    bindings to exempt a form; the allowlist row reads only the statement holding the item. The
+    list: a getattr, setattr or delattr whose name argument is not one plain string constant, and
+    getattr referenced other than as a callee; a reference to builtins or __builtins__, however
+    the name is bound; an attribute __globals__, f_globals, f_locals, f_builtins, __dict__,
+    __builtins__, __getattribute__, __code__, __defaults__ or __kwdefaults__, an attribute named
+    globals, locals or vars, and a gc live-object accessor (get_objects, get_referrers,
+    get_referents, garbage, callbacks) as an attribute, on any object; any subscript, item
+    assignment or method call on globals(), locals(), vars(...) or a .modules attribute
+    (sys.modules), and a subscript of a name a plain import binds; a call of __import__; a string
+    constant naming any of these (or setattr, delattr, getattr, modules, builtins, __setattr__,
+    __delattr__ or __import__) in any position; an import of builtins, ctypes, _ctypes, inspect,
+    operator or _operator, a from-import of a gc live-object accessor, a from-import of the store
+    module, and an import of the store module under a name other than the module's first store
+    alias. The literal-name checks are kept: a literal getattr, setattr or delattr name is
+    reported when it is a reach string, and the binding arm's protected-name checks still apply.
+    An import of gc and its other names are not reported, since none returns a live object.
 
     Exceptions exist only through _HOMES_REACH_ALLOWLIST, a reviewed table of one exact form
     with the reason it is safe: the statement sys.modules["<key>"] = None with one target and a
@@ -1832,13 +1846,11 @@ def _homes_rule_violations(sources):
     writer from inside a call, such as importlib, types, copyreg, string.Formatter's field
     lookup or a deserializer acting on data), a replacement of the store module in sys.modules
     by code that is not scanned before a module imports it, code never handed to the scan, and
-    the bodies and annotations of registered defs. Two known escape forms are residuals of (2)
-    rather than self-test rows, since the arm reports neither: a string.Formatter().get_field
-    lookup with a dotted field such as "0.__globals__", and an attrgetter or setitem of
-    _operator (the C module behind operator, which the import list above does not name) called
-    with strings built at runtime. Each residual can change init_writes_homes2() for every fresh
-    init, so this check guards against an accidental non-compliant call, not a deliberate
-    rewrite.
+    the bodies and annotations of registered defs. One known escape form is a residual of (2)
+    rather than a self-test row, since the arm does not report it: a string.Formatter().get_field
+    lookup with a dotted field such as "0.__globals__". Each residual can change
+    init_writes_homes2() for every fresh init, so this check guards against an accidental
+    non-compliant call, not a deliberate rewrite.
     """
     found = []
     summaries = {}
