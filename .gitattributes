@@ -193,6 +193,7 @@
 .baseline/check_palette.py text eol=lf
 .baseline/opfiles-pin.toml text eol=lf
 .baseline/pin.toml text eol=lf
+.claude-plugin/marketplace.json text eol=lf
 .claude/RULES-INDEX.md text eol=lf
 .claude/rules/README.md text eol=lf
 .claude/rules/aiqt/00-project-integrity.md text eol=lf

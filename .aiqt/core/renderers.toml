@@ -61,3 +61,11 @@ semantics-revision = 1
 targets = [".claude/worker-pack.md"]
 closure = ["tools/gen_worker_pack.py", "tools/_gen_common.py", "tools/_standards.py", "tools/gen_rules.py"]
 code-digest = "085bb10453af467d791d86367e34383f9d936212c96c1a7fd8fbba6d9c36efd4"
+
+[[renderer]]
+renderer-id = "hooks"
+entrypoint = "tools/gen_hooks.py"
+semantics-revision = 1
+targets = ["plugin/aiqt-guardrails-hooks/hooks/", "plugin/aiqt-guardrails-hooks/.claude-plugin/plugin.json", ".claude-plugin/marketplace.json"]
+closure = ["tools/gen_hooks.py", "tools/_gen_common.py", "tools/_standards.py", "tools/gen_rules.py"]
+code-digest = "c2d9baa95ac5a57cfccd998f244868286392a2da77cd5f690ececa76a0ff8e76"

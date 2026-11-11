@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "d8c6e2d1cd4207836cd30b1febfd76a2393099c956a49f542efd32b6f3f624ea"
+tree-sha256 = "a9db8508ab54c1e3d9c1dc892617edbd0bbb2d56e29b4219fedd21ebfbb153b8"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -81,8 +81,8 @@ sha256 = "d6e9ab43b1c98a9b5cf7023b7b43cfd447607673e6128bfd06c4812551d32c7e"
 
 [[sources]]
 path = ".aiqt/core/hooks/manifest.toml"
-bytes = 494213
-sha256 = "d37ef312b5d4834c555d5e87804b51fc394a9873cb15e3c3cb09d1e14420cf66"
+bytes = 494810
+sha256 = "3cac9bcff72dda2d47d48e86520614a2a45dfc758d8361968c013cab528b7509"
 
 [[sources]]
 path = ".aiqt/core/hooks/preview.toml"
@@ -121,8 +121,8 @@ sha256 = "f1625261cc219e8a08ac893874d74d2f1e435683d9e552d877fefcdde6880f9d"
 
 [[sources]]
 path = ".aiqt/core/ownership.toml"
-bytes = 26773
-sha256 = "23a45d69b6aac28c6965c2b94ac8907ecd4a5af8ff95a937f4c0b07d8e56c12f"
+bytes = 26858
+sha256 = "61e0c0ff769aee2d04702cb3df5faea1ca04ac2c1f89d4aa7c7f141222640915"
 
 [[sources]]
 path = ".aiqt/core/profiles/worker-pack.md"
@@ -146,8 +146,8 @@ sha256 = "7396859c9a2b6d18ecec0982f02f9b72a64a5a79ef6d4270df82eab956af0ec7"
 
 [[sources]]
 path = ".aiqt/core/renderers.toml"
-bytes = 3068
-sha256 = "ffce4533f1a2ce4e670e19f0dd2d410985dbe96f4437b307dafead95b77ba3a0"
+bytes = 3488
+sha256 = "d0122a8991197cec8ea92f799b5259be310510577f61e09fdb277148c39280fb"
 
 [[sources]]
 path = ".aiqt/core/rules/00-project-integrity.md"
@@ -836,8 +836,8 @@ sha256 = "0bef727083ae24ef1aea29a2e2b1a3593deaaf0238ec5785e01112f50112e104"
 
 [[sources]]
 path = ".aiqt/gensrc.json"
-bytes = 14513
-sha256 = "308f9285337e54eb891ce82f77e373d6430a1891965cf2db7cc6ed7ce72bb827"
+bytes = 14762
+sha256 = "7a18b464d674cdbe0a4b9cf0ca3952e91ab3cd2dcfc630d849d387c27fafb441"
 
 [[sources]]
 path = ".aiqt/record-sections.toml.example"
@@ -958,6 +958,11 @@ sha256 = "ca2004fe16d4adf88d28892b1aec7ec1026533a1beebf92d07245557fb4e4f21"
 path = ".baseline/pin.toml"
 bytes = 7626
 sha256 = "d58fe4c372546838672266f6cd25e04ed5a58ef730228f913e9196a7222acb90"
+
+[[sources]]
+path = ".claude-plugin/marketplace.json"
+bytes = 376
+sha256 = "3c5487796622b15ab3579e0433817f5572cb2e6ada04c1b92853da8081f5e185"
 
 [[sources]]
 path = ".claude/RULES-INDEX.md"
@@ -2306,8 +2311,8 @@ sha256 = "9e0e365fb1e2813246c724267ec062310de3be1c5ca4ad9cba37fa0ce5691af4"
 
 [[sources]]
 path = ".gitattributes"
-bytes = 53831
-sha256 = "4030055c571dba037d9beaeff8a7e14a032502c882e41f96b0f3ea7c7f62f5db"
+bytes = 53875
+sha256 = "9acf782126dbb4e55105f03824178e899e928731060ee3d8702510ed05524cf8"
 
 [[sources]]
 path = ".github/copilot-instructions.md"
@@ -2416,8 +2421,8 @@ sha256 = "4e25f91d723d0b329a2af16a82abcc891ce6a506ff2874a149e6c4bf58d353db"
 
 [[sources]]
 path = "README.md"
-bytes = 5215
-sha256 = "f6b36880769ad59525481bd3fb9af95f780ac8a846916243853d5ce40ff4420e"
+bytes = 5754
+sha256 = "d8c646907fce880502b363768eef0d0938ba912b3c79d608a99ab799e63be689"
 
 [[sources]]
 path = "RELEASING.md"
@@ -2461,8 +2466,8 @@ sha256 = "dbed3e0c4a29c0ffd01a4e26ca59964a3ef7e2277fc3dcdc2eed7076272461c1"
 
 [[sources]]
 path = "disclosure.toml"
-bytes = 14643
-sha256 = "332876063d46b656ce9fd1b7d9aff5823b056b40a5d394de89a4e91c04286952"
+bytes = 14683
+sha256 = "693d38f64d508e7c970b7c5ab5e82f6bb6e8ba18e1eb0ef42fba0441e4dcf196"
 
 [[sources]]
 path = "docs/_shell.html"
@@ -3641,8 +3646,8 @@ sha256 = "7b50029537b0a0fe577c41a82e3980db46e18b299be2d6d955afd14fb426a16f"
 
 [[sources]]
 path = "site/draft-src/install-details.toml"
-bytes = 9693
-sha256 = "62594bf87d097c68d26bfce6765af8dd60bd0ea5ec2349fcd37d445505c7e224"
+bytes = 10164
+sha256 = "0bb0fa52bde5800b3d1e2eb76f0044c19e4c8cced45d8e9ef8f17f4aaf2142d4"
 
 [[sources]]
 path = "site/draft-src/install.toml"
@@ -3981,8 +3986,8 @@ sha256 = "dfd848a76fa25c004ca4d02cdd372272500e842ee2187610c51873585e2fc01c"
 
 [[sources]]
 path = "site/install/details/index.html"
-bytes = 17229
-sha256 = "a9fe616db9400ba65ff723d794dc882a88fa770b34acb95dfd2ff8ea356d46ac"
+bytes = 17700
+sha256 = "c6f6f328eaa50d02d5c0da79b9530c007fe0eb2cc2cd648ec4bb907dca669846"
 
 [[sources]]
 path = "site/install/index.html"
@@ -4526,8 +4531,8 @@ sha256 = "5fe2069fa9978b5df1ae5cd65211c9d88d4c59f580dfeb4e3c876bbe2ebe1f29"
 
 [[sources]]
 path = "tools/gen_hooks.py"
-bytes = 261561
-sha256 = "8170571ba0b5289456e6b33dc5cb5214f8f19ca2b3460f1ce612578102205690"
+bytes = 275688
+sha256 = "0d915a037603b195c8151939a885f533f9e2de0c845904e37fd5a54428c6c899"
 
 [[sources]]
 path = "tools/gen_manifest.py"
@@ -4546,13 +4551,13 @@ sha256 = "444cd84ced9881500577bc35cd3e9e44219a69767d6e79a57fec61733894a864"
 
 [[sources]]
 path = "tools/gen_reference_facts.py"
-bytes = 40720
-sha256 = "cda29f79cbd3004a6a80a45fc1f6dca27b1d0089fc73935119630f699138995f"
+bytes = 61666
+sha256 = "ec732b1521704b9b476ecf9c970a8611ffcad6f7443034a156dd2f2177d869f3"
 
 [[sources]]
 path = "tools/gen_renderers.py"
-bytes = 104374
-sha256 = "54f698d13acd59da703a713a2dc68658bf145fe57f718e35181b07dabb64c8e2"
+bytes = 104842
+sha256 = "9f012155f26238e2e52b7a28bb2a523e6f84e48ec1a75ad603e8d4693cfbacad"
 
 [[sources]]
 path = "tools/gen_roadmap.py"
@@ -4723,6 +4728,12 @@ sha256 = "9159f0c51f6269626c2c446b4db76977b6d5fe84bc9cfe4cd9df50bafc6944f0"
 path = "tools/tomllib_parse_sites.toml"
 bytes = 29274
 sha256 = "1f678ddace2b6acada257a169726cef72dd798766bdfe5c1b42791f3bac8576c"
+
+[[artifacts]]
+artifact-id = "hooks:.claude-plugin/marketplace.json"
+path = ".claude-plugin/marketplace.json"
+kind = "file"
+sha256 = "3c5487796622b15ab3579e0433817f5572cb2e6ada04c1b92853da8081f5e185"
 
 [[artifacts]]
 artifact-id = "claude:.claude/RULES-INDEX.md"
@@ -6356,6 +6367,24 @@ artifact-id = "adapters:GEMINI.md"
 path = "GEMINI.md"
 kind = "file"
 sha256 = "e82b868d627650c82d5dab0bf1c729cd10636707a24cf4b0075cec561c7df0d7"
+
+[[artifacts]]
+artifact-id = "hooks:plugin/aiqt-guardrails-hooks/.claude-plugin/plugin.json"
+path = "plugin/aiqt-guardrails-hooks/.claude-plugin/plugin.json"
+kind = "file"
+sha256 = "6a019cab82e0df55d88b44b1199d10bf95d37c5bd959fffd57b7aa36df84c591"
+
+[[artifacts]]
+artifact-id = "hooks:plugin/aiqt-guardrails-hooks/hooks/hooks.json"
+path = "plugin/aiqt-guardrails-hooks/hooks/hooks.json"
+kind = "file"
+sha256 = "2fab2f7388e32e7dd07302193217079e070c069c014f43195ade463e707c7813"
+
+[[artifacts]]
+artifact-id = "hooks:plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py"
+path = "plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py"
+kind = "file"
+sha256 = "b8d02451c808defefad5462a05f78e04409408b238883d8384fe68badd05497f"
 
 [[artifacts]]
 artifact-id = "skill:site/downloads/aiqt-instructions.txt"

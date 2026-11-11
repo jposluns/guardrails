@@ -84,7 +84,7 @@ RENDERERS_REL = ".aiqt/core/renderers.toml"
 # deterministic render; reordering changes the bytes of renderers.toml. build_rows fails closed when a
 # tools/*.py file declares RENDERER_DECL but is absent here (_declared_renderer_stems).
 RENDERERS = ("gen_agents", "gen_adapters", "gen_claude", "gen_cursor", "gen_rules", "gen_skill",
-             "gen_worker_pack")
+             "gen_worker_pack", "gen_hooks")
 
 
 class GateError(Exception):
@@ -673,6 +673,12 @@ def build_rows(root):
         raise GateError("renderer roster incomplete: {} declare(s) RENDERER_DECL but are absent from "
                         "RENDERERS; add each to RENDERERS".format(
                             ", ".join("tools/{}.py".format(s) for s in unlisted)))
+    # The authoring-only roster (gen_hooks AUTHORING_ONLY_REL, read statically): those targets never ship,
+    # so they get no ARTIFACTS row; every other declared target stays, and an untracked one still fails.
+    try:
+        authoring_only = set(gen_gensrc.read_authoring_roster(tools_dir))
+    except (ValueError, OSError) as exc:
+        raise GateError("cannot read the authoring-only roster ({})".format(exc))
     rows = []
     seen_ids = set()
     for stem in RENDERERS:
@@ -688,7 +694,7 @@ def build_rows(root):
             decl = gen_gensrc._read_declaration(entry, where)
         except (ValueError, OSError) as exc:
             raise GateError("{}: cannot read GENSRC_OUTPUTS ({})".format(where, exc))
-        targets = [e["target"] for e in decl]
+        targets = [e["target"] for e in decl if e["target"] not in authoring_only]
         closure = compute_closure(stem, tools_dir)
         rows.append({"renderer-id": rid, "entrypoint": "tools/{}.py".format(stem),
                      "semantics-revision": rev, "targets": targets, "closure": closure,

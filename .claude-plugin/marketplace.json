@@ -1,0 +1,15 @@
+{
+  "name": "aiqt-guardrails",
+  "owner": {
+    "name": "Jeff Posluns",
+    "email": "jeff@posluns.ca"
+  },
+  "plugins": [
+    {
+      "name": "aiqt-guardrails-hooks",
+      "source": "./plugin/aiqt-guardrails-hooks",
+      "description": "Mechanical enforcement of AIQT Guardrails rules for Claude Code, generated from the rule corpus.",
+      "version": "0.5.0"
+    }
+  ]
+}

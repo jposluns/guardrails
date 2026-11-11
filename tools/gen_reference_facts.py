@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Generate the manifest-derived reference facts rendered into the prose READMEs: the framework-roster
-block in .aiqt/standards/README.md and the landing-page count blocks in README.md.
+block in .aiqt/standards/README.md, and the landing-page count blocks and Claude Code install item in
+README.md.
 
 The roster used to be a hand-authored sentence ("... (16 in total)") that could silently desync when a
 manifest landed or left, and the landing page's counts (rules, CI gates, Claude Code hooks with their
@@ -39,7 +40,7 @@ if tuple(sys.version_info[:2]) < (3, 14):
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _gen_common import linked_dir_failures, repo_root, reconcile, target_dir_present  # noqa: E402
+from _gen_common import linked_dir_failures, load_toml, repo_root, reconcile, target_dir_present  # noqa: E402
 from _standards import load_manifests, ManifestError, natkey  # noqa: E402
 from check_reference_facts import expected_counts  # noqa: E402
 
@@ -49,6 +50,25 @@ MARKER = "ROSTER"
 # The landing page's two generated blocks: the bold proof line and the "What is inside" table.
 PROOF_MARKER = "COUNTS-PROOF"
 TABLE_MARKER = "COUNTS-TABLE"
+# The landing page's third generated block: the Claude Code plugin install item. Its plugin and
+# marketplace names come from the hooks manifest (the [plugin] and [marketplace] tables tools/gen_hooks.py
+# renders .claude-plugin/marketplace.json from), and its release from VERSION and the release record,
+# changelog.toml, so neither a tag nor a name in the line is hand-typed. No git state is read.
+PLUGIN_MARKER = "PLUGIN-INSTALL"
+HOOKS_MANIFEST_REL = Path(".aiqt") / "core" / "hooks" / "manifest.toml"
+CHANGELOG_REL = Path("changelog.toml")
+VERSION_REL = Path("VERSION")
+# The repository the install line adds as a plugin marketplace.
+MARKETPLACE_REPO_URL = "https://github.com/jposluns/guardrails.git"
+# History, not configuration: the last release cut before .claude-plugin/marketplace.json existed, so no
+# release up to and including it carries the file. Every release above it carries the file by
+# construction: in this repository (the authoring tree, marked by .aiqt/authoring.toml) tools/gen_hooks.py
+# renders the file from the hooks manifest's [marketplace] table and its --check fails while the file is
+# missing or stale, this generator fails closed on a manifest without that table, and RELEASING.md tags
+# only a step 5 merge commit on which the full check run, both gates included, is green. It must itself
+# be a recorded release (checked), so a slip naming no release fails; a release cut before the marketplace
+# file first lands would have to become the anchor instead.
+MARKETPLACE_ABSENT_THROUGH = "1.0.5"
 
 # Declares this generator's outputs for the gensrc registry (tools/gen_gensrc.py); additive metadata only,
 # it does not affect what this generator produces. Each is a generated block inside a hand-authored
@@ -61,7 +81,8 @@ GENSRC_OUTPUTS = (
      "regenerate": "python3 tools/gen_reference_facts.py"},
     {"target": "README.md", "kind": "block",
      "sources": (".aiqt/core/rules/", ".aiqt/core/gates/manifest.toml",
-                 ".aiqt/core/hooks/manifest.toml", ".aiqt/standards/", "ENFORCEMENT.md"),
+                 ".aiqt/core/hooks/manifest.toml", ".aiqt/standards/", "ENFORCEMENT.md",
+                 "VERSION", "changelog.toml"),
      "regenerate": "python3 tools/gen_reference_facts.py"},
 )
 
@@ -108,6 +129,82 @@ _INSIDE_TABLE_ROWS = (
 def render_inside_table(counts):
     """The landing page's "What is inside" table with every count rendered from expected_counts."""
     return "\n".join(row.format(**counts) for row in _INSIDE_TABLE_ROWS)
+
+
+def _version_key(text, where):
+    """(major, minor, patch) of a strict MAJOR.MINOR.PATCH string of ASCII digits; ValueError otherwise."""
+    parts = text.split(".") if isinstance(text, str) else []
+    if len(parts) != 3 or not all(p.isascii() and p.isdigit() for p in parts):
+        raise ValueError("{}: {!r} is not a MAJOR.MINOR.PATCH version".format(where, text))
+    return tuple(int(p) for p in parts)
+
+
+def _plugin_names(root):
+    """(plugin name, marketplace name) from the hooks manifest's [plugin] and [marketplace] tables, each a
+    non-empty string; ValueError when either is missing, so the install item never names a marketplace
+    the manifest does not declare."""
+    data = load_toml(root / HOOKS_MANIFEST_REL)
+    names = []
+    for table in ("plugin", "marketplace"):
+        value = data.get(table, {}).get("name") if isinstance(data.get(table), dict) else None
+        if not isinstance(value, str) or not value or value != value.strip():
+            raise ValueError("{}: [{}] name must be a non-empty string without surrounding "
+                             "whitespace".format(HOOKS_MANIFEST_REL, table))
+        names.append(value)
+    return tuple(names)
+
+
+def render_plugin_install(root):
+    """The landing page's Claude Code install item. It names the newest release in changelog.toml that is
+    strictly above MARKETPLACE_ABSENT_THROUGH, strictly below VERSION, and carries a tag key, and gives the
+    install command pinned to that tag; while no recorded release qualifies it names no tag or command.
+
+    The release that VERSION names is never a candidate. RELEASING.md adds that release's artifact table in
+    step 3, its attestation row (a file this generator does not read) in step 6a, and its tag key in step
+    6b, and the release-delta gate refuses any README.md change in steps 6a and 6b. The item therefore
+    depends only on older entries, so it stays byte-identical through steps 5, 6a and 6b, and a release's
+    tag first appears in the item with the next version. ValueError on any missing or malformed input:
+    VERSION, the release record, a duplicated version, VERSION or the anchor not recorded, or a candidate
+    whose tag is not v<version>."""
+    plugin, market = _plugin_names(root)
+    version = (root / VERSION_REL).read_text(encoding="utf-8").strip()
+    current = _version_key(version, VERSION_REL)
+    releases = load_toml(root / CHANGELOG_REL).get("release")
+    if not isinstance(releases, list) or not all(isinstance(r, dict) for r in releases):
+        raise ValueError("{}: no [[release]] entries".format(CHANGELOG_REL))
+    recorded = {}
+    for entry in releases:
+        key = _version_key(entry.get("version"), CHANGELOG_REL)
+        if key in recorded:
+            raise ValueError("{}: release {} is recorded twice".format(CHANGELOG_REL, entry.get("version")))
+        recorded[key] = entry
+    absent = _version_key(MARKETPLACE_ABSENT_THROUGH, "MARKETPLACE_ABSENT_THROUGH")
+    if absent not in recorded:
+        raise ValueError("{}: no release {} (MARKETPLACE_ABSENT_THROUGH)".format(
+            CHANGELOG_REL, MARKETPLACE_ABSENT_THROUGH))
+    if current not in recorded:
+        raise ValueError("{}: no release entry for VERSION {}".format(CHANGELOG_REL, version))
+    cut = {}
+    for key, entry in recorded.items():
+        if absent < key < current and "tag" in entry:
+            if entry["tag"] != "v" + entry["version"]:
+                raise ValueError("{}: release {} must carry tag = \"v{}\" for the install line".format(
+                    CHANGELOG_REL, entry["version"], entry["version"]))
+            cut[key] = entry
+    tail = "  The hooks run as `python3` and need the Python floor stated in the item above."
+    if not cut:
+        return ("- **In Claude Code**: the opt-in hooks plugin, `{p}`, installs from this repository's "
+                "plugin\n  marketplace, `{m}`, pinned to a release tag. Each release after {a} carries the\n"
+                "  marketplace file, and this item names the newest such release with a recorded tag "
+                "before the\n  current version; none has one yet, so there is no release tag to install "
+                "from here.\n{t}").format(p=plugin, m=market, a=MARKETPLACE_ABSENT_THROUGH, t=tail)
+    newest = cut[max(cut)]
+    return ("- **In Claude Code**: install the opt-in hooks plugin, pinned to the {v} release tag, with\n"
+            "  `claude plugin marketplace add {u}#{g} && claude plugin install {p}@{m}`.\n"
+            "  Each release after {a} carries the marketplace file; {v} is the newest such release with a\n"
+            "  recorded tag before the current version.\n{t}").format(
+                v=newest["version"], u=MARKETPLACE_REPO_URL, g=newest["tag"], p=plugin, m=market,
+                a=MARKETPLACE_ABSENT_THROUGH, t=tail)
 
 
 def _markers(name):
@@ -176,9 +273,11 @@ def build_landing(root, manifests):
     nest or cross (validated against the committed text before either replacement); the caller maps
     those to exit 2."""
     counts = expected_counts(root, manifests)
+    install = render_plugin_install(root)
     text = (root / LANDING_REL).read_text(encoding="utf-8")
-    _require_disjoint(text, (PROOF_MARKER, TABLE_MARKER), LANDING_REL)
+    _require_disjoint(text, (PROOF_MARKER, TABLE_MARKER, PLUGIN_MARKER), LANDING_REL)
     text = _replace_marked(text, PROOF_MARKER, render_proof_line(counts), LANDING_REL)
+    text = _replace_marked(text, PLUGIN_MARKER, install, LANDING_REL)
     return _replace_marked(text, TABLE_MARKER, render_inside_table(counts), LANDING_REL)
 
 
@@ -256,7 +355,13 @@ def main():
 #       BEGIN marker) or sit in swapped order still generate and re-check clean (exit 0): the overlap
 #       test is a strict interval intersection, so touching is the accepted boundary case between the
 #       refused overlaps of (m) and the prose-separated standard fixture, and a guard tightened into
-#       refusing touching blocks fails here instead of over-refusing a legal page.
+#       refusing touching blocks fails here instead of over-refusing a legal page,
+#   (p) the landing install item: no tag or command until the record holds a tagged release between the
+#       anchor and VERSION, then the command pinned to the newest such tag; the release lifecycle (the
+#       1.0.6 step 5 shape that used to exit 2, then steps 5, 6a and 6b) leaves the item byte-identical
+#       and only the next version names the tag; each range end is tested just inside, at and just
+#       outside; drift on a hand edit, and exit 2 on each malformed release record, manifest or marker
+#       input.
 
 _MANIFEST = (
     'map-key = "map-{k}"\nname = "{name}"\npublisher = "AIQT self-test"\nedition = "{ed}"\n'
@@ -275,8 +380,49 @@ _LANDING = (
     "<!-- COUNTS-PROOF:BEGIN (generated) -->\n<!-- COUNTS-PROOF:END -->\n\n"
     "Hand prose between the blocks.\n\n"
     "<!-- COUNTS-TABLE:BEGIN (generated) -->\n<!-- COUNTS-TABLE:END -->\n\n"
-    "Hand prose below the counts.\n"
+    "Hand prose below the counts.\n\n"
+    "<!-- PLUGIN-INSTALL:BEGIN (generated) -->\n<!-- PLUGIN-INSTALL:END -->\n"
 )
+_PLUGIN_PAIR = "<!-- PLUGIN-INSTALL:BEGIN (generated) -->\n<!-- PLUGIN-INSTALL:END -->\n"
+
+# The release record and VERSION for the install item: 1.0.5 is MARKETPLACE_ABSENT_THROUGH, the last
+# release without the marketplace file. The plugin and marketplace names are distinct from every real one.
+_CHANGELOG = '[[release]]\nversion = "1.0.5"\ntag = "v1.0.5"\n'
+_LATER_RELEASES = ('[[release]]\nversion = "1.0.7"\ntag = "v1.0.7"\n'
+                   '[[release]]\nversion = "1.0.6"\ntag = "v1.0.6"\n')
+_PLUGIN_TABLES = '[plugin]\nname = "fixture-hooks"\n[marketplace]\nname = "fixture-market"\n'
+_INSTALL_PENDING = (
+    "- **In Claude Code**: the opt-in hooks plugin, `fixture-hooks`, installs from this repository's plugin\n"
+    "  marketplace, `fixture-market`, pinned to a release tag. Each release after 1.0.5 carries the\n"
+    "  marketplace file, and this item names the newest such release with a recorded tag before the\n"
+    "  current version; none has one yet, so there is no release tag to install from here.\n")
+# The install item naming release 1.0.N, written out per release so no template is shared with the
+# renderer under test.
+_INSTALL_CUT_106 = (
+    "- **In Claude Code**: install the opt-in hooks plugin, pinned to the 1.0.6 release tag, with\n"
+    "  `claude plugin marketplace add https://github.com/jposluns/guardrails.git#v1.0.6 && claude plugin "
+    "install fixture-hooks@fixture-market`.\n"
+    "  Each release after 1.0.5 carries the marketplace file; 1.0.6 is the newest such release with a\n"
+    "  recorded tag before the current version.\n")
+_INSTALL_CUT_107 = (
+    "- **In Claude Code**: install the opt-in hooks plugin, pinned to the 1.0.7 release tag, with\n"
+    "  `claude plugin marketplace add https://github.com/jposluns/guardrails.git#v1.0.7 && claude plugin "
+    "install fixture-hooks@fixture-market`.\n"
+    "  Each release after 1.0.5 carries the marketplace file; 1.0.7 is the newest such release with a\n"
+    "  recorded tag before the current version.\n")
+
+
+def _release(version, tag=False, artifacts=False):
+    """One [[release]] table of the fixture record, shaped the way RELEASING.md grows it: the tag key
+    sits right after the version line (step 6b) and the artifact sub-table comes last (step 3)."""
+    text = '[[release]]\ntitle = "Fixture {v}"\nversion = "{v}"\n'.format(v=version)
+    if tag:
+        text += 'tag = "v{}"\n'.format(version)
+    text += 'date = "2026-01-01"\nitems = ["fixture"]\n'
+    if artifacts:
+        text += ('[release.artifacts]\n"site/downloads/aiqt-instructions.txt" = "sha256:'
+                 + "0" * 64 + '"\n')
+    return text
 
 # Six rule files, five ci gates (one other-platform entry proves the platform filter), seven
 # claude-code hooks split four block / three warn (one other-platform entry again), and an enforcement
@@ -338,7 +484,9 @@ def _write_fixture(base, manifests, readme, landing=None):
     (core / "gates").mkdir()
     (core / "gates" / "manifest.toml").write_text(_GATES_TOML, encoding="utf-8")
     (core / "hooks").mkdir()
-    (core / "hooks" / "manifest.toml").write_text(_HOOKS_TOML, encoding="utf-8")
+    (core / "hooks" / "manifest.toml").write_text(_PLUGIN_TABLES + _HOOKS_TOML, encoding="utf-8")
+    (base / "VERSION").write_text("1.0.5\n", encoding="utf-8")
+    (base / "changelog.toml").write_text(_CHANGELOG, encoding="utf-8")
     (base / "ENFORCEMENT.md").write_text(_ENFORCEMENT, encoding="utf-8")
     (base / "README.md").write_text(landing if landing is not None else _LANDING, encoding="utf-8")
 
@@ -473,7 +621,7 @@ def self_test_main():
         for stem in ("r7", "r8", "r9"):
             (gatemove / ".aiqt" / "core" / "rules" / (stem + ".md")).write_text(
                 "# a fixture rule\n", encoding="utf-8")
-        (gatemove / ".aiqt" / "core" / "hooks" / "manifest.toml").write_text(_HOOKS_TOML + (
+        (gatemove / ".aiqt" / "core" / "hooks" / "manifest.toml").write_text(_PLUGIN_TABLES + _HOOKS_TOML + (
             '[[hook]]\nid = "h9"\nplatform = "claude-code"\ndefault = "block"\n'
             '[[hook]]\nid = "h10"\nplatform = "claude-code"\ndefault = "block"\n'
             '[[hook]]\nid = "h11"\nplatform = "claude-code"\ndefault = "warn"\n'
@@ -571,7 +719,7 @@ def self_test_main():
         )
         for label, landing in overlapping:
             overlap = tmp / ("overlap-" + label)
-            _write_fixture(overlap, two, _README, landing=landing)
+            _write_fixture(overlap, two, _README, landing=landing + "\n" + _PLUGIN_PAIR)
             before = ((overlap / LANDING_REL).read_bytes(), (overlap / README_REL).read_bytes())
             for check_mode, mode_label in ((False, "generate"), (True, "--check")):
                 code, err = run_captured(overlap, check=check_mode)
@@ -618,7 +766,7 @@ def self_test_main():
             + proof_pair + "\n\nHand prose below the counts.\n")
         for label, landing in (("touching", touching_landing), ("swapped-order", swapped_landing)):
             disjoint = tmp / ("disjoint-" + label)
-            _write_fixture(disjoint, two, _README, landing=landing)
+            _write_fixture(disjoint, two, _README, landing=landing + "\n" + _PLUGIN_PAIR)
             if run_quiet(disjoint, check=False) != 0:
                 failures.append("{} disjoint landing blocks expected exit 0 on generate (the strict "
                                 "overlap test must not refuse them)".format(label))
@@ -628,6 +776,144 @@ def self_test_main():
                                 "rendered".format(label))
             if run_quiet(disjoint, check=True) != 0:
                 failures.append("{} disjoint landing blocks expected exit 0 on --check".format(label))
+
+        # (p) the install item. With VERSION at the last release without the marketplace file it names
+        #     the plugin and marketplace from the hooks manifest, no tag and no command. Then the release
+        #     lifecycle as RELEASING.md runs it: the 1.0.6 step 5 shape (VERSION 1.0.6, its entry with no
+        #     tag key), which exited 2 while the item read VERSION's own tag and so deadlocked the
+        #     release, must generate; step 5 (the artifact table), step 6a (an attestation row in
+        #     .aiqt/core/releases.toml) and step 6b (the tag key) must each leave the landing page
+        #     byte-identical with --check exit 0, since the release-delta gate refuses a README.md change
+        #     in 6a and 6b; only the next version (1.0.7) names v1.0.6, through ordinary drift at its
+        #     freeze, and its own steps 5, 6a and 6b again change nothing.
+        inst = tmp / "install"
+        _write_fixture(inst, two, _README)
+        if run_quiet(inst, check=False) != 0:
+            failures.append("install item: generation at VERSION 1.0.5 expected exit 0")
+        pending = (inst / LANDING_REL).read_text(encoding="utf-8")
+        if _INSTALL_PENDING not in pending or "plugin marketplace add" in pending or "#v" in pending:
+            failures.append("install item at VERSION 1.0.5: expected the no-tag text and no command, "
+                            "got {!r}".format(pending))
+        releases_toml = inst / ".aiqt" / "core" / "releases.toml"
+
+        def release_state(version, *tables):
+            (inst / "VERSION").write_text(version + "\n", encoding="utf-8")
+            (inst / "changelog.toml").write_text(_CHANGELOG + "".join(tables), encoding="utf-8")
+
+        def unchanged(label, expected):
+            code = run_quiet(inst, check=True)
+            if code != 0:
+                failures.append("release lifecycle, {}: --check expected exit 0 with the landing page "
+                                "unchanged, got {}".format(label, code))
+            if (inst / LANDING_REL).read_bytes() != expected:
+                failures.append("release lifecycle, {}: the landing page must stay byte-identical".format(
+                    label))
+
+        at_anchor = (inst / LANDING_REL).read_bytes()
+        release_state("1.0.6", _release("1.0.6"))
+        unchanged("1.0.6 freeze, its entry without a tag key", at_anchor)
+        if run_quiet(inst, check=False) != 0 or (inst / LANDING_REL).read_bytes() != at_anchor:
+            failures.append("release lifecycle, 1.0.6 freeze: generation expected exit 0 and no change "
+                            "(the step 5 shape that used to exit 2)")
+        release_state("1.0.6", _release("1.0.6", artifacts=True))
+        unchanged("1.0.6 step 5, the artifact table recorded", at_anchor)
+        releases_toml.write_text('[[release]]\nversion = "1.0.6"\ntag = "v1.0.6"\n', encoding="utf-8")
+        unchanged("1.0.6 step 6a, the attestation row", at_anchor)
+        release_state("1.0.6", _release("1.0.6", tag=True, artifacts=True))
+        unchanged("1.0.6 step 6b, the tag key", at_anchor)
+        release_state("1.0.7", _release("1.0.6", tag=True, artifacts=True), _release("1.0.7"))
+        if run_quiet(inst, check=True) != 1:
+            failures.append("release lifecycle, 1.0.7 freeze: naming v1.0.6 expected drift (exit 1)")
+        if run_quiet(inst, check=False) != 0:
+            failures.append("release lifecycle, 1.0.7 freeze: regeneration expected exit 0")
+        named = (inst / LANDING_REL).read_bytes()
+        if _INSTALL_CUT_106.encode("utf-8") not in named:
+            failures.append("release lifecycle, 1.0.7 freeze: expected {!r}, got {!r}".format(
+                _INSTALL_CUT_106, named))
+        unchanged("1.0.7 freeze, re-check", named)
+        release_state("1.0.7", _release("1.0.6", tag=True, artifacts=True), _release("1.0.7", artifacts=True))
+        unchanged("1.0.7 step 5, the artifact table recorded", named)
+        releases_toml.write_text('[[release]]\nversion = "1.0.6"\ntag = "v1.0.6"\n'
+                                 '[[release]]\nversion = "1.0.7"\ntag = "v1.0.7"\n', encoding="utf-8")
+        unchanged("1.0.7 step 6a, the attestation row", named)
+        release_state("1.0.7", _release("1.0.6", tag=True, artifacts=True),
+                      _release("1.0.7", tag=True, artifacts=True))
+        unchanged("1.0.7 step 6b, the tag key", named)
+
+        # Each end of the candidate range (strictly above the anchor, strictly below VERSION), just
+        # inside, at and just outside, plus a recorded entry with no tag key, no tagged entry at all, and
+        # version order over record order (1.0.7 recorded before 1.0.6).
+        for idx, (label, version, record, want) in enumerate((
+                ("anchor end, just outside: a tagged release below the anchor", "1.0.6",
+                 _release("1.0.4", tag=True) + _CHANGELOG + _release("1.0.6"), _INSTALL_PENDING),
+                ("anchor end, at: only the anchor tagged", "1.0.6",
+                 _CHANGELOG + _release("1.0.6"), _INSTALL_PENDING),
+                ("anchor end, just inside: 1.0.6 tagged", "1.0.7",
+                 _CHANGELOG + _release("1.0.6", tag=True) + _release("1.0.7"), _INSTALL_CUT_106),
+                ("VERSION end, just inside: 1.0.7 tagged under VERSION 1.0.8", "1.0.8",
+                 _CHANGELOG + _release("1.0.6", tag=True) + _release("1.0.7", tag=True)
+                 + _release("1.0.8"), _INSTALL_CUT_107),
+                ("VERSION end, at: VERSION's own entry tagged", "1.0.7",
+                 _CHANGELOG + _release("1.0.6", tag=True) + _release("1.0.7", tag=True), _INSTALL_CUT_106),
+                ("VERSION end, just outside: a tagged entry above VERSION", "1.0.7",
+                 _CHANGELOG + _release("1.0.6", tag=True) + _release("1.0.7")
+                 + _release("1.0.8", tag=True), _INSTALL_CUT_106),
+                ("a recorded entry with no tag key below VERSION", "1.0.8",
+                 _CHANGELOG + _release("1.0.6", tag=True) + _release("1.0.7") + _release("1.0.8"),
+                 _INSTALL_CUT_106),
+                ("no tagged entry above the anchor", "1.0.8",
+                 _CHANGELOG + _release("1.0.6") + _release("1.0.7") + _release("1.0.8"), _INSTALL_PENDING),
+                ("version order, not record order", "1.0.8",
+                 _CHANGELOG + _release("1.0.7", tag=True) + _release("1.0.6", tag=True)
+                 + _release("1.0.8"), _INSTALL_CUT_107))):
+            edge = tmp / "install-edge-{}".format(idx)
+            _write_fixture(edge, two, _README)
+            (edge / "VERSION").write_text(version + "\n", encoding="utf-8")
+            (edge / "changelog.toml").write_text(record, encoding="utf-8")
+            if run_quiet(edge, check=False) != 0 or run_quiet(edge, check=True) != 0:
+                failures.append("install item, {}: expected exit 0 on generate and --check".format(label))
+            got = (edge / LANDING_REL).read_text(encoding="utf-8")
+            if want not in got:
+                failures.append("install item, {}: expected {!r}, got {!r}".format(label, want, got))
+
+        release_state("1.0.7", _release("1.0.6", tag=True), _release("1.0.7"))
+        if run_quiet(inst, check=False) != 0:
+            failures.append("install item: regeneration before the hand edits expected exit 0")
+        cut = (inst / LANDING_REL).read_text(encoding="utf-8")
+        for old, new in (("#v1.0.6", "#v1.0.5"), ("@fixture-market", "@other-market"),
+                         ("install fixture-hooks", "install other-hooks")):
+            (inst / LANDING_REL).write_text(cut.replace(old, new), encoding="utf-8")
+            if run_quiet(inst, check=True) != 1:
+                failures.append("install item: a hand edit {!r} -> {!r} expected exit 1".format(old, new))
+        (inst / LANDING_REL).write_text(cut, encoding="utf-8")
+        for label, version, record, hooks in (
+                ("VERSION without a release entry", "1.0.8\n", _CHANGELOG + _LATER_RELEASES, None),
+                ("candidate tag not v<version>", "1.0.7\n", _CHANGELOG + _LATER_RELEASES.replace(
+                    'tag = "v1.0.6"', 'tag = "v1.0.5"'), None),
+                ("record without the anchor release", "1.0.7\n", _LATER_RELEASES, None),
+                ("release recorded twice", "1.0.7\n",
+                 _CHANGELOG + _LATER_RELEASES + '[[release]]\nversion = "1.0.6"\n', None),
+                ("manifest without [marketplace]", "1.0.7\n", _CHANGELOG + _LATER_RELEASES,
+                 '[plugin]\nname = "fixture-hooks"\n' + _HOOKS_TOML),
+                ("trailing-newline marketplace name", "1.0.7\n", _CHANGELOG + _LATER_RELEASES,
+                 '[plugin]\nname = "fixture-hooks"\n[marketplace]\nname = "fixture-market\\n"\n'
+                 + _HOOKS_TOML)):
+            bad = tmp / ("install-bad-" + label.replace(" ", "-").replace("<", "").replace(">", ""))
+            _write_fixture(bad, two, _README)
+            (bad / "VERSION").write_text(version, encoding="utf-8")
+            (bad / "changelog.toml").write_text(record, encoding="utf-8")
+            if hooks is not None:
+                (bad / ".aiqt" / "core" / "hooks" / "manifest.toml").write_text(hooks, encoding="utf-8")
+            before = (bad / LANDING_REL).read_bytes()
+            for check_mode in (True, False):
+                if run_quiet(bad, check=check_mode) != 2:
+                    failures.append("install item, {}: expected exit 2 (check={})".format(label, check_mode))
+            if (bad / LANDING_REL).read_bytes() != before:
+                failures.append("install item, {}: a failed run must not write the landing page".format(label))
+        nomark = tmp / "install-no-markers"
+        _write_fixture(nomark, two, _README, landing=_LANDING.replace(_PLUGIN_PAIR, ""))
+        if run_quiet(nomark, check=True) != 2:
+            failures.append("landing missing PLUGIN-INSTALL markers expected exit 2 (fail-closed)")
 
         # .aiqt/ above the roster README symlinked outside the root fails closed (exit 2) in --check and write
         # mode with the README there untouched and never read: the README there has no ROSTER markers, and each
@@ -658,7 +944,17 @@ def self_test_main():
           "again writing nothing), duplicated ROSTER blocks "
           "(on both generate and --check), an empty standards dir, a missing ENFORCEMENT.md, and an "
           "invalid-UTF-8 README all fail closed (exit 2); an .aiqt/ symlinked outside the root fails closed "
-          "(exit 2) with the README there untouched and never read, and one inside the root is followed")
+          "(exit 2) with the README there untouched and never read, and one inside the root is followed; "
+          "the Claude Code install item names the plugin and marketplace from the hooks manifest, gives no "
+          "tag or command until the record holds a tagged release above the anchor and below VERSION, "
+          "then the command pinned to the newest such tag by version, not record order (each range end "
+          "tested just inside, at and just outside); the 1.0.6 step 5 shape generates, and release steps "
+          "5, 6a and 6b leave the landing page byte-identical and drift-clean for 1.0.6 and 1.0.7, the "
+          "1.0.7 freeze alone naming v1.0.6; a hand-edited tag or name fails --check (exit 1), and a "
+          "VERSION without a release entry, a candidate tag that is not v<version>, a record without the "
+          "anchor release or with a release recorded twice, a manifest without [marketplace] or with a "
+          "trailing-newline name, and a landing page without the install markers fail closed (exit 2) "
+          "with nothing written")
     return 0
 
 
