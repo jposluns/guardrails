@@ -868,21 +868,26 @@ _STOP_FIELD_CLAIM_PENDING = ()
 
 # The refusal wording that tells the assistant a route which relaxes a guard (ending a review hold early,
 # unsetting registry-required mode, committing or removing a scope record, removing the authoring marker,
-# setting an attended operating mode) is the operator's step, pinned in both hook copies. Each phrase is
-# counted across the string constants of the parsed source (adjacent literals are joined by the parser,
-# so a phrase wrapped across source lines still counts), and each retired phrasing that offered such a
-# route to the assistant must be absent, so restoring the earlier wording in either copy fails here even
-# when the copies agree and the manifest is regenerated.
+# setting an attended operating mode) is the operator's step, and the wording that offers restoring a
+# registry's committed bytes or correcting a permission instead of an open-ended repair, pinned in both
+# hook copies. Each phrase is counted across the string constants of the parsed source (adjacent literals
+# are joined by the parser, so a phrase wrapped across source lines still counts), and each retired
+# phrasing that offered such a route to the assistant must be absent, so restoring the earlier wording in
+# either copy fails here even when the copies agree and the manifest is regenerated. The check sees only
+# these phrases at these counts: it cannot tell which text carries a phrase, and a relaxing route offered
+# in new words passes it.
 _OPERATOR_STEP_FILES = (
     ".aiqt/core/hooks/scripts/aiqt_hooks.py",
     "plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py",
 )
 _OPERATOR_STEP_COUNTS = (
     ("ending the hold first is the operator's step, not the assistant's", 17),
-    ("the operator's step, not the assistant's", 23),
+    ("abandoning it to end the hold is the operator's step, not the assistant's", 1),
+    ("the operator's step, not the assistant's", 24),
     ("(removing it is the operator's step)", 2),
     ("changes this guard's scope and is the operator's step", 2),
-    ("restore its committed bytes", 5),
+    ("restore its committed bytes", 7),
+    ("committed bytes where they exist or correct a permission that keeps it from being read", 4),
 )
 _OPERATOR_STEP_RETIRED = (
     "or end the hold first",
@@ -895,13 +900,18 @@ _OPERATOR_STEP_RETIRED = (
     "Commit the orchestration registry at the repository root, run from",
     "remove the stray .aiqt entry, or unset",
     "run from a directory under the orchestrated tree, or unset",
+    "to their committed form",
+    "Fix the enumerator or the registry",
+    "Fix the orchestration registry",
+    "fix the registry or keep working",
 )
 
 
 def _operator_step_wording_failures(root=None):
-    """(operator-step-wording) The relaxing-route refusal texts in both hook copies carry the operator's-step
-    wording at the pinned counts, and no retired phrasing that offered such a route to the assistant
-    remains. A copy that is missing, unreadable or does not parse is a failure, never a clean result."""
+    """(operator-step-wording) The string constants of both hook copies carry each marked operator's-step and
+    restore phrase at its pinned count, and no retired phrasing that offered a relaxing or open-ended repair
+    route to the assistant remains. A copy that is missing, unreadable or does not parse is a failure, never
+    a clean result."""
     base = Path(root) if root is not None else repo_root()
     out = []
     for rel in _OPERATOR_STEP_FILES:
@@ -30914,8 +30924,9 @@ def _main_isolated(monitor):
     # `return <constructor>(...)` site in the hook source ran at least once above, and
     # (label-unique) no case label names two cases, and (stop-field-claim) a bounded regression check:
     # no hook prose carries one of the absence phrasings about stop_hook_active (or the loop bound) that
-    # this repository carried, and (operator-step-wording) both hook copies keep the operator's-step wording
-    # on every relaxing-route refusal text.
+    # this repository carried, and (operator-step-wording) both hook copies carry the marked operator's-step
+    # and restore phrases at their pinned counts and no retired phrasing (counts of known phrases, not a
+    # reading of each relaxing-route text).
     failures.extend(_note_constructor_shape_failures())
     failures.extend(_note_site_coverage_failures(monitor))
     failures.extend(_ask_label_failures())

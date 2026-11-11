@@ -23087,19 +23087,23 @@ def decide_yield(ctx):
                 return ("DENY",
                         "cntdef: the backlog is not enumerable ({}: {}); a blocking question would "
                         "park the run on work this session cannot even enumerate (cannot-evaluate). "
-                        "Fix the enumerator or the registry, or release through the operator-owned "
-                        "escape sentinel, then re-issue the question".format(
+                        "Fix the enumerator, or restore the orchestration registry's committed bytes "
+                        "where they exist or correct a permission that keeps it from being read, or "
+                        "release through the operator-owned escape sentinel, then re-issue the "
+                        "question".format(
                             ctx["enum_status"], ctx["enum_detail"]), disposition)
             return ("DENY",
                     "the backlog is not enumerable ({}: {}); missing evidence never licenses a new "
-                    "idle or wake. Fix the enumerator or the registry, or release through the "
-                    "operator-owned escape sentinel".format(ctx["enum_status"],
-                                                            ctx["enum_detail"]), disposition)
+                    "idle or wake. Fix the enumerator, or restore the orchestration registry's "
+                    "committed bytes where they exist or correct a permission that keeps it from "
+                    "being read, or release through the operator-owned escape sentinel".format(
+                        ctx["enum_status"], ctx["enum_detail"]), disposition)
         return ("DENY",
                 "cntdef: the backlog is not enumerable ({}: {}); an unconfirmable enumeration cannot "
                 "confirm whole-set exhaustion, so it cannot license a stop (ignorance refuses the "
-                "wind-down). Fix the enumerator or the registry; the operator-owned escape sentinel is "
-                "the release for a genuine block".format(
+                "wind-down). Fix the enumerator, or restore the orchestration registry's committed "
+                "bytes where they exist or correct a permission that keeps it from being read; the "
+                "operator-owned escape sentinel is the release for a genuine block".format(
                     ctx["enum_status"], ctx["enum_detail"]), disposition)
     # ITEM-LEVEL cannot-evaluate (an unreadable proof source for a specific item) is missing evidence: the
     # schedule path DENIES (never licenses an idle), and (FIX 1) the stop path DENIES too, because an
@@ -23680,10 +23684,12 @@ def orch_yield_tool(data):
         return _deny(
             "AIQT guardrail (setcmp/cntdef): the orchestration registry could not be read ({}); a "
             "scheduling call that would park or end the run cannot be judged, so it is denied fail-closed "
-            "(ignorance refuses the wind-down). Fix the orchestration registry, or continue the actionable "
-            "work rather than parking or stopping the run.".format(reg),
+            "(ignorance refuses the wind-down). Restore the orchestration registry's committed bytes "
+            "where they exist or correct a permission that keeps it from being read, or continue the "
+            "actionable work rather than parking or stopping the run.".format(reg),
             "AIQT guardrail: denied a scheduling call under an unreadable orchestration registry "
-            "(ignorance refuses the wind-down); fix the registry or keep working.")
+            "(ignorance refuses the wind-down); restore its committed bytes where they exist, correct "
+            "its permission, or keep working.")
     scope = _orch_scope_live(reg, root, data.get("session_id"))
     if not scope:
         return _allow()
@@ -26133,11 +26139,13 @@ def orch_truncation_guard(data):
             "open without following a symlink and search, or its first present registry name "
             "(orchestration.local.json, then orchestration.json) is not a regular file or cannot be "
             "examined. A registry this guard cannot evaluate is not a registry, so the call is denied "
-            "rather than read as registry-present (check-fails-closed-on-unreadable). Restore that .aiqt "
-            "and its registry to their committed form (a real directory with search (execute) permission "
-            "holding a regular registry file). Removing the stray .aiqt entry, or unsetting "
-            "AIQT_ORCH_REQUIRE_REGISTRY to restore the default scoping (where such an entry keeps this "
-            "guard active), changes this guard's scope and is the operator's step, not the assistant's.",
+            "rather than read as registry-present (check-fails-closed-on-unreadable). Where a registry "
+            "file is committed there, restore its committed bytes, or correct the permission so this "
+            "guard can search that .aiqt and read its registry (it needs a real directory with search "
+            "(execute) permission holding a regular registry file). Removing the stray .aiqt entry, "
+            "or unsetting AIQT_ORCH_REQUIRE_REGISTRY to restore the default scoping (where such an entry "
+            "keeps this guard active), changes this guard's scope and is the operator's step, not the "
+            "assistant's.",
             "AIQT guardrail: denied a Bash call in registry-required mode whose orchestration registry "
             "could not be evaluated (rule trkasy, fail-closed).")
     if scope == "toplevel-unopenable" and _orch_registry_required():
@@ -30742,7 +30750,8 @@ def _rwh_deny_text(marker, path):
             "worktree {} that a live review hold pins (dispatch {}, held at {}, marker {}), or is "
             "outside the enumerated read-only form a live hold lets through. A review's findings "
             "are meaningful only against the state it observed, so the held worktree is not modified "
-            "until the review returns or is abandoned. Make the change on a separate worktree or "
+            "until the review returns or is abandoned, and abandoning it to end the hold is the "
+            "operator's step, not the assistant's. Make the change on a separate worktree or "
             "revision and re-dispatch the review against the new state once it has settled (rvwpin.4); "
             "the dispatcher removes the marker when the review ends.".format(
                 marker["workdir"], marker["dispatch_id"], marker["head"][:12], path))
