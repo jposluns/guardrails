@@ -4145,6 +4145,13 @@ def _test_wait_loop_deny_text(failures, tmp):
 _WAIT_LOOP_HEAD_PIPE_COMMAND = "while true; do gh run view 1 | head -n 5; sleep 30; done &"
 
 
+# A background poll loop whose backquote body is longer than the command reading's body budget: the shared
+# lex stops with _ReadingLimitError, while the wait-loop hook, which lexes without the command reading,
+# reads the loop and denies with its exits, so the guard's reading-limit deny must carry them too.
+_WAIT_LOOP_READING_LIMIT_COMMAND = ("while true; do gh run view `printf %s " + "A" * 600000
+                                    + "`; sleep 30; done &")
+
+
 def _guard_background_reason(root, command):
     """orch_truncation_guard's (verdict, reason) on command sent as a background dispatch with cwd root."""
     code, stdout_obj, _stderr = aiqt_hooks.orch_truncation_guard(
@@ -4180,9 +4187,14 @@ def _wait_loop_background_rows(failures, root, tmp):
     fallback as 'none', which restores the unhedged uncertain-'#' text, and the row must go red.
     (2) A poll loop whose probe is piped into head must take the wait-loop exits, not the truncating-sink
     deny; its flip finds no lexed loop, which restores the sink deny, and the row must go red.
-    (3) One lex: the nest_cmdsubst_amp_background shape (alone, and with the poll shape's words appended)
-    is lexed once, so a revert of the shared lex (two lexes) goes red; a matching poll loop is lexed twice.
-    (4) The background detach deny, and the no-registry note, say that unless the command waits for the
+    (3) A poll loop whose backquote body passes the command reading's budget, which the wait-loop hook
+    denies with its exits, must take the reading-limit deny with the hedge and the same exits; its flip
+    reads the classifier as 'none', which restores the reading-limit text alone, and the row must go red.
+    (4) One lex: the nest_cmdsubst_amp_background shape (alone, and with the poll shape's words appended)
+    is lexed once, so a revert of the shared lex (two lexes) goes red; a matching poll loop is lexed twice,
+    and the same nest with a here-string or a process substitution after its '&', which the shared lex
+    refuses, is lexed twice (the shared lex and the detach detector's), so a third lex goes red.
+    (5) The background detach deny, and the no-registry note, say that unless the command waits for the
     child it can run on untracked, and that this guard does not read whether a wait follows."""
     guard = aiqt_hooks.orch_truncation_guard
     for label, command in _WAIT_LOOP_FALLBACK_LOOP_ROWS:
@@ -4220,9 +4232,42 @@ def _wait_loop_background_rows(failures, root, tmp):
         if not any("generic detach advice" in fault for fault in flipped):
             failures.append("(wl-deny-text-background-head-flip) with the truncating-sink deny restored for the "
                             "piped poll loop the row must go red, got {!r}".format(flipped))
-    nest = _DEADLINE_SHAPES["nest_cmdsubst_amp_background"](3000, root)[1]["command"]
+    command = _WAIT_LOOP_READING_LIMIT_COMMAND
+    try:
+        with aiqt_hooks._CommandReading():
+            aiqt_hooks._lex_command(command)
+        limited = False
+    except aiqt_hooks._ReadingLimitError:
+        limited = True
+    except ValueError:
+        limited = False
+    if not limited or aiqt_hooks._orch_bg_poll_loop(command) != "match":
+        failures.append("(wl-deny-text-background-reading-limit-cannot-evaluate) the poll loop no longer passes "
+                        "the command reading's budget while the wait-loop classifier reads it, so the row below "
+                        "tests nothing")
+    else:
+        for label, handler in (("wait-loop", aiqt_hooks.orch_untracked_wait_loop), ("truncation-guard", guard)):
+            faults = _wait_loop_deny_faults(handler, root, command, background=True)
+            if label == "truncation-guard" and (_WAIT_LOOP_HEDGE_PHRASE
+                                                not in _guard_background_reason(root, command)[1]):
+                faults.append("the reason lacks the hedge ({!r})".format(_WAIT_LOOP_HEDGE_PHRASE))
+            if faults:
+                failures.append("(wl-deny-text-background-reading-limit) the {} deny of a background poll loop "
+                                "past the command reading's budget is wrong: {}".format(label, "; ".join(faults)))
+        saved_bg = aiqt_hooks._orch_bg_poll_loop
+        aiqt_hooks._orch_bg_poll_loop = lambda cmd: "none"
+        try:
+            flipped = _wait_loop_deny_faults(guard, root, command, background=True)
+        finally:
+            aiqt_hooks._orch_bg_poll_loop = saved_bg
+        if not any("do not resubmit the loop" in fault for fault in flipped):
+            failures.append("(wl-deny-text-background-reading-limit-flip) with the reading-limit text alone "
+                            "restored the row must go red, got {!r}".format(flipped))
+    nest =_DEADLINE_SHAPES["nest_cmdsubst_amp_background"](3000, root)[1]["command"]
     for label, command, expected in (("nest", nest, 1), ("nest-poll-words", nest + " sleep 1 # while done", 1),
-                                     ("poll-loop", _WAIT_LOOP_DENY_COMMAND, 2)):
+                                     ("poll-loop", _WAIT_LOOP_DENY_COMMAND, 2),
+                                     ("nest-herestr", nest + " cat <<<x", 2),
+                                     ("nest-procsubst", nest + " cat <(true)", 2)):
         count = _background_lex_count(root, command)
         if count != expected:
             failures.append("(bg-lex-count-{}) the truncation guard lexed the background command {} time(s), "
@@ -6427,6 +6472,17 @@ _DEADLINE_SHAPES = {
     "nest_cmdsubst_amp_background": lambda n, base: ("Bash", {"command": "echo " + "$(" * (n // 3 - 4) + "true"
                                                               + ")" * (n // 3 - 4) + " &",
                                                               "run_in_background": True}),
+    # The same nest and bare '&' followed by a here-string or a process substitution, which the shared lex
+    # refuses: the detach detector lexes such a command again, and nothing else may lex it a third time
+    # (bg-lex-count-nest-herestr and bg-lex-count-nest-procsubst pin the two lexes). These two are not in
+    # the timed table: at about 6.3 s of CPU each at 1 MB they sit close to the 7.0 s bound and push the
+    # timed child past its wall-clock limit, so the lex-count rows pin them instead.
+    "nest_herestr_amp_background": lambda n, base: ("Bash", {"command": "echo " + "$(" * (n // 3 - 7) + "true"
+                                                             + ")" * (n // 3 - 7) + " & cat <<<x",
+                                                             "run_in_background": True}),
+    "nest_procsubst_amp_background": lambda n, base: ("Bash", {"command": "echo " + "$(" * (n // 3 - 8)
+                                                               + "true" + ")" * (n // 3 - 8) + " & cat <(true)",
+                                                               "run_in_background": True}),
     "errexit_guarded": lambda n, base: ("Bash", {"command": "set -e\n" + _repeat("a || exit 1\n", n - 7)}),
     "errexit_nest_parens": lambda n, base: ("Bash", {"command": "set -e; " + "(" * (n // 2 - 6) + "true"
                                                      + ")" * (n // 2 - 6)}),
@@ -6619,7 +6675,9 @@ _DEADLINE_DENY_CASES = frozenset((
     ("git_explicit_binding", "breadth_push_after_unbal"), ("pgrep_self_match", "pgrep_self_after"),
     ("protected_line", "push_force_after"), ("protected_line", "mirror_cfg_run_after"),
     ("protected_line", "procsubst_run_after"), ("orch_truncation_guard", "amp_background"),
-    ("orch_truncation_guard", "nest_cmdsubst_amp_background")))
+    ("orch_truncation_guard", "nest_cmdsubst_amp_background"),
+    ("orch_truncation_guard", "nest_herestr_amp_background"),
+    ("orch_truncation_guard", "nest_procsubst_amp_background")))
 # The (handler, shape) cases whose note must still arrive, each within its bound. For inline_errexit: on
 # errexit_note_after errexit is on for the whole long prefix and the hazard is at its end, and on
 # errexit_unread_after the set -e is in the rest past the long prefix that the lexer did not read. For

@@ -25884,12 +25884,14 @@ def orch_truncation_guard(data):
     check runs last, after the truncating-sink deny and just before the generic note, so every earlier deny
     reason stands; its reason steers to dropping the `&` (one tracked dispatch per worker), never back to
     run_in_background, and a background "unbalanced" read keeps the generic note (a disclosed residual). A
-    backgrounded polling loop is the exception: where the lexer reads it (_orch_detach_poll_loop) it takes
-    the wait-loop exits before the truncating-sink deny, and where a '#' the lexer cannot judge stops the
+    backgrounded polling loop is the exception: where the shared lex reads it (_orch_detach_poll_loop) it
+    takes the wait-loop exits before the truncating-sink deny; where a '#' the lexer cannot judge stops the
     lex, the uncertain-'#' deny hedges on whether the command backgrounds a polling loop and gives those
-    exits on _orch_bg_poll_loop's fallback 'match', as the foreground branch's hedged text does, since
-    orch_untracked_wait_loop denies the same command and forbids resubmitting the loop that the sink and
-    detach advice would offer again.
+    exits on _orch_bg_poll_loop's 'match', as the foreground branch's hedged text does; and where the
+    command reading's budget stops the lex, the reading-limit deny hedges and gives those exits the same
+    way. orch_untracked_wait_loop denies each such command and forbids resubmitting the loop that the sink
+    and detach advice would offer again. Where the shared lex refuses the command with any other error,
+    the loop is not tested for, and the command keeps the background detach advice.
 
     MALFORMED INPUT FAILS CLOSED (check-fails-closed-on-unreadable): a tool_input that is missing, null, or
     not a JSON object, a run_in_background that is present but not a real boolean (the string "true" is
@@ -26325,10 +26327,23 @@ def orch_truncation_guard(data):
         _own = _lexed[:len(_lexed) - _reading.added] if _reading.added else _lexed
     except _ReadingLimitError:
         # The command reading spent its body budget (COST above _COMMAND_LEAD_WORDS): it denies as at a '#'
-        # below, with a reason that names the budget rather than a '#' the command need not hold.
-        return _reading_limit_deny("trkasy/vrfdlv (track-launched-work / verifier-delivery-completeness)", "a "
-                                   "producer piped into a truncating sink (head/tail) that would discard its "
-                                   "output and exit status")
+        # below, with a reason that names the budget rather than a '#' the command need not hold. A
+        # BACKGROUNDED POLLING LOOP past that budget: orch_untracked_wait_loop lexes the command without the
+        # command reading, reads its loop and denies with exits that forbid resubmitting it, so where that
+        # classifier reads 'match' this deny hedges on whether the command backgrounds a polling loop and
+        # gives the same exits. COST: the classifier lexes the command again, so it runs only where the
+        # de-quoted text (_hash_doubt_scan) holds every word of the poll shape (_ORCH_POLL_DOUBT_RES).
+        _reason, _banner = _reading_limit_texts(
+            "trkasy/vrfdlv (track-launched-work / verifier-delivery-completeness)", "a producer piped into a "
+            "truncating sink (head/tail) that would discard its output and exit status")
+        if (all(word.search(_hash_doubt_scan(command)) for word in _ORCH_POLL_DOUBT_RES)
+                and _orch_bg_poll_loop(command) == "match"):
+            return _deny(
+                _reason + " If this command backgrounds a polling loop, do not resubmit the loop. "
+                + _ORCH_POLL_LOOP_EXITS,
+                _banner + " If it backgrounds a polling loop, do not resubmit the loop. "
+                + _ORCH_POLL_LOOP_BANNER_EXITS)
+        return _deny(_reason, _banner)
     except _UncertainHashError:
         # A BACKGROUNDED POLLING LOOP with such a '#': orch_untracked_wait_loop reads the command's text
         # (_orch_bg_poll_loop's fallback over _hash_doubt_scan) and, on its 'match', denies with exits that
@@ -26376,15 +26391,20 @@ def orch_truncation_guard(data):
     # deny further below (drop the '&' and let the tracked dispatch run the work) would each offer that loop
     # again, so on this event (_orch_detach_poll_loop, the lexed 'match' of the foreground branch) this guard
     # gives the same exits first. The verdict is unchanged (every such command denies either way). A command
-    # with a '#' the lexer cannot judge took the hedged uncertain-'#' deny above. COST: the detach detector
-    # reads this lex's segments (_own), and _orch_detach_poll_loop lexes the command again, so it runs only
-    # where one of those segments ends with a bare '&' and is the raw word 'done' (a lexed 'match' needs
-    # one), or where the shared lex refused the command (_own is None). A command without such a segment,
-    # such as the timed 1 MB shapes with or without the poll shape's words in its text, is lexed once; a
-    # matching poll loop is lexed twice.
+    # with a '#' the lexer cannot judge, or past the command reading's budget, took a hedged deny above.
+    # COST: the detach detector reads this lex's segments (_own), and _orch_detach_poll_loop lexes the
+    # command again, so it runs only where one of those segments ends with a bare '&' and is the raw word
+    # 'done' (a lexed 'match' needs one). Where the shared lex refused the command (_own is None) it does
+    # not run, since the detach detector has already lexed that command a second time and a third lex
+    # took 1 MB such commands past the 7.0 s timed bound; a lexed loop there, which the lexer would have
+    # to read outside the command reading after refusing it inside, has not been shown, and such a command
+    # keeps the background detach advice. So a command the shared lex reads without such a segment (the
+    # timed 1 MB shapes, with or without the poll shape's words in its text, among them) is lexed once,
+    # and any other is lexed at most twice: again by the detach detector where the shared lex refused it,
+    # by _orch_detach_poll_loop where such a segment ends it, or by _orch_bg_poll_loop on a hedged deny.
     _detach = _orch_foreground_detach_lexed(command, segments=_own)
-    if _detach == "detach" and (_own is None or any(_seg.sep_after == "&" and _seg.raw.strip() == "done"
-                                                    for _seg in _own)) and _orch_detach_poll_loop(command):
+    if _detach == "detach" and _own is not None and any(_seg.sep_after == "&" and _seg.raw.strip() == "done"
+                                                        for _seg in _own) and _orch_detach_poll_loop(command):
         return _deny(
             "AIQT rule trkasy (track-launched-work): this background dispatch backgrounds a polling loop "
             "with a bare '&' (a for/while/until loop carrying sleep plus a status probe), launching "
@@ -26700,12 +26720,14 @@ def _orch_poll_reading(segments):
 # polling loop, and gives these exits; only a detach the classifier does not read as 'match' keeps the
 # generic detach advice, and there orch_untracked_wait_loop emits nothing. Inside a background dispatch the
 # guard gives the lexed text, before its truncating-sink deny and its background detach deny, where the
-# lexer reads the loop (_orch_detach_poll_loop), and where a '#' the lexer cannot judge stops it, its
-# uncertain-'#' deny hedges the same way and gives these exits on the classifier's fallback 'match'. A
+# shared lex reads the loop (_orch_detach_poll_loop); where a '#' the lexer cannot judge stops that lex,
+# its uncertain-'#' deny hedges the same way and gives these exits on the classifier's 'match'; and where
+# the command reading's budget stops it (_ReadingLimitError), its reading-limit deny does the same. A
 # command whose detach scan cannot read it to its end takes the unreadable-quoting deny, which offers no
-# resubmission. Not shown for every input: the background branch tests no fallback 'match' where the
-# shared lex fails with any other error (_own is None there and _orch_detach_poll_loop is False).
-# The loop is never resubmitted: a tracked or foreground copy
+# resubmission. Not shown for every input: where the shared lex fails with any other error, the
+# background branch tests no 'match' (_own is None there, so _orch_detach_poll_loop is not called) and
+# gives the background detach advice; a command there that orch_untracked_wait_loop denies has not been
+# shown or ruled out. The loop is never resubmitted: a tracked or foreground copy
 # still waits by polling a status probe. Exit (1) needs a CI status reader with a wait mode, which an adopter
 # repository may not have, and many waits are not CI at all, so exit (2), the tracked wake, covers the rest.
 _ORCH_POLL_LOOP_EXITS = (
