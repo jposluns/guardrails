@@ -26320,11 +26320,22 @@ def orch_truncation_guard(data):
     # diff_source_pretool slices them) are what _orch_foreground_detach_lexed would lex again, so the bare-'&'
     # detach checks below read them instead of lexing the command a second time.
     _own = None
+    _own_readings = None
     try:
         with _CommandReading() as _reading:
-            _lexed = _lex_command(command)
+            _readings = _lex_readings(command)
+        _lexed = [_seg for _reading_segs in _readings for _seg in _reading_segs]
         _segs = [(_seg.argv, _seg.sep_after) for _seg in _lexed]
         _own = _lexed[:len(_lexed) - _reading.added] if _reading.added else _lexed
+        # The lexer's own readings, each its own list, come first and the command reading's follow, so
+        # the own readings are the leading entries that hold the first len(_own) segments.
+        _own_readings = []
+        _held = 0
+        for _reading_segs in _readings:
+            if _held >= len(_own):
+                break
+            _own_readings.append(_reading_segs)
+            _held += len(_reading_segs)
     except _ReadingLimitError:
         # The command reading spent its body budget (COST above _COMMAND_LEAD_WORDS): it denies as at a '#'
         # below, with a reason that names the budget rather than a '#' the command need not hold. A
@@ -26392,19 +26403,22 @@ def orch_truncation_guard(data):
     # again, so on this event (_orch_detach_poll_loop, the lexed 'match' of the foreground branch) this guard
     # gives the same exits first. The verdict is unchanged (every such command denies either way). A command
     # with a '#' the lexer cannot judge, or past the command reading's budget, took a hedged deny above.
-    # COST: the detach detector reads this lex's segments (_own), and _orch_detach_poll_loop lexes the
-    # command again, so it runs only where one of those segments ends with a bare '&' and is the raw word
-    # 'done' (a lexed 'match' needs one). Where the shared lex refused the command (_own is None) it does
-    # not run, since the detach detector has already lexed that command a second time and a third lex
-    # took 1 MB such commands past the 7.0 s timed bound; a lexed loop there, which the lexer would have
-    # to read outside the command reading after refusing it inside, has not been shown, and such a command
-    # keeps the background detach advice. So a command the shared lex reads without such a segment (the
-    # timed 1 MB shapes, with or without the poll shape's words in its text, among them) is lexed once,
-    # and any other is lexed at most twice: again by the detach detector where the shared lex refused it,
-    # by _orch_detach_poll_loop where such a segment ends it, or by _orch_bg_poll_loop on a hedged deny.
+    # COST: the detach detector reads this lex's segments (_own), and _orch_detach_poll_loop classifies
+    # this lex's own readings (_own_readings) rather than lexing the command again, so a command the shared
+    # lex reads makes no further whole-command lex here. Inside that shared lex the command reading also
+    # lexes each distinct backquote body once (_read_commands), so a 1 MB poll loop with a large backquote
+    # body costs that body's lex once, not a second whole-command lex on top. The classifier still runs
+    # only where one of those segments ends with a bare '&' and is the raw word 'done' (a lexed 'match'
+    # needs one). Where the shared lex refused the command (_own is None) it does not run, since the
+    # detach detector has already lexed that command a second time; a lexed loop there, which the lexer
+    # would have to read outside the command reading after refusing it inside, has not been shown, and
+    # such a command keeps the background detach advice. So the whole command is lexed once where the
+    # shared lex reads it, and twice where it does not: again by the detach detector where the shared lex
+    # refused it with a plain ValueError, or by _orch_bg_poll_loop on a hedged deny.
     _detach = _orch_foreground_detach_lexed(command, segments=_own)
-    if _detach == "detach" and _own is not None and any(_seg.sep_after == "&" and _seg.raw.strip() == "done"
-                                                        for _seg in _own) and _orch_detach_poll_loop(command):
+    if _detach == "detach" and _own is not None and any(
+            _seg.sep_after == "&" and _seg.raw.strip() == "done" for _seg in _own) and _orch_detach_poll_loop(
+                command, readings=_own_readings):
         return _deny(
             "AIQT rule trkasy (track-launched-work): this background dispatch backgrounds a polling loop "
             "with a bare '&' (a for/while/until loop carrying sleep plus a status probe), launching "
@@ -26744,7 +26758,7 @@ _ORCH_POLL_LOOP_BANNER_EXITS = (
     "run one tracked task with it and read its exit status; otherwise schedule a tracked wake.")
 
 
-def _orch_detach_poll_loop(command):
+def _orch_detach_poll_loop(command, readings=None):
     """True where the shared lexer itself reads command as the backgrounded polling loop
     orch_untracked_wait_loop denies (a reading _orch_poll_reading classifies 'match', the answer
     _orch_bg_poll_loop gives on a lexed command), so orch_truncation_guard's detach deny gives that hook's
@@ -26753,11 +26767,15 @@ def _orch_detach_poll_loop(command):
     'match' from words in quoted text or a comment, and on such a 'match' the truncation guard gives a
     hedged text that carries the wait-loop exits and offers neither dispatch form, never the generic detach
     advice (orch_untracked_wait_loop denies that command too, and the generic advice would offer the loop
-    its deny forbids). Only the reason chooses by this; the truncation guard's verdict does not."""
-    try:
-        readings = _lex_readings(command)
-    except ValueError:                      # _UncertainHashError included: no text-scan fallback here
-        return False
+    its deny forbids). Only the reason chooses by this; the truncation guard's verdict does not. readings,
+    where given, are the lexer's own readings of command from a lex the caller already made (each its own
+    segment list, as _lex_readings returns them outside _CommandReading), and are classified instead of
+    lexing command again."""
+    if readings is None:
+        try:
+            readings = _lex_readings(command)
+        except ValueError:                  # _UncertainHashError included: no text-scan fallback here
+            return False
     return any(_orch_poll_reading(segments) == "match" for segments in readings)
 
 

@@ -4105,7 +4105,7 @@ def _test_wait_loop_deny_text(failures, tmp):
                         "contradicts the wait-loop deny: {}".format("; ".join(faults)))
     saved_poll = aiqt_hooks._orch_detach_poll_loop
     saved_bg = aiqt_hooks._orch_bg_poll_loop
-    aiqt_hooks._orch_detach_poll_loop = lambda command: False
+    aiqt_hooks._orch_detach_poll_loop = lambda command, readings=None: False
     aiqt_hooks._orch_bg_poll_loop = lambda command: "none"
     try:
         flipped = _wait_loop_deny_faults(guard, root)
@@ -4125,7 +4125,7 @@ def _test_wait_loop_deny_text(failures, tmp):
         if faults:
             failures.append("(wl-deny-text-background) the {} deny of a background dispatch that backgrounds the "
                             "poll loop gives contradictory advice: {}".format(label, "; ".join(faults)))
-    aiqt_hooks._orch_detach_poll_loop = lambda command: False
+    aiqt_hooks._orch_detach_poll_loop = lambda command, readings=None: False
     aiqt_hooks._orch_bg_poll_loop = lambda command: "none"
     try:
         flipped = _wait_loop_deny_faults(guard, root, background=True)
@@ -4163,7 +4163,10 @@ def _guard_background_reason(root, command):
 
 
 def _background_lex_count(root, command):
-    """How many times orch_truncation_guard calls _lex_readings on command sent as a background dispatch."""
+    """(count, verdict) for orch_truncation_guard on command sent as a background dispatch: count is how
+    many times it calls _lex_readings, which counts each whole-command lex and also the command reading's
+    lex of each distinct backquote body (_read_commands lexes a body once per depth), and verdict is its
+    reduced verdict."""
     saved = aiqt_hooks._lex_readings
     calls = []
 
@@ -4172,10 +4175,22 @@ def _background_lex_count(root, command):
         return saved(*args, **kwargs)
     aiqt_hooks._lex_readings = counted
     try:
-        _guard_background_reason(root, command)
+        verdict = _guard_background_reason(root, command)[0]
     finally:
         aiqt_hooks._lex_readings = saved
-    return len(calls)
+    return len(calls), verdict
+
+
+# A background poll loop with a backquote body and further nested substitutions: the shared lex reads it
+# and its command reading lexes the body once, so a further whole-command lex for the poll-loop check would
+# make three; at 1 MB that third lex took the real hook past its 8 s budget.
+_BG_POLL_BACKQUOTE_BODY_COMMAND = ("while true; do gh run view `echo " + "$(" * 500 + "true" + ")" * 500 + "` "
+                                   + "$(" * 500 + "true" + ")" * 500 + "; sleep 30; done &")
+# A background loop past the command reading's budget whose text lacks the poll shape's 'sleep': the
+# reading-limit deny's classifier (_orch_bg_poll_loop, a further lex) must not run on it, since the cost
+# gate (_ORCH_POLL_DOUBT_RES) requires every poll word first.
+_BG_READING_LIMIT_NO_SLEEP_COMMAND = ("while true; do gh run view `printf %s " + "A" * 600000
+                                      + "`; done &")
 
 
 def _wait_loop_background_rows(failures, root, tmp):
@@ -4190,10 +4205,17 @@ def _wait_loop_background_rows(failures, root, tmp):
     (3) A poll loop whose backquote body passes the command reading's budget, which the wait-loop hook
     denies with its exits, must take the reading-limit deny with the hedge and the same exits; its flip
     reads the classifier as 'none', which restores the reading-limit text alone, and the row must go red.
-    (4) One lex: the nest_cmdsubst_amp_background shape (alone, and with the poll shape's words appended)
-    is lexed once, so a revert of the shared lex (two lexes) goes red; a matching poll loop is lexed twice,
-    and the same nest with a here-string or a process substitution after its '&', which the shared lex
-    refuses, is lexed twice (the shared lex and the detach detector's), so a third lex goes red.
+    (4) Lex counts (_background_lex_count, which counts whole-command lexes and the command reading's lex
+    of each distinct backquote body), each row also requiring the guard to deny: the
+    nest_cmdsubst_amp_background shape (alone, and with the poll shape's words appended) and a matching
+    poll loop are lexed once, so a revert of the shared lex, or a poll-loop check that lexes again, goes
+    red; a poll loop with a backquote body is lexed twice (the shared lex and its body), so a further
+    whole-command lex goes red; a loop past the command reading's budget whose text lacks 'sleep' is lexed
+    once, so dropping the reading-limit branch's cost gate goes red; and the 3000-byte nest with a
+    here-string or a process substitution after its '&', which the shared lex refuses, is lexed twice (the
+    shared lex and the detach detector's), so a third lex goes red, and must be denied, so a regression
+    that allows it goes red too. These rows pin the count and verdict of those shapes at 3000 bytes, not
+    their time at 1 MB.
     (5) The background detach deny, and the no-registry note, say that unless the command waits for the
     child it can run on untracked, and that this guard does not read whether a wait follows."""
     guard = aiqt_hooks.orch_truncation_guard
@@ -4224,7 +4246,7 @@ def _wait_loop_background_rows(failures, root, tmp):
                 failures.append("(wl-deny-text-background-head) the {} deny of a background poll loop piped "
                                 "into head is wrong: {}".format(label, "; ".join(faults)))
         saved_poll = aiqt_hooks._orch_detach_poll_loop
-        aiqt_hooks._orch_detach_poll_loop = lambda cmd: False
+        aiqt_hooks._orch_detach_poll_loop = lambda cmd, readings=None: False
         try:
             flipped = _wait_loop_deny_faults(guard, root, command, background=True)
         finally:
@@ -4263,15 +4285,20 @@ def _wait_loop_background_rows(failures, root, tmp):
         if not any("do not resubmit the loop" in fault for fault in flipped):
             failures.append("(wl-deny-text-background-reading-limit-flip) with the reading-limit text alone "
                             "restored the row must go red, got {!r}".format(flipped))
-    nest =_DEADLINE_SHAPES["nest_cmdsubst_amp_background"](3000, root)[1]["command"]
+    nest = _DEADLINE_SHAPES["nest_cmdsubst_amp_background"](3000, root)[1]["command"]
     for label, command, expected in (("nest", nest, 1), ("nest-poll-words", nest + " sleep 1 # while done", 1),
-                                     ("poll-loop", _WAIT_LOOP_DENY_COMMAND, 2),
+                                     ("poll-loop", _WAIT_LOOP_DENY_COMMAND, 1),
+                                     ("poll-loop-backquote-body", _BG_POLL_BACKQUOTE_BODY_COMMAND, 2),
+                                     ("reading-limit-no-sleep", _BG_READING_LIMIT_NO_SLEEP_COMMAND, 1),
                                      ("nest-herestr", nest + " cat <<<x", 2),
                                      ("nest-procsubst", nest + " cat <(true)", 2)):
-        count = _background_lex_count(root, command)
+        count, verdict = _background_lex_count(root, command)
         if count != expected:
             failures.append("(bg-lex-count-{}) the truncation guard lexed the background command {} time(s), "
                             "expected {}".format(label, count, expected))
+        if verdict != "deny":
+            failures.append("(bg-lex-count-{}) the truncation guard must deny the background command, got "
+                            "{}".format(label, verdict))
     verdict, reason = _guard_background_reason(root, "sleep 5 &")
     for phrase in ("unless the command waits for the child", "does not read whether a wait follows"):
         if verdict != "deny" or phrase not in reason:
@@ -4351,7 +4378,8 @@ def _wait_loop_overmatch_rows(failures, root):
         failures.append("(wl-deny-text-overmatch) the truncation guard's deny of an over-matched detach is "
                         "wrong: {}".format("; ".join(faults)))
     saved_poll = aiqt_hooks._orch_detach_poll_loop
-    aiqt_hooks._orch_detach_poll_loop = lambda command: aiqt_hooks._orch_bg_poll_loop(command) == "match"
+    aiqt_hooks._orch_detach_poll_loop = (
+        lambda command, readings=None: aiqt_hooks._orch_bg_poll_loop(command) == "match")
     try:
         flipped = _wait_loop_overmatch_faults(root)
     finally:
@@ -6472,17 +6500,11 @@ _DEADLINE_SHAPES = {
     "nest_cmdsubst_amp_background": lambda n, base: ("Bash", {"command": "echo " + "$(" * (n // 3 - 4) + "true"
                                                               + ")" * (n // 3 - 4) + " &",
                                                               "run_in_background": True}),
-    # The same nest and bare '&' followed by a here-string or a process substitution, which the shared lex
-    # refuses: the detach detector lexes such a command again, and nothing else may lex it a third time
-    # (bg-lex-count-nest-herestr and bg-lex-count-nest-procsubst pin the two lexes). These two are not in
-    # the timed table: at about 6.3 s of CPU each at 1 MB they sit close to the 7.0 s bound and push the
-    # timed child past its wall-clock limit, so the lex-count rows pin them instead.
-    "nest_herestr_amp_background": lambda n, base: ("Bash", {"command": "echo " + "$(" * (n // 3 - 7) + "true"
-                                                             + ")" * (n // 3 - 7) + " & cat <<<x",
-                                                             "run_in_background": True}),
-    "nest_procsubst_amp_background": lambda n, base: ("Bash", {"command": "echo " + "$(" * (n // 3 - 8)
-                                                               + "true" + ")" * (n // 3 - 8) + " & cat <(true)",
-                                                               "run_in_background": True}),
+    # The same nest followed, after its '&', by a here-string or a process substitution (which the shared
+    # lex refuses) has no timed shape: at 1 MB each measured about 6.3 s of CPU, close to the 7.0 s bound,
+    # and a suite run that timed them passed the timed child's wall-clock limit, which is inferred, not
+    # shown, to come from them. bg-lex-count-nest-herestr and bg-lex-count-nest-procsubst pin only their
+    # lex count and their deny, on a 3000-byte command.
     "errexit_guarded": lambda n, base: ("Bash", {"command": "set -e\n" + _repeat("a || exit 1\n", n - 7)}),
     "errexit_nest_parens": lambda n, base: ("Bash", {"command": "set -e; " + "(" * (n // 2 - 6) + "true"
                                                      + ")" * (n // 2 - 6)}),
@@ -6675,9 +6697,7 @@ _DEADLINE_DENY_CASES = frozenset((
     ("git_explicit_binding", "breadth_push_after_unbal"), ("pgrep_self_match", "pgrep_self_after"),
     ("protected_line", "push_force_after"), ("protected_line", "mirror_cfg_run_after"),
     ("protected_line", "procsubst_run_after"), ("orch_truncation_guard", "amp_background"),
-    ("orch_truncation_guard", "nest_cmdsubst_amp_background"),
-    ("orch_truncation_guard", "nest_herestr_amp_background"),
-    ("orch_truncation_guard", "nest_procsubst_amp_background")))
+    ("orch_truncation_guard", "nest_cmdsubst_amp_background")))
 # The (handler, shape) cases whose note must still arrive, each within its bound. For inline_errexit: on
 # errexit_note_after errexit is on for the whole long prefix and the hazard is at its end, and on
 # errexit_unread_after the set -e is in the rest past the long prefix that the lexer did not read. For
