@@ -26550,6 +26550,31 @@ def _main_isolated(monitor):
                   "disclosed over-deny)", "git config --get commit.template; echo \"x", "deny")
         cr2expect("(ci-cr-fb7) a command past the read bound that names commit.template and runs no git or gh "
                   "allows", "echo commit.template" + " " * aiqt_hooks._CMTIDN_READ_LIMIT, "allow")
+        # A short option cluster of 5 or 8 letters before F or t: the fallback's earlier pattern read at most 4
+        # letters before the F or t and allowed these; the swap below puts it back and requires each to allow.
+        _cr_clusters = [
+            ("(ci-cr-fb8)", "git commit -asnqvF " + _cr_p["clean.txt"] + "; echo \"x"),
+            ("(ci-cr-fb9)", "git commit -asnqvesvF " + _cr_p["clean.txt"] + "; echo \"x"),
+            ("(ci-cr-fb10)", "git commit -asnqvt " + _cr_p["clean.txt"] + " " * aiqt_hooks._CMTIDN_READ_LIMIT)]
+        for _cr_label, _cr_command in _cr_clusters:
+            cr2expect(_cr_label + " a git command the check cannot read whose short option cluster ends in F or t "
+                      "after 5 or more letters fails closed", _cr_command, "deny")
+        _cr_saved_fo = aiqt_hooks._CMTIDN_FALLBACK_FILE_OPTION_RE
+        try:
+            aiqt_hooks._CMTIDN_FALLBACK_FILE_OPTION_RE = re.compile(
+                r"(?<![^\s\"'=;&|()])(?:-[A-Za-z]{0,4}[Ft]|--(?:fil|te|body-f)[a-z-]*)|(?i:commit\.template)")
+            _cr_kept = [label for label, command in _cr_clusters if _decision(cig, command) != "allow"]
+        finally:
+            aiqt_hooks._CMTIDN_FALLBACK_FILE_OPTION_RE = _cr_saved_fo
+        if _cr_kept:
+            failures.append("(ci-cr-fb-cluster-revert) with the 4-letter cluster pattern put back, {} still deny "
+                            "(want allow, the earlier gap)".format(_cr_kept))
+        # A relative git -c commit.template value fails closed: git resolves it against the repository top, the
+        # check would join it to the payload cwd. An absolute clean template still allows.
+        cr2expect("(ci-cr-g8) git -c commit.template with a relative name fails closed",
+                  "git -c commit.template=clean.txt commit", "deny", cwd=str(_cr_dir))
+        cr2expect("(ci-cr-g9) git -c commit.template with an absolute clean template allows",
+                  "git -c commit.template=" + _cr_p["clean.txt"] + " commit", "allow")
         # gh options before the pr word and the verb, gh pr merge, and git -c commit.template.
         cr2expect("(ci-cr-g1) gh -R before pr does not hide an AI credit line, denies",
                   "gh -R o/r pr create --body " + shlex.quote(_cr_credit), "deny")

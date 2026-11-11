@@ -5453,7 +5453,8 @@ def _commit_message_and_author_ai(tokens, judged, files=None, relative_ok=False,
     subcommand word: every word is scanned for a trailer and a credit line, but only the words after start are
     read with the git commit option table, so a wrapper's own option before the git command (sudo -t, xargs -t)
     is not taken for a template; before it, a git -c commit.template=FILE value names a template that is read
-    the same way."""
+    the same way when FILE is an absolute path, and fails closed otherwise, since git resolves a relative one
+    against the repository top, not the cwd."""
     n = len(tokens)
     for i in range(min(start, n)):
         tok = tokens[i]
@@ -5468,6 +5469,11 @@ def _commit_message_and_author_ai(tokens, judged, files=None, relative_ok=False,
             continue
         key, eq, value = setting.partition("=")
         if eq and key.lower() == "commit.template" and files is not None:
+            if not os.path.isabs(value):
+                # git reads a relative commit.template from the repository top, not from the cwd the check would
+                # join it to, so the check cannot know which file git reads; '-' and an empty value included.
+                return ("commit template {!r}, not an absolute path: git resolves a relative commit.template "
+                        "against the repository top, not the cwd the check reads from".format(value))
             hit = _cmtidn_message_file_ai(value, files, judged, relative_ok, "commit template")
             if hit is not None:
                 return hit
@@ -5720,14 +5726,19 @@ _CMTIDN_RUN_BOUNDS = ("git runs a command line that could not be parsed, or comm
 _CMTIDN_READ_LIMIT = 128 << 10
 _CMTIDN_TOO_LONG = "the command is longer than the commit-identity check reads within the hook timeout"
 # In a command the fallback judges: a message, template or body file option as git commit and gh pr spell it (a
-# short cluster of up to 4 letters ending in F or t, its value attached or not, or --file, --template or
+# short cluster of letters of any length ending in F or t, its value attached or not, or --file, --template or
 # --body-file, a prefix of each included), the commit.template configuration name in any letter case, as a git
 # -c value names a template the reader reads, wherever it stands (a quoted or attached -c value included, and a
-# mention of the name only, a disclosed over-deny), and git or gh as a word (a path to either included). Both
-# are raw scans, linear in the command's length.
+# mention of the name only, a disclosed over-deny), and git or gh as a word (a path to either included). A dash
+# word of another program whose leading letters hold an F or t (sort -t, find -type) matches too, a disclosed
+# over-deny. Both are raw scans, linear in the command's length: a cluster can start only at a '-' after a blank,
+# a quote, '=' or a shell operator, so each run of letters is scanned from one start only. Being raw scans, they
+# do not see an option or configuration name that quoting or escaping splits (-\F, commit.temp\late), which the
+# residue discloses.
 _CMTIDN_FALLBACK_FILE_OPTION_RE = re.compile(
-    r"(?<![^\s\"'=;&|()])(?:-[A-Za-z]{0,4}[Ft]|--(?:fil|te|body-f)[a-z-]*)|(?i:commit\.template)")
-_CMTIDN_FALLBACK_TOOL_RE = re.compile(r"(?<![\w.-])(?:git|gh)(?![\w.-])")# An AI name as AI_IDENTITY_RE spells it but with no word boundary, so that a name the reader would find in a
+    r"(?<![^\s\"'=;&|()])(?:-[A-Za-z]*[Ft]|--(?:fil|te|body-f)[a-z-]*)|(?i:commit\.template)")
+_CMTIDN_FALLBACK_TOOL_RE = re.compile(r"(?<![\w.-])(?:git|gh)(?![\w.-])")
+# An AI name as AI_IDENTITY_RE spells it but with no word boundary, so that a name the reader would find in a
 # command too long to read is found by the fallback as well. Each word the reader judges, a word of a run line
 # included, holds the command's characters in order less only quotes, backslashes, the newline of a
 # backslash-newline and the '$' before a quote (a run line adds quotes and backslashes that its own reading drops
@@ -5818,7 +5829,7 @@ def find_ai_authorship(command, base=None):
     fallback. Raises _ReadingLimitError when the command reading of the command or of any run line spends its
     body budget (COST above _COMMAND_LEAD_WORDS), never a line left unread, so the handler denies it. base is
     the payload's cwd, against which a relative message or body file name resolves (_CmtidnFiles). The same
-    contexts and an AI credit line are also read in the body of a gh pr create, new or edit command
+    contexts and an AI credit line are also read in the body of a gh pr create, new, edit or merge command
     (_cmtidn_gh_pr), and in the commit message files and pull-request body files the command names."""
     if len(command) > _CMTIDN_READ_LIMIT:
         raise ValueError(_CMTIDN_TOO_LONG)
