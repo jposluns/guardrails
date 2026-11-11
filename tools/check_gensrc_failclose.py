@@ -179,6 +179,24 @@ PROBE_TIMEOUT = 120  # per --check; an own exit beside the stop stands, else can
 # silent; 60 s is far above that on a working host.
 PROBE_STALL_S = 60
 TOTAL_TIMEOUT = 1800  # backstop for the whole sweep; exceeding it is cannot-evaluate, never a hang
+# The end-to-end budget of this tool's own --self-test, in wall-clock seconds. tools/check_release_cut.py,
+# which runs that self-test as a child under an injected census read failure, reads this assignment from
+# the parsed source bytes (never importing this module) and refuses its census-mapping table before
+# anything runs unless this tool's row has a kill bound of at least this budget plus its stated margin.
+# Keep it the only binding of the name in this module, a plain assignment of a positive int literal: the
+# caller refuses any other form, or any second binding anywhere in the module, as cannot-evaluate.
+# The measurements behind the figure, each the wall-clock time of one whole run of
+# `python3 -I -B tools/check_gensrc_failclose.py --self-test` from the repository root on a shared host
+# with 80 CPUs:
+#   2026-11-10, the three sizing runs: 133.19 s, 127.44 s and 128.17 s (1-minute load 32.8 to 42.3);
+#   2026-11-10, one later run, exit 0: 140.70 s (1-minute load 54.28 before it, 56.08 after it).
+# The margin rule: the budget is the smallest whole number of seconds at least twice the slowest sizing
+# run, so ceil(2 * 133.19) = ceil(266.38) = 267. The later run is within the budget but above half of it,
+# so the doubling does not hold for that run. Under the caller's 30 s margin the budget needs a row bound
+# of at least 267 + 30 = 297 s, and the row's bound is 430 s. The self-test does not enforce the budget on
+# itself. When the self-test grows, re-measure it, raise the budget here, and raise the caller's row bound
+# with it when the budget plus the margin would pass that bound.
+SELF_TEST_BUDGET_S = 267
 # Wall-clock bound on EACH ONE setup step, per call: every template-setup git call (init, the real_root
 # ls-files, add, commit, the gc, the post-gc readbacks) and, in the self-test, every fixture build step
 # (a fixture git call or a generator write run). Deliberately NOT PROBE_TIMEOUT: the self-test cuts
