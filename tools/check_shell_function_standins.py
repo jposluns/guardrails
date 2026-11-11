@@ -1,0 +1,1284 @@
+#!/usr/bin/env python3
+"""Shell-function stand-in lint over the repository's own Python, first part: environment keys.
+
+Run with: python3 -I -B tools/check_shell_function_standins.py [--root DIR]
+          python3 -I -B tools/check_shell_function_standins.py --self-test
+Exit: 0 clean within scope; 1 finding; 2 cannot-evaluate.
+
+Rule text (tsthrm.10): where verification substitutes for an external executable, the substitute
+is an executable fixture, never a shell function or alias. Bash imports an exported function from
+an environment variable named BASH_FUNC_<name>%%, and before it runs a non-interactive script it
+sources the file that BASH_ENV names. sh and bash read ENV only for an interactive shell; that key
+is listed as a precaution. Either key lets a shell function stand in for an executable. The scan
+parses every *.py file under SCAN_ROOTS with ast, never importing or running the file, and reports
+a CONSTANT str or bytes key stored into a mapping that reaches an environment:
+
+  env-func     a key that starts with BASH_FUNC_ or ends with %% (the exported-function form);
+  env-startup  a key that is exactly BASH_ENV or ENV (a startup file the shell sources).
+
+A mapping reaches an environment when it is the target: os.environ, os.environb, or any name or
+attribute whose last component contains "env" in any case (env, child_env, self.env), assigned
+(plainly, annotated or by :=), updated (update, setdefault, __setitem__, |= or an explicit
+__ior__, a subscript store), or when it is the value of an env= keyword argument of any call, also
+given as the literal "env" key of a dict display passed as a ** mapping
+(run(c, **{"env": {...}})), or the mapping or keywords of a call named dict on an attribute
+(mock.patch.dict, patch.dict, also as a decorator) whose target, in_dict= whenever given and else
+the first argument, is a target or the string "os.environ" or "os.environb"; its mapping is
+values= whenever given, and the second argument. The key of a setenv call (monkeypatch.setenv) is
+a store too: name= whenever given, else the first argument. When the receiver's last name is
+MonkeyPatch and name= is not given, both the first and the second argument are read as keys, since
+a static reading cannot tell an unbound MonkeyPatch.setenv(mp, KEY, v) from a bound instance held
+under that name (self.MonkeyPatch.setenv(KEY, v)); only an environment key name is reported, so
+this fails closed, and a value that is such a name in the second position is reported too. So is
+the first argument of any call named putenv (os.putenv takes positional arguments only, so a name=
+given to a putenv call is never read). The key of the target's setdefault or __setitem__ is key=
+whenever given (os.environ.setdefault(key=KEY, value=v), MutableMapping.setdefault(os.environ,
+key=KEY, default=v)), else the first argument, or the second in an unbound call whose first
+argument is the target; value= and default= are never read, nor is key= on an unbound call through
+dict, whose methods take positional arguments only. The mapping of the target's __ior__, which |=
+calls, is read like update's, literal pairs included: other= whenever given
+(os.environ.__ior__(other={...}), os._Environ.__ior__(os.environ, other={...})), else the first
+argument, or the second in an unbound call whose first argument is the target; its other keywords
+are never read, since __ior__ takes none. In a setenv, putenv or patch.dict call a positional
+argument at or after a starred one is not read, since its position is unknown; the keywords of
+that call still are, and every argument of ChainMap(*maps, {...}) is still read. Both branches of
+a conditional expression, every value of an or/and and the value of a := given as such a mapping
+are read as the mapping. Inside such a mapping a store is one of these routes:
+
+  dict-key          a key of a dict display, also inside a ** entry, a dict(...) argument, a
+                    union (os.environ | {...}), a ChainMap(...) argument or the mapping of
+                    patch.dict (patch.dict(os.environ, {...}), patch.dict(os.environ,
+                    values={...}));
+  dict-comp-key     the key of a dict comprehension;
+  keyword           a keyword argument of dict(...), of the target's update(...) or of
+                    patch.dict(...) other than its own in_dict, values and clear parameters,
+                    which are not read as keys whether given as keywords or as literal keys
+                    of a ** mapping (dict(BASH_ENV=path), os.environ.update(ENV=path),
+                    patch.dict(in_dict=os.environ, BASH_ENV=path));
+  pair              the key of a literal (KEY, v) pair in a literal list or tuple given to
+                    dict(...), update(...), |=, __ior__(...) or as the mapping of patch.dict(...);
+  fromkeys          a literal key listed in fromkeys([KEY], v);
+  first-argument    the key of a putenv call, of setenv (also setenv(name=KEY, value=v),
+                    MonkeyPatch.setenv(mp, name=KEY, value=v) and a bound instance held under the
+                    name MonkeyPatch, self.MonkeyPatch.setenv(KEY, v)) or of the target's
+                    setdefault or __setitem__, also given as key= (os.environ.setdefault(key=KEY,
+                    value=v), os.environ.__setitem__(key=KEY, value=v),
+                    MutableMapping.setdefault(env, key=KEY, default=v));
+  second-argument   the key of an unbound call whose first argument is the target
+                    (dict.setdefault(env, KEY, v), dict.__setitem__(env, KEY, v)) or the
+                    second argument of setenv on a MonkeyPatch receiver without name=
+                    (MonkeyPatch.setenv(mp, KEY, v));
+  subscript-store   a subscript store into the target (env["BASH_ENV"] = path, an augmented or
+                    annotated assignment, a for, with or unpacking target).
+
+Removing or reading a key is not a store, so a filter that drops BASH_FUNC_ keys from an
+inherited environment (a startswith test, a comparison, pop, del, get, os.unsetenv) is clean. A
+mapping that never reaches a target is clean too: a lookup table, a membership test, an
+expected-value literal, a str.format or Template keyword, a counter and a config dict.
+
+A reviewed site is admitted only by an ALLOWLIST entry (path, enclosing qualname, kind, exact
+count, reason); an entry whose count no longer matches is itself a finding. The enclosing qualname
+is the dotted chain of class and function names around the site, or <module>.
+
+Fail closed: each file is decoded as Python decodes it (tokenize.detect_encoding, so a BOM and a
+PEP 263 coding cookie are honoured) and a cookie other than utf-8 is cannot-evaluate. A missing
+scan root, a directory the walk cannot list, any symlink inside a scanned root, a *.py entry that
+is not a regular file, and a file the scan cannot read, decode or parse are cannot-evaluate
+(exit 2), never a clean pass. Only the vendored opf/tools/_vendor tree is excluded.
+
+Residuals (not detected by this part, a best-effort lexical check): a key held in a name
+(KEY = "BASH_ENV"; env[KEY] = p); an env built by a helper (env=mk("BASH_ENV", p)) or a mapping
+built under another name and merged in later; pairs not written as literals (zip, a generator, a
+list held in a name, a list built from environment items with literal pairs appended, as in
+dict(list(os.environ.items()) + [("BASH_ENV", p)]), and .items() passed to update, as in
+env.update({"BASH_ENV": p}.items())); a key built at run time (an f-string, a concatenation, a
+format call) or chosen by a conditional expression on any key route (os.environ["BASH_ENV" if c
+else "HOME"] = p, monkeypatch.setenv("BASH_ENV" if c else "HOME", p), {("BASH_ENV" if c else
+"HOME"): p}), since a key is read only as a constant; a store through operator.setitem,
+monkeypatch.setitem, setattr or another indirection; a mapping loaded from data (json.loads); an
+environment passed positionally (os.execve) or held in a name without "env", including run keyword
+arguments held in a dict (kw = {"env": {...}} or kw["env"] = {...}, then run(c, **kw)) and a tuple
+target (env, x = {"BASH_ENV": p}, 1); a patch.dict target given as any other string; a patch.dict
+target or mapping, a setenv name or a setdefault or __setitem__ key passed through a ** mapping
+(patch.dict(**{"in_dict": os.environ, "values": m}), setenv(**{"name": "BASH_ENV", ...}),
+os.environ.setdefault(**{"key": "BASH_ENV", ...})); a setenv key, a patch.dict target or mapping,
+or any other key or target given positionally at or after a starred argument, whose position is
+unknown (setenv(*("BASH_ENV", p)), patch.dict(*[os.environ], values=m),
+patch.dict(os.environ, *[m])), while the keywords of such a call are still read; an unbound setenv
+through a class not named MonkeyPatch (an alias or a subclass), whose first argument is then read
+as the key; an unbound setdefault, __setitem__, update or __ior__ through a class whose last name
+contains env (os._Environ.setdefault(os.environ, KEY, v), os._Environ.__ior__(os.environ, {...})),
+whose first argument is then read as the key or the mapping, while its key=, other= and update's
+other keywords are still read; a key given as a := expression on any key route
+(monkeypatch.setenv((k := "BASH_ENV"), p), env[(k := "BASH_ENV")] = p, {(k := "BASH_ENV"): p}),
+where the route reads a position that holds no constant; an env= mapping given through a **
+mapping other than a dict display (run(c, **dict({"env": {...}}))); an environment inherited from
+the caller (a launch without env=, tsthrm.17); shell sources; and shell text a source launches (an
+export -f, a declare -fx, or a function or alias named after an executable). Those last two are
+planned as later parts of this lint. A name that contains "env" but holds no environment
+(environment_defaults) is still treated as a target.
+"""
+import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    import os
+    try:
+        sys.stderr.write(
+            "error: check_shell_function_standins.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+            "Nothing was run (cannot evaluate).\n"
+            % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
+
+import argparse
+import ast
+import io
+import os
+import stat
+import tempfile
+import tokenize
+from pathlib import Path
+
+SCAN_ROOTS = ("tools", "opf/tools", ".aiqt/core/hooks/scripts")
+EXCLUDED_DIRS = frozenset({"opf/tools/_vendor"})
+
+KIND_RULES = {
+    "env-func": ("tsthrm",),
+    "env-startup": ("tsthrm",),
+}
+ROUTES = ("dict-key", "dict-comp-key", "keyword", "pair", "fromkeys", "first-argument",
+          "second-argument", "subscript-store")
+
+FUNC_PREFIX = "BASH_FUNC_"
+FUNC_SUFFIX = "%%"
+STARTUP_KEYS = frozenset({"BASH_ENV", "ENV"})
+KEY_METHODS = frozenset({"setdefault", "__setitem__"})
+# The keyword that names the key in every setdefault and __setitem__ signature that accepts
+# keywords: os._Environ.setdefault(self, key, value), os._Environ.__setitem__(self, key, value),
+# MutableMapping.setdefault(self, key, default=None) and MutableMapping.__setitem__(self, key,
+# value). Their value= and default= are values and never read. dict.setdefault and
+# dict.__setitem__ take positional arguments only, so a key= on an unbound call through dict is
+# never read.
+KEY_METHOD_KEYWORD = "key"
+POSITIONAL_ONLY_CLASS = "dict"
+# The target's methods that merge a mapping into it: update, and __ior__, the method that |= calls
+# (os._Environ.__ior__(self, other) passes other to update, so literal pairs are accepted too).
+# __ior__ takes its mapping as other= and no other keyword, so its other keywords are never read.
+UPDATE_METHOD = "update"
+IOR_METHOD = "__ior__"
+IOR_KEYWORD = "other"
+# The keyword argument whose value is the environment of a launch call (subprocess.run(c,
+# env=...)); also read as the literal key of a ** mapping given to the call.
+ENV_KEYWORD = "env"
+# Calls whose first argument is a key set in the process environment (os.putenv,
+# monkeypatch.setenv(name, value)). Of these only setenv also takes the key as a keyword, name=;
+# os.putenv takes positional arguments only, so a name= given to it is never read. The target's
+# setdefault and __setitem__ take theirs as key= (KEY_METHOD_KEYWORD above).
+KEY_SETTERS = frozenset({"putenv", "setenv"})
+NAMED_KEY_SETTER = "setenv"
+KEY_SETTER_KEYWORD = "name"
+# The receiver name of a setenv whose first and second arguments are both read as keys: the
+# class, whose unbound setenv(instance, name, value) takes the key second, and an instance held
+# under the same name (self.MonkeyPatch.setenv(name, value)), which takes it first.
+UNBOUND_SETENV_CLASS = "MonkeyPatch"
+# The import-path strings mock.patch.dict accepts for the process environment.
+ENVIRON_PATHS = frozenset({"os.environ", "os.environb"})
+# mock.patch.dict(in_dict, values=(), clear=False, **kwargs): its own parameters, which are never
+# read as environment keys, given as keywords or as literal keys of a ** mapping; only the
+# remaining keywords are keys set in the target.
+PATCH_DICT_TARGET = "in_dict"
+PATCH_DICT_VALUES = "values"
+PATCH_DICT_PARAMS = frozenset({PATCH_DICT_TARGET, PATCH_DICT_VALUES, "clear"})
+
+# The reviewed allowlist: (path, enclosing qualname, kind, exact count, reason). Every entry names
+# a current site and why it is accepted for now; a count that no longer matches the scan is a
+# finding, so a new site in a reviewed function still needs its own review.
+_CI_PARITY = ("removed by the CI parity executable-stub change; delete this entry when it merges")
+ALLOWLIST = (
+    ("tools/check_ci_parity.py", "_run_runner_copy", "env-startup", 1, _CI_PARITY),
+    ("tools/check_ci_parity.py", "_dirname_guard_outcome", "env-startup", 1, _CI_PARITY),
+    ("tools/check_ci_parity.py", "_cdpath_outcome", "env-startup", 1, _CI_PARITY),
+)
+
+
+class CannotEvaluate(Exception):
+    """The scan cannot reach a verdict for the tree."""
+
+
+def key_kind(text):
+    """The finding kind for a constant key text, or None."""
+    if text.startswith(FUNC_PREFIX) or text.endswith(FUNC_SUFFIX):
+        return "env-func"
+    if text in STARTUP_KEYS:
+        return "env-startup"
+    return None
+
+
+def _constant_text(node):
+    """The text of a str or bytes constant (bytes read as latin-1, so b"BASH_ENV" matches), or
+    None."""
+    if isinstance(node, ast.Constant):
+        if isinstance(node.value, str):
+            return node.value
+        if isinstance(node.value, bytes):
+            return node.value.decode("latin-1")
+    return None
+
+
+def _env_named(node):
+    """Whether node is a name or attribute whose last component contains env in any case
+    (os.environ, os.environb, env, child_env, self.env)."""
+    if isinstance(node, ast.Name):
+        return "env" in node.id.lower()
+    if isinstance(node, ast.Attribute):
+        return "env" in node.attr.lower()
+    return False
+
+
+def _patched_environment(node):
+    """Whether node, the target of a patch.dict call (its in_dict= keyword or else its first
+    positional argument), names an environment: a target (os.environ, os.environb, a name
+    containing env) or the string "os.environ" or "os.environb"."""
+    return _env_named(node) or _constant_text(node) in ENVIRON_PATHS
+
+
+def _keyword_value(keywords, name):
+    """The value of the keyword argument called name, or None."""
+    for keyword in keywords:
+        if keyword.arg == name:
+            return keyword.value
+    return None
+
+
+def _known_args(args):
+    """The positional arguments before the first starred one, the only ones whose position is
+    known (in f(*a, KEY) the position of KEY depends on the length of a)."""
+    known = []
+    for arg in args:
+        if isinstance(arg, ast.Starred):
+            break
+        known.append(arg)
+    return known
+
+
+def _env_keyword_values(keywords):
+    """Yield the value of each env= keyword argument, also of each literal "env" key of a dict
+    display given as a ** mapping (run(c, **{"env": {...}}) passes env= as a keyword), including a
+    ** entry inside that display and both branches of a conditional, every value of an or/and and
+    the value of a := given as the ** mapping. Iterative, like _mapping_keys."""
+    todo = []
+    for keyword in keywords:
+        if keyword.arg == ENV_KEYWORD:
+            yield keyword.value
+        elif keyword.arg is None:
+            todo.append(keyword.value)
+    while todo:
+        node = todo.pop()
+        if isinstance(node, ast.IfExp):
+            todo.append(node.body)
+            todo.append(node.orelse)
+        elif isinstance(node, ast.BoolOp):
+            todo.extend(node.values)
+        elif isinstance(node, ast.NamedExpr):
+            todo.append(node.value)
+        elif isinstance(node, ast.Dict):
+            for key, value in zip(node.keys, node.values):
+                if key is None:
+                    todo.append(value)
+                elif (isinstance(key, ast.Constant) and isinstance(key.value, str)
+                      and key.value == ENV_KEYWORD):
+                    yield value
+
+
+def _call_name(func):
+    if isinstance(func, ast.Attribute):
+        return func.attr
+    if isinstance(func, ast.Name):
+        return func.id
+    return None
+
+
+def _mapping_keys(expr, pairs):
+    """Yield (node, text, route) for each key the mapping expression expr stores. pairs admits a
+    literal list or tuple of literal (KEY, v) pairs at the top. Both branches of a conditional
+    expression, every value of an or/and and the value of a := stand for the mapping itself.
+    Iterative, so a long union chain does not recurse."""
+    todo = [(expr, pairs)]
+    while todo:
+        node, pairs_ok = todo.pop()
+        if isinstance(node, ast.IfExp):
+            todo.append((node.body, pairs_ok))
+            todo.append((node.orelse, pairs_ok))
+        elif isinstance(node, ast.BoolOp):
+            todo.extend((value, pairs_ok) for value in node.values)
+        elif isinstance(node, ast.NamedExpr):
+            todo.append((node.value, pairs_ok))
+        elif isinstance(node, ast.Dict):
+            for key, value in zip(node.keys, node.values):
+                if key is None:
+                    todo.append((value, False))
+                else:
+                    yield key, _constant_text(key), "dict-key"
+        elif isinstance(node, ast.DictComp):
+            yield node.key, _constant_text(node.key), "dict-comp-key"
+        elif isinstance(node, ast.BinOp) and isinstance(node.op, ast.BitOr):
+            todo.append((node.left, False))
+            todo.append((node.right, False))
+        elif isinstance(node, (ast.List, ast.Tuple)) and pairs_ok:
+            for item in node.elts:
+                if isinstance(item, (ast.Tuple, ast.List)) and len(item.elts) == 2:
+                    yield item.elts[0], _constant_text(item.elts[0]), "pair"
+        elif isinstance(node, ast.Call):
+            name = _call_name(node.func)
+            if name == "dict" and isinstance(node.func, ast.Name):
+                if node.args:
+                    todo.append((node.args[0], True))
+                for keyword in node.keywords:
+                    if keyword.arg is None:
+                        todo.append((keyword.value, False))
+                    else:
+                        yield keyword, keyword.arg, "keyword"
+            elif name == "ChainMap":
+                todo.extend((arg, False) for arg in node.args)
+            elif (name == "fromkeys" and isinstance(node.func, ast.Attribute) and node.args
+                  and isinstance(node.args[0], (ast.List, ast.Tuple, ast.Set))):
+                for item in node.args[0].elts:
+                    yield item, _constant_text(item), "fromkeys"
+
+
+_SCOPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+
+
+class _Scanner:
+    def __init__(self, disabled):
+        self.disabled = disabled
+        self.qualname = "<module>"
+        self.findings = []
+
+    def _record(self, node, text, route):
+        if text is None or route in self.disabled:
+            return
+        kind = key_kind(text)
+        if kind is not None:
+            self.findings.append((node.lineno, node.col_offset, self.qualname, kind, route, text))
+
+    def _mapping(self, expr, pairs):
+        for key, text, route in _mapping_keys(expr, pairs):
+            self._record(key, text, route)
+
+    def _keywords(self, keywords, params=frozenset()):
+        """Record each keyword argument as a key, also each literal key of a ** mapping, except
+        the call's own parameters in params."""
+        for keyword in keywords:
+            if keyword.arg is None:
+                for key, text, route in _mapping_keys(keyword.value, False):
+                    if text not in params:
+                        self._record(key, text, route)
+            elif keyword.arg not in params:
+                self._record(keyword, keyword.arg, "keyword")
+
+    def scan(self, tree):
+        """Walk tree with an explicit stack, never recursing, so a long chain of binary operators
+        cannot exhaust the interpreter's recursion limit."""
+        todo = [(tree, ())]
+        while todo:
+            node, scope = todo.pop()
+            self.qualname = ".".join(scope) or "<module>"
+            self._visit(node)
+            if isinstance(node, _SCOPES):
+                scope = scope + (node.name,)
+            todo.extend((child, scope) for child in ast.iter_child_nodes(node))
+
+    def _visit(self, node):
+        if isinstance(node, ast.Subscript):
+            if isinstance(node.ctx, ast.Store) and _env_named(node.value):
+                self._record(node.slice, _constant_text(node.slice), "subscript-store")
+        elif isinstance(node, ast.Assign):
+            if any(_env_named(target) for target in node.targets):
+                self._mapping(node.value, False)
+        elif isinstance(node, (ast.AnnAssign, ast.NamedExpr)):
+            if node.value is not None and _env_named(node.target):
+                self._mapping(node.value, False)
+        elif isinstance(node, ast.AugAssign):
+            if isinstance(node.op, ast.BitOr) and _env_named(node.target):
+                self._mapping(node.value, True)
+        elif isinstance(node, ast.Call):
+            self._call(node)
+
+    def _call(self, node):
+        for value in _env_keyword_values(node.keywords):
+            self._mapping(value, False)
+        func = node.func
+        name = _call_name(func)
+        known = _known_args(node.args)
+        if name in KEY_SETTERS:
+            # setenv's name= is read whenever it is given: a bound setenv cannot also take a
+            # positional key, and in an unbound call the first argument is the instance.
+            key = None
+            if name == NAMED_KEY_SETTER:
+                key = _keyword_value(node.keywords, KEY_SETTER_KEYWORD)
+            if key is not None:
+                self._record(key, _constant_text(key), "first-argument")
+                return
+            # A MonkeyPatch receiver may be the class (the key is second) or an instance held
+            # under that name (the key is first); a static reading cannot tell them apart, so
+            # both positions are read, which fails closed.
+            routes = ["first-argument"]
+            if (name == NAMED_KEY_SETTER and isinstance(func, ast.Attribute)
+                    and _call_name(func.value) == UNBOUND_SETENV_CLASS):
+                routes.append("second-argument")
+            for arg, route in zip(known, routes):
+                self._record(arg, _constant_text(arg), route)
+            return
+        if name == "dict" and isinstance(func, ast.Attribute):
+            # mock.patch.dict(os.environ, {...}, KEY=v) sets the keys like update, in call,
+            # with and decorator form (a decorator is a Call node the walk reaches). The target
+            # may be given as in_dict= and the mapping as values=; each is read whenever given,
+            # since then no positional argument can fill that parameter.
+            target = _keyword_value(node.keywords, PATCH_DICT_TARGET)
+            mapping = None
+            if target is None and known:
+                target = known[0]
+                if len(known) > 1:
+                    mapping = known[1]
+            if target is not None and _patched_environment(target):
+                if mapping is not None:
+                    self._mapping(mapping, True)
+                values = _keyword_value(node.keywords, PATCH_DICT_VALUES)
+                if values is not None:
+                    self._mapping(values, True)
+                self._keywords(node.keywords, PATCH_DICT_PARAMS)
+            return
+        if not isinstance(func, ast.Attribute) or (
+                name not in (UPDATE_METHOD, IOR_METHOD) and name not in KEY_METHODS):
+            return
+        if _env_named(func.value):
+            args, route = node.args, "first-argument"
+        elif node.args and _env_named(node.args[0]):
+            args, route = node.args[1:], "second-argument"
+        else:
+            return
+        if name == UPDATE_METHOD:
+            if args:
+                self._mapping(args[0], True)
+            self._keywords(node.keywords)
+            return
+        if name == IOR_METHOD:
+            # other= is read whenever given, since then no positional argument can also be the
+            # mapping; dict.__ior__ refuses keywords, but reading other= there fails closed.
+            other = _keyword_value(node.keywords, IOR_KEYWORD)
+            if other is None and args:
+                other = args[0]
+            if other is not None:
+                self._mapping(other, True)
+            return
+        # key= is read whenever given, since then no positional argument can also be the key. A
+        # bound receiver may be a dict, which refuses keywords, but a static reading cannot tell
+        # it from os.environ, so key= is read there too, which fails closed.
+        key = None
+        if route == "first-argument" or _call_name(func.value) != POSITIONAL_ONLY_CLASS:
+            key = _keyword_value(node.keywords, KEY_METHOD_KEYWORD)
+        if key is not None:
+            self._record(key, _constant_text(key), "first-argument")
+        elif args:
+            self._record(args[0], _constant_text(args[0]), route)
+
+
+def scan_source(source, filename="<source>", disabled=()):
+    """Return the sorted findings (line, column, qualname, kind, route, key) for one source text;
+    SyntaxError, ValueError, RecursionError and MemoryError propagate."""
+    tree = ast.parse(source, filename=filename)
+    scanner = _Scanner(frozenset(disabled))
+    scanner.scan(tree)
+    return sorted(set(scanner.findings))
+
+
+def _read_bytes(path):
+    return Path(path).read_bytes()
+
+
+def _decode(data, rel):
+    """The source bytes exactly as Python compiles them; a declared encoding other than utf-8
+    is cannot-evaluate, and UnicodeDecodeError propagates as unreadable."""
+    try:
+        encoding, _lines = tokenize.detect_encoding(io.BytesIO(data).readline)
+    except SyntaxError as exc:
+        raise CannotEvaluate("cannot detect the source encoding of " + rel + ": " + str(exc))
+    if encoding not in ("utf-8", "utf-8-sig"):
+        raise CannotEvaluate(rel + " declares source encoding " + encoding
+                             + "; only utf-8 is evaluated")
+    data.decode(encoding)
+    return data
+
+
+def _python_files(root):
+    def rel(path):
+        return Path(path).relative_to(root).as_posix()
+
+    def linked(path):
+        try:
+            mode = os.lstat(path).st_mode
+        except OSError as exc:
+            raise CannotEvaluate("cannot stat " + rel(path) + ": " + str(exc))
+        if stat.S_ISLNK(mode):
+            raise CannotEvaluate("symlink inside a scanned root: " + rel(path))
+        return False
+
+    def walk_error(exc):
+        raise CannotEvaluate("cannot list a directory inside a scanned root: " + str(exc))
+
+    files = []
+    for sub in SCAN_ROOTS:
+        base = root / sub
+        try:
+            mode = os.lstat(base).st_mode
+        except OSError as exc:
+            raise CannotEvaluate("scan root missing: " + sub + ": " + str(exc))
+        if not stat.S_ISDIR(mode):
+            raise CannotEvaluate("scan root is not a directory: " + sub)
+        for current, dirnames, filenames in os.walk(base, onerror=walk_error, followlinks=False):
+            rel_dir = rel(current)
+            dirnames[:] = [d for d in sorted(dirnames) if (rel_dir + "/" + d) not in EXCLUDED_DIRS
+                           and not linked(Path(current) / d)]
+            for name in sorted(filenames):
+                if not linked(Path(current) / name) and name.endswith(".py"):
+                    files.append(Path(current) / name)
+    return files
+
+
+def _check_allowlist(allowlist):
+    if not isinstance(allowlist, tuple):
+        raise CannotEvaluate("the allowlist is not a tuple: " + type(allowlist).__name__)
+    for entry in allowlist:
+        if not (isinstance(entry, tuple) and len(entry) == 5
+                and all(isinstance(entry[i], str) and entry[i].strip() for i in (0, 1, 2, 4))
+                and entry[2] in KIND_RULES and type(entry[3]) is int and entry[3] >= 1):
+            raise CannotEvaluate("malformed allowlist entry: " + repr(entry))
+    keys = [entry[:3] for entry in allowlist]
+    if len(set(keys)) != len(keys):
+        raise CannotEvaluate("duplicate allowlist key")
+
+
+def scan_tree(root, allowlist=ALLOWLIST, reader=_read_bytes):
+    """Return the finding lines for the tree under root; raise CannotEvaluate when it cannot."""
+    root = Path(root)
+    _check_allowlist(allowlist)
+    hits = []
+    try:
+        paths = _python_files(root)
+    except OSError as exc:
+        raise CannotEvaluate("cannot walk the scan roots: " + str(exc))
+    for path in paths:
+        rel = path.relative_to(root).as_posix()
+        try:
+            regular = stat.S_ISREG(os.lstat(path).st_mode)
+        except OSError:
+            regular = False
+        if not regular:
+            raise CannotEvaluate("not a readable regular file: " + rel)
+        try:
+            source = _decode(reader(path), rel)
+        except (OSError, UnicodeDecodeError) as exc:
+            raise CannotEvaluate("cannot read " + rel + ": " + str(exc))
+        try:
+            found = scan_source(source, rel)
+        except (SyntaxError, ValueError, RecursionError, MemoryError) as exc:
+            raise CannotEvaluate("cannot parse " + rel + ": " + type(exc).__name__ + " " + str(exc))
+        hits.extend((rel,) + item for item in found)
+    counts = {}
+    for rel, _line, _column, qual, kind, _route, _key in hits:
+        counts[(rel, qual, kind)] = counts.get((rel, qual, kind), 0) + 1
+    allowed = {entry[:3]: entry[3] for entry in allowlist}
+    findings = []
+    for rel, line, _column, qual, kind, route, key in hits:
+        if allowed.get((rel, qual, kind)) == counts[(rel, qual, kind)]:
+            continue
+        findings.append("{}:{}: [{} {}] {}: key {!r} stored ({})".format(
+            rel, line, kind, "/".join(KIND_RULES[kind]), qual, key, route))
+    for key, expected in sorted(allowed.items()):
+        if counts.get(key, 0) != expected:
+            findings.append("allowlist entry {} {} {} expects {} site(s), scan found {}"
+                            .format(key[0], key[1], key[2], expected, counts.get(key, 0)))
+    return findings
+
+
+def run(root):
+    try:
+        findings = scan_tree(root)
+    except CannotEvaluate as exc:
+        print("ERROR: shell-function-standins cannot evaluate: {}".format(exc), file=sys.stderr)
+        return 2
+    if findings:
+        for line in findings:
+            print("VIOLATION: shell-function-standins: " + line, file=sys.stderr)
+        return 1
+    print("PASS: shell-function-standins: no unreviewed constant BASH_FUNC_, %%-suffixed, BASH_ENV"
+          " or ENV key stored into a mapping that reaches an environment in the scanned roots;"
+          " see residuals.")
+    return 0
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(
+        description="Shell-function stand-in lint (environment keys) over this repo's Python.")
+    parser.add_argument("--root", type=Path)
+    parser.add_argument("--self-test", action="store_true")
+    try:
+        args = parser.parse_args(argv)
+    except SystemExit as exc:
+        return int(exc.code)
+    if args.self_test:
+        if args.root is not None:
+            parser.print_usage(sys.stderr)
+            return 2
+        return self_test()
+    root = args.root if args.root is not None else Path(__file__).resolve().parent.parent
+    return run(root)
+
+
+# Self-test rows, numbered as in the plan's table: (row, source, expected kind, flip source). The
+# row must report its kind and the flip must be clean.
+ROWS = (
+    ("1 env/bash-func-key", 'env = {"BASH_FUNC_python3%%": "() { :; }"}\n', "env-func",
+     'import os\nenv = {k: v for k, v in os.environ.items() if not k.startswith("BASH_FUNC_")}\n'),
+    ("2 env/subscript-store", 'env = {}\nenv["BASH_FUNC_git%%"] = "() { :; }"\n', "env-func",
+     'env = {}\nenv.pop("BASH_FUNC_git%%", None)\n'),
+    ("3 env/percent-suffix", 'env = {"python3%%": "x"}\n', "env-func",
+     'env = {"python3%": "x"}\n'),
+    ("4 env/bash-env", 'env = dict(BASH_ENV=f)\n', "env-startup",
+     'env = dict(HOME=t)\n'),
+)
+
+# Each positive vector is reported by its route alone: with that route disabled it is clean.
+POSITIVE_VECTORS = (
+    ('env = {"BASH_FUNC_": f}\n', "env-func", "dict-key"),
+    ('env = {"BASH_FUNC_ls": f}\n', "env-func", "dict-key"),
+    ('env = {"x%%%": f}\n', "env-func", "dict-key"),
+    ('env = {"x%%": f}\n', "env-func", "dict-key"),
+    ('env = {"ENV": f}\n', "env-startup", "dict-key"),
+    ('env = {"BASH_ENV": p for p in ps}\n', "env-startup", "dict-comp-key"),
+    ('env.update(BASH_ENV=f)\n', "env-startup", "keyword"),
+    ('run(cmd, env=dict(ENV=f))\n', "env-startup", "keyword"),
+    ('env.setdefault("BASH_ENV", f)\n', "env-startup", "first-argument"),
+    ('import os\nos.putenv("BASH_FUNC_ls%%", f)\n', "env-func", "first-argument"),
+    ('import os\nos.environ.__setitem__("ENV", f)\n', "env-startup", "first-argument"),
+    ('env["ENV"] = f\n', "env-startup", "subscript-store"),
+    ('import os\nos.environ["BASH_ENV"] = f\n', "env-startup", "subscript-store"),
+    ('env["BASH_FUNC_x%%"] += f\n', "env-func", "subscript-store"),
+    ('env["BASH_ENV"]: str = f\n', "env-startup", "subscript-store"),
+    ('env["ENV"], x = f, 1\n', "env-startup", "subscript-store"),
+    ('for env["BASH_ENV"] in paths:\n    pass\n', "env-startup", "subscript-store"),
+    # bytes keys
+    ('import os\nos.environb[b"BASH_ENV"] = b"/x"\n', "env-startup", "subscript-store"),
+    ('env = {b"BASH_FUNC_ls%%": b"() { :; }"}\n', "env-func", "dict-key"),
+    ('import os\nos.putenv(b"BASH_ENV", b"/x")\n', "env-startup", "first-argument"),
+    ('import os\nos.environb.update({b"BASH_FUNC_x%%": f})\n', "env-func", "dict-key"),
+    # unbound methods, fromkeys and literal pairs
+    ('dict.__setitem__(env, "BASH_ENV", p)\n', "env-startup", "second-argument"),
+    ('import os\ndict.setdefault(os.environ, "ENV", p)\n', "env-startup", "second-argument"),
+    ('import collections.abc, os\ncollections.abc.MutableMapping.update(os.environ, BASH_ENV=p)\n',
+     "env-startup", "keyword"),
+    ('dict.update(env, [("BASH_FUNC_ls%%", f)])\n', "env-func", "pair"),
+    ('env = dict.fromkeys(["BASH_ENV"], p)\n', "env-startup", "fromkeys"),
+    ('import os\nos.environ.update([("BASH_ENV", p)])\n', "env-startup", "pair"),
+    ('env.update((("ENV", p),))\n', "env-startup", "pair"),
+    ('env = dict([("BASH_ENV", p)])\n', "env-startup", "pair"),
+    ('env |= [("BASH_FUNC_ls%%", f)]\n', "env-func", "pair"),
+    # the contexts that reach an environment
+    ('import os, subprocess\nsubprocess.run(c, env={**os.environ, "BASH_ENV": p})\n',
+     "env-startup", "dict-key"),
+    ('import os\nrun(c, env=dict(os.environ, **{"ENV": p}))\n', "env-startup", "dict-key"),
+    ('import os\nrun(c, env=os.environ | {"BASH_ENV": p})\n', "env-startup", "dict-key"),
+    ('import os\nfrom collections import ChainMap\nrun(c, env=ChainMap({"ENV": p}, os.environ))\n',
+     "env-startup", "dict-key"),
+    ('import os\nos.environ |= {"BASH_ENV": p}\n', "env-startup", "dict-key"),
+    ('self.child_env = {"BASH_FUNC_ls%%": f}\n', "env-func", "dict-key"),
+    ('childEnv: dict = {"ENV": p}\n', "env-startup", "dict-key"),
+    ('if (env := {"BASH_ENV": p}):\n    pass\n', "env-startup", "dict-key"),
+    # a conditional, an or/and and a := given as the mapping
+    ('import os, subprocess\n'
+     'subprocess.run(c, env={**os.environ, "BASH_ENV": p} if p else None)\n',
+     "env-startup", "dict-key"),
+    ('import os\nenv = {**os.environ, "BASH_ENV": p} if p else None\n', "env-startup", "dict-key"),
+    ('import os\nenv = None if p is None else {**os.environ, "ENV": p}\n', "env-startup",
+     "dict-key"),
+    ('import os\nrun(c, env={**os.environ, **({"BASH_ENV": p} if p else {})})\n', "env-startup",
+     "dict-key"),
+    ('import os\nrun(c, env=os.environ | ({"ENV": p} if p else {}))\n', "env-startup", "dict-key"),
+    ('env.update({"BASH_ENV": p} if p else {})\n', "env-startup", "dict-key"),
+    ('env.update([("BASH_FUNC_ls%%", f)] if f else [])\n', "env-func", "pair"),
+    ('run(c, env=extra or {"BASH_ENV": p})\n', "env-startup", "dict-key"),
+    ('env = base and {"ENV": p}\n', "env-startup", "dict-key"),
+    ('run(c, env=(e := {"BASH_ENV": p}))\n', "env-startup", "dict-key"),
+    ('env.update((extra := {"BASH_FUNC_ls%%": f}))\n', "env-func", "dict-key"),
+    # patch.dict on the environment, called, as a context manager and as a decorator
+    ('import os\nfrom unittest import mock\nwith mock.patch.dict(os.environ, BASH_ENV=p):\n'
+     '    pass\n', "env-startup", "keyword"),
+    ('import os\nfrom unittest import mock\nmock.patch.dict(os.environ, {"BASH_FUNC_ls%%": f})'
+     '.start()\n', "env-func", "dict-key"),
+    ('import os\nfrom unittest.mock import patch\npatch.dict(os.environb, {b"ENV": p}).start()\n',
+     "env-startup", "dict-key"),
+    ('from unittest import mock\n@mock.patch.dict("os.environ", {"BASH_ENV": p})\n'
+     'def test():\n    pass\n', "env-startup", "dict-key"),
+    ('from unittest import mock\n@mock.patch.dict("os.environ", ENV=p)\ndef test():\n    pass\n',
+     "env-startup", "keyword"),
+    ('import os\nfrom unittest import mock\n'
+     'mock.patch.dict(os.environ, [("BASH_ENV", p)]).start()\n', "env-startup", "pair"),
+    ('import os\nfrom unittest import mock\n'
+     'mock.patch.dict(os.environ, {"BASH_ENV": p} if p else {}, clear=True).start()\n',
+     "env-startup", "dict-key"),
+    # setenv like os.putenv
+    ('def test(monkeypatch):\n    monkeypatch.setenv("BASH_ENV", p)\n', "env-startup",
+     "first-argument"),
+    ('def test(monkeypatch):\n    monkeypatch.setenv("BASH_FUNC_ls%%", f)\n', "env-func",
+     "first-argument"),
+    # patch.dict's target given as in_dict= and its mapping as values=, and setenv's name=
+    ('import os\nfrom unittest import mock\n'
+     'mock.patch.dict(os.environ, values={"BASH_ENV": p}).start()\n', "env-startup", "dict-key"),
+    ('import os\nfrom unittest import mock\n'
+     'mock.patch.dict(os.environ, values=[("BASH_FUNC_ls%%", f)]).start()\n', "env-func", "pair"),
+    ('import os\nfrom unittest import mock\n'
+     'mock.patch.dict(in_dict=os.environ, BASH_ENV=p).start()\n', "env-startup", "keyword"),
+    ('from unittest import mock\n@mock.patch.dict("os.environ", values={"BASH_ENV": p})\n'
+     'def test():\n    pass\n', "env-startup", "dict-key"),
+    ('import os\nfrom unittest import mock\n'
+     'with mock.patch.dict(in_dict=os.environb, values={b"ENV": p}, clear=True):\n    pass\n',
+     "env-startup", "dict-key"),
+    ('def test(monkeypatch):\n    monkeypatch.setenv(name="BASH_ENV", value=p)\n', "env-startup",
+     "first-argument"),
+    ('def test(monkeypatch):\n    monkeypatch.setenv(value=p, name="BASH_FUNC_ls%%")\n',
+     "env-func", "first-argument"),
+    # an unbound MonkeyPatch.setenv, and keywords read beside an empty starred argument
+    ('import pytest\npytest.MonkeyPatch.setenv(mp, name="BASH_ENV", value=p)\n', "env-startup",
+     "first-argument"),
+    ('from pytest import MonkeyPatch\nMonkeyPatch.setenv(mp, value=f, name="BASH_FUNC_ls%%")\n',
+     "env-func", "first-argument"),
+    ('from pytest import MonkeyPatch\nMonkeyPatch.setenv(mp, "BASH_ENV", p)\n', "env-startup",
+     "second-argument"),
+    ('import pytest\npytest.MonkeyPatch.setenv(mp, "BASH_FUNC_ls%%", f)\n', "env-func",
+     "second-argument"),
+    ('def test(monkeypatch):\n    monkeypatch.setenv(*[], name="BASH_ENV", value=p)\n',
+     "env-startup", "first-argument"),
+    ('import os\nfrom unittest import mock\n'
+     'mock.patch.dict(*[], in_dict=os.environ, values={"BASH_ENV": p}).start()\n',
+     "env-startup", "dict-key"),
+    ('import os\nfrom unittest import mock\n'
+     'mock.patch.dict(*[], in_dict=os.environ, values=[("BASH_FUNC_ls%%", f)]).start()\n',
+     "env-func", "pair"),
+    ('import os\nfrom unittest import mock\n'
+     'mock.patch.dict(*[], in_dict=os.environ, ENV=p).start()\n', "env-startup", "keyword"),
+    ('import os\nfrom unittest import mock\n'
+     'mock.patch.dict(os.environ, *[], values={"BASH_ENV": p}).start()\n', "env-startup",
+     "dict-key"),
+    # a MonkeyPatch receiver: a bound instance held under that name (the key is first) and the
+    # unbound class (the key is second); both positions are read
+    ('class T:\n    def go(self, p):\n        self.MonkeyPatch.setenv("BASH_ENV", p)\n',
+     "env-startup", "first-argument"),
+    ('import pytest\nMonkeyPatch = pytest.MonkeyPatch()\n'
+     'MonkeyPatch.setenv("BASH_FUNC_ls%%", f)\n', "env-func", "first-argument"),
+    ('import _pytest.monkeypatch\n_pytest.monkeypatch.MonkeyPatch.setenv(mp, "ENV", p)\n',
+     "env-startup", "second-argument"),
+    # patch.dict's own parameters as literal keys of a ** mapping are skipped, its other keys
+    # are read
+    ('import os\nfrom unittest import mock\nmock.patch.dict(os.environ, **{"clear": True,'
+     ' "values": {"HOME": t}, "BASH_ENV": p}).start()\n', "env-startup", "dict-key"),
+    # the key of the target's setdefault or __setitem__ given as key=, bound, beside an empty
+    # starred argument, or unbound through a class other than dict
+    ('import os\nos.environ.setdefault(key="BASH_ENV", value=p)\n', "env-startup",
+     "first-argument"),
+    ('import os\nos.environ.setdefault(value=f, key="BASH_FUNC_ls%%")\n', "env-func",
+     "first-argument"),
+    ('import os\nos.environ.__setitem__(key="BASH_ENV", value=p)\n', "env-startup",
+     "first-argument"),
+    ('env.__setitem__(value=p, key=b"ENV")\n', "env-startup", "first-argument"),
+    ('import os\nos.environ.setdefault(*[], key="BASH_ENV", value=p)\n', "env-startup",
+     "first-argument"),
+    ('import collections.abc, os\n'
+     'collections.abc.MutableMapping.setdefault(os.environ, key="ENV", default=p)\n',
+     "env-startup", "first-argument"),
+    ('from collections.abc import MutableMapping\n'
+     'MutableMapping.setdefault(env, default=f, key="BASH_FUNC_ls%%")\n', "env-func",
+     "first-argument"),
+    ('import os\nos._Environ.__setitem__(os.environ, key="BASH_ENV", value=p)\n', "env-startup",
+     "first-argument"),
+    # every argument of ChainMap is read, also one after a starred argument
+    ('import os\nfrom collections import ChainMap\n'
+     'run(c, env=ChainMap(*maps, {"BASH_ENV": p}))\n', "env-startup", "dict-key"),
+    # env= given as the literal "env" key of a ** mapping, also inside a nested ** entry and in a
+    # branch of a conditional, a value of an or/and and the value of a := given as the ** mapping
+    ('import subprocess\nsubprocess.run(c, **{"env": {"BASH_ENV": p}})\n', "env-startup",
+     "dict-key"),
+    ('import os, subprocess\n'
+     'subprocess.Popen(c, **{"env": {**os.environ, "BASH_FUNC_ls%%": f}})\n', "env-func",
+     "dict-key"),
+    ('run(c, **{"check": True, **{"env": dict(ENV=p)}})\n', "env-startup", "keyword"),
+    ('run(c, **({"env": {"BASH_ENV": p}} if p else {}))\n', "env-startup", "dict-key"),
+    ('run(c, **(extra or {"env": {"BASH_FUNC_ls%%": f}}))\n', "env-func", "dict-key"),
+    ('run(c, **(kw := {"env": {"ENV": p}}))\n', "env-startup", "dict-key"),
+    # the target's __ior__, bound or unbound with the target first, other= whenever given
+    ('import os\nos.environ.__ior__({"BASH_ENV": p})\n', "env-startup", "dict-key"),
+    ('import os\nos.environ.__ior__(other={"BASH_ENV": p})\n', "env-startup", "dict-key"),
+    ('import os\nos.environ.__ior__([("BASH_FUNC_ls%%", f)])\n', "env-func", "pair"),
+    ('import os\nos._Environ.__ior__(os.environ, other={"ENV": p})\n', "env-startup", "dict-key"),
+    ('import os\nos._Environ.__ior__(os.environ, other=[("BASH_ENV", p)])\n', "env-startup",
+     "pair"),
+    ('dict.__ior__(env, {"BASH_FUNC_ls%%": f})\n', "env-func", "dict-key"),
+    ('env.__ior__(other=dict(BASH_ENV=p))\n', "env-startup", "keyword"),
+)
+
+# Clean sources, each with a flip that is reported: mappings that never reach an environment
+# (the flip reaches one), and bytes and literal-shape boundaries.
+GATED_VECTORS = (
+    ('env = {b"BASH_ENVX": f}\n', 'env = {b"BASH_ENV": f}\n'),
+    ('import os\ndel os.environb[b"BASH_ENV"]\n', 'import os\nos.environb[b"BASH_ENV"] = f\n'),
+    ('import os\nrun(c, env=os.environ.copy())\n',
+     'import os\nrun(c, env=os.environ.copy() | {"ENV": f})\n'),
+    ('env = {"A": {"BASH_ENV": p}}\n', 'env = {"A": 1, **{"BASH_ENV": p}}\n'),
+    ('env = [("BASH_ENV", p)]\n', 'env = dict([("BASH_ENV", p)])\n'),
+    ('dict.update(counts, BASH_ENV=p)\n', 'dict.update(env, BASH_ENV=p)\n'),
+    ('blocked = {"BASH_ENV": "startup file"}\nfor k in blocked:\n    env.pop(k, None)\n',
+     'blocked_env = {"BASH_ENV": "startup file"}\nfor k in blocked_env:\n    env.pop(k, None)\n'),
+    ('UNSET = {"BASH_ENV": None, "ENV": None}\nok = k not in UNSET\n',
+     'UNSET_ENV = {"BASH_ENV": None, "ENV": None}\nok = k not in UNSET_ENV\n'),
+    ('drop = {"BASH_ENV": True}\n', 'drop.env = {"BASH_ENV": True}\n'),
+    ('ok = key in {"BASH_ENV": 1, "ENV": 1}\n', 'ok = run(c, env={"BASH_ENV": 1, "ENV": 1})\n'),
+    ('expect = {"BASH_ENV": None}\n', 'expect_env = {"BASH_ENV": None}\n'),
+    ('s = "{BASH_ENV}".format(BASH_ENV=p)\n', 's = env.update(BASH_ENV=p)\n'),
+    ('import string\ns = string.Template("$ENV").substitute(ENV="prod")\n',
+     'import string\ns = string.Template("$ENV").substitute(env=dict(ENV="prod"))\n'),
+    ('counts["BASH_ENV"] = counts.get("BASH_ENV", 0) + 1\n',
+     'env["BASH_ENV"] = env.get("BASH_ENV", 0) + 1\n'),
+    ('seen.setdefault("BASH_ENV", []).append(p)\n',
+     'seen_env.setdefault("BASH_ENV", []).append(p)\n'),
+    ('config = {"ENV": "production"}\n', 'config.ENV = {"ENV": "production"}\n'),
+    ('import logging\nlogging.info("m", extra={"ENV": "ci"})\n',
+     'import logging\nlogging.info("m", env={"ENV": "ci"})\n'),
+    ('from typing import TypedDict\nE = TypedDict("E", {"BASH_ENV": str})\n',
+     'from typing import TypedDict\nE = TypedDict("E", env={"BASH_ENV": str})\n'),
+    ('run(cmd, ENV=1)\n', 'run(cmd, env=dict(ENV=1))\n'),
+    ('dict.setdefault(counts, "BASH_ENV", 0)\n', 'dict.setdefault(env, "BASH_ENV", 0)\n'),
+    ('dict.__setitem__(counts, b"ENV", 0)\n', 'dict.__setitem__(env, b"ENV", 0)\n'),
+    ('lookup = dict.fromkeys(["BASH_ENV"], None)\n',
+     'lookup_env = dict.fromkeys(["BASH_ENV"], None)\n'),
+    ('table = dict([("BASH_ENV", p)])\n', 'table_env = dict([("BASH_ENV", p)])\n'),
+    ('table.update([("BASH_ENV", p)])\n', 'table.environ.update([("BASH_ENV", p)])\n'),
+    ('seen[b"BASH_ENV"] = 1\n', 'import os\nos.environb[b"BASH_ENV"] = 1\n'),
+    # a conditional, an or/and and a := whose mapping does not reach an environment
+    ('table = {"BASH_ENV": p} if p else None\n', 'env = {"BASH_ENV": p} if p else None\n'),
+    ('import os\nrun(c, env=os.environ.copy() if p else None)\n',
+     'import os\nrun(c, env=os.environ.copy() if p else {"ENV": p})\n'),
+    ('import os\nrun(c, env={**os.environ} if {"BASH_ENV": p} else None)\n',
+     'import os\nrun(c, env={**os.environ} if p else {"BASH_ENV": p})\n'),
+    ('table = extra or {"BASH_ENV": p}\n', 'env = extra or {"BASH_ENV": p}\n'),
+    ('run(c, extra=(e := {"BASH_ENV": p}))\n', 'run(c, env=(e := {"BASH_ENV": p}))\n'),
+    # patch.dict on a mapping that is not the environment, and setenv's neighbours
+    ('from unittest import mock\nmock.patch.dict(config, BASH_ENV=p).start()\n',
+     'from unittest import mock\nimport os\nmock.patch.dict(os.environ, BASH_ENV=p).start()\n'),
+    ('from unittest import mock\n@mock.patch.dict("app.settings", {"ENV": "x"})\n'
+     'def test():\n    pass\n',
+     'from unittest import mock\n@mock.patch.dict("os.environ", {"ENV": "x"})\n'
+     'def test():\n    pass\n'),
+    ('import os\nfrom unittest import mock\nmock.patch.dict(os.environ, {"HOME": t}, ENV_X=p)'
+     '.start()\n',
+     'import os\nfrom unittest import mock\nmock.patch.dict(os.environ, {"HOME": t}, ENV=p)'
+     '.start()\n'),
+    ('import os\nd = os.environ.dict(a, BASH_ENV=p)\n',
+     'import os\nd = mod.dict(os.environ, BASH_ENV=p)\n'),
+    ('def test(monkeypatch):\n    monkeypatch.delenv("BASH_ENV", raising=False)\n',
+     'def test(monkeypatch):\n    monkeypatch.setenv("BASH_ENV", p)\n'),
+    ('def test(monkeypatch):\n    monkeypatch.setenv("HOME", "BASH_ENV")\n',
+     'def test(monkeypatch):\n    monkeypatch.setenv("ENV", "BASH_ENV")\n'),
+    # the keyword forms of patch.dict and setenv on a mapping that is not the environment, or
+    # with the key in the value
+    ('from unittest import mock\nmock.patch.dict(config, values={"BASH_ENV": p}).start()\n',
+     'from unittest import mock\nimport os\n'
+     'mock.patch.dict(os.environ, values={"BASH_ENV": p}).start()\n'),
+    ('from unittest import mock\n'
+     'mock.patch.dict(config, values=[("BASH_FUNC_ls%%", f)]).start()\n',
+     'from unittest import mock\nimport os\n'
+     'mock.patch.dict(os.environ, values=[("BASH_FUNC_ls%%", f)]).start()\n'),
+    ('from unittest import mock\nmock.patch.dict(in_dict=config, BASH_ENV=p).start()\n',
+     'from unittest import mock\nimport os\n'
+     'mock.patch.dict(in_dict=os.environ, BASH_ENV=p).start()\n'),
+    ('from unittest import mock\n@mock.patch.dict("app.settings", values={"BASH_ENV": p})\n'
+     'def test():\n    pass\n',
+     'from unittest import mock\n@mock.patch.dict("os.environ", values={"BASH_ENV": p})\n'
+     'def test():\n    pass\n'),
+    ('from unittest import mock\n'
+     'mock.patch.dict(in_dict="app.settings", values={"ENV": p}).start()\n',
+     'from unittest import mock\n'
+     'mock.patch.dict(in_dict="os.environb", values={"ENV": p}).start()\n'),
+    ('def test(monkeypatch):\n    monkeypatch.setenv(name="HOME", value="BASH_ENV")\n',
+     'def test(monkeypatch):\n    monkeypatch.setenv(name="BASH_ENV", value="HOME")\n'),
+    ('def test(monkeypatch):\n    monkeypatch.setenv(value="BASH_FUNC_ls%%", name="HOME")\n',
+     'def test(monkeypatch):\n    monkeypatch.setenv(value="HOME", name="BASH_FUNC_ls%%")\n'),
+    # an unbound MonkeyPatch.setenv and the starred forms, with the key in the value, on a
+    # mapping that is not the environment, or bound so that the second argument is the value
+    ('from pytest import MonkeyPatch\nMonkeyPatch.setenv(mp, name="HOME", value="BASH_ENV")\n',
+     'from pytest import MonkeyPatch\nMonkeyPatch.setenv(mp, name="BASH_ENV", value="HOME")\n'),
+    ('import pytest\npytest.MonkeyPatch.setenv(mp, "HOME", "BASH_FUNC_ls%%")\n',
+     'import pytest\npytest.MonkeyPatch.setenv(mp, "BASH_FUNC_ls%%", "HOME")\n'),
+    ('def test(monkeypatch, key):\n    monkeypatch.setenv(key, "BASH_ENV")\n',
+     'from pytest import MonkeyPatch\nMonkeyPatch.setenv(key, "BASH_ENV", p)\n'),
+    ('def test(monkeypatch):\n    monkeypatch.setenv(*[], name="HOME", value="BASH_ENV")\n',
+     'def test(monkeypatch):\n    monkeypatch.setenv(*[], name="BASH_ENV", value="HOME")\n'),
+    ('from unittest import mock\n'
+     'mock.patch.dict(*[], in_dict=config, values={"BASH_ENV": p}).start()\n',
+     'from unittest import mock\nimport os\n'
+     'mock.patch.dict(*[], in_dict=os.environ, values={"BASH_ENV": p}).start()\n'),
+    ('from unittest import mock\nmock.patch.dict(*[], in_dict="app.settings", ENV=p).start()\n',
+     'from unittest import mock\nmock.patch.dict(*[], in_dict="os.environ", ENV=p).start()\n'),
+    # a MonkeyPatch receiver, bound or unbound, setting a key that is not an environment
+    # startup or function key
+    ('class T:\n    def go(self, p):\n        self.MonkeyPatch.setenv("HOME", p)\n',
+     'class T:\n    def go(self, p):\n        self.MonkeyPatch.setenv("BASH_ENV", p)\n'),
+    ('import pytest\nMonkeyPatch = pytest.MonkeyPatch()\nMonkeyPatch.setenv("HOME", f)\n',
+     'import pytest\nMonkeyPatch = pytest.MonkeyPatch()\n'
+     'MonkeyPatch.setenv("BASH_FUNC_ls%%", f)\n'),
+    ('from pytest import MonkeyPatch\nMonkeyPatch.setenv(mp, "HOME", p)\n',
+     'from pytest import MonkeyPatch\nMonkeyPatch.setenv(mp, "ENV", p)\n'),
+    ('import _pytest.monkeypatch\n_pytest.monkeypatch.MonkeyPatch.setenv(mp, "HOME", p)\n',
+     'import _pytest.monkeypatch\n_pytest.monkeypatch.MonkeyPatch.setenv(mp, "BASH_ENV", p)\n'),
+    # patch.dict's own parameters as literal keys of a ** mapping beside a key that is not
+    # reported, and the flip that adds one
+    ('import os\nfrom unittest import mock\n'
+     'mock.patch.dict(os.environ, **{"clear": True, "values": m, "HOME": t}).start()\n',
+     'import os\nfrom unittest import mock\n'
+     'mock.patch.dict(os.environ, **{"clear": True, "values": m, "BASH_ENV": t}).start()\n'),
+    # key= of the target's setdefault or __setitem__: a key that is not reported with the key in
+    # the value, an unbound call through dict (whose methods take no keywords) and a mapping
+    # that is not the environment, each flipped to a reported store
+    ('import os\nos.environ.setdefault(key="HOME", value="BASH_ENV")\n',
+     'import os\nos.environ.setdefault(key="BASH_ENV", value="HOME")\n'),
+    ('import os\nos.environ.__setitem__(value="BASH_FUNC_ls%%", key="HOME")\n',
+     'import os\nos.environ.__setitem__(value="HOME", key="BASH_FUNC_ls%%")\n'),
+    ('import os\ndict.setdefault(os.environ, key="BASH_ENV", default=p)\n',
+     'import collections.abc, os\n'
+     'collections.abc.MutableMapping.setdefault(os.environ, key="BASH_ENV", default=p)\n'),
+    ('import os\ndict.__setitem__(os.environ, key="ENV", value=p)\n',
+     'import os\nos._Environ.__setitem__(os.environ, key="ENV", value=p)\n'),
+    ('seen.setdefault(key="BASH_ENV", default=[])\n',
+     'seen_env.setdefault(key="BASH_ENV", default=[])\n'),
+    # a positional key at or after a starred argument of setenv, putenv or patch.dict is not
+    # read, since its position is unknown; the flip moves it before the starred argument
+    ('def test(monkeypatch):\n    monkeypatch.setenv(*a, "BASH_ENV", p)\n',
+     'def test(monkeypatch):\n    monkeypatch.setenv("BASH_ENV", p, *a)\n'),
+    ('from pytest import MonkeyPatch\nMonkeyPatch.setenv(mp, *a, "BASH_ENV", p)\n',
+     'from pytest import MonkeyPatch\nMonkeyPatch.setenv(mp, "BASH_ENV", *a)\n'),
+    ('import os\nos.putenv(*a, "BASH_FUNC_ls%%", f)\n',
+     'import os\nos.putenv("BASH_FUNC_ls%%", *a)\n'),
+    ('import os\nfrom unittest import mock\n'
+     'mock.patch.dict(*a, os.environ, {"BASH_ENV": p}).start()\n',
+     'import os\nfrom unittest import mock\n'
+     'mock.patch.dict(os.environ, {"BASH_ENV": p}, *a).start()\n'),
+    ('import os\nfrom unittest import mock\n'
+     'mock.patch.dict(os.environ, *a, {"ENV": p}).start()\n',
+     'import os\nfrom unittest import mock\n'
+     'mock.patch.dict(os.environ, {"ENV": p}, *a).start()\n'),
+    # every argument of ChainMap is read after a starred one: a key that is not reported, and
+    # the flip that sets one
+    ('from collections import ChainMap\nrun(c, env=ChainMap(*maps, {"HOME": p}))\n',
+     'from collections import ChainMap\nrun(c, env=ChainMap(*maps, {"ENV": p}))\n'),
+    # a ** mapping whose key is not exactly "env" (or is an "env" key nested in a value), each
+    # flipped to the literal "env" key
+    ('import subprocess\nsubprocess.run(c, **{"extra": {"BASH_ENV": p}})\n',
+     'import subprocess\nsubprocess.run(c, **{"env": {"BASH_ENV": p}})\n'),
+    ('run(c, **{"env_file": {"ENV": p}})\n', 'run(c, **{"env": {"ENV": p}})\n'),
+    ('run(c, **{"opts": {"env": {"BASH_ENV": p}}})\n',
+     'run(c, **{"opts": 1, **{"env": {"BASH_ENV": p}}})\n'),
+    # __ior__ on a mapping that is not the environment, the key in the value, and __or__, which
+    # returns a new mapping and stores nothing, each flipped to a reported store
+    ('table.__ior__({"BASH_ENV": p})\n', 'env.__ior__({"BASH_ENV": p})\n'),
+    ('dict.__ior__(table, [("BASH_FUNC_ls%%", f)])\n',
+     'dict.__ior__(env, [("BASH_FUNC_ls%%", f)])\n'),
+    ('import os\nos.environ.__ior__(other={"HOME": "BASH_ENV"})\n',
+     'import os\nos.environ.__ior__(other={"BASH_ENV": "HOME"})\n'),
+    ('import os\nnew = os.environ.__or__({"BASH_ENV": p})\n',
+     'import os\nos.environ.__ior__({"BASH_ENV": p})\n'),
+)
+
+# The key texts each route reads before the kind test, as sorted (text, route) pairs, a position
+# that holds no constant recorded as None and sorted first: patch.dict's own in_dict, values and
+# clear parameters, given as keywords or as literal keys of a ** mapping, setenv's value=, a third
+# argument of setenv, a positional argument at or after a starred one in a setenv, putenv or
+# patch.dict call, a name= given to os.putenv, the value= and default= of setdefault and
+# __setitem__ and a key= given to them through dict are never read as keys, while the same names
+# given to the target's update are keys, and so is key= given to setdefault or __setitem__ on the
+# target or through another class; a setenv on a MonkeyPatch receiver without name= reads both its
+# first and its second argument, any other setenv only its first; every argument of ChainMap is
+# read, also after a starred one. Only the literal "env" key of a ** mapping display is read as an
+# environment; the other= of __ior__ is read whenever given and its other keywords never are; and
+# the residuals stay unread: an "env" key inside dict({...}) given as a ** mapping, the positional
+# mapping of an unbound __ior__ through os._Environ, and a key given as a := expression or chosen
+# by a conditional expression.
+RECORDED_VECTORS = (
+    ('import os\nfrom unittest import mock\n'
+     'mock.patch.dict(in_dict=os.environ, values={"HOME": t}, clear=True, PATH=p).start()\n',
+     [("HOME", "dict-key"), ("PATH", "keyword")]),
+    ('import os\nfrom unittest import mock\n'
+     'mock.patch.dict(os.environ, values=[("HOME", t)], clear=False).start()\n',
+     [("HOME", "pair")]),
+    ('import os\nos.environ.update(in_dict=t, values=t, clear=t)\n',
+     [("clear", "keyword"), ("in_dict", "keyword"), ("values", "keyword")]),
+    ('def test(monkeypatch):\n    monkeypatch.setenv(value="BASH_ENV", name="HOME")\n',
+     [("HOME", "first-argument")]),
+    ('import os\nfrom unittest import mock\n'
+     'mock.patch.dict(os.environ, **{"clear": True, "values": {"HOME": t}, "PATH": p}).start()\n',
+     [("PATH", "dict-key")]),
+    ('import os\nos.environ.update(**{"clear": t, "values": t, "PATH": p})\n',
+     [("PATH", "dict-key"), ("clear", "dict-key"), ("values", "dict-key")]),
+    ('from pytest import MonkeyPatch\nMonkeyPatch.setenv(mp, "HOME", "PATH")\n',
+     [(None, "first-argument"), ("HOME", "second-argument")]),
+    ('class T:\n    def go(self):\n        self.MonkeyPatch.setenv("HOME", "PATH")\n',
+     [("HOME", "first-argument"), ("PATH", "second-argument")]),
+    ('import pytest\nMonkeyPatch = pytest.MonkeyPatch()\nMonkeyPatch.setenv("HOME", v)\n',
+     [(None, "second-argument"), ("HOME", "first-argument")]),
+    ('def test(monkeypatch):\n    monkeypatch.setenv("HOME", "PATH")\n',
+     [("HOME", "first-argument")]),
+    ('from pytest import MonkeyPatch\nMonkeyPatch.setenv(mp, name="HOME", value=v)\n',
+     [("HOME", "first-argument")]),
+    ('def test(monkeypatch):\n    monkeypatch.setenv(*a, value=v)\n', []),
+    ('def test(monkeypatch):\n    monkeypatch.setenv("HOME", *a)\n', [("HOME", "first-argument")]),
+    ('import os\nos.putenv(name="BASH_ENV", value=p)\n', []),
+    ('import os\nos.putenv(*a)\n', []),
+    ('import os\nos.environ.setdefault(value="PATH", key="HOME")\n', [("HOME", "first-argument")]),
+    ('import os\nos.environ.__setitem__(key="HOME", value="PATH")\n',
+     [("HOME", "first-argument")]),
+    ('import collections.abc, os\n'
+     'collections.abc.MutableMapping.setdefault(os.environ, key="HOME", default="PATH")\n',
+     [("HOME", "first-argument")]),
+    ('import os\ndict.setdefault(os.environ, key="HOME", default="PATH")\n', []),
+    ('import os\ndict.setdefault(os.environ, "HOME", "PATH")\n', [("HOME", "second-argument")]),
+    ('def test(monkeypatch):\n    monkeypatch.setenv(*a, "HOME", v)\n', []),
+    ('from pytest import MonkeyPatch\nMonkeyPatch.setenv(mp, *a, "HOME", v)\n',
+     [(None, "first-argument")]),
+    ('import os\nos.putenv(*a, "HOME", v)\n', []),
+    ('import os\nfrom unittest import mock\n'
+     'mock.patch.dict(*a, os.environ, {"HOME": t}).start()\n', []),
+    ('import os\nfrom unittest import mock\n'
+     'mock.patch.dict(os.environ, *a, {"HOME": t}).start()\n', []),
+    ('from collections import ChainMap\nrun(c, env=ChainMap(*maps, {"HOME": t}))\n',
+     [("HOME", "dict-key")]),
+    ('run(c, **{"env": {"HOME": t}, "extra": {"PATH": p}})\n', [("HOME", "dict-key")]),
+    ('run(c, **dict({"env": {"HOME": t}}))\n', []),
+    ('import os\nos.environ.__ior__(other={"HOME": t}, PATH=p)\n', [("HOME", "dict-key")]),
+    ('import os\nos._Environ.__ior__(os.environ, other=[("HOME", t)])\n', [("HOME", "pair")]),
+    ('import os\nos._Environ.__ior__(os.environ, {"HOME": t})\n', []),
+    # residuals: a key given as a := expression, and a key chosen by a conditional expression,
+    # on the setenv, subscript-store and dict-key routes; each route reads a position that
+    # holds no constant
+    ('monkeypatch.setenv((k := "BASH_ENV"), p)\nenv[(k := "BASH_ENV")] = p\n'
+     'env = {(k := "BASH_ENV"): p}\n',
+     [(None, "dict-key"), (None, "first-argument"), (None, "subscript-store")]),
+    ('monkeypatch.setenv("BASH_ENV" if c else "HOME", p)\n'
+     'import os\nos.environ["BASH_ENV" if c else "HOME"] = p\n'
+     'env = {("BASH_ENV" if c else "HOME"): p}\n',
+     [(None, "dict-key"), (None, "first-argument"), (None, "subscript-store")]),
+)
+
+# Boundary and removal vectors that must stay clean.
+NEGATIVE_VECTORS = (
+    'env = {"BASH_FUNC": f}\n',
+    'env = {"BASH_FUNCx_ls": f}\n',
+    'env = {"x%": f}\n',
+    'env = {"x%%y": f}\n',
+    'env = {"BASH_ENVX": f}\n',
+    'env = {"ENV_FILE": f}\n',
+    'env = {"env": f}\n',
+    'env = {"k": "BASH_ENV"}\n',
+    'env = dict(HOME=t, PATH=p)\n',
+    'del env["BASH_ENV"]\n',
+    'env.pop("ENV")\n',
+    'x = env["BASH_ENV"]\n',
+    'x = env.get("BASH_FUNC_ls%%")\n',
+    'ok = "BASH_ENV" in env\n',
+    'import os\nos.unsetenv("BASH_ENV")\n',
+    'name = "BASH_ENV"\n',
+    'env[key] = f\n',
+    'env.setdefault(key, "BASH_ENV")\n',
+    'env.setdefault(key=k, value="BASH_ENV")\n',
+    'env = {k: v for k, v in pairs if k != "BASH_ENV"}\n',
+    'import os\nfrom unittest import mock\nmock.patch.dict(os.environ, clear=True).start()\n',
+    'def test(monkeypatch):\n    monkeypatch.delenv("BASH_FUNC_ls%%")\n',
+    'env = {"BASH_ENV": p}.get(k) if p else None\n',
+    'import os\nfrom unittest import mock\n'
+    'mock.patch.dict(in_dict=os.environ, values={"HOME": t}, clear=True).start()\n',
+)
+
+_REASON = "self-test reason"
+_FUNC_SITE = ROWS[0][1].encode("utf-8")
+
+
+def _scan_outcome(root, allowlist, reader):
+    try:
+        findings = scan_tree(root, allowlist, reader)
+    except CannotEvaluate:
+        return 2
+    return 1 if findings else 0
+
+
+def _tree_outcome(files, allowlist=(), reader=_read_bytes, roots=SCAN_ROOTS, setup=None):
+    """Build a scratch tree from {rel: bytes} and return its exit code."""
+    with tempfile.TemporaryDirectory(prefix="shfn-standins-") as tmp:
+        root = Path(tmp)
+        for sub in roots:
+            (root / sub).mkdir(parents=True, exist_ok=True)
+        for rel, data in files.items():
+            target = root / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(data)
+        if setup is not None:
+            setup(root)
+        return _scan_outcome(root, allowlist, reader)
+
+
+def _refusing_reader(path):
+    if Path(path).name == "a.py":
+        raise PermissionError(13, "Permission denied (self-test reader)", str(path))
+    return _read_bytes(path)
+
+
+def _link_a(root):
+    os.symlink("b.py", root / "tools" / "a.py")
+
+
+def _fifo_a(root):
+    """A FIFO named a.py: the scan refuses it by its mode and never opens it."""
+    os.mkfifo(root / "tools" / "a.py")
+
+
+# Row 12 and the fail-closed and allowlist tree vectors: (name, kwargs, expected, flip kwargs,
+# flip expected). The flip must change the outcome.
+_VALID = {"tools/a.py": b"x = 1\n"}
+# 500 concatenated terms and a 500-term union: valid code a recursive walk cannot finish.
+_LONG_CHAIN = b"x = " + b" + ".join([b"'a'"] * 500) + b"\n"
+_LONG_UNION = b"env = os.environ" + b" | {}" * 500
+TREE_VECTORS = (
+    ("12 errors/unparseable", dict(files={"tools/a.py": b"def (:\n"}), 2,
+     dict(files=_VALID), 0),
+    ("12 errors/unreadable", dict(files=_VALID, reader=_refusing_reader), 2,
+     dict(files=_VALID), 0),
+    ("errors/undecodable", dict(files={"tools/a.py": b"x = '\xff'\n"}), 2,
+     dict(files=_VALID), 0),
+    ("errors/encoding-cookie", dict(files={"tools/a.py": b"# coding: latin-1\nx = 1\n"}), 2,
+     dict(files={"tools/a.py": b"# coding: utf-8\nx = 1\n"}), 0),
+    ("errors/nonregular", dict(files={}, setup=_fifo_a), 2,
+     dict(files=_VALID), 0),
+    ("errors/symlink", dict(files={"tools/b.py": b"x = 1\n"}, setup=_link_a), 2,
+     dict(files={"tools/b.py": b"x = 1\n"}), 0),
+    ("errors/missing-root", dict(files=_VALID, roots=("tools", "opf/tools")), 2,
+     dict(files=_VALID), 0),
+    ("tree/finding", dict(files={"opf/tools/a.py": _FUNC_SITE}), 1,
+     dict(files={"opf/tools/a.py": ROWS[0][3].encode("utf-8")}), 0),
+    ("tree/hooks-root", dict(files={".aiqt/core/hooks/scripts/a.py": _FUNC_SITE}), 1,
+     dict(files={".aiqt/core/hooks/scripts/a.txt": _FUNC_SITE}), 0),
+    ("tree/vendored", dict(files={"tools/_vendor/a.py": _FUNC_SITE}), 1,
+     dict(files={"opf/tools/_vendor/a.py": _FUNC_SITE}), 0),
+    ("allow/admitted", dict(files={"tools/a.py": _FUNC_SITE}), 1,
+     dict(files={"tools/a.py": _FUNC_SITE},
+          allowlist=(("tools/a.py", "<module>", "env-func", 1, _REASON),)), 0),
+    ("allow/stale-count", dict(files={"tools/a.py": _FUNC_SITE},
+                               allowlist=(("tools/a.py", "<module>", "env-func", 2, _REASON),)), 1,
+     dict(files={"tools/a.py": _FUNC_SITE},
+          allowlist=(("tools/a.py", "<module>", "env-func", 1, _REASON),)), 0),
+    ("allow/other-kind", dict(files={"tools/a.py": _FUNC_SITE},
+                              allowlist=(("tools/a.py", "<module>", "env-startup", 1, _REASON),)),
+     1, dict(files={"tools/a.py": _FUNC_SITE},
+             allowlist=(("tools/a.py", "<module>", "env-func", 1, _REASON),)), 0),
+    ("allow/qualname", dict(files={"tools/a.py": b"class C:\n    def f(self):\n"
+                                                b"        env = dict(BASH_ENV=1)\n"},
+                            allowlist=(("tools/a.py", "f", "env-startup", 1, _REASON),)), 1,
+     dict(files={"tools/a.py": b"class C:\n    def f(self):\n        env = dict(BASH_ENV=1)\n"},
+          allowlist=(("tools/a.py", "C.f", "env-startup", 1, _REASON),)), 0),
+    ("allow/malformed", dict(files=_VALID, allowlist=(("tools/a.py", "<module>", "env-func", 0,
+                                                       _REASON),)), 2,
+     dict(files=_VALID), 0),
+    ("errors/long-chain",
+     dict(files={"tools/a.py": _LONG_CHAIN + _LONG_UNION + b' | {"ENV": f}\n'}), 1,
+     dict(files={"tools/a.py": _LONG_CHAIN + _LONG_UNION + b"\n"}), 0),
+)
+
+
+class _RecordingScanner(_Scanner):
+    """A scanner that keeps every (key text, route) a route reads, before the kind test."""
+
+    def __init__(self):
+        super().__init__(frozenset())
+        self.recorded = []
+
+    def _record(self, node, text, route):
+        self.recorded.append((text, route))
+
+
+def _recorded(source):
+    """The sorted (text, route) pairs the routes read in source; a position that holds no
+    constant has text None and sorts first."""
+    scanner = _RecordingScanner()
+    scanner.scan(ast.parse(source))
+    return sorted(scanner.recorded, key=lambda item: (item[0] is not None, item[0] or "", item[1]))
+
+
+def self_test():
+    failures = []
+    for row, source, kind, flip in ROWS:
+        got = scan_source(source)
+        if [item[3] for item in got] != [kind]:
+            failures.append("row " + row + ": expected one " + kind + " finding, got " + repr(got))
+        got = scan_source(flip)
+        if got:
+            failures.append("row " + row + " flip: expected clean, got " + repr(got))
+    exercised = set()
+    for source, kind, route in POSITIVE_VECTORS:
+        exercised.add(route)
+        got = scan_source(source)
+        if [(item[3], item[4]) for item in got] != [(kind, route)]:
+            failures.append("positive " + repr(source) + ": expected " + kind + " by " + route
+                            + ", got " + repr(got))
+        if scan_source(source, disabled=(route,)):
+            failures.append("positive " + repr(source) + " still reported without " + route)
+    for source in NEGATIVE_VECTORS:
+        got = scan_source(source)
+        if got:
+            failures.append("negative flagged: " + repr(source) + " -> " + repr(got))
+    for source, flip in GATED_VECTORS:
+        got = scan_source(source)
+        if got:
+            failures.append("gated negative flagged: " + repr(source) + " -> " + repr(got))
+        if not scan_source(flip):
+            failures.append("gated flip " + repr(flip) + ": expected a finding, got none")
+    for source, expected in RECORDED_VECTORS:
+        got = _recorded(source)
+        if got != expected:
+            failures.append("recorded keys " + repr(source) + ": expected " + repr(expected)
+                            + ", got " + repr(got))
+    unexercised = sorted(set(ROUTES) - exercised)
+    if unexercised:
+        failures.append("routes without a vector: " + ", ".join(unexercised))
+    for name, case, expected, flip, flip_expected in TREE_VECTORS:
+        got = _tree_outcome(**case)
+        if got != expected:
+            failures.append("tree " + name + ": expected " + str(expected) + ", got " + str(got))
+        got = _tree_outcome(**flip)
+        if got != flip_expected or got == expected:
+            failures.append("tree " + name + " flip: expected " + str(flip_expected) + ", got "
+                            + str(got))
+    try:
+        _check_allowlist(ALLOWLIST)
+    except CannotEvaluate as exc:
+        failures.append("shipped allowlist malformed: " + str(exc))
+    if failures:
+        print("SELF-TEST FAIL:\n  " + "\n  ".join(failures))
+        return 1
+    print("SELF-TEST PASS: shell-function-standins: {} table rows and their flips, {} positive"
+          " vectors (each clean without its route), {} negatives, {} clean sources and their"
+          " reported flips, {} recorded-key vectors, {} fail-closed and allowlist tree vectors"
+          " and their flips.".format(len(ROWS), len(POSITIVE_VECTORS), len(NEGATIVE_VECTORS),
+                                     len(GATED_VECTORS), len(RECORDED_VECTORS),
+                                     len(TREE_VECTORS)))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

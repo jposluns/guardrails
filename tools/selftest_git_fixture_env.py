@@ -1200,14 +1200,16 @@ def _config_poison_fixture(base):
 # to the deadline rather than reported as a failure of the callee. Every bound in this table takes
 # that exception: none of them is offered as a bound above its member's whole self-granted budget.
 # CHOICE: the default is NOT raised above 5766 s, and neither is any entry below (each but the
-# five tools/check_opf_standalone_closure.py --self-test --ci-job entries and the
-# child-status-coverage-selftest entry is sized from config-lane runs MEASURED on this host, see
-# SIZING; those five are sized from standalone runs of the pre-split whole self-test, see their
-# shared comment, and that one from standalone runs, see its own comment); each entry
-# stays a deliberate shorter deadline relative to the member's self-granted budget, yet each
-# formula-sized entry is sized above the member's measured runs (lane runs, or standalone runs for
-# the child-status-coverage-selftest entry) so that the member finishes under the load the SIZING
-# factor covers;
+# five tools/check_opf_standalone_closure.py --self-test --ci-job entries, the
+# child-status-coverage-selftest entry and the tools/check_release_cut.py --self-test
+# --red-on-revert entry is sized from config-lane runs MEASURED on this host, see SIZING; those
+# five are sized from standalone runs of the pre-split whole self-test, see their shared
+# comment, that one from standalone runs, see its own comment, and the check_release_cut.py
+# entry from standalone runs with a stated margin, deliberately below the worst case over named
+# terms that its own comment gives); each entry stays a deliberate shorter deadline relative to
+# the member's self-granted budget, yet each formula-sized entry is sized above the member's
+# measured runs (lane runs, or standalone runs for the child-status-coverage-selftest entry) so
+# that the member finishes under the load the SIZING factor covers;
 # reaching a bound stays cannot-evaluate, attributed to the bound, never a FAIL of that member
 # and never a pass, because this lane owns no member's verdict.
 # Every roster member is a registered step or the runner behind a registered --suite step
@@ -1434,6 +1436,30 @@ CONFIG_MEMBER_BOUNDS = {
     # wall.
     # ESTIMATED: 796 * 20 / 3 = 5306.7, so 5400 s.
     ("tools/check_selftest_execution.py", "--suite", "child-status-coverage-selftest"): 5400,
+    # Sized outside SIZING (the account reports this member only among the nine of 142.55 s or
+    # less, measured before the member's census rows and revert flips existed; no config-lane
+    # time of it since is known). It is sized from the standalone runs MEASURED below with a stated
+    # margin, as a DELIBERATE SHORTER DEADLINE under the kill-timeout rule (see CHOICE).
+    # READ FROM SOURCE (tools/check_release_cut.py, its census budget comment), the worst case over
+    # named terms: a --red-on-revert run ends by at most 10665 s, a BOUND (the census table, census
+    # rows and revert flips spending their bounds in full, 680 + 945 + 880 s, and the 243 fixture
+    # observe calls and the 29 mutation replays each running just under its 30 s TIMEOUT bound,
+    # 7290 + 870 s), plus about 183.1 s, MEASURED (the parts with no bound summed there: the fixture
+    # builds' git calls, the close checks, entry-restore and the close-sweep reverts), about
+    # 10848.1 s. 2700 s is BELOW that worst case ON PURPOSE: the 30 s bounds summed are a ceiling no
+    # run approaches, and a bound near it would let a hung run hold this lane for over three hours.
+    # The margin: 2700 s is about 7.4 times the slowest run below (367.0 s), and it still covers the
+    # census bounds alone spent in full plus the measured rest (2505 + 183.1 = 2688.1 s), which is
+    # above the 1200 s default. Reaching it kills the member at its bound and is reported by
+    # _run_member as this lane's deadline ("reached its 2700 s bound (cannot evaluate)"), never as
+    # a failure of the member.
+    # MEASURED (2026-11-09, 80-CPU host, load5 about 26 to 29, standalone, plain): one --self-test
+    # run took 283.4 s wall and one --self-test --red-on-revert run took 309.4 s wall, both passed.
+    # MEASURED (2026-11-09, 12:06:49 to 12:12:56 UTC, 80-CPU host, 1-minute load 23.9 at the start
+    # and 29.6 at the end, standalone, plain): one --self-test --red-on-revert run took 367.0 s
+    # wall and passed, its replays 12.1 s of it. These runs, with the margin above, size this
+    # entry.
+    ("tools/check_release_cut.py", "--self-test", "--red-on-revert"): 2700,
 }
 # The sizing account's frozen facts (see SIZING above); _roster_figures derives the live figures
 # from them and config/member-roster-figures pins them against _registered_selftests().
@@ -1596,6 +1622,9 @@ SIZING_LATER_MEASURED = {
     ("tools/check_selftest_execution.py", "--suite", "child-status-coverage-selftest"): (
         "Standalone runs only (2026-10-29, CI 796 s, local 604.9 s), no config-lane time known:"
         " see this member's CONFIG_MEMBER_BOUNDS comment."),
+    ("tools/check_release_cut.py", "--self-test", "--red-on-revert"): (
+        "Standalone runs only (2026-11-09), no config-lane time of the member with its census"
+        " rows known: see this member's CONFIG_MEMBER_BOUNDS comment."),
 }
 # After the process-group kill: the bounded drain of output still held by a descendant that left
 # the group (setsid or setpgid), the bounded reap of the leader, and the bounded wait for the group
