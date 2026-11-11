@@ -624,14 +624,14 @@ item 19).
     schemas release, so this point once blocked the conformance claim. The current section 8.5
     states each module type's states, transitions, gated states and fields (for example a
     gate_run's required `gate` and three-valued `verdict`, never folded into status, and a waiver's
-    `expires_at`, required at creation), section 8.6 states the module joins, and section 8.8
-    extends `create` and `transition` to every enabled type and defines `enable-module` and
-    `disable-module`. Build the module types from the specification alone, and still do not read
-    fields out of the reference tooling's code. Section 14.1 says "Adoption MUST refuse to enable a
-    record type the writer cannot author, and enforcement MUST NOT ship before the writer can
-    perform every operation it forces", so enablement follows your writer's support for the
-    module's types; with the schemas stated, build that support in full, and record in your
-    implementation notes that this point is resolved by the specification text itself.
+    `expires_at`, required at creation), and section 8.8 extends `create` and `transition` to every
+    enabled type and defines `enable-module` and `disable-module`. Build the module types from the
+    specification alone, and still do not read fields out of the reference tooling's code. Section
+    14.1 says "Adoption MUST refuse to enable a record type the writer cannot author, and
+    enforcement MUST NOT ship before the writer can perform every operation it forces", so
+    enablement follows your writer's support for the module's types; with the schemas stated, build
+    that support in full, and record in your implementation notes that this point is resolved by
+    the specification text itself.
 27. **A new ID in a maintainer's reviewed repair.** Section 8.2 says "allocation MUST increment its
     counter under the store's lock as one atomic claim". Some integrity defects that step 14,
     Ordering, row R22 routes to the maintainer's reviewed edit need a record with a new ID: a
@@ -1703,12 +1703,10 @@ Implement section 8.8 (Authoring operations). Subcommands:
   Its allowed delta is exactly those value changes on that one row: no ID claim, no counter change
   and no other row. It appends no entry of its own: section 8.8 requires a lifecycle entry only of
   `create`, `transition`, `done-with-receipt`, `receipt-repair`, `enable-module` and
-  `disable-module`, and section 17 says the
-  unreleased tail's
-  mutability "rests on review and version-control history rather than machine enforcement", so the
-  reviewed commit records the correction. A correction never takes `/proposed`, since a worklog
-  entry never does (section 8.4), and like every subcommand it leaves the change uncommitted for the
-  maintainer's review.
+  `disable-module`, and section 17 says the unreleased tail's mutability "rests on review and
+  version-control history rather than machine enforcement", so the reviewed commit records the
+  correction. A correction never takes `/proposed`, since a worklog entry never does (section 8.4),
+  and like every subcommand it leaves the change uncommitted for the maintainer's review.
 - `enable-module` and `disable-module`: the maintainer-only module operations of section 8.8, each
   with its own lifecycle worklog entry; step C builds them with their acceptance checks.
 - Handoff supersession: section 8.5 says "Posting a new handoff MUST supersede the previous in the
@@ -2049,8 +2047,10 @@ Acceptance checks, on throwaway stores:
   cannot author refuses before any write (sections 8.8 and 14.1).
 - Disabling refuses while any clean or imported record of the module's types exists, in the active
   indexes or the archive; on a module whose indexes and imported leaves are all empty it clears the
-  `[modules]` flag and the `[types.<name>]` rows, removes those empty files, leaves `counters.toml`
-  untouched, and the validator then reports valid (section 8.8).
+  `[modules]` flag and the `[types.<name>]` rows, removes those empty files, keeps every
+  `counters.toml` row of the module's namespaces in either series unchanged, changes
+  `counters.toml` only by the `WL` allocation of its own worklog entry, and the validator then
+  reports valid (section 8.8).
 
 ### Step D: relocation and `opf sync`
 

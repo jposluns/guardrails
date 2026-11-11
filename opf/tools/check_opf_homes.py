@@ -522,6 +522,7 @@ _CONTRACT = {
         _D('- transaction (TX) is excluded from the adopter standard with its name and namespace reserved; it may enter later as a versioned module only if portable semantics are demonstrated.'),
         _D('- Modules ship default-off.'),
         "Enabling one is a single act that performs the manifest edit and every section 4.2 same-act duty together, the standard's maintainer-only enable-module operation (section 8.8), which the reference tooling does not implement yet; disabling one MUST be refused while any clean or imported record of the module's types exists, and is the same kind of single act (disable-module, section 8.8).",
+        _D('The reference tooling does not implement disable-module either, nor the section 8.8 rule that worklog-append refuse a detail opening with an opf-record enable-module <NAME> or opf-record disable-module <NAME> line: its worklog-append accepts such a detail.'),
         _D('- Imported history uses the same enabled types (section 8.2) in a separate series, not additional record types.'),
         _D('Reserved namespaces remain reserved.'),
         _D('Imported states describe history and confer no current authority (section 8.6).'),
@@ -756,8 +757,9 @@ _CONTRACT = {
         _D('- disable-module NAME: maintainer-only.'),
         'It MUST refuse an unknown module name and a module not enabled, each with nothing written.',
         'It MUST refuse while any clean or imported record of any of the module\'s types exists, in the active indexes or the archive (section 12): disabling never deletes or hides a record.',
-        'It MUST refuse to disable concurrent_operation while the manifest declares layout = "per-record", the layout that requires that module (section 9), and it MUST refuse a module named in a supported profile\'s required_modules (section 9.1), each with nothing written.',
-        "On a module whose types' indexes and imported leaves are all empty it clears, in one journaled act, the module's [modules] flag and its types' [types.<name>] rows and removes those empty files; it MUST NOT touch counters.toml (section 8.2), so a later enable-module finds the kept rows.",
+        'It MUST refuse to disable concurrent_operation while the manifest declares layout = "per-record", the layout section 9 pairs with that module, and it MUST refuse a module named in a supported profile\'s required_modules (section 9.1), each with nothing written.',
+        _D("On a module whose types' indexes and imported leaves are all empty it clears, in one journaled act, the module's [modules] flag and its types' [types.<name>] rows and removes those empty files."),
+        "It MUST keep every counters.toml row of the module's namespaces, in either series, exactly as it stands (section 8.2), so a later enable-module finds the kept rows; the one counters.toml change it makes is the WL allocation that claims the ID of its own worklog entry (below).",
         _D('- import --batch FILE [--root DIR]: the primary import surface (the import write mode; there is no separate --import flag).'),
         _D('A single-record import is a one-row batch.'),
         _D('The canonical TOML batch, opf.record.import-batch/v1, declares one source path, record rows, worklog rows, historical fields, missingness, verbatim unparsed text and batch-local link keys.'),
@@ -777,7 +779,7 @@ _CONTRACT = {
         'A file carrying comments or non-canonical serialization MUST be refused and left untouched.',
         _D('The check proves serialization only: a hand edit or hand merge that leaves canonical bytes is not detectable by it, and the integration-base merge policy of section 5.7 remains a separate requirement.'),
         _D('3. Claim each new ID as one atomic act (section 8.2): the claim is an irrevocable reservation in the journal home, made before the reversible publication (section 4.2).'),
-        _D("4. Postcondition: the model diff of every rewritten file equals exactly the operation's allowed delta (the new rows appended, the counters advanced by exactly the claim, and for a transition one status and updated_at change plus the proposed_from write or removal and, for a pending_decision, the resolution bundle write or removal and the supersedes link append), value for value and type for type (a boolean or float is never equal to an integer), before anything is written."),
+        _D("4. Postcondition: the model diff of every rewritten file equals exactly the operation's allowed delta (the new rows appended, the counters advanced by exactly the claim, and for a transition one status and updated_at change plus the proposed_from write or removal and, for a pending_decision, the resolution bundle write or removal and the supersedes link append; for enable-module, the module's [modules] flag set, its types' [types.<name>] rows added, each type's clean index and imported leaf created empty, and each counter row it adds at its section 8.8 value; for disable-module, that flag cleared, those [types.<name>] rows removed and those empty files deleted, with every counter row of the module's namespaces unchanged), value for value and type for type (a boolean or float is never equal to an integer), before anything is written."),
         'The expected delta MUST be derived from the request, the prior bytes of each rewritten file, the claimed IDs, the clock value, and the schema rules, never from the planned rows themselves.',
         '5. The in-repo store contract (section 5.7): the planned destinations MUST be clean, including ignored files, and the single-writer lease MUST be held across publication, render, and the final doctor.',
         '6. Every rewritten file MUST be published in one crash-durable journaled transaction, so an interruption leaves the store exactly at its prestate or exactly at its poststate once reconciled.',
@@ -6772,9 +6774,9 @@ def _self_test_vectors():
     ):
         retired_known[section] = retired_known.get(section, ()) + sentences
     # Retired when section 8.5 stated the full module schemas: enabling stopped being one bare
-    # manifest edit (8.1 defines the single enabling act with its section 4.2 same-act duties),
-    # the 8.5 outline's deferral to a module schemas release ended, and 8.8 create widened from
-    # baseline types to every enabled type.
+    # manifest edit (8.8 defines the single enabling act with its section 4.2 same-act duties, and
+    # 8.1 names it), the 8.5 outline's deferral to a module schemas release ended, and 8.8 create
+    # widened from baseline types to every enabled type.
     for section, sentences in (
         ('8.1', (
             '- Modules ship default-off; each is enabled by one manifest edit.',
