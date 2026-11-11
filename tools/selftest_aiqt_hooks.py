@@ -8243,12 +8243,14 @@ def _deadline_race_failures(count=200000):
                        "its deadline and give back the caller's disposition with the timer inactive, got "
                        "raised {}, handler {!r}, timer {!r}".format(raised, handler, timer))
         reset()
-        outer = aiqt_hooks._DeadlineWindow(600.0)
+        outer, inner = aiqt_hooks._DeadlineWindow(600.0), aiqt_hooks._DeadlineWindow(60.0)
+        armed = time.monotonic()
         with outer:
-            raised = expires_at_exit_entry(aiqt_hooks._DeadlineWindow(60.0))
+            raised = expires_at_exit_entry(inner)
             handler, timer = signal.getsignal(signal.SIGALRM), signal.getitimer(signal.ITIMER_REAL)
+            read_by = time.monotonic()
         if not (raised and getattr(handler, "__self__", None) is outer and timer[1] == 0.0
-                and 599.0 < timer[0] <= 600.0):
+                and _countdown_back(timer[0], inner, armed, read_by, full=600.0)):
             out.append("(dl-race-exit-entry-nested) an inner window's expiry delivered at the entry of its "
                        "__exit__ must give the outer window its handler and its countdown back, got raised {}, "
                        "handler {!r}, timer {!r}".format(raised, handler, timer))
@@ -8349,6 +8351,26 @@ def _caller_countdown_bounds(holder, reads, armed, started, finished):
     left = taken - (restored - began)
     _args, before, after = armed[-1]
     return left - (finished[1] - before) - 1e-6, left - (finished[0] - after) + 1e-6, problem
+
+
+def _countdown_back(countdown, holder, armed, read_by, full=30.0):
+    """Whether countdown, read by getitimer before the time.monotonic read read_by, is what a caller's timer,
+    armed at `full` seconds after the read `armed`, has left once holder, the window that borrowed it, gave
+    it back (holder None: no window took it, and it ran on from the arming). The bound comes from clock
+    reads rather than a fixed slack, so a stall of the process anywhere between the arming and the read
+    (under host load, say) moves the low end with it: what holder's take read (holder._timer[0]) is at most
+    `full` and at least what was left at the read, and the restore charged it no more than the time from
+    the take's clock read (holder._began, itself between the arming and the read) to the read. 1e-5 covers
+    the microsecond rounding of setitimer and getitimer. The high end is `full`."""
+    if holder is None:
+        return full - (read_by - armed) - 1e-5 < countdown <= full
+    began = holder._began
+    if began is None or holder._timer is None:
+        return False
+    taken = holder._timer[0]
+    return (armed <= began <= read_by
+            and full - (read_by - armed) - 1e-5 < taken <= full
+            and taken - (read_by - began) - 1e-5 < countdown <= full)
 
 
 def _window_codes():
@@ -8516,20 +8538,23 @@ def _deadline_take_failures(count=50000):
         signal.setitimer(signal.ITIMER_REAL, 0)
         signal.signal(signal.SIGALRM, signal.SIG_DFL)
 
-    def periodic_back(handler, timer, caller):
-        return handler is caller and timer[1] == 30.0 and 29.0 < timer[0] <= 30.0
+    def periodic_back(handler, timer, caller, holder, armed, read_by):
+        return handler is caller and timer[1] == 30.0 and _countdown_back(timer[0], holder, armed, read_by)
 
+    window = aiqt_hooks._DeadlineWindow(5.0)
     signal.signal(signal.SIGALRM, raising)
+    armed = time.monotonic()
     signal.setitimer(signal.ITIMER_REAL, 30.0, 30.0)
     try:
-        at, escaped = enter_traced(aiqt_hooks._DeadlineWindow(5.0), (
+        at, escaped = enter_traced(window, (
             lambda frame: taken(frame) and signal.getsignal(signal.SIGALRM) is raising,
             lambda: signal.raise_signal(signal.SIGALRM)))
         handler, timer = signal.getsignal(signal.SIGALRM), signal.getitimer(signal.ITIMER_REAL)
+        read_by = time.monotonic()
     finally:
         reset()
-    if not (at and escaped == "the caller's exception" and periodic_back(handler, timer, raising)
-            and calls == [signal.SIGALRM]):
+    if not (at and escaped == "the caller's exception"
+            and periodic_back(handler, timer, raising, window, armed, read_by) and calls == [signal.SIGALRM]):
         out.append("(dl-take-raises) a caller handler raising on an expiry delivered just after the take must "
                    "run once and get its periodic timer back, got delivery at {!r}, escaped {}, handler {!r}, "
                    "timer {!r}, caller deliveries {}".format(at, escaped, handler, timer, len(calls)))
@@ -8538,15 +8563,18 @@ def _deadline_take_failures(count=50000):
     window = aiqt_hooks._DeadlineWindow(5.0)
     saved_usr1 = signal.signal(signal.SIGUSR1, raises_other)
     signal.signal(signal.SIGALRM, counting)
+    armed = time.monotonic()
     signal.setitimer(signal.ITIMER_REAL, 30.0, 30.0)
     try:
         at, escaped = enter_traced(window, (
             lambda frame: bound_to(window), lambda: signal.raise_signal(signal.SIGUSR1)))
         handler, timer = signal.getsignal(signal.SIGALRM), signal.getitimer(signal.ITIMER_REAL)
+        read_by = time.monotonic()
     finally:
         reset()
         signal.signal(signal.SIGUSR1, saved_usr1)
-    if not (at and escaped == "the caller's exception" and periodic_back(handler, timer, counting) and not calls):
+    if not (at and escaped == "the caller's exception"
+            and periodic_back(handler, timer, counting, window, armed, read_by) and not calls):
         out.append("(dl-take-swap-raises) another signal's handler raising just after the swap must leave the "
                    "caller its own disposition and periodic timer, got delivery at {!r}, escaped {}, handler "
                    "{!r}, timer {!r}, caller deliveries {}".format(at, escaped, handler, timer, len(calls)))
@@ -8557,6 +8585,7 @@ def _deadline_take_failures(count=50000):
                                         lambda: signal.raise_signal(signal.SIGALRM)))
     caught = None
     signal.signal(signal.SIGALRM, counting)
+    armed = time.monotonic()
     signal.setitimer(signal.ITIMER_REAL, 30.0)
     try:
         try:
@@ -8571,10 +8600,12 @@ def _deadline_take_failures(count=50000):
         finally:
             sys.settrace(None)
         handler, timer = signal.getsignal(signal.SIGALRM), signal.getitimer(signal.ITIMER_REAL)
+        read_by = time.monotonic()
     finally:
         reset()
     if not (at and caught == "the outer deadline" and handler is counting and timer[1] == 0.0
-            and 29.0 < timer[0] <= 30.0 and not calls and not inner.armed and not outer.armed):
+            and _countdown_back(timer[0], outer, armed, read_by) and not calls and not inner.armed
+            and not outer.armed):
         out.append("(dl-take-enclosing) an outer window's expiry delivered just after an inner window's take "
                    "must reach the outer window's owner and leave the caller's timer as the outer window gave "
                    "it back, got delivery at {!r}, {}, handler {!r}, timer {!r}, caller deliveries {}, armed "
@@ -8592,14 +8623,17 @@ def _deadline_take_failures(count=50000):
 
     window = aiqt_hooks._DeadlineWindow(5.0)
     signal.signal(signal.SIGALRM, counting)
+    # make_pending arms the caller's timer after this read; the take reads it as one full interval due.
+    armed = time.monotonic()
     try:
         at, escaped = enter_traced(window, (
             lambda frame: signal.SIGALRM in signal.pthread_sigmask(signal.SIG_BLOCK, ()), make_pending))
         handler, timer = signal.getsignal(signal.SIGALRM), signal.getitimer(signal.ITIMER_REAL)
+        read_by = time.monotonic()
     finally:
         reset()
     if not (at and escaped == "_HookDeadline" and seen == [(0.0, 30.0)] and calls == [signal.SIGALRM]
-            and periodic_back(handler, timer, counting) and not window.armed):
+            and periodic_back(handler, timer, counting, window, armed, read_by) and not window.armed):
         out.append("(dl-take-pending) a periodic caller timer taken with its expiry pending must end the window "
                    "at once, be delivered once and come back due one interval later, got stage at {!r}, "
                    "escaped {}, taken as {!r}, caller deliveries {}, handler {!r}, timer {!r}".format(
@@ -9233,6 +9267,7 @@ def _deadline_discard_failures():
         window = aiqt_hooks._DeadlineWindow(seconds)
         tracer, at = _window_tracer(window, stage(window))
         signal.signal(signal.SIGALRM, counting)
+        armed = time.monotonic()
         signal.setitimer(signal.ITIMER_REAL, 30.0, 30.0)
         escaped = None
         try:
@@ -9247,10 +9282,11 @@ def _deadline_discard_failures():
             finally:
                 sys.settrace(None)
             handler, timer = signal.getsignal(signal.SIGALRM), signal.getitimer(signal.ITIMER_REAL)
+            read_by = time.monotonic()
         finally:
             signal.setitimer(signal.ITIMER_REAL, 0)
             signal.signal(signal.SIGALRM, signal.SIG_DFL)
-        state_ok = (handler is counting and timer[1] == 30.0 and 29.0 < timer[0] <= 30.0
+        state_ok = (handler is counting and timer[1] == 30.0 and _countdown_back(timer[0], window, armed, read_by)
                     and not window.armed and not getattr(window, "broken", False))
         return at, escaped, list(calls), state_ok, (handler, timer)
 
@@ -9355,15 +9391,18 @@ def _deadline_alarm_failures():
     def counting(signum, frame):
         calls.append(signum)
 
-    def caller_back(handler, timer):
-        return handler is counting and timer[1] == 30.0 and 29.0 < timer[0] <= 30.0
+    def caller_back(handler, timer, read_by, holder, armed):
+        return handler is counting and timer[1] == 30.0 and _countdown_back(timer[0], holder, armed, read_by)
 
-    def outer_back(handler, timer, outer):
-        # The outer window's countdown is the caller's 30 seconds, sooner than its own 600.
-        return getattr(handler, "__self__", None) is outer and timer[1] == 0.0 and 29.0 < timer[0] <= 30.0
+    def outer_back(handler, timer, read_by, outer, inner, armed):
+        # The outer window's countdown is the caller's 30 seconds, sooner than its own 600, given back by the
+        # inner window.
+        return (getattr(handler, "__self__", None) is outer and timer[1] == 0.0
+                and _countdown_back(timer[0], inner, armed, read_by))
 
     def state():
-        return signal.getsignal(signal.SIGALRM), signal.getitimer(signal.ITIMER_REAL)
+        handler, timer = signal.getsignal(signal.SIGALRM), signal.getitimer(signal.ITIMER_REAL)
+        return handler, timer, time.monotonic()
 
     def stand_in(pending, outside):
         names = types.SimpleNamespace(**vars(signal))
@@ -9393,6 +9432,7 @@ def _deadline_alarm_failures():
         calls.clear()
         pending = []
         signal.signal(signal.SIGALRM, counting)
+        armed = time.monotonic()
         signal.setitimer(signal.ITIMER_REAL, 30.0, 30.0)
         window = aiqt_hooks._DeadlineWindow(0.2)
         outer = aiqt_hooks._DeadlineWindow(600.0) if case == "nested" else None
@@ -9433,10 +9473,11 @@ def _deadline_alarm_failures():
             problems.append("escaped {}, want {}".format(escaped, want))
         if calls:
             problems.append("caller deliveries {}".format(len(calls)))
-        if not caller_back(*final):
-            problems.append("caller left {!r}".format(final))
-        if case == "nested" and not (ran_on and outer_back(*inside, outer)):
-            problems.append("the outer body ran on {}, the outer window left {!r}".format(ran_on, inside))
+        if not caller_back(*final, outer if case == "nested" else window, armed):
+            problems.append("caller left {!r} {:.6f}s after the arming".format(final[:2], final[2] - armed))
+        if case == "nested" and not (ran_on and outer_back(*inside, outer, window, armed)):
+            problems.append("the outer body ran on {}, the outer window left {!r}".format(
+                ran_on, inside if inside is None else inside[:2]))
         if window.armed or getattr(window, "broken", False) or (outer is not None and outer.armed):
             problems.append("a window left armed or broken")
         return problems
@@ -9524,6 +9565,7 @@ def _deadline_mask_failures():
         before = signal.pthread_sigmask(signal.SIG_BLOCK, ())
         saved = {signum: signal.signal(signum, raising) for signum in pair}
         signal.signal(signal.SIGALRM, counting)
+        armed = time.monotonic()
         signal.setitimer(signal.ITIMER_REAL, 30.0, 30.0)
         window = aiqt_hooks._DeadlineWindow(5.0)
         escaped = None
@@ -9542,6 +9584,7 @@ def _deadline_mask_failures():
                 aiqt_hooks.signal = signal
             after = signal.pthread_sigmask(signal.SIG_BLOCK, ())
             handler, timer = signal.getsignal(signal.SIGALRM), signal.getitimer(signal.ITIMER_REAL)
+            read_by = time.monotonic()
         finally:
             aiqt_hooks.signal = signal
             _signal.pthread_sigmask(signal.SIG_SETMASK, before)
@@ -9549,8 +9592,11 @@ def _deadline_mask_failures():
             signal.signal(signal.SIGALRM, signal.SIG_DFL)
             for signum, previous in saved.items():
                 signal.signal(signum, previous)
+        # The handler raises in the take's blocking call, before the take (enter), or after the take, in the
+        # restore's (exit), so only the exit run's window holds the caller's timer.
+        holder = window if where == "exit" else None
         if not (set(after) == set(before) and sorted(ran) == sorted(pair) and escaped is not None
-                and handler is counting and timer[1] == 30.0 and 29.0 < timer[0] <= 30.0
+                and handler is counting and timer[1] == 30.0 and _countdown_back(timer[0], holder, armed, read_by)
                 and not window.armed and not getattr(window, "broken", False)):
             out.append("(dl-mask-back-{}) the mask must come back as it was when a handler raises inside the call "
                        "that sets it and another is left pending, got {} signals left blocked, handlers run "
@@ -9654,6 +9700,7 @@ def _deadline_mask_thread_failures():
         before = signal.pthread_sigmask(signal.SIG_BLOCK, ())
         saved = {signum: signal.signal(signum, raising) for signum in pair}
         signal.signal(signal.SIGALRM, counting)
+        armed = time.monotonic()
         signal.setitimer(signal.ITIMER_REAL, 30.0, 30.0)
         window = Waiting(5.0)
         escaped = None
@@ -9667,6 +9714,7 @@ def _deadline_mask_thread_failures():
                 escaped = type(exc).__name__
             after = signal.pthread_sigmask(signal.SIG_BLOCK, ())
             handler, timer = signal.getsignal(signal.SIGALRM), signal.getitimer(signal.ITIMER_REAL)
+            read_by = time.monotonic()
         finally:
             _signal.pthread_sigmask(signal.SIG_SETMASK, before)
             if not waited:
@@ -9680,8 +9728,8 @@ def _deadline_mask_thread_failures():
                 signal.signal(signum, previous)
         if not (waited and parked == [True] and took and set(after) == set(before)
                 and sorted(ran) == sorted(pair) and escaped == "a raising handler's exception"
-                and handler is counting and timer[1] == 30.0 and 29.0 < timer[0] <= 30.0 and not window.armed
-                and not getattr(window, "broken", False)):
+                and handler is counting and timer[1] == 30.0 and _countdown_back(timer[0], window, armed, read_by)
+                and not window.armed and not getattr(window, "broken", False)):
             out.append("(dl-mask-back-thread-{}) the mask must come back as it was when a handler raises in the "
                        "blocked section and another is pending behind it, got waited {}, main thread seen at its "
                        "wait {}, wait took the helper's release {}, {} signals left blocked, handlers run {!r}, "
@@ -9705,6 +9753,7 @@ def _deadline_no_c_mask_failures():
 
     before = signal.pthread_sigmask(signal.SIG_BLOCK, ())
     signal.signal(signal.SIGALRM, counting)
+    arming = time.monotonic()
     signal.setitimer(signal.ITIMER_REAL, 30.0, 30.0)
     window = aiqt_hooks._DeadlineWindow(5.0)
     armed = escaped = None
@@ -9719,13 +9768,15 @@ def _deadline_no_c_mask_failures():
             aiqt_hooks._DeadlineWindow._SET_MASK = saved
         after = signal.pthread_sigmask(signal.SIG_BLOCK, ())
         handler, timer = signal.getsignal(signal.SIGALRM), signal.getitimer(signal.ITIMER_REAL)
+        read_by = time.monotonic()
     finally:
         aiqt_hooks._DeadlineWindow._SET_MASK = saved
         _signal.pthread_sigmask(signal.SIG_SETMASK, before)
         signal.setitimer(signal.ITIMER_REAL, 0)
         signal.signal(signal.SIGALRM, signal.SIG_DFL)
+    # The window refuses the borrow, so no window holds the caller's timer: it runs on from the arming.
     if not (armed is False and escaped is None and set(after) == set(before) and handler is counting
-            and timer[1] == 30.0 and 29.0 < timer[0] <= 30.0):
+            and timer[1] == 30.0 and _countdown_back(timer[0], None, arming, read_by)):
         out.append("(dl-refused-no-c-mask) a window without a callable _SET_MASK must refuse the borrow, got "
                    "armed {} in the body, escaped {}, {} signals left blocked, handler {!r}, timer {!r}".format(
                        armed, escaped, len(set(after) - set(before)), handler, timer))
@@ -10042,6 +10093,7 @@ def _deadline_unknown_failures():
             tracer, at = _window_tracer(window, (lambda frame: frame.f_code is give_back,
                                                  lambda: signal.raise_signal(signal.SIGALRM)))
             signal.signal(signal.SIGALRM, counting)
+            armed = time.monotonic()
             signal.setitimer(signal.ITIMER_REAL, 30.0, 30.0)
             try:
                 sys.settrace(tracer)
@@ -10060,11 +10112,13 @@ def _deadline_unknown_failures():
                 sys.settrace(None)
                 aiqt_hooks.signal = signal
             handler, timer = signal.getsignal(signal.SIGALRM), signal.getitimer(signal.ITIMER_REAL)
+            read_by = time.monotonic()
             signal.setitimer(signal.ITIMER_REAL, 0)
             signal.signal(signal.SIGALRM, signal.SIG_DFL)
             if not (at and not faulty.times and escaped == "injected {} fault".format(faulty.name)
                     and calls == [signal.SIGALRM] and handler is counting and timer[1] == 30.0
-                    and 29.0 < timer[0] <= 30.0 and not window.armed and not getattr(window, "broken", False)):
+                    and _countdown_back(timer[0], window, armed, read_by) and not window.armed
+                    and not getattr(window, "broken", False)):
                 out.append("({}) a caller's SIGALRM pending at a restore that cannot know whether the SIGALRM "
                            "pending is the window's own expiry must reach the caller's handler once, got stage at "
                            "{!r}, faults left {}, escaped {}, caller deliveries {}, handler {!r}, timer {!r}, armed "
@@ -10114,6 +10168,7 @@ def _deadline_fire_take_failures():
     faulty = InTake("getitimer", lambda args: True, 1, caller=fire)
     before = signal.pthread_sigmask(signal.SIG_BLOCK, ())
     signal.signal(signal.SIGALRM, counting)
+    armed = time.monotonic()
     signal.setitimer(signal.ITIMER_REAL, 30.0, 30.0)
     window = aiqt_hooks._DeadlineWindow(5.0)
     try:
@@ -10131,6 +10186,7 @@ def _deadline_fire_take_failures():
             aiqt_hooks.signal = signal
         after = signal.pthread_sigmask(signal.SIG_BLOCK, ())
         handler, timer = signal.getsignal(signal.SIGALRM), signal.getitimer(signal.ITIMER_REAL)
+        read_by = time.monotonic()
     finally:
         aiqt_hooks.signal = signal
         _signal.pthread_sigmask(signal.SIG_SETMASK, before)
@@ -10138,7 +10194,8 @@ def _deadline_fire_take_failures():
         signal.signal(signal.SIGALRM, signal.SIG_DFL)
     if not (injected and not faulty.times and escaped == "injected getitimer fault" and not body and not calls
             and set(after) == set(before) and handler is counting and timer[1] == 30.0
-            and 29.0 < timer[0] <= 30.0 and not window.armed and not getattr(window, "broken", False)):
+            and _countdown_back(timer[0], window, armed, read_by) and not window.armed
+            and not getattr(window, "broken", False)):
         out.append("(dl-fire-read-fails-in-take) a read in _fire that raises inside the take must leave the with "
                    "statement, got handler run in the take {}, faults left {}, escaped {}, body run {}, caller "
                    "deliveries {}, {} signals left blocked, handler {!r}, timer {!r}, armed {}".format(
