@@ -11210,6 +11210,251 @@ def _selftest_exit_code(failures, cannot_evaluate):
     return 2 if cannot_evaluate else 0
 
 
+# (rw-*) The records-writer rows: a declared writer piped into head or tail denies, foreground or background;
+# each is a (label, command) pair judged under the declaration _test_records_writers writes.
+_RW_DENY_ROWS = (
+    ("rw-d-head", "recordctl write | head"),
+    ("rw-d-tail", "recordctl write | tail"),
+    ("rw-d-args", "recordctl write --id 7 | head -n 5"),
+    ("rw-d-bytes", "recordctl write | head -c 100"),
+    ("rw-d-follow", "recordctl write | tail -f"),
+    ("rw-d-amp-pipe", "recordctl write |& tail -n 3"),
+    ("rw-d-abs-sink", "recordctl write | /usr/bin/head"),
+    ("rw-d-bg", "recordctl write | head &"),
+    ("rw-d-interp", "python3 /abs/tools/update_records.py --all | tail"),
+    ("rw-d-assign", "LANG=C recordctl write | head"),
+    ("rw-d-wrappers", "env A=1 nice timeout 5 recordctl write | head"),
+    ("rw-d-unresolved-wrapper", "nice -n5 recordctl write | head"),
+    ("rw-d-quoted", "'recordctl' \"write\" | head"),
+    ("rw-d-continuation", "recordctl write |\n head"),
+    ("rw-d-after-semi", "cd /abs; recordctl write | head"),
+    ("rw-d-after-and", "true && recordctl write | head"),
+    ("rw-d-after-or", "false || recordctl write | head"),
+    ("rw-d-pipefail", "set -o pipefail; recordctl write | head"),
+    ("rw-d-later-pipeline", "ls | head; recordctl write | tail"),
+    ("rw-d-tee", "recordctl write | tee /abs/log | head"),
+    ("rw-d-cat", "recordctl write | cat | head"),
+    ("rw-d-tr", "recordctl write | tr a b | tail"),
+    ("rw-d-uniq", "recordctl write | uniq | head"),
+    ("rw-d-file-operand", "recordctl write | head /abs/other"),
+    ("rw-d-stdout-redirected", "recordctl write > /abs/log | head"),
+)
+# Commands the lexer cannot read: a complete offending pipeline before the failure denies, and text naming a
+# writer's command word with head or tail denies as cannot-evaluate.
+_RW_DENY_UNPARSED_ROWS = (
+    ("rw-u-complete-before", "recordctl write | head; cat <<<x"),
+    ("rw-u-unbalanced", "echo \"x; recordctl write | head"),
+)
+# False-positive controls and allowed routes: no deny from this check under the same declaration.
+_RW_ALLOW_ROWS = (
+    ("rw-a-read", "recordctl read | head"),
+    ("rw-a-near-sub", "recordctl writer | head"),
+    ("rw-a-near-exe", "recordctl2 write | head"),
+    ("rw-a-undeclared", "ls -la | head"),
+    ("rw-a-quoted-text", "echo 'recordctl write | head'"),
+    ("rw-a-argument", "grep 'recordctl write' /abs/notes | head"),
+    ("rw-a-comment", "true # recordctl write | head"),
+    ("rw-a-heredoc", "cat <<'EOF'\nrecordctl write | head\nEOF"),
+    ("rw-a-alone", "recordctl write --id 7"),
+    ("rw-a-file", "recordctl write > /abs/log 2>&1"),
+    ("rw-a-tee-alone", "recordctl write | tee /abs/log"),
+    ("rw-a-separate", "recordctl write; recordctl read | head"),
+    ("rw-a-separate-and", "recordctl write && tail -n 5 /abs/record"),
+    ("rw-a-unknown-filter", "recordctl write | grep x | head"),
+    ("rw-a-unparsed-unnamed", "echo \"x; ls | head"),
+)
+_RW_DECLARATION = 'version = 1\nwriters = [["recordctl", "write"], ["python3", "/abs/tools/update_records.py"]]\n'
+
+
+def _test_records_writers(failures, tmp):
+    """(rw-*) The records-writer check of gate_weakening: the deny matrix (both sinks, '|' and '|&', options,
+    absolute sink paths, foreground flag absent, false and true, wrappers, assignments, quoting, pass-through
+    stages, earlier commands), each deny row red with the check removed (the pipeline walk and the
+    unparsed-text test patched to find nothing), the false-positive controls and allowed routes, the
+    declaration's discovery and its fail-closed reads (malformed, invalid UTF-8, wrong types, unknown keys,
+    duplicate or empty entries, oversized, symlink, directory, unreadable via an injected read fault, a cwd
+    that is relative, missing or not a directory), nested precedence, and the dispatcher path."""
+    base = tmp / "records-writers"
+    proj = base / "proj"
+    (proj / ".aiqt").mkdir(parents=True, exist_ok=True)
+    decl = proj / ".aiqt" / "records-writers.toml"
+    decl.write_text(_RW_DECLARATION, encoding="utf-8")
+    sub = proj / "sub" / "deeper"
+    sub.mkdir(parents=True, exist_ok=True)
+
+    def decide(command, cwd, background=None):
+        tool_input = {"command": command}
+        if background is not None:
+            tool_input["run_in_background"] = background
+        data = {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": tool_input, "cwd": str(cwd)}
+        code, obj, _err = aiqt_hooks.gate_weakening(data)
+        return _reduce_result(code, obj), obj
+
+    def expect(label, command, want, cwd=sub, background=None, needles=()):
+        got, obj = decide(command, cwd, background)
+        if got != want:
+            failures.append("({}) {!r}: expected {}, got {}".format(label, command, want, got))
+            return
+        text = json.dumps(obj) if obj else ""
+        for needle in needles:
+            if needle not in text:
+                failures.append("({}) {!r}: the decision does not carry {!r}: {}".format(label, command, needle, text))
+
+    guidance = ("Run the writer alone", "exit status", "re-read the authoritative record")
+    for label, command in _RW_DENY_ROWS:
+        for background in (None, False, True):
+            expect(label, command, "deny", background=background, needles=guidance + ("records writer declared",))
+    expect("rw-d-names-decl", "recordctl write | tail", "deny", needles=("'recordctl write'", "into 'tail'",
+                                                                         str(decl)))
+    for label, command in _RW_DENY_UNPARSED_ROWS:
+        expect(label, command, "deny", needles=("Run the writer alone",))
+    for label, command in _RW_ALLOW_ROWS:
+        got, obj = decide(command, sub)
+        if got == "deny":
+            failures.append("({}) {!r}: the records-writer check must not deny, got deny: {}".format(
+                label, command, json.dumps(obj)))
+    # An existing gate_weakening decision is kept under a declaration: a git hook bypass still denies with its
+    # own message, and a known verification run piped into head keeps the verification-sink deny.
+    expect("rw-keep-noverify", "git commit --no-verify -m x", "deny", needles=("--no-verify",))
+    expect("rw-keep-verify-sink", "pytest | head", "deny", needles=("known verification",))
+    # Each deny row is red with the check removed: with the pipeline walk and the unparsed-text test patched
+    # to find nothing, no row denies.
+    saved = (aiqt_hooks._records_writer_sink, aiqt_hooks._records_writer_named)
+    try:
+        aiqt_hooks._records_writer_sink = lambda records, writers: None
+        aiqt_hooks._records_writer_named = lambda command, writers: False
+        for label, command in _RW_DENY_ROWS + _RW_DENY_UNPARSED_ROWS:
+            got, _obj = decide(command, sub)
+            if got == "deny" and label != "rw-u-unbalanced":
+                failures.append("({}-red) {!r} still denies with the records-writer check removed, so the row "
+                                "does not prove the check".format(label, command))
+    finally:
+        aiqt_hooks._records_writer_sink, aiqt_hooks._records_writer_named = saved
+    # The unbalanced row is left out of the loop above and its control is checked here: the same unbalanced
+    # text naming no writer allows, so only the records-writer check can deny the row.
+    if decide("echo \"x; ls | head", sub)[0] == "deny":
+        failures.append("(rw-u-unbalanced-red) an unbalanced command naming no writer denies, so the "
+                        "unparsed-text row does not prove the check")
+    # No declaration: no change. A cwd with no declaration above it, no cwd key at all, and an explicit empty
+    # list each allow a writer piped into head.
+    bare = base / "bare"
+    bare.mkdir(parents=True, exist_ok=True)
+    expect("rw-c-absent", "recordctl write | head", "allow", cwd=bare)
+    no_cwd = {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": "recordctl write | head"}}
+    if _reduce_result(*aiqt_hooks.gate_weakening(no_cwd)[:2]) != "allow":
+        failures.append("(rw-c-no-cwd) a payload with no cwd key must discover no declaration and allow")
+    empty = base / "empty"
+    (empty / ".aiqt").mkdir(parents=True, exist_ok=True)
+    (empty / ".aiqt" / "records-writers.toml").write_text("version = 1\nwriters = []\n", encoding="utf-8")
+    expect("rw-c-empty", "recordctl write | head", "allow", cwd=empty)
+    expect("rw-c-empty-unparsed", "echo \"x; recordctl write | head", "allow", cwd=empty)
+    # Nested precedence: the nearest declaration replaces its parent's, an empty one included.
+    (proj / "sub" / ".aiqt").mkdir(parents=True, exist_ok=True)
+    nested = proj / "sub" / ".aiqt" / "records-writers.toml"
+    nested.write_text("version = 1\nwriters = [[\"otherctl\", \"put\"]]\n", encoding="utf-8")
+    expect("rw-c-nested-own", "otherctl put | head", "deny", cwd=sub)
+    expect("rw-c-nested-replaces", "recordctl write | head", "allow", cwd=sub)
+    expect("rw-c-parent-applies", "recordctl write | head", "deny", cwd=proj)
+    nested.write_text("version = 1\nwriters = []\n", encoding="utf-8")
+    expect("rw-c-nested-empty", "recordctl write | head", "allow", cwd=sub)
+    nested.unlink()
+    # Fail-closed declarations: each denies every Bash call, an unrelated command included, naming the path.
+    bad_dir = base / "bad"
+    (bad_dir / ".aiqt").mkdir(parents=True, exist_ok=True)
+    bad = bad_dir / ".aiqt" / "records-writers.toml"
+    bad_contents = (
+        ("rw-f-toml", b"version = 1\nwriters = [[\"a\"\n"),
+        ("rw-f-utf8", b"version = 1\nwriters = [[\"\xff\"]]\n"),
+        ("rw-f-version-bool", b"version = true\nwriters = []\n"),
+        ("rw-f-version-2", b"version = 2\nwriters = []\n"),
+        ("rw-f-version-str", b"version = \"1\"\nwriters = []\n"),
+        ("rw-f-unknown-key", b"version = 1\nwriters = []\nextra = 1\n"),
+        ("rw-f-missing-key", b"version = 1\n"),
+        ("rw-f-writers-str", b"version = 1\nwriters = \"recordctl\"\n"),
+        ("rw-f-entry-str", b"version = 1\nwriters = [\"recordctl\"]\n"),
+        ("rw-f-entry-empty", b"version = 1\nwriters = [[]]\n"),
+        ("rw-f-word-empty", b"version = 1\nwriters = [[\"\"]]\n"),
+        ("rw-f-word-int", b"version = 1\nwriters = [[1]]\n"),
+        ("rw-f-control", b"version = 1\nwriters = [[\"a\\u0007\"]]\n"),
+        ("rw-f-duplicate", b"version = 1\nwriters = [[\"a\"], [\"a\"]]\n"),
+        ("rw-f-oversized", b"version = 1\nwriters = []\n" + b"#" * 70000 + b"\n"),
+        ("rw-f-nested", b"version = 1\nwriters = " + b"[" * 4000 + b"]" * 4000 + b"\n"),
+    )
+    for label, content in bad_contents:
+        bad.write_bytes(content)
+        expect(label, "ls", "deny", cwd=bad_dir, needles=(str(bad), "fail-closed"))
+    # Boundary of the size bound: exactly the bound reads, one byte over denies.
+    pad = b"version = 1\nwriters = []\n"
+    bound = aiqt_hooks._RECORDS_WRITERS_MAX_BYTES
+    for label, size, want in (("rw-f-size-under", bound - 1, "allow"), ("rw-f-size-at", bound, "allow"),
+                              ("rw-f-size-over", bound + 1, "deny")):
+        bad.write_bytes(pad + b"#" * (size - len(pad) - 1) + b"\n")
+        expect(label, "ls", want, cwd=bad_dir)
+    bad.unlink()
+    os.symlink(str(decl), str(bad))
+    expect("rw-f-symlink", "ls", "deny", cwd=bad_dir, needles=("not a regular file",))
+    bad.unlink()
+    bad.mkdir()
+    expect("rw-f-directory", "ls", "deny", cwd=bad_dir, needles=("not a regular file",))
+    bad.rmdir()
+    bad.write_text(_RW_DECLARATION, encoding="utf-8")
+    expect("rw-f-valid-again", "ls", "allow", cwd=bad_dir)
+    # Injected faults: an open that fails as unreadable, a file gone between the lstat and the open, and an
+    # lstat fault on a candidate, rather than mode bits the test account may override.
+    real_open, real_lstat = aiqt_hooks.os.open, aiqt_hooks.os.lstat
+
+    def failing_open(path, *args, **kwargs):
+        if str(path).endswith("records-writers.toml"):
+            raise PermissionError(13, "Permission denied (injected)")
+        return real_open(path, *args, **kwargs)
+
+    def gone_open(path, *args, **kwargs):
+        if str(path).endswith("records-writers.toml"):
+            raise FileNotFoundError(2, "No such file (injected)")
+        return real_open(path, *args, **kwargs)
+
+    def failing_lstat(path, *args, **kwargs):
+        if str(path).endswith("records-writers.toml"):
+            raise PermissionError(13, "Permission denied (injected)")
+        return real_lstat(path, *args, **kwargs)
+
+    for label, fake_open, fake_lstat, needle in (
+            ("rw-f-unreadable", failing_open, real_lstat, "could not be opened"),
+            ("rw-f-disappearing", gone_open, real_lstat, "disappeared"),
+            ("rw-f-inaccessible-dir", real_open, failing_lstat, "could not be checked")):
+        aiqt_hooks.os.open, aiqt_hooks.os.lstat = fake_open, fake_lstat
+        try:
+            expect(label, "ls", "deny", cwd=bad_dir, needles=(needle,))
+        finally:
+            aiqt_hooks.os.open, aiqt_hooks.os.lstat = real_open, real_lstat
+    # An unusable cwd cannot be evaluated: a relative path, a missing directory and a regular file deny.
+    expect("rw-f-cwd-relative", "ls", "deny", cwd="relative/dir", needles=("cwd",))
+    expect("rw-f-cwd-missing", "ls", "deny", cwd=base / "no-such-dir", needles=("cwd",))
+    expect("rw-f-cwd-file", "ls", "deny", cwd=decl, needles=("cwd",))
+    # The fail-closed rows are red with the reader removed: a reader that reports an empty declaration allows.
+    saved_read = aiqt_hooks._records_writers_read
+    try:
+        aiqt_hooks._records_writers_read = lambda path: ("ok", ())
+        bad.write_bytes(b"version = 2\nwriters = []\n")
+        if decide("ls", bad_dir)[0] == "deny":
+            failures.append("(rw-f-red) a malformed declaration still denies with the reader removed")
+    finally:
+        aiqt_hooks._records_writers_read = saved_read
+    # The dispatcher path: main routes a Bash payload to gate_weakening, which denies the writer pipeline.
+    payload = json.dumps({"hook_event_name": "PreToolUse", "tool_name": "Bash", "cwd": str(sub),
+                          "tool_input": {"command": "recordctl write | head", "run_in_background": True}})
+    shutil.rmtree(str(proj / "sub" / ".aiqt"), ignore_errors=True)
+    proc = subprocess.run([sys.executable, "-I", "-B", str(aiqt_hooks.__file__), "gate_weakening"], input=payload,
+                          capture_output=True, text=True, timeout=120)
+    try:
+        obj = json.loads(proc.stdout) if proc.stdout.strip() else None
+    except ValueError:
+        obj = None
+    if proc.returncode != 0 or _reduce_result(0, obj) != "deny":
+        failures.append("(rw-dispatch) the dispatcher did not deny a declared writer piped into head: rc {} "
+                        "stdout {!r} stderr {!r}".format(proc.returncode, proc.stdout[-400:], proc.stderr[-400:]))
+
+
 def _main_isolated(monitor):
     scrub_git_environment()
     handler = aiqt_hooks.git_discard
@@ -30512,6 +30757,7 @@ def _main_isolated(monitor):
         _test_deadline_posture(failures, tmp)
         _test_cannot_evaluate_paths(failures, tmp)
         _test_reset_ancestry(failures, tmp)
+        _test_records_writers(failures, tmp)
 
         # === write_scope_guard (wrtscp, EN-8): confine guarded-tool writes to a per-slice scope =========
         # declaration; hard-deny writes to the frozen floor and to other/nested repos as an un-lowerable
