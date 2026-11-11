@@ -381,7 +381,8 @@ DENY_CONSTRUCTORS = (
     "_commit_identity_fallback", "_commit_msg_subst_fallback", "_deny_missing_tool_name", "_deny_relative",
     "_deny_with_recovery", "_discard_deny", "_expbnd_breadth_publish_deny", "_gate_alias_deny",
     "_gate_runtime_deny", "_git_discard_alias_deny", "_git_discard_fallback", "_hash_doubt_opaque_deny",
-    "_protected_line_fallback", "_raw_push_guard", "_reading_limit_deny", "_redirect_deny",
+    "_protected_line_fallback", "_raw_push_guard", "_reading_limit_deny", "_records_writer_deny",
+    "_records_writer_unreadable_deny", "_records_writer_verdict_deny", "_redirect_deny",
     "_reset_ancestry_deny", "_wrtscp_deny")
 
 def _allow():
@@ -18214,11 +18215,12 @@ def _gate_recovered_sink(command, doubt=None):
 # An adopter may declare, in .aiqt/records-writers.toml, the commands that write its authoritative records
 # (version = 1, writers = [["recordctl", "write"], ...]): each entry is a case-sensitive argv prefix of literal
 # words, never a pattern or a shell snippet. The nearest such file in the physical ancestors of the payload's
-# cwd wins, and a nested one replaces its parent's (writers = [] declares none). With no declaration found
-# this check adds nothing. A declaration this check cannot read (unreadable, malformed, oversized, not a
-# regular file, gone during the read) or a cwd it cannot walk denies every Bash call fail-closed, naming the
-# path and the repair. This is a configured tooling check, not a security control or proof that a record was
-# written.
+# cwd wins, and a nested one replaces its parent's (writers = [] declares none). With no declaration found, or
+# none that can be looked for (a cwd that is not an absolute path, or a walk that faults), this check adds
+# nothing. A declaration found but unreadable (malformed, oversized, not a regular file, gone during the read)
+# denies every Bash call fail-closed, naming the path and the repair. Every outcome of this check is decided
+# after every other gate_weakening deny, so it never changes an existing deny's reason. This is a configured
+# tooling check, not a security control or proof that a record was written.
 _RECORDS_WRITERS_REL = os.path.join(".aiqt", "records-writers.toml")
 _RECORDS_WRITERS_MAX_BYTES = 65536
 _RECORDS_WRITERS_MAX_DEPTH = 256
@@ -18297,25 +18299,26 @@ def _records_writers_read(path):
 
 
 def _records_writers_load(data):
-    """("absent", None, None), ("ok", writers, path) or ("bad", detail, path) for the records-writer
-    declaration that governs this Bash payload: the nearest .aiqt/records-writers.toml in the physical
-    ancestors of the payload's cwd (realpath, walked up to the root). A payload with no cwd key discovers
-    nothing (absent). A cwd that is not an absolute string or cannot be resolved and stat'd as a directory, an
-    lstat fault other than not-found or not-a-directory on any candidate, and a walk deeper than
-    _RECORDS_WRITERS_MAX_DEPTH are bad (cannot-evaluate), never absent; a candidate that is present but not a
-    regular file (a symlink included) is bad too."""
+    """("absent", None, None), ("unlocatable", detail, None), ("ok", writers, path) or ("bad", detail, path)
+    for the records-writer declaration that governs this Bash payload: the nearest .aiqt/records-writers.toml
+    in the physical ancestors of the payload's cwd (realpath, walked up to the root). A payload with no cwd key
+    discovers nothing (absent). An absolute cwd that is missing or is not a directory is walked from its
+    existing ancestors, since no declaration can sit inside a path that is not a directory, so the declaration
+    that governs it is still found. Where the declaration cannot be looked for at all (a cwd that is not an
+    absolute string, a resolve fault, an lstat fault other than not-found or not-a-directory on a candidate, or
+    a walk deeper than _RECORDS_WRITERS_MAX_DEPTH) the state is unlocatable: whether a declaration governs the
+    payload cannot be evaluated, and gate_weakening does not deny on that ground alone (its other checks
+    decide as they would with no declaration). A candidate that is present but unreadable, malformed or not a
+    regular file (a symlink included) is bad, a cannot-evaluate that denies."""
     if "cwd" not in data:
         return ("absent", None, None)
     cwd = data.get("cwd")
     if not isinstance(cwd, str) or not cwd or not os.path.isabs(cwd) or "\x00" in cwd:
-        return ("bad", "the payload's cwd is not a usable absolute path, so the declaration cannot be found",
-                None)
+        return ("unlocatable", "the payload's cwd is not a usable absolute path", None)
     try:
         here = os.path.realpath(cwd)
-        if not stat.S_ISDIR(os.stat(here).st_mode):
-            return ("bad", "the payload's cwd is not a directory", None)
     except (OSError, ValueError) as exc:
-        return ("bad", "the payload's cwd could not be resolved ({})".format(exc), None)
+        return ("unlocatable", "the payload's cwd could not be resolved ({})".format(exc), None)
     for _depth in range(_RECORDS_WRITERS_MAX_DEPTH):
         path = os.path.join(here, _RECORDS_WRITERS_REL)
         try:
@@ -18323,7 +18326,7 @@ def _records_writers_load(data):
         except (FileNotFoundError, NotADirectoryError):
             st = None
         except OSError as exc:
-            return ("bad", "the path could not be checked ({})".format(exc), path)
+            return ("unlocatable", "the path {} could not be checked ({})".format(path, exc), None)
         if st is not None:
             if not stat.S_ISREG(st.st_mode):
                 return ("bad", "the file is not a regular file (a symlink, FIFO, directory, ...)", path)
@@ -18333,7 +18336,7 @@ def _records_writers_load(data):
         if parent == here:
             return ("absent", None, None)
         here = parent
-    return ("bad", "the directory walk from the payload's cwd exceeded {} levels".format(
+    return ("unlocatable", "the directory walk from the payload's cwd exceeded {} levels".format(
         _RECORDS_WRITERS_MAX_DEPTH), None)
 
 
@@ -18427,6 +18430,36 @@ def _records_writer_unreadable_deny(command_doubt, detail, path):
         "duplicates); writers = [] declares none.".format(where, detail, _RECORDS_WRITERS_MAX_BYTES),
         "AIQT guardrail: denied a Bash call because the records-writer declaration could not be read (rule "
         "gatdis, fail-closed).")
+
+
+def _records_writer_verdict(data, readings, command=None):
+    """The records-writer outcome gate_weakening decides only after every other deny it holds, or None: ("bad",
+    detail, path) when the governing declaration is found but cannot be read; ("deny", writer, sink, path) when
+    a declared writer is piped into head or tail in any of readings (each a list of segment records); ("doubt",
+    path) when command, the raw text of an unparseable command (None on a parsed one), names a writer's command
+    word and head or tail; else None, which includes no declaration, an empty one, and an unlocatable one
+    (_records_writers_load), so an adopter with no declaration sees no change."""
+    state, value, path = _records_writers_load(data)
+    if state == "bad":
+        return ("bad", value, path)
+    if state != "ok" or not value:
+        return None
+    for records in readings:
+        hit = _records_writer_sink(records, value)
+        if hit is not None:
+            return ("deny", hit[0], hit[1], path)
+    if command is not None and _records_writer_named(command, value):
+        return ("doubt", path)
+    return None
+
+
+def _records_writer_verdict_deny(verdict):
+    """The deny for a non-None _records_writer_verdict result."""
+    if verdict[0] == "deny":
+        return _records_writer_deny(verdict[1], verdict[2], verdict[3])
+    if verdict[0] == "doubt":
+        return _records_writer_unreadable_deny(True, None, verdict[1])
+    return _records_writer_unreadable_deny(False, verdict[1], verdict[2])
 
 
 def gate_weakening(data):
@@ -18704,13 +18737,6 @@ def gate_weakening(data):
             "AIQT rule gatdis (gate-discipline): the Bash payload carried no readable command string, "
             "so the gate-weakening check could not run; failing closed.",
             "AIQT guardrail: denied a Bash call with no readable command (rule gatdis, fail-closed).")
-    # The adopter's records-writer declaration (_records_writers_load): one it cannot read denies at once; a
-    # nonempty list is checked below after every other deny, so each existing deny keeps its message.
-    rw_state, rw_writers, rw_path = _records_writers_load(data)
-    if rw_state == "bad":
-        return _records_writer_unreadable_deny(False, rw_writers, rw_path)
-    if rw_state != "ok" or not rw_writers:
-        rw_writers = ()
     reads = _SubstHeredocs.reads
     try:
         # Each reading of an uncertain '#' (the shared lexer's comment rule) is kept apart for the deny tier
@@ -18779,15 +18805,6 @@ def gate_weakening(data):
         lexed = None
         if kind:
             return _gate_alias_deny(kind == "built")
-        if rw_writers:
-            # A declared writer piped into head or tail among the complete recovered segments denies as on a
-            # parsed command; otherwise text naming a writer's command word and head or tail cannot be
-            # evaluated and denies fail-closed. The unread suffix is never read as clean.
-            rw_hit = _records_writer_sink(recovered, rw_writers)
-            if rw_hit is not None:
-                return _records_writer_deny(rw_hit[0], rw_hit[1], rw_path)
-            if _records_writer_named(command, rw_writers):
-                return _records_writer_unreadable_deny(True, None, rw_path)
         if not isinstance(exc, _UncertainHashError):
             # The text the partial lex could not read, from the start of the in-progress segment (its raw
             # slice runs to the end of command) or the whole command where no segment was in progress, is
@@ -18831,6 +18848,16 @@ def gate_weakening(data):
                     "run. " + _GATE_ALTS,
                     "AIQT guardrail: denied an unparseable command whose quoting spells a git "
                     "verification-hook bypass (rule gatdis, fail-safe).")
+            # The records-writer check (_records_writer_verdict) decides only where the fallback below would
+            # not deny (no raw bypass kind, no closed-grammar refusal, no git word built at run time), so every
+            # existing deny keeps its message: a declared writer piped into head or tail among the complete
+            # recovered segments denies as on a parsed command, and text naming a writer's command word and
+            # head or tail cannot be evaluated and denies fail-closed (the unread suffix is never read as
+            # clean).
+            rw = _records_writer_verdict(data, [recovered], command)
+            if (rw is not None and raw_kind not in _GATE_FALLBACK_DENIES
+                    and _gate_closed_grammar_scan(command) is None and _gate_runtime_bypass(command) is None):
+                return _records_writer_verdict_deny(rw)
             # A word built at run time that may be git ($G commit -nv <<<x) is read over the whole command as
             # on the parsed path (_gate_runtime_bypass), inside the fallback after its own denies, so each deny
             # above and each of the fallback's keeps its message.
@@ -18880,6 +18907,11 @@ def gate_weakening(data):
             kind, what, how = grammar_hit
             reason, banner = _gate_grammar_messages(kind, what, how, False)
             return _deny(reason, banner)
+        # After every deny of this branch, the records-writer check reads the complete recovered segments and
+        # the raw text as on the ordinary parse failure above, before any note.
+        rw = _records_writer_verdict(data, [recovered], command)
+        if rw is not None:
+            return _records_writer_verdict_deny(rw)
         # What remains is still text this guard cannot evaluate: where it holds a checker-shaped word
         # (_gate_doubt_checker, the parsed recognizer's own name splitter and lexicon, so a swallow or
         # truncating spelling behind the '#' pairs through its own '|', '<<<' or substitution marker) and
@@ -19003,13 +19035,13 @@ def gate_weakening(data):
     runtime_hit = _gate_runtime_bypass(command)
     if runtime_hit is not None:
         return _gate_runtime_deny(runtime_hit)
-    if rw_writers:
-        # A declared records writer piped into head or tail denies on any reading (each reading of an
-        # uncertain '#' is judged on its own), foreground or background alike, before any note or allow.
-        for reading in readings:
-            rw_hit = _records_writer_sink(reading, rw_writers)
-            if rw_hit is not None:
-                return _records_writer_deny(rw_hit[0], rw_hit[1], rw_path)
+    # After every other deny, the records-writer check (_records_writer_verdict): a declared records writer
+    # piped into head or tail denies on any reading (each reading of an uncertain '#' is judged on its own),
+    # foreground or background alike, before any note or allow; a declaration found but unreadable denies
+    # fail-closed here too, so no existing deny's reason changes.
+    rw = _records_writer_verdict(data, readings)
+    if rw is not None:
+        return _records_writer_verdict_deny(rw)
     if pending_note is not None:
         return _allow_note(pending_note)
     flow_note = _gate_flow_note(records, command)

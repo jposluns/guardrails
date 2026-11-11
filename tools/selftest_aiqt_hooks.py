@@ -11418,19 +11418,44 @@ def _test_records_writers(failures, tmp):
             raise PermissionError(13, "Permission denied (injected)")
         return real_lstat(path, *args, **kwargs)
 
-    for label, fake_open, fake_lstat, needle in (
-            ("rw-f-unreadable", failing_open, real_lstat, "could not be opened"),
-            ("rw-f-disappearing", gone_open, real_lstat, "disappeared"),
-            ("rw-f-inaccessible-dir", real_open, failing_lstat, "could not be checked")):
+    for label, fake_open, fake_lstat, want, needles in (
+            ("rw-f-unreadable", failing_open, real_lstat, "deny", ("could not be opened",)),
+            ("rw-f-disappearing", gone_open, real_lstat, "deny", ("disappeared",)),
+            ("rw-c-inaccessible-dir", real_open, failing_lstat, "allow", ())):
+        # An lstat fault on a candidate leaves the declaration unlocatable: whether one governs the payload
+        # cannot be evaluated, and that alone never denies.
         aiqt_hooks.os.open, aiqt_hooks.os.lstat = fake_open, fake_lstat
         try:
-            expect(label, "ls", "deny", cwd=bad_dir, needles=(needle,))
+            expect(label, "ls", want, cwd=bad_dir, needles=needles)
+            if want == "allow":
+                expect(label + "-writer", "recordctl write | head", "allow", cwd=bad_dir)
         finally:
             aiqt_hooks.os.open, aiqt_hooks.os.lstat = real_open, real_lstat
-    # An unusable cwd cannot be evaluated: a relative path, a missing directory and a regular file deny.
-    expect("rw-f-cwd-relative", "ls", "deny", cwd="relative/dir", needles=("cwd",))
-    expect("rw-f-cwd-missing", "ls", "deny", cwd=base / "no-such-dir", needles=("cwd",))
-    expect("rw-f-cwd-file", "ls", "deny", cwd=decl, needles=("cwd",))
+    # A cwd from which no declaration can be looked for (not a string, empty, relative) never denies on that
+    # ground alone: with no declaration anywhere it allows, and a relative cwd that would name a directory
+    # under a declaration (resolved against this process's own directory) is not resolved, so it allows too.
+    for label, cwd in (("rw-c-cwd-none", None), ("rw-c-cwd-int", 7), ("rw-c-cwd-empty", ""),
+                       ("rw-c-cwd-relative", "relative/dir")):
+        for command in ("ls", "recordctl write | head", "echo \"x; recordctl write | head"):
+            data = {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": command}}
+            baseline = aiqt_hooks.gate_weakening(data)
+            data["cwd"] = cwd
+            got = aiqt_hooks.gate_weakening(data)
+            if got != baseline or _reduce_result(*got[:2]) == "deny":
+                failures.append("({}) {!r} with cwd {!r}: an unusable cwd must not deny on that ground alone and "
+                                "must decide as a payload with no cwd does: got {!r}, no-cwd {!r}".format(
+                                    label, command, cwd, got, baseline))
+    expect("rw-c-cwd-relative-would-find", "recordctl write | head", "allow",
+           cwd=os.path.relpath(str(proj), os.getcwd()))
+    # An absolute cwd that is missing or is not a directory is walked from its existing ancestors: with no
+    # declaration above it nothing changes, and under one the declaration that governs it still applies.
+    expect("rw-c-cwd-missing-absent", "recordctl write | head", "allow", cwd=bare / "no-such-dir")
+    expect("rw-c-cwd-missing-ls", "ls", "allow", cwd=proj / "no-such-dir")
+    expect("rw-c-cwd-missing-found", "recordctl write | head", "deny", cwd=proj / "no-such-dir",
+           needles=(str(decl),))
+    expect("rw-c-cwd-file-ls", "ls", "allow", cwd=decl)
+    expect("rw-c-cwd-file-found", "recordctl write | head", "deny", cwd=decl, needles=(str(decl),))
+    _test_records_writers_existing(failures, proj, sub, bad_dir, bad, decl)
     # The fail-closed rows are red with the reader removed: a reader that reports an empty declaration allows.
     saved_read = aiqt_hooks._records_writers_read
     try:
@@ -11453,6 +11478,90 @@ def _test_records_writers(failures, tmp):
     if proc.returncode != 0 or _reduce_result(0, obj) != "deny":
         failures.append("(rw-dispatch) the dispatcher did not deny a declared writer piped into head: rc {} "
                         "stdout {!r} stderr {!r}".format(proc.returncode, proc.stdout[-400:], proc.stderr[-400:]))
+
+
+# (rw-k-*) Existing gate_weakening denies whose reason the records-writer check must never change: each command
+# is judged with no cwd key (the baseline, which looks for no declaration) and under each cwd the rows name, and
+# the decision must equal the baseline exactly. They cover the parsed path, the ordinary parse failure (a
+# here-string), the bypass the unread text names, and the uncertain '#' path.
+_RW_KEEP_COMMANDS = (
+    ("rw-k-noverify", "git commit --no-verify -m x"),
+    ("rw-k-alias", "git -c alias.l=log l"),
+    ("rw-k-sink", "pytest | head"),
+    ("rw-k-writer-noverify", "recordctl write | head; git commit --no-verify -m x"),
+    ("rw-k-unparsed-noverify", "git commit --no-verify -m x <<<y"),
+    ("rw-k-unparsed-alias", "git <<<x -c alias.l=log l"),
+    ("rw-k-unparsed-unread", "recordctl write | head; cat <<<x; git commit --no-verify -m y"),
+    ("rw-k-hash", "cat <(a)#; git -C \"a b\" $X l"),
+)
+
+
+def _test_records_writers_existing(failures, proj, sub, bad_dir, bad, decl):
+    """(rw-k-*) The existing-reason rows (_RW_KEEP_COMMANDS): every one denies with no cwd key, and with a
+    cwd that is None, relative, missing, a regular file, under a valid declaration, or under a malformed one,
+    gate_weakening returns exactly that baseline. Then the flip: a gate that decides the declaration in the
+    order the check first shipped with (an unusable cwd or a declaration fault denying before any other
+    check, and the writer pipeline of an unparseable command judged before the raw-fallback denies) fails
+    rows here, so these rows prove the check runs after every existing deny."""
+    bad.write_bytes(b"version = 2\nwriters = []\n")
+    cwds = (("none", None), ("relative", "relative/dir"), ("missing", str(proj / "no-such-dir")),
+            ("file", str(decl)), ("declared", str(sub)), ("malformed", str(bad_dir)))
+
+    def payload(command, cwd=_RW_NO_CWD):
+        data = {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": command}}
+        if cwd is not _RW_NO_CWD:
+            data["cwd"] = cwd
+        return data
+
+    def pinned_order(data):
+        # The order the check first shipped with: a cwd that is not an absolute directory and a declaration
+        # fault deny before any other check, and a declared writer piped into head or tail among the complete
+        # recovered segments of an unparseable command denies before the raw-fallback denies.
+        cwd = data.get("cwd")
+        if "cwd" in data and (not isinstance(cwd, str) or not os.path.isabs(cwd) or not os.path.isdir(cwd)):
+            return aiqt_hooks._records_writer_unreadable_deny(False, "the payload's cwd is not usable", None)
+        state, value, path = aiqt_hooks._records_writers_load(data)
+        if state == "bad":
+            return aiqt_hooks._records_writer_unreadable_deny(False, value, path)
+        if state == "ok" and value:
+            command = data["tool_input"]["command"]
+            try:
+                aiqt_hooks._lex_readings(command)
+            except ValueError:
+                recovered = aiqt_hooks._gate_partial_lex(command, None)[0]
+                hit = aiqt_hooks._records_writer_sink(recovered, value)
+                if hit is not None:
+                    return aiqt_hooks._records_writer_deny(hit[0], hit[1], path)
+        return aiqt_hooks.gate_weakening(data)
+
+    def rows(gate):
+        out = []
+        for label, command in _RW_KEEP_COMMANDS:
+            baseline = aiqt_hooks.gate_weakening(payload(command))
+            if _reduce_result(*baseline[:2]) != "deny":
+                out.append("({}-baseline) {!r} no longer denies with no cwd key, so the row keeps no reason: {!r}"
+                           .format(label, command, baseline))
+                continue
+            for name, cwd in cwds:
+                got = gate(payload(command, cwd))
+                if got != baseline:
+                    out.append("({}-{}) {!r}: the records-writer check changed an existing deny: got {!r}, "
+                               "expected {!r}".format(label, name, command, got, baseline))
+        return out
+
+    failures.extend(rows(aiqt_hooks.gate_weakening))
+    flipped = rows(pinned_order)
+    for name in ("none", "relative", "missing", "file", "malformed"):
+        if not any("-{}) ".format(name) in line for line in flipped):
+            failures.append("(rw-k-flip-{}) the pinned check order changes no existing deny under the {} cwd, so "
+                            "the rw-k rows do not prove the check runs after every existing deny".format(name, name))
+    if not any(line.startswith("(rw-k-unparsed-unread-declared)") for line in flipped):
+        failures.append("(rw-k-flip-unparsed) the pinned check order keeps the unread-text bypass deny under a "
+                        "valid declaration, so the rw-k rows do not prove the unparsed placement")
+    bad.write_text(_RW_DECLARATION, encoding="utf-8")
+
+
+_RW_NO_CWD = object()
 
 
 def _main_isolated(monitor):
