@@ -265,6 +265,8 @@ _CNSDIF_BASE_DECISIONS = {
     "git diff --no-index --stat --word-diff-regex -- -p a b": "deny",
     "git diff --no-index -S -- --output=real.txt a b > out.txt": "allow-note",
     "git diff --no-index --stat -- a b": "allow-note",
+    "git diff --no-index --end-of-options --output=x.txt a": "allow-note",
+    "git diff --no-index --end-of-options --output x.txt a": "allow-note",
     "git log -wp": "allow-note",
     "git log -Sfoo": "allow-note",
     "env git diff": "allow-note",
@@ -437,6 +439,7 @@ _CNSDIF_BASE_DECISIONS = {
     "git diff -wI --output=real.txt": "allow-note",
     "git diff -Ix --output=real.txt": "allow-note",
     "git diff --author --output=real.txt": "allow-note",
+    "git diff --default --output=real.txt HEAD": "allow-note",
     "git diff --no-index --line --output=real.txt a b": "allow-note",
     "git log -p --decorate-refs --output=real.txt": "allow-note",
     "git format-patch --stdout --subject-prefix --output=real.txt": "allow-note",
@@ -17907,6 +17910,15 @@ def _main_isolated(monitor):
                 "with a note", "git diff --no-index -S -- --output=real.txt a b > out.txt", "allow-note")
         dexpect("(cnsdif-ni-c2) a --no-index summary followed by paths allows with a note",
                 "git diff --no-index --stat -- a b", "allow-note")
+        # Under --no-index an --end-of-options right after an option that takes no value ends the options, and
+        # git reads the --output word after it as a path (git 2.53.0 printed the whole patch on stdout and
+        # wrote no x.txt for the first). The scans go on past it, since that option may take it as a value
+        # under the other reading, so a diversion word found past it never makes stdout a decoy: both allowed
+        # with a note at the base.
+        dexpect("(cnsdif-ni-eoo1) a --output=x.txt past a --no-index --end-of-options is a path, denies",
+                "git diff --no-index --end-of-options --output=x.txt a", "deny")
+        dexpect("(cnsdif-ni-eoo2) a separated --output x.txt past that word is a path too, denies",
+                "git diff --no-index --end-of-options --output x.txt a", "deny")
         # Proof D trusts the pipe only when no diversion is found under either reading: git 2.55.0 wrote the
         # patch of git diff --no-index -S -- --output=/dev/stderr a b to stderr and nothing to the pipe, so the
         # pager is a decoy and the console target denies. It allowed at the commit before the option-parser
@@ -17974,6 +17986,9 @@ def _main_isolated(monitor):
                 "git diff -Ix --output=real.txt", "allow-note")
         dexpect("(cnsdif-val-walk) a --output that is the --author value denies",
                 "git diff --author --output=real.txt", "deny")
+        # --default takes the next word too (git 2.53.0 printed the patch on stdout and wrote no real.txt).
+        dexpect("(cnsdif-val-default) a --output that is the --default value denies",
+                "git diff --default --output=real.txt HEAD", "deny")
         dexpect("(cnsdif-val-abbr) a --output that is the value of --line under --no-index denies",
                 "git diff --no-index --line --output=real.txt a b", "deny")
         dexpect("(cnsdif-val-log) a --output that is the log --decorate-refs value denies",
@@ -22209,14 +22224,16 @@ def _main_isolated(monitor):
         pexpect("(qa-b1-pl) backslash-newline force-push does not slip via an empty argv element, denies",
                 "git \\\n push --force origin main", "deny", cwd=plr)
         # A --/--end-of-options right after an option word may be that option's value (git push -o -- --force
-        # origin main force-pushed with git 2.55.0), so the force or delete after it is judged: each deny below
-        # allowed before. The control: a push option whose value is -- with a plain push still allows.
-        pexpect("(pl-eoo1) a --force after a -- that is the -o value denies",
-                "git push -o -- --force origin main", "deny", cwd=plr)
-        pexpect("(pl-eoo2) a --force after a -- that is the --push-option value denies",
-                "git push --push-option -- --force origin main", "deny", cwd=plr)
-        pexpect("(pl-eoo3) a --delete after an --end-of-options that is the -o value denies",
-                "git push -o --end-of-options --delete origin main", "deny", cwd=plr)
+        # origin main force-pushed with git 2.55.0), so the force or delete after it is judged. The raw-text
+        # push check denies each of the three below on its own, so they run with it stood down (pexpect_layer)
+        # to witness the push parser: a parser that ends the options at that word allows all three. The
+        # control: a push option whose value is -- with a plain push still allows.
+        pexpect_layer("(pl-eoo1) a --force after a -- that is the -o value denies",
+                      "git push -o -- --force origin main", "deny", cwd=plr)
+        pexpect_layer("(pl-eoo2) a --force after a -- that is the --push-option value denies",
+                      "git push --push-option -- --force origin main", "deny", cwd=plr)
+        pexpect_layer("(pl-eoo3) a --delete after an --end-of-options that is the -o value denies",
+                      "git push -o --end-of-options --delete origin main", "deny", cwd=plr)
         pexpect("(pl-eoo-c1) a plain push whose -o value is -- allows", "git push -o -- origin feature", "allow",
                 cwd=plr)
         # The protected_line cases end here: every later case runs on the hook production commit limits.

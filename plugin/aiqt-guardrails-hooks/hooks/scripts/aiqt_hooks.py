@@ -4430,7 +4430,10 @@ def _diff_option_takes_next(word):
     --output=x.txt a b, and the same with -u, -U, -wp or -Sp, reads --output=x.txt as a path and exits 129
     without writing x.txt, while -pS -- --output=x.txt gives -S the '--' and writes x.txt (git 2.55.0). Any
     other short word, and a long one with no '=', may take the next word (git diff --stat -- -p reads the
-    '--' as a possible --stat value although --stat takes one only after '=', a safe-direction over-read)."""
+    '--' as a possible --stat value although --stat takes one only after '='). That over-read lets the scans
+    go on past an end-of-options word git ends the options at, so it is safe only because a diversion word
+    found past one never makes stdout a decoy (_diff_output_diversions): git diff --no-index --end-of-options
+    --output=x.txt a reads --output=x.txt as a path and prints the patch on stdout."""
     return _option_may_take_value(word) and (word.startswith("--") or word[-1] not in _SUMMARY_PATCH_SHORT)
 
 
@@ -4471,9 +4474,9 @@ _DIFF_VALUE_NAMES = frozenset((
     "src-prefix", "stat-count", "stat-graph-width", "stat-name-width", "stat-width", "word-diff-regex",
     "ws-error-highlight"))
 _DIFF_WALK_VALUE_NAMES = frozenset((
-    "after", "author", "before", "committer", "date", "diff-merges", "encoding", "exclude", "exclude-hidden",
-    "glob", "grep", "grep-reflog", "max-age", "max-count", "min-age", "since", "since-as-filter", "skip",
-    "until"))
+    "after", "author", "before", "committer", "date", "default", "diff-merges", "encoding", "exclude",
+    "exclude-hidden", "glob", "grep", "grep-reflog", "max-age", "max-count", "min-age", "since",
+    "since-as-filter", "skip", "until"))
 _DIFF_SUB_VALUE_NAMES = {
     "log": frozenset(("decorate-refs", "decorate-refs-exclude")),
     "show": frozenset(("decorate-refs", "decorate-refs-exclude")),
@@ -4573,39 +4576,48 @@ def _diff_output_diversions(argv, ends=_diff_ends_options):
     reading (ends, one of _DIFF_OPTION_READINGS; the revision-walk one by default), in order: is_output is
     True for a --output word and False for a -o word, target is None for a separated value missing at the end,
     and may_be_value is True when the word before it is an option word that may take it as its value
-    (_diff_option_takes_word). Every word spelled as a diversion counts, the word after a separated --output
-    included, since any of them may be the value of the option before it (git diff -S --output
-    --output=/dev/stderr gives the first --output to -S and writes the patch to stderr). The callers judge both
-    readings and keep the stricter outcome: a console target among the diversions under either one is a
-    console dump, a diversion under either one keeps proofs C and D from applying, and only a --output word
-    that is no option's value makes stdout a decoy, while a file diversion under one reading never outweighs
-    a console patch under the other. Under the revision-walk reading the scan stops at the first '--',
-    exactly where the revision walk does, and goes on past an '--end-of-options' only right after an option
-    word. Where that option takes a value, git agrees. Where it takes none, git ends the options there and
-    must read the next word as a revision: a word spelled as a diversion names one only through a ref created
-    with that name by git update-ref (git branch and git tag refuse a name starting with '-'), and otherwise
-    git refuses the command (git diff -p --end-of-options --output=real.txt, git 2.55.0). Under the
-    option-parser reading, the one --no-index uses, a '--' right after an option word that may take a value
-    does not end the scan either (_diff_parser_ends_options: git diff --no-index -S -- --output=/dev/stderr a
-    b writes the patch to stderr). git format-patch (_DIFF_ALWAYS_PATCH_SUBS) takes its own options out of
-    the words before its diff options are read, so its separated --output may take any later word before the
-    end of the options, and each counts as a target too: git format-patch -1 --output --stdout --no-stdout
-    /dev/stderr wrote the patch to stderr (git 2.55.0). That can only find a console target more often."""
+    (_diff_option_takes_word), or when it stands at or after an end-of-options word the scan went on past.
+    Every word spelled as a diversion counts, the word after a separated --output included, since any of them
+    may be the value of the option before it (git diff -S --output --output=/dev/stderr gives the first
+    --output to -S and writes the patch to stderr). The callers judge both readings and keep the stricter
+    outcome: a console target among the diversions under either one is a console dump, a diversion under
+    either one keeps proofs C and D from applying, and only a --output word that is no option's value and
+    stands before every end-of-options word makes stdout a decoy. Under the revision-walk reading the scan
+    stops at the first '--', exactly where the revision walk does, and goes on past an '--end-of-options'
+    only right after an option word that may take a value; under the option-parser reading, the one
+    --no-index uses, it goes on past a '--' or '--end-of-options' there too (_diff_parser_ends_options: git
+    diff --no-index -S -- --output=/dev/stderr a b writes the patch to stderr). Where that option takes the
+    word as its value, git agrees. Where it takes none, git ends the options at that word: the revision walk
+    reads the next word as a revision, which a word spelled as a diversion names only through a ref created
+    with that name by git update-ref, and otherwise refuses the command (git diff -p --end-of-options
+    --output=real.txt, git 2.55.0), while git diff --no-index reads it as a path and prints the patch on
+    stdout (git diff --no-index --end-of-options --output=x.txt a, git 2.53.0, wrote no x.txt). So a
+    diversion word past such a word may be no diversion at all: it is still read for a console target, but
+    it never makes stdout a decoy, and stdout is judged too. git format-patch (_DIFF_ALWAYS_PATCH_SUBS) takes
+    its own options out of the words before its diff options are read, so its separated --output may take
+    any later word before the end of the options, and each counts as a target too: git format-patch -1
+    --output --stdout --no-stdout /dev/stderr wrote the patch to stderr (git 2.55.0). That can only find a
+    console target more often."""
     end = len(argv)
+    passed = None                                # the first end-of-options word the scan goes on past
     for j in range(len(argv)):
         if ends(argv, j):
             end = j
             break
+        if passed is None and argv[j] in _DIFF_END_OF_OPTIONS:
+            passed = j
     sub = _git_subcommand_rest(argv)[0]
     found = []
     i = 0
     while i < end:
         word = argv[i]
-        may_be_value = i > 0 and _diff_option_takes_word(sub, argv[i - 1], ends)
+        may_be_value = ((passed is not None and i >= passed)
+                        or (i > 0 and _diff_option_takes_word(sub, argv[i - 1], ends)))
         if word == "--output":
             found.append((True, argv[i + 1] if i + 1 < len(argv) else None, may_be_value))
             if sub in _DIFF_ALWAYS_PATCH_SUBS:
-                found.extend((True, later, may_be_value) for later in argv[i + 2:end])
+                found.extend((True, argv[k], may_be_value or (passed is not None and k >= passed))
+                             for k in range(i + 2, end))
         elif word.startswith("--output="):
             found.append((True, word[len("--output="):], may_be_value))
         elif word == "-o":
