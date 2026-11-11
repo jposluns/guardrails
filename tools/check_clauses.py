@@ -165,11 +165,15 @@ LEGS (all run at the default step-1 invocation; none needs a manifest):
                         register) strictly EXCEEDS the cumulative maximum ordinal EVER used for that
                         corpus-id, taken from the register's born rows (which persist for dead ids too), so
                         a dead ordinal's gap can never be refilled below the historical maximum (m-A).
-  BORN ORDER (7.1):     each born clause-id's ordinal strictly EXCEEDS every ordinal a born row for the
-                        same corpus-id used EARLIER in the register's row order, whatever the releases, so
-                        a new row cannot take a never-used number below a higher one born at the same
-                        release (which CUMULATIVE-MAX, comparing only earlier releases, cannot see). A gap
-                        stays valid; only a number at or below an earlier one is refused.
+  BORN ORDER (7.1):     each born clause-id's ordinal strictly EXCEEDS every ordinal a born row for the same
+                        corpus-id used EARLIER in the register's row order, whatever the releases. It
+                        refuses a new row appended with a never-used number below a higher one born at the
+                        same release (which CUMULATIVE-MAX, comparing only earlier releases, cannot see).
+                        The leg compares register ROW ORDER, so a row inserted in sorted position passes it
+                        alone; it relies on the append-only prefix check in check_version_monotonicity.py
+                        (the base register's rows must be an exact full-row prefix of the head's) to refuse
+                        an inserted or reordered row. A gap stays valid; only a number at or below an
+                        earlier one is refused.
   RESURRECTION (7.3):   the cumulative ever-retired id set is built FROM THE REGISTER; no id the inventory
                         asserts live (a clause-id or its corpus-id) equals any tombstoned or retired id.
   COMPLETENESS (7.3):   every id the inventory introduces has a born row; every retirement row's id has a
@@ -466,15 +470,18 @@ def check_cumulative_max(born_clause_ids):
 
 
 def check_born_order(born_clause_ids):
-    """BORN ORDER (7.1 / 7.3). born_clause_ids is the list of (clause-id, born-release-tuple) pairs in the
+    """BORN ORDER (7.1). born_clause_ids is the list of (clause-id, born-release-tuple) pairs in the
     register's own row order. Each born clause-id's ordinal must strictly exceed every ordinal a born row
     for the same corpus-id used EARLIER in the register, whatever either row's release. CUMULATIVE-MAX
-    compares only rows born at an earlier release, so it cannot see a new row that takes a never-used
-    number below a higher one born at the same release (every row of an unreleased register shares one
-    born-release). The register is append-only, so a newly assigned number always comes after every number
-    its corpus-id already used. A gap (a number never assigned, such as an allocation withdrawn before
-    release) stays valid: only a number at or below an earlier one is refused. Ordinals are compared
-    NUMERICALLY. Returns a list of finding strings."""
+    compares only rows born at an earlier release, so it cannot see a new row that takes a never-used number
+    below a higher one born at the same release (every row of an unreleased register shares one
+    born-release). The leg compares register ROW ORDER, so it refuses such a row only when it comes after
+    the higher one: a row inserted in sorted position passes this leg alone. It relies on the append-only
+    prefix check in check_version_monotonicity.py (layer_d, through _prefix_findings: the base register's
+    rows must be an exact full-row prefix of the head's) to refuse an inserted or reordered row. A gap (a
+    number never assigned, such as an allocation withdrawn before release) stays valid: only a number at or
+    below an earlier one is refused. Ordinals are compared NUMERICALLY. Returns a list of finding
+    strings."""
     findings = []
     ceiling = {}
     for clause_id, _born in born_clause_ids:
@@ -2939,32 +2946,6 @@ def self_test_main(_mkdtemp=None, _vectors=True):  # noqa: C901  a flat sequence
             if _run_quiet(**_paths(base)) != 0:
                 failures.append("same-release pass-through fold: expected exit 0")
 
-            # (55) born order, refused form: every row is born at 1.1.0, so CUMULATIVE-MAX has no earlier
-            # release to compare with. calpha.18 is appended after calpha.19 (a never-used number in a gap,
-            # below a number its corpus-id already used) -> exit 1 with a born-order finding.
-            lines, line_of = _rule_lines("calpha", ["ob seventeen", "ob nineteen", "ob new"])
-            digest = _sha_of(lines)
-            sp = ".aiqt/core/rules/calpha.md"
-
-            def _order_rows(new_id):
-                return [{"clause-id": cid, "corpus-id": "calpha", "source-path": sp,
-                         "start-line": line_of[k], "end-line": line_of[k], "canonical-text": text,
-                         "source-digest": digest}
-                        for k, (cid, text) in enumerate([("calpha.17", "ob seventeen"),
-                                                          ("calpha.19", "ob nineteen"), (new_id, "ob new")])]
-            born = [("calpha", "1.1.0"), ("calpha.17", "1.1.0"), ("calpha.19", "1.1.0"), ("calpha.18", "1.1.0")]
-            base = _fresh({"calpha": lines}, _order_rows("calpha.18"), born)
-            code, out = _run_capture(**_paths(base, genesis=True))
-            if code != 1 or "'calpha.18' (ordinal 18) is born after a born row" not in out:
-                failures.append("born order: a never-used ordinal 18 born after 19 at the same release "
-                                "expected exit 1 with a born-order finding, got {}".format(code))
-
-            # (56) born order, accepted form: the same corpus with the new row numbered 20 (above every
-            # earlier number) passes, and the gap at 18 left by a number never assigned stays valid.
-            born = [("calpha", "1.1.0"), ("calpha.17", "1.1.0"), ("calpha.19", "1.1.0"), ("calpha.20", "1.1.0")]
-            base = _fresh({"calpha": lines}, _order_rows("calpha.20"), born)
-            if _run_quiet(**_paths(base, genesis=True)) != 0:
-                failures.append("born order: ordinal 20 born after 19 with a gap at 18 expected exit 0")
             # (54) TEXT COVERAGE: every sentence or clause of a rule body lies inside a clause row or a
             # recorded exemption. _cover builds a one-rule corpus whose rows cover the listed (line index,
             # text) pairs, each with its born row, optionally writes an exemptions file, and returns
@@ -3212,6 +3193,33 @@ def self_test_main(_mkdtemp=None, _vectors=True):  # noqa: C901  a flat sequence
                     failures.append("text coverage: an unreadable rule source ({}) must raise GateError".format(name))
                 except GateError:
                     pass
+
+            # (55) born order, refused form: every row is born at 1.1.0, so CUMULATIVE-MAX has no earlier
+            # release to compare with. calpha.18 is appended after calpha.19 (a never-used number in a gap,
+            # below a number its corpus-id already used) -> exit 1 with a born-order finding.
+            lines, line_of = _rule_lines("calpha", ["ob seventeen", "ob nineteen", "ob new"])
+            digest = _sha_of(lines)
+            sp = ".aiqt/core/rules/calpha.md"
+
+            def _order_rows(new_id):
+                return [{"clause-id": cid, "corpus-id": "calpha", "source-path": sp,
+                         "start-line": line_of[k], "end-line": line_of[k], "canonical-text": text,
+                         "source-digest": digest}
+                        for k, (cid, text) in enumerate([("calpha.17", "ob seventeen"),
+                                                          ("calpha.19", "ob nineteen"), (new_id, "ob new")])]
+            born = [("calpha", "1.1.0"), ("calpha.17", "1.1.0"), ("calpha.19", "1.1.0"), ("calpha.18", "1.1.0")]
+            base = _fresh({"calpha": lines}, _order_rows("calpha.18"), born)
+            code, out = _run_capture(**_paths(base, genesis=True))
+            if code != 1 or "'calpha.18' (ordinal 18) is born after a born row" not in out:
+                failures.append("born order: a never-used ordinal 18 born after 19 at the same release "
+                                "expected exit 1 with a born-order finding, got {}".format(code))
+
+            # (56) born order, accepted form: the same corpus with the new row numbered 20 (above every
+            # earlier number) passes, and the gap at 18 left by a number never assigned stays valid.
+            born = [("calpha", "1.1.0"), ("calpha.17", "1.1.0"), ("calpha.19", "1.1.0"), ("calpha.20", "1.1.0")]
+            base = _fresh({"calpha": lines}, _order_rows("calpha.20"), born)
+            if _run_quiet(**_paths(base, genesis=True)) != 0:
+                failures.append("born order: ordinal 20 born after 19 with a gap at 18 expected exit 0")
         finally:
             shutil.rmtree(base_tmp, ignore_errors=True)
 
