@@ -4461,12 +4461,14 @@ _DIFF_OPTION_READINGS = (_diff_ends_options, _diff_parser_ends_options)
 # --git-completion-helper-all lists with a trailing '=', read in full under both readings and, under the
 # option-parser reading, in every abbreviation _git_long_option resolves to one of them (git diff --no-index
 # --line --output=real.txt a b printed the patch, prefixed, on stdout). The revision-walk options are read in
-# full, as the revision walk reads them (git diff --author --output=real.txt printed the patch on stdout), and
-# so are the options each producer reads with its own parser before the revision walk (git log -p
-# --decorate-refs --output=real.txt and git format-patch --stdout --subject-prefix --output=real.txt printed the
-# patch on stdout). range-diff reads its own options with its option parser, but each refused that word as its
-# value (creation-factor and max-memory take a number, diff-merges a style), so no spelling of one prints a
-# patch there.
+# full, as the revision walk reads them (git diff --author --output=real.txt printed the patch on stdout), but
+# never under the option-parser reading of git diff, since git diff --no-index reads no revision-walk option:
+# it reads --default as an abbreviation of --default-prefix, which takes no value (git diff --no-index --stat
+# --default --binary a b printed the whole patch, git 2.53.0). The options each producer reads with its own
+# parser before the revision walk are read in full too (git log -p --decorate-refs --output=real.txt and git
+# format-patch --stdout --subject-prefix --output=real.txt printed the patch on stdout). range-diff reads its
+# own options with its option parser, but each refused that word as its value (creation-factor and max-memory
+# take a number, diff-merges a style), so no spelling of one prints a patch there.
 _DIFF_VALUE_NAMES = frozenset((
     "anchored", "color-moved-ws", "diff-algorithm", "diff-filter", "dst-prefix", "find-object",
     "ignore-matching-lines", "inter-hunk-context", "line-prefix", "max-depth", "output",
@@ -4519,29 +4521,35 @@ def _diff_value_letters(sub):
 def _diff_option_takes_word(sub, word, ends):
     """True when the option word word of the producer sub may take the next word as its value under the
     reading ends (one of _DIFF_OPTION_READINGS): a long option written without '=' that names one of
-    _DIFF_VALUE_NAMES, _DIFF_WALK_VALUE_NAMES or sub's own _DIFF_SUB_VALUE_NAMES, or, under the
-    option-parser reading, one _git_long_option resolves to a name of _DIFF_VALUE_NAMES; or a word of short
-    options whose letters reach one of _diff_value_letters(sub) as the last letter, before any letter of
-    _DIFF_GLUED_VALUE_LETTERS (git diff -wI --output=real.txt gives -I the word). A name of _DIFF_VALUE_NAMES
-    or _DIFF_WALK_VALUE_NAMES is read for every producer, and a letter of _DIFF_VALUE_LETTERS for every
+    _DIFF_VALUE_NAMES or sub's own _DIFF_SUB_VALUE_NAMES, or one of _DIFF_WALK_VALUE_NAMES except under the
+    option-parser reading of git diff, or, under the option-parser reading, one _git_long_option resolves to a
+    name of _DIFF_VALUE_NAMES; or a word of short options whose letters reach one of _diff_value_letters(sub) as
+    the last letter, before any letter of _DIFF_GLUED_VALUE_LETTERS (git diff -wI --output=real.txt gives -I the
+    word). A name of _DIFF_VALUE_NAMES is read for every producer, and a letter of _DIFF_VALUE_LETTERS for every
     producer that does not read it as a flag of its own (_DIFF_SUB_FLAG_LETTERS: git format-patch -n is
     --numbered and takes no word); a name of _DIFF_SUB_VALUE_NAMES, and a letter of _DIFF_SUB_VALUE_LETTERS,
-    only for its own producer (git diff --decorate-refs takes no word here). The diversion scan
-    (_diff_output_diversions) reads word as an option even when it may itself be the value of the word before
-    it (git diff -S --line-prefix --output=real.txt gives --line-prefix to -S and writes to real.txt, not
-    stdout, yet stdout is judged), which can only judge stdout more often. The --binary test
-    (_diff_binary_enables_patch) reads the words in order and skips the word an option takes, so there a name
-    or letter listed for an option that takes no value would hide a --binary git reads as an option; the
-    self-test holds _DIFF_VALUE_NAMES to the list of git diff --no-index -h for that reason."""
+    only for its own producer (git diff --decorate-refs takes no word here). A name of _DIFF_WALK_VALUE_NAMES is
+    read under the revision-walk reading for every producer, and under the option-parser reading for every
+    producer but git diff, the only one --no-index reaches (git log and git show refuse --no-index): git diff
+    --no-index reads no revision-walk option, refusing most (--author and --since exit 129) and reading
+    --default as an abbreviation of --default-prefix, which takes no value (git 2.53.0 printed the whole patch
+    for git diff --no-index --stat --default --binary a b). The diversion scan (_diff_output_diversions) reads
+    word as an option even when it may itself be the value of the word before it (git diff -S --line-prefix
+    --output=real.txt gives --line-prefix to -S and writes to real.txt, not stdout, yet stdout is judged),
+    which can only judge stdout more often. The --binary test (_diff_binary_enables_patch) reads the words in
+    order and skips the word an option takes, so there a name or letter read as taking a value under a reading
+    where git gives that option none would hide a --binary git reads as an option; the self-test holds
+    _DIFF_VALUE_NAMES to the list of git diff --no-index -h for that reason, and keeps
+    _DIFF_WALK_VALUE_NAMES out of the option-parser reading of git diff."""
     if word.startswith("--"):
         if "=" in word or word == "--":
             return False
         name = word[2:]
-        if (name in _DIFF_VALUE_NAMES or name in _DIFF_WALK_VALUE_NAMES
-                or name in _DIFF_SUB_VALUE_NAMES.get(sub, ())):
+        if name in _DIFF_VALUE_NAMES or name in _DIFF_SUB_VALUE_NAMES.get(sub, ()):
             return True
-        return (ends is _diff_parser_ends_options
-                and _git_long_option("diff --no-index", word) in _DIFF_VALUE_NAMES)
+        if ends is not _diff_parser_ends_options or sub != "diff":
+            return name in _DIFF_WALK_VALUE_NAMES
+        return _git_long_option("diff --no-index", word) in _DIFF_VALUE_NAMES
     if len(word) < 2 or not word.startswith("-"):
         return False
     letters = _diff_value_letters(sub)
@@ -4734,6 +4742,18 @@ def _diff_always_patch(argv):
     return stdout
 
 
+def _diff_no_index_has_paths(rest):
+    """True when the words rest after the subcommand of a git diff may hold the two paths git diff --no-index
+    needs: it refuses fewer, explicit or implied outside a repository, with its usage and no patch (git 2.53.0
+    exited 129 for git diff --no-index --stat --binary a, and outside a repository for git diff --stat
+    --default --binary HEAD). Every word that is '-' or does not begin with '-' counts as a path, and so does
+    every word after the first '--' or '--end-of-options', so an option value counts too: an over-count, which
+    only reads the words for a --binary more often."""
+    marker = next((k for k, word in enumerate(rest) if word in _DIFF_END_OF_OPTIONS), len(rest))
+    return sum(1 for k, word in enumerate(rest)
+               if k > marker or word == "-" or not word.startswith("-")) >= 2
+
+
 def _diff_binary_enables_patch(argv, ends=_diff_ends_options, abbrev=None):
     """True when a --binary in the option region of a git producer under the reading ends (one of
     _DIFF_OPTION_READINGS) makes git print a patch. The words are read in order from the one after the
@@ -4742,7 +4762,11 @@ def _diff_binary_enables_patch(argv, ends=_diff_ends_options, abbrev=None):
     --name-only diff --stat --binary gives --name-only to --namespace and prints the patch); where no
     subcommand is found the answer is True, toward deny, which only a direct call reaches: _has_patch_flag
     runs only for a subcommand _is_diff_producer has found, and _argv_has_patch_enabler only for a segment
-    _is_diff_producer has judged a producer, so no decision depends on it. The word an option takes as its value
+    _is_diff_producer has judged a producer, so no decision depends on it. Under the option-parser reading a
+    git diff whose words cannot hold two paths is refused by git diff --no-index (_diff_no_index_has_paths), so
+    the answer there is False; the revision-walk reading still reads that command as the revision walk does,
+    where git diff --stat --default --binary HEAD gives --binary to --default and prints only the stat (git
+    2.53.0; outside a repository git exits 129 for it, refusing one path). The word an option takes as its value
     (_diff_option_takes_word) is skipped, so only a --binary in an option position counts: not one that is the
     value of the option before it (git log -1 -S --binary gives it to -S and prints no patch), not one after
     the end of the options, and not one carrying '=VALUE' (git refuses --binary=x). abbrev says whether a long
@@ -4765,6 +4789,8 @@ def _diff_binary_enables_patch(argv, ends=_diff_ends_options, abbrev=None):
     sub, rest = _git_subcommand_rest(argv)
     if sub is None:
         return True                              # no subcommand to start after: fail toward deny
+    if ends is _diff_parser_ends_options and sub == "diff" and not _diff_no_index_has_paths(rest):
+        return False                             # git diff --no-index refuses fewer than two paths
     value_letters = _diff_value_letters(sub) + _DIFF_GLUED_VALUE_LETTERS
     always = _diff_always_patch(argv)
     if sub in _DIFF_ALWAYS_PATCH_SUBS and not always:

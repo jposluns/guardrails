@@ -440,6 +440,11 @@ _CNSDIF_BASE_DECISIONS = {
     "git diff -Ix --output=real.txt": "allow-note",
     "git diff --author --output=real.txt": "allow-note",
     "git diff --default --output=real.txt HEAD": "allow-note",
+    "git diff --no-index --stat --default --binary a b": "allow-note",
+    "git diff --no-index --numstat --default --binary a b": "allow-note",
+    "git diff --no-index --shortstat --default --binary a b": "allow-note",
+    "git diff --stat --default --binary a b": "allow-note",
+    "git diff --stat --default --binary HEAD": "allow-note",
     "git diff --no-index --line --output=real.txt a b": "allow-note",
     "git log -p --decorate-refs --output=real.txt": "allow-note",
     "git format-patch --stdout --subject-prefix --output=real.txt": "allow-note",
@@ -17912,9 +17917,9 @@ def _main_isolated(monitor):
                 "git diff --no-index --stat -- a b", "allow-note")
         # Under --no-index an --end-of-options right after an option that takes no value ends the options, and
         # git reads the --output word after it as a path (git 2.53.0 printed the whole patch on stdout and
-        # wrote no x.txt for the first). The scans go on past it, since that option may take it as a value
-        # under the other reading, so a diversion word found past it never makes stdout a decoy: both allowed
-        # with a note at the base.
+        # wrote no x.txt for the first). Both readings go on past it, since each reads a long option written
+        # without '=', --no-index here, as one that may take the next word as its value, so a diversion word
+        # found past it never makes stdout a decoy: both allowed with a note at the base.
         dexpect("(cnsdif-ni-eoo1) a --output=x.txt past a --no-index --end-of-options is a path, denies",
                 "git diff --no-index --end-of-options --output=x.txt a", "deny")
         dexpect("(cnsdif-ni-eoo2) a separated --output x.txt past that word is a path too, denies",
@@ -17989,6 +17994,22 @@ def _main_isolated(monitor):
         # --default takes the next word too (git 2.53.0 printed the patch on stdout and wrote no real.txt).
         dexpect("(cnsdif-val-default) a --output that is the --default value denies",
                 "git diff --default --output=real.txt HEAD", "deny")
+        # git diff --no-index, explicit or implied outside a repository, reads --default as an abbreviation of
+        # --default-prefix, which takes no value, so the --binary after it enables the patch: git 2.53.0 printed
+        # the stat and the whole patch for each of these four, each allowed with a note at the base. In a
+        # repository the revision walk gives --binary to --default as its value, and git 2.53.0 printed only the
+        # stat (outside one, git diff --no-index refuses a single path and exits 129), so the control keeps its
+        # allow with a note.
+        dexpect("(cnsdif-bin-default-ni1) a --binary after --default beside --stat under --no-index denies",
+                "git diff --no-index --stat --default --binary a b", "deny")
+        dexpect("(cnsdif-bin-default-ni2) a --binary after --default beside --numstat under --no-index denies",
+                "git diff --no-index --numstat --default --binary a b", "deny")
+        dexpect("(cnsdif-bin-default-ni3) a --binary after --default beside --shortstat under --no-index denies",
+                "git diff --no-index --shortstat --default --binary a b", "deny")
+        dexpect("(cnsdif-bin-default-ni4) a --binary after --default beside --stat with two paths denies",
+                "git diff --stat --default --binary a b", "deny")
+        dexpect("(cnsdif-bin-default-c) a --binary that is the --default value in a repository allows with a note",
+                "git diff --stat --default --binary HEAD", "allow-note")
         dexpect("(cnsdif-val-abbr) a --output that is the value of --line under --no-index denies",
                 "git diff --no-index --line --output=real.txt a b", "deny")
         dexpect("(cnsdif-val-log) a --output that is the log --decorate-refs value denies",
@@ -18267,6 +18288,8 @@ def _main_isolated(monitor):
                 ("diff", "--line-prefix", _ve, True), ("diff", "--line-prefix=X", _ve, False),
                 ("diff", "--line", _ve, False), ("diff", "--line", _vp, True), ("diff", "--l", _vp, True),
                 ("diff", "--s", _vp, False), ("diff", "--author", _ve, True), ("diff", "--cached", _vp, False),
+                ("diff", "--author", _vp, False), ("diff", "--default", _ve, True), ("diff", "--default", _vp, False),
+                ("log", "--default", _vp, True), ("log", "--grep", _vp, True),
                 ("diff", "-I", _ve, True), ("diff", "-wI", _vp, True), ("diff", "-Ix", _ve, False),
                 ("diff", "-pS", _ve, True), ("diff", "-US", _ve, False), ("diff", "-M", _ve, False),
                 ("diff", "-L", _ve, False), ("log", "-L", _ve, True), ("log", "--decorate-refs", _ve, True),
@@ -18299,12 +18322,15 @@ def _main_isolated(monitor):
         # start after the answer is True, toward deny. That last case is checked here only: both callers reach the
         # test only for a segment _is_diff_producer has judged by its subcommand, so no decision depends on it.
         # No --binary counts for a git format-patch whose --stdout a later --no-stdout cancels, since it then
-        # writes a file (git 2.55.0).
+        # writes a file (git 2.55.0). Under the option-parser reading git diff --no-index refuses fewer than two
+        # paths, so the --namespace row names two, and the --binary that --default takes in git diff --stat
+        # --default --binary HEAD counts under neither reading (git 2.53.0 printed only the stat).
         for _bargv, _bwant in (
                 (["git", "format-patch", "--stdout", "-1", "--stat", "-n", "--binary"], True),
                 (["git", "format-patch", "--stdout", "--no-stdout", "-1", "--stat", "--binary"], False),
                 (["git", "log", "-1", "--stat", "-n", "--binary"], False),
-                (["git", "--namespace", "--name-only", "diff", "--stat", "--binary"], True),
+                (["git", "--namespace", "--name-only", "diff", "--stat", "--binary", "a", "b"], True),
+                (["git", "diff", "--stat", "--default", "--binary", "HEAD"], False),
                 (["git", "--namespace", "x", "diff", "--stat", "--binary", "--name-only"], False),
                 (["git", "--namespace"], True)):
             for _bends in aiqt_hooks._DIFF_OPTION_READINGS:
