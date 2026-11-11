@@ -13530,6 +13530,30 @@ def _main_isolated(report_path=None):
         check("trunc/quoted-redirect-head-denies", _verdict(bg("grep '>' index.html | head -5")), "deny")
         check("trunc/quoted-pipe-allows-note", _verdict(bg("grep '|' file")), "warn")
         check("trunc/amp-tail-denies", _verdict(bg("python3 build.py | tail &")), "deny")
+        # A bare '&' inside a background dispatch detaches a child the dispatch does not track (it tracks only
+        # the shell that launched it), so it DENIES, checked after the sink deny (the amp-tail row above keeps
+        # the sink reason); the reason drops the '&' and never sends the caller back to run_in_background. The
+        # ampersand forms that do not detach (a logical AND, an '&>' or '2>&1' redirect, and a quoted,
+        # commented or quoted here-document '&') keep the generic note. Each deny row reads "warn" without
+        # the background detach check.
+        check("trunc/bg-detach-redirect-denies",
+              _verdict(bg("python3 tools/dispatch.py --run r1 > out 2>&1 &")), "deny")
+        check("trunc/bg-detach-mid-denies", _verdict(bg("long_job & echo started")), "deny")
+        check("trunc/bg-detach-no-space-denies", _verdict(bg("long_job&")), "deny")
+        check("trunc/bg-detach-subshell-denies", _verdict(bg("( long_job ) &")), "deny")
+        _bgd = bg("long_job &")
+        _bgd_reason = ((_bgd[1] or {}).get("hookSpecificOutput") or {}).get("permissionDecisionReason", "")
+        check("trunc/bg-detach-reason-no-redispatch",
+              (_verdict(_bgd), "Drop the '&'" in _bgd_reason, "background dispatch detaches" in _bgd_reason,
+               "run_in_background" in _bgd_reason), ("deny", True, True, False))
+        _bgs = bg("python3 build.py | tail &")
+        _bgs_reason = ((_bgs[1] or {}).get("hookSpecificOutput") or {}).get("permissionDecisionReason", "")
+        check("trunc/bg-detach-sink-reason-first",
+              ("truncating sink ('tail')" in _bgs_reason, "bare '&'" in _bgs_reason), (True, False))
+        check("trunc/bg-detach-controls-note",
+              [_verdict(bg(c)) for c in ("build && test", "build &> out.log", "build 2>&1 | tee log",
+                                         "echo 'a & b'", "echo done # & comment",
+                                         "cat > f <<'EOF'\nFix A & B\nEOF")], ["warn"] * 6)
         check("trunc/semicolon-allows-note", _verdict(bg("python3 a.py ; python3 b.py")), "warn")
         # the truncating sink is caught through subshell/brace wrappers too (class width).
         check("trunc/subshell-tail-denies", _verdict(bg("( python3 build.py | tail )")), "deny")
@@ -13683,9 +13707,17 @@ def _main_isolated(report_path=None):
                    "long_job &", ["long_job &"], {"command": 5}, {}, {"command": 5, "run_in_background": "false"},
                    {"command": "ls", "run_in_background": "false"}, {"command": "ls", "run_in_background": None}))],
               [("warn", True)] * 7)
-        check("trunc/bg-no-registry-still-inert",
+        # With no registry a background dispatch keeps the silent allow, but one that detaches a child with a
+        # bare '&' gets the registry scope's background detach reason as a note, saying no registry was found.
+        check("trunc/bg-no-registry-detach-notes",
               [_verdict(ti_call({"command": v, "run_in_background": True})) for v in (
-                  "python3 build.py | tail -5", "long_job &")], ["allow"] * 2)
+                  "python3 build.py | tail -5", "long_job &")], ["allow", "warn"])
+        _bgn = ti_call({"command": "long_job &", "run_in_background": True})
+        _bgn_note = (_bgn[1] or {}).get("systemMessage", "")
+        check("trunc/bg-no-registry-detach-note-text",
+              ("this background dispatch detaches a child with a bare '&'" in _bgn_note,
+               "No orchestration registry was found for this cwd, so this release allows it with this "
+               "warning. Drop the '&'" in _bgn_note, "It is denied" in _bgn_note), (True, True, False))
         check("trunc/fg-detach-no-registry-notes", _verdict(aiqt_hooks.orch_truncation_guard(
             ti.payload("PreToolUse", "Bash",
                        {"command": "long_job &", "run_in_background": False}))), "warn")
@@ -14112,11 +14144,14 @@ def _main_isolated(report_path=None):
                 ("trunc/oos-plain-allows", _fg("python3 build.py"), "allow"),
                 ("trunc/oos-unbalanced-quote-notes", _fg("echo 'oops & bg"), "warn"),
                 # A readable background dispatch (run_in_background exactly the boolean true) stays
-                # the silent allow; a flag that is present but not a real boolean cannot be read as
-                # foreground or background, so it draws the unreadable-input note instead of the
-                # silent allow it was (the boolean rows are the boundary on each side of it).
+                # the silent allow unless it detaches a child with a bare '&', which notes; a flag that
+                # is present but not a real boolean cannot be read as foreground or background, so it
+                # draws the unreadable-input note instead of the silent allow it was (the boolean rows
+                # are the boundary on each side of it).
                 ("trunc/oos-background-allows",
-                 {"command": "setsid long_job &", "run_in_background": True}, "allow"),
+                 {"command": "setsid long_job", "run_in_background": True}, "allow"),
+                ("trunc/oos-background-detach-notes",
+                 {"command": "setsid long_job &", "run_in_background": True}, "warn"),
                 ("trunc/oos-flag-not-boolean-notes",
                  {"command": "long_job &", "run_in_background": "true"}, "warn"),
                 ("trunc/oos-flag-string-false-notes",
@@ -19136,8 +19171,10 @@ def _main_isolated(report_path=None):
           "row; the truncation guard allows (silently) a plain metacharacter-free background command and "
           "ALLOWS-WITH-NOTE (reducer 'warn') any other shell syntax or reserved word, DENIES-and-educates a "
           "background dispatch that pipes a producer into a truncating sink (head/tail, which discards the "
-          "producer's full output and exit status) and a "
-          "foreground bare-& detach (historically an ASK for both), allows-with-note a readable foreground "
+          "producer's full output and exit status), a background dispatch whose command detaches a child "
+          "with a bare '&' (allowed with that reason as a note where no registry is found), and a "
+          "foreground bare-& detach (historically an ASK for both), gives a backgrounded polling loop the "
+          "wait-loop exits in a foreground call and a background dispatch alike, allows-with-note a readable foreground "
           "command that may detach where no registry is found (one note per call naming the tracked "
           "background mechanism, from the in-scope detector or else the note scan; redirect operands keep "
           "their command position pending), while dropping a word-start `#` comment "
