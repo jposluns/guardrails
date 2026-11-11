@@ -381,7 +381,8 @@ DENY_CONSTRUCTORS = (
     "_commit_identity_fallback", "_commit_msg_subst_fallback", "_deny_missing_tool_name", "_deny_relative",
     "_deny_with_recovery", "_discard_deny", "_expbnd_breadth_publish_deny", "_gate_alias_deny",
     "_gate_runtime_deny", "_git_discard_alias_deny", "_git_discard_fallback", "_hash_doubt_opaque_deny",
-    "_protected_line_fallback", "_raw_push_guard", "_reading_limit_deny", "_redirect_deny",
+    "_protected_line_fallback", "_raw_push_guard", "_reading_limit_deny", "_records_writer_deny",
+    "_records_writer_unreadable_deny", "_records_writer_verdict_deny", "_redirect_deny",
     "_reset_ancestry_deny", "_wrtscp_deny")
 
 def _allow():
@@ -18210,6 +18211,317 @@ def _gate_recovered_sink(command, doubt=None):
     return _verification_sink(_gate_recovered_segments(command, doubt))
 
 
+# --- records writers: a declared records-writing command piped into head or tail -----------------------------
+# An adopter may declare, in .aiqt/records-writers.toml, the commands that write its authoritative records
+# (version = 1, writers = [["recordctl", "write"], ...]): each entry is a case-sensitive argv prefix of literal
+# words, never a pattern or a shell snippet. The nearest such file in the physical ancestors of the payload's
+# cwd wins, and a nested one replaces its parent's (writers = [] declares none). With no declaration found, or
+# none that can be looked for (a cwd that is not an absolute path, or a walk that faults), this check adds
+# nothing. A declaration found but unreadable (malformed, oversized, not a regular file, gone during the read)
+# denies every Bash call fail-closed, naming the path and the repair. Every outcome of this check is decided
+# after every other gate_weakening deny, so it never changes an existing deny's reason. This is a configured
+# tooling check, not a security control or proof that a record was written.
+_RECORDS_WRITERS_REL = os.path.join(".aiqt", "records-writers.toml")
+_RECORDS_WRITERS_MAX_BYTES = 65536
+_RECORDS_WRITERS_MAX_DEPTH = 256
+_RECORDS_WRITER_SINKS = frozenset(("head", "tail"))
+_RECORDS_WRITER_SINK_RE = re.compile(r"(?<![A-Za-z0-9_.-])(?:head|tail)(?![A-Za-z0-9_.-])")
+# A sink stage run under a wrapper (| command head, | stdbuf -oL head, | sudo head, | exec head, | xargs head):
+# the note tier's wrapper list and xargs, which runs its operand command on the piped text.
+_RECORDS_WRITER_SINK_WRAPPERS = frozenset(_GATE_NOTE_WRAPPERS | {"xargs"})
+# The bounds of the substitution-body reading (_records_writer_subst_readings): nesting depth and body count.
+_RECORDS_WRITER_SUBST_DEPTH = 4
+_RECORDS_WRITER_SUBST_BODIES = 64
+
+
+def _records_writers_validate(data):
+    """The tuple of writer prefixes (each a tuple of words) a parsed declaration holds, or a str naming the
+    first fault: keys other than exactly version and writers, a version that is not the integer 1 (a bool is
+    refused), writers not an array of nonempty arrays of nonempty strings, a word holding a control character,
+    or a duplicate entry."""
+    if not isinstance(data, dict) or set(data) != {"version", "writers"}:
+        return "the file must hold exactly the keys version and writers"
+    if type(data["version"]) is not int or data["version"] != 1:
+        return "version must be the integer 1"
+    writers = data["writers"]
+    if not isinstance(writers, list):
+        return "writers must be an array of arrays of words"
+    seen = []
+    for entry in writers:
+        if not isinstance(entry, list) or not entry:
+            return "each writers entry must be a nonempty array of words"
+        for word in entry:
+            if not isinstance(word, str) or not word:
+                return "each word of a writers entry must be a nonempty string"
+            if any(ord(ch) < 0x20 or ord(ch) == 0x7f for ch in word):
+                return "a word of a writers entry holds a control character"
+        if tuple(entry) in seen:
+            return "the writers entry {!r} is declared twice".format(entry)
+        seen.append(tuple(entry))
+    return tuple(seen)
+
+
+def _records_writers_read(path):
+    """("ok", writers) or ("bad", detail) for the declaration at path, which an lstat has shown is present.
+    The file is opened without following a symlink and without blocking (a FIFO swapped in never stalls the
+    hook), confirmed regular on the open descriptor, and read to at most _RECORDS_WRITERS_MAX_BYTES + 1 bytes;
+    the descriptor is closed on every path."""
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0)
+    try:
+        fd = os.open(path, flags)
+    except FileNotFoundError:
+        return ("bad", "the file disappeared during the read")
+    except OSError as exc:
+        return ("bad", "the file could not be opened ({})".format(exc))
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return ("bad", "the file is not a regular file")
+        chunks = []
+        size = 0
+        while size <= _RECORDS_WRITERS_MAX_BYTES:
+            chunk = os.read(fd, _RECORDS_WRITERS_MAX_BYTES + 1 - size)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            size += len(chunk)
+    except OSError as exc:
+        return ("bad", "the file could not be read ({})".format(exc))
+    finally:
+        os.close(fd)
+    raw = b"".join(chunks)
+    if len(raw) > _RECORDS_WRITERS_MAX_BYTES:
+        return ("bad", "the file exceeds the {}-byte bound".format(_RECORDS_WRITERS_MAX_BYTES))
+    try:
+        import tomllib  # read here only: this branch parses an adopter's TOML declaration
+        data = tomllib.loads(raw.decode("utf-8"))
+    except (ImportError, ValueError, RecursionError, MemoryError) as exc:
+        # ValueError covers UnicodeDecodeError, TOMLDecodeError and the bare ValueError tomllib raises on an
+        # oversized integer; RecursionError or MemoryError a too deeply nested table.
+        return ("bad", "the file is not readable UTF-8 TOML ({})".format(exc))
+    writers = _records_writers_validate(data)
+    if isinstance(writers, str):
+        return ("bad", writers)
+    return ("ok", writers)
+
+
+def _records_writers_load(data):
+    """("absent", None, None), ("unlocatable", detail, None), ("ok", writers, path) or ("bad", detail, path)
+    for the records-writer declaration that governs this Bash payload: the nearest .aiqt/records-writers.toml
+    in the physical ancestors of the payload's cwd (realpath, walked up to the root). A payload with no cwd key
+    discovers nothing (absent). An absolute cwd that is missing or is not a directory is walked from its
+    existing ancestors, since no declaration can sit inside a path that is not a directory, so the declaration
+    that governs it is still found. Where the declaration cannot be looked for at all (a cwd that is not an
+    absolute string, a resolve fault, an lstat fault other than not-found or not-a-directory on a candidate, or
+    a walk deeper than _RECORDS_WRITERS_MAX_DEPTH) the state is unlocatable: whether a declaration governs the
+    payload cannot be evaluated, and gate_weakening does not deny on that ground alone (its other checks
+    decide as they would with no declaration). A candidate that is present but unreadable, malformed or not a
+    regular file (a symlink included) is bad, a cannot-evaluate that denies."""
+    if "cwd" not in data:
+        return ("absent", None, None)
+    cwd = data.get("cwd")
+    if not isinstance(cwd, str) or not cwd or not os.path.isabs(cwd) or "\x00" in cwd:
+        return ("unlocatable", "the payload's cwd is not a usable absolute path", None)
+    try:
+        here = os.path.realpath(cwd)
+    except (OSError, ValueError) as exc:
+        return ("unlocatable", "the payload's cwd could not be resolved ({})".format(exc), None)
+    for _depth in range(_RECORDS_WRITERS_MAX_DEPTH):
+        path = os.path.join(here, _RECORDS_WRITERS_REL)
+        try:
+            st = os.lstat(path)
+        except (FileNotFoundError, NotADirectoryError):
+            st = None
+        except OSError as exc:
+            return ("unlocatable", "the path {} could not be checked ({})".format(path, exc), None)
+        if st is not None:
+            if not stat.S_ISREG(st.st_mode):
+                return ("bad", "the file is not a regular file (a symlink, FIFO, directory, ...)", path)
+            state, value = _records_writers_read(path)
+            return (state, value, path)
+        parent = os.path.dirname(here)
+        if parent == here:
+            return ("absent", None, None)
+        here = parent
+    return ("unlocatable", "the directory walk from the payload's cwd exceeded {} levels".format(
+        _RECORDS_WRITERS_MAX_DEPTH), None)
+
+
+def _records_writer_match(argv, writers):
+    """The declared writer prefix the command of a segment's argv begins with, or None. Leading reserved words
+    that a command follows (_COMMAND_LEAD_WORDS: !, {, if, then, elif, else, do, while, until), then leading
+    assignments and the env, nice, timeout and time wrappers are peeled (_gate_peel, ordinary mode); where a
+    wrapper option is outside that grammar the command word cannot be placed, so a prefix starting at ANY word
+    counts (a disclosed over-block). Words are compared exactly as the lexer decoded them, case-sensitively."""
+    lead = 0
+    while lead < len(argv) and argv[lead] in _COMMAND_LEAD_WORDS:
+        lead += 1
+    argv = argv[lead:]
+    peeled = _gate_peel(argv)
+    candidates = [peeled] if peeled is not None else [argv[k:] for k in range(len(argv))]
+    for words in candidates:
+        for writer in writers:
+            if len(words) >= len(writer) and tuple(words[:len(writer)]) == writer:
+                return writer
+    return None
+
+
+def _records_writer_sink(records, writers):
+    """(writer prefix, sink word) for the first segment that runs a declared writer and pipes ('|' or '|&') its
+    output, directly or through pass-through stages (_gate_plain_filter: cat, tee, tr, uniq; a tee does not
+    exempt), into a stage whose command word is head or tail, whatever its options or operands; else None. A
+    stage whose command word is a wrapper (_RECORDS_WRITER_SINK_WRAPPERS: command, exec, stdbuf, sudo, xargs
+    and the like) counts as a sink when any later word of it is head or tail, an operand included (a
+    disclosed over-block: xargs grep head denies). An empty segment a line continuation leaves after a pipe is
+    skipped. Redirections are not read: a head with a file operand or a stdin redirection, or a writer whose
+    stdout is redirected, still denies (a disclosed over-block where the sink does not read the writer's
+    output). Any other stage ends the walk."""
+    n = len(records)
+    for i, seg in enumerate(records):
+        if not seg.argv or seg.sep_after not in _GATE_PIPES:
+            continue
+        writer = _records_writer_match(seg.argv, writers)
+        if writer is None:
+            continue
+        for j in range(i + 1, n):
+            stage = records[j]
+            if not stage.argv:
+                if not stage.sep_after and not stage.redirects:
+                    continue
+                break
+            argv = _gate_peel(stage.argv)
+            if argv is None:
+                argv = stage.argv[_command_word_index(stage.argv):]
+            if argv and _gate_word(argv[0]) in _RECORDS_WRITER_SINKS:
+                return writer, _gate_word(argv[0])
+            if argv and _gate_word(argv[0]) in _RECORDS_WRITER_SINK_WRAPPERS:
+                sink = next((_gate_word(word) for word in argv[1:] if _gate_word(word) in _RECORDS_WRITER_SINKS),
+                            None)
+                if sink is not None:
+                    return writer, sink
+            if stage.sep_after not in _GATE_PIPES or not _gate_plain_filter(stage.argv):
+                break
+    return None
+
+
+def _records_writer_named(command, writers):
+    """True when the raw text of an unparseable command names a declared writer's first word and a head or
+    tail word: the lex cannot show whether the writer is piped into the sink, so it cannot be evaluated."""
+    return (any(writer[0] in command for writer in writers)
+            and _RECORDS_WRITER_SINK_RE.search(command) is not None)
+
+
+_RECORDS_WRITER_GUIDANCE = (
+    "Run the writer alone, keep and check its own exit status, then re-read the authoritative record in a "
+    "separate step. Capture full diagnostics to a file at an absolute path if needed, and truncate only a "
+    "subsequent read, never the writer's own output.")
+
+
+def _records_writer_deny(writer, sink, path):
+    """The deny for a declared records writer piped into head or tail."""
+    return _deny(
+        "AIQT rule gatdis (gate-discipline): this command runs '{}', a records writer declared in {}, and pipes "
+        "its output into '{}'. The sink can cut the lines that report a failed write, and by default a "
+        "pipeline's exit status is the last stage's, not the writer's, so a failed write can read as a success "
+        "('set -o pipefail' does not exempt it). {}".format(" ".join(writer), path, sink, _RECORDS_WRITER_GUIDANCE),
+        "AIQT guardrail: denied a declared records writer piped into {} (rule gatdis); run it alone, keep its "
+        "exit status and re-read the record.".format(sink))
+
+
+def _records_writer_subst_readings(command, readings):
+    """The readings of the command substitution bodies a parsed command's lex keeps inside one word (a
+    double-quoted "$(...)" or a backquoted body, which the lexer does not split into segments), each body
+    lexed on its own (_lex_readings), read to _RECORDS_WRITER_SUBST_DEPTH levels of nesting and at most
+    _RECORDS_WRITER_SUBST_BODIES bodies. A body the lexer cannot read is returned as text (a str) for the
+    raw-text test. A single-quoted word spelling '$(' is read the same way (a disclosed over-block)."""
+    out = []
+    work = [(body, 1) for _start, body in _backquote_bodies(command)]
+    work += [(word, 0) for reading in readings for seg in reading for word in seg.argv if "$(" in word]
+    seen = 0
+    while work and seen < _RECORDS_WRITER_SUBST_BODIES:
+        text, depth = work.pop()
+        seen += 1
+        bodies = [text] if depth else []
+        at = text.find("$(")
+        while at >= 0:
+            bodies.append(text[at + 2:])
+            at = text.find("$(", at + 2)
+        for body in bodies:
+            try:
+                lexed = _lex_readings(body)
+            except ValueError:
+                out.append(body)
+                continue
+            out.extend(lexed)
+            if depth < _RECORDS_WRITER_SUBST_DEPTH:
+                work += [(word, depth + 1) for reading in lexed for seg in reading for word in seg.argv
+                         if "$(" in word or "`" in word]
+                work += [(inner, depth + 1) for _start, inner in _backquote_bodies(body)]
+    return out
+
+
+def _records_writer_unreadable_deny(command_doubt, detail, path):
+    """The fail-closed deny when the records-writer check cannot be evaluated: the declaration found at path
+    cannot be read (a cwd from which none can be looked for never reaches here; _records_writers_load), or,
+    with writers declared, the command or a substitution body cannot be lexed and its text names a writer and
+    a head or tail word."""
+    if command_doubt:
+        return _deny(
+            "AIQT rule gatdis (gate-discipline): records writers are declared in {}, and this command could not "
+            "be parsed by the shell lexer while its text names a declared writer's command word and head or "
+            "tail, so whether the writer's output is piped into a truncating sink cannot be evaluated; it is "
+            "denied fail-closed (this is not a finding that it is). Re-issue it in a parseable form. {}".format(
+                path, _RECORDS_WRITER_GUIDANCE),
+            "AIQT guardrail: denied an unparseable command naming a declared records writer and head or tail "
+            "(rule gatdis, fail-closed).")
+    return _deny(
+        "AIQT rule gatdis (gate-discipline): the records-writer declaration check could not be evaluated: {} "
+        "({}). Every Bash call is denied fail-closed until it can be. Repair or remove the file with the Edit or "
+        "Write tool: it must be a regular UTF-8 TOML file of at most {} bytes holding exactly version = 1 and "
+        "writers = [[\"word\", ...], ...] (each entry a nonempty array of nonempty literal words, no "
+        "duplicates); writers = [] declares none.".format(path, detail, _RECORDS_WRITERS_MAX_BYTES),
+        "AIQT guardrail: denied a Bash call because the records-writer declaration could not be read (rule "
+        "gatdis, fail-closed).")
+
+
+def _records_writer_verdict(data, readings, command=None, parsed=None):
+    """The records-writer outcome gate_weakening decides only after every other deny it holds, or None: ("bad",
+    detail, path) when the governing declaration is found but cannot be read; ("deny", writer, sink, path) when
+    a declared writer is piped into head or tail in any of readings (each a list of segment records) or, on a
+    parsed command (parsed, its raw text), in a substitution body its lex keeps inside one word
+    (_records_writer_subst_readings); ("doubt", path) when command, the raw text of an unparseable command
+    (None on a parsed one), or a substitution body the lexer cannot read, names a writer's command word and
+    head or tail; else None, which includes no declaration, an empty one, and an unlocatable one
+    (_records_writers_load), so an adopter with no declaration sees no change."""
+    state, value, path = _records_writers_load(data)
+    if state == "bad":
+        return ("bad", value, path)
+    if state != "ok" or not value:
+        return None
+    unread = []
+    if parsed is not None:
+        extra = _records_writer_subst_readings(parsed, readings)
+        unread = [body for body in extra if isinstance(body, str)]
+        readings = list(readings) + [body for body in extra if not isinstance(body, str)]
+    for records in readings:
+        hit = _records_writer_sink(records, value)
+        if hit is not None:
+            return ("deny", hit[0], hit[1], path)
+    if command is not None and _records_writer_named(command, value):
+        return ("doubt", path)
+    if any(_records_writer_named(body, value) for body in unread):
+        return ("doubt", path)
+    return None
+
+
+def _records_writer_verdict_deny(verdict):
+    """The deny for a non-None _records_writer_verdict result."""
+    if verdict[0] == "deny":
+        return _records_writer_deny(verdict[1], verdict[2], verdict[3])
+    if verdict[0] == "doubt":
+        return _records_writer_unreadable_deny(True, None, verdict[1])
+    return _records_writer_unreadable_deny(False, verdict[1], verdict[2])
+
+
 def gate_weakening(data):
     """gatdis (integ/gate-discipline), PreToolUse/Bash. DENY a git segment that bypasses its
     verification hooks: a --no-verify spelling (exact or conservative long prefix) on a subcommand
@@ -18596,6 +18908,16 @@ def gate_weakening(data):
                     "run. " + _GATE_ALTS,
                     "AIQT guardrail: denied an unparseable command whose quoting spells a git "
                     "verification-hook bypass (rule gatdis, fail-safe).")
+            # The records-writer check (_records_writer_verdict) decides only where the fallback below would
+            # not deny (no raw bypass kind, no closed-grammar refusal, no git word built at run time), so every
+            # existing deny keeps its message: a declared writer piped into head or tail among the complete
+            # recovered segments denies as on a parsed command, and text naming a writer's command word and
+            # head or tail cannot be evaluated and denies fail-closed (the unread suffix is never read as
+            # clean).
+            rw = _records_writer_verdict(data, [recovered], command)
+            if (rw is not None and raw_kind not in _GATE_FALLBACK_DENIES
+                    and _gate_closed_grammar_scan(command) is None and _gate_runtime_bypass(command) is None):
+                return _records_writer_verdict_deny(rw)
             # A word built at run time that may be git ($G commit -nv <<<x) is read over the whole command as
             # on the parsed path (_gate_runtime_bypass), inside the fallback after its own denies, so each deny
             # above and each of the fallback's keeps its message.
@@ -18645,6 +18967,11 @@ def gate_weakening(data):
             kind, what, how = grammar_hit
             reason, banner = _gate_grammar_messages(kind, what, how, False)
             return _deny(reason, banner)
+        # After every deny of this branch, the records-writer check reads the complete recovered segments and
+        # the raw text as on the ordinary parse failure above, before any note.
+        rw = _records_writer_verdict(data, [recovered], command)
+        if rw is not None:
+            return _records_writer_verdict_deny(rw)
         # What remains is still text this guard cannot evaluate: where it holds a checker-shaped word
         # (_gate_doubt_checker, the parsed recognizer's own name splitter and lexicon, so a swallow or
         # truncating spelling behind the '#' pairs through its own '|', '<<<' or substitution marker) and
@@ -18768,6 +19095,14 @@ def gate_weakening(data):
     runtime_hit = _gate_runtime_bypass(command)
     if runtime_hit is not None:
         return _gate_runtime_deny(runtime_hit)
+    # After every other deny, the records-writer check (_records_writer_verdict): a declared records writer
+    # piped into head or tail denies on any reading (each reading of an uncertain '#' is judged on its own),
+    # foreground or background alike, before any note or allow; a declaration found but unreadable denies
+    # fail-closed here too, so no existing deny's reason changes. The substitution bodies the lex keeps inside
+    # one word ("$(...)", a backquoted body) are lexed and read too.
+    rw = _records_writer_verdict(data, readings, parsed=command)
+    if rw is not None:
+        return _records_writer_verdict_deny(rw)
     if pending_note is not None:
         return _allow_note(pending_note)
     flow_note = _gate_flow_note(records, command)
