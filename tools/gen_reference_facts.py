@@ -43,6 +43,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import linked_dir_failures, load_toml, repo_root, reconcile, target_dir_present  # noqa: E402
 from _standards import load_manifests, ManifestError, natkey  # noqa: E402
 from check_reference_facts import expected_counts  # noqa: E402
+from check_versions import _parse as _semver  # noqa: E402  the shared bare-SemVer parser
+from gen_hooks import ID_RE  # noqa: E402  the kebab-case id shape the hooks manifest names are held to
 
 README_REL = Path(".aiqt") / "standards" / "README.md"
 LANDING_REL = Path("README.md")
@@ -132,24 +134,29 @@ def render_inside_table(counts):
 
 
 def _version_key(text, where):
-    """(major, minor, patch) of a strict MAJOR.MINOR.PATCH string of ASCII digits; ValueError otherwise."""
-    parts = text.split(".") if isinstance(text, str) else []
-    if len(parts) != 3 or not all(p.isascii() and p.isdigit() for p in parts):
+    """(major, minor, patch) of a bare MAJOR.MINOR.PATCH version, parsed by the shared SemVer parser the
+    release gates use (ASCII digits, no leading zero, fullmatch); ValueError otherwise. A leading zero is
+    refused rather than read as its integer, so a record holding 1.0.06 can never be ordered as 1.0.6
+    and have its tag rendered into the install command."""
+    key = _semver(text) if isinstance(text, str) else None
+    if key is None:
         raise ValueError("{}: {!r} is not a MAJOR.MINOR.PATCH version".format(where, text))
-    return tuple(int(p) for p in parts)
+    return key
 
 
 def _plugin_names(root):
     """(plugin name, marketplace name) from the hooks manifest's [plugin] and [marketplace] tables, each a
-    non-empty string; ValueError when either is missing, so the install item never names a marketplace
-    the manifest does not declare."""
+    kebab-case id by fullmatch against tools/gen_hooks.py's ID_RE, the rule that generator holds both
+    names to; ValueError when either is missing or has any other shape, so the install item never names
+    a marketplace the manifest does not declare, nor renders a semicolon, a newline or other text into
+    the copy-paste command."""
     data = load_toml(root / HOOKS_MANIFEST_REL)
     names = []
     for table in ("plugin", "marketplace"):
         value = data.get(table, {}).get("name") if isinstance(data.get(table), dict) else None
-        if not isinstance(value, str) or not value or value != value.strip():
-            raise ValueError("{}: [{}] name must be a non-empty string without surrounding "
-                             "whitespace".format(HOOKS_MANIFEST_REL, table))
+        if not isinstance(value, str) or not ID_RE.fullmatch(value):
+            raise ValueError("{}: [{}] name must match ^[a-z][a-z0-9-]*$ (kebab-case)".format(
+                HOOKS_MANIFEST_REL, table))
         names.append(value)
     return tuple(names)
 
@@ -361,7 +368,9 @@ def main():
 #       1.0.6 step 5 shape that used to exit 2, then steps 5, 6a and 6b) leaves the item byte-identical
 #       and only the next version names the tag; each range end is tested just inside, at and just
 #       outside; drift on a hand edit, and exit 2 on each malformed release record, manifest or marker
-#       input.
+#       input: a plugin name that is not a kebab-case id (a semicolon command, an embedded or trailing
+#       newline, an empty name) and a leading-zero version component are refused, while the shipped
+#       names and a two-digit component with no leading zero (1.0.10) are accepted.
 
 _MANIFEST = (
     'map-key = "map-{k}"\nname = "{name}"\npublisher = "AIQT self-test"\nedition = "{ed}"\n'
@@ -865,7 +874,9 @@ def self_test_main():
                  _CHANGELOG + _release("1.0.6") + _release("1.0.7") + _release("1.0.8"), _INSTALL_PENDING),
                 ("version order, not record order", "1.0.8",
                  _CHANGELOG + _release("1.0.7", tag=True) + _release("1.0.6", tag=True)
-                 + _release("1.0.8"), _INSTALL_CUT_107))):
+                 + _release("1.0.8"), _INSTALL_CUT_107),
+                ("a two-digit component with no leading zero: VERSION 1.0.10", "1.0.10",
+                 _CHANGELOG + _release("1.0.6", tag=True) + _release("1.0.10"), _INSTALL_CUT_106))):
             edge = tmp / "install-edge-{}".format(idx)
             _write_fixture(edge, two, _README)
             (edge / "VERSION").write_text(version + "\n", encoding="utf-8")
@@ -897,7 +908,27 @@ def self_test_main():
                  '[plugin]\nname = "fixture-hooks"\n' + _HOOKS_TOML),
                 ("trailing-newline marketplace name", "1.0.7\n", _CHANGELOG + _LATER_RELEASES,
                  '[plugin]\nname = "fixture-hooks"\n[marketplace]\nname = "fixture-market\\n"\n'
-                 + _HOOKS_TOML)):
+                 + _HOOKS_TOML),
+                ("plugin name holding a semicolon and a command", "1.0.7\n", _CHANGELOG + _LATER_RELEASES,
+                 '[plugin]\nname = "fixture-hooks; touch pwned"\n[marketplace]\nname = "fixture-market"\n'
+                 + _HOOKS_TOML),
+                ("embedded-newline plugin name", "1.0.7\n", _CHANGELOG + _LATER_RELEASES,
+                 '[plugin]\nname = "fixture\\nhooks"\n[marketplace]\nname = "fixture-market"\n'
+                 + _HOOKS_TOML),
+                ("trailing-newline plugin name", "1.0.7\n", _CHANGELOG + _LATER_RELEASES,
+                 '[plugin]\nname = "fixture-hooks\\n"\n[marketplace]\nname = "fixture-market"\n'
+                 + _HOOKS_TOML),
+                ("empty plugin name", "1.0.7\n", _CHANGELOG + _LATER_RELEASES,
+                 '[plugin]\nname = ""\n[marketplace]\nname = "fixture-market"\n' + _HOOKS_TOML),
+                ("leading-zero VERSION and candidate, 1.0.07 over 1.0.06", "1.0.07\n",
+                 _CHANGELOG + '[[release]]\nversion = "1.0.06"\ntag = "v1.0.06"\n'
+                 '[[release]]\nversion = "1.0.07"\n', None),
+                ("leading-zero VERSION alone", "1.0.07\n",
+                 _CHANGELOG + _release("1.0.6", tag=True) + '[[release]]\nversion = "1.0.07"\n', None),
+                ("leading-zero candidate release", "1.0.7\n",
+                 _CHANGELOG + '[[release]]\nversion = "1.0.06"\ntag = "v1.0.06"\n' + _release("1.0.7"), None),
+                ("double-zero component", "1.0.7\n",
+                 _CHANGELOG + '[[release]]\nversion = "1.00.6"\ntag = "v1.00.6"\n' + _release("1.0.7"), None)):
             bad = tmp / ("install-bad-" + label.replace(" ", "-").replace("<", "").replace(">", ""))
             _write_fixture(bad, two, _README)
             (bad / "VERSION").write_text(version, encoding="utf-8")
@@ -910,6 +941,19 @@ def self_test_main():
                     failures.append("install item, {}: expected exit 2 (check={})".format(label, check_mode))
             if (bad / LANDING_REL).read_bytes() != before:
                 failures.append("install item, {}: a failed run must not write the landing page".format(label))
+        # The shipped plugin and marketplace names are accepted and render into the command unchanged.
+        shipped = tmp / "install-shipped-names"
+        _write_fixture(shipped, two, _README)
+        (shipped / "VERSION").write_text("1.0.7\n", encoding="utf-8")
+        (shipped / "changelog.toml").write_text(_CHANGELOG + _LATER_RELEASES, encoding="utf-8")
+        (shipped / ".aiqt" / "core" / "hooks" / "manifest.toml").write_text(
+            '[plugin]\nname = "aiqt-guardrails-hooks"\n[marketplace]\nname = "aiqt-guardrails"\n'
+            + _HOOKS_TOML, encoding="utf-8")
+        if run_quiet(shipped, check=False) != 0 or run_quiet(shipped, check=True) != 0:
+            failures.append("install item, the shipped names: expected exit 0 on generate and --check")
+        if ("#v1.0.6 && claude plugin install aiqt-guardrails-hooks@aiqt-guardrails`.\n"
+                not in (shipped / LANDING_REL).read_text(encoding="utf-8")):
+            failures.append("install item, the shipped names: expected them in the install command")
         nomark = tmp / "install-no-markers"
         _write_fixture(nomark, two, _README, landing=_LANDING.replace(_PLUGIN_PAIR, ""))
         if run_quiet(nomark, check=True) != 2:
@@ -953,8 +997,11 @@ def self_test_main():
           "1.0.7 freeze alone naming v1.0.6; a hand-edited tag or name fails --check (exit 1), and a "
           "VERSION without a release entry, a candidate tag that is not v<version>, a record without the "
           "anchor release or with a release recorded twice, a manifest without [marketplace] or with a "
-          "trailing-newline name, and a landing page without the install markers fail closed (exit 2) "
-          "with nothing written")
+          "trailing-newline name, a plugin name holding a semicolon and a command, an embedded or "
+          "trailing newline or nothing, a leading-zero component in VERSION or a recorded release "
+          "(1.0.07 over 1.0.06 included), and a landing page without the install markers fail closed "
+          "(exit 2) with nothing written, while the shipped names and a two-digit component with no "
+          "leading zero are accepted")
     return 0
 
 

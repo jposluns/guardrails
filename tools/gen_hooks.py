@@ -268,6 +268,7 @@ def load_manifest(path):
         raise ValueError("{}: unknown [plugin] key(s): {}".format(path.name, ", ".join(sorted(p_extra))))
     for key in PLUGIN_KEYS:
         _req_str(plugin, key, "{}: [plugin]".format(path.name))
+    _check_plugin_name(plugin, path.name)
     if not SEMVER_RE.match(plugin["version"]):
         raise ValueError("{}: [plugin] version must be SemVer (MAJOR.MINOR.PATCH)".format(path.name))
     if "claude-code-min-version" in plugin:
@@ -355,6 +356,15 @@ def load_manifest(path):
             raise ValueError("{}: class must be the EN-5 letter a/b/c/d".format(where))
         _req_str(hook, "residue", where)  # required, never empty: the control's honest coverage gap
     return plugin, hooks
+
+
+def _check_plugin_name(plugin, name):
+    """The [plugin] name is held to the rule the [marketplace] name gets: a kebab-case id, by fullmatch.
+    It renders into plugin.json, the marketplace file and the landing page's copy-paste install command,
+    so a name holding a semicolon and a second command, or an embedded or trailing newline, is refused
+    here rather than rendered. Raises ValueError, which the caller maps to exit 2."""
+    if not ID_RE.fullmatch(_req_str(plugin, "name", "{}: [plugin]".format(name))):
+        raise ValueError("{}: [plugin] name must match ^[a-z][a-z0-9-]*$ (kebab-case)".format(name))
 
 
 def _check_marketplace(data, name):
@@ -910,7 +920,9 @@ def main():
 #      refused, and the version strings are strict MAJOR.MINOR.PATCH: a claude-code-min-version that is
 #      a non-string, misses a component, carries a trailing newline, a leading zero or non-ASCII digits
 #      is refused while "0.0.0" is accepted, and a leading-zero `version` is refused through the same
-#      regex,
+#      regex; the [plugin] name must fullmatch ID_RE as the [marketplace] name does: a semicolon and a
+#      second command, an embedded or trailing newline and an empty name are each refused in both modes
+#      with no plugin.json written, while the shipped name generates and re-checks clean,
 #  32. with on-failure-render false, and separately with the key ABSENT (its own tree, so a regression
 #      that treats only an explicit false as off is caught), an authored per-hook timeout and the
 #      optional [plugin] keys change NOTHING: hooks.json renders byte-identical to a tree authoring
@@ -3832,6 +3844,29 @@ def self_test_main(_nested=False):
         _mutate(vzero, 'version = "0.1.0"', 'version = "01.1.0"')
         if run_quiet(vzero, check=True) != 2:
             failures.append("[plugin] version-leading-zero: expected exit 2 (fail-closed)")
+        # The [plugin] name is held to the [marketplace] name's rule, a kebab-case id by fullmatch: a
+        # semicolon and a second command, an embedded newline, a trailing newline (which a $-anchored
+        # match accepts) and an empty name are each refused in both modes with no plugin.json written,
+        # while the shipped name generates, re-checks clean and renders into plugin.json unchanged.
+        for label, value, want in (("semicolon-command", "aiqt-guardrails-hooks; touch pwned", 2),
+                                   ("embedded-newline", "aiqt-guardrails\\nhooks", 2),
+                                   ("trailing-newline", "aiqt-guardrails-hooks\\n", 2),
+                                   ("empty", "", 2),
+                                   ("shipped", "aiqt-guardrails-hooks", 0)):
+            tree = tmp / ("plugname-" + label)
+            tree.mkdir()
+            _build_tree(tree)
+            _mutate(tree, 'name = "aiqt-selftest-hooks"', 'name = "{}"'.format(value))
+            codes = (run_quiet(tree, check=(want != 0)), run_quiet(tree, check=(want == 0)))
+            if codes != (want, want):
+                failures.append("[plugin] name {}: expected exit {} in both modes, got {}".format(
+                    label, want, codes))
+            plugin_json = tree / PLUGIN_JSON_REL
+            if want != 0 and _exists(plugin_json):
+                failures.append("[plugin] name {}: a refused name must not write plugin.json".format(label))
+            if want == 0 and (not _exists(plugin_json) or
+                              json.loads(plugin_json.read_text(encoding="utf-8")).get("name") != value):
+                failures.append("[plugin] name {}: expected plugin.json to carry the name".format(label))
 
         # 32. OFF is byte-identity, for an explicitly false switch AND for an ABSENT one (each its own
         #     tree, so a regression that treats only an explicit false as off is caught): an authored
@@ -4262,7 +4297,9 @@ def self_test_main(_nested=False):
           "authored per-hook timeout is accepted only as an integer from TIMEOUT_MIN to TIMEOUT_MAX "
           "(each end refused just outside it, bool/string/float refused), with the optional [plugin] "
           "keys validated fail-closed and the version strings strict MAJOR.MINOR.PATCH (a non-string, "
-          "a missing component, a trailing newline, a leading zero and non-ASCII digits each refused); "
+          "a missing component, a trailing newline, a leading zero and non-ASCII digits each refused), "
+          "and the [plugin] name a kebab-case id by fullmatch (a semicolon command, an embedded or "
+          "trailing newline and an empty name refused in both modes, the shipped name accepted); "
           "with on-failure-render false, and separately with the key absent, nothing new renders "
           "(hooks.json stays byte-identical to a baseline pinned as spelled-out bytes, no onFailure "
           "anywhere); with it true every launcher carries its configured timeout and exactly the "
