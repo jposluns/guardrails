@@ -766,6 +766,14 @@ def _run_self_test():
         expect("K-N40-reserved-view-" + _view,
                canonical_json_bytes(_mk_model(_cv, [_file_dec(_vp)])), _cv, "INVALID")
 
+    # An observed inventory listing one path twice is CANNOT-EVALUATE. The acceptance binds the digest of
+    # that same duplicated inventory and keeps the path once, so without the duplicate-path guard in
+    # _bad_inventory this case reads VALID.
+    ctx_dup = _mk_ctx([_file_entry(".working/f.txt"), _file_entry(".working/f.txt")])
+    expect("K-N41-duplicate-inventory-path",
+           canonical_json_bytes(_mk_model(ctx_dup, [_file_dec(".working/f.txt")])), ctx_dup,
+           "CANNOT-EVALUATE")
+
     failed = [(lbl, why) for (lbl, ok, why) in checks if not ok]
     for lbl, why in failed:
         sys.stderr.write("SELF-TEST FAIL {}: {}\n".format(lbl, why))
