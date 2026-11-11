@@ -2712,9 +2712,10 @@ def _budget_source(root, path):
     and an S_ISREG check on the opened descriptor before any read, so a FIFO, a device or a directory is
     refused unread. At most _BUDGET_SOURCE_CAP + 1 bytes are read, and a source longer than
     _BUDGET_SOURCE_CAP bytes is refused, so no source can exhaust memory. A symlink or a missing entry at
-    any component raises OSError, as does a directory at the final component (os.fdopen refuses it); any
-    other final component that is not a regular file, or a source over the cap, raises CannotEvaluate.
-    Each descriptor is closed once, in its finally."""
+    any component raises OSError, as does a directory at the final component (os.fdopen refuses it) and a
+    socket there (its open fails with ENXIO); any other final component that opens but is not a regular
+    file (a FIFO, a character device), or a source over the cap, raises CannotEvaluate. main() reports
+    either as cannot-evaluate (exit 2). Each descriptor is closed once, in its finally."""
     require(hasattr(os, "O_NOFOLLOW") and hasattr(os, "O_DIRECTORY")
             and os.open in os.supports_dir_fd, "safe filesystem traversal unavailable")
     directory = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
@@ -2742,9 +2743,10 @@ def _budget_source(root, path):
 def _declared_budget(root, path):
     """The SELF_TEST_BUDGET_S the tool at path (repository-relative) beneath root declares, as an int
     (_budget_from_bytes), from the bytes _budget_source reads. A source that cannot be opened (missing, a
-    symlink at any component, or a directory) raises OSError; one that is any other kind of non-regular
-    file, is longer than _BUDGET_SOURCE_CAP bytes, fails the source gate or declares no budget in the one
-    accepted form raises CannotEvaluate. main() reports either as cannot-evaluate (exit 2)."""
+    symlink at any component, a directory, or a socket, whose open fails with ENXIO) raises OSError; one
+    that opens but is not a regular file (a FIFO, a character device), is longer than _BUDGET_SOURCE_CAP
+    bytes, fails the source gate or declares no budget in the one accepted form raises CannotEvaluate.
+    main() reports either as cannot-evaluate (exit 2)."""
     return _budget_from_bytes(_budget_source(root, path), path)
 
 
@@ -3393,15 +3395,21 @@ def _census_budget_cases(table_failures, real):
 # The _budget_source cases, each an entry _budget_source_tree makes: (name, the path _declared_budget reads
 # beneath the tree, the budget it must read, or None where it must be refused). The three cap rows hold the
 # same 600 s declaration padded by a comment to 1 byte under, exactly at and 1 byte over
-# _BUDGET_SOURCE_CAP. A read that follows symlinks reads the two regular-file symlink rows at 600, one that
-# reads with no size bound reads over-cap at 600, and one that opens without O_NONBLOCK or reads before
-# the S_ISREG check blocks on the FIFO or reads /dev/zero until memory runs out.
+# _BUDGET_SOURCE_CAP. The guard each row pins: O_NONBLOCK, fifo (a FIFO with no writer, whose open blocks
+# without it); the S_ISREG check, fifo-with-writer (a FIFO the self-test holds open with the declaration
+# written into it: a read with no S_ISREG check reads it at 600, and a read before the check leaves the
+# FIFO empty, which _budget_source_checks also refuses); O_NOFOLLOW, symlink-regular at the final component
+# and symlinked-directory at the directory walk, each read at 600 by a read that follows symlinks; the cap,
+# over-cap, read at 600 with no size bound, against below-cap and at-cap. symlink-dev-zero is refused by
+# O_NOFOLLOW and, without it, by the S_ISREG check, so it pins neither alone; regular, directory and missing
+# pin no guard of the reader.
 _BUDGET_SOURCE_CASES = (
     ("regular", "tools/regular.py", 600),
     ("below-cap", "tools/below-cap.py", 600),
     ("at-cap", "tools/at-cap.py", 600),
     ("over-cap", "tools/over-cap.py", None),
     ("fifo", "tools/fifo.py", None),
+    ("fifo-with-writer", "tools/fifo-with-writer.py", None),
     ("symlink-dev-zero", "tools/symlink-dev-zero.py", None),
     ("symlink-regular", "tools/symlink-regular.py", None),
     ("symlinked-directory", "linked/regular.py", None),
@@ -3410,19 +3418,24 @@ _BUDGET_SOURCE_CASES = (
 )
 
 
+# The 600 s declaration every _BUDGET_SOURCE_CASES source that holds one starts with.
+_BUDGET_SOURCE_PLAIN = b"SELF_TEST_BUDGET_S = 600\n"
+
+
 def _budget_source_tree(parent):
-    """The tree beneath parent that _BUDGET_SOURCE_CASES read: regular sources, a FIFO, a symlink to
+    """The tree beneath parent that _BUDGET_SOURCE_CASES read: regular sources, two FIFOs, a symlink to
     /dev/zero, a symlink to a regular source, a symlinked directory over that source and a directory.
     Returns its root."""
     tree = parent / "census-budget-source"
     tools = tree / "tools"
     tools.mkdir(parents=True)
-    plain = b"SELF_TEST_BUDGET_S = 600\n"
+    plain = _BUDGET_SOURCE_PLAIN
     (tools / "regular.py").write_bytes(plain)
     for name, size in (("below-cap", _BUDGET_SOURCE_CAP - 1), ("at-cap", _BUDGET_SOURCE_CAP),
                        ("over-cap", _BUDGET_SOURCE_CAP + 1)):
         (tools / (name + ".py")).write_bytes(plain + b"#" + b"x" * (size - len(plain) - 2) + b"\n")
     os.mkfifo(tools / "fifo.py")
+    os.mkfifo(tools / "fifo-with-writer.py")
     os.symlink("/dev/zero", tools / "symlink-dev-zero.py")
     os.symlink("regular.py", tools / "symlink-regular.py")
     os.symlink("tools", tree / "linked")
@@ -3430,20 +3443,51 @@ def _budget_source_tree(parent):
     return tree
 
 
+def _budget_source_read(tree, path):
+    """The budget _declared_budget reads at path beneath tree, or None where it is refused (CannotEvaluate
+    or OSError, each cannot-evaluate in main())."""
+    try:
+        return _declared_budget(tree, path)
+    except (CannotEvaluate, OSError):
+        return None
+
+
+def _budget_source_fifo_with_writer(tree, path):
+    """_budget_source_read at path, a FIFO this function holds open itself (os.O_RDWR | os.O_NONBLOCK, so
+    the open waits for no reader) with _BUDGET_SOURCE_PLAIN written into it before that read; then the bytes
+    still in the FIFO, read back through the same descriptor (b"" when none are left). The descriptor is
+    closed once, in the finally, after both reads. Returns (the budget read or None, the bytes left)."""
+    writer = os.open(tree / path, os.O_RDWR | os.O_NONBLOCK)
+    try:
+        require(os.write(writer, _BUDGET_SOURCE_PLAIN) == len(_BUDGET_SOURCE_PLAIN),
+                path + ": the declaration was not written whole into the FIFO")
+        got = _budget_source_read(tree, path)
+        try:
+            left = os.read(writer, len(_BUDGET_SOURCE_PLAIN) + 1)
+        except BlockingIOError:
+            left = b""
+    finally:
+        _close_fd_yielding(writer)
+    return got, left
+
+
 def _budget_source_checks(parent):
     """Each _BUDGET_SOURCE_CASES entry, read by _declared_budget from the tree _budget_source_tree makes
     under parent, reads as its stated budget or is refused (CannotEvaluate or OSError, each cannot-evaluate
-    in main()). The cap rows first confirm their own sizes."""
+    in main()). The cap rows first confirm their own sizes. The fifo-with-writer row is read through
+    _budget_source_fifo_with_writer, and its declaration must also be left in the FIFO whole, so the FIFO
+    was refused unread."""
     tree = _budget_source_tree(parent)
     sizes = {name: (tree / path).stat().st_size for name, path, _want in _BUDGET_SOURCE_CASES if "cap" in name}
     check("census-budget-source-cap-sizes", sizes == {"below-cap": _BUDGET_SOURCE_CAP - 1,
                                                       "at-cap": _BUDGET_SOURCE_CAP,
                                                       "over-cap": _BUDGET_SOURCE_CAP + 1})
     for name, path, want in _BUDGET_SOURCE_CASES:
-        try:
-            got = _declared_budget(tree, path)
-        except (CannotEvaluate, OSError):
-            got = None
+        if name == "fifo-with-writer":
+            got, left = _budget_source_fifo_with_writer(tree, path)
+            check("census-budget-source-fifo-with-writer-unread", left == _BUDGET_SOURCE_PLAIN)
+        else:
+            got = _budget_source_read(tree, path)
         check("census-budget-source-" + name, got == want)
         print("PASS census-budget-source-" + name)
 
