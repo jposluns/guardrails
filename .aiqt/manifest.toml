@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "d8c6e2d1cd4207836cd30b1febfd76a2393099c956a49f542efd32b6f3f624ea"
+tree-sha256 = "8b1fd0003c43aa0a7af13afeeca5a35f20f94246c7074b9ede374f38beb8752d"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -4186,8 +4186,8 @@ sha256 = "3ebcc30792e1de9dc8cb9e85aad10058e47bd4bc6101b5d7701516002a6cd54d"
 
 [[sources]]
 path = "tools/check_derived_command_parameters.py"
-bytes = 55838
-sha256 = "f8cb45999cd9d47bcf0537cf68805bcb1ccc1893024458ea75f96569c0642b5c"
+bytes = 62025
+sha256 = "261487c16bd4441199517de881d5f5e9bdf12b28842bb7027c65a307c2ad3a57"
 
 [[sources]]
 path = "tools/check_entry_guard.py"
@@ -4451,8 +4451,8 @@ sha256 = "5c11ec76c34975264d4070560859c8d77d451af47eb2ca655cb24a5a6d25b94d"
 
 [[sources]]
 path = "tools/conformance.py"
-bytes = 98769
-sha256 = "7db80a651d640832137af56df93e7ea3e541bfabd3c7bb3d3a4caf3acb098127"
+bytes = 107781
+sha256 = "885117d423791b7df3f3296181de81853c731e4f7dae233cda1bc5fe32814de6"
 
 [[sources]]
 path = "tools/doctor.py"

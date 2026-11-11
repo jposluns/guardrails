@@ -63,7 +63,10 @@ if tuple(sys.version_info[:2]) < (3, 14):
         pass
     os._exit(2)
 
+import io
+import os
 import re
+import stat
 from pathlib import Path
 
 try:
@@ -270,6 +273,23 @@ def _req_str_list(table, key, where, allow_empty=False):
     return value
 
 
+def _read_regular(path):
+    """Read the bytes of the file at path through one descriptor opened with O_NONBLOCK and checked with
+    fstat to be a regular file before any read. A plain open of a FIFO blocks until a writer appears, so a
+    FIFO (or a socket, device or directory) here is refused with an OSError naming the path, which each
+    caller turns into its GateError (exit 2). The check is on the opened descriptor, so a FIFO swapped in
+    after an earlier is_symlink(), exists() or is_file() of the path is refused too. The file object is
+    made with closefd=False, so the finally's close is the one close of fd on every path."""
+    fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError("{} is not a regular file".format(path))
+        with os.fdopen(fd, "rb", closefd=False) as fh:
+            return fh.read()
+    finally:
+        os.close(fd)
+
+
 def load_config(path):
     """Parse and fully validate the adopter configuration into a list of binding dicts. Fail-closed
     (GateError -> exit 2) on any malformed input: an unreadable or unparseable file, an unknown top-level
@@ -277,8 +297,7 @@ def load_config(path):
     or missing binding field, an empty roster, a malformed id, or a duplicate id. An absent file is the
     caller's NOT APPLICABLE case, handled before this loader."""
     try:
-        with open(path, "rb") as handle:
-            data = tomllib.load(handle)
+        data = tomllib.load(io.BytesIO(_read_regular(path)))
     except OSError as exc:
         raise GateError("cannot read the configuration {} ({})".format(CONFIG_REL, exc))
     # ValueError and RecursionError too: tomllib raises a BARE ValueError (not TOMLDecodeError) on an
@@ -405,13 +424,15 @@ def join_continuations(text):
 
 
 def scan_file(root, path, binding, telemetry):
-    """Scan one declared surface file for a binding's sinks. Read fail-closed: an OSError or a non-UTF-8
-    file is exit 2 (an unreadable declared surface is never a clean skip). Returns a list of finding
-    strings naming the binding id, the repo-relative path and line, and the option, WITHOUT echoing the
-    literal value (it may be sensitive). telemetry accumulates the commands and options actually matched,
-    so run() can reconcile the config's selectors against the real source."""
+    """Scan one declared surface file for a binding's sinks. Read fail-closed: an OSError, a file that is
+    not regular (a FIFO a /** selector swept up, or one swapped in after resolve_surface's checks, is
+    refused without blocking), or a non-UTF-8 file is exit 2 (an unreadable declared surface is never a
+    clean skip). Returns a list of finding strings naming the binding id, the repo-relative path and line,
+    and the option, WITHOUT echoing the literal value (it may be sensitive). telemetry accumulates the
+    commands and options actually matched, so run() can reconcile the config's selectors against the real
+    source."""
     try:
-        raw = path.read_bytes()
+        raw = _read_regular(path)
     except OSError as exc:
         raise GateError("configuration {} binding {!r}: cannot read declared surface {} ({})".format(
             CONFIG_REL, binding["id"], path.relative_to(root), exc))
@@ -524,6 +545,59 @@ def _not_run(failures, case, cause):
 _E2E_CASES = "every end-to-end case over a real synthetic tree"
 _SYMLINK_CASE = "e2e (m) the symlink declared-surface fail-closed case"
 _DANGLING_CASE = "e2e (n) the dangling-symlink configuration fail-closed case"
+_FIFO_CASES = "e2e (w) the FIFO configuration and surface fail-closed cases"
+
+
+def _swap_after_check(real_check, target):
+    """A replacement for a Path predicate (exists() or is_file()) for the self-test: the first call on
+    target that returns True replaces target with a FIFO before returning, so the read that follows meets a
+    FIFO the check did not see."""
+    def check(self, *args, **kwargs):
+        result = real_check(self, *args, **kwargs)
+        if result and self == target and not stat.S_ISFIFO(os.lstat(target).st_mode):
+            os.unlink(target)
+            os.mkfifo(target)
+        return result
+    return check
+
+
+class _fifo_unblocker:
+    """Bound a self-test row that meets a FIFO. After delay seconds a helper thread keeps opening each FIFO
+    in paths for writing with O_NONBLOCK and closes it at once. That open succeeds whenever any reader has
+    the FIFO open, a reader waiting in its own open included, so such a reader's open returns and it reads
+    nothing. A read that never blocks is unaffected. The context value lists each FIFO the helper opened.
+    An entry is not proof that a read blocked: a reader that opened without blocking also holds the FIFO
+    open for a moment, and a helper open landing then fails the row spuriously; it never passes one."""
+
+    def __init__(self, paths, delay=3.0):
+        import threading
+        self.paths = list(paths)
+        self.delay = delay
+        self.released = []
+        self.stop = threading.Event()
+        self.thread = threading.Thread(target=self._release, daemon=True)
+
+    def _release(self):
+        if self.stop.wait(self.delay):
+            return
+        while not self.stop.is_set():
+            for path in self.paths:
+                try:
+                    fd = os.open(path, os.O_WRONLY | os.O_NONBLOCK | os.O_CLOEXEC)
+                except OSError:
+                    continue
+                os.close(fd)
+                self.released.append(path)
+            self.stop.wait(0.05)
+
+    def __enter__(self):
+        self.thread.start()
+        return self.released
+
+    def __exit__(self, *_exc):
+        self.stop.set()
+        self.thread.join()
+        return False
 
 
 def _recorded(output, entry):
@@ -918,6 +992,45 @@ def self_test_main(_mkdtemp=None, _symlink=None, _vectors=True):  # noqa: C901  
                        {"cmd/resume.md": "sample-tool -xt sample-org/repo\n"})
             if _run_quiet(r) != 1:
                 failures.append("e2e: a bundled short-option literal value was not scanned")
+
+            # (w) A FIFO at a declared or required input (the configuration, a file a /** selector sweeps
+            # up, the configuration swapped for a FIFO after run()'s is_symlink() and exists() checks, or
+            # an exact-path surface swapped for a FIFO after resolve_surface's is_file() check) fails
+            # closed exit 2 naming it as not a regular file: the read opens without blocking and checks
+            # the opened descriptor, so it never waits for a writer. Each row is bounded by
+            # _fifo_unblocker, so a read that does block fails the row, never hangs the run.
+            if not hasattr(os, "mkfifo"):
+                _not_run(failures, _FIFO_CASES, "no os.mkfifo on this platform")
+            else:
+                prefix_cfg = good_cfg.replace('paths = ["cmd/resume.md"]', 'paths = ["cmd/**"]')
+                clean_surface = {"cmd/resume.md": "sample-tool --target $CURRENT_TARGET\n"}
+                for tag, cfg, fifo_rel, swap in (
+                        ("fifo-config", good_cfg, CONFIG_REL, None),
+                        ("fifo-prefix-surface", prefix_cfg, "cmd/zz-fifo.md", None),
+                        ("fifo-config-swapped", good_cfg, CONFIG_REL, "exists"),
+                        ("fifo-exact-surface-swapped", good_cfg, "cmd/resume.md", "is_file")):
+                    r = _fresh(tag, cfg, clean_surface)
+                    fifo = r.joinpath(*fifo_rel.split("/"))
+                    real_check = getattr(Path, swap) if swap else None
+                    if swap:
+                        setattr(Path, swap, _swap_after_check(real_check, fifo))
+                    else:
+                        if fifo.exists():
+                            fifo.unlink()
+                        os.mkfifo(fifo)
+                    err = io.StringIO()
+                    try:
+                        with _fifo_unblocker([fifo]) as released:
+                            with redirect_stdout(io.StringIO()), redirect_stderr(err):
+                                rc = run(r)
+                    finally:
+                        if swap:
+                            setattr(Path, swap, real_check)
+                    if (rc != 2 or released or "{} is not a regular file".format(fifo) not in err.getvalue()
+                            or not stat.S_ISFIFO(os.lstat(fifo).st_mode)):
+                        failures.append("e2e: {} expected fail-closed exit 2 naming the FIFO as not a regular "
+                                        "file, got exit {} (a blocked read released: {}): {!r}".format(
+                                            tag, rc, bool(released), err.getvalue()))
         finally:
             shutil.rmtree(base_tmp, ignore_errors=True)
 
@@ -941,7 +1054,10 @@ def self_test_main(_mkdtemp=None, _symlink=None, _vectors=True):  # noqa: C901  
           "symlink-surface/dangling-symlink-config fail-closed, directory-prefix scanning, selector "
           "reconciliation of an unmatched-command/unmatched-option/duplicate-path/overlapping-path/"
           "duplicate-option control failing closed, a line-continuation split sink scanned whole, a "
-          "commented-out literal not firing, and a bundled short-option value scanned); an unavailable "
+          "commented-out literal not firing, a bundled short-option value scanned, and a FIFO configuration, "
+          "a FIFO under a /** surface, a configuration swapped for a FIFO after its checks and an exact-path "
+          "surface swapped for a FIFO after its is_file() check each failing closed without blocking); an "
+          "unavailable "
           "temp directory or symlink support is a NOT RUN failure (nonzero exit), never a PASS (PARTIAL)"
           .format(core))
     return 0
