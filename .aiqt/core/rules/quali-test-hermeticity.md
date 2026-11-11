@@ -27,10 +27,10 @@ the code is correct.
 
 A test also leaves the host as it found it. It creates, moves, deletes, or changes the permissions or
 ownership of only paths within a temporary location it made for itself and removes afterwards, and it never
-mutates state outside that location. It keeps its fixtures outside any tree a later check reads and arranges
-their cleanup on normal exit, on failure, and on termination by a catchable signal. Where a test must walk
-real parent directories, it bounds the walk by that fixture root, never by a host property such as ownership,
-which can reach far past the fixture and disturb unrelated state.
+mutates state outside that location. It keeps its fixtures outside any tree scanned by a check not meant to
+read them, and arranges their removal on failure and on termination by a catchable signal too. Where a test
+must walk real parent directories, it bounds the walk by that fixture root, never by a host property such as
+ownership, which can reach far past the fixture and disturb unrelated state.
 
 Where verification substitutes for an external executable that the code under test reaches by command lookup
 or process launch, the substitute is an executable fixture, never a shell function or alias; an in-process
