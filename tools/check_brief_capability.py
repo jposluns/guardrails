@@ -4245,85 +4245,159 @@ DEADLINE_MARGIN_SECONDS = 3.0
 # PARSE_DEADLINE_SECONDS, a wall-clock count by construction (the parent's communicate timeout), plus
 # DEADLINE_MARGIN_SECONDS for the parent's own work around that wait (the child's spawn, the wake-up at
 # the timeout, the group kill, the reap, the result decode). Neither part is scaled by any reading of
-# host load. A parse that runs on past the deadline still fails its row, because a parse takes no less
-# wall time than the CPU time it spends, and the parse of each ceiling shape needs more CPU time than
-# the bound: parse/deadline-cap-under-uncut-parse runs each one with the deadline lifted under a CPU
-# limit of the bound times 1 + DEADLINE_UNCUT_MARGIN and requires the limit to cut it inside the parse
-# (_cap_probe_held). The two old-ceiling shapes are shown past the bound by revert/parse-thread-join-red.
-DEADLINE_UNCUT_MARGIN = 0.2
+# host load. How much CPU time one parse of a ceiling shape needs is a fact about the host (its CPU
+# speed and its Python build), not something this code can hold, so no row requires one parse of a
+# fixed text to outlast the bound: a runner fast enough parses a ceiling shape in less. What
+# parse/deadline-cap-under-uncut-parse holds is the cut itself: with the deadline lifted, its probe
+# parses each ceiling shape again and again, in a loop that does nothing but call read(), until a CPU
+# timer armed at the bound cuts it, and requires that cut to land inside that loop (its frame on the
+# cut's stack) after the bound, with at least one entry into the vendored parser before it
+# (_cap_probe_held), so a parse still running at the bound is ended only by the timer and only once the
+# bound is spent. The loop removes the dependence on how long one parse takes: a cut between two parses
+# lands in the loop's own frame and counts like one inside the parser. Because that frame is on the
+# stack wherever the cut lands, the frame alone does not show the parser ran; the count of parser
+# entries does, so a loop that never reaches the parser reads False. It guarantees nothing more: a child
+# ended any other way, or a timer that never fires, still reads False. With the timer removed the
+# repeated parse never ends and the row reads False.
+# parse/deadline-cap-under-eighth-parse shows the same at one eighth of the ceiling, where one parse
+# ends far inside the bound. The timer is armed at the bound itself, with no margin above it
+# (parse/deadline-cap-armed-at-bound reads it back). The two old-ceiling shapes are shown past the
+# bound by revert/parse-thread-join-red.
 # the probe child for parse/deadline-cap-under-uncut-parse: it builds one ceiling shape (argv[2] its
 # repeated unit, behind the self-test's parse-forcing lead), loads the vendored parser, replaces the
-# thread join with a direct call (so the parse runs in this main thread with no deadline), turns core
-# files off, sets a SIGXCPU handler that raises Cut, sets its CPU limit to the CPU it has spent so far
-# plus argv[3] seconds, rounded up, writes UNCUT_PARSE_MARKER and makes the call UNCUT_PARSE_CALL. When
-# the limit cuts the call, Cut ends it; the child then reads, after the call, the CPU time its own
-# thread spent inside the call and how far the parse got (how many frames of the vendored parser's code
-# were on the stack where the cut landed), writes both as one report line, and ends itself by the
-# signal that cut it at that signal's default action, so its exit status names that signal. A call
+# thread join with a direct call (so the parse runs in this main thread with no deadline), wraps the
+# vendored parser's entry point (marko's Parser.parse) so each entry is counted, turns core files off,
+# sets a SIGPROF handler that raises Cut, writes UNCUT_PARSE_MARKER, reads its own thread's CPU clock
+# and then the process's, arms the one-shot ITIMER_PROF CPU timer at argv[3] seconds and makes the call
+# UNCUT_PARSE_CALL, whose loop (parse_again) reads the text again and again until something ends it, so
+# the loop is still running when the timer reaches argv[3]. Without nohz_full the kernel fires that
+# timer on CPU time it charges a whole clock tick at a time, which can reach argv[3] while the exact CPU
+# clocks read just under it, so the handler raises Cut only once the process's exact CPU clock shows
+# argv[3] seconds since its reading: a timer that fired, and so stands disarmed, while that clock is
+# still short is armed again for the rest and the call goes on. A SIGPROF that arrives while the timer
+# is still armed is not that timer's own and raises Cut at once, whatever the clock shows; several
+# stand-ins in CAP_STANDINS send one on purpose while the timer is armed, and their cuts report less
+# than argv[3]. Apart from such a SIGPROF sent within about one clock tick after argv[3], while Linux
+# still holds the timer armed, only a cut raised because the process's clock showed argv[3] reports at
+# least argv[3]: both clocks are read before the timer is armed, the thread's first, in a process that
+# runs only this thread, so when that Cut ends the call the thread has spent at least argv[3] seconds
+# since its reading. When the timer cuts the call, Cut ends it; the child then reads, after the call,
+# the CPU time its own thread spent inside the call and how many frames of the parse were on the stack
+# where the cut landed (the loop's own frame and those of the vendored parser's code), and how many
+# times the call entered the vendored parser, writes all three as one report line, and ends itself by
+# the signal that cut it at that signal's default action, so its exit status names that signal. A call
 # that returns or is refused writes no report and exits 0.
 UNCUT_PARSE_MARKER = b"parsing\n"
-UNCUT_PARSE_CALL = "    m.read(text)\n"
+UNCUT_PARSE_CALL = "    parse_again()\n"
+# the one-parse call of CAP_ONE_PARSE_PROBE, which returns when its single parse ends
+CAP_ONE_PARSE_CALL = "    m.read(text)\n"
 UNCUT_PARSE_PROBE = (
-    "import math, os, resource, signal, sys, time, traceback\n"
+    "import os, resource, signal, sys, time, traceback\n"
     "sys.path.insert(0, sys.argv[1])\n"
     "import _input_declarations as m\n"
     "class Cut(BaseException):\n"
     "    pass\n"
     "def cut(signum, frame):\n"
+    "    left = float(sys.argv[3]) - (time.process_time() - began_process)\n"
+    "    if left > 0 and signal.getitimer(signal.ITIMER_PROF) == (0.0, 0.0):\n"
+    "        signal.setitimer(signal.ITIMER_PROF, left)\n"
+    "        return\n"
     "    raise Cut(signum)\n"
+    "def parse_again():\n"
+    "    while True:\n"
+    "        m.read(text)\n"
     "m.PARSE_IN_CHILD = False\n"
     "m._joined_parse = lambda text: m._serialize(m._parse_document(text))\n"
-    "parser = os.path.join(os.path.dirname(m._load_marko()[0].__file__), '')\n"
+    "marko = m._load_marko()[0]\n"
+    "parser = os.path.join(os.path.dirname(marko.__file__), '')\n"
+    "entered = []\n"
+    "enter_parser = marko.parser.Parser.parse\n"
+    "def count_entry(self, text):\n"
+    "    entered.append(True)\n"
+    "    return enter_parser(self, text)\n"
+    "marko.parser.Parser.parse = count_entry\n"
     "lead = 'Input notes.' + chr(10) + chr(10)\n"
     "unit = sys.argv[2]\n"
     "text = lead + unit * ((m.MAX_TEXT_BYTES - len(lead) - 1) // len(unit)) + chr(10)\n"
     "resource.setrlimit(resource.RLIMIT_CORE, (0, 0))\n"
-    "signal.signal(signal.SIGXCPU, cut)\n"
-    "used = resource.getrusage(resource.RUSAGE_SELF)\n"
-    "limit = math.ceil(used.ru_utime + used.ru_stime + float(sys.argv[3]))\n"
-    "resource.setrlimit(resource.RLIMIT_CPU, (limit, limit + 5))\n"
+    "signal.signal(signal.SIGPROF, cut)\n"
     "sys.stdout.write('parsing' + chr(10))\n"
     "sys.stdout.flush()\n"
     "began = time.thread_time()\n"
+    "began_process = time.process_time()\n"
+    "signal.setitimer(signal.ITIMER_PROF, float(sys.argv[3]))\n"
     "try:\n"
     + UNCUT_PARSE_CALL +
     "except m.DeclarationError:\n"
     "    pass\n"
     "except Cut as stop:\n"
-    "    signal.signal(signal.SIGXCPU, signal.SIG_IGN)\n"
+    "    signal.setitimer(signal.ITIMER_PROF, 0)\n"
     "    spent = time.thread_time() - began\n"
     "    frames = sum(1 for frame, _ in traceback.walk_tb(stop.__traceback__)\n"
-    "                 if frame.f_code.co_filename.startswith(parser))\n"
-    "    sys.stdout.write('cut %r %d' % (spent, frames) + chr(10))\n"
+    "                 if frame.f_code is parse_again.__code__\n"
+    "                 or frame.f_code.co_filename.startswith(parser))\n"
+    "    sys.stdout.write('cut %r %d %d' % (spent, frames, len(entered)) + chr(10))\n"
     "    sys.stdout.flush()\n"
     "    signal.signal(stop.args[0], signal.SIG_DFL)\n"
     "    os.kill(os.getpid(), stop.args[0])\n"
     "    time.sleep(5)\n")
-# the probe's whole output when the limit cut its parse: the marker, then one report line of the CPU
-# seconds its thread spent inside the call and the parser frames on the cut's stack; the parent keeps
-# at most CAP_OUTPUT_LIMIT bytes of it, more than any output this pattern can match
-CAP_REPORT_PATTERN = rb"cut ([0-9.e+-]{1,32}) ([0-9]{1,6})\n"
+# UNCUT_PARSE_PROBE with its repeated call replaced by one parse (CAP_ONE_PARSE_CALL), for
+# parse/deadline-cap-refuses-parse-under-bound: a parse that ends before the timer reaches the bound
+# returns, and the child exits 0 with no report
+CAP_ONE_PARSE_PROBE = UNCUT_PARSE_PROBE.replace(UNCUT_PARSE_CALL, CAP_ONE_PARSE_CALL)
+
+
+def _probe_replaced(source, old, new):
+    """`source` with its one occurrence of `old` replaced by `new`. Raises ValueError when `old` occurs
+    in `source` any number of times but once, so a probe whose text has moved fails at import instead
+    of silently running unchanged."""
+    if source.count(old) != 1:
+        raise ValueError("probe text {!r} occurs {} times, not once".format(old, source.count(old)))
+    return source.replace(old, new)
+
+
+# UNCUT_PARSE_PROBE with each shape filled to one eighth of the ceiling, for
+# parse/deadline-cap-under-eighth-parse: one parse of such a shape ends far inside the bound, so only
+# the repeated parse is still running when the timer reaches it, and many short parses put many
+# between-parse spans in the timer's way. CAP_FULL_FILL is the probe's full-size fill, the text the
+# change replaces; _probe_replaced refuses the change if that text is gone
+CAP_FULL_FILL = "(m.MAX_TEXT_BYTES - len(lead) - 1)"
+CAP_EIGHTH_PROBE = _probe_replaced(UNCUT_PARSE_PROBE, CAP_FULL_FILL,
+                                   "(m.MAX_TEXT_BYTES // 8 - len(lead) - 1)")
+# the probe's whole output when the timer cut its parse: the marker, then one report line of the CPU
+# seconds its thread spent inside the call, the frames of the parse on the cut's stack (the loop's own
+# frame and those of the vendored parser's code) and how many times the call entered the vendored
+# parser before the cut; the parent keeps at most CAP_OUTPUT_LIMIT bytes of it, more than any output
+# this pattern can match
+CAP_REPORT_PATTERN = rb"cut ([0-9.e+-]{1,32}) ([0-9]{1,6}) ([0-9]{1,9})\n"
 CAP_OUTPUT_LIMIT = 4096
 # stand-in probe children for the rows that show _cap_probe_held refusing a child whose parse the CPU
-# limit did not end; all but the first and the last are UNCUT_PARSE_PROBE with its parse call replaced,
-# so they report through the probe's own code: one kills itself with SIGKILL before any marker; one
-# sends itself SIGXCPU at once; one sleeps for its CPU budget and then sends itself SIGXCPU; one starts
-# a thread that burns CPU until the limit fires while this main thread sleeps; one burns the CPU in this
-# main thread outside the parser; one is cut by a SIGXCPU it sends itself from inside the parser's own
-# call chain, at once; and one writes the marker and a report that meets every requirement and then
-# kills itself with SIGKILL
+# timer did not end, and (the last one) for parse/deadline-cap-holds-past-early-timer; all but the first
+# and forged-report-sigkill are UNCUT_PARSE_PROBE with its parse call or its loop's body replaced, so
+# they report through the probe's own code: one kills itself with SIGKILL before any marker; one sends
+# itself SIGPROF at once; one sleeps for its CPU budget and then sends itself SIGPROF; one starts a
+# thread that burns CPU until the timer fires while this main thread sleeps; one burns the CPU in this
+# main thread outside the parser; one is cut by a SIGPROF it sends itself from inside the parser's own
+# call chain, at once; one, loop-without-parser, runs the repeated-parse loop with its read() replaced
+# by arithmetic, so the timer cuts it inside the loop after the bound but the parser was never entered;
+# and one writes the marker and a report that meets every requirement and then kills itself with
+# SIGKILL. The last one, timer-early-inside-parser, is the real parse with the timer made to fire early
+# once: on entering the parser's link and emphasis scan it disarms the timer and sends itself SIGPROF,
+# as a tick-charged timer does when its clock runs ahead of the exact one, and the parse must still be
+# cut only after it has spent the bound. cut-inside-parser-at-once and timer-early-inside-parser both
+# install their wrapper and then make the repeated-parse call
 CAP_STANDINS = (
     ("sigkill-before-marker",
      "import os, signal\n"
      "os.kill(os.getpid(), signal.SIGKILL)\n"),
-    ("sigxcpu-at-once", UNCUT_PARSE_PROBE.replace(
+    ("sigprof-at-once", UNCUT_PARSE_PROBE.replace(
         UNCUT_PARSE_CALL,
-        "    os.kill(os.getpid(), signal.SIGXCPU)\n"
+        "    os.kill(os.getpid(), signal.SIGPROF)\n"
         "    time.sleep(5)\n")),
-    ("sleep-then-sigxcpu", UNCUT_PARSE_PROBE.replace(
+    ("sleep-then-sigprof", UNCUT_PARSE_PROBE.replace(
         UNCUT_PARSE_CALL,
         "    time.sleep(float(sys.argv[3]))\n"
-        "    os.kill(os.getpid(), signal.SIGXCPU)\n"
+        "    os.kill(os.getpid(), signal.SIGPROF)\n"
         "    time.sleep(5)\n")),
     ("busy-thread-until-limit", UNCUT_PARSE_PROBE.replace(
         UNCUT_PARSE_CALL,
@@ -4343,16 +4417,66 @@ CAP_STANDINS = (
         "    import marko.inline_parser as inline\n"
         "    found = inline.find_links_or_emphs\n"
         "    def cut_here(*args):\n"
-        "        os.kill(os.getpid(), signal.SIGXCPU)\n"
+        "        os.kill(os.getpid(), signal.SIGPROF)\n"
         "        time.sleep(5)\n"
         "        return found(*args)\n"
         "    inline.find_links_or_emphs = cut_here\n"
         + UNCUT_PARSE_CALL)),
+    ("loop-without-parser", _probe_replaced(
+        UNCUT_PARSE_PROBE, "        m.read(text)\n", "        sum(range(100000))\n")),
     ("forged-report-sigkill",
      "import os, signal, sys\n"
-     "sys.stdout.write('parsing' + chr(10) + 'cut 1000.0 9' + chr(10))\n"
+     "sys.stdout.write('parsing' + chr(10) + 'cut 1000.0 9 9' + chr(10))\n"
      "sys.stdout.flush()\n"
-     "os.kill(os.getpid(), signal.SIGKILL)\n"))
+     "os.kill(os.getpid(), signal.SIGKILL)\n"),
+    ("timer-early-inside-parser", UNCUT_PARSE_PROBE.replace(
+        UNCUT_PARSE_CALL,
+        "    import marko.inline_parser as inline\n"
+        "    found, fired = inline.find_links_or_emphs, []\n"
+        "    def fire_early(*args):\n"
+        "        if not fired:\n"
+        "            fired.append(True)\n"
+        "            signal.setitimer(signal.ITIMER_PROF, 0)\n"
+        "            os.kill(os.getpid(), signal.SIGPROF)\n"
+        "        return found(*args)\n"
+        "    inline.find_links_or_emphs = fire_early\n"
+        + UNCUT_PARSE_CALL)))
+# a stand-in probe child for parse/deadline-cap-armed-at-bound: UNCUT_PARSE_PROBE with its parse call
+# replaced by a read-back (getitimer) of the CPU timer the probe has just armed, written as one line
+# after the marker; the child then exits 0 with no cut. It is started by _cap_probe_readings like every
+# probe, so the read-back shows both the CPU budget that function passes and the probe's own arming
+CAP_ARMED_PROBE = UNCUT_PARSE_PROBE.replace(
+    UNCUT_PARSE_CALL,
+    "    sys.stdout.write('armed %r' % (signal.getitimer(signal.ITIMER_PROF)[0],) + chr(10))\n"
+    "    sys.stdout.flush()\n")
+CAP_ARMED_PATTERN = rb"armed ([0-9.e+-]{1,32})\n"
+# how far, in CPU seconds and at either end, the read-back of the probe's armed timer may lie from the
+# bound: Linux adds one clock tick (at most 10 ms, at HZ=100) to an ITIMER_PROF value it arms, and the
+# probe spends a few microseconds of CPU between arming and the read-back, so two of the coarsest ticks
+# cover both; a timer armed further above the bound (the old cut at 1.2 times the bound among them)
+# reads False. This is the read-back's tolerance only; it moves no bound or margin of the deadline rows
+CAP_ARMED_TOLERANCE = 0.02
+# the CPU seconds the re-arm stand-in spends before its timer is made to fire early: far above the
+# coarsest clock tick and far under the bound, so the rest it must re-arm for differs from the bound by
+# much more than CAP_ARMED_TOLERANCE
+CAP_REARM_SPENT = 1.0
+# a stand-in probe child for parse/deadline-cap-rearms-for-rest: UNCUT_PARSE_PROBE with its parse call
+# replaced by a busy loop in this main thread until the process's exact CPU clock shows CAP_REARM_SPENT
+# seconds since its reading, then the timer disarmed and SIGPROF sent, as a tick-charged timer fires
+# early (os.kill runs the Python handler before it returns when the signal is sent to this process).
+# The handler should arm the timer again for the rest of the bound; the child reads that timer back
+# (getitimer) and then the process's CPU seconds since its reading, writes both as one line after the
+# marker and exits 0 with no cut
+CAP_REARM_PROBE = UNCUT_PARSE_PROBE.replace(
+    UNCUT_PARSE_CALL,
+    "    while time.process_time() - began_process < %r:\n"
+    "        pass\n"
+    "    signal.setitimer(signal.ITIMER_PROF, 0)\n"
+    "    os.kill(os.getpid(), signal.SIGPROF)\n"
+    "    sys.stdout.write('rearmed %%r %%r' %% (signal.getitimer(signal.ITIMER_PROF)[0],\n"
+    "                                         time.process_time() - began_process) + chr(10))\n"
+    "    sys.stdout.flush()\n" % (CAP_REARM_SPENT,))
+CAP_REARM_PATTERN = rb"rearmed ([0-9.e+-]{1,32}) ([0-9.e+-]{1,32})\n"
 # the probe child for revert/parse-thread-join-red: it runs the shared reading with the thread join
 # restored (PARSE_IN_CHILD=False) over one shape at the old ceiling and never returns within the
 # deadline (the join's timeout cannot fire while one regex match holds the GIL); the parent shows it
@@ -4373,7 +4497,7 @@ THREAD_JOIN_PROBE = (
 
 def _deadline_bound():
     """The wall seconds a read() through the parse deadline may take: the deadline itself plus
-    DEADLINE_MARGIN_SECONDS, both fixed (see the comment above DEADLINE_UNCUT_MARGIN)."""
+    DEADLINE_MARGIN_SECONDS, both fixed (see the comment above UNCUT_PARSE_MARKER)."""
     return _input_declarations.PARSE_DEADLINE_SECONDS + DEADLINE_MARGIN_SECONDS
 
 
@@ -4412,15 +4536,20 @@ def _deadline_boundary_reading():
 
 def _cap_probe_held(code, output):
     """Whether one probe child's exit status and whole output (at most CAP_OUTPUT_LIMIT bytes kept) show
-    its parse cut by the CPU limit after it spent at least _deadline_bound() of CPU time: the child was
-    ended by SIGXCPU (not SIGKILL, the hard limit's signal, nor any other), its output is
+    its parse cut by the CPU timer after it spent at least _deadline_bound() of CPU time: the child was
+    ended by SIGPROF, the timer's signal (not SIGKILL, SIGXCPU nor any other), its output is
     UNCUT_PARSE_MARKER and then exactly one report line (CAP_REPORT_PATTERN), and that line gives at least
-    _deadline_bound() CPU seconds spent by the child's own thread inside the parse call and at least one
-    frame of the vendored parser's code on the stack where the cut landed. Both readings are the child's
-    own, taken after the call in the thread that made it, so CPU spent by another thread, time spent in
-    a sleep, a cut outside the parser and a delay in this parent each read False; a child written to
-    forge the report line is not detected."""
-    if code != -signal.SIGXCPU or not output.startswith(UNCUT_PARSE_MARKER):
+    _deadline_bound() CPU seconds spent by the child's own thread inside the parse call, at least one
+    frame of the parse (the probe's repeated-parse loop or the vendored parser's code) on the stack where
+    the cut landed, and at least one entry into the vendored parser before the cut. The frame shows only
+    that the cut landed inside the call, since the loop's own frame is on the stack wherever in the loop
+    it lands; the entry count, taken by a wrapper around the parser's entry point, shows the parser ran.
+    All three readings are the child's own, taken after the call in the thread that made it, so CPU
+    spent by another thread, time spent in a sleep, a cut outside the call, a loop that never enters the
+    parser and a delay in this parent each read False. A call that enters the parser once and then
+    spends the bound elsewhere inside the call is not detected, nor is a child written to forge the
+    report line."""
+    if code != -signal.SIGPROF or not output.startswith(UNCUT_PARSE_MARKER):
         return False
     report = re.fullmatch(CAP_REPORT_PATTERN, output[len(UNCUT_PARSE_MARKER):])
     if report is None:
@@ -4429,34 +4558,110 @@ def _cap_probe_held(code, output):
         spent = float(report.group(1))
     except ValueError:
         return False
-    return spent >= _deadline_bound() and int(report.group(2)) >= 1
+    return spent >= _deadline_bound() and int(report.group(2)) >= 1 and int(report.group(3)) >= 1
 
 
 def _cap_report_boundary_reading():
     """What _cap_probe_held returns for set exit statuses and outputs: a report of 1 ms under the bound,
-    exactly the bound and 1 ms over it with one parser frame; the bound plus one second with no parser
-    frame; that report under SIGKILL and under exit status 0; with no marker before it; and with a
+    exactly the bound and 1 ms over it with one frame of the parse (the loop's or a parser frame) and one
+    parser entry; the bound plus one second with no frame of the parse, and with no parser entry; that
+    report under SIGKILL, under SIGXCPU and under exit status 0; with no marker before it; and with a
     second report line after it. The bound is written out as the deadline plus the margin."""
     bound = _input_declarations.PARSE_DEADLINE_SECONDS + DEADLINE_MARGIN_SECONDS
 
-    def report(spent, frames):
-        return UNCUT_PARSE_MARKER + "cut {!r} {}\n".format(spent, frames).encode("ascii")
+    def report(spent, frames, entries=1):
+        return UNCUT_PARSE_MARKER + "cut {!r} {} {}\n".format(spent, frames, entries).encode("ascii")
 
-    xcpu, kill = -signal.SIGXCPU, -signal.SIGKILL
+    prof, kill, xcpu = -signal.SIGPROF, -signal.SIGKILL, -signal.SIGXCPU
     over = report(bound + 1.0, 1)
     return [_cap_probe_held(code, output) for code, output in (
-        (xcpu, report(bound - 0.001, 1)), (xcpu, report(bound, 1)), (xcpu, report(bound + 0.001, 1)),
-        (xcpu, report(bound + 1.0, 0)), (kill, over), (0, over), (xcpu, over[len(UNCUT_PARSE_MARKER):]),
-        (xcpu, over + over[len(UNCUT_PARSE_MARKER):]))]
+        (prof, report(bound - 0.001, 1)), (prof, report(bound, 1)), (prof, report(bound + 0.001, 1)),
+        (prof, report(bound + 1.0, 0)), (prof, report(bound + 1.0, 1, 0)), (kill, over), (xcpu, over),
+        (0, over),
+        (prof, over[len(UNCUT_PARSE_MARKER):]), (prof, over + over[len(UNCUT_PARSE_MARKER):]))]
 
 
-def _cap_probe_readings(runs, timeout=600):
-    """_cap_probe_held for each (probe source, ceiling unit, pause) run: every child is started at once,
-    each in its own process group, with argv this tool's directory, the unit, and the CPU budget
-    _deadline_bound() times 1 + DEADLINE_UNCUT_MARGIN; `pause` is called once in this process when that
-    child's output ends, before the end is recorded (the parent pause stand-in). A child still running
-    after `timeout` wall seconds reads False, and every group is killed before this returns."""
-    spend = _deadline_bound() * (1.0 + DEADLINE_UNCUT_MARGIN)
+def _cap_armed_at_bound(armed):
+    """Whether a read-back of the probe's armed CPU timer, `armed` seconds, lies within
+    CAP_ARMED_TOLERANCE of _deadline_bound() at either end (both ends inclusive)."""
+    return _deadline_bound() - CAP_ARMED_TOLERANCE <= armed <= _deadline_bound() + CAP_ARMED_TOLERANCE
+
+
+def _cap_armed_held(code, output):
+    """Whether one CAP_ARMED_PROBE child's exit status and whole output show its timer armed at the
+    bound: it exited 0, its output is UNCUT_PARSE_MARKER and then exactly one read-back line
+    (CAP_ARMED_PATTERN), and that read-back is at the bound (_cap_armed_at_bound)."""
+    if code != 0 or not output.startswith(UNCUT_PARSE_MARKER):
+        return False
+    report = re.fullmatch(CAP_ARMED_PATTERN, output[len(UNCUT_PARSE_MARKER):])
+    if report is None:
+        return False
+    try:
+        armed = float(report.group(1))
+    except ValueError:
+        return False
+    return _cap_armed_at_bound(armed)
+
+
+def _cap_armed_boundary_reading():
+    """What _cap_armed_at_bound returns for set read-backs: 1 ms outside, exactly at and 1 ms inside the
+    low end of its window, exactly the bound, 1 ms inside, exactly at and 1 ms outside the high end, and
+    the old cut of 1.2 times the bound. The bound is written out as the deadline plus the margin."""
+    bound = _input_declarations.PARSE_DEADLINE_SECONDS + DEADLINE_MARGIN_SECONDS
+    low, high = bound - CAP_ARMED_TOLERANCE, bound + CAP_ARMED_TOLERANCE
+    return [_cap_armed_at_bound(armed) for armed in (
+        low - 0.001, low, low + 0.001, bound, high - 0.001, high, high + 0.001, bound * 1.2)]
+
+
+def _cap_rearmed_for_rest(armed, spent):
+    """Whether a read-back of the re-armed CPU timer, `armed` seconds, taken when the process had spent
+    `spent` CPU seconds since its reading, is the rest of the bound: `spent` is at least CAP_REARM_SPENT
+    and `armed` lies within CAP_ARMED_TOLERANCE of _deadline_bound() minus `spent` at either end (both
+    ends inclusive). A re-arm for the whole bound reads about CAP_REARM_SPENT less CAP_ARMED_TOLERANCE above
+    that window."""
+    rest = _deadline_bound() - spent
+    return spent >= CAP_REARM_SPENT and rest - CAP_ARMED_TOLERANCE <= armed <= rest + CAP_ARMED_TOLERANCE
+
+
+def _cap_rearmed_held(code, output):
+    """Whether one CAP_REARM_PROBE child's exit status and whole output show its timer, made to fire
+    early, armed again for the rest of the bound: it exited 0 (a handler that cut at that fire ends it
+    by SIGPROF), its output is UNCUT_PARSE_MARKER and then exactly one read-back line
+    (CAP_REARM_PATTERN), and that read-back is the rest (_cap_rearmed_for_rest)."""
+    if code != 0 or not output.startswith(UNCUT_PARSE_MARKER):
+        return False
+    report = re.fullmatch(CAP_REARM_PATTERN, output[len(UNCUT_PARSE_MARKER):])
+    if report is None:
+        return False
+    try:
+        armed, spent = float(report.group(1)), float(report.group(2))
+    except ValueError:
+        return False
+    return _cap_rearmed_for_rest(armed, spent)
+
+
+def _cap_rearmed_boundary_reading():
+    """What _cap_rearmed_for_rest returns for set read-backs after CAP_REARM_SPENT seconds: 1 ms outside,
+    exactly at and 1 ms inside the low end of its window, exactly the rest, 1 ms inside, exactly at and
+    1 ms outside the high end, and the whole bound; then the rest after 1 ms under CAP_REARM_SPENT. The
+    bound is written out as the deadline plus the margin."""
+    bound = _input_declarations.PARSE_DEADLINE_SECONDS + DEADLINE_MARGIN_SECONDS
+    spent = CAP_REARM_SPENT
+    rest = bound - spent
+    low, high = rest - CAP_ARMED_TOLERANCE, rest + CAP_ARMED_TOLERANCE
+    under = spent - 0.001
+    return [_cap_rearmed_for_rest(armed, spent) for armed in (
+        low - 0.001, low, low + 0.001, rest, high - 0.001, high, high + 0.001, bound)] + [
+        _cap_rearmed_for_rest(bound - under, under)]
+
+
+def _cap_probe_readings(runs, timeout=600, held=_cap_probe_held):
+    """`held` (by default _cap_probe_held) for each (probe source, ceiling unit, pause) run: every child
+    is started at once, each in its own process group, with argv this tool's directory, the unit, and
+    the CPU budget _deadline_bound() itself; `pause` is called once in this process when that child's
+    output ends, before the end is recorded (the parent pause stand-in). A child still running after
+    `timeout` wall seconds reads False, and every group is killed before this returns."""
+    spend = _deadline_bound()
     probes, output, ended, readings = [], {}, set(), []
     try:
         for source, unit, _ in runs:
@@ -4484,7 +4689,7 @@ def _cap_probe_readings(runs, timeout=600):
                 code = probe.wait(timeout=max(0.0, until - time.monotonic())) if probe.pid in ended else None
             except subprocess.TimeoutExpired:
                 code = None
-            readings.append(code is not None and _cap_probe_held(code, output[probe.pid]))
+            readings.append(code is not None and held(code, output[probe.pid]))
     finally:
         for probe in probes:
             try:
@@ -4495,12 +4700,33 @@ def _cap_probe_readings(runs, timeout=600):
     return readings
 
 
-def _cap_under_uncut_parse(timeout=600):
-    """For each ceiling shape of parse/deadline-held-at-ceiling (the underscore-mark run and the <?
-    opener paragraph), whether UNCUT_PARSE_PROBE shows its parse cut by a CPU limit of _deadline_bound()
-    times 1 + DEADLINE_UNCUT_MARGIN after spending at least _deadline_bound() of its own thread's CPU
-    time inside the parser (_cap_probe_held)."""
-    return _cap_probe_readings([(UNCUT_PARSE_PROBE, unit, lambda: None) for unit in ("_a", "x<?")], timeout)
+def _cap_under_uncut_parse(units=("_a", "x<?"), timeout=600, source=UNCUT_PARSE_PROBE):
+    """One reading for each repeated unit in `units` (by default those of the two ceiling shapes of
+    parse/deadline-held-at-ceiling, the underscore-mark run and the <? opener paragraph): whether the
+    probe `source` (by default UNCUT_PARSE_PROBE, which parses the text again and again until it is cut)
+    run on the text that unit fills shows its call cut by a CPU timer of exactly _deadline_bound() after
+    spending at least _deadline_bound() of its own thread's CPU time inside the call and entering the
+    vendored parser at least once (_cap_probe_held). With the repeated parse the reading does not depend
+    on the shape or on how long one parse of it takes, so it does not show that one parse of a ceiling
+    shape outlasts the bound."""
+    return _cap_probe_readings([(source, unit, lambda: None) for unit in units], timeout)
+
+
+def _cap_eighth_replaced_reading():
+    """(whether CAP_EIGHTH_PROBE differs from UNCUT_PARSE_PROBE, whether its full-size fill CAP_FULL_FILL
+    is gone and the one-eighth fill appears once, and the name of the exception _probe_replaced raises
+    for a target missing from the probe and for one that occurs twice, None where it raises none)."""
+    def raised(source, old):
+        try:
+            _probe_replaced(source, old, "")
+        except ValueError as exc:
+            return type(exc).__name__
+        return None
+
+    return (CAP_EIGHTH_PROBE != UNCUT_PARSE_PROBE,
+            CAP_FULL_FILL not in CAP_EIGHTH_PROBE and CAP_EIGHTH_PROBE.count("MAX_TEXT_BYTES // 8") == 1,
+            raised(UNCUT_PARSE_PROBE, CAP_FULL_FILL.replace("- 1)", "- 2)")),
+            raised(UNCUT_PARSE_PROBE + CAP_FULL_FILL, CAP_FULL_FILL))
 # a stand-in parse child: _CHILD_PATH is pointed at a script that opens with this prefix (the text read
 # from stdin, the script's own directory as `here`) and then runs one vector's body, so each way a child
 # can end is shown against the parent's reading of it
@@ -6105,36 +6331,85 @@ def self_test(report_path=None):
                    + [("answered", False), ("refused", False)])))
     # and the cap probe's reading of a child's exit status and output, driven with set ones
     # (_cap_report_boundary_reading): a report of CPU time 1 ms under the bound does not hold, exactly at
-    # it and 1 ms over it does (the comparison is inclusive); and no parser frame on the cut's stack, an
-    # end by SIGKILL or by a normal exit, no marker, or a second report line each refuse
+    # it and 1 ms over it does (the comparison is inclusive); and no frame of the parse on the cut's
+    # stack, no entry into the parser, an end by SIGKILL, by SIGXCPU or by a normal exit, no marker, or
+    # a second report line each refuse
     check("parse/deadline-cap-report-boundary", _cap_report_boundary_reading(),
-          [False, True, True, False, False, False, False, False])
-    # and the bound is under each ceiling shape's parse: with the deadline lifted, the parse running in
-    # the probe's main thread is cut by a CPU limit of the bound plus DEADLINE_UNCUT_MARGIN of it, and
-    # the probe reports, after the cut, at least the bound of its own thread's CPU spent inside the call
-    # and the cut landing inside the vendored parser, so a read whose child was never killed would stay
-    # over the bound (a bound raised until it nears the shorter parse turns this red)
+          [False, True, True, False, False, False, False, False, False, False])
+    # and a parse still running at the bound is ended only by the CPU timer and only once the bound is
+    # spent: with the deadline lifted, the probe's main thread parses each ceiling shape again and again
+    # (so the loop is still running at the bound whatever one parse takes), is cut by a CPU timer of
+    # exactly the bound, and reports, after the cut, at least the bound of its own thread's CPU spent
+    # inside the call, the cut landing inside the loop or the vendored parser, and at least one entry
+    # into the vendored parser; with the timer removed the parse never ends and this reads False
     check("parse/deadline-cap-under-uncut-parse", _cap_under_uncut_parse(), [True, True])
-    # and a probe child whose parse the CPU limit did not end does not pass for one it did (CAP_STANDINS,
+    # and the same at one eighth of the ceiling (CAP_EIGHTH_PROBE), where one parse of either shape ends
+    # far inside the bound: the repeated parse is still running at the bound and the cut counts wherever
+    # it lands in the loop, so this reads True; one parse in place of the loop returns before the bound
+    # and reads False
+    check("parse/deadline-cap-under-eighth-parse", _cap_under_uncut_parse(source=CAP_EIGHTH_PROBE),
+          [True, True])
+    # and that probe really is the one-eighth one: CAP_EIGHTH_PROBE differs from UNCUT_PARSE_PROBE only
+    # by its fill, and _probe_replaced, which builds it, raises when its target text is missing or occurs
+    # twice, so a moved fill line fails at import instead of leaving the full-size probe in its place
+    check("parse/deadline-cap-eighth-probe-replaced", _cap_eighth_replaced_reading(),
+          (True, True, "ValueError", "ValueError"))
+    # and that timer is armed at the bound itself, with no margin above it: a probe child whose parse call
+    # is replaced by a read-back of the timer it has just armed (CAP_ARMED_PROBE), started through the
+    # same _cap_probe_readings as every probe, reads it back within CAP_ARMED_TOLERANCE of the bound (a
+    # restored cut of 1.2 times the bound reads False), and the read-back's comparison, driven with set
+    # values (_cap_armed_boundary_reading), holds exactly at and 1 ms inside each end of its window and
+    # not 1 ms outside either end or at 1.2 times the bound
+    check("parse/deadline-cap-armed-at-bound",
+          (_cap_probe_readings([(CAP_ARMED_PROBE, "_a", lambda: None)], held=_cap_armed_held),
+           _cap_armed_boundary_reading()),
+          ([True], [False, True, True, True, True, True, False, False]))
+    # and the probe with one parse in place of the repeated one (CAP_ONE_PARSE_PROBE), on a shape whose
+    # whole parse needs far less CPU than the bound (plain prose filled to the ceiling behind the same
+    # parse-forcing lead, about half a second), is not cut: its parse returns, and the row reads False,
+    # as one parse of a ceiling shape would on a runner fast enough to end it before the bound
+    check("parse/deadline-cap-refuses-parse-under-bound",
+          _cap_under_uncut_parse(("ab ",), source=CAP_ONE_PARSE_PROBE), [False])
+    # and a probe child whose parse the CPU timer did not end does not pass for one it did (CAP_STANDINS,
     # all at once on the underscore-mark shape): a child that kills itself with SIGKILL before any marker
-    # or sends itself SIGXCPU at once; a child that sleeps for its CPU budget and then sends itself
-    # SIGXCPU, one whose CPU goes to another thread until the limit fires, and the at-once child with this
-    # parent pausing for the bound plus one second at its end of output; a child that burns its budget in
-    # its main thread outside the parser, and one cut at once inside the parser; and a child that writes
-    # a report meeting both requirements and is ended by SIGKILL
+    # or sends itself SIGPROF at once; a child that sleeps for its CPU budget and then sends itself
+    # SIGPROF, one whose CPU goes to another thread until the timer fires, and the at-once child with
+    # this parent pausing for the bound plus one second at its end of output; a child that burns its
+    # budget in its main thread outside the parser, and one cut at once inside the parser; a child whose
+    # repeated-parse loop never reaches the parser; and a child that writes a report meeting every
+    # requirement and is ended by SIGKILL
     pause = _deadline_bound() + 1.0
     standin_runs = [(source, "_a", lambda: None) for _, source in CAP_STANDINS]
-    standin_runs.append((dict(CAP_STANDINS)["sigxcpu-at-once"], "_a", lambda: time.sleep(pause)))
+    standin_runs.append((dict(CAP_STANDINS)["sigprof-at-once"], "_a", lambda: time.sleep(pause)))
     standin = dict(zip([name for name, _ in CAP_STANDINS] + ["parent-pause"],
                        _cap_probe_readings(standin_runs)))
     check("parse/deadline-cap-refuses-self-killed-probe",
-          [standin[name] for name in ("sigkill-before-marker", "sigxcpu-at-once")], [False, False])
+          [standin[name] for name in ("sigkill-before-marker", "sigprof-at-once")], [False, False])
     check("parse/deadline-cap-refuses-non-parsing-probe",
-          [standin[name] for name in ("sleep-then-sigxcpu", "busy-thread-until-limit", "parent-pause")],
+          [standin[name] for name in ("sleep-then-sigprof", "busy-thread-until-limit", "parent-pause")],
           [False, False, False])
     check("parse/deadline-cap-needs-cpu-and-progress",
           [standin[name] for name in ("busy-main-until-limit", "cut-inside-parser-at-once")], [False, False])
+    # the loop that never reaches the parser is cut inside the loop after the bound, so its frame
+    # requirement holds; it reads False only because no parser entry is reported (with the entry
+    # requirement removed, it reads True)
+    check("parse/deadline-cap-refuses-loop-without-parser", standin["loop-without-parser"], False)
     check("parse/deadline-cap-refuses-sigkill", standin["forged-report-sigkill"], False)
+    # and a timer that fires before the exact CPU clock shows the bound, as a tick-charged one can, does
+    # not cut the parse early: the probe arms it again for the rest, so the real parse is still cut
+    # inside the loop or the parser after spending the bound (with the handler raising at the first
+    # fire, this reads False)
+    check("parse/deadline-cap-holds-past-early-timer", standin["timer-early-inside-parser"], True)
+    # and that re-arm is for the rest of the bound, not the whole bound again: a probe child that spends
+    # CAP_REARM_SPENT of CPU and then has its timer fire early (CAP_REARM_PROBE) reads the re-armed timer
+    # back within CAP_ARMED_TOLERANCE of the bound minus the CPU it has spent (a re-arm for the whole
+    # bound, or a handler that cuts at that fire, reads False), and the read-back's comparison, driven
+    # with set values (_cap_rearmed_boundary_reading), holds exactly at and 1 ms inside each end of its
+    # window and not 1 ms outside either end, at the whole bound, or after less CPU than CAP_REARM_SPENT
+    check("parse/deadline-cap-rearms-for-rest",
+          (_cap_probe_readings([(CAP_REARM_PROBE, "_a", lambda: None)], held=_cap_rearmed_held),
+           _cap_rearmed_boundary_reading()),
+          ([True], [False, True, True, True, True, True, False, False, False]))
     # and shown red under the flip that restores the thread join: a probe child runs the flipped read on
     # each shape and has NOT returned at the same fixed bound (join cannot fire while one regex match
     # holds the GIL), and its own process group is then killed, never left running

@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "d8c6e2d1cd4207836cd30b1febfd76a2393099c956a49f542efd32b6f3f624ea"
+tree-sha256 = "24eb8cf16d970d4e7d503351bbdecdfbaf701e1e59ab44a429230e847615df75"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -4146,8 +4146,8 @@ sha256 = "9ec3224a7e8f517b357ab6738f82a4ce41a9bca6fcba66c3194b3a9157ff9ce0"
 
 [[sources]]
 path = "tools/check_brief_capability.py"
-bytes = 542952
-sha256 = "0caff7b98a834c84324121c16a30f6b4b7e1432d0e15bba3ba8e04398dbc2df7"
+bytes = 561947
+sha256 = "d325f7ed9235ee76a1b4e73228a7fe87186d081429554d51f901191ebeecc0d5"
 
 [[sources]]
 path = "tools/check_byte_canon.py"
@@ -4671,8 +4671,8 @@ sha256 = "a15808a4ca7a2d9482f68a39ec80cf5f30137c36500d7c02a938769e60a75e75"
 
 [[sources]]
 path = "tools/selftest_checks.toml"
-bytes = 239049
-sha256 = "dbc0e0fda0a705da0d632e0e20407af9847a3b664f35cfcf50d826f239e1090e"
+bytes = 239366
+sha256 = "4dcf86fbb6d01be806024089cebb52481fa49cf33a854510fa975c03bdd93730"
 
 [[sources]]
 path = "tools/selftest_ci_status.py"
