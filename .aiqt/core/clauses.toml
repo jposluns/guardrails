@@ -4334,7 +4334,7 @@ source-path = ".aiqt/core/rules/security-secp-synthetic-fixture-data.md"
 start-line = 17
 end-line = 19
 canonical-text = "Test fixtures, seed data, examples, and documentation use purpose-built synthetic data or anonymization\nvalidated against the applicable re-identification risk, never real personal data or production records\ncopied over for convenience."
-source-digest = "220c7bb505f47c4e11fd826aa8bc6350e59dfdd01893f404bfd2f86c172818f7"
+source-digest = "039a3527afc0405a6a77f31ba6b6fba706b901f124939eafef90da087f9b848a"
 
 [[clause]]
 clause-id = "secsyn.2"
@@ -4343,7 +4343,7 @@ source-path = ".aiqt/core/rules/security-secp-synthetic-fixture-data.md"
 start-line = 17
 end-line = 19
 canonical-text = "Test fixtures, seed data, examples, and documentation use purpose-built synthetic data or anonymization\nvalidated against the applicable re-identification risk, never real personal data or production records\ncopied over for convenience."
-source-digest = "220c7bb505f47c4e11fd826aa8bc6350e59dfdd01893f404bfd2f86c172818f7"
+source-digest = "039a3527afc0405a6a77f31ba6b6fba706b901f124939eafef90da087f9b848a"
 
 [[clause]]
 clause-id = "secsyn.3"
@@ -4352,7 +4352,16 @@ source-path = ".aiqt/core/rules/security-secp-synthetic-fixture-data.md"
 start-line = 19
 end-line = 20
 canonical-text = "Version control can retain removed content in history, so later cleanup is not\nthe primary safeguard."
-source-digest = "220c7bb505f47c4e11fd826aa8bc6350e59dfdd01893f404bfd2f86c172818f7"
+source-digest = "039a3527afc0405a6a77f31ba6b6fba706b901f124939eafef90da087f9b848a"
+
+[[clause]]
+clause-id = "secsyn.4"
+corpus-id = "secsyn"
+source-path = ".aiqt/core/rules/security-secp-synthetic-fixture-data.md"
+start-line = 20
+end-line = 23
+canonical-text = "Where licence terms or an owner's restriction forbids reproducing reference material\nor its file names, test fixtures, seed data, examples and documentation, and scratch material prepared for\nthem, use independently invented content and names, never copied files, excerpts or real file names from\nthat material."
+source-digest = "039a3527afc0405a6a77f31ba6b6fba706b901f124939eafef90da087f9b848a"
 
 [[clause]]
 clause-id = "bgcwai.1"
