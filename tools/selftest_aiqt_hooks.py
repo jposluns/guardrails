@@ -6665,8 +6665,14 @@ def _hook_cpu_timed(call, bound=None, runs=3):
 # shows. The least corrected reading is judged against the row's own bound with the row's own
 # inclusiveness. A real slowdown of the timed code is slow on every retiming and slows the row, not
 # the reference, so it still fails, while a reading inflated by load passes. The bounds are unchanged.
+# The cap is the most any reading is forgiven, so it is also the residual: a row whose own work grew
+# to just under _CPU_REFERENCE_CAP times its bound can pass on a retiming whose reference ran that much
+# slower, and a row at or over that multiple fails under any load (1.6 times its bound always fails).
+# It is 1.5, not 2: on an 80-CPU host already near half load, the reference ran a median 1.1 and at
+# most about 2 times its baseline, so the cap covers the load inflation seen on every row near its
+# bound (1.07 and 1.01 times it) and forgives a single retiming at most half its bound.
 _CPU_RETIMES = 2
-_CPU_REFERENCE_CAP = 2.0
+_CPU_REFERENCE_CAP = 1.5
 _CPU_REFERENCE_WARMUP = 5
 _cpu_reference_floor = []
 
@@ -7198,18 +7204,22 @@ def _cpu_judge_failures():
     one a microsecond over it are retimed. A slowdown on every retiming fails with a quiet reference
     (3 s, 3 s) and with a reference 1.5 times slower (4.5 s, 4.5 s, corrected 3 s); a load-inflated
     reading passes (1.07 s, then 1.2 s at a reference 1.5 times slower: 0.8 s, one retiming); the
-    correction stops at _CPU_REFERENCE_CAP (2.5 s at a reference 4 times slower judges 1.25 s); a fast
-    reference never inflates (0.9 s at half the baseline judges 0.9 s); a corrected retiming exactly at
-    the bound judges the bound, a microsecond over judges over; no retime judges the first reading. The
-    recorded failures 1.07 s against 1 s and 7.08 s against 7 s pass when their retimings carry a
-    reference 1.2 and 1.1 times slower.
-    cpu-judge-live (real): through _hook_cpu_timed with a 0.05 s bound, a stand-in spending 0.15 s of
-    its thread's CPU (3 times the bound) on every call judges at least 0.075 s, over the bound whatever the
-    reference shows, and one spending 0.01 s judges under it.
+    correction stops at _CPU_REFERENCE_CAP, 1.5 (2.5 s at a reference 4 times slower judges about
+    1.67 s, and 1.6 s judges about 1.07 s, over the bound); at that reference a retiming a microsecond
+    under 1.5 s judges under the bound, one exactly at 1.5 s judges the bound and one a microsecond over
+    judges over it; a fast reference never inflates (0.9 s at half the baseline judges 0.9 s); a
+    corrected retiming exactly at the bound judges the bound, a microsecond over judges over; no retime
+    judges the first reading (cpu-judge-vectors-no-retime). The recorded failures 1.07 s against 1 s
+    and 7.08 s against 7 s (cpu-judge-vectors-dl-shape) pass when their retimings carry a reference 1.2
+    and 1.1 times slower.
+    cpu-judge-live-slow (real): through _hook_cpu_timed with a 0.05 s bound, a stand-in spending 0.15 s
+    of its thread's CPU (3 times the bound) on every call judges at least 0.075 s, over the bound whatever
+    the reference shows; cpu-judge-live-quick (real): one spending 0.01 s judges under it.
     cpu-judge-coverage: this file's source gives no _cpu_judge_coverage_problems.
-    cpu-judge-coverage-mutants: the source with one row taken off the judge gives a problem for each:
-    ap-c95e timed once with time.process_time, ap-c95e's bound dropped, the lex-cost retime dropped, the
-    dl-shape cpu_retime dropped, and _lex_cost_problems no longer calling _cpu_bound_judge."""
+    cpu-judge-coverage-mutants-caught: the source with one row taken off the judge gives a problem for
+    each: ap-c95e timed once with time.process_time, ap-c95e's bound dropped, the lex-cost retime
+    dropped, the dl-shape cpu_retime dropped, and _lex_cost_problems no longer calling _cpu_bound_judge;
+    cpu-judge-coverage-mutants-apply: each mutant's text occurs exactly once in the source."""
     out = []
     bound, base = 1.0, 0.03
 
@@ -7230,6 +7240,11 @@ def _cpu_judge_failures():
             ("slow on every retiming, reference 1.5 times slower", 3.0, (4.5, 4.5), (1.5 * base,) * 4, 3.0, 2),
             ("load-inflated, reference 1.5 times slower", 1.07, (1.2,), (1.5 * base,) * 2, 0.8, 1),
             ("correction capped", 2.5, (2.5, 2.5), (4 * base,) * 4, 2.5 / _CPU_REFERENCE_CAP, 2),
+            ("1.6 times the bound, reference 4 times slower", 1.6, (1.6, 1.6), (4 * base,) * 4,
+             1.6 / _CPU_REFERENCE_CAP, 2),
+            ("just under the cap times the bound", 1.6, (1.5 - 1e-6,), (4 * base,) * 2, (1.5 - 1e-6) / 1.5, 1),
+            ("exactly the cap times the bound", 1.6, (1.5, 1.5), (4 * base,) * 4, 1.0, 2),
+            ("just over the cap times the bound", 1.6, (1.5 + 1e-6,) * 2, (4 * base,) * 4, (1.5 + 1e-6) / 1.5, 2),
             ("fast reference never inflates", 1.5, (0.9,), (0.5 * base,) * 2, 0.9, 1),
             ("corrected retiming at the bound", 1.5, (bound, bound), (base,) * 4, bound, 2),
             ("corrected retiming just over the bound", 1.5, (bound + 1e-6,) * 2, (base,) * 4, bound + 1e-6, 2),
@@ -7240,10 +7255,10 @@ def _cpu_judge_failures():
                 label, want, want_calls, got, calls))
     got, readings = _cpu_bound_judge(7.08, 7.0, lambda: 7.08, reference=lambda: 1.1 * base, baseline=base)
     if not got < 7.0 or len(readings) != 1:
-        out.append("(cpu-judge-vectors) dl-shape 7.08 s against 7 s with a reference 1.1 times slower must "
-                   "judge under 7 s after one retiming, got {!r} with {!r}".format(got, readings))
+        out.append("(cpu-judge-vectors-dl-shape) dl-shape 7.08 s against 7 s with a reference 1.1 times slower "
+                   "must judge under 7 s after one retiming, got {!r} with {!r}".format(got, readings))
     if _cpu_bound_judge(3.0, bound, None) != (3.0, []):
-        out.append("(cpu-judge-vectors) no retime must judge the first reading as it is")
+        out.append("(cpu-judge-vectors-no-retime) no retime must judge the first reading as it is")
 
     def spin(seconds):
         began = time.thread_time()
@@ -7252,12 +7267,12 @@ def _cpu_judge_failures():
         return "done"
     slow = _hook_cpu_timed(lambda: spin(0.15), bound=0.05)
     if slow[0] != "done" or slow[1] < 0.075:
-        out.append("(cpu-judge-live) a call spending 3 times its 0.05 s bound must judge at least 0.075 s, got "
-                   "{!r}".format(slow))
+        out.append("(cpu-judge-live-slow) a call spending 3 times its 0.05 s bound must judge at least 0.075 s, "
+                   "got {!r}".format(slow))
     quick = _hook_cpu_timed(lambda: spin(0.01), bound=0.05)
     if quick[0] != "done" or quick[1] >= 0.05:
-        out.append("(cpu-judge-live) a call spending 0.01 s must judge under its 0.05 s bound, got {!r}".format(
-            quick))
+        out.append("(cpu-judge-live-quick) a call spending 0.01 s must judge under its 0.05 s bound, got "
+                   "{!r}".format(quick))
     with open(os.path.abspath(__file__), encoding="utf-8") as handle:
         source = handle.read()
     live = _cpu_judge_coverage_problems(source)
@@ -7280,10 +7295,11 @@ def _cpu_judge_failures():
             ("_lex_cost_problems off the judge", "    cpu, readings = _cpu_bound_judge(cpu, 1.0, retime)\n",
              "    readings = []\n")):
         if source.count(old) != 1:
-            out.append("(cpu-judge-coverage-mutants) the {} mutant no longer applies: its text occurs {} "
+            out.append("(cpu-judge-coverage-mutants-apply) the {} mutant no longer applies: its text occurs {} "
                        "times".format(label, source.count(old)))
         elif not _cpu_judge_coverage_problems(source.replace(old, new, 1)):
-            out.append("(cpu-judge-coverage-mutants) the {} mutant must give a coverage problem".format(label))
+            out.append("(cpu-judge-coverage-mutants-caught) the {} mutant must give a coverage problem".format(
+                label))
     return out
 
 
