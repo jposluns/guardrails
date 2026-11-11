@@ -3260,7 +3260,11 @@ def _roster_failures(executed, expected_ids=None, vector_names=None, expected_ve
                      for item in want - have)
         lines.extend("FAIL {}: not in the expected roster".format(item)
                      for item in have - want)
-    lines.extend("FAIL {}: {}".format(row.get("id"), row.get("test_status"))
+    # A row's line carries what each run observed and the row's detail,
+    # so a failure seen only in a short stderr tail still names its cause.
+    lines.extend("FAIL {}: {}".format(row.get("id"), row.get("test_status")) + "".join(
+        "; {}={}".format(key, row[key])
+        for key in ("observed", "mutant_observed", "detail") if key in row)
                  for row in executed if row.get("test_status") != VALID)
     if vector_names is not None and tuple(vector_names) != tuple(expected_vectors):
         lines.append("FAIL roster/vectors: the resolver vectors run ({}) depart from the "
@@ -3303,9 +3307,11 @@ def _failure_lines_self_test():
     vectors = [(name, []) for name in names]
     for label, executed, wanted in (
             ("invalid-row", [{"id": item, "test_status": VALID} for item in expected[:1]]
-             + [{"id": expected[1], "test_status": INVALID}]
+             + [{"id": expected[1], "test_status": INVALID, "observed": VALID,
+                 "mutant_observed": CANNOT_EVALUATE, "detail": "forced cause"}]
              + [{"id": expected[2], "test_status": VALID}],
-             ["FAIL TG-forced/invalid: " + INVALID]),
+             ["FAIL TG-forced/invalid: " + INVALID + "; observed=" + VALID
+              + "; mutant_observed=" + CANNOT_EVALUATE + "; detail=forced cause"]),
             ("roster-mismatch", [{"id": item, "test_status": VALID}
                                  for item in expected[:2] + ["TG-forced/extra"]],
              ["FAIL TG-forced/kept: missing from the executed roster",
@@ -3503,6 +3509,9 @@ def self_test(vectors_only=False, steady_only=False):
             self.mode = mode
             self.requests = []
             self.errors = []
+            # Socket timeouts on this side, kept apart from the other
+            # OSErrors so a run they decide is not evaluated (run_case).
+            self.timeouts = []
             self.stop = threading.Event()
             self.listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.listener.bind(("127.0.0.1", 0))
@@ -3559,6 +3568,8 @@ def self_test(vectors_only=False, steady_only=False):
                         secured.unwrap().close()
                     except (OSError, ssl.SSLError):
                         pass
+                except socket.timeout:
+                    self.timeouts.append("fixture server timeout")
                 except (OSError, ssl.SSLError):
                     # Expected for wrong-chain/name and deadline cases.
                     pass
@@ -3958,10 +3969,24 @@ def self_test(vectors_only=False, steady_only=False):
     BLOCKED_FAILED = "the blocked run failed checks that apply without an observation: "
     BLOCKED_SWEEP = "not evaluated: not run while a resolver straggler was alive, started by "
     LEAKED = "resolver slot held with no live resolver worker"
+    CLOCKED = "not evaluated: a clock limit decided the run: "
+    CLOCKED_FAILED = "the decided run failed checks that apply without an observation: "
+    # Pairs run per row while a clock limit decides one of them, so a
+    # passing stall leaves the verdict to the guard under test.
+    CLOCK_ATTEMPTS = 3
 
-    def run_case(base, contexts, case, mutated):
+    def run_case(base, contexts, case, mutated, clocks=None):
         identifier, expected, mutation, config = case
         label = identifier + (" (mutant)" if mutated else "")
+        # clocks, given by the case loop for a row that is not a timing row,
+        # receives each clock limit that fired in this run: an expired
+        # deadline, a socket timeout or expired resolver wait in a fetch,
+        # the watchdog, or a timeout on the fixture server's side. Such a
+        # run was decided by the host's clock, not by the guard under test,
+        # so the caller does not evaluate it. The resolver vectors pass no
+        # list: they use these limits on purpose.
+        record_clocks = clocks is not None and "fetch_bound" not in config
+        free_unmet = []
         # No earlier run's resolver worker may reach this case. Each place a
         # leaked resolver slot is found is recorded and fails this run. A
         # worker still alive here (inherited) was left by an earlier run. One
@@ -4089,6 +4114,17 @@ def self_test(vectors_only=False, steady_only=False):
                 armed[:] = ["inactivity" if capped else self.guard]
                 return remaining
 
+        class ClockDeadline(original_deadline):
+            # Replaces _Deadline in a run that records its clock limits. It
+            # only records an expiry; it never changes a deadline's end, nor
+            # what left() returns or raises.
+            def left(self, maximum=None):
+                try:
+                    return super().left(maximum)
+                except ObserveError:
+                    clocks.append("deadline expired")
+                    raise
+
         def attribute(exc):
             # Diagnostic: the last deadline queried before each refusal, not
             # proof of which timeout fired. A socket timeout or an expired
@@ -4110,6 +4146,11 @@ def self_test(vectors_only=False, steady_only=False):
                 return fetch(url, cap, deadline, context)
             except BaseException as exc:
                 fetch_guards.append(attribute(exc))
+                if record_clocks and isinstance(exc, socket.timeout):
+                    clocks.append("socket timeout")
+                elif (record_clocks and isinstance(exc, ObserveError)
+                        and exc.detail == "resolver deadline expired"):
+                    clocks.append("resolver deadline expired")
                 raise
             finally:
                 fetch_durations.append(time.monotonic() - started)
@@ -4225,6 +4266,22 @@ def self_test(vectors_only=False, steady_only=False):
                     if len(deadline_names) != 3:
                         raise AssertionError("timing deadlines must be distinct")
                     patch(module, "_Deadline", TrackedDeadline)
+                elif record_clocks:
+                    patch(module, "_Deadline", ClockDeadline)
+                if mutated and config.get("mutant_stall"):
+                    # Clock vectors only: a host stall in the mutant run. The
+                    # first receive outlasts the inactivity limit, then times
+                    # out as the socket would.
+                    stall_receive = _Wire._receive
+
+                    def stalled_receive(wire):
+                        if not stalls:
+                            stalls.append(identifier)
+                            time.sleep(module.INACTIVITY_SECONDS + 0.1)
+                            raise socket.timeout("injected stall")
+                        return stall_receive(wire)
+                    stalls = []
+                    patch(_Wire, "_receive", stalled_receive)
                 patch(module, "_lookup", lookup)
                 if "hold_after_publish" in config:
                     patch(module, "queue", holding_queue)
@@ -4418,6 +4475,8 @@ def self_test(vectors_only=False, steady_only=False):
                         status = observation["status"]
                     except WatchdogExpired:
                         status = "WATCHDOG"
+                        if record_clocks:
+                            clocks.append("watchdog")
                     except ResolverStraggler:
                         status = "NOT-EVALUATED"
                     except (KeyboardInterrupt, SystemExit, GeneratorExit) as exc:
@@ -4544,11 +4603,13 @@ def self_test(vectors_only=False, steady_only=False):
                 passed = passed and bounded()
             if identifier.startswith("TG-05/"):
                 passed = passed and fetch_calls == order
-            if blocked:
+            if blocked or record_clocks:
                 # A blocked run stops at its first resolve, so its fetches
-                # are judged as a prefix of main's order.
+                # are judged as a prefix of main's order. So is a run a clock
+                # limit decides: free_unmet is kept for it, and is used once
+                # the fixture server has stopped and named its own timeouts.
                 ordered = config.get("redirect") or identifier.startswith("TG-05/")
-                unmet = [name for name, check in recorded + (
+                free_unmet = [name for name, check in recorded + (
                     ("quarantine residue",
                      lambda: config.get("cleanup_failure") or not residue()),
                     ("connected before the refusal",
@@ -4562,7 +4623,9 @@ def self_test(vectors_only=False, steady_only=False):
                     ("timing bound",
                      lambda: "fetch_bound" not in config or bounded()),
                 ) if not check()]
-                passed = not unmet
+                if blocked:
+                    unmet = free_unmet
+                    passed = not unmet
         finally:
             if resolver_sockets is not None:
                 resolver_sockets[1].close()
@@ -4579,6 +4642,13 @@ def self_test(vectors_only=False, steady_only=False):
                 stragglers.append("teardown")
                 for thread in alive - inherited:
                     straggler_runs.setdefault(thread, label)
+        if record_clocks:
+            clocks.extend(server.timeouts)
+        if clocks and not blocked:
+            # Not evaluated: judged only on the checks that apply without
+            # an observation, as a blocked run is.
+            unmet = free_unmet
+            passed = not unmet
         # passed is main's verdict on this run, leaks the resolver slots found
         # leaked, stragglers where a worker this run started outlived the
         # join, blocked the runs whose live straggler refused this run the
@@ -4598,9 +4668,11 @@ def self_test(vectors_only=False, steady_only=False):
         # Append, so a row keeps any detail it already has.
         row["detail"] = row["detail"] + "; " + text if "detail" in row else text
 
-    def record_row(case, run, mutant_run):
+    def record_row(case, run, mutant_run, clocks=(), mutant_clocks=()):
         # Main's row from both runs, with the resolver accounting above.
         # The case loop and the resolver vectors share this one rule.
+        # clocks and mutant_clocks name the clock limits that decided each
+        # run (run_case); such a run is not evaluated, as a blocked run.
         (passed, status, elapsed, guards, leaks, stragglers,
          blocked, retained, unmet) = run
         (mutant_passed, mutant_status, mutant_elapsed, mutant_guards,
@@ -4629,6 +4701,22 @@ def self_test(vectors_only=False, steady_only=False):
             row["guards_fired_note"] = (
                 "diagnostic: the last deadline queried before each"
                 " refusal, not proof of which timeout fired")
+        if (clocks or mutant_clocks) and not (blocked or mutant_blocked):
+            # A clock limit, not the guard under test, decided a run: the
+            # row is CANNOT-EVALUATE unless an evaluated run failed or the
+            # decided unmutated run failed a check that applies without an
+            # observation (INVALID). A decided mutant run is no detection.
+            failed = not passed or (not mutant_clocks and mutant_passed)
+            row["test_status"] = INVALID if failed else CANNOT_EVALUATE
+            if mutant_clocks:
+                row["mutant_test_status"] = CANNOT_EVALUATE
+                row["mutation_detected"] = False
+            row["clock_limit"] = list(clocks)
+            row["mutant_clock_limit"] = list(mutant_clocks)
+            add_detail(row, CLOCKED + ", ".join(sorted(set(clocks) | set(mutant_clocks))))
+            if clocks and not passed:
+                row["clock_limit_failed"] = unmet
+                add_detail(row, CLOCKED_FAILED + ", ".join(unmet))
         if blocked or mutant_blocked:
             # A blocked run was not evaluated: the row is
             # CANNOT-EVALUATE unless a run that was evaluated failed
@@ -4675,6 +4763,46 @@ def self_test(vectors_only=False, steady_only=False):
             add_detail(row, RETAINED)
         return row
 
+    def case_row(base, contexts, case):
+        # Run the pair again while a clock limit decided either run, up to
+        # CLOCK_ATTEMPTS pairs. A leak, straggler or retained slot fails
+        # the row whatever decided it, so that pair is kept.
+        for attempt in range(1, CLOCK_ATTEMPTS + 1):
+            clocks, mutant_clocks = [], []
+            run = run_case(base, contexts, case, False, clocks)
+            mutant_run = run_case(base, contexts, case, True, mutant_clocks)
+            kept = run[4:6] + run[7:8] + mutant_run[4:6] + mutant_run[7:8]
+            if not (clocks or mutant_clocks) or any(kept):
+                break
+        row = record_row(case, run, mutant_run, clocks, mutant_clocks)
+        if clocks or mutant_clocks:
+            row["clock_attempts"] = attempt
+        return row
+
+    def clock_vectors(base, contexts, results):
+        # Run E's stall in every mutant run of a row expecting
+        # CANNOT-EVALUATE and of one expecting INVALID: neither row may read
+        # INVALID or earn detection credit from the stall. After
+        # CLOCK_ATTEMPTS pairs each is CANNOT-EVALUATE, which fails the run.
+        for name, identifier in ((CLOCK_VECTOR_NAMES[0], "TG-13/gnu-longlink"),
+                                 (CLOCK_VECTOR_NAMES[1], "TG-13/traversal")):
+            failures = []
+            found = [case for case in cases if case[0] == identifier]
+            if len(found) != 1:
+                failures.append("cannot evaluate: no single row " + identifier)
+            else:
+                row = case_row(base, contexts, found[0][:3] + (
+                    dict(found[0][3], mutant_stall=True),))
+                if (row["test_status"] != CANNOT_EVALUATE
+                        or row["mutant_test_status"] != CANNOT_EVALUATE
+                        or row["mutation_detected"] is not False
+                        or row.get("clock_attempts") != CLOCK_ATTEMPTS
+                        or "socket timeout" not in row.get("mutant_clock_limit", [])):
+                    failures.append("the stalled mutant run decided the row: "
+                                    + row["test_status"] + ", mutation_detected "
+                                    + str(row["mutation_detected"]))
+            results.append((name, failures))
+
     def cancellation_rows(sweep):
         # The cancellation sweep runs the production resolver worker against
         # the real _RESOLVER_SLOT, so it depends on the resolver as a case run
@@ -4713,8 +4841,10 @@ def self_test(vectors_only=False, steady_only=False):
                     "resolver-vector/blocked-timing", "resolver-vector/blocked-mutant",
                     "resolver-vector/retained-slot", "resolver-vector/leaked-slot",
                     "resolver-vector/positive-held-slot", "resolver-vector/sweep-leaked-slot",
-                    "resolver-vector/cleanup")
-    detected = (False, "fixture: detected", 0.0, [], [], [], [], [], [])
+                    "resolver-vector/cleanup", "clock-vector/gnu-longlink-stall",
+                    "clock-vector/traversal-stall")
+    CLOCK_VECTOR_NAMES = VECTOR_NAMES[13:]
+    detected =(False, "fixture: detected", 0.0, [], [], [], [], [], [])
     evaluated = (True, "fixture: evaluated", 0.0, [], [], [], [], [], [])
     # The positive-held-slot vector's join of the worker it releases.
     HELD_JOIN = 10.0
@@ -5080,9 +5210,9 @@ def self_test(vectors_only=False, steady_only=False):
                           + cancellation_rows(_cancellation_self_test))
             executed.extend(guard_rows)
             for case in cases:
-                run = run_case(base, contexts, case, False)
-                executed.append(record_row(case, run, run_case(base, contexts, case, True)))
+                executed.append(case_row(base, contexts, case))
             vector_results = resolver_vectors(base, contexts)
+            run_vector(clock_vectors, CLOCK_VECTOR_NAMES, base, contexts, vector_results)
     except Exception as exc:
         executed.append({
             "id": "fixture/setup-or-teardown",
