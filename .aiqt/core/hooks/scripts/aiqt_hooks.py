@@ -4742,19 +4742,34 @@ def _diff_always_patch(argv):
     return stdout
 
 
-def _diff_no_index_has_paths(rest):
+# The characters that may make the shell expand one word into several arguments before git runs: a glob, a
+# brace, a parameter or command expansion ('$', which also stands for "$@" and $(...)) and a backquote.
+_DIFF_MULTI_ARG_CHARS = frozenset("*?[{$`")
+
+
+def _diff_no_index_has_paths(rest, cut=False):
     """True when the words rest after the subcommand of a git diff may hold the two paths git diff --no-index
     needs: it refuses fewer, explicit or implied outside a repository, with its usage and no patch (git 2.53.0
     exited 129 for git diff --no-index --stat --binary a, and outside a repository for git diff --stat
-    --default --binary HEAD). Every word that is '-' or does not begin with '-' counts as a path, and so does
-    every word after the first '--' or '--end-of-options', so an option value counts too: an over-count, which
-    only reads the words for a --binary more often."""
+    --default --binary HEAD). The words are counted as the shell may hand them to git, not as typed. Every word
+    that is '-' or does not begin with '-' counts as one path, and so does every word after the first '--' or
+    '--end-of-options', so an option value counts too. A word holding a character of _DIFF_MULTI_ARG_CHARS,
+    one beginning with '-' included, counts as two, since the shell may expand it into several arguments (git
+    2.53.0 printed the patch for git diff --no-index --stat --bin {a,b}, and the same with [ab], *.txt, $P
+    holding two words and "$@" holding two); its decoded text is read, so a quoted '{a,b}' counts as two as
+    well. cut says the lexer ended the segment at an unquoted '(' (an extended glob such as +(a|b), or a '$('
+    substitution), so the words after it are not read here, and the words then count as two paths. The count
+    errs toward more paths than git receives, which reads the words for a --binary more often, toward the
+    deny; a plain word that names one path, such as HEAD or a, still counts as one."""
+    if cut:
+        return True                              # the words past the cut are unread: count them as paths
     marker = next((k for k, word in enumerate(rest) if word in _DIFF_END_OF_OPTIONS), len(rest))
-    return sum(1 for k, word in enumerate(rest)
-               if k > marker or word == "-" or not word.startswith("-")) >= 2
+    return sum(2 if _DIFF_MULTI_ARG_CHARS.intersection(word)
+               else 1 if k > marker or word == "-" or not word.startswith("-") else 0
+               for k, word in enumerate(rest)) >= 2
 
 
-def _diff_binary_enables_patch(argv, ends=_diff_ends_options, abbrev=None):
+def _diff_binary_enables_patch(argv, ends=_diff_ends_options, abbrev=None, cut=False):
     """True when a --binary in the option region of a git producer under the reading ends (one of
     _DIFF_OPTION_READINGS) makes git print a patch. The words are read in order from the one after the
     subcommand (_git_subcommand_rest) up to the end of the options under that reading, so a git option before
@@ -4783,13 +4798,15 @@ def _diff_binary_enables_patch(argv, ends=_diff_ends_options, abbrev=None):
     --no-stdout cancels writes its patch to a file, or to its --output, whatever --binary says (git format-patch
     --stdout --no-stdout -1 --stat --binary, and the same with -n, wrote a file, git 2.55.0), so there no
     --binary counts; a console --output beside it is judged before any summary selector (_is_console_dump). -p,
-    -u, -U and the --patch* family are judged by _argv_has_patch_enabler alone, whatever these options say."""
+    -u, -U and the --patch* family are judged by _argv_has_patch_enabler alone, whatever these options say.
+    The words are counted as the shell may expand them, and cut says the lexer ended the segment at an unquoted
+    '(', leaving words unread (both in _diff_no_index_has_paths)."""
     if abbrev is None:
         abbrev = ends is _diff_parser_ends_options
     sub, rest = _git_subcommand_rest(argv)
     if sub is None:
         return True                              # no subcommand to start after: fail toward deny
-    if ends is _diff_parser_ends_options and sub == "diff" and not _diff_no_index_has_paths(rest):
+    if ends is _diff_parser_ends_options and sub == "diff" and not _diff_no_index_has_paths(rest, cut):
         return False                             # git diff --no-index refuses fewer than two paths
     value_letters = _diff_value_letters(sub) + _DIFF_GLUED_VALUE_LETTERS
     always = _diff_always_patch(argv)
@@ -4830,7 +4847,7 @@ def _diff_binary_enables_patch(argv, ends=_diff_ends_options, abbrev=None):
     return binary and (always or not (off or quiet))
 
 
-def _argv_has_patch_enabler(argv, ends=_diff_ends_options):
+def _argv_has_patch_enabler(argv, ends=_diff_ends_options, cut=False):
     """Argument-aware: True when a git producer's OPTION region (before a '--'/'--end-of-options' boundary)
     carries a patch-ENABLING option - one that makes git emit a patch even alongside a summary selector.
     Enablers: -p/-u, -U/--unified, the --patch* long family, a --binary _diff_binary_enables_patch counts under
@@ -4859,7 +4876,7 @@ def _argv_has_patch_enabler(argv, ends=_diff_ends_options):
     --no-index --stat --unif=3 a b, and the same with --u, print the patch (git 2.55.0), as git diff
     --no-index --stat --bin a b does through _diff_binary_enables_patch. An abbreviated value-taking option is
     not read as consuming its value under either reading by this scan, so the word after it is still judged,
-    which can only find an enabler more often."""
+    which can only find an enabler more often. cut goes on to _diff_binary_enables_patch."""
     i = 0
     n = len(argv)
     while i < n:
@@ -4898,10 +4915,10 @@ def _argv_has_patch_enabler(argv, ends=_diff_ends_options):
         if found:
             return True
         i += 2 if consumes_next else 1
-    return _diff_binary_enables_patch(argv, ends)
+    return _diff_binary_enables_patch(argv, ends, cut=cut)
 
 
-def _diff_emits_only_summary(argv, ends=_diff_ends_options):
+def _diff_emits_only_summary(argv, ends=_diff_ends_options, cut=False):
     """Role-aware: True when a producer's OPTION region (before a '--'/'--end-of-options' boundary) carries
     a summary selector (--stat/--name-only/--name-status/--numstat/--shortstat, bare or '=value') and NO
     patch enabler. Distinguishes a genuine summary listing (git diff -M --stat, which is not a console patch
@@ -4919,7 +4936,8 @@ def _diff_emits_only_summary(argv, ends=_diff_ends_options):
     prints its patch whatever is beside it (_diff_always_patch) is never a summary listing: git format-patch
     --stdout prints the patch beside every summary selector it accepts (git format-patch --stdout -1 --stat,
     checked with git 2.55.0) and refuses --name-only and --name-status unless a later --no-patch drops them, so a
-    command git refuses is judged as a dump too, a safe-direction over-read."""
+    command git refuses is judged as a dump too, a safe-direction over-read. cut goes on to
+    _diff_binary_enables_patch (_argv_has_patch_enabler)."""
     if _diff_always_patch(argv):
         return False
     start = len(argv) - len(_git_subcommand_rest(argv)[1])  # the word after the subcommand
@@ -4929,7 +4947,7 @@ def _diff_emits_only_summary(argv, ends=_diff_ends_options):
             break
         if i >= start and word.split("=", 1)[0] in _SUMMARY_FLAGS:
             has_summary = True
-    return has_summary and not _argv_has_patch_enabler(argv, ends)
+    return has_summary and not _argv_has_patch_enabler(argv, ends, cut)
 
 
 def _seg_stdout_reaches_console(seg, segments, index):
@@ -5001,8 +5019,8 @@ def _is_console_dump(seg, segments, index):
                              for _o, target, _v in diversions)
         if console_target and always_sub:
             return True  # a -o naming one: git refuses it or cannot write a file under it, a kept over-deny
-        if _diff_emits_only_summary(seg.argv, ends):
-            continue
+        if _diff_emits_only_summary(seg.argv, ends, seg.sep_after == "("):
+            continue                             # a '(' cut leaves words unread (_diff_no_index_has_paths)
         if console_target:
             return True
         if decoy_possible and any(is_output and not may_be_value

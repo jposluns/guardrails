@@ -445,6 +445,21 @@ _CNSDIF_BASE_DECISIONS = {
     "git diff --no-index --shortstat --default --binary a b": "allow-note",
     "git diff --stat --default --binary a b": "allow-note",
     "git diff --stat --default --binary HEAD": "allow-note",
+    "git diff --no-index --stat --bin {a,b}": "allow-note",
+    "git diff --no-index --stat --bin *.txt": "allow-note",
+    "git diff --no-index --stat --bin [ab]": "allow-note",
+    "git diff --no-index --stat --bin $P": "allow-note",
+    "git diff --no-index --stat --bin \"$@\"": "allow-note",
+    "git diff --no-index --stat --bin $(printf 'a b')": "allow-note",
+    "shopt -s extglob\ngit diff --no-index --stat --bin +(a|b)": "allow-note",
+    "git diff --stat --bin *.txt": "allow-note",
+    "git diff --no-index --stat --default --binary {a,b}": "allow-note",
+    "git diff --no-index --stat --default --binary [ab]": "allow-note",
+    "git diff --stat --default --binary {a,b}": "allow-note",
+    "git diff --stat --default --binary [ab]": "allow-note",
+    "git diff --no-index --stat --bin a": "allow-note",
+    "git diff --no-index --stat --bin -- a": "allow-note",
+    "git diff --stat --bin a": "allow-note",
     "git diff --no-index --line --output=real.txt a b": "allow-note",
     "git log -p --decorate-refs --output=real.txt": "allow-note",
     "git format-patch --stdout --subject-prefix --output=real.txt": "allow-note",
@@ -18010,6 +18025,44 @@ def _main_isolated(monitor):
                 "git diff --stat --default --binary a b", "deny")
         dexpect("(cnsdif-bin-default-c) a --binary that is the --default value in a repository allows with a note",
                 "git diff --stat --default --binary HEAD", "allow-note")
+        # One word the shell may expand into several arguments (a brace, a glob, an unquoted variable, "$@", a
+        # command substitution, an extended glob the lexer cuts at its '(') can hand git diff --no-index the two
+        # paths it needs, so it counts as two: git 2.53.0 printed the stat and the whole patch for the --bin
+        # forms with {a,b}, [ab], *.txt, $P and "$@" holding two words, $(printf 'a b') and +(a|b), and for the
+        # --default --binary forms with {a,b} and [ab], the implied forms outside a repository, each allowed
+        # with a note at the base. The plain one-path forms keep their allow with a note, since git diff
+        # --no-index refuses one path (git 2.53.0 exited 129 for git diff --no-index --stat --bin a, and the
+        # same with -- a; in a repository git diff --stat --bin a exited 129 with "invalid option: --bin").
+        dexpect("(cnsdif-bin-exp-brace) a --bin before a brace under --no-index denies",
+                "git diff --no-index --stat --bin {a,b}", "deny")
+        dexpect("(cnsdif-bin-exp-glob) a --bin before a glob under --no-index denies",
+                "git diff --no-index --stat --bin *.txt", "deny")
+        dexpect("(cnsdif-bin-exp-class) a --bin before a bracket glob under --no-index denies",
+                "git diff --no-index --stat --bin [ab]", "deny")
+        dexpect("(cnsdif-bin-exp-var) a --bin before an unquoted variable under --no-index denies",
+                "git diff --no-index --stat --bin $P", "deny")
+        dexpect("(cnsdif-bin-exp-args) a --bin before \"$@\" under --no-index denies",
+                "git diff --no-index --stat --bin \"$@\"", "deny")
+        dexpect("(cnsdif-bin-exp-subst) a --bin before a command substitution under --no-index denies",
+                "git diff --no-index --stat --bin $(printf 'a b')", "deny")
+        dexpect("(cnsdif-bin-exp-extglob) a --bin before an extended glob under --no-index denies",
+                "shopt -s extglob\ngit diff --no-index --stat --bin +(a|b)", "deny")
+        dexpect("(cnsdif-bin-exp-implied) a --bin before a glob in the implied --no-index form denies",
+                "git diff --stat --bin *.txt", "deny")
+        dexpect("(cnsdif-bin-default-exp1) a --binary after --default before a brace under --no-index denies",
+                "git diff --no-index --stat --default --binary {a,b}", "deny")
+        dexpect("(cnsdif-bin-default-exp2) a --binary after --default before a bracket glob under --no-index denies",
+                "git diff --no-index --stat --default --binary [ab]", "deny")
+        dexpect("(cnsdif-bin-default-exp3) a --binary after --default before a brace in the implied form denies",
+                "git diff --stat --default --binary {a,b}", "deny")
+        dexpect("(cnsdif-bin-default-exp4) a --binary after --default before a bracket glob in the implied form "
+                "denies", "git diff --stat --default --binary [ab]", "deny")
+        dexpect("(cnsdif-bin-one1) a --bin before one plain path under --no-index allows with a note",
+                "git diff --no-index --stat --bin a", "allow-note")
+        dexpect("(cnsdif-bin-one2) a --bin before -- and one plain path under --no-index allows with a note",
+                "git diff --no-index --stat --bin -- a", "allow-note")
+        dexpect("(cnsdif-bin-one3) a --bin before one plain path in the implied form allows with a note",
+                "git diff --stat --bin a", "allow-note")
         dexpect("(cnsdif-val-abbr) a --output that is the value of --line under --no-index denies",
                 "git diff --no-index --line --output=real.txt a b", "deny")
         dexpect("(cnsdif-val-log) a --output that is the log --decorate-refs value denies",
@@ -18337,6 +18390,25 @@ def _main_isolated(monitor):
                 if aiqt_hooks._diff_binary_enables_patch(_bargv, _bends) is not _bwant:
                     failures.append("(cnsdif-bin-scan) _diff_binary_enables_patch({!r}, {}) must be {}"
                                     .format(_bargv, _bends.__name__, _bwant))
+        # The path count reads the words as the shell may expand them: a word holding a glob, brace, '$' or
+        # backquote counts as two paths, one beginning with '-' included, and so does any segment the lexer cut
+        # at an unquoted '(' (cut); a plain word counts as one, and an option word as none.
+        for _prest, _pcut, _pwant in (
+                (["--stat", "--bin", "a"], False, False), (["--stat", "--bin", "--", "a"], False, False),
+                (["--stat", "--default", "--binary", "HEAD"], False, False), (["--stat", "--bin"], False, False),
+                (["--stat", "--bin", "{a,b}"], False, True), (["--stat", "--bin", "*.txt"], False, True),
+                (["--stat", "--bin", "[ab]"], False, True), (["--stat", "--bin", "a?"], False, True),
+                (["--stat", "--bin", "$P"], False, True), (["--stat", "--bin", "`x`"], False, True),
+                (["--stat", "--bin", "--$P"], False, True), (["--stat", "--bin", "a b"], False, False),
+                (["--stat", "--bin", "~/a"], False, False), (["--stat", "--bin", "+"], True, True),
+                (["--stat", "--bin", "a", "b"], False, True)):
+            if aiqt_hooks._diff_no_index_has_paths(_prest, _pcut) is not _pwant:
+                failures.append("(cnsdif-paths-count) _diff_no_index_has_paths({!r}, {!r}) must be {}"
+                                .format(_prest, _pcut, _pwant))
+        # A segment the lexer ends at an unquoted '(' leaves the --binary scan on under --no-index.
+        if not aiqt_hooks._diff_binary_enables_patch(["git", "diff", "--stat", "--bin", "+"],
+                                                     aiqt_hooks._diff_parser_ends_options, cut=True):
+            failures.append("(cnsdif-paths-cut) _diff_binary_enables_patch must count a --bin before a '(' cut")
         # The --stdout of git format-patch stands unless a later --no-stdout in an option position cancels it: not
         # one after -- or --end-of-options, not one an option before it may take as its value, and not one before
         # the subcommand, while the -n of format-patch takes no value; only format-patch is read.
