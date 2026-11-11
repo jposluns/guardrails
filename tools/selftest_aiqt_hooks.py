@@ -26424,7 +26424,7 @@ def _main_isolated(monitor):
         crexpect("(ci-cr15) gh pr create --body-file - with an AI credit line in its here-document denies",
                  "gh pr create --body-file - <<'EOF'\nSummary\n\n" + _cr_credit + "\nEOF", "deny")
         crexpect("(ci-cr-o1) a bare line-start quote of the credit in a pull-request body denies (disclosed "
-                 "over-deny)", "gh pr create --body " + shlex.quote(_cr_gen + " with " + _cr_ai), "deny")
+                 "over-deny)", "gh pr create --body " + shlex.quote(_cr_gen + " with " + _cr_ai), "deny")
         # Fail closed: a file the check cannot resolve or read in full denies.
         _cr_fifo = _cr_dir / "fifo"
         os.mkfifo(str(_cr_fifo))
@@ -26599,6 +26599,46 @@ def _main_isolated(monitor):
         if _cr_kept:
             failures.append("(ci-cr-ge-revert) with GIT_DIR and GIT_WORK_TREE assignments unseen, {} still deny "
                             "(want allow, the earlier gap)".format(_cr_kept))
+        # A word that names GIT_DIR or GIT_WORK_TREE with no assignment in it (a for loop variable, a default-value
+        # expansion, the bare name after export or read, a nameref) can set the variable too, and so can a
+        # core.worktree word; each fails closed for a relative clean file. Each allowed before those words were
+        # read.
+        for _cr_label, _cr_command in [
+                ("(ci-cr-ge5) a for loop over GIT_DIR", "for GIT_DIR in " + _cr_repo + "/.git; do git commit -F "
+                 "clean.txt; done"),
+                ("(ci-cr-ge6) a GIT_DIR default-value expansion", ': "${GIT_DIR:=' + _cr_repo + '/.git}"; git '
+                 "commit -F clean.txt"),
+                ("(ci-cr-ge7) GIT_WORK_TREE exported by its bare name", "export GIT_WORK_TREE; git commit -t "
+                 "clean.txt"),
+                ("(ci-cr-ge8) GIT_DIR set by read", "read GIT_DIR < paths.txt; git commit -F clean.txt"),
+                ("(ci-cr-ge9) a nameref to GIT_DIR", "declare -n _r=GIT_DIR; _r=" + _cr_repo + "/.git; git commit "
+                 "-F clean.txt"),
+                ("(ci-cr-wt1) git config core.worktree", "git config core.worktree " + _cr_repo + "; git commit -F "
+                 "clean.txt"),
+                ("(ci-cr-wt2) git -c CORE.WORKTREE in any letter case", "git -c CORE.WORKTREE=" + _cr_repo
+                 + " commit -F clean.txt")]:
+            cr2expect(_cr_label + " before a relative clean message file fails closed", _cr_command, "deny",
+                      cwd=str(_cr_dir))
+        # The match is anchored at the start of a word: a quoted message that holds GIT_DIR= or core.worktree
+        # after other text is not a directory change, so a relative clean file still allows.
+        cr2expect("(ci-cr-ge-anchor) a message holding GIT_DIR= and core.worktree mid-word allows",
+                  'git commit -m "set GIT_DIR=x and core.worktree here" -F clean.txt', "allow", cwd=str(_cr_dir))
+        # A trailer.<token>.key setting (-c, GIT_CONFIG_COUNT or --config-env) makes --trailer <token>=VALUE or
+        # <token>: VALUE a trailer of that key, so an AI named there denies; an AI-free value still allows.
+        _cr_tv = shlex.quote("cab=" + _cr_ai + " <c@x>")
+        for _cr_label, _cr_command in [
+                ("(ci-cr-ta1) -c trailer.cab.key", "git -c trailer.cab.key=Co-authored-by commit -m x --trailer "
+                 + _cr_tv),
+                ("(ci-cr-ta2) the token: form", "git -c trailer.cab.key=Co-authored-by commit -m x --trailer "
+                 + shlex.quote("cab: " + _cr_ai + " <c@x>")),
+                ("(ci-cr-ta3) GIT_CONFIG_COUNT", "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=trailer.cab.key "
+                 "GIT_CONFIG_VALUE_0=Co-authored-by git commit -m x --trailer " + _cr_tv),
+                ("(ci-cr-ta4) --config-env", "git --config-env=trailer.cab.key=K commit -m x --trailer=" + _cr_tv)]:
+            cr2expect(_cr_label + " aliasing a co-author trailer key, with an AI in the --trailer value, denies",
+                      _cr_command, "deny")
+        cr2expect("(ci-cr-ta5) a trailer.cab.key alias with an AI-free --trailer value allows",
+                  "git -c trailer.cab.key=Co-authored-by commit -m x --trailer " + shlex.quote("cab=Ada <a@x>"),
+                  "allow")
         # The credit line's separator class holds a no-break space, written as an escape in the source.
         cr2expect("(ci-cr-nbsp) a credit line whose words a no-break space separates denies",
                   "gh pr create --body " + shlex.quote(_cr_gen + " with " + _cr_ai), "deny")

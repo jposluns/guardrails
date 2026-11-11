@@ -5185,10 +5185,12 @@ def _cmtidn_ansi_c_credit_ai(command, judged):
 # cannot resolve or read in full fails closed: a file option whose value the check cannot see (the shell lexer
 # drops a process substitution such as -F <(...), so the option has no value word), a name holding a character
 # the shell expands or a '~', a relative name whose base directory the check cannot know (no cwd in the payload, a
-# cd, pushd or popd word or a GIT_DIR or GIT_WORK_TREE assignment anywhere in the command, a directory option
-# before the git command, or a command line git runs from its operands), a file the same command may write (_cmtidn_written), a missing file, one that is not a
-# regular file, one past a bound, or any other error opening or reading it. The open does not block on a FIFO or a
-# device (_RDP_OPEN_FLAGS) and follows a symlink, as git and gh do.
+# cd, pushd or popd word, a word that names GIT_DIR or GIT_WORK_TREE or a core.worktree word anywhere in the
+# command, a directory option before the git command, or a command line git runs from its operands), a file the
+# same command may write (_cmtidn_written), a missing file, one that is not a regular file, one past a bound, or
+# any other error opening or reading it. The open does not block on a FIFO or a device (_RDP_OPEN_FLAGS) and
+# follows a symlink, as git and gh do. Each of those fail-closed labels is a _CmtidnUnread, so the deny reason
+# says the file could not be read rather than that it records an AI identity.
 _CMTIDN_FILE_LIMIT = 1 << 20
 _CMTIDN_FILE_COUNT = 32
 _CMTIDN_FILE_BUDGET = 4 << 20
@@ -5197,23 +5199,51 @@ _CMTIDN_CHDIR_WORDS = frozenset(("cd", "pushd", "popd"))
 # A directory option of a wrapper or of git before the command's subcommand (env -C, env --chdir, sudo -D, git -C,
 # git --git-dir, git --work-tree), so a relative file name there is not resolved against the payload's cwd.
 _CMTIDN_DIR_OPTION_RE = re.compile(r"^-(?:[A-Za-z]*[CD]|-(?:chdir|directory|git-dir|work-tree))")
-# A word that assigns GIT_DIR or GIT_WORK_TREE ('=' or '+='): inline before git, behind env, or exported earlier
-# in the command. Like --git-dir and --work-tree, it can move the directory git reads a relative message or
-# template file from away from the cwd the check reads, so its relative names are not resolved there.
-_CMTIDN_GIT_DIR_ENV_RE = re.compile(r"(?:GIT_DIR|GIT_WORK_TREE)\+?=")
+# A word that names GIT_DIR or GIT_WORK_TREE. Like --git-dir and --work-tree, either variable can move the
+# directory git reads a relative message or template file from away from the cwd the check reads, so its
+# relative names are not resolved there. A shell sets a variable in more ways than a list of forms can cover, as
+# with GIT_CONFIG_* (_git_config_env_named), so a word counts when it starts with the name followed by its end,
+# '=' or '+=' (an assignment inline, behind env or after export, declare or readonly, and the bare name of a for
+# or select loop, read, printf -v, getopts, mapfile or export), when it holds a ${NAME expansion (a ${NAME:=...}
+# default sets it) or when it ends in =NAME (a nameref, declare -n ref=NAME). The match is anchored at the start
+# of the word, so a quoted message that only holds the name after other text (-m "set GIT_DIR=x here") does not
+# count.
+_CMTIDN_GIT_DIR_ENV_RE = re.compile(
+    r"^(?:GIT_DIR|GIT_WORK_TREE)(?:\+?=|$)|\$\{(?:GIT_DIR|GIT_WORK_TREE)(?![A-Za-z0-9_])"
+    r"|^[A-Za-z_][A-Za-z0-9_]*=(?:GIT_DIR|GIT_WORK_TREE)$")
+# A core.worktree word (git config core.worktree DIR, git -c core.worktree=DIR), in any letter case as git reads
+# a configuration name: the work tree it sets can move the directory git reads a relative file from. A
+# core.worktree already persisted in the repository's configuration is not seen (the residue says so).
+_CMTIDN_WORKTREE_KEY_RE = re.compile(r"(?i)^core\.worktree(?:=|$)")
+# A trailer.<token>.key setting in the command (-c, --config-env, GIT_CONFIG_COUNT with GIT_CONFIG_KEY_n, or
+# GIT_CONFIG_PARAMETERS) makes --trailer <token>=VALUE record a trailer of that key, a co-author trailer
+# included, and a key set through the environment holds a value the check cannot read. So when the command
+# text, once every quote, backslash, '$' and newline is dropped, holds both 'trailer.' and '.key' in any letter
+# case, each --trailer value of a commit-family command that names an AI identity denies (_CmtidnFiles). Two
+# substring tests, linear in the command's length; the cost is a safe-direction over-deny of a command that holds
+# both pieces of text for another reason and names an AI in a --trailer value.
+_CMTIDN_TRAILER_KEY_PARTS = ("trailer.", ".key")
+
+
+class _CmtidnUnread(str):
+    """A hit label for a message, template or body file the check cannot resolve or read in full, which fails
+    closed: commit_identity words its deny reason as a file it could not read, not as a recorded AI identity."""
 
 
 class _CmtidnFiles:
     """The state of the named-file reads for one command: the command text (scanned in place of a file read
     from stdin, '-', and of a file the command writes from a quoted here-document, _cmtidn_written), the
-    payload's cwd when it is an absolute path, whether a word of the command is cd, pushd or popd or assigns
-    GIT_DIR or GIT_WORK_TREE (set by _cmtidn_line_ai from the segments of the command, before any of them is
-    judged), and the files read so far."""
+    payload's cwd when it is an absolute path, whether a word of the command is cd, pushd or popd, names GIT_DIR
+    or GIT_WORK_TREE or is a core.worktree word (set by _cmtidn_line_ai from the segments of the command, before
+    any of them is judged), whether the command may set a trailer.<token>.key (_CMTIDN_TRAILER_KEY_PARTS), and
+    the files read so far."""
 
     def __init__(self, command, cwd):
         self.command = command
         self.cwd = cwd if isinstance(cwd, str) and os.path.isabs(cwd) else None
         self.chdir = False
+        plain = _CMTIDN_UNREAD_CHARS_RE.sub("", command).lower()
+        self.trailer_key = all(part in plain for part in _CMTIDN_TRAILER_KEY_PARTS)
         self.read = {}
         self.spent = 0
         self.mentions = {}
@@ -5276,23 +5306,24 @@ def _cmtidn_message_file_ai(name, files, judged, relative_ok, what):
     is scanned in its place. A file the command also names elsewhere fails closed unless each other mention
     writes it from a quoted here-document (_cmtidn_written), whose text is then scanned with the command, beside
     the file when it exists and alone when it does not. relative_ok is False where a relative name's base
-    directory is not the payload's cwd."""
+    directory is not the payload's cwd. Each fail-closed label is a _CmtidnUnread."""
     if name is None:
-        return "{} option with no value the check can see (a process substitution or another word the shell " \
-               "lexer drops)".format(what)
+        return _CmtidnUnread("{} option with no value the check can see (a process substitution or another word "
+                             "the shell lexer drops)".format(what))
     if name == "-":
         return _message_text_ai(files.command, judged)
     if _CMTIDN_PATH_UNSAFE_RE.search(name) or name.startswith("~") or not name:
-        return "{} {!r} whose name holds a character the check does not resolve".format(what, name)
+        return _CmtidnUnread("{} {!r} whose name holds a character the check does not resolve".format(what, name))
     path = name
     if not os.path.isabs(name):
         if not relative_ok or files.cwd is None or files.chdir:
-            return "{} {!r}, a relative name whose base directory the check cannot know".format(what, name)
+            return _CmtidnUnread("{} {!r}, a relative name whose base directory the check cannot know"
+                                 .format(what, name))
         path = os.path.join(files.cwd, name)
     written = _cmtidn_written(files, name)
     if written is False:
-        return ("{} {!r} that the command also names elsewhere, where it may write it after the check reads "
-                "it".format(what, name))
+        return _CmtidnUnread("{} {!r} that the command also names elsewhere, where it may write it after the "
+                             "check reads it".format(what, name))
     if written:
         hit = _message_text_ai(files.command, judged)
         if hit is not None:
@@ -5309,7 +5340,7 @@ def _cmtidn_message_file_ai(name, files, judged, relative_ok, what):
     if text is None:
         if written and reason == "it does not exist":
             return None  # the command writes the file from a quoted here-document, scanned above
-        return "{} {!r} that the check could not read: {}".format(what, name, reason)
+        return _CmtidnUnread("{} {!r} that the check could not read: {}".format(what, name, reason))
     hit = _message_text_ai(text, judged, False)
     return None if hit is None else "{} in {} {!r}".format(hit, what, name)
 
@@ -5476,8 +5507,9 @@ def _commit_message_and_author_ai(tokens, judged, files=None, relative_ok=False,
             if not os.path.isabs(value):
                 # git reads a relative commit.template from the repository top, not from the cwd the check would
                 # join it to, so the check cannot know which file git reads; '-' and an empty value included.
-                return ("commit template {!r}, not an absolute path: git resolves a relative commit.template "
-                        "against the repository top, not the cwd the check reads from".format(value))
+                return _CmtidnUnread("commit template {!r}, not an absolute path: git resolves a relative "
+                                     "commit.template against the repository top, not the cwd the check reads "
+                                     "from".format(value))
             hit = _cmtidn_message_file_ai(value, files, judged, relative_ok, "commit template")
             if hit is not None:
                 return hit
@@ -5498,6 +5530,11 @@ def _commit_message_and_author_ai(tokens, judged, files=None, relative_ok=False,
         hit = _commit_message_value_ai(kind, value, judged, files, relative_ok)
         if hit is not None:
             return hit
+        if (kind == "trailer" and value is not None and files is not None and files.trailer_key
+                and AI_IDENTITY_RE.search(value)):
+            # The command may set trailer.<token>.key, which records this value as a trailer of that key, a
+            # co-author trailer included (_CMTIDN_TRAILER_KEY_PARTS).
+            return "--trailer value {!r} under a trailer.<token>.key setting".format(value.strip()[:80])
         if next_word:
             if value.startswith("--author="):
                 kind, value = "author", value[len("--author="):]  # the over-deny kept above
@@ -5733,11 +5770,13 @@ _CMTIDN_TOO_LONG = "the command is longer than the commit-identity check reads w
 # short cluster of letters of any length ending in F or t, its value attached or not, or --file, --template or
 # --body-file, a prefix of each included), the commit.template configuration name in any letter case, as a git
 # -c value names a template the reader reads, wherever it stands (a quoted or attached -c value included, and a
-# mention of the name only, a disclosed over-deny), and git or gh as a word (a path to either included). A dash
-# word of another program whose leading letters hold an F or t (sort -t, find -type) matches too, a disclosed
-# over-deny. Both are raw scans, linear in the command's length: a cluster can start only at a '-' after a blank,
-# a quote, '=' or a shell operator, so each run of letters is scanned from one start only. Being raw scans, they
-# do not see an option or configuration name that quoting or escaping splits (-\F, commit.temp\late), which the
+# mention of the name only, a disclosed over-deny), and git or gh as a word (a path to either included). Any
+# other dash word whose leading letters hold an F or t matches too, a disclosed over-deny: one of another program
+# (sort -t, find -type), one of git or gh's own options (git log -Stest, gh pr create -t TITLE), and one inside a
+# message (-m "fix -Wformat warnings"). Both are raw scans, linear in the command's length: a cluster can start
+# only at the start of the command or at a '-' after a blank, a quote, '=', ';', '&', '|', '(' or ')' (not after
+# '<', '>', '{' or a backquote), so each run of letters is scanned from one start only. Being raw scans, they do
+# not see an option or configuration name that quoting or escaping splits (-\F, commit.temp\late), which the
 # residue discloses.
 _CMTIDN_FALLBACK_FILE_OPTION_RE = re.compile(
     r"(?<![^\s\"'=;&|()])(?:-[A-Za-z]*[Ft]|--(?:fil|te|body-f)[a-z-]*)|(?i:commit\.template)")
@@ -5908,13 +5947,14 @@ def _cmtidn_line_ai(command, depth, budgets, unread, paths, judged, from_env=Fal
     elif error is not None and not readings:
         raise error
     if depth == 0:
-        # A cd, pushd or popd WORD, or a word that assigns GIT_DIR or GIT_WORK_TREE (_CMTIDN_GIT_DIR_ENV_RE), in
-        # any segment of the command, under either reading, leaves a relative file name's base directory
-        # unknown (_cmtidn_message_file_ai); a quoted message that holds the letters 'cd' is one word and does
-        # not count. A run line's relative names never resolve (relative_ok).
-        files.chdir = files.chdir or any(tok in _CMTIDN_CHDIR_WORDS or _CMTIDN_GIT_DIR_ENV_RE.match(tok)
-                                         for _same, segments in readings for tokens, _sep in segments
-                                         for tok in tokens)
+        # A cd, pushd or popd WORD, a word that names GIT_DIR or GIT_WORK_TREE (_CMTIDN_GIT_DIR_ENV_RE) or a
+        # core.worktree word (_CMTIDN_WORKTREE_KEY_RE), in any segment of the command, under either reading,
+        # leaves a relative file name's base directory unknown (_cmtidn_message_file_ai); a quoted message that
+        # holds the letters 'cd' is one word and does not count. A run line's relative names never resolve
+        # (relative_ok).
+        files.chdir = files.chdir or any(
+            tok in _CMTIDN_CHDIR_WORDS or _CMTIDN_GIT_DIR_ENV_RE.search(tok) or _CMTIDN_WORKTREE_KEY_RE.match(tok)
+            for _same, segments in readings for tokens, _sep in segments for tok in tokens)
     line_env = None  # read at the first segment that runs git (below)
     for same, segments in readings:
         keys = [reading for reading in paths if reading in same] or [None]
@@ -6161,6 +6201,15 @@ def commit_identity(data):
         if _SubstHeredocs.reads != reads:
             return _commit_identity_fallback(command, _SUBST_HEREDOC_MAIN_FAILS)  # main's fallback, in place
         return _allow()
+    if isinstance(hit, _CmtidnUnread):
+        return _deny(
+            "AIQT rule cmtidn (commit-identity): this command names a commit message, template or body file "
+            "the check cannot read here ({}); failing closed, since that file can carry an AI co-author trailer "
+            "or credit line. Name it by an absolute path to a readable regular file, in a command with no cd, "
+            "pushd, popd, GIT_DIR, GIT_WORK_TREE or core.worktree word, and name a commit.template by an absolute "
+            "path.".format(hit),
+            "AIQT guardrail: denied a command naming a message or body file the check cannot read (rule cmtidn, "
+            "fail-closed).")
     reason = ("AIQT rule cmtidn (commit-identity): a recorded change carries the human maintainer's "
               "own identity, with no AI as author, committer, co-author or credit in a commit or a "
               "pull-request body; this command records an AI identity ({}). Remove it and commit as the "
