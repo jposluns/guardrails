@@ -7563,7 +7563,7 @@ def _cpu_judge_failures():
 
 
 def _deadline_retime_context_failures(tmp):
-    """(cpu-judge-retime-context) A spy in place of _deadline_shape_case, run through _deadline_shape_runs
+    """(cpu-judge-retime-context-first) and (cpu-judge-retime-context-retimed) A spy in place of _deadline_shape_case, run through _deadline_shape_runs
     and _deadline_shape_verdicts as _deadline_shape_failures wires them, records for every call whether
     the registry probe was replaced by _no_registry_above: every CPU retiming of a case runs under the
     same context as that case's first runs, and the cases so run are exactly the _DEADLINE_PLAIN_CASES
@@ -7588,14 +7588,14 @@ def _deadline_retime_context_failures(tmp):
     want = sum(len(shapes) for shapes in _DEADLINE_PLAIN_CASES.values()) * len(_DEADLINE_SIZES)
     under = sorted(key for key, ceilings in first.items() if ceilings == {True})
     if len(under) != want or any(first[key] not in ({True}, {False}) for key in first):
-        out.append("(cpu-judge-retime-context) {} cases ran their first runs under _no_registry_above, want {}"
+        out.append("(cpu-judge-retime-context-first) {} cases ran their first runs under _no_registry_above, want {}"
                    .format(len(under), want))
     retimed = {}
     for key, ceiling in calls:
         retimed.setdefault(key, set()).add(ceiling)
     wrong = sorted(key for key in retimed if retimed[key] != first.get(key))
     if len(retimed) != len(plain) + len(other) or wrong:
-        out.append("(cpu-judge-retime-context) every retimed case must run under its first runs' context: {} of "
+        out.append("(cpu-judge-retime-context-retimed) every retimed case must run under its first runs' context: {} of "
                    "{} cases retimed, under another context: {!r}".format(len(retimed), len(plain) + len(other),
                                                                          wrong[:3]))
     return out
