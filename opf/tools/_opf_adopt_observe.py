@@ -4930,6 +4930,13 @@ def self_test(vectors_only=False, steady_only=False):
                     "clock-vector/clocked-run-beside-undetected-mutant",
                     "clock-vector/blocked-run-beside-clocked-mutant")
     CLOCK_VECTOR_NAMES = VECTOR_NAMES[13:]
+    # The vectors this run selects; a steady run leaves out the load-sensitive
+    # ones. The expected vectors, the straggler loop's skip and run_vector's
+    # report for a vector that raises all read this one list, so a vector the
+    # run left out is never reported as one it could not evaluate.
+    SELECTED_VECTORS = tuple(name for name in VECTOR_NAMES
+                             if not (steady_only and name in _LOAD_SENSITIVE_VECTORS))
+    LEFT_OUT_VECTORS = frozenset(VECTOR_NAMES) - frozenset(SELECTED_VECTORS)
     detected = (False, "fixture: detected", 0.0, [], [], [], [], [], [])
     evaluated = (True, "fixture: evaluated", 0.0, [], [], [], [], [], [])
     # The positive-held-slot vector's join of the worker it releases.
@@ -4990,7 +4997,7 @@ def self_test(vectors_only=False, steady_only=False):
                      ["timing bound"])):
                 if ("fetch_bound" in config) != (name in _LOAD_SENSITIVE_VECTORS):
                     raise AssertionError("the load-sensitive vectors depart from the timing configs")
-                if steady_only and name in _LOAD_SENSITIVE_VECTORS:
+                if name in LEFT_OUT_VECTORS:
                     continue
                 failures = []
                 case = (name.replace("resolver-vector/", "vector/"), VALID, "archive", config)
@@ -5165,14 +5172,16 @@ def self_test(vectors_only=False, steady_only=False):
     def run_vector(vector, names, base, contexts, results):
         # A vector that raises reports each of its names not yet reported as
         # "cannot evaluate", naming the exception and its message, so the
-        # report says what could not be evaluated.
+        # report says what could not be evaluated. A name this run left out
+        # (LEFT_OUT_VECTORS) is not reported: it was never to be evaluated.
         try:
             vector(base, contexts, results)
         except Exception as exc:
             done = {name for name, _ in results}
             reason = type(exc).__name__ + (": " + str(exc) if str(exc) else "")
             results.extend((name, ["cannot evaluate: " + reason])
-                           for name in names if name not in done)
+                           for name in names
+                           if name not in done and name not in LEFT_OUT_VECTORS)
 
     def resolver_vectors(base, contexts):
         # Returns (name, failures) per vector; a vector that raises reports
@@ -5193,11 +5202,16 @@ def self_test(vectors_only=False, steady_only=False):
 
         def raising(base, contexts, results):
             raise AssertionError("the probe precondition does not hold")
+        # The probe also names the load-sensitive vectors: a run that left
+        # them out must not report them, and one that selected them must.
         probe = []
-        run_vector(raising, ("vector/raising",), base, contexts, probe)
-        if probe != [("vector/raising", ["cannot evaluate: AssertionError: "
-                                         "the probe precondition does not hold"])]:
-            failures.append("a raising vector's report did not name what it could not evaluate")
+        probe_names = ("vector/raising",) + _LOAD_SENSITIVE_VECTORS
+        run_vector(raising, probe_names, base, contexts, probe)
+        if probe != [(name, ["cannot evaluate: AssertionError: "
+                             "the probe precondition does not hold"])
+                     for name in probe_names if name not in LEFT_OUT_VECTORS]:
+            failures.append("a raising vector's report did not name exactly what it "
+                            "could not evaluate among the vectors this run selects")
         if join_resolvers(5.0):
             failures.append("a resolver worker outlived the vectors")
         if module._lookup is not lookup_before or module._RESOLVER_SLOT is not slot_before:
@@ -5395,8 +5409,7 @@ def self_test(vectors_only=False, steady_only=False):
         red_failure = None
     except AssertionError as exc:
         red_failure = "FAIL " + str(exc)
-    rc = _judge_roster(executed, expected_ids, vector_results, tuple(
-        name for name in VECTOR_NAMES if not (steady_only and name in _LOAD_SENSITIVE_VECTORS)))
+    rc = _judge_roster(executed, expected_ids, vector_results, SELECTED_VECTORS)
     if red_failure is not None:
         _print_failures([red_failure])
         return 1
