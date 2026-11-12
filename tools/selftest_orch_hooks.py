@@ -1861,6 +1861,9 @@ _RDP_TIMING_RUNAWAY = 10.0
 # _RDP_TIMING_RUNAWAY: under 190 CPU seconds, against about 30 for the real screen on the measuring host. A
 # runaway is one call the row cannot cut short; it ends its shape, and the budget still holds for the rest.
 _RDP_TIMING_BUDGET = 180.0
+# The rounds a growth fault must reproduce in before it fails its shape (_rdp_timing_rows): two groups'
+# worth, judged together on each (kind, size)'s least time over them.
+_RDP_CONFIRM_ROUNDS = 6
 
 
 def _rdp_reference_scan(text):
@@ -1937,9 +1940,10 @@ def _rdp_screen_ops(text, labels):
     bounds' job (_rdp_timing_group, _rdp_timing_rows), and how much of such work they catch depends on its
     size. The normalized growth bound fails a super-linear term only when it lifts the screen's multiple
     of the reference by the square root of the length factor (about 1.414 per doubling) in two of three
-    groups; a smaller term passes, and whether one near that size fails depends on the host. On one host
-    a prefix-count mutant (text.count("\\n", 0, i) every 2400 characters inside _rdp_hidden) failed only
-    in the backtick-fence-line shape, and only by 0.8 to 5.8 percent over the bound in five runs. When the
+    groups and in the confirm rounds (_rdp_timing_rows); a smaller term passes, and whether one near that
+    size fails depends on the host. On one host, before the confirm rounds, a prefix-count mutant
+    (text.count("\\n", 0, i) every 2400 characters inside _rdp_hidden) failed only in the
+    backtick-fence-line shape, and only by 0.8 to 5.8 percent over the bound in five runs. When the
     reference's own growth per doubling exceeds the length factor, raw screen growth up to the raw bound
     (the length factor to the power 1.5) times the reference's growth over the length factor passes:
     about 4 percent over it at a reference growth of 2.08, about 11 percent at 2.22, both observed on one
@@ -2056,50 +2060,87 @@ def _rdp_timing_group(least, lengths, bound):
     return faults
 
 
-def _rdp_timing_rows(shapes, timer, budget=_RDP_TIMING_BUDGET, runaway=_RDP_TIMING_RUNAWAY):
+def _rdp_growth_only(faults):
+    """True when faults, one group's (_rdp_timing_group), are all growth faults of measured times ("screen
+    over reference grew ..."): no ratio fault and no cannot-evaluate fault among them."""
+    return bool(faults) and all(fault.startswith("screen over reference grew ") for fault in faults)
+
+
+def _rdp_timing_rows(shapes, timer, budget=_RDP_TIMING_BUDGET, runaway=_RDP_TIMING_RUNAWAY,
+                     confirm=_RDP_CONFIRM_ROUNDS):
     """([(shape, verdict)], CPU seconds spent) for shapes, each (shape, lengths, bound) as _rdp_timing_group
     reads them; timer(shape, kind, size, round_number) times one run and returns its CPU seconds. A shape is
     timed in up to three groups of three rounds; each round times every size once, ascending in an even
     round and descending in an odd one, and at each size the reference and the screen back to back (their
     order also alternating), so a burst of load falls on small and large briefs and on both kinds alike.
     Stray work only adds time, so each group keeps each (kind, size)'s least time over its own rounds, and
-    the shape passes ("linear") when two groups pass (_rdp_timing_group) and fails ("not linear") when two
-    fail: a pass needs two groups' rounds to agree, so one burst through every round of one group cannot
-    alone decide the shape. Three groups always decide, since one of
-    the two counts then reaches two, so the third group is timed only after one pass and one fail, and an
-    AssertionError marks the unreachable end of the loop. A timing over runaway CPU seconds fails the
-    shape at once ("runaway") and the shape is not timed again. A timing starts only while the row has spent
-    under budget CPU seconds; once it has not, the shape and every later one fail untimed ("over budget")."""
+    the shape passes ("linear") when two groups pass (_rdp_timing_group) and fails when two fail: a pass
+    needs two groups' rounds to agree, so one burst through every round of one group cannot alone decide
+    the shape. Three groups always decide, since one of the two counts then reaches two, so the third
+    group is timed only after one pass and one fail, and an AssertionError marks the unreachable end of
+    the loop. A shape that fails with a ratio or cannot-evaluate fault in either failing group fails at
+    once ("not linear"). A shape whose two failing groups hold growth faults only (_rdp_growth_only) fails
+    only when the fault reproduces: confirm more rounds are timed, interleaved the same way and numbered
+    on from the last round timed, and judged once (_rdp_timing_group) on each (kind, size)'s least time
+    over those confirm rounds alone. Any fault there confirms it ("not linear", naming the failing groups
+    and the confirm faults); none passes the shape ("linear"). A super-linear screen's growth holds in its
+    quiet times, the least over many rounds, so its fault reproduces; load that lifted one size's short
+    reference timing (about a tenth of the screen's) through two groups, moving that size's multiple, has
+    to lift that one (kind, size) through every confirm round as well to fail the shape. Residual: load
+    held through every confirm round that lifts the smaller sizes' screen or the larger sizes' reference
+    more than the other leg flattens a multiple and can pass a growth fault there, as it can pass two
+    groups. With confirm 0 a growth fault fails the shape at once, the behaviour before the confirm
+    rounds. A timing over runaway CPU seconds fails the shape at once ("runaway") and the shape is not
+    timed again. A timing starts only while the row has spent under budget CPU seconds; once it has not,
+    the shape and every later one fail untimed ("over budget"), confirm rounds included."""
     spent = 0.0
     rows = []
 
-    def _shape(shape, lengths, bound):
+    def _rounds(shape, lengths, first, count):
+        """Each (kind, size)'s least time over rounds first to first + count - 1, or the verdict that ends
+        the shape (over budget or runaway) as a string."""
         nonlocal spent
-        passed, failed = 0, []
+        least = {}
+        for round_number in range(first, first + count):
+            ascending = round_number % 2 == 0
+            for size in sorted(lengths, reverse=not ascending):
+                for kind in ("reference", "screen") if ascending else ("screen", "reference"):
+                    if spent >= budget:
+                        return "over budget: the row spent {:.1f} CPU seconds of {}; not timed".format(
+                            spent, budget)
+                    took = timer(shape, kind, size, round_number)
+                    spent += took
+                    if took > runaway:
+                        return "runaway: {} at {} bytes took {:.1f} CPU seconds, over {}; not timed again".format(
+                            kind, size, took, runaway)
+                    least[(kind, size)] = min(least.get((kind, size), took), took)
+        return least
+
+    def _shape(shape, lengths, bound):
+        passed, failed, growth_only = 0, [], True
         for group in range(3):
-            least = {}
-            for round_number in range(3 * group, 3 * group + 3):
-                ascending = round_number % 2 == 0
-                for size in sorted(lengths, reverse=not ascending):
-                    for kind in ("reference", "screen") if ascending else ("screen", "reference"):
-                        if spent >= budget:
-                            return "over budget: the row spent {:.1f} CPU seconds of {}; not timed".format(
-                                spent, budget)
-                        took = timer(shape, kind, size, round_number)
-                        spent += took
-                        if took > runaway:
-                            return "runaway: {} at {} bytes took {:.1f} CPU seconds, over {}; not timed again".format(
-                                kind, size, took, runaway)
-                        least[(kind, size)] = min(least.get((kind, size), took), took)
+            least = _rounds(shape, lengths, 3 * group, 3)
+            if isinstance(least, str):
+                return least
             faults = _rdp_timing_group(least, lengths, bound)
             if faults:
                 failed.append("group {}: {}".format(group, ", ".join(faults)))
+                growth_only = growth_only and _rdp_growth_only(faults)
             else:
                 passed += 1
             if passed == 2:
                 return "linear"
             if len(failed) == 2:
-                return "not linear: " + "; ".join(failed)
+                if not growth_only or confirm <= 0:
+                    return "not linear: " + "; ".join(failed)
+                least = _rounds(shape, lengths, 3 * group + 3, confirm)
+                if isinstance(least, str):
+                    return least
+                faults = _rdp_timing_group(least, lengths, bound)
+                if not faults:
+                    return "linear"
+                return "not linear: {}; confirmed over {} rounds: {}".format(
+                    "; ".join(failed), confirm, ", ".join(faults))
         raise AssertionError("three groups of rounds always decide, yet {} passed and {} failed".format(
             passed, len(failed)))
 
@@ -2122,24 +2163,26 @@ def _rdp_label_screen_timing(ls):
     time against a linear reference over the same brief (_rdp_reference_scan): the shape's time must stay
     under its ratio bound to the reference at every size, and its multiple of the reference must grow
     under the length factor to the power 0.5 from each size to the next (_rdp_timing_group,
-    _RDP_TIMING_SHAPES), in two groups of rounds (_rdp_timing_rows). Every timing bound is a ratio of
-    times taken back to back in the same run, so it holds on a fast, slow or loaded host. The growth
-    bound fails super-linear work the counts cannot see only when that work lifts the screen's multiple
-    of the reference by the square root of the length factor (about 1.414 per doubling) in two of three
-    groups; a smaller term passes, and whether one near that size fails depends on the host (on one host
-    a prefix-count mutant, text.count("\\n", 0, i) every 2400 characters inside _rdp_hidden, failed only
-    in the backtick-fence-line shape and only by 0.8 to 5.8 percent over the bound in five runs). When
-    the reference's own growth per doubling exceeds the length factor, raw screen growth up to the raw
-    bound (the length factor to the power 1.5) times the reference's growth over the length factor
-    passes: about 4 percent over it at a reference growth of 2.08, about 11 percent at 2.22, both
-    observed on one host. No rule that cancels load can close that band, since a rule that cancels a
-    load factor shared by both legs depends only on the two multiples and the length factor. The ratio
-    bound also fails a screen that grows linearly but runs several times slower, and the runaway bound
-    fails gross work outright (a C str primitive looped per character exceeds it at these sizes). A
-    runaway timing ends
-    its shape untimed, and the row's timings share a CPU budget (_RDP_TIMING_BUDGET), so a failing row
-    ends with a named failure. Then the decision itself, over simulated counts and times
-    (_rdp_timing_decision_cases)."""
+    _RDP_TIMING_SHAPES), in two groups of rounds (_rdp_timing_rows); a shape failing on growth alone
+    fails only when the fault reproduces in confirm rounds (_RDP_CONFIRM_ROUNDS), since a short
+    reference timing lifted by load through two groups can fail a linear screen's growth. Every timing
+    bound is a ratio of times taken back to back in the same run, so it holds on a fast, slow or loaded
+    host, load that lifts one leg more than the other aside. The growth bound fails super-linear work
+    the counts cannot see only when that work lifts the screen's multiple of the reference by the
+    square root of the length factor (about 1.414 per doubling) in two of three groups and in the
+    confirm rounds; a smaller term passes, and whether one near that size fails depends on the host
+    (on one host, before the confirm rounds, a prefix-count mutant, text.count("\\n", 0, i) every 2400
+    characters inside _rdp_hidden, failed only in the backtick-fence-line shape and only by 0.8 to 5.8
+    percent over the bound in five runs). When the reference's own growth per doubling exceeds the
+    length factor, raw screen growth up to the raw bound (the length factor to the power 1.5) times the
+    reference's growth over the length factor passes: about 4 percent over it at a reference growth of
+    2.08, about 11 percent at 2.22, both observed on one host. No rule that cancels load can close that
+    band, since a rule that cancels a load factor shared by both legs depends only on the two multiples
+    and the length factor. The ratio bound also fails a screen that grows linearly but runs several
+    times slower, and the runaway bound fails gross work outright (a C str primitive looped per
+    character exceeds it at these sizes). A runaway timing ends its shape untimed, and the row's timings
+    share a CPU budget (_RDP_TIMING_BUDGET), so a failing row ends with a named failure. Then the
+    decision itself, over simulated counts and times (_rdp_timing_decision_cases)."""
     labels = ls.binding["labels"]
     lead = _rdp_screen_text(ls, [])
     texts = {}
@@ -2186,9 +2229,12 @@ def _rdp_timing_decision_cases():
     times fail, also when a burst of load lifts its small sizes' times through a whole
     group of rounds, and also when the quadratic stays under the ratio bound and only the normalized
     growth sees it; a linear screen passes through a burst that lifts its largest size through one group;
-    a runaway ends its shape untimed while the next shape is still timed; and timings that each take just
-    under the runaway bound end the row over budget, every shape failed by name, within the stated bound
-    of the budget plus one timing."""
+    a growth fault alone fails only when it reproduces in the confirm rounds, so a linear screen whose
+    reference is lifted through two groups passes, and fails with no confirm rounds, while a lift held
+    through the confirm rounds still fails and a quadratic fails through every confirm round but one
+    that is lifted; a ratio fault fails with no confirm round; a runaway ends its shape untimed while
+    the next shape is still timed; and timings that each take just under the runaway bound end the row
+    over budget, every shape failed by name, within the stated bound of the budget plus one timing."""
     sizes = {262144: 262144, 524288: 524288, 1048576: 1048576}
     bound = Fraction("13.5") * _RDP_TIMING_MARGIN
 
@@ -2252,7 +2298,8 @@ def _rdp_timing_decision_cases():
                                     (1.0, 2.0, 4.0))),
         ("ratio-just-over", _group((at_ratio + 1e-6, 2.0, 4.0), (1.0, 2.0, 4.0)))]
 
-    def _simulate(screen, reference, runaway_at=None, budget=_RDP_TIMING_BUDGET, shapes=("a",)):
+    def _simulate(screen, reference, runaway_at=None, budget=_RDP_TIMING_BUDGET, shapes=("a",),
+                  confirm=_RDP_CONFIRM_ROUNDS):
         calls = []
 
         def _timer(shape, kind, size, round_number):
@@ -2260,7 +2307,8 @@ def _rdp_timing_decision_cases():
             if runaway_at is not None and (shape, kind, size) == runaway_at:
                 return _RDP_TIMING_RUNAWAY + 0.5
             return (screen if kind == "screen" else reference)(size, round_number)
-        rows, spent = _rdp_timing_rows([(shape, sizes, bound) for shape in shapes], _timer, budget=budget)
+        rows, spent = _rdp_timing_rows([(shape, sizes, bound) for shape in shapes], _timer, budget=budget,
+                                       confirm=confirm)
         return ([verdict.split(":")[0] for _shape, verdict in rows], spent, calls)
 
     def _linear(size, _round):
@@ -2301,6 +2349,38 @@ def _rdp_timing_decision_cases():
             _reference)[0]),
         ("five-times-slower", _simulate(lambda size, rnd: 5 * _linear(size, rnd),
                                         lambda size, rnd: _linear(size, rnd) / 13.5)[0])]
+    # The confirm rounds. A linear screen whose 512 KiB reference timing is lifted 1.9 times through the
+    # first and third groups of rounds (the shape of the failure on a busy runner: the 512 KiB reference
+    # read about as long as the 1 MiB one, so the multiple grew about 1.9 times to 1 MiB) fails those two
+    # groups on growth alone and passes on the confirm rounds; with no confirm rounds it fails, the
+    # outcome before them. The same lift through every round, confirm rounds included, still fails. A
+    # quadratic whose reference is lifted 2 times at 512 KiB and 4 times at 1 MiB, which flattens its
+    # multiple, through every confirm round but the last still fails, since the least over the confirm
+    # rounds takes the quiet one; held through all six it passes, the residual the docstring of
+    # _rdp_timing_rows states. A shape failing on growth alone takes 72 timings, its two groups and then
+    # the confirm rounds, and one failing on its ratio bound takes 36, its two groups alone, with no
+    # confirm round.
+    noisy = {0, 1, 2, 6, 7, 8}
+
+    def _noisy_reference(size, rnd):
+        return _reference(size, rnd) * (1.9 if size == 524288 and rnd in noisy else 1.0)
+    cases.append(("linear-reference-lifted-two-groups", _simulate(_linear, _noisy_reference)[0],
+                  _simulate(_linear, _noisy_reference, confirm=0)[0]))
+    cases.append(("linear-reference-lifted-every-round", _simulate(
+        _linear, lambda size, rnd: _reference(size, rnd) * (1.9 if size == 524288 else 1.0))[0]))
+
+    def _flattening_reference(last):
+        def _timed(size, rnd):
+            return 0.04 * size / 262144 * (size / 262144 if 6 <= rnd < last else 1.0)
+        return _timed
+    cases.append(("quadratic-reference-lifted-confirm-but-one",
+                  _simulate(_quadratic, _flattening_reference(11))[0],
+                  _simulate(_quadratic, _flattening_reference(12))[0]))
+    verdicts, _spent, calls = _simulate(_quadratic, lambda size, rnd: 0.04 * size / 262144)
+    cases.append(("growth-fault-confirm-timings", verdicts, len(calls)))
+    verdicts, _spent, calls = _simulate(lambda size, rnd: 5 * _linear(size, rnd),
+                                        lambda size, rnd: _linear(size, rnd) / 13.5)
+    cases.append(("ratio-fault-no-confirm-timings", verdicts, len(calls)))
     verdicts, _spent, calls = _simulate(_linear, _reference, runaway_at=("a", "screen", 1048576),
                                         shapes=("a", "b"))
     runaway = calls.index(("a", "screen", 1048576))
@@ -2324,6 +2404,11 @@ def _rdp_timing_decision_cases():
          ("linear-both-legs-loaded-every-group", ["linear"]),
          ("linear-large-lifted-one-group", ["linear"]),
          ("five-times-slower", ["not linear"]),
+         ("linear-reference-lifted-two-groups", ["linear"], ["not linear"]),
+         ("linear-reference-lifted-every-round", ["not linear"]),
+         ("quadratic-reference-lifted-confirm-but-one", ["not linear"], ["linear"]),
+         ("growth-fault-confirm-timings", ["not linear"], 72),
+         ("ratio-fault-no-confirm-timings", ["not linear"], 36),
          ("runaway", ["runaway", "linear"], [], True),
          ("just-under-runaway-every-timing", ["over budget", "over budget", "over budget"], 19, True)]))
     # The flip: with _rdp_unresolved patched to find no zero time, every time is judged as a measurement
