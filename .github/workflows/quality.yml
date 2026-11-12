@@ -1032,6 +1032,15 @@ jobs:
         shell: bash
         run: python3 -I -B opf/tools/_child_status.py
 
+      # Which coreutils implementation (GNU, uutils or a mix) each tool the suites run resolves to on this
+      # runner, recorded first in the job that runs the Hooks preview gate; what it finds never fails it.
+      - name: Coreutils implementation report
+        shell: bash
+        run: python3 -I -B tools/coreutils_report.py
+      - name: Coreutils report self-test (execution-reconciled)
+        shell: bash
+        run: python3 -I -B tools/check_selftest_execution.py --suite coreutils-report-selftest
+
       - name: Rules self-test
         shell: bash
         run: python3 -I -B tools/gen_rules.py --self-test

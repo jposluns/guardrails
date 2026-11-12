@@ -407,6 +407,15 @@ class = "c"
 residue = "It checks that site/.well-known/security.txt and opf/site/.well-known/security.txt each exist as a regular file whose lines are exactly the 6 owner fields (Contact, Expires, Encryption, Policy, Preferred-Languages, Canonical) in that order, each once, with the owner's values and the Canonical URL of that root's own domain; a missing, unreadable, oversized, non-UTF-8 or not field-shaped file fails closed. It covers a recognizable SUBSET (class c, partial): it reads the repository only, so it does not show that Cloudflare serves the file, at that path, with a text/plain type, nor that the Contact, Encryption and Policy targets resolve, nor that the Expires date is still in the future at serving time. Its linkage to a single corpus rule is arguable, so none is claimed here."
 
 [[gate]]
+id = "coreutils-report"
+script = "tools/coreutils_report.py"
+rules = []
+platform = "ci"
+default = "block"
+class = "c"
+residue = "It reports, for each of 20 coreutils tools the suites run (cp, mv, rm, install, tee, truncate, head, tail, cut, date, ls, env, timeout, dd, ln, sha256sum, mktemp, dirname, mkdir, sleep), the path PATH resolves it to, that path's realpath and the first line of its --version output, then one summary line naming the implementations seen (GNU, uutils, mixed or unknown). It runs first in the local runner, after the child-status probe, and in the CI job that runs the Hooks preview gate, so each side records what it ran. It blocks only when it cannot run a tool it was asked about (not found on PATH, --version not launchable, nonzero, silent or over its 10 s bound); any mix of implementations exits 0. It covers a recognizable SUBSET (class c, partial): it records which implementation each name resolves to; it does not compare the local record with the CI record, does not show that a test passing on one implementation passes on the other, does not see a tool a test reaches by an absolute path or under a PATH it replaces, and classifies only by the --version marker, so a build that prints neither the GNU nor the uutils marker is reported as unknown. Its linkage to a single corpus rule is arguable, so none is claimed here."
+
+[[gate]]
 id = "record-readers"
 script = "tools/check_record_readers.py"
 rules = []

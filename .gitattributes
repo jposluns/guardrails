@@ -893,6 +893,7 @@ tools/check_versions.py text eol=lf
 tools/ci-status.sh text eol=lf
 tools/ci_site_scope.py text eol=lf
 tools/conformance.py text eol=lf
+tools/coreutils_report.py text eol=lf
 tools/doctor.py text eol=lf
 tools/gen_adapters.py text eol=lf
 tools/gen_agents.py text eol=lf

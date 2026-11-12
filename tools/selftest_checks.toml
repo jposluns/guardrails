@@ -5147,6 +5147,29 @@ expected-check-ids = [
 ]
 
 [[suite]]
+id = "coreutils-report-selftest"
+runner = "tools/coreutils_report.py"
+expected-check-ids = [
+  "case/gnu-set",
+  "revert/gnu-detection-removed-red",
+  "case/uutils-set",
+  "revert/uutils-detection-removed-red",
+  "case/mixed-set-exits-0",
+  "revert/mixed-summary-removed-red",
+  "case/missing-from-path-exits-2",
+  "revert/missing-check-removed-red",
+  "case/version-fails-exits-2",
+  "revert/version-status-check-removed-red",
+  "case/unknown-implementation-exits-0",
+  "case/version-silent-exits-2",
+  "case/version-hangs-exits-2",
+  "case/launch-error-exits-2",
+  "case/no-host-tool-reached",
+  "roster/default-tools",
+  "refuse/unrecognized-argument",
+]
+
+[[suite]]
 id = "record-readers-selftest"
 runner = "tools/check_record_readers.py"
 expected-check-ids = [

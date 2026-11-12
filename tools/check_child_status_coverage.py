@@ -480,6 +480,7 @@ DIRECT_LAUNCH_RESIDUAL = (
     "tools/check_version_monotonicity.py",
     "tools/ci_site_scope.py",
     "tools/conformance.py",
+    "tools/coreutils_report.py",
     "tools/doctor.py",
     "tools/gen_adapters.py",
     "tools/gen_agents.py",

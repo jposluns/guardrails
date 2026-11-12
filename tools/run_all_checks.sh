@@ -47,6 +47,11 @@ run_gate() {
 # failed, and the run ends RESULT: FAIL whatever later gates print. check_child_status_coverage.py holds
 # this line first.
 run_gate "child-status" python3 -I -B opf/tools/_child_status.py
+# Which coreutils implementation (GNU, uutils or a mix) each tool the suites run resolves to on this host,
+# recorded before any other gate so a failure below can be read against it. It exits 2 only when it cannot
+# run a tool; what it finds never fails the run. The probe above stays the first gate line.
+run_gate "coreutils-report" python3 -I -B tools/coreutils_report.py
+run_gate "coreutils-report-selftest" python3 -I -B tools/check_selftest_execution.py --suite coreutils-report-selftest
 run_gate "child-status-selftest" python3 -I -B tools/check_selftest_execution.py --suite child-status-selftest
 run_gate "child-status-coverage-selftest" python3 -I -B tools/check_selftest_execution.py --suite child-status-coverage-selftest
 run_gate "child-status-coverage" python3 -I -B tools/check_child_status_coverage.py

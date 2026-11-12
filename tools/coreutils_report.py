@@ -1,0 +1,445 @@
+#!/usr/bin/env python3
+"""Coreutils implementation report: which coreutils the suites on this host actually run.
+
+  coreutils_report.py              report every tool in TOOLS; exit 0, or 2 when a tool cannot be run
+  coreutils_report.py --self-test  assert the report over executable fixtures in a temporary directory
+  coreutils_report.py [--self-test] --execution-report ABS_PATH
+  any other argument list is refused with exit 2
+
+For each tool the suites run, the report prints the path PATH resolves it to, that path's realpath and the
+first line of its --version output, then one summary line naming the implementations seen: GNU, uutils,
+mixed, or unknown. A host can carry GNU coreutils and uutils coreutils side by side (a multicall uutils
+binary behind some names, GNU binaries behind others), and a test that passes against one implementation
+can fail against the other, so the local run and the CI run each record what they ran.
+
+The report never fails the run on what it finds: any mix of implementations exits 0. It exits 2, and says
+so, only when it cannot run a tool it was asked about: the name is not found on PATH, --version cannot be
+launched, exits nonzero, prints nothing on standard output, or does not finish within VERSION_TIMEOUT
+seconds. Each tool is launched by its resolved absolute path with standard input closed, LC_ALL=C and
+only PATH carried over from the environment.
+"""
+import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    import os
+    try:
+        sys.stderr.write(
+            "error: coreutils_report.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+            "Nothing was run (cannot evaluate).\n"
+            % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
+
+import os
+import shutil
+import subprocess
+import tempfile
+from pathlib import Path
+
+# The tools the local runner and the CI jobs reach by bare name, directly or through the scripts and tests
+# they run. Kept in this order so two reports compare line by line.
+TOOLS = (
+    "cp", "mv", "rm", "install", "tee", "truncate", "head", "tail", "cut", "date", "ls", "env", "timeout",
+    "dd", "ln", "sha256sum", "mktemp", "dirname", "mkdir", "sleep",
+)
+# The implementation a --version first line names, by the marker it carries; the first match wins.
+IMPLEMENTATIONS = (
+    ("GNU", "(GNU coreutils)"),
+    ("uutils", "(uutils coreutils)"),
+)
+UNKNOWN = "unknown"
+MIXED = "mixed"
+VERSION_TIMEOUT = 10
+MAX_LINE = 200
+
+
+def classify(line):
+    """The implementation named by a --version first line, or UNKNOWN."""
+    for name, marker in IMPLEMENTATIONS:
+        if marker in line:
+            return name
+    return UNKNOWN
+
+
+def summarize(kinds):
+    """One label for the implementations seen: the single one, MIXED for more than one, UNKNOWN for none."""
+    seen = sorted(set(kinds))
+    if not seen:
+        return UNKNOWN
+    if len(seen) > 1:
+        return MIXED
+    return seen[0]
+
+
+def _printable(text):
+    text = "".join(ch if ch.isprintable() else "?" for ch in text)
+    return text if len(text) <= MAX_LINE else text[:MAX_LINE] + "[truncated]"
+
+
+def _require_found(tool, resolved):
+    """The reason a tool cannot be run when PATH does not resolve it, else None."""
+    if resolved is None:
+        return "{}: not found on PATH".format(tool)
+    return None
+
+
+def _require_version_ok(tool, returncode, first_line):
+    """The reason a finished --version run does not count, else None."""
+    if returncode != 0:
+        return "{}: --version exited {}".format(tool, returncode)
+    if not first_line:
+        return "{}: --version printed nothing on standard output".format(tool)
+    return None
+
+
+def probe(tool, path_env):
+    """(row, None) for a tool that ran, or (None, reason) for one that cannot be run.
+
+    A row is (tool, resolved path, realpath, --version first line, implementation)."""
+    resolved = shutil.which(tool, path=path_env)
+    reason = _require_found(tool, resolved)
+    if reason is not None:
+        return None, reason
+    resolved = os.path.abspath(resolved)
+    try:
+        proc = subprocess.run([resolved, "--version"], stdin=subprocess.DEVNULL, capture_output=True,
+                              timeout=VERSION_TIMEOUT, env={"PATH": path_env, "LC_ALL": "C"})
+    except subprocess.TimeoutExpired:
+        return None, "{}: --version did not finish within {} s".format(tool, VERSION_TIMEOUT)
+    except OSError as exc:
+        return None, "{}: --version could not be launched ({})".format(tool, exc)
+    lines = proc.stdout.decode("utf-8", "replace").splitlines()
+    first = _printable(lines[0].strip()) if lines else ""
+    reason = _require_version_ok(tool, proc.returncode, first)
+    if reason is not None:
+        return None, reason
+    return (tool, resolved, os.path.realpath(resolved), first, classify(first)), None
+
+
+def report(tools, path_env, out):
+    """Append the report lines for tools to out; the exit code: 0, or 2 when a tool cannot be run."""
+    rows, reasons = [], []
+    for tool in tools:
+        row, reason = probe(tool, path_env)
+        if reason is not None:
+            reasons.append(reason)
+            out.append("CANNOT RUN: " + reason)
+            continue
+        rows.append(row)
+        out.append("{}: path={} realpath={} version={!r} implementation={}".format(*row))
+    counts = {}
+    for row in rows:
+        counts[row[4]] = counts.get(row[4], 0) + 1
+    detail = ", ".join("{} {}".format(name, counts[name]) for name in sorted(counts))
+    out.append("SUMMARY: coreutils implementation {} ({} of {} tools reported{}{})".format(
+        summarize(row[4] for row in rows), len(rows), len(tools), ": " if detail else "", detail))
+    if reasons:
+        out.append("EXIT 2: could not run {} of {} tools asked about: {}".format(
+            len(reasons), len(tools), ", ".join(reason.split(":", 1)[0] for reason in reasons)))
+        return 2
+    return 0
+
+
+def run_report():
+    out = []
+    code = report(TOOLS, os.environ.get("PATH", os.defpath), out)
+    for line in out:
+        print(line)
+    return code
+
+
+# The registered execution-suite identity (tools/selftest_checks.toml) and the executed-check-id record
+# the instrumented check() helper appends to; the execution gate reconciles the report against the
+# registry.
+SUITE_ID = "coreutils-report-selftest"
+EXECUTED = []
+FAILURES = []
+
+
+def check(name, ok, detail=""):
+    if name in EXECUTED:
+        print("SELF-TEST HARNESS ERROR: duplicate check id {!r}".format(name), file=sys.stderr)
+        sys.exit(2)
+    EXECUTED.append(name)
+    if not ok:
+        FAILURES.append("{}: {!r}".format(name, detail))
+
+
+# Fixture bodies, run by /bin/sh using only its builtins (printf, echo, exit and a redirect), so no
+# coreutils tool, host or fixture, is reached from inside a fixture. Each appends its own name and
+# arguments to the log beside it, so a case can check every call the report made.
+_FIXTURE = "#!/bin/sh\nprintf '%s %s\\n' \"${{0##*/}}\" \"$*\" >> '{log}'\n{body}\n"
+GNU_LINE = "{} (GNU coreutils) 9.7"
+UUTILS_LINE = "{} (uutils coreutils) 0.8.0"
+
+
+def _write_fixture(directory, name, body, log):
+    path = Path(directory) / name
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write(_FIXTURE.format(log=log, body=body))
+    os.chmod(path, 0o755)
+    return str(path)
+
+
+def _case(base, label, specs):
+    """A fixture bin directory under base for specs, (name, body or a symlink target name) pairs, and its log.
+
+    A body starting with '->' makes the name a symlink to that fixture, as a multicall binary is linked."""
+    directory = Path(base) / label
+    os.makedirs(directory)
+    log = str(Path(base) / (label + ".log"))
+    with open(log, "w", encoding="utf-8"):
+        pass
+    for name, body in specs:
+        if body.startswith("->"):
+            os.symlink(body[2:], directory / name)
+        else:
+            _write_fixture(directory, name, body, log)
+    return str(directory), log
+
+
+def _log(log):
+    with open(log, encoding="utf-8") as handle:
+        return handle.read().splitlines()
+
+
+def _run_case(base, label, specs, tools):
+    """(exit code, report lines, log lines) for tools over a PATH holding only the case's fixtures."""
+    directory, log = _case(base, label, specs)
+    out = []
+    try:
+        code = report(tools, directory, out)
+    except Exception as exc:  # a removed guard can crash the report; the case then fails, never passes
+        return None, ["EXCEPTION: {!r}".format(exc)], _log(log), directory
+    return code, out, _log(log), directory
+
+
+def _gnu_ok(base, label):
+    tools = ("cp", "mv", "rm")
+    code, out, log, d = _run_case(base, label, [(t, "echo '{}'".format(GNU_LINE.format(t))) for t in tools],
+                                  tools)
+    rows = ["{t}: path={d}/{t} realpath={r}/{t} version='{v}' implementation=GNU".format(
+        t=t, d=d, r=os.path.realpath(d), v=GNU_LINE.format(t)) for t in tools]
+    want = rows + ["SUMMARY: coreutils implementation GNU (3 of 3 tools reported: GNU 3)"]
+    return (code, out, log) == (0, want, ["cp --version", "mv --version", "rm --version"]), (code, out, log)
+
+
+def _uutils_ok(base, label):
+    tools = ("tee", "truncate")
+    code, out, log, d = _run_case(
+        base, label, [(t, "echo '{}'".format(UUTILS_LINE.format(t))) for t in tools], tools)
+    want = ["{t}: path={d}/{t} realpath={r}/{t} version='{v}' implementation=uutils".format(
+        t=t, d=d, r=os.path.realpath(d), v=UUTILS_LINE.format(t)) for t in tools]
+    want.append("SUMMARY: coreutils implementation uutils (2 of 2 tools reported: uutils 2)")
+    return (code, out, log) == (0, want, ["tee --version", "truncate --version"]), (code, out, log)
+
+
+def _mixed_ok(base, label):
+    # GNU cp beside a multicall uutils binary that tee and head link to: the realpath shows the link.
+    specs = [("cp", "echo '{}'".format(GNU_LINE.format("cp"))),
+             ("coreutils", "echo \"${0##*/} (uutils coreutils) 0.8.0\""),
+             ("tee", "->coreutils"), ("head", "->coreutils")]
+    code, out, log, d = _run_case(base, label, specs, ("cp", "tee", "head"))
+    r = os.path.realpath(d)
+    want = ["cp: path={}/cp realpath={}/cp version='cp (GNU coreutils) 9.7' implementation=GNU".format(d, r),
+            "tee: path={}/tee realpath={}/coreutils version='tee (uutils coreutils) 0.8.0' "
+            "implementation=uutils".format(d, r),
+            "head: path={}/head realpath={}/coreutils version='head (uutils coreutils) 0.8.0' "
+            "implementation=uutils".format(d, r),
+            "SUMMARY: coreutils implementation mixed (3 of 3 tools reported: GNU 1, uutils 2)"]
+    return (code, out, log) == (0, want, ["cp --version", "tee --version", "head --version"]), (code, out, log)
+
+
+def _missing_ok(base, label):
+    code, out, log, d = _run_case(base, label, [("cp", "echo '{}'".format(GNU_LINE.format("cp")))],
+                                  ("cp", "mkdir"))
+    want = ["cp: path={d}/cp realpath={r}/cp version='cp (GNU coreutils) 9.7' implementation=GNU".format(
+                d=d, r=os.path.realpath(d)),
+            "CANNOT RUN: mkdir: not found on PATH",
+            "SUMMARY: coreutils implementation GNU (1 of 2 tools reported: GNU 1)",
+            "EXIT 2: could not run 1 of 2 tools asked about: mkdir"]
+    return (code, out, log) == (2, want, ["cp --version"]), (code, out, log)
+
+
+def _version_fails_ok(base, label):
+    specs = [("date", "echo 'date: unrecognized option' >&2\nexit 3"),
+             ("ls", "echo '{}'".format(UUTILS_LINE.format("ls")))]
+    code, out, log, d = _run_case(base, label, specs, ("date", "ls"))
+    want = ["CANNOT RUN: date: --version exited 3",
+            "ls: path={d}/ls realpath={r}/ls version='ls (uutils coreutils) 0.8.0' "
+            "implementation=uutils".format(d=d, r=os.path.realpath(d)),
+            "SUMMARY: coreutils implementation uutils (1 of 2 tools reported: uutils 1)",
+            "EXIT 2: could not run 1 of 2 tools asked about: date"]
+    return (code, out, log) == (2, want, ["date --version", "ls --version"]), (code, out, log)
+
+
+# Each case and the removal that must turn it red: the code under test is replaced by the same function
+# or table without it, the case is run again in a fresh directory, and it must fail there.
+def _no_gnu():
+    return tuple(row for row in IMPLEMENTATIONS if row[0] != "GNU")
+
+
+def _no_uutils():
+    return tuple(row for row in IMPLEMENTATIONS if row[0] != "uutils")
+
+
+def _summarize_without_mixed(kinds):
+    seen = sorted(set(kinds))
+    return seen[0] if seen else UNKNOWN
+
+
+def _found_unchecked(tool, resolved):
+    return None
+
+
+def _version_unchecked(tool, returncode, first_line):
+    return None
+
+
+def _flip(name, value):
+    """The previous value of the module global name, after binding it to value."""
+    module = sys.modules[__name__]
+    previous = getattr(module, name)
+    setattr(module, name, value)
+    return previous
+
+
+def _red_with(base, label, case, name, value):
+    """True when case fails with the module global name bound to value (the code under test removed)."""
+    previous = _flip(name, value)
+    try:
+        ok, _detail = case(base, label)
+    finally:
+        _flip(name, previous)
+    return not ok
+
+
+def _self_test():
+    with tempfile.TemporaryDirectory(prefix="coreutils-report-selftest-") as base:
+        ok, detail = _gnu_ok(base, "gnu")
+        check("case/gnu-set", ok, detail)
+        check("revert/gnu-detection-removed-red", _red_with(base, "gnu-red", _gnu_ok, "IMPLEMENTATIONS",
+                                                            _no_gnu()))
+
+        ok, detail = _uutils_ok(base, "uutils")
+        check("case/uutils-set", ok, detail)
+        check("revert/uutils-detection-removed-red", _red_with(base, "uutils-red", _uutils_ok,
+                                                               "IMPLEMENTATIONS", _no_uutils()))
+
+        ok, detail = _mixed_ok(base, "mixed")
+        check("case/mixed-set-exits-0", ok, detail)
+        check("revert/mixed-summary-removed-red", _red_with(base, "mixed-red", _mixed_ok, "summarize",
+                                                            _summarize_without_mixed))
+
+        ok, detail = _missing_ok(base, "missing")
+        check("case/missing-from-path-exits-2", ok, detail)
+        check("revert/missing-check-removed-red", _red_with(base, "missing-red", _missing_ok,
+                                                            "_require_found", _found_unchecked))
+
+        ok, detail = _version_fails_ok(base, "verfail")
+        check("case/version-fails-exits-2", ok, detail)
+        check("revert/version-status-check-removed-red", _red_with(base, "verfail-red", _version_fails_ok,
+                                                                   "_require_version_ok", _version_unchecked))
+
+        # Reported, never failed: a --version line that names neither implementation is unknown, exit 0.
+        code, out, log, _d = _run_case(base, "other", [("sleep", "echo 'sleep (other utilities) 1.0'")],
+                                       ("sleep",))
+        check("case/unknown-implementation-exits-0",
+              code == 0 and out[-1] == "SUMMARY: coreutils implementation unknown (1 of 1 tools reported: "
+              "unknown 1)" and log == ["sleep --version"], (code, out, log))
+
+        # A --version that exits 0 but prints nothing on standard output cannot be classified: exit 2.
+        code, out, log, _d = _run_case(base, "silent", [("env", "echo 'env 1.0' >&2")], ("env",))
+        check("case/version-silent-exits-2",
+              code == 2 and "CANNOT RUN: env: --version printed nothing on standard output" in out
+              and out[-1] == "EXIT 2: could not run 1 of 1 tools asked about: env", (code, out, log))
+
+        # A --version that never finishes is stopped at the bound and reported as not runnable.
+        previous = _flip("VERSION_TIMEOUT", 1)
+        try:
+            code, out, log, _d = _run_case(base, "hang", [("dd", "while :; do :; done")], ("dd",))
+        finally:
+            _flip("VERSION_TIMEOUT", previous)
+        check("case/version-hangs-exits-2",
+              code == 2 and "CANNOT RUN: dd: --version did not finish within 1 s" in out, (code, out, log))
+
+        # A name that resolves but cannot be launched (an executable bit on a file with no interpreter line
+        # the kernel accepts) is reported, never raised.
+        directory = Path(base) / "noexec"
+        os.makedirs(directory)
+        with open(directory / "ln", "wb") as handle:
+            handle.write(b"\x00\x01not an executable\n")
+        os.chmod(directory / "ln", 0o755)
+        out = []
+        code = report(("ln",), str(directory), out)
+        check("case/launch-error-exits-2",
+              code == 2 and len(out) == 3 and out[0].startswith("CANNOT RUN: ln: --version could not be "
+                                                                "launched"), (code, out))
+
+        # The fixtures alone were reached: every case's PATH held only its own fixture directory.
+        check("case/no-host-tool-reached",
+              all(_log(str(Path(base) / (label + ".log"))) != [] for label in ("gnu", "uutils", "mixed")), base)
+
+    # The default roster names every tool the suites are known to run.
+    asked = ("cp", "mv", "rm", "install", "tee", "truncate", "head", "tail", "cut", "date", "ls", "env",
+             "timeout", "dd", "ln", "sha256sum", "mktemp", "dirname", "mkdir", "sleep")
+    check("roster/default-tools", set(asked) <= set(TOOLS) and len(set(TOOLS)) == len(TOOLS),
+          sorted(set(asked) - set(TOOLS)))
+
+    got = [_main_exit(argv) for argv in (["--bogus"], ["--self-test", "--bogus"],
+                                         ["--execution-report", "relative/report"])]
+    check("refuse/unrecognized-argument", got == [2, 2, 2], got)
+
+    if FAILURES:
+        print("SELF-TEST FAIL: coreutils_report {} of {} check(s) failed".format(len(FAILURES), len(EXECUTED)))
+        for failure in FAILURES:
+            print("  - " + failure)
+        return 1
+    print("SELF-TEST PASS: coreutils_report {} checks (GNU, uutils and mixed fixture sets are reported with "
+          "path, realpath and version line and exit 0, an unknown implementation exits 0, a tool missing "
+          "from PATH, a --version that exits nonzero, prints nothing, hangs or cannot be launched exits 2; "
+          "each of the five main cases fails with its code under test removed; an unrecognized argument "
+          "exits 2)".format(len(EXECUTED)))
+    return 0
+
+
+def _main_exit(argv):
+    """main()'s exit code for the argument list argv, its output captured."""
+    import contextlib
+    import io
+    saved = sys.argv
+    sys.argv = [saved[0]] + list(argv)
+    try:
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            return main()
+    finally:
+        sys.argv = saved
+
+
+def main():
+    argv = sys.argv[1:]
+    # The execution gate appends `--execution-report ABS_PATH` to the self-test launch; accepted only in
+    # that trailing two-token form, with an absolute path, alone or after --self-test.
+    report_path = None
+    if len(argv) >= 2 and argv[-2] == "--execution-report" and os.path.isabs(argv[-1]) \
+            and argv[:-2] in ([], ["--self-test"]):
+        report_path, argv = argv[-1], ["--self-test"]
+    if argv not in ([], ["--self-test"]):
+        print("error: unrecognized arguments {!r}; fail closed".format(argv), file=sys.stderr)
+        return 2
+    if argv == ["--self-test"]:
+        if report_path is not None:
+            # Finalized at interpreter exit by tools/_selftest_exit_report.py; nothing writes it in band.
+            sys.path.append(str(Path(__file__).resolve().parent))
+            import _selftest_exit_report
+            _selftest_exit_report.arm(report_path, SUITE_ID, EXECUTED)
+        return _self_test()
+    return run_report()
+
+
+if __name__ == "__main__":
+    _code = main()
+    _finalizer = sys.modules.get("_selftest_exit_report")
+    (sys.exit if _finalizer is None else _finalizer.exit_with)(_code)

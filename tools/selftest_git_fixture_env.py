@@ -5098,6 +5098,13 @@ _SCAN_ALLOWED_UNPINNED = (
      "cannot-evaluate head: os.path.abspath of shutil.which(\"openssl\", path=os.defpath),"
      " the `openssl req -x509` builder of the disposable fixture TLS key/certificate pairs"
      " (env PATH=os.defpath, OPENSSL_CONF=os.devnull); not a git launch"),
+    ("tools/coreutils_report.py", "probe", ("unresolved",),
+     "cannot-evaluate head: os.path.abspath of shutil.which(tool, path=path_env), the"
+     " program PATH resolves for a name from the fixed TOOLS tuple of coreutils names (none"
+     " of them git), and in the self-test a fixture in the case's temporary directory (a"
+     " /bin/sh script, or a file the kernel refuses to execute); the argv is always that"
+     " head and --version alone, which is not a maintenance-triggering subcommand whatever"
+     " program the name resolves to"),
     ("opf/tools/_opf_adopt_observe.py", "self_test.run_case.execute_mutant", ("os",),
      "cannot-evaluate os launch: the TG-15/no-process-execution red-leg mutant of _unpack"
      " calls os.system(\"true\"); it is patched in only for that case's mutated run, whose"
