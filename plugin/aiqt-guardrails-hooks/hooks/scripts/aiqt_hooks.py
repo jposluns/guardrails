@@ -18568,6 +18568,37 @@ def _records_writer_unread_named(unread, writers):
     return any(_records_writer_named(text, writers) for text in unread)
 
 
+# The characters the lexer can drop between the letters of a word it decodes: each quote character, a
+# backslash, and the '$' of a $'...' or $"..." quote.
+_RECORDS_WRITER_DROPPED = str.maketrans("", "", "'\"\\$")
+# A head or tail word in any case: _gate_word lowercases a sink word before it is compared.
+_RECORDS_WRITER_SINK_ANY_CASE_RE = re.compile(_RECORDS_WRITER_SINK_RE.pattern, re.IGNORECASE)
+
+
+def _records_writer_spelled(text, writers):
+    """True when text, with each backslash-newline pair removed and then each quote character, backslash and
+    '$' removed, names a declared writer's first word (read with the same characters removed) and a head or
+    tail word in any case. A word the lexer decodes is its raw text less such characters, so a text this test
+    finds nothing in lexes to no declared writer piped into head or tail. Linear in the text."""
+    plain = text.replace("\\\n", "").translate(_RECORDS_WRITER_DROPPED)
+    return (any(writer[0].translate(_RECORDS_WRITER_DROPPED) in plain for writer in writers)
+            and _RECORDS_WRITER_SINK_ANY_CASE_RE.search(plain) is not None)
+
+
+def _records_writer_escape_named(command, writers):
+    """True when command holds an ANSI-C $'...' quote with an escape the lexer reads otherwise than bash
+    decodes it (the lexer reads $'h\\145ad' as h145ad, while bash runs head) and, with each such quote decoded
+    the way bash decodes it (_ansi_c_decoded), the text names a declared writer and head or tail
+    (_records_writer_spelled). No lex shows where such a decoded word goes, so it cannot be evaluated: a
+    disclosed over-block where the escape spells neither word (a $'\\t' beside a writer and head)."""
+    if "$'" not in command:
+        return False
+    if all(_ansi_c_body(quote) == re.sub(r"\\(.)", r"\1", quote.group(1), flags=re.DOTALL)
+           for quote in _ANSI_C_QUOTE_RE.finditer(command)):
+        return False
+    return _records_writer_spelled(_ansi_c_decoded(command), writers)
+
+
 # The text whose presence in a word makes the word not provably simple: every quote, a backslash, a comment
 # mark, the openers the body scan does not follow, and the case keyword whose pattern ')' closes early.
 _RECORDS_WRITER_NOT_SIMPLE = ("'", '"', "`", "\\", "#", "case") + _RECORDS_WRITER_UNFOLLOWED
@@ -18609,12 +18640,15 @@ def _records_writer_whole_text_doubt(command, readings, writers):
     each '$(' to the end of the word, and each backquote body of the command, then the words holding '$(' or
     a backquote in what it lexed, to _RECORDS_WRITER_SUBST_DEPTH levels and _RECORDS_WRITER_SUBST_BODIES
     items; it reads text bash may not run (a body's close and what follows it), so its finding is doubt, not
-    a finding that the writer is piped. It is read whatever the command's text names, so a writer or sink word
-    split by a quote or a backslash is found once lexed. Past _RECORDS_WRITER_WHOLE_TEXT_BOUND suffixes it
-    stops, and work left past the item bound is not read; each of those two counts as doubt only when the
-    command's text names a writer and head or tail. A provably simple word is left to the body scan, whose
-    bodies there are bash's bodies."""
-    named = _records_writer_named(command, writers)
+    a finding that the writer is piped. It is read only when the command's text, with its quote characters,
+    backslashes, '$' signs and line continuations removed, names a writer and head or tail
+    (_records_writer_spelled): a text that does not lexes to no writer piped into head or tail, so skipping it
+    changes no finding, and a writer or sink word split by a quote or a backslash is read and found once
+    lexed. Past _RECORDS_WRITER_WHOLE_TEXT_BOUND suffixes it stops, and work left past the item bound (which
+    redirect targets share with argv words) is not read; each of those counts as doubt. A provably simple
+    word is left to the body scan, whose bodies there are bash's bodies."""
+    if not _records_writer_spelled(command, writers):
+        return False
     work = [(body, 1) for _start, body in _backquote_bodies(command)]
     work += [(word, 0) for reading in readings for seg in reading
              for word in list(seg.argv) + [redirect.target for redirect in seg.redirects]
@@ -18630,7 +18664,7 @@ def _records_writer_whole_text_doubt(command, readings, writers):
             at = text.find("$(", at + 2)
         suffixes += len(bodies)
         if suffixes > _RECORDS_WRITER_WHOLE_TEXT_BOUND:
-            return named
+            return True
         for body in bodies:
             try:
                 lexed = _lex_readings(body)
@@ -18645,24 +18679,28 @@ def _records_writer_whole_text_doubt(command, readings, writers):
                          for word in list(seg.argv) + [redirect.target for redirect in seg.redirects]
                          if "$(" in word or "`" in word]
                 work += [(inner, depth + 1) for _start, inner in _backquote_bodies(body)]
-    return named and bool(work)
+    return bool(work)
 
 
 def _records_writer_unreadable_deny(command_doubt, detail, path):
     """The fail-closed deny when the records-writer check cannot be evaluated: the declaration found at path
     cannot be read (a cwd from which none can be looked for never reaches here; _records_writers_load), or,
-    with writers declared, the command or a substitution body cannot be lexed, a body lies past the reading's
-    count or depth bound, or the body scan may have misread a word, and its text names a writer and a head or
-    tail word."""
+    with writers declared (command_doubt), the check cannot read as bash does text that may run a writer into
+    head or tail: the command cannot be lexed, a substitution body cannot be lexed, lies past the reading's
+    count or depth bound or may be misread, the whole-text reading of a word that is not provably simple finds
+    a writer piped into head or tail or stops at its bounds, or an ANSI-C escape spells a writer or sink
+    word."""
     if command_doubt:
         return _deny(
-            "AIQT rule gatdis (gate-discipline): records writers are declared in {}, and this command could not "
-            "be parsed by the shell lexer while its text names a declared writer's command word and head or "
-            "tail, so whether the writer's output is piped into a truncating sink cannot be evaluated; it is "
-            "denied fail-closed (this is not a finding that it is). Re-issue it in a parseable form. {}".format(
+            "AIQT rule gatdis (gate-discipline): records writers are declared in {}, and this command holds text "
+            "that may run a declared writer into head or tail but that this check cannot read as bash does (a "
+            "command or substitution body the shell lexer cannot read, one past the reading's bounds or one it "
+            "may misread, or an ANSI-C escape spelling a writer or sink word), so whether the writer's output is "
+            "piped into a truncating sink cannot be evaluated; it is denied fail-closed (this is not a finding "
+            "that it is). Re-issue it with plain words and simple substitutions. {}".format(
                 path, _RECORDS_WRITER_GUIDANCE),
-            "AIQT guardrail: denied an unparseable command naming a declared records writer and head or tail "
-            "(rule gatdis, fail-closed).")
+            "AIQT guardrail: denied a command whose records-writer check could not be evaluated (rule gatdis, "
+            "fail-closed).")
     return _deny(
         "AIQT rule gatdis (gate-discipline): the records-writer declaration check could not be evaluated: {} "
         "({}). Every Bash call is denied fail-closed until it can be. Repair or remove the file with the Edit or "
@@ -18681,18 +18719,17 @@ def _records_writer_verdict(data, readings, command=None, parsed=None):
     (_records_writer_subst_readings); ("doubt", path) when command, the raw text of an unparseable command
     (None on a parsed one), or text the substitution reading could not cover (a body the lexer cannot read,
     one past the count or depth bound, a word's text the body scan may have misread), names a writer's
-    command word and head or tail, or when the whole-text reading of every word not provably simple finds
-    one piped or unreadable (_records_writer_whole_text_doubt); else None, which includes no declaration, an
-    empty one, and an unlocatable one (_records_writers_load), so an adopter with no declaration sees no
-    change. The body scan's bodies are not bash's bodies once a construct it does not follow closes one
-    early, and the lexer's word can then end before the real ')'; so on every word that is not provably
-    simple the whole-text reading is a floor, read whatever the raw text names, and a provably simple word is
-    left to the body scan. That reading can deny a provably simple word only from text that crosses a body's
-    close, as where a body the lexer cannot read leaves a suffix naming a writer and head (echo "$(recordctl
-    write <)$(: | head)"); the verdict allows such a word. The floor also stops past 256 '$(' suffixes, which
-    that reading does not, and counts it as doubt only when the raw text names a writer and head or tail, so
-    a writer or sink word split by a quote or a backslash past that bound is allowed. These are the known
-    ways the verdict is weaker than that reading; no proof shows there are no others."""
+    command word and head or tail, when an ANSI-C escape the lexer reads otherwise than bash spells one
+    (_records_writer_escape_named), or when the whole-text reading of every word not provably simple finds
+    one piped or unreadable or stops at its bounds (_records_writer_whole_text_doubt); else None, which
+    includes no declaration, an empty one, and an unlocatable one (_records_writers_load), so an adopter with
+    no declaration sees no change. The body scan's bodies are not bash's bodies once a construct it does not
+    follow closes one early, and the lexer's word can then end before the real ')'; so on every word that is
+    not provably simple the whole-text reading is a floor, read whenever the de-quoted text may name a writer
+    and head or tail, and a provably simple word is left to the body scan. That reading can deny a provably
+    simple word only from text that crosses a body's close, as where a body the lexer cannot read leaves a
+    suffix naming a writer and head (echo "$(recordctl write <)$(: | head)"); the verdict allows such a word.
+    That is the one known way the verdict is weaker than that reading; no proof shows there are no others."""
     state, value, path = _records_writers_load(data)
     if state == "bad":
         return ("bad", value, path)
@@ -18710,6 +18747,9 @@ def _records_writer_verdict(data, readings, command=None, parsed=None):
     if command is not None and _records_writer_named(command, value):
         return ("doubt", path)
     if _records_writer_unread_named(unread, value):
+        return ("doubt", path)
+    raw = command if command is not None else parsed
+    if raw is not None and _records_writer_escape_named(raw, value):
         return ("doubt", path)
     if parsed is not None and _records_writer_whole_text_doubt(parsed, top, value):
         return ("doubt", path)

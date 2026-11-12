@@ -11329,6 +11329,13 @@ _RW_DENY_UNREAD_ROWS = (
 # A pull-request body in a quoted here-document holding 800 '$(' spellings: read in linear time, it allows.
 _RW_PR_BODY = ("gh pr create --title t --body \"$(cat <<'EOF'\n"
                + "- run x=$(foo) and check it\n" * 800 + "EOF\n)\"")
+# A body of about 98 KB holding 250 '$(' spellings, fewer than the floor's suffix bound, whose text names no
+# writer: the floor is not read for it, so it decides in a few hundredths of a second (with the floor read on
+# every such word it took about 8 s).
+_RW_PR_BODY_LONG = ("gh pr create --title t --body \"$(cat <<'EOF'\n"
+                    + "".join("- run x=$(foo) and check it\n" if i % 6 == 0 else
+                              "- a plain line of text in the description body that describes the change\n"
+                              for i in range(1500)) + "EOF\n)\"")
 # Seconds of this thread's CPU one decision on a timed row may take: far above the linear reading's cost (a
 # few hundredths of a second) and far below the reading that lexed each '$(' to the end of its word (about
 # 7 s on the many-substitution row).
@@ -11362,6 +11369,7 @@ _RW_ALLOW_ROWS = (
     ("rw-a-subst-arith-one", "echo \"$(echo $[1+1]; recordctl read | head)\""),
     ("rw-a-subst-dq-backquote-two", "echo \"$(echo \"`date`\") $(ls | head)\""),
     ("rw-a-subst-dq-param-two-no-sink", "echo \"$(echo \"${x:-y}\") $(recordctl write)\""),
+    ("rw-a-ansi-escape-no-writer", "printf $'a\\tb' | head"),
 )
 _RW_DECLARATION = 'version = 1\nwriters = [["recordctl", "write"], ["python3", "/abs/tools/update_records.py"]]\n'
 # Words that are not provably simple, where only the whole-text reading denies (as cannot-evaluate): a case
@@ -11399,7 +11407,12 @@ _RW_DENY_FLOOR_ROWS = (
 )
 # Words that are not provably simple whose writer or sink word is split by a quote or a backslash, so the raw
 # text names no writer and head or tail while the lexed text does: the floor reads them whatever the raw text
-# names. Each row is red with the floor removed and red with the floor gated on the raw-text name test.
+# names. Each row is red with the floor removed and red with the floor gated on the raw-text name test. The
+# redirect-budget rows put 63, 64 or 70 redirect targets that are not provably simple after such a word: the
+# floor's 64-item bound, which the whole-text reading spends on argv words alone, runs out on the targets
+# before the word from 64 targets on, and work left past the bound must still deny.
+_RW_SPLIT_WORD = "echo \"$(case x in x) recordctl write | h''ead;; esac; : \" \")\""
+_RW_SPLIT_TARGET = " >\"$(echo /dev/nul'l')\""
 _RW_DENY_SPLIT_ROWS = (
     ("rw-s-case-sink-quotes", "echo \"$(case x in x) recordctl write | h''ead;; esac; echo \" \")\""),
     ("rw-s-case-writer-quotes", "echo \"$(case x in x) record''ctl write | head;; esac; echo \" \")\""),
@@ -11412,6 +11425,25 @@ _RW_DENY_SPLIT_ROWS = (
     ("rw-s-case-nested", "echo \"$(echo \"$(case x in x) recordctl write | h''ead;; esac; : \" \")\")\""),
     ("rw-s-case-comment-subst", "echo \"$(case x in x) recordctl write | h''ead;; esac; # $(\n)\""),
     ("rw-s-case-redirect-tail", "echo hi > \"$(case x in x) recordctl write | t''ail;; esac; : \" \")\""),
+    ("rw-s-redirect-budget-70", _RW_SPLIT_WORD + _RW_SPLIT_TARGET * 70),
+    ("rw-s-redirect-budget-64", _RW_SPLIT_WORD + _RW_SPLIT_TARGET * 64),
+    ("rw-s-redirect-budget-63", _RW_SPLIT_WORD + _RW_SPLIT_TARGET * 63),
+    ("rw-s-redirect-budget-tail-fd", "echo \"$(case x in x) recordctl write | t''ail;; esac; : \" \")\""
+     + " 2>\"$(echo /dev/nul'l')\"" * 70),
+    ("rw-s-redirect-budget-writer", "echo \"$(case x in x) record''ctl write | head;; esac; : \" \")\""
+     + _RW_SPLIT_TARGET * 70),
+)
+# A writer or sink word spelled with an ANSI-C escape the lexer reads as the character after its backslash
+# ($'h\145ad' lexes as h145ad, bash runs head), inside a substitution and at the top level: denied as
+# cannot-evaluate by the escape test, and each row is red with that test patched out. The last row is the
+# disclosed over-block, an escape that spells neither word beside a writer and tail.
+_RW_DENY_ESCAPE_ROWS = (
+    ("rw-e-sink-case", "echo \"$(case x in x) recordctl write | $'h\\145ad';; esac; : \" \")\""),
+    ("rw-e-sink-subst", "echo \"$(recordctl write | $'h\\145ad')\""),
+    ("rw-e-writer-subst", "echo \"$($'record\\x63tl' write | head)\""),
+    ("rw-e-sink-top", "recordctl write | $'t\\x61il' -n 1"),
+    ("rw-e-sink-beside-plain-head", "echo head; recordctl write | $'h\\145ad'"),
+    ("rw-e-tab-overblock", "recordctl write --sep $'\\t' && tail -n 5 /abs/record"),
 )
 # Provably simple words whose body the lexer cannot read: the body scan alone decides them and allows, while
 # the whole-text reading denies them as cannot-evaluate (its suffix to the end of the word crosses the body's
@@ -11525,13 +11557,15 @@ def _test_records_writers_no_regression(failures, decide):
         if aiqt_hooks._records_writer_word_simple(word) is not want:
             failures.append("(rw-nr-simple) {!r}: provably simple should be {}".format(word, want))
     # The floor's bound doubts, read on the floor itself: past the item bound (70 words not provably simple)
-    # and past the suffix bound (one word holding 300 '$('), work is left unread, which is doubt when the text
-    # names a writer and head or tail (here only in a ':' argument) and nothing when it does not. With the
-    # count doubt made an allow, or the suffix bound removed, the named form gives False.
+    # and past the suffix bound (one word holding 300 '$('), work is left unread, which is doubt when the
+    # de-quoted text names a writer and head or tail (here only in a ':' argument, spelled plainly or split by
+    # quotes) and nothing when it does not. With the count doubt made an allow, the suffix bound removed, or the
+    # floor gated on the raw-text name test, a named form gives False.
     writers = [["recordctl", "write"]]
     for label, command in (("count", "echo" + " \"$(:) x\"" * 70 + "; : recordctl write | head"),
                            ("suffix", "echo \"" + "$(:)" * 300 + " x\"; : recordctl write | head")):
-        for text, want in ((command, True), (command.replace("recordctl write", "ls"), False)):
+        for text, want in ((command, True), (command.replace("recordctl write | head", "record''ctl write | h''ead"),
+                                             True), (command.replace("recordctl write", "ls"), False)):
             got = aiqt_hooks._records_writer_whole_text_doubt(text, aiqt_hooks._lex_readings(text), writers)
             if got is not want:
                 failures.append("(rw-nr-bound-{}) the floor gives {} past its {} bound, not {}".format(
@@ -11587,8 +11621,17 @@ def _test_records_writers(failures, tmp):
         expect(label, command, "deny", needles=("Run the writer alone",))
     for label, command in _RW_DENY_UNREAD_ROWS:
         expect(label, command, "deny", needles=("Run the writer alone", "denied fail-closed"))
-    for label, command in _RW_DENY_FLOOR_ROWS + _RW_DENY_SPLIT_ROWS:
+    for label, command in _RW_DENY_FLOOR_ROWS + _RW_DENY_SPLIT_ROWS + _RW_DENY_ESCAPE_ROWS:
         expect(label, command, "deny", needles=("Run the writer alone", "denied fail-closed"))
+    saved_escape = aiqt_hooks._records_writer_escape_named
+    try:
+        aiqt_hooks._records_writer_escape_named = lambda command, writers: False
+        for label, command in _RW_DENY_ESCAPE_ROWS:
+            if decide(command, sub)[0] == "deny":
+                failures.append("({}-red) {!r} still denies with the ANSI-C escape test removed, so the row does "
+                                "not prove it".format(label, command))
+    finally:
+        aiqt_hooks._records_writer_escape_named = saved_escape
     # The unread-text test and the whole-text floor are the only denies of each unread row: both patched to
     # find nothing, every one allows. The floor alone is the deny of each floor and split row, and each split
     # row allows with the floor read only when the raw text names a writer and head or tail.
@@ -11619,7 +11662,8 @@ def _test_records_writers(failures, tmp):
     # decide within _RW_TIMED_SECONDS of CPU, and the writer past the padding still denies.
     timed = (("rw-t-many-subst", "echo \"" + "$(:)" * 1000 + "\"", "allow"),
              ("rw-t-many-subst-writer", "echo \"" + "$(:)" * 1000 + "\" \"$(recordctl write | head)\"", "deny"),
-             ("rw-t-pr-body", _RW_PR_BODY, "allow"))
+             ("rw-t-pr-body", _RW_PR_BODY, "allow"),
+             ("rw-t-pr-body-long", _RW_PR_BODY_LONG, "allow"))
     for label, command, want in timed:
         start = time.thread_time()
         got, obj = decide(command, sub)
@@ -11653,17 +11697,21 @@ def _test_records_writers(failures, tmp):
     # Each deny row is red with the check removed: with the pipeline walk and the unparsed-text test patched
     # to find nothing, no row denies.
     saved = (aiqt_hooks._records_writer_sink, aiqt_hooks._records_writer_named)
+    saved_names = (aiqt_hooks._records_writer_spelled, aiqt_hooks._records_writer_escape_named)
     try:
         aiqt_hooks._records_writer_sink = lambda records, writers: None
         aiqt_hooks._records_writer_named = lambda command, writers: False
+        aiqt_hooks._records_writer_spelled = lambda command, writers: False
+        aiqt_hooks._records_writer_escape_named = lambda command, writers: False
         for label, command in (_RW_DENY_ROWS + _RW_DENY_UNPARSED_ROWS + _RW_DENY_UNREAD_ROWS + _RW_DENY_FLOOR_ROWS
-                               + _RW_DENY_SPLIT_ROWS):
+                               + _RW_DENY_SPLIT_ROWS + _RW_DENY_ESCAPE_ROWS):
             got, _obj = decide(command, sub)
             if got == "deny" and label != "rw-u-unbalanced":
                 failures.append("({}-red) {!r} still denies with the records-writer check removed, so the row "
                                 "does not prove the check".format(label, command))
     finally:
         aiqt_hooks._records_writer_sink, aiqt_hooks._records_writer_named = saved
+        aiqt_hooks._records_writer_spelled, aiqt_hooks._records_writer_escape_named = saved_names
     # The unbalanced row is left out of the loop above and its control is checked here: the same unbalanced
     # text naming no writer allows, so only the records-writer check can deny the row.
     if decide("echo \"x; ls | head", sub)[0] == "deny":
