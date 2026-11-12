@@ -343,8 +343,10 @@ missing-mandatory finding, not a silent pass. The
 child-status probe (CHILD_STATUS_PROBE) and its coverage gate are MANDATORY_MEMBERS for
 the same reason: removing either from both runners together is a missing-mandatory
 finding. Where the probe sits in a roster (first) is held by
-tools/check_child_status_coverage.py, not here. The
-extractors implement a disclosed shell and YAML subset; an unknown construct is
+tools/check_child_status_coverage.py, not here. The OPF init contract gate's
+--parent-integration run is a MANDATORY_MEMBERS entry too: without the flag that gate
+checks only the OPF-local rosters and cannot see its own flag missing, so the flag
+dropped from both runners is a missing-mandatory finding. The extractors implement a disclosed shell and YAML subset; an unknown construct is
 cannot-evaluate rather than a clean pass. Fail-closed cases include an unknown
 top-level or job-level workflow key, an exit outside the exact terminal summary
 blocks or the top-level directory-binding line before the first gate, unbalanced
@@ -885,6 +887,8 @@ MSG_LEAKS_SCAN = "tools/check_msg_leaks.py"  # the live scan (module docstring, 
 # included, so that workflow admits it beside its own scan.
 CHILD_STATUS_PROBE = "opf/tools/_child_status.py"
 CHILD_STATUS_COVERAGE = "tools/check_child_status_coverage.py"
+# The OPF init contract gate run with the flag that adds its parent-repository roster checks.
+OPF_INIT_CONTRACT_PARENT = "opf/tools/check_opf_init_contract.py --parent-integration"
 # The only members msg-leaks.yml may run (module docstring, TWO WORKFLOWS): its own scan, that
 # scan's self-test and the child-status probe. Any other member there is a relocation finding,
 # because that workflow's status is separate from the aggregated Quality gates and re-runs on every
@@ -1068,6 +1072,9 @@ MANDATORY_MEMBERS = frozenset({
     # leave every gate reading a lost child exit status as a pass, unseen.
     CHILD_STATUS_PROBE,
     CHILD_STATUS_COVERAGE,
+    # The OPF init contract gate's parent-integration run: without the flag the gate checks only the
+    # OPF-local rosters, and it cannot see its own flag missing, so both runners must carry it.
+    OPF_INIT_CONTRACT_PARENT,
 })
 
 INTERPRETERS = frozenset({"python", "python3"})
@@ -5442,6 +5449,8 @@ def self_test():
         # The child-status probe and its coverage gate, mandatory as the contracts are.
         "python3 -I -B opf/tools/_child_status.py",
         "python3 -I -B tools/check_child_status_coverage.py",
+        # The OPF init contract gate's parent-integration run, mandatory the same way.
+        "python3 -I -B " + OPF_INIT_CONTRACT_PARENT,
         # The scope tool's self-test, which the pinned SCOPE_JOB fixture body runs on
         # the CI side of every heavy fixture, so both sides carry it everywhere.
         "python3 -I -B tools/ci_site_scope.py --self-test",
@@ -5630,7 +5639,8 @@ def self_test():
             ".github/check_cited_standards_contract.py --self-test",
             ".github/check_newtab_contract.py",
             "opf/tools/_child_status.py",
-            "tools/check_child_status_coverage.py"):
+            "tools/check_child_status_coverage.py",
+            "opf/tools/check_opf_init_contract.py --parent-integration"):
         count += 1
         if member not in MANDATORY_MEMBERS:
             failures.append(
@@ -5645,7 +5655,24 @@ def self_test():
              1, ("missing-mandatory",), (),
              ("opf/tools/_child_status.py",)
              if member == "opf/tools/_child_status.py" else ())
-    unknown = "python3 -I -B .github/unrecognized.py"
+    # The OPF init contract gate run WITHOUT its --parent-integration flag checks only the OPF-local
+    # rosters and cannot see the flag missing: the flag dropped from both runners together, or from
+    # either one, is a finding here, never a pass.
+    opf_flagged = "python3 -I -B opf/tools/check_opf_init_contract.py --parent-integration"
+    opf_unflagged = "python3 -I -B opf/tools/check_opf_init_contract.py"
+    opf_dropped = tuple(c if c != opf_flagged else opf_unflagged for c in common)
+    case("01l OPF init contract gate without its flag in both runners",
+         evaluate(local_fixture(opf_dropped), ci_fixture(opf_dropped), ()),
+         1, ("missing-mandatory",), (), ())
+    case("01l OPF init contract gate without its flag in the local runner",
+         evaluate(local_fixture(opf_dropped), ci_fixture(common), ()),
+         1, ("missing-mandatory", "ci-only", "local-only"),
+         ("opf/tools/check_opf_init_contract.py",), (OPF_INIT_CONTRACT_PARENT,))
+    case("01l OPF init contract gate without its flag in CI",
+         evaluate(local_fixture(common), ci_fixture(opf_dropped), ()),
+         1, ("missing-mandatory", "ci-only", "local-only"),
+         (OPF_INIT_CONTRACT_PARENT,), ("opf/tools/check_opf_init_contract.py",))
+    unknown ="python3 -I -B .github/unrecognized.py"
     case("01f unknown repository executable refused",
          evaluate(local_fixture(common + (unknown,)),
                   ci_fixture(common + (unknown,)), ()), 2)

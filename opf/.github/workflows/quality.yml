@@ -2,10 +2,10 @@ name: OPF Quality
 
 # The OPF repository's own check workflow. GitHub discovers workflows only under the repository root's
 # .github/workflows/, so this file is inert while OPF is nested in a parent repository; there the
-# parent's workflow runs the OPF gates by path under opf/tools/, and its init contract gate (run with
-# --parent-integration) also requires this file to run the OPF runner. Once OPF is the root of its own
-# repository this workflow runs that runner, tools/run_all_checks.sh, which resolves every gate from its
-# own directory. The Python floor is 3.14, as each OPF tool declares at its entry.
+# parent's workflow runs OPF gates by path under opf/tools/ (not every OPF runner line verbatim), and
+# the OPF init contract gate requires a step of this file to run the OPF runner. Once OPF is the root of
+# its own repository this workflow runs that runner, tools/run_all_checks.sh, which resolves every gate
+# from its own directory. The Python floor is 3.14, as each OPF tool declares at its entry.
 
 on:
   pull_request:
