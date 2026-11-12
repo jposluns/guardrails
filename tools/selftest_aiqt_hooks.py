@@ -11270,13 +11270,36 @@ _RW_DENY_UNPARSED_ROWS = (
     ("rw-u-complete-before", "recordctl write | head; cat <<<x"),
     ("rw-u-unbalanced", "echo \"x; recordctl write | head"),
 )
-# Substitution bodies the reading cannot cover (a body the lexer cannot read, one cut short at a case
-# pattern's ')', one past the count bound, one past the depth bound): text naming a writer's command word with
-# head or tail denies as cannot-evaluate, and each row allows with that test patched to find nothing.
+# Substitution text the reading cannot cover (a body the lexer cannot read, a word's text the body scan may
+# have misread because a ')' of a case pattern, a comment, a here-document line or a backquote closed a body
+# early, with or without a later body in the same word, and whether or not a '(' of a comment, a
+# here-document, a backquote or a '${' expansion in that later body took the real ')', one past the count
+# bound, one past the depth bound): text naming a writer's command word with head or tail denies as
+# cannot-evaluate, and each row allows with that test patched to find nothing.
 _RW_DENY_UNREAD_ROWS = (
     ("rw-u-subst-herestring", "echo \"$(recordctl write | head <<<x)\""),
     ("rw-u-subst-herestring-before", "echo \"$(cat <<<x; recordctl write | head)\""),
     ("rw-u-subst-case", "echo \"$(case x in x) recordctl write | head;; esac)\""),
+    ("rw-u-subst-case-later", "echo \"$(case x in x) recordctl write | head;; esac; $(true))\""),
+    ("rw-u-subst-case-later-echo", "echo \"$(case x in x) :;; esac; recordctl write | head; echo $(true))\""),
+    ("rw-u-subst-case-later-tail", "echo \"$(case x in x) recordctl write | tail -n1 ;; esac; : $(:))\""),
+    ("rw-u-subst-case-later-assign", "x=\"$(case x in x) recordctl write | head ;; esac; : $(:))\""),
+    ("rw-u-subst-case-later-redirect", "echo hi > \"$(case x in x) recordctl write | head ;; esac; : $(:))\""),
+    ("rw-u-subst-case-later-nested",
+     "echo \"$(echo \"$(case x in x) recordctl write | head;; esac; $(true))\")\""),
+    ("rw-u-subst-case-later-pr", "gh pr create --title t --body \"$(case x in x) recordctl write | head -n 3 ;; "
+     "esac; date +%F; echo $(whoami))\""),
+    ("rw-u-subst-case-comment-paren", "echo \"$(case x in x) recordctl write | head;; esac; echo $(: # (\n))\""),
+    ("rw-u-subst-case-heredoc-paren",
+     "echo \"$(case x in x) recordctl write | head;; esac; $(cat <<E\n(\nE\n))\""),
+    ("rw-u-subst-case-backquote-paren", "echo \"$(case x in x) recordctl write | head;; esac; : $(echo `echo (`))\""),
+    ("rw-u-subst-case-param-paren", "echo \"$(case x in x) recordctl write | head;; esac; : $(echo ${x/(/y}))\""),
+    ("rw-u-subst-comment-later","echo \"$(echo # )\nrecordctl write | head; $(true))\""),
+    ("rw-u-subst-comment-glued-later", "echo \"$(true #)\nrecordctl write | head; : $(:))\""),
+    ("rw-u-subst-heredoc-later", "echo \"$(cat <<E\n)\nE\nrecordctl write | head; : $(:))\""),
+    ("rw-u-subst-backquote-later", "echo \"$(echo `echo )`; recordctl write | head; : $(:))\""),
+    ("rw-u-subst-backquote-case-later",
+     "echo \"$(echo `case x in x) :;; esac`; recordctl write | head; $(true))\""),
     ("rw-u-subst-past-count", "echo" + " \"$(:)\"" * 80 + " \"$(recordctl write | head)\""),
     ("rw-u-subst-past-depth", "echo " + "\"$(echo " * 6 + "\"$(recordctl write | head)\"" + ")\"" * 6),
 )

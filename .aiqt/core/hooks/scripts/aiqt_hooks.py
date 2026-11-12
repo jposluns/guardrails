@@ -18428,19 +18428,29 @@ def _records_writer_deny(writer, sink, path):
         "exit status and re-read the record.".format(sink))
 
 
+# The characters after which a '#' inside a substitution body starts a comment (bash reads '#' as a comment
+# only at the start of a word): a blank, a newline or an operator character.
+_RECORDS_WRITER_COMMENT_AFTER = frozenset(" \t\n;&|()<>")
+
+
 def _records_writer_subst_bodies(word):
-    """The outermost '$(' substitution bodies of one decoded word, in text order, and the text a body may have
-    been cut short in: (bodies, doubt), doubt None or a str. Outside any body the word is decoded text, so
-    only '$(' counts there; inside one a single-quoted string, a double-quoted string (in which a '$(' opens a
-    body of its own), a backslash and a parenthesis are followed, and a body ends at the ')' that closes its
-    '$(' or at the end of the word. So each character of the word is scanned once and lies in at most one
-    returned body: the text read grows linearly with the word. A '$((' arithmetic expansion is read as a body
-    holding a subshell. A ')' outside every body after a body closed (a case pattern's ')' or a backquote in
-    a body can close it early) makes doubt the text from that body's start to the end of the word."""
+    """The outermost '$(' substitution bodies of one decoded word, in text order, and the text the scan may
+    have misread: (bodies, doubt), doubt None or a str. Outside any body the word is decoded text, so only
+    '$(' counts there; inside one a single-quoted string, a double-quoted string (in which a '$(' opens a body
+    of its own), a backslash and a parenthesis are followed, and a body ends at the ')' that closes its '$('
+    or at the end of the word. So each character of the word is scanned once and lies in at most one returned
+    body: the text read grows linearly with the word. A '$((' arithmetic expansion is read as a body holding a
+    subshell. A case pattern, a comment, a here-document, a backquote, an ANSI-C quote and a '${' expansion
+    are not followed, so a ')' in one can close a body early and a '(' in one can take the ')' that closes an
+    earlier body, leaving text bash runs in no returned body. So where a ')' stands outside every body after a
+    body closed, or where the word holds two or more bodies and one of them holds a '#' that can start a
+    comment, a '<<', a backquote, a "$'" or a '${', doubt is the text from the start of the first body to the
+    end of the word, however many bodies close after it."""
     bodies = []
-    doubt = None
+    misread = unfollowed = False
+    first = None
     stack = []
-    begin = last = 0
+    begin = 0
     i, n = 0, len(word)
     while i < n:
         ch = word[i]
@@ -18448,10 +18458,12 @@ def _records_writer_subst_bodies(word):
             if word.startswith("$(", i):
                 stack.append(")")
                 begin = i + 2
+                if first is None:
+                    first = begin
                 i += 2
                 continue
-            if ch == ")" and bodies and doubt is None:
-                doubt = word[last:]
+            if ch == ")" and bodies:
+                misread = True
             i += 1
             continue
         if ch == "\\":
@@ -18470,6 +18482,9 @@ def _records_writer_subst_bodies(word):
             close = word.find("'", i + 1)
             i = n if close < 0 else close + 1
             continue
+        if (ch == "`" or word.startswith("<<", i) or word.startswith("$'", i) or word.startswith("${", i)
+                or (ch == "#" and word[i - 1] in _RECORDS_WRITER_COMMENT_AFTER)):
+            unfollowed = True
         if ch == '"':
             stack.append('"')
         elif word.startswith("$(", i):
@@ -18481,11 +18496,12 @@ def _records_writer_subst_bodies(word):
             stack.pop()
             if not stack:
                 bodies.append(word[begin:i])
-                last = begin
         i += 1
     if stack:
         bodies.append(word[begin:])
-    return bodies, doubt
+    if misread or (unfollowed and len(bodies) > 1):
+        return bodies, word[first:]
+    return bodies, None
 
 
 def _records_writer_subst_readings(command, readings):
@@ -18494,11 +18510,13 @@ def _records_writer_subst_readings(command, readings):
     segments), in an argv word or a redirect target, each body lexed on its own (_lex_readings); unread holds
     the text the readings could not cover. Each '$(' body ends at its matching ')' (_records_writer_subst_bodies),
     so the text lexed grows linearly with the command: the bodies of one level lie inside the words of the level
-    above, and nesting is read to _RECORDS_WRITER_SUBST_DEPTH levels. Bodies are lexed in text order, and every
-    body lexed counts against _RECORDS_WRITER_SUBST_BODIES; past that bound, and past the depth bound, each
-    body left unlexed is put in unread. A body the lexer cannot read is put in unread too, with the text a body
-    may have been cut short in. A single-quoted or backslash-escaped '$(' spelling is read the same way, since
-    the lexer has decoded the word (a disclosed over-block)."""
+    above, and nesting is read to _RECORDS_WRITER_SUBST_DEPTH levels. Bodies are lexed breadth-first by depth,
+    not in text order: the command's backquote bodies first, then the '$(' bodies of its words, then those of
+    each lexed body followed by its backquote bodies, and every body lexed counts against
+    _RECORDS_WRITER_SUBST_BODIES; past that bound, and past the depth bound, each body left unlexed is put in
+    unread. A body the lexer cannot read is put in unread too, with each word's text the body scan may have
+    misread (a body closed early, its doubt). A single-quoted or backslash-escaped '$(' spelling is read the
+    same way, since the lexer has decoded the word (a disclosed over-block)."""
     out = []
     unread = []
     work = collections.deque((body, 1) for _start, body in _backquote_bodies(command))
@@ -18542,8 +18560,9 @@ def _records_writer_unread_named(unread, writers):
 def _records_writer_unreadable_deny(command_doubt, detail, path):
     """The fail-closed deny when the records-writer check cannot be evaluated: the declaration found at path
     cannot be read (a cwd from which none can be looked for never reaches here; _records_writers_load), or,
-    with writers declared, the command or a substitution body cannot be lexed, or a body lies past the reading's
-    count or depth bound, and its text names a writer and a head or tail word."""
+    with writers declared, the command or a substitution body cannot be lexed, a body lies past the reading's
+    count or depth bound, or the body scan may have misread a word, and its text names a writer and a head or
+    tail word."""
     if command_doubt:
         return _deny(
             "AIQT rule gatdis (gate-discipline): records writers are declared in {}, and this command could not "
@@ -18570,8 +18589,9 @@ def _records_writer_verdict(data, readings, command=None, parsed=None):
     parsed command (parsed, its raw text), in a substitution body its lex keeps inside one word
     (_records_writer_subst_readings); ("doubt", path) when command, the raw text of an unparseable command
     (None on a parsed one), or text the substitution reading could not cover (a body the lexer cannot read,
-    one past the count or depth bound), names a writer's command word and head or tail; else None, which includes no declaration, an empty one, and an unlocatable one
-    (_records_writers_load), so an adopter with no declaration sees no change."""
+    one past the count or depth bound, a word's text the body scan may have misread), names a writer's
+    command word and head or tail; else None, which includes no declaration, an empty one, and an unlocatable
+    one (_records_writers_load), so an adopter with no declaration sees no change."""
     state, value, path = _records_writers_load(data)
     if state == "bad":
         return ("bad", value, path)
