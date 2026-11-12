@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "24eb8cf16d970d4e7d503351bbdecdfbaf701e1e59ab44a429230e847615df75"
+tree-sha256 = "5ddcffe64102bd023ccc1027ce6b109ce1da283cbc6db0eb6e57e249503ef28c"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -121,8 +121,8 @@ sha256 = "f1625261cc219e8a08ac893874d74d2f1e435683d9e552d877fefcdde6880f9d"
 
 [[sources]]
 path = ".aiqt/core/ownership.toml"
-bytes = 26773
-sha256 = "23a45d69b6aac28c6965c2b94ac8907ecd4a5af8ff95a937f4c0b07d8e56c12f"
+bytes = 27038
+sha256 = "40a6b793803406e3c0baad2634463e5793119af9dc60a7728b9f738887f76f66"
 
 [[sources]]
 path = ".aiqt/core/profiles/worker-pack.md"
@@ -3446,8 +3446,8 @@ sha256 = "2be7bd6f3d7861c5e9a89a3b0853afc7433e78aa39e940a45db0b782c05cac69"
 
 [[sources]]
 path = "opf/tools/check_opf_init_contract.py"
-bytes = 117326
-sha256 = "5751d52fc95e2299c5da9be990c0fd2e980d68a8e0f066193b3f69c1cefe08a7"
+bytes = 123064
+sha256 = "8336ac8712ce4662d8d117f4fdb6ea3df4602c0d45501064e85b73398f7d7b91"
 
 [[sources]]
 path = "opf/tools/check_opf_init_observe.py"
@@ -3486,8 +3486,8 @@ sha256 = "55526c18bda5a9036ad9c5f9580405d1f1a349b004ccc79da7856fc33ce299a2"
 
 [[sources]]
 path = "opf/tools/run_all_checks.sh"
-bytes = 5288
-sha256 = "b6b152722a1308e28881151e72cf37c18b6514c8a852b93a82f788608477e97f"
+bytes = 5376
+sha256 = "1d82e2b954d47b7c8adcb42329db588168e94d05bb6d92547890279f1169ac84"
 
 [[sources]]
 path = "opf/tools/selftest_commonmark_conformance.py"
@@ -4656,8 +4656,8 @@ sha256 = "2b1d57119dd5e8849a0b28d9c58e35f2cfb900742b738b787e68b28650b39c22"
 
 [[sources]]
 path = "tools/run_all_checks.sh"
-bytes = 29751
-sha256 = "f28ae6d3e629562b6378bb9e7d09a5529f1e9b26217f4de83d3646bd0e0b4b37"
+bytes = 29772
+sha256 = "892938f9da8f71361aa03bf6448d134a419d3f6439bad7f8f822f4450555045d"
 
 [[sources]]
 path = "tools/selftest_aiqt_corpus.py"

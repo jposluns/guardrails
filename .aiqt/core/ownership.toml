@@ -41,6 +41,10 @@ path = ".github/workflows/msg-leaks.yml"
 reason = "CI message/metadata leak workflow; tracked, not shipped. Exact literal, not a glob (F-235)."
 
 [[exclusion]]
+path = "opf/.github/workflows/quality.yml"
+reason = "OPF's own CI quality workflow, inert while nested (GitHub reads workflows only at the repository root) and active once opf/ is its own repository; tracked, not shipped. Exact literal, not a glob."
+
+[[exclusion]]
 path = ".github/check_newtab_contract.py"
 reason = "Repository-local NEWTAB declaration-content assertion; tracked, not shipped."
 

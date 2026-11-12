@@ -3,15 +3,24 @@
 Verifies the frozen contract constants stay aligned with their source authorities and that the PR1
 contract surface is registered. Fail-closed: exit 2 (CANNOT-EVALUATE) on a missing/unreadable authority
 or a changed source shape that means the contract can no longer be checked; exit 1 (DRIFT) on a concrete
-mismatch; exit 0 clean. Run: python3 -I -B opf/tools/check_opf_init_contract.py [--self-test].
+mismatch; exit 0 clean. Run from any working directory: python3 -I -B <OPF root>/tools/
+check_opf_init_contract.py [--self-test | --parent-integration].
+
+Every path is resolved from the OPF root, the directory above this script's own directory, never from
+the calling directory, so the gate runs the same in a standalone OPF tree and in an OPF tree nested in
+a parent repository. The default (OPF-local) run checks the contract sources and the OPF-local rosters:
+the OPF runner tools/run_all_checks.sh must register the validator self-test, this gate's self-test and
+this gate's live run, and the OPF workflow .github/workflows/quality.yml must run that runner.
+--parent-integration adds the parent repository's rosters, read from the directory above the OPF root:
+the parent runner must register both scripts and this gate's live run WITH --parent-integration, and
+the parent's standalone-closure roster must register both self-tests. The parent CI workflow is not
+read; its gate lines are reconciled against the parent runner by the parent's own CI parity gate.
 
 Detection is SEMANTIC, never a bare substring: a constant is matched as a whole module-level line
 (ignoring trailing comments); the pinned view tuple and the reserved-namespace set are parsed with
 comments stripped and compared by membership (so a commented-out literal does not count); the machine
 store path is checked against the store authority's DEFAULT_MACHINE_SUBDIR; and a roster registration
-must appear on an ACTIVE (non-comment) line, with the live gate present in the repo-root runner. The CI
-workflow is not read, so the check holds whichever gates .github/workflows/quality.yml carries; that
-workflow's gate lines are reconciled against the repo-root runner by tools/check_ci_parity.py.
+must appear on an ACTIVE (non-comment) line.
 """
 import sys
 
@@ -30,7 +39,9 @@ if tuple(sys.version_info[:2]) < (3, 14):
 import re
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[2]
+# The OPF root: the directory above this script's own directory (tools/), whatever the working directory
+# and whether or not a parent repository encloses it.
+ROOT = Path(__file__).resolve().parents[1]
 
 ACTOR_LINE = 'ACTOR_KINDS = ("maintainer", "assistant", "automation", "importer")'
 
@@ -60,16 +71,19 @@ FROZEN_LINES = (
 # the view-tuple compare).
 RESERVED_MEMBERS = (".opf.toml", ".working/imports", ".working/archive")
 
-# Every roster surface that must register BOTH the validator self-test and the consistency gate: the two
-# local runners and the standalone-closure roster. The CI workflow is deliberately absent (see the module
-# docstring).
-ROSTER_FILES = (
-    "tools/run_all_checks.sh",
-    "opf/tools/run_all_checks.sh",
-    "tools/check_opf_standalone_closure.py",
-)
-# Surfaces where the LIVE consistency gate (invoked without --self-test) must run: the repo-root runner.
-LIVE_GATE_FILES = ("tools/run_all_checks.sh",)
+# OPF-local rosters, relative to the OPF root: the OPF runner must register BOTH the validator self-test
+# and this gate, and must run this gate LIVE (without --self-test); the OPF workflow must run that runner.
+LOCAL_ROSTER_FILES = ("tools/run_all_checks.sh",)
+LOCAL_LIVE_GATE_FILES = ("tools/run_all_checks.sh",)
+LOCAL_WORKFLOW = ".github/workflows/quality.yml"
+LOCAL_WORKFLOW_RUNNER = r"(?<![\w./-])tools/run_all_checks\.sh\b"
+# Parent integration rosters, relative to the OPF root (the parent repository is the directory above
+# it), read only under --parent-integration: the parent runner and the parent's standalone-closure roster
+# must register both scripts, and the parent runner must run this gate live WITH --parent-integration.
+# The parent CI workflow is deliberately absent (see the module docstring).
+PARENT_FLAG = "--parent-integration"
+PARENT_ROSTER_FILES = ("../tools/run_all_checks.sh", "../tools/check_opf_standalone_closure.py")
+PARENT_LIVE_GATE_FILES = ("../tools/run_all_checks.sh",)
 
 
 def _cant(msg):
@@ -525,12 +539,26 @@ def _active_line_matches(text, pattern):
     return any(rx.search(line) and not line.strip().startswith("#") for line in text.splitlines())
 
 
-def _runner_drifts(read):
+def _runner_drifts(read, parent=False):
     """C-RUNNERS, lazily: yield one drift message per miss, in order, reading each roster file through
-    read(rel) only when it is reached. BOTH scripts must be registered on an ACTIVE (non-comment) line in
-    every ROSTER_FILES surface, and the LIVE consistency gate (no --self-test) in every LIVE_GATE_FILES
-    surface. The live gate passes _read; the self-test passes an in-memory map."""
-    for rel in ROSTER_FILES:
+    read(rel) only when it is reached. The OPF-local rosters always: BOTH scripts on an ACTIVE
+    (non-comment) line in every LOCAL_ROSTER_FILES surface, the LIVE consistency gate (no --self-test) in
+    every LOCAL_LIVE_GATE_FILES surface, and the OPF runner on an active line of LOCAL_WORKFLOW. With
+    parent, then the parent rosters: both scripts in every PARENT_ROSTER_FILES surface and the live gate
+    carrying PARENT_FLAG in every PARENT_LIVE_GATE_FILES surface. The live gate passes _read; the
+    self-test passes an in-memory map."""
+    yield from _roster_drifts(read, LOCAL_ROSTER_FILES, LOCAL_LIVE_GATE_FILES, None)
+    if not _active_line_matches(read(LOCAL_WORKFLOW), LOCAL_WORKFLOW_RUNNER):
+        yield "the OPF runner tools/run_all_checks.sh is not run by {}".format(LOCAL_WORKFLOW)
+    if parent:
+        yield from _roster_drifts(read, PARENT_ROSTER_FILES, PARENT_LIVE_GATE_FILES, PARENT_FLAG)
+
+
+def _roster_drifts(read, rosters, live_files, flag):
+    """One roster set of C-RUNNERS (see _runner_drifts): both scripts actively registered in every
+    rosters surface, then the live gate (no --self-test, and carrying flag as a whole word when flag is
+    not None) in every live_files surface."""
+    for rel in rosters:
         text = read(rel)
         # The validator name is a substring of the gate name, so match it on a word boundary; the gate
         # name is unique and matched as a plain active-line substring.
@@ -538,23 +566,25 @@ def _runner_drifts(read):
             yield "_opf_init_contract.py not actively registered in {}".format(rel)
         if not _active_line_has(text, "check_opf_init_contract.py"):
             yield "check_opf_init_contract.py not actively registered in {}".format(rel)
-    for rel in LIVE_GATE_FILES:
+    for rel in live_files:
         text = read(rel)
         live = any("check_opf_init_contract.py" in line and "--self-test" not in line
+                   and (flag is None or flag in line.split())
                    and not line.strip().startswith("#") for line in text.splitlines())
         if not live:
-            yield "live consistency gate (no --self-test) not registered in {}".format(rel)
+            yield "live consistency gate (no --self-test{}) not registered in {}".format(
+                "" if flag is None else ", with " + flag, rel)
 
 
 def _checks():
-    contract = _read("opf/tools/_opf_init_contract.py")
-    schema = _read("opf/tools/_opf_schema.py")
-    store = _read("opf/tools/_opf_store.py")
-    check = _read("opf/tools/_opf_check.py")
-    init = _read("opf/tools/_opf_init.py")
-    opf = _read("opf/tools/opf.py")
-    spec = _read("opf/spec/OPF-INIT-D2B.md")
-    review = _read("opf/spec/OPF-INIT-D2B-REVIEW.md")
+    contract = _read("tools/_opf_init_contract.py")
+    schema = _read("tools/_opf_schema.py")
+    store = _read("tools/_opf_store.py")
+    check = _read("tools/_opf_check.py")
+    init = _read("tools/_opf_init.py")
+    opf = _read("tools/opf.py")
+    spec = _read("spec/OPF-INIT-D2B.md")
+    review = _read("spec/OPF-INIT-D2B-REVIEW.md")
 
     # C-ACTOR: the schema authority holds its shape, and the validator mirrors it exactly.
     if not _has_line(schema, ACTOR_LINE):
@@ -600,7 +630,7 @@ def _checks():
     # checks above cannot see the view comprehension). The child never sets __name__ to __main__, so the
     # validator self-test does not run on load; ANY other ending of the loaded code, an os._exit with any
     # status included, is fail-closed (exit 2), never this gate's status (_validator_missing).
-    for view in _validator_missing(str(ROOT / "opf/tools/_opf_init_contract.py"), src_views):
+    for view in _validator_missing(str(ROOT / "tools/_opf_init_contract.py"), src_views):
         _drift("pinned view not a member of the validator _RESERVED set: .working/{}".format(view))
 
     # C-D2A: the shipped D2a success wording is present (D2b must not silently retrofit an envelope).
@@ -625,10 +655,12 @@ def _checks():
 
     # C-RUNNERS: see _runner_drifts. The first drift ends the gate, so the reads and their order match a
     # sequential check: a later roster file is never read once an earlier one has drifted.
-    for message in _runner_drifts(_read):
+    parent = PARENT_FLAG in sys.argv[1:]
+    for message in _runner_drifts(_read, parent=parent):
         _drift(message)
 
-    sys.stdout.write("PASS check_opf_init_contract: contract/source consistency\n")
+    sys.stdout.write("PASS check_opf_init_contract: contract/source consistency{}\n".format(
+        " (with parent integration)" if parent else ""))
     sys.exit(0)
 
 
@@ -1265,25 +1297,32 @@ def _self_test_loaded_exit_in_child():
 
 
 # In-memory roster surfaces for the C-RUNNERS vectors, in the registration shapes the live files use.
-# There is no CI workflow entry: the check must pass without reading one.
+# Keys are relative to the OPF root, as the live gate reads them; the parent's files sit under "../".
+# There is no parent CI workflow entry: the check must pass without reading one.
+_PARENT_WORKFLOW = "../.github/workflows/quality.yml"
 _RUNNER_FIXTURE = {
     "tools/run_all_checks.sh": (
+        'run_gate "opf-init-contract-selftest"  python3 -I -B "$here/_opf_init_contract.py" --self-test\n'
+        'run_gate "opf-init-contract-check-selftest" python3 -I -B "$here/check_opf_init_contract.py"'
+        ' --self-test\n'
+        'run_gate "opf-init-contract-check"     python3 -I -B "$here/check_opf_init_contract.py"\n'),
+    ".github/workflows/quality.yml": (
+        "      - name: OPF checks\n"
+        "        run: bash tools/run_all_checks.sh\n"),
+    "../tools/run_all_checks.sh": (
         'run_gate "opf-init-contract-selftest" python3 -I -B opf/tools/_opf_init_contract.py --self-test\n'
         'run_gate "opf-init-contract-check-selftest" python3 -I -B opf/tools/check_opf_init_contract.py'
         ' --self-test\n'
-        'run_gate "opf-init-contract-check" python3 -I -B opf/tools/check_opf_init_contract.py\n'),
-    "opf/tools/run_all_checks.sh": (
-        'run_gate "opf-init-contract-selftest"  python3 -I -B "$here/_opf_init_contract.py" --self-test\n'
-        'run_gate "opf-init-contract-check-selftest" python3 -I -B "$here/check_opf_init_contract.py"'
-        ' --self-test\n'),
-    "tools/check_opf_standalone_closure.py": (
+        'run_gate "opf-init-contract-check" python3 -I -B opf/tools/check_opf_init_contract.py'
+        ' --parent-integration\n'),
+    "../tools/check_opf_standalone_closure.py": (
         '    ("opf-init-contract-validator-selftest", "_opf_init_contract.py", ["--self-test"]),\n'
         '    ("opf-init-contract-check-selftest", "check_opf_init_contract.py", ["--self-test"]),\n'),
 }
-_WORKFLOW = ".github/workflows/quality.yml"
+_LOCAL_FIXTURE = {rel: text for rel, text in _RUNNER_FIXTURE.items() if not rel.startswith("../")}
 
 
-def _runner_case(files):
+def _runner_case(files, parent=False):
     """(drift messages, the files read in order) for _runner_drifts over the in-memory map files. A read
     of a file the map lacks is recorded and ends the case with one cannot-evaluate message, as the live
     _read refuses a missing input."""
@@ -1295,49 +1334,81 @@ def _runner_case(files):
             raise LookupError(rel)
         return files[rel]
     try:
-        return list(_runner_drifts(read)), reads
+        return list(_runner_drifts(read, parent=parent)), reads
     except LookupError as exc:
         return ["cannot evaluate: missing input: {}".format(exc.args[0])], reads
 
 
+def _replaced(files, rel, text):
+    changed = dict(files)
+    changed[rel] = text
+    return changed
+
+
 def _self_test_runner_rosters():
-    """C-RUNNERS vectors over in-memory rosters: the CI workflow is never read (red when it is put back
-    in ROSTER_FILES or LIVE_GATE_FILES), and every local registration the check still guards is red when
-    it is missing, commented out, or (for the live gate) present only as its self-test."""
-    local_reads = list(ROSTER_FILES) + list(LIVE_GATE_FILES)
-    drifts, reads = _runner_case(_RUNNER_FIXTURE)
-    _expect(drifts == [], "runner rosters: a tree with no CI workflow must pass on the local rosters "
-            "alone: {}".format(drifts))
-    _expect(_WORKFLOW not in reads and reads == local_reads,
-            "runner rosters: reads were {}, expected {}".format(reads, local_reads))
-    with_workflow = dict(_RUNNER_FIXTURE)
-    with_workflow[_WORKFLOW] = "name: Quality\njobs: {}\n"
-    drifts, reads = _runner_case(with_workflow)
-    _expect(drifts == [] and _WORKFLOW not in reads,
-            "runner rosters: a CI workflow carrying neither script must not be read or reported: "
+    """C-RUNNERS vectors over in-memory rosters. The OPF-local run reads only the OPF root's own files (a
+    standalone OPF tree with no parent passes; red when a parent path is put back in the local sets); the
+    parent integration run adds exactly the parent runner and closure roster and never the parent CI
+    workflow. Every registration the check guards is red when it is missing, commented out, or (for a
+    live gate) present only as its self-test, and the parent live gate is red without its flag."""
+    local_reads = list(LOCAL_ROSTER_FILES) + list(LOCAL_LIVE_GATE_FILES) + [LOCAL_WORKFLOW]
+    parent_reads = local_reads + list(PARENT_ROSTER_FILES) + list(PARENT_LIVE_GATE_FILES)
+    drifts, reads = _runner_case(_LOCAL_FIXTURE)
+    _expect(drifts == [] and reads == local_reads,
+            "runner rosters: a standalone OPF tree must pass on its own rosters alone: {} (reads {}, "
+            "expected {})".format(drifts, reads, local_reads))
+    _expect(not any(rel.startswith("../") for rel in local_reads),
+            "runner rosters: the OPF-local sets must name no path outside the OPF root")
+    drifts, reads = _runner_case(_RUNNER_FIXTURE, parent=True)
+    _expect(drifts == [] and reads == parent_reads,
+            "runner rosters: reads were {}, expected {} ({})".format(reads, parent_reads, drifts))
+    with_workflow = _replaced(_RUNNER_FIXTURE, _PARENT_WORKFLOW, "name: Quality\njobs: {}\n")
+    drifts, reads = _runner_case(with_workflow, parent=True)
+    _expect(drifts == [] and _PARENT_WORKFLOW not in reads,
+            "runner rosters: a parent CI workflow carrying neither script must not be read or reported: "
             "{} (reads {})".format(drifts, reads))
+    drifts, reads = _runner_case(_LOCAL_FIXTURE, parent=True)
+    _expect(drifts == ["cannot evaluate: missing input: ../tools/run_all_checks.sh"],
+            "runner rosters: --parent-integration without a parent must not pass: {}".format(drifts))
 
-    no_live = dict(_RUNNER_FIXTURE)
-    no_live["tools/run_all_checks.sh"] = "".join(
-        _RUNNER_FIXTURE["tools/run_all_checks.sh"].splitlines(keepends=True)[:2])
-    drifts, _reads = _runner_case(no_live)
+    lines = _RUNNER_FIXTURE["tools/run_all_checks.sh"].splitlines(keepends=True)
+    drifts, _reads = _runner_case(_replaced(_LOCAL_FIXTURE, "tools/run_all_checks.sh", "".join(lines[:2])))
     _expect(drifts == ["live consistency gate (no --self-test) not registered in tools/run_all_checks.sh"],
-            "runner rosters: a repo-root runner with only the self-test lines must drift once: "
-            "{}".format(drifts))
+            "runner rosters: an OPF runner with only the self-test lines must drift once: {}".format(drifts))
 
-    commented = dict(_RUNNER_FIXTURE)
-    commented["opf/tools/run_all_checks.sh"] = "# " + _RUNNER_FIXTURE["opf/tools/run_all_checks.sh"]
-    drifts, _reads = _runner_case(commented)
-    _expect(drifts == ["_opf_init_contract.py not actively registered in opf/tools/run_all_checks.sh"],
+    drifts, _reads = _runner_case(_replaced(_LOCAL_FIXTURE, "tools/run_all_checks.sh",
+                                            "# " + _RUNNER_FIXTURE["tools/run_all_checks.sh"]))
+    _expect(drifts == ["_opf_init_contract.py not actively registered in tools/run_all_checks.sh"],
             "runner rosters: a commented validator registration in the OPF runner must drift once: "
             "{}".format(drifts))
 
-    closure = dict(_RUNNER_FIXTURE)
-    closure["tools/check_opf_standalone_closure.py"] = (
-        _RUNNER_FIXTURE["tools/check_opf_standalone_closure.py"].splitlines(keepends=True)[0])
-    drifts, _reads = _runner_case(closure)
+    for label, text in (("absent", "name: Quality\njobs: {}\n"),
+                        ("commented", "        # run: bash tools/run_all_checks.sh\n"),
+                        ("another runner", "        run: bash ../tools/run_all_checks.sh\n"),
+                        ("a longer name", "        run: bash tools/run_all_checks.sh2\n")):
+        drifts, _reads = _runner_case(_replaced(_LOCAL_FIXTURE, LOCAL_WORKFLOW, text))
+        _expect(drifts == ["the OPF runner tools/run_all_checks.sh is not run by " + LOCAL_WORKFLOW],
+                "runner rosters: an OPF workflow with the runner {} must drift once: {}".format(label, drifts))
+
+    parent_lines = _RUNNER_FIXTURE["../tools/run_all_checks.sh"].splitlines(keepends=True)
+    no_flag = "".join(parent_lines[:2]) + parent_lines[2].replace(" --parent-integration", "")
+    drifts, _reads = _runner_case(_replaced(_RUNNER_FIXTURE, "../tools/run_all_checks.sh", no_flag),
+                                  parent=True)
+    _expect(drifts == ["live consistency gate (no --self-test, with --parent-integration) not registered "
+                       "in ../tools/run_all_checks.sh"],
+            "runner rosters: a parent runner whose live gate lacks the flag must drift once: "
+            "{}".format(drifts))
+    drifts, _reads = _runner_case(_replaced(_RUNNER_FIXTURE, "../tools/run_all_checks.sh",
+                                            "".join(parent_lines[:2])), parent=True)
+    _expect(len(drifts) == 1 and drifts[0].endswith("not registered in ../tools/run_all_checks.sh"),
+            "runner rosters: a parent runner with only the self-test lines must drift once: "
+            "{}".format(drifts))
+
+    closure_text = _RUNNER_FIXTURE["../tools/check_opf_standalone_closure.py"]
+    drifts, _reads = _runner_case(_replaced(_RUNNER_FIXTURE, "../tools/check_opf_standalone_closure.py",
+                                            closure_text.splitlines(keepends=True)[0]), parent=True)
     _expect(drifts == ["check_opf_init_contract.py not actively registered in "
-                       "tools/check_opf_standalone_closure.py"],
+                       "../tools/check_opf_standalone_closure.py"],
             "runner rosters: a closure roster without the gate must drift once: {}".format(drifts))
 
     # Lazy order: the first drift is yielded before any later roster file is read, so the live gate's
@@ -1346,8 +1417,8 @@ def _self_test_runner_rosters():
 
     def read(rel):
         reads.append(rel)
-        return no_live[rel] if rel != "tools/run_all_checks.sh" else ""
-    first = next(_runner_drifts(read), None)
+        return _RUNNER_FIXTURE[rel] if rel != "tools/run_all_checks.sh" else ""
+    first = next(_runner_drifts(read, parent=True), None)
     _expect(first == "_opf_init_contract.py not actively registered in tools/run_all_checks.sh"
             and reads == ["tools/run_all_checks.sh"],
             "runner rosters: the first drift must come before any later read: {} (reads {})".format(

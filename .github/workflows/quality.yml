@@ -676,9 +676,9 @@ jobs:
         shell: bash
         run: python3 -I -B opf/tools/check_opf_init_contract.py --self-test
 
-      - name: OPF init contract consistency gate
+      - name: OPF init contract consistency gate (OPF-local and parent integration rosters)
         shell: bash
-        run: python3 -I -B opf/tools/check_opf_init_contract.py
+        run: python3 -I -B opf/tools/check_opf_init_contract.py --parent-integration
 
       - name: OPF operation-lock self-test
         shell: bash
