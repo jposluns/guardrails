@@ -12945,7 +12945,9 @@ def _main_isolated(report_path=None):
                 # The structured operating-mode record (mode plus only phase, set_by and set_at) is read by its
                 # mode exactly as the bare object is. The attended vectors prove the record is accepted (a refused
                 # record arms and denies); the unattended vector pins the deny but cannot prove acceptance, since a
-                # refused record denies alike, so ask/json-mode-record-unattended-read-by-mode below proves it:
+                # refused record denies alike. ask/json-mode-record-unattended-read-by-mode below does not read this
+                # record: it feeds _orch_mode_classify_text the same phase, set_by and set_at with the mode
+                # "unattended; overnight" and proves that record is accepted:
                 ("ask/json-mode-record-unattended-denies",
                  '{"mode": "unattended", "phase": null, "set_by": "operator",'
                  ' "set_at": "2026-11-04T17:47:04Z"}\n', "deny"),
@@ -12969,9 +12971,21 @@ def _main_isolated(report_path=None):
                 ("ask/json-mode-record-phase-nested-object-denies-armed",
                  '{"mode": "attended", "phase": {"mode": "attended"}, "set_by": "operator",'
                  ' "set_at": "2026-11-04T17:47:04Z"}\n', "deny"),
+                ("ask/json-mode-record-phase-array-denies-armed",
+                 '{"mode": "attended", "phase": ["review"], "set_by": "operator",'
+                 ' "set_at": "2026-11-04T17:47:04Z"}\n', "deny"),
+                ("ask/json-mode-record-phase-boolean-denies-armed",
+                 '{"mode": "attended", "phase": true, "set_by": "operator", "set_at": "2026-11-04T17:47:04Z"}\n',
+                 "deny"),
                 ("ask/json-mode-record-set-by-null-denies-armed",
                  '{"mode": "attended", "phase": null, "set_by": null, "set_at": "2026-11-04T17:47:04Z"}\n',
                  "deny"),
+                ("ask/json-mode-record-set-by-number-denies-armed",
+                 '{"mode": "attended", "phase": null, "set_by": 7, "set_at": "2026-11-04T17:47:04Z"}\n',
+                 "deny"),
+                ("ask/json-mode-record-set-by-object-denies-armed",
+                 '{"mode": "attended", "phase": null, "set_by": {"name": "operator"},'
+                 ' "set_at": "2026-11-04T17:47:04Z"}\n', "deny"),
                 ("ask/json-mode-record-set-at-malformed-denies-armed",
                  '{"mode": "attended", "phase": null, "set_by": "operator", "set_at": "2026-11-04 17:47:04Z"}\n',
                  "deny"),
@@ -12985,6 +12999,10 @@ def _main_isolated(report_path=None):
                  '{"mode": "attended", "set_at": "2026-13-04T17:47:04Z"}\n', "deny"),
                 ("ask/json-mode-record-set-at-number-denies-armed",
                  '{"mode": "attended", "set_at": 1793814424}\n', "deny"),
+                ("ask/json-mode-record-set-at-null-denies-armed",
+                 '{"mode": "attended", "set_at": null}\n', "deny"),
+                ("ask/json-mode-record-no-mode-denies-armed",
+                 '{"phase": null, "set_by": "operator", "set_at": "2026-11-04T17:47:04Z"}\n', "deny"),
                 ("ask/json-mode-record-duplicate-key-denies-armed",
                  '{"mode": "attended", "phase": null, "set_by": "operator",'
                  ' "set_at": "2026-11-04T17:47:04Z", "set_at": "2026-11-04T17:47:05Z"}\n', "deny"),
@@ -13001,7 +13019,8 @@ def _main_isolated(report_path=None):
             check(check_id, _verdict(ask()), want)
         # An accepted unattended record and a refused one both read as the guards-armed `unattended` token, so
         # the reader is observed at its classifier: an accepted record hands its own `mode` string to it, while
-        # a refused record fails closed before the classifier sees anything.
+        # a refused record fails closed before the classifier sees anything. This row feeds the record below,
+        # whose mode is "unattended; overnight", straight to _orch_mode_classify_text (no mode file is read).
         _rec_seen = []
         _rec_classify = aiqt_hooks._orch_mode_classify
         try:
