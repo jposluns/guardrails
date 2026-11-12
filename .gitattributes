@@ -658,6 +658,7 @@ opf/tools/_opf_worklog_regressions.py text eol=lf
 opf/tools/_opf_write_guard.py text eol=lf
 opf/tools/_optlevel.py text eol=lf
 opf/tools/_semver.py text eol=lf
+opf/tools/_standards.py text eol=lf
 opf/tools/_vendor/commonmark-spec-0.31.2/spec-0.31.2-examples.json binary
 opf/tools/_vendor/licenses/marko-MIT.txt text eol=lf
 opf/tools/_vendor/marko-2.2.4.manifest.sha256 text eol=lf
@@ -687,6 +688,8 @@ opf/tools/_vendor/marko/patterns.py text eol=lf
 opf/tools/_vendor/marko/py.typed binary
 opf/tools/_vendor/marko/renderer.py text eol=lf
 opf/tools/_vendor/marko/source.py text eol=lf
+opf/tools/check_cited_standards.py text eol=lf
+opf/tools/check_cited_standards_contract.py text eol=lf
 opf/tools/check_opf_doctor.py text eol=lf
 opf/tools/check_opf_drift.py text eol=lf
 opf/tools/check_opf_homes.py text eol=lf
@@ -697,6 +700,7 @@ opf/tools/check_opf_init_p0.py text eol=lf
 opf/tools/check_opf_init_qa.py text eol=lf
 opf/tools/check_opf_prompt_pack.py text eol=lf
 opf/tools/check_opf_record.py text eol=lf
+opf/tools/cited-standards.toml text eol=lf
 opf/tools/opf-declaration.toml binary
 opf/tools/opf.py text eol=lf
 opf/tools/run_all_checks.sh text eol=lf

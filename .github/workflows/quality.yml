@@ -524,6 +524,22 @@ jobs:
         shell: bash
         run: python3 -I -B opf/tools/check_opf_prompt_pack.py
 
+      - name: OPF cited-standards contract self-test
+        shell: bash
+        run: python3 -I -B opf/tools/check_cited_standards_contract.py --self-test
+
+      - name: OPF cited-standards contract
+        shell: bash
+        run: python3 -I -B opf/tools/check_cited_standards_contract.py
+
+      - name: OPF cited-standards gate self-test
+        shell: bash
+        run: python3 -I -B opf/tools/check_cited_standards.py --self-test
+
+      - name: OPF cited-standards gate
+        shell: bash
+        run: python3 -I -B opf/tools/check_cited_standards.py --config opf/tools/cited-standards.toml
+
       - name: OPF adoption schema and read-only planning self-test
         shell: bash
         run: python3 -I -B opf/tools/_opf_adopt.py --self-test

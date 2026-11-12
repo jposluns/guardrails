@@ -1,0 +1,22 @@
+# opf/tools/cited-standards.toml: OPF's reviewed corpus for tools/check_cited_standards.py (OPF's own copy
+# of the cited-standards gate). Paths are relative to the OPF root, the directory above tools/. The OPF
+# runner (tools/run_all_checks.sh) passes this file with --config, and tools/check_cited_standards_contract.py
+# fails if this corpus stops covering a member prompt-pack/pack.toml lists (pack.toml validated by its owning
+# validator, tools/check_opf_prompt_pack.py), or if the runner's cited-standards gate line is not exactly
+# that one invocation.
+#
+# The corpus is the prompt-pack members that prompt-pack/pack.toml lists: the adopter-facing skills and the
+# import examples. The skills sit one directory down (adopt/, flow/, import/), so their glob is recursive.
+# Each glob must match at least one file, so an emptied directory fails closed (exit 2). The skills glob
+# reads Markdown only, and the import examples, the members that are not .md files, have their own glob
+# (import/examples/*.batch.toml), narrow so that pack.toml itself (member paths and digests, not prose) is
+# not scanned. A member added with another extension or elsewhere is not scanned until a glob names it.
+#
+# OPF's standards manifests live in standards/ under the OPF root. No member cites a numbered standard, so
+# that directory is absent and the manifest set is empty; a citation added to a member fails this gate
+# until a manifest there registers it or an exclusion here records it.
+#
+# No exclusion is recorded: when this corpus was first scanned by the parent repository's gate, no member
+# (nor pack.toml) carried a numbered standard designator.
+format-version = 1
+corpus = ["prompt-pack/**/*.md", "prompt-pack/import/examples/*.batch.toml"]

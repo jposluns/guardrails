@@ -894,6 +894,9 @@ ALLOWLIST = (
      " Arabic-Indic or fullwidth digits names the same identity as its ASCII spelling, and its"
      " letter tests ([^\\W_] and [^\\W\\d_]; the pattern holds no \\w) are Unicode through \\W,"
      " so a letter of any script glued to a designator makes it a token"),
+    ("opf/tools/check_cited_standards.py", "parse_designator", "regex", 1,
+     "Unicode on purpose: OPF's own copy of tools/check_cited_standards.py, whose parse_designator"
+     " and _PATTERN it carries unchanged; the reason recorded for that entry holds here word for word"),
     ("tools/check_clauses.py", "rule_units", "regex", 1,
      "Unicode on purpose: _UNCLASSIFIABLE_FIRST_LINE_RE refuses a paragraph whose first line opens"
      " with a list marker numbered in any script's digits, which a renderer may read as a list; its"

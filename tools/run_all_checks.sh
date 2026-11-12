@@ -162,6 +162,10 @@ run_gate "opf-adopt-observe-selftest" python3 -I -B opf/tools/_opf_adopt_observe
 run_gate "opf-adopt-discover-selftest" python3 -I -B opf/tools/_opf_adopt_discover.py --self-test
 run_gate "opf-prompt-pack-selftest" python3 -I -B opf/tools/check_opf_prompt_pack.py --self-test
 run_gate "opf-prompt-pack" python3 -I -B opf/tools/check_opf_prompt_pack.py
+run_gate "opf-cited-standards-contract-selftest" python3 -I -B opf/tools/check_cited_standards_contract.py --self-test
+run_gate "opf-cited-standards-contract" python3 -I -B opf/tools/check_cited_standards_contract.py
+run_gate "opf-cited-standards-selftest" python3 -I -B opf/tools/check_cited_standards.py --self-test
+run_gate "opf-cited-standards" python3 -I -B opf/tools/check_cited_standards.py --config opf/tools/cited-standards.toml
 run_gate "opf-enforce-platforms-selftest" python3 -I -B tools/check_opf_enforce_platforms.py --self-test
 run_gate "opf-enforce-platforms" python3 -I -B tools/check_opf_enforce_platforms.py
 run_gate "opf-enforce-residuals-selftest" python3 -I -B tools/check_opf_enforce_residuals.py --self-test
