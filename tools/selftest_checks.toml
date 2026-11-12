@@ -1700,6 +1700,7 @@ expected-check-ids = [
   "rdp/label-screen-mutants",
   "rdp/label-screen-sweep",
   "rdp/label-screen-linear-time",
+  "rdp/label-screen-linear-time-mutant",
   "rdp/label-screen-linear-time-decision",
   "rdp/label-screen-linear-time-zero-flip",
   "rdp/proc-self-brief-unverifiable",
