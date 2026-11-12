@@ -12959,12 +12959,25 @@ def _main_isolated(report_path=None):
                  ' "set_at": "2026-11-04T23:59:59Z"}\n', "allow"),
                 ("ask/json-mode-record-attended-subset-allows",
                  '{"mode": "attended", "set_at": "2026-11-04T00:00:00Z"}\n', "allow"),
-                # A record that breaks the shape fails CLOSED to armed even with an attended mode:
+                # A record that breaks the shape fails CLOSED to armed. Each row with a string mode has an attended
+                # one, so only the broken field can deny; the wrong-typed mode rows and the no-mode row have none:
                 ("ask/json-mode-record-extra-key-denies-armed",
                  '{"mode": "attended", "phase": null, "set_by": "operator",'
                  ' "set_at": "2026-11-04T17:47:04Z", "note": "x"}\n', "deny"),
                 ("ask/json-mode-record-mode-not-string-denies-armed",
                  '{"mode": 1, "phase": null, "set_by": "operator", "set_at": "2026-11-04T17:47:04Z"}\n', "deny"),
+                ("ask/json-mode-record-mode-null-denies-armed",
+                 '{"mode": null, "phase": null, "set_by": "operator", "set_at": "2026-11-04T17:47:04Z"}\n',
+                 "deny"),
+                ("ask/json-mode-record-mode-boolean-denies-armed",
+                 '{"mode": true, "phase": null, "set_by": "operator", "set_at": "2026-11-04T17:47:04Z"}\n',
+                 "deny"),
+                ("ask/json-mode-record-mode-array-denies-armed",
+                 '{"mode": ["attended"], "phase": null, "set_by": "operator",'
+                 ' "set_at": "2026-11-04T17:47:04Z"}\n', "deny"),
+                ("ask/json-mode-record-mode-object-denies-armed",
+                 '{"mode": {"mode": "attended"}, "phase": null, "set_by": "operator",'
+                 ' "set_at": "2026-11-04T17:47:04Z"}\n', "deny"),
                 ("ask/json-mode-record-phase-number-denies-armed",
                  '{"mode": "attended", "phase": 2, "set_by": "operator", "set_at": "2026-11-04T17:47:04Z"}\n',
                  "deny"),
@@ -12986,6 +12999,12 @@ def _main_isolated(report_path=None):
                 ("ask/json-mode-record-set-by-object-denies-armed",
                  '{"mode": "attended", "phase": null, "set_by": {"name": "operator"},'
                  ' "set_at": "2026-11-04T17:47:04Z"}\n', "deny"),
+                ("ask/json-mode-record-set-by-boolean-denies-armed",
+                 '{"mode": "attended", "phase": null, "set_by": true, "set_at": "2026-11-04T17:47:04Z"}\n',
+                 "deny"),
+                ("ask/json-mode-record-set-by-array-denies-armed",
+                 '{"mode": "attended", "phase": null, "set_by": ["operator"],'
+                 ' "set_at": "2026-11-04T17:47:04Z"}\n', "deny"),
                 ("ask/json-mode-record-set-at-malformed-denies-armed",
                  '{"mode": "attended", "phase": null, "set_by": "operator", "set_at": "2026-11-04 17:47:04Z"}\n',
                  "deny"),
@@ -13001,6 +13020,12 @@ def _main_isolated(report_path=None):
                  '{"mode": "attended", "set_at": 1793814424}\n', "deny"),
                 ("ask/json-mode-record-set-at-null-denies-armed",
                  '{"mode": "attended", "set_at": null}\n', "deny"),
+                ("ask/json-mode-record-set-at-boolean-denies-armed",
+                 '{"mode": "attended", "set_at": true}\n', "deny"),
+                ("ask/json-mode-record-set-at-array-denies-armed",
+                 '{"mode": "attended", "set_at": ["2026-11-04T17:47:04Z"]}\n', "deny"),
+                ("ask/json-mode-record-set-at-object-denies-armed",
+                 '{"mode": "attended", "set_at": {"utc": "2026-11-04T17:47:04Z"}}\n', "deny"),
                 ("ask/json-mode-record-no-mode-denies-armed",
                  '{"phase": null, "set_by": "operator", "set_at": "2026-11-04T17:47:04Z"}\n', "deny"),
                 ("ask/json-mode-record-duplicate-key-denies-armed",
