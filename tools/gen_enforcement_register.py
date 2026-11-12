@@ -172,7 +172,7 @@ COLUMN_HEADING = "Linked controls or planned build"
 NO_CONTROL_TEXT = "No shipped control cites this rule."
 # The accessible name of the HTML rules table, emitted as a visually hidden caption (the site's vh class, as
 # on the evidence page) so a screen reader announces what the table holds. The Markdown view has no caption.
-TABLE_CAPTION = "Rule status and linked controls"
+TABLE_CAPTION = "Rule status and linked controls or planned build"
 
 GENERATED_NOTE = (
     "This file is generated from the enforceability ledger, the enforcement roadmap, and the rule corpus "
@@ -1231,6 +1231,10 @@ def self_test_main():
         if caption_html not in html_page or html_page.count("<caption") != 1:
             failures.append("conformant tree: the rules table must open with exactly one visually hidden "
                             "caption <caption class=\"vh\">{}</caption>".format(TABLE_CAPTION))
+        # The expected markup above is built from TABLE_CAPTION itself, so it cannot tell an empty caption,
+        # which gives the table no accessible name, from a real one: require caption text after stripping.
+        if not TABLE_CAPTION.strip():
+            failures.append("conformant tree: the rules table caption text must not be empty or whitespace")
         for chrome_token in ("<title>Guardrail Enforcement Register</title>",
                              "<p class=\"eyebrow\">Enforcement register</p>"):
             if chrome_token not in html_page:
