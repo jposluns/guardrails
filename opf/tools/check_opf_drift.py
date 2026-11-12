@@ -238,6 +238,12 @@ def _self_test_isolated():
         """Build synthetic stores and assert the 0/1/2 render contract end to end through opf.py. Returns
         the list of assertion failures; raises OSError if a fixture cannot be built or read (a harness
         error, which _classify maps to exit 2)."""
+        # The no-repo-root, invalid-git-marker and relative-toplevel legs expect what _git_toplevel returns
+        # when git is missing, so without git they would pass with nothing probed: a missing git is a
+        # cannot-evaluate (exit 2) for the whole suite, never a pass.
+        if shutil.which("git") is None:
+            raise OSError("cannot evaluate: no git on PATH, so the no-repo-root, invalid-git-marker and "
+                          "relative-toplevel legs cannot reach their probes")
         failures = []
 
         def expect(label, got, want):
@@ -383,6 +389,19 @@ def _self_test_isolated():
             contract.append("failing-assertion body did not map to exit 1")
         if _classify(lambda: []) != EXIT_OK:
             contract.append("clean body did not map to exit 0")
+        # With no git on PATH the drift suite is a cannot-evaluate (exit 2). Red without the suite's git
+        # precondition: the legs that expect a failed git probe then pass and the suite returns 0.
+        real_which_git = shutil.which
+
+        def _which_no_git(cmd, *args, **kwargs):
+            return None if cmd == "git" else real_which_git(cmd, *args, **kwargs)
+        shutil.which = _which_no_git
+        try:
+            missing_git = _classify(_drift_suite)
+        finally:
+            shutil.which = real_which_git
+        if missing_git != EXIT_ERROR:
+            contract.append("missing-git suite gave exit {}, not 2".format(missing_git))
     if contract:
         for c in contract:
             print("check_opf_drift self-test: FAIL: status-contract: {}".format(c), file=sys.stderr)
@@ -395,7 +414,7 @@ def _self_test_isolated():
               "child exit 1 without the drift marker -> 2 (cannot-evaluate); no-repo-root -> 2; "
               "invalid-git-marker -> 2; relative-toplevel probe -> None (exit 2); "
               "git executable absolutized (relative which() -> absolute argv[0]); "
-              "status contract 1=assertion 2=harness)")
+              "status contract 1=assertion 2=harness; no git on PATH -> 2)")
     return rc
 
 

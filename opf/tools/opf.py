@@ -24057,13 +24057,34 @@ def _dv_gate_refuses_oversize(tmp):
     return _declaration_gate_refuses(tmp, installed, _opf_declaration.UNREADABLE)
 
 
+def _declaration_gate_refuses_eacces(tmp, installed):
+    """The unreadable-mode case where mode bits do not bind (uid 0): os.open of `installed` alone raises the
+    EACCES a mode-0 file gives any other user, and the gate must refuse every store verb as unreadable. The
+    detail carries the count of refused opens; zero is red, since the gate then never reached the file."""
+    import errno
+    from unittest.mock import patch
+    real_open = os.open
+    target = os.fspath(installed)
+    refused = []
+
+    def refusing_open(path, *args, **kwargs):
+        if not isinstance(path, int) and os.fspath(path) == target:
+            refused.append(target)
+            raise PermissionError(errno.EACCES, os.strerror(errno.EACCES), target)
+        return real_open(path, *args, **kwargs)
+    with patch.object(os, "open", refusing_open):
+        ok, detail = _declaration_gate_refuses(tmp, installed, _opf_declaration.UNREADABLE)
+    return ok and len(refused) > 0, detail + (len(refused),)
+
+
 def _dv_gate_refuses_unreadable_mode(tmp):
     installed = Path(tmp) / _opf_declaration.DECLARATION_NAME
     installed.write_bytes(_opf_declaration.SHIPPED_DECLARATION_BYTES)
-    if hasattr(os, "geteuid") and os.geteuid() == 0:   # chmod cannot make a file unreadable to root
-        print("opf declaration cli self-test: DISCLOSED SKIP: gate-refuses-unreadable-mode not run (uid 0 is not "
-              "bound by mode bits)", file=sys.stderr)
-        return True, "skipped: uid 0 is not bound by mode bits"
+    if hasattr(os, "geteuid") and os.geteuid() == 0:
+        # chmod cannot make a file unreadable to uid 0, so the refusal a mode-0 file gives any other user
+        # (EACCES at its open) is injected at the open of this one path, and the case still runs through the
+        # gate; it is red unless the gate reached that open and refused as unreadable.
+        return _declaration_gate_refuses_eacces(tmp, installed)
     installed.chmod(0)
     try:
         return _declaration_gate_refuses(tmp, installed, _opf_declaration.UNREADABLE)
@@ -24244,18 +24265,28 @@ def _declaration_cli_self_test():
     (exit 0, and exit 2 with not-read and cannot_evaluate when absent), doctor appends the report, and a build
     raised in process passes the gate only over the declaration _running_build_declaration presents for it.
     tools/check_opf_declaration.py runs each under its registered check id and shows it red under its revert."""
+    from unittest.mock import patch
     failures = []
     for name, _fn in _DECLARATION_CLI_VECTORS:
         ok, detail = run_declaration_cli_vector(name)
         if not ok:
             failures.append((name, detail))
+    # The mode row under uid 0 (os.geteuid patched to 0) must still run through the gate and return its
+    # unreadable refusal rows. Red when that row returns a pass in place of a result under uid 0: its detail
+    # then carries no refusal rows, so a skipped case is never counted as a passing vector.
+    with patch.object(os, "geteuid", lambda: 0, create=True):
+        ok, detail = run_declaration_cli_vector("gate-refuses-unreadable-mode")
+    if not (ok and type(detail) is tuple and len(detail) == 4 and detail[0] == _opf_declaration.UNREADABLE
+            and detail[1] and detail[3] > 0):
+        failures.append(("gate-refuses-unreadable-mode-as-uid-0", detail))
+    checks = len(_DECLARATION_CLI_VECTORS) + 1
     if failures:
-        print("opf declaration cli self-test: FAIL ({} of {} vectors)".format(
-            len(failures), len(_DECLARATION_CLI_VECTORS)), file=sys.stderr)
+        print("opf declaration cli self-test: FAIL ({} of {} vectors)".format(len(failures), checks),
+              file=sys.stderr)
         for name, detail in failures:
             print("  {}: {!r}".format(name, detail), file=sys.stderr)
         return EXIT_FINDING
-    print("opf declaration cli self-test: PASS ({} vectors)".format(len(_DECLARATION_CLI_VECTORS)))
+    print("opf declaration cli self-test: PASS ({} vectors)".format(checks))
     return EXIT_OK
 
 
