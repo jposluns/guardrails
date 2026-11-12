@@ -287,6 +287,38 @@ PREFLIGHT (the input paths a brief names; read over the whole brief, line by lin
                        conformance is exactly Marko
                        2.2.4's, so rare edge inputs are read exactly where Marko diverges from a strict
                        CommonMark reading (a no-break space accepted after a closing fence, for one).
+  P7 residual anchor   HARD, for every family. A declaration is a column-zero line of the raw brief text,
+                       `ACCEPTED-RESIDUAL: <anchor>`, one per residual. An anchor is gate:<id> or hook:<id>,
+                       accepting that control's whole residue field in .aiqt/core/gates/manifest.toml
+                       ([[gate]]) or .aiqt/core/hooks/manifest.toml ([[hook]]) read at the brief's pinned
+                       revision and matched by exact id; or <path> :: <symbol> :: <excerpt>, split at the
+                       first two " :: " separators, whose excerpt must occur byte-exact (whitespace, case
+                       and CR against LF all count) inside the named symbol at the pin: a Python qualified
+                       def or class name located with ast (the source is never imported), or
+                       gate:<id>.residue / hook:<id>.residue naming a manifest field of the TOML file at
+                       <path>, matched against the TOML-decoded value (escapes applied, as a reviewer reads
+                       the field), never the file's source bytes. The pin is the first BRIEF-PIN line's
+                       value, else the first pin line's, resolved as in P3, and every pin line must resolve
+                       to that one commit (two REVIEWED HEAD lines with no BRIEF-PIN line included); a short
+                       pin resolves through git rev-parse, so a branch named like it can take its place, as
+                       in P3. Content is read from the git object store (read_at_revision: a regular-file
+                       blob of at most P7_READ_MAX_BYTES, under the P3 reads' hermetic environment and
+                       timeout, object substitution disabled), never HEAD, the index or the working tree,
+                       and a symbol that is not found is never a whole-file search. Python source is read
+                       only as UTF-8 (a coding cookie naming another encoding on either of the first two
+                       lines is CANNOT_EVALUATE) and a definition is sliced as the parser splits lines
+                       (CRLF, a lone CR or LF) by ast.get_source_segment. A
+                       declaration with no anchor, or an anchor whose id, symbol or excerpt is absent at
+                       the pin (a missing path or residue field included), is HARD (exit 1). A malformed
+                       declaration (a column-zero label without its colon, a glued suffix, one " :: "
+                       separator, an empty path, symbol or excerpt), an unresolved or conflicting pin, a
+                       brief with declarations and no pin or no repository to read it from, and content
+                       that cannot be read or parsed at the pin (a non-regular or oversized entry, invalid
+                       TOML, two manifest rows with one id, source ast cannot parse, a declared encoding
+                       other than UTF-8, a definition it cannot locate) are CANNOT_EVALUATE
+                       (exit 2), never a pass. Keyword-free residual prose is at most advisory: a line
+                       holding the label outside a column-zero declaration prints one ADVISORY line, and
+                       nothing is read at the pin for it.
 
 What the preflight cannot know: whether the worker's uid can read a path (permissions, ACLs, a mount, a
 sandbox); that is the dispatcher's check, made where the worker runs, and the hard readability check belongs
@@ -626,6 +658,7 @@ if tuple(sys.version_info[:2]) < (3, 14):
 import ast
 import atexit
 import bisect
+import codecs
 import contextlib
 import errno
 import io
@@ -634,6 +667,7 @@ import os
 import posixpath
 import random
 import re
+import selectors
 import shlex
 import shutil
 import signal
@@ -641,6 +675,7 @@ import stat
 import subprocess
 import tempfile
 import time
+import tokenize
 import unicodedata
 from pathlib import Path
 
@@ -2217,6 +2252,15 @@ def _git_read_env():
     return env
 
 
+def _no_replace_env():
+    """_git_read_env() with object substitution disabled (GIT_NO_REPLACE_OBJECTS=1, beside each command's
+    --no-replace-objects flag), so a refs/replace/* entry in the repository cannot decide which object a
+    read sees: a pin, an existence probe and a blob read all answer from the genuine object graph."""
+    env = _git_read_env()
+    env["GIT_NO_REPLACE_OBJECTS"] = "1"
+    return env
+
+
 # git's ownership refusal: its first line in English, and the command of its hint, which a translation keeps
 OWNERSHIP_REFUSAL_MARKS = ("detected dubious ownership in repository at ", "--add safe.directory ")
 OWNERSHIP_REMEDY = ("git refused it for dubious ownership: the repository is owned by another user, and this read "
@@ -2225,15 +2269,38 @@ OWNERSHIP_REMEDY = ("git refused it for dubious ownership: the repository is own
 
 
 def _rev_parse(repo, rev):
-    """git rev-parse of `rev` as a commit in `repo` under _git_read_env(), output captured."""
-    return subprocess.run(["git", "-C", str(repo), "rev-parse", "--verify", "--quiet", rev + "^{commit}"],
-                          capture_output=True, timeout=GIT_READ_TIMEOUT, env=_git_read_env())
+    """git rev-parse of `rev` as a commit in `repo` under _no_replace_env(), output captured. Substitution is
+    disabled so that a pin naming an annotated tag object peels to the tag's genuine target: a refs/replace/*
+    entry pointing that tag (or a commit) at another object cannot decide which commit a pin, or a dispatch
+    ref, resolves to."""
+    return subprocess.run(["git", "--no-replace-objects", "-C", str(repo), "rev-parse", "--verify", "--quiet",
+                           rev + "^{commit}"],
+                          capture_output=True, timeout=GIT_READ_TIMEOUT, env=_no_replace_env())
 
 
 def _cat_file(repo, commit, path):
-    """git cat-file -e of `path` at `commit` in `repo` under _git_read_env(), output captured."""
-    return subprocess.run(["git", "-C", str(repo), "cat-file", "-e", commit + ":" + path],
-                          capture_output=True, timeout=GIT_READ_TIMEOUT, env=_git_read_env())
+    """git cat-file -e of `path` at `commit` in `repo` under _no_replace_env(), output captured, so the
+    existence probe walks the same genuine objects the resolved pin and the blob reads name."""
+    return subprocess.run(["git", "--no-replace-objects", "-C", str(repo), "cat-file", "-e",
+                           commit + ":" + path],
+                          capture_output=True, timeout=GIT_READ_TIMEOUT, env=_no_replace_env())
+
+
+def _ls_tree_entry(repo, commit, path):
+    """git ls-tree -l of `path` at `commit` in `repo` under _no_replace_env(), output captured: the entry
+    read_at_revision checks (mode, type and size) before it reads any bytes, named through a :(literal)
+    pathspec so no wildcard is applied, from the genuine tree of the genuine commit."""
+    return subprocess.run(["git", "--no-replace-objects", "-C", str(repo), "ls-tree", "-l", "--full-tree",
+                           commit, "--", ":(literal)" + path],
+                          capture_output=True, timeout=GIT_READ_TIMEOUT, env=_no_replace_env())
+
+
+def _cat_blob(repo, commit, path):
+    """git cat-file blob of `path` at `commit` in `repo` under _no_replace_env(), output captured: the bytes
+    read_at_revision returns, from the same genuine objects the ls-tree entry named."""
+    return subprocess.run(["git", "--no-replace-objects", "-C", str(repo), "cat-file", "blob",
+                           commit + ":" + path],
+                          capture_output=True, timeout=GIT_READ_TIMEOUT, env=_no_replace_env())
 
 
 def _ownership_refused(probe):
@@ -2245,7 +2312,8 @@ def _ownership_refused(probe):
 def resolve_revision(repo, rev):
     """The full commit id a pinned revision names in `repo`, or CannotEvaluate: a revision that does not
     resolve, a repository git refuses for its ownership (named as such), or a git that cannot be launched or
-    times out, leaves the question open, never a pass."""
+    times out, leaves the question open, never a pass. The revision is resolved with replace objects
+    disabled (_rev_parse), so a refs/replace/* entry cannot redirect a pin at another commit."""
     try:
         probe = _rev_parse(repo, rev)
     except (OSError, subprocess.SubprocessError) as exc:
@@ -2912,7 +2980,8 @@ def pin_reaches(text, raw):
 def dispatch_commit(repo, ref):
     """The full commit id a dispatch ref names in `repo`, or None when no repository was given or it does not
     resolve there (unknown, refused for its ownership, git not launched or timed out): `repo` need not be the
-    server the worker fetches from, so a ref that does not resolve is not checked, not a refusal."""
+    server the worker fetches from, so a ref that does not resolve is not checked, not a refusal. The ref is
+    resolved with replace objects disabled (_rev_parse), like every pin."""
     if repo is None:
         return None
     try:
@@ -3040,12 +3109,277 @@ def rule_p6(names, row, repo):
     return findings
 
 
+# ---------- P7: accepted residuals at the pin ----------
+# a declaration is a column-zero line of the raw brief text: ACCEPTED-RESIDUAL: <anchor>
+RESIDUAL_LABEL = "ACCEPTED-RESIDUAL"
+ANCHOR_SEPARATOR = " :: "
+ANCHOR_SHAPE = "gate:<id>, hook:<id>, or <path> :: <symbol> :: <excerpt>"
+MANIFEST_RELS = dict(gate=".aiqt/core/gates/manifest.toml", hook=".aiqt/core/hooks/manifest.toml")
+# the symbol of an excerpt anchor that names a manifest residue field instead of a Python symbol
+RESIDUE_FIELD_RE = re.compile(r"(gate|hook):(\S+)\.residue\Z")
+P7_READ_MAX_BYTES = 1 << 20
+REGULAR_FILE_MODES = ("100644", "100755")
+
+
+def read_at_revision(repo, commit, path):
+    """The bytes of `path` at `commit` in `repo`, read from the object store (never HEAD, the index or the
+    working tree), or None when the commit has no entry at that path. Both reads run under GIT_READ_TIMEOUT
+    and _no_replace_env(), hermetic like the P3 reads (_cat_file keeps checking existence only). git ls-tree
+    (_ls_tree_entry) names the entry first, through a :(literal) pathspec so no wildcard is applied: only a
+    regular-file blob (mode 100644 or 100755) of at most P7_READ_MAX_BYTES is then read, with git cat-file
+    blob (_cat_blob); any other
+    entry (a symlink, a submodule, a directory), an oversized blob, a repository git refuses for its
+    ownership, and a git that fails, cannot be launched or times out are CannotEvaluate, never a pass. Both
+    reads disable object substitution (--no-replace-objects and GIT_NO_REPLACE_OBJECTS=1, as the release
+    schema and branch-root readers do), so a refs/replace/* entry cannot decide which bytes are read."""
+    def refusal(why):
+        return CannotEvaluate("cannot read {} at {} in {}: {}".format(path, commit, repo, why))
+    try:
+        probe = _ls_tree_entry(repo, commit, path)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise refusal(exc)
+    if _ownership_refused(probe):
+        raise refusal(OWNERSHIP_REMEDY)
+    if probe.returncode != 0:
+        raise refusal(probe.stderr.decode("utf-8", "replace").strip() or "git ls-tree failed")
+    listing = probe.stdout.decode("utf-8", "replace")
+    if not listing.strip():
+        return None
+    fields = listing.split("\t", 1)[0].split()
+    if len(fields) != 4 or fields[1] != "blob" or fields[0] not in REGULAR_FILE_MODES:
+        raise refusal("not a regular file at the pin (mode {})".format(fields[0] if fields else "unknown"))
+    if not fields[3].isdigit() or int(fields[3]) > P7_READ_MAX_BYTES:
+        raise refusal("larger than {} bytes".format(P7_READ_MAX_BYTES))
+    try:
+        blob = _cat_blob(repo, commit, path)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise refusal(exc)
+    if _ownership_refused(blob):
+        raise refusal(OWNERSHIP_REMEDY)
+    if blob.returncode != 0:
+        raise refusal(blob.stderr.decode("utf-8", "replace").strip() or "git cat-file failed")
+    if len(blob.stdout) > P7_READ_MAX_BYTES:
+        raise refusal("larger than {} bytes".format(P7_READ_MAX_BYTES))
+    return blob.stdout
+
+
+def residual_declarations(raw):
+    """[(line, anchor)] for the ACCEPTED-RESIDUAL declarations of the raw brief text, one per residual: a
+    column-zero line `ACCEPTED-RESIDUAL: <anchor>`, the anchor the rest of the line with surrounding
+    whitespace stripped (an excerpt's interior bytes are kept exactly). A column-zero line that opens with
+    the label but not with `ACCEPTED-RESIDUAL:` (another separator, a glued suffix such as
+    ACCEPTED-RESIDUALS) is a malformed declaration: CannotEvaluate, never ignored. The label anywhere else
+    (indented, mid-line, in code) is prose and declares nothing; rule_p7 prints it as ADVISORY at most."""
+    declarations = []
+    for number, line in enumerate(raw.split("\n"), 1):
+        if not line.startswith(RESIDUAL_LABEL):
+            continue
+        rest = line[len(RESIDUAL_LABEL):]
+        if not rest.startswith(":"):
+            raise CannotEvaluate("line {}: a column-zero {} line is not a declaration; write {}: "
+                                 "<anchor>".format(number, RESIDUAL_LABEL, RESIDUAL_LABEL))
+        declarations.append((number, rest[1:].strip()))
+    return declarations
+
+
+def residual_entries(data, kind, path, commit):
+    """The [[gate]] or [[hook]] rows of a manifest's bytes read at a pin, as id -> row: bytes that are not
+    UTF-8 TOML (a parser recursion and memory exhaustion included) and two rows with one id are
+    CannotEvaluate, never a pass; a row with no string id is skipped (it can anchor nothing)."""
+    try:
+        doc = tomllib.loads(data.decode("utf-8"))
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError, ValueError, RecursionError, MemoryError) as exc:
+        raise CannotEvaluate("{} at {}: not valid UTF-8 TOML: {}".format(path, commit, exc))
+    rows = doc.get(kind)
+    entries = dict()
+    for row in rows if isinstance(rows, list) else []:
+        if not isinstance(row, dict) or not isinstance(row.get("id"), str):
+            continue
+        if row["id"] in entries:
+            raise CannotEvaluate("{} at {}: two [[{}]] rows hold id {!r}".format(path, commit, kind, row["id"]))
+        entries[row["id"]] = row
+    return entries
+
+
+def _definition_nodes(body, name):
+    """The def and class statements of a body list named `name`."""
+    kinds = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+    return [node for node in body if isinstance(node, kinds) and node.name == name]
+
+
+def python_source_text(data, path, commit):
+    """The text Python reads from a source's bytes, or CannotEvaluate. The bytes are decoded as strict UTF-8
+    first (a leading byte order mark dropped), since ast column offsets count UTF-8 bytes of the decoded text
+    and would not match bytes in another encoding: bytes that are not UTF-8 are refused naming that cause,
+    whatever any cookie declares. The parser ends a line at CRLF, a lone CR or LF, so the first two lines are
+    then taken that way and each is read alone by tokenize.detect_encoding: a declared encoding (a coding
+    cookie or a byte order mark) whose codec is not UTF-8 is refused. A cookie on the second line is refused
+    even after a line of code, where Python ignores it: fail closed. An unknown or malformed cookie is
+    CannotEvaluate."""
+    try:
+        text = data.decode("utf-8-sig")
+    except UnicodeDecodeError as exc:
+        raise CannotEvaluate("{} at {}: not UTF-8 Python source: {}".format(path, commit, exc))
+    lines = data.replace(b"\r\n", b"\n").replace(b"\r", b"\n").split(b"\n", 2)[:2]
+    for line in lines:
+        try:
+            declared, _ = tokenize.detect_encoding(iter((line + b"\n",)).__next__)
+            name = codecs.lookup(declared).name
+        except (SyntaxError, LookupError, UnicodeDecodeError, ValueError) as exc:
+            raise CannotEvaluate("{} at {}: cannot read its encoding declaration: {}".format(path, commit, exc))
+        if name not in ("utf-8", "utf-8-sig"):
+            raise CannotEvaluate("{} at {}: declares the encoding {}; only UTF-8 Python source is read".format(
+                path, commit, declared))
+    return text
+
+
+def definition_segment(text, node, path, commit):
+    """The UTF-8 bytes of one definition's source, sliced by ast.get_source_segment from the decoded text,
+    which splits lines as the parser does (CRLF, a lone CR or LF, never a form feed), so the segment ends
+    where the definition ends; a node it cannot place (no position, a line or column outside the text, a
+    column inside a character) is CannotEvaluate, never an uncaught error."""
+    try:
+        segment = ast.get_source_segment(text, node)
+    except (IndexError, ValueError, TypeError, AttributeError, UnicodeError, RecursionError, MemoryError) as exc:
+        raise CannotEvaluate("{} at {}: cannot locate a definition's source: {!r}".format(path, commit, exc))
+    if segment is None:
+        raise CannotEvaluate("{} at {}: cannot locate a definition's source (no position)".format(path, commit))
+    return segment.encode("utf-8")
+
+
+def symbol_segments(data, symbol, path, commit):
+    """The byte segments of the Python definitions a qualified name reaches in a source read at a pin: the
+    source is decoded as Python reads it (python_source_text: UTF-8 only), parsed with ast and never
+    imported; each dotted part is matched, by exact name, against the statements directly in the previous
+    part's body (the module's at the start), so a name is found only inside its qualifier, never by a
+    whole-file search. Every match of the last part is returned (a name defined twice at one level gives
+    each segment), each sliced from the decoded text as the parser splits it (definition_segment) and
+    encoded as UTF-8, so a segment holds the definition's bytes exactly (decorators sit outside it; a CRLF
+    or lone CR line end keeps its carriage return). Source the parser cannot read is CannotEvaluate."""
+    text = python_source_text(data, path, commit)
+    try:
+        tree = ast.parse(text)
+    except (SyntaxError, UnicodeDecodeError, ValueError, RecursionError, MemoryError) as exc:
+        raise CannotEvaluate("{} at {}: cannot parse as Python: {}".format(path, commit, exc))
+    nodes = [tree]
+    for part in symbol.split("."):
+        nodes = [found for node in nodes for found in _definition_nodes(getattr(node, "body", []), part)]
+        if not nodes:
+            return []
+    return [definition_segment(text, node, path, commit) for node in nodes]
+
+
+def excerpt_in(excerpt, data):
+    """Whether a declared excerpt occurs inside the anchored bytes, byte for byte (the excerpt's utf-8
+    bytes; whitespace, case and CR against LF all count), bound here so the self-test can patch it red."""
+    return excerpt.encode("utf-8") in data
+
+
+def judge_residual(repo, commit, line, anchor):
+    """The P7 finding for one declaration's anchor at the resolved pin, or None when it holds (rule_p7)."""
+    def hard(message):
+        return ("P7", "HARD", line, message, _excerpt(anchor or RESIDUAL_LABEL + ":"))
+    if ANCHOR_SEPARATOR not in anchor:
+        kind, _, ident = anchor.partition(":")
+        if kind not in MANIFEST_RELS or not ident:
+            return hard("accepted-residual declaration with no anchor: name " + ANCHOR_SHAPE)
+        path = MANIFEST_RELS[kind]
+        data = read_at_revision(repo, commit, path)
+        if data is None:
+            return hard("the {} manifest ({}) does not exist at the pinned revision".format(kind, path))
+        row = residual_entries(data, kind, path, commit).get(ident)
+        if row is None:
+            return hard("{}:{} is not in {} at the pinned revision".format(kind, ident, path))
+        if not isinstance(row.get("residue"), str):
+            return hard("{}:{} has no residue field in {} at the pinned revision".format(kind, ident, path))
+        return None
+    path, _, rest = anchor.partition(ANCHOR_SEPARATOR)
+    symbol, separator, excerpt = rest.partition(ANCHOR_SEPARATOR)
+    path, symbol = path.strip(), symbol.strip()
+    if not separator or not path or not symbol or not excerpt:
+        raise CannotEvaluate("line {}: malformed accepted-residual anchor: write <path> :: <symbol> :: "
+                             "<excerpt>, two \" :: \" separators with no part empty".format(line))
+    data = read_at_revision(repo, commit, path)
+    if data is None:
+        return hard("{} does not exist at the pinned revision, so the symbol {} is absent "
+                    "there".format(path, symbol))
+    field = RESIDUE_FIELD_RE.fullmatch(symbol)
+    if field:
+        row = residual_entries(data, field.group(1), path, commit).get(field.group(2))
+        if row is None:
+            return hard("{}:{} is not in {} at the pinned revision".format(
+                field.group(1), field.group(2), path))
+        if not isinstance(row.get("residue"), str):
+            return hard("{} names no residue field in {} at the pinned revision".format(symbol, path))
+        # matched against the TOML-decoded value's utf-8 bytes, not the file's source bytes, so the
+        # excerpt reads like a reviewer reads the field: escapes applied, quotes removed
+        if not excerpt_in(excerpt, row["residue"].encode("utf-8")):
+            return hard("the excerpt does not occur byte-exact in the {} field of {} at the pinned "
+                        "revision".format(symbol, path))
+        return None
+    segments = symbol_segments(data, symbol, path, commit)
+    if not segments:
+        return hard("the symbol {} (a qualified def or class name) is not in {} at the pinned "
+                    "revision".format(symbol, path))
+    if not any(excerpt_in(excerpt, segment) for segment in segments):
+        return hard("the excerpt does not occur byte-exact inside the symbol {} in {} at the pinned "
+                    "revision (the whole file is never searched)".format(symbol, path))
+    return None
+
+
+def rule_p7(names, row, repo):
+    """P7 HARD, for every family: each accepted-residual declaration (residual_declarations: a column-zero
+    ACCEPTED-RESIDUAL: <anchor> line of the raw brief text, one per residual) must anchor its residual at
+    the brief's pinned revision: the first BRIEF-PIN line's value, else the first pin line's, resolved as in
+    P3. An anchor is gate:<id> or hook:<id>, accepting that control's whole residue field in the gates or
+    hooks manifest read at the pin and matched by exact id, or <path> :: <symbol> :: <excerpt>, split at the
+    first two " :: " separators, whose excerpt must occur byte-exact inside the named symbol at the pin
+    (judge_residual): a Python qualified def or class name located with ast and never imported, or
+    gate:<id>.residue / hook:<id>.residue naming a manifest field of the TOML file at <path>, matched
+    against the TOML-decoded value. A declaration with no anchor, or an anchor whose id, symbol or excerpt
+    is absent at the pin, is HARD; a malformed declaration or anchor, an unresolved or conflicting pin, a
+    brief with declarations and no pin or no repository, and pinned content that cannot be read or parsed
+    are CannotEvaluate, never a pass. Keyword-free residual prose is at most advisory: a line holding the
+    label outside a column-zero declaration prints one ADVISORY line and nothing is read at the pin."""
+    declarations = residual_declarations(names.raw)
+    advisory = [("P7", "ADVISORY", number, "the ACCEPTED-RESIDUAL label outside a column-zero declaration "
+                 "is prose and is not checked at the pin; declare it as ACCEPTED-RESIDUAL: <anchor> at "
+                 "column zero", _excerpt(line.strip()))
+                for number, line in enumerate(names.raw.split("\n"), 1)
+                if RESIDUAL_LABEL in line and not line.startswith(RESIDUAL_LABEL)]
+    if not declarations:
+        return advisory
+    if names.bad_pins:
+        raise CannotEvaluate("line {}: a REVIEWED HEAD or BRIEF-PIN line with no pin of 7 to 40 or 64 hex "
+                             "digits".format(names.bad_pins[0]))
+    conflict = brief_pin_conflict(names) or reviewed_head_conflict(names) or near_pin_conflict(names)
+    if conflict is not None:
+        raise CannotEvaluate(pin_conflict_message(conflict))
+    if not names.pins:
+        raise CannotEvaluate("the brief declares an accepted residual but pins no revision; add a BRIEF-PIN "
+                             "line for the anchors to be read at")
+    if repo is None:
+        raise CannotEvaluate("the brief declares an accepted residual but no repository was given to read "
+                             "the pin from")
+    commit = resolve_revision(repo, (names.brief_pins or names.pins)[0][1])
+    # every pin line must resolve to that one commit: two REVIEWED HEAD lines with no BRIEF-PIN line are not
+    # compared by the conflict checks above, and an anchor read at one of two revisions proves nothing
+    for number, pin in names.pins:
+        other = resolve_revision(repo, pin)
+        if other != commit:
+            raise CannotEvaluate("line {}: the pin {} resolves to {}, not to {}, the revision the anchors are "
+                                 "read at; the accepted residuals are read at one revision, so every REVIEWED "
+                                 "HEAD and BRIEF-PIN line must name it".format(number, pin, other, commit))
+    findings = [judge_residual(repo, commit, line, anchor) for line, anchor in declarations]
+    return [finding for finding in findings if finding is not None] + advisory
+
+
 def preflight(text, row, repo, raw):
-    """The preflight findings (P1 to P6) for a brief's text and its family's row; they apply to every family. `raw`
-    is the text before decode_brief removed format characters, which the P5 cure reads."""
+    """The preflight findings (P1 to P7) for a brief's text and its family's row; they apply to every family. `raw`
+    is the text before decode_brief removed format characters, which the P5 cure and the P7 declarations read."""
     names = PreflightText(text, raw)
     return rule_p1(names, row, repo) + rule_p2(names, row, repo) + rule_p3(names, row, repo) + rule_p4(
-        names, row, repo) + rule_p5(names, row, repo) + rule_p6(names, row, repo)
+        names, row, repo) + rule_p5(names, row, repo) + rule_p6(names, row, repo) + rule_p7(names, row, repo)
 
 
 def can_execute(row):
@@ -3108,7 +3442,7 @@ COMMAND_LINE_HINT = ("to ask about a command line, name the function, row or ent
                      "embedding the command (for example: quote the def line of X, not the line that runs git push)")
 
 
-PREFLIGHT_RULES = frozenset(("P1", "P2", "P3", "P4", "P5", "P6"))
+PREFLIGHT_RULES = frozenset(("P1", "P2", "P3", "P4", "P5", "P6", "P7"))
 # added to a REFUSE line when a P6 hit is among the hard hits
 INPUT_HINT = "; provide each missing declared input, or correct its INPUT line, before sending"
 
@@ -3139,6 +3473,10 @@ def run(brief_path, family, table_path, scoped=True, repo=None):
     elif code == EXIT_REFUSE and set(hard) == {"P6"}:
         print("REFUSE: family {}: the brief declares an input that does not exist on this host ({} hard hit(s): "
               "P6 x{}){}".format(family, len(hard), len(hard), INPUT_HINT))
+    elif code == EXIT_REFUSE and set(hard) == {"P7"}:
+        print("REFUSE: family {}: the brief accepts a residual whose anchor does not hold at the pinned "
+              "revision ({} hard hit(s): P7 x{}); correct each ACCEPTED-RESIDUAL line ({}), or re-pin the "
+              "brief".format(family, len(hard), len(hard), ANCHOR_SHAPE))
     elif code == EXIT_REFUSE:
         print("REFUSE: family {}: the brief names an input the family cannot read ({} hard hit(s): {}); name "
               "paths under the declared workdir, or state a path the worker must not use as a prohibition{}".format(
@@ -3903,10 +4241,246 @@ LINEAR_FACTOR, LINEAR_SLACK, LINEAR_TIMEOUT = 16, 1.0, 120
 # start, the kill, the reap and the result decode measured 0.04 to 0.14 s past the deadline on the two
 # old-ceiling shapes (an 80-cpu host at one-minute load averages 35 to 43), so three seconds is wide
 DEADLINE_MARGIN_SECONDS = 3.0
+# The deadline rows judge a whole read() by wall clock against one fixed bound, _deadline_bound():
+# PARSE_DEADLINE_SECONDS, a wall-clock count by construction (the parent's communicate timeout), plus
+# DEADLINE_MARGIN_SECONDS for the parent's own work around that wait (the child's spawn, the wake-up at
+# the timeout, the group kill, the reap, the result decode). Neither part is scaled by any reading of
+# host load. How much CPU time one parse of a ceiling shape needs is a fact about the host (its CPU
+# speed and its Python build), not something this code can hold, so no row requires one parse of a
+# fixed text to outlast the bound: a runner fast enough parses a ceiling shape in less. What
+# parse/deadline-cap-under-uncut-parse holds is the cut itself: with the deadline lifted, its probe
+# parses each ceiling shape again and again, in a loop that does nothing but call read(), until a CPU
+# timer armed at the bound cuts it, and requires that cut to land inside that loop (its frame on the
+# cut's stack) after the bound, with at least one entry into the vendored parser before it
+# (_cap_probe_held), so a parse still running at the bound is ended only by the timer and only once the
+# bound is spent. The loop removes the dependence on how long one parse takes: a cut between two parses
+# lands in the loop's own frame and counts like one inside the parser. Because that frame is on the
+# stack wherever the cut lands, the frame alone does not show the parser ran; the count of parser
+# entries does, so a loop that never reaches the parser reads False. It guarantees nothing more: a child
+# ended any other way, or a timer that never fires, still reads False. With the timer removed the
+# repeated parse never ends and the row reads False.
+# parse/deadline-cap-under-eighth-parse shows the same at one eighth of the ceiling, where one parse
+# ends far inside the bound. The timer is armed at the bound itself, with no margin above it
+# (parse/deadline-cap-armed-at-bound reads it back). The two old-ceiling shapes are shown past the
+# bound by revert/parse-thread-join-red.
+# the probe child for parse/deadline-cap-under-uncut-parse: it builds one ceiling shape (argv[2] its
+# repeated unit, behind the self-test's parse-forcing lead), loads the vendored parser, replaces the
+# thread join with a direct call (so the parse runs in this main thread with no deadline), wraps the
+# vendored parser's entry point (marko's Parser.parse) so each entry is counted, turns core files off,
+# sets a SIGPROF handler that raises Cut, writes UNCUT_PARSE_MARKER, reads its own thread's CPU clock
+# and then the process's, arms the one-shot ITIMER_PROF CPU timer at argv[3] seconds and makes the call
+# UNCUT_PARSE_CALL, whose loop (parse_again) reads the text again and again until something ends it, so
+# the loop is still running when the timer reaches argv[3]. Without nohz_full the kernel fires that
+# timer on CPU time it charges a whole clock tick at a time, which can reach argv[3] while the exact CPU
+# clocks read just under it, so the handler raises Cut only once the process's exact CPU clock shows
+# argv[3] seconds since its reading: a timer that fired, and so stands disarmed, while that clock is
+# still short is armed again for the rest and the call goes on. A SIGPROF that arrives while the timer
+# is still armed is not that timer's own and raises Cut at once, whatever the clock shows; several
+# stand-ins in CAP_STANDINS send one on purpose while the timer is armed, and their cuts report less
+# than argv[3]. Apart from such a SIGPROF sent within about one clock tick after argv[3], while Linux
+# still holds the timer armed, only a cut raised because the process's clock showed argv[3] reports at
+# least argv[3]: both clocks are read before the timer is armed, the thread's first, in a process that
+# runs only this thread, so when that Cut ends the call the thread has spent at least argv[3] seconds
+# since its reading. When the timer cuts the call, Cut ends it; the child then reads, after the call,
+# the CPU time its own thread spent inside the call and how many frames of the parse were on the stack
+# where the cut landed (the loop's own frame and those of the vendored parser's code), and how many
+# times the call entered the vendored parser, writes all three as one report line, and ends itself by
+# the signal that cut it at that signal's default action, so its exit status names that signal. A call
+# that returns or is refused writes no report and exits 0.
+UNCUT_PARSE_MARKER = b"parsing\n"
+UNCUT_PARSE_CALL = "    parse_again()\n"
+# the one-parse call of CAP_ONE_PARSE_PROBE, which returns when its single parse ends
+CAP_ONE_PARSE_CALL = "    m.read(text)\n"
+UNCUT_PARSE_PROBE = (
+    "import os, resource, signal, sys, time, traceback\n"
+    "sys.path.insert(0, sys.argv[1])\n"
+    "import _input_declarations as m\n"
+    "class Cut(BaseException):\n"
+    "    pass\n"
+    "def cut(signum, frame):\n"
+    "    left = float(sys.argv[3]) - (time.process_time() - began_process)\n"
+    "    if left > 0 and signal.getitimer(signal.ITIMER_PROF) == (0.0, 0.0):\n"
+    "        signal.setitimer(signal.ITIMER_PROF, left)\n"
+    "        return\n"
+    "    raise Cut(signum)\n"
+    "def parse_again():\n"
+    "    while True:\n"
+    "        m.read(text)\n"
+    "m.PARSE_IN_CHILD = False\n"
+    "m._joined_parse = lambda text: m._serialize(m._parse_document(text))\n"
+    "marko = m._load_marko()[0]\n"
+    "parser = os.path.join(os.path.dirname(marko.__file__), '')\n"
+    "entered = []\n"
+    "enter_parser = marko.parser.Parser.parse\n"
+    "def count_entry(self, text):\n"
+    "    entered.append(True)\n"
+    "    return enter_parser(self, text)\n"
+    "marko.parser.Parser.parse = count_entry\n"
+    "lead = 'Input notes.' + chr(10) + chr(10)\n"
+    "unit = sys.argv[2]\n"
+    "text = lead + unit * ((m.MAX_TEXT_BYTES - len(lead) - 1) // len(unit)) + chr(10)\n"
+    "resource.setrlimit(resource.RLIMIT_CORE, (0, 0))\n"
+    "signal.signal(signal.SIGPROF, cut)\n"
+    "sys.stdout.write('parsing' + chr(10))\n"
+    "sys.stdout.flush()\n"
+    "began = time.thread_time()\n"
+    "began_process = time.process_time()\n"
+    "signal.setitimer(signal.ITIMER_PROF, float(sys.argv[3]))\n"
+    "try:\n"
+    + UNCUT_PARSE_CALL +
+    "except m.DeclarationError:\n"
+    "    pass\n"
+    "except Cut as stop:\n"
+    "    signal.setitimer(signal.ITIMER_PROF, 0)\n"
+    "    spent = time.thread_time() - began\n"
+    "    frames = sum(1 for frame, _ in traceback.walk_tb(stop.__traceback__)\n"
+    "                 if frame.f_code is parse_again.__code__\n"
+    "                 or frame.f_code.co_filename.startswith(parser))\n"
+    "    sys.stdout.write('cut %r %d %d' % (spent, frames, len(entered)) + chr(10))\n"
+    "    sys.stdout.flush()\n"
+    "    signal.signal(stop.args[0], signal.SIG_DFL)\n"
+    "    os.kill(os.getpid(), stop.args[0])\n"
+    "    time.sleep(5)\n")
+# UNCUT_PARSE_PROBE with its repeated call replaced by one parse (CAP_ONE_PARSE_CALL), for
+# parse/deadline-cap-refuses-parse-under-bound: a parse that ends before the timer reaches the bound
+# returns, and the child exits 0 with no report
+CAP_ONE_PARSE_PROBE = UNCUT_PARSE_PROBE.replace(UNCUT_PARSE_CALL, CAP_ONE_PARSE_CALL)
+
+
+def _probe_replaced(source, old, new):
+    """`source` with its one occurrence of `old` replaced by `new`. Raises ValueError when `old` occurs
+    in `source` any number of times but once, so a probe whose text has moved fails at import instead
+    of silently running unchanged."""
+    if source.count(old) != 1:
+        raise ValueError("probe text {!r} occurs {} times, not once".format(old, source.count(old)))
+    return source.replace(old, new)
+
+
+# UNCUT_PARSE_PROBE with each shape filled to one eighth of the ceiling, for
+# parse/deadline-cap-under-eighth-parse: one parse of such a shape ends far inside the bound, so only
+# the repeated parse is still running when the timer reaches it, and many short parses put many
+# between-parse spans in the timer's way. CAP_FULL_FILL is the probe's full-size fill, the text the
+# change replaces; _probe_replaced refuses the change if that text is gone
+CAP_FULL_FILL = "(m.MAX_TEXT_BYTES - len(lead) - 1)"
+CAP_EIGHTH_PROBE = _probe_replaced(UNCUT_PARSE_PROBE, CAP_FULL_FILL,
+                                   "(m.MAX_TEXT_BYTES // 8 - len(lead) - 1)")
+# the probe's whole output when the timer cut its parse: the marker, then one report line of the CPU
+# seconds its thread spent inside the call, the frames of the parse on the cut's stack (the loop's own
+# frame and those of the vendored parser's code) and how many times the call entered the vendored
+# parser before the cut; the parent keeps at most CAP_OUTPUT_LIMIT bytes of it, more than any output
+# this pattern can match
+CAP_REPORT_PATTERN = rb"cut ([0-9.e+-]{1,32}) ([0-9]{1,6}) ([0-9]{1,9})\n"
+CAP_OUTPUT_LIMIT = 4096
+# stand-in probe children for the rows that show _cap_probe_held refusing a child whose parse the CPU
+# timer did not end, and (the last one) for parse/deadline-cap-holds-past-early-timer; all but the first
+# and forged-report-sigkill are UNCUT_PARSE_PROBE with its parse call or its loop's body replaced, so
+# they report through the probe's own code: one kills itself with SIGKILL before any marker; one sends
+# itself SIGPROF at once; one sleeps for its CPU budget and then sends itself SIGPROF; one starts a
+# thread that burns CPU until the timer fires while this main thread sleeps; one burns the CPU in this
+# main thread outside the parser; one is cut by a SIGPROF it sends itself from inside the parser's own
+# call chain, at once; one, loop-without-parser, runs the repeated-parse loop with its read() replaced
+# by arithmetic, so the timer cuts it inside the loop after the bound but the parser was never entered;
+# and one writes the marker and a report that meets every requirement and then kills itself with
+# SIGKILL. The last one, timer-early-inside-parser, is the real parse with the timer made to fire early
+# once: on entering the parser's link and emphasis scan it disarms the timer and sends itself SIGPROF,
+# as a tick-charged timer does when its clock runs ahead of the exact one, and the parse must still be
+# cut only after it has spent the bound. cut-inside-parser-at-once and timer-early-inside-parser both
+# install their wrapper and then make the repeated-parse call
+CAP_STANDINS = (
+    ("sigkill-before-marker",
+     "import os, signal\n"
+     "os.kill(os.getpid(), signal.SIGKILL)\n"),
+    ("sigprof-at-once", UNCUT_PARSE_PROBE.replace(
+        UNCUT_PARSE_CALL,
+        "    os.kill(os.getpid(), signal.SIGPROF)\n"
+        "    time.sleep(5)\n")),
+    ("sleep-then-sigprof", UNCUT_PARSE_PROBE.replace(
+        UNCUT_PARSE_CALL,
+        "    time.sleep(float(sys.argv[3]))\n"
+        "    os.kill(os.getpid(), signal.SIGPROF)\n"
+        "    time.sleep(5)\n")),
+    ("busy-thread-until-limit", UNCUT_PARSE_PROBE.replace(
+        UNCUT_PARSE_CALL,
+        "    import threading\n"
+        "    def burn():\n"
+        "        while time.thread_time() < 2 * float(sys.argv[3]):\n"
+        "            pass\n"
+        "    threading.Thread(target=burn, daemon=True).start()\n"
+        "    for _ in range(12000):\n"
+        "        time.sleep(0.05)\n")),
+    ("busy-main-until-limit", UNCUT_PARSE_PROBE.replace(
+        UNCUT_PARSE_CALL,
+        "    while time.thread_time() < began + 2 * float(sys.argv[3]):\n"
+        "        pass\n")),
+    ("cut-inside-parser-at-once", UNCUT_PARSE_PROBE.replace(
+        UNCUT_PARSE_CALL,
+        "    import marko.inline_parser as inline\n"
+        "    found = inline.find_links_or_emphs\n"
+        "    def cut_here(*args):\n"
+        "        os.kill(os.getpid(), signal.SIGPROF)\n"
+        "        time.sleep(5)\n"
+        "        return found(*args)\n"
+        "    inline.find_links_or_emphs = cut_here\n"
+        + UNCUT_PARSE_CALL)),
+    ("loop-without-parser", _probe_replaced(
+        UNCUT_PARSE_PROBE, "        m.read(text)\n", "        sum(range(100000))\n")),
+    ("forged-report-sigkill",
+     "import os, signal, sys\n"
+     "sys.stdout.write('parsing' + chr(10) + 'cut 1000.0 9 9' + chr(10))\n"
+     "sys.stdout.flush()\n"
+     "os.kill(os.getpid(), signal.SIGKILL)\n"),
+    ("timer-early-inside-parser", UNCUT_PARSE_PROBE.replace(
+        UNCUT_PARSE_CALL,
+        "    import marko.inline_parser as inline\n"
+        "    found, fired = inline.find_links_or_emphs, []\n"
+        "    def fire_early(*args):\n"
+        "        if not fired:\n"
+        "            fired.append(True)\n"
+        "            signal.setitimer(signal.ITIMER_PROF, 0)\n"
+        "            os.kill(os.getpid(), signal.SIGPROF)\n"
+        "        return found(*args)\n"
+        "    inline.find_links_or_emphs = fire_early\n"
+        + UNCUT_PARSE_CALL)))
+# a stand-in probe child for parse/deadline-cap-armed-at-bound: UNCUT_PARSE_PROBE with its parse call
+# replaced by a read-back (getitimer) of the CPU timer the probe has just armed, written as one line
+# after the marker; the child then exits 0 with no cut. It is started by _cap_probe_readings like every
+# probe, so the read-back shows both the CPU budget that function passes and the probe's own arming
+CAP_ARMED_PROBE = UNCUT_PARSE_PROBE.replace(
+    UNCUT_PARSE_CALL,
+    "    sys.stdout.write('armed %r' % (signal.getitimer(signal.ITIMER_PROF)[0],) + chr(10))\n"
+    "    sys.stdout.flush()\n")
+CAP_ARMED_PATTERN = rb"armed ([0-9.e+-]{1,32})\n"
+# how far, in CPU seconds and at either end, the read-back of the probe's armed timer may lie from the
+# bound: Linux adds one clock tick (at most 10 ms, at HZ=100) to an ITIMER_PROF value it arms, and the
+# probe spends a few microseconds of CPU between arming and the read-back, so two of the coarsest ticks
+# cover both; a timer armed further above the bound (the old cut at 1.2 times the bound among them)
+# reads False. This is the read-back's tolerance only; it moves no bound or margin of the deadline rows
+CAP_ARMED_TOLERANCE = 0.02
+# the CPU seconds the re-arm stand-in spends before its timer is made to fire early: far above the
+# coarsest clock tick and far under the bound, so the rest it must re-arm for differs from the bound by
+# much more than CAP_ARMED_TOLERANCE
+CAP_REARM_SPENT = 1.0
+# a stand-in probe child for parse/deadline-cap-rearms-for-rest: UNCUT_PARSE_PROBE with its parse call
+# replaced by a busy loop in this main thread until the process's exact CPU clock shows CAP_REARM_SPENT
+# seconds since its reading, then the timer disarmed and SIGPROF sent, as a tick-charged timer fires
+# early (os.kill runs the Python handler before it returns when the signal is sent to this process).
+# The handler should arm the timer again for the rest of the bound; the child reads that timer back
+# (getitimer) and then the process's CPU seconds since its reading, writes both as one line after the
+# marker and exits 0 with no cut
+CAP_REARM_PROBE = UNCUT_PARSE_PROBE.replace(
+    UNCUT_PARSE_CALL,
+    "    while time.process_time() - began_process < %r:\n"
+    "        pass\n"
+    "    signal.setitimer(signal.ITIMER_PROF, 0)\n"
+    "    os.kill(os.getpid(), signal.SIGPROF)\n"
+    "    sys.stdout.write('rearmed %%r %%r' %% (signal.getitimer(signal.ITIMER_PROF)[0],\n"
+    "                                         time.process_time() - began_process) + chr(10))\n"
+    "    sys.stdout.flush()\n" % (CAP_REARM_SPENT,))
+CAP_REARM_PATTERN = rb"rearmed ([0-9.e+-]{1,32}) ([0-9.e+-]{1,32})\n"
 # the probe child for revert/parse-thread-join-red: it runs the shared reading with the thread join
 # restored (PARSE_IN_CHILD=False) over one shape at the old ceiling and never returns within the
 # deadline (the join's timeout cannot fire while one regex match holds the GIL); the parent shows it
-# still running at the deadline plus DEADLINE_MARGIN_SECONDS and kills its process group
+# still running at _deadline_bound(), the bound the deadline rows judge, and kills its process group
 THREAD_JOIN_PROBE = (
     "import sys\n"
     "sys.path.insert(0, sys.argv[1])\n"
@@ -3919,6 +4493,240 @@ THREAD_JOIN_PROBE = (
     "    m.read(text)\n"
     "except m.DeclarationError:\n"
     "    pass\n")
+
+
+def _deadline_bound():
+    """The wall seconds a read() through the parse deadline may take: the deadline itself plus
+    DEADLINE_MARGIN_SECONDS, both fixed (see the comment above UNCUT_PARSE_MARKER)."""
+    return _input_declarations.PARSE_DEADLINE_SECONDS + DEADLINE_MARGIN_SECONDS
+
+
+def _deadline_held(read, text, clock=time.monotonic):
+    """(how read(text) ended, "answered" or "refused", whether its wall time held _deadline_bound()).
+    The wall clock is a seam the boundary row drives with set timings, so that row judges this
+    function's own comparison."""
+    began = clock()
+    try:
+        read(text)
+        ended = "answered"
+    except _input_declarations.DeclarationError:
+        ended = "refused"
+    return ended, clock() - began <= _deadline_bound()
+
+
+def _deadline_boundary_reading():
+    """What _deadline_held itself returns at the end of its bound, driven with set timings: a read that
+    took 1 ms under the bound, exactly the bound, and 1 ms over it (the clock reads 0 when the call
+    begins, so the elapsed time is exact), each answered and refused. The bound is written out here as
+    the deadline plus the margin, not taken from _deadline_bound, so a change to either the bound or the
+    comparison moves the reading."""
+    def answer(text):
+        return text
+
+    def refuse(text):
+        raise _input_declarations.DeclarationError("a stand-in refusal")
+
+    bound = _input_declarations.PARSE_DEADLINE_SECONDS + DEADLINE_MARGIN_SECONDS
+    row = []
+    for elapsed in (bound - 0.001, bound, bound + 0.001):
+        for read in (answer, refuse):
+            row.append(_deadline_held(read, "", iter((0.0, elapsed)).__next__))
+    return bound, row
+
+
+def _cap_probe_held(code, output):
+    """Whether one probe child's exit status and whole output (at most CAP_OUTPUT_LIMIT bytes kept) show
+    its parse cut by the CPU timer after it spent at least _deadline_bound() of CPU time: the child was
+    ended by SIGPROF, the timer's signal (not SIGKILL, SIGXCPU nor any other), its output is
+    UNCUT_PARSE_MARKER and then exactly one report line (CAP_REPORT_PATTERN), and that line gives at least
+    _deadline_bound() CPU seconds spent by the child's own thread inside the parse call, at least one
+    frame of the parse (the probe's repeated-parse loop or the vendored parser's code) on the stack where
+    the cut landed, and at least one entry into the vendored parser before the cut. The frame shows only
+    that the cut landed inside the call, since the loop's own frame is on the stack wherever in the loop
+    it lands; the entry count, taken by a wrapper around the parser's entry point, shows the parser ran.
+    All three readings are the child's own, taken after the call in the thread that made it, so CPU
+    spent by another thread, time spent in a sleep, a cut outside the call, a loop that never enters the
+    parser and a delay in this parent each read False. A call that enters the parser once and then
+    spends the bound elsewhere inside the call is not detected, nor is a child written to forge the
+    report line."""
+    if code != -signal.SIGPROF or not output.startswith(UNCUT_PARSE_MARKER):
+        return False
+    report = re.fullmatch(CAP_REPORT_PATTERN, output[len(UNCUT_PARSE_MARKER):])
+    if report is None:
+        return False
+    try:
+        spent = float(report.group(1))
+    except ValueError:
+        return False
+    return spent >= _deadline_bound() and int(report.group(2)) >= 1 and int(report.group(3)) >= 1
+
+
+def _cap_report_boundary_reading():
+    """What _cap_probe_held returns for set exit statuses and outputs: a report of 1 ms under the bound,
+    exactly the bound and 1 ms over it with one frame of the parse (the loop's or a parser frame) and one
+    parser entry; the bound plus one second with no frame of the parse, and with no parser entry; that
+    report under SIGKILL, under SIGXCPU and under exit status 0; with no marker before it; and with a
+    second report line after it. The bound is written out as the deadline plus the margin."""
+    bound = _input_declarations.PARSE_DEADLINE_SECONDS + DEADLINE_MARGIN_SECONDS
+
+    def report(spent, frames, entries=1):
+        return UNCUT_PARSE_MARKER + "cut {!r} {} {}\n".format(spent, frames, entries).encode("ascii")
+
+    prof, kill, xcpu = -signal.SIGPROF, -signal.SIGKILL, -signal.SIGXCPU
+    over = report(bound + 1.0, 1)
+    return [_cap_probe_held(code, output) for code, output in (
+        (prof, report(bound - 0.001, 1)), (prof, report(bound, 1)), (prof, report(bound + 0.001, 1)),
+        (prof, report(bound + 1.0, 0)), (prof, report(bound + 1.0, 1, 0)), (kill, over), (xcpu, over),
+        (0, over),
+        (prof, over[len(UNCUT_PARSE_MARKER):]), (prof, over + over[len(UNCUT_PARSE_MARKER):]))]
+
+
+def _cap_armed_at_bound(armed):
+    """Whether a read-back of the probe's armed CPU timer, `armed` seconds, lies within
+    CAP_ARMED_TOLERANCE of _deadline_bound() at either end (both ends inclusive)."""
+    return _deadline_bound() - CAP_ARMED_TOLERANCE <= armed <= _deadline_bound() + CAP_ARMED_TOLERANCE
+
+
+def _cap_armed_held(code, output):
+    """Whether one CAP_ARMED_PROBE child's exit status and whole output show its timer armed at the
+    bound: it exited 0, its output is UNCUT_PARSE_MARKER and then exactly one read-back line
+    (CAP_ARMED_PATTERN), and that read-back is at the bound (_cap_armed_at_bound)."""
+    if code != 0 or not output.startswith(UNCUT_PARSE_MARKER):
+        return False
+    report = re.fullmatch(CAP_ARMED_PATTERN, output[len(UNCUT_PARSE_MARKER):])
+    if report is None:
+        return False
+    try:
+        armed = float(report.group(1))
+    except ValueError:
+        return False
+    return _cap_armed_at_bound(armed)
+
+
+def _cap_armed_boundary_reading():
+    """What _cap_armed_at_bound returns for set read-backs: 1 ms outside, exactly at and 1 ms inside the
+    low end of its window, exactly the bound, 1 ms inside, exactly at and 1 ms outside the high end, and
+    the old cut of 1.2 times the bound. The bound is written out as the deadline plus the margin."""
+    bound = _input_declarations.PARSE_DEADLINE_SECONDS + DEADLINE_MARGIN_SECONDS
+    low, high = bound - CAP_ARMED_TOLERANCE, bound + CAP_ARMED_TOLERANCE
+    return [_cap_armed_at_bound(armed) for armed in (
+        low - 0.001, low, low + 0.001, bound, high - 0.001, high, high + 0.001, bound * 1.2)]
+
+
+def _cap_rearmed_for_rest(armed, spent):
+    """Whether a read-back of the re-armed CPU timer, `armed` seconds, taken when the process had spent
+    `spent` CPU seconds since its reading, is the rest of the bound: `spent` is at least CAP_REARM_SPENT
+    and `armed` lies within CAP_ARMED_TOLERANCE of _deadline_bound() minus `spent` at either end (both
+    ends inclusive). A re-arm for the whole bound reads about CAP_REARM_SPENT less CAP_ARMED_TOLERANCE above
+    that window."""
+    rest = _deadline_bound() - spent
+    return spent >= CAP_REARM_SPENT and rest - CAP_ARMED_TOLERANCE <= armed <= rest + CAP_ARMED_TOLERANCE
+
+
+def _cap_rearmed_held(code, output):
+    """Whether one CAP_REARM_PROBE child's exit status and whole output show its timer, made to fire
+    early, armed again for the rest of the bound: it exited 0 (a handler that cut at that fire ends it
+    by SIGPROF), its output is UNCUT_PARSE_MARKER and then exactly one read-back line
+    (CAP_REARM_PATTERN), and that read-back is the rest (_cap_rearmed_for_rest)."""
+    if code != 0 or not output.startswith(UNCUT_PARSE_MARKER):
+        return False
+    report = re.fullmatch(CAP_REARM_PATTERN, output[len(UNCUT_PARSE_MARKER):])
+    if report is None:
+        return False
+    try:
+        armed, spent = float(report.group(1)), float(report.group(2))
+    except ValueError:
+        return False
+    return _cap_rearmed_for_rest(armed, spent)
+
+
+def _cap_rearmed_boundary_reading():
+    """What _cap_rearmed_for_rest returns for set read-backs after CAP_REARM_SPENT seconds: 1 ms outside,
+    exactly at and 1 ms inside the low end of its window, exactly the rest, 1 ms inside, exactly at and
+    1 ms outside the high end, and the whole bound; then the rest after 1 ms under CAP_REARM_SPENT. The
+    bound is written out as the deadline plus the margin."""
+    bound = _input_declarations.PARSE_DEADLINE_SECONDS + DEADLINE_MARGIN_SECONDS
+    spent = CAP_REARM_SPENT
+    rest = bound - spent
+    low, high = rest - CAP_ARMED_TOLERANCE, rest + CAP_ARMED_TOLERANCE
+    under = spent - 0.001
+    return [_cap_rearmed_for_rest(armed, spent) for armed in (
+        low - 0.001, low, low + 0.001, rest, high - 0.001, high, high + 0.001, bound)] + [
+        _cap_rearmed_for_rest(bound - under, under)]
+
+
+def _cap_probe_readings(runs, timeout=600, held=_cap_probe_held):
+    """`held` (by default _cap_probe_held) for each (probe source, ceiling unit, pause) run: every child
+    is started at once, each in its own process group, with argv this tool's directory, the unit, and
+    the CPU budget _deadline_bound() itself; `pause` is called once in this process when that child's
+    output ends, before the end is recorded (the parent pause stand-in). A child still running after
+    `timeout` wall seconds reads False, and every group is killed before this returns."""
+    spend = _deadline_bound()
+    probes, output, ended, readings = [], {}, set(), []
+    try:
+        for source, unit, _ in runs:
+            probes.append(subprocess.Popen([sys.executable, "-I", "-B", "-c", source,
+                                            str(Path(__file__).resolve().parent), unit, repr(spend)],
+                                           stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                           start_new_session=True))
+        until = time.monotonic() + timeout
+        with selectors.DefaultSelector() as selector:
+            for probe, (_, _, pause) in zip(probes, runs):
+                selector.register(probe.stdout, selectors.EVENT_READ, (probe, pause))
+                output[probe.pid] = b""
+            while selector.get_map() and time.monotonic() < until:
+                for key, _ in selector.select(max(0.0, until - time.monotonic())):
+                    probe, pause = key.data
+                    chunk = os.read(key.fd, 4096)
+                    if not chunk:
+                        pause()
+                        ended.add(probe.pid)
+                        selector.unregister(key.fileobj)
+                        continue
+                    output[probe.pid] = (output[probe.pid] + chunk)[:CAP_OUTPUT_LIMIT]
+        for probe in probes:
+            try:
+                code = probe.wait(timeout=max(0.0, until - time.monotonic())) if probe.pid in ended else None
+            except subprocess.TimeoutExpired:
+                code = None
+            readings.append(code is not None and held(code, output[probe.pid]))
+    finally:
+        for probe in probes:
+            try:
+                os.killpg(probe.pid, signal.SIGKILL)
+            except OSError:
+                probe.kill()
+            probe.communicate()
+    return readings
+
+
+def _cap_under_uncut_parse(units=("_a", "x<?"), timeout=600, source=UNCUT_PARSE_PROBE):
+    """One reading for each repeated unit in `units` (by default those of the two ceiling shapes of
+    parse/deadline-held-at-ceiling, the underscore-mark run and the <? opener paragraph): whether the
+    probe `source` (by default UNCUT_PARSE_PROBE, which parses the text again and again until it is cut)
+    run on the text that unit fills shows its call cut by a CPU timer of exactly _deadline_bound() after
+    spending at least _deadline_bound() of its own thread's CPU time inside the call and entering the
+    vendored parser at least once (_cap_probe_held). With the repeated parse the reading does not depend
+    on the shape or on how long one parse of it takes, so it does not show that one parse of a ceiling
+    shape outlasts the bound."""
+    return _cap_probe_readings([(source, unit, lambda: None) for unit in units], timeout)
+
+
+def _cap_eighth_replaced_reading():
+    """(whether CAP_EIGHTH_PROBE differs from UNCUT_PARSE_PROBE, whether its full-size fill CAP_FULL_FILL
+    is gone and the one-eighth fill appears once, and the name of the exception _probe_replaced raises
+    for a target missing from the probe and for one that occurs twice, None where it raises none)."""
+    def raised(source, old):
+        try:
+            _probe_replaced(source, old, "")
+        except ValueError as exc:
+            return type(exc).__name__
+        return None
+
+    return (CAP_EIGHTH_PROBE != UNCUT_PARSE_PROBE,
+            CAP_FULL_FILL not in CAP_EIGHTH_PROBE and CAP_EIGHTH_PROBE.count("MAX_TEXT_BYTES // 8") == 1,
+            raised(UNCUT_PARSE_PROBE, CAP_FULL_FILL.replace("- 1)", "- 2)")),
+            raised(UNCUT_PARSE_PROBE + CAP_FULL_FILL, CAP_FULL_FILL))
 # a stand-in parse child: _CHILD_PATH is pointed at a script that opens with this prefix (the text read
 # from stdin, the script's own directory as `here`) and then runs one vector's body, so each way a child
 # can end is shown against the parent's reading of it
@@ -4129,6 +4937,154 @@ def _child_commit(repo, commit):
                            "maintenance.auto=false", "commit-tree", commit + "^{tree}", "-p", commit, "-m", "child"],
                           check=True, capture_output=True, timeout=60, env=env)
     return made.stdout.decode("ascii").strip()
+
+
+# P7 fixture content: the old gates manifest holds a residue with a TOML-escaped CRLF (its decoded value
+# holds a real carriage return and line feed) and a row with no residue field; the module holds the needle
+# inside one function, a different needle outside every definition, and one inside a nested method
+P7_GATES_OLD = ('[[gate]]\nid = "g1"\nresidue = "old gate residue win\\r\\nend"\n\n'
+                '[[gate]]\nid = "noresidue"\nscript = "x"\n')
+P7_GATES_NEW = '[[gate]]\nid = "g1"\nresidue = "new gate residue"\n'
+P7_GATES_INVALID = "[[gate]\n"
+P7_GATES_DUPLICATE = '[[gate]]\nid = "g1"\nresidue = "a"\n\n[[gate]]\nid = "g1"\nresidue = "b"\n'
+P7_HOOKS = '[[hook]]\nid = "h1"\nresidue = "old hook residue"\n'
+P7_MODULE_OLD = ('OUTSIDE = "needle outside symbol"\n\n\ndef outer():\n    return "needle inside old"\n\n\n'
+                 'class Box:\n    def method(self):\n        return "boxed needle"\n')
+P7_MODULE_NEW = P7_MODULE_OLD.replace("needle inside old", "needle inside new")
+# sources of the fifth fixture commit, each with a needle inside target() and another after it, and what
+# each row pins: a lone CR line end before the def, a lone CR inside a string literal, only lone CR line
+# ends, and CRLF line ends (the parser's line split); latin_first, valid UTF-8 whose first line declares
+# latin-1 (the cookie refusal itself); latin_second, bytes that are not UTF-8 declaring latin-1 on the
+# second line after a lone-CR shebang (the strict decode and the second-line cookie check each refuse it,
+# so it pins the second-line cookie refusal only together with a weakened decode, and with the decode
+# weakened alone the cookie still refuses it, so it does not pin the decode either); latin_body and
+# latin_body_utf8_cookie, bytes that are not UTF-8 only after the second line, with no cookie and with a
+# UTF-8 cookie (no cookie check refuses them, so only the strict decode does: they pin it); gbk_cr_blank
+# and gbk_shebang, valid UTF-8 declaring gbk on the second line after a lone-CR blank line and after a
+# shebang (the second-line cookie refusal, found only when the first two lines are split at a lone CR too
+# and the second is read; gbk_shebang, with the revert/p7-cookie-second-line-red flip that reads only the
+# first line, is the single-mutation pin of the second-line check); a UTF-8 cookie in two spellings (read,
+# not refused); and source ast cannot parse
+P7_TAIL = b"\n\n\nAFTER = 'needle after'\n"
+P7_SOURCES = {
+    "pkg/cr_line.py": b"def first():\r    return 1\n\n\ndef target():\n    return 'needle target'\n" + P7_TAIL,
+    "pkg/cr_string.py": (b"def first():\n    return '''a\rb'''\n\n\ndef target():\n    return 'needle target'\n"
+                         + P7_TAIL),
+    "pkg/cr_only.py": b"X = 'needle outside'\rdef target():\r    return 'needle target'\r",
+    "pkg/crlf.py": b"def target():\r\n    return 'needle target'\r\n\r\n\r\nAFTER = 'needle after'\r\n",
+    "pkg/latin_first.py": (b"# -*- coding: latin-1 -*-\ndef target():\n    return '" + b"\xc3\xa9" * 20
+                           + b"'\n" + P7_TAIL),
+    "pkg/latin_second.py": (b"#!/usr/bin/env python3\r# -*- coding: latin-1 -*-\ndef target():\n    return '"
+                            + b"\xe9" * 40 + b"'\n" + P7_TAIL),
+    "pkg/latin_body.py": b"def target():\n    return 'needle target'\nY = '\xe9'\n" + P7_TAIL,
+    "pkg/latin_body_utf8_cookie.py": (b"# coding: utf-8\ndef target():\n    return 'needle target'\nY = '\xe9'\n"
+                                      + P7_TAIL),
+    "pkg/utf8_cookie.py": (b"# -*- coding: utf-8 -*-\ndef target():\n    return 'needle target \xc3\xa9'\n"
+                           + P7_TAIL),
+    "pkg/gbk_cr_blank.py": b"\r# coding: gbk\ndef target():\n    return 'needle target'\n" + P7_TAIL,
+    "pkg/gbk_shebang.py": (b"#!/usr/bin/env python3\n# coding: gbk\ndef target():\n    return 'needle target'\n"
+                           + P7_TAIL),
+    "pkg/utf8_spelt.py": b"# coding=utf8\ndef target():\n    return 'needle target'\n" + P7_TAIL,
+    "pkg/broken.py": b"def target(:\n    return 'needle target'\n",
+}
+P7_BIG_HEAD = b"def big():\n    return 'needle big'\n"
+
+
+def _p7_commit(repo, env, message):
+    """Stage everything and commit in the P7 fixture repository; the new commit's full id."""
+    subprocess.run(["git", "-C", str(repo), "-c", "gc.auto=0", "-c", "gc.autoDetach=false", "-c",
+                    "maintenance.auto=false", "add", "-A"], check=True, capture_output=True, timeout=60, env=env)
+    subprocess.run(["git", "-C", str(repo), "-c", "gc.auto=0", "-c", "gc.autoDetach=false", "-c",
+                    "maintenance.auto=false", "commit", "-q", "-m", message],
+                   check=True, capture_output=True, timeout=60, env=env)
+    made = subprocess.run(["git", "-C", str(repo), "-c", "gc.auto=0", "-c", "gc.autoDetach=false", "-c",
+                           "maintenance.auto=false", "rev-parse", "HEAD"],
+                          check=True, capture_output=True, timeout=60, env=env)
+    return made.stdout.decode("ascii").strip()
+
+
+def p7_big_source(size):
+    """A Python source of exactly `size` bytes whose def big() holds the needle, padded by one comment line."""
+    return P7_BIG_HEAD + b"#" * (size - len(P7_BIG_HEAD) - 1) + b"\n"
+
+
+def _p7_repo(base):
+    """(repo, [five commit ids], tag-object pin, replaced commit) of a fixture repository for P7: the first
+    commit holds the manifests and a module the anchors read, the second changes their content (so a later
+    HEAD differs from the first pin), the third makes the gates manifest invalid TOML and the fourth gives it
+    two rows with one id. The fifth adds the P7_SOURCES, sources of P7_READ_MAX_BYTES less one, exactly and plus one bytes, a
+    symbolic link and a submodule entry. A refs/replace entry then substitutes the first commit's module blob with the
+    second's, which a read that honoured replace objects would take at the first pin; an annotated tag of the
+    first commit, returned as the tag-object pin, gets a refs/replace entry pointing it at an annotated tag
+    of the second commit, which a resolution that honoured replace objects would peel to the second commit.
+    Last, a commit outside every branch with the first commit's tree, returned as the replaced commit, gets a
+    refs/replace entry pointing it at a commit with the fifth commit's tree except that pkg/mod.py holds the
+    P7_READ_MAX_BYTES plus one byte source, so a path the fifth adds is absent at the replaced commit but
+    found by an existence probe or an ls-tree read that honoured replace objects, and the replaced commit's
+    small pkg/mod.py is listed, or read, as oversized by an ls-tree or a blob read that honoured them."""
+    repo = base / "p7-repo"
+    os.makedirs(repo / ".aiqt" / "core" / "gates")
+    os.makedirs(repo / ".aiqt" / "core" / "hooks")
+    os.makedirs(repo / "pkg")
+    env = _git_fixture_env.git_fixture_env(
+        GIT_AUTHOR_NAME="fixture", GIT_AUTHOR_EMAIL="fixture@example.invalid",
+        GIT_COMMITTER_NAME="fixture", GIT_COMMITTER_EMAIL="fixture@example.invalid")
+    subprocess.run(["git", "-c", "gc.auto=0", "-c", "gc.autoDetach=false", "-c", "maintenance.auto=false",
+                    "init", "-q", str(repo)], check=True, capture_output=True, timeout=60, env=env)
+    gates = repo / ".aiqt" / "core" / "gates" / "manifest.toml"
+    hooks = repo / ".aiqt" / "core" / "hooks" / "manifest.toml"
+    module = repo / "pkg" / "mod.py"
+    commits = []
+    for message, gates_text, module_text in (("old", P7_GATES_OLD, P7_MODULE_OLD),
+                                             ("new", P7_GATES_NEW, P7_MODULE_NEW),
+                                             ("invalid", P7_GATES_INVALID, P7_MODULE_NEW),
+                                             ("duplicate", P7_GATES_DUPLICATE, P7_MODULE_NEW)):
+        with open(gates, "w", encoding="utf-8") as handle:
+            handle.write(gates_text)
+        with open(hooks, "w", encoding="utf-8") as handle:
+            handle.write(P7_HOOKS)
+        with open(module, "w", encoding="utf-8", newline="") as handle:
+            handle.write(module_text)
+        commits.append(_p7_commit(repo, env, message))
+    sizes = dict(inside=P7_READ_MAX_BYTES - 1, at=P7_READ_MAX_BYTES, over=P7_READ_MAX_BYTES + 1)
+    sources = dict(P7_SOURCES, **dict(("pkg/big_{}.py".format(name), p7_big_source(size))
+                                      for name, size in sizes.items()))
+    for rel, content in sources.items():
+        with open(repo / rel, "wb") as handle:
+            handle.write(content)
+    os.symlink("mod.py", repo / "pkg" / "link.py")
+    git = ["git", "-C", str(repo), "-c", "gc.auto=0", "-c", "gc.autoDetach=false", "-c", "maintenance.auto=false"]
+    subprocess.run(git + ["add", "-A"], check=True, capture_output=True, timeout=60, env=env)
+    subprocess.run(git + ["update-index", "--add", "--cacheinfo", "160000,{},pkg/sub".format(commits[0])],
+                   check=True, capture_output=True, timeout=60, env=env)
+    subprocess.run(git + ["commit", "-q", "-m", "entries"], check=True, capture_output=True, timeout=60, env=env)
+    commits.append(subprocess.run(git + ["rev-parse", "HEAD"], check=True, capture_output=True, timeout=60,
+                                  env=env).stdout.decode("ascii").strip())
+    blobs = [subprocess.run(git + ["rev-parse", commit + ":pkg/mod.py"], check=True, capture_output=True,
+                            timeout=60, env=env).stdout.decode("ascii").strip() for commit in commits[:2]]
+    subprocess.run(git + ["replace", blobs[0], blobs[1]], check=True, capture_output=True, timeout=60, env=env)
+    tags = []
+    for name, commit in (("pin-old", commits[0]), ("pin-new", commits[1])):
+        subprocess.run(git + ["tag", "-a", "-m", name, name, commit],
+                       check=True, capture_output=True, timeout=60, env=env)
+        tags.append(subprocess.run(git + ["rev-parse", "refs/tags/" + name], check=True, capture_output=True,
+                                   timeout=60, env=env).stdout.decode("ascii").strip())
+    subprocess.run(git + ["replace", tags[0], tags[1]], check=True, capture_output=True, timeout=60, env=env)
+    trees = [subprocess.run(git + ["rev-parse", commit + "^{tree}"], check=True, capture_output=True, timeout=60,
+                            env=env).stdout.decode("ascii").strip() for commit in (commits[0], commits[4])]
+    over = subprocess.run(git + ["rev-parse", commits[4] + ":pkg/big_over.py"], check=True, capture_output=True,
+                          timeout=60, env=env).stdout.decode("ascii").strip()
+    index_env = dict(env, GIT_INDEX_FILE=str(base / "p7-replacement-index"))
+    subprocess.run(git + ["read-tree", trees[1]], check=True, capture_output=True, timeout=60, env=index_env)
+    subprocess.run(git + ["update-index", "--cacheinfo", "100644,{},pkg/mod.py".format(over)],
+                   check=True, capture_output=True, timeout=60, env=index_env)
+    trees[1] = subprocess.run(git + ["write-tree"], check=True, capture_output=True, timeout=60,
+                              env=index_env).stdout.decode("ascii").strip()
+    made = [subprocess.run(git + ["commit-tree", "-m", message, tree], check=True, capture_output=True,
+                           timeout=60, env=env).stdout.decode("ascii").strip()
+            for message, tree in (("genuine paths", trees[0]), ("replacement paths", trees[1]))]
+    subprocess.run(git + ["replace", made[0], made[1]], check=True, capture_output=True, timeout=60, env=env)
+    return repo, commits, tags[0], made[0]
 # The child caps its address space at 1 GiB, then times evaluate() on 8 KiB and 64 KiB briefs (the
 # larger exactly at the shared reading's text ceiling), each a lead that forces the parsed-document path
 # (it holds "nput", so the ASCII fast path never answers it), a prefix, one unit repeated, and a suffix.
@@ -5341,8 +6297,8 @@ def self_test(report_path=None):
     # that held the in-process parse far past the deadline (a paragraph of unclosed inline-HTML openers,
     # held inside InlineHTML.pattern's lazy scans, and a line of fullwidth letters, held inside the GFM
     # bare-URL lookbehind's quadratic backtracking): with the ceiling patched up to admit them, read()
-    # answers or refuses within the deadline plus DEADLINE_MARGIN_SECONDS of measured wall clock, timed
-    # here in the parent around the call that waits on the killed child
+    # answers or refuses within _deadline_bound() (the deadline plus DEADLINE_MARGIN_SECONDS, fixed) of
+    # measured wall clock, timed here in the parent around the call that waits on the killed child
     old_ceiling = 1 << 19
     slow_shapes = (("x<!--" * (old_ceiling // 5))[:old_ceiling - 1] + "\n",
                    "Ａ" * ((old_ceiling - 1) // 3) + "\n")
@@ -5351,37 +6307,112 @@ def self_test(report_path=None):
     try:
         _input_declarations.MAX_TEXT_BYTES = old_ceiling
         for shape in slow_shapes:
-            began = time.monotonic()
-            try:
-                read_inputs(shape)
-                ended = "answered"
-            except _input_declarations.DeclarationError:
-                ended = "refused"
-            held.append((ended in ("answered", "refused"),
-                         time.monotonic() - began
-                         <= _input_declarations.PARSE_DEADLINE_SECONDS + DEADLINE_MARGIN_SECONDS))
+            ended, within = _deadline_held(read_inputs, shape)
+            held.append((ended in ("answered", "refused"), within))
     finally:
         _input_declarations.MAX_TEXT_BYTES = saved_ceiling
     check("parse/deadline-held-at-old-ceiling", held, [(True, True)] * 2)
     # and at the current ceiling, on the in-bound shapes measured slowest there (an underscore-mark run and
     # a paragraph of unclosed <? openers, each filled to the ceiling behind a parse-forcing lead): each is
-    # answered or refused within the deadline plus DEADLINE_MARGIN_SECONDS, timed in the parent the same way
+    # answered or refused within the same fixed bound, timed in the parent the same way
     ceiling = _input_declarations.MAX_TEXT_BYTES
     ceiling_shapes = [parse_lead + unit * ((ceiling - len(parse_lead) - 1) // len(unit)) + "\n"
                       for unit in ("_a", "x<?")]
     held = []
     for shape in ceiling_shapes:
-        began = time.monotonic()
-        try:
-            read_inputs(shape)
-        except _input_declarations.DeclarationError:
-            pass
-        held.append((len(shape.encode("utf-8")) <= ceiling, time.monotonic() - began
-                     <= _input_declarations.PARSE_DEADLINE_SECONDS + DEADLINE_MARGIN_SECONDS))
+        held.append((len(shape.encode("utf-8")) <= ceiling, _deadline_held(read_inputs, shape)[1]))
     check("parse/deadline-held-at-ceiling", held, [(True, True)] * 2)
+    # the bound itself at its end: _deadline_held, driven with set timings (_deadline_boundary_reading),
+    # holds an answered or refused read 1 ms inside the bound and exactly at it (its comparison is
+    # inclusive) and does not hold one 1 ms outside it
+    bound = _input_declarations.PARSE_DEADLINE_SECONDS + DEADLINE_MARGIN_SECONDS
+    check("parse/deadline-bound-boundary", (_deadline_bound(), _deadline_boundary_reading()),
+          (bound, (bound, [("answered", True), ("refused", True)] * 2
+                   + [("answered", False), ("refused", False)])))
+    # and the cap probe's reading of a child's exit status and output, driven with set ones
+    # (_cap_report_boundary_reading): a report of CPU time 1 ms under the bound does not hold, exactly at
+    # it and 1 ms over it does (the comparison is inclusive); and no frame of the parse on the cut's
+    # stack, no entry into the parser, an end by SIGKILL, by SIGXCPU or by a normal exit, no marker, or
+    # a second report line each refuse
+    check("parse/deadline-cap-report-boundary", _cap_report_boundary_reading(),
+          [False, True, True, False, False, False, False, False, False, False])
+    # and a parse still running at the bound is ended only by the CPU timer and only once the bound is
+    # spent: with the deadline lifted, the probe's main thread parses each ceiling shape again and again
+    # (so the loop is still running at the bound whatever one parse takes), is cut by a CPU timer of
+    # exactly the bound, and reports, after the cut, at least the bound of its own thread's CPU spent
+    # inside the call, the cut landing inside the loop or the vendored parser, and at least one entry
+    # into the vendored parser; with the timer removed the parse never ends and this reads False
+    check("parse/deadline-cap-under-uncut-parse", _cap_under_uncut_parse(), [True, True])
+    # and the same at one eighth of the ceiling (CAP_EIGHTH_PROBE), where one parse of either shape ends
+    # far inside the bound: the repeated parse is still running at the bound and the cut counts wherever
+    # it lands in the loop, so this reads True; one parse in place of the loop returns before the bound
+    # and reads False
+    check("parse/deadline-cap-under-eighth-parse", _cap_under_uncut_parse(source=CAP_EIGHTH_PROBE),
+          [True, True])
+    # and that probe really is the one-eighth one: CAP_EIGHTH_PROBE differs from UNCUT_PARSE_PROBE only
+    # by its fill, and _probe_replaced, which builds it, raises when its target text is missing or occurs
+    # twice, so a moved fill line fails at import instead of leaving the full-size probe in its place
+    check("parse/deadline-cap-eighth-probe-replaced", _cap_eighth_replaced_reading(),
+          (True, True, "ValueError", "ValueError"))
+    # and that timer is armed at the bound itself, with no margin above it: a probe child whose parse call
+    # is replaced by a read-back of the timer it has just armed (CAP_ARMED_PROBE), started through the
+    # same _cap_probe_readings as every probe, reads it back within CAP_ARMED_TOLERANCE of the bound (a
+    # restored cut of 1.2 times the bound reads False), and the read-back's comparison, driven with set
+    # values (_cap_armed_boundary_reading), holds exactly at and 1 ms inside each end of its window and
+    # not 1 ms outside either end or at 1.2 times the bound
+    check("parse/deadline-cap-armed-at-bound",
+          (_cap_probe_readings([(CAP_ARMED_PROBE, "_a", lambda: None)], held=_cap_armed_held),
+           _cap_armed_boundary_reading()),
+          ([True], [False, True, True, True, True, True, False, False]))
+    # and the probe with one parse in place of the repeated one (CAP_ONE_PARSE_PROBE), on a shape whose
+    # whole parse needs far less CPU than the bound (plain prose filled to the ceiling behind the same
+    # parse-forcing lead, about half a second), is not cut: its parse returns, and the row reads False,
+    # as one parse of a ceiling shape would on a runner fast enough to end it before the bound
+    check("parse/deadline-cap-refuses-parse-under-bound",
+          _cap_under_uncut_parse(("ab ",), source=CAP_ONE_PARSE_PROBE), [False])
+    # and a probe child whose parse the CPU timer did not end does not pass for one it did (CAP_STANDINS,
+    # all at once on the underscore-mark shape): a child that kills itself with SIGKILL before any marker
+    # or sends itself SIGPROF at once; a child that sleeps for its CPU budget and then sends itself
+    # SIGPROF, one whose CPU goes to another thread until the timer fires, and the at-once child with
+    # this parent pausing for the bound plus one second at its end of output; a child that burns its
+    # budget in its main thread outside the parser, and one cut at once inside the parser; a child whose
+    # repeated-parse loop never reaches the parser; and a child that writes a report meeting every
+    # requirement and is ended by SIGKILL
+    pause = _deadline_bound() + 1.0
+    standin_runs = [(source, "_a", lambda: None) for _, source in CAP_STANDINS]
+    standin_runs.append((dict(CAP_STANDINS)["sigprof-at-once"], "_a", lambda: time.sleep(pause)))
+    standin = dict(zip([name for name, _ in CAP_STANDINS] + ["parent-pause"],
+                       _cap_probe_readings(standin_runs)))
+    check("parse/deadline-cap-refuses-self-killed-probe",
+          [standin[name] for name in ("sigkill-before-marker", "sigprof-at-once")], [False, False])
+    check("parse/deadline-cap-refuses-non-parsing-probe",
+          [standin[name] for name in ("sleep-then-sigprof", "busy-thread-until-limit", "parent-pause")],
+          [False, False, False])
+    check("parse/deadline-cap-needs-cpu-and-progress",
+          [standin[name] for name in ("busy-main-until-limit", "cut-inside-parser-at-once")], [False, False])
+    # the loop that never reaches the parser is cut inside the loop after the bound, so its frame
+    # requirement holds; it reads False only because no parser entry is reported (with the entry
+    # requirement removed, it reads True)
+    check("parse/deadline-cap-refuses-loop-without-parser", standin["loop-without-parser"], False)
+    check("parse/deadline-cap-refuses-sigkill", standin["forged-report-sigkill"], False)
+    # and a timer that fires before the exact CPU clock shows the bound, as a tick-charged one can, does
+    # not cut the parse early: the probe arms it again for the rest, so the real parse is still cut
+    # inside the loop or the parser after spending the bound (with the handler raising at the first
+    # fire, this reads False)
+    check("parse/deadline-cap-holds-past-early-timer", standin["timer-early-inside-parser"], True)
+    # and that re-arm is for the rest of the bound, not the whole bound again: a probe child that spends
+    # CAP_REARM_SPENT of CPU and then has its timer fire early (CAP_REARM_PROBE) reads the re-armed timer
+    # back within CAP_ARMED_TOLERANCE of the bound minus the CPU it has spent (a re-arm for the whole
+    # bound, or a handler that cuts at that fire, reads False), and the read-back's comparison, driven
+    # with set values (_cap_rearmed_boundary_reading), holds exactly at and 1 ms inside each end of its
+    # window and not 1 ms outside either end, at the whole bound, or after less CPU than CAP_REARM_SPENT
+    check("parse/deadline-cap-rearms-for-rest",
+          (_cap_probe_readings([(CAP_REARM_PROBE, "_a", lambda: None)], held=_cap_rearmed_held),
+           _cap_rearmed_boundary_reading()),
+          ([True], [False, True, True, True, True, True, False, False, False]))
     # and shown red under the flip that restores the thread join: a probe child runs the flipped read on
-    # each shape, has NOT returned at the deadline plus the same margin (join cannot fire while one regex
-    # match holds the GIL), and its own process group is then killed, never left running
+    # each shape and has NOT returned at the same fixed bound (join cannot fire while one regex match
+    # holds the GIL), and its own process group is then killed, never left running
     still_running = []
     for name in ("html-opener", "fullwidth"):
         probe = subprocess.Popen([sys.executable, "-I", "-B", "-c", THREAD_JOIN_PROBE,
@@ -5389,8 +6420,7 @@ def self_test(report_path=None):
                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                  start_new_session=True)
         try:
-            probe.communicate(timeout=_input_declarations.PARSE_DEADLINE_SECONDS
-                              + DEADLINE_MARGIN_SECONDS)
+            probe.communicate(timeout=_deadline_bound())
             still_running.append(False)
         except subprocess.TimeoutExpired:
             try:
@@ -6906,7 +7936,278 @@ def self_test(report_path=None):
         if os.path.lexists(locked):
             os.chmod(locked, 0o700)
         shutil.rmtree(inputs, ignore_errors=True)
-    check("revert/every-flip-ran", len(flipped), 218)
+    # ---------- P7: accepted residuals at the pin ----------
+    p7_base = Path(tempfile.mkdtemp(prefix="aiqt-brief-p7-"))
+    try:
+        p7_repo, p7_commits, p7_tag_pin, p7_replaced = _p7_repo(p7_base)
+        p7_old, p7_head, p7_entries = p7_commits[0], p7_commits[3], p7_commits[4]
+
+        def p7(lines, pin=p7_old, family="alpha"):
+            return _outcome("BRIEF-PIN: {}\n".format(pin) + lines, family, True, p7_repo)
+
+        p7_hard = (1, [("P7", "HARD")])
+        gates_rel, hooks_rel = MANIFEST_RELS["gate"], MANIFEST_RELS["hook"]
+        # both whole-field anchors hold at the pin: the gate's and the hook's residue fields exist by id
+        check("preflight/p7-whole-field-pass",
+              [p7("ACCEPTED-RESIDUAL: gate:g1\n"), p7("ACCEPTED-RESIDUAL: hook:h1\n"),
+               p7("ACCEPTED-RESIDUAL: gate:g1\nACCEPTED-RESIDUAL: hook:h1\n")], [(0, [])] * 3)
+        # a partial residue (the TOML-decoded field value) and a Python excerpt, inside its def or its
+        # nested method, each occur byte-exact at the pin
+        check("preflight/p7-excerpt-pass", [p7(lines) for lines in (
+            "ACCEPTED-RESIDUAL: " + gates_rel + " :: gate:g1.residue :: old gate residue\n",
+            "ACCEPTED-RESIDUAL: " + hooks_rel + " :: hook:h1.residue :: old hook residue\n",
+            "ACCEPTED-RESIDUAL: pkg/mod.py :: outer :: needle inside old\n",
+            "ACCEPTED-RESIDUAL: pkg/mod.py :: Box.method :: boxed needle\n")], [(0, [])] * 4)
+        check("preflight/p7-unanchored-hard",
+              [p7("ACCEPTED-RESIDUAL:\n"), p7("ACCEPTED-RESIDUAL: just prose words\n"),
+               p7("ACCEPTED-RESIDUAL: gates:g1\n")], [p7_hard] * 3)
+        check("preflight/p7-missing-id-hard",
+              [p7("ACCEPTED-RESIDUAL: gate:absent\n"), p7("ACCEPTED-RESIDUAL: hook:absent\n"),
+               p7("ACCEPTED-RESIDUAL: " + gates_rel + " :: gate:absent.residue :: x\n")], [p7_hard] * 3)
+        check("preflight/p7-missing-symbol-hard",
+              [p7("ACCEPTED-RESIDUAL: pkg/mod.py :: missing :: x\n"),
+               p7("ACCEPTED-RESIDUAL: pkg/mod.py :: Box.absent :: x\n"),
+               p7("ACCEPTED-RESIDUAL: pkg/mod.py :: method :: boxed needle\n")], [p7_hard] * 3)
+        check("preflight/p7-missing-excerpt-hard",
+              [p7("ACCEPTED-RESIDUAL: pkg/mod.py :: outer :: not there\n"),
+               p7("ACCEPTED-RESIDUAL: " + gates_rel + " :: gate:g1.residue :: not there\n")], [p7_hard] * 2)
+        # the needle is in the file, only outside the named symbol: never found by a whole-file search
+        check("preflight/p7-outside-symbol-hard",
+              p7("ACCEPTED-RESIDUAL: pkg/mod.py :: outer :: needle outside symbol\n"), p7_hard)
+        # an old pin matches while HEAD differs, and the same excerpt at the later pin matches its content
+        check("preflight/p7-old-pin-pass",
+              (p7("ACCEPTED-RESIDUAL: pkg/mod.py :: outer :: needle inside old\n"), p7_head != p7_old,
+               p7("ACCEPTED-RESIDUAL: pkg/mod.py :: outer :: needle inside new\n", p7_head)),
+              ((0, []), True, (0, [])))
+        # an excerpt present only at HEAD is absent at the old pin
+        check("preflight/p7-head-only-hard",
+              p7("ACCEPTED-RESIDUAL: pkg/mod.py :: outer :: needle inside new\n"), p7_hard)
+        # byte-exactness: a doubled space, another case, and a CRLF in the decoded residue (its CR and LF
+        # are real bytes, so "win end" does not match "win\r\nend") each miss
+        check("preflight/p7-byte-exact-hard",
+              [p7("ACCEPTED-RESIDUAL: pkg/mod.py :: outer :: needle  inside old\n"),
+               p7("ACCEPTED-RESIDUAL: pkg/mod.py :: outer :: Needle inside old\n"),
+               p7("ACCEPTED-RESIDUAL: " + gates_rel + " :: gate:g1.residue :: win end\n")], [p7_hard] * 3)
+        check("preflight/p7-missing-residue-hard",
+              [p7("ACCEPTED-RESIDUAL: gate:noresidue\n"),
+               p7("ACCEPTED-RESIDUAL: " + gates_rel + " :: gate:noresidue.residue :: x\n")], [p7_hard] * 2)
+        # a path with no entry at the pin is HARD for P7 and ADVISORY for P3 (it may be a file to create)
+        check("preflight/p7-missing-file-hard",
+              p7("ACCEPTED-RESIDUAL: absent/file.py :: f :: x\n"),
+              (1, [("P3", "ADVISORY"), ("P7", "HARD")]))
+        check("preflight/p7-malformed-cannot-evaluate",
+              [p7("ACCEPTED-RESIDUALS: gate:g1\n"), p7("ACCEPTED-RESIDUAL gate:g1\n"),
+               p7("ACCEPTED-RESIDUAL: pkg/mod.py :: outer\n"),
+               p7("ACCEPTED-RESIDUAL: pkg/mod.py ::  :: x\n")], ["CannotEvaluate"] * 4)
+        # a declaration with no pin, an unresolved pin, conflicting pins, or no repository, each through
+        # rule_p7 itself where rule_p3 would answer first
+        check("preflight/p7-pin-cannot-evaluate",
+              [_outcome("ACCEPTED-RESIDUAL: gate:g1\n", "alpha", True, p7_repo),
+               _git_outcome(rule_p7, PreflightText(
+                   "BRIEF-PIN: 0123456789ab\nACCEPTED-RESIDUAL: gate:g1\n"), None, p7_repo),
+               _git_outcome(rule_p7, PreflightText(
+                   "BRIEF-PIN: {}\nBRIEF-PIN: {}\nACCEPTED-RESIDUAL: gate:g1\n".format(p7_old, p7_head)),
+                   None, p7_repo),
+               _git_outcome(rule_p7, PreflightText(
+                   "BRIEF-PIN: {}\nACCEPTED-RESIDUAL: gate:g1\n".format(p7_old)), None, None)],
+              ["CannotEvaluate"] * 4)
+        check("preflight/p7-invalid-toml-cannot-evaluate",
+              [p7("ACCEPTED-RESIDUAL: gate:g1\n", p7_commits[2]),
+               p7("ACCEPTED-RESIDUAL: " + gates_rel + " :: gate:g1.residue :: a\n", p7_commits[2])],
+              ["CannotEvaluate"] * 2)
+        check("preflight/p7-duplicate-id-cannot-evaluate",
+              [p7("ACCEPTED-RESIDUAL: gate:g1\n", p7_commits[3]),
+               p7("ACCEPTED-RESIDUAL: " + gates_rel + " :: gate:g1.residue :: a\n", p7_commits[3])],
+              ["CannotEvaluate"] * 2)
+        # the label outside a column-zero declaration is prose: one ADVISORY line, nothing read at the pin
+        # (gate:absent would be HARD as a declaration), and a brief without the label prints nothing
+        check("preflight/p7-prose-advisory",
+              [p7(" ACCEPTED-RESIDUAL: gate:absent\n"), p7("Note the ACCEPTED-RESIDUAL label here.\n"),
+               p7("No residual lines here.\n")],
+              [(0, [("P7", "ADVISORY")]), (0, [("P7", "ADVISORY")]), (0, [])])
+
+        def p7_entry(rel, excerpt, symbol="target"):
+            return p7("ACCEPTED-RESIDUAL: {} :: {} :: {}\n".format(rel, symbol, excerpt), p7_entries)
+
+        # a lone CR ends a line for the parser: before the def, and inside a string literal, a slice that
+        # counted only LF lines would end past the def and take the needle after it
+        check("preflight/p7-lone-cr-scope",
+              [p7_entry(rel, excerpt) for rel in ("pkg/cr_line.py", "pkg/cr_string.py")
+               for excerpt in ("needle target", "needle after")], [(0, []), p7_hard] * 2)
+        # a source whose lines end only in lone CRs is read, never an uncaught IndexError
+        check("preflight/p7-cr-only-source",
+              [p7_entry("pkg/cr_only.py", "needle target"), p7_entry("pkg/cr_only.py", "needle outside")],
+              [(0, []), p7_hard])
+        check("preflight/p7-crlf-source",
+              [p7_entry("pkg/crlf.py", "needle target"), p7_entry("pkg/crlf.py", "needle after")],
+              [(0, []), p7_hard])
+        # a declared encoding other than UTF-8 cannot be read (column offsets count UTF-8 bytes); a UTF-8
+        # cookie in either spelling is read
+        check("preflight/p7-declared-encoding",
+              [p7_entry("pkg/latin_first.py", "needle after"), p7_entry("pkg/latin_second.py", "needle after"),
+               p7_entry("pkg/utf8_cookie.py", "needle target é"),
+               p7_entry("pkg/utf8_cookie.py", "needle after"), p7_entry("pkg/utf8_spelt.py", "needle target")],
+              ["CannotEvaluate", "CannotEvaluate", (0, []), p7_hard, (0, [])])
+        # bytes that are not UTF-8 only after the second line, with no cookie or a UTF-8 one, pass every
+        # cookie check: only the strict decode refuses them
+        check("preflight/p7-strict-decode-cannot-evaluate",
+              [p7_entry("pkg/latin_body.py", "needle target"),
+               p7_entry("pkg/latin_body_utf8_cookie.py", "needle target")], ["CannotEvaluate"] * 2)
+        # a non-UTF-8 cookie on the second line of valid UTF-8 bytes is refused: after a lone-CR blank line
+        # (hidden from a split that reads only LF line ends) and after a shebang (hidden from a guard that
+        # reads only the first line)
+        check("preflight/p7-cookie-second-line-cannot-evaluate",
+              [p7_entry("pkg/gbk_cr_blank.py", "needle target"), p7_entry("pkg/gbk_shebang.py", "needle target")],
+              ["CannotEvaluate"] * 2)
+        check("preflight/p7-unparsable-source-cannot-evaluate",
+              p7_entry("pkg/broken.py", "needle target"), "CannotEvaluate")
+        # a definition whose position cannot be placed in the text is CannotEvaluate, never an uncaught error
+        check("preflight/p7-segment-failure-cannot-evaluate",
+              [_git_outcome(definition_segment, "x = 1\n", ast.Name(id="x"), "p", "c"),
+               _git_outcome(definition_segment, "x = 1\n",
+                            ast.Pass(lineno=5, col_offset=0, end_lineno=5, end_col_offset=4), "p", "c"),
+               _git_outcome(definition_segment, "x = 'é'\n",
+                            ast.Pass(lineno=1, col_offset=0, end_lineno=1, end_col_offset=6), "p", "c")],
+              ["CannotEvaluate"] * 3)
+        # the size bound: one byte under and exactly P7_READ_MAX_BYTES are read, one byte over is not
+        check("preflight/p7-size-bound",
+              [p7_entry("pkg/big_{}.py".format(name), "needle big", "big") for name in ("inside", "at", "over")],
+              [(0, []), (0, []), "CannotEvaluate"])
+        # a symbolic link (mode 120000, a blob) and a submodule entry (mode 160000) are not regular files
+        check("preflight/p7-non-regular-entry-cannot-evaluate",
+              [p7_entry("pkg/link.py", "needle target"), p7_entry("pkg/sub", "needle target")],
+              ["CannotEvaluate"] * 2)
+        # a refs/replace entry substitutes the first pin's module blob with the second's: never read
+        check("preflight/p7-replace-objects-ignored",
+              [p7("ACCEPTED-RESIDUAL: pkg/mod.py :: outer :: needle inside old\n"),
+               p7("ACCEPTED-RESIDUAL: pkg/mod.py :: outer :: needle inside new\n")], [(0, []), p7_hard])
+        # a pin naming an annotated tag object peels to the genuine first commit: the refs/replace entry
+        # pointing that tag at a tag of the second commit never decides which commit the pin names
+        check("preflight/p7-tag-pin-replace-ignored",
+              [p7("ACCEPTED-RESIDUAL: pkg/mod.py :: outer :: needle inside old\n", p7_tag_pin),
+               p7("ACCEPTED-RESIDUAL: pkg/mod.py :: outer :: needle inside new\n", p7_tag_pin)],
+              [(0, []), p7_hard])
+        # a refs/replace entry points a commit at one with another path set: the existence probe walks the
+        # genuine tree, where the fifth commit's pkg/cr_line.py is absent and pkg/mod.py is present
+        check("preflight/p7-exists-replace-ignored",
+              [p7("Read pkg/cr_line.py before you answer.\n", p7_replaced),
+               p7("Read pkg/mod.py before you answer.\n", p7_replaced)], [(0, [("P3", "ADVISORY")]), (0, [])])
+        # the residual reads at the replaced commit list its genuine tree: a path only the replacement adds
+        # has no entry there, so the anchor is HARD as for any missing file (and P3 ADVISORY)
+        check("preflight/p7-read-replaced-added-path-hard",
+              p7("ACCEPTED-RESIDUAL: pkg/cr_line.py :: target :: needle target\n", p7_replaced),
+              (1, [("P3", "ADVISORY"), ("P7", "HARD")]))
+        # the replacement holds an oversized pkg/mod.py where the genuine tree holds the small one: the
+        # entry's size and bytes are the genuine ones, so the anchor holds
+        check("preflight/p7-read-replaced-size-ignored",
+              p7("ACCEPTED-RESIDUAL: pkg/mod.py :: outer :: needle inside old\n", p7_replaced), (0, []))
+        # REVIEWED HEAD lines with no BRIEF-PIN line, which the conflict checks do not compare, must all
+        # resolve to one commit; two that agree pass
+        check("preflight/p7-reviewed-heads-cannot-evaluate",
+              [_outcome("REVIEWED HEAD: {}\nREVIEWED HEAD: {}\nACCEPTED-RESIDUAL: gate:g1\n".format(
+                  p7_old, p7_head), "alpha", True, p7_repo),
+               _outcome("REVIEWED HEAD: {}\nREVIEWED HEAD: {}\nACCEPTED-RESIDUAL: gate:g1\n".format(
+                   p7_old, p7_old[:12]), "alpha", True, p7_repo)],
+              ["CannotEvaluate", (0, [])])
+
+        def p7_case(lines, pin=p7_old):
+            return lambda: p7(lines, pin)
+
+        check("revert/p7-red", *flip([p7_case("ACCEPTED-RESIDUAL: just prose words\n")], [(0, [])],
+                                     rule_p7=nothing))
+        check("revert/p7-symbol-scope-red", *flip(
+            [p7_case("ACCEPTED-RESIDUAL: pkg/mod.py :: outer :: needle outside symbol\n")], [(0, [])],
+            symbol_segments=lambda data, symbol, path, commit: [data]))
+        check("revert/p7-byte-exact-red", *flip(
+            [p7_case("ACCEPTED-RESIDUAL: pkg/mod.py :: outer :: Needle inside old\n")], [(0, [])],
+            excerpt_in=lambda excerpt, data: excerpt.encode("utf-8").lower() in data.lower()))
+        pinned_read = read_at_revision
+        check("revert/p7-pin-read-red", *flip(
+            [p7_case("ACCEPTED-RESIDUAL: pkg/mod.py :: outer :: needle inside new\n")], [(0, [])],
+            read_at_revision=lambda repo, commit, path: pinned_read(repo, p7_head, path)))
+        # with the regular-file mode check widened to a symbolic link, the link's target text is read as
+        # Python source and the anchor turns from CannotEvaluate into a missing symbol
+        check("revert/p7-regular-file-red", *flip(
+            [p7_case("ACCEPTED-RESIDUAL: pkg/link.py :: target :: needle target\n", p7_entries)], [p7_hard],
+            REGULAR_FILE_MODES=REGULAR_FILE_MODES + ("120000",)))
+
+        def replaced_rev_parse(repo, rev):
+            return subprocess.run(["git", "-C", str(repo), "rev-parse", "--verify", "--quiet",
+                                   rev + "^{commit}"],
+                                  capture_output=True, timeout=GIT_READ_TIMEOUT, env=_git_read_env())
+
+        # with replace objects honoured in the pin resolution again, the replaced tag pin peels to the
+        # second commit and the tag-pin anchors swap
+        check("revert/p7-tag-pin-replace-red", *flip(
+            [p7_case("ACCEPTED-RESIDUAL: pkg/mod.py :: outer :: needle inside old\n", p7_tag_pin),
+             p7_case("ACCEPTED-RESIDUAL: pkg/mod.py :: outer :: needle inside new\n", p7_tag_pin)],
+            [p7_hard, (0, [])], _rev_parse=replaced_rev_parse))
+
+        def replaced_cat_file(repo, commit, path):
+            return subprocess.run(["git", "-C", str(repo), "cat-file", "-e", commit + ":" + path],
+                                  capture_output=True, timeout=GIT_READ_TIMEOUT, env=_git_read_env())
+
+        # with replace objects honoured in the existence probe again, the replaced commit's path is found
+        # through its replacement's tree and the P3 advisory goes quiet
+        check("revert/p7-exists-replace-red", *flip(
+            [p7_case("Read pkg/cr_line.py before you answer.\n", p7_replaced)], [(0, [])],
+            _cat_file=replaced_cat_file))
+
+        def replaced_ls_tree(repo, commit, path):
+            return subprocess.run(["git", "-C", str(repo), "ls-tree", "-l", "--full-tree", commit, "--",
+                                   ":(literal)" + path],
+                                  capture_output=True, timeout=GIT_READ_TIMEOUT, env=_git_read_env())
+
+        # with replace objects honoured in the residual read's ls-tree again, the replaced commit lists its
+        # replacement's tree: the added path is found (and its genuine blob read then fails), and the small
+        # pkg/mod.py is listed at the replacement's oversized length
+        check("revert/p7-read-ls-tree-replace-red", *flip(
+            [p7_case("ACCEPTED-RESIDUAL: pkg/cr_line.py :: target :: needle target\n", p7_replaced),
+             p7_case("ACCEPTED-RESIDUAL: pkg/mod.py :: outer :: needle inside old\n", p7_replaced)],
+            ["CannotEvaluate"] * 2, _ls_tree_entry=replaced_ls_tree))
+
+        def replaced_cat_blob(repo, commit, path):
+            return subprocess.run(["git", "-C", str(repo), "cat-file", "blob", commit + ":" + path],
+                                  capture_output=True, timeout=GIT_READ_TIMEOUT, env=_git_read_env())
+
+        # with replace objects honoured in the residual read's blob read again, the replaced commit's
+        # pkg/mod.py is read from its replacement's tree (oversized), and the first pin's module blob is read
+        # as its replacement (the second commit's content), so the old excerpt goes missing
+        check("revert/p7-read-blob-replace-red", *flip(
+            [p7_case("ACCEPTED-RESIDUAL: pkg/mod.py :: outer :: needle inside old\n", p7_replaced),
+             p7_case("ACCEPTED-RESIDUAL: pkg/mod.py :: outer :: needle inside old\n")],
+            ["CannotEvaluate", p7_hard], _cat_blob=replaced_cat_blob))
+
+        def p7_cookie_mutant(heads, errors="strict"):
+            def mutant(data, path, commit):
+                text = data.decode("utf-8-sig", errors)
+                for line in heads(data):
+                    declared, _ = tokenize.detect_encoding(iter((line + b"\n",)).__next__)
+                    if codecs.lookup(declared).name not in ("utf-8", "utf-8-sig"):
+                        raise CannotEvaluate("{} at {}: declares the encoding {}".format(path, commit, declared))
+                return text
+            return mutant
+
+        # with the first two lines split on LF only, the lone-CR blank line glues the gbk cookie onto a
+        # first line it cannot start, and the source is wrongly read
+        check("revert/p7-cookie-cr-split-red", *flip(
+            [p7_case("ACCEPTED-RESIDUAL: pkg/gbk_cr_blank.py :: target :: needle target\n", p7_entries)],
+            [(0, [])], python_source_text=p7_cookie_mutant(lambda data: data.split(b"\n", 2)[:2])))
+        # with only the first line read, the gbk cookie after the shebang is never seen
+        check("revert/p7-cookie-second-line-red", *flip(
+            [p7_case("ACCEPTED-RESIDUAL: pkg/gbk_shebang.py :: target :: needle target\n", p7_entries)],
+            [(0, [])], python_source_text=p7_cookie_mutant(
+                lambda data: data.replace(b"\r\n", b"\n").replace(b"\r", b"\n").split(b"\n", 2)[:1])))
+        # with the decode weakened to errors='replace' (the two-line cookie check kept), bytes that are not
+        # UTF-8 after the second line are read and the anchors pass
+        check("revert/p7-strict-decode-red", *flip(
+            [p7_case("ACCEPTED-RESIDUAL: pkg/latin_body.py :: target :: needle target\n", p7_entries),
+             p7_case("ACCEPTED-RESIDUAL: pkg/latin_body_utf8_cookie.py :: target :: needle target\n", p7_entries)],
+            [(0, [])] * 2, python_source_text=p7_cookie_mutant(
+                lambda data: data.replace(b"\r\n", b"\n").replace(b"\r", b"\n").split(b"\n", 2)[:2], "replace")))
+    finally:
+        shutil.rmtree(p7_base, ignore_errors=True)
+    check("revert/every-flip-ran", len(flipped), 230)
 
     for check_id in sorted(expected - _EXECUTED_SET):
         FAILURES.append("execution-set/missing: {}".format(check_id))
@@ -6964,7 +8265,11 @@ def self_test(report_path=None):
           "heading or table cell (folded through the bounded confusable table), a brief holding a non-LF line "
           "separator or a format character outside code, a brief the vendored parser cannot read, a FIFO or "
           "device, or an input this uid "
-          "cannot read (P6), and "
+          "cannot read (P6), refuses a column-zero ACCEPTED-RESIDUAL declaration with no anchor or whose "
+          "gate or hook id, Python symbol or byte-exact excerpt is absent at the brief's pinned revision, "
+          "read from the git object store and never by a whole-file search, exits 2 on a malformed "
+          "declaration, an unresolved or conflicting pin, or pinned content it cannot read or parse, and "
+          "prints the label in prose as ADVISORY (P7), and "
           "each preflight rule and guard patched out flips its fixture; "
           "the regex audit reads the module-level patterns and COMMAND_FORMS (and, without claiming completeness, "
           "container and class globals and the production source's re calls), flags no pattern, "

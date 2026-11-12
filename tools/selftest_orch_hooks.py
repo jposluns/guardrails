@@ -339,9 +339,50 @@ import sys
 import time
 ctl = json.load(open(sys.argv[1]))
 time.sleep(ctl.get("sleep", 0))
+if ctl.get("done"):
+    open(ctl["done"], "w").close()
 sys.stdout.write(ctl.get("out", ""))
 sys.exit(ctl.get("exit", 0))
 """
+
+# The review dispatch deadline rows run the decision under a budget of _RDP_ROW_BUDGET seconds and judge
+# its raw wall-clock time against a fixed bound, nothing divided by anything: the decision is a wait (for
+# the authority child, or a blocked read) that the hook cuts off at its deadline, so a decision over the
+# bound fails whatever the load and whatever other threads or children compute meanwhile. The bounds are
+# the budget plus _RDP_DECISION_SLACK (2.5 s) and plus _RDP_HUNG_READ_SLACK (2.0 s). Honest decisions
+# measured on one 80-CPU host at a load average of 40.5 to 43.5 (2026-11-10, 12 runs each): 1.0034 to
+# 1.0085 s for the authority row and 1.2505 to 1.2519 s for the hung-read row, so the bounds leave margins
+# of 1.49 s and 0.75 s over the largest honest decision.
+_RDP_ROW_BUDGET = 1.0
+_RDP_DECISION_SLACK = 1.5
+_RDP_HUNG_READ_SLACK = 1.0
+
+
+def _rdp_deadline_run(call):
+    """(wall_seconds, outcome) for outcome = call(), timed with time.monotonic."""
+    began = time.monotonic()
+    outcome = call()
+    return time.monotonic() - began, outcome
+
+
+def _rdp_deadline_verdict(wall, outlived, bound):
+    """Whether a review dispatch deadline run passes: the guarded sleep had not finished when the decision
+    returned (outlived False) and its raw wall-clock seconds are under bound (the bound itself fails)."""
+    return not outlived and wall < bound
+
+
+def _rdp_hashing_thread(seconds, stop=None):
+    """A started daemon thread that hashes a 1 MB buffer for seconds of wall-clock time or until the event
+    stop is set: real CPU work beside the caller (hashlib releases the interpreter lock on a buffer this
+    size), for the planted rows that check such work cannot shorten a decision's judged time."""
+    def run():
+        block = b"\0" * (1 << 20)
+        ends = time.monotonic() + seconds
+        while time.monotonic() < ends and not (stop is not None and stop.is_set()):
+            hashlib.sha256(block)
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    return thread
 
 
 def _rdp_git(root, *args):
@@ -406,8 +447,8 @@ class RdpFixture:
         exclude.parent.mkdir(parents=True, exist_ok=True)
         exclude.write_text("".join(p + "\n" for p in patterns), encoding="utf-8")
 
-    def authority(self, out, code=0, sleep=0):
-        self.ctl.write_text(json.dumps(dict(out=out, exit=code, sleep=sleep)), encoding="utf-8")
+    def authority(self, out, code=0, sleep=0, done=None):
+        self.ctl.write_text(json.dumps(dict(out=out, exit=code, sleep=sleep, done=done)), encoding="utf-8")
 
     def brief(self, lines, name="brief.txt"):
         path = self.briefs / name
@@ -819,17 +860,21 @@ def _rdp_cases(tmp):
     fm_kind = _rdp_kind(fm.dispatch(fm.good()))
     aiqt_hooks._review_git(str(fm.root), "status", "--porcelain")
     check("rdp/fsmonitor-never-runs", (fm_kind, marker.exists()), ("allow", False))
+    # The decision must not wait for the authority's 3-second sleep: the authority marks the end of its sleep in
+    # a file, which must not exist when the decision returns (a load cannot create it, since the deadline kills
+    # the authority), and the decision's raw wall-clock time must be under the budget plus 1.5 s
+    # (_rdp_deadline_verdict), so a wait between 2.5 s and the 3-second sleep fails at any load.
     saved_budget = aiqt_hooks._RDP_BUDGET
-    f.authority(f.pin + "\n", sleep=3)
-    aiqt_hooks._RDP_BUDGET = 1.0
-    started = aiqt_hooks.time.monotonic()
+    authority_done = f.briefs / "authority-done"
+    f.authority(f.pin + "\n", sleep=3, done=str(authority_done))
+    aiqt_hooks._RDP_BUDGET = _RDP_ROW_BUDGET
     try:
-        budget_kind = _rdp_kind(f.dispatch(f.good()))
+        budget_run = _rdp_deadline_run(lambda: (_rdp_kind(f.dispatch(f.good())), authority_done.exists()))
     finally:
         aiqt_hooks._RDP_BUDGET = saved_budget
         f.authority(f.pin + "\n")
-    check("rdp/deadline-bounds-the-decision", (budget_kind, aiqt_hooks.time.monotonic() - started < 2.5),
-          ("unverifiable", True))
+    check("rdp/deadline-bounds-the-decision", (budget_run[1][0], _rdp_deadline_verdict(
+        budget_run[0], budget_run[1][1], _RDP_ROW_BUDGET + _RDP_DECISION_SLACK)), ("unverifiable", True))
     # Each content read and git probe refuses to start once the deadline has passed: a past deadline is set
     # directly, then each reader is called (a symlink entry exercises the walk without the blob hash).
     (f.root / "rdp-link").symlink_to("seed.txt")
@@ -989,23 +1034,73 @@ def _rdp_cases(tmp):
     check("rdp/symlink-target-compared", sl_got, ["deny", "allow"])
     # A read that blocks in the kernel (a hung filesystem; here a sleep that never checks the deadline) cannot
     # hold the hook past its budget.
+    # As in rdp/deadline-bounds-the-decision: the hung read records the end of its sleep, which must not have
+    # come when the decision returns, and the decision's raw wall-clock time must be under the budget plus 1 s,
+    # so a wait over 2 s fails at any load.
     real_blob = aiqt_hooks._rdp_blob_id
+    hung_slept = []
 
     def _hung_blob(fmt, header_size, fd):
         aiqt_hooks.time.sleep(3)
+        hung_slept.append(True)
         return real_blob(fmt, header_size, fd)
     saved_budget = aiqt_hooks._RDP_BUDGET
-    aiqt_hooks._RDP_BUDGET = 1.0
+    aiqt_hooks._RDP_BUDGET = _RDP_ROW_BUDGET
     aiqt_hooks._rdp_blob_id = _hung_blob
-    started = aiqt_hooks.time.monotonic()
     try:
-        hung_kind = _rdp_kind(f.dispatch(f.good()))
+        hung_run = _rdp_deadline_run(lambda: (_rdp_kind(f.dispatch(f.good())), bool(hung_slept)))
     finally:
         aiqt_hooks._rdp_blob_id = real_blob
         aiqt_hooks._RDP_BUDGET = saved_budget
-    check("rdp/hung-read-bounded-by-deadline", (hung_kind, aiqt_hooks.time.monotonic() - started < 2.0),
-          ("unverifiable", True))
+    check("rdp/hung-read-bounded-by-deadline", (hung_run[1][0], _rdp_deadline_verdict(
+        hung_run[0], hung_run[1][1], _RDP_ROW_BUDGET + _RDP_HUNG_READ_SLACK)), ("unverifiable", True))
     aiqt_hooks.time.sleep(2.5)   # the abandoned worker finishes before the next vector uses f
+    # Three planted decisions the rule above must fail under both rows' bounds, each a stand-in for the
+    # dispatch that returns the expected UNVERIFIABLE without finishing the sleep the marker guards, after
+    # 2.7 s, between the 2.5 s bound and the 3-second sleep, while other threads compute (hashing, which runs
+    # outside the interpreter lock): a hashing thread started before the call and running through the wait;
+    # two short-lived hashing workers the call starts and joins before it returns; and a busy hashing thread
+    # the call leaves running, while a thread alive before the call ends during it.
+    overlap_stop = threading.Event()
+    overlap = _rdp_hashing_thread(30.0, overlap_stop)
+    try:
+        overlap_run = _rdp_deadline_run(lambda: (aiqt_hooks.time.sleep(2.7), ("unverifiable", False))[1])
+    finally:
+        overlap_stop.set()
+        overlap.join(10)
+    check("rdp/deadline-planted-wait-overrun-fails", [
+        _rdp_deadline_verdict(overlap_run[0], False, _RDP_ROW_BUDGET + slack)
+        for slack in (_RDP_DECISION_SLACK, _RDP_HUNG_READ_SLACK)], [False, False])
+
+    def _short_lived_workers():
+        workers = [_rdp_hashing_thread(2.6) for _ in range(2)]
+        aiqt_hooks.time.sleep(2.7)
+        for worker in workers:
+            worker.join(10)
+        return ("unverifiable", False)
+    worker_run = _rdp_deadline_run(_short_lived_workers)
+    check("rdp/deadline-planted-short-lived-worker-fails", [
+        _rdp_deadline_verdict(worker_run[0], False, _RDP_ROW_BUDGET + slack)
+        for slack in (_RDP_DECISION_SLACK, _RDP_HUNG_READ_SLACK)], [False, False])
+    stop_busy, busy_threads = threading.Event(), [_rdp_hashing_thread(1.0)]
+
+    def _leaves_busy_thread():
+        busy_threads.append(_rdp_hashing_thread(60.0, stop_busy))
+        aiqt_hooks.time.sleep(2.7)
+        return ("unverifiable", False)
+    try:
+        busy_run = _rdp_deadline_run(_leaves_busy_thread)
+    finally:
+        stop_busy.set()
+        for thread in busy_threads:
+            thread.join(10)
+    check("rdp/deadline-planted-busy-thread-fails", [
+        _rdp_deadline_verdict(busy_run[0], False, _RDP_ROW_BUDGET + slack)
+        for slack in (_RDP_DECISION_SLACK, _RDP_HUNG_READ_SLACK)], [False, False])
+    # The bound's edges: just under the 2.5 s bound passes, exactly at it and just over it fail, as does an
+    # outlived sleep well under it.
+    check("rdp/deadline-verdict-edges", [_rdp_deadline_verdict(wall, outlived, 2.5) for wall, outlived in (
+        (2.5 - 1e-6, False), (2.5, False), (2.5 + 1e-6, False), (1.0, True))], [True, False, False, False])
     mf = RdpFixture(base, "mutants")
     check("rdp/duplicate-repo-or-branch-unverifiable", [_rdp_kind(mf.dispatch(mf.good(extra=[
         lab + " " + v, lab + " " + v]))) for lab, v in (("Review-repo:", str(mf.root)), ("Review-branch:", "main"))],
@@ -1749,7 +1844,9 @@ def _rdp_label_screen_sweep(ls):
 # real screen may run about 2.39 times slower against the reference than the slowest measured run (another
 # host, another build) and still pass, while a screen 5 times slower, which this ratio bound exists to
 # catch, exceeds it with room to spare (5 times the least measured ratio of every shape is over 1.7 times
-# its bound).
+# its bound). Growth across sizes is judged twice: on deterministic operation counts (_rdp_screen_ops,
+# _rdp_ops_growth), and, for super-linear work the counts cannot see, on the screen's time as a multiple
+# of the reference's (_rdp_timing_group), never on raw times, which host load moves across sizes.
 _RDP_TIMING_SHAPES = (
     ("backtick-fence-line", "`", "x`", "2.1"), ("name-prefix-and-colon", "reviewpa\u0435:", "", "13.5"),
     ("lookalike-pairs", "r\u0435", ":", "14.4"), ("short-lines", "a:\n", "", "10"),
@@ -1764,6 +1861,12 @@ _RDP_TIMING_RUNAWAY = 10.0
 # _RDP_TIMING_RUNAWAY: under 190 CPU seconds, against about 30 for the real screen on the measuring host. A
 # runaway is one call the row cannot cut short; it ends its shape, and the budget still holds for the rest.
 _RDP_TIMING_BUDGET = 180.0
+# The rounds a growth fault must reproduce in before it fails its shape (_rdp_timing_rows): two groups'
+# worth, judged together on each (kind, size)'s least time over them.
+_RDP_CONFIRM_ROUNDS = 6
+# The cubic work the mutant row adds to the real screen (_rdp_label_screen_mutant_timing): this many full
+# reference scans of the brief times the square of its length in units of 256 KiB (2, 8 and 32 scans).
+_RDP_MUTANT_SCANS = 2
 
 
 def _rdp_reference_scan(text):
@@ -1776,28 +1879,183 @@ def _rdp_reference_scan(text):
     return count
 
 
+class _RdpCountingPattern:
+    """A compiled-pattern stand-in that adds the length of each string a call reads to count[0], then
+    defers to the real pattern, leaving its behaviour unchanged. sub and search are the only pattern
+    methods the label screen calls."""
+
+    def __init__(self, pattern, count):
+        self._pattern, self._count = pattern, count
+
+    def sub(self, repl, string):
+        self._count[0] += len(string)
+        return self._pattern.sub(repl, string)
+
+    def search(self, string):
+        self._count[0] += len(string)
+        return self._pattern.search(string)
+
+
+class _RdpCountingRe:
+    """An re-module stand-in counting the length of each string re.search reads into count[0]; every other
+    attribute (escape, compile) defers to the real module."""
+
+    def __init__(self, real, count):
+        self._real, self._count = real, count
+
+    def search(self, pattern, string):
+        self._count[0] += len(string)
+        return self._real.search(pattern, string)
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
+class _RdpCountingUnicodedata:
+    """A unicodedata-module stand-in counting the length of each text normalize reads, and one per
+    category call, into count[0]; every other attribute (name) defers to the real module."""
+
+    def __init__(self, real, count):
+        self._real, self._count = real, count
+
+    def normalize(self, form, text):
+        self._count[0] += len(text)
+        return self._real.normalize(form, text)
+
+    def category(self, ch):
+        self._count[0] += 1
+        return self._real.category(ch)
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
+def _rdp_screen_ops(text, labels):
+    """The label screen's work over text, counted without changing its behaviour: the characters each call
+    of the module-level patterns (_RDP_NOT_WORD, _RDP_UNLETTER, _RDP_LOOKALIKE, _RDP_NOT_ASCII), of
+    re.search and of unicodedata.normalize reads, one per unicodedata.category call, and the length of the
+    input each stage reads (text itself, _rdp_hidden, _rdp_screened, _rdp_named and every line
+    _rdp_read_labels reads), patched over aiqt_hooks around one call of _rdp_labels and restored in a
+    finally. The count is deterministic for a given brief (a second count of the same brief measured
+    equal, every shape), so a loaded or small runner cannot move it, where it moves any CPU time. Work a
+    stage does through plain str operations is counted once per stage, by its input's length, so extra
+    passes of a C primitive looped from Python inside a stage show only as time; those are the timing
+    bounds' job (_rdp_timing_group, _rdp_timing_rows), and how much of such work they catch depends on its
+    size. The normalized growth bound fails a super-linear term only when it lifts the screen's multiple
+    of the reference by the square root of the length factor (about 1.414 per doubling) in two of three
+    groups and in the confirm rounds (_rdp_timing_rows); a smaller term passes, and whether one near that
+    size fails depends on the host. On one host, before the confirm rounds, a prefix-count mutant
+    (text.count("\\n", 0, i) every 2400 characters inside _rdp_hidden) failed only in the
+    backtick-fence-line shape, and only by 0.8 to 5.8 percent over the bound in five runs. When the
+    reference's own growth per doubling exceeds the length factor, raw screen growth up to the raw bound
+    (the length factor to the power 1.5) times the reference's growth over the length factor passes:
+    about 4 percent over it at a reference growth of 2.08, about 11 percent at 2.22, both observed on one
+    host. No rule that cancels load can close that band, since a rule that cancels a load factor shared
+    by both legs depends only on the two multiples and the length factor. The ratio bound catches work
+    that is merely several times slower, and the runaway bound work that is gross."""
+    count = [len(text)]
+    patched = ("_RDP_NOT_WORD", "_RDP_UNLETTER", "_RDP_LOOKALIKE", "_RDP_NOT_ASCII", "re",
+               "unicodedata", "_rdp_hidden", "_rdp_screened", "_rdp_named", "_rdp_read_labels")
+    saved = {name: getattr(aiqt_hooks, name) for name in patched}
+
+    def _counted_text(fn):
+        def wrapper(first, *args):
+            count[0] += len(first)
+            return fn(first, *args)
+        return wrapper
+
+    def _counted_lines(fn):
+        def wrapper(lines, *args):
+            count[0] += sum(len(line) for line in lines)
+            return fn(lines, *args)
+        return wrapper
+    try:
+        for name in ("_RDP_NOT_WORD", "_RDP_UNLETTER", "_RDP_LOOKALIKE", "_RDP_NOT_ASCII"):
+            setattr(aiqt_hooks, name, _RdpCountingPattern(saved[name], count))
+        aiqt_hooks.re = _RdpCountingRe(saved["re"], count)
+        aiqt_hooks.unicodedata = _RdpCountingUnicodedata(saved["unicodedata"], count)
+        for name in ("_rdp_hidden", "_rdp_screened", "_rdp_named"):
+            setattr(aiqt_hooks, name, _counted_text(saved[name]))
+        aiqt_hooks._rdp_read_labels = _counted_lines(saved["_rdp_read_labels"])
+        aiqt_hooks._rdp_labels(text, labels)
+    finally:
+        for name in patched:
+            setattr(aiqt_hooks, name, saved[name])
+    return count[0]
+
+
+def _rdp_ops_growth(ops, lengths):
+    """The growth faults of one shape's operation counts, an empty list when linear enough: from each size
+    to the next, the count grows by a factor under the length factor to the power 1.5, compared exactly in
+    integers (o2 * o2 * n1 ** 3 < o1 * o1 * n2 ** 3), so a count exactly at the bound fails; about 2 per
+    doubling is linear and 4 quadratic, so each doubling must grow under about 2.83 times, and the 512 KiB
+    count is checked against both its neighbours. The real screen's counts measured 1.9991 to 2.0000 per
+    doubling over every shape (counts 1136955 to 13631411 over 256 KiB to 1 MiB; Python 3.14, x86_64), so
+    the bound sits about 1.41 times above the measured growth and a quadratic's 4 about 1.41 times over
+    the bound."""
+    sizes = sorted(lengths)
+    faults = []
+    for small, large in zip(sizes, sizes[1:]):
+        o1, o2 = ops[small], ops[large]
+        if not o2 * o2 * lengths[small] ** 3 < o1 * o1 * lengths[large] ** 3:
+            faults.append("ops grew {} to {} from {} to {} bytes".format(o1, o2, small, large))
+    return faults
+
+
+def _rdp_unresolved(least, sizes):
+    """The zero times among the screen's and the reference's least times at sizes, named in one string
+    ("screen time zero at 1048576 bytes, ..."), or "" when every one is above zero. A zero time is below
+    the clock's resolution: no measurement, so a term holding one cannot be evaluated."""
+    return ", ".join("{} time zero at {} bytes".format(kind, size) for size in sizes
+                     for kind in ("screen", "reference") if Fraction(least[(kind, size)]) == 0)
+
+
 def _rdp_timing_group(least, lengths, bound):
     """The faults of one group of rounds, an empty list when it passes. least maps (kind, size) to the least
     CPU seconds over the group's rounds, kind "screen" or "reference"; lengths maps each size to its brief's
     length in bytes; bound is the shape's ratio bound. The group passes when both hold, each compared
     exactly in rationals (Fraction), so a value exactly at a bound fails:
-    - growth: from each size to the next, the screen's time grows by a factor under the length factor to
-      the power 1.5 (t2 * t2 * n1 ** 3 < t1 * t1 * n2 ** 3); about 1 is linear and about 2 quadratic, so
-      each doubling must grow less than about 2.83 times, and the 512 KiB time is checked against both its
-      neighbours; and
-    - ratio: at each size, the screen's time is under bound times the reference's time.
-    A time of zero, below the clock's resolution, cannot show growth and fails."""
+    - ratio: at each size, the screen's time is under bound times the reference's time; and
+    - growth: from each size to the next, the screen's time as a multiple of the reference's grows by a
+      factor under the length factor to the power 0.5 (s2 * s2 * r1 * r1 * n1 < s1 * s1 * r2 * r2 * n2),
+      the 512 KiB multiple checked against both its neighbours. The reference is linear, so a linear
+      screen's multiple holds near 1 per doubling while a screen with a dominant quadratic term reaches 2,
+      against the bound's square root of 2 (about 1.414); when the reference grows by exactly the length
+      factor this is as sensitive as holding raw screen time under the length factor to the power 1.5 per
+      step. When the reference grows by more, it is less sensitive by that excess (the band
+      _rdp_screen_ops and _rdp_label_screen_timing state).
+    The screen and the reference are timed back to back over the same brief, so load, frequency scaling
+    and cache contention lift both legs together and cancel out of both bounds. Raw CPU time is never
+    compared across sizes: a loaded or small runner can lift a larger brief's per-character CPU time on
+    its own, and a raw growth bound would then fail linear code where the normalized one holds. The
+    decision cases show that on synthetic times, not measured ones (growth-load-lifts-both-legs and
+    linear-both-legs-loaded-every-group in _rdp_timing_decision_cases). Growth the operation counts can
+    see is judged on them first (_rdp_ops_growth), which load cannot move; this growth bound exists for
+    super-linear work the counts cannot see, extra passes of a C primitive looped from Python inside one
+    stage. A time of zero, below the clock's resolution, is not a measurement, so it can neither anchor
+    nor judge a bound: a zero screen or reference time at any size makes every term it takes part in
+    (its size's ratio term and each growth term that starts or ends at its size) a cannot-evaluate fault
+    instead, "cannot evaluate" and the term, naming each zero time in it, and that term is not compared,
+    so it never passes (decision cases zero-*, and rdp/label-screen-linear-time-zero-flip, where reading
+    every time as a measurement again turns those cases red). The other terms are judged as above."""
     sizes = sorted(lengths)
     faults = []
-    # The growth bound is the tightest of the row's bounds and, unlike the ratio bound, is not normalised by
-    # the reference, so load that lifts only the larger size's time counts against it in full (short-lines
-    # from 512 KiB to 1 MiB has measured 2.212 and 2.034 against the limit of about 2.828).
     for small, large in zip(sizes, sizes[1:]):
-        t1, t2 = Fraction(least[("screen", small)]), Fraction(least[("screen", large)])
-        if not t2 * t2 * lengths[small] ** 3 < t1 * t1 * lengths[large] ** 3:
-            faults.append("growth {:.3f}s to {:.3f}s from {} to {} bytes".format(
-                float(t1), float(t2), small, large))
+        unresolved = _rdp_unresolved(least, (small, large))
+        if unresolved:
+            faults.append("cannot evaluate growth from {} to {} bytes: {}".format(small, large, unresolved))
+            continue
+        s1, r1 = Fraction(least[("screen", small)]), Fraction(least[("reference", small)])
+        s2, r2 = Fraction(least[("screen", large)]), Fraction(least[("reference", large)])
+        if not s2 * s2 * r1 * r1 * lengths[small] < s1 * s1 * r2 * r2 * lengths[large]:
+            faults.append(
+                "screen over reference grew from {:.4f}s/{:.4f}s at {} bytes to {:.4f}s/{:.4f}s at"
+                " {} bytes".format(float(s1), float(r1), small, float(s2), float(r2), large))
     for size in sizes:
+        unresolved = _rdp_unresolved(least, (size,))
+        if unresolved:
+            faults.append("cannot evaluate ratio at {} bytes: {}".format(size, unresolved))
+            continue
         screen, reference = least[("screen", size)], least[("reference", size)]
         if not Fraction(screen) < bound * Fraction(reference):
             faults.append("screen {:.4f}s against reference {:.4f}s at {} bytes, not under {} times".format(
@@ -1805,50 +2063,100 @@ def _rdp_timing_group(least, lengths, bound):
     return faults
 
 
-def _rdp_timing_rows(shapes, timer, budget=_RDP_TIMING_BUDGET, runaway=_RDP_TIMING_RUNAWAY):
+def _rdp_growth_only(faults):
+    """True when faults, one group's (_rdp_timing_group), are all growth faults of measured times ("screen
+    over reference grew ..."): no ratio fault and no cannot-evaluate fault among them."""
+    return bool(faults) and all(fault.startswith("screen over reference grew ") for fault in faults)
+
+
+def _rdp_timing_rows(shapes, timer, budget=_RDP_TIMING_BUDGET, runaway=_RDP_TIMING_RUNAWAY,
+                     confirm=_RDP_CONFIRM_ROUNDS):
     """([(shape, verdict)], CPU seconds spent) for shapes, each (shape, lengths, bound) as _rdp_timing_group
     reads them; timer(shape, kind, size, round_number) times one run and returns its CPU seconds. A shape is
     timed in up to three groups of three rounds; each round times every size once, ascending in an even
     round and descending in an odd one, and at each size the reference and the screen back to back (their
     order also alternating), so a burst of load falls on small and large briefs and on both kinds alike.
     Stray work only adds time, so each group keeps each (kind, size)'s least time over its own rounds, and
-    the shape passes ("linear") when two groups pass (_rdp_timing_group) and fails ("not linear") when two
-    fail: a pass needs two groups' rounds to agree, so one burst that lifts the small sizes' times in every
-    round of one group cannot pass a screen that grows too fast. Three groups always decide, since one of
-    the two counts then reaches two, so the third group is timed only after one pass and one fail, and an
-    AssertionError marks the unreachable end of the loop. A timing over runaway CPU seconds fails the
-    shape at once ("runaway") and the shape is not timed again. A timing starts only while the row has spent
-    under budget CPU seconds; once it has not, the shape and every later one fail untimed ("over budget")."""
+    the shape passes ("linear") when two groups pass (_rdp_timing_group) and fails when two fail: a pass
+    needs two groups' rounds to agree, so one burst through every round of one group cannot alone decide
+    the shape. Three groups always decide, since one of the two counts then reaches two, so the third
+    group is timed only after one pass and one fail, and an AssertionError marks the unreachable end of
+    the loop. A shape that fails with a ratio or cannot-evaluate fault in either failing group fails at once
+    ("not linear"), with no confirm round, also when that group holds a growth fault as well (decision cases
+    ratio-fault-no-confirm-timings, cannot-evaluate-no-confirm and mixed-faults-no-confirm). A shape whose
+    two failing groups hold growth faults only (_rdp_growth_only) fails only when the fault reproduces:
+    confirm more rounds are timed, interleaved the same way and numbered on from the last round timed, and
+    judged once (_rdp_timing_group) on each (kind, size)'s least time over those confirm rounds alone. Any
+    fault there confirms it ("not linear", naming the failing groups and the confirm faults); none passes
+    the shape ("linear"). A super-linear screen's growth holds in its quiet times, the least over many
+    rounds, so a fault well over the growth bound reproduces; load that lifted one size's short reference
+    timing (from about a sixteenth to a ninth of the screen's for the shapes whose ratio is 8.9 to 16, but
+    about half for backtick-fence-line, whose ratio is 2.1) through two groups, moving that size's multiple,
+    has to lift that one (kind, size) through every confirm round as well to fail the shape. The confirm
+    rounds narrow what the growth bound catches, a reduction accepted so that load on a linear screen's
+    short reference timing does not fail it. Before them a growth fault in two groups failed the shape; now
+    two more ways pass it. A term near the bound, a few percent over it in two groups, can come out under it
+    in the confirm rounds and pass (on one host a prefix-count mutant, text.count("\\n", 0, i) every 2200
+    characters inside _rdp_hidden, failed the confirm rounds with its larger step about 3 percent over the
+    bound). And load confined to the confirm rounds that lifts the smaller sizes' screen or the larger
+    sizes' reference more than the other leg in every one of them flattens their multiples and passes a
+    growth fault two groups found, where before the confirm rounds it failed (decision case
+    quadratic-reference-lifted-confirm-rounds-only: not linear with confirm 0, linear with the default; a
+    lift that leaves the confirm multiple growing just over the bound still fails). Load that flattens two
+    groups' multiples passes a growth fault, as it did before the confirm rounds. A growth fault well over
+    the bound in a real screen still fails in the confirm rounds (rdp/label-screen-linear-time-mutant). With
+    confirm 0 a growth fault fails the shape at once, the behaviour before the confirm rounds. A timing over
+    runaway CPU seconds fails the shape at once ("runaway") and the shape is not timed again. A timing
+    starts only while the row has spent under budget CPU seconds; once it has not, the shape and every later
+    one fail untimed ("over budget"), confirm rounds included."""
     spent = 0.0
     rows = []
 
-    def _shape(shape, lengths, bound):
+    def _rounds(shape, lengths, first, count):
+        """Each (kind, size)'s least time over rounds first to first + count - 1, or the verdict that ends
+        the shape (over budget or runaway) as a string."""
         nonlocal spent
-        passed, failed = 0, []
+        least = {}
+        for round_number in range(first, first + count):
+            ascending = round_number % 2 == 0
+            for size in sorted(lengths, reverse=not ascending):
+                for kind in ("reference", "screen") if ascending else ("screen", "reference"):
+                    if spent >= budget:
+                        return "over budget: the row spent {:.1f} CPU seconds of {}; not timed".format(
+                            spent, budget)
+                    took = timer(shape, kind, size, round_number)
+                    spent += took
+                    if took > runaway:
+                        return "runaway: {} at {} bytes took {:.1f} CPU seconds, over {}; not timed again".format(
+                            kind, size, took, runaway)
+                    least[(kind, size)] = min(least.get((kind, size), took), took)
+        return least
+
+    def _shape(shape, lengths, bound):
+        passed, failed, growth_only = 0, [], True
         for group in range(3):
-            least = {}
-            for round_number in range(3 * group, 3 * group + 3):
-                ascending = round_number % 2 == 0
-                for size in sorted(lengths, reverse=not ascending):
-                    for kind in ("reference", "screen") if ascending else ("screen", "reference"):
-                        if spent >= budget:
-                            return "over budget: the row spent {:.1f} CPU seconds of {}; not timed".format(
-                                spent, budget)
-                        took = timer(shape, kind, size, round_number)
-                        spent += took
-                        if took > runaway:
-                            return "runaway: {} at {} bytes took {:.1f} CPU seconds, over {}; not timed again".format(
-                                kind, size, took, runaway)
-                        least[(kind, size)] = min(least.get((kind, size), took), took)
+            least = _rounds(shape, lengths, 3 * group, 3)
+            if isinstance(least, str):
+                return least
             faults = _rdp_timing_group(least, lengths, bound)
             if faults:
                 failed.append("group {}: {}".format(group, ", ".join(faults)))
+                growth_only = growth_only and _rdp_growth_only(faults)
             else:
                 passed += 1
             if passed == 2:
                 return "linear"
             if len(failed) == 2:
-                return "not linear: " + "; ".join(failed)
+                if not growth_only or confirm <= 0:
+                    return "not linear: " + "; ".join(failed)
+                least = _rounds(shape, lengths, 3 * group + 3, confirm)
+                if isinstance(least, str):
+                    return least
+                faults = _rdp_timing_group(least, lengths, bound)
+                if not faults:
+                    return "linear"
+                return "not linear: {}; confirmed over {} rounds: {}".format(
+                    "; ".join(failed), confirm, ", ".join(faults))
         raise AssertionError("three groups of rounds always decide, yet {} passed and {} failed".format(
             passed, len(failed)))
 
@@ -1865,14 +2173,38 @@ def _rdp_label_screen_timing(ls):
     other character), a short line, repeated (the most lines), a whole name and a word, repeated on one line
     that ends in a colon (a name ended at every word), a letter and a look-alike between two marks, repeated
     (every mark a colon the look-alike test passes over), and a mark, repeated (a colon at every character).
-    Each brief is timed in this process's CPU time against a linear reference over the same brief
-    (_rdp_reference_scan), and a shape passes when its time grows less than the size to the power 1.5 over
-    each doubling and stays under its ratio bound to the reference at every size (_rdp_timing_group,
-    _RDP_TIMING_SHAPES), in two groups of rounds (_rdp_timing_rows). Every bound is a ratio of times taken
-    in the same run, so it holds on a fast or a slow host; the ratio bound also fails a screen that grows
-    linearly but runs several times slower. A runaway timing ends its shape untimed, and the row's timings
-    share a CPU budget (_RDP_TIMING_BUDGET), so a failing row ends with a named failure. Then the decision
-    itself, over simulated times (_rdp_timing_decision_cases)."""
+    Each shape is judged twice. Its operation counts (_rdp_screen_ops), deterministic for a given brief,
+    must grow less than the size to the power 1.5 over each doubling (_rdp_ops_growth); a shape whose
+    counts grow too fast fails by name and is not timed. And each brief is timed in this process's CPU
+    time against a linear reference over the same brief (_rdp_reference_scan): the shape's time must stay
+    under its ratio bound to the reference at every size, and its multiple of the reference must grow
+    under the length factor to the power 0.5 from each size to the next (_rdp_timing_group,
+    _RDP_TIMING_SHAPES), in two groups of rounds (_rdp_timing_rows); a shape failing on growth alone
+    fails only when the fault reproduces in confirm rounds (_RDP_CONFIRM_ROUNDS), since a short
+    reference timing lifted by load through two groups can fail a linear screen's growth. That narrows
+    the growth bound, a reduction accepted for that reason: a term near the bound that fails two groups
+    can pass in the confirm rounds where it failed before them, and load confined to the confirm rounds
+    that lifts one leg more than the other can pass a growth fault two groups found (_rdp_timing_rows
+    states both, and decision case quadratic-reference-lifted-confirm-rounds-only pins the second).
+    Every timing bound is a ratio of times taken back to back in the same run, so it holds on a fast,
+    slow or loaded host, load that lifts one leg more than the other aside. The growth bound fails
+    super-linear work the counts cannot see only when that work lifts the screen's multiple of the
+    reference by the square root of the length factor (about 1.414 per doubling) in two of three groups
+    and in the confirm rounds; a smaller term passes, and whether one near that size fails depends on
+    the host (on one host, before the confirm rounds, a prefix-count mutant, text.count("\\n", 0, i)
+    every 2400 characters inside _rdp_hidden, failed only in the backtick-fence-line shape and only by
+    0.8 to 5.8 percent over the bound in five runs). When the reference's own growth per doubling
+    exceeds the length factor, raw screen growth up to the raw bound (the length factor to the power
+    1.5) times the reference's growth over the length factor passes: about 4 percent over it at a
+    reference growth of 2.08, about 11 percent at 2.22, both observed on one host. No rule that cancels
+    load can close that band, since a rule that cancels a load factor shared by both legs depends only
+    on the two multiples and the length factor. The ratio bound also fails a screen that grows linearly
+    but runs several times slower, and the runaway bound fails gross work outright (a C str primitive
+    looped per character exceeds it at these sizes). A runaway timing ends its shape untimed, and the
+    row's timings share a CPU budget (_RDP_TIMING_BUDGET), so a failing row ends with a named failure.
+    Then the real screen with cubic work added must still fail, at its ratio bound and on growth
+    alone through the confirm rounds (_rdp_label_screen_mutant_timing), and then the decision itself,
+    over simulated counts and times (_rdp_timing_decision_cases)."""
     labels = ls.binding["labels"]
     lead = _rdp_screen_text(ls, [])
     texts = {}
@@ -1889,44 +2221,181 @@ def _rdp_label_screen_timing(ls):
             _rdp_reference_scan(text)
         return time.process_time() - started
     shapes = []
+    counted = {}
     for shape, unit, tail, ratio in _RDP_TIMING_SHAPES:
         for size in _RDP_TIMING_SIZES:
             texts[(shape, size)] = _brief(unit, tail, size)
-        shapes.append((shape, {size: len(texts[(shape, size)].encode()) for size in _RDP_TIMING_SIZES},
-                       Fraction(ratio) * _RDP_TIMING_MARGIN))
-    rows, _spent = _rdp_timing_rows(shapes, _timer)
-    check("rdp/label-screen-linear-time", rows, [(shape, "linear") for shape, _l, _b in shapes])
+        lengths = {size: len(texts[(shape, size)].encode()) for size in _RDP_TIMING_SIZES}
+        shapes.append((shape, lengths, Fraction(ratio) * _RDP_TIMING_MARGIN))
+        ops = {size: _rdp_screen_ops(texts[(shape, size)], labels) for size in _RDP_TIMING_SIZES}
+        faults = _rdp_ops_growth(ops, lengths)
+        if faults:
+            counted[shape] = "not linear: " + ", ".join(faults)
+    rows, _spent = _rdp_timing_rows([row for row in shapes if row[0] not in counted], _timer)
+    timed = dict(rows)
+    check("rdp/label-screen-linear-time",
+          [(shape, counted.get(shape, timed.get(shape))) for shape, _l, _b in shapes],
+          [(shape, "linear") for shape, _l, _b in shapes])
+    _rdp_label_screen_mutant_timing(next(row for row in shapes if row[0] == "backtick-fence-line"), _timer)
     _rdp_timing_decision_cases()
 
 
+def _rdp_label_screen_mutant_timing(row, timer):
+    """A real super-linear screen still fails the timing row (rdp/label-screen-linear-time-mutant), confirm
+    rounds included. The mutant wraps the real _rdp_hidden, patched over aiqt_hooks for the timings and
+    restored in a finally: before calling it, the wrapper runs _rdp_reference_scan over the whole brief
+    _RDP_MUTANT_SCANS times the square of its length in units of 256 KiB (2, 8 and 32 scans at 256 KiB,
+    512 KiB and 1 MiB). That is cubic work the operation counts cannot see, and since it is the
+    reference's own Python loop, it adds that many times the reference to the screen's multiple of the
+    reference whatever the host's speed. row is the backtick-fence-line shape, whose own screen is the
+    fastest against the reference (about 2.1), and timer the row's (_rdp_label_screen_timing). The mutant
+    is timed twice: under the shape's ratio bound, where it must fail ("not linear"), and with that bound
+    lifted a thousand times, far over its measured multiples, where in the measured runs only the growth
+    bound sees it, so its two failing groups hold growth faults alone and the confirm rounds must reproduce
+    them ("confirmed over" in the verdict). On one host its multiples measured about 4.1, 10 and 35,
+    growing about 2.5 and 3.4 per doubling (about 75 and 140 percent over the growth bound), and the two
+    timings spent about 5.7 and 11.6 CPU seconds; in another run the 1 MiB mutant screen call took about
+    0.75 to 0.87 CPU seconds. No artefact in the repository keeps the output of either run, and the margins
+    below are derived from these figures. With eight busy loops pinned to the one core the row ran on, in
+    one run whose output no artefact in the repository keeps either, they measured 3.8 to 3.9, 9.8 to 10.0
+    and 33.8 to 34.0, growing 2.53 to 2.62 and 3.39 to 3.46. Load can turn the row red in at least the four
+    ways below, a list that illustrates and does not claim to be complete, and these margins say how much
+    load each needs, not that load cannot supply it. The row's timer counts CPU seconds, so on a host that
+    does not charge hypervisor steal time to the process, load reaches its bounds only by slowing the
+    process's own work, not by time the process spends waiting for a core. On a virtual machine whose
+    kernel lacks paravirtual steal accounting (CONFIG_PARAVIRT_TIME_ACCOUNTING), time its virtual CPU waits
+    for a physical core while running the process is not subtracted from the process's CPU time, so load
+    elsewhere on the physical host can lift a timing too. First, a false "linear": a timing reads linear
+    only when a group or the confirm rounds hold each doubling's growth of the multiple under the bound's
+    square root of 2, so load would have to cut the two doublings' growth about 1.76 and 2.40 times in
+    every round of two groups, or of the confirm rounds, by lifting one leg against the other: for example
+    the 256 KiB screen 1.76 times and the 1 MiB reference 2.40 times, or the 512 KiB reference 1.76 times
+    and the 1 MiB reference about 4.2 times. In that second example the 1 MiB reference's lift of about 4.2
+    is the product of the two doublings' cuts (1.76 times 2.40), since the 512 KiB reference's lift also
+    raises the second doubling's growth 1.76 times; a lift of the 1 MiB reference alone leaves the first
+    doubling's growth near 2.5, which fails however large that lift is. The timing under the ratio bound
+    must also bring every size's multiple under that bound (about 5.25). In the runner's failure that the
+    confirm rounds answer, a 512 KiB reference read about 1.9 times its linear share (from the runner's job
+    log, which the repository does not keep). Second, a runaway: a timing reads "runaway" when one call
+    takes over _RDP_TIMING_RUNAWAY (10) CPU seconds. The cheapest route is to make the 1 MiB mutant call,
+    the row's longest, about 11 to 13 times longer; any other call over 10 CPU seconds, a smaller size's
+    screen or any reference, is a runaway as well, and needs a larger lift of its own time. Third, over
+    budget: a timing reads "over budget" when its calls have spent _RDP_TIMING_BUDGET (180) CPU seconds
+    before a later call starts, a budget each of the two timings has to itself, so load would have to make
+    the longer one's CPU time about 15.5 times longer (the two together spent about 17). Fourth, a ratio
+    fault on the timing with the lifted bound: that bound is the shape's multiplied by 1000 (5250), finite,
+    not disabled, and a ratio fault in either failing group fails the shape at once ("not linear" with no
+    confirm round), so the row's requirement that the verdict read "confirmed over" fails. Load would have
+    to lift a screen timing against its reference about 150 times at 1 MiB (5250 over about 35) through
+    every round of one of the groups that decide the shape, and more at the smaller sizes; at the 1 MiB
+    call times above, that lift takes the call past the runaway bound first. A term only a few percent over
+    the bound can pass the confirm rounds (_rdp_timing_rows), so this row pins that a clear super-linear
+    term still fails, not that every one does."""
+    shape, lengths, bound = row
+    real = aiqt_hooks._rdp_hidden
+
+    def _mutant(text):
+        for _scan in range(_RDP_MUTANT_SCANS * (len(text) // 262144) ** 2):
+            _rdp_reference_scan(text)
+        return real(text)
+    aiqt_hooks._rdp_hidden = _mutant
+    try:
+        bounded, _spent = _rdp_timing_rows([row], timer)
+        unbounded, _spent = _rdp_timing_rows([(shape, lengths, 1000 * bound)], timer)
+    finally:
+        aiqt_hooks._rdp_hidden = real
+    check("rdp/label-screen-linear-time-mutant",
+          [bounded[0][1].split(":")[0], unbounded[0][1].split(":")[0], "; confirmed over " in unbounded[0][1]],
+          ["not linear", "not linear", True])
+
+
 def _rdp_timing_decision_cases():
-    """The linear-time decision over simulated times (rdp/label-screen-linear-time-decision), no screen run:
-    each bound fails exactly at its value and passes just inside it; a quadratic screen fails, also when a
-    burst of load lifts its small sizes' times through a whole group of rounds; a linear screen passes
-    through a burst that lifts its largest size through one group; a runaway ends its shape untimed while
-    the next shape is still timed; and timings that each take just under the runaway bound end the row
-    over budget, every shape failed by name, within the stated bound of the budget plus one timing."""
+    """The linear-time decision over simulated counts and times (rdp/label-screen-linear-time-decision),
+    no screen run: each bound fails exactly at its value and passes just inside it, the growth bound on
+    integer operation counts (_rdp_ops_growth), and the normalized growth and ratio bounds on times
+    (_rdp_timing_group); a screen or reference time of zero at either end of a growth step gives a named
+    cannot-evaluate fault for each term it takes part in, never a pass, while the least positive time is
+    judged as a measurement, and a flip that judges zero as a measurement again turns the zero cases red
+    (rdp/label-screen-linear-time-zero-flip); load that lifts both legs of one size cancels out of the
+    timing bounds, also when it lifts every group of rounds, where a raw growth bound would fail; a
+    quadratic screen's times fail, also when a burst of load lifts its small sizes' times through a whole
+    group of rounds, and also when the quadratic stays under the ratio bound and only the normalized
+    growth sees it; a linear screen passes through a burst that lifts its largest size through one group;
+    a growth fault alone fails only when it reproduces in the confirm rounds, so a linear screen whose
+    reference is lifted through two groups passes, and fails with no confirm rounds, while a lift held
+    through the confirm rounds still fails, and a quadratic whose reference is lifted through every confirm
+    round except one quiet round still fails, while a quadratic whose reference is lifted through the
+    confirm rounds alone passes and fails with no confirm rounds (the coverage they give up, judged by the
+    same growth bound just over and just inside it); a ratio fault fails with no confirm round, and so do
+    a cannot-evaluate fault whose later rounds are all measured and a group that holds a growth fault
+    beside a ratio or cannot-evaluate fault; a runaway ends its shape untimed while the next shape is
+    still timed; and timings that each take just under the runaway bound end the row over budget, every
+    shape failed by name, within the stated bound of the budget plus one timing."""
     sizes = {262144: 262144, 524288: 524288, 1048576: 1048576}
     bound = Fraction("13.5") * _RDP_TIMING_MARGIN
 
-    def _group(screen, reference=(1.0, 1.0, 1.0), lengths=sizes):
+    def _faults(screen, reference=(1.0, 1.0, 1.0), lengths=sizes):
         least = {}
         for size, took, ref in zip(sorted(lengths), screen, reference):
             least[("screen", size)], least[("reference", size)] = took, ref
-        return len(_rdp_timing_group(least, lengths, bound))
+        return _rdp_timing_group(least, lengths, bound)
+
+    def _group(screen, reference=(1.0, 1.0, 1.0), lengths=sizes):
+        return len(_faults(screen, reference, lengths))
     quarter = {262144: 262144, 1048576: 1048576}
     at_ratio = float(bound)
+    # Over one quadrupling of size the ops bound is a growth factor of exactly 8 (the length factor to the
+    # power 1.5): a count at it fails, one just inside passes. Counts are integers, so the boundary is
+    # exact. A quadratic's counts (4 per doubling) fail at both steps, and the 512 KiB count is checked
+    # against both neighbours, so a middle count that grew too fast from the smallest size decides alone.
+    # The normalized time bound allows a growth factor of exactly 2 for the screen-over-reference multiple
+    # over one quadrupling (the length factor to the power 0.5): with a linear reference quadrupling from
+    # 1.0 to 4.0, a screen going from 1.0 to 8.0 sits exactly at it and fails, 7.999999 just inside
+    # passes, 8.000001 just outside fails; both legs of one size lifted together (each grows 6 times from
+    # 512 KiB to 1 MiB) cancel and pass; and a middle multiple that grew too fast from the smallest size
+    # decides alone. A time of zero over one quadrupling, screen or reference, at the smaller size or the
+    # larger: the growth term and that size's ratio term are each a named cannot-evaluate fault, and the
+    # other size's ratio term, with no zero in it, is judged and passes. The least positive float time
+    # at the larger size is a measurement and is judged: it passes both terms.
+    zeros = [
+        ("zero-screen-at-larger", (1.0, 0.0), (1.0, 4.0)), ("zero-reference-at-smaller", (1.0, 4.0), (0.0, 4.0)),
+        ("zero-screen-at-smaller", (0.0, 4.0), (1.0, 4.0)), ("zero-reference-at-larger", (1.0, 4.0), (1.0, 0.0))]
+    growth, small_ratio, large_ratio = ("cannot evaluate growth from 262144 to 1048576 bytes: ",
+                                        "cannot evaluate ratio at 262144 bytes: ",
+                                        "cannot evaluate ratio at 1048576 bytes: ")
+    zero_faults = [
+        ("zero-screen-at-larger", [growth + "screen time zero at 1048576 bytes",
+                                   large_ratio + "screen time zero at 1048576 bytes"]),
+        ("zero-reference-at-smaller", [growth + "reference time zero at 262144 bytes",
+                                       small_ratio + "reference time zero at 262144 bytes"]),
+        ("zero-screen-at-smaller", [growth + "screen time zero at 262144 bytes",
+                                    small_ratio + "screen time zero at 262144 bytes"]),
+        ("zero-reference-at-larger", [growth + "reference time zero at 1048576 bytes",
+                                      large_ratio + "reference time zero at 1048576 bytes"])]
+
+    def _zero_cases():
+        return [(case, _faults(screen, reference, lengths=quarter)) for case, screen, reference in zeros]
     bounds = [
-        ("growth-4x-exactly-8", _group((1.0, 8.0), lengths=quarter)),
-        ("growth-4x-just-under-8", _group((1.0, 7.999999), lengths=quarter)),
-        ("growth-4x-just-over-8", _group((1.0, 8.000001), lengths=quarter)),
+        ("ops-growth-4x-exactly-8", len(_rdp_ops_growth({262144: 1000, 1048576: 8000}, quarter))),
+        ("ops-growth-4x-just-under-8", len(_rdp_ops_growth({262144: 1000, 1048576: 7999}, quarter))),
+        ("ops-growth-4x-just-over-8", len(_rdp_ops_growth({262144: 1000, 1048576: 8001}, quarter))),
+        ("ops-quadratic", len(_rdp_ops_growth({262144: 1000, 524288: 4000, 1048576: 16000}, sizes))),
+        ("ops-middle-size-decides", len(_rdp_ops_growth({262144: 1000, 524288: 4000, 1048576: 5000},
+                                                        sizes))),
+        ("growth-4x-exactly-2", _group((1.0, 8.0), (1.0, 4.0), lengths=quarter)),
+        ("growth-4x-just-under-2", _group((1.0, 7.999999), (1.0, 4.0), lengths=quarter)),
+        ("growth-4x-just-over-2", _group((1.0, 8.000001), (1.0, 4.0), lengths=quarter)),
+        ("growth-load-lifts-both-legs", _group((1.0, 2.0, 12.0), (1.0, 2.0, 12.0))),
+        ("growth-middle-size-decides", _group((1.0, 4.0, 5.0), (1.0, 2.0, 4.0))),
+        *_zero_cases(),
+        ("least-positive-screen-at-larger", _group((1.0, 5e-324), (1.0, 4.0), lengths=quarter)),
         ("ratio-exactly-at", _group((at_ratio, at_ratio * 2, at_ratio * 4), (1.0, 2.0, 4.0))),
         ("ratio-just-under", _group((at_ratio - 1e-6, (at_ratio - 1e-6) * 2, (at_ratio - 1e-6) * 4),
                                     (1.0, 2.0, 4.0))),
-        ("ratio-just-over", _group((at_ratio + 1e-6, 2.0, 4.0), (1.0, 2.0, 4.0))),
-        ("middle-size-decides", _group((1.0, 4.0, 5.0)))]
+        ("ratio-just-over", _group((at_ratio + 1e-6, 2.0, 4.0), (1.0, 2.0, 4.0)))]
 
-    def _simulate(screen, reference, runaway_at=None, budget=_RDP_TIMING_BUDGET, shapes=("a",)):
+    def _simulate(screen, reference, runaway_at=None, budget=_RDP_TIMING_BUDGET, shapes=("a",),
+                  confirm=_RDP_CONFIRM_ROUNDS):
         calls = []
 
         def _timer(shape, kind, size, round_number):
@@ -1934,7 +2403,8 @@ def _rdp_timing_decision_cases():
             if runaway_at is not None and (shape, kind, size) == runaway_at:
                 return _RDP_TIMING_RUNAWAY + 0.5
             return (screen if kind == "screen" else reference)(size, round_number)
-        rows, spent = _rdp_timing_rows([(shape, sizes, bound) for shape in shapes], _timer, budget=budget)
+        rows, spent = _rdp_timing_rows([(shape, sizes, bound) for shape in shapes], _timer, budget=budget,
+                                       confirm=confirm)
         return ([verdict.split(":")[0] for _shape, verdict in rows], spent, calls)
 
     def _linear(size, _round):
@@ -1945,8 +2415,15 @@ def _rdp_timing_decision_cases():
 
     def _quadratic(size, _round):
         return 0.1 * (size / 262144) ** 2
-    # A quadratic screen with its 256 KiB time lifted 2.1 times through the first group of rounds, and one
-    # with its 256 KiB and 512 KiB times lifted so that the first group looks linear (4, 2 and 1 times).
+    # A quadratic screen with its 256 KiB time lifted 2.1 times through the first group of rounds (the
+    # ratio bound still fails it at 1 MiB); one that stays under the ratio bound at every size (every
+    # multiple of its reference between 2.5 and 10 against a bound of 33.75), which only the normalized
+    # growth bound sees; and one whose first group of rounds is flattened to look linear (4, 2 and 1
+    # times), which the second and third groups' unflattened multiples fail. A linear screen whose 1 MiB
+    # screen AND reference timings are lifted 3 times through every group of rounds (sustained load falls
+    # on both legs timed back to back) still passes: the lift cancels out of the multiple, where a raw-time
+    # growth bound, or one that divides each size's screen time by the reference's least time per byte
+    # over all sizes, reads 6 per doubling in every group and fails linear code.
     lifted = {262144: 2.1}
     flattened = {262144: 4.0, 524288: 2.0}
     cases = [
@@ -1955,14 +2432,100 @@ def _rdp_timing_decision_cases():
         ("quadratic-small-lifted-one-group", _simulate(
             lambda size, rnd: _quadratic(size, rnd) * (lifted.get(size, 1.0) if rnd < 3 else 1.0),
             _reference)[0]),
+        ("quadratic-under-ratio-bound", _simulate(
+            _quadratic, lambda size, rnd: 0.04 * size / 262144)[0]),
         ("quadratic-flattened-one-group", _simulate(
             lambda size, rnd: _quadratic(size, rnd) * (flattened.get(size, 1.0) if rnd < 3 else 1.0),
             lambda size, rnd: 0.04 * size / 262144)[0]),
+        ("linear-both-legs-loaded-every-group", _simulate(
+            lambda size, rnd: _linear(size, rnd) * (3.0 if size == 1048576 else 1.0),
+            lambda size, rnd: _reference(size, rnd) * (3.0 if size == 1048576 else 1.0))[0]),
         ("linear-large-lifted-one-group", _simulate(
             lambda size, rnd: _linear(size, rnd) * (3.0 if size == 1048576 and 3 <= rnd < 6 else 1.0),
             _reference)[0]),
         ("five-times-slower", _simulate(lambda size, rnd: 5 * _linear(size, rnd),
                                         lambda size, rnd: _linear(size, rnd) / 13.5)[0])]
+    # The confirm rounds. A linear screen whose 512 KiB reference timing is lifted 1.9 times through the
+    # first and third groups of rounds, so its multiple grows 1.9 times to 1 MiB in each, fails those two
+    # groups on growth alone and passes on the confirm rounds. It follows the failure on a busy runner in
+    # its first group, where the 512 KiB reference read about as long as the 1 MiB one and the multiple
+    # grew 1.52 times to 1 MiB; there the third group's multiple grew 1.84 times, mainly through the 1 MiB
+    # screen timing (0.4570 s against 0.2664 s in the first group). With no confirm rounds it fails, the
+    # outcome before them. The same lift through every round, confirm rounds included, still fails. A
+    # quadratic whose reference is lifted 2 times at 512 KiB and 4 times at 1 MiB, which flattens its
+    # multiple, through every confirm round but the last still fails, since the least over the confirm
+    # rounds takes the quiet one; held through all six it passes, the reduction the docstring of
+    # _rdp_timing_rows states. A shape failing on growth alone takes 72 timings, its two groups and then
+    # the confirm rounds, and one failing on its ratio bound takes 36, its two groups alone, with no
+    # confirm round.
+    noisy = {0, 1, 2, 6, 7, 8}
+
+    def _noisy_reference(size, rnd):
+        return _reference(size, rnd) * (1.9 if size == 524288 and rnd in noisy else 1.0)
+    cases.append(("linear-reference-lifted-two-groups", _simulate(_linear, _noisy_reference)[0],
+                  _simulate(_linear, _noisy_reference, confirm=0)[0]))
+    cases.append(("linear-reference-lifted-every-round", _simulate(
+        _linear, lambda size, rnd: _reference(size, rnd) * (1.9 if size == 524288 else 1.0))[0]))
+
+    def _flattening_reference(last):
+        def _timed(size, rnd):
+            return 0.04 * size / 262144 * (size / 262144 if 6 <= rnd < last else 1.0)
+        return _timed
+    cases.append(("quadratic-reference-lifted-confirm-but-one",
+                  _simulate(_quadratic, _flattening_reference(11))[0],
+                  _simulate(_quadratic, _flattening_reference(12))[0]))
+    # The coverage the confirm rounds give up: the same quadratic with its reference lifted through the
+    # confirm rounds alone, every one of them, fails its two groups on growth and passes the shape, where
+    # with no confirm rounds it fails. The lift that leaves the confirm multiple growing 1.42 times per
+    # doubling, just over the bound's square root of 2, still fails, and one that leaves it growing 1.41
+    # times, just inside, passes, so the confirm rounds' growth bound lies between 1.41 and 1.42 per
+    # doubling, where the groups' is the square root of 2. That pin catches a confirm bound 1 percent
+    # looser (about 1.428, which passes the 1.42 leg) and, through the timing counts below, a confirm
+    # count of 5 or 7, but a confirm bound loosened only to between 1.414 and 1.42 per doubling would pass
+    # both legs unseen.
+    steps = {262144: 0, 524288: 1, 1048576: 2}
+
+    def _confirm_lifted(growth):
+        def _timed(size, rnd):
+            return 0.04 * size / 262144 * ((2 / growth) ** steps[size] if rnd >= 6 else 1.0)
+        return _timed
+    cases.append(("quadratic-reference-lifted-confirm-rounds-only",
+                  _simulate(_quadratic, _flattening_reference(12))[0],
+                  _simulate(_quadratic, _flattening_reference(12), confirm=0)[0],
+                  _simulate(_quadratic, _confirm_lifted(1.42))[0],
+                  _simulate(_quadratic, _confirm_lifted(1.41))[0]))
+    verdicts, _spent, calls = _simulate(_quadratic, lambda size, rnd: 0.04 * size / 262144)
+    cases.append(("growth-fault-confirm-timings", verdicts, len(calls)))
+    verdicts, _spent, calls = _simulate(lambda size, rnd: 5 * _linear(size, rnd),
+                                        lambda size, rnd: _linear(size, rnd) / 13.5)
+    cases.append(("ratio-fault-no-confirm-timings", verdicts, len(calls)))
+    # A cannot-evaluate fault fails at once, with no confirm round: a linear screen whose 512 KiB reference
+    # reads zero through the first two groups, and is measured in every round after them, fails in 36
+    # timings; sent to the confirm rounds, it would pass on their quiet times in 72. A group that holds a
+    # growth fault beside a ratio fault (the 1 MiB screen lifted 3 times) or beside a cannot-evaluate
+    # fault (a zero 256 KiB reference, the 1 MiB screen lifted 2 times) through the first two groups also
+    # fails at once, so a growth fault only routes a group to the confirm rounds when every fault in it is
+    # one; each leg also names the kinds of fault in its first group, so it stays a mixed group.
+
+    def _kinds(faults):
+        return sorted({"growth" if fault.startswith("screen over reference grew ") else
+                       "cannot evaluate" if fault.startswith("cannot evaluate ") else "ratio"
+                       for fault in faults})
+
+    def _first_two_groups(fn, lifts):
+        def _timed(size, rnd):
+            return lifts.get(size, 1.0) * fn(size, rnd) if rnd < 6 else fn(size, rnd)
+        return _timed
+    verdicts, _spent, calls = _simulate(_linear, _first_two_groups(_reference, {524288: 0.0}))
+    cases.append(("cannot-evaluate-no-confirm", verdicts, len(calls)))
+    mixed = [("growth-and-ratio", {1048576: 3.0}, {}),
+             ("growth-and-cannot-evaluate", {1048576: 2.0}, {262144: 0.0})]
+    for leg, screen_lifts, reference_lifts in mixed:
+        screen = _first_two_groups(_linear, screen_lifts)
+        reference = _first_two_groups(_reference, reference_lifts)
+        verdicts, _spent, calls = _simulate(screen, reference)
+        cases.append(("mixed-faults-no-confirm/" + leg, verdicts, len(calls), _kinds(_faults(
+            [screen(size, 0) for size in sorted(sizes)], [reference(size, 0) for size in sorted(sizes)]))))
     verdicts, _spent, calls = _simulate(_linear, _reference, runaway_at=("a", "screen", 1048576),
                                         shapes=("a", "b"))
     runaway = calls.index(("a", "screen", 1048576))
@@ -1973,16 +2536,47 @@ def _rdp_timing_decision_cases():
     cases.append(("just-under-runaway-every-timing", verdicts, len(calls),
                   _RDP_TIMING_BUDGET <= spent < _RDP_TIMING_BUDGET + _RDP_TIMING_RUNAWAY))
     check("rdp/label-screen-linear-time-decision", (bounds, cases), (
-        [("growth-4x-exactly-8", 1), ("growth-4x-just-under-8", 0), ("growth-4x-just-over-8", 1),
-         ("ratio-exactly-at", 3), ("ratio-just-under", 0), ("ratio-just-over", 1),
-         ("middle-size-decides", 1)],
+        [("ops-growth-4x-exactly-8", 1), ("ops-growth-4x-just-under-8", 0),
+         ("ops-growth-4x-just-over-8", 1), ("ops-quadratic", 2), ("ops-middle-size-decides", 1),
+         ("growth-4x-exactly-2", 1), ("growth-4x-just-under-2", 0), ("growth-4x-just-over-2", 1),
+         ("growth-load-lifts-both-legs", 0), ("growth-middle-size-decides", 1),
+         *zero_faults, ("least-positive-screen-at-larger", 0),
+         ("ratio-exactly-at", 3), ("ratio-just-under", 0), ("ratio-just-over", 1)],
         [("linear", ["linear"]), ("quadratic", ["not linear"]),
          ("quadratic-small-lifted-one-group", ["not linear"]),
+         ("quadratic-under-ratio-bound", ["not linear"]),
          ("quadratic-flattened-one-group", ["not linear"]),
+         ("linear-both-legs-loaded-every-group", ["linear"]),
          ("linear-large-lifted-one-group", ["linear"]),
          ("five-times-slower", ["not linear"]),
+         ("linear-reference-lifted-two-groups", ["linear"], ["not linear"]),
+         ("linear-reference-lifted-every-round", ["not linear"]),
+         ("quadratic-reference-lifted-confirm-but-one", ["not linear"], ["linear"]),
+         ("quadratic-reference-lifted-confirm-rounds-only", ["linear"], ["not linear"], ["not linear"],
+          ["linear"]),
+         ("growth-fault-confirm-timings", ["not linear"], 72),
+         ("ratio-fault-no-confirm-timings", ["not linear"], 36),
+         ("cannot-evaluate-no-confirm", ["not linear"], 36),
+         ("mixed-faults-no-confirm/growth-and-ratio", ["not linear"], 36, ["growth", "ratio"]),
+         ("mixed-faults-no-confirm/growth-and-cannot-evaluate", ["not linear"], 36,
+          ["cannot evaluate", "growth"]),
          ("runaway", ["runaway", "linear"], [], True),
          ("just-under-runaway-every-timing", ["over budget", "over budget", "over budget"], 19, True)]))
+    # The flip: with _rdp_unresolved patched to find no zero time, every time is judged as a measurement
+    # again, the behaviour before zero times failed closed. Each zero case then gives its old outcome (a
+    # zero screen time at the larger size no fault at all, reading as no growth) and differs from its
+    # expected faults, so the decision row above would go red. The patch is restored in a finally.
+    saved = globals()["_rdp_unresolved"]
+    globals()["_rdp_unresolved"] = lambda least, at: ""
+    try:
+        flipped = _zero_cases()
+    finally:
+        globals()["_rdp_unresolved"] = saved
+    expected = dict(zero_faults)
+    check("rdp/label-screen-linear-time-zero-flip",
+          [(case, len(faults), faults == expected[case]) for case, faults in flipped],
+          [("zero-screen-at-larger", 0, False), ("zero-reference-at-smaller", 1, False),
+           ("zero-screen-at-smaller", 1, False), ("zero-reference-at-larger", 2, False)])
 
 
 def _rwh_iso(hours=0):
@@ -15851,7 +16445,7 @@ def _main_isolated(report_path=None):
         # comment-rule nesting stack of its own. Each of those tests costs the same time however deep the stack
         # is only when the stack counts its entries (_NestStack, COST in the comment above _nest_track in
         # aiqt_hooks.py); on a plain list it reads every entry, so a deep nesting stack under repeated escaped
-        # backquotes makes the raw word scan quadratic. Each scan must decide these inputs in under 1 s of CPU:
+        # backquotes makes the raw word scan quadratic. Each scan must decide these inputs within a CPU bound:
         # a 256 KiB line of blank-led '#' inside a double-quoted substitution; a 128 KiB run of open
         # parentheses and backquote substitutions; and a 320 KiB deep parameter-expansion stack ("${x:-"
         # repeated) closed after an equal run of escaped backquotes, which drives the raw word scanner's
@@ -15869,19 +16463,42 @@ def _main_isolated(report_path=None):
                     + "\\`" * _cost_bq_n + "}" * _cost_bq_n
                     + "; sleep 1; gh pr checks 1; done &")
 
+        # The CPU bound is a ratio to a linear reference scan over the same command, not a fixed absolute
+        # bound (the previous form, under 1 s of CPU, is load-movable the way _rdp_timing_group describes:
+        # a loaded runner inflated one CPU timing of linear code about 3.6 times, and the counted-stack
+        # scans measured up to 0.36 s here, so load alone could cross a 1 s absolute). Each scan and the
+        # reference are timed back to back in each of three rounds, so load, frequency scaling and cache
+        # contention lift both legs of the ratio together, and the least of the three rounds drops stray
+        # spikes. Measured over 7 runs per input on one shared host (Python 3.14, x86_64), the
+        # counted-stack scans' least-to-least ratios were 16.1 to 51.3 (least CPU 0.10 s to 0.33 s over
+        # references of 0.0033 s to 0.0088 s), while the plain-list quadratic figures above, 3.63 s to
+        # 14.85 s, stand 413 to about 4200 times their references: the bound of 150 sits about 2.9 times
+        # above the slowest counted-stack scan and the smallest quadratic about 2.75 times above the bound.
         def _cost_cpu(fn, command):
-            """'under 1 s' when fn(command) takes under 1 s of CPU, else the time it took."""
-            t0 = time.process_time()
-            fn(command)
-            cpu = time.process_time() - t0
-            return "under 1 s" if cpu < 1.0 else "{:.2f} s of CPU on {} characters".format(cpu, len(command))
+            """'within bound' when fn(command)'s least CPU over three calls is under 150 times the least
+            CPU of a linear scan of command (_rdp_reference_scan), each pair timed back to back and
+            compared exactly in rationals, so a ratio exactly at the bound fails; else the times it
+            took."""
+            least = reference = None
+            for _ in range(3):
+                t0 = time.process_time()
+                fn(command)
+                t1 = time.process_time()
+                _rdp_reference_scan(command)
+                t2 = time.process_time()
+                least = t1 - t0 if least is None else min(least, t1 - t0)
+                reference = t2 - t1 if reference is None else min(reference, t2 - t1)
+            if Fraction(least) < 150 * Fraction(reference):
+                return "within bound"
+            return "{:.2f} s of CPU against a {:.4f} s reference on {} characters".format(
+                least, reference, len(command))
 
-        check("wl/cost-long-comment-line", _cost_cpu(clf, _cost_long), "under 1 s")
-        check("wl/cost-deep-nesting", _cost_cpu(clf, _cost_deep), "under 1 s")
+        check("wl/cost-long-comment-line", _cost_cpu(clf, _cost_long), "within bound")
+        check("wl/cost-deep-nesting", _cost_cpu(clf, _cost_deep), "within bound")
         check("wl/raw-words-cost-long-comment-line", _cost_cpu(aiqt_hooks._orch_raw_unquoted_words, _cost_long),
-              "under 1 s")
+              "within bound")
         check("trunc/fg-scan-cost-deep-nesting", _cost_cpu(aiqt_hooks._orch_foreground_detach_kind, _cost_deep),
-              "under 1 s")
+              "within bound")
         # A deep parameter-expansion stack closed after repeated escaped backquotes: the poll-loop body is a
         # real probe loop, so the classification is 'match' whether the raw scan's nest is a plain list or a
         # counted stack (this control holds on both), while the two cost checks fail on a plain-list nest (the
@@ -15889,8 +16506,8 @@ def _main_isolated(report_path=None):
         # nesting stack. The classifier runs the raw scan, so its cost covers both the scan and the lexer path.
         check("wl/deep-param-escaped-backquote-match", clf(_cost_bq), "match")
         check("wl/raw-words-cost-deep-param-escaped-backquote",
-              _cost_cpu(aiqt_hooks._orch_raw_unquoted_words, _cost_bq), "under 1 s")
-        check("wl/cost-deep-param-escaped-backquote", _cost_cpu(clf, _cost_bq), "under 1 s")
+              _cost_cpu(aiqt_hooks._orch_raw_unquoted_words, _cost_bq), "within bound")
+        check("wl/cost-deep-param-escaped-backquote", _cost_cpu(clf, _cost_bq), "within bound")
         # run_in_background true with an inner trailing `done &` is still 'match' (predicate ignores rib).
         check("wl/deny-rib-true-inner-detach", clf(BASE), "match")
         # NEGATIVE fixtures (this control): every one is 'none'.

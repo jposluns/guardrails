@@ -1168,9 +1168,9 @@ def _self_test():
             # control: the same stamp without its brackets is history, not a header, so it is never BEHIND
             self.assertEqual(mod.check_message(stamp[1:-1] + " working\n", minute_us + mod.BEHIND_US + 1, None, "x",
                                                mod.BEHIND_US), [])
-            # AHEAD: one minute ahead of the reference passes, one microsecond more is refused
-            self.assertEqual(mod.check_message(text, minute_us - mod.AHEAD_US, None, "x", mod.BEHIND_US), [])
-            self.assertEqual(len(mod.check_message(text, minute_us - mod.AHEAD_US - 1, None, "x", mod.BEHIND_US)), 1)
+            # AHEAD: the header gets no slack: exactly at the reference passes, one microsecond ahead of it is refused
+            self.assertEqual(mod.check_message(text, minute_us, None, "x", mod.BEHIND_US), [])
+            self.assertEqual(len(mod.check_message(text, minute_us - 1, None, "x", mod.BEHIND_US)), 1)
 
         def test_stamp_present_in_injected_context_under_utc(self):
             # the stamp tests above skip, or accept an omitted segment, under a zone that gives none, so a hook

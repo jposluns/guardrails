@@ -1947,6 +1947,7 @@ def _member_bound_checks(roster):
                  "opf-closure-f")
     coverage_suite = ("tools/check_selftest_execution.py", "--suite",
                       "child-status-coverage-selftest")
+    release_cut = ("tools/check_release_cut.py", "--self-test", "--red-on-revert")
 
     figures, problems = _roster_figures(roster)
     print("CONFIG ROSTER FIGURES: {} members, {} in the malformed lane, {} outside the sizing"
@@ -2097,7 +2098,8 @@ def _member_bound_checks(roster):
 
     overrides = {record: 5100, opf_selftest: 3600, adopt_observe: 1800, release_delta: 1800,
                  opf_init: 1800, closure_a: 3600, closure_b: 3600, closure_c: 3600,
-                 closure_d: 3600, closure_e: 3600, closure_f: 3600, coverage_suite: 5400}
+                 closure_d: 3600, closure_e: 3600, closure_f: 3600, coverage_suite: 5400,
+                 release_cut: 2700}
     check("config/member-bound-table",
           (sorted(key for key in CONFIG_MEMBER_BOUNDS if key not in roster),
            {key: _config_member_bound(key) for key in CONFIG_MEMBER_BOUNDS},
@@ -2118,15 +2120,16 @@ def _member_bound_checks(roster):
     # is patched there, not into this runner.
     with patch.object(_gfe, "_run_bounded", recording):
         for member in (record, opf_selftest, adopt_observe, release_delta, opf_init, closure_a,
-                       closure_b, closure_c, closure_d, closure_e, closure_f,
-                       ("opf/tools/opf.py",)):
+                       closure_b, closure_c, closure_d, closure_e, closure_f, coverage_suite,
+                       release_cut, ("opf/tools/opf.py",)):
             _run_config_member(member, {})
     check("config/member-bound-reaches-run", handed,
           [(" ".join(record), 5100), (" ".join(opf_selftest), 3600),
            (" ".join(adopt_observe), 1800), (" ".join(release_delta), 1800),
            (" ".join(opf_init), 1800), (" ".join(closure_a), 3600), (" ".join(closure_b), 3600),
            (" ".join(closure_c), 3600), (" ".join(closure_d), 3600), (" ".join(closure_e), 3600),
-           (" ".join(closure_f), 3600), ("opf/tools/opf.py", 1200)])
+           (" ".join(closure_f), 3600), (" ".join(coverage_suite), 5400),
+           (" ".join(release_cut), 2700), ("opf/tools/opf.py", 1200)])
 
 
 _MEMBER_TIMEOUT_EXPECTED = [
