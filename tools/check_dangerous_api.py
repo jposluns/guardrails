@@ -815,6 +815,10 @@ ALLOWLIST = (
     ("tools/_selftest_exit_report.py", "_bootstrap_main", "code", 1,
      "execution-report bootstrap: runs the runner script named in its own argv as __main__ under its"
      " audit hook, the same trust as running that script directly with python3; no other input"),
+    ("opf/tools/_selftest_exit_report.py", "_bootstrap_main", "code", 1,
+     "the OPF-local copy of the execution-report bootstrap: runs the runner script named in its own"
+     " argv as __main__ under its audit hook, the same trust as running that script directly with"
+     " python3; no other input"),
     ("tools/check_opf_enforce_platforms.py", "load_hook", "code", 1,
      "check harness: loads the repository's own Claude Code deny hook as a private module, never"
      " entered in sys.modules and its main() never called, the equivalent of an import; no external"

@@ -36,7 +36,10 @@ Detection is SEMANTIC, never a bare substring: a constant is matched as a whole 
 (ignoring trailing comments); the pinned view tuple and the reserved-namespace set are parsed with
 comments stripped and compared by membership (so a commented-out literal does not count); the machine
 store path is checked against the store authority's DEFAULT_MACHINE_SUBDIR; and a roster registration
-is a whole registration line (its words, comment dropped), never a mention of a script name.
+is a whole registration line (its words, comment dropped), never a mention of a script name. Every
+line is split on LF alone, never at a form feed, a vertical tab, U+001C to U+001E, U+0085, U+2028 or
+U+2029, where neither bash nor Python ends a line, and a shell roster keeps its carriage returns (see
+_decoded).
 """
 import sys
 
@@ -519,15 +522,33 @@ def _read(rel):
     if not p.is_file():
         _cant("missing input: {}".format(rel))
     try:
-        return p.read_text(encoding="utf-8")
+        return _decoded(rel, p.read_bytes())
     except Exception as exc:
         _cant("unreadable {}: {}".format(rel, exc))
+
+
+def _decoded(rel, data):
+    """The UTF-8 text of input rel (its bytes given). A shell roster (.sh) keeps every carriage return:
+    bash ends a line at LF alone and reads a carriage return as part of a word or a comment, so a CR
+    turned into LF here could expose a registration bash never runs. Any other input (Python source or
+    YAML, both of which end a line at CRLF and CR too) has those line ends turned into LF."""
+    text = data.decode("utf-8")
+    if rel.endswith(".sh"):
+        return text
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
+def _lines(text):
+    """The lines of text split on LF alone. str.splitlines also breaks at a form feed, a vertical tab,
+    U+001C to U+001E, U+0085, U+2028 and U+2029, where neither bash nor Python ends a line, so a
+    registration, a constant or a tuple member after one inside a comment would count as live."""
+    return text.split("\n")
 
 
 def _has_line(text, exact):
     """True only if `exact` appears as a whole module-level line, ignoring any trailing #-comment and
     surrounding whitespace, never as a substring (a longer value cannot satisfy a shorter one)."""
-    return any(line.split("#", 1)[0].rstrip() == exact for line in text.splitlines())
+    return any(line.split("#", 1)[0].rstrip() == exact for line in _lines(text))
 
 
 def _quoted_in_tuple(text, name):
@@ -536,7 +557,7 @@ def _quoted_in_tuple(text, name):
     m = re.search(re.escape(name) + r"\s*=\s*\((.*?)\)", text, re.S)
     if not m:
         return None
-    body = "\n".join(line.split("#", 1)[0] for line in m.group(1).splitlines())
+    body = "\n".join(line.split("#", 1)[0] for line in _lines(m.group(1)))
     return set(re.findall(r'"([^"]+)"', body))
 
 
@@ -545,7 +566,7 @@ def _ordered_quoted_in_tuple(text, name):
     m = re.search(re.escape(name) + r"\s*=\s*\((.*?)\)", text, re.S)
     if not m:
         return None
-    body = "\n".join(line.split("#", 1)[0] for line in m.group(1).splitlines())
+    body = "\n".join(line.split("#", 1)[0] for line in _lines(m.group(1)))
     return tuple(re.findall(r'"([^"]+)"', body))
 
 
@@ -557,21 +578,27 @@ def _value_of(text, name):
 
 def _active_line_has(text, needle):
     """True if `needle` appears on a line whose stripped form does not start with '#' (i.e. not commented)."""
-    return any(needle in line and not line.strip().startswith("#") for line in text.splitlines())
+    return any(needle in line and not line.strip().startswith("#") for line in _lines(text))
 
 
 def _active_line_matches(text, pattern):
     """True if `pattern` (a regex) matches on a non-comment line."""
     rx = re.compile(pattern)
-    return any(rx.search(line) and not line.strip().startswith("#") for line in text.splitlines())
+    return any(rx.search(line) and not line.strip().startswith("#") for line in _lines(text))
 
 
 def _shell_words(line):
     """The words of one shell line with its # comment dropped (shlex, POSIX rules), or None when the line
-    does not tokenise (an unbalanced quote, say), so such a line never counts as a registration."""
+    does not tokenise (an unbalanced quote, say), so such a line never counts as a registration. Words
+    are split at a space or a tab alone, the blanks bash splits at: shlex.split also splits at a carriage
+    return, which bash keeps in the word, so a CRLF-ended registration would count though bash passes
+    its last word with the carriage return."""
     import shlex
+    lexer = shlex.shlex(line, posix=True)
+    lexer.whitespace = " \t"
+    lexer.whitespace_split = True
     try:
-        return shlex.split(line, comments=True)
+        return list(lexer)
     except ValueError:
         return None
 
@@ -585,9 +612,10 @@ def _registrations(rel, text, script, directory):
     exactly run_gate, a gate name, python3, interpreter options (each starting with -), the path
     directory/script, then the arguments; an echo, a comment or a longer or renamed path is no
     registration. The standalone-closure roster (.py) registers it as a whole ("name", "script", [args])
-    entry line with only a comment after it. Any other roster suffix registers nothing."""
+    entry line with only a comment after it. Any other roster suffix registers nothing. Lines are split
+    on LF alone (_lines), as bash splits them."""
     found = []
-    for line in text.splitlines():
+    for line in _lines(text):
         if rel.endswith(".sh"):
             words = _shell_words(line)
             if not words or len(words) < 4 or words[0] != "run_gate" or words[2] != "python3":
@@ -877,7 +905,7 @@ def _source_checks():
     contract = _read("tools/_opf_init_contract.py")
     schema = _read("tools/_opf_schema.py")
     store = _read("tools/_opf_store.py")
-    check = _read("tools/_opf_check.py")
+    check_source = _read("tools/_opf_check.py")
     init = _read("tools/_opf_init.py")
     opf = _read("tools/opf.py")
     spec = _read("spec/OPF-INIT-D2B.md")
@@ -942,7 +970,7 @@ def _source_checks():
         _cant("_opf_store.py SUPPORTED_SPEC_VERSION changed; re-verify the schema-compat boundary")
 
     # C-CHECKER-ROSTER: the required-checks authority the coupled success contract depends on.
-    if "REQUIRED_CHECKS" not in check:
+    if "REQUIRED_CHECKS" not in check_source:
         _cant("_opf_check.py REQUIRED_CHECKS missing")
 
     # C-REVIEW: the durable review register enumerates F01..F30.
@@ -1670,7 +1698,7 @@ def _self_test_runner_rosters():
     local_live = "live consistency gate (no --self-test) not registered in " + local_runner
     local_gate_selftest = "check_opf_init_contract.py --self-test not actively registered in " + local_runner
     local_validator = "_opf_init_contract.py --self-test not actively registered in " + local_runner
-    lines = _RUNNER_FIXTURE[local_runner].splitlines(keepends=True)
+    lines = re.findall(r"[^\n]*\n", _RUNNER_FIXTURE[local_runner])
     # Each of the three OPF runner registrations is required on its own: dropping any one line (the gate's
     # self-test included, which the live line names the same script as) drifts exactly once.
     for index, want in ((0, local_validator), (1, local_gate_selftest), (2, local_live)):
@@ -1829,7 +1857,7 @@ def _self_test_runner_rosters():
     parent_live = ("live consistency gate (no --self-test, with --parent-integration) not registered in "
                    + parent_runner)
     parent_gate_selftest = "check_opf_init_contract.py --self-test not actively registered in " + parent_runner
-    parent_lines = _RUNNER_FIXTURE[parent_runner].splitlines(keepends=True)
+    parent_lines = re.findall(r"[^\n]*\n", _RUNNER_FIXTURE[parent_runner])
     for label, text, want in (
             ("the live gate without the flag",
              "".join(parent_lines[:2]) + parent_lines[2].replace(" --parent-integration", ""), [parent_live]),
@@ -1848,7 +1876,7 @@ def _self_test_runner_rosters():
             label, want, drifts))
 
     closure = "../tools/check_opf_standalone_closure.py"
-    closure_lines = _RUNNER_FIXTURE[closure].splitlines(keepends=True)
+    closure_lines = re.findall(r"[^\n]*\n", _RUNNER_FIXTURE[closure])
     for label, text, want in (
             ("no gate entry", closure_lines[0], ["check_opf_init_contract.py --self-test not actively "
                                                  "registered in " + closure]),
@@ -1943,15 +1971,18 @@ _ENTRY_REFUSED_ARGS = (["--parent-integraton", "--self-test"], ["--self-test", "
 
 def _self_test_entry_arguments():
     """The entry's routing, run for real: this self-test runs only when its own argument list is exactly
-    --self-test, and the script started as a child with each _ENTRY_REFUSED_ARGS list must end 2 with the
-    unknown-argument refusal as its stderr's first line and nothing on stdout. With the entry back to
-    running the self-test whenever --self-test appears anywhere in sys.argv, the child runs this self-test
-    instead, which stops at the first requirement here (its argument list is not exactly --self-test), so
-    the child ends without the refusal and the vector is red; that requirement also keeps the child from
-    starting children of its own."""
+    --self-test, or --self-test REPORT_FLAG and an absolute report path under the execution gate, and the
+    script started as a child with each _ENTRY_REFUSED_ARGS list must end 2 with the unknown-argument
+    refusal as its stderr's first line and nothing on stdout. With the entry back to running the
+    self-test whenever --self-test appears anywhere in sys.argv, the child runs the self-test instead,
+    whose leg here stops at its first requirement (the argument list is neither accepted form) and so
+    starts no child of its own; the child ends 1 without the refusal and the vector is red."""
     import subprocess
-    _expect(sys.argv[1:] == [SELF_TEST], "entry arguments: the self-test must run only for exactly {}, not "
-            "for {!r}".format(SELF_TEST, sys.argv[1:]))
+    args = sys.argv[1:]
+    _expect(args == [SELF_TEST] or (len(args) == 3 and args[:2] == [SELF_TEST, REPORT_FLAG]
+                                    and Path(args[2]).is_absolute()),
+            "entry arguments: the self-test must run only for exactly {}, or {} {} <absolute path>, not for "
+            "{!r}".format(SELF_TEST, SELF_TEST, REPORT_FLAG, args))
     tool = str(Path(__file__).resolve())
     for args in _ENTRY_REFUSED_ARGS:
         try:
@@ -1965,12 +1996,121 @@ def _self_test_entry_arguments():
                 "{!r})".format(args, child.returncode, child.stdout[-300:], child.stderr[-300:]))
 
 
+_NON_LF_BREAKS = (("a form feed", "\x0c"), ("a vertical tab", "\x0b"), ("U+001C", "\x1c"), ("U+001D", "\x1d"),
+                  ("U+001E", "\x1e"), ("U+0085", "\x85"), ("U+2028", "\N{LINE SEPARATOR}"),
+                  ("U+2029", "\N{PARAGRAPH SEPARATOR}"))
+
+
+def _self_test_line_ends():
+    """Each line reader splits on LF alone: a comment line whose text goes on past one of _NON_LF_BREAKS
+    (no line end to bash or Python) hides what follows, so a constant, a tuple member, an active line or
+    a registration after one never counts (red when the reader goes back to str.splitlines). A shell
+    roster keeps its carriage returns (_decoded) and splits words at a space or a tab alone
+    (_shell_words), so a registration after a CR in a comment, or one whose line ends in CRLF, is no
+    registration, while Python and YAML inputs still read CRLF and CR as LF."""
+    runner = "tools/run_all_checks.sh"
+    closure = "../tools/check_opf_standalone_closure.py"
+    live = _RUNNER_FIXTURE[runner].split("\n")[2]
+    entry = _RUNNER_FIXTURE[closure].split("\n")[1]
+    gate_selftest = [[SELF_TEST]]
+    for name, mark in _NON_LF_BREAKS:
+        _expect(not _has_line("# note" + mark + "KEEP_SCHEMA = 1\n", "KEEP_SCHEMA = 1"),
+                "line ends: _has_line must not split a comment at {}".format(name))
+        tuple_text = '_RESERVED = (\n# ".x"' + mark + '".y",\n".z",\n)'
+        _expect(_quoted_in_tuple(tuple_text, "_RESERVED") == {".z"},
+                "line ends: _quoted_in_tuple must not split a comment at {}".format(name))
+        _expect(_ordered_quoted_in_tuple(tuple_text, "_RESERVED") == (".z",),
+                "line ends: _ordered_quoted_in_tuple must not split a comment at {}".format(name))
+        _expect(not _active_line_has("# note" + mark + "run x " + GATE_NAME, GATE_NAME),
+                "line ends: _active_line_has must not split a comment at {}".format(name))
+        _expect(not _active_line_matches('# note' + mark + 'run "$here/_opf_init_contract.py" --self-test',
+                                         r"\b_opf_init_contract\.py"),
+                "line ends: _active_line_matches must not split a comment at {}".format(name))
+        for label, text in (("after a comment", "# note" + mark + live + "\n"),
+                            ("after a colon", ":" + mark + live + "\n")):
+            _expect(_registrations(runner, text, GATE_NAME, LOCAL_SCRIPT_DIR) == [],
+                    "line ends: a shell roster line {} and {} must not register: {}".format(
+                        label, name, _registrations(runner, text, GATE_NAME, LOCAL_SCRIPT_DIR)))
+        text = "    # note" + mark + entry + "\n"
+        _expect(_registrations(closure, text, GATE_NAME, LOCAL_SCRIPT_DIR) == [],
+                "line ends: a closure entry after a comment and {} must not register".format(name))
+    _expect(_registrations(runner, live + "\n", GATE_NAME, LOCAL_SCRIPT_DIR) == [[]]
+            and _registrations(closure, entry + "\n", GATE_NAME, LOCAL_SCRIPT_DIR) == gate_selftest,
+            "line ends: the plain registrations must still count")
+    raw = ("# note\r" + live + "\n").encode("utf-8")
+    _expect(_decoded(runner, raw) == raw.decode("utf-8")
+            and _registrations(runner, _decoded(runner, raw), GATE_NAME, LOCAL_SCRIPT_DIR) == [],
+            "line ends: a shell roster must keep a carriage return, so a registration after one in a "
+            "comment does not count")
+    crlf = live + "\r\n"
+    _expect(_registrations(runner, crlf, GATE_NAME, LOCAL_SCRIPT_DIR) == [],
+            "line ends: a CRLF-ended shell registration passes its last word with the carriage return, so "
+            "it must not count: {}".format(_registrations(runner, crlf, GATE_NAME, LOCAL_SCRIPT_DIR)))
+    _expect(_decoded("tools/_opf_store.py", b"A = 1\r\nB = 2\rC = 3\n") == "A = 1\nB = 2\nC = 3\n"
+            and _decoded(LOCAL_WORKFLOW, b"a: 1\r\nb: 2\r") == "a: 1\nb: 2\n",
+            "line ends: Python and YAML inputs must read CRLF and CR line ends as LF")
+
+
+# The execution-report protocol (tools/check_opf_selftest_execution.py, suite SELF_TEST_SUITE in the
+# OPF-local registry tools/selftest_checks.toml): every self-test leg runs through check(), which records
+# its id BEFORE the leg runs, so the gate reconciles the executed set against the registry. A leg's
+# AssertionError is recorded as a failure and the later legs still run.
+SELF_TEST_SUITE = "opf-init-contract-check-selftest"
+REPORT_FLAG = "--execution-report"
+EXECUTED = []
+FAILURES = []
+
+
+def check(cid, leg):
+    """Record cid as executed, then run leg(); an AssertionError it raises is a recorded failure."""
+    EXECUTED.append(cid)
+    try:
+        leg()
+    except AssertionError as exc:
+        FAILURES.append("{}: {}".format(cid, exc))
+
+
 def _self_test():
-    # Git-free, not source-free. The matcher, roster and workflow vectors run on in-memory text, the
-    # comment-evasion cases included. The entry pins and the entry-wiring pin read this script's own
-    # source; the entry-argument vectors start this script as a child with this interpreter, and the
-    # loaded-exit and fault-channel vectors write probe files to a temporary directory and start them as
-    # children that load this script.
+    """Every self-test leg, each through check(); 0 when none failed, else 1 after naming each failure.
+    Git-free, not source-free. The matcher, line-end, roster and workflow vectors run on in-memory text,
+    the comment-evasion cases included. The entry pins and the entry-wiring pin read this script's own
+    source; the entry-argument vectors start this script as a child with this interpreter, and the
+    loaded-exit and fault-channel vectors write probe files to a temporary directory and start them as
+    children that load this script."""
+    check("init-contract/matchers", _self_test_matchers)
+    check("init-contract/line-ends", _self_test_line_ends)
+    check("init-contract/runner-rosters", _self_test_runner_rosters)
+    check("init-contract/entry-pins", _self_test_entry_pins)
+    check("init-contract/entry-arguments", _self_test_entry_arguments)
+    check("init-contract/census-errors", _self_test_census_errors)
+    check("init-contract/loaded-exit-in-child", _self_test_loaded_exit_in_child)
+    check("init-contract/fault-channels", _self_test_fault_channels)
+    for failure in FAILURES:
+        sys.stdout.write("FAIL check_opf_init_contract self-test: {}\n".format(failure))
+    if FAILURES:
+        return 1
+    sys.stdout.write("PASS check_opf_init_contract self-test\n")
+    return 0
+
+
+def _report_main():
+    """The self-test under the OPF execution gate, whose bootstrap launches this file as
+    [<this file>, --self-test, --execution-report, <absolute report path>]: arm the report finalizer
+    (tools/_selftest_exit_report.py beside this file) before any leg runs, then exit through it, so the
+    report is written only at interpreter exit with the status the process really ends with. Any other
+    argv is usage, exit 2, with no report."""
+    args = sys.argv[1:]
+    if len(args) != 3 or args[0] != "--self-test" or args[1] != REPORT_FLAG or not Path(args[2]).is_absolute():
+        sys.stderr.write("usage: check_opf_init_contract.py --self-test {} <absolute path>\n".format(REPORT_FLAG))
+        sys.exit(2)
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import _selftest_exit_report
+    _selftest_exit_report.arm(args[2], SELF_TEST_SUITE, EXECUTED)
+    _selftest_exit_report.exit_with(_self_test())
+
+
+def _self_test_matchers():
+    # Git-free / source-free: exercise the matchers on in-memory text, including the comment-evasion cases.
     _expect(_has_line("KEEP_SCHEMA = 1  # comment", "KEEP_SCHEMA = 1"), "exact line ignores comment")
     _expect(not _has_line("KEEP_SCHEMA = 10\n", "KEEP_SCHEMA = 1"), "substring must NOT match a longer value")
     _expect(_quoted_in_tuple('_RESERVED = (\n".opf.toml",\n".working/toml",\n)', "_RESERVED") == \
@@ -1990,14 +2130,6 @@ def _self_test():
     labels = ["F{:02d}".format(n) for n in range(1, 31)]
     _expect(labels[0] == "F01" and labels[-1] == "F30" and len(labels) == 30, "F-range")
     _expect(ACTOR_LINE.count('"') == 8, "actor line shape")
-    _self_test_runner_rosters()
-    _self_test_entry_pins()
-    _self_test_entry_arguments()
-    _self_test_census_errors()
-    _self_test_loaded_exit_in_child()
-    _self_test_fault_channels()
-    sys.stdout.write("PASS check_opf_init_contract self-test\n")
-    sys.exit(0)
 
 
 
@@ -2580,9 +2712,13 @@ def _flush_window_failures():
 # The entry wiring, checked statically on this file's own source: the final __main__ block must be
 # exactly _ENTRY_WIRING by AST (spacing and comments aside), so a rewiring that keeps _fail_closed_main
 # defined but routes an entry branch around it (a plain sys.exit around the work, say) is red even though
-# the channel probes above drive _fail_closed_main directly. The self-test runs only for exactly
-# --self-test; every other argument list goes to _checks, which refuses all but none and PARENT_FLAG.
+# the channel probes above drive _fail_closed_main directly. An argument list carrying REPORT_FLAG goes
+# to _report_main, which runs the self-test only for exactly --self-test REPORT_FLAG <absolute path> and
+# refuses any other with exit 2; otherwise the self-test runs only for exactly --self-test, and every
+# other argument list goes to _checks, which refuses all but none and PARENT_FLAG.
 _ENTRY_WIRING = '''if __name__ == "__main__":
+    if REPORT_FLAG in sys.argv:
+        _report_main()
     if sys.argv[1:] == ["--self-test"]:
         _fail_closed_main(_self_test)
     _fail_closed_main(_checks)
@@ -2642,6 +2778,8 @@ def _self_test_fault_channels():
 
 
 if __name__ == "__main__":
+    if REPORT_FLAG in sys.argv:
+        _report_main()
     if sys.argv[1:] == ["--self-test"]:
         _fail_closed_main(_self_test)
     _fail_closed_main(_checks)
