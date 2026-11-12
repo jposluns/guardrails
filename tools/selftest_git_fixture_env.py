@@ -1736,14 +1736,16 @@ def _derived_member_bound(budget):
 
 
 def _config_member_label(member, bound):
-    """The label _run_bounded puts in member's messages: its argv joined, and where bound is the
-    member's declared deadline (CONFIG_MEMBER_DEADLINES), that deadline's reason, so a kill there
-    reads "TIMEOUT: <argv> (bound is its declared deadline: <reason>) reached its <bound> s bound
-    (cannot evaluate)", attributed to the declared deadline, not to the member. The same label,
-    reason included, is on every other message _run_member makes for that member under that
-    bound: a launch the registry lock refused ("TIMEOUT: <label> not started: ...") and a stop at
-    the suite's close ("<label> was stopped by the suite's close (no result)"). There the reason
-    names the bound the member was given, not a kill at it."""
+    """The label _run_bounded gives member: its argv joined, and where bound is the member's
+    declared deadline (CONFIG_MEMBER_DEADLINES), that deadline's reason. Three messages _run_member
+    makes for that member under that bound carry it, reason included. A kill at the bound reads
+    "TIMEOUT: <argv> (bound is its declared deadline: <reason>) reached its <bound> s bound (cannot
+    evaluate)", attributed to the declared deadline, not to the member. A launch the registry lock
+    refused reads "TIMEOUT: <label> not started: ...", and a stop at the suite's close reads
+    "<label> was stopped by the suite's close (no result)"; in those two the reason names the bound
+    the member was given, not a kill at it. No other message carries the label: a launch error or
+    a communication error is returned as its bare exception text, a cleanup problem is reported
+    without it, and _run_config_member's non-zero-exit output names the member tuple instead."""
     label = " ".join(member)
     declared = CONFIG_MEMBER_DEADLINES.get(tuple(member))
     if declared is not None and declared[0] == bound:
@@ -2393,11 +2395,12 @@ def _run_member(argv, cwd, env, bound, label, banner, cannot_evaluate, report):
 
 def _run_config_member(member, env, bound=None, cannot_evaluate=None, report=None):
     """Run one registered member under its bound (_config_member_bound) through _run_bounded,
-    labelled by _config_member_label (where its bound is a declared deadline, each message of it
-    names that deadline, a kill there included); return its exit code, or a string for a launch
-    error or a timeout. A member that exits non-zero has its output printed on report (default
-    sys.stdout, never stderr), so the execution gate reads a real member failure as the suite's
-    FAIL (exit 1), not as undeclared stderr (cannot evaluate)."""
+    labelled by _config_member_label (where its bound is a declared deadline, the timeout, the
+    registry-lock refusal and the close-stop messages name that deadline; a launch or communication
+    error and the non-zero-exit output below do not); return its exit code, or a string for a
+    launch error or a timeout. A member that exits non-zero has its output printed on report
+    (default sys.stdout, never stderr), so the execution gate reads a real member failure as the
+    suite's FAIL (exit 1), not as undeclared stderr (cannot evaluate)."""
     bound = _config_member_bound(member) if bound is None else bound
     rc, stdout, stderr = _run_bounded(
         [sys.executable, "-I", "-B", str(ROOT / member[0]), *member[1:]], ROOT, env, bound,
