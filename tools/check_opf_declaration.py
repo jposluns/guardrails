@@ -128,9 +128,11 @@ The self-test runs every vector of opf/tools/_opf_declaration.py (the runtime ch
 spec 16.1 vector of opf/tools/opf.py (the gate before dispatch on each refusing state, the ungated verbs,
 `--declaration` and the doctor report) under its own registered check id, shows each red under its revert (a
 mutant of _opf_declaration.py or opf.py loaded from a scratch directory, or a patched attribute of opf.py,
-_opf_declaration or _opf_store; under uid 0 the unreadable-mode vector is skipped and so not shown red), and
-runs this gate's own document and helper-import vectors. Its check ids are registered in
-tools/selftest_checks.toml (suite opf-declaration-selftest) and reconciled by tools/check_selftest_execution.py.
+_opf_declaration or _opf_store; under uid 0, where mode bits do not bind, the unreadable-mode vector runs
+through the gate with EACCES injected at the declaration's open, so there it tests the gate's handling of an
+unreadable open, not the kernel's mode-bit check), and runs this gate's own document and helper-import vectors.
+Its check ids are registered in tools/selftest_checks.toml (suite opf-declaration-selftest) and reconciled by
+tools/check_selftest_execution.py.
 """
 import sys
 
@@ -851,13 +853,11 @@ def self_test(report_path=None):
         check("revert/cli-raised-build-check-silenced-red",
               not opf.run_declaration_cli_vector("raised-build-reads-its-declaration")[0])
     # The gate narrowed to refuse on absent alone (a mutant of opf.py): every other refusing state then
-    # dispatches, so each of its rows is red (the mode row is skipped, and so excluded, under uid 0), while the
+    # dispatches, so each of its rows is red (under uid 0 the mode row too, by its injected EACCES), while the
     # absent row stays green, so the mutant is that narrowing and not a broken copy.
     states = ["gate-refuses-symlink", "gate-refuses-crlf", "gate-refuses-empty", "gate-refuses-directory",
               "gate-refuses-fifo", "gate-refuses-oversize", "gate-refuses-unreadable-mode",
               "gate-refuses-malformed", "gate-refuses-contradictory"]
-    if hasattr(os, "geteuid") and os.geteuid() == 0:
-        states.remove("gate-refuses-unreadable-mode")
     tmp = tempfile.mkdtemp(prefix="opf-declaration-selftest-")
     try:
         narrowed = _copy_mutant(tmp, OPF_TOOLS / "opf.py", "opf_declaration_gate_mutant",
