@@ -2534,8 +2534,9 @@ runpy.run_path(path, run_name="__main__")
 # waits) and the record publication row 40 s (its TIMEOUT s bound and both post-kill waits): about 945 s
 # together. The revert flips, run only under --red-on-revert, cost at worst 60 s (interrupt), 70 s (exit
 # code), 75 s (reaped exit), 130 s (drain reaped), 135 s (construction), 70 s (sigchld), 60 s and 70 s (the
-# two kernel sigchld flips, which launch), 25 s each (the two exit-outlived flips), 40 s each (the two
-# exit-at-bound flips and the full-pipe flip) and 40 s (the record publication flip): about 880 s together.
+# two kernel sigchld flips, which launch), 25 s each (the two exit-outlived flips), 44 s each (the two
+# exit-at-bound flips: their pause and post-kill waits plus the 4 s their copy sleeps before setting its
+# deadline), 40 s (the full-pipe flip) and 40 s (the record publication flip): about 888 s together.
 # Outside the census, the fixture cases and the mutation replays run their children through observe, each
 # call under subprocess.run's TIMEOUT = 30 s bound: the 242 fixture cases of test_cases() make 243 observe
 # calls (one each, and push-protected's push-bare call), at most 243 * 30 = 7290 s, and the 29 mutation
@@ -2553,15 +2554,15 @@ runpy.run_path(path, run_name="__main__")
 # reverts and the mutation replays) 12.1 s of it (from its entry-restore line to its last line).
 # The worst case over those terms: a --self-test run ends by at most 680 (table) + 945 (census rows) + 7290
 # (fixture observe calls) = 8915 s (BOUND) plus the parts not summed (about 171 s, MEASURED), about 9086 s;
-# a --red-on-revert run by at most 8915 + 880 (flips) + 870 (mutation replays) = 10665 s (BOUND) plus the
-# parts not summed (about 171 + 12.1 = 183.1 s, MEASURED), about 10848.1 s. Both exceed the 1200 s default
-# member bound, as do the census bounds alone (680 + 945 + 880 = 2505 s), so the member carries its own
+# a --red-on-revert run by at most 8915 + 888 (flips) + 870 (mutation replays) = 10673 s (BOUND) plus the
+# parts not summed (about 171 + 12.1 = 183.1 s, MEASURED), about 10856.1 s. Both exceed the 1200 s default
+# member bound, as do the census bounds alone (680 + 945 + 888 = 2513 s), so the member carries its own
 # 2700 s entry in tools/selftest_git_fixture_env.py. That entry is BELOW the worst case ON PURPOSE, a
 # deliberate shorter deadline under the kill-timeout rule: the 30 s observe bounds summed are a ceiling no
 # run approaches, and a bound near it would let a hung run hold the config lane for over three hours. It is
 # sized from measured runs with a stated margin: about 7.4 times the slowest (367.0 s, --red-on-revert, the
 # entry's own comment records the runs), and it still covers every census bound above spent in full plus
-# the measured rest (2505 + 183.1 = 2688.1 s). A run that reaches it is killed at its bound and reported as
+# the measured rest (2513 + 183.1 = 2696.1 s). A run that reaches it is killed at its bound and reported as
 # that lane's deadline (cannot evaluate, attributed to the bound), never as a failure of this self-test.
 _CENSUS_BOUND_CAP = 600
 _CENSUS_TOTAL_CAP = 720
@@ -3541,8 +3542,8 @@ def _census_exit_at_bound_row(parent, race):
     """A callee that ends on its own, with no descendant, while its bound runs out: the stand-in sleeps 1 s
     and exits 2 with its cannot-evaluate report, under a 3 s bound, through _census_paused_run: the drain's
     first os.waitid on the leader, which finds it still running, pauses once until the leader has exited
-    (seen with WNOWAIT, reaping nothing) and at least 2 s past the bound after its construction, so past
-    the drain's deadline, for at most TIMEOUT s. Race "stale": the wrapper then hands back the result
+    (seen with WNOWAIT, reaping nothing) and at least the bound after that os.waitid was entered, so at or
+    past the drain's deadline, for at most TIMEOUT s. Race "stale": the wrapper then hands back the result
     read before the pause (still running), the leader's exit landing between the drain's os.waitid and its
     deadline check. Race "unread": the wrapper hands back a fresh read (exited), the exit landing after the
     drain's last select, so both pipes are still registered with their end of file unread. Either way
@@ -3626,18 +3627,23 @@ def _census_exit_at_bound_full_row(parent, size, cap=None):
 
 def _census_paused_run(argv, stale):
     """_census_run on argv under a 3 s bound with os.waitid wrapped (and restored in a finally, with
-    subprocess.Popen, wrapped to record the leader's pid and construction time) so that the drain's first
-    os.waitid on the leader, which finds it still running, pauses once until the leader has exited (seen
-    with WNOWAIT, reaping nothing) and at least 2 s past the bound after its construction, so past the
-    drain's deadline, for at most TIMEOUT s. With stale true the wrapper then hands back the result read
-    before the pause (still running); otherwise a fresh read (exited). The leader is held at a gate this run
-    controls, so that first os.waitid finds it running however the host schedules the two processes: the
-    wrapped subprocess.Popen hands it the read end of a pipe (pass_fds, its number in CENSUS_PAUSE_GATE),
-    both stand-ins block on one read of it before they do anything else, and the wrapper writes the byte
-    that releases it only once that first os.waitid has returned. Both ends are closed in a finally, so a
-    leader still at the gate reads its end of file and goes on. A leader found exited at the first
-    os.waitid all the same reproduced nothing. Returns (code, err, note, paused), paused ["exited past the
-    deadline"] when the pause reproduced that state."""
+    subprocess.Popen, wrapped to record the leader's pid) so that the drain's first os.waitid on the leader,
+    which finds it still running, pauses once until the leader has exited (seen with WNOWAIT, reaping
+    nothing) and at least the bound has passed since that os.waitid was entered, for at most TIMEOUT s.
+    _census_run calls os.waitid only in its drain, after it has set its deadline to the bound past a
+    time.monotonic() read, so the time read on entering that os.waitid is no earlier than that read, and a
+    pause that ends at least the bound after it ends at or past the deadline, however long the parent was
+    descheduled between the leader's construction and the deadline's initialization. With stale true the
+    wrapper then hands back the result read before the pause (still running); otherwise a fresh read
+    (exited). The leader is held at a gate this run controls, so it cannot exit before that first os.waitid
+    has returned: the wrapped subprocess.Popen hands it the read end of a pipe (pass_fds, its number in
+    CENSUS_PAUSE_GATE), both stand-ins block on one read of it before they do anything else, and the wrapper
+    writes the byte that releases it only once that first os.waitid has returned. Both ends are closed in a
+    finally, so a leader still at the gate reads its end of file and goes on. A leader found exited at the
+    first os.waitid all the same, or not seen exited past the deadline within TIMEOUT s of its release,
+    reproduced nothing.
+    Returns (code, err, note, paused), paused ["exited past the deadline"] when the pause reproduced that
+    state."""
     bound = 3
     real_popen = subprocess.Popen
     real_waitid = os.waitid
@@ -3649,10 +3655,13 @@ def _census_paused_run(argv, stale):
         kwargs["pass_fds"] = (gate_read,)
         kwargs["env"] = dict(os.environ, CENSUS_PAUSE_GATE=str(gate_read))
         proc = real_popen(*args, **kwargs)
-        leader.extend((proc.pid, time.monotonic()))
+        leader.append(proc.pid)
         return proc
 
     def pausing(idtype, pid, flags):
+        # read before the call, so no earlier than the read the drain's deadline was set from: _census_run
+        # calls os.waitid only in its drain, after setting that deadline
+        entered = time.monotonic()
         result = real_waitid(idtype, pid, flags)
         if not leader or pid != leader[0] or paused:
             return result
@@ -3662,7 +3671,9 @@ def _census_paused_run(argv, stale):
             return result
         end = time.monotonic() + TIMEOUT
         while True:
-            past = time.monotonic() >= leader[1] + bound + 2
+            # the deadline is at most entered + bound (a later read plus the same bound, rounded alike), so
+            # once this holds the drain's next `deadline - time.monotonic()` is at most 0: the bound is spent
+            past = time.monotonic() >= entered + bound
             if past and real_waitid(idtype, pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is not None:
                 paused.append("exited past the deadline")
                 break
@@ -3769,10 +3780,11 @@ def _census_interrupt_flip_red(parent, script):
     return []
 
 
-def _census_run_flipped(parent, script, name, old, new):
-    """A copy of _census_run taken from this file's own text with only `old` replaced by `new`, written to a
-    scratch module and loaded through the import machinery (never registered in sys.modules), so a flip row
-    runs the real drain's text with exactly one revert. Returns that copy's _census_run."""
+def _census_run_flipped(parent, script, name, old, new, also=()):
+    """A copy of _census_run taken from this file's own text with only `old` replaced by `new`, and each
+    further (old, new) pair in `also` replaced the same way, written to a scratch module and loaded through
+    the import machinery (never registered in sys.modules), so a flip row runs the real drain's text with
+    exactly one revert (and only the stated additions). Returns that copy's _census_run."""
     import importlib.util
     source = script.read_text(encoding="utf-8")
     count = source.count("\ndef _census_run(")
@@ -3780,9 +3792,11 @@ def _census_run_flipped(parent, script, name, old, new):
     require(count == 1, name + ": its function anchor is repeated")
     begin = source.index("\ndef _census_run(")
     body = source[begin:source.index("\ndef ", begin + 1)]
-    count = body.count(old)
-    require(count != 0, name + ": its revert anchor is absent")
-    require(count == 1, name + ": its revert anchor is repeated")
+    for anchor, replacement in ((old, new), *also):
+        count = body.count(anchor)
+        require(count != 0, name + ": its revert anchor is absent")
+        require(count == 1, name + ": its revert anchor is repeated")
+        body = body.replace(anchor, replacement, 1)
     parent.mkdir()
     location = parent / "flipped.py"
     location.write_text(
@@ -3790,7 +3804,7 @@ def _census_run_flipped(parent, script, name, old, new):
         + "CENSUS_DRIVER = " + repr(CENSUS_DRIVER) + "\n"
         + "_CENSUS_KILL_WAIT = " + repr(_CENSUS_KILL_WAIT) + "\n"
         + "_CENSUS_LAST_READ_CAP = " + repr(_CENSUS_LAST_READ_CAP) + "\n"
-        + body.replace(old, new, 1), encoding="utf-8")
+        + body, encoding="utf-8")
     spec = importlib.util.spec_from_file_location("check_release_cut_" + name.replace(" ", "_"), location)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -3991,15 +4005,23 @@ def _census_exit_at_bound_flip_red(parent, script, race):
     exited:` becomes `if not exited and not last:`), so the exit that landed after the drain's earlier
     os.waitid goes unseen and the copy kills the group and returns no code. Race "unread": the last pass's
     pipe reads are removed (`if exited and last:` becomes `if False:`), so the unread end of file leaves
-    both pipes registered and the copy adds the descendant note. The real _census_exit_at_bound_row, run
-    with this module's _census_run swapped for the copy (restored in a finally), must report that outcome.
-    Returns the failures: [] when the row turned red, a named failure when it did not."""
+    both pipes registered and the copy adds the descendant note. The copy also sleeps 4 s just before it
+    sets its deadline, a parent descheduled between the leader's construction and that initialization: a
+    pause that ended before the real deadline would let the drain see the exit, or read the end of file,
+    on an ordinary pass, and the row would pass despite the revert. The leader stays at the run's gate
+    through that sleep; without the gate, a leader that starts and ends its 1 s sleep within those 4 s has
+    exited before the first os.waitid, and the row reports that nothing was reproduced. The real
+    _census_exit_at_bound_row, run with this module's _census_run swapped for the copy (restored in a
+    finally), must report that race's outcome. Returns the failures: [] when the row turned red, a named
+    failure when it did not."""
     this = sys.modules[__name__]
     if race == "stale":
         old, new, want = "if not exited:", "if not exited and not last:", "got None with note ''"
     else:
         old, new, want = "if exited and last:", "if False:", "with note 'a descendant still held its output pipes"
-    flipped = _census_run_flipped(parent, script, "census exit at bound flip " + race, old, new)
+    delay = ("deadline = time.monotonic() + bound",
+             "time.sleep(4)\n            deadline = time.monotonic() + bound")
+    flipped = _census_run_flipped(parent, script, "census exit at bound flip " + race, old, new, (delay,))
     real = this._census_run
     this._census_run = flipped
     try:
