@@ -11272,10 +11272,11 @@ _RW_DENY_UNPARSED_ROWS = (
 )
 # Substitution text the reading cannot cover (a body the lexer cannot read, a word's text the body scan may
 # have misread because a ')' of a case pattern, a comment, a here-document line or a backquote closed a body
-# early, with or without a later body in the same word, and whether or not a '(' of a comment, a
-# here-document, a backquote or a '${' expansion in that later body took the real ')', one past the count
-# bound, one past the depth bound): text naming a writer's command word with head or tail denies as
-# cannot-evaluate, and each row allows with that test patched to find nothing.
+# early, with or without a later body in the same word, and whether or not a '(' or a quote of a comment, a
+# here-document, a backquote, an ANSI-C quote, a '${' or a '$[' expansion in that later body, inside or
+# outside a double-quoted string, took the real ')', one past the count bound, one past the depth bound):
+# text naming a writer's command word with head or tail denies as cannot-evaluate, and each row allows with
+# that test patched to find nothing.
 _RW_DENY_UNREAD_ROWS = (
     ("rw-u-subst-herestring", "echo \"$(recordctl write | head <<<x)\""),
     ("rw-u-subst-herestring-before", "echo \"$(cat <<<x; recordctl write | head)\""),
@@ -11294,7 +11295,29 @@ _RW_DENY_UNREAD_ROWS = (
      "echo \"$(case x in x) recordctl write | head;; esac; $(cat <<E\n(\nE\n))\""),
     ("rw-u-subst-case-backquote-paren", "echo \"$(case x in x) recordctl write | head;; esac; : $(echo `echo (`))\""),
     ("rw-u-subst-case-param-paren", "echo \"$(case x in x) recordctl write | head;; esac; : $(echo ${x/(/y}))\""),
-    ("rw-u-subst-comment-later","echo \"$(echo # )\nrecordctl write | head; $(true))\""),
+    ("rw-u-subst-case-ansi-c-paren", "echo \"$(case x in x) recordctl write | head;; esac; $(echo $'\\'''('\\'))\""),
+    ("rw-u-subst-case-arith-paren", "echo \"$(case x in x) recordctl write | head;; esac; $(: $[ ( ]))\""),
+    # A backquote or a '${' inside a double-quoted string in a later body: its inner '"' would end the scan's
+    # string early, so a '(', a ')' or a "'" after it would be miscounted.
+    ("rw-u-subst-dq-backquote-paren",
+     "echo \"$(case x in x) recordctl write | head;; esac; $(echo \"`echo \"(\"`\"))\""),
+    ("rw-u-subst-dq-param-paren", "echo \"$(case x in x) recordctl write | head;; esac; $(echo \"${x:-\"(\"}\"))\""),
+    ("rw-u-subst-dq-backquote-quote",
+     "echo \"$(case x in x) recordctl write | head;; esac; $(echo \"`echo \"'\"`\"))\""),
+    ("rw-u-subst-dq-param-nested",
+     "echo \"$(echo \"$(case x in x) recordctl write | head;; esac; $(echo \"${x:-\"(\"}\"))\")\""),
+    ("rw-u-subst-dq-backquote-close",
+     "echo \"$(echo \"`echo \")\"`\"; recordctl write | head; $(echo \"`echo \"(\"`\"))\""),
+    ("rw-u-subst-dq-param-close",
+     "echo \"$(echo \"${x:-\")\"}\"; recordctl write | head; $(echo \"${x:-\"(\"}\"))\""),
+    ("rw-u-subst-dq-param-assign", "x=\"$(case x in x) recordctl write | head;; esac; $(echo \"${x:-\"(\"}\"))\""),
+    ("rw-u-subst-dq-param-redirect",
+     "echo hi > \"$(case x in x) recordctl write | tail;; esac; $(echo \"${x:-\"(\"}\"))\""),
+    ("rw-u-subst-dq-param-git",
+     "git log -1 --format=%H \"$(echo \"${x:-\")\"}\"; recordctl write | tail -n 1; $(echo \"${y:-\"(\"}\"))\""),
+    ("rw-u-subst-dq-backquote-nested",
+     "echo \"$(echo \"$(case x in x) recordctl write | head;; esac; $(echo \"`echo \"(\"`\"))\")\""),
+    ("rw-u-subst-comment-later", "echo \"$(echo # )\nrecordctl write | head; $(true))\""),
     ("rw-u-subst-comment-glued-later", "echo \"$(true #)\nrecordctl write | head; : $(:))\""),
     ("rw-u-subst-heredoc-later", "echo \"$(cat <<E\n)\nE\nrecordctl write | head; : $(:))\""),
     ("rw-u-subst-backquote-later", "echo \"$(echo `echo )`; recordctl write | head; : $(:))\""),
@@ -11333,6 +11356,12 @@ _RW_ALLOW_ROWS = (
     ("rw-a-subst-text-after", "echo \"$(date) recordctl write | tail\""),
     ("rw-a-subst-arith", "echo \"$((1)) recordctl write | head\""),
     ("rw-a-subst-padding", "echo" + " \"$(:)\"" * 80),
+    # A flagged construct with one body, or with two bodies whose text names no writer and sink, keeps no doubt
+    # that denies.
+    ("rw-a-subst-dq-param-one", "echo \"$(echo \"${HOME}\"; recordctl read | head)\""),
+    ("rw-a-subst-arith-one", "echo \"$(echo $[1+1]; recordctl read | head)\""),
+    ("rw-a-subst-dq-backquote-two", "echo \"$(echo \"`date`\") $(ls | head)\""),
+    ("rw-a-subst-dq-param-two-no-sink", "echo \"$(echo \"${x:-y}\") $(recordctl write)\""),
 )
 _RW_DECLARATION = 'version = 1\nwriters = [["recordctl", "write"], ["python3", "/abs/tools/update_records.py"]]\n'
 

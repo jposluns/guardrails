@@ -18431,6 +18431,10 @@ def _records_writer_deny(writer, sink, path):
 # The characters after which a '#' inside a substitution body starts a comment (bash reads '#' as a comment
 # only at the start of a word): a blank, a newline or an operator character.
 _RECORDS_WRITER_COMMENT_AFTER = frozenset(" \t\n;&|()<>")
+# The openers, besides a backquote and a '#' that can start a comment, of the constructs inside a '$(' body
+# whose quotes and parentheses the body scan does not follow: a here-document, an ANSI-C quote, a '${'
+# expansion and a '$[' arithmetic expansion.
+_RECORDS_WRITER_UNFOLLOWED = ("<<", "$'", "${", "$[")
 
 
 def _records_writer_subst_bodies(word):
@@ -18440,12 +18444,17 @@ def _records_writer_subst_bodies(word):
     of its own), a backslash and a parenthesis are followed, and a body ends at the ')' that closes its '$('
     or at the end of the word. So each character of the word is scanned once and lies in at most one returned
     body: the text read grows linearly with the word. A '$((' arithmetic expansion is read as a body holding a
-    subshell. A case pattern, a comment, a here-document, a backquote, an ANSI-C quote and a '${' expansion
-    are not followed, so a ')' in one can close a body early and a '(' in one can take the ')' that closes an
-    earlier body, leaving text bash runs in no returned body. So where a ')' stands outside every body after a
-    body closed, or where the word holds two or more bodies and one of them holds a '#' that can start a
-    comment, a '<<', a backquote, a "$'" or a '${', doubt is the text from the start of the first body to the
-    end of the word, however many bodies close after it."""
+    subshell. Nothing else is followed: a case pattern, a comment, a here-document, a backquote, an ANSI-C
+    quote, a '${' expansion and a '$[' expansion can hold a quote or a parenthesis bash does not count, so a
+    ')' can close a body early and a '(' can take the ')' that closes an earlier body, leaving text bash runs
+    in no returned body. Doubt is the text from the start of the first body to the end of the word, however
+    many bodies close after it, where a ')' stands outside every body after a body closed, or where the word
+    holds two or more bodies and any body holds a backquote, a '<<', a "$'", a '${', a '$[' or a '#' after a
+    blank or an operator character, inside or outside a double-quoted string (only a single-quoted string and
+    a backslash-escaped character the scan skips are exempt). A case pattern has no opener to flag: its ')'
+    only closes early, so unless a flagged construct supplies a '(' to take it, the real ')' stands outside
+    every body. Flagging inside a double-quoted string, where bash reads a '#', a '<<' and a "$'" as plain
+    text, over-blocks in the safe direction."""
     bodies = []
     misread = unfollowed = False
     first = None
@@ -18469,6 +18478,9 @@ def _records_writer_subst_bodies(word):
         if ch == "\\":
             i += 2
             continue
+        if ch == "`" or word.startswith(_RECORDS_WRITER_UNFOLLOWED, i) or (
+                ch == "#" and word[i - 1] in _RECORDS_WRITER_COMMENT_AFTER):
+            unfollowed = True
         if stack[-1] == '"':
             if ch == '"':
                 stack.pop()
@@ -18482,9 +18494,6 @@ def _records_writer_subst_bodies(word):
             close = word.find("'", i + 1)
             i = n if close < 0 else close + 1
             continue
-        if (ch == "`" or word.startswith("<<", i) or word.startswith("$'", i) or word.startswith("${", i)
-                or (ch == "#" and word[i - 1] in _RECORDS_WRITER_COMMENT_AFTER)):
-            unfollowed = True
         if ch == '"':
             stack.append('"')
         elif word.startswith("$(", i):
