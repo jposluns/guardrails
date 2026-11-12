@@ -2252,17 +2252,30 @@ def _rdp_label_screen_mutant_timing(row, timer):
     is timed twice: under the shape's ratio bound, where it must fail ("not linear"), and with that bound
     lifted a thousand times out of reach, where only the growth bound sees it, so its two failing groups
     hold growth faults alone and the confirm rounds must reproduce them ("confirmed over" in the verdict).
-    The row must not fail on load alone. To read linear, a group or the confirm rounds must hold the
-    multiple's whole growth from 256 KiB to 1 MiB under 2 (the bound's square root of 2 per doubling,
-    twice), where the mutant's is about 8.5, so load would have to lift the 1 MiB reference or the 256 KiB
-    screen, or both, about 4.2 times together in every round of two groups, or of the confirm rounds; in
-    the runner's failure that the confirm rounds answer, a 512 KiB reference read about 1.9 times its
-    linear share. On one host its multiples measured about 4.1, 10 and 35, growing about 2.5 and 3.4
-    per doubling (about 75 and 140 percent over the growth bound), and the two timings spent about 5.7
-    and 11.6 CPU seconds; with eight busy loops pinned to the one core the row ran on, they measured 3.8
-    to 3.9, 9.8 to 10.0 and 33.8 to 34.0, growing 2.53 to 2.62 and 3.39 to 3.46. A term only a few
-    percent over the bound can pass the confirm rounds (_rdp_timing_rows), so this row pins that a clear
-    super-linear term still fails, not that every one does."""
+    On one host its multiples measured about 4.1, 10 and 35, growing about 2.5 and 3.4 per doubling (about
+    75 and 140 percent over the growth bound), and the two timings spent about 5.7 and 11.6 CPU seconds;
+    in another run the 1 MiB mutant screen call took about 0.75 to 0.87 CPU seconds. With eight busy loops
+    pinned to the one core the row ran on, in one run whose output no artefact in the repository keeps,
+    they measured 3.8 to 3.9, 9.8 to 10.0 and 33.8 to 34.0, growing 2.53 to 2.62 and 3.39 to 3.46. Load
+    can turn the row red in three ways, and these margins say how much load each needs, not that load
+    cannot supply it. The row's timer counts CPU seconds, so load reaches its bounds only by slowing the
+    process's own work, not by time the process spends waiting for a core. A timing reads linear only when
+    a group or the confirm rounds hold each doubling's growth of the multiple under the bound's square
+    root of 2, so load would have to cut the two doublings' growth about 1.76 and 2.40 times in every
+    round of two groups, or of the confirm rounds, by lifting one leg against the other: for example the
+    256 KiB screen 1.76 times and the 1 MiB reference 2.40 times, or the 512 KiB reference 1.76 times and
+    the 1 MiB reference about 4.2 times. The figure of about 4.2 is the product of the two doublings'
+    lifts, not one leg's lift: a lift of the 1 MiB reference alone leaves the first doubling's growth near
+    2.5, which fails however large that lift is. The timing under the ratio bound must also bring every
+    size's multiple under that bound (about 5.25). In the runner's failure that the confirm rounds answer,
+    a 512 KiB reference read about 1.9 times its linear share. A timing reads "runaway" when one call
+    takes over _RDP_TIMING_RUNAWAY (10) CPU seconds, so load would have to make the 1 MiB mutant call's
+    CPU time about 11 to 13 times longer. And one reads "over budget" when its calls have spent
+    _RDP_TIMING_BUDGET (180) CPU seconds before a later call starts, a budget each of the two timings has
+    to itself, so load would have to make the longer one's CPU time about 15.5 times longer (the two
+    together spent about 17). A term only a few percent over the bound can pass the confirm rounds
+    (_rdp_timing_rows), so this row pins that a clear super-linear term still fails, not that every one
+    does."""
     shape, lengths, bound = row
     real = aiqt_hooks._rdp_hidden
 
@@ -2426,7 +2439,7 @@ def _rdp_timing_decision_cases():
     # outcome before them. The same lift through every round, confirm rounds included, still fails. A
     # quadratic whose reference is lifted 2 times at 512 KiB and 4 times at 1 MiB, which flattens its
     # multiple, through every confirm round but the last still fails, since the least over the confirm
-    # rounds takes the quiet one; held through all six it passes, the residual the docstring of
+    # rounds takes the quiet one; held through all six it passes, the reduction the docstring of
     # _rdp_timing_rows states. A shape failing on growth alone takes 72 timings, its two groups and then
     # the confirm rounds, and one failing on its ratio bound takes 36, its two groups alone, with no
     # confirm round.
@@ -2446,12 +2459,15 @@ def _rdp_timing_decision_cases():
     cases.append(("quadratic-reference-lifted-confirm-but-one",
                   _simulate(_quadratic, _flattening_reference(11))[0],
                   _simulate(_quadratic, _flattening_reference(12))[0]))
-    # The coverage the confirm rounds give up, pinned so it cannot widen unseen: the same quadratic with
-    # its reference lifted through the confirm rounds alone, every one of them, fails its two groups on
-    # growth and passes the shape, where with no confirm rounds it fails. The lift that leaves the confirm
-    # multiple growing 1.42 times per doubling, just over the bound's square root of 2, still fails, and
-    # one that leaves it growing 1.41 times, just inside, passes, so the confirm rounds are judged by the
-    # same growth bound as the groups.
+    # The coverage the confirm rounds give up: the same quadratic with its reference lifted through the
+    # confirm rounds alone, every one of them, fails its two groups on growth and passes the shape, where
+    # with no confirm rounds it fails. The lift that leaves the confirm multiple growing 1.42 times per
+    # doubling, just over the bound's square root of 2, still fails, and one that leaves it growing 1.41
+    # times, just inside, passes, so the confirm rounds' growth bound lies between 1.41 and 1.42 per
+    # doubling, where the groups' is the square root of 2. That pin catches a confirm bound 1 percent
+    # looser (about 1.428, which passes the 1.42 leg) and, through the timing counts below, a confirm
+    # count of 5 or 7, but a confirm bound loosened only to between 1.414 and 1.42 per doubling would pass
+    # both legs unseen.
     steps = {262144: 0, 524288: 1, 1048576: 2}
 
     def _confirm_lifted(growth):
