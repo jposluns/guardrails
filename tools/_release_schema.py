@@ -182,6 +182,9 @@ def strict_releases(data, where):
 # is the stricter kind-specific form gen_manifest actually emits.
 MANIFEST_TOP_KEYS = frozenset({"format-version", "release-version", "genesis", "tree-sha256", "sources",
                                "artifacts"})
+# OPF's own release version (opf/VERSION), emitted by gen_manifest where the pack tracks that file; the same
+# optional key the shared pack grammar (opf/tools/_opf_pack_manifest.py) admits.
+MANIFEST_OPTIONAL_KEYS = frozenset({"opf-version"})
 MANIFEST_SOURCES_KEYS = frozenset({"path", "bytes", "sha256"})
 MANIFEST_ARTIFACT_BASE = frozenset({"artifact-id", "path", "kind", "sha256"})
 MANIFEST_ARTIFACT_KEYS = {"file": MANIFEST_ARTIFACT_BASE,
@@ -204,9 +207,12 @@ def strict_manifest(data, where):
     artifact-id. The full SOURCES-set-equality against the tracked tree stays check_manifest's."""
     if not isinstance(data, dict):
         raise SchemaError("{}: manifest is not a table".format(where))
-    if set(data) != MANIFEST_TOP_KEYS:
-        raise SchemaError("{}: top-level keys must be EXACTLY {} (found {})".format(
-            where, sorted(MANIFEST_TOP_KEYS), sorted(data)))
+    if not MANIFEST_TOP_KEYS <= set(data) <= MANIFEST_TOP_KEYS | MANIFEST_OPTIONAL_KEYS:
+        raise SchemaError("{}: top-level keys must be EXACTLY {}, optionally with {} (found {})".format(
+            where, sorted(MANIFEST_TOP_KEYS), sorted(MANIFEST_OPTIONAL_KEYS), sorted(data)))
+    if "opf-version" in data and (not isinstance(data["opf-version"], str)
+                                  or _parse(data["opf-version"]) is None):
+        raise SchemaError("{}: opf-version {!r} is not a bare SemVer".format(where, data["opf-version"]))
     if data["format-version"] != 1:
         raise SchemaError("{}: format-version must be exactly 1".format(where))
     if not isinstance(data["release-version"], str) or _parse(data["release-version"]) is None:

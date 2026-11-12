@@ -1122,7 +1122,7 @@ reason = "test-code"
 path = "tools/check_manifest.py"
 function = "_self_test_main_isolated"
 form = "call"
-count = 1
+count = 2
 class = "EXEMPT"
 reason = "test-code"
 
