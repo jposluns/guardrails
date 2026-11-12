@@ -18450,10 +18450,12 @@ def _records_writer_subst_bodies(word):
     in no returned body. Doubt is the text from the start of the first body to the end of the word, however
     many bodies close after it, where a ')' stands outside every body after a body closed, or where the word
     holds two or more bodies and any body holds a backquote, a '<<', a "$'", a '${', a '$[' or a '#' after a
-    blank or an operator character, inside or outside a double-quoted string (only a single-quoted string and
-    a backslash-escaped character the scan skips are exempt). A case pattern has no opener to flag: its ')'
-    only closes early, so unless a flagged construct supplies a '(' to take it, the real ')' stands outside
-    every body. Flagging inside a double-quoted string, where bash reads a '#', a '<<' and a "$'" as plain
+    blank or an operator character, inside or outside a double-quoted string (a single-quoted string, a
+    backslash-escaped character and text outside every body are not tested). This doubt does not close the
+    class: after an early close the scan's bodies are not bash's bodies, and the lexer's word can end before
+    the real ')' (a case pattern's ')' or a ')' in an ANSI-C quote), so no stray ')' is seen. The verdict
+    therefore never rests on this scan alone outside a provably simple word (_records_writer_whole_text_doubt
+    is its floor). Flagging inside a double-quoted string, where bash reads a '#', a '<<' and a "$'" as plain
     text, over-blocks in the safe direction."""
     bodies = []
     misread = unfollowed = False
@@ -18566,6 +18568,86 @@ def _records_writer_unread_named(unread, writers):
     return any(_records_writer_named(text, writers) for text in unread)
 
 
+# The text whose presence in a word makes the word not provably simple: every quote, a backslash, a comment
+# mark, the openers the body scan does not follow, and the case keyword whose pattern ')' closes early.
+_RECORDS_WRITER_NOT_SIMPLE = ("'", '"', "`", "\\", "#", "case") + _RECORDS_WRITER_UNFOLLOWED
+# The '$(' suffixes the whole-text reading lexes per command; past it, the command's text is not read.
+_RECORDS_WRITER_WHOLE_TEXT_BOUND = 256
+
+
+def _records_writer_word_simple(word):
+    """True when a word is provably simple: it holds no quote, backslash, '#', '<<', "$'", '${', '$[' or
+    'case', and every character from its first '$(' to its end lies in a '$(' body whose ')' the plain
+    parenthesis count finds, the last ')' closing the last body. In such a word no construct bash reads holds
+    a parenthesis bash does not count, so the body scan's bodies are bash's bodies and nothing follows them."""
+    if any(mark in word for mark in _RECORDS_WRITER_NOT_SIMPLE):
+        return False
+    at = word.find("$(")
+    if at < 0:
+        return False
+    depth = 0
+    i, n = at, len(word)
+    while i < n:
+        if depth == 0:
+            if not word.startswith("$(", i):
+                return False
+            depth = 1
+            i += 2
+            continue
+        if word[i] == "(":
+            depth += 1
+        elif word[i] == ")":
+            depth -= 1
+        i += 1
+    return depth == 0
+
+
+def _records_writer_whole_text_doubt(command, readings, writers):
+    """The no-regression floor under the body scan: True when the whole-text reading finds a declared writer
+    piped into head or tail, or a text it cannot lex names one. That reading lexes, for each argv word or
+    redirect target holding '$(' that is not provably simple (_records_writer_word_simple), the text from
+    each '$(' to the end of the word, and each backquote body of the command, then the words holding '$(' or
+    a backquote in what it lexed, to _RECORDS_WRITER_SUBST_DEPTH levels and _RECORDS_WRITER_SUBST_BODIES
+    items, work left past that bound counting as doubt; it reads text bash may not run (a body's close and
+    what follows it), so its finding is doubt, not a finding that the writer is piped. Past
+    _RECORDS_WRITER_WHOLE_TEXT_BOUND suffixes it stops and counts as doubt. It is read only when the
+    command's text names a writer and head or tail, and a provably simple word is left to the body scan,
+    whose bodies there are bash's bodies."""
+    if not _records_writer_named(command, writers):
+        return False
+    work = [(body, 1) for _start, body in _backquote_bodies(command)]
+    work += [(word, 0) for reading in readings for seg in reading
+             for word in list(seg.argv) + [redirect.target for redirect in seg.redirects]
+             if "$(" in word and not _records_writer_word_simple(word)]
+    seen = suffixes = 0
+    while work and seen < _RECORDS_WRITER_SUBST_BODIES:
+        text, depth = work.pop()
+        seen += 1
+        bodies = [text] if depth else []
+        at = text.find("$(")
+        while at >= 0:
+            bodies.append(text[at + 2:])
+            at = text.find("$(", at + 2)
+        suffixes += len(bodies)
+        if suffixes > _RECORDS_WRITER_WHOLE_TEXT_BOUND:
+            return True
+        for body in bodies:
+            try:
+                lexed = _lex_readings(body)
+            except ValueError:
+                if _records_writer_named(body, writers):
+                    return True
+                continue
+            if any(_records_writer_sink(records, writers) is not None for records in lexed):
+                return True
+            if depth < _RECORDS_WRITER_SUBST_DEPTH:
+                work += [(word, depth + 1) for reading in lexed for seg in reading
+                         for word in list(seg.argv) + [redirect.target for redirect in seg.redirects]
+                         if "$(" in word or "`" in word]
+                work += [(inner, depth + 1) for _start, inner in _backquote_bodies(body)]
+    return bool(work)
+
+
 def _records_writer_unreadable_deny(command_doubt, detail, path):
     """The fail-closed deny when the records-writer check cannot be evaluated: the declaration found at path
     cannot be read (a cwd from which none can be looked for never reaches here; _records_writers_load), or,
@@ -18599,14 +18681,20 @@ def _records_writer_verdict(data, readings, command=None, parsed=None):
     (_records_writer_subst_readings); ("doubt", path) when command, the raw text of an unparseable command
     (None on a parsed one), or text the substitution reading could not cover (a body the lexer cannot read,
     one past the count or depth bound, a word's text the body scan may have misread), names a writer's
-    command word and head or tail; else None, which includes no declaration, an empty one, and an unlocatable
-    one (_records_writers_load), so an adopter with no declaration sees no change."""
+    command word and head or tail, or when the whole-text reading of every word not provably simple finds
+    one piped or unreadable (_records_writer_whole_text_doubt); else None, which includes no declaration, an
+    empty one, and an unlocatable one (_records_writers_load), so an adopter with no declaration sees no
+    change. The body scan's bodies are not bash's bodies once a construct it does not follow closes one
+    early, and the lexer's word can then end before the real ')'; so the body scan only adds precision on a
+    provably simple word, and on every other word the whole-text reading is a floor: the verdict denies, as
+    a records-writer deny or as cannot-evaluate, wherever that reading alone would deny."""
     state, value, path = _records_writers_load(data)
     if state == "bad":
         return ("bad", value, path)
     if state != "ok" or not value:
         return None
     unread = []
+    top = readings
     if parsed is not None:
         extra, unread = _records_writer_subst_readings(parsed, readings)
         readings = list(readings) + extra
@@ -18617,6 +18705,8 @@ def _records_writer_verdict(data, readings, command=None, parsed=None):
     if command is not None and _records_writer_named(command, value):
         return ("doubt", path)
     if _records_writer_unread_named(unread, value):
+        return ("doubt", path)
+    if parsed is not None and _records_writer_whole_text_doubt(parsed, top, value):
         return ("doubt", path)
     return None
 

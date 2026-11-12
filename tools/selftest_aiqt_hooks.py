@@ -11353,9 +11353,9 @@ _RW_ALLOW_ROWS = (
     ("rw-a-echo-if", "echo if recordctl write | head"),
     ("rw-a-subst-other", "echo \"$(recordctl read | head)\""),
     ("rw-a-sink-wrapper-other", "recordctl write | stdbuf -oL wc -l"),
-    ("rw-a-subst-text-after", "echo \"$(date) recordctl write | tail\""),
-    ("rw-a-subst-arith", "echo \"$((1)) recordctl write | head\""),
     ("rw-a-subst-padding", "echo" + " \"$(:)\"" * 80),
+    ("rw-a-subst-simple-assign", "x=$(recordctl read | head)"),
+    ("rw-a-subst-simple-many", "echo \"$(:)$(recordctl read | tail)$(:)\""),
     # A flagged construct with one body, or with two bodies whose text names no writer and sink, keeps no doubt
     # that denies.
     ("rw-a-subst-dq-param-one", "echo \"$(echo \"${HOME}\"; recordctl read | head)\""),
@@ -11364,6 +11364,135 @@ _RW_ALLOW_ROWS = (
     ("rw-a-subst-dq-param-two-no-sink", "echo \"$(echo \"${x:-y}\") $(recordctl write)\""),
 )
 _RW_DECLARATION = 'version = 1\nwriters = [["recordctl", "write"], ["python3", "/abs/tools/update_records.py"]]\n'
+# Words that are not provably simple, where only the whole-text reading denies (as cannot-evaluate): a case
+# pattern or an ANSI-C quote closes the body scan's body early and the lexer's word ends before the real
+# ')', or a comment, a here-document or an escaped '$(' after the early close opens a body bash never runs;
+# and literal text after a body's close that the whole-text reading lexes (a disclosed over-block). Each row
+# allows with that reading patched out.
+_RW_DENY_FLOOR_ROWS = (
+    ("rw-f-case-quote-close", "echo \"$(case x in x) recordctl write | head;; esac; echo \" \")\""),
+    ("rw-f-case-quote-close-tail", "echo \"$(case x in x) recordctl write | tail -n 1;; esac; echo \" \")\""),
+    ("rw-f-case-quote-close-assign", "x=\"$(case x in x) recordctl write | head;; esac; : \" \")\""),
+    ("rw-f-case-quote-close-redirect", "echo hi > \"$(case x in x) recordctl write | head;; esac; : \" \")\""),
+    ("rw-f-case-quote-close-git",
+     "git log -1 --format=%H \"$(case x in x) recordctl write | tail -n 1;; esac; : \" \")\""),
+    ("rw-f-case-quote-close-nested", "echo \"$(echo \"$(case x in x) recordctl write | head;; esac; : \" \")\")\""),
+    ("rw-f-case-escaped-subst", "echo \"$(case x in x) recordctl write | head;; esac; echo \"\\$(\")\""),
+    ("rw-f-case-quoted-semi", "echo \"$(case x in x) recordctl write | head;; esac; echo \";\")\""),
+    ("rw-f-case-printf-semi", "printf %s \"$(case x in x) recordctl write | head;; esac; printf \";\")\""),
+    ("rw-f-ansi-c-close", "echo \"$(echo $'\\')'; recordctl write | head -n 3; echo \" \")\""),
+    ("rw-f-case-empty-item", "echo \"$(case x in x) recordctl write | head -n 3; ;; esac; echo \" \")\""),
+    ("rw-f-case-comment-subst", "echo \"$(case x in x) recordctl write | head;; esac; # $(\n)\""),
+    ("rw-f-case-comment-subst-tail", "echo \"$(case x in x) recordctl write | tail -n 2;; esac; # $(\n)\""),
+    ("rw-f-case-comment-subst-assign", "x=\"$(case x in x) recordctl write | head;; esac; # $(\n)\""),
+    ("rw-f-case-comment-subst-redirect", "echo hi > \"$(case x in x) recordctl write | head;; esac; # $(\n)\""),
+    ("rw-f-case-comment-subst-nested", "echo \"$(echo \"$(case x in x) recordctl write | head;; esac; # $(\n)\")\""),
+    ("rw-f-case-comment-subst-git",
+     "git log -1 --format=%H \"$(case x in x) recordctl write | tail -n 1;; esac; # $(\n)\""),
+    ("rw-f-case-comment-subst-later", "echo \"$(case x in x) :;; esac; recordctl write | head # $(\n)\""),
+    ("rw-f-case-comment-subst-glued", "echo \"$(case x in x) recordctl write | head;; esac;#$(\n)\""),
+    ("rw-f-case-heredoc-subst", "echo \"$(case x in x) recordctl write | head;; esac; cat <<'E'\n$(\nE\n)\""),
+    ("rw-f-case-heredoc-subst-tail", "echo \"$(case x in x) recordctl write | tail;; esac; cat <<'E'\n$(\nE\n)\""),
+    ("rw-f-case-heredoc-escaped", "echo \"$(case x in x) recordctl write | head;; esac; cat <<E\n\\$(\nE\n)\""),
+    ("rw-f-text-after", "echo \"$(date) recordctl write | tail\""),
+    ("rw-f-arith-text-after", "echo \"$((1)) recordctl write | head\""),
+)
+# Further shapes run through both the frozen whole-text decision and the hook (no expected verdict of their
+# own): unquoted outer forms, one-body double-quoted strings holding a backquote or a '${' with an early ')',
+# '(' or "'", and a one-body '${' that must keep allowing.
+_RW_COMPARE_EXTRA = (
+    ("rw-x-unquoted-case-close", "x=$(case x in x) recordctl write | head;; esac; : \" \")"),
+    ("rw-x-unquoted-case-echo", "echo $(case x in x) recordctl write | head;; esac; echo \" \")"),
+    ("rw-x-dq-backquote-close", "echo \"$(echo \"`echo \")\"`\"; recordctl write | head)\""),
+    ("rw-x-dq-backquote-open", "echo \"$(echo \"`echo \"(\"`\"; recordctl write | head)\""),
+    ("rw-x-dq-backquote-quote", "echo \"$(echo \"`echo \"'\"`\"; recordctl write | head)\""),
+    ("rw-x-dq-param-close", "echo \"$(echo \"${x:-\")\"}\"; recordctl write | head)\""),
+    ("rw-x-dq-param-open", "echo \"$(echo \"${x:-\"(\"}\"; recordctl write | head)\""),
+    ("rw-x-dq-param-text-after", "echo \"$(echo \"${x:-y}\"; recordctl write | head) z\""),
+    ("rw-x-dq-param-sink-arg", "x=\"$(recordctl read | head \"${y}\")\""),
+    ("rw-x-case-heredoc-unquoted", "echo \"$(case x in x) recordctl write | head;; esac; cat <<E\nx\nE\n)\""),
+)
+
+
+def _rw_reference_subst_readings(command, readings):
+    """A frozen copy of the whole-text substitution reading the records-writer check first shipped with:
+    every '$(' in a word is lexed to the end of that word. The no-regression test compares the hook against
+    it; it is never loaded from another revision."""
+    out = []
+    work = [(body, 1) for _start, body in aiqt_hooks._backquote_bodies(command)]
+    work += [(word, 0) for reading in readings for seg in reading for word in seg.argv if "$(" in word]
+    seen = 0
+    while work and seen < aiqt_hooks._RECORDS_WRITER_SUBST_BODIES:
+        text, depth = work.pop()
+        seen += 1
+        bodies = [text] if depth else []
+        at = text.find("$(")
+        while at >= 0:
+            bodies.append(text[at + 2:])
+            at = text.find("$(", at + 2)
+        for body in bodies:
+            try:
+                lexed = aiqt_hooks._lex_readings(body)
+            except ValueError:
+                out.append(body)
+                continue
+            out.extend(lexed)
+            if depth < aiqt_hooks._RECORDS_WRITER_SUBST_DEPTH:
+                work += [(word, depth + 1) for reading in lexed for seg in reading for word in seg.argv
+                         if "$(" in word or "`" in word]
+                work += [(inner, depth + 1) for _start, inner in aiqt_hooks._backquote_bodies(body)]
+    return out
+
+
+def _rw_reference_verdict(data, readings, command=None, parsed=None):
+    """A frozen copy of the records-writer verdict over the whole-text reading (_rw_reference_subst_readings)."""
+    state, value, path = aiqt_hooks._records_writers_load(data)
+    if state == "bad":
+        return ("bad", value, path)
+    if state != "ok" or not value:
+        return None
+    unread = []
+    if parsed is not None:
+        extra = _rw_reference_subst_readings(parsed, readings)
+        unread = [body for body in extra if isinstance(body, str)]
+        readings = list(readings) + [body for body in extra if not isinstance(body, str)]
+    for records in readings:
+        hit = aiqt_hooks._records_writer_sink(records, value)
+        if hit is not None:
+            return ("deny", hit[0], hit[1], path)
+    if command is not None and aiqt_hooks._records_writer_named(command, value):
+        return ("doubt", path)
+    if any(aiqt_hooks._records_writer_named(body, value) for body in unread):
+        return ("doubt", path)
+    return None
+
+
+def _test_records_writers_no_regression(failures, decide):
+    """(rw-nr-*) No regression against the whole-text reading: every deny, unparsed, unread, floor and allow
+    row and every further shape (_RW_COMPARE_EXTRA) is decided by gate_weakening once with the frozen
+    whole-text verdict (_rw_reference_verdict) patched in and once as shipped; an input the frozen verdict
+    denies that the hook allows fails. The provably simple test is pinned both ways."""
+    rows = (_RW_DENY_ROWS + _RW_DENY_UNPARSED_ROWS + _RW_DENY_UNREAD_ROWS + _RW_DENY_FLOOR_ROWS + _RW_ALLOW_ROWS
+            + _RW_COMPARE_EXTRA)
+    saved = aiqt_hooks._records_writer_verdict
+    try:
+        aiqt_hooks._records_writer_verdict = _rw_reference_verdict
+        reference = [decide(command)[0] for _label, command in rows]
+    finally:
+        aiqt_hooks._records_writer_verdict = saved
+    if not any(got == "deny" for got in reference):
+        failures.append("(rw-nr-reference) the frozen whole-text verdict denies no row, so it is not wired in")
+    for (label, command), want in zip(rows, reference):
+        got = decide(command)[0]
+        if want == "deny" and got != "deny":
+            failures.append("(rw-nr-{}) {!r}: the whole-text reading denies it but the hook gives {}".format(
+                label, command, got))
+    for word, want in (("$(recordctl read | head)", True), ("x=$(:)$(echo $(ls))", True),
+                       ("$(:) x", False), ("$(:)x$(:)", False), ("$(case x in x) :;; esac)", False),
+                       ("$(echo \"a\")", False), ("$(echo ${x})", False), ("$(a", False), ("$(a))", False),
+                       ("x(", False), ("$(echo #)", False)):
+        if aiqt_hooks._records_writer_word_simple(word) is not want:
+            failures.append("(rw-nr-simple) {!r}: provably simple should be {}".format(word, want))
 
 
 def _test_records_writers(failures, tmp):
@@ -11415,9 +11544,18 @@ def _test_records_writers(failures, tmp):
         expect(label, command, "deny", needles=("Run the writer alone",))
     for label, command in _RW_DENY_UNREAD_ROWS:
         expect(label, command, "deny", needles=("Run the writer alone", "denied fail-closed"))
-    # The unread-text test is the only deny of each unread row: patched to find nothing, every one allows.
+    for label, command in _RW_DENY_FLOOR_ROWS:
+        expect(label, command, "deny", needles=("Run the writer alone", "denied fail-closed"))
+    # The unread-text test and the whole-text floor are the only denies of each unread row: both patched to
+    # find nothing, every one allows. The floor alone is the deny of each floor row.
     saved_unread = aiqt_hooks._records_writer_unread_named
+    saved_floor = aiqt_hooks._records_writer_whole_text_doubt
     try:
+        aiqt_hooks._records_writer_whole_text_doubt = lambda command, readings, writers: False
+        for label, command in _RW_DENY_FLOOR_ROWS:
+            if decide(command, sub)[0] == "deny":
+                failures.append("({}-red) {!r} still denies with the whole-text floor removed, so the row does "
+                                "not prove it".format(label, command))
         aiqt_hooks._records_writer_unread_named = lambda unread, writers: False
         for label, command in _RW_DENY_UNREAD_ROWS:
             if decide(command, sub)[0] == "deny":
@@ -11425,6 +11563,8 @@ def _test_records_writers(failures, tmp):
                                 "prove it".format(label, command))
     finally:
         aiqt_hooks._records_writer_unread_named = saved_unread
+        aiqt_hooks._records_writer_whole_text_doubt = saved_floor
+    _test_records_writers_no_regression(failures, lambda command: decide(command, sub))
     # The reading is linear in the command: many '$(' under a declaration, and a long pull-request body, each
     # decide within _RW_TIMED_SECONDS of CPU, and the writer past the padding still denies.
     timed = (("rw-t-many-subst", "echo \"" + "$(:)" * 1000 + "\"", "allow"),
@@ -11454,7 +11594,7 @@ def _test_records_writers(failures, tmp):
     try:
         aiqt_hooks._records_writer_sink = lambda records, writers: None
         aiqt_hooks._records_writer_named = lambda command, writers: False
-        for label, command in _RW_DENY_ROWS + _RW_DENY_UNPARSED_ROWS + _RW_DENY_UNREAD_ROWS:
+        for label, command in _RW_DENY_ROWS + _RW_DENY_UNPARSED_ROWS + _RW_DENY_UNREAD_ROWS + _RW_DENY_FLOOR_ROWS:
             got, _obj = decide(command, sub)
             if got == "deny" and label != "rw-u-unbalanced":
                 failures.append("({}-red) {!r} still denies with the records-writer check removed, so the row "
