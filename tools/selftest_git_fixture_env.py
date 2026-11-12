@@ -1178,13 +1178,14 @@ def _config_poison_fixture(base):
 # of them tests any sizing.
 # Figures in this comment carry one of four labels: MEASURED (run for SIZING below), ESTIMATED
 # (derived by the SIZING formula), REPORTED (an earlier account, not reproduced here) or
-# READ FROM SOURCE (read from the member's own code, not measured). The exceptions are the five
-# tools/check_opf_standalone_closure.py --self-test --ci-job entries, sized outside SIZING: their
-# MEASURED figures are standalone runs of the pre-split whole self-test (and one of the
-# opf-closure-c member when it held one leg) and their ESTIMATED figure scales the latest
-# whole-self-test run by load alone, not by the SIZING formula (their shared comment gives both),
-# and the tools/check_selftest_execution.py --suite child-status-coverage-selftest entry, whose
-# MEASURED figures are standalone runs (its own comment), fed to the SIZING formula.
+# READ FROM SOURCE (read from the member's own code, not measured). The exceptions are the six
+# tools/check_opf_standalone_closure.py --self-test --ci-job entries, sized outside SIZING from
+# their members' worst cases READ FROM SOURCE: their MEASURED figures are standalone runs of the
+# pre-split whole self-test (and one of the opf-closure-c member when it held one leg) and their
+# ESTIMATED figure scales the latest whole-self-test run by load alone, not by the SIZING formula
+# (their shared comment gives both; neither sizes an entry now), and the
+# tools/check_selftest_execution.py --suite child-status-coverage-selftest entry, whose MEASURED
+# figures are standalone runs (its own comment), fed to the SIZING formula.
 #
 # CONFIG_MEMBER_BOUND_DEFAULT is a DELIBERATE SHORTER DEADLINE, not a bound sized above every
 # member's own end-to-end budget. Budgets the members grant themselves, READ FROM SOURCE (not
@@ -1197,21 +1198,24 @@ def _config_poison_fixture(base):
 # ("A kill timeout outlives the wait it bounds", AGENTS.md) asks that a bound meant to let a command
 # finish be sized above the budget the command grants itself; it allows a deliberately shorter
 # deadline where cutting the work short is the explicit intent, provided reaching it is attributed
-# to the deadline rather than reported as a failure of the callee. Every bound in this table takes
-# that exception: none of them is offered as a bound above its member's whole self-granted budget.
-# CHOICE: the default is NOT raised above 5766 s, and neither is any entry below (each but the
-# five tools/check_opf_standalone_closure.py --self-test --ci-job entries, the
-# child-status-coverage-selftest entry and the tools/check_release_cut.py --self-test
-# --red-on-revert entry is sized from config-lane runs MEASURED on this host, see SIZING; those
-# five are sized from standalone runs of the pre-split whole self-test, see their shared
-# comment, that one from standalone runs, see its own comment, and the check_release_cut.py
-# entry from standalone runs with a stated margin, deliberately below the worst case over named
-# terms that its own comment gives); each entry stays a deliberate shorter deadline relative to
-# the member's self-granted budget, yet each formula-sized entry is sized above the member's
-# measured runs (lane runs, or standalone runs for the child-status-coverage-selftest entry) so
-# that the member finishes under the load the SIZING factor covers;
-# reaching a bound stays cannot-evaluate, attributed to the bound, never a FAIL of that member
-# and never a pass, because this lane owns no member's verdict.
+# to the deadline rather than reported as a failure of the callee. Every bound in this table but the
+# six tools/check_opf_standalone_closure.py --self-test --ci-job entries takes that exception; each
+# of those six is sized above its member's whole self-granted budget, its worst case READ FROM
+# SOURCE (their shared comment).
+# CHOICE: the default is NOT raised above 5766 s, and neither is any entry below but the
+# opf-closure-a to opf-closure-e entries (each but the six tools/check_opf_standalone_closure.py
+# --self-test --ci-job entries, the child-status-coverage-selftest entry and the
+# tools/check_release_cut.py --self-test --red-on-revert entry is sized from config-lane runs
+# MEASURED on this host, see SIZING; those six are sized above their members' worst cases READ FROM
+# SOURCE, see their shared comment, that one from standalone runs, see its own comment, and the
+# check_release_cut.py entry from standalone runs with a stated margin, deliberately below the worst
+# case over named terms that its own comment gives); each other entry stays a deliberate shorter
+# deadline relative to the member's self-granted budget, yet each formula-sized entry is sized above
+# the member's measured runs (lane runs, or standalone runs for the child-status-coverage-selftest
+# entry) so that the member finishes under the load the SIZING factor covers; reaching a bound stays
+# cannot-evaluate, attributed to the bound, never a FAIL of that member and never a pass, because
+# this lane owns no member's verdict. Raising those five entries does not keep a config lane inside
+# its CI job's 21600 s limit (their shared comment, JOB LIMIT).
 # Every roster member is a registered step or the runner behind a registered --suite step
 # (_registered_selftests reads both CI workflows, both standalone runners and the suite manifest),
 # and that step runs the member to completion under no deadline from this suite, so no member's
@@ -1339,7 +1343,8 @@ def _config_poison_fixture(base):
 # above 24 throughout, so this overstates the growth from where it was measured). 4 is headroom for
 # what that model does not explain: the REPORTED (not reproduced here) opf.py --self-test lane runs
 # of 1192 s and the four that reached the then 1200 s default, at least 2.2 times its slowest
-# measured lane time. Each bound stays below 5766 s (see CHOICE).
+# measured lane time. Each bound but the opf-closure-a to opf-closure-e entries stays below 5766 s
+# (see CHOICE).
 CONFIG_MEMBER_BOUND_DEFAULT = 1200
 CONFIG_MEMBER_BOUNDS = {
     # MEASURED lane times (see SIZING): 650.49 s, 709.77 s, 734.81 s (whole roster) and 683.69 s
@@ -1370,9 +1375,54 @@ CONFIG_MEMBER_BOUNDS = {
     # sweep is a proper part of the whole self-test's over the same tree; that is NOT a subset of
     # what the measured pre-split runs below swept, since opf-closure-c holds two legs
     # (opf-adopt-state-selftest and opf-adopt-complete-selftest) and opf-closure-f one
-    # (opf-release-history-selftest) absent from the tree those runs measured. Every part keeps the
-    # whole self-test's 3600 s entry rather than a bound sized from a run of its own: a deliberate
-    # shorter deadline for every part but opf-closure-f (see below).
+    # (opf-release-history-selftest) absent from the tree those runs measured.
+    # SIZED ABOVE EACH MEMBER'S OWN WORST CASE (the kill-timeout rule, see CHOICE), so no entry here
+    # is a shorter deadline: each is its member's worst case, READ FROM SOURCE (not measured), plus
+    # the member's 60 s launch margin, rounded up to a multiple of 300 s, and an entry already above
+    # that figure is kept (opf-closure-f's 3600 s).
+    # WORST CASE, READ FROM SOURCE (tools/check_opf_standalone_closure.py on this tree, imported:
+    # _leg_bounds over opf/tools, _CI_JOB_LEGS, _FLIP_LEG, _DRAIN_MARGIN_S, _VECTOR_ALLOWANCE_S and
+    # _LAUNCH_MARGIN_S): the --self-test step of one --ci-job sweeps that job's legs once, each under
+    # its leg bound, runs the flip (opf.py --self-test under the opf-tooling-selftest bound) only in
+    # the job holding that leg, pays one 10 s cleanup deadline per leg that can be killed, and spends
+    # the 350 s vector allowance:
+    #   member         sweep   flip   cleanups   vectors   worst case   + 60 s   entry
+    #   opf-closure-a   7251   5691     3 x 10       350        13322    13382   13500
+    #   opf-closure-b  10145      0     9 x 10       350        10585    10645   10800
+    #   opf-closure-c   7380      0     5 x 10       350         7780     7840    8100
+    #   opf-closure-d   9420      0     7 x 10       350         9840     9900    9900
+    #   opf-closure-e   9126      0     5 x 10       350         9526     9586    9600
+    #   opf-closure-f   1260      0     1 x 10       350         1620     1680    3600 (kept)
+    # opf-closure-a's sweep is its opf-tooling-selftest leg bound, 5691 s, and its
+    # opf-doctor-selftest leg bound, 1560 s. Each CI job's own worst case (two sweeps, the flip, the
+    # cleanups, the vectors and 600 s of setup; _job_worst_case_s in the member) is larger: 21193 s,
+    # 21420 s, 15810 s, 19930 s, 19302 s and 3490 s.
+    # The member's OWN inner bounds still end it within that worst case, and they are read
+    # differently from these entries: when one of its legs is killed at its leg bound, ended by a
+    # signal, or its flip is not evaluated, the member itself exits 2, and this lane reads any
+    # non-zero member exit as a definite offender (_split_offenders: only this suite's own recorded
+    # timeout is cannot-evaluate), so under lane load such a trip reads here as a FAIL of the member,
+    # not as cannot-evaluate; reaching one of these entries stays cannot-evaluate, never a pass. Each
+    # of those inner leg bounds is itself a deliberate shorter deadline (the member says so beside
+    # _LEG_CEILING_S), held, for each leg whose command is a member here, at or above this table's
+    # deadline for that command plus the member's 60 s launch margin, so that the closure never
+    # kills such a leg before this lane would.
+    # WHY THEY ROSE (REPORTED, from two CI runs of the malformed lane on the same tree, read from the
+    # runs' step timestamps; not reproduced here): the lane step took 5454.6 s on one runner and
+    # 8560.1 s on another, 1.569 times as long, with its members finishing in nearly the same order,
+    # so every member slowed by about that factor; opf-closure-a completed on the faster runner and
+    # reached its then 3600 s entry on the slower one. The same account REPORTED no stall in two runs
+    # of that member on another host, both cut at 2040 s while still in its opf-tooling-selftest leg,
+    # so no length of any of these members under the lane is known. opf-closure-b to opf-closure-e
+    # sat below their worst cases in the same way and are raised with it.
+    # JOB LIMIT: the lane's CI jobs set no timeout-minutes, so each runs under the 21600 s limit of a
+    # hosted-runner job, and these entries do NOT keep a lane inside it. The five raised members sit
+    # next to one another in the roster, so on the lane's four workers two of them always run one
+    # after the other on one worker: at their entries that is at least 8100 + 9600 = 17700 s (the
+    # two smallest, c and e), after whatever that worker ran before them. With every member at its
+    # bound the pool alone runs 60900 s in roster order (52500 s with these five at 3600 s). A lane
+    # that reaches the job limit is ended by it and fails with no member named.
+    # HISTORY (no entry is sized from these figures now).
     # Sized outside SIZING (no config-lane time of this member is known: the lane runs below
     # reached the 1200 s default, so they have no known length and none is fed to the formula).
     # Every run below is of the PRE-SPLIT whole self-test (one sweep over every leg plus the flip).
@@ -1388,41 +1438,22 @@ CONFIG_MEMBER_BOUNDS = {
     # measured at): one complete run took 1667.7 s wall and passed. The member's vectors and the opf/
     # tree its legs run have changed since, so for this tree that run time is INFERRED, not measured,
     # and so is the estimate below, which scales it.
-    # ESTIMATED (SIZING's model that wall time grows in proportion to load5 once load5 exceeds the
-    # CPU count, applied to that standalone run): 3600 s, about 2.2 times that run (3600 / 1667.7 =
-    # 2.159), covers load5 up to about 51.8 scaled from the run's start (its starting load5, 22.8,
-    # sits below the 24 CPUs, where the model adds no growth, so it scales from 24: 24 x 2.159 =
-    # 51.8), and about 70 from its ending load5 (32.6 x 2.159 = 70.4).
-    # DELIBERATE SHORTER DEADLINE: 3600 s sits far BELOW each member's own worst case but F's, READ
-    # FROM SOURCE (tools/check_opf_standalone_closure.py, its own fit arithmetic on this tree: the
-    # member's legs' bounds, one 10 s cleanup deadline per leg, the flip and its cleanup where it
-    # runs, and the 350 s vector allowance), 13322 s (opf-closure-a), 10585 s (b), 7780 s (c),
-    # 9840 s (d) and 9526 s (e), and below each CI job's worst case (21193 s, 21420 s, 15810 s,
-    # 19930 s and 19302 s; see _LEG_CEILING_S and _job_worst_case_s in the member itself). For
-    # opf-closure-f, whose worst case is 1620 s (its one leg's 1260 s bound, one cleanup deadline
-    # and the vector allowance; its CI job's is 3490 s), the same 3600 s sits ABOVE that worst case,
-    # so for that member alone it is no shorter deadline. For the other five it is a shorter
-    # deadline exactly as the default's comment above sanctions: this lane owns no member's
-    # verdict, and reaching this 3600 s bound is cannot-evaluate, never a pass or a fail of the
-    # member. The member's OWN inner bounds are read differently: when one of its legs is killed at
-    # its leg bound, ended by a signal, or its flip is not evaluated, the member itself exits 2, and
-    # this lane reads any non-zero member exit as a definite offender (_split_offenders: only this
-    # suite's own recorded timeout is cannot-evaluate), so under lane load such a trip reads here as
-    # a FAIL of the member, not as cannot-evaluate. Each of those inner leg bounds is itself a
-    # deliberate shorter deadline (the member says so beside _LEG_CEILING_S), held, for each leg
-    # whose command is a member here, at or above this table's deadline for that command plus the
-    # member's 60 s launch margin, so that the closure never kills such a leg before this lane would.
+    # ESTIMATED, when every entry here was 3600 s (SIZING's model that wall time grows in proportion
+    # to load5 once load5 exceeds the CPU count, applied to that standalone run): 3600 s, about 2.2
+    # times that run (3600 / 1667.7 = 2.159), covers load5 up to about 51.8 scaled from the run's
+    # start (its starting load5, 22.8, sits below the 24 CPUs, where the model adds no growth, so it
+    # scales from 24: 24 x 2.159 = 51.8), and about 70 from its ending load5 (32.6 x 2.159 = 70.4).
     # The opf-closure-c entry was 1800 s while that member swept opf-homes-selftest alone, sized above
-    # its then worst case, 1620 s; it now sweeps five legs, so it takes the 3600 s of the others.
+    # its then worst case, 1620 s; when it came to sweep five legs it took the 3600 s of the others.
     # MEASURED (2026-10-23, at the tree of that one-leg member, plain, on a 24-CPU host, load5 5.4 at
     # the start and 5.9 at the end): one complete standalone run of it took 110.3 s wall and passed,
     # its homes leg 53.4 s. No config-lane time of any of the six members is known, and no run of
     # the opf-closure-f member at all.
-    ("tools/check_opf_standalone_closure.py", "--self-test", "--ci-job", "opf-closure-a"): 3600,
-    ("tools/check_opf_standalone_closure.py", "--self-test", "--ci-job", "opf-closure-b"): 3600,
-    ("tools/check_opf_standalone_closure.py", "--self-test", "--ci-job", "opf-closure-c"): 3600,
-    ("tools/check_opf_standalone_closure.py", "--self-test", "--ci-job", "opf-closure-d"): 3600,
-    ("tools/check_opf_standalone_closure.py", "--self-test", "--ci-job", "opf-closure-e"): 3600,
+    ("tools/check_opf_standalone_closure.py", "--self-test", "--ci-job", "opf-closure-a"): 13500,
+    ("tools/check_opf_standalone_closure.py", "--self-test", "--ci-job", "opf-closure-b"): 10800,
+    ("tools/check_opf_standalone_closure.py", "--self-test", "--ci-job", "opf-closure-c"): 8100,
+    ("tools/check_opf_standalone_closure.py", "--self-test", "--ci-job", "opf-closure-d"): 9900,
+    ("tools/check_opf_standalone_closure.py", "--self-test", "--ci-job", "opf-closure-e"): 9600,
     ("tools/check_opf_standalone_closure.py", "--self-test", "--ci-job", "opf-closure-f"): 3600,
     # Sized outside SIZING, by its formula (no config-lane time of this member is known: its lane
     # runs reached the 1200 s default in two of three config lanes of one CI run, so they have no
