@@ -16,8 +16,10 @@ interpreter, its standard library, /proc and the validator child's temporary fil
 The default (OPF-local) run checks the contract sources and the OPF-local rosters: the OPF runner
 tools/run_all_checks.sh must register the validator self-test, this gate's self-test and this gate's
 live run as three separate registrations, and a step of the OPF workflow .github/workflows/quality.yml
-must run that runner, unconditionally (a parsed YAML subset; see _workflow_runs_runner for the
-residuals). The roster check reads lines, not shell control flow: a registration line after an exit 0,
+must run that runner, with no if: or continue-on-error on the step or its job (a parsed YAML subset;
+see _workflow_runs_runner for the residuals). A workflow outside that subset, a folded block scalar (>)
+or an indentation indicator among them, is refused with exit 2 (cannot evaluate), never read line by
+line. The roster check reads lines, not shell control flow: a registration line after an exit 0,
 inside an if false block, inside a here-document or inside a function that is never called is not seen
 as dead and still counts, as does a standalone-closure entry line inside a string literal.
 --parent-integration adds the parent repository's rosters, read from the directory above the OPF root:
@@ -609,11 +611,14 @@ _YAML_KEY_RE = re.compile(r"""([A-Za-z0-9_-]+|"[^"]*"|'[^']*'):(?:\s(.*))?""")
 
 def _yaml_subset(text):
     """Parse the block-YAML subset a workflow uses into dicts, lists and strings: block mappings and
-    sequences by indentation, plain and quoted scalars (a plain scalar's " #" comment dropped), block
-    scalars (| and >, kept as their dedented lines joined by newlines, never folded) and a one-line flow
-    collection kept as its text. Raise ValueError on anything else (a tab in an indent, a duplicate key, a
-    line at an unexpected indent, a document marker), so a shape this parser does not know never reads as
-    a runner step."""
+    sequences by indentation, plain and quoted scalars (a plain scalar's " #" comment dropped), literal
+    block scalars (|, |- or |+, kept as their lines dedented by the first content line's indent and
+    joined by newlines) and a one-line flow collection kept as its text. Raise ValueError on anything else
+    (a tab in an indent, a duplicate key, a line at an unexpected indent, a document marker, a folded
+    block scalar >, an indentation indicator, a literal block line indented less than its first content
+    line), so a shape this parser does not know never reads as a runner step. A folded block is refused
+    rather than read line by line: YAML joins its lines with spaces, so a first line # skip turns the
+    whole value into one shell comment."""
     lines = text.split("\n")
     n = len(lines)
     if any(line.lstrip(" ").startswith("\t") for line in lines):
@@ -639,12 +644,17 @@ def _yaml_subset(text):
             raise ValueError("block scalar in a sequence item")
         return re.split(r"\s#", raw, maxsplit=1)[0].rstrip()
 
-    def block(k, parent):
+    def block(k, parent, header):
+        if not re.fullmatch(r"\|[+-]?(?:\s+#.*)?", header):
+            raise ValueError("block scalar header {}".format(header))
         body = []
         while k < n and (not lines[k].strip() or indent(k) > parent):
             body.append(lines[k])
             k += 1
-        width = min((len(line) - len(line.lstrip(" ")) for line in body if line.strip()), default=0)
+        widths = [len(line) - len(line.lstrip(" ")) for line in body if line.strip()]
+        if widths and min(widths) < widths[0]:
+            raise ValueError("block scalar line indented less than its first line")
+        width = widths[0] if widths else 0
         return "\n".join(line[width:] for line in body).strip("\n"), k
 
     def value(rest, k, ind):
@@ -657,7 +667,7 @@ def _yaml_subset(text):
                 return sequence(j, ind)
             return None, k
         if rest[0] in "|>":
-            return block(k, ind)
+            return block(k, ind, rest)
         return scalar(rest), k
 
     def node(k):
@@ -752,6 +762,10 @@ def _workflow_runs_runner(text):
     return False
 
 
+class _Unparsed(Exception):
+    """A roster input outside the shape this gate parses, so its check cannot be evaluated."""
+
+
 def _runner_drifts(read, parent=False):
     """C-RUNNERS, lazily: yield one drift message per miss, in order, reading each roster file through
     read(rel) only when it is reached. The OPF-local rosters always: in every LOCAL_ROSTER_FILES surface
@@ -759,13 +773,14 @@ def _runner_drifts(read, parent=False):
     LOCAL_LIVE_GATE_FILES surface this gate's live run with no argument, a third registration; and a
     step of LOCAL_WORKFLOW that runs the OPF runner (_workflow_runs_runner). With parent, then the parent
     rosters: both self-tests in every PARENT_ROSTER_FILES surface and the live gate with PARENT_FLAG as
-    its only argument in every PARENT_LIVE_GATE_FILES surface. The live gate passes _read; the self-test
-    passes an in-memory map."""
+    its only argument in every PARENT_LIVE_GATE_FILES surface. A LOCAL_WORKFLOW outside the parsed YAML
+    subset raises _Unparsed, which the gate reports as cannot-evaluate (exit 2), not as a drift. The live
+    gate passes _read; the self-test passes an in-memory map."""
     yield from _roster_drifts(read, LOCAL_ROSTER_FILES, LOCAL_LIVE_GATE_FILES, None, LOCAL_SCRIPT_DIR)
     runs = _workflow_runs_runner(read(LOCAL_WORKFLOW))
     if runs is None:
-        yield "{} is outside the workflow shape this gate parses".format(LOCAL_WORKFLOW)
-    elif not runs:
+        raise _Unparsed("{} is outside the workflow shape this gate parses".format(LOCAL_WORKFLOW))
+    if not runs:
         yield "the OPF runner tools/run_all_checks.sh is not run by {}".format(LOCAL_WORKFLOW)
     if parent:
         yield from _roster_drifts(read, PARENT_ROSTER_FILES, PARENT_LIVE_GATE_FILES, PARENT_FLAG,
@@ -809,9 +824,13 @@ def _checks():
     _source_checks()
 
     # C-RUNNERS: see _runner_drifts. The first drift ends the gate, so the reads and their order match a
-    # sequential check: a later roster file is never read once an earlier one has drifted.
-    for message in _runner_drifts(_read, parent=parent):
-        _drift(message)
+    # sequential check: a later roster file is never read once an earlier one has drifted. An input
+    # outside the parsed shape ends the gate as cannot-evaluate (exit 2).
+    try:
+        for message in _runner_drifts(_read, parent=parent):
+            _drift(message)
+    except _Unparsed as exc:
+        _cant(exc.args[0])
 
     sys.stdout.write("PASS check_opf_init_contract: contract/source consistency{}\n".format(
         " (with parent integration)" if parent else ""))
@@ -1561,7 +1580,7 @@ _LOCAL_FIXTURE = {rel: text for rel, text in _RUNNER_FIXTURE.items() if not rel.
 def _runner_case(files, parent=False):
     """(drift messages, the files read in order) for _runner_drifts over the in-memory map files. A read
     of a file the map lacks is recorded and ends the case with one cannot-evaluate message, as the live
-    _read refuses a missing input."""
+    _read refuses a missing input; so does a workflow outside the parsed shape (_Unparsed)."""
     reads = []
 
     def read(rel):
@@ -1569,10 +1588,15 @@ def _runner_case(files, parent=False):
         if rel not in files:
             raise LookupError(rel)
         return files[rel]
+    drifts = []
     try:
-        return list(_runner_drifts(read, parent=parent)), reads
+        for message in _runner_drifts(read, parent=parent):
+            drifts.append(message)
     except LookupError as exc:
         return ["cannot evaluate: missing input: {}".format(exc.args[0])], reads
+    except _Unparsed as exc:
+        return drifts + ["cannot evaluate: {}".format(exc.args[0])], reads
+    return drifts, reads
 
 
 def _replaced(files, rel, text):
@@ -1641,7 +1665,8 @@ def _self_test_runner_rosters():
             label, want, drifts))
 
     # The OPF workflow must have a step that runs the runner. Each input with its expected outcome: True
-    # runs the runner (no drift), False does not (one drift), None is outside the parsed YAML subset.
+    # runs the runner (no drift), False does not (one drift), None is outside the parsed YAML subset (one
+    # cannot-evaluate message; the live gate ends exit 2).
     def workflow(step, job_extra=""):
         return ("name: OPF Quality\non:\n  push:\n    branches: [main]\njobs:\n  opf-checks:\n"
                 "    runs-on: ubuntu-latest\n" + job_extra + "    steps:\n"
@@ -1692,13 +1717,33 @@ def _self_test_runner_rosters():
             ("a duplicate key", workflow(named + "        run: echo skipped\n"
                                          "        run: bash tools/run_all_checks.sh\n"), None),
             ("a line at an unexpected indent",
-             workflow(named + "         run: bash tools/run_all_checks.sh\n"), None)):
+             workflow(named + "         run: bash tools/run_all_checks.sh\n"), None),
+            # A folded block joins its lines with spaces, so a leading comment line comments out the
+            # runner; the literal block of the same lines runs it.
+            ("a literal block with a comment line first", workflow(
+                named + "        run: |\n          # skip runner\n          bash tools/run_all_checks.sh\n"), True),
+            ("a folded block with a comment line first", workflow(
+                named + "        run: >\n          # skip runner\n          bash tools/run_all_checks.sh\n"), None),
+            ("a folded block, strip chomping", workflow(
+                named + "        run: >-\n          # skip runner\n          bash tools/run_all_checks.sh\n"), None),
+            ("a folded block, keep chomping", workflow(
+                named + "        run: >+\n          # skip runner\n          bash tools/run_all_checks.sh\n"), None),
+            ("a folded step name", workflow(
+                "      - name: >\n          OPF runner\n        run: bash tools/run_all_checks.sh\n"), None),
+            ("a literal block, strip chomping", workflow(
+                named + "        run: |-\n          bash tools/run_all_checks.sh\n"), True),
+            ("a literal block with an indentation indicator",
+             workflow(named + "        run: |4\n          bash tools/run_all_checks.sh\n"), None),
+            ("a literal block line indented less than its first line", workflow(
+                named + "        run: |\n            # skip runner\n          bash tools/run_all_checks.sh\n"),
+             None)):
         _expect(_workflow_runs_runner(text) is want,
                 "runner rosters: an OPF workflow with {} must give {}, got {}".format(
                     label, want, _workflow_runs_runner(text)))
         drifts, _reads = _runner_case(_replaced(_LOCAL_FIXTURE, LOCAL_WORKFLOW, text))
         expected = {True: [], False: ["the OPF runner tools/run_all_checks.sh is not run by " + LOCAL_WORKFLOW],
-                    None: [LOCAL_WORKFLOW + " is outside the workflow shape this gate parses"]}[want]
+                    None: ["cannot evaluate: " + LOCAL_WORKFLOW + " is outside the workflow shape this gate "
+                           "parses"]}[want]
         _expect(drifts == expected,
                 "runner rosters: an OPF workflow with {} must drift {}: {}".format(label, expected, drifts))
 
@@ -1758,9 +1803,10 @@ def _self_test_entry_pins():
     (red when ROOT is moved up a level: this script is then not at ROOT/tools). _mode accepts no argument
     or PARENT_FLAG alone and refuses anything else, and _checks carries it: the parent run reaches the
     roster check with parent set, the local run without, an unknown argument ends exit 2 before any input
-    is read, and a roster drift ends exit 1 (red when _checks fixes the mode instead of reading it). The
-    wiring vectors stub the source checks and the roster generator in this module's globals and restore
-    them, so no parent-repository file is read and the validator child is not started."""
+    is read, a roster drift ends exit 1 (red when _checks fixes the mode instead of reading it) and a
+    roster input outside the parsed shape (_Unparsed) ends exit 2 as cannot-evaluate. The wiring vectors
+    stub the source checks and the roster generator in this module's globals and restore them, so no
+    parent-repository file is read and the validator child is not started."""
     import contextlib
     import io
     here = Path(__file__).resolve()
@@ -1780,6 +1826,7 @@ def _self_test_entry_pins():
             ([PARENT_FLAG], (), 0, ["source", True],
              "PASS check_opf_init_contract: contract/source consistency (with parent integration)\n", ""),
             ([PARENT_FLAG], ("a roster miss",), 1, ["source", True], "", "DRIFT: a roster miss\n"),
+            ([], None, 2, ["source", False], "", "CANNOT-EVALUATE: an unparsed workflow\n"),
             (["--parent-integraton"], (), 2, [], "", None)):
         seen = []
 
@@ -1788,6 +1835,8 @@ def _self_test_entry_pins():
 
         def runner_drifts(read, parent=False, drift=drift):
             seen.append(parent if read is _read else "another reader")
+            if drift is None:
+                raise _Unparsed("an unparsed workflow")
             return iter(drift)
         out, err = io.StringIO(), io.StringIO()
         code = "no exit"
@@ -1839,7 +1888,11 @@ def _self_test_entry_arguments():
 
 
 def _self_test():
-    # Git-free / source-free: exercise the matchers on in-memory text, including the comment-evasion cases.
+    # Git-free, not source-free. The matcher, roster and workflow vectors run on in-memory text, the
+    # comment-evasion cases included. The entry pins and the entry-wiring pin read this script's own
+    # source; the entry-argument vectors start this script as a child with this interpreter, and the
+    # loaded-exit and fault-channel vectors write probe files to a temporary directory and start them as
+    # children that load this script.
     _expect(_has_line("KEEP_SCHEMA = 1  # comment", "KEEP_SCHEMA = 1"), "exact line ignores comment")
     _expect(not _has_line("KEEP_SCHEMA = 10\n", "KEEP_SCHEMA = 1"), "substring must NOT match a longer value")
     _expect(_quoted_in_tuple('_RESERVED = (\n".opf.toml",\n".working/toml",\n)', "_RESERVED") == \
