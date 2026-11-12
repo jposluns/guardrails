@@ -4,13 +4,13 @@
 Same core that feeds Claude's .claude/rules/ tree, so a Codex session gets identical AIQT governance. The
 rules are concatenated in AIQT priority order (apex; then Accuracy, Integrity, Quality, Trust at tier 10;
 then Progress, Speed, Cost; then the security family in CIA-plus-privacy order), each rule's title demoted
-to a section heading. The layout (legacy, or composed with reviewed blocks around the rules) comes from the
-block registry .aiqt/core/adapter-blocks.toml through tools/_adapter_compose.py, the engine this generator
-shares with gen_adapters.py. --check drift-gates AGENTS.md byte for byte; exit 2 on a malformed source or
-registry, a symlinked target, an absent rule corpus (nothing is deleted), or a write that would erase a
-hand edit in a composed-layout target. A legacy-layout target is refused only when it holds a pasted
-marker-like line; any other hand edit in it is lost on regeneration, though --check still reports it as
-drift.
+to a section heading and its `## Detail` split line, if any, to a subsection under it. The layout (legacy,
+or composed with reviewed blocks around the rules) comes from the block registry
+.aiqt/core/adapter-blocks.toml through tools/_adapter_compose.py, the engine this generator shares with
+gen_adapters.py. --check drift-gates AGENTS.md byte for byte; exit 2 on a malformed source or registry, a
+symlinked target, an absent rule corpus (nothing is deleted), or a write that would erase a hand edit in a
+composed-layout target. A legacy-layout target is refused only when it holds a pasted marker-like line;
+any other hand edit in it is lost on regeneration, though --check still reports it as drift.
 
   gen_agents.py              regenerate AGENTS.md
   gen_agents.py --check      exit 1 if AGENTS.md differs from a fresh composition; write nothing
@@ -35,7 +35,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import repo_root  # noqa: E402
 from _adapter_compose import legacy_render, run  # noqa: E402
-from gen_rules import load_corpus  # noqa: E402
+from gen_rules import DETAIL_HEADING, load_corpus  # noqa: E402
 
 AIQT_FACET_ORDER = {"ACCUR": 0, "INTEG": 1, "QUALI": 2, "TRUST": 3}
 CIA_FACET_ORDER = {"SECC": 0, "SECI": 1, "SECA": 2, "SECP": 3}
@@ -71,10 +71,13 @@ def sort_key(fm):
 def body_of(path):
     text = path.read_text(encoding="utf-8")
     end = text.find("\n---\n", 4)
-    body = text[end + 5:].strip()
-    if body.startswith("# "):        # demote the rule title to a section heading under the AGENTS.md H1
-        body = "#" + body
-    return body
+    lines = text[end + 5:].strip().split("\n")
+    if lines[0].startswith("# "):    # demote the rule title to a section heading under the AGENTS.md H1
+        lines[0] = "#" + lines[0]
+    # The one `## Detail` split line (below the title, never the title itself) goes one level further
+    # down, so in a combined output it stays a subsection of its rule and never reads as a sibling rule.
+    lines[1:] = ["#" + line if line == DETAIL_HEADING else line for line in lines[1:]]
+    return "\n".join(lines)
 
 
 def ordered_bodies(corpus):
@@ -135,13 +138,20 @@ def main():
 #   T16c a rule corpus path that is a symlink: to a directory inside the root it is read (exit 0); dangling,
 #       to a regular file, or to a directory outside the root it is exit 2 in both modes, named, nothing written.
 #   T17 a rule corpus path that exists but cannot be stat'ed (a symlink loop): exit 2, nothing deleted.
-#   T18 a rule body holding a marker-like line, composed target: exit 2.
+#   T18 a rule body holding a marker-like line, composed target: exit 2 naming the body grammar; and
+#       compose() itself, driven directly, refuses bodies holding a strict or an indented marker-like
+#       line (ComposeError naming it) while the same bodies without it compose to the golden bytes.
 #   T19 a target that is a symlink (to a file outside the tree, or dangling), a target under a symlinked
 #       directory, and a target that is a directory: exit 2 in both modes; the outside file and directory
 #       and the sibling target are unchanged, and nothing is created through the link (decided by
 #       os.lstat, so a vector's faulty engine leaving a dangling symlink there fails the leg).
 #   T20 a rule body holding a marker-like line is outside the gen_rules body grammar: the corpus read
 #       refuses it (exit 2 naming the body grammar, in write and --check mode) and nothing is written.
+#       A legacy target already in sync is not judged: run() with a stand-in corpus reader returning a
+#       marker-like line writes once, then --check and a rewrite are exit 0, while guard() refuses those
+#       same bytes when asked directly.
+#   T20b a rule using the `## Detail` split: in the combined output the split line is `### Detail`, under
+#       its rule's demoted title, and the next rule's title is still `##`.
 #   T21 a write keeps the target's ordinary permission bits and drops its set-user-ID and sticky bits
 #       (umask pinned; the kept bits hold execute bits no creation mode supplies, so a dropped fchmod
 #       cannot pass, and the whole S_IMODE is asserted, so a kept sticky bit, which no write clears, fails)
@@ -855,11 +865,29 @@ def self_test_main(nested_run=False):
         if not ((root / "GEMINI.md").exists() and (root / ".github" / "copilot-instructions.md").exists()):
             failures.append("T17: an adapter was deleted on an unreachable corpus")
 
-        # T18. A rule body holding a marker-like line cannot be composed.
+        # T18. A rule body holding a marker-like line cannot be composed. The gen_rules body grammar refuses
+        #      it at the corpus read (its message asserted), before compose() is reached, so the compose-time
+        #      marker guard is also driven directly: compose() on bodies holding a marker-like line (strict,
+        #      or indented) raises ComposeError naming it, while the same bodies without it compose to the
+        #      golden bytes.
         marked = _RULE.replace("Rule text.", "Rule text.\n\n<!-- RULE-X:BEGIN (generated) -->")
         root = tree(composed_reg, rules=(_APEX, marked), agents=golden)
-        expect("T18 marker-like rule body", root, True, 2)
-        expect("T18 marker-like rule body", root, False, 2)
+        for t18_check in (True, False):
+            t18_out = expect("T18 marker-like rule body", root, t18_check, 2)
+            if "outside the body grammar" not in t18_out:
+                failures.append("T18: the refusal does not name the body grammar: {!r}".format(t18_out))
+        t18_reg = ac.load_registry(root)
+        if ac.compose(AGENTS_REL, HEADER, list(_BODIES), t18_reg).data != golden:
+            failures.append("T18: compose() on the unmarked bodies did not give the golden bytes")
+        for t18_line in ("<!-- RULE-X:BEGIN (generated) -->", "  <!-- OPF-A:END -->"):
+            try:
+                ac.compose(AGENTS_REL, HEADER, [_BODIES[0], _BODIES[1] + "\n\n" + t18_line], t18_reg)
+            except ac.ComposeError as exc:
+                if "marker-like line" not in str(exc) or t18_line not in str(exc):
+                    failures.append("T18: compose() refused {!r} without naming it: {}".format(t18_line, exc))
+            else:
+                failures.append("T18: compose() composed a rule body holding the marker-like line {!r}".format(
+                    t18_line))
 
         # T19. Symlinked and non-regular targets: exit 2 in both modes, nothing outside the tree touched.
         outside = tmp / "outside"
@@ -952,6 +980,47 @@ def self_test_main(nested_run=False):
                 failures.append("T20: the refusal does not name the body grammar: {!r}".format(t20_out))
         if (root / AGENTS_REL).exists():
             failures.append("T20: a refused corpus still wrote {}".format(AGENTS_REL))
+
+        # T20 (cont.). A legacy target already in sync is not judged. No corpus the body grammar accepts
+        #      holds a marker-like line, so run() is driven with a stand-in corpus reader that returns one;
+        #      guard() refuses those very in-sync bytes (asserted directly), so the exit 0 of the rewrite
+        #      shows the engine skips judging a target whose bytes would not change.
+        sync_bodies = [_BODIES[0], _BODIES[1] + "\n\n<!-- EXAMPLE:BEGIN -->"]
+        root = tree(ac.registry_text(), blocks=())
+
+        def sync_run(check):
+            buf = io.StringIO()
+            with redirect_stdout(buf), redirect_stderr(buf):
+                code = ac.run(root, check, agents_only, "tools/gen_agents.py", lambda _src: list(sync_bodies))
+            return code, buf.getvalue()
+
+        sync_want = legacy_render(HEADER, sync_bodies).encode("utf-8")
+        for t20_label, t20_check in (("first write", False), ("--check", True), ("rewrite", False)):
+            t20_code, t20_out = sync_run(t20_check)
+            if t20_code != 0 or read(root / AGENTS_REL) != sync_want:
+                failures.append("T20 in-sync legacy target, {}: expected exit 0 with the legacy rendering, got "
+                                "{}: {}".format(t20_label, t20_code, t20_out.strip()))
+        t20_composed = ac.compose(AGENTS_REL, HEADER, sync_bodies, ac.load_registry(root))
+        t20_reason = ac.guard(read(root / AGENTS_REL), t20_composed, ac.load_registry(root))
+        if t20_composed.layout != "legacy" or not t20_reason or "marker-like line" not in t20_reason:
+            failures.append("T20: guard() must refuse the in-sync legacy bytes it is never asked to judge, got "
+                            "{!r}".format(t20_reason))
+
+        # T20b. A rule using the two-layer split: in the combined output its `## Detail` line sits one level
+        #      below its demoted title (`### Detail`), never as a sibling `##` heading of the rule titles
+        #      (the rule after it still opens at `##`).
+        split_rule = _RULE.replace("---\n\n# Fixture rule\n\nRule text.\n",
+                                   "detail-trigger: writing a self-test fixture\n---\n\n# Fixture rule\n\n"
+                                   "Rule text.\n\n## Detail\n\nDetail text.\n")
+        after_rule = _RULE.replace("ruleaa", "rulebb").replace("fixture-rule", "zeta-rule").replace(
+            "# Fixture rule", "# Zeta rule")
+        root = tree(ac.registry_text(), blocks=(), rules=(_APEX, split_rule, after_rule))
+        expect("T20b split rule, first write", root, False, 0, unchanged=False)
+        t20b = (read(root / AGENTS_REL) or b"").decode("utf-8", "replace")
+        t20b_heads = [line for line in t20b.split("\n") if line.startswith("#")]
+        if t20b_heads != ["# AGENTS.md", "## Project integrity", "## Fixture rule", "### Detail", "## Zeta rule"]:
+            failures.append("T20b: the combined headings are {!r}; the split line must sit under its rule "
+                            "title".format(t20b_heads))
 
         # T21. A write keeps the mode and leaves no temporary file; a failed rename leaves the target as it was.
         #      The umask is pinned (and restored) and the asserted mode holds execute bits, which the
@@ -2594,9 +2663,10 @@ def self_test_main(nested_run=False):
           "field, and a registry parse raising a bare ValueError (an over-long integer literal) or a "
           "MemoryError (injected) is refused naming the class; CRLF is drift; either refused adapter blocks the other's write; no corpus is exit 2 and "
           "deletes nothing; an unreachable corpus deletes nothing; a marker-like rule body is exit 2 for a "
-          "composed target; a symlinked target or parent, a dangling link and a directory target are exit 2 "
-          "with nothing outside the tree touched; a marker-like rule body is refused by the body grammar "
-          "for a legacy target; a write keeps the "
+          "composed target, and compose() refuses one directly; a symlinked target or parent, a dangling "
+          "link and a directory target are exit 2 with nothing outside the tree touched; a marker-like rule "
+          "body is refused by the body grammar for a legacy target, and an in-sync legacy target is not "
+          "judged; a `## Detail` split line renders under its rule title; a write keeps the "
           "ordinary permission bits, dropping set-ID and sticky bits (under a pinned umask), and leaves no "
           "temporary file, and a failed rename names the one it "
           "leaves; a parent swapped for a symlink after the walk redirects neither a write nor a read; a "

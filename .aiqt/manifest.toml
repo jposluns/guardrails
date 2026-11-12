@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "63eff3c0fa887dc9998e21f195655b686f8caa421ec865c7b1aec618cead48a3"
+tree-sha256 = "8233cfa5fc2bfce74d78416be0d6b0664e89c2ab66460f5bc357c7f22b5c2c18"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -147,7 +147,7 @@ sha256 = "7396859c9a2b6d18ecec0982f02f9b72a64a5a79ef6d4270df82eab956af0ec7"
 [[sources]]
 path = ".aiqt/core/renderers.toml"
 bytes = 3068
-sha256 = "e2ee7f82796ad65821077ed5ae67419331db98f0cfa9fae5626dcef964c114fc"
+sha256 = "bac58cdc41d56e52809e7e5e5367672164024670474d53ea4e1609da8bda9402"
 
 [[sources]]
 path = ".aiqt/core/rules/00-project-integrity.md"
@@ -4086,8 +4086,8 @@ sha256 = "221a387a4812762e1f5e58f84fbfcdbc0ac2d36296079e8d3e9220e1ac0c04fd"
 
 [[sources]]
 path = "tools/_release_schema.py"
-bytes = 59941
-sha256 = "83deeecbd6b943f7d16ece0b9c62b1c6ecea9a83dc21b27840e6605ffb5c27fa"
+bytes = 59944
+sha256 = "78be02adde80b2cb78bf66612a67c07d9523021fbc4ac565e3284255fcfe85f9"
 
 [[sources]]
 path = "tools/_selftest_exit_report.py"
@@ -4172,7 +4172,7 @@ sha256 = "0a30385485f8ee7db5d200846b72e264130ad489752c736c1f5d280cb3a2ee3c"
 [[sources]]
 path = "tools/check_clauses.py"
 bytes = 255940
-sha256 = "efe0d93c993ee6797e53dab9cfe474162232a9e3320c9c60324eed973692fe5b"
+sha256 = "e06cc6647c60c3eca96d5491c5e784bc9a4f47d91b72381a908ef4cd88ea86a5"
 
 [[sources]]
 path = "tools/check_crosswalk.py"
@@ -4361,8 +4361,8 @@ sha256 = "61c57525f6a5057fc5fad55f6a6b2800463fce38f158cbfd4a8e1baaecd68e8e"
 
 [[sources]]
 path = "tools/check_release_delta.py"
-bytes = 585051
-sha256 = "b58ba33f32095b6f58725101b0987416686e32a25cd40959d76bc56a89fd2070"
+bytes = 585055
+sha256 = "be620c7108e6d70b5750dbc0c430adb62ea7a4f4d1c617c1197040afa3529765"
 
 [[sources]]
 path = "tools/check_relied_exit_pipes.py"
@@ -4466,8 +4466,8 @@ sha256 = "783a0eb4e035a7c4c73af119236bf496ab1c4d7bc57d49ae42db5e14cb0b812d"
 
 [[sources]]
 path = "tools/gen_agents.py"
-bytes = 157850
-sha256 = "7eb45eb8f9d8ef240cba362ed780073599352f13e372ba375c2336628b4f41fa"
+bytes = 163487
+sha256 = "f831bb2465b5b40e24f81bff120d4ac7e38c5f26ecef446b37850b28121622f8"
 
 [[sources]]
 path = "tools/gen_changelog.py"
@@ -4516,8 +4516,8 @@ sha256 = "3316a3abc01801f7e7b3ac59ae2e30f653b537014b220b08a889b6df2d6663fc"
 
 [[sources]]
 path = "tools/gen_first_pin_demo.py"
-bytes = 39073
-sha256 = "116d60460b0c7847501fc8c412d30d60084954d657b96b2ccf7766ec7a8a66c9"
+bytes = 42750
+sha256 = "9c236464c51d0644d75a2f1ea27ef4614f9b4394453923213b89987876aae4ba"
 
 [[sources]]
 path = "tools/gen_gensrc.py"
@@ -4561,8 +4561,8 @@ sha256 = "ae2ed51a4df01f32279b8742a630036ad795e5694baeec217ee93eb84a943b47"
 
 [[sources]]
 path = "tools/gen_rules.py"
-bytes = 135151
-sha256 = "7b2dbf991011b0699aa7c646e5305693377699243e4ace1298bcbe139d1adf98"
+bytes = 135157
+sha256 = "6514a20ea13793dca9d3cf47c53dbc984a77901e3f5267640af02f66686de7bf"
 
 [[sources]]
 path = "tools/gen_secret_patterns.py"

@@ -10,8 +10,9 @@ RULE SOURCE FORMAT (the two-layer split; this step parses and validates it, and 
   A rule source is read from its raw bytes as UTF-8 with no newline translation, and a source holding
   any CR byte is refused (check_clauses reads it the same way, through read_rule_source and
   decode_rule_source, so both tools number lines alike). The split is the one body line that reads
-  exactly `## Detail` (column 0, no trailing whitespace) with a blank line directly above it. The text above it is the CORE layer and the text below it is the DETAIL layer. Two
-  optional frontmatter keys go with it, on aiqt non-apex and security rules only (the apex never splits):
+  exactly `## Detail` (column 0, no trailing whitespace) with a blank line directly above it. The text
+  above it is the CORE layer and the text below it is the DETAIL layer. Two optional frontmatter keys go
+  with it, on aiqt non-apex and security rules only (the apex never splits):
     detail-trigger: <a short phrase naming the operation>   required when the split exists
     detail-reason:  <one line recording the must-fire review> optional when the split exists
   BODY GRAMMAR: this reader models no Markdown. Every body line
@@ -577,7 +578,8 @@ def detail_heading_line(text, name):
 def check_detail(text, fm, name):
     """Validate the two-layer split of one source: the detail keys go with exactly one `## Detail` split,
     detail-trigger is required with it, each key is a non-empty string, and the detail layer is not
-    blank lines only (the core always holds the title line). Returns the split's line number, or None. Raises ValueError (a malformed source) on any violation."""
+    blank lines only (the core always holds the title line). Returns the split's line number, or None.
+    Raises ValueError (a malformed source) on any violation."""
     heading = detail_heading_line(text, name)
     if heading is None:
         present = sorted(k for k in DETAIL_KEYS if k in fm)

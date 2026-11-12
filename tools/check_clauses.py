@@ -165,9 +165,9 @@ gen_manifest.py at build time).
   body with no title line, any body line outside the gen_rules BODY GRAMMAR (blank, the one `# ` title
   line first, the `## Detail` split, or a plain prose line; so no fence, HTML, block quote, list,
   indented code, setext underline, thematic break, link reference definition or other heading), and any
-  other body line whose visible text reads Detail. A missing, non-string,
-  or unknown `layer` value is also malformed input (exit 2); a disagreement, a crossing span, a frontmatter span, or an
-  unregistered detail line is a finding (exit 1).
+  other body line whose visible text reads Detail. A missing, non-string, or unknown `layer` value is
+  also malformed input (exit 2); a disagreement, a crossing span, a frontmatter span, or an unregistered
+  detail line is a finding (exit 1).
 
 LEGS (all run at the default step-1 invocation; none needs a manifest):
   ID SCHEME (7.1):      every rule corpus-id under rules-dir appears in the inventory; every clause-id is

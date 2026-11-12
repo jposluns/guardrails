@@ -261,7 +261,9 @@ def main():
 #      ending ONE byte past it (its last byte is byte CAP_BYTES) is not;
 #   2b. spans are measured in UTF-8 BYTES, not characters: with two-byte characters in a before-rules block
 #      (a rule body is ASCII), a rule whose character span ends inside the cap but whose byte span ends past
-#      it is not delivered;
+#      it is not delivered; a two-byte character straddling the cap is reachable only in a block (a rule
+#      body padded with one is refused at the corpus read): after the rules, every rule is delivered; before
+#      them, the apex is past the cap and the build fails closed (exit 2, nothing written);
 #   2c. an apex that is not the first rule span (a patched gen_agents.sort_key) fails closed (exit 2);
 #   3. AGENTS.md under the cap delivers every rule, in AGENTS.md order, and floor equals delivered;
 #   4. a missing apex fails closed (exit 2, nothing written), as does an apex that itself straddles the cap;
@@ -433,6 +435,50 @@ def self_test_main():
               or demo_of(mb).get("floor-profile-obligations") != ["prjint1"]):
             failures.append("multi-byte: spans must be measured in UTF-8 bytes (ruleaa's character span ends "
                             "inside the cap, its byte span past it), got {}".format(demo_of(mb)))
+
+        # 2b (cont.). A two-byte character straddling the cap (its first byte is byte CAP_BYTES - 1, its
+        # second byte CAP_BYTES). The composer takes multi-byte text only in a block, never in a rule body:
+        #   - a rule body padded with U+00E9 is refused at the corpus read (the body grammar), so the
+        #     straddle cannot fall inside a rule span;
+        #   - in an after-rules block it lies past every rule: the build passes (exit 0) and every rule is
+        #     delivered, the straddle read by no span;
+        #   - in a before-rules block it pushes the apex past the cap: fail closed (exit 2), nothing written.
+        try:
+            _write_tree(tmp / "mbrule", [("prjint1", True, 0), ("ruleaa", False, two * 10)])
+        except ValueError as exc:
+            if "ruleaa" not in str(exc):
+                failures.append("straddle: the refused multi-byte rule body is not named: {}".format(exc))
+        else:
+            failures.append("straddle: a rule body padded with U+00E9 must be refused at the corpus read")
+        for st_label, st_want in (("after-rules", 0), ("before-rules", 2)):
+            st = tmp / ("straddle-" + st_label)
+            st_block = ("OPF-SELFTEST", AGENTS_REL, st_label, 1, "opf/blocks/selftest.md", two * CAP_BYTES + "\n")
+            st_registry = adapter_compose.registry_text([(AGENTS_REL, "composed")], [st_block])
+            st_specs = [("prjint1", True, 0), ("ruleaa", False, 10)]
+            _write_tree(st, st_specs, st_registry, [st_block])
+            st_start = (st / AGENTS_REL).read_bytes().find(two.encode("utf-8"))
+            st_lead = (CAP_BYTES - 1 - st_start) % 2        # one ASCII byte aligns a U+00E9 onto the cap
+            st_block = st_block[:5] + ("a" * st_lead + two * ((CAP_BYTES - st_start) // 2 + 10) + "\n",)
+            st_registry = adapter_compose.registry_text([(AGENTS_REL, "composed")], [st_block])
+            sp = _write_tree(st, st_specs, st_registry, [st_block])
+            raw = (st / AGENTS_REL).read_bytes()
+            placed = raw[CAP_BYTES - 1:CAP_BYTES + 1] == two.encode("utf-8")
+            if st_want == 0:
+                placed = placed and max(end for _start, end in sp.values()) < CAP_BYTES - 1
+            else:
+                placed = placed and min(start for start, _end in sp.values()) > CAP_BYTES
+            if not placed:
+                failures.append("straddle {}: the fixture did not place a U+00E9 across the cap: bytes at the "
+                                "cap {!r}, spans {}".format(st_label, raw[CAP_BYTES - 1:CAP_BYTES + 1], sp))
+                continue
+            code, out = capture(st, False)
+            if st_want == 0:
+                if code != 0 or demo_of(st).get("delivered-prefix-obligations") != ["prjint1", "ruleaa"]:
+                    failures.append("straddle after-rules: expected exit 0 with every rule delivered, got {}\n"
+                                    "{}".format(code, out))
+            elif code != 2 or (st / DEMO_REL).exists() or "no rule lies whole" not in out:
+                failures.append("straddle before-rules: expected exit 2 (the apex past the cap) with nothing "
+                                "written, got {}\n{}".format(code, out))
 
         # 2c. The apex is not the first rule span: fail closed. gen_agents.sort_key always places the apex
         # first, so the fixture patches it (restored in finally) to sort the apex last for both the fixture
@@ -621,7 +667,9 @@ def self_test_main():
         return 1
     print("SELF-TEST PASS: obligations() adds an undelivered apex to the floor; a rule straddling the cap, "
           "or ending one byte past it, is not delivered and one ending exactly at it is; spans are measured "
-          "in UTF-8 bytes, not characters; an apex that is not the first rule fails closed (exit 2); an "
+          "in UTF-8 bytes, not characters, and a two-byte character straddling the cap (only a block can "
+          "hold one) leaves every rule delivered after the rules and fails closed before them; an apex that "
+          "is not the first rule fails closed (exit 2); an "
           "AGENTS.md under the cap delivers every rule; a missing apex and an apex past the cap fail closed "
           "(exit 2); a digest mismatch is drift (exit 1) and the consumer flags it; an unreadable, absent, "
           "non-regular, non-UTF-8 or hand-edited AGENTS.md fails closed (exit 2); a before-rules block moves "

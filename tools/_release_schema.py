@@ -437,13 +437,14 @@ def strict_order(data, where):
 
 def strict_clause_inventory(data, where):
     """EXHAUSTIVE 7.2 clause-inventory schema (round-4 finding 2): a [[clause]] array of tables, each with
-    EXACTLY the 7.2 keyset, or that keyset plus a layer of core or detail; a well-formed clause-id (UNIQUE) whose corpus part equals a well-formed
-    corpus-id field; a non-empty source-path; positive integer start-line/end-line with end >= start; a
-    non-empty canonical-text; and a 64-lowercase-hex source-digest. The full source-file span/text/digest
-    CONSISTENCY (reading the rule sources) stays check_clauses'; this validates the record's own structure
-    exhaustively on BOTH objects (the round-2/3 three-field guard accepted malformed ids and missing span/
-    digest fields). The EXACT top-level keyset is required first (round-6 finding 3: an unknown top-level
-    key like `bogus` was ignored). Returns the rows list."""
+    EXACTLY the 7.2 keyset, or that keyset plus a layer of core or detail; a well-formed clause-id
+    (UNIQUE) whose corpus part equals a well-formed corpus-id field; a non-empty source-path; positive
+    integer start-line/end-line with end >= start; a non-empty canonical-text; and a 64-lowercase-hex
+    source-digest. The full source-file span/text/digest CONSISTENCY (reading the rule sources) stays
+    check_clauses'; this validates the record's own structure exhaustively on BOTH objects (the round-2/3
+    three-field guard accepted malformed ids and missing span/digest fields). The EXACT top-level keyset
+    is required first (round-6 finding 3: an unknown top-level key like `bogus` was ignored). Returns the
+    rows list."""
     if not isinstance(data, dict) or set(data) != {"clause"}:
         raise SchemaError("{}: top-level keys must be EXACTLY {{'clause'}} (found {})".format(
             where, sorted(data) if isinstance(data, dict) else type(data).__name__))

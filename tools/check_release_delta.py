@@ -1167,14 +1167,15 @@ def _register_lifecycle(register):
 def clause_text_leg(prev_inv, head_inv, register, rows, head_version):
     """6.5 CLAUSE TEXT and 7.3 ID LIFECYCLE. Diff canonical text per clause-id; classify a same-id text
     change via the public dispositions. A same-id LAYER change (core to detail or back; a row with no layer
-    key, from an inventory older than the field, reads as core) is a delta classified the same way, by
-    the same dispositions, and one disposition covers a clause whose text and layer both changed. Span or
-    source-digest movement without a text or layer change is not a delta. For an ADD or a REMOVAL the accepted disposition is the id-history ROW (6.5 accepts exactly one
-    of: an id-history row; or a same-id behaviour-neutral/strengthened/default-correction disposition), so
-    this leg REQUIRES that row, at THIS release and unique (VC-4 QA #3): an added id needs a born row
-    dated head_version; a removed id needs exactly one retirement row dated head_version. Corpus-ids (the
-    family before the dot) are diffed INDEPENDENTLY of clause-ids, so a wholly new or fully-retired corpus
-    family gains or needs its own 7.3 row (7.3 keeps one born row per corpus-id AND clause-id)."""
+    key, from an inventory older than the field, reads as core) is a delta classified the same way, by the
+    same dispositions, and one disposition covers a clause whose text and layer both changed. Span or
+    source-digest movement without a text or layer change is not a delta. For an ADD or a REMOVAL the
+    accepted disposition is the id-history ROW (6.5 accepts exactly one of: an id-history row; or a same-id
+    behaviour-neutral/strengthened/default-correction disposition), so this leg REQUIRES that row, at THIS
+    release and unique (VC-4 QA #3): an added id needs a born row dated head_version; a removed id needs
+    exactly one retirement row dated head_version. Corpus-ids (the family before the dot) are diffed
+    INDEPENDENTLY of clause-ids, so a wholly new or fully-retired corpus family gains or needs its own 7.3
+    row (7.3 keeps one born row per corpus-id AND clause-id)."""
     events, findings = [], []
     prev = {r["clause-id"]: r.get("canonical-text", "") for r in prev_inv if isinstance(r, dict)}
     head = {r["clause-id"]: r.get("canonical-text", "") for r in head_inv if isinstance(r, dict)}
