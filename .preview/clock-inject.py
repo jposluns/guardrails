@@ -1,21 +1,47 @@
 #!/usr/bin/env python3
-"""PostToolUse and PostToolUseFailure hook (all tools): inject the real clock into the assistant's context.
+"""PostToolUse, PostToolUseFailure and UserPromptSubmit hook (all tools): inject the real clock into context.
 
 Motivated by an assistant composing console timestamps and "Session elapsed HH:MM" footers from its own
 sense of time instead of reading the clock, drifting up to 4h40m ahead (timestamp-from-clock;
-claims-rest-on-observation). After a tool call that ran, it emits ONE short additionalContext line read from
-the process clock, for example:
+claims-rest-on-observation). After a tool call that ran, and when a prompt is submitted, it emits ONE short
+additionalContext line read from the process clock, for example:
 
-    CLOCK (read by hook, authoritative): 2026-09-23 13:45:02 EDT | 2026-09-23T17:45:02Z | session elapsed 03:27
+    CLOCK (read by hook, authoritative): 2026-09-23 13:45:02 EDT | 2026-09-23T17:45:02Z | stamp: [2026-09-23 13:45 EDT] | session elapsed 03:27
 
 so a fresh authoritative reading is the most recent time value in context.
 
+Stamp segment. ` | stamp: [YYYY-MM-DD HH:MM ZONE]` is a ready-to-copy status header in the bracketed console
+form stamp-truth-stop.py reads as a message's header claim. It is built from the SAME single clock reading as
+the line's local and UTC segments, in the same local zone, TRUNCATED to the minute (the seconds and any
+fraction are dropped, never rounded up, so 23:59:59.999 stays on its own minute and day). stamp-truth-stop.py
+resolves a letter name (2 to 6 capitals) through the local zone with mktime, and glibc's mktime result can
+depend on earlier mktime calls in that process where a wall time occurs twice. So ZONE is the local zone's
+letter name only when time.localtime gives the same offset and name at the reading's minute and 26 hours before
+and after it, no other instant within 45 hours has the reading's wall minute under that name, and the offset
+also has a +HHMM form that hook converts. Within 26 hours of a change of offset or name, both passes of a
+repeated hour included (TZ=XXX3XXX,M3.2.0,M11.1.0 around 2026-11-01T04:00Z, Asia/Pyongyang at
+2015-08-14T15:00:30Z, Europe/Simferopol at 2014-10-25T22:00:30Z), it is not kept, nor where the wall minute
+recurs under the name after a change and a change back within those 52 hours (TZ=AAA3AAA,J100/0,J101/0) or
+across an offset jump of more than 26 hours (TZ=AAA-18AAA18,M3.2.0,M11.1.0). That recurrence is found by
+sampling time.localtime every 15 minutes, so an offset the name holds for less than 15 minutes, or one outside
+-24:59:59 to +25:59:59 (only a crafted TZif file gives one), can go undetected. UTC or GMT, which that hook
+reads as offset zero, is kept only when the local offset is zero; a numeric name such as +03, which it reads
+literally, only when it states the local offset. A POSIX TZ string can give a name that misstates the offset
+(TZ=UTC-3 names +03:00 "UTC"); then, and for any other name, ZONE is the local offset in +HHMM form when that
+hook converts it (no seconds, and an hours field of at most 18, so up to 18:59). When neither converts (an
+offset with seconds, or one of 19 hours or more, as TZ=xxx-19, TZ=ABC-19 and TZ=LMT-0:19:32 give, whatever the
+name) the segment is omitted. The self-test converts each stamp with stamp-truth-stop.py's own code, also after
+earlier mktime calls, under such TZ strings, and passes whether the segment is present or not; under TZ=UTC it
+runs this file as the hook and requires the segment in the injected context, converting to the reading's minute.
+
 Coverage. Registered under PostToolUse it fires after a tool call that SUCCEEDED; registered under
-PostToolUseFailure it fires after a tool call that started and FAILED. The emitted hookEventName matches the
-incoming payload's hook_event_name (PostToolUseFailure when that is the event, otherwise PostToolUse), as the
-hooks contract requires. Both registrations are needed for both outcomes. Neither event fires for a tool
-call rejected before execution (an unknown tool, input failing validation, or a permission denial), so such
-calls, and any stretch of prose with no tool call, see no fresh reading.
+PostToolUseFailure it fires after a tool call that started and FAILED; registered under UserPromptSubmit it
+fires when a prompt is submitted, so the first text of a turn also has a fresh reading. The emitted
+hookEventName matches the incoming payload's hook_event_name (PostToolUseFailure or UserPromptSubmit when
+that is the event, otherwise PostToolUse), as the hooks contract requires. All three registrations are
+needed for full coverage. No event fires for a tool call rejected before execution (an unknown tool, input
+failing validation, or a permission denial), so such calls, and any stretch of prose after the prompt with
+no tool call, see no fresh reading.
 
 Elapsed resolution. The lease file is env AIQT_LEASE_FILE when it is set to a non-empty value (a legacy
 spelling is accepted as a fallback, see _cfg); otherwise there is NO lease and the elapsed segment is
@@ -52,14 +78,16 @@ NEVER fails the tool: any error at all exits 0, including an argument, stdin, or
 payload is evaluated. The one exception to exit 0 is an interpreter older than Python 3.14 that can start the
 hook: the guard at the top of this file reads no input, writes one line beginning
 `error: clock-inject.py requires Python 3.14 or newer` to stderr (a best-effort write: the exit does
-not depend on it) and exits 2. Under PostToolUse and
-PostToolUseFailure the tool call has already run, so that exit blocks nothing: the line reaches the assistant
-and no clock line is added. These exits hold while the hook's output (its diagnostic on stderr, and what it
-prints on stdout) can be written and flushed. A failing output stream can change the exit status and can lose
-output, a decision included; a separate fix in progress addresses this. An older interpreter that cannot start
-the hook never reaches the guard and fails with Python's own error first; .preview/README.md (Installing a
-hook, step 4) describes those cases. The payload is read as BYTES and parsed by json.loads, so its decoding
-does not depend on the process locale.
+not depend on it) and exits 1, which every event this hook uses treats as a non-blocking error: under
+PostToolUse and PostToolUseFailure the tool call has already run, and under UserPromptSubmit the prompt goes
+ahead, and in each case no clock line is added. It does not exit 2: on UserPromptSubmit exit 2 blocks the
+prompt. These exits hold while the hook's output (its diagnostic on stderr, and what it prints on stdout)
+can be written and flushed. A failing output stream can change the exit status and can lose output, a
+decision included; a separate fix in progress addresses this. An older interpreter that cannot start the
+hook never reaches the guard and fails with Python's own error first: one that predates the -I option exits
+2, which blocks every UserPromptSubmit prompt; .preview/README.md (Installing a hook, step 4) describes
+those cases. The payload is read as BYTES and parsed by json.loads, so its decoding does not depend on the
+process locale.
 Unparseable hook input still emits the clock line under PostToolUse (the clock does not
 depend on the payload). An error writing the output (a closed or full stdout) is swallowed and the hook
 still exits 0 (round 24); if the stream cannot even be pointed at /dev/null, the hook ends at once with
@@ -70,8 +98,9 @@ host's debug log.
 In-session subagents are deliberately NOT skipped (there is no agent_id check): they benefit from the true
 time too, and this hook only adds context, it never blocks.
 
-RESIDUAL COVERAGE. This INFORMS; it enforces nothing. The model can
-still ignore the line or mis-copy it; the companion Stop hook (stamp-truth-stop.py) is the check. The line
+RESIDUAL COVERAGE. This INFORMS; it enforces nothing. The model can still ignore the line or mis-copy it, or
+copy the stamp segment long after its reading (it is the reading's minute, not the time of the copy); the
+companion Stop hook (stamp-truth-stop.py) is the check, and it does not require a stamp at all. The line
 reflects the host clock, so a wrong host clock (no NTP) is reproduced faithfully. Elapsed is only as right
 as the lease: a lease id minted from a wrong clock, a stale id after an unclean exit, or a configured lease
 file that belongs to another session yields a wrong or missing elapsed. No session
@@ -103,17 +132,30 @@ if tuple(sys.version_info[:2]) < (3, 14):
         sys.stderr.flush()
     except BaseException:
         pass
-    os._exit(2)
+    os._exit(1)
 
 import datetime
 import json
 import os
 import re
 import stat
+import time
 
 LEASE_MAX_BYTES = 1 << 20
 _SESS_RE = re.compile(r"[A-Za-z0-9]{1,32}-(\d{8}T\d{6}Z)")
-_EVENTS = ("PostToolUse", "PostToolUseFailure")
+_EVENTS = ("PostToolUse", "PostToolUseFailure", "UserPromptSubmit")
+# a zone stamp-truth-stop.py's claim grammar reads after one space: UTC, GMT, 2 to 6 capitals, or an offset
+_STAMP_ZONE_RE = re.compile(r"UTC|GMT|[A-Z]{2,6}|[+-]\d{2}(?::?\d{2})?")
+_EPOCH_UTC = datetime.datetime(1970, 1, 1, tzinfo=datetime.timezone.utc)
+_ONE_S = datetime.timedelta(seconds=1)
+# a letter name is kept only with no change of offset or name this many seconds either side of the reading
+_LETTER_WINDOW_S = 26 * 3600
+# another instant with the reading's wall time lies at most this far from it: a kept name's offset is at most
+# 18:59 either way, and any other offset lies within -24:59:59 to +25:59:59 (glibc caps a POSIX TZ offset at
+# 24:59:59, and RFC 8536 asks a TZif file to stay inside that range), so at most 44:58:59 apart
+_LETTER_REACH_S = 45 * 3600
+# the step at which time.localtime is sampled across that reach for the other offsets the name has
+_LETTER_STEP_S = 15 * 60
 
 
 def _cfg(name, env=None):
@@ -538,10 +580,96 @@ def fmt_elapsed(delta):
     return f"{secs // 3600:02d}:{(secs % 3600) // 60:02d}"
 
 
+def _stamp_offset(text):
+    """The offset stamp-truth-stop.py's claim conversion gives the numeric zone `text` ([+-]HH, [+-]HHMM or
+    [+-]HH:MM, nothing else, so +05: is None), as a timedelta, or None when it converts no such zone (hours
+    above 18 or minutes above 59)."""
+    m = re.fullmatch(r"([+-])(\d{2})(?::?(\d{2}))?", text)
+    if m is None:
+        return None
+    hours, mins = int(m.group(2)), int(m.group(3) or 0)
+    if hours > 18 or mins > 59:
+        return None
+    delta = datetime.timedelta(hours=hours, minutes=mins)
+    return delta if m.group(1) == "+" else -delta
+
+
+def _letter_zone_steady(local, zone):
+    """True when time.localtime gives the offset of `local` and the name `zone` at the start of its minute and
+    also 26 hours before and 26 hours after it, and no other instant it samples has that wall minute under
+    that name. stamp-truth-stop.py converts a letter name with mktime, and glibc's mktime result can depend
+    on earlier mktime calls in the same process where a wall time occurs twice, so a name is kept only where
+    the reading's wall minute occurs once under it. The first check reads only the minute and the two ends,
+    so it misses a change and a change back that both fall inside those 52 hours, and an instant with this
+    wall time and name whose offset differs by more than 26 hours. The second check catches both: it
+    samples time.localtime every 15 minutes across 45 hours either side of the minute, and for each other
+    offset seen under this name tests the one instant at which that offset would give this wall minute.
+    Neither calls mktime, so the answer does not depend on earlier calls. Not detected: a second instant
+    whose offset no sample sees (one this name holds for less than 15 minutes), or one whose offset lies
+    outside -24:59:59 to +25:59:59, which only a crafted TZif file can give (tzdata's offsets lie within
+    -15:56:08, Asia/Manila before 1845, and +15:13:42, America/Metlakatla before 1867)."""
+    minute = (local.replace(second=0, microsecond=0) - _EPOCH_UTC) // _ONE_S
+    want = (int(local.utcoffset() // _ONE_S), zone)
+    try:
+        for at in (minute, minute - _LETTER_WINDOW_S, minute + _LETTER_WINDOW_S):
+            lt = time.localtime(at)
+            if (lt.tm_gmtoff, lt.tm_zone) != want:
+                return False
+        wall = tuple(time.localtime(minute))[:6]
+        others = set()
+        for at in range(minute - _LETTER_REACH_S, minute + _LETTER_REACH_S + 1, _LETTER_STEP_S):
+            lt = time.localtime(at)
+            if lt.tm_zone == zone and lt.tm_gmtoff != want[0]:
+                others.add(lt.tm_gmtoff)
+        for off in sorted(others):
+            # the one instant at which offset `off` gives this wall minute
+            lt = time.localtime(minute + want[0] - off)
+            if lt.tm_zone == zone and tuple(lt)[:6] == wall:
+                return False
+    except (OverflowError, ValueError, OSError):
+        return False
+    return True
+
+
+def stamp_segment(local):
+    """The ready-to-copy header `[YYYY-MM-DD HH:MM ZONE]` for the aware datetime `local`, truncated to its
+    minute (strftime drops the seconds; nothing rounds up), or None when the offset has no +HHMM form that
+    stamp-truth-stop.py converts. ZONE is a letter name (2 to 6 capitals), which that hook resolves through
+    the process zone with mktime, only when the process zone gives this offset and name at the reading's
+    minute and 26 hours either side of it, and no other instant within 45 hours has that wall minute under
+    that name (see _letter_zone_steady; so not within 26 hours of a change of offset or name, which covers
+    both passes of a repeated hour, nor in a wall minute that recurs later or earlier under the name), and
+    the offset also has a +HHMM form below (never an offset with seconds or of 19 hours or more); UTC or
+    GMT, which it reads as offset zero, only when the offset is zero; a numeric name, which it reads
+    literally, only when it states the offset. Otherwise ZONE is the offset as +HHMM when that hook
+    converts it (no seconds, and an hours field of at most 18, so up to 18:59); any other offset gives
+    None."""
+    offset, zone = local.utcoffset(), local.tzname()
+    if offset is None:
+        return None
+    if not isinstance(zone, str) or not _STAMP_ZONE_RE.fullmatch(zone):
+        zone = None
+    elif zone in ("UTC", "GMT"):
+        zone = zone if offset == datetime.timedelta(0) else None
+    elif zone[0] in "+-":
+        zone = zone if _stamp_offset(zone) == offset else None
+    elif _stamp_offset(local.strftime("%z")) != offset or not _letter_zone_steady(local, zone):
+        zone = None  # a letter name near a change of offset or name, or an offset no numeric form gives
+    if zone is None:
+        zone = local.strftime("%z")
+        if _stamp_offset(zone) != offset:
+            return None
+    return f"[{local.strftime('%Y-%m-%d %H:%M')} {zone}]"
+
+
 def clock_line(now_utc, start=None):
+    # every segment comes from the one reading now_utc, so the stamp never disagrees with the local segment
     local = now_utc.astimezone()
     line = (f"CLOCK (read by hook, authoritative): {local.strftime('%Y-%m-%d %H:%M:%S')} {local.tzname()} | "
             f"{now_utc.strftime('%Y-%m-%dT%H:%M:%SZ')}")
+    stamp = stamp_segment(local)
+    if stamp is not None:
+        line += f" | stamp: {stamp}"
     if start is not None:
         el = fmt_elapsed(now_utc - start)
         if el is not None:
@@ -620,8 +748,26 @@ def _self_test():
     # a FIFO test's child timeout is a hang guard only (a blocking open never returns), far above the child's own
     # run (well under a second), so the verdict never depends on the host's speed
     HANG_TIMEOUT = 120
+    # the stamp segment is optional: it is omitted under a zone whose stamp stamp-truth-stop.py cannot convert
     line_re = re.compile(r"^CLOCK \(read by hook, authoritative\): \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} \S+ \| "
-                         r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z( \| session elapsed \d{2,}:\d{2})?$")
+                         r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z( \| stamp: \[\d{4}-\d{2}-\d{2} \d{2}:\d{2} \S+\])?"
+                         r"( \| session elapsed \d{2,}:\d{2})?$")
+    # the line's local segment and its stamp segment (None when omitted), captured to compare them
+    parts_re = re.compile(r"^CLOCK \(read by hook, authoritative\): (\d{4}-\d{2}-\d{2} \d{2}:\d{2}):\d{2} (\S+) \| "
+                          r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z(?: \| stamp: \[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}) "
+                          r"(\S+)\])?(?: \| session elapsed \d{2,}:\d{2})?$")
+
+    def local_reading(*wall):
+        """The UTC reading whose process-local wall time is `wall` (year, month, day, hour, minute, second, us)."""
+        return datetime.datetime(*wall).astimezone().astimezone(utc)
+
+    def segments(line):
+        """(local minute, local zone, stamp minute, stamp zone) of a clock line, the stamp pair None when the
+        stamp segment is omitted; fails the test when the line has no local segment."""
+        m = parts_re.match(line)
+        if m is None:
+            raise AssertionError("no local and stamp segments in %r" % line)
+        return m.groups()
 
     def run_main(stdin_text, env=None, argv=("clock-inject.py",)):
         old_in, old_out, old_env = sys.stdin, sys.stdout, dict(os.environ)
@@ -658,7 +804,10 @@ def _self_test():
             now = datetime.datetime(2026, 9, 23, 17, 45, 2, tzinfo=utc)
             ln = clock_line(now, datetime.datetime(2026, 9, 23, 14, 17, 10, tzinfo=utc))
             self.assertRegex(ln, line_re)
-            self.assertIn("| 2026-09-23T17:45:02Z | session elapsed 03:27", ln)
+            stamp = stamp_segment(now.astimezone())
+            # the stamp segment, when this zone gives one, sits between the UTC segment and elapsed
+            middle = "" if stamp is None else " | stamp: " + stamp
+            self.assertTrue(ln.endswith("| 2026-09-23T17:45:02Z" + middle + " | session elapsed 03:27"), ln)
 
         def test_line_omits_elapsed_when_unknown(self):
             ln = clock_line(datetime.datetime(2026, 9, 23, 17, 45, 2, tzinfo=utc), None)
@@ -751,6 +900,318 @@ def _self_test():
             self.assertEqual(json.loads(out)["hookSpecificOutput"]["hookEventName"], "PostToolUse")
             rc, out = run_main(json.dumps({"hook_event_name": "Bogus"}))
             self.assertEqual(json.loads(out)["hookSpecificOutput"]["hookEventName"], "PostToolUse")
+
+        # -- the ready-to-copy stamp segment and the UserPromptSubmit registration --
+        def test_stamp_agrees_with_local_segment(self):
+            now = local_reading(2026, 9, 23, 13, 45, 2, 0)
+            if stamp_segment(now.astimezone()) is None:
+                self.skipTest("this process zone gives no stamp segment (stamp-truth-stop.py cannot convert it)")
+            local_min, local_zone, stamp_min, stamp_zone = segments(clock_line(now))
+            self.assertEqual(stamp_min, local_min)
+            self.assertEqual(stamp_min, now.astimezone().strftime("%Y-%m-%d %H:%M"))
+            # the zone's own name, or else its numeric offset
+            self.assertIn(stamp_zone, (local_zone, now.astimezone().strftime("%z")))
+
+        def test_stamp_zone_fallbacks(self):
+            at = datetime.datetime(2026, 9, 23, 13, 45, 59, 999000)
+
+            def stamp_zone(name, **offset):
+                got = stamp_segment(at.replace(tzinfo=datetime.timezone(datetime.timedelta(**offset), name)))
+                if got is not None:
+                    self.assertTrue(got.startswith("[2026-09-23 13:45 "), got)
+                    return got[len("[2026-09-23 13:45 "):-1]
+                return None
+
+            # a letter name is kept only when the process zone gives it, unchanged, across the window (stood in
+            # for here, so the case does not depend on the process zone; the TZ cases below run the real rule)
+            # and the offset has a +HHMM form: otherwise the offset, or nothing
+            real_rule = _letter_zone_steady
+            try:
+                for steady, want in ((True, "EDT"), (False, "-0400")):
+                    globals()["_letter_zone_steady"] = lambda local, zone: steady
+                    self.assertEqual(stamp_zone("EDT", hours=-4), want, steady)
+                globals()["_letter_zone_steady"] = lambda local, zone: True
+                self.assertEqual(stamp_zone("ABC", hours=18), "ABC")  # inside, at and past the 18-hour bound
+                self.assertEqual(stamp_zone("ABC", hours=18, minutes=59), "ABC")
+                self.assertIsNone(stamp_zone("ABC", hours=19))
+                self.assertIsNone(stamp_zone("ABC", hours=-19))
+                self.assertIsNone(stamp_zone("LMT", minutes=19, seconds=32))
+                self.assertEqual(stamp_zone("LMT", minutes=19), "LMT")
+            finally:
+                globals()["_letter_zone_steady"] = real_rule
+            self.assertEqual(stamp_zone("x-ist", hours=5, minutes=30), "+0530")  # an unreadable name: the offset
+            # an offset with seconds fits no claim form: omitted (exactly on the minute, and one second past it)
+            self.assertIsNone(stamp_zone("lmt", minutes=19, seconds=32))
+            self.assertEqual(stamp_zone("lmt", minutes=19), "+0019")
+            self.assertIsNone(stamp_zone("lmt", minutes=19, seconds=1))
+            # UTC and GMT read as offset zero there, so they are kept only at offset zero
+            for name in ("UTC", "GMT"):
+                self.assertEqual(stamp_zone(name, hours=0), name)
+                self.assertEqual(stamp_zone(name, hours=3), "+0300", name)
+                self.assertEqual(stamp_zone(name, hours=-5), "-0500", name)
+                self.assertEqual(stamp_zone(name, minutes=1), "+0001", name)
+            # a numeric name is read literally there, so it is kept only when it states the offset
+            self.assertEqual(stamp_zone("+05", hours=5), "+05")
+            self.assertEqual(stamp_zone("+03", hours=5), "+0500")
+            self.assertEqual(stamp_zone("+05:30", hours=5, minutes=30), "+05:30")
+            self.assertEqual(stamp_zone("-0330", hours=-3, minutes=-30), "-0330")
+            self.assertEqual(stamp_zone("-0330", hours=3, minutes=30), "+0330")  # the wrong sign
+            self.assertEqual(stamp_zone("-00", hours=0), "-00")
+            # the offset there converts at most 18 hours (with any minutes): just inside, at, and past the bound
+            for sign, name in ((1, "+1859"), (-1, "-1859")):
+                self.assertEqual(stamp_zone("xxx", hours=sign * 18), name[0] + "1800")
+                self.assertEqual(stamp_zone("xxx", hours=sign * 18, minutes=sign * 59), name)
+                self.assertEqual(stamp_zone(name, hours=sign * 18, minutes=sign * 59), name)
+                self.assertIsNone(stamp_zone("xxx", hours=sign * 19))
+                self.assertIsNone(stamp_zone(name[0] + "19", hours=sign * 19))
+                self.assertIsNone(stamp_zone("xxx", hours=sign * 19, minutes=sign))
+            self.assertEqual(_stamp_offset("+1859"), datetime.timedelta(hours=18, minutes=59))
+            for text in ("+1900", "+0560", "+05:60", "05", "+5", "+05:3", "+0530x", ""):
+                self.assertIsNone(_stamp_offset(text), text)
+            self.assertEqual(_stamp_offset("+05"), datetime.timedelta(hours=5))
+            self.assertIsNone(_stamp_offset("+05:"))  # a colon with no minutes is no claim zone
+
+        STAMP_WALLS = ((2026, 9, 23, 13, 45, 59, 999000), (2026, 1, 15, 0, 0, 0, 0),
+                       (2026, 6, 30, 23, 59, 59, 999999))
+
+        # earlier mktime calls made before a conversion: glibc's mktime result can depend on them
+        STAMP_PRIMERS = ((2026, 6, 1, 12, 0, 0, 0, 0, -1), (2014, 6, 1, 12, 0, 0, 0, 0, -1),
+                         (2020, 1, 1, 12, 0, 0, 0, 0, -1))
+
+        def _stamps_under_tz(self, tz, walls=STAMP_WALLS):
+            """[(line, stamp, conversions, minute)] for the UTC readings `walls` (three by default), computed in a
+            child interpreter whose TZ is `tz`: the clock line and stamp segment of this file, the stamp's
+            conversions by the sibling stamp-truth-stop.py (each None when it converts nothing, "nomatch" when
+            its claim grammar does not match), first with no primer call before it and then once after each
+            primer mktime call in STAMP_PRIMERS, and the epoch microseconds of the reading's local minute. The child runs only this interpreter on these two files (no other executable, no
+            network, nothing written)."""
+            sib = _sibling_or_skip("stamp-truth-stop.py")
+            code = ("import datetime, importlib.util as u, json, sys, time\n"
+                    "def load(name, path):\n"
+                    "    s = u.spec_from_file_location(name, path)\n"
+                    "    m = u.module_from_spec(s)\n"
+                    "    s.loader.exec_module(m)\n"
+                    "    return m\n"
+                    "ci, st = load('ci', sys.argv[1]), load('st', sys.argv[2])\n"
+                    "out = []\n"
+                    "for wall in json.loads(sys.argv[3]):\n"
+                    "    now = datetime.datetime(*wall, tzinfo=datetime.timezone.utc)\n"
+                    "    local = now.astimezone()\n"
+                    "    stamp = ci.stamp_segment(local)\n"
+                    "    conv = []\n"
+                    "    if stamp is not None:\n"
+                    "        m = st._CLAIM_RE.fullmatch(stamp[1:-1])\n"
+                    "        for primer in [None] + json.loads(sys.argv[4]):\n"
+                    "            if primer is not None:\n"
+                    "                time.mktime(tuple(primer))\n"
+                    "            conv.append(st.claim_us(m) if m else 'nomatch')\n"
+                    "    minute = int(local.replace(second=0, microsecond=0).timestamp()) * st.US\n"
+                    "    out.append([ci.clock_line(now), stamp, conv, minute])\n"
+                    "print(json.dumps(out))\n")
+            env = {k: v for k, v in os.environ.items() if k not in ("AIQT_LEASE_FILE", "ORCH_LEASE_FILE")}
+            env["TZ"] = tz
+            p = subprocess.run([sys.executable, "-I", "-S", "-B", "-c", code, os.path.abspath(__file__), sib,
+                                json.dumps(walls), json.dumps(self.STAMP_PRIMERS)], env=env, capture_output=True,
+                               text=True, timeout=HANG_TIMEOUT)
+            self.assertEqual(p.returncode, 0, p.stderr)
+            return json.loads(p.stdout)
+
+        def test_stamp_converts_to_the_reading_under_posix_tz(self):
+            # a POSIX TZ string can name a zone with a name that misstates its offset, or give an offset the stop
+            # hook cannot convert: each stamp present converts there to the reading's minute, also after earlier
+            # mktime calls, and an omitted one leaves a well-formed line. Each value is the set of stamp zones
+            # allowed (None: omitted).
+            repeated = "XXX3XXX,M3.2.0,M11.1.0"  # 2026-11-01 01:00 to 01:59 XXX comes twice, at -0200 then -0300
+            dst_end = "EST5EDT,M3.2.0,M11.1.0"  # EDT ends at 2026-11-01T06:00:00Z
+            # a 23-hour AAA at -0200 from 2026-04-10T03:00Z to 2026-04-11T02:00Z, so 2026-04-10 23:00 to 23:59
+            # AAA comes twice, at -0200 then -0300
+            short_dst = "AAA3AAA,J100/0,J101/0"
+            # a jump of 36 hours, from +1800 to -1800 at 2026-03-07T08:00Z: a wall minute read at -1800 up to
+            # 36 hours after it also came at +1800, 36 hours earlier
+            jump = "AAA-18AAA18,M3.2.0,M11.1.0"
+            cases = (("UTC-3", {"+0300"}), ("GMT+5", {"-0500"}), ("<+03>-5", {"+0500"}), ("xxx-19", {None}),
+                     ("<+001932>-0:19:32", {None}),
+                     # a letter name whose offset has no numeric form the stop hook converts: omitted
+                     ("LMT-0:19:32", {None}), ("ABC-19", {None}),
+                     # a letter name within 26 hours of a change of offset or name: the offset is given. Both
+                     # passes of a repeated hour that keeps its name and the hour after it, and readings whose
+                     # name the stop hook's mktime converted, after an earlier mktime call, to another minute
+                     # (Pyongyang, Simferopol) or to nothing (Volgograd)
+                     (repeated, {"-0200"}, ((2026, 11, 1, 3, 30, 30, 0),)),
+                     (repeated, {"-0300"}, ((2026, 11, 1, 4, 30, 30, 0), (2026, 11, 1, 5, 30, 30, 0))),
+                     ("Europe/Moscow", {"+0300"}, ((2014, 10, 25, 22, 30, 30, 0),)),
+                     ("Asia/Pyongyang", {"+0830"}, ((2015, 8, 14, 15, 0, 30, 0),)),
+                     ("Europe/Simferopol", {"+0300"}, ((2014, 10, 25, 22, 0, 30, 0),)),
+                     ("Europe/Volgograd", {"+0300"}, ((2020, 12, 26, 22, 30, 30, 0),)),
+                     # a wall minute that recurs under the name although the offset and name are the same 26
+                     # hours either side: the second pass after a change and a change back 23 hours apart, and
+                     # a reading 30 hours after a 36-hour jump. Its recurrence ends 36 hours after the jump: one
+                     # minute earlier (just inside, the offset), exactly at it and one minute later (the name).
+                     # A control 34 hours after the change back, whose wall minute does not recur
+                     (short_dst, {"-0300"}, ((2026, 4, 11, 2, 30, 30, 0),)),
+                     (short_dst, {"AAA"}, ((2026, 4, 12, 12, 0, 0, 0),)),
+                     (jump, {"-1800"}, ((2026, 3, 8, 14, 0, 30, 0), (2026, 3, 8, 19, 59, 59, 999999))),
+                     (jump, {"AAA"}, ((2026, 3, 8, 20, 0, 0, 0), (2026, 3, 8, 20, 1, 0, 0))),
+                     # the window's ends: the change 26 hours after the reading's minute, one minute later (just
+                     # outside, the name kept), exactly at it and one minute earlier (the offset); the change 26
+                     # hours before it, one minute later (just inside, the offset), exactly at it (outside: the
+                     # change instant already has the new offset and name) and one minute earlier (the name)
+                     (dst_end, {"EDT"}, ((2026, 10, 31, 3, 59, 59, 999999),)),
+                     (dst_end, {"-0400"}, ((2026, 10, 31, 4, 0, 0, 0), (2026, 10, 31, 4, 1, 0, 0))),
+                     (dst_end, {"-0500"}, ((2026, 11, 2, 7, 59, 59, 999999),)),
+                     (dst_end, {"EST"}, ((2026, 11, 2, 8, 0, 0, 0), (2026, 11, 2, 8, 1, 0, 0))),
+                     # controls: names that state the offset are kept, and a letter name through the local zone
+                     # more than 26 hours from any change
+                     ("UTC0", {"UTC"}), ("<+05>-5", {"+05"}), ("EST5EDT", {"EST", "EDT"}),
+                     ("<+1859>-18:59", {"+1859"}), ("xxx-18:59", {"+1859"}),
+                     (repeated, {"XXX"}, ((2026, 10, 30, 12, 0, 0, 0), (2026, 11, 3, 12, 0, 0, 0))),
+                     ("Asia/Pyongyang", {"KST"}, ((2015, 8, 20, 3, 0, 0, 0),)),
+                     ("Europe/Moscow", {"MSK"}, ((2014, 11, 5, 12, 0, 0, 0),)))
+            # a zone read from the host's tzdata: without it the zone is not that zone, so only the conversion
+            # of any stamp given is checked there (the POSIX cases need no tzdata)
+            tzdata_name = {"Europe/Moscow": "MSK", "Asia/Pyongyang": "KST", "Europe/Simferopol": "MSK",
+                           "Europe/Volgograd": "MSK"}
+            for tz, zones, *walls in cases:
+                for line, stamp, conv, minute in self._stamps_under_tz(tz, *walls):
+                    with self.subTest(tz=tz, line=line):
+                        self.assertRegex(line, line_re)
+                        local_min, _zone, stamp_min, stamp_zone = segments(line)
+                        if tzdata_name.get(tz, _zone) == _zone:
+                            self.assertIn(stamp_zone, zones)
+                        self.assertEqual(stamp_min is None, stamp is None)
+                        if stamp is not None:
+                            self.assertEqual(stamp, "[%s %s]" % (stamp_min, stamp_zone))
+                            self.assertEqual(stamp_min, local_min)
+                            # with no primer, then after each primer call
+                            self.assertEqual(conv, [minute] * (1 + len(self.STAMP_PRIMERS)))
+                        else:
+                            self.assertEqual(conv, [])
+
+        def test_stamp_minute_boundaries_truncate_from_one_reading(self):
+            for wall, want in (((2026, 9, 23, 13, 45, 0, 0), "2026-09-23 13:45"),
+                               ((2026, 9, 23, 13, 45, 59, 999000), "2026-09-23 13:45"),
+                               ((2026, 9, 23, 13, 44, 59, 999999), "2026-09-23 13:44"),
+                               ((2026, 9, 23, 23, 59, 59, 999000), "2026-09-23 23:59"),
+                               ((2026, 9, 24, 0, 0, 0, 0), "2026-09-24 00:00")):
+                now = local_reading(*wall)
+                ln = clock_line(now)
+                self.assertRegex(ln, line_re)
+                local_min, _zone, stamp_min, _szone = segments(ln)
+                # an omitted stamp (a zone stamp-truth-stop.py cannot convert) leaves the local minute to check
+                stamp_want = None if stamp_segment(now.astimezone()) is None else want
+                self.assertEqual((stamp_min, local_min), (stamp_want, want), wall)
+                # the UTC segment is followed by another segment, or ends the line when the stamp is omitted
+                self.assertIn("| " + now.strftime("%Y-%m-%dT%H:%M:%SZ") + " |", ln + " |", wall)
+
+        def test_main_reads_the_clock_once(self):
+            # a clock that moves 1 ms across midnight on each read: a second read would put the stamp on the
+            # next day while the local segment stays on the first, so the one reading is what keeps them equal
+            first = local_reading(2026, 9, 23, 23, 59, 59, 999000)
+            reads = []
+
+            class OneShot(datetime.datetime):
+                @classmethod
+                def now(cls, tz=None):
+                    reads.append(tz)
+                    return (first + datetime.timedelta(milliseconds=len(reads) - 1)).astimezone(tz)
+
+            real = globals()["datetime"]
+            globals()["datetime"] = type(sys)("datetime_shim")
+            globals()["datetime"].datetime, globals()["datetime"].timezone = OneShot, real.timezone
+            globals()["datetime"].timedelta = real.timedelta
+            try:
+                rc, out = run_main(json.dumps({"hook_event_name": "UserPromptSubmit", "prompt": "go"}))
+            finally:
+                globals()["datetime"] = real
+            self.assertEqual((rc, len(reads)), (0, 1))
+            line = json.loads(out)["hookSpecificOutput"]["additionalContext"]
+            stamp_want = None if stamp_segment(first.astimezone()) is None else "2026-09-23 23:59"
+            self.assertEqual(segments(line)[0::2], ("2026-09-23 23:59", stamp_want))
+
+        def test_user_prompt_submit_event(self):
+            rc, out = run_main(json.dumps({"hook_event_name": "UserPromptSubmit", "session_id": "s",
+                                           "prompt": "hello"}))
+            obj = json.loads(out)["hookSpecificOutput"]
+            self.assertEqual((rc, obj["hookEventName"]), (0, "UserPromptSubmit"))
+            self.assertRegex(obj["additionalContext"], line_re)
+            self.assertIn("UserPromptSubmit", _EVENTS)
+
+        CROSS_FILE_READING = (2026, 9, 23, 13, 45, 59, 999000)
+
+        def test_stamp_is_a_bracketed_header_claim_in_stop_hook(self):
+            # cross-file: the segment matches stamp-truth-stop.py's claim grammar, converts to the reading's
+            # minute, and is read there as the message's bracketed HEADER (checked for BEHIND), at its bounds
+            import importlib.util
+            sib = _sibling_or_skip("stamp-truth-stop.py")
+            spec = importlib.util.spec_from_file_location("sts_stamp_sibling", sib)
+            mod = importlib.util.module_from_spec(spec)
+            old_dwb, sys.dont_write_bytecode = sys.dont_write_bytecode, True
+            try:
+                spec.loader.exec_module(mod)
+            finally:
+                sys.dont_write_bytecode = old_dwb
+            now = local_reading(*self.CROSS_FILE_READING)
+            if stamp_segment(now.astimezone()) is None:
+                self.skipTest("this process zone gives no stamp segment (stamp-truth-stop.py cannot convert it)")
+            stamp = re.search(r"\| stamp: (\[[^]]+\])", clock_line(now)).group(1)
+            m = mod._CLAIM_RE.fullmatch(stamp[1:-1])
+            self.assertIsNotNone(m, stamp)
+            # the stamp truncates the LOCAL minute, which differs from the UTC minute under an offset with seconds
+            minute_us = int(now.astimezone().replace(second=0, microsecond=0).timestamp()) * mod.US
+            self.assertEqual(mod.claim_us(m), minute_us)
+            text = stamp + " working on the change\n"
+            # BEHIND: exactly at the tolerance passes, one microsecond past it is refused as a status stamp
+            self.assertEqual(mod.check_message(text, minute_us + mod.BEHIND_US, None, "x", mod.BEHIND_US), [])
+            late = mod.check_message(text, minute_us + mod.BEHIND_US + 1, None, "x", mod.BEHIND_US)
+            self.assertEqual(len(late), 1, late)
+            self.assertTrue(late[0].startswith("status stamp " + stamp[1:-1]), late)
+            # control: the same stamp without its brackets is history, not a header, so it is never BEHIND
+            self.assertEqual(mod.check_message(stamp[1:-1] + " working\n", minute_us + mod.BEHIND_US + 1, None, "x",
+                                               mod.BEHIND_US), [])
+            # AHEAD: the header gets no slack: exactly at the reference passes, one microsecond ahead of it is refused
+            self.assertEqual(mod.check_message(text, minute_us, None, "x", mod.BEHIND_US), [])
+            self.assertEqual(len(mod.check_message(text, minute_us - 1, None, "x", mod.BEHIND_US)), 1)
+
+        def test_stamp_present_in_injected_context_under_utc(self):
+            # the stamp tests above skip, or accept an omitted segment, under a zone that gives none, so a hook
+            # that never emits the segment passes them. TZ=UTC always gives one, so here it is REQUIRED: this
+            # file runs as the hook in a child under TZ=UTC, and the context it injects must carry the stamp
+            # segment, which must convert in stamp-truth-stop.py (a second child, also under TZ=UTC) to the
+            # minute of the reading on that same line. Executables reached: only this interpreter, on this file
+            # and on its sibling (no other program, no network; worker and lease settings are removed and the
+            # payload names no transcript, so nothing is read but the two files, and nothing is written)
+            sib = _sibling_or_skip("stamp-truth-stop.py")
+            hook = os.path.abspath(__file__)
+            env = {k: v for k, v in os.environ.items() if k not in (
+                "AIQT_HOOKS_WORKER", "ORCH_WORKER", "ORCH_VERIFY_OWNER", "AIQT_LEASE_FILE", "ORCH_LEASE_FILE",
+                "CLAUDE_PROJECT_DIR")}
+            env["TZ"] = "UTC"
+            p = subprocess.run([sys.executable, "-I", "-S", "-B", hook], env=env, capture_output=True, text=True,
+                               input=json.dumps({"hook_event_name": "PostToolUse", "tool_name": "Bash"}),
+                               timeout=HANG_TIMEOUT)
+            self.assertEqual(p.returncode, 0, p.stderr)
+            obj = json.loads(p.stdout)["hookSpecificOutput"]
+            self.assertEqual(obj["hookEventName"], "PostToolUse")
+            line = obj["additionalContext"]
+            self.assertIn(" | stamp: [", line, "the injected context carries no stamp segment under TZ=UTC")
+            m = re.fullmatch(r"CLOCK \(read by hook, authoritative\): (\d{4}-\d{2}-\d{2} \d{2}:\d{2}):\d{2} UTC \| "
+                             r"(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2}:\d{2})Z \| stamp: \[([^]]*)\]", line)
+            self.assertIsNotNone(m, line)
+            local_min, utc_date, utc_time, stamp = m.groups()
+            reading = datetime.datetime.fromisoformat(utc_date + "T" + utc_time + "+00:00")
+            self.assertEqual(stamp, reading.strftime("%Y-%m-%d %H:%M") + " UTC", line)
+            self.assertEqual(stamp, local_min + " UTC", line)
+            code = ("import importlib.util as u, json, sys\n"
+                    "s = u.spec_from_file_location('st', sys.argv[1])\n"
+                    "st = u.module_from_spec(s)\n"
+                    "s.loader.exec_module(st)\n"
+                    "m = st._CLAIM_RE.fullmatch(sys.argv[2])\n"
+                    "print(json.dumps([st.claim_us(m) if m else 'nomatch', st.US]))\n")
+            q = subprocess.run([sys.executable, "-I", "-S", "-B", "-c", code, sib, stamp], env=env,
+                               capture_output=True, text=True, timeout=HANG_TIMEOUT)
+            self.assertEqual(q.returncode, 0, q.stderr)
+            conv, us = json.loads(q.stdout)
+            self.assertEqual(conv, (reading.replace(second=0) - _EPOCH_UTC) // _ONE_S * us, (line, conv))
 
         def test_worker_kill_switch_silent(self):
             for env in ({"AIQT_HOOKS_WORKER": "1"}, {"ORCH_WORKER": "1"}):
@@ -994,7 +1455,10 @@ def _self_test():
             self.assertEqual(_wall_clock_asserts(good), [])
 
         # -- sibling parity on a single-hook install --
-        PARITY_TESTS = ("test_r13_shared_lease_code_identical_to_stop_hook",)
+        PARITY_TESTS = ("test_r13_shared_lease_code_identical_to_stop_hook",
+                        "test_stamp_is_a_bracketed_header_claim_in_stop_hook",
+                        "test_stamp_converts_to_the_reading_under_posix_tz",
+                        "test_stamp_present_in_injected_context_under_utc")
         PARITY_SIBLINGS = ("stamp-truth-stop.py",)
 
         def _parity_in_copy(self, siblings, value, dangling=False):
@@ -1053,11 +1517,13 @@ def _self_test():
                 self.assertEqual((got[0], got[1], got[2], got[3] + got[4]), (1, n, 0, n), (value, err))
 
         def test_sibling_parity_runs_and_passes_with_siblings_present(self):
-            # with every sibling beside the copy the parity tests RUN and pass, whatever the variable says
+            # with every sibling beside the copy the parity tests RUN and pass, whatever the variable says; the
+            # cross-file stamp test alone skips, under a process zone that gives no stamp segment
             n = len(self.PARITY_TESTS)
+            no_stamp = int(stamp_segment(local_reading(*self.CROSS_FILE_READING).astimezone()) is None)
             for value in (None, "1"):
                 got, err = self._parity_in_copy(self.PARITY_SIBLINGS, value)
-                self.assertEqual(got, [0, n, 0, 0, 0], (value, err))
+                self.assertEqual(got, [0, n, no_stamp, 0, 0], (value, err))
 
     result = unittest.TextTestRunner(verbosity=2).run(unittest.TestLoader().loadTestsFromTestCase(T))
     return 0 if result.wasSuccessful() else 1

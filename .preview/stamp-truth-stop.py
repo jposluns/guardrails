@@ -1078,7 +1078,11 @@ def _naive_us(y, mo, d, hh, mi, ss, us):
 def _local_us(y, mo, d, hh, mi, ss, abbr):
     """Epoch microseconds for a local wall time whose zone abbreviation is `abbr`, or None."""
     found = []
-    for isdst in (0, 1):  # an explicit isdst makes mktime deterministic (no dependence on earlier calls)
+    # an explicit isdst does not make mktime deterministic: glibc's mktime starts its search from an offset
+    # left by an earlier mktime call in the process, so where this wall time occurs twice with the same isdst
+    # the instant found can depend on earlier calls (clock-inject.py keeps a letter name in its stamp only
+    # when the offset and name are the same 26 hours before and after the reading)
+    for isdst in (0, 1):
         try:
             ts = time.mktime((y, mo, d, hh, mi, ss, 0, 0, isdst))
             lt = time.localtime(ts)

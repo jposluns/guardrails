@@ -213,6 +213,7 @@ guarded-surfaces = [
     "tools/selftest_orch_hooks.py",
 ]
 nonblocking-surfaces = [
+    ".preview/clock-inject.py",
     ".preview/constraint-reread.py",
     ".preview/rerun-pass-check.py",
     ".preview/stamp-truth-stop.py",
