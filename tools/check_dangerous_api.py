@@ -561,7 +561,12 @@ ALLOWLIST = (
     ("tools/check_release_cut.py", "_census_kernel_sigchld_row", "shell", 1, _SAVED),
     ("tools/check_release_cut.py", "_census_reaped_exit_row", "shell", 1, _SAVED),
     ("tools/check_release_cut.py", "_census_drain_reaped_row", "shell", 1, _SAVED),
-    ("tools/check_release_cut.py", "_census_paused_run", "shell", 1, _SAVED),
+    ("tools/check_release_cut.py", "_census_paused_run", "shell", 1,
+     "self-test stub: keeps the real subprocess.Popen to delegate to and restore after patching;"
+     " the wrapper forwards its caller's own arguments and sets two keywords that caller does not"
+     " pass, pass_fds to the gate pipe's read end alone and env to a copy of os.environ with"
+     " CENSUS_PAUSE_GATE (that descriptor's number) added; it never sets shell, and no call in"
+     " this file turns shell on"),
     ("tools/check_release_cut.py", "_census_run_flipped", "code", 1,
      _MUTANT + " (each census drain revert, loaded by exec_module from a scratch file)"),
     ("tools/pin.py", "_recover_close_vectors", "code", 1,

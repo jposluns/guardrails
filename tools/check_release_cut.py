@@ -2903,7 +2903,9 @@ def _census_mapping_check(root, mappings=_CENSUS_MAPPINGS):
 # and never signals a pid that left it). The record is written whole to argv[2] + ".partial", in the same
 # directory, and only then moved onto argv[2] with os.replace, so a row that sees the record (some poll
 # for it while the stand-in runs) always reads both numbers, never a file created but not yet written.
-# Given argv[5] as well, it exits with that code after its sleep, with no census read and no report.
+# Given argv[5] as well, it exits with that code after its sleep, with no census read and no report. With
+# CENSUS_PAUSE_GATE set (only _census_paused_run sets it), it first blocks on one read of that descriptor
+# and closes it, so the run decides when it may go on and its census read never sees that descriptor.
 _CENSUS_STANDIN = """import os, subprocess, sys, time
 def _st_fd_table():
     for number in range(3, 256):
@@ -2913,6 +2915,10 @@ def _st_fd_table():
             if exc.errno != 9:
                 return number, exc
     return None, None
+gate = os.environ.get("CENSUS_PAUSE_GATE")
+if gate:
+    os.read(int(gate), 1)
+    os.close(int(gate))
 if len(sys.argv) > 2:
     pid = os.getpid()
     if len(sys.argv) > 3:
@@ -3559,8 +3565,13 @@ def _census_exit_at_bound_row(parent, race):
 # The stand-in of _census_exit_at_bound_full_row: it raises its stdout pipe to 1 MiB (exit 3 with a line
 # naming the refusal when that is refused or grants less than argv[1] bytes), writes argv[1] bytes to it,
 # which then fit without a reader, prints a cannot-evaluate report on stderr and exits 2. It starts no
-# descendant, so once it has exited nothing else holds either pipe.
+# descendant, so once it has exited nothing else holds either pipe. Under _census_paused_run it first waits
+# at the run's gate, as _CENSUS_STANDIN does.
 _CENSUS_FULL_STANDIN = """import fcntl, os, sys
+gate = os.environ.get("CENSUS_PAUSE_GATE")
+if gate:
+    os.read(int(gate), 1)
+    os.close(int(gate))
 size = int(sys.argv[1])
 try:
     granted = fcntl.fcntl(1, getattr(fcntl, "F_SETPIPE_SZ", 1031), 1048576)
@@ -3619,15 +3630,24 @@ def _census_paused_run(argv, stale):
     os.waitid on the leader, which finds it still running, pauses once until the leader has exited (seen
     with WNOWAIT, reaping nothing) and at least 2 s past the bound after its construction, so past the
     drain's deadline, for at most TIMEOUT s. With stale true the wrapper then hands back the result read
-    before the pause (still running); otherwise a fresh read (exited). Returns (code, err, note, paused),
-    paused ["exited past the deadline"] when the pause reproduced that state."""
+    before the pause (still running); otherwise a fresh read (exited). The leader is held at a gate this run
+    controls, so that first os.waitid finds it running however the host schedules the two processes: the
+    wrapped subprocess.Popen hands it the read end of a pipe (pass_fds, its number in CENSUS_PAUSE_GATE),
+    both stand-ins block on one read of it before they do anything else, and the wrapper writes the byte
+    that releases it only once that first os.waitid has returned. Both ends are closed in a finally, so a
+    leader still at the gate reads its end of file and goes on. A leader found exited at the first
+    os.waitid all the same reproduced nothing. Returns (code, err, note, paused), paused ["exited past the
+    deadline"] when the pause reproduced that state."""
     bound = 3
     real_popen = subprocess.Popen
     real_waitid = os.waitid
     leader = []
     paused = []
+    gate_read, gate_write = os.pipe()
 
     def capturing(*args, **kwargs):
+        kwargs["pass_fds"] = (gate_read,)
+        kwargs["env"] = dict(os.environ, CENSUS_PAUSE_GATE=str(gate_read))
         proc = real_popen(*args, **kwargs)
         leader.extend((proc.pid, time.monotonic()))
         return proc
@@ -3636,6 +3656,7 @@ def _census_paused_run(argv, stale):
         result = real_waitid(idtype, pid, flags)
         if not leader or pid != leader[0] or paused:
             return result
+        os.write(gate_write, b"\0")    # this first waitid has returned: only now may the leader go on to exit
         if result is not None:
             paused.append("the leader had already exited at the first waitid")
             return result
@@ -3651,11 +3672,15 @@ def _census_paused_run(argv, stale):
             time.sleep(0.05)
         return result if stale else real_waitid(idtype, pid, flags)
 
-    subprocess.Popen, os.waitid = capturing, pausing
     try:
-        code, err, note = _census_run(argv, bound)
+        subprocess.Popen, os.waitid = capturing, pausing
+        try:
+            code, err, note = _census_run(argv, bound)
+        finally:
+            subprocess.Popen, os.waitid = real_popen, real_waitid
     finally:
-        subprocess.Popen, os.waitid = real_popen, real_waitid
+        os.close(gate_write)    # a leader still at the gate reads its end of file here and goes on
+        os.close(gate_read)
     return code, err, note, paused
 
 
