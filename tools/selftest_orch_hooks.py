@@ -2096,16 +2096,17 @@ def _rdp_timing_rows(shapes, timer, budget=_RDP_TIMING_BUDGET, runaway=_RDP_TIMI
     rounds narrow what the growth bound catches, a reduction accepted so that load on a linear screen's
     short reference timing does not fail it. Before them a growth fault in two groups failed the shape; now
     two more ways pass it. A term near the bound, a few percent over it in two groups, can come out under it
-    in the confirm rounds and pass. A term can also fail there: on one host a prefix-count mutant,
-    text.count("\\n", 0, i) every 2200 characters inside _rdp_hidden, did not pass, since its growth fault
-    reproduced in the confirm rounds and failed the shape (no artefact in the repository keeps that run's
-    output, so how far over the bound it was is not given here). And load confined to the confirm rounds
-    that lifts the smaller sizes' screen or the larger sizes' reference more than the other leg in every one
-    of them flattens their multiples and passes a growth fault two groups found, where before the confirm
-    rounds it failed (decision case quadratic-reference-lifted-confirm-rounds-only: not linear with confirm
-    0, linear with the default; a lift that leaves the confirm multiple growing just over the bound still
-    fails). Load that flattens two groups' multiples passes a growth fault, as it did before the confirm
-    rounds. A growth fault well over the bound in a real screen still fails in the confirm rounds
+    in the confirm rounds and pass. A term can also fail there, though the one example here rests on a run
+    whose output was not kept: on one host a prefix-count mutant, text.count("\\n", 0, i) every 2200
+    characters inside _rdp_hidden, did not pass, since its growth fault reproduced in the confirm rounds and
+    failed the shape; no artefact in the repository keeps that run's output, so this outcome is unrecorded
+    and how far over the bound it was is not given here. And load confined to the confirm rounds that lifts
+    the smaller sizes' screen or the larger sizes' reference more than the other leg in every one of them
+    flattens their multiples and passes a growth fault two groups found, where before the confirm rounds it
+    failed (decision case quadratic-reference-lifted-confirm-rounds-only: not linear with confirm 0, linear
+    with the default; a lift that leaves the confirm multiple growing just over the bound still fails). Load
+    that flattens two groups' multiples passes a growth fault, as it did before the confirm rounds. A growth
+    fault well over the bound in a real screen still fails in the confirm rounds
     (rdp/label-screen-linear-time-mutant). With confirm 0 a growth fault fails the shape at once, the
     behaviour before the confirm rounds. A timing over runaway CPU seconds fails the shape at once
     ("runaway") and the shape is not timed again. A timing starts only while the row has spent under budget
@@ -2265,12 +2266,14 @@ def _rdp_label_screen_mutant_timing(row, timer):
     load each needs, not that load cannot supply it. The row's timer counts CPU seconds, so time the
     process spends queued for a core in its own kernel is not counted, and load reaches its bounds by
     slowing the process's own work, or by time that is not the process's own work but that the kernel
-    charges to it, as in the two cases that follow. On a virtual machine whose kernel lacks paravirtual
-    steal accounting (CONFIG_PARAVIRT_TIME_ACCOUNTING), time its virtual CPU waits for a physical core
-    while running the process is not subtracted from the process's CPU time, so load elsewhere on the
-    physical host can lift a timing. And on a kernel without interrupt time accounting
-    (CONFIG_IRQ_TIME_ACCOUNTING, or with that accounting turned off), time spent in hardware and software
-    interrupts that other load causes is charged to the task it interrupts, so it can lift a timing too.
+    charges to it, as in the two cases that follow. On a virtual machine whose kernel does not subtract
+    steal time (for example one built without CONFIG_PARAVIRT_TIME_ACCOUNTING, one whose hypervisor exposes
+    no steal clock, or one with steal accounting turned off, as by the no-steal-acc boot option), time its
+    virtual CPU waits for a physical core while running the process is not subtracted from the process's
+    CPU time, so load elsewhere on the physical host can lift a timing. And on a kernel without interrupt
+    time accounting (CONFIG_IRQ_TIME_ACCOUNTING, or with it turned off), time spent in hardware and
+    software interrupts that other load causes can be charged, wholly or in part, to the task it interrupts
+    (softirq work deferred to ksoftirqd is charged to ksoftirqd instead), so it can lift a timing too.
     First, a false "linear": a timing reads linear only when a group or the confirm rounds hold each
     doubling's growth of the multiple under the bound's square root of 2, so load would have to cut the two
     doublings' growth about 1.76 and 2.40 times in every round of two groups, or of the confirm rounds, by
@@ -2281,7 +2284,11 @@ def _rdp_label_screen_mutant_timing(row, timer):
     of the 1 MiB reference alone leaves the first doubling's growth near 2.5, which fails however large
     that lift is. The cuts 1.76 and 2.40 are rounded down from the growths over the square root of 2 (about
     2.5 and 3.4 over 1.414), so the exact threshold of that second lift is near 4.25 (2.5 times 3.4 over
-    2), a little above 4.224; the figures here understate the load needed, which errs toward caution. The
+    2), a little above 4.224. At growths of 2.5 and 3.4 the figures here understate the load needed, which
+    errs toward caution, and so do the 1.76 cut and the 4.224 lift at every loaded growth quoted above
+    (2.53 to 2.62 and 3.39 to 3.46; the lowest pair, 2.53 and 3.39, gives a threshold near 4.29). The 2.40
+    cut does not hold across that range: it understates the cut needed only above a growth of about 3.394,
+    and a growth of 3.39 needs a cut of only about 2.397, so there 2.40 overstates the load needed. The
     timing under the ratio bound must also bring every size's multiple under that bound (about 5.25). In
     the runner's failure that the confirm rounds answer, a 512 KiB reference read about 1.9 times its
     linear share (from the runner's job log, which the repository does not keep). Second, a runaway: a
