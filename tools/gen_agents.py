@@ -140,8 +140,8 @@ def main():
 #       directory, and a target that is a directory: exit 2 in both modes; the outside file and directory
 #       and the sibling target are unchanged, and nothing is created through the link (decided by
 #       os.lstat, so a vector's faulty engine leaving a dangling symlink there fails the leg).
-#   T20 a legacy target already in sync is not judged: a rule body holding a marker-like line writes once
-#       and then rewrites as exit 0 (the guard runs only on a target whose bytes would change).
+#   T20 a rule body holding a marker-like line is outside the gen_rules body grammar: the corpus read
+#       refuses it (exit 2 naming the body grammar, in write and --check mode) and nothing is written.
 #   T21 a write keeps the target's ordinary permission bits and drops its set-user-ID and sticky bits
 #       (umask pinned; the kept bits hold execute bits no creation mode supplies, so a dropped fchmod
 #       cannot pass, and the whole S_IMODE is asserted, so a kept sticky bit, which no write clears, fails)
@@ -942,12 +942,16 @@ def self_test_main(nested_run=False):
         if not (root / AGENTS_REL).is_dir() or any((root / AGENTS_REL).iterdir()):
             failures.append("T19: a directory target was replaced or written into")
 
-        # T20. A legacy target in sync is not judged, so a rule body holding a marker-like line rewrites.
+        # T20. A rule body holding a marker-like line is outside the gen_rules body grammar, so the corpus
+        #      read refuses it (exit 2, nothing written) before any target is composed or judged.
         marked = _RULE.replace("Rule text.", "Rule text.\n\n<!-- EXAMPLE:BEGIN -->")
         root = tree(ac.registry_text(), blocks=(), rules=(_APEX, marked))
-        expect("T20 legacy marker-like body, first write", root, False, 0, unchanged=False)
-        expect("T20 legacy marker-like body, --check", root, True, 0)
-        expect("T20 legacy marker-like body, rewrite", root, False, 0)
+        for t20_check in (False, True):
+            t20_out = expect("T20 marker-like rule body", root, t20_check, 2)
+            if "outside the body grammar" not in t20_out:
+                failures.append("T20: the refusal does not name the body grammar: {!r}".format(t20_out))
+        if (root / AGENTS_REL).exists():
+            failures.append("T20: a refused corpus still wrote {}".format(AGENTS_REL))
 
         # T21. A write keeps the mode and leaves no temporary file; a failed rename leaves the target as it was.
         #      The umask is pinned (and restored) and the asserted mode holds execute bits, which the
@@ -2591,7 +2595,8 @@ def self_test_main(nested_run=False):
           "MemoryError (injected) is refused naming the class; CRLF is drift; either refused adapter blocks the other's write; no corpus is exit 2 and "
           "deletes nothing; an unreachable corpus deletes nothing; a marker-like rule body is exit 2 for a "
           "composed target; a symlinked target or parent, a dangling link and a directory target are exit 2 "
-          "with nothing outside the tree touched; an in-sync legacy target rewrites; a write keeps the "
+          "with nothing outside the tree touched; a marker-like rule body is refused by the body grammar "
+          "for a legacy target; a write keeps the "
           "ordinary permission bits, dropping set-ID and sticky bits (under a pinned umask), and leaves no "
           "temporary file, and a failed rename names the one it "
           "leaves; a parent swapped for a symlink after the walk redirects neither a write nor a read; a "

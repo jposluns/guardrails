@@ -1476,7 +1476,7 @@ def self_test(report_path=None):
             # is judged before its name, so it never reads as only a placement violation); and a
             # rule read through its descriptor is still parsed, so its frontmatter drift is found.
             rule = ("---\ncorpus-id: abcdef1\norigin: adopter\nfamily: aiqt\nslug: sample\ntier: 10\n"
-                    "facet: ACCUR\n---\n")
+                    "facet: ACCUR\n---\n\n# Sample\n\nA sample rule.\n")
             for cid, entry, kind in (
                     ("gate/rule-file-symlink-exits-2", "aiqt/10-ACCUR-sample.md", "rule"),
                     ("gate/rule-file-fifo-exits-2", "aiqt/10-ACCUR-sample.md", "fifo"),

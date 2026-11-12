@@ -254,6 +254,17 @@ GENSRC_OUTPUTS = (
 )
 
 
+def _unquote(tok):
+    """A single scalar STRING element: strip matching quotes, else the bare token. Fail-closed.
+    check_instruction_budget reads generated rule frontmatter through this; the typed FRONTMATTER
+    grammar here uses _quoted and _value instead."""
+    if tok and tok[0] in "\"'":
+        if len(tok) >= 2 and tok[-1] == tok[0]:
+            return tok[1:-1]
+        raise ValueError("malformed quoted value {!r}".format(tok))
+    return tok
+
+
 def _quoted(tok):
     """The text inside one matching pair of quotes around tok, with no quote of that kind inside, or None."""
     if len(tok) >= 2 and tok[0] in "\"'" and tok[-1] == tok[0] and tok[0] not in tok[1:-1]:
