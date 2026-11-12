@@ -144,9 +144,11 @@ with the worksheet that froze the plan and the plan's own run instant and nonce,
 byte for byte; a moved revision, a changed observed item (sources, targets, store identity, ancestry) or
 a changed worksheet refuses into a fresh plan with its own single approval. Replay admission precedes
 freshness: a run whose base transaction exists refuses on the one-apply rule itself. A plan row whose
-handler needs what this driver cannot supply (_DRIVER_UNSUPPLIED: planned create-file bytes, a consumer
-postimage model, a pack, observations, a receipt, init-store's own sequencing) refuses before anything is
-written, naming it. Apply then composes, into the one base transaction, the preservation pass
+handler needs what this driver cannot supply (_DRIVER_UNSUPPLIED: a consumer postimage model, a pack,
+observations, a receipt, init-store's own sequencing) refuses before anything is written, naming it; a
+create-file row's planned bytes come from the file the sealed planning inventory observed at its
+content_digest (_opf_adopt_plan.bound_create_content), and a missing or drifted source refuses before
+anything is written too. Apply then composes, into the one base transaction, the preservation pass
 (compose_preservation), then every plan op in plan order in the apply stage, each handler with its typed
 context (_driver_contexts: ONE OpContext for the file ops, ONE RegistrationContext for the registration
 ops, a HookContext for enable-hook) or, for every other handler, the context table (`ops`, the
@@ -7477,8 +7479,6 @@ _DRIVER_UNSUPPLIED = {
                           "composition guard refuses a handler's own transaction), and for a re-adoption "
                           "context ancestral (the pinned ancestral snapshot its counters seed from); this "
                           "driver sequences neither, a later unit"),
-    (_execute_file_op, "create-file"): ("the created file's planned bytes (the plan binds only its "
-                                        "content_digest, and no bound source supplies the bytes)"),
     (_execute_registration_op, "repoint-consumer"): ("the consumer's planned postimage model (the plan binds "
                                                      "only its new_digest)"),
     (_plant_governance, None): ("context pack (the release manifest, root.txt and member bytes, which only "
@@ -7502,28 +7502,45 @@ def _unsupplied(rows):
     return found
 
 
-def _driver_contexts(ops, plan_doc, approval, product_root, manifest_digest=None):
+def _driver_contexts(ops, plan_doc, approval, product_root, manifest_digest=None, content=None):
     """The contexts the plan op handlers of ONE apply-stage composition take, built from the sealed plan, the
     captured approval and `product_root`, run_apply's own argument (the root it admitted the plan against
     and re-derived it over), never from other ambient state (spec 14.1); only the table carries
     `product_root` and `approval`, and no typed context carries either. Returns (table, typed). `typed` maps
     each handler that composes through a typed context to it: the file-op handler to ONE OpContext over the
-    plan's source rows (so its claims span every file-op row), the registration handler to ONE
+    plan's source rows (so its claims span every file-op row) and `content`, the planned bytes of each
+    create-file path that run_apply read from its plan-bound source (bound_create_content; the composer
+    still digest-checks them against the row), the registration handler to ONE
     RegistrationContext over the plan's frozen store identity, each keep source's approved digest (so a
     registration chain extends link by link) and `manifest_digest`, the store manifest digest of the
     observation rederive_bound_or_refuse re-derived (plan-bound: the byte-identical plan's inventory_digest seals
     it; None binds nothing, so a live manifest refuses), and the enable-hook handler to a HookContext. Every other
     handler, and the receipt stage, takes `table` (`ops`, `plan`, `approval`, `product_root`, `stage`).
-    No typed context carries a value the plan does not bind: the OpContext holds no planned bytes, the
-    RegistrationContext no consumer model and the HookContext only `ops`, and run_apply refuses a row that
-    needs a value no context carries (_DRIVER_UNSUPPLIED) before anything is composed."""
+    No typed context carries a value the plan does not bind: the OpContext holds only planned bytes whose
+    source the sealed inventory binds at the row's digest, the RegistrationContext no consumer model and the
+    HookContext only `ops`, and run_apply refuses a row that needs a value no context carries
+    (_DRIVER_UNSUPPLIED) before anything is composed."""
     table = dict(ops=ops, plan=plan_doc, approval=approval, product_root=product_root, stage=APPLY_STAGE)
     kept = dict((row["path"], row["digest"]) for row in plan_doc["sources"] if row["disposition"] == "keep")
-    typed = {_execute_file_op: OpContext(ops, plan_doc["sources"]),
+    typed = {_execute_file_op: OpContext(ops, plan_doc["sources"], content),
              _execute_registration_op: RegistrationContext(ops, plan_doc["store"], kept=kept,
                                                            manifest_digest=manifest_digest),
              _execute_enable_hook: HookContext(ops)}
     return table, typed
+
+
+def _bound_create_content(product_root, inventory_bytes, rows):
+    """The planned bytes of each create-file row, keyed by path, read by the planner's own bounded reader
+    from the file the sealed planning inventory (the one rederive_bound_or_refuse proved seals to the
+    plan's inventory_digest) observed at the row's content_digest, and re-checked against that digest. A
+    row no observed file binds, or a source whose live bytes drifted, refuses here, before the preflight
+    and before the journal is prepared, so nothing is written."""
+    import _opf_adopt_plan as planner
+    inventory = _canonical_toml(inventory_bytes, "the re-derived planning inventory")
+    try:
+        return planner.bound_create_content(product_root, inventory, rows)
+    except planner.PlanError as exc:
+        raise AdoptApplyError("{}; apply refuses before anything is written".format(exc))
 
 
 def _require_archived_once(ops, plan_doc):
@@ -7885,6 +7902,7 @@ def _run_apply_engine(product_root, plan_bytes, approval_bytes, worksheet):
         raise AdoptApplyError("{}; this driver supplies only what the sealed plan, its approval and the product "
                               "root carry, and apply never composes a row over a default, so it refuses before "
                               "anything is written (fail-closed)".format("; ".join(unsupplied)))
+    content = _bound_create_content(product_root, inventory_bytes, rows)
     frozen = set(row["path"] for row in plan_doc["sources"] if not row["occupying"])
 
     def compose(ops):
@@ -7893,7 +7911,7 @@ def _run_apply_engine(product_root, plan_bytes, approval_bytes, worksheet):
             ops.create(approval_rel(run_id), approval_bytes)
             ops.create(planning_inventory_rel(run_id), inventory_bytes)
             compose_preservation(ops, plan_doc)
-            context, typed = _driver_contexts(ops, plan_doc, approval, product_root, manifest_digest)
+            context, typed = _driver_contexts(ops, plan_doc, approval, product_root, manifest_digest, content)
             for i, row in enumerate(rows):
                 verdict = dispatch(row, typed.get(OP_HANDLERS.get(row["op"]), context))
                 if verdict.status != store.VALID:
@@ -16535,9 +16553,8 @@ def _self_test_checks():
     named = _unsupplied([schema.canonical_op(name) for name in (
         "create-file", "repoint-consumer", "plant-governance", "record-adoption", "render-views", "init-store",
         "retire-file", "move-file", "register-unmanaged", "enable-hook")])
-    check("driver-unsupplied-names-each-missing-value", len(named) == 6 and all(
+    check("driver-unsupplied-names-each-missing-value", len(named) == 5 and all(
         any(needle in finding for finding in named) for needle in (
-            "('create-file') needs the created file's planned bytes",
             "('repoint-consumer') needs the consumer's planned postimage model",
             "('plant-governance') needs context pack", "('record-adoption') needs context receipt and now",
             "('render-views') needs context observations",
@@ -16545,7 +16562,80 @@ def _self_test_checks():
     # a stand-in handler for the same op needs none of them (red against an _unsupplied keyed by op name
     # alone), and the ops the driver supplies in full name nothing.
     with mock.patch.dict(OP_HANDLERS, dict.fromkeys(OP_HANDLERS, lambda op_row, context=None: schema._ok())):
-        check("driver-unsupplied-keyed-by-handler", _unsupplied([schema.canonical_op("create-file")]) == [])
+        check("driver-unsupplied-keyed-by-handler", _unsupplied([schema.canonical_op("repoint-consumer")]) == [])
+    # create-file's bytes come from a plan-bound source, so its real handler names nothing unsupplied (red
+    # against a _DRIVER_UNSUPPLIED that still carries the create-file entry).
+    check("driver-create-file-bytes-supplied", _unsupplied([schema.canonical_op("create-file")]) == [])
+
+    # 11b2: create-file through the real driver. Its planned bytes are those of a file the sealed planning
+    # inventory observed at the row's content_digest (a kept source here), re-read live and digest-checked
+    # before the preflight. The other rows this driver cannot run, and the receipt stage, are 11b's stand-ins.
+    def _create_sheet(root, head, digest):
+        sheet = _sheet_with(root, head, [dict(path="keep.md", disposition="keep", actor="fixture")])
+        sheet["targets"] = sorted(sheet["targets"] + ["NEW.md"])
+        sheet["ops"] = sheet["ops"] + [dict(op="create-file", path="NEW.md", content_digest=digest)]
+        obs = planner.investigate(root, sources=sheet["sources"], targets=sheet["targets"])
+        observed = attempt(_canonical_toml, obs.observation, "the fixture observation")[0] or {}
+        sheet["expected_observation_digest"] = observed.get("observation_digest", "")
+        return sheet
+
+    def _create_fixture(temp, digest):
+        root = Path(temp).resolve()
+        (root / "keep.md").write_bytes(b"kept\n")
+        head = _selftest_git_commit(root)
+        sheet = _create_sheet(root, head, digest)
+        frozen_bytes = _freeze(root, sheet)[0] or b""
+        approval_bytes_ = attempt(_capture_approval_engine, root, frozen_bytes, sheet, "adopter", now)[0] or b""
+        return root, sheet, frozen_bytes, approval_bytes_
+
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root, csheet, cplan, capproval = _create_fixture(temp, plan_digest(b"kept\n"))
+        cdoc = attempt(frozen_plan, cplan)[0] or dict(run_id=rid, ops=[])
+        crid = cdoc["run_id"]
+        # PRECONDITION: the fixture froze and was approved with its create-file row.
+        check("driver-create-fixture-frozen-and-approved", bool(cplan) and bool(capproval)
+              and "create-file" in [row["op"] for row in cdoc["ops"]])
+        before = _snapshot(root)
+        # digest drift: the source changes after re-derivation proved the plan fresh, so the bytes no longer
+        # hash to the declared digest; apply names the drift and writes nothing (red against a reader that
+        # skips its own digest check, where the composer's generic digest refusal speaks instead).
+        real_rederive = rederive_bound_or_refuse
+
+        def drifting(product_root, *args):
+            bound = real_rederive(product_root, *args)
+            (Path(product_root) / "keep.md").write_bytes(b"drifted\n")
+            return bound
+        with typed_driver(stood_in), mock.patch.dict(globals(), rederive_bound_or_refuse=drifting):
+            err = refusal(_run_apply_engine, root, cplan, capproval, csheet)
+        check("driver-create-file-source-drift-refused",
+              "drifted from the declared content_digest" in (err or "") and "'NEW.md'" in (err or "")
+              and "before anything is written" in (err or "")
+              and _snapshot(root) == dict(before, **{"keep.md": b"drifted\n"}), observed=err)
+        (root / "keep.md").write_bytes(b"kept\n")
+        # GREEN-ON-REVERT GUARD (the composer's own digest check, which this change keeps): a reader that
+        # returned other bytes would still refuse in the write-free preflight, with nothing written.
+        with typed_driver(stood_in), mock.patch.object(planner, "bound_create_content",
+                                                       lambda *args: {"NEW.md": b"other\n"}):
+            err = refusal(_run_apply_engine, root, cplan, capproval, csheet)
+        check("driver-create-file-content-digest-rechecked",
+              "do not match its content_digest" in (err or "") and _snapshot(root) == before, observed=err)
+        # successful composition: the real handler creates the planned bytes (red against a driver that
+        # passes no content to the OpContext, or a _DRIVER_UNSUPPLIED still carrying create-file).
+        with typed_driver(stood_in):
+            ctxn, cerr = attempt(_run_apply_engine, root, cplan, capproval, csheet)
+        cafter = _snapshot(root)
+        check("driver-create-file-composes-bound-bytes", ctxn == crid and cerr is None
+              and cafter.get("NEW.md") == b"kept\n" and cafter.get("keep.md") == b"kept\n", observed=cerr)
+    # a missing source: no observed file holds the declared digest, so apply names it and writes nothing
+    # (red against a driver that still refuses create-file as unsupplied, which names no source).
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root, msheet, mplan, mapproval = _create_fixture(temp, plan_digest(b"never observed\n"))
+        before = _snapshot(root)
+        with typed_driver(stood_in):
+            err = refusal(_run_apply_engine, root, mplan, mapproval, msheet)
+        check("driver-create-file-missing-source-refused", bool(mplan) and bool(mapproval)
+              and "no plan-bound source supplies its bytes" in (err or "") and "'NEW.md'" in (err or "")
+              and "before anything is written" in (err or "") and _snapshot(root) == before, observed=err)
 
     # 11c: the driver's archive rule over a planner-frozen MOVE fixture (claude round 2, MEDIUM-2): one
     # occupying move source (.working/TODO.md, a declared view target) and one non-occupying one

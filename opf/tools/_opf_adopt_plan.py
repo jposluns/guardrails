@@ -1130,6 +1130,54 @@ def _order_ops(dispositions, additional):
     return before + additional[:cut] + after + additional[cut:]
 
 
+def bound_create_content(product_root, inventory, ops):
+    """The planned bytes of each create-file row in `ops`, read from the one source the plan binds for
+    them: a file the sealed planning `inventory` observed at exactly the row's content_digest (the first
+    such path in sorted order). The plan's inventory_digest seals that observation, so the source is the
+    plan's own, never a value supplied beside it. Each source is re-read live beneath the product root,
+    no-follow and tied to its opened inode (_read), and its bytes must still hash to the declared
+    content_digest. Returns {path: bytes}. Raises PlanError when no observed file holds a row's digest
+    (a missing source) or the live bytes no longer hash to it (digest drift); nothing is written."""
+    wanted = [row for row in ops if row["op"] == "create-file"]
+    if not wanted:
+        return {}
+    observed = sorted((row["path"], row["digest"]) for row in inventory["observation"]["entries"]
+                      if row["kind"] == "file")
+    content = {}
+    store._journal.require_containment()
+    root_fd = store._open_dir_nofollow(product_root)
+    try:
+        for row in wanted:
+            digest = row["content_digest"]
+            held = [path for path, seen in observed if seen == digest]
+            if not held:
+                raise PlanError("no file the plan's inventory observed holds create-file {!r}'s "
+                                "content_digest {}, so no plan-bound source supplies its bytes "
+                                "(fail-closed)".format(row["path"], digest))
+            source = held[0]
+            try:
+                parent, name = store._journal._open_parent(root_fd, source)
+            except (OSError, store._journal.JournalError) as exc:
+                raise PlanError("the plan-bound source {!r} of create-file {!r} cannot be opened "
+                                "({}); fail-closed".format(source, row["path"], exc))
+            try:
+                before = os.stat(name, dir_fd=parent, follow_symlinks=False)
+                data = _read(parent, name, before, [0])
+            except OSError as exc:
+                raise PlanError("the plan-bound source {!r} of create-file {!r} cannot be read "
+                                "({}); fail-closed".format(source, row["path"], exc))
+            finally:
+                store._journal._close_fd_propagating(parent)
+            if _digest(data) != digest:
+                raise PlanError("the plan-bound source {!r} of create-file {!r} drifted from the declared "
+                                "content_digest {}; a fresh plan with its own approval is the remedy "
+                                "(fail-closed)".format(source, row["path"], digest))
+            content[row["path"]] = data
+    finally:
+        store._journal._close_fd_propagating(root_fd)
+    return content
+
+
 def re_full_nonce(value):
     return len(value) == 16 and all(c in "0123456789abcdef" for c in value)
 
