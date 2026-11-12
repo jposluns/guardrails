@@ -7256,14 +7256,15 @@ def _cpu_judge_coverage_problems(source):
     time, resource, os, posix or nt; a _hook_cpu_timed call with no bound (by keyword or position) or
     with a constant runs under 2, or whose result is not unpacked into a pair whose time the first
     later if-statement naming it compares with exactly the bound expression passed (outside
-    _cpu_judge_failures, whose rows test the judge itself); a _cpu_bound_judge call outside
-    _cpu_judge_failures that passes reference or baseline (by keyword, by position or through **), or
-    retimes other than retimes=runs - 1 in _hook_cpu_timed, so a judging helper cannot judge against a
-    forged baseline or reference or with more retimings than its row's runs allow; a judging helper
-    (_CPU_JUDGED_HELPERS) that does not call _cpu_bound_judge, or a median helper (_CPU_MEDIAN_HELPERS)
-    that does not pass median=True; a live lex-cost row (its CPU argument not a recorded constant) given
-    no retime; and _deadline_shape_failures not passing a cpu_retime built by _deadline_case_in_context
-    over the contexts _deadline_shape_runs filled.
+    _cpu_judge_failures and the functions nested in it, whose rows test the judge itself, matched by
+    that exact dotted name, so another function whose name only starts with it is checked); a
+    _cpu_bound_judge call outside those same functions that passes reference or baseline (by keyword, by
+    position or through **), or retimes other than retimes=runs - 1 in _hook_cpu_timed, so a judging
+    helper cannot judge against a forged baseline or reference or with more retimings than its row's runs
+    allow; a judging helper (_CPU_JUDGED_HELPERS) that does not call _cpu_bound_judge, or a median helper
+    (_CPU_MEDIAN_HELPERS) that does not pass median=True; a live lex-cost row (its CPU argument not a
+    recorded constant) given no retime; and _deadline_shape_failures not passing a cpu_retime built by
+    _deadline_case_in_context over the contexts _deadline_shape_runs filled.
     NOT closed, disclosed: a clock reached without an attribute of its name in the source (getattr with
     a computed string, times read on anything but an imported name, such as sys.modules["posix"].times
     or a module passed as an argument, a clock passed in from another module, or a clock read in a child
@@ -7273,7 +7274,14 @@ def _cpu_judge_coverage_problems(source):
     more chances at a loaded reference; the judge's inputs changed anywhere but its call (an assignment
     to _cpu_reference_floor, _cpu_reference_seconds or a _CPU_ constant: the recorded rows catch such a
     change only where it alters an outcome they pin, as a changed margin, cap, retime count or warm-up
-    count does, and a cached baseline forged before the first live row is not caught at all); and a
+    count does, and a cached baseline forged before the first live row is not caught at all); runs
+    reassigned inside _hook_cpu_timed before its judge call, which like a changed runs default gives
+    every row more retimings; a retime callable replaced where the judge is called, such as lambda: 0.0
+    in _hook_cpu_timed or in _deadline_shape_verdicts, which this check does not see and the run-time
+    rows catch instead (cpu-judge-live-slow at _hook_cpu_timed, cpu-judge-retime-context-retimed in
+    _deadline_shape_verdicts); a cpu_retime other than the one _deadline_shape_failures builds, passed
+    by it, which this check does not see and no row here is shown to catch; any call inside
+    _cpu_judge_failures or a function nested in it, exempt from the call checks above by design; and a
     comparison of the time made somewhere other than the first later if-statement naming it, or one
     made inert inside that if-statement, such as (_ut_cpu >= 1.0 and False)."""
     import ast
@@ -7310,8 +7318,9 @@ def _cpu_judge_coverage_problems(source):
                         child.lineno, inner, text(child)))
             if isinstance(child, ast.Call):
                 name, keywords = callee(child), {kw.arg: kw.value for kw in child.keywords}
+                judge_rows = inner == "_cpu_judge_failures" or inner.startswith("_cpu_judge_failures.")
                 if name == "_hook_cpu_timed":
-                    if not inner.startswith("_cpu_judge_failures"):
+                    if not judge_rows:
                         rows.append(child)
                     bound = keywords.get("bound", child.args[1] if len(child.args) > 1 else None)
                     runs = keywords.get("runs", child.args[2] if len(child.args) > 2 else None)
@@ -7323,7 +7332,7 @@ def _cpu_judge_coverage_problems(source):
                                                                and runs.value >= 2):
                         out.append("line {}: a _hook_cpu_timed call with runs under 2 is never re-timed".format(
                             child.lineno))
-                if name == "_cpu_bound_judge" and not inner.startswith("_cpu_judge_failures"):
+                if name == "_cpu_bound_judge" and not judge_rows:
                     retimes = keywords.get("retimes", child.args[3] if len(child.args) > 3 else None)
                     if (len(child.args) > 4 or None in keywords or "reference" in keywords or "baseline" in keywords
                             or any(isinstance(arg, ast.Starred) for arg in child.args)):
@@ -7410,8 +7419,10 @@ def _cpu_judge_baseline_failures():
     """(cpu-judge-baseline-*) The quiet baseline of the judge's reference workload (_cpu_reference_baseline)
     on recorded readings: _cpu_reference_seconds is replaced by a recorded sequence and the cached baseline
     is emptied for each row, both restored afterwards; no handler is run. The seven warm-up readings are
-    0.05, 0.01, 0.07, 0.04, 0.02, 0.06 and 0.03 s: their median is 0.04 s, their least 0.01 s and the first
-    0.05 s, so a baseline taken as the least of seven or from the first reading is not 0.04 s, and a
+    0.05, 0.01, 0.07, 0.04, 0.02, 0.065 and 0.03 s, not symmetric about their median: their median is
+    0.04 s, their mean about 0.0407 s, the mean of the five left when the least and the greatest are
+    dropped 0.041 s, their least 0.01 s, their greatest 0.07 s and the first 0.05 s, so a baseline taken
+    as their mean, a trimmed mean, the least, the greatest or the first reading is not 0.04 s, and a
     warm-up of any other count reads other than seven readings.
     cpu-judge-baseline-median: the first call reads exactly the seven warm-up readings and gives 0.04 s, and
     a second call gives 0.04 s again with no further reading.
@@ -7421,9 +7432,11 @@ def _cpu_judge_baseline_failures():
     times the median, factor 1.375, so 1.4 s corrects to about 1.02 s, over the bound): the row judges
     1.4 s after eleven readings in all and the cached baseline is still exactly [0.04]. A baseline that a
     later reading lowered (to 0.005 s), or one taken as the least of seven (0.01 s), puts the second
-    factor at the 1.5 cap and clears the row at about 0.93 s, so both fail this row."""
+    factor at the 1.5 cap and clears the row at about 0.93 s, so both fail this row; a baseline taken as
+    the mean (factor about 1.351) or the trimmed mean (about 1.341) fails it on its factor and its
+    cached baseline."""
     out = []
-    warmup = (0.05, 0.01, 0.07, 0.04, 0.02, 0.06, 0.03)
+    warmup = (0.05, 0.01, 0.07, 0.04, 0.02, 0.065, 0.03)
     feed, calls = [iter(())], []
 
     def reference():
@@ -7491,7 +7504,9 @@ def _cpu_judge_failures():
     median of 1.6 s with retimings exactly 1.5 times the bound at the cap judges 1.6 s. No retime
     judges the first reading as it is (cpu-judge-vectors-no-retime).
     cpu-judge-baseline-median and cpu-judge-baseline-fixed: the baseline is the median of seven recorded
-    warm-up readings and no later reading lowers it (_cpu_judge_baseline_failures).
+    warm-up readings that are not symmetric about it, so neither their mean, a trimmed mean, their least,
+    their greatest nor the first reading gives it, and no later reading lowers it
+    (_cpu_judge_baseline_failures).
     cpu-judge-quiet-retime-median: a lex-cost median of 1.6 s with a 0.4 s retiming under a quiet
     reference (the reference workload and its cached baseline replaced by constants for the call, then
     restored) gives exactly its one median failure line.
@@ -7520,7 +7535,10 @@ def _cpu_judge_failures():
     ap-c95e with runs=1; ap-c95e with bound=9.0 against its comparison with 1.0; a thread clock read
     through time.clock_gettime; a clock imported by name from time; a clock alias; a listed site's line
     reused in a new local helper; os.times through import os as o; posix.times; _hook_cpu_timed and
-    the dl-shape verdicts each judging against a forged baseline=1e-6; and each passing retimes=50.
+    the dl-shape verdicts each judging against a forged baseline=1e-6, and each passing retimes=50;
+    _hook_cpu_timed passing a forged reference by keyword, a forged baseline through ** and a forged
+    baseline by position; times imported by name from posix and from nt; and a forged baseline=1e-6
+    in a function whose name only starts with _cpu_judge_failures.
     cpu-judge-coverage-mutants-apply: each mutant's text occurs exactly once in the source.
     cpu-judge-coverage-positional: ap-c95e with its bound passed by position gives no coverage problem."""
     out = []
@@ -7697,6 +7715,21 @@ def _cpu_judge_failures():
              "retimes=runs - 1)", "_cpu_bound_judge(spent, bound, retime, retimes=runs - 1, baseline=1e-6)"),
             ("_hook_cpu_timed retiming more often than its runs", "_cpu_bound_judge(spent, bound, " "retime, "
              "retimes=runs - 1)", "_cpu_bound_judge(spent, bound, retime, retimes=50)"),
+            ("_hook_cpu_timed judging against a forged reference by keyword", "_cpu_bound_judge(spent, bound, "
+             "retime, " "retimes=runs - 1)", "_cpu_bound_judge(spent, bound, retime, retimes=runs - 1, "
+             "reference=lambda: 1.0)"),
+            ("_hook_cpu_timed judging against a forged baseline through **", "_cpu_bound_judge(spent, bound, "
+             "retime, " "retimes=runs - 1)", "_cpu_bound_judge(spent, bound, retime, retimes=runs - 1, "
+             "**{\"baseline\": 1e-6})"),
+            ("_hook_cpu_timed judging against a forged baseline by position", "_cpu_bound_judge(spent, bound, "
+             "retime, " "retimes=runs - 1)", "_cpu_bound_judge(spent, bound, retime, runs - 1, None, 1e-6)"),
+            ("a clock imported by name from posix", "\n\ndef _cpu_judge_failures():",
+             "\n\nfrom posix import times as _mutant_times\n\n\ndef _cpu_judge_failures():"),
+            ("a clock imported by name from nt", "\n\ndef _cpu_judge_failures():",
+             "\n\nfrom nt import times as _mutant_times\n\n\ndef _cpu_judge_failures():"),
+            ("a forged baseline in a function whose name only starts with _cpu_judge_failures",
+             "\n\ndef _cpu_judge_failures():", "\n\ndef _cpu_judge_failures_mutant():\n    return _cpu_bound_judge("
+             "1.0, 1.0, None, baseline=1e-6)\n\n\ndef _cpu_judge_failures():"),
             ("dl-shape judging against a forged baseline", "cpu_retime(name, shape, size, cwd)[0]), " "median=True)",
              "cpu_retime(name, shape, size, cwd)[0]), median=True, baseline=1e-6)"),
             ("dl-shape retiming more often", "cpu_retime(name, shape, size, cwd)[0]), " "median=True)",
