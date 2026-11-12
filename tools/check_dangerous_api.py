@@ -228,22 +228,25 @@ import statement in the same scope included, can then load from the mutated path
 by the dotted name of the enclosing def, async def or class, not by the true Python scope: a
 lambda or comprehension shares the name of the function, class or module around it, and two
 scopes with one dotted name, such as a function defined twice, one name in both branches of an
-if, or a class and a function of one name, are paired, which errs toward reporting; an insert
-in one function and the importer in a function of another name, a mutation whose importer
-is in a nested function, a module-level mutation whose importer is in a top-level def, a
-class-body mutation whose importer is in a method of that class, and a mutation in a def
-whose importer is at module level are not paired); a plain import statement after a
-sys.path insert or append in the same scope (not counted because it matches about 160 live
-scopes, most of them a tool importing its own directory, so counting it would over-fire);
-a literal module name for a file the code itself writes under a name the tree or the
-standard library already holds (the literal is read as known), a dotted name whose first
-part is a standard-library name included; importlib.util.find_spec of a dotted name (it
-imports the parent packages of that name); any API other than the importers named above
-(importlib.import_module, the __import__ spellings, pkgutil.resolve_name, pydoc.locate
-and importlib.reload) that imports a module by name or from a path is not counted either
-(among those reviewed: pkgutil.walk_packages, pkgutil.get_data, importlib.resources.files, a
-string target of mock.patch, and unittest's TestLoader loadTestsFromName and discover); an
-importer reached
+if, or a class and a function of one name, are paired, which errs toward reporting; a mutation
+is paired only with an importer whose enclosing dotted name is identical, the module counting
+as one name, and any other placement is not paired, for example an insert in one function and
+the importer in a function of another name, a mutation whose importer is in a nested function
+or the reverse, a module-level mutation whose importer is in a top-level def, a class body or
+a method, a class-body mutation whose importer is in a method of that class or at module
+level, a method mutation whose importer is in its class body, a mutation in a def whose
+importer is at module level or in a class body, and a mutation and an importer in methods of
+one name in two classes of different names); a plain import statement after a sys.path insert
+or append in the same scope (not counted because it matches about 160 live scopes, most of
+them a tool importing its own directory, so counting it would over-fire); a literal module
+name for a file the code itself writes under a name the tree or the standard library already
+holds (the literal is read as known), a dotted name whose first part is a standard-library
+name included; importlib.util.find_spec of a dotted name (it imports the parent packages of
+that name); any API other than the importers named above (importlib.import_module, the
+__import__ spellings, pkgutil.resolve_name, pydoc.locate and importlib.reload) that imports a
+module by name or from a path is not counted either (among those reviewed:
+pkgutil.walk_packages, pkgutil.get_data, importlib.resources.files, a string target of
+mock.patch, and unittest's TestLoader loadTestsFromName and discover); an importer reached
 through an alias of getattr (g = getattr, then g(importlib, "import_module")(n)) is not
 followed, since only a getattr called directly in the call position is; while a
 repository module is known only by the stem of a scanned *.py file, so a literal dotted
@@ -3027,10 +3030,11 @@ _SYSPATH_SHARED = (
 )
 
 # Two scopes with one dotted name pair, whichever holds the mutation and which the importer: a
-# function defined twice, one name in both branches of an if, a class and a function of one
-# name, an async def and a def of one name, and a method of one name in two classes of one
-# name. The self-test also reads these with pairing by definition (each def, async def or class
-# told apart by its line), where none may report code-syspath.
+# function defined twice (once with the importer in the first), one name in both branches of
+# an if, a class and a function of one name, an async def and a def of one name, and a method
+# of one name in two classes of one name. The self-test also reads these with pairing by
+# definition (each def, async def or class told apart by its line), where none may report
+# code-syspath.
 _SYSPATH_SAME_NAME = (
     "import importlib, sys\ndef load(td):\n    sys.path.insert(0, str(td))\n"
     "def load():\n    return importlib.import_module('json')\n",
@@ -3042,6 +3046,34 @@ _SYSPATH_SAME_NAME = (
     "def load():\n    return importlib.import_module('json')\n",
     "import importlib, sys\nclass C:\n    def load(self, td):\n        sys.path.append(str(td))\n"
     "class C:\n    def load(self):\n        return importlib.import_module('json')\n",
+    "import importlib, sys\ndef load():\n    return importlib.import_module('json')\n"
+    "def load(td):\n    sys.path.insert(0, str(td))\n",
+)
+
+# A mutation pairs only with an importer whose enclosing dotted name is identical, so one in a
+# scope that encloses the other's, or is enclosed by it, does not pair: a module-level mutation
+# and an importer in a top-level def or a class body, a class-body mutation and an importer in
+# a method of that class or at module level, a def mutation and a module-level importer, once
+# with the importer first, a nested def mutation and an importer in the def around it, and a
+# method mutation and an importer in its class body. None may report code-syspath; the
+# self-test also reads them with pairing by enclosing scope, where each must report it.
+_SYSPATH_UNPAIRED = (
+    "import importlib, sys\nsys.path.insert(0, str(td))\n"
+    "def load():\n    return importlib.import_module('json')\n",
+    "import importlib, sys\nsys.path.append(str(td))\n"
+    "class C:\n    mod = importlib.import_module('json')\n",
+    "import importlib, sys\nclass C:\n    sys.path.insert(0, str(td))\n"
+    "    def load(self):\n        return importlib.import_module('json')\n",
+    "import importlib, sys\nclass C:\n    sys.path.append(str(td))\n"
+    "mod = importlib.import_module('json')\n",
+    "import importlib, sys\ndef add(td):\n    sys.path.insert(0, str(td))\n"
+    "mod = importlib.import_module('json')\n",
+    "import importlib, sys\nmod = importlib.import_module('json')\n"
+    "def add(td):\n    sys.path.append(str(td))\n",
+    "import importlib, sys\ndef load(td):\n    def add():\n        sys.path.insert(0, str(td))\n"
+    "    add()\n    return importlib.import_module('json')\n",
+    "import importlib, sys\nclass C:\n    def add(self, td):\n        sys.path.append(str(td))\n"
+    "    mod = importlib.import_module('json')\n",
 )
 
 # Negative vectors: the safe spellings each check must leave alone.
@@ -3647,6 +3679,33 @@ def self_test():
     finally:
         _Scanner.visit_FunctionDef = _Scanner.visit_AsyncFunctionDef = enter
         _Scanner.visit_ClassDef = enter
+    # Pairing needs an identical dotted name: no unpaired vector reports code-syspath, and with
+    # a mutation also paired with an importer in an enclosing or enclosed scope, each does.
+    for source in _SYSPATH_UNPAIRED:
+        if any(item[4] == "code-syspath" for item in scan_source(source)):
+            failures.append("sys.path mutation and importer of different dotted names paired: "
+                            + repr(source))
+    finish = _Scanner.finish
+
+    def related(qual, scope):
+        return qual == scope or "<module>" in (qual, scope) or qual.startswith(scope + ".") \
+            or scope.startswith(qual + ".")
+
+    def by_enclosing_scope(self):
+        scopes = list(self.importer_scopes)
+        for _node, qual, _name in self.syspath_pending:
+            if any(related(qual, scope) for scope in scopes):
+                self.importer_scopes.add(qual)
+        finish(self)
+
+    _Scanner.finish = by_enclosing_scope
+    try:
+        for source in _SYSPATH_UNPAIRED:
+            if not any(item[4] == "code-syspath" for item in scan_source(source)):
+                failures.append("no code-syspath with pairing by enclosing scope: "
+                                + repr(source))
+    finally:
+        _Scanner.finish = finish
     # \z is read as an end anchor: with it dropped from the end anchors, its vectors pass.
     global _REGEX_ENDS
     ends, _REGEX_ENDS = _REGEX_ENDS, tuple(end for end in _REGEX_ENDS if end != "\\z")
@@ -3720,14 +3779,15 @@ def self_test():
           " them), {} reimporter sys.path vectors (each loses its code-syspath with the"
           " reimporters dropped from the scope registration), {} lambda and comprehension"
           " sys.path vectors that lose it with each given a name of its own and {} same-name"
-          " sys.path vectors that lose it with pairing by definition, {} \\z vectors"
+          " sys.path vectors that lose it with pairing by definition, {} unpaired sys.path"
+          " vectors that gain it with pairing by enclosing scope, {} \\z vectors"
           " that pass without \\z as an end anchor, {} leading comment-group vectors that flip"
           " with only flag groups read as leading, {} scoped u vectors that pass with u not"
           " clearing ASCII, {} getattr(x, \"getattr\") and {} __builtins__ vectors that pass"
           " without that reading.".format(
               len(POSITIVE_VECTORS), len(generated), len(NEGATIVE_VECTORS), len(TREE_VECTORS),
               2 + len(_IMPORT_STDLIB), len(_SYSPATH_REIMPORTERS), len(_SYSPATH_SHARED),
-              len(_SYSPATH_SAME_NAME),
+              len(_SYSPATH_SAME_NAME), len(_SYSPATH_UNPAIRED),
               len(_REGEX_END_Z), len(_REGEX_LEADING_COMMENT) + len(_REGEX_LEADING_ASCII),
               len(_REGEX_SCOPE_U), len(_GETATTR_BY_NAME),
               len(_BUILTINS_DUNDER) + len(_BUILTINS_BOUND)))

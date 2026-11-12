@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "a4043e055fccbf1d537ea9222d5cd25323eba84ecc7bce565bcfd0ca8618c35e"
+tree-sha256 = "b1dc8a76b8647b783e84172839ee19d1b3c66838ad28f65739cd2457f0c2a632"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -71,8 +71,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 591719
-sha256 = "df5ab26ad9358a537edb2e291dd0e1f3617919c2f38eb01076b9a53dd9ba4a52"
+bytes = 592275
+sha256 = "85c24cec7d9d62e5befea9effe2f06b057bae732a8ccdefebdbb57d867daa7a9"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -826,8 +826,8 @@ sha256 = "0b38d8d8ebf794ff90d1966dd4032ceb40562575431b9dac1507e41f899aa16f"
 
 [[sources]]
 path = ".aiqt/enforceability.json"
-bytes = 1130689
-sha256 = "2898293054e75a3224296012eef0223c55edf0dc944df81f0590828e16306e4b"
+bytes = 1132357
+sha256 = "bb1fb6ebccf22ca39d1c2d89c7b6058379f3e18295768c752b0ee1f200d4675b"
 
 [[sources]]
 path = ".aiqt/frozen.json"
@@ -2391,8 +2391,8 @@ sha256 = "854403d7fd810507f024d0ff23a6db4c8bcf8978ea92210d7536a247d5c0fd28"
 
 [[sources]]
 path = "ENFORCEMENT.md"
-bytes = 659572
-sha256 = "636289d2618ab81a04d89c076eaa912459862557fff4e75012c5f7096a994224"
+bytes = 660128
+sha256 = "8f00b26759d3d27c44d4ce887dd6c87abb537eb0a9702c69d1d9408425ef668b"
 
 [[sources]]
 path = "GEMINI.md"
@@ -3956,8 +3956,8 @@ sha256 = "dd0e5f2a6402329e70ad8e81e5cd63557683e24044cd3eb16686a60eaf81cae6"
 
 [[sources]]
 path = "site/enforcement.html"
-bytes = 719822
-sha256 = "bb07d9f02f9a203de5dcccc750fad3582893eee04d10cf0df78334e56dbc4fdc"
+bytes = 720378
+sha256 = "96e3cd5165fadd17e065eb67f00ae7a1750a898868f80f3bb7048bdc1a58fee9"
 
 [[sources]]
 path = "site/evidence.html"
@@ -4181,8 +4181,8 @@ sha256 = "0238bb4c907c358a4718a70f8630a92517444f64139b4c0517004bfdbf2321ec"
 
 [[sources]]
 path = "tools/check_dangerous_api.py"
-bytes = 227263
-sha256 = "258a0bd2726a49f7859f0b3f73c4c0daceced9896581d819e85a55f8f0abc6f0"
+bytes = 230923
+sha256 = "cf514c872063ec7363651cca8d5a345495fc146e79c4100197c5079439231359"
 
 [[sources]]
 path = "tools/check_derived_command_parameters.py"
