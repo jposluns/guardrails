@@ -1508,9 +1508,9 @@ def _gather_active_records(root_fd, machine_rel, enabled_types, layout, register
             unread.add(tname)
             continue
         if _schema_deferred(tname):
-            # F4/round-5 F-2: a record whose schema has not shipped in the baseline validator (a module-tier
-            # type, or the importer legacy_fragment type) defers its CONTENT schema to a named
-            # CANNOT-EVALUATE rather than the baseline validator's false "not a supported type".
+            # A record whose schema has not shipped in the baseline validator (a module-tier type, or the
+            # importer legacy_fragment type) defers its CONTENT schema to a named CANNOT-EVALUATE rather than
+            # the baseline validator's false "not a supported type".
             if layout == "per-record":
                 # round-7 BLOCKER: per-record bodies still need STRUCTURAL reconciliation (orphan bodies,
                 # row/body id-state-digest binding, path canonicality, the reverse body-file scan) even when
@@ -2168,9 +2168,9 @@ def _validate_archive(root_fd, machine_rel, enabled_types, registered_vendors, i
                 continue
             deferred = _schema_deferred(tname)
             if deferred and rows:
-                # F4/round-5 F-2: an archived record whose schema has not shipped in the baseline validator
-                # (module-tier, or importer legacy_fragment) is deferred to a named CANNOT-EVALUATE rather
-                # than the baseline validator's false "not a supported type".
+                # An archived record whose schema has not shipped in the baseline validator (module-tier, or
+                # importer legacy_fragment) is deferred to a named CANNOT-EVALUATE rather than the baseline
+                # validator's false "not a supported type".
                 rep.cant("{}: {} archived schema-deferred record(s) of type {!r}; {}".format(
                     idx_rel, len(rows), tname, _SCHEMA_DEFERRAL))
             idx_ids, idx_counted = set(), True
@@ -4298,8 +4298,9 @@ def _check_canonical_store_files(root_fd, machine_rel, manifest_data, rep, impor
     <type>.index.toml, which _validate_archive grades, keep this check during the partial import. A file
     that cannot be read or parsed is left to the check that reads it, EXCEPT init.toml, whose only reader
     is this leg, so its faults are graded here (unreadable is a CANNOT-EVALUATE, unparseable a finding),
-    never a silent pass. A non-canonical managed or archived file is advised to be restored from the
-    integration base; an unregistered stray has no base version, so its finding advises removal or
+    never a silent pass. A non-canonical managed file, or an archive file _validate_archive grades, is
+    advised to be restored from the integration base; an unregistered stray (outside the archive, or an
+    _archive_triaged_file path inside it) has no base version, so its finding advises removal or
     re-admission through opf instead. It proves serialization only: a hand edit that leaves canonical
     bytes is not detected here."""
     cls = classify_containment(manifest_data, machine_rel)
@@ -4359,7 +4360,7 @@ def _check_canonical_store_files(root_fd, machine_rel, manifest_data, rep, impor
                                 full, _safe_display(str(exc))))
                 continue
             if not _opf_emit.matches_store_bytes(raw, fresh):
-                if managed or archived:
+                if managed or (archived and not _archive_triaged_file(cls.archive_root, full)):
                     rep.finding("C-CONTAINMENT: machine-store file {!r} is not in canonical emitted form "
                                 "(it carries comments or non-canonical serialization, which no sanctioned "
                                 "writer produces); restore it from the integration base and redo the "
@@ -6751,6 +6752,20 @@ def self_test():
                       and "integration base" not in m and "no base version" in m
                       for m in _cjr.by_check.get("C-CONTAINMENT", []))
               and any("unregistered path '.working/toml/junk.toml'" in m for m in _cjr.findings))
+        # The same holds inside the archive tree: at steady state a non-index file in a bucket is an
+        # _archive_unmanaged path with no base version, so its canonical finding advises removal, never a
+        # restore, while the files _validate_archive grades keep the restore advice (the partial-import
+        # archive vectors below). Flip: the old managed-or-archived advice condition gives it the restore.
+        _caj = clean_machine()
+        _caj["archive/2026/notes.toml"] = "a = 1 # a hand comment\n"
+        _cajr = run(_caj)
+        check("canonical-archive-stray-no-base-advice",
+              _cajr is not None and _cajr.status == INVALID
+              and any("'.working/toml/archive/2026/notes.toml'" in m and _canon in m
+                      and "integration base" not in m and "no base version" in m
+                      for m in _cajr.by_check.get("C-CONTAINMENT", []))
+              and any("unregistered path '.working/toml/archive/2026/notes.toml'" in m
+                      for m in _cajr.findings))
         # A partial import SUBSTANTIATED by an active imports/<run-id> run triages stray paths (VALID):
         # the stray junk and the active run interior both land in triage, never a finding (codex-2).
         RUNID = "imp-20260601T000000Z-0123456789abcdef"

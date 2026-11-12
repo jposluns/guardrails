@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "24eb8cf16d970d4e7d503351bbdecdfbaf701e1e59ab44a429230e847615df75"
+tree-sha256 = "03bdd18394d8d0e0e37efa6df69977ea48f2b8228503ad55da48c04ef6daaa14"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -942,7 +942,7 @@ sha256 = "592f6c7648751c99981f2bb90cdd9c8859030e4444328d8893e3d98a8cbf9088"
 [[sources]]
 path = ".aiqt/tracker-label-baseline.toml"
 bytes = 5110
-sha256 = "6fad18d936e8d1e250ceaf7de87f41a2ac8188e188fcbcfc9063cd06c62cf742"
+sha256 = "9a01b7cdc7122ec8e1367de6648422e2e45a928c66628a546503621d0af23a18"
 
 [[sources]]
 path = ".baseline/check_palette.py"
@@ -3141,8 +3141,8 @@ sha256 = "46fc281172a82ade8fe5915f6b3a4db47e3929f05efef1ea4964bb97553b0e7d"
 
 [[sources]]
 path = "opf/tools/_opf_check.py"
-bytes = 913266
-sha256 = "268832b14c97261e6641c0aa396108b281f91a78f61175c82c24a7faea12ede4"
+bytes = 914427
+sha256 = "c9348f32bce46de23199dbc2bdc65154a2156a71a8b0c54573e9a04f5c5baaaa"
 
 [[sources]]
 path = "opf/tools/_opf_declaration.py"
