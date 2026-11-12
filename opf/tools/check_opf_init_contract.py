@@ -5,8 +5,8 @@ contract surface is registered. Fail-closed: exit 2 (CANNOT-EVALUATE) on a missi
 or a changed source shape that means the contract can no longer be checked; exit 1 (DRIFT) on a concrete
 mismatch; exit 0 clean. Run from any working directory: python3 -I -B <OPF root>/tools/
 check_opf_init_contract.py [--self-test | --parent-integration]. Any other argument list (a misspelled
-or extra flag, also one beside --self-test) is refused with exit 2 before anything is read, so a
-misspelled flag never runs the OPF-local mode or the self-test in its place.
+or extra flag, also one beside --self-test) is refused with exit 2 before any contract source or
+roster is read, so a misspelled flag never runs the OPF-local mode or the self-test in its place.
 
 Every path is resolved from the OPF root, the directory above this script's own directory, never from
 the calling directory, so the gate runs the same in a standalone OPF tree and in an OPF tree nested in
@@ -16,10 +16,13 @@ interpreter, its standard library, /proc and the validator child's temporary fil
 The default (OPF-local) run checks the contract sources and the OPF-local rosters: the OPF runner
 tools/run_all_checks.sh must register the validator self-test, this gate's self-test and this gate's
 live run as three separate registrations, and a step of the OPF workflow .github/workflows/quality.yml
-must run that runner, with no if: or continue-on-error on the step or its job (a parsed YAML subset;
-see _workflow_runs_runner for the residuals). A workflow outside that subset, a folded block scalar (>)
-or an indentation indicator among them, is refused with exit 2 (cannot evaluate), never read line by
-line. The roster check reads lines, not shell control flow: a registration line after an exit 0,
+must run that runner, with no if: and no continue-on-error other than false on the step or its job, and
+no BASH_ENV or ENV in the env: of the step, its job or the workflow (a parsed YAML subset; see
+_workflow_runs_runner for the residuals). A workflow outside that subset is refused with exit 2 (cannot
+evaluate), never read line by line: among them a workflow with a folded block scalar (>) or an
+indentation indicator, and one with a carriage return left after reading (CRLF and CR line ends are
+read as LF) or a U+0085, U+2028 or U+2029 character anywhere, characters a YAML 1.1 reader takes as
+line breaks. The roster check reads lines, not shell control flow: a registration line after an exit 0,
 inside an if false block, inside a here-document or inside a function that is never called is not seen
 as dead and still counts, as does a standalone-closure entry line inside a string literal.
 --parent-integration adds the parent repository's rosters, read from the directory above the OPF root:
@@ -610,15 +613,25 @@ _YAML_KEY_RE = re.compile(r"""([A-Za-z0-9_-]+|"[^"]*"|'[^']*'):(?:\s(.*))?""")
 
 
 def _yaml_subset(text):
-    """Parse the block-YAML subset a workflow uses into dicts, lists and strings: block mappings and
-    sequences by indentation, plain and quoted scalars (a plain scalar's " #" comment dropped), literal
-    block scalars (|, |- or |+, kept as their lines dedented by the first content line's indent and
-    joined by newlines) and a one-line flow collection kept as its text. Raise ValueError on anything else
-    (a tab in an indent, a duplicate key, a line at an unexpected indent, a document marker, a folded
-    block scalar >, an indentation indicator, a literal block line indented less than its first content
-    line), so a shape this parser does not know never reads as a runner step. A folded block is refused
-    rather than read line by line: YAML joins its lines with spaces, so a first line # skip turns the
-    whole value into one shell comment."""
+    """Parse the block-YAML subset a workflow uses into dicts, lists, strings and None (an empty value):
+    block mappings and sequences by indentation, plain scalars (a plain scalar's " #" comment dropped),
+    quoted scalars kept as the text between their quotes (escapes not decoded), literal block scalars
+    (|, |- or |+, kept as their lines dedented by the first content line's indent and joined by
+    newlines, the result's leading and trailing newlines dropped whatever the chomping indicator) and a
+    one-line flow collection read as a plain scalar, so kept as text. Lines are split on LF alone, so a
+    carriage return (the gate's _read has already turned CRLF and CR line ends into LF), U+0085, U+2028
+    or U+2029 anywhere in the text raises ValueError: a YAML 1.1 reader breaks a line at each, so a key
+    after one would sit unseen on what this parser reads as a comment or a scalar. Raise ValueError as
+    well on a tab in an indent, a duplicate key, a line at an unexpected indent, a document marker, a
+    block scalar as a sequence item, a folded block scalar (>), an indentation indicator, a literal
+    block line indented less than its first content line and a blank line before that first content
+    line longer than its indent, so none of these shapes reads as a runner step. Anchors, aliases and
+    tags are not interpreted: where this parser accepts one, its characters stay in the scalar text. A
+    folded block is refused rather than read line by line: YAML joins its lines of equal indent with
+    spaces (a blank or more-indented line keeps a line break), so a first line # skip followed by the
+    command at the same indent turns the whole value into one shell comment."""
+    if any(mark in text for mark in ("\r", "\x85", "\N{LINE SEPARATOR}", "\N{PARAGRAPH SEPARATOR}")):
+        raise ValueError("a carriage return or a U+0085, U+2028 or U+2029 line break")
     lines = text.split("\n")
     n = len(lines)
     if any(line.lstrip(" ").startswith("\t") for line in lines):
@@ -655,6 +668,11 @@ def _yaml_subset(text):
         if widths and min(widths) < widths[0]:
             raise ValueError("block scalar line indented less than its first line")
         width = widths[0] if widths else 0
+        for line in body:
+            if line.strip():
+                break
+            if widths and len(line) > width:
+                raise ValueError("block scalar blank line longer than its first line's indent")
         return "\n".join(line[width:] for line in body).strip("\n"), k
 
     def value(rest, k, ind):
@@ -740,24 +758,41 @@ def _unconditional(entry):
     return "if" not in entry and entry.get("continue-on-error", "false") == "false"
 
 
+_STARTUP_ENV = ("BASH_ENV", "ENV")
+
+
+def _no_startup_env(entry):
+    """True when a workflow, job or step (a parsed mapping) sets neither BASH_ENV nor ENV: its env: is
+    absent, empty or a mapping without either key. A non-interactive bash sources the file BASH_ENV names
+    before the step's script, and that file can end the step with exit 0 before the runner starts; ENV,
+    the startup file of an interactive POSIX shell, is refused with it as a precaution. An env: this
+    parser keeps as text (a flow mapping or an expression) cannot be read, so it counts as setting one."""
+    env = entry.get("env")
+    return env is None or (isinstance(env, dict) and not any(key in env for key in _STARTUP_ENV))
+
+
 def _workflow_runs_runner(text):
     """True when the workflow text has a job and a step in it, both unconditional, whose step runs the OPF
-    runner (_runs_runner) with no working-directory and a bash shell (the shell: key absent or bash);
-    None when the text is outside the parsed YAML subset (_yaml_subset); False otherwise. Stated
-    residuals, not checked: the workflow's triggers, job- and workflow-level defaults, a needs: on
-    another job (a needed job that is skipped or fails skips the runner's job), and whether a prior step
-    ends the job early."""
+    runner (_runs_runner) with no working-directory and a bash shell (the shell: key absent or bash), and
+    neither that step, its job nor the workflow sets BASH_ENV or ENV (_no_startup_env); None when the
+    text is outside the parsed YAML subset (_yaml_subset); False otherwise. Stated residuals, not
+    checked: the workflow's triggers, job- and workflow-level defaults, a needs: on another job (a
+    needed job that is skipped or fails skips the runner's job), whether a prior step ends the job early
+    or sets BASH_ENV for later steps through the GITHUB_ENV file, and the environment the runner machine
+    itself supplies."""
     try:
         doc = _yaml_subset(text)
     except ValueError:
         return None
-    jobs = doc.get("jobs") if isinstance(doc, dict) else None
+    jobs = doc.get("jobs") if isinstance(doc, dict) and _no_startup_env(doc) else None
     for job in (jobs.values() if isinstance(jobs, dict) else ()):
-        if not isinstance(job, dict) or not _unconditional(job) or not isinstance(job.get("steps"), list):
+        if (not isinstance(job, dict) or not _unconditional(job) or not _no_startup_env(job)
+                or not isinstance(job.get("steps"), list)):
             continue
         for step in job["steps"]:
-            if (isinstance(step, dict) and _unconditional(step) and "working-directory" not in step
-                    and step.get("shell", "bash") == "bash" and _runs_runner(step.get("run"))):
+            if (isinstance(step, dict) and _unconditional(step) and _no_startup_env(step)
+                    and "working-directory" not in step and step.get("shell", "bash") == "bash"
+                    and _runs_runner(step.get("run"))):
                 return True
     return False
 
@@ -1673,7 +1708,22 @@ def _self_test_runner_rosters():
                 "      - uses: actions/checkout@v4\n        with:\n          persist-credentials: false\n"
                 + step)
     named = "      - name: OPF runner\n        shell: bash\n"
-    for label, text, want in (
+    runner = "        run: bash tools/run_all_checks.sh\n"
+    # This parser splits lines on LF alone, while a YAML 1.1 reader also breaks a line at a carriage
+    # return, U+0085, U+2028 and U+2029, so a key after one would hide on what reads here as a comment or
+    # a scalar: each is refused in a comment line, in a plain scalar's comment and at job level.
+    line_breaks = []
+    for name, mark in (("a carriage return", "\r"), ("U+0085", "\x85"), ("U+2028", "\N{LINE SEPARATOR}"),
+                       ("U+2029", "\N{PARAGRAPH SEPARATOR}")):
+        line_breaks += [
+            (name + " in a comment line before if: false",
+             workflow(named + "        # note" + mark + "        if: false\n" + runner), None),
+            (name + " in a plain scalar's comment before continue-on-error: true",
+             workflow(named + runner.rstrip("\n") + "  # note" + mark + "        continue-on-error: true\n"),
+             None),
+            (name + " in a job-level comment line before if: false",
+             workflow(named + runner, "    # note" + mark + "    if: false\n"), None)]
+    for label, text, want in tuple(line_breaks) + (
             ("the live file's shape", workflow(named + "        run: bash tools/run_all_checks.sh\n"), True),
             ("bash ./ path", workflow(named + "        run: bash ./tools/run_all_checks.sh\n"), True),
             ("the bare path", workflow(named + "        run: tools/run_all_checks.sh\n"), True),
@@ -1718,8 +1768,8 @@ def _self_test_runner_rosters():
                                          "        run: bash tools/run_all_checks.sh\n"), None),
             ("a line at an unexpected indent",
              workflow(named + "         run: bash tools/run_all_checks.sh\n"), None),
-            # A folded block joins its lines with spaces, so a leading comment line comments out the
-            # runner; the literal block of the same lines runs it.
+            # A folded block joins lines of equal indent with spaces, so a leading comment line comments
+            # out the runner; the literal block of the same lines runs it.
             ("a literal block with a comment line first", workflow(
                 named + "        run: |\n          # skip runner\n          bash tools/run_all_checks.sh\n"), True),
             ("a folded block with a comment line first", workflow(
@@ -1736,7 +1786,35 @@ def _self_test_runner_rosters():
              workflow(named + "        run: |4\n          bash tools/run_all_checks.sh\n"), None),
             ("a literal block line indented less than its first line", workflow(
                 named + "        run: |\n            # skip runner\n          bash tools/run_all_checks.sh\n"),
-             None)):
+             None),
+            # A blank line before the first content line may be no longer than that line's indent (10).
+            ("a literal block with a leading blank line of 11 spaces", workflow(
+                named + "        run: |\n" + " " * 11 + "\n          bash tools/run_all_checks.sh\n"), None),
+            ("a literal block with a leading blank line of 10 spaces", workflow(
+                named + "        run: |\n" + " " * 10 + "\n          bash tools/run_all_checks.sh\n"), True),
+            ("a literal block with a leading blank line of 9 spaces", workflow(
+                named + "        run: |\n" + " " * 9 + "\n          bash tools/run_all_checks.sh\n"), True),
+            # bash sources the file BASH_ENV names before the step's script, and that file can end the step
+            # with exit 0, so BASH_ENV (and ENV with it) in the env: of the step, its job or the workflow
+            # keeps the runner from running; an env: kept as text cannot be read and counts as setting it.
+            ("a step env: setting BASH_ENV",
+             workflow(named + "        env:\n          BASH_ENV: tools/skip.sh\n" + runner), False),
+            ("a step env: setting ENV", workflow(named + "        env:\n          ENV: tools/skip.sh\n" + runner),
+             False),
+            ("a step env: setting a quoted BASH_ENV key",
+             workflow(named + '        env:\n          "BASH_ENV": tools/skip.sh\n' + runner), False),
+            ("a step env: as a flow mapping", workflow(named + "        env: {BASH_ENV: tools/skip.sh}\n" + runner),
+             False),
+            ("a step env: setting another variable",
+             workflow(named + "        env:\n          LANG: C\n" + runner), True),
+            ("a job env: setting BASH_ENV",
+             workflow(named + runner, "    env:\n      BASH_ENV: tools/skip.sh\n"), False),
+            ("a job env: setting ENV", workflow(named + runner, "    env:\n      ENV: tools/skip.sh\n"), False),
+            ("a job env: setting another variable", workflow(named + runner, "    env:\n      LANG: C\n"), True),
+            ("a workflow env: setting BASH_ENV",
+             "env:\n  BASH_ENV: tools/skip.sh\n" + workflow(named + runner), False),
+            ("a workflow env: setting ENV", "env:\n  ENV: tools/skip.sh\n" + workflow(named + runner), False),
+            ("a workflow env: setting another variable", "env:\n  LANG: C\n" + workflow(named + runner), True)):
         _expect(_workflow_runs_runner(text) is want,
                 "runner rosters: an OPF workflow with {} must give {}, got {}".format(
                     label, want, _workflow_runs_runner(text)))
