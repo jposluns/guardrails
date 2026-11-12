@@ -845,6 +845,7 @@ def _quiet(call, *args):
 def self_test():
     """Synthetic OPF roots and fake runners, run through run_suite and validate_registry in process (the
     fake runners run as real children through the bootstrap shim). Each vector names the leg it pins."""
+    _child_status_refusal_exit("check_opf_selftest_execution.py")
     failures = []
     count = 0
     reporting = _DEMO_REPORTING
@@ -945,7 +946,9 @@ def main(argv=None):
 # Inline, not imported, so this gate stays one file with no import beyond the report module its children
 # load. This file launches every registered suite and reads each child's exit status, so under an ignored
 # SIGCHLD it would read a failing suite as a pass; it refuses at its entry line instead, before main()
-# runs.
+# runs. Its self-test launches fake runners as children too, so the guard also runs as the first
+# statement of self_test(); the entry line comes after the --self-test statement that opf.py requires
+# first in the __main__ block.
 # The status the probe child exits with; any value other than 0 and the refusal exit would do.
 _CHILD_STATUS_PROBE_CODE = 77
 
@@ -998,4 +1001,6 @@ def _child_status_refusal_exit(name):
 
 
 if __name__ == "__main__":
+    if sys.argv[1:] == ["--self-test"]:
+        sys.exit(self_test())
     sys.exit(_child_status_refusal_exit("check_opf_selftest_execution.py") or main())

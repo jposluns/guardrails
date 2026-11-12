@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "db4cc7710f55d87efc18de0d9612f7e1e833581b85af321ba08724b3f3ec8952"
+tree-sha256 = "0233b5c862c0e5b94aae369d99bf013e3e69ba6df86e73fa82dc3b270d94c3b4"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -3481,8 +3481,8 @@ sha256 = "dd031f0f75629c4eeca26d53edb56be8b660a70c2d313b2973632d5483c9c74d"
 
 [[sources]]
 path = "opf/tools/check_opf_selftest_execution.py"
-bytes = 52669
-sha256 = "8dbe375a0e5cee3b52d5a2dea8beb07a5f97f5db2aee9b0a627e8a2bd86777bf"
+bytes = 53027
+sha256 = "a44f372fad4d953c52bf577aacec2823eea90df73d7eb7041cc642ad1b78edb0"
 
 [[sources]]
 path = "opf/tools/opf-declaration.toml"
@@ -4171,8 +4171,8 @@ sha256 = "9387831df89640649d02a6382c5714bbcd2afc7079a5ccba60c8632d3f3349d2"
 
 [[sources]]
 path = "tools/check_child_status_coverage.py"
-bytes = 226999
-sha256 = "0f3592bab672a199e0d3601f7798e9cf8df74b9a03443455b4edd5d1be5d6580"
+bytes = 227043
+sha256 = "c4795eb69c8f28c392f1736427365de3959a4cd0bef351a902c9fb0ad3130b9e"
 
 [[sources]]
 path = "tools/check_ci_parity.py"
@@ -4316,8 +4316,8 @@ sha256 = "e77c1875e2792a260b893816e5798a0ed19fdc7c49668c2a14f2258ca40a37ae"
 
 [[sources]]
 path = "tools/check_opf_standalone_closure.py"
-bytes = 340394
-sha256 = "5a84d0e6518d11c47300eac4236476ea7f76101f918f9a33367a9038233e4eee"
+bytes = 343382
+sha256 = "92f70229f785028134a0464578bd456c4e1072034410bdae5992212072ad97e1"
 
 [[sources]]
 path = "tools/check_overclaim.py"
@@ -4696,8 +4696,8 @@ sha256 = "982b66da8d9e1a5d4f0a3c084bc699e32aee547d7fe7d3de1841f6a38e84b02f"
 
 [[sources]]
 path = "tools/selftest_git_fixture_env.py"
-bytes = 461918
-sha256 = "c4a8f85b6cc22ee0f18ef55186cb1dda24c92b0f317e67505683b11531ceeeaa"
+bytes = 462662
+sha256 = "fff4c72e0193dfeed9e395eecedf46ada95ebeafdafbf1802a18750d947b89f1"
 
 [[sources]]
 path = "tools/selftest_git_fixture_env_config_combined.py"
