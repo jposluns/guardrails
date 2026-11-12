@@ -2096,19 +2096,21 @@ def _rdp_timing_rows(shapes, timer, budget=_RDP_TIMING_BUDGET, runaway=_RDP_TIMI
     rounds narrow what the growth bound catches, a reduction accepted so that load on a linear screen's
     short reference timing does not fail it. Before them a growth fault in two groups failed the shape; now
     two more ways pass it. A term near the bound, a few percent over it in two groups, can come out under it
-    in the confirm rounds and pass (on one host a prefix-count mutant, text.count("\\n", 0, i) every 2200
-    characters inside _rdp_hidden, failed the confirm rounds with its larger step about 3 percent over the
-    bound). And load confined to the confirm rounds that lifts the smaller sizes' screen or the larger
-    sizes' reference more than the other leg in every one of them flattens their multiples and passes a
-    growth fault two groups found, where before the confirm rounds it failed (decision case
-    quadratic-reference-lifted-confirm-rounds-only: not linear with confirm 0, linear with the default; a
-    lift that leaves the confirm multiple growing just over the bound still fails). Load that flattens two
-    groups' multiples passes a growth fault, as it did before the confirm rounds. A growth fault well over
-    the bound in a real screen still fails in the confirm rounds (rdp/label-screen-linear-time-mutant). With
-    confirm 0 a growth fault fails the shape at once, the behaviour before the confirm rounds. A timing over
-    runaway CPU seconds fails the shape at once ("runaway") and the shape is not timed again. A timing
-    starts only while the row has spent under budget CPU seconds; once it has not, the shape and every later
-    one fail untimed ("over budget"), confirm rounds included."""
+    in the confirm rounds and pass. A term can also fail there: on one host a prefix-count mutant,
+    text.count("\\n", 0, i) every 2200 characters inside _rdp_hidden, did not pass, since its growth fault
+    reproduced in the confirm rounds and failed the shape (no artefact in the repository keeps that run's
+    output, so how far over the bound it was is not given here). And load confined to the confirm rounds
+    that lifts the smaller sizes' screen or the larger sizes' reference more than the other leg in every one
+    of them flattens their multiples and passes a growth fault two groups found, where before the confirm
+    rounds it failed (decision case quadratic-reference-lifted-confirm-rounds-only: not linear with confirm
+    0, linear with the default; a lift that leaves the confirm multiple growing just over the bound still
+    fails). Load that flattens two groups' multiples passes a growth fault, as it did before the confirm
+    rounds. A growth fault well over the bound in a real screen still fails in the confirm rounds
+    (rdp/label-screen-linear-time-mutant). With confirm 0 a growth fault fails the shape at once, the
+    behaviour before the confirm rounds. A timing over runaway CPU seconds fails the shape at once
+    ("runaway") and the shape is not timed again. A timing starts only while the row has spent under budget
+    CPU seconds; once it has not, the shape and every later one fail untimed ("over budget"), confirm rounds
+    included."""
     spent = 0.0
     rows = []
 
@@ -2260,37 +2262,43 @@ def _rdp_label_screen_mutant_timing(row, timer):
     one run whose output no artefact in the repository keeps either, they measured 3.8 to 3.9, 9.8 to 10.0
     and 33.8 to 34.0, growing 2.53 to 2.62 and 3.39 to 3.46. Load can turn the row red in at least the four
     ways below, a list that illustrates and does not claim to be complete, and these margins say how much
-    load each needs, not that load cannot supply it. The row's timer counts CPU seconds, so on a host that
-    does not charge hypervisor steal time to the process, load reaches its bounds only by slowing the
-    process's own work, not by time the process spends waiting for a core. On a virtual machine whose
-    kernel lacks paravirtual steal accounting (CONFIG_PARAVIRT_TIME_ACCOUNTING), time its virtual CPU waits
-    for a physical core while running the process is not subtracted from the process's CPU time, so load
-    elsewhere on the physical host can lift a timing too. First, a false "linear": a timing reads linear
-    only when a group or the confirm rounds hold each doubling's growth of the multiple under the bound's
-    square root of 2, so load would have to cut the two doublings' growth about 1.76 and 2.40 times in
-    every round of two groups, or of the confirm rounds, by lifting one leg against the other: for example
-    the 256 KiB screen 1.76 times and the 1 MiB reference 2.40 times, or the 512 KiB reference 1.76 times
-    and the 1 MiB reference about 4.2 times. In that second example the 1 MiB reference's lift of about 4.2
-    is the product of the two doublings' cuts (1.76 times 2.40), since the 512 KiB reference's lift also
-    raises the second doubling's growth 1.76 times; a lift of the 1 MiB reference alone leaves the first
-    doubling's growth near 2.5, which fails however large that lift is. The timing under the ratio bound
-    must also bring every size's multiple under that bound (about 5.25). In the runner's failure that the
-    confirm rounds answer, a 512 KiB reference read about 1.9 times its linear share (from the runner's job
-    log, which the repository does not keep). Second, a runaway: a timing reads "runaway" when one call
-    takes over _RDP_TIMING_RUNAWAY (10) CPU seconds. The cheapest route is to make the 1 MiB mutant call,
-    the row's longest, about 11 to 13 times longer; any other call over 10 CPU seconds, a smaller size's
-    screen or any reference, is a runaway as well, and needs a larger lift of its own time. Third, over
-    budget: a timing reads "over budget" when its calls have spent _RDP_TIMING_BUDGET (180) CPU seconds
-    before a later call starts, a budget each of the two timings has to itself, so load would have to make
-    the longer one's CPU time about 15.5 times longer (the two together spent about 17). Fourth, a ratio
-    fault on the timing with the lifted bound: that bound is the shape's multiplied by 1000 (5250), finite,
-    not disabled, and a ratio fault in either failing group fails the shape at once ("not linear" with no
-    confirm round), so the row's requirement that the verdict read "confirmed over" fails. Load would have
-    to lift a screen timing against its reference about 150 times at 1 MiB (5250 over about 35) through
-    every round of one of the groups that decide the shape, and more at the smaller sizes; at the 1 MiB
-    call times above, that lift takes the call past the runaway bound first. A term only a few percent over
-    the bound can pass the confirm rounds (_rdp_timing_rows), so this row pins that a clear super-linear
-    term still fails, not that every one does."""
+    load each needs, not that load cannot supply it. The row's timer counts CPU seconds, so time the
+    process spends queued for a core in its own kernel is not counted, and load reaches its bounds by
+    slowing the process's own work, or by time that is not the process's own work but that the kernel
+    charges to it, as in the two cases that follow. On a virtual machine whose kernel lacks paravirtual
+    steal accounting (CONFIG_PARAVIRT_TIME_ACCOUNTING), time its virtual CPU waits for a physical core
+    while running the process is not subtracted from the process's CPU time, so load elsewhere on the
+    physical host can lift a timing. And on a kernel without interrupt time accounting
+    (CONFIG_IRQ_TIME_ACCOUNTING, or with that accounting turned off), time spent in hardware and software
+    interrupts that other load causes is charged to the task it interrupts, so it can lift a timing too.
+    First, a false "linear": a timing reads linear only when a group or the confirm rounds hold each
+    doubling's growth of the multiple under the bound's square root of 2, so load would have to cut the two
+    doublings' growth about 1.76 and 2.40 times in every round of two groups, or of the confirm rounds, by
+    lifting one leg against the other: for example the 256 KiB screen 1.76 times and the 1 MiB reference
+    2.40 times, or the 512 KiB reference 1.76 times and the 1 MiB reference 4.224 times. In that second
+    example the 1 MiB reference's lift of 4.224 is the product of the two doublings' cuts (1.76 times
+    2.40), since the 512 KiB reference's lift also raises the second doubling's growth 1.76 times; a lift
+    of the 1 MiB reference alone leaves the first doubling's growth near 2.5, which fails however large
+    that lift is. The cuts 1.76 and 2.40 are rounded down from the growths over the square root of 2 (about
+    2.5 and 3.4 over 1.414), so the exact threshold of that second lift is near 4.25 (2.5 times 3.4 over
+    2), a little above 4.224; the figures here understate the load needed, which errs toward caution. The
+    timing under the ratio bound must also bring every size's multiple under that bound (about 5.25). In
+    the runner's failure that the confirm rounds answer, a 512 KiB reference read about 1.9 times its
+    linear share (from the runner's job log, which the repository does not keep). Second, a runaway: a
+    timing reads "runaway" when one call takes over _RDP_TIMING_RUNAWAY (10) CPU seconds. The cheapest
+    route is to make the 1 MiB mutant call, the row's longest, about 11 to 13 times longer; any other call
+    over 10 CPU seconds, a smaller size's screen or any reference, is a runaway as well, and needs a larger
+    lift of its own time. Third, over budget: a timing reads "over budget" when its calls have spent
+    _RDP_TIMING_BUDGET (180) CPU seconds before a later call starts, a budget each of the two timings has
+    to itself, so load would have to make the longer one's CPU time about 15.5 times longer (the two
+    together spent about 17). Fourth, a ratio fault on the timing with the lifted bound: that bound is the
+    shape's multiplied by 1000 (5250), finite, not disabled, and a ratio fault in either failing group
+    fails the shape at once ("not linear" with no confirm round), so the row's requirement that the verdict
+    read "confirmed over" fails. Load would have to lift a screen timing against its reference about 150
+    times at 1 MiB (5250 over about 35) through every round of one of the groups that decide the shape, and
+    more at the smaller sizes; at the 1 MiB call times above, that lift takes the call past the runaway
+    bound first. A term only a few percent over the bound can pass the confirm rounds (_rdp_timing_rows),
+    so this row pins that a clear super-linear term still fails, not that every one does."""
     shape, lengths, bound = row
     real = aiqt_hooks._rdp_hidden
 
