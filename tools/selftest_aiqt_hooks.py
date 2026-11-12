@@ -26666,6 +26666,101 @@ def _main_isolated(monitor):
         cr2expect("(ci-cr-ta13) a [trailer section appended to .git/config with an AI-free --trailer value allows",
                   _cr_alias_text + " >> .git/config; git commit -m x --trailer " + shlex.quote("cab=Ada <a@x>"),
                   "allow")
+        # Each configuration word alone decides its row: with that one word dropped from the list, its row
+        # allows. The [include section's printf has no conversion, so only the word reads it.
+        _cr_cfg_words = [
+            ("(ci-cr-cw1) include.path alone", "include.path", "git -c include.path=" + _cr_alias_cfg
+             + " commit -m x --trailer " + _cr_tv),
+            ("(ci-cr-cw2) an [include section appended to .git/config", "[include", "printf "
+             + shlex.quote("[include]\\n\\tpath = " + _cr_alias_cfg + "\\n") + " >> .git/config; git commit -m x "
+             "--trailer " + _cr_tv),
+            ("(ci-cr-cw3) GIT_CONFIG_SYSTEM", "git_config_system", "GIT_CONFIG_SYSTEM=" + _cr_alias_cfg
+             + " git commit -m x --trailer " + _cr_tv),
+            ("(ci-cr-cw4) XDG_CONFIG_HOME", "xdg_config_home", "XDG_CONFIG_HOME=" + str(_cr_dir)
+             + " git commit -m x --trailer " + _cr_tv)]
+        for _cr_label, _cr_word, _cr_command in _cr_cfg_words:
+            cr2expect(_cr_label + " may bring in a trailer key alias, with an AI in the --trailer value, denies",
+                      _cr_command, "deny")
+        _cr_saved_cw = aiqt_hooks._CMTIDN_TRAILER_CONFIG_WORDS
+        _cr_kept = []
+        try:
+            for _cr_label, _cr_word, _cr_command in _cr_cfg_words:
+                aiqt_hooks._CMTIDN_TRAILER_CONFIG_WORDS = tuple(w for w in _cr_saved_cw if w != _cr_word)
+                if _decision(cig, _cr_command) != "allow":
+                    _cr_kept.append(_cr_label)
+        finally:
+            aiqt_hooks._CMTIDN_TRAILER_CONFIG_WORDS = _cr_saved_cw
+        if _cr_kept:
+            failures.append("(ci-cr-cw-revert) with its own word dropped, {} still deny (want allow: the word "
+                            "decides the row)".format(_cr_kept))
+        # A printf whose format holds a conversion builds a [trailer section from its arguments, so the command
+        # text holds no [trailer; such a printf may set a trailer key alias. An AI-free value, and a printf that
+        # builds no section, allow.
+        _cr_printf = [
+            ("(ci-cr-pf1) a [%s section filled by printf arguments", "printf "
+             + shlex.quote('[%s "%s"]\\n\\tkey = %s\\n') + " trailer cab Co-authored-by >> .git/config; git "
+             "commit -m x --trailer " + _cr_tv),
+            ("(ci-cr-pf2) a %c conversion filled with [", "printf "
+             + shlex.quote('%ctrailer "cab"]\\n\\tkey = Co-authored-by\\n') + " '[' >> .git/config; git commit "
+             "-m x --trailer " + _cr_tv),
+            ("(ci-cr-pf3) a section name split across printf arguments", "printf "
+             + shlex.quote('[%s%s "cab"]\\n\\tkey = Co-authored-by\\n') + " trai ler >> .git/config; git commit "
+             "-m x --trailer " + _cr_tv)]
+        for _cr_label, _cr_command in _cr_printf:
+            cr2expect(_cr_label + " may set a trailer key alias, with an AI in the --trailer value, denies",
+                      _cr_command, "deny")
+        cr2expect("(ci-cr-pf4) a [%s section filled by printf arguments with an AI-free --trailer value allows",
+                  "printf " + shlex.quote('[%s "%s"]\\n\\tkey = %s\\n') + " trailer cab Co-authored-by >> "
+                  ".git/config; git commit -m x --trailer " + shlex.quote("cab=Ada <a@x>"), "allow")
+        cr2expect("(ci-cr-pf5) a printf that builds no configuration section, with an AI in a --trailer value and "
+                  "no alias, allows", "printf " + shlex.quote("%s\\n") + " done; git commit -m x --trailer "
+                  + _cr_tv, "allow")
+        _cr_saved_pf = aiqt_hooks._cmtidn_printf_may_set_trailer_key
+        try:
+            aiqt_hooks._cmtidn_printf_may_set_trailer_key = lambda tokens: False
+            _cr_kept = [label for label, command in _cr_printf if _decision(cig, command) != "allow"]
+        finally:
+            aiqt_hooks._cmtidn_printf_may_set_trailer_key = _cr_saved_pf
+        if _cr_kept:
+            failures.append("(ci-cr-pf-revert) with printf's arguments unread, {} still deny (want allow, the "
+                            "earlier gap)".format(_cr_kept))
+        # Under a trailer key alias and any --trailer, git interpret-trailers rewrites a '<token>: VALUE' line
+        # already in the -m message or the -F file into the aliased key, so an AI named in such a line denies.
+        # An AI-free line, a commit with no --trailer, and a command with no alias allow.
+        (_cr_dir / "cabmsg.txt").write_text("fix: parser\n\ncab: " + _cr_ai + " <c@x>\n", encoding="utf-8")
+        (_cr_dir / "cabclean.txt").write_text("fix: parser\n\ncab: Ada <a@x>\n", encoding="utf-8")
+        _cr_alias = "git -c trailer.cab.key=Co-authored-by commit "
+        _cr_so = " --trailer " + shlex.quote("Signed-off-by: M <m@x>")
+        _cr_token_lines = [
+            ("(ci-cr-tl1) an ANSI-C quoted -m message", _cr_alias + "-m $'x\\n\\ncab: " + _cr_ai + " <c@x>'"
+             + _cr_so),
+            ("(ci-cr-tl2) a -m message with a newline", _cr_alias + "-m " + shlex.quote("x\n\ncab: " + _cr_ai
+                                                                                       + " <c@x>") + _cr_so),
+            ("(ci-cr-tl3) an absolute -F message file", _cr_alias + "-F " + str(_cr_dir / "cabmsg.txt") + _cr_so),
+            ("(ci-cr-tl4) a [trailer section appended to .git/config", _cr_alias_text + " >> .git/config; git "
+             "commit -m " + shlex.quote("x\n\ncab: " + _cr_ai + " <c@x>") + _cr_so)]
+        for _cr_label, _cr_command in _cr_token_lines:
+            cr2expect(_cr_label + " holding an AI token line under a trailer key alias and a --trailer denies",
+                      _cr_command, "deny")
+        for _cr_label, _cr_command in [
+                ("(ci-cr-tl5) an AI-free token line in a -m message", _cr_alias + "-m "
+                 + shlex.quote("x\n\ncab: Ada <a@x>") + _cr_so),
+                ("(ci-cr-tl6) an AI-free token line in a -F file", _cr_alias + "-F " + str(_cr_dir / "cabclean.txt")
+                 + _cr_so),
+                ("(ci-cr-tl7) an AI token line with no --trailer", _cr_alias + "-m "
+                 + shlex.quote("x\n\ncab: " + _cr_ai + " <c@x>")),
+                ("(ci-cr-tl8) an AI token line and a --trailer with no alias", "git commit -m "
+                 + shlex.quote("x\n\ncab: " + _cr_ai + " <c@x>") + _cr_so)]:
+            cr2expect(_cr_label + " allows", _cr_command, "allow")
+        _cr_saved_tl = aiqt_hooks._cmtidn_message_token_lines_ai
+        try:
+            aiqt_hooks._cmtidn_message_token_lines_ai = lambda *args: None
+            _cr_kept = [label for label, command in _cr_token_lines if _decision(cig, command) != "allow"]
+        finally:
+            aiqt_hooks._cmtidn_message_token_lines_ai = _cr_saved_tl
+        if _cr_kept:
+            failures.append("(ci-cr-tl-revert) with the message token lines unread, {} still deny (want allow, "
+                            "the earlier gap)".format(_cr_kept))
 
         def cr_reason(command, cwd=None):
             # The deny reason commit_identity gives for command, or "" for any other result.
@@ -26687,6 +26782,12 @@ def _main_isolated(monitor):
         if "--author value" not in _cr_why:
             failures.append("(ci-cr-unread-author) an AI --author value after an unreadable message file gave the "
                             "reason {!r} (want the --author value named)".format(_cr_why[:200]))
+        # A relative -c commit.template is held back like an unreadable file, so a later AI --author names it.
+        _cr_why = cr_reason("git -c commit.template=clean.txt commit --author=" + shlex.quote(_cr_ai + " <c@x>"),
+                            cwd=str(_cr_dir))
+        if "--author value" not in _cr_why:
+            failures.append("(ci-cr-unread-template-author) an AI --author value after a relative commit template "
+                            "gave the reason {!r} (want the --author value named)".format(_cr_why[:200]))
         # The no-break space the credit-line rows test is written as an escape: neither this suite nor either
         # hook copy holds a literal U+00A0, which reads as a plain space in review and in a diff.
         _cr_nbsp_kept = [rel for rel in ("tools/selftest_aiqt_hooks.py", ".aiqt/core/hooks/scripts/aiqt_hooks.py",

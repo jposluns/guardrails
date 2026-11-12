@@ -5226,11 +5226,13 @@ _CMTIDN_WORKTREE_KEY_RE = re.compile(r"(?i)^core\.worktree(?:=|$)")
 # echo, or appended to .git/config), an include (include.path, includeIf, an '[include' section) or a
 # configuration file named by GIT_CONFIG_GLOBAL, GIT_CONFIG_SYSTEM or XDG_CONFIG_HOME, any of which can bring in
 # such a section. The text is read as written and again with its backslash escapes decoded as an ANSI-C quote
-# decodes them (a $'...' quote, printf's escapes), and so is each word the shell lexer decodes
-# (_cmtidn_line_ai), so a key spelled with escapes ($'trailer.cab.\x6bey=...') counts. When it may, each
-# --trailer value of a commit-family command that names an AI identity denies (_CmtidnFiles). Substring tests,
-# linear in the command's length; the cost is a safe-direction over-deny of a command that holds such text for
-# another reason and names an AI in a --trailer value.
+# decodes them (a $'...' quote, printf's escapes), so a key spelled with escapes ($'trailer.cab.\x6bey=...')
+# counts. A printf that fills its output from its arguments may set one too (_cmtidn_printf_may_set_trailer_key).
+# When it may, each --trailer value of a commit-family command that names an AI identity denies (_CmtidnFiles),
+# and so does, when the command has any --trailer, a '<token>: VALUE' line naming an AI in its message or message
+# file (_cmtidn_token_line_ai), since git interpret-trailers then rewrites such a line under the aliased key.
+# Substring tests, linear in the command's length; the cost is a safe-direction over-deny of a command that holds
+# such text for another reason and names an AI in a --trailer value or such a line.
 _CMTIDN_TRAILER_KEY_PARTS = ("trailer.", ".key")
 _CMTIDN_TRAILER_CONFIG_WORDS = ("[trailer", "[include", "include.path", "includeif.", "git_config_global",
                                 "git_config_system", "xdg_config_home")
@@ -5246,6 +5248,57 @@ def _cmtidn_may_set_trailer_key(text):
                 or any(word in plain for word in _CMTIDN_TRAILER_CONFIG_WORDS)):
             return True
     return False
+
+
+# A printf whose words hold a conversion ('%' not followed by '%') builds its output from its arguments, so a
+# configuration section it writes need not hold '[trailer' in the command text (printf '[%s "%s"]\n\tkey = %s\n'
+# trailer cab Co-authored-by >> .git/config, or printf '%ctrailer ...' '['). Such a printf may set a
+# trailer.<token>.key when its words after the printf word, joined and read with their backslash escapes decoded,
+# hold 'trailer' in any letter case, or hold both a '[' and an '=' (a section header and a setting line, in
+# whatever order the arguments fill them in). A section header or key built at run time ($x, $(...)) is not seen.
+_CMTIDN_PRINTF_CONVERSION_RE = re.compile(r"%(?!%)")
+
+
+def _cmtidn_printf_may_set_trailer_key(tokens):
+    """True when this segment runs printf (after reserved words, VAR=value words and a wrapper such as env or
+    command, or builtin) with a conversion in its words and a word text that may build a trailer section
+    (_CMTIDN_PRINTF_CONVERSION_RE). Linear in the segment's length, never raises."""
+    n = len(tokens)
+    i = 0
+    while i < n and tokens[i] in _CMTIDN_RESERVED:
+        i += 1
+    while i < n and _ENV_ASSIGN_RE.match(tokens[i]):
+        i += 1
+    if i >= n:
+        return False
+    word = tokens[i].rsplit("/", 1)[-1]
+    if word in _CMTIDN_GIT_WRAPPERS or word == "builtin":
+        i = next((j for j in range(i + 1, n) if tokens[j].rsplit("/", 1)[-1] == "printf"), n)
+    elif word != "printf":
+        return False
+    rest = tokens[i + 1:]
+    if not any(_CMTIDN_PRINTF_CONVERSION_RE.search(tok) for tok in rest):
+        return False
+    text = " ".join(rest)
+    text = _ANSI_C_ESCAPE_RE.sub(_ansi_c_escape, text).lower() if "\\" in text else text.lower()
+    return "trailer" in text or ("[" in text and "=" in text)
+
+
+# A message line that git interpret-trailers can read as a trailer of a token: the token's letters, digits, '-'
+# or '_', then a separator character (':' by default; trailer.separators can add others, so any character that
+# is not a letter, digit, '-', '_' or white space counts). Anchored at a line start, linear in the text's length.
+_CMTIDN_TOKEN_LINE_RE = re.compile(r"^[ \t]*[A-Za-z0-9][A-Za-z0-9_-]*[ \t]*[^\sA-Za-z0-9_-][^\n]*", re.M)
+
+
+def _cmtidn_token_line_ai(text):
+    """A hit label for a '<token>: VALUE' line of text (_CMTIDN_TOKEN_LINE_RE) that names an AI identity, else
+    None. Under a trailer.<token>.key setting and any --trailer, git rewrites such a line already in the message
+    into a trailer of the aliased key, a co-author trailer included."""
+    for m in _CMTIDN_TOKEN_LINE_RE.finditer(text):
+        if AI_IDENTITY_RE.search(m.group(0)):
+            return "message line {!r} under a trailer.<token>.key setting and a --trailer".format(
+                m.group(0).strip()[:80])
+    return None
 
 
 class _CmtidnUnread(str):
@@ -5320,7 +5373,7 @@ def _cmtidn_written(files, name):
     return result
 
 
-def _cmtidn_message_file_ai(name, files, judged, relative_ok, what):
+def _cmtidn_message_file_ai(name, files, judged, relative_ok, what, token_lines=False):
     """A hit label for an AI co-author trailer or AI credit line in the file named name, or for a file the
     check cannot resolve or read in full (fail closed, _CMTIDN_FILE_LIMIT), else None. what names the file in
     the label. A name of None is a file option whose value the shell lexer dropped (a process substitution),
@@ -5328,12 +5381,17 @@ def _cmtidn_message_file_ai(name, files, judged, relative_ok, what):
     is scanned in its place. A file the command also names elsewhere fails closed unless each other mention
     writes it from a quoted here-document (_cmtidn_written), whose text is then scanned with the command, beside
     the file when it exists and alone when it does not. relative_ok is False where a relative name's base
-    directory is not the payload's cwd. Each fail-closed label is a _CmtidnUnread."""
+    directory is not the payload's cwd. Each fail-closed label is a _CmtidnUnread. With token_lines True the
+    same text (a file already read is not read again) is scanned instead for a '<token>: VALUE' line naming an
+    AI (_cmtidn_token_line_ai)."""
+    def scan(text, decode=True):
+        return _cmtidn_token_line_ai(text) if token_lines else _message_text_ai(text, judged, decode)
+
     if name is None:
         return _CmtidnUnread("{} option with no value the check can see (a process substitution or another word "
                              "the shell lexer drops)".format(what))
     if name == "-":
-        return _message_text_ai(files.command, judged)
+        return scan(files.command)
     if _CMTIDN_PATH_UNSAFE_RE.search(name) or name.startswith("~") or not name:
         return _CmtidnUnread("{} {!r} whose name holds a character the check does not resolve".format(what, name))
     path = name
@@ -5347,7 +5405,7 @@ def _cmtidn_message_file_ai(name, files, judged, relative_ok, what):
         return _CmtidnUnread("{} {!r} that the command also names elsewhere, where it may write it after the "
                              "check reads it".format(what, name))
     if written:
-        hit = _message_text_ai(files.command, judged)
+        hit = scan(files.command)
         if hit is not None:
             return hit
     if path not in files.read:
@@ -5363,7 +5421,7 @@ def _cmtidn_message_file_ai(name, files, judged, relative_ok, what):
         if written and reason == "it does not exist":
             return None  # the command writes the file from a quoted here-document, scanned above
         return _CmtidnUnread("{} {!r} that the check could not read: {}".format(what, name, reason))
-    hit = _message_text_ai(text, judged, False)
+    hit = scan(text, False)
     return None if hit is None else "{} in {} {!r}".format(hit, what, name)
 
 
@@ -5512,9 +5570,13 @@ def _commit_message_and_author_ai(tokens, judged, files=None, relative_ok=False,
     is not taken for a template; before it, a git -c commit.template=FILE value names a template that is read
     the same way when FILE is an absolute path, and fails closed otherwise, since git resolves a relative one
     against the repository top, not the cwd. A file the check cannot read (_CmtidnUnread) is returned only once
-    the rest of the segment holds no other hit, so an AI --author value or trailer after it names the deny."""
+    the rest of the segment holds no other hit, so an AI --author value or trailer after it names the deny. When
+    the command may set a trailer.<token>.key and the segment has any --trailer, a '<token>: VALUE' line naming an
+    AI in a message, message file or template denies too (_cmtidn_message_token_lines_ai)."""
     n = len(tokens)
     unread = None
+    any_trailer = False
+    messages = []  # the message, message file and template values, read for token lines at the end
     for i in range(min(start, n)):
         tok = tokens[i]
         hit = _message_text_ai(tok, judged)
@@ -5559,6 +5621,10 @@ def _commit_message_and_author_ai(tokens, judged, files=None, relative_ok=False,
             unread = unread or hit
         elif hit is not None:
             return hit
+        if kind == "trailer":
+            any_trailer = True
+        elif kind in ("message", "file") and value is not None:
+            messages.append((kind, value))
         if (kind == "trailer" and value is not None and files is not None and files.trailer_key
                 and AI_IDENTITY_RE.search(value)):
             # The command may set trailer.<token>.key, which records this value as a trailer of that key, a
@@ -5573,7 +5639,41 @@ def _commit_message_and_author_ai(tokens, judged, files=None, relative_ok=False,
         if kind == "author" and value is not None and AI_IDENTITY_RE.search(value):
             return "--author value {!r}".format(value.strip()[:80])
         i += 1
+    if any_trailer and files is not None and files.trailer_key:
+        hit = _cmtidn_message_token_lines_ai(messages, files, judged, relative_ok)
+        if hit is not None:
+            return hit
     return unread
+
+
+def _cmtidn_message_token_lines_ai(messages, files, judged, relative_ok):
+    """A hit label for a '<token>: VALUE' line naming an AI (_cmtidn_token_line_ai) in a commit's messages, a
+    commit message file or template (messages, (kind, value) pairs), else None, for a commit with a --trailer
+    under a command that may set a trailer.<token>.key. A message value is read as the lexer gives it, the whole
+    command text stands in for one holding a command substitution, and the decoded body of each ANSI-C quote of
+    the command is read too (the lexer keeps a $'...\\n...' body's escapes undecoded, so its lines have no line
+    start). A file is read through _cmtidn_message_file_ai, whose fail-closed result was already kept by the
+    caller. Each text is scanned at most once, so the cost stays linear in the command and the files read."""
+    texts = []
+    whole = False
+    for kind, value in messages:
+        if kind == "message":
+            texts.append(value)
+            whole = whole or "$(" in value or "`" in value
+    if texts and "$'" in files.command:
+        texts.extend(_ansi_c_body(m) for m in _ANSI_C_QUOTE_RE.finditer(files.command))
+    if whole:
+        texts.append(files.command)
+    for text in texts:
+        hit = _cmtidn_token_line_ai(text)
+        if hit is not None:
+            return "{} in the commit message".format(hit)
+    for kind, value in messages:
+        if kind == "file":
+            hit = _cmtidn_message_file_ai(value, files, judged, relative_ok, "commit message file", True)
+            if hit is not None and not isinstance(hit, _CmtidnUnread):
+                return hit
+    return None
 
 
 def _identity_assignment_ai(tokens):
@@ -5984,10 +6084,10 @@ def _cmtidn_line_ai(command, depth, budgets, unread, paths, judged, from_env=Fal
         files.chdir = files.chdir or any(
             tok in _CMTIDN_CHDIR_WORDS or _CMTIDN_GIT_DIR_ENV_RE.search(tok) or _CMTIDN_WORKTREE_KEY_RE.match(tok)
             for _same, segments in readings for tokens, _sep in segments for tok in tokens)
-        # The words as the lexer decodes them may also set a trailer.<token>.key (_CMTIDN_TRAILER_KEY_PARTS).
-        files.trailer_key = files.trailer_key or any(
-            _cmtidn_may_set_trailer_key(tok) for _same, segments in readings for tokens, _sep in segments
-            for tok in tokens)
+    # A printf segment that builds a configuration section from its arguments may set a trailer.<token>.key
+    # (_cmtidn_printf_may_set_trailer_key); read on every line before any of its segments is judged.
+    files.trailer_key = files.trailer_key or any(
+        _cmtidn_printf_may_set_trailer_key(tokens) for _same, segments in readings for tokens, _sep in segments)
     line_env = None  # read at the first segment that runs git (below)
     for same, segments in readings:
         keys = [reading for reading in paths if reading in same] or [None]
