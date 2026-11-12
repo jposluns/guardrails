@@ -346,7 +346,8 @@ finding. Where the probe sits in a roster (first) is held by
 tools/check_child_status_coverage.py, not here. The OPF init contract gate's
 --parent-integration run is a MANDATORY_MEMBERS entry too: without the flag that gate
 checks only the OPF-local rosters and cannot see its own flag missing, so the flag
-dropped from both runners is a missing-mandatory finding. The extractors implement a disclosed shell and YAML subset; an unknown construct is
+dropped from both runners is a missing-mandatory finding. The
+extractors implement a disclosed shell and YAML subset; an unknown construct is
 cannot-evaluate rather than a clean pass. Fail-closed cases include an unknown
 top-level or job-level workflow key, an exit outside the exact terminal summary
 blocks or the top-level directory-binding line before the first gate, unbalanced
@@ -5672,7 +5673,7 @@ def self_test():
          evaluate(local_fixture(common), ci_fixture(opf_dropped), ()),
          1, ("missing-mandatory", "ci-only", "local-only"),
          (OPF_INIT_CONTRACT_PARENT,), ("opf/tools/check_opf_init_contract.py",))
-    unknown ="python3 -I -B .github/unrecognized.py"
+    unknown = "python3 -I -B .github/unrecognized.py"
     case("01f unknown repository executable refused",
          evaluate(local_fixture(common + (unknown,)),
                   ci_fixture(common + (unknown,)), ()), 2)

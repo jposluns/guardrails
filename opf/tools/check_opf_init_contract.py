@@ -4,8 +4,9 @@ Verifies the frozen contract constants stay aligned with their source authoritie
 contract surface is registered. Fail-closed: exit 2 (CANNOT-EVALUATE) on a missing/unreadable authority
 or a changed source shape that means the contract can no longer be checked; exit 1 (DRIFT) on a concrete
 mismatch; exit 0 clean. Run from any working directory: python3 -I -B <OPF root>/tools/
-check_opf_init_contract.py [--self-test | --parent-integration]. Any other argument is refused with
-exit 2, so a misspelled flag never runs the OPF-local mode in its place.
+check_opf_init_contract.py [--self-test | --parent-integration]. Any other argument list (a misspelled
+or extra flag, also one beside --self-test) is refused with exit 2 before anything is read, so a
+misspelled flag never runs the OPF-local mode or the self-test in its place.
 
 Every path is resolved from the OPF root, the directory above this script's own directory, never from
 the calling directory, so the gate runs the same in a standalone OPF tree and in an OPF tree nested in
@@ -15,7 +16,10 @@ interpreter, its standard library, /proc and the validator child's temporary fil
 The default (OPF-local) run checks the contract sources and the OPF-local rosters: the OPF runner
 tools/run_all_checks.sh must register the validator self-test, this gate's self-test and this gate's
 live run as three separate registrations, and a step of the OPF workflow .github/workflows/quality.yml
-must run that runner, unconditionally (a parsed YAML subset; see _workflow_runs_runner).
+must run that runner, unconditionally (a parsed YAML subset; see _workflow_runs_runner for the
+residuals). The roster check reads lines, not shell control flow: a registration line after an exit 0,
+inside an if false block, inside a here-document or inside a function that is never called is not seen
+as dead and still counts, as does a standalone-closure entry line inside a string literal.
 --parent-integration adds the parent repository's rosters, read from the directory above the OPF root:
 the parent runner must register both self-tests and this gate's live run WITH --parent-integration, and
 the parent's standalone-closure roster must register both self-tests. This gate cannot see its own flag
@@ -730,8 +734,9 @@ def _workflow_runs_runner(text):
     """True when the workflow text has a job and a step in it, both unconditional, whose step runs the OPF
     runner (_runs_runner) with no working-directory and a bash shell (the shell: key absent or bash);
     None when the text is outside the parsed YAML subset (_yaml_subset); False otherwise. Stated
-    residuals, not checked: the workflow's triggers, job- and workflow-level defaults, and whether a
-    prior step ends the job early."""
+    residuals, not checked: the workflow's triggers, job- and workflow-level defaults, a needs: on
+    another job (a needed job that is skipped or fails skips the runner's job), and whether a prior step
+    ends the job early."""
     try:
         doc = _yaml_subset(text)
     except ValueError:
@@ -1802,6 +1807,37 @@ def _self_test_entry_pins():
                     args, code, seen, out.getvalue(), err.getvalue()))
 
 
+# Argument lists that carry --self-test beside another argument: the real entry must refuse each one
+# with exit 2, never run the self-test (or the gate) in its place.
+_ENTRY_REFUSED_ARGS = (["--parent-integraton", "--self-test"], ["--self-test", "--parent-integraton"],
+                       ["--self-test", "--self-test"], ["--self-test", PARENT_FLAG],
+                       [PARENT_FLAG, "--self-test"])
+
+
+def _self_test_entry_arguments():
+    """The entry's routing, run for real: this self-test runs only when its own argument list is exactly
+    --self-test, and the script started as a child with each _ENTRY_REFUSED_ARGS list must end 2 with the
+    unknown-argument refusal as its stderr's first line and nothing on stdout. With the entry back to
+    running the self-test whenever --self-test appears anywhere in sys.argv, the child runs this self-test
+    instead, which stops at the first requirement here (its argument list is not exactly --self-test), so
+    the child ends without the refusal and the vector is red; that requirement also keeps the child from
+    starting children of its own."""
+    import subprocess
+    _expect(sys.argv[1:] == [SELF_TEST], "entry arguments: the self-test must run only for exactly {}, not "
+            "for {!r}".format(SELF_TEST, sys.argv[1:]))
+    tool = str(Path(__file__).resolve())
+    for args in _ENTRY_REFUSED_ARGS:
+        try:
+            child = subprocess.run([sys.executable, "-I", "-B", tool] + args, capture_output=True, text=True,
+                                   timeout=120)
+        except (OSError, subprocess.SubprocessError) as exc:
+            _expect(False, "entry arguments: {!r} did not run ({})".format(args, type(exc).__name__))
+        _expect(child.returncode == 2 and child.stdout == ""
+                and child.stderr.startswith("CANNOT-EVALUATE: unknown argument"),
+                "entry arguments: {!r} must end 2 with the unknown-argument refusal, got {!r} ({!r}, "
+                "{!r})".format(args, child.returncode, child.stdout[-300:], child.stderr[-300:]))
+
+
 def _self_test():
     # Git-free / source-free: exercise the matchers on in-memory text, including the comment-evasion cases.
     _expect(_has_line("KEEP_SCHEMA = 1  # comment", "KEEP_SCHEMA = 1"), "exact line ignores comment")
@@ -1825,6 +1861,7 @@ def _self_test():
     _expect(ACTOR_LINE.count('"') == 8, "actor line shape")
     _self_test_runner_rosters()
     _self_test_entry_pins()
+    _self_test_entry_arguments()
     _self_test_census_errors()
     _self_test_loaded_exit_in_child()
     _self_test_fault_channels()
@@ -2412,9 +2449,10 @@ def _flush_window_failures():
 # The entry wiring, checked statically on this file's own source: the final __main__ block must be
 # exactly _ENTRY_WIRING by AST (spacing and comments aside), so a rewiring that keeps _fail_closed_main
 # defined but routes an entry branch around it (a plain sys.exit around the work, say) is red even though
-# the channel probes above drive _fail_closed_main directly.
+# the channel probes above drive _fail_closed_main directly. The self-test runs only for exactly
+# --self-test; every other argument list goes to _checks, which refuses all but none and PARENT_FLAG.
 _ENTRY_WIRING = '''if __name__ == "__main__":
-    if "--self-test" in sys.argv:
+    if sys.argv[1:] == ["--self-test"]:
         _fail_closed_main(_self_test)
     _fail_closed_main(_checks)
 '''
@@ -2473,6 +2511,6 @@ def _self_test_fault_channels():
 
 
 if __name__ == "__main__":
-    if "--self-test" in sys.argv:
+    if sys.argv[1:] == ["--self-test"]:
         _fail_closed_main(_self_test)
     _fail_closed_main(_checks)
