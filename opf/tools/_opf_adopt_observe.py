@@ -2629,10 +2629,10 @@ exit 0
         # still carry wall-clock bounds that can change their verdict, among
         # them: each row run's 30 s watchdog and its deadlines scaled to
         # connect 2.0 s, inactivity 1.5 s, request 8.0 s and gather 16.0 s;
-        # the TLS fixture's 2.0 s socket timeout (raw.settimeout) and its
-        # 1.0 s stop join; the 2.0 s join of a run's resolver workers (a
-        # straggler fails the row INVALID); the 1.0 s resolver-slot acquire
-        # after a run and in the held-slot queue; the 10 s HELD_JOIN of
+        # the TLS fixture's 2.0 s socket timeout (raw.settimeout); the 2.0 s
+        # join of a run's resolver workers (a straggler fails the row
+        # INVALID); the 1.0 s resolver-slot acquire after a run and in the
+        # held-slot queue; the 10 s HELD_JOIN of
         # resolver-vector/positive-held-slot; the 5.0 s resolver join of
         # resolver-vector/cleanup; and this leg's own 450 s bound
         # (cannot-evaluate/timeout). A heavily loaded host can still fail
@@ -3504,6 +3504,10 @@ def self_test(vectors_only=False, steady_only=False):
             self.requests = []
             self.errors = []
             self.stop = threading.Event()
+            # The connection in flight, which close() shuts down; the lock
+            # orders setting stop against the serving thread taking one.
+            self.lock = threading.Lock()
+            self.connection = None
             self.listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.listener.bind(("127.0.0.1", 0))
             self.listener.listen(8)
@@ -3511,6 +3515,16 @@ def self_test(vectors_only=False, steady_only=False):
             self.port = self.listener.getsockname()[1]
             self.thread = threading.Thread(target=self.serve, daemon=True)
             self.thread.start()
+
+        def hold(self, connection):
+            # Make connection the one close() shuts down, or report that
+            # close() has already run, so the caller abandons it. Either way
+            # no blocking call on it outlasts close().
+            with self.lock:
+                if self.stop.is_set():
+                    return False
+                self.connection = connection
+                return True
 
         def serve(self):
             while not self.stop.is_set():
@@ -3522,11 +3536,19 @@ def self_test(vectors_only=False, steady_only=False):
                     break
                 secured = None
                 try:
+                    if not self.hold(raw):
+                        continue
                     raw.settimeout(2.0)
                     if self.mode == "tls-stall":
                         self.stop.wait(1.10)
                         continue
-                    secured = self.context.wrap_socket(raw, server_side=True)
+                    # Wrapping takes over raw's descriptor, so hold the
+                    # wrapped socket before its handshake can block.
+                    secured = self.context.wrap_socket(
+                        raw, server_side=True, do_handshake_on_connect=False)
+                    if not self.hold(secured):
+                        continue
+                    secured.do_handshake()
                     request = bytearray()
                     while not request.endswith(b"\r\n\r\n"):
                         block = secured.recv(4096)
@@ -3565,16 +3587,33 @@ def self_test(vectors_only=False, steady_only=False):
                 except Exception as exc:
                     self.errors.append(type(exc).__name__)
                 finally:
+                    with self.lock:
+                        self.connection = None
                     if secured is not None:
                         secured.close()
                     raw.close()
 
         def close(self):
-            self.stop.set()
+            # Wait for the serving thread to end, the event this fixture
+            # needs, rather than for a fixed delay that a loaded host can
+            # outlast. Stop is set under the lock and the connection in
+            # flight and the listener are shut down, so every blocking call
+            # in serve() returns at once: an Event wait on stop, a socket
+            # call on the shutdown. The thread then ends however late the
+            # host schedules it.
+            with self.lock:
+                self.stop.set()
+                if self.connection is not None:
+                    try:
+                        socket.socket.shutdown(self.connection, socket.SHUT_RDWR)
+                    except OSError:
+                        pass
+            try:
+                self.listener.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
             self.listener.close()
-            self.thread.join(timeout=1.0)
-            if self.thread.is_alive():
-                raise AssertionError("local TLS fixture did not stop")
+            self.thread.join()
 
     def snapshot(root):
         result = {}
@@ -5084,10 +5123,13 @@ def self_test(vectors_only=False, steady_only=False):
                 executed.append(record_row(case, run, run_case(base, contexts, case, True)))
             vector_results = resolver_vectors(base, contexts)
     except Exception as exc:
+        # The message names the cause, so a failure reads as more than its
+        # exception class.
         executed.append({
             "id": "fixture/setup-or-teardown",
             "test_status": CANNOT_EVALUATE,
             "exception": type(exc).__name__,
+            "detail": str(exc) or "no message",
         })
         SELF_TEST_ROSTER = tuple(executed)
         print(_report_line(executed))
