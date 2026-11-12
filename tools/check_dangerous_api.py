@@ -563,8 +563,9 @@ ALLOWLIST = (
     ("tools/check_release_cut.py", "_census_drain_reaped_row", "shell", 1, _SAVED),
     ("tools/check_release_cut.py", "_census_paused_run", "shell", 1,
      "self-test stub: keeps the real subprocess.Popen to delegate to and restore after patching;"
-     " the wrapper forwards its caller's own arguments and sets two keywords that caller does not"
-     " pass, pass_fds to the gate pipe's read end alone and env to a copy of os.environ with"
+     " the wrapper forwards its caller's own arguments and sets two keywords: pass_fds, which"
+     " that caller does not pass, to the gate pipe's read end alone, and env, replacing the"
+     " caller's copy of os.environ less CENSUS_PAUSE_GATE, to a copy of os.environ with"
      " CENSUS_PAUSE_GATE (that descriptor's number) added; it never sets shell, and no call in"
      " this file turns shell on"),
     ("tools/check_release_cut.py", "_census_run_flipped", "code", 1,
