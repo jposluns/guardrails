@@ -229,15 +229,17 @@ by the dotted name of the enclosing def, async def or class, not by the true Pyt
 lambda or comprehension shares the name of the function, class or module around it, and two
 scopes with one dotted name, such as a function defined twice, one name in both branches of an
 if, or a class and a function of one name, are paired, which errs toward reporting; an insert
-in one function and the importer in a function of another name, and a mutation whose importer
-is in a nested function, are not paired); a plain
-import statement after a sys.path insert or append in the same scope (not counted because it
-matches about 160 live scopes, most of them a tool importing its own directory, so counting
-it would over-fire); a literal module name for a file the code itself writes under a name the
-tree or the standard library already holds (the literal is read as known), a dotted name
-whose first part is a standard-library name included; importlib.util.find_spec of a dotted
-name (it imports the parent packages of that name); any API other than the importers named
-above (importlib.import_module, the __import__ spellings, pkgutil.resolve_name, pydoc.locate
+in one function and the importer in a function of another name, a mutation whose importer
+is in a nested function, a module-level mutation whose importer is in a top-level def, a
+class-body mutation whose importer is in a method of that class, and a mutation in a def
+whose importer is at module level are not paired); a plain import statement after a
+sys.path insert or append in the same scope (not counted because it matches about 160 live
+scopes, most of them a tool importing its own directory, so counting it would over-fire);
+a literal module name for a file the code itself writes under a name the tree or the
+standard library already holds (the literal is read as known), a dotted name whose first
+part is a standard-library name included; importlib.util.find_spec of a dotted name (it
+imports the parent packages of that name); any API other than the importers named above
+(importlib.import_module, the __import__ spellings, pkgutil.resolve_name, pydoc.locate
 and importlib.reload) that imports a module by name or from a path is not counted either
 (among those reviewed: pkgutil.walk_packages, pkgutil.get_data, importlib.resources.files, a
 string target of mock.patch, and unittest's TestLoader loadTestsFromName and discover); an
@@ -3003,6 +3005,45 @@ _SYSPATH_REIMPORTERS = (
     "    return importlib.reload(mod)\n",
 )
 
+# A lambda or comprehension shares the dotted name of the scope around it, so a non-literal
+# sys.path mutation and an importer split between one and its enclosing def or module pair. The
+# self-test also reads these with each lambda and comprehension given a name of its own, where
+# none may report code-syspath.
+_SYSPATH_SHARED = (
+    "import importlib, sys\ndef load(td):\n    sys.path.insert(0, str(td))\n"
+    "    get = lambda: importlib.import_module('json')\n    return get()\n",
+    "import importlib, sys\ndef load(td):\n    add = lambda: sys.path.append(str(td))\n"
+    "    add()\n    return importlib.import_module('json')\n",
+    "import importlib, sys\nsys.path.insert(0, str(td))\n"
+    "get = lambda: importlib.import_module('json')\n",
+    "import importlib, sys\ndef load(td, names):\n    sys.path.insert(0, str(td))\n"
+    "    return [importlib.import_module('json') for _ in names]\n",
+    "import importlib, sys\ndef load(tds):\n    {sys.path.append(str(td)) for td in tds}\n"
+    "    return importlib.import_module('json')\n",
+    "import importlib, sys\ndef load(td, names):\n    sys.path.insert(0, str(td))\n"
+    "    return {n: importlib.import_module('json') for n in names}\n",
+    "import importlib, sys\ndef load(td, names):\n    sys.path.insert(0, str(td))\n"
+    "    return list(importlib.import_module('json') for _ in names)\n",
+)
+
+# Two scopes with one dotted name pair, whichever holds the mutation and which the importer: a
+# function defined twice, one name in both branches of an if, a class and a function of one
+# name, an async def and a def of one name, and a method of one name in two classes of one
+# name. The self-test also reads these with pairing by definition (each def, async def or class
+# told apart by its line), where none may report code-syspath.
+_SYSPATH_SAME_NAME = (
+    "import importlib, sys\ndef load(td):\n    sys.path.insert(0, str(td))\n"
+    "def load():\n    return importlib.import_module('json')\n",
+    "import importlib, sys\nif fast:\n    def load(td):\n        sys.path.append(str(td))\n"
+    "else:\n    def load(td):\n        return importlib.import_module('json')\n",
+    "import importlib, sys\nclass load:\n    sys.path.insert(0, str(td))\n"
+    "def load():\n    return importlib.import_module('json')\n",
+    "import importlib, sys\nasync def load(td):\n    sys.path.insert(0, str(td))\n"
+    "def load():\n    return importlib.import_module('json')\n",
+    "import importlib, sys\nclass C:\n    def load(self, td):\n        sys.path.append(str(td))\n"
+    "class C:\n    def load(self):\n        return importlib.import_module('json')\n",
+)
+
 # Negative vectors: the safe spellings each check must leave alone.
 NEGATIVE_VECTORS = (
     "import yaml\nyaml.load(text, Loader=yaml.SafeLoader)\nyaml.safe_load(text)\n"
@@ -3563,6 +3604,49 @@ def self_test():
                                 + repr(source))
     finally:
         _SCOPE_IMPORTERS = scope_importers
+    # sys.path pairing is by dotted name: a lambda or comprehension shares the name around it,
+    # and two scopes of one name pair. With each lambda and comprehension given a name of its
+    # own, no scope-sharing vector reports code-syspath; with each def, async def or class told
+    # apart by its line, no same-name vector does.
+    for source in _SYSPATH_SHARED + _SYSPATH_SAME_NAME:
+        if not any(item[4] == "code-syspath" for item in scan_source(source)):
+            failures.append("sys.path mutation and importer of one dotted name not paired: "
+                            + repr(source))
+    enter = _Scanner._enter
+
+    def own_name(self, node):
+        self.qual.append("<" + type(node).__name__ + ">")
+        try:
+            enter(self, node)
+        finally:
+            self.qual.pop()
+
+    def by_definition(self, node):
+        self.qual.append(str(node.lineno))
+        try:
+            enter(self, node)
+        finally:
+            self.qual.pop()
+
+    _Scanner.visit_Lambda = _Scanner.visit_ListComp = _Scanner.visit_SetComp = own_name
+    _Scanner.visit_GeneratorExp = _Scanner.visit_DictComp = own_name
+    try:
+        for source in _SYSPATH_SHARED:
+            if any(item[4] == "code-syspath" for item in scan_source(source)):
+                failures.append("code-syspath with lambdas and comprehensions given a name of"
+                                " their own: " + repr(source))
+    finally:
+        _Scanner.visit_Lambda = _Scanner.visit_ListComp = _Scanner.visit_SetComp = enter
+        _Scanner.visit_GeneratorExp = _Scanner.visit_DictComp = enter
+    _Scanner.visit_FunctionDef = _Scanner.visit_AsyncFunctionDef = by_definition
+    _Scanner.visit_ClassDef = by_definition
+    try:
+        for source in _SYSPATH_SAME_NAME:
+            if any(item[4] == "code-syspath" for item in scan_source(source)):
+                failures.append("code-syspath with pairing by definition: " + repr(source))
+    finally:
+        _Scanner.visit_FunctionDef = _Scanner.visit_AsyncFunctionDef = enter
+        _Scanner.visit_ClassDef = enter
     # \z is read as an end anchor: with it dropped from the end anchors, its vectors pass.
     global _REGEX_ENDS
     ends, _REGEX_ENDS = _REGEX_ENDS, tuple(end for end in _REGEX_ENDS if end != "\\z")
@@ -3634,13 +3718,16 @@ def self_test():
           " vectors (each changes outcome without its check), 4 admission vectors, {} literal-"
           "import vectors (the repository module file and the emptied stdlib roster flip"
           " them), {} reimporter sys.path vectors (each loses its code-syspath with the"
-          " reimporters dropped from the scope registration), {} \\z vectors"
+          " reimporters dropped from the scope registration), {} lambda and comprehension"
+          " sys.path vectors that lose it with each given a name of its own and {} same-name"
+          " sys.path vectors that lose it with pairing by definition, {} \\z vectors"
           " that pass without \\z as an end anchor, {} leading comment-group vectors that flip"
           " with only flag groups read as leading, {} scoped u vectors that pass with u not"
           " clearing ASCII, {} getattr(x, \"getattr\") and {} __builtins__ vectors that pass"
           " without that reading.".format(
               len(POSITIVE_VECTORS), len(generated), len(NEGATIVE_VECTORS), len(TREE_VECTORS),
-              2 + len(_IMPORT_STDLIB), len(_SYSPATH_REIMPORTERS),
+              2 + len(_IMPORT_STDLIB), len(_SYSPATH_REIMPORTERS), len(_SYSPATH_SHARED),
+              len(_SYSPATH_SAME_NAME),
               len(_REGEX_END_Z), len(_REGEX_LEADING_COMMENT) + len(_REGEX_LEADING_ASCII),
               len(_REGEX_SCOPE_U), len(_GETATTR_BY_NAME),
               len(_BUILTINS_DUNDER) + len(_BUILTINS_BOUND)))
