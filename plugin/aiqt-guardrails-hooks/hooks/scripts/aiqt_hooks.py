@@ -5164,19 +5164,16 @@ def _message_text_ai(text, judged, decode=True):
     return _co_author_ai(text, judged) or _credit_line_ai(text, judged, decode)
 
 
-def _cmtidn_ansi_c_credit_ai(command, judged):
+def _cmtidn_ansi_c_credit_ai(files, judged):
     """A hit label for an AI credit line in the decoded body of an ANSI-C $'...' quote of the command text
-    (_ANSI_C_QUOTE_RE, _ansi_c_body), else None. The shell lexer keeps such a body's escapes undecoded (it reads
-    \\n as n), so a message or body value given as $'fix\\n\\nGenerated with ...' has no line start for the
-    credit line in its word; each quote of the command is read instead, a safe-direction over-read of a quote
-    that is not the value. Linear in the command's length."""
-    if "$'" not in command:
-        return None
-    for m in _ANSI_C_QUOTE_RE.finditer(command):
-        hit = _credit_line_ai(_ansi_c_body(m), judged)
-        if hit is not None:
-            return hit
-    return None
+    (files.ansi_c_bodies), else None. The shell lexer keeps such a body's escapes undecoded (it reads \\n as n),
+    so a message or body value given as $'fix\\n\\nGenerated with ...' has no line start for the credit line in
+    its word; each quote of the command is read instead, a safe-direction over-read of a quote that is not the
+    value. The result is kept on files, so the bodies are scanned once per command, not once per value."""
+    if files.ansi_c_credit is _CMTIDN_UNSET:
+        files.ansi_c_credit = next((hit for hit in (_credit_line_ai(body, judged) for body in files.ansi_c_bodies())
+                                    if hit is not None), None)
+    return files.ansi_c_credit
 
 
 # The files one command can make the commit-identity check read (a commit message file, a commit template, a
@@ -5306,13 +5303,19 @@ class _CmtidnUnread(str):
     closed: commit_identity words its deny reason as a file it could not read, not as a recorded AI identity."""
 
 
+_CMTIDN_UNSET = object()
+
+
 class _CmtidnFiles:
     """The state of the named-file reads for one command: the command text (scanned in place of a file read
     from stdin, '-', and of a file the command writes from a quoted here-document, _cmtidn_written), the
     payload's cwd when it is an absolute path, whether a word of the command is cd, pushd or popd, names GIT_DIR
     or GIT_WORK_TREE or is a core.worktree word (set by _cmtidn_line_ai from the segments of the command, before
-    any of them is judged), whether the command may set a trailer.<token>.key (_CMTIDN_TRAILER_KEY_PARTS), and
-    the files read so far."""
+    any of them is judged), whether the command may set a trailer.<token>.key (_CMTIDN_TRAILER_KEY_PARTS), the
+    files read so far, and the results of the reads of the whole command text that do not depend on a segment
+    (the decoded ANSI-C quote bodies, their credit-line and token-line hits, the command's token-line hit), each
+    computed once on first use, so a command of many commit segments reads that text once, not once per segment.
+    _CMTIDN_UNSET marks a result not yet computed."""
 
     def __init__(self, command, cwd):
         self.command = command
@@ -5322,6 +5325,31 @@ class _CmtidnFiles:
         self.read = {}
         self.spent = 0
         self.mentions = {}
+        self.bodies = None
+        self.ansi_c_credit = _CMTIDN_UNSET
+        self.ansi_c_token_line = _CMTIDN_UNSET
+        self.command_token_line = _CMTIDN_UNSET
+
+    def ansi_c_bodies(self):
+        """The decoded body of each ANSI-C quote of the command text (_ANSI_C_QUOTE_RE, _ansi_c_body), decoded
+        on the first call only."""
+        if self.bodies is None:
+            self.bodies = ([_ansi_c_body(m) for m in _ANSI_C_QUOTE_RE.finditer(self.command)]
+                           if "$'" in self.command else [])
+        return self.bodies
+
+    def ansi_c_token_hit(self):
+        """The first token-line hit (_cmtidn_token_line_ai) in the decoded ANSI-C bodies, computed once."""
+        if self.ansi_c_token_line is _CMTIDN_UNSET:
+            self.ansi_c_token_line = next((hit for hit in map(_cmtidn_token_line_ai, self.ansi_c_bodies())
+                                           if hit is not None), None)
+        return self.ansi_c_token_line
+
+    def command_token_hit(self):
+        """The token-line hit (_cmtidn_token_line_ai) in the whole command text, computed once."""
+        if self.command_token_line is _CMTIDN_UNSET:
+            self.command_token_line = _cmtidn_token_line_ai(self.command)
+        return self.command_token_line
 
 
 def _cmtidn_read_named_file(path, limit):
@@ -5385,7 +5413,9 @@ def _cmtidn_message_file_ai(name, files, judged, relative_ok, what, token_lines=
     same text (a file already read is not read again) is scanned instead for a '<token>: VALUE' line naming an
     AI (_cmtidn_token_line_ai)."""
     def scan(text, decode=True):
-        return _cmtidn_token_line_ai(text) if token_lines else _message_text_ai(text, judged, decode)
+        if token_lines:
+            return files.command_token_hit() if text is files.command else _cmtidn_token_line_ai(text)
+        return _message_text_ai(text, judged, decode)
 
     if name is None:
         return _CmtidnUnread("{} option with no value the check can see (a process substitution or another word "
@@ -5513,7 +5543,7 @@ def _gh_pr_body_ai(tokens, k, judged, files, relative_ok):
         if kind == "file" and value is None:
             return _cmtidn_message_file_ai(None, files, judged, relative_ok, "pull-request body file")
         if kind == "message" and value is not None:
-            hit = _message_text_ai(value, judged) or _cmtidn_ansi_c_credit_ai(files.command, judged)
+            hit = _message_text_ai(value, judged) or _cmtidn_ansi_c_credit_ai(files, judged)
             if hit is None and ("$(" in value or "`" in value):
                 hit = _message_text_ai(files.command, judged)
             if hit is not None:
@@ -5540,7 +5570,7 @@ def _commit_message_value_ai(kind, value, judged, files, relative_ok):
     if kind in ("message", "trailer") and ("$(" in value or "`" in value):
         return _message_text_ai(files.command, judged)
     if kind in ("message", "trailer"):
-        return _cmtidn_ansi_c_credit_ai(files.command, judged)
+        return _cmtidn_ansi_c_credit_ai(files, judged)
     if kind == "file":
         return _cmtidn_message_file_ai(value, files, judged, relative_ok, "commit message file")
     return None
@@ -5572,7 +5602,8 @@ def _commit_message_and_author_ai(tokens, judged, files=None, relative_ok=False,
     against the repository top, not the cwd. A file the check cannot read (_CmtidnUnread) is returned only once
     the rest of the segment holds no other hit, so an AI --author value or trailer after it names the deny. When
     the command may set a trailer.<token>.key and the segment has any --trailer, a '<token>: VALUE' line naming an
-    AI in a message, message file or template denies too (_cmtidn_message_token_lines_ai)."""
+    AI in a message, a message file, a -t or --template template or an absolute git -c commit.template template
+    denies too (_cmtidn_message_token_lines_ai)."""
     n = len(tokens)
     unread = None
     any_trailer = False
@@ -5602,6 +5633,7 @@ def _commit_message_and_author_ai(tokens, judged, files=None, relative_ok=False,
                 unread = unread or hit
             elif hit is not None:
                 return hit
+            messages.append(("template", value))
     i = min(start, n - 1) + 1 if n else 0
     while i < n:
         tok = tokens[i]
@@ -5648,29 +5680,30 @@ def _commit_message_and_author_ai(tokens, judged, files=None, relative_ok=False,
 
 def _cmtidn_message_token_lines_ai(messages, files, judged, relative_ok):
     """A hit label for a '<token>: VALUE' line naming an AI (_cmtidn_token_line_ai) in a commit's messages, a
-    commit message file or template (messages, (kind, value) pairs), else None, for a commit with a --trailer
-    under a command that may set a trailer.<token>.key. A message value is read as the lexer gives it, the whole
-    command text stands in for one holding a command substitution, and the decoded body of each ANSI-C quote of
-    the command is read too (the lexer keeps a $'...\\n...' body's escapes undecoded, so its lines have no line
-    start). A file is read through _cmtidn_message_file_ai, whose fail-closed result was already kept by the
-    caller. Each text is scanned at most once, so the cost stays linear in the command and the files read."""
-    texts = []
-    whole = False
-    for kind, value in messages:
-        if kind == "message":
-            texts.append(value)
-            whole = whole or "$(" in value or "`" in value
-    if texts and "$'" in files.command:
-        texts.extend(_ansi_c_body(m) for m in _ANSI_C_QUOTE_RE.finditer(files.command))
-    if whole:
-        texts.append(files.command)
-    for text in texts:
-        hit = _cmtidn_token_line_ai(text)
+    commit message file, a -t or --template template or a git -c commit.template value given as an absolute
+    path (messages, (kind, value) pairs), else None, for a commit with a --trailer under a command that may set a
+    trailer.<token>.key. When the commit has a message value, the decoded body of each ANSI-C quote of the
+    command is read first (the lexer keeps a $'...\\n...' body's escapes undecoded, so its lines have no line
+    start, and the deny reason then quotes the decoded line, not the lexed word), then each message value as the
+    lexer gives it, and the whole command text for one holding a command substitution. A file is read through
+    _cmtidn_message_file_ai, whose fail-closed result was already kept by the caller. The reads of the whole
+    command text (the ANSI-C bodies and the command itself) are made once per command and kept on files, so a
+    command of many commit segments costs time linear in its length, plus each segment's own message values and
+    the files read once each."""
+    values = [value for kind, value in messages if kind == "message"]
+    hit = files.ansi_c_token_hit() if values else None
+    for value in values:
         if hit is not None:
-            return "{} in the commit message".format(hit)
+            break
+        hit = _cmtidn_token_line_ai(value)
+    if hit is None and any("$(" in value or "`" in value for value in values):
+        hit = files.command_token_hit()
+    if hit is not None:
+        return "{} in the commit message".format(hit)
     for kind, value in messages:
-        if kind == "file":
-            hit = _cmtidn_message_file_ai(value, files, judged, relative_ok, "commit message file", True)
+        if kind in ("file", "template"):
+            what = "commit message file" if kind == "file" else "commit template"
+            hit = _cmtidn_message_file_ai(value, files, judged, relative_ok, what, True)
             if hit is not None and not isinstance(hit, _CmtidnUnread):
                 return hit
     return None

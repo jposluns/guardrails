@@ -26761,6 +26761,120 @@ def _main_isolated(monitor):
         if _cr_kept:
             failures.append("(ci-cr-tl-revert) with the message token lines unread, {} still deny (want allow, "
                             "the earlier gap)".format(_cr_kept))
+        # A template that git -c commit.template names by an absolute path is a message source like -t: its
+        # token lines are read under an alias and a --trailer, in both command forms; an AI-free one allows, and
+        # each deny row allows with the template left out of the token-line read.
+        _cr_ct_cfg = "GIT_EDITOR=true git -c commit.template=" + str(_cr_dir / "cabmsg.txt")
+        _cr_template = [
+            ("(ci-cr-ct1) a -c commit.template beside a -c trailer key alias", _cr_ct_cfg
+             + " -c trailer.cab.key=Co-authored-by commit --allow-empty" + _cr_so),
+            ("(ci-cr-ct2) a -c commit.template after git config sets the alias", "git config trailer.cab.key "
+             "Co-authored-by; " + _cr_ct_cfg + " commit" + _cr_so)]
+        for _cr_label, _cr_command in _cr_template:
+            cr2expect(_cr_label + " holding an AI token line, with a --trailer, denies", _cr_command, "deny")
+        cr2expect("(ci-cr-ct3) a -c commit.template with an AI-free token line allows", "GIT_EDITOR=true git -c "
+                  "commit.template=" + str(_cr_dir / "cabclean.txt") + " -c trailer.cab.key=Co-authored-by commit"
+                  + _cr_so, "allow")
+        try:
+            aiqt_hooks._cmtidn_message_token_lines_ai = lambda messages, *rest: _cr_saved_tl(
+                [m for m in messages if m[0] != "template"], *rest)
+            _cr_kept = [label for label, command in _cr_template if _decision(cig, command) != "allow"]
+        finally:
+            aiqt_hooks._cmtidn_message_token_lines_ai = _cr_saved_tl
+        if _cr_kept:
+            failures.append("(ci-cr-ct-revert) with the -c commit.template left out of the token-line read, {} "
+                            "still deny (want allow)".format(_cr_kept))
+        # The decoded body of an ANSI-C -m quote is what puts this token line at a line start: the lexed word
+        # reads fix parsernncab: ..., no token line. The row allows with the decoded bodies unread, and a deny
+        # reason quotes the decoded line, not the lexed word.
+        _cr_ansi = _cr_alias + "-m $'fix parser\\n\\ncab: " + _cr_ai + " <c@x>'" + _cr_so
+        cr2expect("(ci-cr-tl9) an AI token line only the decoded ANSI-C -m body holds denies", _cr_ansi, "deny")
+        _cr_saved_hit = aiqt_hooks._CmtidnFiles.ansi_c_token_hit
+        try:
+            aiqt_hooks._CmtidnFiles.ansi_c_token_hit = lambda self: None
+            _cr_kept = _decision(cig, _cr_ansi)
+        finally:
+            aiqt_hooks._CmtidnFiles.ansi_c_token_hit = _cr_saved_hit
+        if _cr_kept != "allow":
+            failures.append("(ci-cr-tl9-revert) with the ANSI-C bodies unread the row gave {!r} (want allow)"
+                            .format(_cr_kept))
+        _cr_why = aiqt_hooks.find_ai_authorship(_cr_token_lines[0][1]) or ""
+        if "'cab: " not in _cr_why or "xnncab" in _cr_why:
+            failures.append("(ci-cr-tl-reason) the ANSI-C -m token line deny reason was {!r} (want the decoded "
+                            "line quoted)".format(_cr_why[:200]))
+        # The reads of the whole command text (the ANSI-C bodies and the command itself) are made once per
+        # command, not once per commit segment. Each command below is AI-free and allows, and its decoded and
+        # token-line-scanned characters stay within a small multiple of its length. The rows count characters,
+        # not wall-clock time, so a loaded host cannot fail them. With the per-segment re-read put back (no
+        # result kept on the file state) each row fails on that count.
+        _cr_sizes = [
+            ("(ci-cr-lin1) a -m $(...) commit under an alias, repeated", "git -c trailer.cab.key=x commit -m "
+             "\"$(true)\" --trailer 'b: c'; ", 124000),
+            ("(ci-cr-lin2) an ANSI-C -m commit under an alias, repeated", "git -c trailer.cab.key=x commit -m "
+             "$'a' --trailer 'b: c'; ", 114000),
+            ("(ci-cr-lin3) an ANSI-C -m commit with no alias, repeated", "git commit -m $'a'; ", 38000)]
+
+        def cr_linear(label, segment, size):
+            # The failure text for one row, or None: the command allows and the characters given to the ANSI-C
+            # body decoder and the token-line scan stay within 8 times its length.
+            command = segment * (size // len(segment))
+            work = [0]
+            saved = (aiqt_hooks._ansi_c_body, aiqt_hooks._cmtidn_token_line_ai)
+
+            def body(match):
+                work[0] += len(match.group(0))
+                return saved[0](match)
+
+            def token_line(text):
+                work[0] += len(text)
+                return saved[1](text)
+
+            aiqt_hooks._ansi_c_body, aiqt_hooks._cmtidn_token_line_ai = body, token_line
+            try:
+                got = _decision(cig, command)
+            finally:
+                aiqt_hooks._ansi_c_body, aiqt_hooks._cmtidn_token_line_ai = saved
+            if got != "allow" or work[0] > 8 * len(command):
+                return "{} of {} bytes gave {!r} after reading {} characters".format(
+                    label, len(command), got, work[0])
+            return None
+
+        for _cr_label, _cr_segment, _cr_size in _cr_sizes:
+            _cr_fail = cr_linear(_cr_label, _cr_segment, _cr_size)
+            if _cr_fail is not None:
+                failures.append(_cr_fail + " (want allow, reading within 8 times the command length)")
+        _cr_saved_files = aiqt_hooks._CmtidnFiles
+        _cr_saved_credit = aiqt_hooks._cmtidn_ansi_c_credit_ai
+
+        def cr_per_value_credit(files, judged):
+            # The ANSI-C credit-line read with no result kept: every message value reads every body again.
+            return next((hit for hit in (aiqt_hooks._credit_line_ai(body, judged) for body in files.ansi_c_bodies())
+                         if hit is not None), None)
+
+        class _CrPerSegment(_cr_saved_files):
+            # The file state with nothing kept: each segment re-reads the whole command text.
+            def ansi_c_bodies(self):
+                self.bodies = None
+                return _cr_saved_files.ansi_c_bodies(self)
+
+            def ansi_c_token_hit(self):
+                self.ansi_c_token_line = aiqt_hooks._CMTIDN_UNSET
+                return _cr_saved_files.ansi_c_token_hit(self)
+
+            def command_token_hit(self):
+                self.command_token_line = aiqt_hooks._CMTIDN_UNSET
+                return _cr_saved_files.command_token_hit(self)
+
+        try:
+            aiqt_hooks._CmtidnFiles = _CrPerSegment
+            aiqt_hooks._cmtidn_ansi_c_credit_ai = cr_per_value_credit
+            _cr_kept = [label for label, segment, size in _cr_sizes if cr_linear(label, segment, size) is None]
+        finally:
+            aiqt_hooks._CmtidnFiles = _cr_saved_files
+            aiqt_hooks._cmtidn_ansi_c_credit_ai = _cr_saved_credit
+        if _cr_kept:
+            failures.append("(ci-cr-lin-revert) with the per-segment re-read put back, {} still pass (want each "
+                            "to fail)".format(_cr_kept))
 
         def cr_reason(command, cwd=None):
             # The deny reason commit_identity gives for command, or "" for any other result.
