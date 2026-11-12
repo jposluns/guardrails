@@ -78,7 +78,9 @@ import json
 import os
 import re
 import stat
+import struct
 import zipfile
+import zlib
 from pathlib import Path
 
 try:
@@ -1134,7 +1136,114 @@ def main():
 #      the root is opened once per run (a root path swapped after that open is never followed by any walk),
 #  11. a symlink, hard link or FIFO at an input (LICENSE, skill-source.md, the hooks manifest; a hard link at
 #      the evidence page too) is refused (exit 2), and a
-#      FIFO at one output plus a drifted other output exits 2 having written nothing (the pre-write pass).
+#      FIFO at one output plus a drifted other output exits 2 having written nothing (the pre-write pass),
+#  12. the published download contract holds: both zip names, exactly LICENSE and SKILL.md at the archive
+#      root, their pinned metadata, identical bytes under both names, and whole-archive bytes equal to an
+#      independent packer; an extra, prefixed, reordered or changed member, a changed timestamp, compression,
+#      creator or mode, and differing aliases each turn it red.
+
+# The published skill download contract. Packaging work that moves the generated skill (for example into a
+# plugin directory) must keep it, so it is pinned here as literals, never read back from ZIP_MEMBER,
+# LICENSE_MEMBER, ZIP_EPOCH or render_zip: a change to any of those turns the self-test red instead of
+# moving the expectation with it. Each archive holds exactly these members, in this sorted order, at the
+# archive root with no directory prefix, each STORED, stamped 1980-01-01 00:00:00, created by zip version
+# 2.0 on unix (create_system 3) with mode 0644 and no flags, extra field or comment.
+_CONTRACT_LATEST = "aiqt-skill.zip"
+_CONTRACT_DOWNLOADS = ("site", "downloads")
+_CONTRACT_MEMBERS = ("LICENSE", "SKILL.md")
+_CONTRACT_DATE_TIME = (1980, 1, 1, 0, 0, 0)
+_CONTRACT_DOS_DATE = 0x21           # 1980-01-01 in MS-DOS date form: (year - 1980) << 9 | month << 5 | day
+_CONTRACT_DOS_TIME = 0              # 00:00:00
+_CONTRACT_VERSION = 20              # zip 2.0, both "version made by" and "version needed to extract"
+_CONTRACT_SYSTEM = 3                # unix
+_CONTRACT_MODE = 0o644 << 16        # -rw-r--r-- in the high half of the external attributes, no type bits
+
+
+def _contract_zip(members):
+    """The archive the download contract requires for members ({name: bytes}), packed byte by byte from the
+    ZIP format (local headers, central directory, end record) without zipfile, so it is an oracle
+    independent of zipfile's writer and of render_zip. A change in how either lays the archive out (a
+    flag, a version field, an extra field, an offset) makes the generator's bytes differ from these."""
+    local, central, offset = [], [], 0
+    for name in sorted(members):
+        data, raw = members[name], name.encode("ascii")
+        crc = zlib.crc32(data) & 0xFFFFFFFF
+        # flags, method (0 is STORED), time, date, CRC-32, compressed size, size, name length.
+        common = struct.pack("<HHHHLLLH", 0, 0, _CONTRACT_DOS_TIME, _CONTRACT_DOS_DATE, crc, len(data),
+                             len(data), len(raw))
+        head = b"PK\x03\x04" + struct.pack("<BB", _CONTRACT_VERSION, 0) + common + struct.pack("<H", 0) + raw
+        local.append(head + data)
+        # extra length, comment length, disk number, internal attributes, external attributes, offset.
+        central.append(b"PK\x01\x02" + struct.pack("<BBBB", _CONTRACT_VERSION, _CONTRACT_SYSTEM,
+                                                    _CONTRACT_VERSION, 0) + common
+                       + struct.pack("<HHHHLL", 0, 0, 0, 0, _CONTRACT_MODE, offset) + raw)
+        offset += len(head) + len(data)
+    directory = b"".join(central)
+    end = b"PK\x05\x06" + struct.pack("<HHHHLLH", 0, 0, len(members), len(members), len(directory),
+                                      offset, 0)
+    return b"".join(local) + directory + end
+
+
+def _zip_contract_problems(blob, skill_md, licence):
+    """Every way blob breaks the download contract for the given SKILL.md and LICENSE bytes, as a list of
+    findings (empty when it holds). Each property is judged on its own, so a fixture that breaks one of
+    them is named for that property, and the whole archive is then compared with _contract_zip."""
+    problems = []
+    want = {"LICENSE": licence, "SKILL.md": skill_md}
+    try:
+        with zipfile.ZipFile(io.BytesIO(blob)) as zf:
+            infos = zf.infolist()
+            names = [info.filename for info in infos]
+            if sorted(names) != list(_CONTRACT_MEMBERS):
+                problems.append("member list {!r}, expected exactly {!r}".format(names, list(_CONTRACT_MEMBERS)))
+            elif names != sorted(names):
+                problems.append("members {!r} are not in sorted order".format(names))
+            if zf.comment:
+                problems.append("archive comment {!r}, expected none".format(zf.comment))
+            for info in infos:
+                name = info.filename
+                if "/" in name or "\\" in name:
+                    problems.append("member {!r} has a directory prefix, expected the archive root".format(name))
+                if info.date_time != _CONTRACT_DATE_TIME:
+                    problems.append("member {!r} timestamp {!r}, expected {!r}".format(
+                        name, info.date_time, _CONTRACT_DATE_TIME))
+                if info.compress_type != zipfile.ZIP_STORED:
+                    problems.append("member {!r} compression {!r}, expected STORED (0)".format(
+                        name, info.compress_type))
+                if (info.create_system, info.create_version, info.extract_version) != (
+                        _CONTRACT_SYSTEM, _CONTRACT_VERSION, _CONTRACT_VERSION):
+                    problems.append("member {!r} creator (system {}, version {}, extract {}), expected "
+                                    "(system 3, version 20, extract 20)".format(
+                                        name, info.create_system, info.create_version, info.extract_version))
+                if info.external_attr != _CONTRACT_MODE:
+                    problems.append("member {!r} permissions {:#o}, expected {:#o}".format(
+                        name, info.external_attr, _CONTRACT_MODE))
+                if info.flag_bits or info.extra or info.comment or info.internal_attr:
+                    problems.append("member {!r} carries flags, an extra field, a comment or internal "
+                                    "attributes, expected none".format(name))
+                if name in want and zf.read(info) != want[name]:
+                    problems.append("member {!r} bytes differ from the expected {}".format(name, name))
+    except (zipfile.BadZipFile, zipfile.LargeZipFile, OSError, ValueError, EOFError) as exc:
+        problems.append("not a readable zip archive ({}: {})".format(type(exc).__name__, exc))
+    if blob != _contract_zip(want):
+        problems.append("archive bytes differ from the contract packing of the same SKILL.md and LICENSE")
+    return problems
+
+
+def _contract_pack(entries):
+    """A test archive built with zipfile from (name, data, overrides) entries, in the given order; every
+    entry takes the contract metadata unless overrides (ZipInfo attribute values) say otherwise. With no
+    overrides and the contract members in sorted order it equals _contract_zip, so each negative fixture
+    differs from a conforming archive only by the property it overrides."""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        for name, data, overrides in entries:
+            info = zipfile.ZipInfo(name, date_time=overrides.get("date_time", _CONTRACT_DATE_TIME))
+            info.compress_type = overrides.get("compress_type", zipfile.ZIP_STORED)
+            info.create_system = overrides.get("create_system", _CONTRACT_SYSTEM)
+            info.external_attr = overrides.get("external_attr", _CONTRACT_MODE)
+            zf.writestr(info, data)
+    return buf.getvalue()
 
 _APEX = """---
 corpus-id: prjint1
@@ -2278,6 +2387,79 @@ def self_test_main():
                 if code != want or (reason is not None and "is a symbolic link " + reason not in out):
                     failures.append("a corpus path that is a symlink {} expected exit {} (check={}), got {}\n{}".format(
                         shape, want, chk, code, out))
+
+        # 24. The published download contract, the baseline packaging changes must keep. Both zip names sit
+        #     in site/downloads, the stable alias and the version-numbered copy; each archive the generator
+        #     writes passes _zip_contract_problems against the SKILL.md it wrote and the fixture LICENSE; the
+        #     two names hold identical bytes; and with unchanged skill source and licence the archive is byte
+        #     identical across a regeneration and a fresh tree. Each negative fixture breaks one property and
+        #     must be named for it (and fail the whole-archive comparison); a passing fixture would mean the
+        #     contract no longer sees that change. Differing aliases are also --check drift (exit 1).
+        if ZIP_PARTS != _CONTRACT_DOWNLOADS + (_CONTRACT_LATEST,):
+            failures.append("the stable download is {!r}, expected {!r}".format(
+                "/".join(ZIP_PARTS), "/".join(_CONTRACT_DOWNLOADS + (_CONTRACT_LATEST,))))
+        if ZIP_VERSIONED_PARTS != _CONTRACT_DOWNLOADS + ("aiqt-skill-{}.zip".format(zip_versioned_version()),):
+            failures.append("the version-numbered download is {!r}, expected site/downloads/"
+                            "aiqt-skill-<version>.zip".format("/".join(ZIP_VERSIONED_PARTS)))
+        dlc = tmp / "download-contract"
+        dlc.mkdir()
+        _write_fixture(dlc, good_src)
+        code, out = capture(dlc, False)
+        if code != 0:
+            failures.append("download contract fixture expected a clean generate (exit 0), got {}\n{}".format(
+                code, out))
+        dlc_skill = dlc.joinpath(*RESERVED_PARTS, "SKILL.md").read_bytes()
+        dlc_licence = dlc.joinpath(*LICENSE_PARTS).read_bytes()
+        dlc_latest = dlc.joinpath(*ZIP_PARTS).read_bytes()
+        dlc_versioned = dlc.joinpath(*ZIP_VERSIONED_PARTS).read_bytes()
+        for label, blob in (("stable", dlc_latest), ("version-numbered", dlc_versioned)):
+            problems = _zip_contract_problems(blob, dlc_skill, dlc_licence)
+            if problems:
+                failures.append("the {} download breaks the archive contract: {}".format(label, "; ".join(problems)))
+        if dlc_latest != dlc_versioned:
+            failures.append("the stable and version-numbered downloads must hold identical bytes")
+        capture(dlc, False)
+        again = tmp / "download-contract-again"
+        again.mkdir()
+        _write_fixture(again, good_src)
+        capture(again, False)
+        if (dlc.joinpath(*ZIP_PARTS).read_bytes() != dlc_latest
+                or again.joinpath(*ZIP_PARTS).read_bytes() != dlc_latest):
+            failures.append("unchanged skill source and licence must give a byte-identical archive across a "
+                            "regeneration and a fresh tree")
+        conforming = [(_CONTRACT_MEMBERS[0], dlc_licence, {}), (_CONTRACT_MEMBERS[1], dlc_skill, {})]
+        if _contract_pack(conforming) != dlc_latest:
+            failures.append("the negative-fixture packer must reproduce the conforming archive exactly")
+        flipped = bytes([dlc_skill[0] ^ 0x01]) + dlc_skill[1:]
+        negatives = (
+            ("an extra member", "member list",
+             conforming + [("NOTICE.md", b"extra\n", {})]),
+            ("a prefixed member", "has a directory prefix",
+             [("aiqt/" + n, d, o) for n, d, o in conforming]),
+            ("a changed member byte", "member 'SKILL.md' bytes differ",
+             [conforming[0], (_CONTRACT_MEMBERS[1], flipped, {})]),
+            ("unsorted members", "not in sorted order", [conforming[1], conforming[0]]),
+            ("a changed timestamp", "timestamp",
+             [(n, d, {"date_time": (2026, 1, 1, 0, 0, 0)}) for n, d, o in conforming]),
+            ("deflate compression", "compression",
+             [(n, d, {"compress_type": zipfile.ZIP_DEFLATED}) for n, d, o in conforming]),
+            ("a non-unix creator", "creator", [(n, d, {"create_system": 0}) for n, d, o in conforming]),
+            ("executable permissions", "permissions",
+             [(n, d, {"external_attr": 0o755 << 16}) for n, d, o in conforming]),
+        )
+        for label, finding, entries in negatives:
+            problems = _zip_contract_problems(_contract_pack(entries), dlc_skill, dlc_licence)
+            if not any(finding in p for p in problems) or not any("archive bytes differ" in p for p in problems):
+                failures.append("an archive with {} must break the contract naming {!r} and the whole-archive "
+                                "comparison, got {!r}".format(label, finding, problems))
+        dlc.joinpath(*ZIP_VERSIONED_PARTS).write_bytes(
+            _contract_pack([conforming[0], (_CONTRACT_MEMBERS[1], flipped, {})]))
+        if dlc.joinpath(*ZIP_PARTS).read_bytes() == dlc.joinpath(*ZIP_VERSIONED_PARTS).read_bytes():
+            failures.append("the differing-aliases fixture must leave the two downloads with different bytes")
+        code, out = capture(dlc, True)
+        if code != 1 or ZIP_VERSIONED_PARTS[-1] not in out:
+            failures.append("differing stable and version-numbered downloads expected --check exit 1 naming "
+                            "{}, got {}\n{}".format(ZIP_VERSIONED_PARTS[-1], code, out))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -2308,7 +2490,11 @@ def self_test_main():
           "deliberate markup around or inside the phrase or after a '.' is out of scope); a hard-linked input "
           "is refused as an input (break the link, never git rm); a facet-misplaced rule and a corpus path that "
           "is not a directory or a symlink to a directory inside the root fail closed (exit 2), and a corpus "
-          "symlinked to a directory inside the root is read.")
+          "symlinked to a directory inside the root is read; the published download contract holds (both "
+          "zip names, exactly LICENSE and SKILL.md at the archive root with the pinned metadata, identical "
+          "aliases, and whole-archive bytes equal to an independent packing), and an extra, prefixed, "
+          "reordered or changed member, a changed timestamp, compression, creator or mode, and differing "
+          "aliases each break it.")
     return 0
 
 
