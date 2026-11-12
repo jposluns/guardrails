@@ -26424,7 +26424,7 @@ def _main_isolated(monitor):
         crexpect("(ci-cr15) gh pr create --body-file - with an AI credit line in its here-document denies",
                  "gh pr create --body-file - <<'EOF'\nSummary\n\n" + _cr_credit + "\nEOF", "deny")
         crexpect("(ci-cr-o1) a bare line-start quote of the credit in a pull-request body denies (disclosed "
-                 "over-deny)", "gh pr create --body " + shlex.quote(_cr_gen + " with " + _cr_ai), "deny")
+                 "over-deny)", "gh pr create --body " + shlex.quote(_cr_gen + " with " + _cr_ai), "deny")
         # Fail closed: a file the check cannot resolve or read in full denies.
         _cr_fifo = _cr_dir / "fifo"
         os.mkfifo(str(_cr_fifo))
@@ -26639,9 +26639,64 @@ def _main_isolated(monitor):
         cr2expect("(ci-cr-ta5) a trailer.cab.key alias with an AI-free --trailer value allows",
                   "git -c trailer.cab.key=Co-authored-by commit -m x --trailer " + shlex.quote("cab=Ada <a@x>"),
                   "allow")
+        # A trailer key alias that the same command sets through a configuration file (a [trailer section that
+        # printf writes, named by include.path, includeIf or GIT_CONFIG_GLOBAL or appended to .git/config) or
+        # spells with escapes makes --trailer <token>=VALUE a co-author trailer too, so an AI named there denies;
+        # each allowed while only the text as written was read for trailer. and .key. An AI-free value allows.
+        _cr_alias_cfg = str(_cr_dir / "al.cfg")
+        _cr_alias_text = "printf " + shlex.quote('[trailer "cab"]\\n\\tkey = Co-authored-by\\n')
+        for _cr_label, _cr_command in [
+                ("(ci-cr-ta6) a [trailer section printf writes, named by include.path", _cr_alias_text + " > "
+                 + _cr_alias_cfg + "; git -c include.path=" + _cr_alias_cfg + " commit -m x --trailer " + _cr_tv),
+                ("(ci-cr-ta7) a configuration file named by GIT_CONFIG_GLOBAL", "GIT_CONFIG_GLOBAL="
+                 + _cr_alias_cfg + " git commit -m x --trailer " + _cr_tv),
+                ("(ci-cr-ta8) a configuration file named by includeIf", "git -c includeIf.onbranch:main.path="
+                 + _cr_alias_cfg + " commit -m x --trailer " + _cr_tv),
+                ("(ci-cr-ta9) a [trailer section appended to .git/config", _cr_alias_text + " >> .git/config; "
+                 "git commit -m x --trailer " + _cr_tv),
+                ("(ci-cr-ta10) a [trailer section header printf spells with an escape", "printf "
+                 + shlex.quote('\\x5btrailer "cab"]\\n\\tkey = Co-authored-by\\n') + " >> .git/config; git "
+                 "commit -m x --trailer " + _cr_tv),
+                ("(ci-cr-ta11) a .key spelled with an ANSI-C escape", "git -c $'trailer.cab.\\x6bey=Co-authored-by' "
+                 "commit -m x --trailer " + _cr_tv),
+                ("(ci-cr-ta12) a trailer. spelled with an ANSI-C escape", "git -c "
+                 "$'\\x74railer.cab.key=Co-authored-by' commit -m x --trailer " + _cr_tv)]:
+            cr2expect(_cr_label + " aliasing a co-author trailer key, with an AI in the --trailer value, denies",
+                      _cr_command, "deny")
+        cr2expect("(ci-cr-ta13) a [trailer section appended to .git/config with an AI-free --trailer value allows",
+                  _cr_alias_text + " >> .git/config; git commit -m x --trailer " + shlex.quote("cab=Ada <a@x>"),
+                  "allow")
+
+        def cr_reason(command, cwd=None):
+            # The deny reason commit_identity gives for command, or "" for any other result.
+            data = {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": command}}
+            if cwd is not None:
+                data["cwd"] = cwd
+            _code, obj, _err = cig(data)
+            specific = obj.get("hookSpecificOutput") if isinstance(obj, dict) else None
+            return str(specific.get("permissionDecisionReason", "")) if isinstance(specific, dict) else ""
+
+        # A message file the check cannot read denies with a reason that says so, not one that says the command
+        # records an AI identity; an AI --author value after that file in the same commit still names the deny.
+        _cr_why = cr_reason("cd sub; git commit -F clean.txt", cwd=str(_cr_dir))
+        if "file the check cannot read here" not in _cr_why or "records an AI identity" in _cr_why:
+            failures.append("(ci-cr-unread-reason) a relative message file after cd gave the reason {!r} (want the "
+                            "file the check cannot read here)".format(_cr_why[:200]))
+        _cr_why = cr_reason("cd sub; git commit -F clean.txt --author=" + shlex.quote(_cr_ai + " <c@x>"),
+                            cwd=str(_cr_dir))
+        if "--author value" not in _cr_why:
+            failures.append("(ci-cr-unread-author) an AI --author value after an unreadable message file gave the "
+                            "reason {!r} (want the --author value named)".format(_cr_why[:200]))
+        # The no-break space the credit-line rows test is written as an escape: neither this suite nor either
+        # hook copy holds a literal U+00A0, which reads as a plain space in review and in a diff.
+        _cr_nbsp_kept = [rel for rel in ("tools/selftest_aiqt_hooks.py", ".aiqt/core/hooks/scripts/aiqt_hooks.py",
+                                         "plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py")
+                         if b"\xc2\xa0" in (repo_root() / rel).read_bytes()]
+        if _cr_nbsp_kept:
+            failures.append("(ci-cr-nbsp-src) a literal U+00A0 in {} (want the escape)".format(_cr_nbsp_kept))
         # The credit line's separator class holds a no-break space, written as an escape in the source.
         cr2expect("(ci-cr-nbsp) a credit line whose words a no-break space separates denies",
-                  "gh pr create --body " + shlex.quote(_cr_gen + " with " + _cr_ai), "deny")
+                  "gh pr create --body " + shlex.quote(_cr_gen + "\u00a0with " + _cr_ai), "deny")
         # gh options before the pr word and the verb, gh pr merge, and git -c commit.template.
         cr2expect("(ci-cr-g1) gh -R before pr does not hide an AI credit line, denies",
                   "gh -R o/r pr create --body " + shlex.quote(_cr_credit), "deny")

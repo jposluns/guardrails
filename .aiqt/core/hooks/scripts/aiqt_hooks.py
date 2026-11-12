@@ -5212,17 +5212,40 @@ _CMTIDN_GIT_DIR_ENV_RE = re.compile(
     r"^(?:GIT_DIR|GIT_WORK_TREE)(?:\+?=|$)|\$\{(?:GIT_DIR|GIT_WORK_TREE)(?![A-Za-z0-9_])"
     r"|^[A-Za-z_][A-Za-z0-9_]*=(?:GIT_DIR|GIT_WORK_TREE)$")
 # A core.worktree word (git config core.worktree DIR, git -c core.worktree=DIR), in any letter case as git reads
-# a configuration name: the work tree it sets can move the directory git reads a relative file from. A
-# core.worktree already persisted in the repository's configuration is not seen (the residue says so).
+# a configuration name. A work tree that git config writes into the repository's configuration moves the
+# directory git reads a relative file from; under git -c core.worktree=DIR, git 2.53.0 still read a relative
+# file from the cwd, so that form is a safe-direction over-deny. A core.worktree already persisted in the
+# repository's configuration, or written into it as text by the same command (printf ... >> .git/config), is
+# not seen (the residue says so).
 _CMTIDN_WORKTREE_KEY_RE = re.compile(r"(?i)^core\.worktree(?:=|$)")
-# A trailer.<token>.key setting in the command (-c, --config-env, GIT_CONFIG_COUNT with GIT_CONFIG_KEY_n, or
-# GIT_CONFIG_PARAMETERS) makes --trailer <token>=VALUE record a trailer of that key, a co-author trailer
-# included, and a key set through the environment holds a value the check cannot read. So when the command
-# text, once every quote, backslash, '$' and newline is dropped, holds both 'trailer.' and '.key' in any letter
-# case, each --trailer value of a commit-family command that names an AI identity denies (_CmtidnFiles). Two
-# substring tests, linear in the command's length; the cost is a safe-direction over-deny of a command that holds
-# both pieces of text for another reason and names an AI in a --trailer value.
+# A trailer.<token>.key setting makes --trailer <token>=VALUE record a trailer of that key, a co-author trailer
+# included, and a key set through the environment holds a value the check cannot read. The command may set one
+# when its text, once every quote, backslash, '$' and newline is dropped, holds in any letter case both
+# 'trailer.' and '.key' (-c, --config-env, GIT_CONFIG_COUNT with GIT_CONFIG_KEY_n, GIT_CONFIG_PARAMETERS), or
+# one of _CMTIDN_TRAILER_CONFIG_WORDS: a configuration file's '[trailer' section header (written by printf or
+# echo, or appended to .git/config), an include (include.path, includeIf, an '[include' section) or a
+# configuration file named by GIT_CONFIG_GLOBAL, GIT_CONFIG_SYSTEM or XDG_CONFIG_HOME, any of which can bring in
+# such a section. The text is read as written and again with its backslash escapes decoded as an ANSI-C quote
+# decodes them (a $'...' quote, printf's escapes), and so is each word the shell lexer decodes
+# (_cmtidn_line_ai), so a key spelled with escapes ($'trailer.cab.\x6bey=...') counts. When it may, each
+# --trailer value of a commit-family command that names an AI identity denies (_CmtidnFiles). Substring tests,
+# linear in the command's length; the cost is a safe-direction over-deny of a command that holds such text for
+# another reason and names an AI in a --trailer value.
 _CMTIDN_TRAILER_KEY_PARTS = ("trailer.", ".key")
+_CMTIDN_TRAILER_CONFIG_WORDS = ("[trailer", "[include", "include.path", "includeif.", "git_config_global",
+                                "git_config_system", "xdg_config_home")
+
+
+def _cmtidn_may_set_trailer_key(text):
+    """True when text, read as written or with its backslash escapes decoded (_ANSI_C_ESCAPE_RE), may set a
+    trailer.<token>.key (_CMTIDN_TRAILER_KEY_PARTS, _CMTIDN_TRAILER_CONFIG_WORDS). Linear, never raises."""
+    readings = (text, _ANSI_C_ESCAPE_RE.sub(_ansi_c_escape, text)) if "\\" in text else (text,)
+    for reading in readings:
+        plain = _CMTIDN_UNREAD_CHARS_RE.sub("", reading).lower()
+        if (all(part in plain for part in _CMTIDN_TRAILER_KEY_PARTS)
+                or any(word in plain for word in _CMTIDN_TRAILER_CONFIG_WORDS)):
+            return True
+    return False
 
 
 class _CmtidnUnread(str):
@@ -5242,8 +5265,7 @@ class _CmtidnFiles:
         self.command = command
         self.cwd = cwd if isinstance(cwd, str) and os.path.isabs(cwd) else None
         self.chdir = False
-        plain = _CMTIDN_UNREAD_CHARS_RE.sub("", command).lower()
-        self.trailer_key = all(part in plain for part in _CMTIDN_TRAILER_KEY_PARTS)
+        self.trailer_key = _cmtidn_may_set_trailer_key(command)
         self.read = {}
         self.spent = 0
         self.mentions = {}
@@ -5489,8 +5511,10 @@ def _commit_message_and_author_ai(tokens, judged, files=None, relative_ok=False,
     read with the git commit option table, so a wrapper's own option before the git command (sudo -t, xargs -t)
     is not taken for a template; before it, a git -c commit.template=FILE value names a template that is read
     the same way when FILE is an absolute path, and fails closed otherwise, since git resolves a relative one
-    against the repository top, not the cwd."""
+    against the repository top, not the cwd. A file the check cannot read (_CmtidnUnread) is returned only once
+    the rest of the segment holds no other hit, so an AI --author value or trailer after it names the deny."""
     n = len(tokens)
+    unread = None
     for i in range(min(start, n)):
         tok = tokens[i]
         hit = _message_text_ai(tok, judged)
@@ -5507,11 +5531,14 @@ def _commit_message_and_author_ai(tokens, judged, files=None, relative_ok=False,
             if not os.path.isabs(value):
                 # git reads a relative commit.template from the repository top, not from the cwd the check would
                 # join it to, so the check cannot know which file git reads; '-' and an empty value included.
-                return _CmtidnUnread("commit template {!r}, not an absolute path: git resolves a relative "
-                                     "commit.template against the repository top, not the cwd the check reads "
-                                     "from".format(value))
+                unread = unread or _CmtidnUnread("commit template {!r}, not an absolute path: git resolves a "
+                                                 "relative commit.template against the repository top, not the "
+                                                 "cwd the check reads from".format(value))
+                continue
             hit = _cmtidn_message_file_ai(value, files, judged, relative_ok, "commit template")
-            if hit is not None:
+            if isinstance(hit, _CmtidnUnread):
+                unread = unread or hit
+            elif hit is not None:
                 return hit
     i = min(start, n - 1) + 1 if n else 0
     while i < n:
@@ -5528,7 +5555,9 @@ def _commit_message_and_author_ai(tokens, judged, files=None, relative_ok=False,
             if hit is not None:
                 return hit
         hit = _commit_message_value_ai(kind, value, judged, files, relative_ok)
-        if hit is not None:
+        if isinstance(hit, _CmtidnUnread):
+            unread = unread or hit
+        elif hit is not None:
             return hit
         if (kind == "trailer" and value is not None and files is not None and files.trailer_key
                 and AI_IDENTITY_RE.search(value)):
@@ -5544,7 +5573,7 @@ def _commit_message_and_author_ai(tokens, judged, files=None, relative_ok=False,
         if kind == "author" and value is not None and AI_IDENTITY_RE.search(value):
             return "--author value {!r}".format(value.strip()[:80])
         i += 1
-    return None
+    return unread
 
 
 def _identity_assignment_ai(tokens):
@@ -5955,6 +5984,10 @@ def _cmtidn_line_ai(command, depth, budgets, unread, paths, judged, from_env=Fal
         files.chdir = files.chdir or any(
             tok in _CMTIDN_CHDIR_WORDS or _CMTIDN_GIT_DIR_ENV_RE.search(tok) or _CMTIDN_WORKTREE_KEY_RE.match(tok)
             for _same, segments in readings for tokens, _sep in segments for tok in tokens)
+        # The words as the lexer decodes them may also set a trailer.<token>.key (_CMTIDN_TRAILER_KEY_PARTS).
+        files.trailer_key = files.trailer_key or any(
+            _cmtidn_may_set_trailer_key(tok) for _same, segments in readings for tokens, _sep in segments
+            for tok in tokens)
     line_env = None  # read at the first segment that runs git (below)
     for same, segments in readings:
         keys = [reading for reading in paths if reading in same] or [None]
