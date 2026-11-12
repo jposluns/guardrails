@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "24eb8cf16d970d4e7d503351bbdecdfbaf701e1e59ab44a429230e847615df75"
+tree-sha256 = "438c51e94892bc1b13cf188949977b9e401a07c57b3583643a157f668d702f38"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -3956,8 +3956,8 @@ sha256 = "dd0e5f2a6402329e70ad8e81e5cd63557683e24044cd3eb16686a60eaf81cae6"
 
 [[sources]]
 path = "site/enforcement.html"
-bytes = 719822
-sha256 = "bb07d9f02f9a203de5dcccc750fad3582893eee04d10cf0df78334e56dbc4fdc"
+bytes = 719896
+sha256 = "da8c97e28043495557d5bd90ada2c90d9b3c35b930c38f4bc6002c06929896cc"
 
 [[sources]]
 path = "site/evidence.html"
@@ -4511,8 +4511,8 @@ sha256 = "86d55d3f474a61803df772ded86a9f9d1ffe74bc9f83b2f36fb1a643bf706ab5"
 
 [[sources]]
 path = "tools/gen_enforcement_register.py"
-bytes = 94799
-sha256 = "3316a3abc01801f7e7b3ac59ae2e30f653b537014b220b08a889b6df2d6663fc"
+bytes = 95836
+sha256 = "828e2897952d0febd2e232a389602c6e2ce127f6be7ad5c90e5a447e1fab5ff2"
 
 [[sources]]
 path = "tools/gen_first_pin_demo.py"
