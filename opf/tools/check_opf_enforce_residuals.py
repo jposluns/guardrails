@@ -2,17 +2,17 @@
 """OPF enforcement-pack residual register gate: every residual disclosed, and disclosed where it is named.
 
 OPF-SPEC 14.1 requires the enforcement pack to disclose the residuals it does not eliminate. The pack's
-register of where each member discloses each residual is opf/enforcement/residuals.toml. This gate holds
+register of where each member discloses each residual is enforcement/residuals.toml. This gate holds
 the register, its header and the pack to these rules:
 
-  rows        exactly one [[residual]] row per token of ENFORCEMENT_RESIDUALS (opf/tools/_opf_adopt.py,
+  rows        exactly one [[residual]] row per token of ENFORCEMENT_RESIDUALS (tools/_opf_adopt.py,
               read statically), in that order. The document carries exactly format-version and the rows,
               the format-version is the exact integer 1 (a boolean true or a float 1.0 is refused), and
               each row carries exactly id, spec, members, anchors and statement: id, spec and statement
               non-empty strings (a row with any other id is a finding, recorded under no id), members a
               non-empty list of unique contained paths, anchors a table whose keys are exactly the row's
               members and whose values are non-empty strings.
-  members     each member is a regular file of the pack (opf/enforcement/) reached through no symlink,
+  members     each member is a regular file of the pack (enforcement/) reached through no symlink,
               and never one of the two registers (residuals.toml, platforms.toml), which are not members.
   anchors     each anchor occurs in its member verbatim. The register states no other normalisation
               ("a phrase that member contains verbatim"), so none is applied: a respaced, rewrapped or
@@ -45,11 +45,12 @@ oversized or malformed input, a vocabulary literal that cannot be read).
 DISCLOSED RESIDUALS. The gate cannot tell a disclosure from a locator, or judge whether an anchor's
 member really discloses the residual: it checks that each anchor occurs, and holds the declared locators
 and unnamed members to its two lists and the header. The spec field is not compared with
-opf/spec/OPF-SPEC.md, and the statement is not compared with the members. The header reading is lexical:
-it reads the listed sentence forms, not meaning. platforms.toml is read only for each row's platform,
-means and member; tools/check_opf_enforce_platforms.py validates it. Each input is opened after a
-symlinked-parent check, and its regular-file and size checks are made on the opened descriptor, so a
-parent directory swapped for a symlink between that check and the open is a check-to-use race.
+spec/OPF-SPEC.md, and the statement is not compared with the members. The header reading is lexical: it
+reads the listed sentence forms, not meaning. platforms.toml is read only for each row's platform, means
+and member; the authoring repository's tools/check_opf_enforce_platforms.py validates it, and a
+standalone OPF tree carries no gate that does. Each input is opened after a symlinked-parent check, and
+its regular-file and size checks are made on the opened descriptor, so a parent directory swapped for a
+symlink between that check and the open is a check-to-use race.
 """
 import sys
 
@@ -74,11 +75,13 @@ import tempfile
 import tomllib
 from pathlib import Path
 
+# The OPF root: the directory above this script's tools/ directory. Every path below is relative to it,
+# so the gate reads the same inputs from the authoring repository's opf/ and from a standalone OPF tree.
 ROOT = Path(__file__).resolve().parents[1]
-PACK_REL = "opf/enforcement"
+PACK_REL = "enforcement"
 REGISTER_REL = PACK_REL + "/residuals.toml"
 ROSTER_REL = PACK_REL + "/platforms.toml"
-ADOPT_REL = "opf/tools/_opf_adopt.py"
+ADOPT_REL = "tools/_opf_adopt.py"
 REGISTERS = frozenset(("residuals.toml", "platforms.toml"))
 MAX_INPUT_BYTES = 4 * 1024 * 1024
 
