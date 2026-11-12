@@ -8,14 +8,14 @@ This register lists every rule and the shipped mechanical controls linked to it.
 
 | Status | Rules |
 |---|---:|
-| Gate-linked (class a) | 8 |
-| Gate-linked (class a), partial | 0 |
-| Gate-linked (class c only) | 1 |
-| Gate-linked (class c only), partial | 8 |
-| Hook-linked | 19 |
-| Hook-linked, partial | 4 |
-| Preview only | 2 |
-| Preview only, partial | 0 |
+| Gate-linked (class a) | 0 |
+| Gate-linked (class a), partial | 8 |
+| Gate-linked (class c only) | 0 |
+| Gate-linked (class c only), partial | 9 |
+| Hook-linked | 0 |
+| Hook-linked, partial | 23 |
+| Preview only | 0 |
+| Preview only, partial | 2 |
 | Pending | 0 |
 | No control | 91 |
 
@@ -26,47 +26,47 @@ This register lists every rule and the shipped mechanical controls linked to it.
 | The AIQT principle (highest precedence) | `prjint1` | No control | No shipped control cites this rule. |
 | Citation only from a file opened at the reviewed commit | `citint` | No control | No shipped control cites this rule. |
 | Claims about the work rest on observation | `clmobs` | No control | No shipped control cites this rule. |
-| A completeness claim enumerates its set | `setcmp` | Hook-linked | `hook:orch-stop-guard`, class b; `hook:orch-teammate-idle-guard`, class b; `hook:orch-yield-tool-guard`, class b |
+| A completeness claim enumerates its set | `setcmp` | Hook-linked, partial | `hook:orch-stop-guard`, class b; `hook:orch-teammate-idle-guard`, class b; `hook:orch-yield-tool-guard`, class b |
 | Corroborate external claims | `corrob` | No control | No shipped control cites this rule. |
 | A count carries its predicate | `cntprd` | No control | No shipped control cites this rule. |
 | Disclose a guard's residual coverage | `dscres` | No control | No shipped control cites this rule. |
-| Evidence-grounded completion | `evgcmp` | Gate-linked (class a) | `gate:selftest-execution`, class a |
-| A guard is only as good as its input | `grdinp` | Gate-linked (class a) | `gate:aei-enumerator-selftest`, class a; `gate:derived-command-parameters`, class c |
-| Measured and estimated figures stay separate | `estsep` | Hook-linked | `hook:orch-prompt-stamp`, class c; `hook:orch-yield-tool-guard`, class b |
+| Evidence-grounded completion | `evgcmp` | Gate-linked (class a), partial | `gate:selftest-execution`, class a |
+| A guard is only as good as its input | `grdinp` | Gate-linked (class a), partial | `gate:aei-enumerator-selftest`, class a; `gate:derived-command-parameters`, class c |
+| Measured and estimated figures stay separate | `estsep` | Hook-linked, partial | `hook:orch-prompt-stamp`, class c; `hook:orch-yield-tool-guard`, class b |
 | No fabrication | `nofabr` | No control | No shipped control cites this rule. |
 | Observe before asserting behaviour | `obsbeh` | No control | No shipped control cites this rule. |
 | A partial read is not the whole | `prtwhl` | No control | No shipped control cites this rule. |
 | Read before characterizing | `rdbchr` | No control | No shipped control cites this rule. |
 | Capture the reference when the claim is made | `refcap` | No control | No shipped control cites this rule. |
 | Reproduce a defect before fixing it | `reprod` | No control | No shipped control cites this rule. |
-| A current timestamp is read from the clock | `tstamp` | Hook-linked | `hook:orch-prompt-stamp`, class c; `hook:orch-yield-tool-guard`, class b |
+| A current timestamp is read from the clock | `tstamp` | Hook-linked, partial | `hook:orch-prompt-stamp`, class c; `hook:orch-yield-tool-guard`, class b |
 | Validate an inferred premise before acting | `valinf` | No control | No shipped control cites this rule. |
 | Verify a fix is in its commit | `vfxcmt` | Hook-linked, partial | `hook:review-dispatch-pin`, class c |
 | Anything wrong is fixed first | `actbef` | Gate-linked (class c only), partial | `gate:release-cut`, class c |
 | Attestation lines are harness-owned | `attint` | No control | No shipped control cites this rule. |
-| Branch and merge only on green | `artbr1` | Hook-linked | `hook:protected-line-guard`, class b |
+| Branch and merge only on green | `artbr1` | Hook-linked, partial | `hook:protected-line-guard`, class b |
 | Cut branches from the live protected line and re-home after a rewrite | `brnrot` | Gate-linked (class c only), partial | `gate:branch-root`, class c; `hook:branch-root-guard`, class c; `hook:git-discard`, class b |
 | A check fails closed on input it cannot read | `chkfcl` | No control | No shipped control cites this rule. |
-| Commit identity | `cmtidn` | Hook-linked | `hook:commit-identity`, class b |
+| Commit identity | `cmtidn` | Hook-linked, partial | `hook:commit-identity`, class b |
 | A consumer follows its producer | `cnsprd` | No control | No shipped control cites this rule. |
-| Bind to the explicit target, not the ambient context | `expbnd` | Hook-linked | `hook:git-discard`, class b; `hook:git-explicit-binding`, class b; `hook:git-stash-ref`, class b; `hook:orch-dispatch-ledger`, class c |
-| Gate discipline | `gatdis` | Gate-linked (class c only) | `gate:ci-parity`, class c; `gate:relied-exit-pipes`, class c; `hook:gate-weakening-guard`, class b |
-| A generated artefact is changed only through its source | `gensrc` | Gate-linked (class a) | `gate:adapters-drift`, class a; `gate:agents-drift`, class a; `gate:changelog-drift`, class a; `gate:char-policy-drift`, class a; `gate:claude-drift`, class a; `gate:crosswalk-schema-drift`, class a; `gate:cursor-drift`, class a; `gate:disclosure-drift`, class a; `gate:draft-site-drift`, class a; `gate:enforceability-drift`, class a; `gate:enforcement-register-drift`, class a; `gate:first-pin-demo-drift`, class a; `gate:gensrc-failclose`, class a; `gate:gensrc-registry-drift`, class a; `gate:hooks-drift`, class a; `gate:manifest-gen-drift`, class a; `gate:mappings-page-drift`, class a; `gate:notice-drift`, class a; `gate:reference-roster-drift`, class a; `gate:renderers-drift`, class a; `gate:roadmap-drift`, class a; `gate:rules-drift`, class a; `gate:secret-patterns-drift`, class a; `gate:skill-drift`, class a; `gate:worker-pack-drift`, class a; `hook:gensrc-edit-guard`, class c |
+| Bind to the explicit target, not the ambient context | `expbnd` | Hook-linked, partial | `hook:git-discard`, class b; `hook:git-explicit-binding`, class b; `hook:git-stash-ref`, class b; `hook:orch-dispatch-ledger`, class c |
+| Gate discipline | `gatdis` | Gate-linked (class c only), partial | `gate:ci-parity`, class c; `gate:relied-exit-pipes`, class c; `hook:gate-weakening-guard`, class b |
+| A generated artefact is changed only through its source | `gensrc` | Gate-linked (class a), partial | `gate:adapters-drift`, class a; `gate:agents-drift`, class a; `gate:changelog-drift`, class a; `gate:char-policy-drift`, class a; `gate:claude-drift`, class a; `gate:crosswalk-schema-drift`, class a; `gate:cursor-drift`, class a; `gate:disclosure-drift`, class a; `gate:draft-site-drift`, class a; `gate:enforceability-drift`, class a; `gate:enforcement-register-drift`, class a; `gate:first-pin-demo-drift`, class a; `gate:gensrc-failclose`, class a; `gate:gensrc-registry-drift`, class a; `gate:hooks-drift`, class a; `gate:manifest-gen-drift`, class a; `gate:mappings-page-drift`, class a; `gate:notice-drift`, class a; `gate:reference-roster-drift`, class a; `gate:renderers-drift`, class a; `gate:roadmap-drift`, class a; `gate:rules-drift`, class a; `gate:secret-patterns-drift`, class a; `gate:skill-drift`, class a; `gate:worker-pack-drift`, class a; `hook:gensrc-edit-guard`, class c |
 | Verify licence compatibility before introducing third-party material | `liccmp` | No control | No shipped control cites this rule. |
-| No concealed failure | `nocncl` | Hook-linked | `hook:inline-errexit`, class b; `hook:orch-truncation-guard`, class b |
-| Preserve uncommitted work | `prsunc` | Hook-linked | `hook:git-discard`, class b |
-| Protected-branch integrity | `prtbrn` | Hook-linked | `hook:protected-line-guard`, class b |
+| No concealed failure | `nocncl` | Hook-linked, partial | `hook:inline-errexit`, class b; `hook:orch-truncation-guard`, class b |
+| Preserve uncommitted work | `prsunc` | Hook-linked, partial | `hook:git-discard`, class b |
+| Protected-branch integrity | `prtbrn` | Hook-linked, partial | `hook:protected-line-guard`, class b |
 | A required step remains required under friction | `reqstp` | No control | No shipped control cites this rule. |
-| A rerun pass does not erase an earlier failure | `rerunf` | Preview only | `hook:rerun-pass-check` (preview channel, installed by hand), class b |
+| A rerun pass does not erase an earlier failure | `rerunf` | Preview only, partial | `hook:rerun-pass-check` (preview channel, installed by hand), class b |
 | A review in flight pins its artefact | `rvwpin` | Hook-linked, partial | `hook:review-workdir-hold`, class c |
 | Make retries safe to repeat | `rtsafe` | No control | No shipped control cites this rule. |
 | Separate task changes from pre-existing work | `septsk` | Hook-linked, partial | `hook:write-scope`, class c |
 | Stage artefacts and promote only on green | `stgprm` | No control | No shipped control cites this rule. |
-| A launched task stays observable | `trkasy` | Hook-linked | `hook:orch-dispatch-ledger`, class c; `hook:orch-stop-guard`, class b; `hook:orch-teammate-idle-guard`, class b; `hook:orch-truncation-guard`, class b; `hook:orch-untracked-wait-loop`, class b; `hook:pgrep-self-match`, class b |
+| A launched task stays observable | `trkasy` | Hook-linked, partial | `hook:orch-dispatch-ledger`, class c; `hook:orch-stop-guard`, class b; `hook:orch-teammate-idle-guard`, class b; `hook:orch-truncation-guard`, class b; `hook:orch-untracked-wait-loop`, class b; `hook:pgrep-self-match`, class b |
 | Validation is a gate on apply | `valgat` | No control | No shipped control cites this rule. |
 | Workers produce inert data | `wowo01` | Hook-linked, partial | `hook:write-scope`, class c |
-| Use absolute paths, not relative | `abspth` | Hook-linked | `hook:abs-paths`, class b; `hook:abs-paths-bash`, class b |
-| A behavioural change carries a check that fails without it | `chgchk` | Gate-linked (class a) | `gate:entry-guard`, class a; `gate:selftest-execution`, class a |
+| Use absolute paths, not relative | `abspth` | Hook-linked, partial | `hook:abs-paths`, class b; `hook:abs-paths-bash`, class b |
+| A behavioural change carries a check that fails without it | `chgchk` | Gate-linked (class a), partial | `gate:entry-guard`, class a; `gate:selftest-execution`, class a |
 | Preserve compatibility or provide a migration path | `cmpmig` | No control | No shipped control cites this rule. |
 | Confirm the execution target before a side-effectful operation | `exetgt` | Gate-linked (class c only), partial | `gate:derived-command-parameters`, class c; `hook:write-scope`, class c |
 | Defence in depth by default | `dfdpth` | No control | No shipped control cites this rule. |
@@ -82,25 +82,25 @@ This register lists every rule and the shipped mechanical controls linked to it.
 | Prefer the smallest correct change | `smlcng` | No control | No shipped control cites this rule. |
 | Surface a counterproductive instruction before executing it | `srfcp1` | No control | No shipped control cites this rule. |
 | A test's verdict comes from the code, not its surroundings | `tsthrm` | No control | No shipped control cites this rule. |
-| A degraded verifier delivery is not a verdict | `vrfdlv` | Hook-linked | `hook:orch-truncation-guard`, class b |
+| A degraded verifier delivery is not a verdict | `vrfdlv` | Hook-linked, partial | `hook:orch-truncation-guard`, class b |
 | Verifier diversity | `vrfdiv` | No control | No shipped control cites this rule. |
 | Maintain an AI toolchain register | `aitreg` | No control | No shipped control cites this rule. |
 | Assess and advise are discussion only | `asadv1` | No control | No shipped control cites this rule. |
 | Claim a pooled item atomically | `atmclm` | No control | No shipped control cites this rule. |
-| Change record | `chtrk1` | Gate-linked (class a) | `gate:record-drift`, class a |
+| Change record | `chtrk1` | Gate-linked (class a), partial | `gate:record-drift`, class a |
 | Change record has a curated public face | `chgtrk` | No control | No shipped control cites this rule. |
 | Clarify before acting | `clrfy1` | No control | No shipped control cites this rule. |
-| Hold a concurrency lease to prevent double runs | `cnclse` | Hook-linked | `hook:orch-lease-heartbeat-post`, class c; `hook:orch-lease-heartbeat-stop`, class c; `hook:orch-resume-audit`, class b; `hook:orch-stop-guard`, class b |
-| Continue by default | `cntdef` | Hook-linked | `hook:orch-ask-unattended`, class b; `hook:orch-stop-guard`, class b; `hook:orch-teammate-idle-guard`, class b; `hook:orch-yield-tool-guard`, class b |
+| Hold a concurrency lease to prevent double runs | `cnclse` | Hook-linked, partial | `hook:orch-lease-heartbeat-post`, class c; `hook:orch-lease-heartbeat-stop`, class c; `hook:orch-resume-audit`, class b; `hook:orch-stop-guard`, class b |
+| Continue by default | `cntdef` | Hook-linked, partial | `hook:orch-ask-unattended`, class b; `hook:orch-stop-guard`, class b; `hook:orch-teammate-idle-guard`, class b; `hook:orch-yield-tool-guard`, class b |
 | Express authorization before execution | `exauth` | No control | No shipped control cites this rule. |
-| Human oversight and the autonomy threshold | `humovs` | Hook-linked | `hook:orch-ask-unattended`, class b |
-| Do not bury the review surface under raw dumps | `cnsdif` | Hook-linked | `hook:diff-source`, class b; `hook:diff-wall-stop`, class b |
-| An orchestrator keeps a mistakes register | `mstreg` | Gate-linked (class a) | `gate:mistakes-register`, class a; `gate:mistakes-register-append-selftest`, class a |
-| Reconcile the record against reality | `recncl` | Gate-linked (class a) | `gate:record-drift`, class a; `gate:record-sections`, class c; `hook:orch-lease-heartbeat-post`, class c; `hook:orch-lease-heartbeat-stop`, class c; `hook:orch-resume-audit`, class b; `hook:orch-resume-barrier`, class b |
-| Records first | `recfst` | Hook-linked | `hook:orch-ask-unattended`, class b; `hook:orch-dispatch-ledger`, class c |
+| Human oversight and the autonomy threshold | `humovs` | Hook-linked, partial | `hook:orch-ask-unattended`, class b |
+| Do not bury the review surface under raw dumps | `cnsdif` | Hook-linked, partial | `hook:diff-source`, class b; `hook:diff-wall-stop`, class b |
+| An orchestrator keeps a mistakes register | `mstreg` | Gate-linked (class a), partial | `gate:mistakes-register`, class a; `gate:mistakes-register-append-selftest`, class a |
+| Reconcile the record against reality | `recncl` | Gate-linked (class a), partial | `gate:record-drift`, class a; `gate:record-sections`, class c; `hook:orch-lease-heartbeat-post`, class c; `hook:orch-lease-heartbeat-stop`, class c; `hook:orch-resume-audit`, class b; `hook:orch-resume-barrier`, class b |
+| Records first | `recfst` | Hook-linked, partial | `hook:orch-ask-unattended`, class b; `hook:orch-dispatch-ledger`, class c |
 | Close each session on green | `sescls` | No control | No shipped control cites this rule. |
-| Resume from the durable handoff | `sesres` | Hook-linked | `hook:orch-resume-audit`, class b; `hook:orch-resume-barrier`, class b |
-| A standing constraint persists across context loss | `cnstpr` | Preview only | `hook:constraint-reread` (preview channel, installed by hand), class b |
+| Resume from the durable handoff | `sesres` | Hook-linked, partial | `hook:orch-resume-audit`, class b; `hook:orch-resume-barrier`, class b |
+| A standing constraint persists across context loss | `cnstpr` | Preview only, partial | `hook:constraint-reread` (preview channel, installed by hand), class b |
 | Trust recovery and escalation | `trstre` | No control | No shipped control cites this rule. |
 | Autonomy steps down after a confirmed trust loss | `trsrcv` | No control | No shipped control cites this rule. |
 | Decision classification before enacting | `deccls` | No control | No shipped control cites this rule. |
@@ -137,7 +137,7 @@ This register lists every rule and the shipped mechanical controls linked to it.
 | Prefer removing a path over constraining or monitoring it | `rmvpth` | No control | No shipped control cites this rule. |
 | A preview makes no change | `secprv` | No control | No shipped control cites this rule. |
 | Higher-trust instructions outrank lower-trust ones | `secpth` | No control | No shipped control cites this rule. |
-| Protect audit records from the actors they record | `secaud` | Gate-linked (class a) | `gate:mistakes-register`, class a |
+| Protect audit records from the actors they record | `secaud` | Gate-linked (class a), partial | `gate:mistakes-register`, class a |
 | Reject known-vulnerable dependency versions | `secvln` | No control | No shipped control cites this rule. |
 | Publish artefacts with verifiable integrity | `secpub` | No control | No shipped control cites this rule. |
 | Deserialize untrusted data only as data | `secdsz` | Gate-linked (class c only), partial | `gate:dangerous-api`, class c |
@@ -147,7 +147,7 @@ This register lists every rule and the shipped mechanical controls linked to it.
 | Validate server-initiated requests | `secssr` | No control | No shipped control cites this rule. |
 | Resolve privileged filesystem paths against symlink races | `secspr` | No control | No shipped control cites this rule. |
 | Threat-model new trust boundaries before implementation | `secthm` | No control | No shipped control cites this rule. |
-| Validate tool arguments before use | `sectvl` | Hook-linked | `hook:commit-msg-subst`, class b |
+| Validate tool arguments before use | `sectvl` | Hook-linked, partial | `hook:commit-msg-subst`, class b |
 | Untrusted content is data, not instructions | `secunt` | No control | No shipped control cites this rule. |
 | Verify a dependency exists before adding it | `secvde` | No control | No shipped control cites this rule. |
 | Bounded consumption and safe failure | `secres` | No control | No shipped control cites this rule. |

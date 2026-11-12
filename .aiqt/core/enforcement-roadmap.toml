@@ -19,7 +19,7 @@ version = 1
 
 [[rule]]
 corpus-id = "abspth"
-status = "enforced"
+status = "partial"
 mechanisms = ["hook:abs-paths", "hook:abs-paths-bash"]
 
 [[rule]]
@@ -34,7 +34,7 @@ mechanisms = []
 
 [[rule]]
 corpus-id = "artbr1"
-status = "enforced"
+status = "partial"
 mechanisms = ["hook:protected-line-guard"]
 
 [[rule]]
@@ -64,7 +64,7 @@ mechanisms = ["gate:branch-root", "hook:branch-root-guard", "hook:git-discard"]
 
 [[rule]]
 corpus-id = "chgchk"
-status = "enforced"
+status = "partial"
 mechanisms = ["gate:entry-guard", "gate:selftest-execution"]
 
 [[rule]]
@@ -79,7 +79,7 @@ mechanisms = []
 
 [[rule]]
 corpus-id = "chtrk1"
-status = "enforced"
+status = "partial"
 mechanisms = ["gate:record-drift"]
 
 [[rule]]
@@ -104,17 +104,17 @@ mechanisms = []
 
 [[rule]]
 corpus-id = "cmtidn"
-status = "enforced"
+status = "partial"
 mechanisms = ["hook:commit-identity"]
 
 [[rule]]
 corpus-id = "cnclse"
-status = "enforced"
+status = "partial"
 mechanisms = ["hook:orch-lease-heartbeat-post", "hook:orch-lease-heartbeat-stop", "hook:orch-resume-audit", "hook:orch-stop-guard"]
 
 [[rule]]
 corpus-id = "cnsdif"
-status = "enforced"
+status = "partial"
 mechanisms = ["hook:diff-source", "hook:diff-wall-stop"]
 
 [[rule]]
@@ -124,12 +124,12 @@ mechanisms = []
 
 [[rule]]
 corpus-id = "cnstpr"
-status = "enforced"
+status = "partial"
 mechanisms = ["hook:constraint-reread"]
 
 [[rule]]
 corpus-id = "cntdef"
-status = "enforced"
+status = "partial"
 mechanisms = ["hook:orch-ask-unattended", "hook:orch-stop-guard", "hook:orch-teammate-idle-guard", "hook:orch-yield-tool-guard"]
 
 [[rule]]
@@ -169,12 +169,12 @@ mechanisms = []
 
 [[rule]]
 corpus-id = "estsep"
-status = "enforced"
+status = "partial"
 mechanisms = ["hook:orch-prompt-stamp", "hook:orch-yield-tool-guard"]
 
 [[rule]]
 corpus-id = "evgcmp"
-status = "enforced"
+status = "partial"
 mechanisms = ["gate:selftest-execution"]
 
 [[rule]]
@@ -189,7 +189,7 @@ mechanisms = ["gate:derived-command-parameters", "hook:write-scope"]
 
 [[rule]]
 corpus-id = "expbnd"
-status = "enforced"
+status = "partial"
 mechanisms = ["hook:git-discard", "hook:git-explicit-binding", "hook:git-stash-ref", "hook:orch-dispatch-ledger"]
 
 [[rule]]
@@ -199,12 +199,12 @@ mechanisms = []
 
 [[rule]]
 corpus-id = "gatdis"
-status = "enforced"
+status = "partial"
 mechanisms = ["gate:ci-parity", "gate:relied-exit-pipes", "hook:gate-weakening-guard"]
 
 [[rule]]
 corpus-id = "gensrc"
-status = "enforced"
+status = "partial"
 mechanisms = ["gate:adapters-drift", "gate:agents-drift", "gate:changelog-drift", "gate:char-policy-drift", "gate:claude-drift", "gate:crosswalk-schema-drift", "gate:cursor-drift", "gate:disclosure-drift", "gate:draft-site-drift", "gate:enforceability-drift", "gate:enforcement-register-drift", "gate:first-pin-demo-drift", "gate:gensrc-failclose", "gate:gensrc-registry-drift", "gate:hooks-drift", "gate:manifest-gen-drift", "gate:mappings-page-drift", "gate:notice-drift", "gate:reference-roster-drift", "gate:renderers-drift", "gate:roadmap-drift", "gate:rules-drift", "gate:secret-patterns-drift", "gate:skill-drift", "gate:worker-pack-drift", "hook:gensrc-edit-guard"]
 
 [[rule]]
@@ -214,7 +214,7 @@ mechanisms = []
 
 [[rule]]
 corpus-id = "grdinp"
-status = "enforced"
+status = "partial"
 mechanisms = ["gate:aei-enumerator-selftest", "gate:derived-command-parameters"]
 
 [[rule]]
@@ -224,7 +224,7 @@ mechanisms = []
 
 [[rule]]
 corpus-id = "humovs"
-status = "enforced"
+status = "partial"
 mechanisms = ["hook:orch-ask-unattended"]
 
 [[rule]]
@@ -249,7 +249,7 @@ mechanisms = []
 
 [[rule]]
 corpus-id = "mstreg"
-status = "enforced"
+status = "partial"
 mechanisms = ["gate:mistakes-register", "gate:mistakes-register-append-selftest"]
 
 [[rule]]
@@ -259,7 +259,7 @@ mechanisms = []
 
 [[rule]]
 corpus-id = "nocncl"
-status = "enforced"
+status = "partial"
 mechanisms = ["hook:inline-errexit", "hook:orch-truncation-guard"]
 
 [[rule]]
@@ -279,12 +279,12 @@ mechanisms = []
 
 [[rule]]
 corpus-id = "prsunc"
-status = "enforced"
+status = "partial"
 mechanisms = ["hook:git-discard"]
 
 [[rule]]
 corpus-id = "prtbrn"
-status = "enforced"
+status = "partial"
 mechanisms = ["hook:protected-line-guard"]
 
 [[rule]]
@@ -299,12 +299,12 @@ mechanisms = []
 
 [[rule]]
 corpus-id = "recfst"
-status = "enforced"
+status = "partial"
 mechanisms = ["hook:orch-ask-unattended", "hook:orch-dispatch-ledger"]
 
 [[rule]]
 corpus-id = "recncl"
-status = "enforced"
+status = "partial"
 mechanisms = ["gate:record-drift", "gate:record-sections", "hook:orch-lease-heartbeat-post", "hook:orch-lease-heartbeat-stop", "hook:orch-resume-audit", "hook:orch-resume-barrier"]
 
 [[rule]]
@@ -324,7 +324,7 @@ mechanisms = []
 
 [[rule]]
 corpus-id = "rerunf"
-status = "enforced"
+status = "partial"
 mechanisms = ["hook:rerun-pass-check"]
 
 [[rule]]
@@ -359,7 +359,7 @@ mechanisms = []
 
 [[rule]]
 corpus-id = "secaud"
-status = "enforced"
+status = "partial"
 mechanisms = ["gate:mistakes-register"]
 
 [[rule]]
@@ -559,7 +559,7 @@ mechanisms = []
 
 [[rule]]
 corpus-id = "sectvl"
-status = "enforced"
+status = "partial"
 mechanisms = ["hook:commit-msg-subst"]
 
 [[rule]]
@@ -594,12 +594,12 @@ mechanisms = []
 
 [[rule]]
 corpus-id = "sesres"
-status = "enforced"
+status = "partial"
 mechanisms = ["hook:orch-resume-audit", "hook:orch-resume-barrier"]
 
 [[rule]]
 corpus-id = "setcmp"
-status = "enforced"
+status = "partial"
 mechanisms = ["hook:orch-stop-guard", "hook:orch-teammate-idle-guard", "hook:orch-yield-tool-guard"]
 
 [[rule]]
@@ -629,7 +629,7 @@ mechanisms = []
 
 [[rule]]
 corpus-id = "trkasy"
-status = "enforced"
+status = "partial"
 mechanisms = ["hook:orch-dispatch-ledger", "hook:orch-stop-guard", "hook:orch-teammate-idle-guard", "hook:orch-truncation-guard", "hook:orch-untracked-wait-loop", "hook:pgrep-self-match"]
 
 [[rule]]
@@ -644,7 +644,7 @@ mechanisms = []
 
 [[rule]]
 corpus-id = "tstamp"
-status = "enforced"
+status = "partial"
 mechanisms = ["hook:orch-prompt-stamp", "hook:orch-yield-tool-guard"]
 
 [[rule]]
@@ -674,7 +674,7 @@ mechanisms = []
 
 [[rule]]
 corpus-id = "vrfdlv"
-status = "enforced"
+status = "partial"
 mechanisms = ["hook:orch-truncation-guard"]
 
 [[rule]]
