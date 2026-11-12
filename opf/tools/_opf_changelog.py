@@ -1157,7 +1157,6 @@ def self_test():
                 os.close(started_r)
             return result, elapsed, started
 
-        fifo_result, _probe_elapsed, _probe_started = _run_fifo_probe(5)
         # A TIMEOUT that reached the 5 s bound WITHOUT the probe's start
         # receipt establishes nothing: a starved host can fail to start a
         # correct probe inside the bound (guardian startup shares it), so
@@ -1169,25 +1168,83 @@ def self_test():
         # work is milliseconds, measured well inside either bound), and only
         # the same started-timeout shape under the long bound is judged the
         # definite hang -- a probe that blocks forever repeats it under any
-        # bound, a starved correct probe returns its value, and a long run
-        # the guardian never started stays no verdict. An early TIMEOUT and
-        # every other result stay with the check, whichever run produced
-        # them: the guard-deletion regression is judged by the recorded
-        # downstream-reader call (_rc_calls), which no host speed can move.
+        # bound -- while a long run the guardian never started stays no
+        # verdict. A confirm run that PASSES after that started timeout is no
+        # verdict either: a rerun pass never erases the earlier failure, so
+        # the pair is an unresolved intermittent result (the deadline cases
+        # judge their analogous pair the same way), never a pass. An early
+        # TIMEOUT and every other result stay with the check, whichever run
+        # produced them: the guard-deletion regression is judged by the
+        # recorded downstream-reader call (_rc_calls), which no host speed
+        # can move.
         from _opf_emit import bounded_probe_starved_suspect, bounded_probe_unestablished
-        if bounded_probe_starved_suspect(fifo_result, _probe_elapsed, 5, _probe_started):
-            fifo_result, _probe_elapsed, _probe_started = _run_fifo_probe(25)
-            if bounded_probe_unestablished(fifo_result, _probe_elapsed, 25, _probe_started):
-                unestablished.append("f1-fifo-changelog-not-regular-fail-closed: the started "
-                                     "FIFO probe timed out and its confirm run was never "
-                                     "observed to start inside the 25 s bound")
-            else:
-                check("f1-fifo-changelog-not-regular-fail-closed", fifo_result == "True")
-        elif bounded_probe_unestablished(fifo_result, _probe_elapsed, 5, _probe_started):
-            unestablished.append("f1-fifo-changelog-not-regular-fail-closed: the bounded FIFO "
-                                 "probe was never observed to start inside its 5 s bound")
+
+        def _fifo_probe_decision(first, rerun):
+            """("check", passed) or ("unestablished", reason) for the FIFO
+            probe, from its first run's (result, elapsed, started) and
+            `rerun(bound)`, which runs the probe again and is called only for
+            the started-timeout shape."""
+            result, elapsed, started = first
+            if bounded_probe_starved_suspect(result, elapsed, 5, started):
+                result, elapsed, started = rerun(25)
+                if bounded_probe_unestablished(result, elapsed, 25, started):
+                    return ("unestablished", "the started FIFO probe timed out and its "
+                            "confirm run was never observed to start inside the 25 s bound")
+                if result == "True":
+                    return ("unestablished", "the started FIFO probe timed out under its "
+                            "5 s bound and its confirm run then passed under the 25 s "
+                            "bound: an intermittent result, which the passing rerun "
+                            "does not resolve")
+                return ("check", False)
+            if bounded_probe_unestablished(result, elapsed, 5, started):
+                return ("unestablished", "the bounded FIFO probe was never observed to "
+                        "start inside its 5 s bound")
+            return ("check", result == "True")
+
+        _fifo_kind, _fifo_outcome = _fifo_probe_decision(_run_fifo_probe(5), _run_fifo_probe)
+        if _fifo_kind == "unestablished":
+            unestablished.append("f1-fifo-changelog-not-regular-fail-closed: " + _fifo_outcome)
         else:
-            check("f1-fifo-changelog-not-regular-fail-closed", fifo_result == "True")
+            check("f1-fifo-changelog-not-regular-fail-closed", _fifo_outcome)
+        # The decision on scripted runs: a started timeout followed by a
+        # passing confirm run is no verdict naming both runs; a first run
+        # that passes keeps its pass (no confirm run), and a confirmed hang
+        # (the started timeout repeated under the 25 s bound) or a failing
+        # confirm run keeps the definite failure.
+        _rerun_bounds = []
+
+        def _scripted_rerun(outcome):
+            def rerun(bound):
+                _rerun_bounds.append(bound)
+                return outcome
+            return rerun
+
+        _flaky = _fifo_probe_decision(("TIMEOUT", 5.0, True), _scripted_rerun(("True", 0.01, True)))
+        check("f1-fifo-probe-started-timeout-then-pass-no-verdict",
+              _flaky[0] == "unestablished" and "5 s bound" in _flaky[1]
+              and "confirm run then passed under the 25 s bound" in _flaky[1]
+              and _rerun_bounds == [25])
+        del _rerun_bounds[:]
+        check("f1-fifo-probe-first-pass-keeps-verdict",
+              _fifo_probe_decision(("True", 0.01, True), _scripted_rerun(("True", 0.01, True)))
+              == ("check", True)
+              and _fifo_probe_decision(("False", 0.01, True), _scripted_rerun(("True", 0.01, True)))
+              == ("check", False)
+              and _rerun_bounds == [])
+        check("f1-fifo-probe-confirmed-hang-keeps-verdict",
+              _fifo_probe_decision(("TIMEOUT", 5.0, True), _scripted_rerun(("TIMEOUT", 25.0, True)))
+              == ("check", False)
+              and _fifo_probe_decision(("TIMEOUT", 5.0, True),
+                                       _scripted_rerun(("TIMEOUT", 25.01, True)))
+              == ("check", False)
+              and _fifo_probe_decision(("TIMEOUT", 5.0, True),
+                                       _scripted_rerun(("TIMEOUT", 24.99, False)))
+              == ("check", False)
+              and _fifo_probe_decision(("TIMEOUT", 5.0, True), _scripted_rerun(("False", 0.01, True)))
+              == ("check", False)
+              and _fifo_probe_decision(("TIMEOUT", 5.0, True),
+                                       _scripted_rerun(("TIMEOUT", 25.0, False)))[0]
+              == "unestablished")
         # The classifier's window ends, pinned: at the bound and above it an
         # UNSTARTED probe is unestablished; one tick under the bound, a
         # STARTED probe at any measured time, and a returned value at any

@@ -637,10 +637,19 @@ _VECTOR_ALLOWANCE_S = 350
 # grace and the 1 s receipt allowance (11 + 11 = 22 s). "completion-deadline-flips" is that leg's
 # formula at two priced attempts per retried row (2 x 210.2 + 38 = 458.4 s, so 459 s); at three
 # attempts it is 668.6 s, which this row refuses, and the 77 s fixed budget it replaced held no
-# retried row and no confirm run.
+# retried row and no confirm run. The tree and isolation rows are the figures those legs already
+# ran under when their budgets entered this table, unchanged by that move: "completion-nested-timeout"
+# and "completion-nested-cancel" are one allowance at the 60 s startup backstop (60 + 5 + 1 = 66 s),
+# "completion-nested-orders" is nine such allowances, nine at the 5 s vector backstop (11 s each),
+# six 60 s holds and four 5 s holds (594 + 99 + 360 + 20 = 1073 s), and "blocked-isolation" is 31
+# isolation cases at the 180 s allowance of 186 s (5766 s).
 _OPF_DECLARED_BUDGETS_SEEN = {
     "deadline-case": 22,
     "completion-deadline-flips": 459,
+    "completion-nested-timeout": 66,
+    "completion-nested-cancel": 66,
+    "completion-nested-orders": 1073,
+    "blocked-isolation": 5766,
 }
 
 
@@ -794,11 +803,12 @@ def _leg_bounds(tools_dir, ceilings=None, launch_margin_s=None, bound_floors=Non
     return bounds
 
 
-def _opf_declared_budgets(tools_dir, attempts=None):
+def _opf_declared_budgets(tools_dir, attempts=None, backstop_raise_s=None):
     """{leg label: budget in seconds} from the opf.py under tools_dir (its _watchdog_declared_budgets),
     imported in this process with tools_dir first on sys.path; sys.path and sys.modules are restored
     afterwards, so the import leaves nothing behind. attempts, when given, stands in for opf.py's
-    _DEADLINE_FLIPS_ATTEMPTS during the call (the self-test's flip). Raises _BoundError (cannot
+    _DEADLINE_FLIPS_ATTEMPTS during the call, and backstop_raise_s, when given, is added to its
+    _TREE_STARTUP_BACKSTOP during the call (the self-test's flips). Raises _BoundError (cannot
     evaluate) when the module or the function cannot be loaded."""
     tools_dir = str(Path(tools_dir))
     before = set(sys.modules)
@@ -810,14 +820,15 @@ def _opf_declared_budgets(tools_dir, attempts=None):
         except (ImportError, AttributeError, SyntaxError, OSError) as exc:
             raise _BoundError("cannot read opf.py's declared budgets under {}: {}: {}".format(
                 tools_dir, type(exc).__name__, exc))
-        if attempts is None:
-            return dict(declared())
-        saved = opf._DEADLINE_FLIPS_ATTEMPTS
-        opf._DEADLINE_FLIPS_ATTEMPTS = attempts
+        saved = opf._DEADLINE_FLIPS_ATTEMPTS, opf._TREE_STARTUP_BACKSTOP
+        if attempts is not None:
+            opf._DEADLINE_FLIPS_ATTEMPTS = attempts
+        if backstop_raise_s is not None:
+            opf._TREE_STARTUP_BACKSTOP = saved[1] + backstop_raise_s
         try:
             return dict(declared())
         finally:
-            opf._DEADLINE_FLIPS_ATTEMPTS = saved
+            opf._DEADLINE_FLIPS_ATTEMPTS, opf._TREE_STARTUP_BACKSTOP = saved
     finally:
         sys.path.remove(tools_dir)
         for name in set(sys.modules) - before:
@@ -849,8 +860,9 @@ def _declared_budget_faults(live, seen):
 def _declared_budgets_self_test(root):
     """closure/declared-budgets-seen: every arithmetic regression-leg budget of the real opf.py sits at
     or below the row the sizing accounts for, and the comparison is discriminating at its boundary
-    (just inside, exactly at and just outside each row), on a missing or stale row and on the
-    three-attempt deadline-flips formula this row was set against."""
+    (just inside, exactly at and just outside each row), on a missing or stale row, on the
+    three-attempt deadline-flips formula this row was set against and on a tree startup backstop one
+    second over the live one."""
     check = "declared-budgets-seen"
     tools_dir = Path(root) / "opf" / "tools"
     live = _under_test(check, _opf_declared_budgets, tools_dir, refuses=(_BoundError,))
@@ -881,9 +893,20 @@ def _declared_budgets_self_test(root):
     if not any(fault.startswith("completion-deadline-flips: declared budget") for fault in got):
         raise _CheckFailure("closure/{}: three deadline-flips attempts ({}s) not refused: {!r}".format(
             check, flipped.get("completion-deadline-flips"), got))
+    # A raised tree startup backstop must reach the budgets this gate reads: one second more moves
+    # every tree leg's declared budget past its row, so each is refused by name.
+    raised = _under_test(check, _opf_declared_budgets, tools_dir, backstop_raise_s=1,
+                         refuses=(_BoundError,))
+    got = _declared_budget_faults(raised, _OPF_DECLARED_BUDGETS_SEEN)
+    for label in ("completion-nested-timeout", "completion-nested-cancel", "completion-nested-orders"):
+        if not any(fault.startswith(label + ": declared budget") for fault in got):
+            raise _CheckFailure("closure/{}: a startup backstop one second over the live one left "
+                                "{} at {!r}s, not refused: {!r}".format(check, label,
+                                                                       raised.get(label), got))
     print("PASS closure/{} (every arithmetic budget at or below its row; RED one hundredth over a row, "
-          "a budget with no row, a stale row, a NaN budget, and three deadline-flips attempts at "
-          "{}s)".format(check, flipped["completion-deadline-flips"]))
+          "a budget with no row, a stale row, a NaN budget, three deadline-flips attempts at "
+          "{}s, and a tree startup backstop one second over the live one)".format(
+              check, flipped["completion-deadline-flips"]))
 
 
 def _bound_faults(bounds, needs):

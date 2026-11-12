@@ -1778,16 +1778,70 @@ def _deadline_flips_budget():
 
 
 def _watchdog_declared_budgets():
-    """{leg label: declared budget in seconds} for every regression leg whose
+    """{leg label: declared budget in seconds} for the regression legs whose
     budget is ARITHMETIC (derived from named constants, so the closure gate's
     literal wait-site scan cannot read it): the confirm-priced deadline legs
-    (one requested-timeout run and one confirm run at four times it) and the
-    deadline-flips leg. The regression runner takes these figures from here,
+    (one requested-timeout run and one confirm run at four times it, under
+    "deadline-case"), the deadline-flips leg, the three tree legs
+    (nested-timeout, nested-cancel and nested-orders, each derived from
+    _TREE_STARTUP_BACKSTOP and nested-orders also from _TREE_VECTOR_BACKSTOP)
+    and blocked-isolation (one allowance at _WATCHDOG_ISOLATION_TIMEOUT per
+    isolation case). The regression runner takes these figures from here,
     and tools/check_opf_standalone_closure.py reads the same function, so the
-    figure the closure checks is the figure the leg runs under."""
+    figure the closure checks is the figure the leg runs under.
+
+    Two arithmetic rows of the runner's budget table are NOT included: the
+    six launcher legs and the ledger vectors priced at
+    _deadline_case_budget(0.5). Their multipliers are the runner's own local
+    rosters (its mode tuples and ledger vectors), which this function cannot
+    read without moving those rosters out of the runner, and their only
+    named-constant term is one run's allowance at a timeout at or under
+    _DEADLINE_EXECUTION_BOUND, the same per-run term "deadline-case" sums
+    twice, so a constant change that raises it raises that row too."""
     deadline = _deadline_case_budget() + _deadline_case_budget(4 * _DEADLINE_CASE_TIMEOUT)
+    tree = _deadline_case_budget(_TREE_STARTUP_BACKSTOP)
+    # nested-orders, term by term: nine launches at the startup backstop,
+    # nine at the vector backstop, six holds at the startup backstop and
+    # four at the vector backstop (stated beside its row in the runner).
+    orders = (9 * tree + 9 * _deadline_case_budget(_TREE_VECTOR_BACKSTOP)
+              + 6 * _TREE_STARTUP_BACKSTOP + 4 * _TREE_VECTOR_BACKSTOP)
+    isolation = (len(_watchdog_isolation_cases())
+                 * _deadline_case_budget(_WATCHDOG_ISOLATION_TIMEOUT))
     return {"deadline-case": deadline,
-            "completion-deadline-flips": _deadline_flips_budget()}
+            "completion-deadline-flips": _deadline_flips_budget(),
+            "completion-nested-timeout": tree,
+            "completion-nested-cancel": tree,
+            "completion-nested-orders": orders,
+            "blocked-isolation": isolation}
+
+
+def _watchdog_declared_budget_vectors():
+    """Each miss of the declared-budget table against the constants it is
+    derived from: with _TREE_STARTUP_BACKSTOP raised by 1000 s in memory
+    (restored afterwards), every tree leg's declared budget must move with
+    it (nested-timeout and nested-cancel by 1000 s, nested-orders by the
+    nine launches and six holds that each pay it), so a raised backstop
+    always reaches the figure tools/check_opf_standalone_closure.py reads,
+    and every other declared budget must stay where it was. [] when all
+    hold."""
+    global _TREE_STARTUP_BACKSTOP
+    raise_by = 1000
+    before = _watchdog_declared_budgets()
+    saved = _TREE_STARTUP_BACKSTOP
+    try:
+        _TREE_STARTUP_BACKSTOP = saved + raise_by
+        after = _watchdog_declared_budgets()
+    finally:
+        _TREE_STARTUP_BACKSTOP = saved
+    moves = {"completion-nested-timeout": raise_by, "completion-nested-cancel": raise_by,
+             "completion-nested-orders": 15 * raise_by}
+    missed = ["declared budget %s is not declared" % label
+              for label in sorted(moves) if label not in before]
+    missed.extend("declared budget %s with _TREE_STARTUP_BACKSTOP raised by %d s: %r, want %r"
+                  % (label, raise_by, after.get(label), before[label] + moves.get(label, 0))
+                  for label in sorted(before)
+                  if after.get(label) != before[label] + moves.get(label, 0))
+    return missed
 
 
 # Two literals of _opf_emit's close-out code, named here for the close-out
@@ -16727,7 +16781,8 @@ def _watchdog_regression_self_test():
     # the one confirm run a starvation-suspect failure launches at four times
     # that timeout (both allowances are 11 while the timeout sits under the
     # execution bound), term by term, never a blended number.
-    deadline_budget = _watchdog_declared_budgets()["deadline-case"]
+    declared_budgets = _watchdog_declared_budgets()
+    deadline_budget = declared_budgets["deadline-case"]
     # Every leg's budget is DECLARED here and checked on every run: the leg
     # runs under _watchdog_leg_entry, which charges each bounded wait it makes
     # at its full timeout and fails the leg when the charges exceed this
@@ -16770,9 +16825,10 @@ def _watchdog_regression_self_test():
         # The tree legs charge exactly one fixture launch at the startup
         # backstop (their stimulus is event-ordered; the backstop is the
         # only declared wait), so each budget IS that call's allowance,
-        # derived, never a flat constant under the sanctioned wait.
-        ("nested-timeout", _deadline_case_budget(_TREE_STARTUP_BACKSTOP)),
-        ("nested-cancel", _deadline_case_budget(_TREE_STARTUP_BACKSTOP)),
+        # derived, never a flat constant under the sanctioned wait
+        # (_watchdog_declared_budgets, which the closure gate reads).
+        ("nested-timeout", declared_budgets["completion-nested-timeout"]),
+        ("nested-cancel", declared_budgets["completion-nested-cancel"]),
         # nested-orders runs eighteen tree exercises, one fixture launch
         # each: nine at the startup backstop and the nine real-expiry
         # vectors at their short backstop, each launch charged its
@@ -16786,10 +16842,9 @@ def _watchdog_regression_self_test():
         # two backstop-after-snapshot orders, the self-exit order and the
         # outside-kill order (six), and at the vector backstop the stall
         # vector's three holds and the late-READY wait (four). Nothing
-        # here is a blended margin: every term is a declared bound.
-        ("nested-orders", 9 * _deadline_case_budget(_TREE_STARTUP_BACKSTOP)
-         + 9 * _deadline_case_budget(_TREE_VECTOR_BACKSTOP)
-         + 6 * _TREE_STARTUP_BACKSTOP + 4 * _TREE_VECTOR_BACKSTOP),
+        # here is a blended margin: every term is a declared bound
+        # (_watchdog_declared_budgets computes it, term by term).
+        ("nested-orders", declared_budgets["completion-nested-orders"]),
         ("no-signal-echild", 15), ("guardian-error", 48), ("empty-children", 48),
         ("bounded-diagnostics", 66), ("cleanup-budget", 21),
         # deadline-flips, term by term (_deadline_flips_budget): ten settled
@@ -16820,7 +16875,7 @@ def _watchdog_regression_self_test():
         # bounded wait and add no term, nor do the own-deadline watch rows (a
         # stand-in fixture on a scripted clock). And 4 for conversion ticks
         # the host's scheduling can add to the charged waits.
-        ("deadline-flips", _watchdog_declared_budgets()["completion-deadline-flips"]),
+        ("deadline-flips", declared_budgets["completion-deadline-flips"]),
         ("subject-setup", 22), ("overdue-success", 161.0 + 0.01), ("launch-ownership", 60),
         ("launch-cancel", 33), ("fd-hygiene-total", 92), ("nested-keep", 108),
         ("fd-census", 48), ("subject-gc", 32), ("guardian-preload", 20),
@@ -16870,8 +16925,7 @@ def _watchdog_regression_self_test():
     # ends; the top-level run of the same matrix has no such bound (each of
     # its calls is bounded on its own, and a call killed at that bound is
     # the distinct CANNOT-EVALUATE there).
-    budgets["blocked-isolation"] = (len(_watchdog_isolation_cases())
-                                    * _deadline_case_budget(_WATCHDOG_ISOLATION_TIMEOUT))
+    budgets["blocked-isolation"] = declared_budgets["blocked-isolation"]
     # The ledger concurrency vectors: the declared budget IS the vector
     # leg's own (the fixture passes it through), so the kill-bound rule
     # (budget + launch margin) prices each vector exactly.
@@ -17646,6 +17700,7 @@ def _watchdog_regression_self_test():
     # each derived path under a virtual clock, must fit that path's total
     # and reach each of its waits.
     flip_missed.extend(_watchdog_closeout_vectors())
+    flip_missed.extend(_watchdog_declared_budget_vectors())
     flip_missed.extend("startup diagnosis %r -> %r, want %r" % miss
                        for miss in _watchdog_startup_vectors())
     floor = _watchdog_bound_faults(live, budgets)
