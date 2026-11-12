@@ -185,8 +185,9 @@ TOTAL_TIMEOUT = 1800  # backstop for the whole sweep; exceeding it is cannot-eva
 # anything runs unless this tool's row has a kill bound of at least this budget plus its stated margin.
 # Keep it the only binding of the name in this module, a plain assignment of a positive int literal: the
 # caller refuses any other form, or any second binding anywhere in the module, as cannot-evaluate. Sized
-# from three measured runs of `python3 -I -B tools/check_gensrc_failclose.py --self-test` on 2026-11-11
-# (134.69 s, 126.00 s and 129.12 s wall, 80 CPUs, 1-minute load 28.5 to 35.8), as the smallest whole
+# from three runs of `python3 -I -B tools/check_gensrc_failclose.py --self-test` on 2026-11-11 (134.69 s,
+# 126.00 s and 129.12 s wall, 80 CPUs, 1-minute load 28.5 to 35.8; the three timings and the CPU and load
+# figures are as reported by whoever measured them and have not been re-verified), as the smallest whole
 # number of seconds at least twice the slowest (2 * 134.69 = 269.38). The self-test does not enforce it on
 # itself. When the self-test grows, raise it here, and raise the caller's row bound with it when the budget
 # plus the margin would pass that bound.

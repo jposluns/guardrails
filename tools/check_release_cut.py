@@ -2516,19 +2516,22 @@ runpy.run_path(path, run_name="__main__")
 # The bounds must also fit inside the whole run: tools/selftest_git_fixture_env.py kills
 # `check_release_cut.py --self-test --red-on-revert` at 2700 s (its CONFIG_MEMBER_BOUNDS entry), and a run
 # killed there never reaches the named failure below. A killed entry spends its bound, then at most
-# _CENSUS_KILL_WAIT s draining its pipes and at most _CENSUS_KILL_WAIT s polling its group empty, so an entry
-# costs at worst its bound plus 2 * _CENSUS_KILL_WAIT s. _census_table_failures refuses, before anything runs,
-# an empty table, a row bound above _CENSUS_BOUND_CAP, and a table whose bounds plus 2 * _CENSUS_KILL_WAIT s
-# per entry sum above _CENSUS_TOTAL_CAP, so a table edit cannot silently break this arithmetic: any table that
-# runs spends at most _CENSUS_TOTAL_CAP = 720 s on its entries, post-kill waits included. This table's bounds
-# sum to 430 + 6 * 30 = 610 s, 610 + 7 * 2 * 5 = 680 s with the post-kill waits.
+# _CENSUS_KILL_WAIT s draining its pipes and at most _CENSUS_KILL_WAIT s polling its group empty, so an entry's
+# bound and post-kill waits come to at most its bound plus 2 * _CENSUS_KILL_WAIT s. _census_table_failures
+# refuses, before anything runs, an empty table, a row bound above _CENSUS_BOUND_CAP, and a table whose bounds
+# plus 2 * _CENSUS_KILL_WAIT s per entry sum above _CENSUS_TOTAL_CAP, so a table edit cannot silently break this
+# arithmetic: in any table that runs, the entries' bounds and post-kill waits together come to at most
+# _CENSUS_TOTAL_CAP = 720 s. That is not a ceiling on the entries' wall time: the fork and exec of each entry's
+# leader before its wait begins, and each wait's poll overshoot, lie outside that arithmetic and are not bounded
+# by it (as _census_table_failures states). This table's bounds sum to 430 + 6 * 30 = 610 s,
+# 610 + 7 * 2 * 5 = 680 s with the post-kill waits.
 # A row whose tool is in _CENSUS_BUDGETED is also held to the self-test budget that tool declares
 # (SELF_TEST_BUDGET_S, read from its source bytes by _declared_budget; the tool is never imported): before
 # anything runs, _census_table_failures refuses such a row whose bound is below that budget plus
 # CENSUS_BOUND_MARGIN_S, and refuses the row when no budget was read for it. That cross-check never raises a
 # bound or lifts a cap, so a budget that outgrows its row is refused rather than run, and the row bound is
-# raised here, within the caps, when it does. The budget cross-check rows launch nothing (their one run row
-# is refused before its launch), so they add no term to the sums below.
+# raised here, within the caps, when it does. The budget cross-check rows launch nothing (their two run rows
+# are each refused before launch), so they add no term to the sums below.
 # The census rows spend their own drains and waits on top of the table, each _census_run they make bounded at
 # 2 * TIMEOUT = 60 s plus the two post-kill waits (70 s at worst): with every one of those bounds spent in
 # full, the bound rows cost at worst 70 + 20 + 5 = 95 s (their 60 s and 10 s entries plus the grandchild
@@ -2543,6 +2546,8 @@ runpy.run_path(path, run_name="__main__")
 # code), 75 s (reaped exit), 130 s (drain reaped), 135 s (construction), 70 s (sigchld), 60 s and 70 s (the
 # two kernel sigchld flips, which launch), 25 s each (the two exit-outlived flips), 40 s each (the two
 # exit-at-bound flips and the full-pipe flip) and 40 s (the record publication flip): about 880 s together.
+# Like the table's 680 s, these sums count bounds and post-kill waits only: each launch's fork and exec and each
+# wait's poll overshoot are not in them and are not bounded by them.
 # Outside the census, the fixture cases and the mutation replays run their children through observe, each
 # call under subprocess.run's TIMEOUT = 30 s bound: the 242 fixture cases of test_cases() make 243 observe
 # calls (one each, and push-protected's push-bare call), at most 243 * 30 = 7290 s, and the 29 mutation
@@ -2558,18 +2563,21 @@ runpy.run_path(path, run_name="__main__")
 # --self-test --red-on-revert run on 2026-11-09 from 12:06:49 to 12:12:56 UTC, on 80 CPUs at a 1-minute load
 # of 23.9 at its start and 29.6 at its end, took 367.0 s wall and passed, its replays (the close-sweep
 # reverts and the mutation replays) 12.1 s of it (from its entry-restore line to its last line).
-# The worst case over those terms: a --self-test run ends by at most 680 (table) + 945 (census rows) + 7290
-# (fixture observe calls) = 8915 s (BOUND) plus the parts not summed (about 171 s, MEASURED), about 9086 s;
-# a --red-on-revert run by at most 8915 + 880 (flips) + 870 (mutation replays) = 10665 s (BOUND) plus the
-# parts not summed (about 171 + 12.1 = 183.1 s, MEASURED), about 10848.1 s. Both exceed the 1200 s default
-# member bound, as do the census bounds alone (680 + 945 + 880 = 2505 s), so the member carries its own
-# 2700 s entry in tools/selftest_git_fixture_env.py. That entry is BELOW the worst case ON PURPOSE, a
-# deliberate shorter deadline under the kill-timeout rule: the 30 s observe bounds summed are a ceiling no
-# run approaches, and a bound near it would let a hung run hold the config lane for over three hours. It is
-# sized from measured runs with a stated margin: about 7.4 times the slowest (367.0 s, --red-on-revert, the
-# entry's own comment records the runs), and it still covers every census bound above spent in full plus
-# the measured rest (2505 + 183.1 = 2688.1 s). A run that reaches it is killed at its bound and reported as
-# that lane's deadline (cannot evaluate, attributed to the bound), never as a failure of this self-test.
+# The worst case over those terms: a --self-test run's bounded terms come to at most 680 (table) + 945 (census
+# rows) + 7290 (fixture observe calls) = 8915 s (BOUND, leaving out each launch's fork and exec and each wait's
+# poll overshoot, as above), and the parts not summed add about 171 s (MEASURED, with no bound), about 9086 s; a
+# --red-on-revert run's bounded terms come to at most 8915 + 880 (flips) + 870 (mutation replays) = 10665 s
+# (BOUND, with the same exclusions), and the parts not summed add about 171 + 12.1 = 183.1 s (MEASURED), about
+# 10848.1 s. Neither total is a ceiling on a run's wall time: its measured parts have no bound. Both exceed the
+# 1200 s default member bound, as do the census bounds alone (680 + 945 + 880 = 2505 s), so the member carries
+# its own 2700 s entry in tools/selftest_git_fixture_env.py. That entry is BELOW the worst case ON PURPOSE, a
+# deliberate shorter deadline under the kill-timeout rule: the 30 s observe bounds summed are a ceiling no run
+# approaches, and a bound near it would let a hung run hold the config lane for over three hours. It is sized
+# from measured runs with a stated margin: about 7.4 times the slowest (367.0 s, --red-on-revert, the entry's
+# own comment records the runs), and it covers every census bound above spent in full plus the rest as measured
+# (2505 + 183.1 = 2688.1 s), not any worst case of that rest, which has no bound. A run that reaches it is
+# killed at its bound and reported as that lane's deadline (cannot evaluate, attributed to the bound), never as
+# a failure of this self-test.
 _CENSUS_BOUND_CAP = 600
 _CENSUS_TOTAL_CAP = 720
 # The most a killed entry waits after its group kill, once for its pipes and once more for its group to empty.
@@ -2595,7 +2603,9 @@ _CENSUS_MAPPINGS = (
 # The tools whose census row must outlive the end-to-end self-test budget the tool itself declares, as the
 # only binding of SELF_TEST_BUDGET_S in its module (a module-level plain assignment of a positive int
 # literal, in wall-clock seconds), and the margin a row's bound must keep above that budget: one parent call
-# bound, for interpreter start-up, CENSUS_DRIVER and the teardown, which the callee's own budget does not count.
+# bound, for CENSUS_DRIVER and the parent's launch, drain and teardown around the run. Interpreter start-up is
+# already inside the budget, which was measured as the wall time of the whole
+# `python3 -I -B tools/check_gensrc_failclose.py --self-test` invocation.
 CENSUS_BOUND_MARGIN_S = TIMEOUT
 _CENSUS_BUDGETED = ("tools/check_gensrc_failclose.py",)
 _BUDGET_NAME = "SELF_TEST_BUDGET_S"
@@ -3338,8 +3348,10 @@ def _census_budget_rows(parent, root):
     _census_budgets; a source that fails the reader raises and the self-test is cannot-evaluate). The
     table-only cases are _census_budget_cases on the real _census_table_failures. Run: a stand-in row with a
     30 s budget and a 59 s bound, 1 s below that budget plus the margin, is refused by _census_mapping_check
-    with no launch (zero runs, and the stand-in's record file must not appear). Returns (failures, rows
-    checked)."""
+    with no launch (zero runs, and the stand-in's record file must not appear). With no budgets argument,
+    _census_mapping_check reads the budgets from the root it is given: a fixture root whose gensrc source
+    declares 100 s, with that row bounded 1 s below 100 s plus the margin, is refused naming the 100 s
+    budget, with no launch. Returns (failures, rows checked)."""
     real = _census_budgets(root, _CENSUS_MAPPINGS)
     failures = []
     if sorted(real) != sorted(_CENSUS_BUDGETED):
@@ -3361,7 +3373,16 @@ def _census_budget_rows(parent, root):
         failures.append("census budget row run-below: expected %r, got %r" % (want, got))
     if ran.exists():
         failures.append("census budget row run-below: the stand-in ran although its row was refused")
-    return failures, len(cases) + 2
+    omitted = parent / "census-budget-omitted"
+    (omitted / "tools").mkdir(parents=True)
+    gensrc = "tools/check_gensrc_failclose.py"
+    (omitted / gensrc).write_text("SELF_TEST_BUDGET_S = 100\n", encoding="utf-8")
+    want = (["%s (census under *): its bound %d s is below its declared self-test budget of 100 s plus the %d s "
+             "margin; nothing run" % (gensrc, 100 + CENSUS_BOUND_MARGIN_S - 1, CENSUS_BOUND_MARGIN_S)], 0)
+    got = _census_mapping_check(omitted, ((gensrc, "*", ("--self-test",), 100 + CENSUS_BOUND_MARGIN_S - 1),))
+    if got != want:
+        failures.append("census budget row omitted-budgets: expected %r, got %r" % (want, got))
+    return failures, len(cases) + 3
 
 
 def _census_table_flipped(parent, script, name, old, new):
@@ -3388,7 +3409,7 @@ def _census_table_flipped(parent, script, name, old, new):
         + "CENSUS_BOUND_MARGIN_S = " + repr(CENSUS_BOUND_MARGIN_S) + "\n"
         + "_CENSUS_BUDGETED = " + repr(_CENSUS_BUDGETED) + "\n"
         + body.replace(old, new, 1), encoding="utf-8")
-    spec = importlib.util.spec_from_file_location("check_release_cut_" + name.replace("-", "_"), location)
+    spec = importlib.util.spec_from_file_location("check_release_cut_" + name.replace(" ", "_"), location)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module._census_table_failures
