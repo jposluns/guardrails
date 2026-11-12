@@ -31,7 +31,8 @@ literally, only when it states the local offset. A POSIX TZ string can give a na
 hook converts it (no seconds, and an hours field of at most 18, so up to 18:59). When neither converts (an
 offset with seconds, or one of 19 hours or more, as TZ=xxx-19, TZ=ABC-19 and TZ=LMT-0:19:32 give, whatever the
 name) the segment is omitted. The self-test converts each stamp with stamp-truth-stop.py's own code, also after
-earlier mktime calls, under such TZ strings, and passes whether the segment is present or not.
+earlier mktime calls, under such TZ strings, and passes whether the segment is present or not; under TZ=UTC it
+runs this file as the hook and requires the segment in the injected context, converting to the reading's minute.
 
 Coverage. Registered under PostToolUse it fires after a tool call that SUCCEEDED; registered under
 PostToolUseFailure it fires after a tool call that started and FAILED; registered under UserPromptSubmit it
@@ -1171,6 +1172,47 @@ def _self_test():
             self.assertEqual(mod.check_message(text, minute_us - mod.AHEAD_US, None, "x", mod.BEHIND_US), [])
             self.assertEqual(len(mod.check_message(text, minute_us - mod.AHEAD_US - 1, None, "x", mod.BEHIND_US)), 1)
 
+        def test_stamp_present_in_injected_context_under_utc(self):
+            # the stamp tests above skip, or accept an omitted segment, under a zone that gives none, so a hook
+            # that never emits the segment passes them. TZ=UTC always gives one, so here it is REQUIRED: this
+            # file runs as the hook in a child under TZ=UTC, and the context it injects must carry the stamp
+            # segment, which must convert in stamp-truth-stop.py (a second child, also under TZ=UTC) to the
+            # minute of the reading on that same line. Executables reached: only this interpreter, on this file
+            # and on its sibling (no other program, no network; worker and lease settings are removed and the
+            # payload names no transcript, so nothing is read but the two files, and nothing is written)
+            sib = _sibling_or_skip("stamp-truth-stop.py")
+            hook = os.path.abspath(__file__)
+            env = {k: v for k, v in os.environ.items() if k not in (
+                "AIQT_HOOKS_WORKER", "ORCH_WORKER", "ORCH_VERIFY_OWNER", "AIQT_LEASE_FILE", "ORCH_LEASE_FILE",
+                "CLAUDE_PROJECT_DIR")}
+            env["TZ"] = "UTC"
+            p = subprocess.run([sys.executable, "-I", "-S", "-B", hook], env=env, capture_output=True, text=True,
+                               input=json.dumps({"hook_event_name": "PostToolUse", "tool_name": "Bash"}),
+                               timeout=HANG_TIMEOUT)
+            self.assertEqual(p.returncode, 0, p.stderr)
+            obj = json.loads(p.stdout)["hookSpecificOutput"]
+            self.assertEqual(obj["hookEventName"], "PostToolUse")
+            line = obj["additionalContext"]
+            self.assertIn(" | stamp: [", line, "the injected context carries no stamp segment under TZ=UTC")
+            m = re.fullmatch(r"CLOCK \(read by hook, authoritative\): (\d{4}-\d{2}-\d{2} \d{2}:\d{2}):\d{2} UTC \| "
+                             r"(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2}:\d{2})Z \| stamp: \[([^]]*)\]", line)
+            self.assertIsNotNone(m, line)
+            local_min, utc_date, utc_time, stamp = m.groups()
+            reading = datetime.datetime.fromisoformat(utc_date + "T" + utc_time + "+00:00")
+            self.assertEqual(stamp, reading.strftime("%Y-%m-%d %H:%M") + " UTC", line)
+            self.assertEqual(stamp, local_min + " UTC", line)
+            code = ("import importlib.util as u, json, sys\n"
+                    "s = u.spec_from_file_location('st', sys.argv[1])\n"
+                    "st = u.module_from_spec(s)\n"
+                    "s.loader.exec_module(st)\n"
+                    "m = st._CLAIM_RE.fullmatch(sys.argv[2])\n"
+                    "print(json.dumps([st.claim_us(m) if m else 'nomatch', st.US]))\n")
+            q = subprocess.run([sys.executable, "-I", "-S", "-B", "-c", code, sib, stamp], env=env,
+                               capture_output=True, text=True, timeout=HANG_TIMEOUT)
+            self.assertEqual(q.returncode, 0, q.stderr)
+            conv, us = json.loads(q.stdout)
+            self.assertEqual(conv, (reading.replace(second=0) - _EPOCH_UTC) // _ONE_S * us, (line, conv))
+
         def test_worker_kill_switch_silent(self):
             for env in ({"AIQT_HOOKS_WORKER": "1"}, {"ORCH_WORKER": "1"}):
                 rc, out = run_main(json.dumps({"tool_name": "Bash"}), env)
@@ -1415,7 +1457,8 @@ def _self_test():
         # -- sibling parity on a single-hook install --
         PARITY_TESTS = ("test_r13_shared_lease_code_identical_to_stop_hook",
                         "test_stamp_is_a_bracketed_header_claim_in_stop_hook",
-                        "test_stamp_converts_to_the_reading_under_posix_tz")
+                        "test_stamp_converts_to_the_reading_under_posix_tz",
+                        "test_stamp_present_in_injected_context_under_utc")
         PARITY_SIBLINGS = ("stamp-truth-stop.py",)
 
         def _parity_in_copy(self, siblings, value, dangling=False):

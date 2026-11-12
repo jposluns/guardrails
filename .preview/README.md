@@ -200,7 +200,7 @@ files are served from this repository's main branch; for a raw download, use
 | File | SHA-256 | Link |
 |---|---|---|
 | `char-policy-write.py` | `84a08059513f27c76e944d54c08e8ddae520f9e040ebe19296d139d49646b0f8` | [char-policy-write.py](char-policy-write.py) |
-| `clock-inject.py` | `006122a07c012cbdd0083521a1405908e6277f72ca830bde7d24f045f319949e` | [clock-inject.py](clock-inject.py) |
+| `clock-inject.py` | `d84d14dac2e67522122b3f93766d6698dcbdabc73b3dc051c3e294cc92bd5689` | [clock-inject.py](clock-inject.py) |
 | `constraint-reread.py` | `725974c306e63a3f9a1b4a2be2992c9ee9792c231aaad66035a813525d10c48a` | [constraint-reread.py](constraint-reread.py) |
 | `future-stamp-write.py` | `1cf8608693f472df1c7bee03b5ab5bf5de3e79a19b00c782a7015e77d167c348` | [future-stamp-write.py](future-stamp-write.py) |
 | `pattern-self-match.py` | `b70287e2aab2b08b0cd240c6c9150feb65141f2e3612adad63e402221dfcbb2f` | [pattern-self-match.py](pattern-self-match.py) |
