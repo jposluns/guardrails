@@ -11,25 +11,25 @@ with exit 2). This gate holds where it runs:
   1. live: the canonical guard runs in this process first, in every mode; a refusal exits 2 by name.
   2. copies: the inline copies in each CLI_COPIES entry (opf/tools/opf.py, tools/check_selftest_execution.py,
      opf/tools/_opf_adopt_complete.py, opf/tools/_opf_adopt_state.py, opf/tools/_opf_import_complete.py,
-     tools/check_gitleaks_pin.py, tools/check_must_deliver.py, tools/_load_bound.py and
-     tools/check_verifier_delivery.py), in opf/tools/_opf_declaration.py and tools/check_opf_declaration.py
-     (the constant and both functions) and in the hooks dispatcher and its generated plugin copy (the constant
-     and the probe) are each bound exactly once at module scope, by one top-level definition (an undecorated one
-     for a function), and AST-identical (ast.dump, docstrings included) to the canonical text, so a call by that
-     name reaches the copy. The binding count (_bindings) is the one binding counter of legs 2 and 3; it is a
-     static walk of
-     every node that runs in the module's own scope: nested if, try, with, for, while and match blocks, tuple,
-     list and starred targets, walrus, for, with-as, except-as and match names, import and from-import aliases
-     (a star import counts), del, and a global declaration of the name in any function. Every attribute or
-     subscript store or delete at module scope or in a class body (_entry.__code__ = ..., globals()["_entry"] =
-     ...) is counted for every name and is never clean: through an alias it can reach the module namespace or
-     the function. A rebinding made by a call (setattr, globals().update), by a store inside a function body
-     other than through a global declaration, or from another module is not seen.
+     opf/tools/check_cited_standards_contract.py, tools/check_gitleaks_pin.py, tools/check_must_deliver.py,
+     tools/_load_bound.py and tools/check_verifier_delivery.py), in opf/tools/_opf_declaration.py and
+     tools/check_opf_declaration.py (the constant and both functions) and in the hooks dispatcher and its
+     generated plugin copy (the constant and the probe) are each bound exactly once at module scope, by one
+     top-level definition (an undecorated one for a function), and AST-identical (ast.dump, docstrings included)
+     to the canonical text, so a call by that name reaches the copy. The binding count (_bindings) is the one
+     binding counter of legs 2 and 3; it is a static walk of every node that runs in the module's own scope:
+     nested if, try, with, for, while and match blocks, tuple, list and starred targets, walrus, for, with-as,
+     except-as and match names, import and from-import aliases (a star import counts), del, and a global
+     declaration of the name in any function. Every attribute or subscript store or delete at module scope or in
+     a class body (_entry.__code__ = ..., globals()["_entry"] = ...) is counted for every name and is never
+     clean: through an alias it can reach the module namespace or the function. A rebinding made by a call
+     (setattr, globals().update), by a store inside a function body other than through a global declaration, or
+     from another module is not seen.
   3. entries: each CLI copy's __main__ body is exactly its cli_entry line: for opf/tools/opf.py,
      _main_exit(lambda: _child_status_refusal_exit("opf.py") or main()) (the guard runs first, and _main_exit
      ends the process by raising SystemExit itself, never through sys.exit), and for every other,
      sys.exit(_child_status_refusal_exit("<basename>") or main()), except that of each SELF_TEST_COPIES entry
-     (the three opf/tools self_test modules above), which is exactly opf.py's canonical --self-test statement
+     (the four opf/tools self_test modules above), which is exactly opf.py's canonical --self-test statement
      (SELF_TEST_ENTRY, held to opf.py's own _ENTRY_STATEMENT) then that second form, with self_test bound once
      at module scope (the same count), by one undecorated top-level def whose first statement after the
      docstring is the guard call _child_status_refusal_exit("<basename>"); opf.py's _main_exit, which receives
@@ -237,7 +237,8 @@ CLI_COPIES = (("opf/tools/opf.py", "opf.py"), ("tools/check_selftest_execution.p
               ("tools/check_gitleaks_pin.py", "check_gitleaks_pin.py"),
               ("tools/check_must_deliver.py", "check_must_deliver.py"), ("tools/_load_bound.py", "_load_bound.py"),
               ("tools/check_verifier_delivery.py", "check_verifier_delivery.py"),
-              ("tools/render_og_cards.py", "render_og_cards.py"))
+              ("tools/render_og_cards.py", "render_og_cards.py"),
+              ("opf/tools/check_cited_standards_contract.py", "check_cited_standards_contract.py"))
 # The CLI copy whose __main__ body is the one call _entry() (it raises its own exit rather than calling sys.exit):
 # its guard is the first statement of its one top-level _entry(), exactly ENTRY_GUARD.
 ENTRY_COPIES = (("tools/check_opf_declaration.py", "check_opf_declaration.py"),)
@@ -277,7 +278,7 @@ MAIN_EXIT_CALL = "status = main()"
 # exactly that statement then the CLI entry line, and the guard call SELF_TEST_GUARD is the first statement of
 # self_test() after its docstring, so the --self-test path refuses too.
 SELF_TEST_COPIES = ("opf/tools/_opf_adopt_complete.py", "opf/tools/_opf_adopt_state.py",
-                    "opf/tools/_opf_import_complete.py")
+                    "opf/tools/_opf_import_complete.py", "opf/tools/check_cited_standards_contract.py")
 SELF_TEST_ENTRY = 'if sys.argv[1:] == ["--self-test"]:\n    sys.exit(self_test())\n'
 SELF_TEST_GUARD = '_child_status_refusal_exit("{}")'
 # The file whose _ENTRY_STATEMENT SELF_TEST_ENTRY copies: it must bind that name once, at the top level, to a string
