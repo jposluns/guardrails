@@ -50,7 +50,10 @@ reads the listed sentence forms, not meaning. platforms.toml is read only for ea
 and member; the authoring repository's tools/check_opf_enforce_platforms.py validates it, and a
 standalone OPF tree carries no gate that does. Each input is opened after a symlinked-parent check, and
 its regular-file and size checks are made on the opened descriptor, so a parent directory swapped for a
-symlink between that check and the open is a check-to-use race.
+symlink between that check and the open is a check-to-use race. The live run refuses an OPF root, or its
+tools directory, that is a symlink in the path the interpreter gives for this script; a run whose working
+directory is already inside a link's target reaches the tree through no symlink in that path, so it is
+not refused.
 """
 import sys
 
@@ -77,6 +80,8 @@ from pathlib import Path
 
 # The OPF root: the directory above this script's tools/ directory. Every path below is relative to it,
 # so the gate reads the same inputs from the authoring repository's opf/ and from a standalone OPF tree.
+# The live run takes it from _opf_root, which refuses a root or tools directory reached through a
+# symlink; the self-test copies its fixtures from ROOT.
 ROOT = Path(__file__).resolve().parents[1]
 PACK_REL = "enforcement"
 REGISTER_REL = PACK_REL + "/residuals.toml"
@@ -117,6 +122,26 @@ def _input(root, rel, label):
         raise CannotEvaluate("%s %s is reached through a symlink (it resolves to %s, not %s), so its "
                              "bytes are not the tree's own" % (label, path, actual, expected))
     return path
+
+
+def _opf_root(script):
+    """The OPF root the gate at `script` evaluates (the directory above the directory holding `script`),
+    resolved. CannotEvaluate when that root, or its tools directory, is itself a symlink: the gate would then
+    read another tree's inputs as this tree's own, which the no-symlink rule for paths below the root
+    refuses. A symlink above the root is resolved, as it was when the authoring repository's gate read the
+    OPF root as opf/ under its own resolved root."""
+    tools = os.path.dirname(os.path.abspath(str(script)))
+    root = os.path.dirname(tools)
+    for label, path in (("the OPF root", root), ("the OPF root's tools directory", tools)):
+        try:
+            actual = os.path.realpath(path)
+            expected = os.path.join(os.path.realpath(os.path.dirname(path)), os.path.basename(path))
+        except (OSError, ValueError) as exc:
+            raise CannotEvaluate("%s %s cannot be resolved (%r)" % (label, path, exc))
+        if actual != expected:
+            raise CannotEvaluate("%s %s is reached through a symlink (it resolves to %s, not %s), so the "
+                                 "inputs below it are not the tree's own" % (label, path, actual, expected))
+    return Path(os.path.realpath(root))
 
 
 def _text(path, label):
@@ -416,7 +441,7 @@ def main(argv):
         print("usage: check_opf_enforce_residuals.py [--self-test]", file=sys.stderr)
         return 2
     try:
-        findings = evaluate(ROOT)
+        findings = evaluate(_opf_root(__file__))
     except CannotEvaluate as exc:
         print("check_opf_enforce_residuals: CANNOT EVALUATE: %s" % (exc,))
         return 2
@@ -433,6 +458,7 @@ def main(argv):
 
 # --- self-test -----------------------------------------------------------------------------------------
 
+GATE = "check_opf_enforce_residuals.py"
 SETTINGS = "claude/settings.opf.json"
 LOCAL_SETTINGS = "claude/settings.local.json"
 LOCATOR_KEY = ("server-side-protection-adopter-attested", "ci/github-actions.yml")
@@ -499,6 +525,31 @@ def _drop_last_row(tree):
     path = tree / REGISTER_REL
     text = path.read_text(encoding="utf-8")
     path.write_text(text[:text.index('[[residual]]\nid = "unverified-platform-denial"')], encoding="utf-8")
+
+
+def _linked_root(tree, link):
+    """An authoring-repository layout beside the fixture whose opf/ is the fixture: a symlink to it when
+    `link`, else a real copy. The overrides run the gate as that repository's opf/tools/ would."""
+    repo = tree.parent / (tree.name + "-repo")
+    repo.mkdir()
+    if link:
+        os.symlink(os.path.join("..", tree.name), repo / "opf")
+    else:
+        shutil.copytree(tree, repo / "opf")
+    return dict(script=repo / "opf" / "tools" / GATE)
+
+
+def _linked_tools(tree, link):
+    """A standalone OPF tree beside the fixture with its own copy of the pack and the fixture's tools/
+    directory: a symlink to it when `link`, else a real copy. The overrides run the gate as that tree's
+    tools/ would."""
+    standalone = tree.parent / (tree.name + "-standalone")
+    shutil.copytree(tree / PACK_REL, standalone / PACK_REL)
+    if link:
+        os.symlink(tree / "tools", standalone / "tools")
+    else:
+        shutil.copytree(tree / "tools", standalone / "tools")
+    return dict(script=standalone / "tools" / GATE)
 
 
 def _second_locator(tree, row):
@@ -692,6 +743,12 @@ def _vectors():
                                     "does not list the instructions member claude/pretooluse_deny.py"),
          (seq(edit(ROSTER_REL, 'means = "deny-hook"', 'means = "instructions"'),
               lambda tree: _add_member(tree, "claude/pretooluse_deny.py", HOOK_PHRASE)),) + clean),
+        # the OPF root: a root or tools directory reached through a symlink is cannot-evaluate, in the
+        # authoring repository's opf/ and in a standalone tree; a real copy in the same place is clean.
+        ("root-symlinked-opf", (lambda tree: _linked_root(tree, True), "cannot", "CANNOT EVALUATE: the OPF root /"),
+         (lambda tree: _linked_root(tree, False),) + clean),
+        ("root-symlinked-tools", (lambda tree: _linked_tools(tree, True), "cannot", "the OPF root's tools directory"),
+         (lambda tree: _linked_tools(tree, False),) + clean),
         # cannot evaluate: the document shape, the vocabulary, the size bound and unreadable inputs.
         ("format-version-bool", (edit(REGISTER_REL, "format-version = 1\n", "format-version = true\n"), "cannot",
                                  "exact integer format-version"),
@@ -734,13 +791,15 @@ MODE_000 = frozenset(("member-mode-000", "register-mode-000"))
 
 def _observe(base, name, mutate):
     """The status and text of the gate over a fresh fixture mutated by `mutate` (a mutation that reads an
-    input it cannot parse is cannot-evaluate too). A RecursionError or MemoryError that escapes the mutation
-    or the gate is the status "error", which no vector expects, so the run names the vector it failed."""
+    input it cannot parse is cannot-evaluate too). An override `script` runs the gate on the OPF root of a
+    gate at that path, as the live run does. A RecursionError or MemoryError that escapes the mutation or
+    the gate is the status "error", which no vector expects, so the run names the vector it failed."""
     tree = _fixture(base, name)
     try:
         overrides = mutate(tree)
-        overrides = overrides if isinstance(overrides, dict) else {}
-        got = evaluate(tree, **overrides)
+        overrides = dict(overrides) if isinstance(overrides, dict) else {}
+        script = overrides.pop("script", None)
+        got = evaluate(tree if script is None else _opf_root(script), **overrides)
     except CannotEvaluate as exc:
         return "cannot", "CANNOT EVALUATE: %s" % (exc,)
     except (RecursionError, MemoryError) as exc:

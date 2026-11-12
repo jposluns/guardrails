@@ -15,9 +15,9 @@
 # CI row (_opf_adopt.ENFORCEMENT_REQUIRED_RESIDUALS), and the CI row names it. ci/opf-ci.sh carries
 # that row's disclosure. Every other anchor is a disclosure.
 #
-# tools/check_opf_enforce_residuals.py validates this file: one row per token, each member a regular
-# pack file, each anchor present verbatim in its member, every member named but the exception above,
-# the locator above, and each means' required residual; it fails when this header and its lists
+# opf/tools/check_opf_enforce_residuals.py validates this file: one row per token, each member a
+# regular pack file, each anchor present verbatim in its member, every member named but the exception
+# above, the locator above, and each means' required residual; it fails when this header and its lists
 # disagree. A change to a member's residual wording must keep its anchor here present verbatim.
 #
 # Fields per [[residual]]:
