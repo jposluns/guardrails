@@ -234,7 +234,7 @@ reason = "Rationale for prsunc.1 and prsunc.2; no obligation of its own."
 
 [[exempt]]
 corpus-id = "prsunc"
-text = "git checkout -- <path> and git restore <path> overwrite the working tree from the index or a commit, discarding your unstaged edits; git reset --hard drops both staged and unstaged changes."
+text = "git checkout -- FILE and git restore FILE overwrite the working tree from the index or a commit, discarding your unstaged edits; git reset --hard drops both staged and unstaged changes."
 reason = "Examples of the commands prsunc.1 and prsunc.2 govern; no obligation of their own."
 
 [[exempt]]
