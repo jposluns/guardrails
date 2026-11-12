@@ -696,6 +696,20 @@ ALLOWLIST = (
     ("tools/check_rule_placement.py", "_load_placement_mutant", "code", 1,
      "self-test mutant: exec_module of a scratch copy of this gate's own source (read from __file__)"
      " with one reviewed literal substitution (the listing identity check dropped); no external input"),
+    ("tools/gen_rules.py", "_load_reverted", "code", 1,
+     "self-test mutant: exec_module of a scratch copy of this generator's own source (read from __file__)"
+     " with the reviewed literal substitutions of its fixed revert table (one rule-source guard put back);"
+     " no external input"),
+    ("tools/check_clauses.py", "_load_reverted", "code", 1,
+     "self-test mutant: exec_module of a scratch copy of this gate's own source (read from __file__)"
+     " with one reviewed literal substitution from its fixed layer revert table; no external input"),
+    ("tools/check_clauses.py", "self_test_main", "code", 1,
+     "self-test mutant: exec_module of a scratch copy of the repository's own gen_rules.py with the"
+     " reviewed literal substitutions of the fixed shared-reader revert table; no external input"),
+    ("tools/check_release_delta.py", "_self_test_main_isolated", "code", 2,
+     "self-test mutant: exec_module of a scratch copy of this gate's own source and of the repository's"
+     " own _release_schema.py, each with one reviewed literal substitution (the clause layer comparison"
+     " or the clause layer value check dropped); no external input"),
     ("tools/check_python_floor.py", "_rule_reverts", "code", 1,
      "self-test mutant: exec_module of a copy of this gate's own source with one rule removed"
      " from RULES; no external input"),
