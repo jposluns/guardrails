@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "f127503faed2e8cab1dfbaed87373458039bb6b115f9a6eca77ff30b8cf26f59"
+tree-sha256 = "6a039a3bf5cb56c99f46ad25e653f7b45e38a9e0601c99f015720e605a4eb613"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -71,8 +71,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 593091
-sha256 = "522f5a81ae56c1a5fd8e6b003bf7ffedc2e1c13812ebc241a973be267e80d45c"
+bytes = 593452
+sha256 = "6c36a1f9a604b14ae670fe9594d1a88842157f0fd2cf877814953239d5db28b3"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -4456,8 +4456,8 @@ sha256 = "7db80a651d640832137af56df93e7ea3e541bfabd3c7bb3d3a4caf3acb098127"
 
 [[sources]]
 path = "tools/coreutils_report.py"
-bytes = 20083
-sha256 = "06932ed8daff53454ec5e04054d396268d82702cefe1cc157c956aa23e484dcc"
+bytes = 29857
+sha256 = "a577f625bfce5148c0af518c01260c5e16dc04b3f0de2fd20a382a4ad0b7e7b2"
 
 [[sources]]
 path = "tools/doctor.py"
@@ -4661,8 +4661,8 @@ sha256 = "2b1d57119dd5e8849a0b28d9c58e35f2cfb900742b738b787e68b28650b39c22"
 
 [[sources]]
 path = "tools/run_all_checks.sh"
-bytes = 30244
-sha256 = "ce816bc457af68cfdf80c4a735d6590c8cb058100e10b91471742c4b9242bf01"
+bytes = 30273
+sha256 = "0834edd2bbd06aa52b982327fd54dcfa8ea9bcbdeef2c2ebb54cf745a162e4bd"
 
 [[sources]]
 path = "tools/selftest_aiqt_corpus.py"
@@ -4676,8 +4676,8 @@ sha256 = "a15808a4ca7a2d9482f68a39ec80cf5f30137c36500d7c02a938769e60a75e75"
 
 [[sources]]
 path = "tools/selftest_checks.toml"
-bytes = 240035
-sha256 = "efb78aa8822f8621629839e9c6b2cf5122e4c2b2d1521d67379bae97d4dd4029"
+bytes = 240256
+sha256 = "19c92fd28d6e962de9ae5ebb9ffbed4f4bf8b24e6f985db208f272a4cc3f092e"
 
 [[sources]]
 path = "tools/selftest_ci_status.py"

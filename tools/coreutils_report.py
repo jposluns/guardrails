@@ -6,17 +6,24 @@
   coreutils_report.py [--self-test] --execution-report ABS_PATH
   any other argument list is refused with exit 2
 
-For each tool the suites run, the report prints the path PATH resolves it to, that path's realpath and the
-first line of its --version output, then one summary line naming the implementations seen: GNU, uutils,
-mixed, or unknown. A host can carry GNU coreutils and uutils coreutils side by side (a multicall uutils
-binary behind some names, GNU binaries behind others), and a test that passes against one implementation
-can fail against the other, so the local run and the CI run each record what they ran.
+For each tool in TOOLS, the report prints the path PATH resolves it to, that path's realpath and the first
+line of its --version output that is not blank, then one summary line naming the implementations seen:
+GNU, uutils, mixed, or unknown. A host can carry GNU coreutils and uutils coreutils side by side (a
+multicall uutils binary behind some names, GNU binaries behind others), and a test that passes against
+one implementation can fail against the other, so the local run and the CI run each record what they ran.
 
-The report never fails the run on what it finds: any mix of implementations exits 0. It exits 2, and says
-so, only when it cannot run a tool it was asked about: the name is not found on PATH, --version cannot be
-launched, exits nonzero, prints nothing on standard output, or does not finish within VERSION_TIMEOUT
-seconds. Each tool is launched by its resolved absolute path with standard input closed, LC_ALL=C and
-only PATH carried over from the environment.
+The report never fails the run on what it finds: any mix of implementations exits 0, and so does a version
+line that names neither (reported as unknown). It exits 2, and says so, when it cannot run a tool it was
+asked about: the name is not found on PATH, --version cannot be launched, exits nonzero, prints only blank
+lines or nothing on standard output, or does not exit within VERSION_TIMEOUT seconds. It also exits 2 on
+an argument list it does not recognize and on a Python older than 3.14.
+
+Each tool is launched by its resolved absolute path in its own session, with standard input from
+/dev/null and only PATH and LC_ALL=C in its environment. The bound is on the tool's own exit, and its
+whole process group is killed once it exits or the bound passes, so a process it leaves holding standard
+output neither stretches the wait nor outlives the report (one that starts a session of its own escapes
+the kill). The version line is classified whole; only then are its non-printable characters replaced
+with "?" and the line shortened to MAX_LINE characters for display.
 """
 import sys
 
@@ -34,15 +41,19 @@ if tuple(sys.version_info[:2]) < (3, 14):
 
 import os
 import shutil
+import signal
 import subprocess
 import tempfile
 from pathlib import Path
 
-# The tools the local runner and the CI jobs reach by bare name, directly or through the scripts and tests
-# they run. Kept in this order so two reports compare line by line.
+# Coreutils tools the suites are known to reach by bare name, including every coreutils name a text
+# search finds at a command position in the tracked shell scripts and workflow run steps (chmod and rmdir
+# in opf/enforcement/precommit/install.sh among them). The list is not shown to be complete: that search
+# does not parse Python launches or names built at run time, so a tool reached only that way can be
+# missing. Kept in this order so two reports compare line by line.
 TOOLS = (
     "cp", "mv", "rm", "install", "tee", "truncate", "head", "tail", "cut", "date", "ls", "env", "timeout",
-    "dd", "ln", "sha256sum", "mktemp", "dirname", "mkdir", "sleep",
+    "dd", "ln", "sha256sum", "mktemp", "dirname", "mkdir", "sleep", "chmod", "rmdir",
 )
 # The implementation a --version first line names, by the marker it carries; the first match wins.
 IMPLEMENTATIONS = (
@@ -53,6 +64,8 @@ UNKNOWN = "unknown"
 MIXED = "mixed"
 VERSION_TIMEOUT = 10
 MAX_LINE = 200
+# The most of a --version run's standard output that is read; the rest is never read.
+MAX_OUTPUT = 65536
 
 
 def classify(line):
@@ -78,6 +91,28 @@ def _printable(text):
     return text if len(text) <= MAX_LINE else text[:MAX_LINE] + "[truncated]"
 
 
+def version_line(text):
+    """The first line of text that is not blank, stripped, or "" when every line is blank."""
+    for line in text.splitlines():
+        if line.strip():
+            return line.strip()
+    return ""
+
+
+def _kill_group(proc):
+    """Kill the --version child's whole process group (it was started in its own session, so the group id is
+    its pid and holds only what it started), or the child alone when the group cannot be signalled. After
+    the child is reaped its group id stays taken while any member lives, so the kill reaches only what the
+    child left behind; an empty group is no error."""
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except OSError:
+        try:
+            proc.kill()
+        except OSError:
+            pass
+
+
 def _require_found(tool, resolved):
     """The reason a tool cannot be run when PATH does not resolve it, else None."""
     if resolved is None:
@@ -90,7 +125,7 @@ def _require_version_ok(tool, returncode, first_line):
     if returncode != 0:
         return "{}: --version exited {}".format(tool, returncode)
     if not first_line:
-        return "{}: --version printed nothing on standard output".format(tool)
+        return "{}: --version printed no line that is not blank on standard output".format(tool)
     return None
 
 
@@ -103,19 +138,30 @@ def probe(tool, path_env):
     if reason is not None:
         return None, reason
     resolved = os.path.abspath(resolved)
-    try:
-        proc = subprocess.run([resolved, "--version"], stdin=subprocess.DEVNULL, capture_output=True,
-                              timeout=VERSION_TIMEOUT, env={"PATH": path_env, "LC_ALL": "C"})
-    except subprocess.TimeoutExpired:
-        return None, "{}: --version did not finish within {} s".format(tool, VERSION_TIMEOUT)
-    except OSError as exc:
-        return None, "{}: --version could not be launched ({})".format(tool, exc)
-    lines = proc.stdout.decode("utf-8", "replace").splitlines()
-    first = _printable(lines[0].strip()) if lines else ""
-    reason = _require_version_ok(tool, proc.returncode, first)
+    # Standard output goes to an unnamed file, not a pipe: the wait is on the child's exit alone, so a
+    # process it leaves holding standard output cannot hold the wait open past that exit.
+    with tempfile.TemporaryFile() as captured:
+        try:
+            proc = subprocess.Popen([resolved, "--version"], stdin=subprocess.DEVNULL, stdout=captured,
+                                    stderr=subprocess.DEVNULL, env={"PATH": path_env, "LC_ALL": "C"},
+                                    start_new_session=True)
+        except OSError as exc:
+            return None, "{}: --version could not be launched ({})".format(tool, exc)
+        try:
+            returncode = proc.wait(timeout=VERSION_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            returncode = None
+        finally:
+            _kill_group(proc)
+            proc.wait()
+        if returncode is None:
+            return None, "{}: --version did not exit within {} s".format(tool, VERSION_TIMEOUT)
+        captured.seek(0)
+        first = version_line(captured.read(MAX_OUTPUT).decode("utf-8", "replace"))
+    reason = _require_version_ok(tool, returncode, first)
     if reason is not None:
         return None, reason
-    return (tool, resolved, os.path.realpath(resolved), first, classify(first)), None
+    return (tool, resolved, os.path.realpath(resolved), _printable(first), classify(first)), None
 
 
 def report(tools, path_env, out):
@@ -167,10 +213,10 @@ def check(name, ok, detail=""):
         FAILURES.append("{}: {!r}".format(name, detail))
 
 
-# Fixture bodies, run by /bin/sh using only its builtins (printf, echo, exit and a redirect), so no
-# coreutils tool, host or fixture, is reached from inside a fixture. Each appends its own name and
-# arguments to the log beside it, so a case can check every call the report made.
-_FIXTURE = "#!/bin/sh\nprintf '%s %s\\n' \"${{0##*/}}\" \"$*\" >> '{log}'\n{body}\n"
+# Fixture bodies, run by /bin/sh using only its builtins (printf, echo, read, exit, a loop and a
+# redirect), so no coreutils tool, host or fixture, is reached from inside a fixture. Each appends its
+# own name and arguments to the log beside it ($log), so a case can check every call the report made.
+_FIXTURE = "#!/bin/sh\nlog='{log}'\nprintf '%s %s\\n' \"${{0##*/}}\" \"$*\" >> \"$log\"\n{body}\n"
 GNU_LINE = "{} (GNU coreutils) 9.7"
 UUTILS_LINE = "{} (uutils coreutils) 0.8.0"
 
@@ -316,6 +362,157 @@ def _red_with(base, label, case, name, value):
     return not ok
 
 
+def _row(tool, d, version, kind):
+    return "{t}: path={d}/{t} realpath={r}/{t} version={v!r} implementation={k}".format(
+        t=tool, d=d, r=os.path.realpath(d), v=version, k=kind)
+
+
+GNU_SUMMARY = "SUMMARY: coreutils implementation GNU (1 of 1 tools reported: GNU 1)"
+
+
+def _blank_lines_ok(base, label):
+    # Blank and space-only lines come first and a later line names the other implementation: the first
+    # line that is not blank is the one reported and classified.
+    body = "printf '\\n   \\n%s\\n%s\\n' 'cp (GNU coreutils) 9.7' 'cp (uutils coreutils) 0.8.0'"
+    code, out, log, d = _run_case(base, label, [("cp", body)], ("cp",))
+    want = [_row("cp", d, "cp (GNU coreutils) 9.7", "GNU"), GNU_SUMMARY]
+    return (code, out, log) == (0, want, ["cp --version"]), (code, out, log)
+
+
+LONG_LINE = "cp " + "x" * 205 + " (GNU coreutils) 9.7"
+
+
+def _long_line_ok(base, label):
+    # The marker sits past the display bound: the line is classified whole and only then shortened.
+    code, out, log, d = _run_case(base, label, [("cp", "echo '{}'".format(LONG_LINE))], ("cp",))
+    want = [_row("cp", d, LONG_LINE[:200] + "[truncated]", "GNU"), GNU_SUMMARY]
+    return (code, out, log) == (0, want, ["cp --version"]), (code, out, log)
+
+
+def _printable_ok(base, label):
+    # An escape and a tab in the version line are shown as "?", never passed through.
+    body = "printf 'cp (GNU coreutils) 9.7\\033[1m\\tend\\n'"
+    code, out, log, d = _run_case(base, label, [("cp", body)], ("cp",))
+    want = [_row("cp", d, "cp (GNU coreutils) 9.7?[1m?end", "GNU"), GNU_SUMMARY]
+    return (code, out, log) == (0, want, ["cp --version"]), (code, out, log)
+
+
+SENTINEL = "COREUTILS_REPORT_SELFTEST_SENTINEL"
+_LAUNCH_BODY = ('if read line; then input="read [$line]"; else input="eof [$line]"; fi\n'
+                'echo "launch PATH=[$PATH] LC_ALL=[${LC_ALL-unset}] sentinel=[${' + SENTINEL + '-unset}] '
+                'stdin=$input" >> "$log"\n'
+                "echo 'cp (GNU coreutils) 9.7'")
+
+
+def _with_stdin(data, thunk):
+    """thunk() with this process's standard input a pipe holding data, the previous one restored after."""
+    saved = os.dup(0)
+    try:
+        read_end, write_end = os.pipe()
+        try:
+            os.write(write_end, data)
+        finally:
+            os.close(write_end)
+        try:
+            os.dup2(read_end, 0)
+        finally:
+            os.close(read_end)
+        return thunk()
+    finally:
+        os.dup2(saved, 0)
+        os.close(saved)
+
+
+def _launch_ok(base, label):
+    # This process holds a sentinel variable in its environment and a line on its standard input while the
+    # report runs; the fixture logs the PATH, LC_ALL and sentinel it was given and what a read of its
+    # standard input returned: only PATH and LC_ALL=C may reach it, and its standard input is empty.
+    previous = os.environ.get(SENTINEL)
+    os.environ[SENTINEL] = "leaked"
+    try:
+        code, out, log, d = _with_stdin(b"leaked\n", lambda: _run_case(base, label, [("cp", _LAUNCH_BODY)],
+                                                                       ("cp",)))
+    except OSError as exc:
+        return False, "standard input could not be replaced: {!r}".format(exc)
+    finally:
+        if previous is None:
+            os.environ.pop(SENTINEL, None)
+        else:
+            os.environ[SENTINEL] = previous
+    want_log = ["cp --version", "launch PATH=[{}] LC_ALL=[C] sentinel=[unset] stdin=eof []".format(d)]
+    want = [_row("cp", d, "cp (GNU coreutils) 9.7", "GNU"), GNU_SUMMARY]
+    return (code, out, log) == (0, want, want_log), (code, out, log)
+
+
+def _gone(pid, deadline_s=5.0):
+    """True once pid is no longer a live process (absent, or a zombie awaiting its reaper) within deadline_s."""
+    import time
+    end = time.monotonic() + deadline_s
+    while True:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        except OSError:
+            return False
+        try:
+            with open("/proc/{}/stat".format(pid), encoding="ascii", errors="replace") as handle:
+                if handle.read().rsplit(")", 1)[-1].split()[:1] == ["Z"]:
+                    return True
+        except OSError:
+            pass
+        if time.monotonic() >= end:
+            return False
+        time.sleep(0.05)
+
+
+def _grandchild_ok(base, label):
+    # The tool prints its line and exits at once, leaving a background child that holds its standard output
+    # and never ends: the report reads the line without waiting for that child, and leaves it not running.
+    body = ("(while :; do :; done) &\n"
+            "echo \"grandchild $!\" >> \"$log\"\n"
+            "echo 'cp (GNU coreutils) 9.7'")
+    previous = _flip("VERSION_TIMEOUT", 3)
+    try:
+        code, out, log, d = _run_case(base, label, [("cp", body)], ("cp",))
+    finally:
+        _flip("VERSION_TIMEOUT", previous)
+    pids = [int(line.split()[1]) for line in log if line.startswith("grandchild ")]
+    gone = [_gone(pid) for pid in pids]
+    for pid, ended in zip(pids, gone):
+        if not ended:  # only a broken report leaves it; the fixture's own child is killed here by its pid
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except OSError:
+                pass
+    want = [_row("cp", d, "cp (GNU coreutils) 9.7", "GNU"), GNU_SUMMARY]
+    ok = code == 0 and out == want and len(pids) == 1 and all(gone)
+    return ok, (code, out, log, gone)
+
+
+def _default_run_ok(base, label):
+    # run_report() asks about every name in TOOLS, in order, on the PATH of this process's environment.
+    directory, log = _case(base, label, [(t, "echo '{}'".format(GNU_LINE.format(t))) for t in TOOLS])
+    saved = os.environ.get("PATH")
+    os.environ["PATH"] = directory
+    try:
+        import contextlib
+        import io
+        with contextlib.redirect_stdout(io.StringIO()) as printed:
+            code = run_report()
+    finally:
+        if saved is None:
+            os.environ.pop("PATH", None)
+        else:
+            os.environ["PATH"] = saved
+    calls = _log(log)
+    last = printed.getvalue().splitlines()[-1:]
+    want_last = ["SUMMARY: coreutils implementation GNU ({0} of {0} tools reported: GNU {0})".format(len(TOOLS))]
+    ok = code == 0 and calls == [t + " --version" for t in TOOLS] and last == want_last \
+        and len(set(TOOLS)) == len(TOOLS)
+    return ok, (code, calls, last)
+
+
 def _self_test():
     with tempfile.TemporaryDirectory(prefix="coreutils-report-selftest-") as base:
         ok, detail = _gnu_ok(base, "gnu")
@@ -353,8 +550,8 @@ def _self_test():
         # A --version that exits 0 but prints nothing on standard output cannot be classified: exit 2.
         code, out, log, _d = _run_case(base, "silent", [("env", "echo 'env 1.0' >&2")], ("env",))
         check("case/version-silent-exits-2",
-              code == 2 and "CANNOT RUN: env: --version printed nothing on standard output" in out
-              and out[-1] == "EXIT 2: could not run 1 of 1 tools asked about: env", (code, out, log))
+              code == 2 and "CANNOT RUN: env: --version printed no line that is not blank on standard output"
+              in out and out[-1] == "EXIT 2: could not run 1 of 1 tools asked about: env", (code, out, log))
 
         # A --version that never finishes is stopped at the bound and reported as not runnable.
         previous = _flip("VERSION_TIMEOUT", 1)
@@ -363,7 +560,7 @@ def _self_test():
         finally:
             _flip("VERSION_TIMEOUT", previous)
         check("case/version-hangs-exits-2",
-              code == 2 and "CANNOT RUN: dd: --version did not finish within 1 s" in out, (code, out, log))
+              code == 2 and "CANNOT RUN: dd: --version did not exit within 1 s" in out, (code, out, log))
 
         # A name that resolves but cannot be launched (an executable bit on a file with no interpreter line
         # the kernel accepts) is reported, never raised.
@@ -378,15 +575,27 @@ def _self_test():
               code == 2 and len(out) == 3 and out[0].startswith("CANNOT RUN: ln: --version could not be "
                                                                 "launched"), (code, out))
 
-        # The fixtures alone were reached: every case's PATH held only its own fixture directory.
-        check("case/no-host-tool-reached",
-              all(_log(str(Path(base) / (label + ".log"))) != [] for label in ("gnu", "uutils", "mixed")), base)
+        # A name this host's PATH resolves is still not found when the PATH the report is given holds no
+        # tool: the report looks only where it is told to.
+        host_tool = next((t for t in TOOLS if shutil.which(t)), None)
+        os.makedirs(Path(base) / "empty")
+        out = []
+        code = report((host_tool,), str(Path(base) / "empty"), out) if host_tool else None
+        check("case/given-path-only",
+              code == 2 and out[:1] == ["CANNOT RUN: {}: not found on PATH".format(host_tool)], (host_tool, out))
 
-    # The default roster names every tool the suites are known to run.
-    asked = ("cp", "mv", "rm", "install", "tee", "truncate", "head", "tail", "cut", "date", "ls", "env",
-             "timeout", "dd", "ln", "sha256sum", "mktemp", "dirname", "mkdir", "sleep")
-    check("roster/default-tools", set(asked) <= set(TOOLS) and len(set(TOOLS)) == len(TOOLS),
-          sorted(set(asked) - set(TOOLS)))
+        ok, detail = _blank_lines_ok(base, "blank")
+        check("case/blank-leading-lines-skipped", ok, detail)
+        ok, detail = _long_line_ok(base, "long")
+        check("case/long-line-classified-whole", ok, detail)
+        ok, detail = _printable_ok(base, "printable")
+        check("case/unprintable-shown-as-question-mark", ok, detail)
+        ok, detail = _launch_ok(base, "launch")
+        check("case/launch-stdin-null-path-and-lc-all-only", ok, detail)
+        ok, detail = _grandchild_ok(base, "grandchild")
+        check("case/grandchild-holding-output-killed", ok, detail)
+        ok, detail = _default_run_ok(base, "roster")
+        check("roster/default-run-asks-every-tool", ok, detail)
 
     got = [_main_exit(argv) for argv in (["--bogus"], ["--self-test", "--bogus"],
                                          ["--execution-report", "relative/report"])]
@@ -400,8 +609,11 @@ def _self_test():
     print("SELF-TEST PASS: coreutils_report {} checks (GNU, uutils and mixed fixture sets are reported with "
           "path, realpath and version line and exit 0, an unknown implementation exits 0, a tool missing "
           "from PATH, a --version that exits nonzero, prints nothing, hangs or cannot be launched exits 2; "
-          "each of the five main cases fails with its code under test removed; an unrecognized argument "
-          "exits 2)".format(len(EXECUTED)))
+          "each of the five main cases fails with its code under test removed; only the given PATH is "
+          "searched; the first line that is not blank is classified whole, then shown printable and "
+          "shortened; the tool gets standard input from /dev/null and only PATH and LC_ALL=C; a background "
+          "child holding its output neither delays the report nor outlives it; the default run asks about "
+          "every tool in order; an unrecognized argument exits 2)".format(len(EXECUTED)))
     return 0
 
 

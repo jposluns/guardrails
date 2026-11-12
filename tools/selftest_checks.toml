@@ -5164,8 +5164,13 @@ expected-check-ids = [
   "case/version-silent-exits-2",
   "case/version-hangs-exits-2",
   "case/launch-error-exits-2",
-  "case/no-host-tool-reached",
-  "roster/default-tools",
+  "case/given-path-only",
+  "case/blank-leading-lines-skipped",
+  "case/long-line-classified-whole",
+  "case/unprintable-shown-as-question-mark",
+  "case/launch-stdin-null-path-and-lc-all-only",
+  "case/grandchild-holding-output-killed",
+  "roster/default-run-asks-every-tool",
   "refuse/unrecognized-argument",
 ]
 

@@ -1032,8 +1032,9 @@ jobs:
         shell: bash
         run: python3 -I -B opf/tools/_child_status.py
 
-      # Which coreutils implementation (GNU, uutils or a mix) each tool the suites run resolves to on this
-      # runner, recorded first in the job that runs the Hooks preview gate; what it finds never fails it.
+      # Which coreutils implementation (GNU, uutils or a mix) each listed tool resolves to on this runner,
+      # recorded right after the child-status step of the job that runs the Hooks preview gate; what it
+      # finds never fails it.
       - name: Coreutils implementation report
         shell: bash
         run: python3 -I -B tools/coreutils_report.py
