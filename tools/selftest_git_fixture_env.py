@@ -4415,6 +4415,13 @@ OPF_LIFECYCLE_EXEMPTIONS = {
     "opf/tools/_opf_init_contract.py": "KEEP contract validation over synthetic models.",
     "opf/tools/_opf_pack_manifest.py": "Pack parsing and digest vectors over filesystem fixtures.",
     "opf/tools/_opf_release_history.py": "Pure history parsing, canonical emission and digest vectors over in-memory bytes.",
+    "opf/tools/check_cited_standards.py": ("Designator grammar, manifest, config and corpus vectors run in process "
+                                           "over temporary filesystem fixtures (an empty .git marker directory, "
+                                           "symlinks, a unix socket); no subprocess, no git."),
+    "opf/tools/check_cited_standards_contract.py": ("Corpus and runner-wiring vectors driving main in process over "
+                                                    "temporary filesystem fixtures; its only children are the "
+                                                    "child-status fork probe and one isolated interpreter over a "
+                                                    "scratch copy beside stub collaborators; no git."),
     "opf/tools/check_opf_homes.py": "Homes contract and schema boundary vectors.",
     "opf/tools/check_opf_init_contract.py": "Source-free contract matcher vectors.",
     "opf/tools/check_opf_init_observe.py": "Observation vectors with mocked git subprocesses.",
