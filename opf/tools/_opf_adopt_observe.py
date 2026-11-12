@@ -7,7 +7,7 @@ Public contract:
 
 request is a plain dict with exactly:
     product_root: absolute, lexically contained POSIX directory path
-    version:      bare pack SemVer
+    version:      bare SemVer of OPF's own release (the manifest's opf-version)
     commit:       full lowercase SHA-1 commit identifier
 
 policy is a plain dict supplied ONLY by the installed bootstrap trust caller:

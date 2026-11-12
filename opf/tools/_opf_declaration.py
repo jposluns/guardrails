@@ -70,9 +70,47 @@ import _opf_store  # noqa: E402
 from _semver import _parse as _parse_version  # noqa: E402
 
 DECLARATION_NAME = "opf-declaration.toml"
-# The release identity this build carries apart from the declaration file: OPF's own release version in
-# opf/VERSION, which tools/check_opf_declaration.py pins equal to it; the pack release version is not it.
-RELEASE_IDENTITY = "1.0.5"
+# OPF's own release version file, one directory above this module (opf/VERSION), read at most this many bytes.
+OPF_VERSION_NAME = "VERSION"
+MAX_OPF_VERSION_BYTES = 64
+
+
+def read_opf_version(path):
+    """OPF's own release version from the file at `path`: (version, None), or (None, why) where the path is
+    missing, a symlink or other non-regular file, over MAX_OPF_VERSION_BYTES bytes, unreadable, or not exactly
+    one bare SemVer line ended by one line feed (no carriage return, whitespace or second line)."""
+    try:
+        fd = os.open(path, os.O_NOFOLLOW | os.O_RDONLY | os.O_NONBLOCK)
+    except OSError as exc:
+        return None, "{} cannot be opened ({})".format(path, exc.strerror or exc)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            return None, "{} is not a regular file".format(path)
+        if info.st_size > MAX_OPF_VERSION_BYTES:
+            return None, "{} is over {} bytes".format(path, MAX_OPF_VERSION_BYTES)
+        data = os.read(fd, MAX_OPF_VERSION_BYTES + 1)
+    except OSError as exc:
+        return None, "{} cannot be read ({})".format(path, exc.strerror or exc)
+    finally:
+        os.close(fd)
+    if len(data) > MAX_OPF_VERSION_BYTES or not data.endswith(b"\n") or data.count(b"\n") != 1:
+        return None, "{} is not exactly one line ended by a line feed".format(path)
+    try:
+        text = data[:-1].decode("ascii")
+    except UnicodeDecodeError:
+        return None, "{} is not ASCII".format(path)
+    if _parse_version(text) is None:
+        return None, "{} does not hold a bare SemVer ({!r})".format(path, text)
+    return text, None
+
+
+# The release identity this build carries apart from the declaration file: OPF's own release version, read
+# from opf/VERSION when this module loads (the pack release version in the root VERSION is not it). Where
+# that file is missing or malformed the build carries no identity (None, with the reason beside it), so the
+# runtime check finds every declaration contradictory and refuses each gated verb: it fails closed.
+RELEASE_IDENTITY, RELEASE_IDENTITY_PROBLEM = read_opf_version(
+    Path(__file__).resolve().parent.parent / OPF_VERSION_NAME)
 # The declaration file's bytes as this release ships them, and their SHA-256 digest (the shipped-file digest).
 SHIPPED_DECLARATION_BYTES = b'release = "1.0.5"\nspec_version = "1.2.0"\nhomes = 1\nworklog = 1\n'
 SHIPPED_DECLARATION_SHA256 = "5f13d71937d37efa09894c7176e98c1a94dbb2271143f155a56e051562b121bc"
@@ -178,8 +216,11 @@ def _contradiction(fields):
         ("homes", _opf_store.SUPPORTED_HOMES),
         ("worklog", _opf_store.SUPPORTED_WORKLOG),
     )
-    return "; ".join("{} = {!r}, but this build carries {!r}".format(key, fields[key], value)
-                     for key, value in expected if fields[key] != value)
+    detail = "; ".join("{} = {!r}, but this build carries {!r}".format(key, fields[key], value)
+                       for key, value in expected if fields[key] != value)
+    if RELEASE_IDENTITY is None:
+        detail += " (no release identity: {})".format(RELEASE_IDENTITY_PROBLEM)
+    return detail
 
 
 def runtime_check(path):
@@ -460,6 +501,44 @@ def _v_declaration_tracks_constants(tmp):
     return problem is None and fields == want, (fields, problem, want)
 
 
+def _v_opf_version_fail_closed(tmp):
+    # read_opf_version admits exactly one bare SemVer line ended by one line feed, in a regular file of at most
+    # 64 bytes (written here as literals, so a changed cap is red); everything else yields no identity, and a
+    # build without one finds even the shipped declaration contradictory.
+    global RELEASE_IDENTITY, RELEASE_IDENTITY_PROBLEM
+    path = Path(tmp) / OPF_VERSION_NAME
+    rows = []
+    for label, data, want in (
+            ("plain", b"2.3.4\n", "2.3.4"), ("at-cap", b"1.0." + b"1" * 59 + b"\n", "1.0." + "1" * 59),
+            ("over-cap", b"1.0." + b"1" * 60 + b"\n", None), ("crlf", b"2.3.4\r\n", None),
+            ("no-line-feed", b"2.3.4", None), ("two-lines", b"2.3.4\n\n", None), ("empty", b"", None),
+            ("not-semver", b"2.3\n", None), ("prerelease", b"2.3.4-rc.1\n", None),
+            ("padded", b" 2.3.4\n", None), ("non-ascii", "2.3.٤\n".encode("utf-8"), None)):
+        path.write_bytes(data)
+        got, why = read_opf_version(path)
+        rows.append((label, got == want and (why is None) == (want is not None), got, why))
+    path.unlink()
+    got, why = read_opf_version(path)
+    rows.append(("missing", got is None and why is not None, got, why))
+    path.mkdir()
+    got, why = read_opf_version(path)
+    rows.append(("directory", got is None and why is not None, got, why))
+    path.rmdir()
+    target = _write(tmp, b"2.3.4\n", "target")
+    path.symlink_to(target)
+    got, why = read_opf_version(path)
+    rows.append(("symlink", got is None and why is not None, got, why))
+    saved = RELEASE_IDENTITY, RELEASE_IDENTITY_PROBLEM
+    RELEASE_IDENTITY, RELEASE_IDENTITY_PROBLEM = None, "no opf/VERSION"
+    try:
+        check = runtime_check(_write(tmp, SHIPPED_DECLARATION_BYTES))
+    finally:
+        RELEASE_IDENTITY, RELEASE_IDENTITY_PROBLEM = saved
+    rows.append(("no-identity-contradictory", check.state == CONTRADICTORY and "no opf/VERSION" in check.detail,
+                 check.state, check.detail))
+    return all(row[1] for row in rows), rows
+
+
 VECTORS = (
     ("shipped-digest-matches-file", _v_shipped_digest_matches_file),
     ("valid-authorizes", _v_valid_authorizes),
@@ -490,6 +569,7 @@ VECTORS = (
     ("report-restates-shipped-on-mismatch", _v_report_restates_shipped_on_mismatch),
     ("report-digest-form", _v_report_digest_form),
     ("declaration-tracks-constants", _v_declaration_tracks_constants),
+    ("opf-version-fail-closed", _v_opf_version_fail_closed),
 )
 
 

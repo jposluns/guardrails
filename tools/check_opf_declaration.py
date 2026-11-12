@@ -98,13 +98,14 @@ code, a bare sys.exit() and an exception whose MRO leaves out BaseException are 
 (exit 2), never a finding or a clean exit: tools/_selftest_exit_report.py and tools/check_selftest_execution.py,
 opf/tools/_opf_declaration.py and opf/tools/_opf_store.py, and, for the self-test, opf/tools/opf.py and each
 opf/tools helper its _bootstrap() imports (one that _bootstrap() itself maps to its exit 2 included). So is a
-declaration file, opf/VERSION, surface or rule 6 document that is not a regular file of at most MAX_READ_BYTES
-bytes, cannot be read or (but for the declaration file) is not UTF-8, an opf/VERSION that is not exactly one
-nonempty line ended by a line feed (an empty file, a lone line feed, a second line, a missing final line feed or a
-carriage return), and a directory rule 6 cannot list, and any other
-exception (a KeyboardInterrupt aside) raised while these inputs are read. So, last, is any escape from the gate
-body: any exception other than a KeyboardInterrupt (re-raised unchanged) that leaves run() or the self-test,
-whatever its type or MRO, a SystemExit of any code or an error raised by a helper the gate calls included, ends
+declaration file, surface or rule 6 document that is not a regular file of at most MAX_READ_BYTES bytes, an
+opf/VERSION that is not a regular file of at most MAX_OPF_VERSION_BYTES bytes (the cap the runtime and
+tools/gen_manifest.py apply to it), an input that cannot be read or (but for the declaration file)
+is not UTF-8, an opf/VERSION that is not exactly one nonempty line ended by a line feed (an empty file, a lone
+line feed, a second line, a missing final line feed or a carriage return), and a directory rule 6 cannot list,
+and any other exception (a KeyboardInterrupt aside) raised while these inputs are read. So, last, is any escape
+from the gate body: any exception other than a KeyboardInterrupt (re-raised unchanged) that leaves run() or the
+self-test, whatever its type or MRO, a SystemExit of any code or an error raised by a helper the gate calls included, ends
 the gate with exit 2, never with that SystemExit's code or a traceback's exit 1. Each site that catches one of
 these does so with a bare except, which also catches an exception whose MRO leaves out BaseException (no except
 BaseException clause matches one), and takes it with sys.exception(), which reads nothing from it. The tools-side
@@ -219,6 +220,9 @@ _MD_HTML_BLOCKS = (
 )
 DOC_SUFFIXES = (".md", ".html")
 MAX_READ_BYTES = 1 << 20
+# The most bytes opf/VERSION may hold: _opf_declaration.MAX_OPF_VERSION_BYTES, the one cap every reader of that
+# file applies (tools/gen_manifest.py included); the self-test holds the two equal.
+MAX_OPF_VERSION_BYTES = 64
 
 
 class CannotEvaluate(Exception):
@@ -280,25 +284,25 @@ def _load_opf():
     return opf
 
 
-def _read_regular(path, rel):
-    """The bytes of a regular, non-symlink file of at most MAX_READ_BYTES bytes."""
+def _read_regular(path, rel, limit=MAX_READ_BYTES):
+    """The bytes of a regular, non-symlink file of at most `limit` bytes (MAX_READ_BYTES unless given)."""
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
     except OSError as exc:
         raise CannotEvaluate("{} cannot be opened ({})".format(rel, exc.strerror or exc))
     try:
         st = os.fstat(fd)
-        if not stat.S_ISREG(st.st_mode) or st.st_size > MAX_READ_BYTES:
-            raise CannotEvaluate("{} is not a regular file of at most {} bytes".format(rel, MAX_READ_BYTES))
+        if not stat.S_ISREG(st.st_mode) or st.st_size > limit:
+            raise CannotEvaluate("{} is not a regular file of at most {} bytes".format(rel, limit))
         chunks = []
         total = 0
-        while total <= MAX_READ_BYTES:
-            chunk = os.read(fd, MAX_READ_BYTES + 1 - total)
+        while total <= limit:
+            chunk = os.read(fd, limit + 1 - total)
             if not chunk:
                 return b"".join(chunks)
             chunks.append(chunk)
             total += len(chunk)
-        raise CannotEvaluate("{} grew past {} bytes while read".format(rel, MAX_READ_BYTES))
+        raise CannotEvaluate("{} grew past {} bytes while read".format(rel, limit))
     finally:
         os.close(fd)
 
@@ -546,7 +550,8 @@ def run(root):
         return _cannot_evaluate("a helper module cannot be loaded", exc)
     try:
         data = _read_regular(Path(root) / DECLARATION_REL, DECLARATION_REL)
-        version = read_opf_version(_read_regular(Path(root) / VERSION_REL, VERSION_REL).decode("utf-8"))
+        version = read_opf_version(_read_regular(Path(root) / VERSION_REL, VERSION_REL,
+                                                 MAX_OPF_VERSION_BYTES).decode("utf-8"))
         surfaces = dict((rel, _read_regular(Path(root) / rel, rel).decode("utf-8")) for rel in DOC_SURFACES)
         documents = restating_documents(root)
     except:   # a CannotEvaluate, a UnicodeDecodeError, an OSError, or any other exception while the inputs are read
@@ -602,6 +607,26 @@ def _mutant(directory, number, old, new, declaration=None):
     finally:
         sys.path[:] = saved
     return module
+
+
+def _identity_read_at_import(directory, label, old, new):
+    """Fresh copies of _opf_declaration.py (`old` replaced by `new`, loaded through _mutant), each one directory
+    below its own VERSION file, as the module sits below opf/VERSION: a version other than this build's, no
+    file, a malformed one and one ended by CRLF. Each copy takes RELEASE_IDENTITY from that file as it loads, so
+    a differing version is taken as it stands and a missing or malformed file leaves no identity with its reason
+    beside it: (ok, rows)."""
+    rows = []
+    for number, (case, data, want) in enumerate((
+            ("differing", b"9.8.7\n", "9.8.7"), ("missing", None, None), ("malformed", b"9.8\n", None),
+            ("crlf", b"9.8.7\r\n", None))):
+        home = Path(directory) / "identity-{}-{}".format(label, number)
+        home.mkdir()
+        if data is not None:
+            (home / _opf_declaration.OPF_VERSION_NAME).write_bytes(data)
+        module = _mutant(home, "identity_{}_{}".format(label, number), old, new)
+        got, why = module.RELEASE_IDENTITY, module.RELEASE_IDENTITY_PROBLEM
+        rows.append((case, got == want and (why is None) == (want is not None), got, why))
+    return all(row[1] for row in rows), rows
 
 
 def _copy_mutant(directory, source_path, name, old, new):
@@ -711,6 +736,7 @@ def self_test(report_path=None):
         ("runtime/report-restates-shipped-on-mismatch", "report-restates-shipped-on-mismatch"),
         ("runtime/report-digest-form", "report-digest-form"),
         ("runtime/declaration-tracks-constants", "declaration-tracks-constants"),
+        ("runtime/opf-version-fail-closed", "opf-version-fail-closed"),
     ):
         check(check_id, *_opf_declaration.run_vector(vector))
         covered.add(vector)
@@ -722,6 +748,8 @@ def self_test(report_path=None):
     expected_line = '        ("{}", {}),\n'
     reverted = set()
     tmp = tempfile.mkdtemp(prefix="opf-declaration-selftest-")
+    # Each mutant reads its release identity from VERSION one directory above it, as the module reads opf/VERSION.
+    (Path(tmp) / "VERSION").write_bytes((OPF_TOOLS.parent / "VERSION").read_bytes())
     number = 0
     for check_id, vector, old, new in (
         ("revert/shipped-digest-constant-alone-red", "shipped-digest-matches-file", digest_line,
@@ -780,6 +808,8 @@ def self_test(report_path=None):
          '    stream.write("[declaration]\\n" + (check.data or SHIPPED_DECLARATION_BYTES).decode("ascii")'),
         ("revert/digest-form-unchecked-red", "report-digest-form", '_DIGEST_RE = re.compile(r"[0-9a-f]{64}\\Z")',
          '_DIGEST_RE = re.compile(r".*")'),
+        ("revert/opf-version-grammar-dropped-red", "opf-version-fail-closed",
+         "    if _parse_version(text) is None:", "    if False:"),
     ):
         number += 1
         try:
@@ -792,6 +822,22 @@ def self_test(report_path=None):
     check("revert/shipped-file-alone-red",
           _red(_mutant(tmp, "file", "MAX_DECLARATION_BYTES = 4096", "MAX_DECLARATION_BYTES = 4096", edited),
                "shipped-digest-matches-file"))
+    # The release identity is read from opf/VERSION as the module loads, which no vector of the loaded module can
+    # show: fresh copies are loaded below four VERSION files instead, as shipped and with the identity hardcoded.
+    identity_line = ("RELEASE_IDENTITY, RELEASE_IDENTITY_PROBLEM = read_opf_version(\n"
+                     "    Path(__file__).resolve().parent.parent / OPF_VERSION_NAME)")
+    try:
+        live = _identity_read_at_import(tmp, "shipped", identity_line, identity_line)
+    except AssertionError as exc:
+        live = False, str(exc)
+    check("runtime/release-identity-read-at-import", *live)
+    hardcoded = "RELEASE_IDENTITY, RELEASE_IDENTITY_PROBLEM = {!r}, None".format(_opf_declaration.RELEASE_IDENTITY)
+    try:
+        ok, detail = _identity_read_at_import(tmp, "hardcoded", identity_line, hardcoded)
+        red = ok is False
+    except AssertionError as exc:
+        red, detail = False, str(exc)
+    check("revert/release-identity-hardcoded-red", red, detail)
     shutil.rmtree(tmp)
     with patch.object(_opf_store, "SUPPORTED_HOMES", _opf_store.SUPPORTED_HOMES + 1):
         check("revert/constants-flipped-without-the-file-red",
@@ -1025,7 +1071,7 @@ def self_test(report_path=None):
         shutil.rmtree(tmp)
 
     # rule 3 over scratch trees, through run(): RELEASE_IDENTITY equals OPF's own release version, the one line of
-    # opf/VERSION (a regular file of at most MAX_READ_BYTES bytes, exactly one nonempty line ended by a line feed),
+    # opf/VERSION (a regular file of at most MAX_OPF_VERSION_BYTES bytes, one nonempty line ended by a line feed),
     # and the root VERSION is no input of it; each row red under its revert
     identity = _opf_declaration.RELEASE_IDENTITY.encode("ascii")
 
@@ -1048,8 +1094,8 @@ def self_test(report_path=None):
         "non-utf-8": (identity + b"\xff\n", identity + b"\n"),
         "directory": (lambda path: path.mkdir(), identity + b"\n"),
         "symlink": (make_symlink, identity + b"\n"),
-        "at-size-bound": (b"9" * (MAX_READ_BYTES - 1) + b"\n", identity + b"\n"),
-        "over-size-bound": (b"9" * MAX_READ_BYTES + b"\n", identity + b"\n"),
+        "at-size-bound": (b"9" * (MAX_OPF_VERSION_BYTES - 1) + b"\n", identity + b"\n"),
+        "over-size-bound": (b"9" * MAX_OPF_VERSION_BYTES + b"\n", identity + b"\n"),
         "root-version-changed": (identity + b"\n", identity + b"-root\n"),
         "root-version-missing": (identity + b"\n", None),
     }
@@ -1135,7 +1181,8 @@ def self_test(report_path=None):
           and unreadable in live["non-utf-8"][1] and "UnicodeDecodeError" in live["non-utf-8"][1],
           live["non-utf-8"])
     check("doc/opf-version-size-bound", live["at-size-bound"][0] == 1 and live["over-size-bound"][0] == 2
-          and "not a regular file of at most" in live["over-size-bound"][1],
+          and "not a regular file of at most 64 bytes" in live["over-size-bound"][1]
+          and MAX_OPF_VERSION_BYTES == _opf_declaration.MAX_OPF_VERSION_BYTES,
           statuses(dict((name, live[name]) for name in ("at-size-bound", "over-size-bound"))))
     check("doc/opf-version-root-version-alone-ignored",
           live["root-version-changed"][0] == 0 and live["root-version-missing"][0] == 0,
@@ -1160,7 +1207,7 @@ def self_test(report_path=None):
         ("revert/opf-version-unterminated-or-crlf-read-leniently-red", ("unterminated", "crlf")),
     ):
         check(check_id, all(lenient[name] != 2 for name in names), dict((name, lenient[name]) for name in names))
-    with patch.object(here, "_read_regular", lambda path, rel: Path(path).read_bytes()):
+    with patch.object(here, "_read_regular", lambda path, rel, limit=None: Path(path).read_bytes()):
         followed = statuses(version_runs(("symlink",)))
     check("revert/opf-version-symlink-followed-red", followed == {"symlink": 0}, followed)
     tmp = tempfile.mkdtemp(prefix="opf-declaration-selftest-")
@@ -1169,12 +1216,12 @@ def self_test(report_path=None):
             ("revert/opf-version-compare-dropped-red", "different",
              "    if version != _opf_declaration." "RELEASE_IDENTITY:\n", "    if False:\n", 0),
             ("revert/opf-version-size-bound-off-by-one-red", "at-size-bound",
-             "or st.st_size > " "MAX_READ_BYTES:", "or st.st_size >= MAX_READ_BYTES:", 2),
+             "or st.st_size > " "limit:", "or st.st_size >= limit:", 2),
             # the regular-file check alone removed (the size check kept): the waiting FIFO bytes then read as
             # the version and the gate passes a FIFO at opf/VERSION with exit 0
             ("revert/opf-version-regular-file-check-dropped-red", "fifo-with-data",
-             "        if not stat.S_ISREG(st.st_mode) or st.st_size > " "MAX_READ_BYTES:",
-             "        if st.st_size > " "MAX_READ_BYTES:", 0),
+             "        if not stat.S_ISREG(st.st_mode) or st.st_size > " "limit:",
+             "        if st.st_size > " "limit:", 0),
         ):
             module = "opf_declaration_version_mutant_" + name.replace("-", "_")
             try:

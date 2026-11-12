@@ -6539,6 +6539,10 @@ def _context_plan(context):
     return plan
 
 
+# The release manifest key whose value the approved release version must equal: OPF's own release version.
+_GATE_VERSION_KEY = "opf-version"
+
+
 def verify_pack_member(plan, pack, source_member):
     """The b.5 trust gate for ONE pack member (spec 14.1: the release identity, bound by digest). `pack`
     carries the release manifest's exact bytes (`manifest`), the caller-observed `root.txt` bytes (`root`)
@@ -6547,15 +6551,15 @@ def verify_pack_member(plan, pack, source_member):
     observing the anchor at its independent source is the planner's b.5 capture, never re-done here); the
     observed root.txt and the sha256 of the exact manifest bytes must both equal that ROOT; the manifest
     must parse VALID through the shipped _opf_pack_manifest grammar, its tree-sha256 must recompute from
-    its own source rows (the consumer obligation that grammar leaves), and its release-version must BE the
-    approved release's version, so the approved identity can never name one version while the digest-agreed
-    pack carries another; and the member's bytes must match the size and sha256 its one source row records
-    in that frozen inventory. Returns (bytes, bare-hex sha256); any failure raises AdoptApplyError. Passing
-    proves the bytes are the ones the agreed release lists, never that its publisher is authentic beyond
-    the anchor (the self-asserted-identity residual, spec 14.1). The version this gate binds is still the
-    pack release version: the manifest's release-version, taken from the root VERSION of the reference
-    repository, not OPF's own version in opf/VERSION; moving adoption to OPF's own version is a later step
-    of the version split."""
+    its own source rows (the consumer obligation that grammar leaves), it must state an opf-version, and
+    that opf-version must BE the approved release's version, so the approved identity can never name one
+    version while the digest-agreed pack carries another; and the member's bytes must match the size and
+    sha256 its one source row records in that frozen inventory. Returns (bytes, bare-hex sha256); any
+    failure raises AdoptApplyError. Passing proves the bytes are the ones the agreed release lists, never
+    that its publisher is authentic beyond the anchor (the self-asserted-identity residual, spec 14.1).
+    The version this gate binds is OPF's own release version: the manifest's opf-version, taken from
+    opf/VERSION of the reference repository, never the pack release version (its release-version, from
+    the root VERSION), which this gate does not compare; a manifest without an opf-version refuses."""
     import _opf_pack_manifest as pack_manifest
     release = plan.get("release")
     agreed = release.get("manifest_sha256") if isinstance(release, dict) else None
@@ -6579,10 +6583,14 @@ def verify_pack_member(plan, pack, source_member):
             checked.status, "; ".join(checked.findings)))
     if pack_manifest.compute_tree(document["sources"]) != document["tree-sha256"]:
         raise AdoptApplyError("the pack manifest's tree-sha256 does not recompute from its own source rows")
-    if document["release-version"] != release.get("version"):
-        raise AdoptApplyError("the pack manifest's release-version {!r} is not the approved release version "
-                              "{!r}; the approved release identity is contradictory (fail-closed)".format(
-                                  document["release-version"], release.get("version")))
+    bound = document.get(_GATE_VERSION_KEY)
+    if bound is None:
+        raise AdoptApplyError("the pack manifest states no {} (OPF's own release version), so the approved "
+                              "release version binds nothing (fail-closed)".format(_GATE_VERSION_KEY))
+    if bound != release.get("version"):
+        raise AdoptApplyError("the pack manifest's {} {!r} is not the approved release version {!r}; the "
+                              "approved release identity is contradictory (fail-closed)".format(
+                                  _GATE_VERSION_KEY, bound, release.get("version")))
     rows = [row for row in document["sources"] if row["path"] == source_member]
     if len(rows) != 1:
         raise AdoptApplyError("source_member {!r} is not a source row of the frozen pack "
@@ -23303,11 +23311,12 @@ def _finish_ops_self_test(check):
     member = b"# Governance adapter\nRecords are written through opf record, never by hand.\n"
     source = schema.pack_source("AGENTS.md")
 
-    def manifest_bytes(data, tree=None):
+    def manifest_bytes(data, tree=None, opf="1.3.0"):
         rows = [dict(path=source, bytes=len(data), sha256=_sha256(data))]
         q = chr(34)
-        lines = ["format-version = 1", "release-version = " + q + "1.3.0" + q, "genesis = true",
-                 "tree-sha256 = " + q + (tree or pack_manifest.compute_tree(rows)) + q,
+        lines = ["format-version = 1", "release-version = " + q + "1.3.0" + q]
+        lines += ["opf-version = " + q + opf + q] if opf is not None else []
+        lines += ["genesis = true", "tree-sha256 = " + q + (tree or pack_manifest.compute_tree(rows)) + q,
                  "", "[[sources]]", "path = " + q + source + q, "bytes = " + str(len(data)),
                  "sha256 = " + q + _sha256(data) + q,
                  "", "[[artifacts]]", "artifact-id = " + q + "file:" + source + q, "path = " + q + source + q,
@@ -23489,8 +23498,8 @@ def _finish_ops_self_test(check):
     def two_member_manifest():
         rows, q = sorted([(source, member), (foreign_rel, foreign)]), chr(34)
         tree = pack_manifest.compute_tree([dict(path=p, bytes=len(d), sha256=_sha256(d)) for p, d in rows])
-        lines = ["format-version = 1", "release-version = " + q + "1.3.0" + q, "genesis = true",
-                 "tree-sha256 = " + q + tree + q]
+        lines = ["format-version = 1", "release-version = " + q + "1.3.0" + q, "opf-version = " + q + "1.3.0" + q,
+                 "genesis = true", "tree-sha256 = " + q + tree + q]
         for p, d in rows:
             lines += ["", "[[sources]]", "path = " + q + p + q, "bytes = " + str(len(d)),
                       "sha256 = " + q + _sha256(d) + q]
@@ -23518,6 +23527,47 @@ def _finish_ops_self_test(check):
     version_plan["release"] = dict(plan["release"], version="9.9.9")
     refuses_untouched("plant-release-version-mismatch-refused", [plant],
                       "not the approved release version", plan=version_plan)
+    # the version the gate binds is OPF's own (the manifest's opf-version, from opf/VERSION), never the pack
+    # release version: over a release whose two versions differ, a plan naming OPF's version commits, one
+    # naming only the pack version refuses, and a manifest stating no opf-version refuses, nothing written;
+    # the first two go red with the gate's key reverted to the pack's release-version.
+
+    def split_release(version, opf="2.0.0"):
+        approved = dict(base_plan, release=dict(base_plan["release"], version=version))
+        return release(manifest_bytes(member, opf=opf), plan=approved)
+
+    def plant_outcome(plan_s, pack_s):
+        with tempfile.TemporaryDirectory(prefix="opf-adopt-finish-") as temp:
+            root = Path(temp).resolve()
+            txn, why = run(root, [plant], **dict(ctx, plan=plan_s, pack=pack_s))
+            return txn, why or "", snapshot(root)
+
+    def commits(outcome):
+        return outcome[0] == rid and outcome[2].get("AGENTS.md") == member
+
+    def refuses(outcome, needle):
+        return outcome[0] is None and needle in outcome[1] and outcome[2] == dict()
+
+    opf_only = split_release("2.0.0")
+    pack_only = split_release("1.3.0")
+    unstated = split_release("1.3.0", opf=None)
+    check("plant-opf-version-not-pack-version-commits", commits(plant_outcome(*opf_only)))
+    check("plant-pack-version-not-opf-version-refused",
+          refuses(plant_outcome(*pack_only), "not the approved release version"))
+    check("plant-manifest-without-opf-version-refused",
+          refuses(plant_outcome(*unstated), "states no opf-version"))
+    # a plan with no release.version over a manifest with no opf-version: the two absent values would compare
+    # equal, so only the gate's own refusal of a manifest stating no opf-version stops it (red without it).
+    unversioned = dict(base_plan, release=dict((key, value) for key, value in base_plan["release"].items()
+                                               if key != "version"))
+    check("plant-plan-without-release-version-refused",
+          refuses(plant_outcome(*release(manifest_bytes(member, opf=None), plan=unversioned)),
+                  "states no opf-version"))
+    from unittest.mock import patch as _patch
+    with _patch.object(sys.modules[verify_pack_member.__module__], "_GATE_VERSION_KEY", "release-version"):
+        check("revert/gate-binds-pack-version-opf-row-red", not commits(plant_outcome(*opf_only)))
+        check("revert/gate-binds-pack-version-pack-row-red",
+              not refuses(plant_outcome(*pack_only), "not the approved release version"))
     # the product-root VERSION deliverable is a render-managed destination (spec 14.2), never a plant target.
     refuses_untouched("plant-version-deliverable-refused", [dict(plant, path="VERSION")],
                       "VERSION deliverable")
