@@ -246,11 +246,12 @@ def _decision(handler, command, tool="Bash", cwd=None):
 def _fifo_open_waits(run, fifo, bound=60.0):
     """None when run() returns within bound seconds, else a failure text. run makes a decision that opens
     fifo, a FIFO with no writer: an open without O_NONBLOCK waits there until a writer comes, so it never
-    returns by itself, while a non-blocking open returns at once. bound is a hang bound, not a speed bound: a
-    correct decision on a loaded host returns long before it, and only a real block reaches it. run goes in
-    a daemon thread so the suite goes on; when bound passes, the FIFO's write end is opened and closed once,
-    which lets a blocked open return, and the thread is given bound again to end. An exception run raises is
-    raised again here."""
+    returns by itself, while a non-blocking open returns at once. bound is a hang bound, not a speed bound: it
+    is far above any measured correct decision (milliseconds), though a decision slower than it would fail
+    too. run goes in a daemon thread so the suite goes on; when bound passes, the FIFO's write end is opened
+    and closed once, which lets a blocked open return, and the thread is given bound again to end. An
+    exception run raises is raised again here only when run ends within bound; past bound it is dropped and
+    the failure text is returned."""
     done = threading.Event()
     raised = []
 
@@ -26470,13 +26471,25 @@ def _main_isolated(monitor):
         crexpect("(ci-cr-fc2) a message file that is a directory fails closed", "git commit -F " + str(_cr_dir),
                  "deny")
         # The FIFO has no writer, so a reader that opened it without O_NONBLOCK would wait for good: the row
-        # fails when its decision still waits after the 60 s bound of _fifo_open_waits, which host load does not
-        # reach, never on how long a correct decision takes.
+        # fails when its decision still waits after the 60 s bound of _fifo_open_waits, a hang bound far above
+        # any measured correct decision (milliseconds), not a measure of how long a correct decision takes.
         _cr_fifo_wait = _fifo_open_waits(
             lambda: crexpect("(ci-cr-fc3) a message file that is a FIFO fails closed without blocking",
                              "git commit -F " + str(_cr_fifo), "deny"), str(_cr_fifo))
         if _cr_fifo_wait is not None:
             failures.append("(ci-cr-fc3-block) {}".format(_cr_fifo_wait))
+        # With the reader opening the FIFO without O_NONBLOCK, the same check must report the wait: this revert
+        # waits out the 60 s bound once, and the write end _fifo_open_waits then opens lets the open return.
+        _cr_saved_flags = aiqt_hooks._RDP_OPEN_FLAGS
+        try:
+            aiqt_hooks._RDP_OPEN_FLAGS = _cr_saved_flags & ~os.O_NONBLOCK
+            _cr_fifo_wait = _fifo_open_waits(lambda: _decision(cig, "git commit -F " + str(_cr_fifo)),
+                                             str(_cr_fifo))
+        finally:
+            aiqt_hooks._RDP_OPEN_FLAGS = _cr_saved_flags
+        if _cr_fifo_wait is None:
+            failures.append("(ci-cr-fc3-revert) with the FIFO opened without O_NONBLOCK the row still passed "
+                            "(want the wait reported)")
         crexpect("(ci-cr-fc5) a relative message file with no cwd in the payload fails closed",
                  "git commit -F credit.txt", "deny")
         crexpect("(ci-cr-fc6) a relative message file after a cd fails closed",
@@ -26842,6 +26855,43 @@ def _main_isolated(monitor):
         if "'cab: " not in _cr_why or "xnncab" in _cr_why:
             failures.append("(ci-cr-tl-reason) the ANSI-C -m token line deny reason was {!r} (want the decoded "
                             "line quoted)".format(_cr_why[:200]))
+        # A credit line whose line break comes from an ANSI-C quote beside a plainly quoted part of the same
+        # word, which git records as a line of its own: the lexed word reads fixnnGenerated ..., and no ANSI-C
+        # body holds the credit, so only the word read with its ANSI-C part decoded in place puts it at a line
+        # start. Each such row allows with those words unread; the two controls (the credit inside the ANSI-C
+        # quote, and real newlines in a double-quoted message) deny either way.
+        _cr_tail = shlex.quote(_cr_gen + " with " + _cr_ai + " Code")
+        _cr_adjacent = [
+            ("(ci-cr-aq1) a double-quoted -m part after an ANSI-C line break",
+             "git commit -m \"fix (parser)\"$'\\n\\n'" + _cr_tail),
+            ("(ci-cr-aq2) an ANSI-C -m part ending in a line break before a quoted part",
+             "git commit -m $'fix\\n\\n'" + _cr_tail),
+            ("(ci-cr-aq3) single-quoted -m parts around an ANSI-C line break",
+             "git commit -m 'fix'$'\\n\\n'" + _cr_tail),
+            ("(ci-cr-aq4) a gh pr create --body split the same way",
+             "gh pr create --title t --body \"Summary\"$'\\n\\n'" + _cr_tail)]
+        _cr_adjacent_controls = [
+            ("(ci-cr-aq-c1) the credit inside the ANSI-C quote",
+             "git commit -m \"fix\"$'\\n\\n" + _cr_gen + " with " + _cr_ai + " Code'"),
+            ("(ci-cr-aq-c2) a double-quoted message with real newlines",
+             "git commit -m \"fix\n\n" + _cr_gen + " with " + _cr_ai + " Code\"")]
+        for _cr_label, _cr_command in _cr_adjacent + _cr_adjacent_controls:
+            cr2expect(_cr_label + " holding an AI credit line denies", _cr_command, "deny")
+        cr2expect("(ci-cr-aq5) a mid-line credit after an ANSI-C line break allows",
+                  "git commit -m \"fix\"$'\\n\\n'" + shlex.quote("we " + _cr_gen + " with " + _cr_ai), "allow")
+        _cr_saved_words = aiqt_hooks._CmtidnFiles.ansi_c_words
+        try:
+            aiqt_hooks._CmtidnFiles.ansi_c_words = lambda self: []
+            _cr_kept = [label for label, command in _cr_adjacent if _decision(cig, command) != "allow"]
+            _cr_lost = [label for label, command in _cr_adjacent_controls if _decision(cig, command) != "deny"]
+        finally:
+            aiqt_hooks._CmtidnFiles.ansi_c_words = _cr_saved_words
+        if _cr_kept:
+            failures.append("(ci-cr-aq-revert) with the words holding an ANSI-C quote unread, {} still deny (want "
+                            "allow, the earlier gap)".format(_cr_kept))
+        if _cr_lost:
+            failures.append("(ci-cr-aq-control) with those words unread, the controls {} no longer deny"
+                            .format(_cr_lost))
         # The reads of the whole command text (the ANSI-C bodies and the command itself) are made once per
         # command, not once per commit segment. Each command below is AI-free and allows, and its decoded and
         # token-line-scanned characters stay within a small multiple of its length. The rows count characters,

@@ -5164,14 +5164,99 @@ def _message_text_ai(text, judged, decode=True):
     return _co_author_ai(text, judged) or _credit_line_ai(text, judged, decode)
 
 
+# The characters that end an unquoted shell word: blanks, a newline and the control and redirection operators.
+_CMTIDN_WORD_END = frozenset(" \t\n;&|()<>")
+
+
+def _cmtidn_shell_word(text, i):
+    """(value, end, ansi_c) for the shell word that starts at index i of text: value is the word as bash
+    assembles it, with each ANSI-C $'...' part decoded in place (_ansi_c_body), the quotes of each '...',
+    "..." and $"..." part removed (a backslash inside "..." kept unless it escapes a double quote, a backslash,
+    $, a backquote or a newline) and an unquoted backslash escape read as the character it escapes; end is the
+    index after the word, and ansi_c is True when the word holds an ANSI-C part. A quote left open runs to the
+    end of text. Expansions are not modelled: a $(...) or `...` inside double quotes is kept as its text, and
+    an unquoted one ends the word at its first blank or parenthesis. Linear in the word's length, never
+    raises."""
+    out = []
+    n = len(text)
+    ansi_c = False
+    while i < n:
+        c = text[i]
+        if c in _CMTIDN_WORD_END:
+            break
+        if text.startswith("$'", i):
+            m = _ANSI_C_QUOTE_RE.match(text, i)
+            ansi_c = True
+            if m is None:  # left open: bash reads to the end of text
+                out.append(_ANSI_C_ESCAPE_RE.sub(_ansi_c_escape, text[i + 2:]))
+                i = n
+                break
+            out.append(_ansi_c_body(m))
+            i = m.end()
+        elif c == "'":
+            close = text.find("'", i + 1)
+            close = n if close == -1 else close
+            out.append(text[i + 1:close])
+            i = close + 1
+        elif c == '"' or text.startswith('$"', i):
+            k = i + (2 if c == "$" else 1)
+            while k < n and text[k] != '"':
+                if text[k] == "\\" and k + 1 < n and text[k + 1] in '"\\$`\n':
+                    if text[k + 1] != "\n":
+                        out.append(text[k + 1])
+                    k += 2
+                else:
+                    out.append(text[k])
+                    k += 1
+            i = k + 1
+        elif c == "\\":
+            if i + 1 < n and text[i + 1] != "\n":
+                out.append(text[i + 1])
+            i += 2
+        else:
+            out.append(c)
+            i += 1
+    return "".join(out), min(i, n), ansi_c
+
+
+def _cmtidn_ansi_c_words(command):
+    """The value (_cmtidn_shell_word) of each word of command that holds an ANSI-C $'...' part, read two ways:
+    the command split into words from its start, and the rest of the word read from each ANSI-C quote that no
+    earlier such read covers, so text before a quote whose quotes this reader pairs otherwise than bash does
+    (a lone apostrophe in a here-document or a comment) cannot hide a credit line that starts in or after the
+    quote. Each way reads each character a bounded number of times, so the cost is linear in the command's
+    length."""
+    if "$'" not in command:
+        return []
+    words = []
+    n = len(command)
+    i = 0
+    while i < n:
+        if command[i] in _CMTIDN_WORD_END:
+            i += 1
+            continue
+        value, i, ansi_c = _cmtidn_shell_word(command, i)
+        if ansi_c:
+            words.append(value)
+    covered = 0
+    for m in _ANSI_C_QUOTE_RE.finditer(command):
+        if m.start() >= covered:
+            value, covered, _ = _cmtidn_shell_word(command, m.start())
+            words.append(value)
+    return words
+
+
 def _cmtidn_ansi_c_credit_ai(files, judged):
     """A hit label for an AI credit line in the decoded body of an ANSI-C $'...' quote of the command text
-    (files.ansi_c_bodies), else None. The shell lexer keeps such a body's escapes undecoded (it reads \\n as n),
-    so a message or body value given as $'fix\\n\\nGenerated with ...' has no line start for the credit line in
-    its word; each quote of the command is read instead, a safe-direction over-read of a quote that is not the
-    value. The result is kept on files, so the bodies are scanned once per command, not once per value."""
+    (files.ansi_c_bodies) or in a word of the command that holds one, read with each ANSI-C part decoded in
+    place (files.ansi_c_words), else None. The shell lexer keeps such a body's escapes undecoded (it reads \\n
+    as n), so a message or body value given as $'fix\\n\\nGenerated with ...' or as
+    "fix"$'\\n\\n'"Generated with ..." has no line start for the credit line in its word; each quote and each
+    word holding one is read instead, a safe-direction over-read of a quote or word that is not the value.
+    The result is kept on files, so the command is scanned once per command, not once per value."""
     if files.ansi_c_credit is _CMTIDN_UNSET:
-        files.ansi_c_credit = next((hit for hit in (_credit_line_ai(body, judged) for body in files.ansi_c_bodies())
+        texts = itertools.chain(files.ansi_c_bodies(), files.ansi_c_words())
+        files.ansi_c_credit = next((hit for hit in (_credit_line_ai(text, judged) for text in texts)
                                     if hit is not None), None)
     return files.ansi_c_credit
 
@@ -5326,6 +5411,7 @@ class _CmtidnFiles:
         self.spent = 0
         self.mentions = {}
         self.bodies = None
+        self.words = None
         self.ansi_c_credit = _CMTIDN_UNSET
         self.ansi_c_token_line = _CMTIDN_UNSET
         self.command_token_line = _CMTIDN_UNSET
@@ -5337,6 +5423,13 @@ class _CmtidnFiles:
             self.bodies = ([_ansi_c_body(m) for m in _ANSI_C_QUOTE_RE.finditer(self.command)]
                            if "$'" in self.command else [])
         return self.bodies
+
+    def ansi_c_words(self):
+        """The value of each shell word of the command text that holds an ANSI-C quote, with each ANSI-C part
+        decoded in place (_cmtidn_ansi_c_words), read on the first call only."""
+        if self.words is None:
+            self.words = _cmtidn_ansi_c_words(self.command)
+        return self.words
 
     def ansi_c_token_hit(self):
         """The first token-line hit (_cmtidn_token_line_ai) in the decoded ANSI-C bodies, computed once."""
