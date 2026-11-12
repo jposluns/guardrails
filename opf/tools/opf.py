@@ -1822,8 +1822,10 @@ def _watchdog_declared_budget_vectors():
     it (nested-timeout and nested-cancel by 1000 s, nested-orders by the
     nine launches and six holds that each pay it), so a raised backstop
     always reaches the figure tools/check_opf_standalone_closure.py reads,
-    and every other declared budget must stay where it was. [] when all
-    hold."""
+    and every other declared budget must stay where it was; and every
+    declared budget must be READ by the regression runner's row for it
+    (_watchdog_declared_budget_reads, shown refusing a row that holds its
+    figure as a literal). [] when all hold."""
     global _TREE_STARTUP_BACKSTOP
     raise_by = 1000
     before = _watchdog_declared_budgets()
@@ -1841,6 +1843,64 @@ def _watchdog_declared_budget_vectors():
                   % (label, raise_by, after.get(label), before[label] + moves.get(label, 0))
                   for label in sorted(before)
                   if after.get(label) != before[label] + moves.get(label, 0))
+    missed.extend(_watchdog_declared_budget_reads())
+    # The read check is discriminating: the runner's nested-timeout row
+    # holding today's figure as a literal, the same number it reads now,
+    # must be refused by name.
+    import inspect
+    runner = inspect.getsource(_watchdog_regression_self_test)
+    row = 'declared_budgets["completion-nested-timeout"]'
+    literal = runner.replace(row, repr(before.get("completion-nested-timeout")))
+    if runner.count(row) != 1 or not any(
+            "completion-nested-timeout" in miss
+            for miss in _watchdog_declared_budget_reads(literal)):
+        missed.append("declared budget completion-nested-timeout: a runner row holding "
+                      "its figure as a literal is not refused")
+    return missed
+
+
+def _watchdog_declared_budget_reads(source=None):
+    """Each budget _watchdog_declared_budgets declares that the regression
+    runner's budget table does not READ from it. The runner must bind
+    declared_budgets to one call of that function, and each label must
+    reach its row as a read of that binding: a "completion-<mode>" label
+    as the row ("<mode>", declared_budgets["completion-<mode>"]),
+    "deadline-case" as deadline_budget = declared_budgets["deadline-case"]
+    with the (mode, deadline_budget) rows taking it, and any other label
+    as budgets["<label>"] = declared_budgets["<label>"]. A row holding the
+    same figure as a literal, or recomputing it, matches today's numbers
+    but no longer follows the function the closure gate reads, so this
+    reads the runner's source, not its figures. source defaults to the
+    runner's own; [] when every declared budget is read."""
+    import ast
+    import inspect
+    if source is None:
+        source = inspect.getsource(_watchdog_regression_self_test)
+    present = {ast.dump(node) for node in ast.walk(ast.parse(source))
+               if isinstance(node, (ast.Assign, ast.Tuple))}
+
+    def statement(text):
+        return ast.dump(ast.parse(text).body[0])
+
+    def expression(text):
+        return ast.dump(ast.parse(text, mode="eval").body)
+
+    missed = []
+    if statement("declared_budgets = _watchdog_declared_budgets()") not in present:
+        missed.append("declared budgets: the regression runner does not bind "
+                      "declared_budgets = _watchdog_declared_budgets()")
+    for label in sorted(_watchdog_declared_budgets()):
+        if label.startswith("completion-"):
+            rows = [expression("(%r, declared_budgets[%r])"
+                               % (label[len("completion-"):], label))]
+        elif label == "deadline-case":
+            rows = [statement("deadline_budget = declared_budgets[%r]" % label),
+                    expression("(mode, deadline_budget)")]
+        else:
+            rows = [statement("budgets[%r] = declared_budgets[%r]" % (label, label))]
+        if not all(row in present for row in rows):
+            missed.append("declared budget %s: no regression-runner row reads it "
+                          "from _watchdog_declared_budgets" % label)
     return missed
 
 
@@ -6259,7 +6319,16 @@ def _watchdog_completion_case(mode, tree=None):
         # past the execution bound found no receipt. A starved or
         # unstarted attempt is retried within the priced attempts, and an
         # exhausted retry fails the row by name, never passes it; a
-        # receipt of either kind fails it by name too.
+        # receipt of either kind fails it by name too. "held" is accepted
+        # here at once, where the green leg above retries it, because it is
+        # the only outcome a started mutant can reach: the source count
+        # above pins that the one loop-top deadline check is the line
+        # removed, the stalling subject never exits, and the guardian's
+        # only other expiry sample follows a control-channel EOF, which
+        # this row sends only at proc.close(), after the watch has ended.
+        # So the mutant writes no receipt while the channel is held open,
+        # and "held" is its true outcome however starved the host is,
+        # never a starvation shape standing in for another result.
         outcome = own_deadline_wait(unchecked_guardian,
                                     ("unstarted", "drain-starved"))
         assert outcome == "held", (

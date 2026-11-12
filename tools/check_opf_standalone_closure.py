@@ -624,25 +624,28 @@ _CI_SETUP_ALLOWANCE_S = 600    # checkout with full history and setup-python, be
 #     a bound.
 # 311 + 38.4 = 349.4 s, rounded up to 350 s.
 _VECTOR_ALLOWANCE_S = 350
-# The ARITHMETIC regression-leg budgets of opf.py --self-test (opf.py's _watchdog_declared_budgets, in
-# seconds) that this gate's sizing accounts for. _declared_wait_sites reads only literal `timeout=`
-# sites, so it never sees a budget built from named constants: when such a budget grows, the
-# opf-tooling-selftest bound above stays where it was, and so do the opf-closure-a fit and the config
-# lanes' deadline for this gate's opf-closure-a member, all of which then cover less of the leg than
-# they did. Each row is the largest budget the sizing was checked against, and
-# closure/declared-budgets-seen refuses, by name, a live budget above its row, a live budget with no
-# row and a row with no live budget, so a budget can grow only in a change that also re-derives those
-# bounds from new measurements and raises the row. FIGURE BASIS: "deadline-case" is one requested run
-# at 0.25 s and its one confirm run at 1 s, each priced at the 5 s execution bound, the 5 s cleanup
+# Every budget opf.py's _watchdog_declared_budgets declares (in seconds), each a regression-leg budget
+# of opf.py --self-test built from named constants. It does NOT declare every such budget: the six
+# launcher legs and the ledger vectors priced at _deadline_case_budget(0.5) are arithmetic rows of
+# the regression runner's budget table that it leaves out, so this table and its check do not cover
+# them. _declared_wait_sites reads only literal `timeout=` sites, so it never sees a budget built
+# from named constants: when such a budget grows, the opf-tooling-selftest bound above stays where it
+# was, and so do the opf-closure-a fit and the config lanes' deadline for this gate's opf-closure-a
+# member, all of which then cover less of the leg than they did. Each row records the figure its leg
+# runs under, and closure/declared-budgets-seen refuses, by name, a live budget above its row, a live
+# budget with no row and a row with no live budget, so a declared budget cannot grow past its row
+# without a change that raises the row. The check compares figures only: a row is no evidence that
+# the bounds above were re-measured for it. FIGURE BASIS: "deadline-case" is one requested run at
+# 0.25 s and its one confirm run at 1 s, each priced at the 5 s execution bound, the 5 s cleanup
 # grace and the 1 s receipt allowance (11 + 11 = 22 s). "completion-deadline-flips" is that leg's
 # formula at two priced attempts per retried row (2 x 210.2 + 38 = 458.4 s, so 459 s); at three
 # attempts it is 668.6 s, which this row refuses, and the 77 s fixed budget it replaced held no
 # retried row and no confirm run. The tree and isolation rows are the figures those legs already
-# ran under when their budgets entered this table, unchanged by that move: "completion-nested-timeout"
-# and "completion-nested-cancel" are one allowance at the 60 s startup backstop (60 + 5 + 1 = 66 s),
-# "completion-nested-orders" is nine such allowances, nine at the 5 s vector backstop (11 s each),
-# six 60 s holds and four 5 s holds (594 + 99 + 360 + 20 = 1073 s), and "blocked-isolation" is 31
-# isolation cases at the 180 s allowance of 186 s (5766 s).
+# ran under when their budgets entered this table, unchanged by that move:
+# "completion-nested-timeout" and "completion-nested-cancel" are one allowance at the 60 s startup
+# backstop (60 + 5 + 1 = 66 s), "completion-nested-orders" is nine such allowances, nine at the 5 s
+# vector backstop (11 s each), six 60 s holds and four 5 s holds (594 + 99 + 360 + 20 = 1073 s), and
+# "blocked-isolation" is 31 isolation cases at the 180 s allowance of 186 s (5766 s).
 _OPF_DECLARED_BUDGETS_SEEN = {
     "deadline-case": 22,
     "completion-deadline-flips": 459,
@@ -805,22 +808,39 @@ def _leg_bounds(tools_dir, ceilings=None, launch_margin_s=None, bound_floors=Non
 
 def _opf_declared_budgets(tools_dir, attempts=None, backstop_raise_s=None):
     """{leg label: budget in seconds} from the opf.py under tools_dir (its _watchdog_declared_budgets),
-    imported in this process with tools_dir first on sys.path; sys.path and sys.modules are restored
-    afterwards, so the import leaves nothing behind. attempts, when given, stands in for opf.py's
-    _DEADLINE_FLIPS_ATTEMPTS during the call, and backstop_raise_s, when given, is added to its
-    _TREE_STARTUP_BACKSTOP during the call (the self-test's flips). Raises _BoundError (cannot
-    evaluate) when the module or the function cannot be loaded."""
+    imported in this process with tools_dir first on sys.path. The import always loads tools_dir's own
+    opf.py and helper modules: every sys.modules entry named for a module file under tools_dir (an
+    opf module cached from another directory included; a standard-library name never) is set aside
+    first, and an opf module that loads from anywhere else is refused. Afterwards sys.path is restored
+    from a snapshot of the whole list (opf.py inserts its own directory on import), every module the
+    import added is dropped and every entry set aside is put back, so the import leaves nothing
+    behind. attempts, when given, stands in for opf.py's _DEADLINE_FLIPS_ATTEMPTS during the call, and
+    backstop_raise_s, when given, is added to its _TREE_STARTUP_BACKSTOP during the call (the
+    self-test's flips). Raises _BoundError (cannot evaluate) when the directory cannot be listed, or
+    the module, the function or either constant cannot be loaded."""
     tools_dir = str(Path(tools_dir))
+    try:
+        names = {entry.stem for entry in Path(tools_dir).iterdir() if entry.suffix == ".py"}
+    except OSError as exc:
+        raise _BoundError("cannot list the modules under {}: {}: {}".format(
+            tools_dir, type(exc).__name__, exc))
+    names = (names | {"opf"}) - sys.stdlib_module_names
+    saved_path = list(sys.path)
+    set_aside = {name: sys.modules.pop(name) for name in sorted(names) if name in sys.modules}
     before = set(sys.modules)
     sys.path.insert(0, tools_dir)
     try:
         try:
             import opf
+            loaded = Path(opf.__file__).resolve()
             declared = opf._watchdog_declared_budgets
-        except (ImportError, AttributeError, SyntaxError, OSError) as exc:
+            saved = opf._DEADLINE_FLIPS_ATTEMPTS, opf._TREE_STARTUP_BACKSTOP
+        except (ImportError, AttributeError, SyntaxError, OSError, TypeError) as exc:
             raise _BoundError("cannot read opf.py's declared budgets under {}: {}: {}".format(
                 tools_dir, type(exc).__name__, exc))
-        saved = opf._DEADLINE_FLIPS_ATTEMPTS, opf._TREE_STARTUP_BACKSTOP
+        if loaded != (Path(tools_dir) / "opf.py").resolve():
+            raise _BoundError("cannot read opf.py's declared budgets under {}: the import loaded "
+                              "{}".format(tools_dir, loaded))
         if attempts is not None:
             opf._DEADLINE_FLIPS_ATTEMPTS = attempts
         if backstop_raise_s is not None:
@@ -830,9 +850,10 @@ def _opf_declared_budgets(tools_dir, attempts=None, backstop_raise_s=None):
         finally:
             opf._DEADLINE_FLIPS_ATTEMPTS, opf._TREE_STARTUP_BACKSTOP = saved
     finally:
-        sys.path.remove(tools_dir)
+        sys.path[:] = saved_path
         for name in set(sys.modules) - before:
             del sys.modules[name]
+        sys.modules.update(set_aside)
 
 
 def _declared_budget_faults(live, seen):
@@ -857,15 +878,84 @@ def _declared_budget_faults(live, seen):
     return faults
 
 
+# The arithmetic regression-leg budgets opf.py's _watchdog_declared_budgets leaves out, which
+# closure/declared-budgets-seen therefore does not check; its PASS line must name each one.
+_DECLARED_BUDGETS_LEFT_OUT = ("the launcher legs", "the ledger vectors")
+
+
+def _declared_budgets_pass_line(check, flips_s):
+    """The PASS line of closure/declared-budgets-seen: what it checked (every budget opf.py's
+    _watchdog_declared_budgets declares, naming the arithmetic budgets that function leaves out) and
+    the flips it showed refused. flips_s is the three-attempt deadline-flips budget."""
+    return ("PASS closure/{} (every budget opf.py's _watchdog_declared_budgets declares at or below "
+            "its row; {} and {}, which it leaves out, are not checked here; RED one hundredth over a "
+            "row, a budget with no row, a stale row, a NaN budget, three deadline-flips attempts at "
+            "{}s, and a tree startup backstop one second over the live one; the import restores "
+            "sys.path and sys.modules, loads the requested opf.py over a cached opf module, and "
+            "refuses an opf.py missing a constant as cannot evaluate)".format(
+                check, _DECLARED_BUDGETS_LEFT_OUT[0], _DECLARED_BUDGETS_LEFT_OUT[1], flips_s))
+
+
 def _declared_budgets_self_test(root):
-    """closure/declared-budgets-seen: every arithmetic regression-leg budget of the real opf.py sits at
-    or below the row the sizing accounts for, and the comparison is discriminating at its boundary
-    (just inside, exactly at and just outside each row), on a missing or stale row, on the
-    three-attempt deadline-flips formula this row was set against and on a tree startup backstop one
-    second over the live one."""
+    """closure/declared-budgets-seen: every budget the real opf.py's _watchdog_declared_budgets
+    declares sits at or below the row the sizing accounts for (the launcher legs and the ledger
+    vectors, which that function leaves out, are not checked, and the PASS line names them), and the
+    comparison is discriminating at its boundary (just inside, exactly at and just outside each row),
+    on a missing or stale row, on the three-attempt deadline-flips formula this row was set against
+    and on a tree startup backstop one second over the live one. The import behind it restores
+    sys.path and sys.modules whole, loads the requested directory's opf.py even when another opf
+    module is cached in sys.modules, and refuses an opf.py missing a constant it reads as
+    cannot evaluate (_BoundError)."""
     check = "declared-budgets-seen"
     tools_dir = Path(root) / "opf" / "tools"
+    path_before, modules_before = list(sys.path), dict(sys.modules)
     live = _under_test(check, _opf_declared_budgets, tools_dir, refuses=(_BoundError,))
+    # opf.py inserts its own directory on sys.path when imported, so removing only the entry this
+    # gate added would leave a copy behind: the whole list must come back as it was.
+    if sys.path != path_before:
+        raise _CheckFailure("closure/{}: reading the declared budgets left sys.path changed: "
+                            "{!r}, was {!r}".format(check, sys.path, path_before))
+    changed = sorted(name for name in set(sys.modules) | set(modules_before)
+                     if sys.modules.get(name) is not modules_before.get(name))
+    if changed:
+        raise _CheckFailure("closure/{}: reading the declared budgets left sys.modules changed: "
+                            "{}".format(check, ", ".join(changed)))
+    # An opf module already cached in sys.modules (here a stub) must not stand in for the requested
+    # directory's opf.py, and it must be back in place afterwards.
+    stub = type(sys)("opf")
+    stub._watchdog_declared_budgets = lambda: {"stub": 1}
+    stub._DEADLINE_FLIPS_ATTEMPTS, stub._TREE_STARTUP_BACKSTOP = 9, 0
+    cached = sys.modules.get("opf")
+    sys.modules["opf"] = stub
+    try:
+        got = _under_test(check, _opf_declared_budgets, tools_dir, refuses=(_BoundError,))
+        kept = sys.modules.get("opf")
+    finally:
+        if cached is None:
+            sys.modules.pop("opf", None)
+        else:
+            sys.modules["opf"] = cached
+    if got != live or kept is not stub:
+        raise _CheckFailure("closure/{}: with an opf stub cached in sys.modules the declared budgets "
+                            "read {!r} (want {!r}) and the stub was {}".format(
+                                check, got, live, "put back" if kept is stub else "not put back"))
+    # An opf.py that lacks a constant the read sets aside is a module that cannot be evaluated
+    # (_BoundError), never a raw AttributeError.
+    tmp = Path(tempfile.mkdtemp(prefix="opf-closure-budgets-"))
+    try:
+        for present in ("_DEADLINE_FLIPS_ATTEMPTS = 2\n", "_TREE_STARTUP_BACKSTOP = 60\n"):
+            stub_dir = tmp / present.split()[0]
+            stub_dir.mkdir()
+            (stub_dir / "opf.py").write_text(present + "\n\ndef _watchdog_declared_budgets():\n"
+                                             "    return {}\n", encoding="utf-8")
+            try:
+                _under_test(check, _opf_declared_budgets, stub_dir, refuses=(_BoundError,))
+            except _BoundError:
+                continue
+            raise _CheckFailure("closure/{}: an opf.py holding only {} was not refused as "
+                                "cannot evaluate".format(check, present.split()[0]))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
     faults = _under_test(check, _declared_budget_faults, live, _OPF_DECLARED_BUDGETS_SEEN)
     if faults:
         raise _CheckFailure("closure/{}: {}".format(check, "; ".join(faults)))
@@ -903,10 +993,14 @@ def _declared_budgets_self_test(root):
             raise _CheckFailure("closure/{}: a startup backstop one second over the live one left "
                                 "{} at {!r}s, not refused: {!r}".format(check, label,
                                                                        raised.get(label), got))
-    print("PASS closure/{} (every arithmetic budget at or below its row; RED one hundredth over a row, "
-          "a budget with no row, a stale row, a NaN budget, three deadline-flips attempts at "
-          "{}s, and a tree startup backstop one second over the live one)".format(
-              check, flipped["completion-deadline-flips"]))
+    # The PASS line states what was checked: every budget _watchdog_declared_budgets declares, never
+    # every arithmetic budget, so it must name each arithmetic budget that function leaves out.
+    line = _declared_budgets_pass_line(check, flipped["completion-deadline-flips"])
+    missing = [name for name in _DECLARED_BUDGETS_LEFT_OUT if name not in line]
+    if missing or "every arithmetic budget" in line:
+        raise _CheckFailure("closure/{}: the PASS line {!r} claims every arithmetic budget or does "
+                            "not name {}".format(check, line, ", ".join(missing) or "nothing"))
+    print(line)
 
 
 def _bound_faults(bounds, needs):
