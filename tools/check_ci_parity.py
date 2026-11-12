@@ -7261,6 +7261,11 @@ def self_test():
             # reads, so a reviewed count with a changed read target stays
             # inside the allowlist.
             ("_close_lock_sites", "open-text"): 1,
+            # Not a read at all: splits a declared deadline's in-memory
+            # reason string to require that it is exactly one line under
+            # every boundary str.splitlines() splits on. No file, runner
+            # or workflow text is opened or read at this site.
+            ("_deadline_well_formed", "splitlines"): 1,
             ("_maintenance_pin_scan", "read_text"): 1,
             # /proc/<pid>/stat, the timeout control's liveness probe.
             ("_pid_state", "open-text"): 1,

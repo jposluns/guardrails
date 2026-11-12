@@ -1889,10 +1889,12 @@ def _member_bound_checks(roster):
     member's declared deadline in CONFIG_MEMBER_DEADLINES (exactly the six closure parts, at
     3600 s), with no entry in neither set and no budget or deadline without an entry.
     config/member-bound-budget-vectors: the derivation at a step boundary and the budget refusals
-    of _member_bound_problems on synthetic tables. config/member-bound-deadline-vectors: on a
-    synthetic member, an entry equal to its declared deadline is accepted and each deadline
-    refusal fires; the label names the deadline only at that bound; a real 1 s kill at a declared
-    deadline reports that deadline in its recorded timeout message.
+    of _member_bound_problems on synthetic tables, a float and a str bound among them (the str
+    refused, not raising). config/member-bound-deadline-vectors: on a synthetic member, an entry
+    equal to its declared deadline is accepted and each deadline refusal fires (a bool bound, a
+    list-shaped deadline, and a reason holding a line feed, a carriage return or U+2028 among
+    them); the label names the deadline only at that bound; a real 1 s kill at a declared deadline
+    reports that deadline in its recorded timeout message.
     config/member-roster-figures: the frozen sizing account (SIZING_ACCOUNT_ROSTER,
     SIZING_ACCOUNT_TIMED, SIZING_MEASURED and SIZING_MALFORMED_MEASURED in the engine) still
     applies to the live roster (_roster_figures reports no problem), keeps its sizes, and keeps
@@ -2141,8 +2143,9 @@ def _member_bound_checks(roster):
         # A caller's own bound that is not the declared deadline drops the deadline's reason.
         _run_config_member(closure_a, {}, bound=1200)
     # A closure part's label names its declared deadline, so a kill there reads as that deadline.
-    closure_reason = (" (bound is its declared deadline: this lane cuts a closure self-test part"
-                      " short on purpose; its registered step runs it to completion)")
+    closure_reason = (" (bound is its declared deadline: this lane caps each closure self-test"
+                      " part at 3600 s, not at a bound derived from a run of its own; its"
+                      " registered step runs it to completion)")
     check("config/member-bound-reaches-run", handed,
           [(" ".join(record), 5100), (" ".join(opf_selftest), 3600),
            (" ".join(adopt_observe), 1800), (" ".join(release_delta), 1800),
@@ -2171,7 +2174,15 @@ def _member_bound_checks(roster):
     # over it), the selftest_aiqt_hooks.py budget, and _member_bound_problems on a synthetic
     # member whose bound sits just under, exactly at and just over its 1230 s budget (each refused,
     # the last as not derived), at its derived bound (green), with no budget, with no bound, and
-    # with a zero and a bool budget.
+    # with a zero and a bool budget; and a bound that is not a plain int, a float equal to the
+    # derived bound and a str of it, each refused (red when the int check is dropped: the float
+    # then passes and the str raises, which this records rather than propagates).
+    def problems_or_raised(bounds, budgets, deadlines):
+        try:
+            return _member_bound_problems(bounds, budgets, deadlines)
+        except TypeError as exc:
+            return "raised TypeError: {}".format(exc)
+
     budget_probe = ("tools/check_secrets.py", "--self-test", "--budget-probe")
     budget_vectors = [_member_bound_problems({budget_probe: bound}, {budget_probe: 1230}, {})
                       for bound in (1229, 1230, 1231, 8400)]
@@ -2179,6 +2190,9 @@ def _member_bound_checks(roster):
                        _member_bound_problems({}, {budget_probe: 1230}, {}),
                        _member_bound_problems({budget_probe: 300}, {budget_probe: 0}, {}),
                        _member_bound_problems({budget_probe: 300}, {budget_probe: True}, {})]
+    budget_vectors += [problems_or_raised({budget_probe: bound}, {budget_probe: 1230}, {})
+                       for bound in (8400.0, "8400")]
+    not_int = ["bound not a plain int of seconds: {!r}".format(budget_probe)]
     check("config/member-bound-budget-vectors",
           ([_derived_member_bound(value) for value in (44.99, 45, 45.01, 1230)], budget_vectors),
           ([300, 300, 600, 8400],
@@ -2190,14 +2204,18 @@ def _member_bound_checks(roster):
             ["bound with no declared budget or deadline: {!r}".format(budget_probe)],
             ["declared budget with no bound: {!r}".format(budget_probe)],
             ["declared budget not a positive number: {!r}".format(budget_probe)],
-            ["declared budget not a positive number: {!r}".format(budget_probe)]]))
+            ["declared budget not a positive number: {!r}".format(budget_probe)],
+            not_int, not_int]))
     # A declared deadline on a synthetic member: an entry equal to it is accepted although it is
     # far under the bound its budget would derive (8400 s from 1230 s), and one second under or
     # over it is refused; a deadline with no entry, a member declaring both a budget and a
     # deadline, and an entry in neither set are each refused, as is a deadline whose seconds are
-    # zero or a bool or whose reason is empty or not one line. The label names the deadline only
-    # when the bound handed to the run is that deadline, and a real kill at it (a 1 s deadline on
-    # a sleeping child, reaching only sys.executable, writing nothing) reports that deadline.
+    # zero or a bool, one declared as a list, one whose reason is empty or not one line (a line
+    # feed, a carriage return, U+2028: each red when the one-line check is dropped), and a bool
+    # bound equal to its deadline (red when the int check is dropped). The label names the
+    # deadline only when the bound handed to the run is that deadline, and a real kill at it (a
+    # 1 s deadline on a sleeping child, reaching only sys.executable, writing nothing) reports
+    # that deadline.
     deadline_probe = ("tools/check_secrets.py", "--self-test", "--deadline-probe")
     declared = {deadline_probe: (3600, "probe reason")}
     deadline_vectors = [_member_bound_problems({deadline_probe: bound}, {}, declared)
@@ -2209,7 +2227,11 @@ def _member_bound_checks(roster):
         _member_bound_problems({deadline_probe: 0}, {}, {deadline_probe: (0, "probe reason")}),
         _member_bound_problems({deadline_probe: 1}, {}, {deadline_probe: (True, "probe reason")}),
         _member_bound_problems({deadline_probe: 3600}, {}, {deadline_probe: (3600, " ")}),
-        _member_bound_problems({deadline_probe: 3600}, {}, {deadline_probe: (3600, "a\nb")})]
+        _member_bound_problems({deadline_probe: 3600}, {}, {deadline_probe: (3600, "a\nb")}),
+        _member_bound_problems({deadline_probe: 3600}, {}, {deadline_probe: (3600, "a\rb")}),
+        _member_bound_problems({deadline_probe: 3600}, {}, {deadline_probe: (3600, "a\u2028b")}),
+        _member_bound_problems({deadline_probe: 3600}, {}, {deadline_probe: [3600, "probe"]}),
+        _member_bound_problems({deadline_probe: True}, {}, {deadline_probe: (1, "probe")})]
     malformed = ["declared deadline not (positive int seconds, one-line reason): {!r}".format(
         deadline_probe)]
     with patch.dict(CONFIG_MEMBER_DEADLINES, {deadline_probe: (1, "probe reason")}):
@@ -2229,7 +2251,8 @@ def _member_bound_checks(roster):
             ["declared deadline with no bound: {!r}".format(deadline_probe)],
             ["declared both a budget and a deadline: {!r}".format(deadline_probe)],
             ["bound with no declared budget or deadline: {!r}".format(deadline_probe)],
-            malformed, malformed, malformed, malformed],
+            malformed, malformed, malformed, malformed, malformed, malformed, malformed,
+            ["bound not a plain int of seconds: {!r}".format(deadline_probe)]],
            [joined + " (bound is its declared deadline: probe reason)", joined],
            deadline_kill, [deadline_kill]))
 

@@ -1200,17 +1200,22 @@ def _config_poison_fixture(base):
 # ("A kill timeout outlives the wait it bounds", AGENTS.md) asks that a bound meant to let a command
 # finish be sized above the budget the command grants itself; it allows a deliberately shorter
 # deadline where cutting the work short is the explicit intent, provided reaching it is attributed
-# to the deadline rather than reported as a failure of the callee. Every bound in this table takes
-# that exception: none of them is offered as a bound above its member's whole self-granted budget.
+# to the deadline rather than reported as a failure of the callee. No bound in this table is
+# offered as one sized above its member's whole self-granted budget, so wherever a bound sits
+# below that budget it takes that exception. That reading is against the member's own budget; it
+# is not what sets an entry's value, which is either DERIVED from a declared budget or a DECLARED
+# DEADLINE (CHOICE).
 # CHOICE: the default is NOT raised above 5766 s. Every entry below but the six closure entries
-# is DERIVED from its member's declared budget (CONFIG_MEMBER_BUDGETS: the slowest complete run
-# its comment records) by the SIZING formula, so it sits above that run by the formula's margin
-# and no such member is killed under its own declared budget; an entry exceeds 5766 s where its
-# budget requires it (tools/selftest_aiqt_hooks.py). The six closure entries instead keep a
-# DECLARED DEADLINE (CONFIG_MEMBER_DEADLINES), 3600 s, below the bound their budget would derive:
-# cutting their run short is the intent there, and a kill at it is reported as that declared
-# deadline (_config_member_label). Against the member's self-granted budget a derived entry may
-# also be a deliberate shorter deadline (its own comment says where); reaching any bound stays
+# is DERIVED from its member's declared budget (CONFIG_MEMBER_BUDGETS, by the rule stated there:
+# one recorded run of the member, graded MEASURED or REPORTED) by the SIZING formula, so it sits
+# above that run by the formula's margin and no such member is killed under its own declared
+# budget; an entry exceeds 5766 s where its budget requires it (tools/selftest_aiqt_hooks.py).
+# The six closure entries instead keep a DECLARED DEADLINE (CONFIG_MEMBER_DEADLINES), 3600 s,
+# below the 11400 s their pre-split run would derive: the lane caps each part there rather than
+# wait out a derived bound, a cap below five parts' own worst case but above opf-closure-f's
+# (their shared comment), and a kill at it is reported as that declared deadline
+# (_config_member_label). Against the member's self-granted budget a derived entry may also be a
+# deliberate shorter deadline (its own comment says where); reaching any bound stays
 # cannot-evaluate, attributed to the bound, never a FAIL of that member and never a pass, because
 # this lane owns no member's verdict.
 # Every roster member is a registered step or the runner behind a registered --suite step
@@ -1289,7 +1294,8 @@ def _config_poison_fixture(base):
 # the formula value exceeds the 1200 s default exactly when that time exceeds 180 s. REPORTED times
 # (opf.py's 1192 s lane run, and the opf.py and check_opf_record.py lane runs that reached a 1200 s
 # bound) are not fed to the formula; the factor's headroom is meant to allow for them, but a run
-# that reached a bound has no known length, so no bound here is shown to cover it (below).
+# that reached a bound has no known length, so no bound here is shown to cover it (below). Outside
+# SIZING, a member with no MEASURED run is fed its slowest REPORTED one (CONFIG_MEMBER_BUDGETS).
 # Roster coverage: the account of the whole-roster run gives a time or an upper bound for
 # SIZING_ACCOUNT_TIMED of the SIZING_ACCOUNT_ROSTER members. Five took over 180 s and carry the
 # five formula-sized entries below. Nine more are named here (the six shorter opf/tools self-tests,
@@ -1442,70 +1448,79 @@ CONFIG_MEMBER_BOUNDS = {
     # wall.
     # ESTIMATED: 796 * 20 / 3 = 5306.7, so 5400 s.
     ("tools/check_selftest_execution.py", "--suite", "child-status-coverage-selftest"): 5400,
-    # Sized outside SIZING (the account reports this member only among the nine of 142.55 s or
-    # less, measured before the member's census rows and revert flips existed; no config-lane
-    # time of it since is known). It is sized from the standalone runs MEASURED below with a stated
-    # margin, as a DELIBERATE SHORTER DEADLINE under the kill-timeout rule (see CHOICE).
+    # Sized outside SIZING, by its formula (the account reports this member only among the nine of
+    # 142.55 s or less, measured before the member's census rows and revert flips existed; no
+    # config-lane time of it since is known). DECLARED BUDGET (MEASURED): 367.0 s, the slowest
+    # standalone run below. DERIVED: 367.0 * 20 / 3 = 2446.7, so 2700 s.
     # READ FROM SOURCE (tools/check_release_cut.py, its census budget comment), the worst case over
     # named terms: a --red-on-revert run ends by at most 10665 s, a BOUND (the census table, census
     # rows and revert flips spending their bounds in full, 680 + 945 + 880 s, and the 243 fixture
     # observe calls and the 29 mutation replays each running just under its 30 s TIMEOUT bound,
     # 7290 + 870 s), plus about 183.1 s, MEASURED (the parts with no bound summed there: the fixture
     # builds' git calls, the close checks, entry-restore and the close-sweep reverts), about
-    # 10848.1 s. 2700 s is BELOW that worst case ON PURPOSE: the 30 s bounds summed are a ceiling no
-    # run approaches, and a bound near it would let a hung run hold this lane for over three hours.
-    # The margin: 2700 s is about 7.4 times the slowest run below (367.0 s), and it still covers the
-    # census bounds alone spent in full plus the measured rest (2505 + 183.1 = 2688.1 s), which is
-    # above the 1200 s default. Reaching it kills the member at its bound and is reported by
-    # _run_member as this lane's deadline ("reached its 2700 s bound (cannot evaluate)"), never as
-    # a failure of the member.
+    # 10848.1 s. The derived 2700 s sits below that worst case, as the default's comment above
+    # allows (see CHOICE): the 30 s bounds summed are a ceiling no run approaches. At this budget it
+    # also covers the census bounds alone spent in full plus the measured rest (2505 + 183.1 =
+    # 2688.1 s), but nothing holds it there: a smaller budget would derive a smaller bound. Reaching
+    # it kills the member at its bound and is reported by _run_member as this lane's bound
+    # ("reached its 2700 s bound (cannot evaluate)"), never as a failure of the member.
     # MEASURED (2026-11-09, 80-CPU host, load5 about 26 to 29, standalone, plain): one --self-test
     # run took 283.4 s wall and one --self-test --red-on-revert run took 309.4 s wall, both passed.
     # MEASURED (2026-11-09, 12:06:49 to 12:12:56 UTC, 80-CPU host, 1-minute load 23.9 at the start
     # and 29.6 at the end, standalone, plain): one --self-test --red-on-revert run took 367.0 s
-    # wall and passed, its replays 12.1 s of it. These runs, with the margin above, size this
-    # entry.
+    # wall and passed, its replays 12.1 s of it. The slowest of these runs is this entry's budget.
     ("tools/check_release_cut.py", "--self-test", "--red-on-revert"): 2700,
     # Sized outside SIZING (the account gives this member no named time, and no config-lane time of
     # it is known). REPORTED, not reproduced here (2026-11-11 to 2026-11-12, runs of this self-test
     # on a shared host under load): 1052 s to 1230 s wall, so at the 1200 s default the
     # config-system lane killed its rerun at that bound (cannot evaluate); an earlier run on the
     # same host under load took 873 s.
-    # DECLARED BUDGET: 1230 s, the slowest of those runs. DERIVED: 1230 * 20 / 3 = 8200, so 8400 s.
+    # DECLARED BUDGET (REPORTED, as no run of this member is MEASURED): 1230 s, the slowest of
+    # those runs. DERIVED: 1230 * 20 / 3 = 8200, so 8400 s.
     ("tools/selftest_aiqt_hooks.py",): 8400,
 }
-# DECLARED BUDGETS (seconds): a CONFIG_MEMBER_BOUNDS key's own budget, the slowest complete run of
-# the member its entry's comment records (a MEASURED lane time, or a standalone run where no lane
-# time is known). Every entry above with a budget is DERIVED from it, never set by hand: the
-# budget times CONFIG_MEMBER_BUDGET_MARGIN (the SIZING factor, 20 / 3), rounded up to a multiple
-# of CONFIG_MEMBER_BOUND_STEP (_derived_member_bound). The entries stay int literals because
-# tools/check_opf_standalone_closure.py reads the table from source; config/member-bound-derived
-# holds each to its derivation (_member_bound_problems), so a bound at or under its budget, a
-# hand-set or stale bound, a bound with no budget and a budget with no bound are each refused. A
-# member with no declared budget keeps CONFIG_MEMBER_BOUND_DEFAULT; a member whose runs come near
-# that default needs a budget here and its derived entry above.
+# DECLARED BUDGETS (seconds): a CONFIG_MEMBER_BOUNDS key's own budget, one run of the member its
+# entry's comment records, chosen by this rule: its slowest MEASURED config-lane time; where no
+# lane time is MEASURED, its slowest MEASURED standalone run; where no run is MEASURED, its
+# slowest REPORTED run. A REPORTED time is never chosen over a MEASURED one, even where it is
+# slower (opf.py's REPORTED lane runs of 730 s and 1192 s: its budget is its slowest MEASURED lane
+# time, 529.80 s), and a run that reached a bound has no known length, so it is never a budget.
+# Each budget below is grouped under its grade. Every entry above with a budget is DERIVED from
+# it, never set by hand: the budget times CONFIG_MEMBER_BUDGET_MARGIN (the SIZING factor, 20 / 3),
+# rounded up to a multiple of CONFIG_MEMBER_BOUND_STEP (_derived_member_bound). The entries stay
+# int literals because tools/check_opf_standalone_closure.py reads the table from source;
+# config/member-bound-derived holds each to its derivation (_member_bound_problems), so a bound
+# that is not a plain int, a bound at or under its budget, a hand-set or stale bound, a bound with
+# no budget and a budget with no bound are each refused. A member with no CONFIG_MEMBER_BOUNDS
+# entry keeps CONFIG_MEMBER_BOUND_DEFAULT; a member whose runs come near that default needs a
+# budget here and its derived entry above.
 CONFIG_MEMBER_BUDGET_MARGIN = (20, 3)
 CONFIG_MEMBER_BOUND_STEP = 300
 CONFIG_MEMBER_BUDGETS = {
+    # MEASURED: the slowest config-lane time (SIZING).
     ("opf/tools/check_opf_record.py", "--self-test", "--red-on-revert"): 734.81,
     ("opf/tools/opf.py", "--self-test"): 529.80,
     ("opf/tools/_opf_adopt_observe.py", "--self-test"): 265.55,
     ("tools/check_release_delta.py", "--self-test"): 243.45,
     ("opf/tools/check_opf_init.py", "--self-test"): 229.02,
+    # MEASURED: the slowest standalone run (no config-lane time MEASURED).
     ("tools/check_selftest_execution.py", "--suite", "child-status-coverage-selftest"): 796,
     ("tools/check_release_cut.py", "--self-test", "--red-on-revert"): 367.0,
+    # REPORTED: the slowest reported run (no run MEASURED).
     ("tools/selftest_aiqt_hooks.py",): 1230,
 }
-# DECLARED DEADLINES: the entries the kill-timeout rule's exception covers, where cutting the run
-# short is the intent, so the entry is held to the deadline declared here (seconds, and a one-line
-# reason) instead of a bound derived from a budget. Keep this set small: an entry belongs here
-# only when a shorter deadline is the point, never to dodge a budget. A member here has no
-# CONFIG_MEMBER_BUDGETS entry; a kill at its deadline is reported as that deadline, with its
-# reason, in the timeout message (_config_member_label). _member_bound_problems refuses an entry
-# that differs from its deadline, a deadline that is not a positive int, a deadline with no entry,
-# a member that declares both a budget and a deadline, and an entry in neither set.
-_CLOSURE_DEADLINE_REASON = ("this lane cuts a closure self-test part short on purpose; its"
-                            " registered step runs it to completion")
+# DECLARED DEADLINES: the entries held to a cap declared here (seconds, and a one-line reason)
+# instead of a bound derived from a budget, because the lane is meant to stop waiting there
+# whatever the member's runs would derive. Keep this set small: an entry belongs here only when
+# that cap is the point, never to dodge a budget. A member here has no CONFIG_MEMBER_BUDGETS
+# entry; its reason must hold for every member that declares it, and _config_member_label puts it
+# in the member's messages (a kill at the deadline among them). _member_bound_problems refuses an
+# entry that differs from its deadline, a bound that is not a plain int, a deadline that is not
+# (positive int seconds, one-line reason), a deadline with no entry, a member that declares both
+# a budget and a deadline, and an entry in neither set.
+_CLOSURE_DEADLINE_REASON = ("this lane caps each closure self-test part at 3600 s, not at a bound"
+                            " derived from a run of its own; its registered step runs it to"
+                            " completion")
 CONFIG_MEMBER_DEADLINES = {
     ("tools/check_opf_standalone_closure.py", "--self-test", "--ci-job", "opf-closure-a"): (
         3600, _CLOSURE_DEADLINE_REASON),
@@ -1713,7 +1728,9 @@ def _derived_member_bound(budget):
     """The bound DERIVED from a declared budget (seconds): the budget times
     CONFIG_MEMBER_BUDGET_MARGIN, rounded up to a multiple of CONFIG_MEMBER_BOUND_STEP. The budget
     is taken through its decimal text, so a product landing exactly on a multiple keeps that
-    multiple rather than rounding past it on a binary float error."""
+    multiple rather than rounding past it on a binary float error. That path is DEFENSIVE: no
+    budget is known for which float arithmetic (budget * 20 / 3, or the float itself as a
+    Fraction) rounds to a different bound, so no vector shows the difference."""
     exact = Fraction(str(budget)) * Fraction(*CONFIG_MEMBER_BUDGET_MARGIN)
     return int(-(-exact // CONFIG_MEMBER_BOUND_STEP) * CONFIG_MEMBER_BOUND_STEP)
 
@@ -1722,7 +1739,11 @@ def _config_member_label(member, bound):
     """The label _run_bounded puts in member's messages: its argv joined, and where bound is the
     member's declared deadline (CONFIG_MEMBER_DEADLINES), that deadline's reason, so a kill there
     reads "TIMEOUT: <argv> (bound is its declared deadline: <reason>) reached its <bound> s bound
-    (cannot evaluate)", attributed to the declared deadline, not to the member."""
+    (cannot evaluate)", attributed to the declared deadline, not to the member. The same label,
+    reason included, is on every other message _run_member makes for that member under that
+    bound: a launch the registry lock refused ("TIMEOUT: <label> not started: ...") and a stop at
+    the suite's close ("<label> was stopped by the suite's close (no result)"). There the reason
+    names the bound the member was given, not a kill at it."""
     label = " ".join(member)
     declared = CONFIG_MEMBER_DEADLINES.get(tuple(member))
     if declared is not None and declared[0] == bound:
@@ -1731,12 +1752,13 @@ def _config_member_label(member, bound):
 
 
 def _deadline_well_formed(declared):
-    """Whether a CONFIG_MEMBER_DEADLINES value is (seconds, reason): seconds a positive int (not a
-    bool), reason a nonempty one-line str."""
+    """Whether a CONFIG_MEMBER_DEADLINES value is (seconds, reason): a tuple (not a list), seconds
+    a positive int (not a bool), reason a nonempty str that str.splitlines() leaves as one line
+    (so no line feed, carriage return, U+2028 or any other line boundary it splits on)."""
     return (isinstance(declared, tuple) and len(declared) == 2
             and type(declared[0]) is int and declared[0] > 0
             and isinstance(declared[1], str) and declared[1].strip() != ""
-            and "\n" not in declared[1] and "\r" not in declared[1])
+            and declared[1].splitlines() == [declared[1]])
 
 
 def _member_bound_problems(bounds=None, budgets=None, deadlines=None):
@@ -1744,12 +1766,13 @@ def _member_bound_problems(bounds=None, budgets=None, deadlines=None):
     CONFIG_MEMBER_BUDGETS) and the declared deadlines (default CONFIG_MEMBER_DEADLINES), in this
     order: a bound with neither a declared budget nor a declared deadline; a declared budget with
     no bound; a declared deadline with no bound; a member that declares both; then per member with
-    a deadline only, a deadline that is not (positive int seconds, one-line reason), and a bound
-    other than that deadline (an entry equal to its declared deadline is accepted, whatever its
-    budget would derive); then per member with a budget only, a budget that is not a positive
-    number (a bool included), a bound at or under its budget (a run that takes its whole budget
-    would be killed), and a bound other than the one derived from its budget
-    (_derived_member_bound). Pure: nothing is launched."""
+    a deadline only, a deadline that is not (positive int seconds, one-line reason), a bound that
+    is not a plain int (a bool, a float or a str is refused, never compared), and a bound other
+    than that deadline (an entry equal to its declared deadline is accepted, whatever its budget
+    would derive); then per member with a budget only, a budget that is not a positive number (a
+    bool included), a bound that is not a plain int, a bound at or under its budget (a run that
+    takes its whole budget would be killed), and a bound other than the one derived from its
+    budget (_derived_member_bound). Pure: nothing is launched."""
     bounds = CONFIG_MEMBER_BOUNDS if bounds is None else bounds
     budgets = CONFIG_MEMBER_BUDGETS if budgets is None else budgets
     deadlines = CONFIG_MEMBER_DEADLINES if deadlines is None else deadlines
@@ -1766,6 +1789,8 @@ def _member_bound_problems(bounds=None, budgets=None, deadlines=None):
         if not _deadline_well_formed(declared):
             problems.append("declared deadline not (positive int seconds, one-line reason):"
                             " {!r}".format(argv))
+        elif type(bound) is not int:
+            problems.append("bound not a plain int of seconds: {!r}".format(argv))
         elif bound != declared[0]:
             problems.append("bound {} s is not its declared deadline {} s: {!r}".format(
                 bound, declared[0], argv))
@@ -1773,6 +1798,8 @@ def _member_bound_problems(bounds=None, budgets=None, deadlines=None):
         bound, budget = bounds[argv], budgets[argv]
         if isinstance(budget, bool) or not isinstance(budget, (int, float)) or not budget > 0:
             problems.append("declared budget not a positive number: {!r}".format(argv))
+        elif type(bound) is not int:
+            problems.append("bound not a plain int of seconds: {!r}".format(argv))
         elif bound <= budget:
             problems.append("bound {} s at or under its declared budget {} s: {!r}".format(
                 bound, budget, argv))
@@ -2366,11 +2393,11 @@ def _run_member(argv, cwd, env, bound, label, banner, cannot_evaluate, report):
 
 def _run_config_member(member, env, bound=None, cannot_evaluate=None, report=None):
     """Run one registered member under its bound (_config_member_bound) through _run_bounded,
-    labelled by _config_member_label (a kill at a declared deadline names that deadline); return
-    its exit code, or a string for a launch error or a timeout. A member that exits non-zero has
-    its output printed on report (default sys.stdout, never stderr), so the execution gate reads
-    a real member failure as the suite's FAIL (exit 1), not as undeclared stderr (cannot
-    evaluate)."""
+    labelled by _config_member_label (where its bound is a declared deadline, each message of it
+    names that deadline, a kill there included); return its exit code, or a string for a launch
+    error or a timeout. A member that exits non-zero has its output printed on report (default
+    sys.stdout, never stderr), so the execution gate reads a real member failure as the suite's
+    FAIL (exit 1), not as undeclared stderr (cannot evaluate)."""
     bound = _config_member_bound(member) if bound is None else bound
     rc, stdout, stderr = _run_bounded(
         [sys.executable, "-I", "-B", str(ROOT / member[0]), *member[1:]], ROOT, env, bound,
