@@ -243,6 +243,43 @@ def _decision(handler, command, tool="Bash", cwd=None):
     return _reduce_result(code, stdout_obj)
 
 
+def _fifo_open_waits(run, fifo, bound=60.0):
+    """None when run() returns within bound seconds, else a failure text. run makes a decision that opens
+    fifo, a FIFO with no writer: an open without O_NONBLOCK waits there until a writer comes, so it never
+    returns by itself, while a non-blocking open returns at once. bound is a hang bound, not a speed bound: a
+    correct decision on a loaded host returns long before it, and only a real block reaches it. run goes in
+    a daemon thread so the suite goes on; when bound passes, the FIFO's write end is opened and closed once,
+    which lets a blocked open return, and the thread is given bound again to end. An exception run raises is
+    raised again here."""
+    done = threading.Event()
+    raised = []
+
+    def target():
+        try:
+            run()
+        except BaseException as exc:  # handed to the caller's thread below
+            raised.append(exc)
+        finally:
+            done.set()
+
+    worker = threading.Thread(target=target, name="fifo-open-wait", daemon=True)
+    worker.start()
+    if done.wait(bound):
+        worker.join()
+        if raised:
+            raise raised[0]
+        return None
+    try:
+        fd = os.open(fifo, os.O_WRONLY | os.O_NONBLOCK | os.O_CLOEXEC)
+    except OSError:
+        pass  # ENXIO: no reader holds the FIFO open, so the wait is somewhere else
+    else:
+        os.close(fd)
+    worker.join(bound)
+    return "the decision was still waiting after {} s on a FIFO with no writer{}".format(
+        bound, "" if not worker.is_alive() else ", and still waits after its write end was opened")
+
+
 def _declared_names(tree, name):
     """(node, names) for the string tuple assigned to module-level `name` in tree: names is None when the
     value is not a literal tuple of string constants, and both are None when the name is not assigned."""
@@ -26432,11 +26469,14 @@ def _main_isolated(monitor):
                  "deny")
         crexpect("(ci-cr-fc2) a message file that is a directory fails closed", "git commit -F " + str(_cr_dir),
                  "deny")
-        _cr_t0 = time.monotonic()
-        crexpect("(ci-cr-fc3) a message file that is a FIFO fails closed without blocking",
-                 "git commit -F " + str(_cr_fifo), "deny")
-        if time.monotonic() - _cr_t0 > 1.0:
-            failures.append("(ci-cr-fc3-time) the FIFO row took more than 1 s")
+        # The FIFO has no writer, so a reader that opened it without O_NONBLOCK would wait for good: the row
+        # fails when its decision still waits after the 60 s bound of _fifo_open_waits, which host load does not
+        # reach, never on how long a correct decision takes.
+        _cr_fifo_wait = _fifo_open_waits(
+            lambda: crexpect("(ci-cr-fc3) a message file that is a FIFO fails closed without blocking",
+                             "git commit -F " + str(_cr_fifo), "deny"), str(_cr_fifo))
+        if _cr_fifo_wait is not None:
+            failures.append("(ci-cr-fc3-block) {}".format(_cr_fifo_wait))
         crexpect("(ci-cr-fc5) a relative message file with no cwd in the payload fails closed",
                  "git commit -F credit.txt", "deny")
         crexpect("(ci-cr-fc6) a relative message file after a cd fails closed",
