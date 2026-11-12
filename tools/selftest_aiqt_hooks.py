@@ -11397,6 +11397,30 @@ _RW_DENY_FLOOR_ROWS = (
     ("rw-f-text-after", "echo \"$(date) recordctl write | tail\""),
     ("rw-f-arith-text-after", "echo \"$((1)) recordctl write | head\""),
 )
+# Words that are not provably simple whose writer or sink word is split by a quote or a backslash, so the raw
+# text names no writer and head or tail while the lexed text does: the floor reads them whatever the raw text
+# names. Each row is red with the floor removed and red with the floor gated on the raw-text name test.
+_RW_DENY_SPLIT_ROWS = (
+    ("rw-s-case-sink-quotes", "echo \"$(case x in x) recordctl write | h''ead;; esac; echo \" \")\""),
+    ("rw-s-case-writer-quotes", "echo \"$(case x in x) record''ctl write | head;; esac; echo \" \")\""),
+    ("rw-s-case-sink-backslash", "echo \"$(case x in x) recordctl write | h\\ead;; esac; echo \" \")\""),
+    ("rw-s-ansi-c-sink-quotes", "echo \"$(echo $'\\')'; recordctl write | h''ead -n 3; echo \" \")\""),
+    ("rw-s-case-writer-dquotes", "echo \"$(case x in x) \"record\"ctl write | head;; esac; echo \" \")\""),
+    ("rw-s-case-assign", "x=\"$(case x in x) recordctl write | h''ead;; esac; : \" \")\""),
+    ("rw-s-case-git-tail",
+     "git log -1 --format=%H \"$(case x in x) recordctl write | t''ail -n 1;; esac; : \" \")\""),
+    ("rw-s-case-nested", "echo \"$(echo \"$(case x in x) recordctl write | h''ead;; esac; : \" \")\")\""),
+    ("rw-s-case-comment-subst", "echo \"$(case x in x) recordctl write | h''ead;; esac; # $(\n)\""),
+    ("rw-s-case-redirect-tail", "echo hi > \"$(case x in x) recordctl write | t''ail;; esac; : \" \")\""),
+)
+# Provably simple words whose body the lexer cannot read: the body scan alone decides them and allows, while
+# the whole-text reading denies them as cannot-evaluate (its suffix to the end of the word crosses the body's
+# close and names a writer and head). A disclosed difference, kept out of the no-regression comparison; each
+# row is red with the provably simple test patched to find no simple word.
+_RW_SIMPLE_ALLOW_ROWS = (
+    ("rw-p-unlexable-body", "echo \"$(recordctl write <)$(: | head)\""),
+    ("rw-p-unlexable-body-arith", "echo \"$(;=head!cat<)$((recordctl write)=recordctl write)\""),
+)
 # Further shapes run through both the frozen whole-text decision and the hook (no expected verdict of their
 # own): unquoted outer forms, one-body double-quoted strings holding a backquote or a '${' with an early ')',
 # '(' or "'", and a one-body '${' that must keep allowing.
@@ -11471,17 +11495,24 @@ def _test_records_writers_no_regression(failures, decide):
     """(rw-nr-*) No regression against the whole-text reading: every deny, unparsed, unread, floor and allow
     row and every further shape (_RW_COMPARE_EXTRA) is decided by gate_weakening once with the frozen
     whole-text verdict (_rw_reference_verdict) patched in and once as shipped; an input the frozen verdict
-    denies that the hook allows fails. The provably simple test is pinned both ways."""
-    rows = (_RW_DENY_ROWS + _RW_DENY_UNPARSED_ROWS + _RW_DENY_UNREAD_ROWS + _RW_DENY_FLOOR_ROWS + _RW_ALLOW_ROWS
-            + _RW_COMPARE_EXTRA)
+    denies that the hook allows fails. The disclosed provably simple rows (_RW_SIMPLE_ALLOW_ROWS) are the one
+    exception: the frozen verdict must deny each, so the disclosure stays exact. The provably simple test is
+    pinned both ways, the case keyword included, and the floor's two bound doubts are pinned on its own."""
+    rows = (_RW_DENY_ROWS + _RW_DENY_UNPARSED_ROWS + _RW_DENY_UNREAD_ROWS + _RW_DENY_FLOOR_ROWS
+            + _RW_DENY_SPLIT_ROWS + _RW_ALLOW_ROWS + _RW_COMPARE_EXTRA)
     saved = aiqt_hooks._records_writer_verdict
     try:
         aiqt_hooks._records_writer_verdict = _rw_reference_verdict
         reference = [decide(command)[0] for _label, command in rows]
+        disclosed = [decide(command)[0] for _label, command in _RW_SIMPLE_ALLOW_ROWS]
     finally:
         aiqt_hooks._records_writer_verdict = saved
     if not any(got == "deny" for got in reference):
         failures.append("(rw-nr-reference) the frozen whole-text verdict denies no row, so it is not wired in")
+    for (label, command), got in zip(_RW_SIMPLE_ALLOW_ROWS, disclosed):
+        if got != "deny":
+            failures.append("(rw-nr-{}) {!r}: the frozen whole-text verdict gives {}, not the deny the disclosure "
+                            "names".format(label, command, got))
     for (label, command), want in zip(rows, reference):
         got = decide(command)[0]
         if want == "deny" and got != "deny":
@@ -11490,9 +11521,21 @@ def _test_records_writers_no_regression(failures, decide):
     for word, want in (("$(recordctl read | head)", True), ("x=$(:)$(echo $(ls))", True),
                        ("$(:) x", False), ("$(:)x$(:)", False), ("$(case x in x) :;; esac)", False),
                        ("$(echo \"a\")", False), ("$(echo ${x})", False), ("$(a", False), ("$(a))", False),
-                       ("x(", False), ("$(echo #)", False)):
+                       ("x(", False), ("$(echo #)", False), ("$(case x in (x) :;; esac)", False)):
         if aiqt_hooks._records_writer_word_simple(word) is not want:
             failures.append("(rw-nr-simple) {!r}: provably simple should be {}".format(word, want))
+    # The floor's bound doubts, read on the floor itself: past the item bound (70 words not provably simple)
+    # and past the suffix bound (one word holding 300 '$('), work is left unread, which is doubt when the text
+    # names a writer and head or tail (here only in a ':' argument) and nothing when it does not. With the
+    # count doubt made an allow, or the suffix bound removed, the named form gives False.
+    writers = [["recordctl", "write"]]
+    for label, command in (("count", "echo" + " \"$(:) x\"" * 70 + "; : recordctl write | head"),
+                           ("suffix", "echo \"" + "$(:)" * 300 + " x\"; : recordctl write | head")):
+        for text, want in ((command, True), (command.replace("recordctl write", "ls"), False)):
+            got = aiqt_hooks._records_writer_whole_text_doubt(text, aiqt_hooks._lex_readings(text), writers)
+            if got is not want:
+                failures.append("(rw-nr-bound-{}) the floor gives {} past its {} bound, not {}".format(
+                    label, got, label, want))
 
 
 def _test_records_writers(failures, tmp):
@@ -11544,15 +11587,22 @@ def _test_records_writers(failures, tmp):
         expect(label, command, "deny", needles=("Run the writer alone",))
     for label, command in _RW_DENY_UNREAD_ROWS:
         expect(label, command, "deny", needles=("Run the writer alone", "denied fail-closed"))
-    for label, command in _RW_DENY_FLOOR_ROWS:
+    for label, command in _RW_DENY_FLOOR_ROWS + _RW_DENY_SPLIT_ROWS:
         expect(label, command, "deny", needles=("Run the writer alone", "denied fail-closed"))
     # The unread-text test and the whole-text floor are the only denies of each unread row: both patched to
-    # find nothing, every one allows. The floor alone is the deny of each floor row.
+    # find nothing, every one allows. The floor alone is the deny of each floor and split row, and each split
+    # row allows with the floor read only when the raw text names a writer and head or tail.
     saved_unread = aiqt_hooks._records_writer_unread_named
     saved_floor = aiqt_hooks._records_writer_whole_text_doubt
     try:
+        aiqt_hooks._records_writer_whole_text_doubt = lambda command, readings, writers: (
+            aiqt_hooks._records_writer_named(command, writers) and saved_floor(command, readings, writers))
+        for label, command in _RW_DENY_SPLIT_ROWS:
+            if decide(command, sub)[0] == "deny":
+                failures.append("({}-gated-red) {!r} still denies with the floor gated on the raw-text name "
+                                "test, so the row does not prove the floor reads it ungated".format(label, command))
         aiqt_hooks._records_writer_whole_text_doubt = lambda command, readings, writers: False
-        for label, command in _RW_DENY_FLOOR_ROWS:
+        for label, command in _RW_DENY_FLOOR_ROWS + _RW_DENY_SPLIT_ROWS:
             if decide(command, sub)[0] == "deny":
                 failures.append("({}-red) {!r} still denies with the whole-text floor removed, so the row does "
                                 "not prove it".format(label, command))
@@ -11579,11 +11629,23 @@ def _test_records_writers(failures, tmp):
         if took > _RW_TIMED_SECONDS:
             failures.append("({}-time) the decision took {:.2f} s of CPU, over the {} s bound".format(
                 label, took, _RW_TIMED_SECONDS))
-    for label, command in _RW_ALLOW_ROWS:
+    for label, command in _RW_ALLOW_ROWS + _RW_SIMPLE_ALLOW_ROWS:
         got, obj = decide(command, sub)
         if got == "deny":
             failures.append("({}) {!r}: the records-writer check must not deny, got deny: {}".format(
                 label, command, json.dumps(obj)))
+    # The provably simple path is what allows each disclosed simple row: with no word provably simple, the
+    # floor reads it whole and every one denies. (rw-a-subst-simple-assign and rw-a-subst-simple-many are
+    # false-positive controls that allow either way; they do not pin this path.)
+    saved_simple = aiqt_hooks._records_writer_word_simple
+    try:
+        aiqt_hooks._records_writer_word_simple = lambda word: False
+        for label, command in _RW_SIMPLE_ALLOW_ROWS:
+            if decide(command, sub)[0] != "deny":
+                failures.append("({}-red) {!r} still allows with no word provably simple, so the row does not "
+                                "pin the provably simple path".format(label, command))
+    finally:
+        aiqt_hooks._records_writer_word_simple = saved_simple
     # An existing gate_weakening decision is kept under a declaration: a git hook bypass still denies with its
     # own message, and a known verification run piped into head keeps the verification-sink deny.
     expect("rw-keep-noverify", "git commit --no-verify -m x", "deny", needles=("--no-verify",))
@@ -11594,7 +11656,8 @@ def _test_records_writers(failures, tmp):
     try:
         aiqt_hooks._records_writer_sink = lambda records, writers: None
         aiqt_hooks._records_writer_named = lambda command, writers: False
-        for label, command in _RW_DENY_ROWS + _RW_DENY_UNPARSED_ROWS + _RW_DENY_UNREAD_ROWS + _RW_DENY_FLOOR_ROWS:
+        for label, command in (_RW_DENY_ROWS + _RW_DENY_UNPARSED_ROWS + _RW_DENY_UNREAD_ROWS + _RW_DENY_FLOOR_ROWS
+                               + _RW_DENY_SPLIT_ROWS):
             got, _obj = decide(command, sub)
             if got == "deny" and label != "rw-u-unbalanced":
                 failures.append("({}-red) {!r} still denies with the records-writer check removed, so the row "

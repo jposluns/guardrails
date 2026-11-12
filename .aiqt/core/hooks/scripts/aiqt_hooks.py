@@ -18608,13 +18608,13 @@ def _records_writer_whole_text_doubt(command, readings, writers):
     redirect target holding '$(' that is not provably simple (_records_writer_word_simple), the text from
     each '$(' to the end of the word, and each backquote body of the command, then the words holding '$(' or
     a backquote in what it lexed, to _RECORDS_WRITER_SUBST_DEPTH levels and _RECORDS_WRITER_SUBST_BODIES
-    items, work left past that bound counting as doubt; it reads text bash may not run (a body's close and
-    what follows it), so its finding is doubt, not a finding that the writer is piped. Past
-    _RECORDS_WRITER_WHOLE_TEXT_BOUND suffixes it stops and counts as doubt. It is read only when the
-    command's text names a writer and head or tail, and a provably simple word is left to the body scan,
-    whose bodies there are bash's bodies."""
-    if not _records_writer_named(command, writers):
-        return False
+    items; it reads text bash may not run (a body's close and what follows it), so its finding is doubt, not
+    a finding that the writer is piped. It is read whatever the command's text names, so a writer or sink word
+    split by a quote or a backslash is found once lexed. Past _RECORDS_WRITER_WHOLE_TEXT_BOUND suffixes it
+    stops, and work left past the item bound is not read; each of those two counts as doubt only when the
+    command's text names a writer and head or tail. A provably simple word is left to the body scan, whose
+    bodies there are bash's bodies."""
+    named = _records_writer_named(command, writers)
     work = [(body, 1) for _start, body in _backquote_bodies(command)]
     work += [(word, 0) for reading in readings for seg in reading
              for word in list(seg.argv) + [redirect.target for redirect in seg.redirects]
@@ -18630,7 +18630,7 @@ def _records_writer_whole_text_doubt(command, readings, writers):
             at = text.find("$(", at + 2)
         suffixes += len(bodies)
         if suffixes > _RECORDS_WRITER_WHOLE_TEXT_BOUND:
-            return True
+            return named
         for body in bodies:
             try:
                 lexed = _lex_readings(body)
@@ -18645,7 +18645,7 @@ def _records_writer_whole_text_doubt(command, readings, writers):
                          for word in list(seg.argv) + [redirect.target for redirect in seg.redirects]
                          if "$(" in word or "`" in word]
                 work += [(inner, depth + 1) for _start, inner in _backquote_bodies(body)]
-    return bool(work)
+    return named and bool(work)
 
 
 def _records_writer_unreadable_deny(command_doubt, detail, path):
@@ -18685,9 +18685,14 @@ def _records_writer_verdict(data, readings, command=None, parsed=None):
     one piped or unreadable (_records_writer_whole_text_doubt); else None, which includes no declaration, an
     empty one, and an unlocatable one (_records_writers_load), so an adopter with no declaration sees no
     change. The body scan's bodies are not bash's bodies once a construct it does not follow closes one
-    early, and the lexer's word can then end before the real ')'; so the body scan only adds precision on a
-    provably simple word, and on every other word the whole-text reading is a floor: the verdict denies, as
-    a records-writer deny or as cannot-evaluate, wherever that reading alone would deny."""
+    early, and the lexer's word can then end before the real ')'; so on every word that is not provably
+    simple the whole-text reading is a floor, read whatever the raw text names, and a provably simple word is
+    left to the body scan. That reading can deny a provably simple word only from text that crosses a body's
+    close, as where a body the lexer cannot read leaves a suffix naming a writer and head (echo "$(recordctl
+    write <)$(: | head)"); the verdict allows such a word. The floor also stops past 256 '$(' suffixes, which
+    that reading does not, and counts it as doubt only when the raw text names a writer and head or tail, so
+    a writer or sink word split by a quote or a backslash past that bound is allowed. These are the known
+    ways the verdict is weaker than that reading; no proof shows there are no others."""
     state, value, path = _records_writers_load(data)
     if state == "bad":
         return ("bad", value, path)
