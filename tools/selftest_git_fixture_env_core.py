@@ -2210,12 +2210,14 @@ def _member_bound_checks(roster):
     # far under the bound its budget would derive (8400 s from 1230 s), and one second under or
     # over it is refused; a deadline with no entry, a member declaring both a budget and a
     # deadline, and an entry in neither set are each refused, as is a deadline whose seconds are
-    # zero or a bool, one declared as a list, one whose reason is empty or not one line (a line
-    # feed, a carriage return, U+2028: each red when the one-line check is dropped), and a bool
-    # bound equal to its deadline (red when the int check is dropped). The label names the
-    # deadline only when the bound handed to the run is that deadline, and a real kill at it (a
-    # 1 s deadline on a sleeping child, reaching only sys.executable, writing nothing) reports
-    # that deadline.
+    # zero or a bool, one declared as a list, one of three members (red when the length check is
+    # dropped), one whose reason is not a str (bytes, which passes every other reason check: red
+    # when the str check is dropped), one whose reason is empty or not one line (a line feed, a
+    # carriage return, U+2028: each red when the one-line check is dropped), and a bool bound
+    # equal to its deadline (red when the int check is dropped). The label names the deadline
+    # only when the bound handed to the run is that deadline, and a real kill at it (a 1 s
+    # deadline on a sleeping child, reaching only sys.executable, writing nothing) reports that
+    # deadline.
     deadline_probe = ("tools/check_secrets.py", "--self-test", "--deadline-probe")
     declared = {deadline_probe: (3600, "probe reason")}
     deadline_vectors = [_member_bound_problems({deadline_probe: bound}, {}, declared)
@@ -2231,6 +2233,8 @@ def _member_bound_checks(roster):
         _member_bound_problems({deadline_probe: 3600}, {}, {deadline_probe: (3600, "a\rb")}),
         _member_bound_problems({deadline_probe: 3600}, {}, {deadline_probe: (3600, "a\u2028b")}),
         _member_bound_problems({deadline_probe: 3600}, {}, {deadline_probe: [3600, "probe"]}),
+        _member_bound_problems({deadline_probe: 3600}, {}, {deadline_probe: (3600, "probe", "x")}),
+        _member_bound_problems({deadline_probe: 3600}, {}, {deadline_probe: (3600, b"probe")}),
         _member_bound_problems({deadline_probe: True}, {}, {deadline_probe: (1, "probe")})]
     malformed = ["declared deadline not (positive int seconds, one-line reason): {!r}".format(
         deadline_probe)]
@@ -2252,6 +2256,7 @@ def _member_bound_checks(roster):
             ["declared both a budget and a deadline: {!r}".format(deadline_probe)],
             ["bound with no declared budget or deadline: {!r}".format(deadline_probe)],
             malformed, malformed, malformed, malformed, malformed, malformed, malformed,
+            malformed, malformed,
             ["bound not a plain int of seconds: {!r}".format(deadline_probe)]],
            [joined + " (bound is its declared deadline: probe reason)", joined],
            deadline_kill, [deadline_kill]))

@@ -2398,9 +2398,10 @@ def _run_config_member(member, env, bound=None, cannot_evaluate=None, report=Non
     labelled by _config_member_label (where its bound is a declared deadline, the timeout, the
     registry-lock refusal and the close-stop messages name that deadline; a launch or communication
     error and the non-zero-exit output below do not); return its exit code, or a string for a
-    launch error or a timeout. A member that exits non-zero has its output printed on report
-    (default sys.stdout, never stderr), so the execution gate reads a real member failure as the
-    suite's FAIL (exit 1), not as undeclared stderr (cannot evaluate)."""
+    launch error, a registry-lock refusal, a timeout, a communication error or a stop at the
+    suite's close. A member that exits non-zero has its output printed on report (default
+    sys.stdout, never stderr), so the execution gate reads a real member failure as the suite's
+    FAIL (exit 1), not as undeclared stderr (cannot evaluate)."""
     bound = _config_member_bound(member) if bound is None else bound
     rc, stdout, stderr = _run_bounded(
         [sys.executable, "-I", "-B", str(ROOT / member[0]), *member[1:]], ROOT, env, bound,
