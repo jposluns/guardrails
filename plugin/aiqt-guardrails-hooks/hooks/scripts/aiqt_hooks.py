@@ -13272,10 +13272,13 @@ _PUSH_LONG_ARG_OPTS = frozenset((
     "--push-option", "--repo", "--receive-pack", "--exec", "--recurse-submodules"))
 _PUSH_SHORT_ARG_OPTS = frozenset(("o",))  # bare letter: the char-scan tests body chars; '-o <val>' skips its value, attached '-o<val>' does not
 
-# Fallback-only raw-string probes, used when the shared tokenizer cannot parse the command (an unbalanced quote or an unsupported construct);
-# mirrors the _RAW_DIFF_PRODUCER_RE / _RAW_LOSSY_VERB_RE posture: conservative, over-matching, never
-# a silent allow. _RAW_PUSH_RE/_RAW_COMMIT_RE pair git with a LATER verb (a _RawSequence, case-folded,
-# the gap spanning newlines). _RAW_PUSH_FORCE_RE spots a force or sweep spelling: '--for[a-z-]*' covers
+# Raw-string probes, read when the shared tokenizer cannot parse the command (an unbalanced quote or an
+# unsupported construct) and also on parsed commands: the push backstop (_raw_push_match) reads every
+# command, and the commit recognizer reads each unclassified segment and the whole text of a command
+# holding '<<', whose quoted here-document body the lexer leaves out of every segment
+# (_commit_command_syntax). They mirror the _RAW_DIFF_PRODUCER_RE / _RAW_LOSSY_VERB_RE posture:
+# conservative, over-matching, never a silent allow. _RAW_PUSH_RE/_RAW_COMMIT_RE pair git with a LATER
+# verb (a _RawSequence, case-folded, the gap spanning newlines). _RAW_PUSH_FORCE_RE spots a force or sweep spelling: '--for[a-z-]*' covers
 # --for/--force/--force-with-lease/--force-if-includes; the short cluster scan now admits a digit
 # ('-[A-Za-z0-9]*f'), so an ipv4/ipv6 '-4f'/'-6f' clustered with force is caught, and its
 # disclosed false-hit on an attached -o value ending in f ('-of') now also covers '-o4f'; the short
@@ -13619,6 +13622,11 @@ def _commit_apparent_segment(seg, named=False):
     command's text names a git configuration variable or the hook's environment
     carries one naming an alias (_git_alias_outside, _git_alias_segment).
 
+    A quoted here-document's body is in no segment's argv or raw text, so this scan
+    never reads it; _commit_command_syntax reads the whole text of a command holding
+    '<<' beside it, raw and de-quoted, so a commit in a body the same command runs
+    denies, and so does here-document prose naming one (a disclosed over-refusal).
+
     This does not discover every renamed executable, alias, function, opaque script,
     or unparseable fragmentation. Detection is not a Bash interpreter.
     """
@@ -13701,6 +13709,14 @@ def _commit_command_syntax(command):
     named = _git_alias_outside(command)
     hidden = any(_commit_apparent_segment(seg, named)
                  for seg, step in zip(records, steps) if step is None)
+    # The lexer leaves a quoted here-document's body out of every segment's argv and raw text, so the scan
+    # above cannot see a commit in a body the same command runs (bash <<'EOF', sh -s, or cat or tee writing
+    # the body to a file a later segment runs). A command holding '<<' is therefore also read whole, as the
+    # unparseable branch above reads it: the raw text, and beside it the de-quoted copy (_dequoted_text), so
+    # a quote-split or continuation-split body ('git co''mmit') is read too. Nothing is stripped before the
+    # scan, so prose in any here-document naming git and then commit denies (a disclosed over-refusal).
+    hidden = hidden or ("<<" in command and bool(
+        _RAW_COMMIT_RE.search(command) or _RAW_COMMIT_RE.search(_dequoted_text(command))))
     if not commits and not hidden:
         return _CommitSyntax("outside", records, steps, (), "no apparent direct commit")
     if (len(records) == 1 and steps[0] is not None
@@ -14735,6 +14751,14 @@ def protected_line(data):
     apparent commit or push its text names (_hash_doubt_scan) denies, and so does
     text holding quoting that scan does not decode (_hash_doubt_opaque), which the
     commit recognizer reads as an apparent commit.
+
+    The lexer leaves a quoted here-document's body out of every segment, so a parsed
+    command holding '<<' is also read whole, raw and de-quoted, for git and then
+    commit (_commit_command_syntax): a commit in a body the same command runs (bash
+    <<'EOF', sh -s, or cat or tee writing a file a later segment runs) denies, and so
+    does here-document prose naming one, a disclosed over-refusal. A commit run from
+    text this guard reads only as data across separate Bash calls (a file written in
+    one call and run in a later one) or built at run time stays outside it.
 
     A raw-text backstop (_raw_push_guard) scans the unmodified command on every
     call, before any parsing, and denies a force/delete/mirror push spelling paired with a
