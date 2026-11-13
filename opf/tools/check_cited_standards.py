@@ -12,15 +12,16 @@ absent and the set is empty, which load_manifests reads as no manifests. A run w
 OPF's own config, tools/cited-standards.toml under the root it checks (DEFAULT_CONFIG_REL: under the OPF
 root unless --root names another tree), and exits 2 (cannot evaluate) when that file is missing,
 unreadable or not a regular file; it never falls back to the parent's rule-file corpus. The self-test
-adds vectors that drive main with no --config, to hold that default. And the usage lines below name the
-OPF config. run() itself keeps the parent's built-in default corpus, the rule-file glob, for a call with
-no config, so the self-test's default-corpus vectors, which call run() directly, hold this copy exactly
-as they hold the parent; main never makes that call. That glob matches no file in an OPF tree, so an OPF
-config with no corpus line exits 2 there, never a false pass. The OPF runner passes --config
-tools/cited-standards.toml explicitly, and tools/check_cited_standards_contract.py beside this file pins
-that invocation and that config's coverage of every prompt-pack member. Where the text below names the
-repository's rule corpus, .aiqt/standards or .aiqt/cited-standards.toml, it describes the parent gate
-this copy was taken from.
+adds vectors that drive main with no --config, to hold that default, and vectors that hold STANDARDS_REL
+and OPF_ROOT (a manifest only under .aiqt/standards is not read, and the OPF root is the directory whose
+tools/ holds this file). And the usage lines below name the OPF config. run() itself keeps the parent's
+built-in default corpus, the rule-file glob, for a call with no config, so the self-test's default-corpus
+vectors, which call run() directly, hold this copy exactly as they hold the parent; main never makes that
+call. That glob matches no file in an OPF tree, so an OPF config with no corpus line exits 2 there, never
+a false pass. The OPF runner passes --config tools/cited-standards.toml explicitly, and
+tools/check_cited_standards_contract.py beside this file pins that invocation and that config's coverage
+of every prompt-pack member. Where the text below names the repository's rule corpus, .aiqt/standards or
+.aiqt/cited-standards.toml, it describes the parent gate this copy was taken from.
 
 .aiqt/standards/README.md makes two claims. A rule's `map-<key>` frontmatter may cite a framework only after its
 manifest lands there; check_mappings holds that. A numbered designator in rule prose must resolve to a manifest
@@ -890,10 +891,11 @@ _VECTORS += (
 # V104 expects a designator in a prompt-pack member to fail the gate; run with the built-in default, which never reads
 # the prompt pack, the gate passes and V104 fails. V105 pins that default, and V106 that an exclusion may name a
 # member. Each has no patch (None) and, as an eighth element, the files written outside the rules directory.
-# They carry their own corpus and read neither .aiqt/cited-standards.toml nor the runners that pass it; the
-# repository-only .github/check_cited_standards_contract.py pins that config and wiring. Like every vector here,
-# they call run() directly, so "the built-in default" is run()'s, the parent's; main never passes run() no config,
-# and _cli_default_problems below holds what main reads without --config.
+# They carry their own corpus and read no config file and no runner. OPF's own contract beside this file,
+# tools/check_cited_standards_contract.py, pins OPF's config (tools/cited-standards.toml) and the OPF runner's
+# wiring; the parent repository's .github/check_cited_standards_contract.py still checks its half, over the parent's
+# own config. Like every vector here, they call run() directly, so "the built-in default" is run()'s, the parent's;
+# main never passes run() no config, and _cli_default_problems below holds what main reads without --config.
 _PACK = {"opf/prompt-pack/flow/SKILL.md": "# Flow\n\nFollow ISO/IEC 99999:2031 here.\n"}
 _WIDE = 'format-version = 1\ncorpus = [".aiqt/core/rules/*.md", "opf/prompt-pack/**/*.md"]\n'
 _VECTORS += (
@@ -1118,6 +1120,37 @@ def _cli_default_problems():
     return problems
 
 
+# The two layout values only this copy carries. The fixture writes its manifests under STANDARDS_REL, so every vector
+# above passes whatever that value is; these cases write the manifest at a literal path instead. A manifest at
+# standards/ must resolve the citation (exit 0) and one only at the parent's .aiqt/standards must not (exit 1), so a
+# copy that reads .aiqt/standards fails both. OPF_ROOT must be the directory whose tools/ holds this file, and the
+# config main reads without --config must then be this file's sibling cited-standards.toml; a root one level off
+# (the enclosing repository, say) fails both.
+_LAYOUT_RULES = {"r.md": "Timestamps follow RFC 3339.\n"}
+_LAYOUT_MANIFEST = _manifest_text("rfc-3339", "RFC 3339 date and time")
+
+
+def _opf_layout_problems():
+    """The failures of the OPF-only layout values, STANDARDS_REL and OPF_ROOT; [] when every case holds."""
+    problems = []
+    code, out = _drive(manifests={}, rules=_LAYOUT_RULES, others={"standards/rfc-3339.toml": _LAYOUT_MANIFEST})
+    if code != 0 or not out.startswith("PASS") or "from 1 manifest(s)" not in out:
+        problems.append("a manifest at standards/ under the root must resolve RFC 3339 (exit 0 from 1 manifest), got "
+                        "exit {}; output:\n{}".format(code, out))
+    code, out = _drive(manifests={}, rules=_LAYOUT_RULES,
+                       others={".aiqt/standards/rfc-3339.toml": _LAYOUT_MANIFEST})
+    if code != 1 or "RFC 3339: cited in 1 document(s)" not in out:
+        problems.append("a manifest only at the parent's .aiqt/standards must leave RFC 3339 unresolved (exit 1), got "
+                        "exit {}; output:\n{}".format(code, out))
+    here = Path(__file__).resolve()
+    if (OPF_ROOT / "tools" / here.name).resolve() != here:
+        problems.append("OPF_ROOT {} is not the directory whose tools/ holds this file ({})".format(OPF_ROOT, here))
+    if (OPF_ROOT / DEFAULT_CONFIG_REL).resolve() != here.parent / "cited-standards.toml":
+        problems.append("OPF_ROOT/{} is {}, not this file's sibling cited-standards.toml".format(
+            DEFAULT_CONFIG_REL, (OPF_ROOT / DEFAULT_CONFIG_REL).resolve()))
+    return problems
+
+
 def self_test_main():
     failures = []
     for text, expect in _NORMALISATION:
@@ -1210,6 +1243,7 @@ def self_test_main():
         failures.append("a usage error: expected exit 2 and the residual, got {}; output:\n{}".format(
             code, buf.getvalue()))
     failures.extend(_cli_default_problems())
+    failures.extend(_opf_layout_problems())
     if failures:
         print("SELF-TEST FAIL: {} case(s)".format(len(failures)))
         for line in failures:
@@ -1222,7 +1256,8 @@ def self_test_main():
           "refused before it is listed and one symlinked inside the root read, the _drive patch contract (an unknown name is "
           "rejected; a patched name is restored after a non-zero return, a zero return and a raise), the "
           "usage error and {} case(s) of the config main reads (OPF's config without --config, refused when "
-          "missing or unreadable, and an explicit --config honoured): "
+          "missing or unreadable, and an explicit --config honoured), the OPF layout (manifests read from standards/, "
+          "never .aiqt/standards, and OPF_ROOT the directory above this file): "
           "an unresolved designator fails, a "
           "manifest resolves it, a suffixed token never resolves to a shorter identity, an exclusion is per path, "
           "needs a reason and goes stale, and a contradicted or malformed input fails closed".format(

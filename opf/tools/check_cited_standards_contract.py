@@ -10,13 +10,31 @@ prompt-pack/pack.toml lists; and unless every cited-standards gate line of tools
 than the exact self-test line is exactly the one permitted invocation, the gate with --config
 "$here/cited-standards.toml" and nothing else, so an appended --root or any other extra argument is a
 finding. A run_gate line names the gate when one of its words, after shell quote removal, has the
-basename check_cited_standards.py. pack.toml is validated by its owning validator
-(tools/check_opf_prompt_pack.py, imported, never re-implemented); a pack that validator refuses, a
-missing or malformed config or runner, a runner line that cannot be split into words, a corpus glob the
-gate cannot expand, a pack.toml re-read that fails after validation, an argument list other than none or
---self-test alone (a usage error), an unexpected exception while the check runs, or an import failure of
-a collaborator module (guarded at module level, so a renamed collaborator symbol exits 2, never a
-traceback exit 1), is cannot-evaluate (exit 2).
+basename check_cited_standards.py.
+
+The runner is read only through a small line grammar, so that every gate line the scan reads is one
+bash runs unconditionally. Only LF ends a line (a carriage return stays part of its line), and leading
+and trailing spaces and tabs are ignored. A blank line or a comment (first character #) is skipped.
+Every other line, in order, must be the pinned prologue (RUNNER_PROLOGUE: set -uo pipefail, the checked
+$here binding, the export, the failure-state initializers and the run_gate function definition, line for
+line), then roster lines only, then the pinned epilogue (RUNNER_EPILOGUE: the failed-gates check and the
+two exits). A roster line starts with "run_gate " (one space) and fully matches ROSTER_LINE_RE: a
+double-quoted label, python3 -I -B, a double-quoted "$here/" script path, then only plain words or
+double-quoted "$here/" paths, so it carries no other expansion, quote, operator, redirection, separator
+or comment. Any line outside that grammar is cannot-evaluate (exit 2): among others a compound command
+(an if, while, for, case or brace group, multi-line or on one line), a function definition or
+redefinition, an exit, an assignment, a scaffold line respelled, added or moved, and a run_gate line
+with a tab after the name, a quoted function name, a script path in a variable or a separator such as
+"; exit 0". A line that mentions check_cited_standards but does not start with "run_gate " is named as
+such in its diagnostic.
+
+pack.toml is validated by its owning validator (tools/check_opf_prompt_pack.py, imported, never
+re-implemented); a pack that validator refuses, a missing or malformed config, a missing or undecodable
+(not UTF-8) runner, a runner line outside the grammar above or one that cannot be split into words, a
+corpus glob the gate cannot expand, a pack.toml re-read that fails after validation, an argument list
+other than none or --self-test alone (a usage error), an unexpected exception while the check runs, or
+an import failure of a collaborator module (guarded at module level, so a renamed collaborator symbol
+exits 2, never a traceback exit 1), is cannot-evaluate (exit 2).
 
 Every collaborator sits beside this file in OPF's tools directory, so the contract runs in an OPF tree
 with no parent repository present. The parent repository's .github/check_cited_standards_contract.py
@@ -28,11 +46,19 @@ OPF's own config and runner.
 diagnostics for every finding and every cannot-evaluate path above, among them the --root redirect, the
 permitted line plus a forbidden one sorting after it and one sorting before it (so a loop over only the
 first or only the last sorted gate line is red), a self-test line with extra arguments (live, never
-excluded), the post-validation pack.toml re-read failure (the owning validator stubbed to accept), the
-usage error, the unexpected-exception backstop, the self-test harness backstop and, in a fresh process
-over a scratch copy whose stub collaborator renames validate_pack away, the import-time guard.
+excluded), a runner with blank, comment and indented lines that passes, and, each beside the permitted
+line, a multi-line if, a while loop, a one-line if, an exit line, run_gate redefined (with and without a
+space before its parentheses), a tab after run_gate, a quoted function name, a script path in a variable
+(after its assignment) and an exit chained onto a run_gate line, then a respelled prologue line, a
+respelled epilogue line, a runner with no scaffold, an undecodable runner, the post-validation pack.toml
+re-read failure (the owning validator stubbed to accept), the usage error, the unexpected-exception
+backstop, the self-test harness backstop and, in a fresh process over a scratch copy whose stub
+collaborator renames validate_pack away, the import-time guard. A for, case or brace group, or a lone
+assignment, takes the same branch as the multi-line if and has no vector of its own.
 This guards declaration and wiring drift, not environment overrides, a member the gate scans and reads
-short, or the content of recorded exclusions. It reads the OPF runner's text; it does not run the runner.
+short, or the content of recorded exclusions. It reads the OPF runner's text; it does not run the runner,
+and it does not follow a script a roster line launches, so a roster script that itself starts the gate
+is not seen.
 """
 import sys
 
@@ -52,6 +78,7 @@ import contextlib
 import hashlib
 import io
 import os
+import re
 import shlex
 import subprocess
 import tempfile
@@ -81,6 +108,44 @@ LAUNCH = ["python3", "-I", "-B", "$here/" + GATE_NAME]
 # The one permitted live invocation, as the words after the run_gate label: --config and NOTHING else.
 PERMITTED = LAUNCH + ["--config", "$here/cited-standards.toml"]
 SELF_TEST = LAUNCH + ["--self-test"]
+GATE_STEM = "check_cited_standards"
+# The runner grammar (see the module docstring). Each tuple is the runner's own non-blank, non-comment lines,
+# with leading and trailing spaces and tabs removed, line for line and in order: the prologue before the first
+# roster line and the epilogue after the last. A runner scaffold edit is cannot-evaluate here until these follow.
+RUNNER_PROLOGUE = (
+    "set -uo pipefail",
+    'dir=$(dirname -- "$0") || exit 2',
+    '[ -n "$dir" ] || exit 2',
+    'here="$(CDPATH= cd -- "$dir/." && pwd)" || exit 2',
+    "export PYTHONDONTWRITEBYTECODE=1",
+    "failed=0",
+    'failed_names=""',
+    "run_gate() {",
+    'local name="$1"; shift',
+    'echo "--- ${name} ---"',
+    'if "$@"; then :; else',
+    "local rc=$?",
+    "failed=1",
+    'failed_names="${failed_names:+${failed_names}, }${name}"',
+    'echo "GATE FAILED: ${name} (exit ${rc})"',
+    "fi",
+    "echo",
+    "}",
+)
+RUNNER_EPILOGUE = (
+    'if [ "$failed" -ne 0 ]; then',
+    'echo "FAILED GATES: ${failed_names}"',
+    'echo "OPF STANDALONE SUBSET: FAILED"',
+    "exit 1",
+    "fi",
+    'echo "OPF STANDALONE SUBSET: OK"',
+    "exit 0",
+)
+# A roster line: a double-quoted label, python3 -I -B, a double-quoted "$here/" script path, then plain words or
+# double-quoted "$here/" paths. No other expansion, quote, operator, redirection, separator or comment can match.
+ROSTER_LINE_RE = re.compile(
+    r'run_gate "[a-z0-9][a-z0-9-]*" +python3 -I -B "\$here/[A-Za-z0-9_./-]+\.py"'
+    r'(?: +(?:[A-Za-z0-9_./=:-]+|"\$here/[A-Za-z0-9_./-]*"))*')
 
 
 def corpus_findings(root):
@@ -117,17 +182,59 @@ def corpus_findings(root):
     return [], []
 
 
-def gate_lines(text):
-    """(sorted word lists after the label of every run_gate line naming the gate, errors)."""
-    found, errors = [], []
+def _command_lines(text):
+    """(line number, text) of every runner line bash reads as a command: not blank, not a comment. Only LF ends a
+    line and only spaces and tabs are stripped, as bash reads them; a carriage return stays in its line."""
+    commands = []
     for number, line in enumerate(text.split("\n"), 1):
-        stripped = line.strip()
-        if not stripped.startswith("run_gate "):
+        content = line.strip(" \t")
+        if content and not content.startswith("#"):
+            commands.append((number, content))
+    return commands
+
+
+def _scaffold_errors(commands):
+    """The first departure from RUNNER_PROLOGUE and the first from RUNNER_EPILOGUE, as errors; [] when both hold."""
+    head, tail = len(RUNNER_PROLOGUE), len(RUNNER_EPILOGUE)
+    if len(commands) < head + tail:
+        return ["{}: {} command line(s), fewer than the {} of the pinned prologue and epilogue the runner grammar "
+                "requires".format(RUNNER, len(commands), head + tail)]
+    errors = []
+    for part, want in ((commands[:head], RUNNER_PROLOGUE), (commands[len(commands) - tail:], RUNNER_EPILOGUE)):
+        for (number, content), expected in zip(part, want):
+            if content != expected:
+                errors.append("{}:{}: {!r} is not the pinned scaffold line {!r} the runner grammar requires "
+                              "there".format(RUNNER, number, content, expected))
+                break
+    return errors
+
+
+def gate_lines(text):
+    """(sorted word lists after the label of every run_gate line naming the gate, errors). Every command line
+    outside the runner grammar (module docstring) is an error, so a gate line bash may skip or reroute is never
+    read as run."""
+    commands = _command_lines(text)
+    errors = _scaffold_errors(commands)
+    if errors:
+        return [], errors
+    found = []
+    for number, content in commands[len(RUNNER_PROLOGUE):len(commands) - len(RUNNER_EPILOGUE)]:
+        if not content.startswith("run_gate "):
+            why = ("mentions {} but does not start with 'run_gate '".format(GATE_STEM) if GATE_STEM in content
+                   else "is neither a roster line (starting 'run_gate ') nor pinned scaffold")
+            errors.append("{}:{}: {!r} {}; a compound command, function definition, exit, assignment or any other "
+                          "shell line between the pinned prologue and epilogue is outside the runner grammar, so "
+                          "whether bash runs the gate cannot be evaluated".format(RUNNER, number, content, why))
             continue
         try:
-            words = shlex.split(stripped, comments=True)
+            words = shlex.split(content, comments=True)
         except ValueError as exc:
             errors.append("{}:{}: cannot split the run_gate line into words: {}".format(RUNNER, number, exc))
+            continue
+        if not ROSTER_LINE_RE.fullmatch(content):
+            errors.append('{}:{}: run_gate line {!r} is outside the roster grammar (a double-quoted label, python3 '
+                          '-I -B, a double-quoted "$here/" script path, then only plain words or double-quoted '
+                          '"$here/" paths)'.format(RUNNER, number, content))
             continue
         if any(word.rsplit("/", 1)[-1] == GATE_NAME for word in words):
             found.append(words[2:])
@@ -185,11 +292,13 @@ def _write(path, text):
 
 
 def _runner(*gate_lines_text):
+    """A runner inside the grammar: the pinned prologue, a commented-out gate line, the given roster lines (the
+    self-test line and the permitted line when none are given) and the pinned epilogue."""
     if not gate_lines_text:
         gate_lines_text = (_SELF_LINE, _LIVE + '--config "$here/cited-standards.toml"')
-    body = ["#!/usr/bin/env bash", "set -uo pipefail", "run_gate() {", '  "$@"', "}",
-            "# run_gate \"commented\" python3 -I -B \"$here/check_cited_standards.py\" --root x"]
-    return "\n".join(body + list(gate_lines_text)) + "\n"
+    body = (["#!/usr/bin/env bash"] + list(RUNNER_PROLOGUE)
+            + ["", "# run_gate \"commented\" python3 -I -B \"$here/check_cited_standards.py\" --root x"])
+    return "\n".join(body + list(gate_lines_text) + [""] + list(RUNNER_EPILOGUE)) + "\n"
 
 
 def _build_tree(root):
@@ -209,6 +318,12 @@ def _runner_with(*lines):
 
 
 _PERMITTED_LINE = _LIVE + '--config "$here/cited-standards.toml"'
+_DECOY_LINE = _PERMITTED_LINE + " --root decoy"
+_VARIABLE_LINE = 'run_gate "cited-standards" python3 -I -B "$g" --config "$here/cited-standards.toml" --root decoy'
+_CHAINED_LINE = 'run_gate "opf-other" python3 -I -B "$here/other.py"; exit 0'
+_NOT_SCAFFOLD = "is neither a roster line"
+_NOT_ROSTER = "is outside the roster grammar"
+_UNPREFIXED = "mentions check_cited_standards but does not start with 'run_gate '"
 
 
 def _vectors():
@@ -255,6 +370,48 @@ def _vectors():
         ("permitted line plus a forbidden line sorting before it",
          _runner_with(_SELF_LINE, _PERMITTED_LINE, _LIVE + '--config "$here/a.toml"'),
          1, "permitted invocation", 1),
+        # The runner grammar. Each runner below carries the permitted line, and bash either skips it or also runs
+        # the gate another way, so a scan that read only lines starting with run_gate would pass it.
+        ("runner grammar: blank, comment and indented lines are read as bash reads them",
+         _runner_with(_SELF_LINE, "", "  # a comment naming check_cited_standards.py","\t" + _PERMITTED_LINE),
+         0, None, None),
+        ("runner grammar: the permitted line inside a multi-line if false block",
+         _runner_with(_SELF_LINE, "if false; then", _PERMITTED_LINE, "fi"), 2, "'if false; then' " + _NOT_SCAFFOLD,
+         1),
+        ("runner grammar: the permitted line inside a while false loop",
+         _runner_with(_SELF_LINE, "while false; do", _PERMITTED_LINE, "done"), 2,
+         "'while false; do' " + _NOT_SCAFFOLD, 1),
+        ("runner grammar: an exit line before the permitted line",
+         _runner_with(_SELF_LINE, "exit 0", _PERMITTED_LINE), 2, "'exit 0' " + _NOT_SCAFFOLD, 1),
+        ("runner grammar: run_gate redefined before the gate lines",
+         _runner_with("run_gate() { :; }", _SELF_LINE, _PERMITTED_LINE), 2, "'run_gate() { :; }' " + _NOT_SCAFFOLD,
+         1),
+        ("runner grammar: run_gate redefined with a space before its parentheses",
+         _runner_with("run_gate () { :; }", _SELF_LINE, _PERMITTED_LINE), 2, _NOT_ROSTER, 1),
+        ("runner grammar: a tab after run_gate on a forbidden gate line",
+         _runner_with(_SELF_LINE, _PERMITTED_LINE, _DECOY_LINE.replace("run_gate ", "run_gate\t", 1)), 2,
+         _UNPREFIXED, 1),
+        ("runner grammar: a quoted function name on a forbidden gate line",
+         _runner_with(_SELF_LINE, _PERMITTED_LINE, '"run_gate"' + _DECOY_LINE[len("run_gate"):]), 2, _UNPREFIXED, 1),
+        ("runner grammar: a forbidden gate line inside a one-line if",
+         _runner_with(_SELF_LINE, _PERMITTED_LINE, "if true; then " + _DECOY_LINE + "; fi"), 2, _UNPREFIXED, 1),
+        ("runner grammar: the gate script path in a variable",
+         _runner_with(_SELF_LINE, _PERMITTED_LINE, 'g="$here/check_cited_standards.py"', _VARIABLE_LINE), 2,
+         _NOT_ROSTER, 1),
+        ("runner grammar: an exit chained onto a run_gate line",
+         _runner_with(_CHAINED_LINE, _SELF_LINE, _PERMITTED_LINE), 2, _NOT_ROSTER, 1),
+        ("runner grammar: a prologue line respelled so run_gate no longer runs its command",
+         lambda root: _write(root / RUNNER, _runner().replace('if "$@"; then', "if true; then", 1)), 2,
+         "not the pinned scaffold line", 1),
+        ("runner grammar: an epilogue line respelled so a failed gate exits 0",
+         lambda root: _write(root / RUNNER, _runner().replace("exit 1\n", "exit 0\n", 1)), 2,
+         "not the pinned scaffold line", 1),
+        ("runner grammar: a runner with no scaffold",
+         lambda root: _write(root / RUNNER, _SELF_LINE + "\n" + _PERMITTED_LINE + "\n"), 2,
+         "fewer than the", 1),
+        ("runner not valid UTF-8",
+         lambda root: (root / RUNNER).write_bytes(b"#!/usr/bin/env bash\n\xff\xfe\n"), 2,
+         "cannot read {}: 'utf-8' codec can't decode".format(RUNNER), 1),
     )
 
 
@@ -420,8 +577,8 @@ def main(argv=None, root=ROOT):
     if findings:
         return 1
     print("PASS: OPF cited-standards contract: {} covers every member {}/pack.toml (validated by "
-          "tools/check_opf_prompt_pack.py) lists, and every cited-standards gate line in {} is exactly "
-          "{!r}".format(CONFIG, PACK, RUNNER, " ".join(PERMITTED)))
+          "tools/check_opf_prompt_pack.py) lists, and {} is inside the runner grammar with every cited-standards "
+          "gate line exactly {!r}".format(CONFIG, PACK, RUNNER, " ".join(PERMITTED)))
     return 0
 
 
