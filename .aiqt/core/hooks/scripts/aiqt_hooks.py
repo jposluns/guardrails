@@ -26028,7 +26028,10 @@ def orch_truncation_guard(data):
     NOT INSPECTED (disclosed in the manifest residue): commands that run where this hook cannot see their text, that
     is a command inside a script file the Bash command runs (bash FILE, sh FILE, python3 FILE, or a sourced file), a
     subprocess call made by a program the command runs, and a command built at run time from text that is not in the
-    command; a here-document body fed to a shell is read as code by the scan (_orch_foreground_scan)."""
+    command; a here-document body fed to a shell is read as code by the scan (_orch_foreground_scan), but where the
+    scan reads the command to its end the lexer narrowing (1) of _orch_foreground_detach_lexed lifts a bare `&` in
+    such a body under a quoted delimiter (`bash <<'EOF'` then `job &`), so that detach is a silent allow disclosed
+    in the manifest residue."""
     tool_name = data.get("tool_name")
     if tool_name is None:
         return _deny_missing_tool_name("trkasy")
@@ -26740,8 +26743,11 @@ def orch_untracked_wait_loop(data):
     NOT INSPECTED (disclosed in the manifest residue): commands that run where this hook cannot see their
     text, that is a command inside a script file the Bash command runs (bash FILE, sh FILE, python3 FILE, or
     a sourced file), a subprocess call made by a program the command runs, and a command built at run time
-    from text that is not in the command; a here-document fed to a shell is one of the heredoc forms on which
-    this guard emits nothing and defers to the truncation guard."""
+    from text that is not in the command; a poll loop in a here-document body fed to a shell is not read as
+    one (the shared lexer reads a quoted delimiter's body as data, 'none', and refuses a command holding an
+    unquoted delimiter, 'indeterminate'), so this guard emits nothing, and the truncation guard lifts a bare
+    `&` in a quoted delimiter's body, so such a loop backgrounded there is a silent allow of both hooks,
+    disclosed in the manifest residue."""
     tool_name = data.get("tool_name")
     if tool_name is None:
         # A missing tool_name is a malformed payload, not another tool: it is denied before the registry
