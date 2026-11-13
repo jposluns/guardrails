@@ -2576,6 +2576,98 @@ def _test_reset_ancestry(failures, tmp):
                             .format(args, want, got))
 
 
+# The shared interpreter reader (_interp_run), the segment stdin feeds (_segment_stdin_feed with _HeredocMarks)
+# and the gensrc python walker read through it. Each row whose (source, operand index) or feed set names a
+# part fails when that part is reverted: the - reading (ird-1), the value of -X (ird-2), the stop at the
+# script operand (ird-3), the value of -o (ird-4), the wrapper peel (ird-8), the basename match (ird-9), the
+# stdin path check (ird-10) and the here-document recorder (ird-11); ird-14 and ird-15 also run as gensrc
+# Bash cases (_gb_cases).
+_IRD_RUNS = (
+    ("(ird-1) python3 with - as the script reads the stdin", "python3 -I - x", ("stdin-dash", 2)),
+    ("(ird-2) the value of -X is no script", "python3 -X dev", ("implicit", None)),
+    ("(ird-3) a - after the script operand is the script's argument", "python3 tools/x.py -", ("file", 1)),
+    ("(ird-4) the value of bash -o is no script", "bash -o pipefail s.sh", ("file", 3)),
+    ("(ird-5) bash -s reads the stdin", "bash -s a b", ("stdin-s", None)),
+    ("(ird-6) bash -c reads its first operand", "bash -c 'x'", ("inline", 2)),
+    ("(ird-7) python3 -m runs a module", "python3 -m json.tool", ("module", 2)),
+    ("(ird-8) env and timeout are peeled", "env -i timeout 5 python3 -", ("stdin-dash", 5)),
+    ("(ird-9) a path and a version are read from the basename", "/usr/bin/python3.12 -", ("stdin-dash", 1)),
+    ("(ird-10) a stdin path as the script reads the stdin", "bash /dev/stdin", ("stdin-dash", 1)),
+)
+_IRD_FEEDS = (
+    ("(ird-11) a quoted here-document feeds python3", "python3 <<'EOF'\nprint(1)\nEOF", {"heredoc"}),
+    ("(ird-12) a pipe feeds python3", "printf x | python3", {"pipe"}),
+    ("(ird-13) a < redirect feeds bash", "bash < f", {"redirect"}),
+)
+# The recorder identity (ird-16): commands holding quoted and unquoted here-documents, here-strings, process
+# substitutions, pipes, uncertain '#' readings and backquote bodies, each lexed in every caller shape the hooks
+# use, give the same result with the recorder on as with it off; the hooks' own rows (the rest of this suite)
+# lex with it off.
+_IRD_LEX = (
+    "python3 <<'EOF'\nprint(1)\nEOF", "cat <<'EOF' | python3 -\nx\nEOF\necho done", "python3 <<<'x'",
+    "python3 <<EOF\nx\nEOF", "bash <(echo x) && echo y", "printf x | bash -s", "(true #a\n) ; python3 - <<'A'\nb\nA",
+    "x=`cat <<'E'\ny\nE\n`; python3 -", "if true; then python3 - <<'EOF'\nx\nEOF\nfi", "echo 'python3 - <<EOF'",
+    "a <<'X' <<-'Y'\n1\nX\n\t2\n\tY\nb", "",
+)
+
+
+def _test_interp_reader(failures):
+    hooks = aiqt_hooks
+    for label, command, want in _IRD_RUNS:
+        seg = hooks._lex_command(command)[0]
+        got = hooks._interp_run(seg.argv, seg.argv_opaque)
+        got = None if got is None else (got.source, got.operand_index)
+        if got != want:
+            failures.append("{}: expected {}, got {} for {!r}".format(label, want, got, command))
+    for label, command, want in _IRD_FEEDS:
+        with hooks._HeredocMarks() as marks:
+            segments = hooks._lex_command(command)
+        index = [k for k, seg in enumerate(segments) if seg.argv[:1] in (["python3"], ["bash"])]
+        got = hooks._segment_stdin_feed(segments, index[0], marks) if index else None
+        if got != frozenset(want):
+            failures.append("{}: expected {}, got {} for {!r}".format(label, sorted(want), got, command))
+    # The gensrc walker through the shared reader: a literal - is a stdin-fed program (uncleared), and -m
+    # spells no sink (the Bash posture of each is pinned by the gb cases of the same labels).
+    for label, argv, want in (
+            ("(ird-14-effect) python3 -I - is a stdin-fed program", ["python3", "-I", "-"],
+             [("uncleared", "a stdin-fed interpreter program")]),
+            ("(ird-15-effect) python3 -m spells no sink", ["python3", "-m", "x"], [])):
+        effects = []
+        hooks._gensrc_program_effects("python3", argv, 0, [False] * len(argv), [False] * len(argv), None,
+                                      effects)
+        got = [(effect.kind, effect.word) for effect in effects]
+        if got != want:
+            failures.append("{}: expected {}, got {}".format(label, want, got))
+    if hooks._HeredocMarks.at is not None:
+        failures.append("(ird-16-before) the here-document recorder is on outside its context")
+    for command in _IRD_LEX:
+        shapes = (
+            lambda: hooks._lex_command(command),
+            lambda: hooks._lex_command(command, partial=True),
+            lambda: hooks._lex_command(command, partial=True, skip_empty=hooks._SKIP_EMPTY_REPEATS),
+            lambda: hooks._lex_command(command, locale=True),
+        )
+        for shape, call in enumerate(shapes):
+            results = []
+            for marked in (False, True):
+                with contextlib.ExitStack() as stack:
+                    if marked:
+                        stack.enter_context(hooks._HeredocMarks())
+                    if shape == 1:
+                        stack.enter_context(hooks._WordSpellings())
+                        stack.enter_context(hooks._CommandReading())
+                        stack.enter_context(hooks._LexStops())
+                    try:
+                        result = call()
+                    except ValueError as exc:
+                        result = ("raised", type(exc).__name__, str(exc))
+                results.append(repr(result))
+            if results[0] != results[1]:
+                failures.append("(ird-16) the recorder changes the lex of {!r} (shape {})".format(command, shape))
+    if hooks._HeredocMarks.at is not None:
+        failures.append("(ird-16-after) the here-document recorder stays on after its context")
+
+
 def _test_git_stash_ref(failures):
     """Direct, warn-distinct checks; no submitted Bash command is executed."""
     handler = aiqt_hooks.git_stash_ref
@@ -28586,6 +28678,10 @@ def _main_isolated(monitor):
             ("(gb-x4) a heredoc-fed interpreter naming GEN.md denies (an uncleared write)", "deny",
              "python3 - <<EOF\nopen('GEN.md','w')\nEOF", gr),
             ("(gb-x5) deleting a generated file is not judged", "allow", "rm GEN.md", gr),
+            # the python walker read through the shared interpreter reader keeps its outcomes
+            ("(ird-14) a quoted-heredoc-fed python3 -I - naming no registered target notes", "allow-note",
+             "python3 -I - <<'EOF'\nprint(1)\nEOF", gr),
+            ("(ird-15) python3 -m allows silently", "allow", "python3 -m x", gr),
             # registry states
             ("(gb-s1) no registry allows", "allow", "echo x >> GEN.md", gr2),
             ("(gb-s2) a malformed registry denies a sink into its repo", "deny", "echo x >> GEN.md", gr3),
@@ -30500,6 +30596,7 @@ def _main_isolated(monitor):
                             "HANDLER_EVENT {!r}".format(aiqt_hooks.FLOOR_FAIL_OPEN_MODES, _pf_want))
 
         _test_git_stash_ref(failures)
+        _test_interp_reader(failures)
         _test_inline_errexit(failures, tmp)
         _test_pgrep_self_match(failures)
         _test_trkasy_no_amp(failures, tmp)
