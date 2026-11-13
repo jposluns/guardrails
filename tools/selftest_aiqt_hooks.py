@@ -4325,28 +4325,51 @@ def _test_pgrep_self_match(failures):
 
 
 # status_after_subst rows. Each fire row reads $? where bash expands it after a command substitution in the
-# same simple command. The lettered rows (a, b, d, e, f, g, i, k, l, m, q, r, s) are cases of the
-# bash-semantics table the hook rests on: run after a failing command under bash 5.3.9 with --norc
-# --noprofile, the fire rows read the substitution's 0 and the quiet rows the earlier command's 1, while bash
-# --posix read 1 on each of them. The braced-read, arith-body, case-arm, subshell, after-redirect, case-subst,
-# k-assignment-only, redirect-target, procsub, pipeline and then-assign rows were observed in the same shape,
-# literal text aside, under bash 5.3.9 (the assignment-only command read 0, the status often wanted there, so
-# it stays quiet), and so were the arith-shift, cond-*, assign-read, after-assign, herestring*,
-# assign-herestring, redirect-redirect, heredoc*, dollar-dollar, redirect-target-separated,
-# assign-read-redirect, redirect-before and assign-no-subst rows (bash expanded the words, then the leading
-# assignments, then the redirections, a here-document body among them; cond-end read the status of the
-# [[ ]] command itself), and so were the for-arith-*, line-continuation, case-second-pattern, case-esac-word,
-# heredoc-strip-later-line, cond-glued-redirect, cond-glued-amp-redirect and ansi-c-escaped rows (the
-# for-arith-and, -or and -pipe rows printed their loop line under bash and nothing under --posix), and so were
-# the for-do-*, for-brace-assign-read, time-*, coproc-*, if-*-then-* and while-arith-do-assign fire rows (each
-# read or printed the substitution's status under bash and the earlier status under --posix, where the time -p
-# and time -- rows are a syntax error; the if-*-then-assign and while-arith-do-assign rows read the 1 of
-# $(false) under bash and the condition's 0 under --posix) and the for-do-assignment-only and if-*-then-read
-# quiet rows (the assignment-only command read 0, as above; the if rows read the 0 of the (( )) or [[ ]]
-# condition under both). The in-body-after-subst row read 0 under bash: it pins the documented NOT SEEN limit
-# that a read inside a substitution body is not judged. The remaining rows pin the reading's own quoting,
-# comment and command-boundary rules.
-# No row executes a command here: the handler is called directly.
+# same simple command; each quiet row does not. The lettered rows (a, b, d, e, f, g, i, k, l, m, q, r, s)
+# are cases of the bash-semantics table the hook rests on. No row executes a command here: the handler is
+# called directly, and this self-test runs no bash and does not re-check the readings below. They were taken
+# once, outside it, by running each row's command text as written with GNU bash 5.3.9, as bash --norc
+# --noprofile -c (B below) and again with --posix added (P), in an empty directory with only PATH, HOME and
+# LC_ALL=C set. Where a row prints nothing that shows its read, that run appended the printing suffix given
+# in braces, which is not part of the row. Each row is named without its sas-fire- or sas-quiet- prefix.
+# Fire rows that read the substitution's 0 under B and the earlier command's 1 under P, as the printed rc=,
+# RC=, x=, y=, v= or w= value or bare status showed: a, b, e, g, i, q, r, s, braced-read, arith-body,
+# newline, arith-shift, assign-read, after-assign, line-continuation, heredoc, heredoc-word,
+# heredoc-redirect, heredoc-strip, heredoc-strip-later-line, for-arith-shift, case-second-pattern,
+# case-esac-word, for-do-arith-shift, for-do-assign-read, for-brace-assign-read, coproc-arith-shift,
+# coproc-for-arith-shift, if-cond-then-arith-shift, dollar-bracket-shift, subscript-shift and
+# subscript-quoted-bracket, and herestring, assign-herestring and redirect-redirect {; echo "v=$v"} and
+# herestring-word {; echo "v=$v w=$w"}.
+# Fire rows whose read showed only in what ran: cond-and, cond-or, cond-compare, cond-group and
+# cond-newline exited 1 under B (their $? -eq 1 test failed) and 0 under P; for-arith-and, for-arith-or,
+# for-do-cond-and and for-do-for-arith printed zero under B (their $? == 0 or $? -eq 0 test held) and
+# nothing under P; for-arith-pipe printed x=2 under B and nothing under P; for-do-arith-pipe printed x=2
+# under B and x=3 under P (2 | 0, then 2 | 1).
+# Fire rows reading 0 under B where P did not run the same command: time-p-for-arith,
+# time-dashdash-for-arith and time-p-dashdash-for-arith printed zero under B and were a syntax error (exit 2)
+# under P; time-p-cond printed zero and time-p-assign-read printed 0 under B, and under P each exited 127
+# with a No such file or directory error naming [[ or RC=1 (so the read there gave 1).
+# Fire rows that read the 1 of $(false) under B and the condition's 0 under P: if-arith-then-assign,
+# while-arith-do-assign and if-cond-then-assign.
+# Fire rows these runs do not tell apart, since no command failed before them: case-arm, subshell and
+# case-subst printed 0 under both, and after-redirect {; cat f} wrote 0 under both. seed printed rc=128
+# (the exit of git) under B and rc=2 (the exit of python3) under P.
+# Quiet rows that read the earlier command's 1 under both: d, f, k, l, m, redirect-target, procsub,
+# pipeline, then-assign, redirect-target-separated, assign-read-redirect, assign-no-subst,
+# heredoc-read-first, heredoc-later-redirect, for-arith-later-line, cond-glued-redirect,
+# cond-glued-amp-redirect, dollar-bracket-later-line, subscript-later-line, cond-read-first (it exited 0,
+# so its $? -eq 1 test held), redirect-before {; echo "v=$v"}, and in-body (inside the substitution body,
+# after its false).
+# Quiet rows that read 0 under both from a command that succeeded: next-command (the echo's 0), cond-end
+# (the [[ ]] command's own 0), and if-arith-then-read and if-cond-then-read (the (( )) or [[ ]] condition's
+# 0).
+# Quiet rows that read the substitution's 0 under B and 1 under P, quiet by design: k-assignment-only
+# {; echo "rc=$rc"} and for-do-assignment-only (an assignment-only command leaves its substitution's exit
+# in $?, often the status wanted), and in-body-after-subst (a read inside a substitution body is not
+# judged, the documented NOT SEEN limit).
+# Quiet rows with no read: single-quoted, escaped, dq-escaped, ansi-c, ansi-c-escaped, heredoc and
+# heredoc-escaped printed their $? as literal text; comment printed an empty line; dollar-dollar printed the
+# shell's process id and a ?; no-read holds no $?.
 _SAS_FIRE_ROWS = (
     ("(sas-fire-a) substitution in double quotes", 'false; echo "x $(true): rc=$?"'),
     ("(sas-fire-b) substitution with an argument", 'false; echo "x $(basename /a/b): rc=$?"'),
@@ -4437,6 +4460,12 @@ _SAS_FIRE_ROWS = (
      'if [[ 1 ]] then RC=$? env "SHA=$(false)" printenv RC; fi'),
     ("(sas-fire-if-cond-then-arith-shift) a later line after a << shift in (( )) right after if [[ ]] then",
      'if [[ 1 ]] then (( y = 1<<2 )); fi\nfalse; RC=$? env "SHA=$(true)" printenv RC'),
+    ("(sas-fire-dollar-bracket-shift) a later line after a << shift in $[...]",
+     'echo $[1<<0]\nfalse; RC=$? env "SHA=$(true)" printenv RC'),
+    ("(sas-fire-subscript-shift) a later line after a << shift in an assignment subscript",
+     'a[1<<0]=5\nfalse; RC=$? env "SHA=$(true)" printenv RC'),
+    ("(sas-fire-subscript-quoted-bracket) a later line after a << in a subscript holding a quoted ]",
+     "declare -A h; h[']<<x']=1\nfalse; RC=$? env \"SHA=$(true)\" printenv RC"),
 )
 _SAS_QUIET_ROWS = (
     ("(sas-quiet-d) read before every substitution", 'false; echo "rc=$? $(true)"'),
@@ -4492,6 +4521,10 @@ _SAS_QUIET_ROWS = (
      'false; if (( $(echo 1) )) then echo "rc=$?"; fi'),
     ("(sas-quiet-if-cond-then-read) read right after if [[ ]] then, substitution in the [[ ]]",
      'false; if [[ -n "$(echo 1)" ]] then echo "rc=$?"; fi'),
+    ("(sas-quiet-dollar-bracket-later-line) a read on a later line after a << shift in $[...]",
+     'echo "$(true)" $[1<<0]\nfalse; echo "rc=$?"'),
+    ("(sas-quiet-subscript-later-line) a read on a later line after a << shift in an assignment subscript",
+     'a[1<<0]=5 b="$(true)"\nfalse; echo "rc=$?"'),
 )
 
 
@@ -4530,8 +4563,15 @@ def _test_status_after_subst(failures):
         failures.append("(sas-note) the note must name the rule, the substitution's exit, the saved form and "
                         "the posix-mode limit, with no permission decision, got {!r}".format(stdout_obj))
     deep = "echo " + "$(" * 100 + "true" + ")" * 100
-    if _decision(handler, deep + " $?") != "allow-note":
-        failures.append("(sas-deep) a $? past the nesting bound must note the unread rest")
+    code, stdout_obj, _stderr = handler({"hook_event_name": aiqt_hooks.PRETOOL, "tool_name": "Bash",
+                                         "tool_input": {"command": deep + " $?"}})
+    note = (stdout_obj or {}).get("systemMessage", "")
+    if (_reduce_result(code, stdout_obj) != "allow-note" or "rule gatdis" not in note
+            or "({} levels)".format(aiqt_hooks._SUBST_STATUS_MAX_DEPTH) not in note
+            or "holds $? text that was not checked (it may or may not be a read)" not in note
+            or "not checked, not passed" not in note or "permissionDecision" in str(stdout_obj)):
+        failures.append("(sas-deep) a $? past the nesting bound must note the unread rest as $? text that may "
+                        "not be a read, with the bound and no permission decision, got {!r}".format(stdout_obj))
     if _decision(handler, "echo $? " + deep) != "allow":
         failures.append("(sas-deep-no-read) a nesting past the bound with a $? only before it must allow "
                         "silently")
