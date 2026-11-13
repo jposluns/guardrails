@@ -2629,15 +2629,15 @@ exit 0
         # still carry wall-clock bounds that can change their verdict, among
         # them: each row run's 30 s watchdog and its deadlines scaled to
         # connect 2.0 s, inactivity 1.5 s, request 8.0 s and gather 16.0 s;
-        # the TLS fixture's 2.0 s socket timeout (raw.settimeout); the 2.0 s
-        # join of a run's resolver workers (a straggler fails the row
-        # INVALID); the 1.0 s resolver-slot acquire after a run and in the
-        # held-slot queue; the 10 s HELD_JOIN of
-        # resolver-vector/positive-held-slot; the 5.0 s resolver join of
-        # resolver-vector/cleanup; and this leg's own 450 s bound
-        # (cannot-evaluate/timeout). A heavily loaded host can still fail
-        # any of them, so leaving out the short-deadline cases reduces this
-        # leg's exposure to host load; it does not remove it.
+        # the TLS fixture's 2.0 s socket timeout (raw.settimeout) and the
+        # 1.0 s close bound of fixture/server-close-unblocks; the 2.0 s join
+        # of a run's resolver workers (a straggler fails the row INVALID);
+        # the 1.0 s resolver-slot acquire after a run and in the held-slot
+        # queue; the 10 s HELD_JOIN of resolver-vector/positive-held-slot;
+        # the 5.0 s resolver join of resolver-vector/cleanup; and this leg's
+        # own 450 s bound (cannot-evaluate/timeout). A heavily loaded host can
+        # still fail any of them, so leaving out the short-deadline cases
+        # reduces this leg's exposure to host load; it does not remove it.
         # Measured once, as part of a full --self-test run on a shared host:
         # the leg took 229.3 s, at a one-minute load average of 29.45 when
         # it started and 26.15 when it ended (/proc/loadavg). 450 s leaves
@@ -3614,6 +3614,96 @@ def self_test(vectors_only=False, steady_only=False):
                 pass
             self.listener.close()
             self.thread.join()
+
+    class PausedStop(threading.Event):
+        # Stop for one fixture server: its serving thread, once it holds a
+        # connection, reads it in the next registration and then waits there
+        # until close() has begun, so close() meets that thread between
+        # reading stop and taking the wrapped connection.
+        def __init__(self, server):
+            super().__init__()
+            self.server = server
+            self.paused = threading.Event()
+            self.closing = threading.Event()
+
+        def is_set(self):
+            value = super().is_set()
+            if (threading.current_thread() is self.server.thread
+                    and self.server.connection is not None
+                    and not self.paused.is_set()):
+                self.paused.set()
+                self.closing.wait(10.0)
+                # Time for close() to reach the lock, or with no lock, to
+                # pass the connection it would shut down.
+                time.sleep(0.1)
+            return value
+
+    CLOSE_IDENTITY = "fixture/server-close-unblocks"
+    CLOSE_BOUND = 1.0
+
+    def close_row(context, certificates):
+        # close() must end a serving thread blocked in a socket call rather
+        # than leave the call to its 2.0 s socket timeout: a client that never
+        # sends the TLS handshake, one that completes it and never sends a
+        # request, and a close() that meets the thread inside its
+        # registration of the wrapped connection (PausedStop). Each close()
+        # must return within CLOSE_BOUND and the thread must have ended. The
+        # bound is half the socket timeout, which a close() that leaves the
+        # call to time out spends nearly all of, and many times the 0.1 s
+        # pause plus the milliseconds close() otherwise takes, so a loaded
+        # host has most of a second to spare before it fails the row.
+        client_context = original_context(cadata=certificates)
+        failures = []
+        measured = {}
+        for case in ("handshake", "request", "registration"):
+            server = Server(context, b"", b"")
+            if case == "registration":
+                stop = server.stop = PausedStop(server)
+            client = None
+            reached = False
+            try:
+                client = socket.create_connection(("127.0.0.1", server.port), timeout=10.0)
+                if case == "request":
+                    # Wrapping takes over the client's descriptor, so the
+                    # wrapped socket is the one to close.
+                    client = client_context.wrap_socket(client, server_hostname="posluns.dev")
+                if case == "registration":
+                    reached = stop.paused.wait(10.0)
+                else:
+                    end = time.monotonic() + 10.0
+                    while server.connection is None and time.monotonic() < end:
+                        time.sleep(0.01)
+                    reached = server.connection is not None
+                    # Time for the thread to enter its blocking call.
+                    time.sleep(0.2)
+            finally:
+                # The server's one close(), timed while the client still
+                # holds its connection open.
+                if case == "registration":
+                    stop.closing.set()
+                start = time.monotonic()
+                server.close()
+                elapsed = time.monotonic() - start
+                if client is not None:
+                    client.close()
+            if not reached:
+                failures.append(case + ": the serving thread did not reach the point "
+                                "this case closes it at")
+                continue
+            measured[case] = round(elapsed, 3)
+            if elapsed > CLOSE_BOUND:
+                failures.append("{}: close() took {:.3f} s, over its {} s bound".format(
+                    case, elapsed, CLOSE_BOUND))
+            if server.thread.is_alive():
+                failures.append(case + ": the serving thread outlived close()")
+            if server.errors:
+                failures.append(case + ": fixture server error " + ", ".join(server.errors))
+        row = {"id": CLOSE_IDENTITY, "close_seconds": measured,
+               "close_bound_seconds": CLOSE_BOUND,
+               "test_status": INVALID if failures else VALID}
+        if failures:
+            row["detail"] = "; ".join(failures)
+        return row
 
     def snapshot(root):
         result = {}
@@ -5115,6 +5205,8 @@ def self_test(vectors_only=False, steady_only=False):
                                 + ["FAIL roster/rows: the run stopped after its positive control"])
                 return 1
 
+            # The fixture's close() itself, which every run's teardown relies on.
+            executed.append(close_row(contexts[0], fixture_certificates))
             guard_rows = (_guard_self_test() + _ownership_self_test()
                           + cancellation_rows(_cancellation_self_test))
             executed.extend(guard_rows)
@@ -5123,19 +5215,28 @@ def self_test(vectors_only=False, steady_only=False):
                 executed.append(record_row(case, run, run_case(base, contexts, case, True)))
             vector_results = resolver_vectors(base, contexts)
     except Exception as exc:
-        # The message names the cause, so a failure reads as more than its
-        # exception class.
+        # Carry the exception's message, so a failure reads as more than its
+        # exception class. Reading the message can itself raise; the row is
+        # still recorded, with a fallback detail, and the run still exits 2.
+        try:
+            detail = str(exc) or "no message"
+        except Exception:
+            detail = "the exception's message could not be read"
         executed.append({
             "id": "fixture/setup-or-teardown",
             "test_status": CANNOT_EVALUATE,
             "exception": type(exc).__name__,
-            "detail": str(exc) or "no message",
+            "detail": detail,
         })
         SELF_TEST_ROSTER = tuple(executed)
         print(_report_line(executed))
         # Exit 2 (cannot evaluate), but still name every row that is not
-        # VALID, the setup-or-teardown row included.
-        _print_failures(_roster_failures(executed))
+        # VALID, the setup-or-teardown row included. That row is the last
+        # one and not VALID, so the last line is its own; it also names the
+        # exception and its detail, on one line.
+        lines = _roster_failures(executed)
+        lines[-1] += ": {}: {}".format(type(exc).__name__, " ".join(detail.splitlines()))
+        _print_failures(lines)
         return 2
 
     # Every exit-code departure from main; all concern resolver workers:
@@ -5185,7 +5286,7 @@ def self_test(vectors_only=False, steady_only=False):
     #   during them.
     SELF_TEST_ROSTER = tuple(executed)
     print(_report_line(executed))
-    expected_ids = ([positive[0]] + [row["id"] for row in guard_rows]
+    expected_ids = ([positive[0], CLOSE_IDENTITY] + [row["id"] for row in guard_rows]
                     + [case[0] for case in cases])
     # The FAIL-line check runs first, so its PASS lines precede any FAIL line,
     # and the real roster is judged and named whatever its outcome.
