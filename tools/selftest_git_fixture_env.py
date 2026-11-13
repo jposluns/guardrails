@@ -1294,7 +1294,8 @@ def _config_poison_fixture(base):
 # among its timed members: SIZING_ACCOUNT_TIMED stays 88, as for the relaunched member above, and
 # may overstate the timed members still registered by up to two, so the count of members with no
 # recorded time may understate by up to two. The runs and times recorded here are unchanged.
-# NOT MEASURED, though these bounds govern those reruns all the same: the system lane; the
+# NOT MEASURED in the account, though these bounds govern those reruns all the same: the system
+# lane (one member, tools/selftest_aiqt_hooks.py, was MEASURED in it later; its own entry); the
 # malformed lane's configuration for every member of that lane outside SIZING_MALFORMED_MEASURED;
 # and the fsmonitor pass's own configuration (fsmonitor set in both config files, ignore and
 # attributes files removed, its four members run one at a time).
@@ -1317,11 +1318,12 @@ def _config_poison_fixture(base):
 # member registered after the account unless SIZING_LATER_MEASURED records a measurement of it.
 # Their default bound is NOT sized from a measurement. One account member,
 # tools/selftest_aiqt_hooks.py, was later MEASURED in the config lanes at over 1200 s (its own
-# entry); the account's times date from 2026-10-12, so a member that has grown since, as that one
-# did, can sit near or over the default with no figure here showing it. _roster_figures derives
-# the live counts from these constants (members, malformed-lane members, members outside the
-# account, members with no recorded time, malformed-lane members not measured in that lane), and
-# config/member-roster-figures prints them with one line per member outside the account.
+# entry); the account's times date from 2026-10-12, so a member that has grown since can sit near
+# or over the default with no figure here showing it. That this member grew past the default since
+# then is INFERRED, not measured: the account gives no time for it (its own entry). _roster_figures
+# derives the live counts from these constants (members, malformed-lane members, members outside
+# the account, members with no recorded time, malformed-lane members not measured in that lane),
+# and config/member-roster-figures prints them with one line per member outside the account.
 # A bound sized from a measurement taken after the account (an entry whose own comment says it
 # was sized outside SIZING) is allowed only when SIZING_LATER_MEASURED maps its argv to a
 # one-line citation of that measurement; _roster_figures reports any other CONFIG_MEMBER_BOUNDS
@@ -1459,7 +1461,7 @@ CONFIG_MEMBER_BOUNDS = {
     # after the other on one worker: at their entries that is at least 8100 + 9600 = 17700 s (the
     # two smallest, c and e), after whatever that worker ran before them. On the malformed-config
     # lane's roster (every member outside CONFIG_EXCLUSIONS["malformed"]), with every member at its
-    # bound, that lane's four workers alone run 60900 s in roster order (52500 s with these five at
+    # bound, that lane's four workers alone run 64500 s in roster order (56100 s with these five at
     # 3600 s): a schedule of this table's entries, not a measured time, and the other lanes' rosters
     # differ. A lane that reaches the job limit is ended by it and fails with no member named.
     # HISTORY (no entry is sized from these figures now).
@@ -1540,9 +1542,9 @@ CONFIG_MEMBER_BOUNDS = {
     # carries its own bound (a fixed one, such as its 900 s deadline-child limit, or one stretched
     # with host load through tools/_load_bound.py), and no bound covers the whole run, so this entry
     # is a DELIBERATE SHORTER DEADLINE like the others (see CHOICE), sized above its measured runs.
-    # REPORTED, not reproduced here (2026-11-13, host load5 about 50 on 96 CPUs): a config-system
-    # lane run reached the then 1200 s default on this member (cannot evaluate); three other runs of
-    # this self-test took 1097.7 s, 1157.0 s and 1180.7 s.
+    # REPORTED, not reproduced here (2026-11-13): two system-lane runs, applying pull requests
+    # #1148 and #1141, each reached the then 1200 s default on this member (cannot evaluate), so
+    # neither run has a known length and neither is fed to the formula.
     # MEASURED (2026-11-13, 15:58:07 to 16:19:04 UTC, 96-CPU host, plain, the bound lifted to
     # 2400 s): the suite's own _config_results over this one member (so one pool worker busy),
     # under the combined lane's injected configuration, rebuilt by a copy of that lane's setup code,
