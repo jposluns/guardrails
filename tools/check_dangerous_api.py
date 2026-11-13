@@ -564,6 +564,8 @@ ALLOWLIST = (
     ("tools/check_release_cut.py", "_census_paused_run", "shell", 1, _SAVED),
     ("tools/check_release_cut.py", "_census_run_flipped", "code", 1,
      _MUTANT + " (each census drain revert, loaded by exec_module from a scratch file)"),
+    ("tools/check_release_cut.py", "_census_table_flipped", "code", 1,
+     _MUTANT + " (each census budget cross-check revert, loaded by exec_module from a scratch file)"),
     ("tools/pin.py", "_recover_close_vectors", "code", 1,
      _MUTANT + " (the recover close reverts)"),
     ("tools/selftest_git_fixture_env_core.py", "_system_pin_checks", "code", 1,
