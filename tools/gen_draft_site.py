@@ -21,8 +21,9 @@ pages. Each site's base (SITES) is the one base path for every internal href and
 becomes "/" at that site's promotion, and the robots meta goes with it (a page under draft/ keeps it). Asset
 URLs follow the site's separate asset base ("assets" in SITES), which stays "/draft/" after promotion, so
 the pinned copy is served where it was staged. A page is refused (exit 2, nothing written) if it carries an
-en or em dash, an inline style or script, an `on*` attribute, or "what this is" framing. The baseline
-files under assets/baseline/ are a pinned copy, not generated here (tools/check_baseline_pin.py).
+en or em dash, an inline style or script, an `on*` attribute, "what this is" framing, or markup Python's
+html.parser and a browser parse differently (tools/_html_differential.py). The baseline files under
+assets/baseline/ are a pinned copy, not generated here (tools/check_baseline_pin.py).
 
 Content model: each page is 1 TOML data file under its site's data directory (site/draft-src/ for aiqt.ai,
 opf/site/draft-src/ for opfiles.ai), discovered by listing that directory, so a page lands or changes as
@@ -74,6 +75,7 @@ from urllib.parse import unquote
 ROOT = Path(__file__).resolve().parents[1]
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _html_differential  # noqa: E402  (raw-source checks for markup a browser parses another way)
 from _standards import load_manifests, ManifestError  # noqa: E402
 import gen_mappings  # noqa: E402  (the one mappings rendering source: rows, registry and wording)
 import gen_rules  # noqa: E402  (the one frontmatter parser and corpus loader)
@@ -1398,10 +1400,9 @@ def _body_html(site, page):
 # paths, with no backslash, whitespace or control character, no protocol-relative "//" start and no "." or
 # ".." segment, raw or percent-encoded (%2e, either case); and every a or area whose href is https carries
 # target="_blank", rel with noopener and noreferrer, and the "(opens in a new tab)" hint in its text or
-# aria-label. Residual: the guard judges the markup as Python's html.parser tokenizes it, so a malformed
-# construct a browser repairs differently is outside it; it reads no stylesheet (inline styles are refused
-# separately) and treats a URL-shaped value in any attribute not listed here as text; and it does not
-# check that an allowed target exists.
+# aria-label. Markup html.parser and a browser parse differently is refused beside this pass (refusals_for,
+# through tools/_html_differential.py). The guards' residual is stated in the draft-site-drift entry of
+# .aiqt/core/gates/manifest.toml.
 LINK_REFUSED_TAGS = frozenset((
     "script", "iframe", "frame", "frameset", "base", "form", "object", "embed", "applet", "portal",
     "animate", "set", "animatemotion", "animatetransform", "handler", "foreignobject"))
@@ -1573,8 +1574,10 @@ class _Refusals(HTMLParser):
         self.found = []
         self._script = None
         self.text = []
+        self.starts = {}
 
     def handle_starttag(self, tag, attrs):
+        self.starts[tag] = self.starts.get(tag, 0) + 1
         names = [name for name, _value in attrs]
         if tag == "style":
             self.found.append("inline <style> element")
@@ -1598,8 +1601,18 @@ class _Refusals(HTMLParser):
         self.text.append(data)
 
 
+# The tags the raw-versus-parsed check counts: every element the guards refuse or allow only in the shell's
+# exact form. A start tag html.parser did not see (hidden in a comment, a marked section, raw text or an
+# attribute value) makes the raw count differ and refuses the page. Equal counts with one tag hidden and
+# another seen in its place still refuse: style and iframe are always refused, and the link guard allows
+# each shell script once, so a script the shell did not write is refused where it is seen.
+DIFFERENTIAL_TAGS = frozenset(("script", "style", "iframe")) | LINK_REFUSED_TAGS
+
+
 def refusals_for(html):
-    """Every template code-style refusal a page triggers (specification sections 5 and 12)."""
+    """Every template code-style refusal a page triggers (specification sections 5 and 12), plus every
+    construct html.parser and a browser parse differently and every DIFFERENTIAL_TAGS start tag the parser
+    did not see (tools/_html_differential.py), each with its reason."""
     found = []
     if any(dash in html for dash in DASHES):
         found.append("en or em dash")
@@ -1609,6 +1622,8 @@ def refusals_for(html):
     found.extend(parser.found)
     if FRAMING_RE.search(" ".join(parser.text)):
         found.append('"what this is" framing')
+    found.extend(_html_differential.differential_constructs(html))
+    found.extend(_html_differential.raw_vs_parsed(html, parser.starts, DIFFERENTIAL_TAGS))
     return found
 
 
@@ -2002,6 +2017,61 @@ def _self_test():
         expect(name, refusals_for(text) != [], text)
     expect("refuse/external-script-allowed", refusals_for('<script src="/draft/x.js" defer></script>') == [])
     expect("refuse/word-only-allowed", refusals_for("<p>Here is what the standard is for.</p>") == [])
+
+    # Markup html.parser and a browser parse differently: each case carries content the guard refuses
+    # (script, an on* attribute or framing) where only a browser reads it, and must be refused with the
+    # differential's own reason, whatever else the page triggers.
+    for name, text, reason in (
+            ("differential/iframe-srcdoc",
+             '<iframe srcdoc="&lt;script&gt;alert(1)&lt;/script&gt;"></iframe>', "srcdoc attribute"),
+            ("differential/srcdoc-uppercase-after-quote",
+             '<iframe title="x"SRCDOC="&lt;p onclick=x()&gt;"></iframe>', "srcdoc attribute"),
+            ("differential/noscript-escape",
+             '<noscript><p title="</noscript><script>alert(1)</script>"></p></noscript>', "<noscript>"),
+            ("differential/noscript-escape-script-unseen",
+             '<noscript><p title="</noscript><script>alert(1)</script>"></p></noscript>',
+             "<script> start tags: 1 in the source, 0 parsed"),
+            ("differential/cdata-in-svg-text",
+             "<svg><text><![CDATA[What this is: a site.]]></text></svg>", '"<![" CDATA'),
+            ("differential/cdata-outside-svg",
+             "<div><![CDATA[x]><script>alert(1)</script>]]></div>", '"<![" CDATA'),
+            ("differential/cdata-outside-svg-script-unseen",
+             "<div><![CDATA[x]><script>alert(1)</script>]]></div>",
+             "<script> start tags: 1 in the source, 0 parsed"),
+            ("differential/empty-comment",
+             '<!--><p onclick="x()">x</p><!-- -->', '"<!-->" or "<!--->"'),
+            ("differential/empty-comment-dash",
+             '<!---><p onclick="x()">x</p><!-- -->', '"<!-->" or "<!--->"'),
+            ("differential/template",
+             '<template><p onclick="x()">x</p></template>', "<template>"),
+            ("differential/style-in-svg",
+             '<svg><style><img src="/draft/x.png" onerror="x()"></style></svg>', "<style> after an <svg>"),
+            ("differential/script-in-svg",
+             '<svg><script><p onclick="x()">x</p></script></svg>', "<script> after an <svg>"),
+            ("differential/style-in-math",
+             '<math><style><p onclick="x()">x</p></style></math>', "<style> after an <svg> or <math>"),
+            ("differential/title-in-svg",
+             '<svg><title><p onclick="x()">x</p></title></svg>', "<title> after an <svg>"),
+            ("differential/textarea-in-svg",
+             '<svg><textarea><p onclick="x()">x</p></textarea></svg>', "<textarea> after an <svg>"),
+            ("differential/hidden-iframe-fails-closed",
+             '<textarea><iframe src="/draft/x"></iframe></textarea>',
+             "<iframe> start tags: 1 in the source, 0 parsed"),
+            ("differential/hidden-object-fails-closed",
+             '<p title="<OBJECT data=/draft/x>">x</p>', "<object> start tags: 1 in the source, 0 parsed")):
+        found = refusals_for(text)
+        expect(name, any(reason in item for item in found), found)
+    # Controls: escaped text, ordinary comments (the "--!>" close and the 1 empty comment both parsers end
+    # at "-->"), an svg with no raw text element, and names that only start like a refused one, pass.
+    for name, text in (
+            ("differential/escaped-script-text-passes", "<p>&lt;script&gt;alert(1)&lt;/script&gt;</p>"),
+            ("differential/plain-comment-passes", "<p>a</p><!-- note --><p>b</p>"),
+            ("differential/bang-close-comment-passes", "<p>a</p><!-- note --!><p>b</p>"),
+            ("differential/empty-comment-four-dashes-passes", "<p>a</p><!----><p>b</p>"),
+            ("differential/svg-text-passes", '<svg viewBox="0 0 2 2"><text x="1" y="1">a</text></svg>'),
+            ("differential/data-srcdoc-passes", '<p data-srcdoc="x">a</p>'),
+            ("differential/longer-tag-name-passes", "<p><scriptx>a</scriptx><settings>b</settings></p>")):
+        expect(name, refusals_for(text) == [], refusals_for(text))
 
     # The data model: a page dict straight from parsed TOML text, as _load_pages produces it.
     def model(text, where="fixture.toml"):
