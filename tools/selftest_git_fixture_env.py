@@ -1503,18 +1503,20 @@ CONFIG_MEMBER_BOUNDS = {
     # time of it since is known). It is sized from the standalone runs MEASURED below with a stated
     # margin, as a DELIBERATE SHORTER DEADLINE under the kill-timeout rule (see CHOICE).
     # READ FROM SOURCE (tools/check_release_cut.py, its census budget comment), the worst case over
-    # named terms: a --red-on-revert run ends by at most 10665 s, a BOUND (the census table, census
-    # rows and revert flips spending their bounds in full, 680 + 945 + 880 s, and the 243 fixture
-    # observe calls and the 29 mutation replays each running just under its 30 s TIMEOUT bound,
-    # 7290 + 870 s), plus about 183.1 s, MEASURED (the parts with no bound summed there: the fixture
-    # builds' git calls, the close checks, entry-restore and the close-sweep reverts), about
-    # 10848.1 s. 2700 s is BELOW that worst case ON PURPOSE: the 30 s bounds summed are a ceiling no
-    # run approaches, and a bound near it would let a hung run hold this lane for over three hours.
-    # The margin: 2700 s is about 7.4 times the slowest run below (367.0 s), and it still covers the
-    # census bounds alone spent in full plus the measured rest (2505 + 183.1 = 2688.1 s), which is
-    # above the 1200 s default. Reaching it kills the member at its bound and is reported by
-    # _run_member as this lane's deadline ("reached its 2700 s bound (cannot evaluate)"), never as
-    # a failure of the member.
+    # named terms: a --red-on-revert run's bounded terms come to at most 10665 s, a BOUND that
+    # leaves out each launch's fork and exec and each wait's poll overshoot (the census table,
+    # census rows and revert flips spending their bounds in full, 680 + 945 + 880 s, and the 243
+    # fixture observe calls and the 29 mutation replays each running just under its 30 s TIMEOUT
+    # bound, 7290 + 870 s), plus about 183.1 s, MEASURED, with no bound (the parts with no bound
+    # summed there: the fixture builds' git calls, the close checks, entry-restore and the
+    # close-sweep reverts), about 10848.1 s. That sum is not a ceiling on a run's wall time: its
+    # measured parts have no bound. 2700 s is BELOW that worst case ON PURPOSE: the 30 s bounds
+    # summed are a ceiling no run approaches, and a bound near it would let a hung run hold this
+    # lane for over three hours. The margin: 2700 s is about 7.4 times the slowest run below
+    # (367.0 s), and it still covers the census bounds alone spent in full plus the measured rest as
+    # measured (2505 + 183.1 = 2688.1 s), which is above the 1200 s default. Reaching it kills the
+    # member at its bound and is reported by _run_member as this lane's deadline ("reached its
+    # 2700 s bound (cannot evaluate)"), never as a failure of the member.
     # MEASURED (2026-11-09, 80-CPU host, load5 about 26 to 29, standalone, plain): one --self-test
     # run took 283.4 s wall and one --self-test --red-on-revert run took 309.4 s wall, both passed.
     # MEASURED (2026-11-09, 12:06:49 to 12:12:56 UTC, 80-CPU host, 1-minute load 23.9 at the start
