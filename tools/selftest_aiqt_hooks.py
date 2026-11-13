@@ -6313,9 +6313,13 @@ _DEADLINE_SHAPES = {
     "push_force_after": lambda n, base: ("Bash", {"command": _repeat("git ", n, "; git push --force origin main")}),
     "noverify_after": lambda n, base: ("Bash", {"command": _repeat("git ", n, "; git commit --no-verify -m x")}),
     # gate_weakening's check-then-push reading: a long run of known checks with no push (each check once
-    # walked to the end of the command, quadratic in the run), and a push after one long '&&' list of checks.
+    # walked to the end of the command, quadratic in the run), a push after one long '&&' list of checks, and
+    # such a list whose status a long next command keeps and tests before the push (that command judged once
+    # for every check sharing the list's end, so with each judged again the cost is checks times its length).
     "checks_no_push": lambda n, base: ("Bash", {"command": _repeat("pytest; ", n)}),
     "check_push_after": lambda n, base: ("Bash", {"command": _repeat("pytest && ", n, "true; git push origin feat")}),
+    "checks_kept_push": lambda n, base: ("Bash", {"command": _repeat(
+        "pytest && ", n, "true; : " + "x" * (n // 2) + "$? && git push origin feat")}),
     "subst_after": lambda n, base: ("Bash", {"command": _repeat("git ", n, '; git commit -m "$(id)"')}),
     "breadth_push_after_unbal": lambda n, base: ("Bash", {"command": _repeat(
         "git add x ", n, "; git commit -a -m x; git push origin '")}),
@@ -6450,7 +6454,7 @@ _DEADLINE_CASES = {
     "diff_source_pretool": ("git_words_in_dquotes", "cd_git_fetch_unbal", "git_words", "diff_after"),
     "gate_weakening": ("git_words_unbal_dq", "git_add_unbal", "git_push_words_unbal", "noverify_after",
                        "ansi_c_herestr", "ansi_c_noverify_after", "procsubst_run_after",
-                       "fg_setsid_options", "checks_no_push", "check_push_after"),
+                       "fg_setsid_options", "checks_no_push", "check_push_after", "checks_kept_push"),
     "gensrc_guard": ("write_content", "write_deep_path", "redirects_many", "heredocs", "nest_parens",
                      "tee_operands", "tee_operands_distinct"),
     "git_discard": ("git_segments_reset", "nest_parens", "procsubst_run_after"),
@@ -6484,7 +6488,8 @@ _DEADLINE_DENY_CASES = frozenset((
     ("bash_absolute_paths", "dq_case_substs_after"),
     ("commit_msg_subst", "subst_after"), ("diff_source_pretool", "diff_after"),
     ("gate_weakening", "noverify_after"), ("gate_weakening", "ansi_c_noverify_after"),
-    ("gate_weakening", "check_push_after"), ("git_explicit_binding", "breadth_push_after_unbal"), ("pgrep_self_match", "pgrep_self_after"),
+    ("gate_weakening", "check_push_after"), ("git_explicit_binding", "breadth_push_after_unbal"),
+    ("pgrep_self_match", "pgrep_self_after"),
     ("protected_line", "push_force_after"), ("protected_line", "mirror_cfg_run_after"),
     ("protected_line", "procsubst_run_after")))
 # The (handler, shape) cases whose note must still arrive, each within its bound. For inline_errexit: on
@@ -6515,8 +6520,9 @@ _DEADLINE_ALLOW_CASES = frozenset((
     ("orch_truncation_guard", "fg_subshells"),
     ("orch_truncation_guard", "fg_nested_glued_substs"),
     ("orch_truncation_guard", "fg_quoted_heredoc_amps"),
-    ("pgrep_self_match", "pgrep_distinct"), ("gate_weakening", "checks_no_push")))
-_DEADLINE_SIZES =(65536, 262144, 1048576)
+    ("pgrep_self_match", "pgrep_distinct"), ("gate_weakening", "checks_no_push"),
+    ("gate_weakening", "checks_kept_push")))
+_DEADLINE_SIZES = (65536, 262144, 1048576)
 # CPU seconds one in-process handler call may use on a shape of that size, judged on the calling thread's own
 # CPU clock (time.thread_time, read inside the call by _deadline_timed_call). The figures below were recorded
 # before these rows moved to that clock, on this process's CPU time plus that of the child processes it
@@ -24047,13 +24053,33 @@ def _main_isolated(monitor):
             ("(gw-cp-r6) a status saved but never tested before the push denies",
              "pytest; rc=$?; git push origin feat; exit $rc"),
             ("(gw-cp-r7) a printed copy of the status is not a test, denies",
-             'pytest; echo "exit $?"; git push origin feat'),
+             "pytest; echo $? && git push origin feat"),
             ("(gw-cp-r8) a push joined by '&&' to an unrelated command denies",
              "npm test; cd /var/tmp/x && git push origin feat"),
             ("(gw-cp-r9) the check's output in a file does not guard the push, denies",
              "pytest > /var/tmp/x/l 2>&1\n\ngit push origin feat"),
             ("(gw-cp-r10) a blank line and a trailer between check and push deny",
              "ruff check .\n\necho checked\ngit push origin feat"),
+            ("(gw-cp-r11) a printed copy of the status, then ';' git push, denies",
+             'pytest; echo "exit $?"; git push origin feat'),
+            # After a '&' only a wait naming the check's own job keeps its status: a bare wait returns 0 once
+            # every job has ended, and a wait on another job returns that job's status.
+            ("(gw-cp-r12) a bare wait after a backgrounded check is not a test of it, denies",
+             "pytest & wait && git push origin feat"),
+            ("(gw-cp-r13) a bare wait with || exit does not stop a failing check, denies",
+             "pytest & wait || exit 1; git push origin feat"),
+            ("(gw-cp-r14) a wait on another job does not keep the check's status, denies",
+             "sleep 1 & pytest & wait %1 && git push origin feat"),
+            ("(gw-cp-r15) $! saved in one variable and a wait on another, denies",
+             'pytest & pid=$!; wait "$other" && git push origin feat'),
+            ("(gw-cp-r16) $! saved in a backgrounded assignment the shell never keeps, denies",
+             'pytest & pid=$! & wait "$pid" && git push origin feat'),
+            ("(gw-cp-r17) a test of the kept status piped on is the pipeline's status, denies",
+             "pytest; [ $? -eq 0 ] | cat && git push origin feat"),
+            ("(gw-cp-r18) a wait on the check's job sent to the background is not a test, denies",
+             "pytest & wait $! & true && git push origin feat"),
+            ("(gw-cp-r19) $! saved in a variable bash does not keep (BASHPID) is not the job, denies",
+             'pytest & BASHPID=$!; wait "$BASHPID" && git push origin feat'),
         ]
         _cp_allowed = [
             ("(gw-cp-a1) check && git push allows", "pytest && git push origin feat"),
@@ -24062,7 +24088,7 @@ def _main_isolated(monitor):
             ("(gw-cp-a3) a saved status tested with || exit before the push allows",
              'pytest; rc=$?; [ "$rc" -eq 0 ] || exit "$rc"; git push origin feat'),
             ("(gw-cp-a4) a push inside an if on the saved status allows",
-             "pytest; if [ $? -eq 0 ]; then git push origin feat; fi"),
+             "pytest; if [ $? -eq 0 ]; then\ngit push origin feat\nfi"),
             ("(gw-cp-a5) a push alone allows", "git push origin feat"),
             ("(gw-cp-a6) a check alone allows", "pytest -q"),
             ("(gw-cp-a7) check || exit 1 stops a failing check before the push, allows",
@@ -24075,8 +24101,15 @@ def _main_isolated(monitor):
             ("(gw-cp-a12) a check the hook does not recognise is the disclosed residual, allows",
              "tools/run_all_checks.sh; git push origin feat"),
             ("(gw-cp-a13) a push in a group is outside the shape, allows",
-             "pytest; { git push origin feat; }"),
+             "pytest; {\ngit push origin feat\n}"),
             ("(gw-cp-a14) a git command other than push after a check allows", "pytest; git status"),
+            ("(gw-cp-a15) a push after 'then' on its line is not read as a push, allows",
+             "pytest; if [ $? -eq 0 ]; then git push origin feat; fi"),
+            ("(gw-cp-a16) a push after '{' on its line is not read as a push, allows",
+             "pytest; { git push origin feat; }"),
+            ("(gw-cp-a17) $! saved in a variable and that job waited on allows",
+             'pytest & pid=$!; wait "$pid" && git push origin feat'),
+            ("(gw-cp-a18) a quoted wait on $! allows", 'pytest & wait "$!" && git push origin feat'),
         ]
         for _cp_label, _cp_cmd in _cp_refused:
             gexpect(_cp_label, _cp_cmd, "deny")

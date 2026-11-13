@@ -16927,14 +16927,40 @@ def _verification_sink_message(hit):
 # and-or list ends at a ';', a newline or a '&', then a git push (_gate_push_argv) later in the same command,
 # every segment from the check to the push plain (_gate_push_plain: no reserved word, no parenthesis). Not
 # refused: a push in the check's own and-or list (check && git push); a check whose list holds '|| exit' or
-# '|| return'; a check whose status the first command after its list keeps (_gate_status_kept) when a '&&' or
+# '|| return'; a check whose status a command right after its list keeps (_gate_status_keeper) when a '&&' or
 # '||' joins some command from that one up to the push (a test of the saved status); a push with a reserved word
-# or a parenthesis on the way (inside an if, a loop, a case or a group); and a push with no known check before it.
+# or a parenthesis anywhere on the way (an if, a loop, a case or a group, whether or not the push is inside
+# it); and a push with no known check before it. After a '&' only a wait that names the check's own job keeps
+# its status ('wait $!', or 'pid=$!' and then 'wait "$pid"'): a bare wait returns 0 once every job has ended,
+# and a wait on another job returns that job's status. Not judged, each a silent allow: a check that pipes
+# onward (pytest | tee log); a push after a parenthesis, so an exit inside a subshell ('|| (echo; exit 1)'),
+# which leaves only the subshell, still lets the push run; any reserved word between the check and the push,
+# even one that closes before it (if true; then :; fi); a check whose list goes on with '||' to a command
+# other than exit or return, whose success can hide the check's failure from a later '|| exit', a push later
+# in that list or a kept status; any '&&' or '||' after a kept status counted as its test, whichever way it
+# branches; and a function or alias that redefines wait, test, '[' or exit. The judgement of each list end is
+# made once and shared by every check whose list ends there, so the whole reading takes time linear in the
+# records.
 _GATE_PUSH_LIST_ENDS = frozenset((";", "", "&"))
 _GATE_PUSH_ANDOR = frozenset(("&&", "||"))
 _GATE_PUSH_STOPS = frozenset(("exit", "return"))
 _GATE_PUSH_DRY = frozenset(("-n", "--dry-run"))
 _GATE_PUSH_SEP_TEXT = dict(((";", "a ';'"), ("", "a newline"), ("&", "a '&' (the check runs in the background)")))
+# A command that keeps a status ends its own list at one of these, never at '&' or a pipe, which would run
+# it in a subshell or make the list's status another command's.
+_GATE_KEEPER_ENDS = frozenset((";", "", "&&", "||"))
+# A wait on one job, the whole raw text of its segment: 'wait' and one operand, $NAME or ${NAME} (NAME being
+# '!' or a variable name), bare or in double quotes.
+_GATE_WAIT_ONE_RE = re.compile(r"[ \t]*wait[ \t]+(\"?)\$(\{?)(!|[A-Za-z_][A-Za-z0-9_]*)(\}?)\1[ \t]*\Z")
+# An assignment of $! to a variable, the whole raw text of its segment: NAME=$!, NAME="$!", NAME=${!} or
+# NAME="${!}".
+_GATE_PID_SAVE_RE = re.compile(r"[ \t]*([A-Za-z_][A-Za-z0-9_]*)=(\"?)\$(\{?)!(\}?)\2[ \t]*\Z")
+# Shell variables whose assignment bash ignores or refuses, or whose value changes by itself, so a wait on
+# them need not name the job just saved.
+_GATE_PID_SPECIAL = frozenset((
+    "BASHOPTS", "BASHPID", "BASH_ARGC", "BASH_ARGV", "BASH_COMMAND", "BASH_LINENO", "BASH_SOURCE",
+    "BASH_SUBSHELL", "DIRSTACK", "EPOCHREALTIME", "EPOCHSECONDS", "EUID", "FUNCNAME", "GROUPS", "HISTCMD",
+    "LINENO", "PPID", "RANDOM", "SECONDS", "SHELLOPTS", "SRANDOM", "UID"))
 
 
 def _gate_push_argv(seg):
@@ -16955,22 +16981,49 @@ def _gate_push_plain(seg):
     return seg.sep_after not in ("(", ")") and (not seg.argv or seg.argv[0] not in _GATE_RESERVED)
 
 
-def _gate_status_kept(seg, background):
-    """True when the first command after a check's list keeps the check's status for a later test: after a
-    '&', a wait (which returns the background check's status); otherwise a command whose raw text reads '$?'
-    (or '${?}'), unless it is an echo with stdout not redirected (a printed copy is output, not the verdict)."""
+def _gate_wait_operand(seg):
+    """The name a segment that is only a wait on one job waits on ('!' for $!), or None: a wait with no
+    redirection whose whole raw text is _GATE_WAIT_ONE_RE, its braces paired, ended by a _GATE_KEEPER_ENDS
+    separator. A bare wait, a job spec (%1), a literal pid, an option or a single-quoted operand is None."""
+    if seg.redirects or seg.sep_after not in _GATE_KEEPER_ENDS or len(seg.argv) != 2:
+        return None
+    m = _GATE_WAIT_ONE_RE.match(seg.raw)
+    if m is None or bool(m.group(2)) != bool(m.group(4)):
+        return None
+    return m.group(3)
+
+
+def _gate_status_keeper(records, end, first, next_word):
+    """The index of the command that keeps, for a later test, the status of the check's list ending at end,
+    first being the index of the first command after that list, or None. After a '&' (the list runs in the
+    background) it is a wait on that job: first itself when it is 'wait $!' (_gate_wait_operand), or the next
+    command when first only saves $! in a variable (_GATE_PID_SAVE_RE, not a _GATE_PID_SPECIAL name, ended by
+    ';', a newline or '&&') and that command waits on the same variable. A bare wait returns 0 once every job
+    has ended, and a wait on another job returns that job's status, so neither keeps it. Otherwise it is first
+    when its raw text reads '$?' (or '${?}') and it ends at a _GATE_KEEPER_ENDS separator, unless it is an
+    echo with stdout not redirected (a printed copy is output, not the verdict)."""
+    seg = records[first]
+    if records[end].sep_after == "&":
+        if _gate_wait_operand(seg) == "!":
+            return first
+        save = _GATE_PID_SAVE_RE.match(seg.raw)
+        if (save is None or bool(save.group(3)) != bool(save.group(4)) or seg.redirects or len(seg.argv) != 1
+                or seg.sep_after not in (";", "", "&&") or save.group(1) in _GATE_PID_SPECIAL):
+            return None
+        second = next_word[first + 1]
+        if second < len(records) and _gate_wait_operand(records[second]) == save.group(1):
+            return second
+        return None
+    if seg.sep_after not in _GATE_KEEPER_ENDS or ("$?" not in seg.raw and "${?}" not in seg.raw):
+        return None
     word = _command_word(seg.argv) if seg.argv else ""
-    if background:
-        return word == "wait"
-    if "$?" not in seg.raw and "${?}" not in seg.raw:
-        return False
-    return not (word == "echo" and not _gate_stdout_redirected(seg))
+    return None if word == "echo" and not _gate_stdout_redirected(seg) else first
 
 
 def _gate_push_walk(records):
-    """The facts _check_then_push reads at each index, gathered in one pass from the end so the judgement
-    takes time linear in the records (a walk from each check to the end of the command took time quadratic in
-    a long run of checks): next_word[j], the first index at or after j of a segment with a word or a
+    """The facts _check_then_push reads at each index, gathered in one pass from the end, so a check reads
+    them in constant time (a walk from each check to the end of the command took time quadratic in a long
+    run of checks): next_word[j], the first index at or after j of a segment with a word or a
     redirection (len(records) for none); next_push[j], the first such index holding a git push
     (_gate_push_argv) when every such segment from j to it is _gate_push_plain (len(records) for none);
     list_end[j], for a segment with a word or a redirection, the index of the last segment of the and-or list
@@ -17012,29 +17065,46 @@ def _check_then_push(records):
     """gatdis check then push: (check argv, separator, push argv) for the first known verification run in
     records (_is_verification_run; a simple command outside any case compound, not piped on) whose and-or list
     ends at a ';', a newline or a '&' (_gate_push_walk's list_end) and is followed by a git push before any
-    segment that is not _gate_push_plain, or None. A push is not a hit when the first command after the
-    check's list kept the status (_gate_status_kept) and a '&&' or '||' ends some command from that one up to
-    the push (a test of the saved status)."""
+    segment that is not _gate_push_plain, or None. A push is not a hit when a command right after the
+    check's list kept the status (_gate_status_keeper) and a '&&' or '||' ends some command from that one up
+    to the push (a test of the saved status). Checks joined by '&&' share one list end, and each end is
+    judged once (_gate_push_unguarded), so the reading takes time linear in the records however many checks
+    share it."""
     checks = [i for (i, seg), case_depth in zip(enumerate(records), _gate_case_depths(records))
               if not case_depth and _gate_simple(seg) and seg.sep_after not in _GATE_PIPES
               and _is_verification_run(seg.argv)]
     if not checks:
         return None
-    n = len(records)
-    next_word, next_push, list_end, joins = _gate_push_walk(records)
+    facts = _gate_push_walk(records)
+    list_end = facts[2]
+    judged = {}
     for i in checks:
         end = list_end[i]
         if end is None:
             continue
-        first = next_word[end + 1]
-        push = next_push[first] if first < n else n
-        if push >= n:
-            continue
-        ended = records[end].sep_after
-        if _gate_status_kept(records[first], ended == "&") and joins[push] > joins[first]:
-            continue   # the status kept right after the list is tested before the push
-        return records[i].argv, ended, _gate_push_argv(records[push])
+        if end not in judged:
+            judged[end] = _gate_push_unguarded(records, end, facts)
+        push = judged[end]
+        if push is not None:
+            return records[i].argv, records[end].sep_after, _gate_push_argv(records[push])
     return None
+
+
+def _gate_push_unguarded(records, end, facts):
+    """The index of the git push that runs whatever the and-or list ending at end returned, or None: the
+    first push after that list with every segment on the way _gate_push_plain (next_push in facts, the
+    _gate_push_walk tuple), unless a command right after the list keeps its status (_gate_status_keeper) and
+    a '&&' or '||' ends some command from that one up to the push."""
+    next_word, next_push, _list_end, joins = facts
+    n = len(records)
+    first = next_word[end + 1]
+    push = next_push[first] if first < n else n
+    if push >= n:
+        return None
+    keeper = _gate_status_keeper(records, end, first, next_word)
+    if keeper is not None and keeper < push and joins[push] > joins[keeper]:
+        return None   # the status kept right after the list is tested before the push
+    return push
 
 
 def _check_then_push_message(hit):
@@ -18610,15 +18680,23 @@ def gate_weakening(data):
     word or parenthesis on the way, since that push runs whatever the check returned; the reason names the
     check, the separator and the push. It allows check && git push, a push after the check's status is kept
     by the next command and tested by a '&&' or '||' before the push ([ $? -eq 0 ] && git push, or rc=$?;
-    [ "$rc" -eq 0 ] || exit 1; git push), a check whose list holds '|| exit' or '|| return', a push inside an
-    if, a loop, a case or a group, a push carrying -n or --dry-run, and a push with no known check before it.
-    Disclosed residual: a push in a later call, a check run inside a script the hook cannot read (a CI
-    script, bash -c or eval), and a check the hook does not recognise (a checker-shaped command off that
-    allow-list, such as tools/run_all_checks.sh run directly or a wrapper the peel does not resolve) are not
-    refused, nor is a push behind such a wrapper (sudo, command), one joined to the check by '||', or one in
-    a command the lexer cannot parse; a kept status tested by an unrelated '&&' or '||' counts as tested. An
-    inline set -e is not credited (a disclosed over-refusal of set -e; check; git push), since in this tool
-    an inline set -e was seen not to stop a later step (inline_errexit).
+    [ "$rc" -eq 0 ] || exit 1; git push; after a '&' only a wait naming the check's own job, 'wait $!' or
+    pid=$!; wait "$pid", since a bare wait returns 0 and a wait on another job returns that job's status), a
+    check whose list holds '|| exit' or '|| return', a push with a reserved word or a parenthesis anywhere on
+    the way (an if, a loop, a case or a group, whether or not the push is inside it), a push carrying -n or
+    --dry-run, and a push with no known check before it. Each list end is judged once, however many checks
+    share it, so this reading takes time linear in the lexed segments. Disclosed residual: a push in a later
+    call, a check run inside a script the hook cannot read (a CI script, bash -c or eval), and a check the
+    hook does not recognise (a checker-shaped command off that allow-list, such as tools/run_all_checks.sh
+    run directly or a wrapper the peel does not resolve) are not refused, nor is a check that pipes onward
+    (pytest | tee log), a push behind such a wrapper (sudo, command), one joined to the check by '||', one
+    after an exit inside a subshell (pytest || (echo fail; exit 1); git push, the exit leaving only the
+    subshell), one after any reserved word, even one that closes before it (if true; then :; fi; git push),
+    one after a check whose list goes on with '||' to a command other than exit or return (whose success can
+    hide the check's failure), one after a function or alias that redefines wait, test, '[' or exit, or one
+    in a command the lexer cannot parse; any '&&' or '||' after a kept status counts as its test, whichever
+    way it branches. An inline set -e is not credited (a disclosed over-refusal of set -e; check; git push),
+    since in this tool an inline set -e was seen not to stop a later step (inline_errexit).
     Disclosed residuals: R1 a check inside an sh -c/bash -c, eval or
     xargs body; R2 an alias defined in a configuration file, or a shell function; R3 a gate whose name and
     options carry no checker part
