@@ -4,15 +4,20 @@ exclusion.
 
 OPF COPY. This file is OPF's own working copy of tools/check_cited_standards.py, so the OPF tree checks its
 prompt-pack citations with no parent tree present. The designator grammar, the corpus, exclusion and
-manifest handling, the residual and the self-test are the parent gate's, unchanged; only three things
-differ. The default root is the OPF root (the directory above this file), not the enclosing repository
-root, so _gen_common is not imported. Standards manifests are read from <root>/standards (STANDARDS_REL),
-OPF's own manifest set; while OPF's corpus cites no numbered standard, that directory is absent and the
-set is empty, which load_manifests reads as no manifests. And the usage lines below name the OPF config.
-The built-in default corpus is the parent's rule-file glob, kept so the self-test's default-corpus
-vectors hold this copy exactly as they hold the parent; it matches no file in an OPF tree, so a run
-without --config there exits 2 (cannot evaluate), never a false pass. The OPF runner always passes
---config tools/cited-standards.toml, and tools/check_cited_standards_contract.py beside this file pins
+manifest handling, the residual and the parent's fixture vectors are the parent gate's, unchanged; only
+these things differ. The default root is the OPF root (the directory above this file), not the enclosing
+repository root, so _gen_common is not imported. Standards manifests are read from <root>/standards
+(STANDARDS_REL), OPF's own manifest set; while OPF's corpus cites no numbered standard, that directory is
+absent and the set is empty, which load_manifests reads as no manifests. A run without --config reads
+OPF's own config, tools/cited-standards.toml under the root it checks (DEFAULT_CONFIG_REL: under the OPF
+root unless --root names another tree), and exits 2 (cannot evaluate) when that file is missing,
+unreadable or not a regular file; it never falls back to the parent's rule-file corpus. The self-test
+adds vectors that drive main with no --config, to hold that default. And the usage lines below name the
+OPF config. run() itself keeps the parent's built-in default corpus, the rule-file glob, for a call with
+no config, so the self-test's default-corpus vectors, which call run() directly, hold this copy exactly
+as they hold the parent; main never makes that call. That glob matches no file in an OPF tree, so an OPF
+config with no corpus line exits 2 there, never a false pass. The OPF runner passes --config
+tools/cited-standards.toml explicitly, and tools/check_cited_standards_contract.py beside this file pins
 that invocation and that config's coverage of every prompt-pack member. Where the text below names the
 repository's rule corpus, .aiqt/standards or .aiqt/cited-standards.toml, it describes the parent gate
 this copy was taken from.
@@ -103,14 +108,17 @@ ISO WD-40) is reported, never ignored, a dash that ends a line makes a token eve
 (RFC 3339-<break>compliant is token "RFC 3339-"), and a sentence ending in a body before a number reads as a
 designator (RFC. 2 and RFC.<break>2. Next read RFC 2).
 
-  check_cited_standards.py                  check the OPF root with the built-in default corpus (exit 2 there)
-  check_cited_standards.py --root DIR       check the tree at DIR (manifests from DIR/standards)
-  check_cited_standards.py --config PATH    read the corpus globs and exclusions from a TOML file
+  check_cited_standards.py                  check the OPF root with OPF's config, tools/cited-standards.toml
+  check_cited_standards.py --root DIR       check the tree at DIR with DIR/tools/cited-standards.toml
+                                            (manifests from DIR/standards)
+  check_cited_standards.py --config PATH    read the corpus globs and exclusions from PATH instead
   check_cited_standards.py --self-test      run the fixture vectors
 
-Without --config the built-in default applies: corpus [".aiqt/core/rules/*.md"] and no exclusions; no
-default file is read. This repository's own CI and tools/run_all_checks.sh pass --config
-.aiqt/cited-standards.toml (tracked, not shipped), whose corpus adds the OPF prompt-pack members
+Without --config, main reads tools/cited-standards.toml under the root it checks (the OPF root, or DIR
+with --root). That file missing, unreadable, not a regular file or malformed exits 2 (cannot evaluate);
+no built-in corpus is used in its place. The OPF runner and this repository's CI pass the same file
+explicitly with --config. In the parent gate, this repository's own CI and tools/run_all_checks.sh pass
+--config .aiqt/cited-standards.toml (tracked, not shipped), whose corpus adds the OPF prompt-pack members
 (opf/prompt-pack/**/*.md and opf/prompt-pack/import/examples/*.batch.toml) to the rule files. A config file carries:
   format-version = 1                        required
   corpus = ["<root-relative glob>", ...]    optional; each glob must match at least one file
@@ -157,6 +165,9 @@ from _standards import (load_manifests, ManifestError, dir_or_absent, dir_presen
 # The OPF root: the directory above this file's own directory, whatever the working directory is.
 OPF_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CORPUS = (".aiqt/core/rules/*.md",)
+# The config main reads when --config is omitted: OPF's own, relative to the root being checked. A missing or
+# unreadable file there is cannot-evaluate (load_config), never a fallback to DEFAULT_CORPUS.
+DEFAULT_CONFIG_REL = "tools/cited-standards.toml"
 STANDARDS_REL = "standards"
 MIN_DOCUMENTS = 1           # fixed, not configurable: one citation in one document is a finding
 CONFIG_KEYS = {"format-version", "corpus", "exclusion"}
@@ -880,7 +891,9 @@ _VECTORS += (
 # the prompt pack, the gate passes and V104 fails. V105 pins that default, and V106 that an exclusion may name a
 # member. Each has no patch (None) and, as an eighth element, the files written outside the rules directory.
 # They carry their own corpus and read neither .aiqt/cited-standards.toml nor the runners that pass it; the
-# repository-only .github/check_cited_standards_contract.py pins that config and wiring.
+# repository-only .github/check_cited_standards_contract.py pins that config and wiring. Like every vector here,
+# they call run() directly, so "the built-in default" is run()'s, the parent's; main never passes run() no config,
+# and _cli_default_problems below holds what main reads without --config.
 _PACK = {"opf/prompt-pack/flow/SKILL.md": "# Flow\n\nFollow ISO/IEC 99999:2031 here.\n"}
 _WIDE = 'format-version = 1\ncorpus = [".aiqt/core/rules/*.md", "opf/prompt-pack/**/*.md"]\n'
 _VECTORS += (
@@ -1052,6 +1065,58 @@ _ROSTER = (
 )
 _ROSTER_IDENTITIES = ["ISO 23894", "ISO 42001", "NIST AI 100-1", "NIST SP 800-218", "NIST SP 800-53"]
 
+# main without --config reads DEFAULT_CONFIG_REL under the root it checks. Each case writes a fixture OPF root and
+# calls main with OPF_ROOT swapped to that root and no --root, or with --root naming it (OPF_ROOT then swapped to an
+# absent decoy). The fixture's rule file cites nothing, so a main that fell back to run()'s built-in rule-file corpus
+# would pass clean (exit 0) where each case expects the OPF config to be read (exit 1 naming docs/x.md) or a missing
+# or unreadable one to be cannot-evaluate (exit 2). The last case holds an explicit --config over a failing default.
+# (label, expected exit, swap OPF_ROOT instead of --root, pass an explicit --config, files under the root, predicate)
+_OPF_CONFIG = 'format-version = 1\ncorpus = ["docs/*.md"]\n'
+_OPF_DOC = {"docs/x.md": "Per RFC 9999.\n"}
+_RULES_CONFIG = 'format-version = 1\ncorpus = [".aiqt/core/rules/*.md"]\n'
+_CLI_DEFAULT = (
+    ("main with no --root and no --config reads tools/cited-standards.toml under the OPF root", 1, True, False,
+     {**_OPF_DOC, DEFAULT_CONFIG_REL: _OPF_CONFIG},
+     lambda o: "RFC 9999: cited in 1 document(s)" in o and "docs/x.md:1: RFC 9999\n" in o),
+    ("main with no --root and no --config refuses when the OPF root has no tools/cited-standards.toml", 2, True,
+     False, _OPF_DOC, lambda o: "tools/cited-standards.toml cannot be read" in o and "cannot evaluate" in o),
+    ("main with --root DIR and no --config reads DIR/tools/cited-standards.toml", 1, False, False,
+     {**_OPF_DOC, DEFAULT_CONFIG_REL: _OPF_CONFIG}, lambda o: "docs/x.md:1: RFC 9999\n" in o),
+    ("main with --root DIR and no --config refuses when DIR/tools/cited-standards.toml is missing", 2, False,
+     False, _OPF_DOC, lambda o: "tools/cited-standards.toml cannot be read" in o),
+    ("main with --root DIR and no --config refuses when DIR/tools/cited-standards.toml is not a file", 2, False,
+     False, {**_OPF_DOC, DEFAULT_CONFIG_REL + "/held.md": "Nothing.\n"},
+     lambda o: "tools/cited-standards.toml is not a regular file" in o),
+    ("main with an explicit --config reads that file, not tools/cited-standards.toml", 0, False, True,
+     {**_OPF_DOC, DEFAULT_CONFIG_REL: _OPF_CONFIG}, lambda o: o.startswith("PASS: 1 corpus document(s)")),
+)
+
+
+def _cli_default_problems():
+    """The failures of main without --config over fixture OPF roots (_CLI_DEFAULT); [] when every case holds.
+    OPF_ROOT is swapped for each call and restored after it, whether main returns or raises."""
+    global OPF_ROOT
+    problems = []
+    for label, expect, swap_root, explicit, others, predicate in _CLI_DEFAULT:
+        with tempfile.TemporaryDirectory(prefix="aiqt-cited-standards-selftest-") as tmp:
+            root, cfg = _fixture(tmp, config=_RULES_CONFIG if explicit else None, others=others)
+            argv = [] if swap_root else ["--root", str(root)]
+            if explicit:
+                argv += ["--config", str(cfg)]
+            saved = OPF_ROOT
+            OPF_ROOT = root if swap_root else Path(tmp) / "absent-opf-root"
+            buf = io.StringIO()
+            try:
+                with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+                    code = main(argv)
+            finally:
+                OPF_ROOT = saved
+        if code != expect or not predicate(buf.getvalue()):
+            problems.append("{}: expected exit {}, got {}; output:\n{}".format(label, expect, code, buf.getvalue()))
+        if OPF_ROOT is not saved:
+            problems.append("{}: OPF_ROOT was not restored after the call".format(label))
+    return problems
+
 
 def self_test_main():
     failures = []
@@ -1144,6 +1209,7 @@ def self_test_main():
     if code != 2 or RESIDUAL[0] not in buf.getvalue():
         failures.append("a usage error: expected exit 2 and the residual, got {}; output:\n{}".format(
             code, buf.getvalue()))
+    failures.extend(_cli_default_problems())
     if failures:
         print("SELF-TEST FAIL: {} case(s)".format(len(failures)))
         for line in failures:
@@ -1154,12 +1220,13 @@ def self_test_main():
     print("SELF-TEST PASS: {} normalisation case(s), {} in-text case(s), {} non-designator case(s), the roster's "
           "manifest-field identities, {} fixture vector(s), a corpus glob base symlinked outside the root "
           "refused before it is listed and one symlinked inside the root read, the _drive patch contract (an unknown name is "
-          "rejected; a patched name is restored after a non-zero return, a zero return and a raise) and the "
-          "usage error: an "
-          "unresolved designator fails, a "
+          "rejected; a patched name is restored after a non-zero return, a zero return and a raise), the "
+          "usage error and {} case(s) of the config main reads (OPF's config without --config, refused when "
+          "missing or unreadable, and an explicit --config honoured): "
+          "an unresolved designator fails, a "
           "manifest resolves it, a suffixed token never resolves to a shorter identity, an exclusion is per path, "
           "needs a reason and goes stale, and a contradicted or malformed input fails closed".format(
-              len(_NORMALISATION), len(_IN_TEXT), len(_NOT_DESIGNATORS), len(_VECTORS)))
+              len(_NORMALISATION), len(_IN_TEXT), len(_NOT_DESIGNATORS), len(_VECTORS), len(_CLI_DEFAULT)))
     for line in RESIDUAL:
         print(line)
     return 0
@@ -1179,7 +1246,9 @@ def main(argv):
             return 2
         opts[flag] = Path(argv[i + 1])
         i += 2
-    return run(opts.get("--root") or OPF_ROOT, opts.get("--config"))
+    root = opts.get("--root") or OPF_ROOT
+    # No --config: OPF's own config under the root, never run()'s built-in parent corpus.
+    return run(root, opts.get("--config") or root / DEFAULT_CONFIG_REL)
 
 
 if __name__ == "__main__":

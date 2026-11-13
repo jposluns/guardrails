@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "74f0ba34deed80c049c69444fb9d8b28230d0b542a909d5fb0769444b6932db7"
+tree-sha256 = "48489e836a55f3babd90551cd2b741c9ecc3f8ec1e25ce89d791d207e70a7811"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -71,8 +71,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 593838
-sha256 = "0c308aac19a2a341af92d3e2f1430276847cd25f38f81e7833581235936efdfe"
+bytes = 594185
+sha256 = "f138930e6fcb40877d2e9a32a34cba1fd3d5be921e7ae6c2223749eb7503550c"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -3431,13 +3431,13 @@ sha256 = "363663005882dabe4f01b43e28926f4093bce4d718a4e67bfa13b7318a9a3247"
 
 [[sources]]
 path = "opf/tools/check_cited_standards.py"
-bytes = 76891
-sha256 = "e2ff20ffb4a849a55b7dfc87155a78cde95e4b189bab27508f1927ac3513447d"
+bytes = 82100
+sha256 = "f49d0049e9d25ca9e1ddb4afeedb9c13769db43aad40bfd80722570dcaa7ce33"
 
 [[sources]]
 path = "opf/tools/check_cited_standards_contract.py"
-bytes = 24209
-sha256 = "70393ee1b4aac081c3d74e7d3fe5ad718b6b6e765f123b8add87186e9532bdb0"
+bytes = 24277
+sha256 = "6e5272a5dd95f1316b5653d4999ec61f2e1a6ff542cf9c5606e1bac9f5c3248d"
 
 [[sources]]
 path = "opf/tools/check_opf_doctor.py"
@@ -4181,8 +4181,8 @@ sha256 = "1378f1e565605d4a013ac38e09a84f65c6aa07cb473b493ad6ab4c8229c23a97"
 
 [[sources]]
 path = "tools/check_ci_parity.py"
-bytes = 472743
-sha256 = "cf7055062ecd3f706aba2ec4211d3c564a58c93becfef56cfab3a39f43817891"
+bytes = 473628
+sha256 = "c6972b3ae722d6644dd4f86a21d0f7b8f08823b190ca8f5e8da76eaa8581e839"
 
 [[sources]]
 path = "tools/check_cited_standards.py"

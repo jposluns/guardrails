@@ -342,7 +342,8 @@ MANDATORY_MEMBERS, so removing one of them from both runners together is a
 missing-mandatory finding, not a silent pass. The
 child-status probe (CHILD_STATUS_PROBE) and its coverage gate are MANDATORY_MEMBERS for
 the same reason: removing either from both runners together is a missing-mandatory
-finding. Where the probe sits in a roster (first) is held by
+finding. So are OPF's cited-standards contract, opf/tools/check_cited_standards_contract.py,
+and its --self-test. Where the probe sits in a roster (first) is held by
 tools/check_child_status_coverage.py, not here. The
 extractors implement a disclosed shell and YAML subset; an unknown construct is
 cannot-evaluate rather than a clean pass. Fail-closed cases include an unknown
@@ -1068,6 +1069,11 @@ MANDATORY_MEMBERS = frozenset({
     # leave every gate reading a lost child exit status as a pass, unseen.
     CHILD_STATUS_PROBE,
     CHILD_STATUS_COVERAGE,
+    # OPF's cited-standards contract and its self-test, mandatory as the repository's
+    # cited-standards contract is: removing it from both rosters together would leave
+    # OPF's prompt-pack coverage and gate wiring unchecked, unseen.
+    "opf/tools/check_cited_standards_contract.py",
+    "opf/tools/check_cited_standards_contract.py --self-test",
 })
 
 INTERPRETERS = frozenset({"python", "python3"})
@@ -5442,6 +5448,9 @@ def self_test():
         # The child-status probe and its coverage gate, mandatory as the contracts are.
         "python3 -I -B opf/tools/_child_status.py",
         "python3 -I -B tools/check_child_status_coverage.py",
+        # OPF's cited-standards contract and its self-test, mandatory as well.
+        "python3 -I -B opf/tools/check_cited_standards_contract.py --self-test",
+        "python3 -I -B opf/tools/check_cited_standards_contract.py",
         # The scope tool's self-test, which the pinned SCOPE_JOB fixture body runs on
         # the CI side of every heavy fixture, so both sides carry it everywhere.
         "python3 -I -B tools/ci_site_scope.py --self-test",
@@ -5624,13 +5633,16 @@ def self_test():
     # member list is spelled out rather than derived from MANDATORY_MEMBERS, so reverting
     # the contracts out of that set turns these vectors red instead of silently skipping.
     # The child-status probe and its coverage gate are held the same way: either one
-    # removed from both runners together is a missing-mandatory finding.
+    # removed from both runners together is a missing-mandatory finding, and so are
+    # OPF's cited-standards contract and its self-test.
     for member in (
             ".github/check_cited_standards_contract.py",
             ".github/check_cited_standards_contract.py --self-test",
             ".github/check_newtab_contract.py",
             "opf/tools/_child_status.py",
-            "tools/check_child_status_coverage.py"):
+            "tools/check_child_status_coverage.py",
+            "opf/tools/check_cited_standards_contract.py",
+            "opf/tools/check_cited_standards_contract.py --self-test"):
         count += 1
         if member not in MANDATORY_MEMBERS:
             failures.append(

@@ -20,8 +20,9 @@ traceback exit 1), is cannot-evaluate (exit 2).
 
 Every collaborator sits beside this file in OPF's tools directory, so the contract runs in an OPF tree
 with no parent repository present. The parent repository's .github/check_cited_standards_contract.py
-keeps the rule-file corpus assertion for the parent's own config; this contract holds the prompt-pack
-coverage that moved here with the OPF copy of the gate.
+keeps the rule-file corpus assertion for the parent's own config, and it still checks prompt-pack
+coverage too: both contracts check that coverage until the parent's half is retired, this one over
+OPF's own config and runner.
 
 --self-test drives the real entry point, main, over fixture vectors and asserts main's exit code and its
 diagnostics for every finding and every cannot-evaluate path above, among them the --root redirect, the
