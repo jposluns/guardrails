@@ -4335,7 +4335,12 @@ def _test_pgrep_self_match(failures):
 # assign-herestring, redirect-redirect, heredoc*, dollar-dollar, redirect-target-separated,
 # assign-read-redirect, redirect-before and assign-no-subst rows (bash expanded the words, then the leading
 # assignments, then the redirections, a here-document body among them; cond-end read the status of the
-# [[ ]] command itself); the remaining rows pin the reading's own quoting, comment and command-boundary rules.
+# [[ ]] command itself), and so were the for-arith-*, line-continuation, case-second-pattern, case-esac-word,
+# heredoc-strip-later-line, cond-glued-redirect, cond-glued-amp-redirect and ansi-c-escaped rows (the
+# for-arith-and, -or and -pipe rows printed their loop line under bash and nothing under --posix). The
+# in-body-after-subst row read 0 under bash: it pins the documented NOT SEEN limit that a read inside a
+# substitution body is not judged. The remaining rows pin the reading's own quoting, comment and
+# command-boundary rules.
 # No row executes a command here: the handler is called directly.
 _SAS_FIRE_ROWS = (
     ("(sas-fire-a) substitution in double quotes", 'false; echo "x $(true): rc=$?"'),
@@ -4377,6 +4382,22 @@ _SAS_FIRE_ROWS = (
     ("(sas-fire-heredoc-redirect) here-document body read after a redirection substitution",
      'false; cat 2>/dev/null"$(true)" <<EOF\nrc=$?\nEOF'),
     ("(sas-fire-heredoc-strip) read in a <<- body", 'false; cat <<-EOF\n\t$(true) rc=$?\n\tEOF'),
+    ("(sas-fire-heredoc-strip-later-line) a later line after a <<- body ended by a tab-led delimiter",
+     'cat <<-EOF\n\tx\n\tEOF\nfalse; RC=$? env "SHA=$(true)"'),
+    ("(sas-fire-for-arith-shift) a later line after a << shift in a for (( )) header",
+     'for ((i=1<<0; i<1; i++)); do :; done\nfalse; RC=$? env "SHA=$(true)"'),
+    ("(sas-fire-for-arith-and) && inside a for (( )) header",
+     'false; for (( i=$(echo 0); i < 1 && $? == 0; i++ )); do echo zero; done'),
+    ("(sas-fire-for-arith-or) || inside a for (( )) header",
+     'false; for (( i=$(echo 0); i > 0 || $? == 0; i++ )); do echo zero; break; done'),
+    ("(sas-fire-for-arith-pipe) | inside a for (( )) header",
+     'false; for ((x = $(echo 2) | $?; x < 3; x++)); do echo "x=$x"; done'),
+    ("(sas-fire-line-continuation) a line continuation between leading assignments",
+     'false; x=$(true) \\\ny=$? env'),
+    ("(sas-fire-case-second-pattern) a read after a case with a second pattern",
+     'false; echo $(case a in b) :;; a) true;; esac) $?'),
+    ("(sas-fire-case-esac-word) an esac word inside a case arm",
+     'false; echo $(case a in a) echo esac;; b) true;; esac) $?'),
 )
 _SAS_QUIET_ROWS = (
     ("(sas-quiet-d) read before every substitution", 'false; echo "rc=$? $(true)"'),
@@ -4416,6 +4437,16 @@ _SAS_QUIET_ROWS = (
     ("(sas-quiet-heredoc-later-redirect) body read before a later redirection substitution",
      'false; cat <<EOF 2>/dev/null"$(true)"\nrc=$?\nEOF'),
     ("(sas-quiet-heredoc-escaped) escaped read in a body", 'false; cat <<EOF\n$(true) rc=\\$?\nEOF'),
+    ("(sas-quiet-for-arith-later-line) a later line after a << shift in a for (( )) header",
+     'for ((i=1<<0; i<1; i++)); do :; done\necho "$(true)" >/dev/null; false; echo "rc=$?"'),
+    ("(sas-quiet-cond-glued-redirect) read after a ]] glued to a redirection",
+     'false; [[ -z "$(true)x" ]]>/dev/null || echo "rc=$?"'),
+    ("(sas-quiet-cond-glued-amp-redirect) read after a ]] glued to an &> redirection",
+     'false; [[ -z "$(true)x" ]]&>/dev/null || echo "rc=$?"'),
+    ("(sas-quiet-ansi-c-escaped) read after an escaped quote in $'...' text",
+     "false; echo $(true) $'\\'$?'"),
+    ("(sas-quiet-in-body-after-subst) read after a substitution inside a substitution body (not judged)",
+     'false; echo "$(echo $(true) $?)"'),
 )
 
 
@@ -4456,8 +4487,9 @@ def _test_status_after_subst(failures):
     deep = "echo " + "$(" * 100 + "true" + ")" * 100
     if _decision(handler, deep + " $?") != "allow-note":
         failures.append("(sas-deep) a $? past the nesting bound must note the unread rest")
-    if _decision(handler, deep) != "allow":
-        failures.append("(sas-deep-no-read) a nesting past the bound with no $? after it must allow silently")
+    if _decision(handler, "echo $? " + deep) != "allow":
+        failures.append("(sas-deep-no-read) a nesting past the bound with a $? only before it must allow "
+                        "silently")
     for label, data, field in (
             ("(sas-unreadable-tool-missing)", {"hook_event_name": aiqt_hooks.PRETOOL,
                                                "tool_input": {"command": "echo $(true) $?"}}, "tool_name"),
