@@ -1952,6 +1952,7 @@ def _member_bound_checks(roster):
     coverage_suite = ("tools/check_selftest_execution.py", "--suite",
                       "child-status-coverage-selftest")
     release_cut = ("tools/check_release_cut.py", "--self-test", "--red-on-revert")
+    aiqt_hooks = ("tools/selftest_aiqt_hooks.py",)
 
     figures, problems = _roster_figures(roster)
     print("CONFIG ROSTER FIGURES: {} members, {} in the malformed lane, {} outside the sizing"
@@ -2103,7 +2104,7 @@ def _member_bound_checks(roster):
     overrides = {record: 5100, opf_selftest: 3600, adopt_observe: 1800, release_delta: 1800,
                  opf_init: 1800, closure_a: 13500, closure_b: 10800, closure_c: 8100,
                  closure_d: 9900, closure_e: 9600, closure_f: 3600, coverage_suite: 5400,
-                 release_cut: 2700}
+                 release_cut: 2700, aiqt_hooks: 5700}
     check("config/member-bound-table",
           (sorted(key for key in CONFIG_MEMBER_BOUNDS if key not in roster),
            {key: _config_member_bound(key) for key in CONFIG_MEMBER_BOUNDS},
@@ -2125,7 +2126,7 @@ def _member_bound_checks(roster):
     with patch.object(_gfe, "_run_bounded", recording):
         for member in (record, opf_selftest, adopt_observe, release_delta, opf_init, closure_a,
                        closure_b, closure_c, closure_d, closure_e, closure_f, coverage_suite,
-                       release_cut, ("opf/tools/opf.py",)):
+                       release_cut, aiqt_hooks, ("opf/tools/opf.py",)):
             _run_config_member(member, {})
     check("config/member-bound-reaches-run", handed,
           [(" ".join(record), 5100), (" ".join(opf_selftest), 3600),
@@ -2133,7 +2134,8 @@ def _member_bound_checks(roster):
            (" ".join(opf_init), 1800), (" ".join(closure_a), 13500), (" ".join(closure_b), 10800),
            (" ".join(closure_c), 8100), (" ".join(closure_d), 9900), (" ".join(closure_e), 9600),
            (" ".join(closure_f), 3600), (" ".join(coverage_suite), 5400),
-           (" ".join(release_cut), 2700), ("opf/tools/opf.py", 1200)])
+           (" ".join(release_cut), 2700), (" ".join(aiqt_hooks), 5700),
+           ("opf/tools/opf.py", 1200)])
 
 
 # The argv prefix of the closure gate's --ci-job members, and the closure module's names their

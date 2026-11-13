@@ -1,0 +1,21 @@
+# The OPF-local self-test execution registry, read by tools/check_opf_selftest_execution.py (paths are
+# relative to the OPF root). Each [[suite]] row names a runner and the check ids its self-test must
+# execute; the gate reconciles the runner's source check() sites and the ids its child reports against
+# this list. Hand-authored from source review, never regenerated from a run. An empty registry is
+# refused, never a pass.
+format-version = 1
+
+[[suite]]
+id = "opf-init-contract-check-selftest"
+runner = "tools/check_opf_init_contract.py"
+args = ["--self-test"]
+expected-check-ids = [
+    "init-contract/matchers",
+    "init-contract/line-ends",
+    "init-contract/runner-rosters",
+    "init-contract/entry-pins",
+    "init-contract/entry-arguments",
+    "init-contract/census-errors",
+    "init-contract/loaded-exit-in-child",
+    "init-contract/fault-channels",
+]
