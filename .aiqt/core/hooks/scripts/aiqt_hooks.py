@@ -16926,29 +16926,40 @@ def _verification_sink_message(hit):
 # producer allow-list) that is a simple command (_gate_simple) outside any case compound and not piped on, whose
 # and-or list ends at a ';', a newline or a '&', then a git push (_gate_push_argv) later in the same command,
 # every segment from the check to the push plain (_gate_push_plain: no reserved word, no parenthesis). Not
-# refused: a push in the check's own and-or list (check && git push); a check whose list holds '|| exit' or
-# '|| return'; a check whose status a command right after its list keeps (_gate_status_keeper) when a '&&' or
-# '||' joins some command from that one up to the push (a test of the saved status); a push with a reserved word
-# or a parenthesis anywhere on the way (an if, a loop, a case or a group, whether or not the push is inside
-# it); and a push with no known check before it. After a '&' only a wait that names the check's own job keeps
-# its status ('wait $!', or 'pid=$!' and then 'wait "$pid"'): a bare wait returns 0 once every job has ended,
-# and a wait on another job returns that job's status. Not judged, each a silent allow: a check that pipes
-# onward (pytest | tee log); a push after a parenthesis, so an exit inside a subshell ('|| (echo; exit 1)'),
-# which leaves only the subshell, still lets the push run; any reserved word between the check and the push,
-# even one that closes before it (if true; then :; fi); a check whose list goes on with '||' to a command
-# other than exit or return, whose success can hide the check's failure from a later '|| exit', a push later
+# refused: a push in the check's own and-or list (check && git push); a check whose list holds an '|| exit'
+# or '|| return' that guards (_GATE_GUARD_ENDS: the exit not piped on, its list ended by ';' or a newline,
+# not sent to the background); a check whose status a command right after its list keeps
+# (_gate_status_keeper) when a '&&' or '||' joins some command from that one up to the push (a test of the
+# saved status) in an and-or list that holds the push or that guards; a push with a reserved word or a
+# parenthesis anywhere on the way (an if, a loop, a case or a group, whether or not the push is inside it);
+# and a push with no known check before it. After a '&' only a wait that names the check's own job keeps its
+# status ('wait $!', or 'pid=$!' and then 'wait "$pid"', never through '_', which bash resets after every
+# command): a bare wait returns 0 once every job has ended, and a wait on another job returns that job's
+# status. A wait in any other form is not credited, so these honest forms are refused, a disclosed
+# over-refusal: a job spec (wait %%, wait %+, wait %1), an option (wait -n, wait -- $!), a redirected wait
+# (wait $! 2>/dev/null), and a kept status read through a pipe (printf %s $? | grep -qx 0 && git push).
+# Not judged, each a silent allow: a check that pipes onward (pytest | tee log); a push after a parenthesis,
+# so an exit inside a subshell ('|| (echo; exit 1)'), which leaves only the subshell, still lets the push
+# run; any reserved word between the check and the push, even one that closes before it (if true; then :;
+# fi); a check whose list goes on with '||' to a command other than exit or return, or to an exit piped on
+# (pytest || exit 1 | cat), whose success can hide the check's failure from a later '|| exit', a push later
 # in that list or a kept status; any '&&' or '||' after a kept status counted as its test, whichever way it
-# branches; and a function or alias that redefines wait, test, '[' or exit. The judgement of each list end is
-# made once and shared by every check whose list ends there, so the whole reading takes time linear in the
-# records.
+# branches, once its and-or list holds the push or guards; and a function or alias that redefines wait,
+# test, '[' or exit. The judgement of each list end is made once and shared by every check whose list ends
+# there, so the whole reading takes time linear in the records.
 _GATE_PUSH_LIST_ENDS = frozenset((";", "", "&"))
 _GATE_PUSH_ANDOR = frozenset(("&&", "||"))
 _GATE_PUSH_STOPS = frozenset(("exit", "return"))
 _GATE_PUSH_DRY = frozenset(("-n", "--dry-run"))
 _GATE_PUSH_SEP_TEXT = dict(((";", "a ';'"), ("", "a newline"), ("&", "a '&' (the check runs in the background)")))
-# A command that keeps a status ends its own list at one of these, never at '&' or a pipe, which would run
-# it in a subshell or make the list's status another command's.
+# A command that keeps a status is itself ended by one of these, never by '&' or a pipe, which would run
+# it in a subshell or make the status another command's.
 _GATE_KEEPER_ENDS = frozenset((";", "", "&&", "||"))
+# An '&&' or '||' in an and-or list guards the commands after that list (a test of a kept status, or an
+# '|| exit' or '|| return') only when the list ends at one of these and the command after the '&&' or '||'
+# is not piped on: a list ended by '&' runs in the background, and a command piped on runs in a subshell, so
+# an exit in either leaves only that subshell and the commands after the list go on whatever the test found.
+_GATE_GUARD_ENDS = frozenset((";", ""))
 # A wait on one job, the whole raw text of its segment: 'wait' and one operand, $NAME or ${NAME} (NAME being
 # '!' or a variable name), bare or in double quotes.
 _GATE_WAIT_ONE_RE = re.compile(r"[ \t]*wait[ \t]+(\"?)\$(\{?)(!|[A-Za-z_][A-Za-z0-9_]*)(\}?)\1[ \t]*\Z")
@@ -16956,9 +16967,10 @@ _GATE_WAIT_ONE_RE = re.compile(r"[ \t]*wait[ \t]+(\"?)\$(\{?)(!|[A-Za-z_][A-Za-z
 # NAME="${!}".
 _GATE_PID_SAVE_RE = re.compile(r"[ \t]*([A-Za-z_][A-Za-z0-9_]*)=(\"?)\$(\{?)!(\}?)\2[ \t]*\Z")
 # Shell variables whose assignment bash ignores or refuses, or whose value changes by itself, so a wait on
-# them need not name the job just saved.
+# them need not name the job just saved. '_' is among them: bash sets it after every command, so by the time
+# 'wait $_' runs it no longer holds the saved pid, and an unquoted empty operand leaves a bare wait.
 _GATE_PID_SPECIAL = frozenset((
-    "BASHOPTS", "BASHPID", "BASH_ARGC", "BASH_ARGV", "BASH_COMMAND", "BASH_LINENO", "BASH_SOURCE",
+    "_", "BASHOPTS", "BASHPID", "BASH_ARGC", "BASH_ARGV", "BASH_COMMAND", "BASH_LINENO", "BASH_SOURCE",
     "BASH_SUBSHELL", "DIRSTACK", "EPOCHREALTIME", "EPOCHSECONDS", "EUID", "FUNCNAME", "GROUPS", "HISTCMD",
     "LINENO", "PPID", "RANDOM", "SECONDS", "SHELLOPTS", "SRANDOM", "UID"))
 
@@ -17028,13 +17040,19 @@ def _gate_push_walk(records):
     (_gate_push_argv) when every such segment from j to it is _gate_push_plain (len(records) for none);
     list_end[j], for a segment with a word or a redirection, the index of the last segment of the and-or list
     it starts or continues (an empty segment after '&&', '||' or a pipe continues it; a pipe joins as a list
-    does here), or None when that list holds a push, an '|| exit' or '|| return', a segment that is not
-    _gate_push_plain, a '(' or ')' separator, or runs off the end; and joins[j], how many such segments
-    before j are ended by '&&' or '||'."""
+    does here), or None when that list holds a push, an '|| exit' or '|| return' that guards (the exit not
+    piped on and run_end at a _GATE_GUARD_ENDS separator), a segment that is not _gate_push_plain, a '(' or
+    ')' separator, or runs off the end; joins[j], how many such segments before j are ended by '&&' or '||';
+    guard_joins[j], how many of those guard (the command after the '&&' or '||' not piped on and run_end at a
+    _GATE_GUARD_ENDS separator); and run_start[j], for a segment with a word or a redirection, the index of
+    the first segment of its run. A run is a stretch of such segments joined by '&&', '||' or a pipe (the
+    whole and-or list, whose end '&', ';' or a newline marks); run_end[j] is the separator that ends the run
+    from j on, or None when it runs off the end."""
     n = len(records)
     next_word = [n] * (n + 1)
     next_push = [n] * (n + 1)
     list_end = [None] * (n + 1)
+    run_end = [None] * (n + 1)
     for j in range(n - 1, -1, -1):
         seg = records[j]
         if not seg.argv and not seg.redirects:
@@ -17045,20 +17063,40 @@ def _gate_push_walk(records):
         pushed = plain and _gate_push_argv(seg) is not None
         next_push[j] = j if pushed else (next_push[j + 1] if plain else n)
         sep = seg.sep_after
+        k = next_word[j + 1]
+        if sep in _GATE_PUSH_ANDOR or sep in _GATE_PIPES:
+            run_end[j] = run_end[k] if k < n else None
+        else:
+            run_end[j] = sep
         if sep in _GATE_PUSH_LIST_ENDS:
             list_end[j] = j
         elif sep not in ("(", ")"):
             # The list goes on to the next segment with a word: a push there, a segment that is not plain, or an
-            # '|| exit' or '|| return' (the check's failure stops the command there) leaves list_end None.
-            k = next_word[j + 1]
+            # '|| exit' or '|| return' (the check's failure stops the command there) leaves list_end None. An
+            # exit piped on, or in a list sent to the background, leaves only a subshell, so it does not stop.
             nxt = records[k] if k < n else None
             if (nxt is not None and _gate_push_plain(nxt) and _gate_push_argv(nxt) is None
-                    and not (sep == "||" and _command_word(nxt.argv) in _GATE_PUSH_STOPS)):
+                    and not (sep == "||" and _command_word(nxt.argv) in _GATE_PUSH_STOPS
+                             and nxt.sep_after not in _GATE_PIPES and run_end[k] in _GATE_GUARD_ENDS)):
                 list_end[j] = list_end[k]
     joins = [0] * (n + 1)
+    guard_joins = [0] * (n + 1)
+    run_start = [None] * (n + 1)
+    last = None
     for j, seg in enumerate(records):
-        joins[j + 1] = joins[j] + ((bool(seg.argv) or bool(seg.redirects)) and seg.sep_after in _GATE_PUSH_ANDOR)
-    return next_word, next_push, list_end, joins
+        worded = bool(seg.argv) or bool(seg.redirects)
+        joined = worded and seg.sep_after in _GATE_PUSH_ANDOR
+        joins[j + 1] = joins[j] + joined
+        k = next_word[j + 1]
+        guards = (joined and run_end[j] in _GATE_GUARD_ENDS and k < n
+                  and records[k].sep_after not in _GATE_PIPES)
+        guard_joins[j + 1] = guard_joins[j] + guards
+        if worded:
+            joined_before = last is not None and (records[last].sep_after in _GATE_PUSH_ANDOR
+                                                  or records[last].sep_after in _GATE_PIPES)
+            run_start[j] = run_start[last] if joined_before else j
+            last = j
+    return next_word, next_push, list_end, joins, guard_joins, run_start
 
 
 def _check_then_push(records):
@@ -17067,9 +17105,9 @@ def _check_then_push(records):
     ends at a ';', a newline or a '&' (_gate_push_walk's list_end) and is followed by a git push before any
     segment that is not _gate_push_plain, or None. A push is not a hit when a command right after the
     check's list kept the status (_gate_status_keeper) and a '&&' or '||' ends some command from that one up
-    to the push (a test of the saved status). Checks joined by '&&' share one list end, and each end is
-    judged once (_gate_push_unguarded), so the reading takes time linear in the records however many checks
-    share it."""
+    to the push (a test of the saved status) in an and-or list that holds the push or that guards
+    (_GATE_GUARD_ENDS). Checks joined by '&&' share one list end, and each end is judged once
+    (_gate_push_unguarded), so the reading takes time linear in the records however many checks share it."""
     checks = [i for (i, seg), case_depth in zip(enumerate(records), _gate_case_depths(records))
               if not case_depth and _gate_simple(seg) and seg.sep_after not in _GATE_PIPES
               and _is_verification_run(seg.argv)]
@@ -17094,15 +17132,19 @@ def _gate_push_unguarded(records, end, facts):
     """The index of the git push that runs whatever the and-or list ending at end returned, or None: the
     first push after that list with every segment on the way _gate_push_plain (next_push in facts, the
     _gate_push_walk tuple), unless a command right after the list keeps its status (_gate_status_keeper) and
-    a '&&' or '||' ends some command from that one up to the push."""
-    next_word, next_push, _list_end, joins = facts
+    a '&&' or '||' ends some command from that one up to the push, in an and-or list that holds the push or
+    that guards (_GATE_GUARD_ENDS: the list ended by ';' or a newline, the command after that '&&' or '||'
+    not piped on): a test whose list is sent to the background, or whose exit is piped on, does not hold
+    back a push after that list."""
+    next_word, next_push, _list_end, joins, guard_joins, run_start = facts
     n = len(records)
     first = next_word[end + 1]
     push = next_push[first] if first < n else n
     if push >= n:
         return None
     keeper = _gate_status_keeper(records, end, first, next_word)
-    if keeper is not None and keeper < push and joins[push] > joins[keeper]:
+    if keeper is not None and keeper < push and (
+            guard_joins[push] > guard_joins[keeper] or joins[push] > joins[max(keeper, run_start[push])]):
         return None   # the status kept right after the list is tested before the push
     return push
 
@@ -18680,23 +18722,33 @@ def gate_weakening(data):
     word or parenthesis on the way, since that push runs whatever the check returned; the reason names the
     check, the separator and the push. It allows check && git push, a push after the check's status is kept
     by the next command and tested by a '&&' or '||' before the push ([ $? -eq 0 ] && git push, or rc=$?;
-    [ "$rc" -eq 0 ] || exit 1; git push; after a '&' only a wait naming the check's own job, 'wait $!' or
-    pid=$!; wait "$pid", since a bare wait returns 0 and a wait on another job returns that job's status), a
-    check whose list holds '|| exit' or '|| return', a push with a reserved word or a parenthesis anywhere on
-    the way (an if, a loop, a case or a group, whether or not the push is inside it), a push carrying -n or
+    [ "$rc" -eq 0 ] || exit 1; git push) in an and-or list that holds the push or that ends at ';' or a
+    newline with the command after that '&&' or '||' not piped on (so [ $? -eq 0 ] || exit 1 & git push and
+    [ $? -eq 0 ] || exit 1 | cat; git push deny); after a '&' only a wait naming the check's own job, 'wait
+    $!' or pid=$!; wait "$pid" (never through '_', which bash resets after every command), since a bare wait
+    returns 0 and a wait on another job returns that job's status. It also allows a check whose list holds an
+    '|| exit' or '|| return' not piped on, in a list ended by ';' or a newline (pytest || exit 1 & git push
+    and pytest || exit 1 | cat; git push deny), a push with a reserved word or a parenthesis anywhere on the
+    way (an if, a loop, a case or a group, whether or not the push is inside it), a push carrying -n or
     --dry-run, and a push with no known check before it. Each list end is judged once, however many checks
-    share it, so this reading takes time linear in the lexed segments. Disclosed residual: a push in a later
-    call, a check run inside a script the hook cannot read (a CI script, bash -c or eval), and a check the
-    hook does not recognise (a checker-shaped command off that allow-list, such as tools/run_all_checks.sh
+    share it, so this reading takes time linear in the lexed segments. Disclosed over-refusal: a wait on the
+    check's job in any other form is not credited, so a job spec (wait %%, wait %+, wait %1), an option (wait
+    -n, wait -- $!), a redirected wait (wait $! 2>/dev/null) and a kept status read through a pipe (printf %s
+    $? | grep -qx 0 && git push) deny even where they keep the check's status. Disclosed residual: a push in
+    a later call, a check run inside a script the hook cannot read (a CI script, bash -c or eval), and a check
+    the hook does not recognise (a checker-shaped command off that allow-list, such as tools/run_all_checks.sh
     run directly or a wrapper the peel does not resolve) are not refused, nor is a check that pipes onward
     (pytest | tee log), a push behind such a wrapper (sudo, command), one joined to the check by '||', one
     after an exit inside a subshell (pytest || (echo fail; exit 1); git push, the exit leaving only the
     subshell), one after any reserved word, even one that closes before it (if true; then :; fi; git push),
-    one after a check whose list goes on with '||' to a command other than exit or return (whose success can
-    hide the check's failure), one after a function or alias that redefines wait, test, '[' or exit, or one
-    in a command the lexer cannot parse; any '&&' or '||' after a kept status counts as its test, whichever
-    way it branches. An inline set -e is not credited (a disclosed over-refusal of set -e; check; git push),
-    since in this tool an inline set -e was seen not to stop a later step (inline_errexit).
+    one after a check whose list goes on with '||' to a command other than exit or return, or to an exit
+    piped on (pytest || exit 1 | cat; [ $? -eq 0 ] && git push), when that command's success hides the
+    check's failure from a later '|| exit', a push later in that list or a kept status (pytest || echo
+    failed; git push itself denies), one after a function or alias that redefines wait, test, '[' or exit, or
+    one in a command the lexer cannot parse; any '&&' or '||' after a kept status counts as its test,
+    whichever way it branches, once its and-or list holds the push or guards as above.
+    An inline set -e is not credited (a disclosed over-refusal of set -e; check; git push), since in this
+    tool an inline set -e was seen not to stop a later step (inline_errexit).
     Disclosed residuals: R1 a check inside an sh -c/bash -c, eval or
     xargs body; R2 an alias defined in a configuration file, or a shell function; R3 a gate whose name and
     options carry no checker part

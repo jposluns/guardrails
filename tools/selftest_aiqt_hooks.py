@@ -24080,6 +24080,30 @@ def _main_isolated(monitor):
              "pytest & wait $! & true && git push origin feat"),
             ("(gw-cp-r19) $! saved in a variable bash does not keep (BASHPID) is not the job, denies",
              'pytest & BASHPID=$!; wait "$BASHPID" && git push origin feat'),
+            # bash sets '_' after every command, so an unquoted wait on it is a bare wait, which returns 0.
+            ("(gw-cp-r20) $! saved in '_', which bash resets after every command, then wait $_, denies",
+             "pytest & _=$!; wait $_ && git push origin feat"),
+            ("(gw-cp-r21) the braced form, _=${!} then wait ${_}, denies",
+             "pytest & _=${!}; wait ${_} && git push origin feat"),
+            # A test or an '|| exit' guards a later push only when its and-or list ends at ';' or a newline and
+            # the exit is not piped on: sent to the background or piped on, the exit leaves only a subshell.
+            ("(gw-cp-r22) a kept-status test whose '|| exit' list is sent to the background, denies",
+             "pytest; [ $? -eq 0 ] || exit 1 & git push origin feat"),
+            ("(gw-cp-r23) a kept-status test whose '|| exit' is piped on, denies",
+             "pytest; [ $? -eq 0 ] || exit 1 | cat; git push origin feat"),
+            ("(gw-cp-r24) a wait on the check's job whose '|| exit' list is sent to the background, denies",
+             "pytest & wait $! || exit 1 & git push origin feat"),
+            ("(gw-cp-r25) a wait on the check's job whose '|| exit' is piped on, denies",
+             "pytest & wait $! || exit 1 | cat; git push origin feat"),
+            ("(gw-cp-r26) a check whose '|| exit' list is sent to the background, denies",
+             "pytest || exit 1 & git push origin feat"),
+            ("(gw-cp-r27) a check whose '|| exit' is piped on, denies",
+             "pytest || exit 1 | cat; git push origin feat"),
+            ("(gw-cp-r28) a wait on a saved pid whose '|| exit' list is sent to the background, denies",
+             'pytest & pid=$!; wait "$pid" || exit 1 & git push origin feat'),
+            # A wait operand with unpaired braces is not read as a wait on the check's job.
+            ("(gw-cp-r29) a wait on $!} (an unpaired brace) is not credited, denies",
+             "pytest & wait $!} && git push origin feat"),
         ]
         _cp_allowed = [
             ("(gw-cp-a1) check && git push allows", "pytest && git push origin feat"),
@@ -24110,6 +24134,10 @@ def _main_isolated(monitor):
             ("(gw-cp-a17) $! saved in a variable and that job waited on allows",
              'pytest & pid=$!; wait "$pid" && git push origin feat'),
             ("(gw-cp-a18) a quoted wait on $! allows", 'pytest & wait "$!" && git push origin feat'),
+            ("(gw-cp-a19) an '|| exit' not piped on still stops when a later command of its list is, allows",
+             "pytest || exit 1 && true | cat; git push origin feat"),
+            ("(gw-cp-a20) a test of the kept status with the push in its backgrounded list allows",
+             "pytest; [ $? -eq 0 ] && git push origin feat &"),
         ]
         for _cp_label, _cp_cmd in _cp_refused:
             gexpect(_cp_label, _cp_cmd, "deny")
