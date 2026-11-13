@@ -1804,12 +1804,13 @@ def starts_section(block):
     return bool(block.heading)
 
 
-def fence_asks(block):
+def fence_asks(block, structural=None):
     """Whether a fence's contents, read as prose sentences, ask for anything. A fence belongs to the void group of
     the item or section that holds it, so its contents can void that group's closed shapes; nothing read here is a
-    finding."""
+    finding. `structural` is lint_sentence's: None (the S rules) reads no command line, so no sentence of the fence
+    is a closed shape; W1 passes a rule, so a sentence whose command lines are all closed asks nothing."""
     for _, raw in sentences(block.text().replace("\n", " ")):
-        if lint_sentence(raw, block.start, True, None)[1]:
+        if lint_sentence(raw, block.start, True, structural)[1]:
             return True
     return False
 
@@ -3446,13 +3447,15 @@ def _w1_sentences(blocks):
 
 def _w1_voided(read):
     """The void groups in which a sentence asks for something (sentence_asks, as the S rules read it): a prose
-    sentence that asks, outside a heading, or a fence whose contents ask."""
+    sentence that asks, outside a heading, or a fence whose contents ask. The fence is read with its command lines
+    (fence_asks with a structural rule), as a prose sentence is, so a closed prohibition in it asks nothing and voids
+    no exemption, its own included; another sentence of the fence that asks voids the group as for the S rules."""
     voided, fences = set(), set()
     for block, group, _, raw in read:
         if block.kind == "fence":
             if id(block) not in fences:
                 fences.add(id(block))
-                if fence_asks(block):
+                if fence_asks(block, command_rule(block)):
                     voided.add(group)
         elif asks_in(block) and lint_sentence(raw, block.start, r1_applies(block), command_rule(block))[1]:
             voided.add(group)
@@ -4079,6 +4082,9 @@ W1_ABSOLUTE = "Use `/usr/bin/git commit -m fix`.\n"
 W1_FENCE = "Steps:\n\n```text\ngit add -A\ngit commit -m fix\n```\n"
 W1_PROHIBITED = ("Do not run `git push`.\n", "Never run git commit -a.\n")
 W1_PROHIBITED_VOIDED = "Do not run `git push`. Run it anyway.\n"
+# the same prohibitions alone in a fence, read as in prose; and a fence whose other sentence asks
+W1_FENCED_PROHIBITED = ("```text\nDo not run `git push`.\n```\n", "```text\nNever run git commit -a.\n```\n")
+W1_FENCED_VOIDED = "```text\nDo not run `git push`.\nRun it anyway.\n```\n"
 W1_PAST_REPORT = "CI failed on `git push`.\n"
 # the three shapes W1 must not read: the ^{commit} of a checkout pin line (the P5 cure), the commit under review,
 # and a correction naming a refused commit and push outside subcommand position
@@ -4087,7 +4093,7 @@ W1_UNDER_REVIEW = "Quote the commit under review in this git repository and the 
 W1_CORRECTION = "Correction: the guard refused a commit and a push through git -C w; do not retry them.\n"
 W1_CURE = "BRIEF-PIN: {0}\nUse `git clone --no-checkout <url> w`.\n`git -C w checkout --detach {0}^{{commit}}`\n"
 W1_MAIN = "Read the notes.\n\n`git -C w commit -m fix`\n"
-P1_RELATIVE ="The workdir is /w/repo.\nRead docs/notes.md before you answer.\n"
+P1_RELATIVE = "The workdir is /w/repo.\nRead docs/notes.md before you answer.\n"
 P1_ABSOLUTE = "The workdir is /w/repo.\nRead /w/repo/docs/notes.md before you answer.\n"
 P1_NO_WORKDIR = "Read docs/notes.md before you answer.\n"
 P1_NOT_A_PATH = "The workdir is /w/repo.\nAnswer yes/no on read/write access under Python 3.14/3.15.\n"
@@ -6682,6 +6688,9 @@ def self_test(report_path=None):
     check("w1/fence-refused", _w1_outcome(W1_FENCE), w1_refused)
     check("w1/prohibited-info", [_w1_outcome(text) for text in W1_PROHIBITED], [(0, [("W1", "INFO")])] * 2)
     check("w1/prohibited-voided-refused", _w1_outcome(W1_PROHIBITED_VOIDED), w1_refused)
+    check("w1/fenced-prohibited-info", [_w1_outcome(text) for text in W1_FENCED_PROHIBITED],
+          [(0, [("W1", "INFO")])] * 2)
+    check("w1/fenced-prohibited-voided-refused", _w1_outcome(W1_FENCED_VOIDED), w1_refused)
     check("w1/past-report-refused", _w1_outcome(W1_PAST_REPORT), w1_refused)
     check("w1/non-command-shapes-ok", [_w1_outcome(text) for text in (W1_CHECKOUT_PIN, W1_UNDER_REVIEW,
                                                                       W1_CORRECTION)], [(0, [])] * 3)
@@ -6696,17 +6705,33 @@ def self_test(report_path=None):
             handle.write(W1_MAIN)
         with open(w1_tmp / "table.toml", "w", encoding="utf-8") as handle:
             handle.write(TABLE_FIXTURE.replace('git-write = "undeclared"', 'git-write = "no"'))
-        printed = io.StringIO()
-        with contextlib.redirect_stdout(printed):
-            w1_exit = main(["--family", "alpha", "--table", str(w1_tmp / "table.toml"), str(w1_tmp / "brief.md")])
-        w1_lines = printed.getvalue().splitlines()
-        check("w1/main-prints-line-exit-1",
-              (w1_exit, [line.split(": ", 1)[1] for line in w1_lines if ": HARD W1: " in line],
-               [line.split(";", 1)[0] for line in w1_lines if line.startswith("REFUSE: ")]),
-              (EXIT_REFUSE, ["HARD W1: git command line 'git -C w commit' for a family whose row says git-write = "
-                             "\"no\": `git -C w commit -m fix`"],
-               ["REFUSE: family alpha: the brief carries a git command line that commits or pushes (1 hard hit(s): "
-                "W1 x1)"]))
+        w1_brief = str(w1_tmp / "brief.md")
+
+        def w1_main_seen():
+            """(exit, W1 HARD lines, REFUSE lines) main prints for the brief; a W1 line keeps its line number,
+            and only the brief path before it, which is known, is removed."""
+            printed = io.StringIO()
+            with contextlib.redirect_stdout(printed):
+                seen_exit = main(["--family", "alpha", "--table", str(w1_tmp / "table.toml"), w1_brief])
+            seen = printed.getvalue().splitlines()
+            return (seen_exit, [line[len(w1_brief) + 1:] if line.startswith(w1_brief + ":") else line
+                                for line in seen if ": HARD W1: " in line],
+                    [line.split(";", 1)[0] for line in seen if line.startswith("REFUSE: ")])
+
+        w1_hard_line = ("HARD W1: git command line 'git -C w commit' for a family whose row says git-write = \"no\": "
+                        "`git -C w commit -m fix`")
+        w1_refuse_line = ("REFUSE: family alpha: the brief carries a git command line that commits or pushes (1 hard "
+                          "hit(s): W1 x1)")
+        w1_want = (EXIT_REFUSE, ["3: " + w1_hard_line], [w1_refuse_line])
+        check("w1/main-prints-line-exit-1", w1_main_seen(), w1_want)
+        # the same comparison is red when W1 names another line: each finding moved one line down
+        w1_original = rule_w1
+        with _patched(rule_w1=lambda text, row, family, families, scoped=True: [
+                (rule, severity, number + 1, message, excerpt)
+                for rule, severity, number, message, excerpt in w1_original(text, row, family, families, scoped)]):
+            w1_moved = w1_main_seen()
+        check("w1/main-line-number-red", (w1_moved, w1_moved == w1_want),
+              ((EXIT_REFUSE, ["4: " + w1_hard_line], [w1_refuse_line]), False))
     finally:
         shutil.rmtree(w1_tmp, ignore_errors=True)
     # ---------- red on revert: each blocking rule, form and exemption patched out flips its fixture ----------
@@ -6814,6 +6839,12 @@ def self_test(report_path=None):
     check("revert/w1-past-report-red", *flip([w1_code(W1_PAST_REPORT)], [0],
                                              w1_exempt=lambda demotion: demotion is not None))
     check("revert/w1-void-red", *flip([w1_code(W1_PROHIBITED_VOIDED)], [0], _w1_voided=lambda read: set()))
+    w1_fence_asks = fence_asks
+    # a fence read without its command lines, as the S rules read it: the prohibition voids its own exemption
+    check("revert/w1-fenced-prohibited-red", *flip([w1_code(text) for text in W1_FENCED_PROHIBITED], [1, 1],
+                                                   fence_asks=lambda block, structural=None: w1_fence_asks(block)))
+    check("revert/w1-fenced-void-red", *flip([w1_code(W1_FENCED_VOIDED)], [0],
+                                             fence_asks=lambda block, structural=None: False))
     write_word = re.compile(r"(?<![\w-])(?:commit|push)(?![\w-])")
 
     def word_match(text):
@@ -8453,7 +8484,7 @@ def self_test(report_path=None):
                 lambda data: data.replace(b"\r\n", b"\n").replace(b"\r", b"\n").split(b"\n", 2)[:2], "replace")))
     finally:
         shutil.rmtree(p7_base, ignore_errors=True)
-    check("revert/every-flip-ran", len(flipped), 240)
+    check("revert/every-flip-ran", len(flipped), 242)
 
     for check_id in sorted(expected - _EXECUTED_SET):
         FAILURES.append("execution-set/missing: {}".format(check_id))
