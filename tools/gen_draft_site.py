@@ -21,9 +21,9 @@ pages. Each site's base (SITES) is the one base path for every internal href and
 becomes "/" at that site's promotion, and the robots meta goes with it (a page under draft/ keeps it). Asset
 URLs follow the site's separate asset base ("assets" in SITES), which stays "/draft/" after promotion, so
 the pinned copy is served where it was staged. A page is refused (exit 2, nothing written) if it carries an
-en or em dash, an inline style or script, an `on*` attribute, "what this is" framing, or markup Python's
-html.parser and a browser parse differently (tools/_html_differential.py). The baseline files under
-assets/baseline/ are a pinned copy, not generated here (tools/check_baseline_pin.py).
+en or em dash, an inline style or script, an `on*` attribute, "what this is" framing, or one of the
+constructs tools/_html_differential.py lists as parsed differently by Python's html.parser and a browser.
+The baseline files under assets/baseline/ are a pinned copy, not generated here (tools/check_baseline_pin.py).
 
 Content model: each page is 1 TOML data file under its site's data directory (site/draft-src/ for aiqt.ai,
 opf/site/draft-src/ for opfiles.ai), discovered by listing that directory, so a page lands or changes as
@@ -1400,9 +1400,9 @@ def _body_html(site, page):
 # paths, with no backslash, whitespace or control character, no protocol-relative "//" start and no "." or
 # ".." segment, raw or percent-encoded (%2e, either case); and every a or area whose href is https carries
 # target="_blank", rel with noopener and noreferrer, and the "(opens in a new tab)" hint in its text or
-# aria-label. Markup html.parser and a browser parse differently is refused beside this pass (refusals_for,
-# through tools/_html_differential.py). The guards' residual is stated in the draft-site-drift entry of
-# .aiqt/core/gates/manifest.toml.
+# aria-label. The constructs tools/_html_differential.py lists as parsed differently by html.parser and a
+# browser are refused beside this pass (refusals_for). The guards' residual is stated in the draft-site-drift
+# entry of .aiqt/core/gates/manifest.toml.
 LINK_REFUSED_TAGS = frozenset((
     "script", "iframe", "frame", "frameset", "base", "form", "object", "embed", "applet", "portal",
     "animate", "set", "animatemotion", "animatetransform", "handler", "foreignobject"))
@@ -1601,18 +1601,19 @@ class _Refusals(HTMLParser):
         self.text.append(data)
 
 
-# The tags the raw-versus-parsed check counts: every element the guards refuse or allow only in the shell's
-# exact form. A start tag html.parser did not see (hidden in a comment, a marked section, raw text or an
-# attribute value) makes the raw count differ and refuses the page. Equal counts with one tag hidden and
-# another seen in its place still refuse: style and iframe are always refused, and the link guard allows
-# each shell script once, so a script the shell did not write is refused where it is seen.
-DIFFERENTIAL_TAGS = frozenset(("script", "style", "iframe")) | LINK_REFUSED_TAGS
+# The tags the raw-versus-parsed check counts: every element the guards refuse (style, iframe, the link
+# guard's LINK_REFUSED_TAGS, and meta, which the link guard refuses when it carries http-equiv) or allow
+# only in the shell's exact form (script). A start tag html.parser did not see (hidden in a comment, a
+# marked section, raw text or an attribute value) makes the raw count differ and refuses the page. Counts
+# are kept per tag name, and html.parser reports a start tag only where the raw pattern also matches it,
+# so a hidden tag always leaves its name's raw count above the parsed count.
+DIFFERENTIAL_TAGS = frozenset(("script", "style", "iframe", "meta")) | LINK_REFUSED_TAGS
 
 
 def refusals_for(html):
     """Every template code-style refusal a page triggers (specification sections 5 and 12), plus every
-    construct html.parser and a browser parse differently and every DIFFERENTIAL_TAGS start tag the parser
-    did not see (tools/_html_differential.py), each with its reason."""
+    construct tools/_html_differential.py lists as parsed differently by html.parser and a browser and
+    every DIFFERENTIAL_TAGS start tag the parser did not see, each with its reason."""
     found = []
     if any(dash in html for dash in DASHES):
         found.append("en or em dash")
@@ -2058,12 +2059,68 @@ def _self_test():
              '<textarea><iframe src="/draft/x"></iframe></textarea>',
              "<iframe> start tags: 1 in the source, 0 parsed"),
             ("differential/hidden-object-fails-closed",
-             '<p title="<OBJECT data=/draft/x>">x</p>', "<object> start tags: 1 in the source, 0 parsed")):
+             '<p title="<OBJECT data=/draft/x>">x</p>', "<object> start tags: 1 in the source, 0 parsed"),
+            ("differential/hidden-meta-fails-closed",
+             '<textarea><meta http-equiv="refresh" content="0"></textarea>',
+             "<meta> start tags: 1 in the source, 0 parsed"),
+            # A raw text start tag inside a select: html.parser reads the rest as raw text, a browser's
+            # in-select rules ignore the tag, so the paragraph is live.
+            ("differential/select-xmp",
+             '<select><xmp></select><p onclick="x()">x</p></xmp>', "<select> element"),
+            ("differential/select-title",
+             '<select><title></select><p onclick="x()">x</p></title>', "<select> element"),
+            ("differential/select-noembed",
+             '<select><noembed></select><p onclick="x()">x</p></noembed>', "<select> element"),
+            ("differential/select-noframes",
+             '<select><noframes></select><p onclick="x()">x</p></noframes>', "<select> element"),
+            ("differential/select-plaintext",
+             '<select><plaintext></select><p onclick="x()">x</p>', "<select> element"),
+            ("differential/select-uppercase",
+             '<SELECT name="a"><xmp></select><p onclick="x()">x</p></xmp>', "<select> element"),
+            # A raw text start tag written self-closing: html.parser stays in markup and reads the next
+            # raw text element over the image, a browser reads raw text up to the matching end tag.
+            ("differential/self-closed-xmp",
+             '<xmp/><textarea></xmp><img src="/draft/x.png" onerror="x()"></textarea>', "<xmp/> written"),
+            ("differential/self-closed-title",
+             '<title/><xmp></title><img src="/draft/x.png" onerror="x()"></xmp>', "<title/> written"),
+            ("differential/self-closed-textarea",
+             '<textarea/><xmp></textarea><img src="/draft/x.png" onerror="x()"></xmp>',
+             "<textarea/> written"),
+            ("differential/self-closed-noembed",
+             '<noembed/><xmp></noembed><img src="/draft/x.png" onerror="x()"></xmp>', "<noembed/> written"),
+            ("differential/self-closed-noframes",
+             '<noframes/><xmp></noframes><img src="/draft/x.png" onerror="x()"></xmp>',
+             "<noframes/> written"),
+            ("differential/self-closed-style",
+             '<style/><xmp></style><img src="/draft/x.png" onerror="x()"></xmp>', "<style/> written"),
+            ("differential/self-closed-script",
+             '<script/><xmp></script><img src="/draft/x.png" onerror="x()"></xmp>', "<script/> written"),
+            ("differential/self-closed-plaintext", "<plaintext/><p>x</p>", "<plaintext/> written"),
+            ("differential/self-closed-iframe",
+             '<iframe/><xmp></iframe><img src="/draft/x.png" onerror="x()"></xmp>', "<iframe/> written"),
+            ("differential/self-closed-noscript",
+             '<noscript/><xmp></noscript><img src="/draft/x.png" onerror="x()"></xmp>',
+             "<noscript/> written"),
+            ("differential/self-closed-space-before-slash",
+             '<xmp /><textarea></xmp><img src="/draft/x.png" onerror="x()"></textarea>', "<xmp/> written"),
+            ("differential/self-closed-after-quoted-attribute",
+             '<title class="a>b"/><xmp></title><img src="/draft/x.png" onerror="x()"></xmp>',
+             "<title/> written"),
+            ("differential/self-closed-uppercase",
+             '<XMP/><textarea></xmp><img src="/draft/x.png" onerror="x()"></textarea>', "<xmp/> written")):
         found = refusals_for(text)
         expect(name, any(reason in item for item in found), found)
     # Controls: escaped text, ordinary comments (the "--!>" close and the 1 empty comment both parsers end
-    # at "-->"), an svg with no raw text element, and names that only start like a refused one, pass.
+    # at "-->"), an svg with no raw text element, names that only start like a refused one, a void or svg
+    # element written self-closing, and a raw text element whose "/" is part of an unquoted attribute
+    # value (both parsers enter raw text), pass.
     for name, text in (
+            ("differential/self-closed-void-passes",
+             '<p>a<br/>b</p><img src="/draft/x.png" alt="x"/><img src="/draft/y.png" alt="y" />'),
+            ("differential/self-closed-svg-path-passes",
+             '<svg viewBox="0 0 2 2"><path d="M0 0"/><circle cx="1" cy="1" r="1" /></svg>'),
+            ("differential/raw-text-slash-in-value-passes", "<p>a</p><xmp class=b/>x</xmp>"),
+            ("differential/longer-select-name-passes", "<p><selection>a</selection><selectx>b</selectx></p>"),
             ("differential/escaped-script-text-passes", "<p>&lt;script&gt;alert(1)&lt;/script&gt;</p>"),
             ("differential/plain-comment-passes", "<p>a</p><!-- note --><p>b</p>"),
             ("differential/bang-close-comment-passes", "<p>a</p><!-- note --!><p>b</p>"),
