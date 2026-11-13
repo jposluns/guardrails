@@ -2629,8 +2629,13 @@ exit 0
         # still carry wall-clock bounds that can change their verdict, among
         # them: each row run's 30 s watchdog and its deadlines scaled to
         # connect 2.0 s, inactivity 1.5 s, request 8.0 s and gather 16.0 s;
-        # the TLS fixture's 2.0 s socket timeout (raw.settimeout) and the
-        # 1.0 s close bound of fixture/server-close-unblocks; the 2.0 s join
+        # the TLS fixture's 2.0 s socket timeout (raw.settimeout), its 30 s
+        # JOIN_BOUND in close(), and the 1.0 s close bound and 10 s event
+        # waits of fixture/server-close-unblocks (a close() over 1.0 s that
+        # the row's ordering shows did its work is CANNOT-EVALUATE, not
+        # INVALID, and still fails this leg, which needs every row VALID;
+        # a blocking call close() left to its socket timeout, as that
+        # ordering shows, is INVALID whatever the time); the 2.0 s join
         # of a run's resolver workers (a straggler fails the row INVALID);
         # the 1.0 s resolver-slot acquire after a run and in the held-slot
         # queue; the 10 s HELD_JOIN of resolver-vector/positive-held-slot;
@@ -3495,6 +3500,9 @@ def self_test(vectors_only=False, steady_only=False):
             headers = b"Content-Length: " + str(len(body)).encode("ascii") + b"\r\n"
         return b"HTTP/1.1 " + status + b"\r\n" + headers + extra + b"\r\n" + body
 
+    # How long Server.close() waits for its serving thread to end.
+    JOIN_BOUND = 30.0
+
     class Server:
         def __init__(self, context, archive_body, anchor_response, mode="normal"):
             self.context = context
@@ -3508,6 +3516,12 @@ def self_test(vectors_only=False, steady_only=False):
             # orders setting stop against the serving thread taking one.
             self.lock = threading.Lock()
             self.connection = None
+            # Set as the serving thread enters each blocking call on a held
+            # wrapped connection; and the monotonic time at which each call
+            # that ran to its socket timeout ended. close_row orders both
+            # against close().
+            self.entered = {"handshake": threading.Event(), "request": threading.Event()}
+            self.timed_out = []
             self.listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.listener.bind(("127.0.0.1", 0))
             self.listener.listen(8)
@@ -3548,9 +3562,11 @@ def self_test(vectors_only=False, steady_only=False):
                         raw, server_side=True, do_handshake_on_connect=False)
                     if not self.hold(secured):
                         continue
+                    self.entered["handshake"].set()
                     secured.do_handshake()
                     request = bytearray()
                     while not request.endswith(b"\r\n\r\n"):
+                        self.entered["request"].set()
                         block = secured.recv(4096)
                         if not block:
                             break
@@ -3581,6 +3597,10 @@ def self_test(vectors_only=False, steady_only=False):
                         secured.unwrap().close()
                     except (OSError, ssl.SSLError):
                         pass
+                except socket.timeout:
+                    # A blocking call ran to its socket timeout: expected for
+                    # deadline cases, and recorded.
+                    self.timed_out.append(time.monotonic())
                 except (OSError, ssl.SSLError):
                     # Expected for wrong-chain/name and deadline cases.
                     pass
@@ -3596,11 +3616,16 @@ def self_test(vectors_only=False, steady_only=False):
         def close(self):
             # Wait for the serving thread to end, the event this fixture
             # needs, rather than for a fixed delay that a loaded host can
-            # outlast. Stop is set under the lock and the connection in
-            # flight and the listener are shut down, so every blocking call
-            # in serve() returns at once: an Event wait on stop, a socket
-            # call on the shutdown. The thread then ends however late the
-            # host schedules it.
+            # outlast. Under the lock, stop is set and the connection in
+            # flight is shut down; the listener is then shut down and closed
+            # outside it. No blocking call in serve() then waits out its own
+            # timeout: an Event wait on stop returns once stop is set, and a
+            # socket call on the shut-down connection or listener fails or
+            # reads end of file. How soon each returns, and the thread ends,
+            # depends on when the host schedules the thread. The join is
+            # bounded by JOIN_BOUND, many times the 2.0 s socket timeout, so
+            # a thread stuck past it is named in an AssertionError rather
+            # than hanging the self-test.
             with self.lock:
                 self.stop.set()
                 if self.connection is not None:
@@ -3613,18 +3638,27 @@ def self_test(vectors_only=False, steady_only=False):
             except OSError:
                 pass
             self.listener.close()
-            self.thread.join()
+            self.thread.join(JOIN_BOUND)
+            if self.thread.is_alive():
+                raise AssertionError(
+                    "local TLS fixture: serving thread still running {} s after "
+                    "close() began joining it".format(JOIN_BOUND))
 
     class PausedStop(threading.Event):
         # Stop for one fixture server: its serving thread, once it holds a
         # connection, reads it in the next registration and then waits there
-        # until close() has begun, so close() meets that thread between
-        # reading stop and taking the wrapped connection.
-        def __init__(self, server):
+        # (paused) until reached is set, that is until close() is seen
+        # waiting for the lock that registration holds (MarkedLock) or past
+        # the connection it shuts down (MarkedListener). So close() meets
+        # that thread between reading stop and taking the wrapped connection,
+        # by ordering rather than by a delay. ordered records whether reached
+        # was set within the wait's 10 s bound.
+        def __init__(self, server, reached):
             super().__init__()
             self.server = server
+            self.reached = reached
             self.paused = threading.Event()
-            self.closing = threading.Event()
+            self.ordered = False
 
         def is_set(self):
             value = super().is_set()
@@ -3632,11 +3666,42 @@ def self_test(vectors_only=False, steady_only=False):
                     and self.server.connection is not None
                     and not self.paused.is_set()):
                 self.paused.set()
-                self.closing.wait(10.0)
-                # Time for close() to reach the lock, or with no lock, to
-                # pass the connection it would shut down.
-                time.sleep(0.1)
+                self.ordered = self.reached.wait(10.0)
             return value
+
+    class MarkedLock:
+        # A fixture server's lock that sets reached when a thread other
+        # than the serving thread, close(), finds it held and waits for it.
+        def __init__(self, server, reached):
+            self.lock = threading.Lock()
+            self.server = server
+            self.reached = reached
+
+        def __enter__(self):
+            if not self.lock.acquire(blocking=False):
+                if threading.current_thread() is not self.server.thread:
+                    self.reached.set()
+                self.lock.acquire()
+            return self
+
+        def __exit__(self, *exc_info):
+            self.lock.release()
+            return False
+
+    class MarkedListener:
+        # A fixture server's listener that sets reached as close() shuts it
+        # down: close() has then passed the connection in flight, which it
+        # shuts down before the listener.
+        def __init__(self, listener, reached):
+            self.listener = listener
+            self.reached = reached
+
+        def shutdown(self, how):
+            self.reached.set()
+            return self.listener.shutdown(how)
+
+        def __getattr__(self, name):
+            return getattr(self.listener, name)
 
     CLOSE_IDENTITY = "fixture/server-close-unblocks"
     CLOSE_BOUND = 1.0
@@ -3646,63 +3711,91 @@ def self_test(vectors_only=False, steady_only=False):
         # than leave the call to its 2.0 s socket timeout: a client that never
         # sends the TLS handshake, one that completes it and never sends a
         # request, and a close() that meets the thread inside its
-        # registration of the wrapped connection (PausedStop). Each close()
-        # must return within CLOSE_BOUND and the thread must have ended. The
-        # bound is half the socket timeout, which a close() that leaves the
-        # call to time out spends nearly all of, and many times the 0.1 s
-        # pause plus the milliseconds close() otherwise takes, so a loaded
-        # host has most of a second to spare before it fails the row.
+        # registration of the wrapped connection (PausedStop). Each case is
+        # ordered by events, not by sleeps: the test closes only once the
+        # serving thread has set the event it sets as it enters the blocking
+        # call (Server.entered) or pauses in the registration
+        # (PausedStop.paused), and that pause lasts until close() is seen at
+        # the lock or past the connection. A call that ran to its socket
+        # timeout after close() began (Server.timed_out) is the regression
+        # and fails the row INVALID, however long close() took; so do a case
+        # not reached, a server error, and a thread still running JOIN_BOUND
+        # after close(), named by close()'s own error. A case the ordering
+        # cannot judge is CANNOT-EVALUATE (scheduling): its call timed out
+        # before close() began, or close() was not seen within 10 s of the
+        # pause. Each close() must also return within CLOSE_BOUND, half the
+        # socket timeout and many times the milliseconds it takes when the
+        # host schedules it promptly. A close() over that bound that ended
+        # the thread with no call timed out after it began did reach and
+        # interrupt the call, so the miss is scheduling, not a regression:
+        # CANNOT-EVALUATE, with the measured time.
         client_context = original_context(cadata=certificates)
         failures = []
+        unjudged = []
         measured = {}
         for case in ("handshake", "request", "registration"):
             server = Server(context, b"", b"")
             if case == "registration":
-                stop = server.stop = PausedStop(server)
+                reached_close = threading.Event()
+                server.lock = MarkedLock(server, reached_close)
+                server.listener = MarkedListener(server.listener, reached_close)
+                stop = server.stop = PausedStop(server, reached_close)
+                entered = stop.paused
+            else:
+                entered = server.entered[case]
             client = None
             reached = False
+            stuck = None
             try:
                 client = socket.create_connection(("127.0.0.1", server.port), timeout=10.0)
                 if case == "request":
                     # Wrapping takes over the client's descriptor, so the
                     # wrapped socket is the one to close.
                     client = client_context.wrap_socket(client, server_hostname="posluns.dev")
-                if case == "registration":
-                    reached = stop.paused.wait(10.0)
-                else:
-                    end = time.monotonic() + 10.0
-                    while server.connection is None and time.monotonic() < end:
-                        time.sleep(0.01)
-                    reached = server.connection is not None
-                    # Time for the thread to enter its blocking call.
-                    time.sleep(0.2)
+                reached = entered.wait(10.0)
             finally:
                 # The server's one close(), timed while the client still
-                # holds its connection open.
-                if case == "registration":
-                    stop.closing.set()
+                # holds its connection open; the client is closed whatever
+                # close() does.
                 start = time.monotonic()
-                server.close()
-                elapsed = time.monotonic() - start
-                if client is not None:
-                    client.close()
+                try:
+                    server.close()
+                except AssertionError as exc:
+                    stuck = str(exc)
+                finally:
+                    elapsed = time.monotonic() - start
+                    if client is not None:
+                        client.close()
             if not reached:
                 failures.append(case + ": the serving thread did not reach the point "
                                 "this case closes it at")
                 continue
             measured[case] = round(elapsed, 3)
-            if elapsed > CLOSE_BOUND:
-                failures.append("{}: close() took {:.3f} s, over its {} s bound".format(
-                    case, elapsed, CLOSE_BOUND))
-            if server.thread.is_alive():
+            if stuck is not None:
+                failures.append(case + ": " + stuck)
+            elif server.thread.is_alive():
                 failures.append(case + ": the serving thread outlived close()")
             if server.errors:
                 failures.append(case + ": fixture server error " + ", ".join(server.errors))
+            if any(moment >= start for moment in server.timed_out):
+                failures.append(case + ": close() left the serving thread's blocking call "
+                                "to its 2.0 s socket timeout")
+            elif server.timed_out:
+                unjudged.append(case + ": the blocking call timed out before close() "
+                                "began (scheduling)")
+            elif case == "registration" and not stop.ordered:
+                unjudged.append(case + ": close() was not seen at the lock or past the "
+                                "connection within 10 s of the pause (scheduling)")
+            elif elapsed > CLOSE_BOUND and not server.thread.is_alive():
+                unjudged.append("{}: close() took {:.3f} s, over its {} s bound, though it "
+                                "ended the thread with no call timed out (scheduling)".format(
+                                    case, elapsed, CLOSE_BOUND))
         row = {"id": CLOSE_IDENTITY, "close_seconds": measured,
                "close_bound_seconds": CLOSE_BOUND,
-               "test_status": INVALID if failures else VALID}
-        if failures:
-            row["detail"] = "; ".join(failures)
+               "test_status": (INVALID if failures
+                               else CANNOT_EVALUATE if unjudged else VALID)}
+        if failures or unjudged:
+            row["detail"] = "; ".join(failures + unjudged)
         return row
 
     def snapshot(root):
@@ -5216,12 +5309,18 @@ def self_test(vectors_only=False, steady_only=False):
             vector_results = resolver_vectors(base, contexts)
     except Exception as exc:
         # Carry the exception's message, so a failure reads as more than its
-        # exception class. Reading the message can itself raise; the row is
-        # still recorded, with a fallback detail, and the run still exits 2.
+        # exception class, and flatten it for the FAIL line. Reading or
+        # splitting the message can itself raise; the row is still recorded,
+        # with a fallback detail, and the run still exits 2. A message that
+        # is empty or only white space, line breaks included, reads "no
+        # message" in both.
         try:
-            detail = str(exc) or "no message"
+            detail = str(exc)
+            flat = " ".join(detail.splitlines()).strip()
         except Exception:
-            detail = "the exception's message could not be read"
+            detail = flat = "the exception's message could not be read"
+        if not flat:
+            detail = flat = "no message"
         executed.append({
             "id": "fixture/setup-or-teardown",
             "test_status": CANNOT_EVALUATE,
@@ -5235,7 +5334,7 @@ def self_test(vectors_only=False, steady_only=False):
         # one and not VALID, so the last line is its own; it also names the
         # exception and its detail, on one line.
         lines = _roster_failures(executed)
-        lines[-1] += ": {}: {}".format(type(exc).__name__, " ".join(detail.splitlines()))
+        lines[-1] += ": {}: {}".format(type(exc).__name__, flat)
         _print_failures(lines)
         return 2
 
