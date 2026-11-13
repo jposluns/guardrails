@@ -1712,7 +1712,10 @@ def _member_timeout_controls(base):
     _member_close_controls.
     config/member-bound-table and config/member-bound-opf-selftest pin the per-member bound table
     against the registered roster, and config/member-bound-reaches-run pins that the looked-up
-    bound is the one handed to _run_bounded (_member_bound_checks). A fixture that never got going
+    bound is the one handed to _run_bounded (_member_bound_checks).
+    config/member-bound-closure-worst-case holds each closure --ci-job entry at or above its
+    member's worst case plus the launch margin, recomputed through the closure module, with
+    config/member-bound-closure-vectors (_closure_bound_checks). A fixture that never got going
     inside its bound is attributed to that timeout, never a red."""
     import contextlib
     import io
@@ -1868,6 +1871,7 @@ def _member_timeout_controls(base):
     _member_close_controls(fixture)
 
     _member_bound_checks(set(_registered_selftests()))
+    _closure_bound_checks()
 
 
 def _member_bound_checks(roster):
@@ -2130,6 +2134,200 @@ def _member_bound_checks(roster):
            (" ".join(closure_c), 8100), (" ".join(closure_d), 9900), (" ".join(closure_e), 9600),
            (" ".join(closure_f), 3600), (" ".join(coverage_suite), 5400),
            (" ".join(release_cut), 2700), ("opf/tools/opf.py", 1200)])
+
+
+# The argv prefix of the closure gate's --ci-job members, and the closure module's names their
+# worst case is computed from (the WORST CASE paragraph of the engine's comment on their entries).
+_CLOSURE_MEMBER_PREFIX = ("tools/check_opf_standalone_closure.py", "--self-test", "--ci-job")
+_CLOSURE_WORST_CASE_NAMES = ("_leg_bounds", "_CI_JOB_LEGS", "_FLIP_LEG", "_DRAIN_MARGIN_S",
+                             "_VECTOR_ALLOWANCE_S", "_LAUNCH_MARGIN_S")
+
+
+def _closure_worst_cases(closure, tools_dir, leg_bounds=None):
+    """({job: (worst case s, launch margin s)}, problems, leg bounds) for every --ci-job member
+    of the closure gate, computed through the closure module's own _leg_bounds and constants: one
+    sweep of the job's legs at their leg bounds, the flip at the _FLIP_LEG bound in the job that
+    holds that leg, one _DRAIN_MARGIN_S cleanup deadline per leg that can be killed, and
+    _VECTOR_ALLOWANCE_S. A name the module lacks or holds with the wrong type, a _leg_bounds call
+    that raises, and a job leg with no positive int bound are each a problem, and any problem
+    yields no figures (fail-closed, never a skip). leg_bounds, when given, stands in for the
+    _leg_bounds result (the vectors raise one leg's bound through it)."""
+    values = {}
+    for name in _CLOSURE_WORST_CASE_NAMES:
+        if not hasattr(closure, name):
+            return {}, ["closure module has no {}".format(name)], None
+        values[name] = getattr(closure, name)
+    for name in ("_DRAIN_MARGIN_S", "_VECTOR_ALLOWANCE_S", "_LAUNCH_MARGIN_S"):
+        if type(values[name]) is not int or values[name] <= 0:
+            return {}, ["closure {} is not a positive int: {!r}".format(name, values[name])], None
+    flip_leg, jobs = values["_FLIP_LEG"], values["_CI_JOB_LEGS"]
+    if type(flip_leg) is not str or not flip_leg:
+        return {}, ["closure _FLIP_LEG is not a nonempty str: {!r}".format(flip_leg)], None
+    if (type(jobs) is not dict or not jobs
+            or not all(type(job) is str and isinstance(legs, (set, frozenset)) and legs
+                       and all(type(leg) is str for leg in legs) for job, legs in jobs.items())):
+        return {}, ["closure _CI_JOB_LEGS is not a nonempty dict of str to nonempty sets of"
+                    " str: {!r}".format(jobs)], None
+    if not callable(values["_leg_bounds"]):
+        return {}, ["closure _leg_bounds is not callable"], None
+    if leg_bounds is None:
+        try:
+            leg_bounds = values["_leg_bounds"](tools_dir)
+        except Exception as error:  # the closure's own _BoundError included
+            return {}, ["closure _leg_bounds({}) raised {}: {}".format(
+                tools_dir, type(error).__name__, error)], None
+    if type(leg_bounds) is not dict:
+        return {}, ["closure _leg_bounds returned {!r}, not a dict".format(leg_bounds)], None
+    figures, problems = {}, []
+    for job in sorted(jobs):
+        bounds = {}
+        for leg in sorted(jobs[job]):
+            row = leg_bounds.get(leg)
+            bound = row[0] if type(row) is tuple and row else None
+            if type(bound) is not int or bound <= 0:
+                problems.append("closure leg {} of {} has no positive int bound: {!r}".format(
+                    leg, job, row))
+            bounds[leg] = bound
+        if problems:
+            continue
+        flip = bounds[flip_leg] if flip_leg in bounds else 0
+        kills = len(bounds) + (1 if flip_leg in bounds else 0)
+        figures[job] = (sum(bounds.values()) + flip + kills * values["_DRAIN_MARGIN_S"]
+                        + values["_VECTOR_ALLOWANCE_S"], values["_LAUNCH_MARGIN_S"])
+    return ({}, problems, None) if problems else (figures, [], leg_bounds)
+
+
+def _closure_bound_shortfalls(figures, table):
+    """Each closure --ci-job member (figures, from _closure_worst_cases) whose entry in table (a
+    CONFIG_MEMBER_BOUNDS mapping) is missing, not an int, or below its worst case plus the launch
+    margin, and each closure --ci-job entry in table naming a job the module does not hold; []
+    when every entry reaches its member's worst case plus the margin."""
+    findings = []
+    for job in sorted(figures):
+        worst, margin = figures[job]
+        entry = table.get(_CLOSURE_MEMBER_PREFIX + (job,))
+        if type(entry) is not int:
+            findings.append("{}: no int CONFIG_MEMBER_BOUNDS entry ({!r}), its worst case {} s plus"
+                            " the {} s launch margin is {} s".format(
+                                job, entry, worst, margin, worst + margin))
+        elif entry < worst + margin:
+            findings.append("{}: entry {} s is below its worst case {} s plus the {} s launch"
+                            " margin, {} s".format(job, entry, worst, margin, worst + margin))
+    for argv in sorted(table):
+        if (tuple(argv[:len(_CLOSURE_MEMBER_PREFIX)]) == _CLOSURE_MEMBER_PREFIX
+                and (len(argv) != len(_CLOSURE_MEMBER_PREFIX) + 1 or argv[-1] not in figures)):
+            findings.append("entry for a closure member the module holds no job for: {!r}".format(
+                argv))
+    return findings
+
+
+def _closure_member_figures(tools_dir, leg_bounds=None):
+    """_closure_worst_cases over the live tools/check_opf_standalone_closure.py, imported; an
+    import that fails is a problem, never a skip. Returns (module or None, figures, problems,
+    leg bounds)."""
+    try:
+        import check_opf_standalone_closure as closure
+    except (Exception, SystemExit) as error:
+        return None, {}, ["tools/check_opf_standalone_closure.py cannot be imported: {}: {}".format(
+            type(error).__name__, error)], None
+    figures, problems, bounds = _closure_worst_cases(closure, tools_dir, leg_bounds)
+    return closure, figures, problems, bounds
+
+
+def _closure_bound_checks():
+    """config/member-bound-closure-worst-case: every --ci-job member of the closure gate has a
+    CONFIG_MEMBER_BOUNDS entry at or above its worst case plus the launch margin, each recomputed
+    on every run through the live closure module's _leg_bounds over opf/tools and its
+    _CI_JOB_LEGS, _FLIP_LEG, _DRAIN_MARGIN_S, _VECTOR_ALLOWANCE_S and _LAUNCH_MARGIN_S (the model
+    the engine's comment on those entries gives), and no closure --ci-job entry names a job the
+    module does not hold. The literal pins in _member_bound_checks cannot see a rise in a closure
+    leg bound or floor that leaves an entry below that figure; this check can. It fails closed: a
+    module that cannot be imported, a name missing or of the wrong type, or a _leg_bounds that
+    raises is a finding. The figures are printed, not pinned.
+    config/member-bound-closure-vectors: from the live table with each closure entry raised to at
+    least its live worst case plus margin, for each member, an entry one second below that figure
+    is a finding naming that member, and one at it or one second above is not; one of the
+    member's legs raised (through a stand-in _leg_bounds result) by one second more than the
+    entry's slack is a finding naming that member, and by exactly the slack is not;
+    a stand-in module missing each name in turn, one with a constant of the wrong type, one whose
+    _leg_bounds raises, and a blocked import each yield a problem and no figures (red when the
+    comparison, the recomputation or the fail-closed handling is dropped)."""
+    tools_dir = ROOT / "opf" / "tools"
+    closure, figures, problems, bounds = _closure_member_figures(tools_dir)
+    for job in sorted(figures):
+        worst, margin = figures[job]
+        print("CLOSURE MEMBER WORST CASE: {} {} s, plus the {} s launch margin {} s,"
+              " entry {}".format(job, worst, margin, worst + margin,
+                                 CONFIG_MEMBER_BOUNDS.get(_CLOSURE_MEMBER_PREFIX + (job,))),
+              flush=True)
+    check("config/member-bound-closure-worst-case",
+          problems or _closure_bound_shortfalls(figures, CONFIG_MEMBER_BOUNDS), [])
+    # With no live figures the vectors have nothing to start from: the problems stand as their
+    # finding too, never a skip.
+    got, want = (problems, []) if problems else _closure_bound_vectors(
+        closure, figures, bounds, tools_dir)
+    check("config/member-bound-closure-vectors", got, want)
+
+
+def _closure_bound_vectors(closure, figures, bounds, tools_dir):
+    """(got, want) for config/member-bound-closure-vectors (see _closure_bound_checks), from the
+    live closure module, its figures and its leg bounds."""
+    import types
+    from unittest.mock import patch
+
+    def named(findings):
+        return sorted({finding.split(":", 1)[0] for finding in findings})
+
+    # The vectors start from a table whose closure entries each reach their live worst case plus
+    # margin, so a live shortfall is named by the check above alone, not again by every vector.
+    base = dict(CONFIG_MEMBER_BOUNDS)
+    for job, (worst, margin) in figures.items():
+        entry = base.get(_CLOSURE_MEMBER_PREFIX + (job,))
+        base[_CLOSURE_MEMBER_PREFIX + (job,)] = max(
+            entry if type(entry) is int else 0, worst + margin)
+    got, want = [], []
+    for job in sorted(figures):
+        argv = _CLOSURE_MEMBER_PREFIX + (job,)
+        worst, margin = figures[job]
+        for delta, red in ((-1, True), (0, False), (1, False)):
+            table = {**base, argv: worst + margin + delta}
+            got.append(("entry", job, delta, named(_closure_bound_shortfalls(figures, table))))
+            want.append(("entry", job, delta, [job] if red else []))
+        legs = sorted(closure._CI_JOB_LEGS[job])
+        leg = next((name for name in legs if name != closure._FLIP_LEG), legs[0])
+        unit = 2 if leg == closure._FLIP_LEG else 1  # the flip leg counts in the sweep and the flip
+        slack = base[argv] - worst - margin
+        for rise, red in ((slack // unit + 1, True), (slack // unit, False)):
+            raised = dict(bounds)
+            raised[leg] = (bounds[leg][0] + rise,) + tuple(bounds[leg][1:])
+            more, more_problems, _bounds = _closure_worst_cases(closure, tools_dir, raised)
+            got.append(("leg", job, red, more_problems,
+                        named(_closure_bound_shortfalls(more, base))))
+            want.append(("leg", job, red, [], [job] if red else []))
+
+    def stand_in(**changed):
+        names = {name: getattr(closure, name) for name in _CLOSURE_WORST_CASE_NAMES}
+        names.update(changed)
+        return types.SimpleNamespace(**{name: value for name, value in names.items()
+                                        if value is not None})
+
+    def raising(_tools_dir):
+        raise ValueError("stand-in leg bound fault")
+
+    for name in _CLOSURE_WORST_CASE_NAMES:
+        missing = _closure_worst_cases(stand_in(**{name: None}), tools_dir, bounds)
+        got.append(("missing", name, missing[0], name in "".join(missing[1])))
+        want.append(("missing", name, {}, True))
+    for label, module in (("wrong type", stand_in(_VECTOR_ALLOWANCE_S="350")),
+                          ("leg bounds raise", stand_in(_leg_bounds=raising))):
+        faulted = _closure_worst_cases(module, tools_dir)
+        got.append((label, faulted[0], len(faulted[1])))
+        want.append((label, {}, 1))
+    with patch.dict(sys.modules, {"check_opf_standalone_closure": None}):
+        blocked = _closure_member_figures(tools_dir, bounds)
+    got.append(("import blocked", blocked[0], blocked[1], len(blocked[2])))
+    want.append(("import blocked", None, {}, 1))
+    return got, want
 
 
 _MEMBER_TIMEOUT_EXPECTED = [
