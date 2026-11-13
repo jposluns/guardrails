@@ -5479,6 +5479,7 @@ def _init_store_view_digests(product_root, operation_id):
                         and eff["digest"].startswith("sha256:"):
                     out[eff["path"]] = eff["digest"][len("sha256:"):]
     except (_journal.JournalError, OSError):
+        # A refused intact unknown-type frame lands here: fewer digests accepted, so a reversal may refuse, never remove more.
         return {}
     finally:
         for fd in (jr_fd, home_fd, control_fd):

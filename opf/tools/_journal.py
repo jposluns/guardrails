@@ -3517,7 +3517,8 @@ def _st_frame_classification_checks(base):
           naming the unknown type, never read as a torn tail; classify_state refuses it rather than
           reading the transaction as open, and recover refuses it and leaves the log byte-unchanged.
       J2  the same frame mid-log (a known frame follows it) is refused with the same JournalError.
-      J3  a truly torn last frame (its body short of the declared length, the trailing newline missing)
+      J3  a truly torn last frame (its body short of the declared length, the trailing newline missing),
+          and a last frame whose body matches its checksum but which lacks only its final newline, each
           still reads as a torn tail with the clean prefix's frames and length, for a known type and for
           an unknown type alike (a torn frame was never written, whatever its header names).
       J4  a last frame whose body does not match its checksum still reads as a torn tail, for a known
@@ -3548,6 +3549,10 @@ def _st_frame_classification_checks(base):
                 _st_frame_read(jroot, intent + complete[:-4]) == ("read", prefix)),
                ("J3-short-body-unknown-type-last-frame-torn",
                 _st_frame_read(jroot, intent + unknown[:-4]) == ("read", prefix)),
+               ("J3-missing-final-newline-last-frame-torn",
+                _st_frame_read(jroot, intent + complete[:-1]) == ("read", prefix)),
+               ("J3-missing-final-newline-unknown-type-last-frame-torn",
+                _st_frame_read(jroot, intent + unknown[:-1]) == ("read", prefix)),
                ("J4-bad-checksum-last-frame-torn",
                 _st_frame_read(jroot, intent + bad_digest(complete)) == ("read", prefix)),
                ("J4-bad-checksum-unknown-type-last-frame-torn",
