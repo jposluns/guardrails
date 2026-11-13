@@ -2578,10 +2578,13 @@ def _test_reset_ancestry(failures, tmp):
 
 # The shared interpreter reader (_interp_run), the segment stdin feeds (_segment_stdin_feed with _HeredocMarks)
 # and the gensrc python walker read through it. Each row whose (source, operand index) or feed set names a
-# part fails when that part is reverted: the - reading (ird-1), the value of -X (ird-2), the stop at the
-# script operand (ird-3), the value of -o (ird-4), the wrapper peel (ird-8), the basename match (ird-9), the
-# stdin path check (ird-10) and the here-document recorder (ird-11); ird-14 and ird-15 also run as gensrc
-# Bash cases (_gb_cases).
+# part fails when that part is reverted: python's - entry (ird-1, which reads as a file once that entry is
+# an operand), the value of -X (ird-2), the stop at the script operand (ird-3), the value of -o (ird-4), the
+# wrapper peel (ird-8), the basename match (ird-9), the stdin path check (ird-10), the here-document recorder
+# (ird-11), bash's one-dash long options (ird-17 to ird-19), the opacity of a value word (ird-20, ird-21),
+# the lone - of source (ird-22), bash's lone + (ird-23), the descriptor path branch (ird-24, ird-25), the
+# recorder's stop feeds (ird-26 to ird-29), its command substitution skip (ird-30) and its matching
+# condition (ird-31); ird-14 and ird-15 also run as gensrc Bash cases (_gb_cases).
 _IRD_RUNS = (
     ("(ird-1) python3 with - as the script reads the stdin", "python3 -I - x", ("stdin-dash", 2)),
     ("(ird-2) the value of -X is no script", "python3 -X dev", ("implicit", None)),
@@ -2593,11 +2596,29 @@ _IRD_RUNS = (
     ("(ird-8) env and timeout are peeled", "env -i timeout 5 python3 -", ("stdin-dash", 5)),
     ("(ird-9) a path and a version are read from the basename", "/usr/bin/python3.12 -", ("stdin-dash", 1)),
     ("(ird-10) a stdin path as the script reads the stdin", "bash /dev/stdin", ("stdin-dash", 1)),
+    ("(ird-17) bash reads -rcfile as --rcfile, whose value is no script", "bash -rcfile rc.sh s.sh", ("file", 3)),
+    ("(ird-18) bash reads -norc as --norc, no letter cluster", "bash -norc s.sh", ("file", 2)),
+    ("(ird-19) bash -version prints and exits", "bash -version", ("info", 1)),
+    ("(ird-20) an expansion in the value of -W is unknown", "python3 -W $x s.py", ("unknown", 2)),
+    ("(ird-21) an expansion in the value of --rcfile is unknown", "bash --rcfile $x s.sh", ("unknown", 2)),
+    ("(ird-22) source reads a lone - as a file named -", "source -", ("file", 1)),
+    ("(ird-23) bash skips a lone +", "bash + s.sh", ("file", 2)),
+    ("(ird-24) a /dev/fd path as the script reads a descriptor", "python3 /dev/fd/3", ("stdin-dash", 1)),
+    ("(ird-25) a /proc fd path as the script reads a descriptor", "bash /proc/1234/fd/0", ("stdin-dash", 1)),
 )
 _IRD_FEEDS = (
     ("(ird-11) a quoted here-document feeds python3", "python3 <<'EOF'\nprint(1)\nEOF", {"heredoc"}),
     ("(ird-12) a pipe feeds python3", "printf x | python3", {"pipe"}),
     ("(ird-13) a < redirect feeds bash", "bash < f", {"redirect"}),
+)
+# The feeds the recorder takes from where a partial lex stopped (ird-26 to ird-29), and a quoted
+# here-document inside a backquote substitution, which feeds the substitution's cat, not python3 (ird-30).
+_IRD_STOP_FEEDS = (
+    ("(ird-26) a here-string feeds python3", "python3 <<<'x'", {"herestring"}),
+    ("(ird-27) an unquoted here-document feeds python3", "python3 <<EOF\nx\nEOF", {"heredoc"}),
+    ("(ird-28) a process substitution after < feeds python3", "python3 < <(echo x)", {"procsubst"}),
+    ("(ird-29) a process substitution as a word is an operand", "python3 <(echo x)", {"procsubst-word"}),
+    ("(ird-30) a here-document in backquotes feeds no outer segment", "python3 - `cat <<'E'\nx\nE\n`", set()),
 )
 # The recorder identity (ird-16): commands holding quoted and unquoted here-documents, here-strings, process
 # substitutions, pipes, uncertain '#' readings and backquote bodies, each lexed in every caller shape the hooks
@@ -2626,6 +2647,28 @@ def _test_interp_reader(failures):
         got = hooks._segment_stdin_feed(segments, index[0], marks) if index else None
         if got != frozenset(want):
             failures.append("{}: expected {}, got {} for {!r}".format(label, sorted(want), got, command))
+    for label, command, want in _IRD_STOP_FEEDS:
+        with hooks._HeredocMarks() as marks:
+            segments = hooks._lex_command(command, partial=True)[0]
+        got = hooks._segment_stdin_feed(segments, 0, marks) if segments else None
+        if got != frozenset(want):
+            failures.append("{}: expected {}, got {} for {!r}".format(label, sorted(want), got, command))
+    # The recorder's matching condition (ird-31): a '<<' marks only the segment of the same command object
+    # that starts where it was read and ends after it.
+    command = "python3 <<'E'"
+    other = "".join(list(command))
+    seg = hooks._lex_command("true")[0]
+    inside, ended, elsewhere, early = [seg._replace(redirects=[]) for _ in range(4)]
+    with hooks._HeredocMarks() as marks:
+        marks.open(command, 0, 8)
+        marks.open(command, 30, 25)
+        marks.close(command, 0, 8, ended)
+        marks.close(other, 0, 20, elsewhere)
+        marks.close(command, 30, 40, early)
+        marks.close(command, 0, 20, inside)
+    got = [sorted(marks.feeds(part)) for part in (inside, ended, elsewhere, early)]
+    if got != [["heredoc"], [], [], []]:
+        failures.append("(ird-31) the recorder marks segments by command, start and end: got {}".format(got))
     # The gensrc walker through the shared reader: a literal - is a stdin-fed program (uncleared), and -m
     # spells no sink (the Bash posture of each is pinned by the gb cases of the same labels).
     for label, argv, want in (

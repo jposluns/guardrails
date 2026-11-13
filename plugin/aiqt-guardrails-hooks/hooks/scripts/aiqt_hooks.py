@@ -588,16 +588,20 @@ class _LexStops:
 
 
 # Where a stopped partial lex stopped, as a feed of the in-progress segment's standard input: a here-string, an
-# unquoted here-document, or a process substitution (as a '<' redirect's target or as a word).
-_HEREDOC_STOP_RE = re.compile(r"(<<<)|(<<)|(?:<[ \t]*)?<\(")
+# unquoted here-document, or a process substitution as a '<' redirect's target; a process substitution used as
+# a word is an operand (such as a script file), not the stdin, and is told apart.
+_HEREDOC_STOP_RE = re.compile(r"(<<<)|(<<)|(<[ \t]*<\()|<\(")
 
 
 class _HeredocMarks:
     """A context in which every lex records which of the segments it builds have their standard input fed by
     something the segment record does not show: a QUOTED here-document whose '<<' was read inside the segment
+    and outside any backquote or '$(' command substitution, whose here-documents feed a command of that body
     ("heredoc"), and, for the in-progress segment a partial lex returns when it stops, a here-string
-    ("herestring"), an unquoted here-document ("heredoc") or a process substitution ("procsubst") at the token
-    it stopped at. _segment_stdin_feed reads the record (feeds). A segment is known by its redirects list,
+    ("herestring"), an unquoted here-document ("heredoc") or a process substitution that is a '<' redirect's
+    target ("procsubst") at the token it stopped at; a process substitution used as a word there is recorded
+    as "procsubst-word", an operand that is not the stdin, so a consumer still learns that the argv stops
+    before it. _segment_stdin_feed reads the record (feeds). A segment is known by its redirects list,
     which _read_past and every other _replace copy share with the record the lexer built, so a copy read from
     its command word keeps the record's feeds. A '<<' is matched to a segment by the command text it was read
     in (the same object), the start of the segment it was read in and an offset before that segment's end, so
@@ -635,7 +639,8 @@ class _HeredocMarks:
         if stop is not None:
             match = _HEREDOC_STOP_RE.match(command, stop)
             if match is not None:
-                feeds.add("herestring" if match.group(1) else "heredoc" if match.group(2) else "procsubst")
+                feeds.add("herestring" if match.group(1) else "heredoc" if match.group(2)
+                          else "procsubst" if match.group(3) else "procsubst-word")
         if feeds:
             self.keep.append(seg.redirects)
             self.fed.setdefault(id(seg.redirects), set()).update(feeds)
@@ -3163,7 +3168,9 @@ def _lex_pass(command, partial, hash_reading, locale, subst_heredocs, skip_empty
                             if nest.backquotes:
                                 nest.heredoc_bq = max(nest.heredoc_bq, nest.backquotes[-1])
                             pending_heredocs.append((_delim, _strip))
-                            if _HeredocMarks.at is not None:
+                            if _HeredocMarks.at is not None and "`" not in nest and "$(" not in nest:
+                                # one read inside a command substitution feeds a command of that body,
+                                # not the segment the substitution is a word of
                                 _HeredocMarks.at.open(command, seg_start[0], i)
                             i = _next_i
                             continue
@@ -16700,14 +16707,17 @@ def _gate_peel(argv, producer=False):
 # --- the shared interpreter reader: where the program an interpreter runs comes from ---------------------------
 # _interp_run reads a segment's argv, after _gate_peel, as one run of python (python, python3 or python3.N,
 # _GENSRC_PYTHON_RE), bash, sh or zsh, or the source or . builtin, and reports where its program comes from
-# (_InterpRun.source): "file" (a script operand, operand_index), "stdin-dash" (python's -, or a script operand
-# _interp_stdin_path reads as the stdin or a descriptor path), "stdin-s" (a shell's -s), "implicit" (no program
-# operand and no -c or -m: the program is read from the stdin, or for source and . bash refuses the command),
-# "inline" (-c), "module" (python -m), "info" (a help or version option: no program runs) and "unknown" (an
-# option outside the grammar, or, where argv_opaque is given, a word formed with an expansion before the program
-# is placed). The lexer stops before a process substitution, so no argv holds one: a stopped partial lex's
-# feed (_segment_stdin_feed, "procsubst") is where a consumer finds it. Each option grammar (_InterpGrammar) is
-# read from the interpreter installed on the host it was written on (checked 2026-11-13):
+# (_InterpRun.source): "file" (a script operand, operand_index; for source and . a lone - too, a file named
+# -), "stdin-dash" (python's -, or a script operand _interp_stdin_path reads as the stdin or a descriptor path),
+# "stdin-s" (a shell's -s), "implicit" (no program operand and no -c or -m: the program is read from the stdin,
+# or for source and . bash refuses the command), "inline" (-c), "module" (python -m), "info" (a help or version
+# option: no program runs) and "unknown" (an option outside the grammar, or, where argv_opaque is given, a word
+# formed with an expansion before the program is placed, an option's value word included, since splitting it
+# can place an option such as -c). The lexer stops before a process substitution, so no argv holds one: a
+# stopped partial lex's feed (_segment_stdin_feed: "procsubst" for one that is the target of a '<' redirect,
+# "procsubst-word" for one used as a word, which is an operand such as a script file and not the stdin) is
+# where a consumer finds it. Each option grammar (_InterpGrammar) is read from the interpreter installed on the
+# host it was written on (checked 2026-11-13):
 #   python: Python 3.14.4 'python3 --help'. -h, -? and --help, -V and --version, --help-env, --help-xoptions and
 #     --help-all print and exit; -c CMD and -m MOD end the options, each taking the rest of its word or the next
 #     word; -W ARG and -X OPT take a value the same way; --check-hash-based-pycs takes the next word; the other
@@ -16717,10 +16727,15 @@ def _gate_peel(argv, producer=False):
 #   bash: GNU bash 5.3.9 'bash --help'. The long options (--debug, --debugger, --dump-po-strings,
 #     --dump-strings, --login, --noediting, --noprofile, --norc, --posix, --pretty-print, --restricted,
 #     --verbose; --init-file and --rcfile take the next word; --help and --version print and exit) are read only
-#     before the first single-letter option; -c reads the program from the first operand; -s reads it from the
-#     stdin; -o and -O (and +o, +O) take the next word; the other listed letters (ilrD, abefhkmnptuvxBCEHPT)
-#     take none; a lone - or -- ends the options.
-#   source and .: bash 5.3.9 'help source': -p takes the next word (a search path); -- ends the options.
+#     before the first single-letter option, and there bash also reads each spelled with one dash (-norc,
+#     -rcfile F, -version), which the help text does not list ('bash -rcfile rc.sh s.sh' ran s.sh); -c reads
+#     the program from the first operand; -s reads it from the stdin; -o and -O (and +o, +O) take the next
+#     word; the other listed letters (ilrD, abefhkmnptuvxBCEHPT) take none. A lone - or -- ends the options and
+#     a lone + is an option word with no letters, none of which the help text lists ('bash - s.sh', 'bash --
+#     s.sh' and 'bash + s.sh' each ran s.sh).
+#   source and .: bash 5.3.9 'help source': -p takes the next word (a search path). -- ends the options and a
+#     lone - is a file name, neither listed there ('source -- s.sh' ran s.sh; 'source -' failed with "-: No
+#     such file or directory").
 #   sh and zsh: no grammar was read (sh is dash on that host, whose manual page was not read; zsh is not
 #     installed there), so every option of either is unknown.
 _InterpRun = collections.namedtuple(
@@ -16784,10 +16799,11 @@ def _interp_stdin_path(tok):
 def _interp_read(family, argv, wi, argv_opaque, grammar):
     """The _InterpRun of argv[wi], an interpreter of family, read by grammar (_InterpGrammar) over the words
     after it. argv_opaque, when not None, is the per-word opacity parallel to argv: a word formed with an
-    expansion before the program is placed is unknown (the -c program and the -m module themselves aside).
-    attached is the program or module text the option word itself holds after its letter (python -cCODE,
-    -mMOD), else None; operand_index is the index of the program's word (the option word itself where the text
-    is attached), None where the word is missing."""
+    expansion before the program is placed is unknown, an option's value word included (python's -c program
+    and -m module themselves aside, which end its options; bash's -c program is its first operand, so an
+    expansion there is unknown). attached is the program or module text the option word itself holds after its
+    letter (python -cCODE, -mMOD), else None; operand_index is the index of the program's word (the option
+    word itself where the text is attached), None where the word is missing."""
     n = len(argv)
     k = wi + 1
     letters = False
@@ -16806,6 +16822,8 @@ def _interp_read(family, argv, wi, argv_opaque, grammar):
         tok = argv[k]
         if dark(k):
             return unknown(k, "a word formed with an expansion")
+        if not letters and tok[:1] == "-" and "-" + tok in grammar.long_first:
+            tok = "-" + tok   # bash reads a long option spelled with one dash (-norc, -rcfile F) as with two
         kind = grammar.words.get(tok)
         if kind is not None:
             if letters and tok in grammar.long_first:
@@ -16817,7 +16835,18 @@ def _interp_read(family, argv, wi, argv_opaque, grammar):
             if kind == "end":
                 k += 1
                 break
-            k += 2 if kind == "value" else 1
+            if kind == "value":
+                if dark(k + 1):
+                    return unknown(k + 1, "a word formed with an expansion")
+                k += 2
+                continue
+            k += 1
+            continue
+        if tok == "+" and grammar.plus:
+            if not grammar.flags:
+                return unknown(k)
+            letters = True   # bash reads a lone + as an option word with no letters
+            k += 1
             continue
         if tok == "-":
             if grammar.dash == "stdin":
@@ -16867,6 +16896,9 @@ def _interp_read(family, argv, wi, argv_opaque, grammar):
                 j += 1
             else:
                 return unknown(k)
+        for j in range(k + 1, k + 1 + taken):
+            if dark(j):
+                return unknown(j, "a word formed with an expansion")
         k += 1 + taken
     if inline:
         return run("inline", k if k < n else None)
@@ -16876,14 +16908,18 @@ def _interp_read(family, argv, wi, argv_opaque, grammar):
         return run("implicit")
     if dark(k):
         return unknown(k, "a word formed with an expansion")
+    if argv[k] == "-" and grammar.dash == "operand":
+        return run("file", k)   # source and . read a lone - as a file named -
     return run("stdin-dash" if _interp_stdin_path(argv[k]) else "file", k)
 
 
 def _interp_run(argv, argv_opaque):
     """The _InterpRun of the interpreter a segment's argv runs once _gate_peel has peeled its assignments and
     wrappers, matched on its _gate_word (_interp_family), with that family's grammar (_INTERP_GRAMMARS); None
-    when no interpreter runs there, the peel refuses a wrapper option, or the command word (where argv_opaque
-    is given) was formed with an expansion."""
+    when the command word left after the peel is no interpreter (a wrapper the peel does not take, such as
+    command, exec or sudo, is that word, so 'sudo python3 -' is None though python3 runs), the peel refuses a
+    wrapper option, no command word remains, or the command word (where argv_opaque is given) was formed with
+    an expansion."""
     peeled = _gate_peel(argv)
     if not peeled:
         return None
@@ -16900,8 +16936,9 @@ def _segment_stdin_feed(segments, i, marks):
     """The feeds of the standard input of segments[i], a set of: "pipe" (the record before it in segments
     ended with '|' or '|&'), "redirect" (a '<', '<>' or '<&' redirect of descriptor 0), and what marks, the
     _HeredocMarks of the lex that built segments (None when it ran without one), recorded for the segment:
-    "heredoc", "herestring" and "procsubst". Over the records a _CommandReading adds after the lexer's own,
-    "pipe" reads the record before it in the list it is given."""
+    "heredoc", "herestring" and "procsubst", and "procsubst-word", which is no stdin feed but marks a stop at
+    a process substitution used as a word (an operand the argv does not hold). Over the records a
+    _CommandReading adds after the lexer's own, "pipe" reads the record before it in the list it is given."""
     seg = segments[i]
     feeds = set()
     if i > 0 and segments[i - 1].sep_after in _GATE_PIPES:
@@ -20247,8 +20284,9 @@ _GENSRC_PYTHON_RE = re.compile(r"python(?:3(?:\.[0-9]+)?)?\Z")
 # The python options _gensrc_program_effects models, read by the shared interpreter reader (_interp_read): the
 # letters bBdEIOPqRsSuv taking no value, W and X taking a value only as the first letter of a word, -c ending a
 # word of those letters, and the whole words -V, --version, -h, --help and -m. Every other option (-i, -x, -?,
-# -mMOD, a letter after W or X, --) is one the guard does not model, so its program stays uncleared; this is
-# narrower than the installed grammar (_INTERP_PYTHON_GRAMMAR) on purpose, and widening it moves outcomes.
+# -mMOD, a W or X after another letter, --) is one the guard does not model, so its program stays uncleared;
+# this is narrower than the installed grammar (_INTERP_PYTHON_GRAMMAR) on purpose, and widening it moves
+# outcomes.
 _GENSRC_PYTHON_GRAMMAR = _InterpGrammar(
     "bBdEIOPqRsSuv", "WX", True, True, "c", False, "", "", "", False,
     dict((("-V", "info"), ("--version", "info"), ("-h", "info"), ("--help", "info"), ("-m", "module"))),
