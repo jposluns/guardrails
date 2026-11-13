@@ -51,9 +51,11 @@ and member; the authoring repository's tools/check_opf_enforce_platforms.py vali
 standalone OPF tree carries no gate that does. Each input is opened after a symlinked-parent check, and
 its regular-file and size checks are made on the opened descriptor, so a parent directory swapped for a
 symlink between that check and the open is a check-to-use race. The live run refuses an OPF root, or its
-tools directory, that is a symlink in the path the interpreter gives for this script; a run whose working
-directory is already inside a link's target reaches the tree through no symlink in that path, so it is
-not refused.
+tools directory, that is itself a symlink in the path the interpreter gives for this script; a symlink
+above the root is resolved, and a '..' in that path is followed as the kernel follows it (from a link's
+target), so the gate checks the tree the kernel opens. A run whose working directory is already inside a
+link's target reaches the tree through no symlink in that path, so it is not refused, and a symlink to
+the gate file itself is not followed, so the tree that holds the link is checked.
 """
 import sys
 
@@ -70,6 +72,8 @@ if tuple(sys.version_info[:2]) < (3, 14):
     os._exit(2)
 
 import ast
+import contextlib
+import io
 import os
 import re
 import shutil
@@ -80,8 +84,8 @@ from pathlib import Path
 
 # The OPF root: the directory above this script's tools/ directory. Every path below is relative to it,
 # so the gate reads the same inputs from the authoring repository's opf/ and from a standalone OPF tree.
-# The live run takes it from _opf_root, which refuses a root or tools directory reached through a
-# symlink; the self-test copies its fixtures from ROOT.
+# The live run takes it from _opf_root, which refuses a root or tools directory that is itself a
+# symlink and resolves a symlink above the root; the self-test copies its fixtures from ROOT.
 ROOT = Path(__file__).resolve().parents[1]
 PACK_REL = "enforcement"
 REGISTER_REL = PACK_REL + "/residuals.toml"
@@ -126,22 +130,37 @@ def _input(root, rel, label):
 
 def _opf_root(script):
     """The OPF root the gate at `script` evaluates (the directory above the directory holding `script`),
-    resolved. CannotEvaluate when that root, or its tools directory, is itself a symlink: the gate would then
-    read another tree's inputs as this tree's own, which the no-symlink rule for paths below the root
-    refuses. A symlink above the root is resolved, as it was when the authoring repository's gate read the
-    OPF root as opf/ under its own resolved root."""
-    tools = os.path.dirname(os.path.abspath(str(script)))
-    root = os.path.dirname(tools)
+    resolved as the kernel resolves `script` when it opens it: a '..' is followed from where the path has
+    reached, a link's target included, never cancelled as text. CannotEvaluate when that root, or its tools
+    directory, is itself a symlink: the gate would then read another tree's inputs as this tree's own, which
+    the no-symlink rule for paths below the root refuses. A symlink above the root is resolved, as it was
+    when the authoring repository's gate read the OPF root as opf/ under its own resolved root. A '.'
+    component is dropped, as the kernel takes it as no step, and a root or tools path ending in '..' names
+    the directory above another, not an entry that can be a symlink."""
+    try:
+        path = str(script)
+        path = path if os.path.isabs(path) else os.path.join(os.getcwd(), path)
+    except (OSError, ValueError) as exc:
+        raise CannotEvaluate("the gate path %s cannot be made absolute (%r)" % (script, exc))
+    names = [name for name in path.split("/") if name not in ("", ".")]
+    tools = "/" + "/".join(names[:-1])
+    root = os.path.join(tools, "..") if names[-2:-1] == [".."] else os.path.dirname(tools)
     for label, path in (("the OPF root", root), ("the OPF root's tools directory", tools)):
+        head, name = os.path.split(path)
+        if name in ("", ".."):
+            continue
         try:
-            actual = os.path.realpath(path)
-            expected = os.path.join(os.path.realpath(os.path.dirname(path)), os.path.basename(path))
+            expected = os.path.join(os.path.realpath(head), name)
+            actual = os.path.realpath(expected)
         except (OSError, ValueError) as exc:
             raise CannotEvaluate("%s %s cannot be resolved (%r)" % (label, path, exc))
         if actual != expected:
-            raise CannotEvaluate("%s %s is reached through a symlink (it resolves to %s, not %s), so the "
-                                 "inputs below it are not the tree's own" % (label, path, actual, expected))
-    return Path(os.path.realpath(root))
+            raise CannotEvaluate("%s %s is itself a symlink (it resolves to %s, not %s), so the inputs below "
+                                 "it are not the tree's own" % (label, path, actual, expected))
+    try:
+        return Path(os.path.realpath(root))
+    except (OSError, ValueError) as exc:
+        raise CannotEvaluate("the OPF root %s cannot be resolved (%r)" % (root, exc))
 
 
 def _text(path, label):
@@ -527,29 +546,65 @@ def _drop_last_row(tree):
     path.write_text(text[:text.index('[[residual]]\nid = "unverified-platform-denial"')], encoding="utf-8")
 
 
-def _linked_root(tree, link):
+def _runnable(tree):
+    """Put a copy of this gate in the fixture's tools/ directory, so the fixture is a tree it can run in."""
+    shutil.copyfile(ROOT / "tools" / GATE, tree / "tools" / GATE)
+
+
+def _run_override(script, live):
+    """The override that runs the gate at `script`: through main() when `live`, else through _opf_root."""
+    return dict(live=str(script)) if live else dict(script=script)
+
+
+def _linked_root(tree, link, live=False):
     """An authoring-repository layout beside the fixture whose opf/ is the fixture: a symlink to it when
     `link`, else a real copy. The overrides run the gate as that repository's opf/tools/ would."""
+    _runnable(tree)
     repo = tree.parent / (tree.name + "-repo")
     repo.mkdir()
     if link:
         os.symlink(os.path.join("..", tree.name), repo / "opf")
     else:
         shutil.copytree(tree, repo / "opf")
-    return dict(script=repo / "opf" / "tools" / GATE)
+    return _run_override(repo / "opf" / "tools" / GATE, live)
 
 
-def _linked_tools(tree, link):
+def _linked_tools(tree, link, live=False, spelling=GATE):
     """A standalone OPF tree beside the fixture with its own copy of the pack and the fixture's tools/
     directory: a symlink to it when `link`, else a real copy. The overrides run the gate as that tree's
-    tools/ would."""
+    tools/ would, by the path tools/`spelling`."""
+    _runnable(tree)
     standalone = tree.parent / (tree.name + "-standalone")
     shutil.copytree(tree / PACK_REL, standalone / PACK_REL)
     if link:
         os.symlink(tree / "tools", standalone / "tools")
     else:
         shutil.copytree(tree / "tools", standalone / "tools")
-    return dict(script=standalone / "tools" / GATE)
+    return _run_override(os.path.join(str(standalone), "tools", spelling), live)
+
+
+def _live_plain(tree):
+    """Run the gate through main() from the fixture's own tools/ directory, with no symlink anywhere."""
+    _runnable(tree)
+    return _run_override(tree / "tools" / GATE, True)
+
+
+def _dotdot_root(tree, link):
+    """A layout beside the fixture where good/opf is the fixture and x/opf a copy of it with its last row
+    dropped, and x/sub is a symlink to good/deep when `link`, else a real directory. The kernel opens the
+    gate at x/sub/../opf/tools/ from good/opf when x/sub is a link and from x/opf otherwise; the override
+    runs the gate through main() by that path, with its '..' as the interpreter gives it."""
+    _runnable(tree)
+    top = tree.parent / (tree.name + "-dotdot")
+    (top / "good" / "deep").mkdir(parents=True)
+    shutil.copytree(tree, top / "good" / "opf")
+    shutil.copytree(tree, top / "x" / "opf")
+    _drop_last_row(top / "x" / "opf")
+    if link:
+        os.symlink(os.path.join("..", "good", "deep"), top / "x" / "sub")
+    else:
+        (top / "x" / "sub").mkdir()
+    return _run_override(os.path.join(str(top), "x", "sub", "..", "opf", "tools", GATE), True)
 
 
 def _second_locator(tree, row):
@@ -743,12 +798,28 @@ def _vectors():
                                     "does not list the instructions member claude/pretooluse_deny.py"),
          (seq(edit(ROSTER_REL, 'means = "deny-hook"', 'means = "instructions"'),
               lambda tree: _add_member(tree, "claude/pretooluse_deny.py", HOOK_PHRASE)),) + clean),
-        # the OPF root: a root or tools directory reached through a symlink is cannot-evaluate, in the
+        # the OPF root: a root or tools directory that is itself a symlink is cannot-evaluate, in the
         # authoring repository's opf/ and in a standalone tree; a real copy in the same place is clean.
         ("root-symlinked-opf", (lambda tree: _linked_root(tree, True), "cannot", "CANNOT EVALUATE: the OPF root /"),
          (lambda tree: _linked_root(tree, False),) + clean),
         ("root-symlinked-tools", (lambda tree: _linked_tools(tree, True), "cannot", "the OPF root's tools directory"),
          (lambda tree: _linked_tools(tree, False),) + clean),
+        # the same layouts through main(), the live run's own root wiring, with a plain-layout control; a '.'
+        # in the path does not hide a symlinked tools directory; a '..' after a symlink is followed as the
+        # kernel follows it, so the gate checks the tree the kernel opens (good/opf, clean), and with a real
+        # directory in the link's place the kernel opens x/opf, whose last row is dropped.
+        ("live-symlinked-opf", (lambda tree: _linked_root(tree, True, live=True), "cannot",
+                                "CANNOT EVALUATE: the OPF root /"),
+         (lambda tree: _linked_root(tree, False, live=True),) + clean),
+        ("live-symlinked-tools", (lambda tree: _linked_tools(tree, True, live=True), "cannot",
+                                  "CANNOT EVALUATE: the OPF root's tools directory"),
+         (lambda tree: _linked_tools(tree, False, live=True),) + clean),
+        ("live-plain", (_live_plain,) + clean, (seq(drift, _live_plain), "finding", "is not present verbatim")),
+        ("live-symlinked-tools-dot", (lambda tree: _linked_tools(tree, True, live=True, spelling="./" + GATE),
+                                      "cannot", "CANNOT EVALUATE: the OPF root's tools directory"),
+         (lambda tree: _linked_tools(tree, False, live=True, spelling="./" + GATE),) + clean),
+        ("live-dotdot-after-symlink", (lambda tree: _dotdot_root(tree, True),) + clean,
+         (lambda tree: _dotdot_root(tree, False), "finding", "in that order")),
         # cannot evaluate: the document shape, the vocabulary, the size bound and unreadable inputs.
         ("format-version-bool", (edit(REGISTER_REL, "format-version = 1\n", "format-version = true\n"), "cannot",
                                  "exact integer format-version"),
@@ -789,15 +860,34 @@ def _vectors():
 MODE_000 = frozenset(("member-mode-000", "register-mode-000"))
 
 
+def _live(script):
+    """The status and output of main() for the gate at the path `script`: this module's __file__ is that
+    path, as the interpreter gives it for a run of the gate there, for the one call, so the root main()
+    evaluates comes from main's own wiring. An exit status main() does not use is the status "error"."""
+    global __file__
+    saved, out = __file__, io.StringIO()
+    __file__ = script
+    try:
+        with contextlib.redirect_stdout(out):
+            code = main([])
+    finally:
+        __file__ = saved
+    return {0: "clean", 1: "finding", 2: "cannot"}.get(code, "error"), out.getvalue()
+
+
 def _observe(base, name, mutate):
     """The status and text of the gate over a fresh fixture mutated by `mutate` (a mutation that reads an
     input it cannot parse is cannot-evaluate too). An override `script` runs the gate on the OPF root of a
-    gate at that path, as the live run does. A RecursionError or MemoryError that escapes the mutation or
-    the gate is the status "error", which no vector expects, so the run names the vector it failed."""
+    gate at that path, and an override `live` runs main() as the gate at that path (_live). A
+    RecursionError or MemoryError that escapes the mutation or the gate is the status "error", which no
+    vector expects, so the run names the vector it failed."""
     tree = _fixture(base, name)
     try:
         overrides = mutate(tree)
         overrides = dict(overrides) if isinstance(overrides, dict) else {}
+        live = overrides.pop("live", None)
+        if live is not None:
+            return _live(live)
         script = overrides.pop("script", None)
         got = evaluate(tree if script is None else _opf_root(script), **overrides)
     except CannotEvaluate as exc:
