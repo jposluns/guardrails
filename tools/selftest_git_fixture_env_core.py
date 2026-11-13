@@ -2243,15 +2243,21 @@ def _closure_bound_checks():
     module does not hold. The literal pins in _member_bound_checks cannot see a rise in a closure
     leg bound or floor that leaves an entry below that figure; this check can. It fails closed: a
     module that cannot be imported, a name missing or of the wrong type, or a _leg_bounds that
-    raises is a finding. The figures are printed, not pinned.
+    raises is a finding. The figures are printed, not pinned to literals.
     config/member-bound-closure-vectors: from the live table with each closure entry raised to at
     least its live worst case plus margin, for each member, an entry one second below that figure
     is a finding naming that member, and one at it or one second above is not; one of the
     member's legs raised (through a stand-in _leg_bounds result) by one second more than the
-    entry's slack is a finding naming that member, and by exactly the slack is not;
-    a stand-in module missing each name in turn, one with a constant of the wrong type, one whose
-    _leg_bounds raises, and a blocked import each yield a problem and no figures (red when the
-    comparison, the recomputation or the fail-closed handling is dropped)."""
+    entry's slack is a finding naming that member, and by exactly the slack is not; each member's
+    figure equals the closure module's own _job_worst_case_s for that job less one sweep, one
+    _DRAIN_MARGIN_S per leg and _CI_SETUP_ALLOWANCE_S; a job leg missing from the leg bounds
+    yields the named per-leg problem and no figures; a stand-in module missing each name in turn,
+    one with a constant of the wrong type, one whose _leg_bounds raises, and a blocked import each
+    yield a problem and no figures. It is red when the comparison, the whole recomputation, any
+    one term of it (the sweep, the flip, a cleanup deadline or _VECTOR_ALLOWANCE_S), the per-leg
+    problem or the fail-closed handling is dropped. The entry and leg cases derive from the same
+    formula as the figures, so on their own they stay green when the flip, a cleanup deadline or
+    _VECTOR_ALLOWANCE_S is dropped from it; the _job_worst_case_s case turns red for each."""
     tools_dir = ROOT / "opf" / "tools"
     closure, figures, problems, bounds = _closure_member_figures(tools_dir)
     for job in sorted(figures):
@@ -2304,6 +2310,37 @@ def _closure_bound_vectors(closure, figures, bounds, tools_dir):
             got.append(("leg", job, red, more_problems,
                         named(_closure_bound_shortfalls(more, base))))
             want.append(("leg", job, red, [], [job] if red else []))
+    # The cases above come from the same formula as the figures, so dropping the flip, a cleanup
+    # deadline or _VECTOR_ALLOWANCE_S from _closure_worst_cases leaves them green. Each member's
+    # figure is also held to one the closure module computes itself: its _job_worst_case_s for
+    # that job (two sweeps, the negative leg at the _FLIP_LEG bound where the job holds that leg,
+    # one cleanup deadline per leg that can be killed, the vectors and _CI_SETUP_ALLOWANCE_S) less
+    # one sweep, one _DRAIN_MARGIN_S per leg and the setup. Dropping the sweep, the flip, a
+    # cleanup deadline or _VECTOR_ALLOWANCE_S from the figure makes the two differ for the
+    # members it touches.
+    job_worst = getattr(closure, "_job_worst_case_s", None)
+    setup = getattr(closure, "_CI_SETUP_ALLOWANCE_S", None)
+    for job in sorted(figures):
+        sweep = {leg: bounds[leg][0] for leg in closure._CI_JOB_LEGS[job]}
+        negative = sweep.get(closure._FLIP_LEG, 0)
+        try:
+            independent = (job_worst(sweep, negative, closure._CI_JOB_LEGS[job])
+                           - sum(sweep.values()) - len(sweep) * closure._DRAIN_MARGIN_S - setup)
+        except Exception as error:  # a name the module lacks is a mismatch, never a skip
+            independent = "{}: {}".format(type(error).__name__, error)
+        got.append(("job worst case", job, figures[job][0]))
+        want.append(("job worst case", job, independent))
+    # A job leg missing from the leg bounds is the named per-leg problem and yields no figures.
+    gone = min(closure._CI_JOB_LEGS[min(figures)])
+    try:
+        lacking = _closure_worst_cases(
+            closure, tools_dir, {leg: row for leg, row in bounds.items() if leg != gone})
+    except Exception as error:
+        lacking = ("raised", type(error).__name__)
+    got.append(("leg missing", gone, lacking))
+    want.append(("leg missing", gone, (
+        {}, ["closure leg {} of {} has no positive int bound: None".format(gone, job)
+             for job in sorted(closure._CI_JOB_LEGS) if gone in closure._CI_JOB_LEGS[job]], None)))
 
     def stand_in(**changed):
         names = {name: getattr(closure, name) for name in _CLOSURE_WORST_CASE_NAMES}
