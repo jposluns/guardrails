@@ -1823,9 +1823,17 @@ def _watchdog_declared_budget_vectors():
     nine launches and six holds that each pay it), so a raised backstop
     always reaches the figure tools/check_opf_standalone_closure.py reads,
     and every other declared budget must stay where it was; and every
-    declared budget must be READ by the regression runner's row for it
-    (_watchdog_declared_budget_reads, shown refusing a row that holds its
-    figure as a literal). [] when all hold."""
+    declared budget must be READ by the one regression-runner row that sets
+    its legs' budget (_watchdog_declared_budget_reads), shown refusing by
+    name, on in-memory copies of the runner's source, each of six runners
+    that hold today's figure as a literal: the nested-timeout row's read
+    replaced by it, a literal blocked-isolation write after the read row, a
+    duplicate literal nested-timeout row after the read row in the same
+    update, declared_budgets rebound after its binding, the blocked-isolation
+    read kept only under "if False:" with a literal write in effect, and the
+    safety rows priced at it while the deadline rows keep the read. A
+    vector whose anchor text is not in the runner exactly once is reported
+    as not built, never as a runner the check accepts. [] when all hold."""
     global _TREE_STARTUP_BACKSTOP
     raise_by = 1000
     before = _watchdog_declared_budgets()
@@ -1844,40 +1852,224 @@ def _watchdog_declared_budget_vectors():
                   for label in sorted(before)
                   if after.get(label) != before[label] + moves.get(label, 0))
     missed.extend(_watchdog_declared_budget_reads())
-    # The read check is discriminating: the runner's nested-timeout row
-    # holding today's figure as a literal, the same number it reads now,
-    # must be refused by name.
+    # The read check is discriminating: each runner below holds today's
+    # figure as a literal, the same number the read gives now, so only its
+    # source tells it apart, and each must be refused by the name given.
     import inspect
     runner = inspect.getsource(_watchdog_regression_self_test)
-    row = 'declared_budgets["completion-nested-timeout"]'
-    literal = runner.replace(row, repr(before.get("completion-nested-timeout")))
-    if runner.count(row) != 1 or not any(
-            "completion-nested-timeout" in miss
-            for miss in _watchdog_declared_budget_reads(literal)):
-        missed.append("declared budget completion-nested-timeout: a runner row holding "
-                      "its figure as a literal is not refused")
+    nested = repr(before.get("completion-nested-timeout"))
+    isolation = repr(before.get("blocked-isolation"))
+    bind = "declared_budgets = _watchdog_declared_budgets()\n"
+    tree_row = '("nested-timeout", declared_budgets["completion-nested-timeout"]),'
+    isolation_row = 'budgets["blocked-isolation"] = declared_budgets["blocked-isolation"]\n'
+    isolation_literal = 'budgets["blocked-isolation"] = %s\n' % isolation
+    safety_rows = "budgets.update((mode, deadline_budget) for mode in safety_modes)"
+    vectors = (
+        ("the nested-timeout row holding its figure as a literal",
+         'declared_budgets["completion-nested-timeout"]', nested,
+         "completion-nested-timeout"),
+        ("a literal blocked-isolation write after the read row",
+         isolation_row, isolation_row + "    " + isolation_literal, "blocked-isolation"),
+        ("a duplicate literal nested-timeout row after the read row",
+         tree_row, tree_row + ' ("nested-timeout", %s),' % nested,
+         "completion-nested-timeout"),
+        ("declared_budgets rebound to literals after its binding",
+         bind, bind + "    declared_budgets = %r\n" % (before,),
+         "binding declared_budgets"),
+        ('the blocked-isolation read only under "if False:"',
+         isolation_row, "if False:\n        " + isolation_row + "    " + isolation_literal,
+         "blocked-isolation"),
+        ("the safety rows priced at a literal while the deadline rows read",
+         safety_rows, safety_rows.replace("deadline_budget",
+                                          repr(before.get("deadline-case"))),
+         "deadline-case"))
+    for name, anchor, replacement, label in vectors:
+        if runner.count(anchor) != 1:
+            missed.append("declared-budget read vector (%s) not built: its anchor %r occurs "
+                          "%d times in the regression runner, want once"
+                          % (name, anchor.strip(), runner.count(anchor)))
+        elif not any(miss.startswith("declared budget %s: " % label)
+                     for miss in _watchdog_declared_budget_reads(
+                         runner.replace(anchor, replacement))):
+            missed.append("declared budget %s: a runner with %s is not refused by that name"
+                          % (label, name))
     return missed
 
 
 def _watchdog_declared_budget_reads(source=None):
-    """Each budget _watchdog_declared_budgets declares that the regression
-    runner's budget table does not READ from it. The runner must bind
-    declared_budgets to one call of that function, and each label must
-    reach its row as a read of that binding: a "completion-<mode>" label
-    as the row ("<mode>", declared_budgets["completion-<mode>"]),
-    "deadline-case" as deadline_budget = declared_budgets["deadline-case"]
-    with the (mode, deadline_budget) rows taking it, and any other label
-    as budgets["<label>"] = declared_budgets["<label>"]. A row holding the
-    same figure as a literal, or recomputing it, matches today's numbers
-    but no longer follows the function the closure gate reads, so this
-    reads the runner's source, not its figures. source defaults to the
-    runner's own; [] when every declared budget is read."""
+    """Each fault in how the regression runner's budget table takes the
+    budgets _watchdog_declared_budgets declares, judged on the statements
+    that set each leg's budget, never on a read merely appearing somewhere.
+    The runner must bind declared_budgets exactly once, as declared_budgets
+    = _watchdog_declared_budgets(), deadline_budget exactly once, as
+    deadline_budget = declared_budgets["deadline-case"], and budgets exactly
+    once, as budgets = dict((mode, deadline_budget) for mode in
+    deadline_modes), each on the runner's unconditional path (a statement of
+    its own body, under no branch, loop, try, with or nested function, and
+    after no statement of that body that returns or raises), and must never
+    write any of the three names again (a rebinding, a subscript write, a
+    delete or a method call other than a read), except that budgets takes
+    rows through subscript writes, update() and setdefault(). Every such
+    write is expanded into the keys it sets (a constant subscript, or the
+    (key, value) rows of a dict literal, a literal tuple, or a
+    comprehension over literal tuples and the runner's literal rosters); a
+    write this cannot expand could set any leg and is refused. Then every
+    leg of a declared label must be set by exactly one row, on that
+    unconditional path, whose value is the read: declared_budgets["<label>"]
+    for each label but "deadline-case", whose legs are every mode of
+    deadline_modes and safety_modes, each set by its (mode,
+    deadline_budget) row of exactly the two statements budgets =
+    dict((mode, deadline_budget) for mode in deadline_modes) and
+    budgets.update((mode, deadline_budget) for mode in safety_modes). The
+    one exception is the safety legs priced on their own (lost-cleanup,
+    fork-error and poll-error), each also set by exactly one row after the
+    second statement. Each fault names its label, or "binding <name>" for a
+    binding. A row holding the same figure as a literal, or recomputing it,
+    matches today's numbers but no longer follows the function the closure
+    gate reads, so this reads the runner's source, not its figures. It reads
+    the runner's own statements only: a write through another name bound to
+    the same dict, or inside a function the runner calls, is not followed.
+    source defaults to the runner's own; [] when every declared budget is
+    the one figure its legs run under."""
     import ast
     import inspect
     if source is None:
         source = inspect.getsource(_watchdog_regression_self_test)
-    present = {ast.dump(node) for node in ast.walk(ast.parse(source))
-               if isinstance(node, (ast.Assign, ast.Tuple))}
+    try:
+        runner = ast.parse(source).body[0]
+    except (SyntaxError, ValueError, IndexError) as exc:
+        return ["declared budget source: the regression runner's source cannot be read: "
+                "%s: %s" % (type(exc).__name__, exc)]
+    if not isinstance(runner, ast.FunctionDef):
+        return ["declared budget source: the source holds no regression runner function"]
+    body = runner.body
+    parent = {child: node for node in ast.walk(runner) for child in ast.iter_child_nodes(node)}
+    scoped = (ast.If, ast.IfExp, ast.BoolOp, ast.While, ast.For, ast.AsyncFor, ast.Try,
+              ast.TryStar, ast.ExceptHandler, ast.With, ast.AsyncWith, ast.Match, ast.Lambda,
+              ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+
+    def reached(node):
+        # The index of the runner's own statement holding node when the path
+        # to node is unconditional (as the docstring states), else None.
+        while parent.get(node) is not runner:
+            node = parent.get(node)
+            if node is None or isinstance(node, scoped) or (
+                    isinstance(node, ast.comprehension) and node.ifs):
+                return None
+        index = next((at for at, stmt in enumerate(body) if stmt is node), None)
+        if index is None or any(isinstance(stmt, (ast.Return, ast.Raise))
+                                for stmt in body[:index]):
+            return None
+        return index
+
+    def writes(name):
+        # Every node of the runner that binds, deletes or writes name, or
+        # calls a method of it other than a read.
+        found = []
+        for node in ast.walk(runner):
+            if isinstance(node, ast.Name):
+                if node.id == name and not isinstance(node.ctx, ast.Load):
+                    found.append(node)
+            elif isinstance(node, (ast.Subscript, ast.Attribute)):
+                if (isinstance(node.value, ast.Name) and node.value.id == name
+                        and not isinstance(node.ctx, ast.Load)):
+                    found.append(node)
+            elif isinstance(node, ast.Call):
+                if (isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name)
+                        and node.func.value.id == name
+                        and node.func.attr not in ("get", "items", "keys", "values", "copy")):
+                    found.append(node)
+            elif isinstance(node, ast.arg):
+                if node.arg == name:
+                    found.append(node)
+            elif isinstance(node, (ast.Global, ast.Nonlocal)):
+                if name in node.names:
+                    found.append(node)
+            elif isinstance(node, ast.alias):
+                if (node.asname or node.name.split(".")[0]) == name:
+                    found.append(node)
+            elif isinstance(node, (ast.ExceptHandler, ast.MatchAs, ast.MatchStar)):
+                if node.name == name:
+                    found.append(node)
+            elif isinstance(node, ast.MatchMapping):
+                if node.rest == name:
+                    found.append(node)
+        return found
+
+    def items(node, seen=()):
+        # The element nodes of a literal tuple or list, a sum of them, or a
+        # runner roster bound once, unconditionally, to one; None otherwise.
+        if isinstance(node, (ast.Tuple, ast.List)):
+            if any(isinstance(elt, ast.Starred) for elt in node.elts):
+                return None
+            return list(node.elts)
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+            left, right = items(node.left, seen), items(node.right, seen)
+            return None if left is None or right is None else left + right
+        if isinstance(node, ast.Name) and node.id not in seen:
+            found = writes(node.id)
+            stmt = parent.get(found[0]) if len(found) == 1 else None
+            if (isinstance(stmt, ast.Assign) and stmt.targets == [found[0]]
+                    and reached(stmt) is not None):
+                return items(stmt.value, seen + (node.id,))
+        return None
+
+    def text(node, env):
+        # The string a key expression gives under env, or None.
+        if isinstance(node, ast.Name) and node.id in env:
+            node, env = env[node.id], {}
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return node.value
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+            left, right = text(node.left, env), text(node.right, env)
+            return None if left is None or right is None else left + right
+        return None
+
+    def unpack(target, node, env):
+        if isinstance(target, ast.Name):
+            env[target.id] = node
+            return True
+        return (isinstance(target, ast.Tuple) and isinstance(node, ast.Tuple)
+                and len(target.elts) == len(node.elts)
+                and all(unpack(name, item, env) for name, item in zip(target.elts, node.elts)))
+
+    def rows(arg):
+        # [(key, value node, nodes the row comes from)] for each row arg sets
+        # in a dict, or None when it cannot be expanded.
+        if isinstance(arg, ast.Dict):
+            found = [(None if key is None else text(key, {}), value, (key,))
+                     for key, value in zip(arg.keys, arg.values)]
+        elif isinstance(arg, (ast.GeneratorExp, ast.ListComp, ast.SetComp, ast.DictComp)):
+            if isinstance(arg, ast.DictComp):
+                pair = (arg.key, arg.value)
+            elif isinstance(arg.elt, ast.Tuple) and len(arg.elt.elts) == 2:
+                pair = tuple(arg.elt.elts)
+            else:
+                return None
+            bound = [({}, ())]
+            for gen in arg.generators:
+                elements = items(gen.iter)
+                if gen.ifs or gen.is_async or elements is None:
+                    return None
+                grown = []
+                for env, origin in bound:
+                    for element in elements:
+                        scope = dict(env)
+                        if not unpack(gen.target, element, scope):
+                            return None
+                        grown.append((scope, origin + (element,)))
+                bound = grown
+            found = [(text(pair[0], env),
+                      env.get(pair[1].id, pair[1]) if isinstance(pair[1], ast.Name) else pair[1],
+                      origin) for env, origin in bound]
+        else:
+            elements = items(arg)
+            if elements is None or not all(isinstance(element, ast.Tuple)
+                                           and len(element.elts) == 2 for element in elements):
+                return None
+            found = [(text(element.elts[0], {}), element.elts[1], (element,))
+                     for element in elements]
+        return None if any(key is None for key, _value, _origin in found) else found
 
     def statement(text):
         return ast.dump(ast.parse(text).body[0])
@@ -1886,21 +2078,101 @@ def _watchdog_declared_budget_reads(source=None):
         return ast.dump(ast.parse(text, mode="eval").body)
 
     missed = []
-    if statement("declared_budgets = _watchdog_declared_budgets()") not in present:
-        missed.append("declared budgets: the regression runner does not bind "
-                      "declared_budgets = _watchdog_declared_budgets()")
-    for label in sorted(_watchdog_declared_budgets()):
-        if label.startswith("completion-"):
-            rows = [expression("(%r, declared_budgets[%r])"
-                               % (label[len("completion-"):], label))]
-        elif label == "deadline-case":
-            rows = [statement("deadline_budget = declared_budgets[%r]" % label),
-                    expression("(mode, deadline_budget)")]
-        else:
-            rows = [statement("budgets[%r] = declared_budgets[%r]" % (label, label))]
-        if not all(row in present for row in rows):
-            missed.append("declared budget %s: no regression-runner row reads it "
-                          "from _watchdog_declared_budgets" % label)
+    deadline_rows = "budgets = dict((mode, deadline_budget) for mode in deadline_modes)"
+    safety_rows = "budgets.update((mode, deadline_budget) for mode in safety_modes)"
+    row_writes = []
+    for name, text_ in (("declared_budgets", "declared_budgets = _watchdog_declared_budgets()"),
+                        ("deadline_budget", 'deadline_budget = declared_budgets["deadline-case"]'),
+                        ("budgets", deadline_rows)):
+        found = writes(name)
+        if name == "budgets":
+            row_writes = [node for node in found if isinstance(node, ast.Subscript) or (
+                isinstance(node, ast.Call) and node.func.attr in ("update", "setdefault"))]
+            found = [node for node in found if not any(node is row for row in row_writes)]
+        stmt = parent.get(found[0]) if len(found) == 1 else None
+        if (not isinstance(stmt, ast.Assign) or ast.dump(stmt) != statement(text_)
+                or reached(stmt) is None):
+            missed.append("declared budget binding %s: the regression runner must bind it "
+                          "exactly once, as %s, on its unconditional path and never write it "
+                          "again (%d bindings or writes found)" % (name, text_, len(found)))
+        if name == "budgets":
+            row_writes.extend(node for node in found if isinstance(node, ast.Name))
+    keyed = {}
+    for node in row_writes:
+        stmt = parent.get(node)
+        found = None
+        if isinstance(node, ast.Name):
+            value = stmt.value if isinstance(stmt, ast.Assign) else None
+            if isinstance(value, ast.Dict):
+                found = rows(value)
+            elif (isinstance(value, ast.Call) and isinstance(value.func, ast.Name)
+                  and value.func.id == "dict" and len(value.args) == 1 and not value.keywords):
+                found = rows(value.args[0])
+        elif isinstance(node, ast.Subscript):
+            key = text(node.slice, {})
+            value = stmt.value if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1 else None
+            found = None if key is None else [(key, value, ())]
+        elif node.func.attr == "setdefault":
+            if len(node.args) in (1, 2) and not node.keywords:
+                key = text(node.args[0], {})
+                value = node.args[1] if len(node.args) == 2 else None
+                found = None if key is None else [(key, value, ())]
+        elif len(node.args) <= 1 and all(keyword.arg for keyword in node.keywords):
+            found = rows(node.args[0]) if node.args else []
+            if found is not None:
+                found.extend((keyword.arg, keyword.value, ()) for keyword in node.keywords)
+        if found is None:
+            missed.append("declared budget writes: the regression runner writes budgets at line "
+                          "%d of its source in a form this check cannot expand into keys, so it "
+                          "could set any declared leg" % node.lineno)
+            continue
+        for key, value, origin in found:
+            keyed.setdefault(key, []).append((value, (node,) + origin))
+
+    def reads(value, origin, want):
+        return (value is not None and ast.dump(value) == want
+                and all(reached(node) is not None for node in origin))
+
+    declared = _watchdog_declared_budgets()
+    for label in sorted(declared):
+        if label == "deadline-case":
+            continue
+        set_by = keyed.get(label, [])
+        want = expression("declared_budgets[%r]" % label)
+        good = [origin for value, origin in set_by if reads(value, origin, want)]
+        if len(set_by) != 1 or len(good) != 1:
+            missed.append("declared budget %s: %d regression-runner rows set its leg, %d of them "
+                          "reading declared_budgets[%r] on the runner's unconditional path; want "
+                          "exactly one row, that read" % (label, len(set_by), len(good), label))
+    if "deadline-case" in declared:
+        own = ("lost-cleanup", "fork-error", "poll-error")
+        want = expression("deadline_budget")
+        for roster, text_ in (("deadline_modes", deadline_rows), ("safety_modes", safety_rows)):
+            at = [index for index, stmt in enumerate(body) if ast.dump(stmt) == statement(text_)]
+            if len(at) != 1 or reached(body[at[0]]) is None:
+                missed.append("declared budget deadline-case: the regression runner must hold %s "
+                              "exactly once, on its unconditional path (%d found)"
+                              % (text_, len(at)))
+                continue
+            elements = items(ast.Name(id=roster, ctx=ast.Load()))
+            modes = None if elements is None else [text(element, {}) for element in elements]
+            if modes is None or None in modes:
+                missed.append("declared budget deadline-case: the regression runner's %s roster "
+                              "is not one literal tuple of names bound once" % roster)
+                continue
+            for mode in modes:
+                set_by = keyed.get(mode, [])
+                mine = [origin for value, origin in set_by
+                        if reached(origin[0]) == at[0] and reads(value, origin, want)]
+                after = [origin for value, origin in set_by
+                         if not any(origin is row for row in mine)
+                         and reached(origin[0]) is not None and reached(origin[0]) > at[0]]
+                others = 1 if roster == "safety_modes" and mode in own else 0
+                if len(mine) != 1 or len(after) != others or len(set_by) != 1 + others:
+                    missed.append("declared budget deadline-case: leg %s is set by %d "
+                                  "regression-runner rows; want only its (mode, deadline_budget) "
+                                  "row of %s%s" % (mode, len(set_by), text_,
+                                                   " and one row after it" if others else ""))
     return missed
 
 

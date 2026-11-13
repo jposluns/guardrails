@@ -811,13 +811,19 @@ def _opf_declared_budgets(tools_dir, attempts=None, backstop_raise_s=None):
     imported in this process with tools_dir first on sys.path. The import always loads tools_dir's own
     opf.py and helper modules: every sys.modules entry named for a module file under tools_dir (an
     opf module cached from another directory included; a standard-library name never) is set aside
-    first, and an opf module that loads from anywhere else is refused. Afterwards sys.path is restored
-    from a snapshot of the whole list (opf.py inserts its own directory on import), every module the
-    import added is dropped and every entry set aside is put back, so the import leaves nothing
-    behind. attempts, when given, stands in for opf.py's _DEADLINE_FLIPS_ATTEMPTS during the call, and
-    backstop_raise_s, when given, is added to its _TREE_STARTUP_BACKSTOP during the call (the
-    self-test's flips). Raises _BoundError (cannot evaluate) when the directory cannot be listed, or
-    the module, the function or either constant cannot be loaded."""
+    first, and an opf module that loads from anywhere else is refused. Afterwards sys.path and
+    sys.path_importer_cache are restored from snapshots of the whole list and the whole cache (opf.py
+    inserts its own directory on sys.path, and the import caches a finder for each directory it
+    searches), every module the import added is dropped and every entry set aside is put back. Any
+    other process state the loaded module changes on import is not restored. attempts, when given,
+    stands in for opf.py's _DEADLINE_FLIPS_ATTEMPTS during the call, and backstop_raise_s, when given,
+    is added to its _TREE_STARTUP_BACKSTOP during the call (the self-test's flips). Raises _BoundError
+    (cannot evaluate) when the directory cannot be listed, when importing opf or reading the function
+    or either constant raises an ImportError, AttributeError, SyntaxError, OSError or TypeError, and
+    when the import loads an opf.py from anywhere else. Anything else the loaded module raises, on
+    import (a ValueError or a SystemExit, for one) or in the call (a KeyError), escapes unconverted;
+    the self-test makes every call through _under_test, which turns such an escape into that check's
+    failure (exit 1), never a pass."""
     tools_dir = str(Path(tools_dir))
     try:
         names = {entry.stem for entry in Path(tools_dir).iterdir() if entry.suffix == ".py"}
@@ -826,6 +832,7 @@ def _opf_declared_budgets(tools_dir, attempts=None, backstop_raise_s=None):
             tools_dir, type(exc).__name__, exc))
     names = (names | {"opf"}) - sys.stdlib_module_names
     saved_path = list(sys.path)
+    saved_finders = dict(sys.path_importer_cache)
     set_aside = {name: sys.modules.pop(name) for name in sorted(names) if name in sys.modules}
     before = set(sys.modules)
     sys.path.insert(0, tools_dir)
@@ -851,6 +858,8 @@ def _opf_declared_budgets(tools_dir, attempts=None, backstop_raise_s=None):
             opf._DEADLINE_FLIPS_ATTEMPTS, opf._TREE_STARTUP_BACKSTOP = saved
     finally:
         sys.path[:] = saved_path
+        sys.path_importer_cache.clear()
+        sys.path_importer_cache.update(saved_finders)
         for name in set(sys.modules) - before:
             del sys.modules[name]
         sys.modules.update(set_aside)
@@ -891,24 +900,32 @@ def _declared_budgets_pass_line(check, flips_s):
             "its row; {} and {}, which it leaves out, are not checked here; RED one hundredth over a "
             "row, a budget with no row, a stale row, a NaN budget, three deadline-flips attempts at "
             "{}s, and a tree startup backstop one second over the live one; the import restores "
-            "sys.path and sys.modules, loads the requested opf.py over a cached opf module, and "
-            "refuses an opf.py missing a constant as cannot evaluate)".format(
+            "sys.path, sys.path_importer_cache and sys.modules, loads the requested opf.py over a "
+            "cached opf module, and refuses an opf.py loaded from elsewhere and one missing a "
+            "constant as cannot evaluate)".format(
                 check, _DECLARED_BUDGETS_LEFT_OUT[0], _DECLARED_BUDGETS_LEFT_OUT[1], flips_s))
 
 
 def _declared_budgets_self_test(root):
     """closure/declared-budgets-seen: every budget the real opf.py's _watchdog_declared_budgets
     declares sits at or below the row the sizing accounts for (the launcher legs and the ledger
-    vectors, which that function leaves out, are not checked, and the PASS line names them), and the
-    comparison is discriminating at its boundary (just inside, exactly at and just outside each row),
-    on a missing or stale row, on the three-attempt deadline-flips formula this row was set against
-    and on a tree startup backstop one second over the live one. The import behind it restores
-    sys.path and sys.modules whole, loads the requested directory's opf.py even when another opf
-    module is cached in sys.modules, and refuses an opf.py missing a constant it reads as
-    cannot evaluate (_BoundError)."""
+    vectors, which that function leaves out, are not checked, and the PASS line names them, read
+    against this check's own statement of them, so a wrong or duplicated _DECLARED_BUDGETS_LEFT_OUT
+    entry fails), and the comparison is discriminating at its boundary (just inside, exactly at and
+    just outside each row), on a missing or stale row, on the three-attempt deadline-flips formula
+    this row was set against and on a tree startup backstop one second over the live one. The import
+    behind it restores sys.path, sys.path_importer_cache and sys.modules whole, loads the requested
+    directory's opf.py even when another opf module is cached in sys.modules, and refuses as cannot
+    evaluate (_BoundError) an opf.py loaded from anywhere but the requested directory and one missing
+    a constant it reads."""
     check = "declared-budgets-seen"
     tools_dir = Path(root) / "opf" / "tools"
+    # No finder is cached for opf/tools before the read (an earlier check's import may have cached
+    # one), so the import has to add one and the restore has to take it away again.
+    for key in {str(tools_dir), str(tools_dir.resolve())}:
+        sys.path_importer_cache.pop(key, None)
     path_before, modules_before = list(sys.path), dict(sys.modules)
+    finders_before = dict(sys.path_importer_cache)
     live = _under_test(check, _opf_declared_budgets, tools_dir, refuses=(_BoundError,))
     # opf.py inserts its own directory on sys.path when imported, so removing only the entry this
     # gate added would leave a copy behind: the whole list must come back as it was.
@@ -920,6 +937,13 @@ def _declared_budgets_self_test(root):
     if changed:
         raise _CheckFailure("closure/{}: reading the declared budgets left sys.modules changed: "
                             "{}".format(check, ", ".join(changed)))
+    absent = object()
+    changed = sorted(
+        key for key in set(sys.path_importer_cache) | set(finders_before)
+        if sys.path_importer_cache.get(key, absent) is not finders_before.get(key, absent))
+    if changed:
+        raise _CheckFailure("closure/{}: reading the declared budgets left sys.path_importer_cache "
+                            "changed: {}".format(check, ", ".join(changed)))
     # An opf module already cached in sys.modules (here a stub) must not stand in for the requested
     # directory's opf.py, and it must be back in place afterwards.
     stub = type(sys)("opf")
@@ -954,6 +978,25 @@ def _declared_budgets_self_test(root):
                 continue
             raise _CheckFailure("closure/{}: an opf.py holding only {} was not refused as "
                                 "cannot evaluate".format(check, present.split()[0]))
+        # An opf.py loaded from anywhere but the requested directory is refused as cannot evaluate:
+        # asked for a directory holding no opf.py while the real opf/tools sits later on sys.path,
+        # the import finds the real one, whose budgets must not be returned as that directory's.
+        empty = tmp / "no-opf"
+        empty.mkdir()
+        path_saved = list(sys.path)
+        sys.path.append(str(tools_dir))
+        try:
+            got = _under_test(check, _opf_declared_budgets, empty, refuses=(_BoundError,))
+        except _BoundError as exc:
+            if "the import loaded" not in str(exc):
+                raise _CheckFailure("closure/{}: an opf.py loaded from outside the requested "
+                                    "directory was refused for another reason: {}".format(check, exc))
+        else:
+            raise _CheckFailure("closure/{}: a directory holding no opf.py, with the real opf/tools "
+                                "later on sys.path, read {!r} instead of being refused as cannot "
+                                "evaluate".format(check, got))
+        finally:
+            sys.path[:] = path_saved
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     faults = _under_test(check, _declared_budget_faults, live, _OPF_DECLARED_BUDGETS_SEEN)
@@ -994,9 +1037,15 @@ def _declared_budgets_self_test(root):
                                 "{} at {!r}s, not refused: {!r}".format(check, label,
                                                                        raised.get(label), got))
     # The PASS line states what was checked: every budget _watchdog_declared_budgets declares, never
-    # every arithmetic budget, so it must name each arithmetic budget that function leaves out.
+    # every arithmetic budget, so it must name each arithmetic budget that function leaves out. Those
+    # rows are stated again here, independently of _DECLARED_BUDGETS_LEFT_OUT, so a wrong, missing or
+    # duplicated entry there fails instead of being read back as its own proof.
+    left_out = ("the launcher legs", "the ledger vectors")
+    if _DECLARED_BUDGETS_LEFT_OUT != left_out:
+        raise _CheckFailure("closure/{}: _DECLARED_BUDGETS_LEFT_OUT is {!r}, want {!r}".format(
+            check, _DECLARED_BUDGETS_LEFT_OUT, left_out))
     line = _declared_budgets_pass_line(check, flipped["completion-deadline-flips"])
-    missing = [name for name in _DECLARED_BUDGETS_LEFT_OUT if name not in line]
+    missing = [name for name in left_out if name not in line]
     if missing or "every arithmetic budget" in line:
         raise _CheckFailure("closure/{}: the PASS line {!r} claims every arithmetic budget or does "
                             "not name {}".format(check, line, ", ".join(missing) or "nothing"))
