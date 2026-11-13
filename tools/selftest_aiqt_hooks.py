@@ -2259,18 +2259,23 @@ def _test_clock_inject(failures, tmp):
     _clock_local keeps a fixed injected zone (TZ a POSIX rule). ck-zone-known-*: each TZ the C library
     reads correctly (unset, UTC, zone database names, an absolute zone file, complete POSIX rules, the
     legacy EST5EDT) is kept when the injected conversion gives what the C library gives for it.
-    ck-zone-unknown-*: TZ empty (pinned by its own reason), an unknown name, an absent file, TZ unset
-    with /etc/localtime not a readable regular file, a conversion that fails or gives no abbreviation, a
-    zone database offset or abbreviation that differs from the conversion's (the C library's fallback
-    name at offset zero included), the abbreviation -00 through TZ and through /etc/localtime, a TZ that
-    only looks like a POSIX rule, and a rule whose names or offsets the conversion does not match each
-    give no local time and the reason for that case. ck-rule-*: _clock_posix_rule accepts and refuses
-    each number just inside and just outside its range, refuses a daylight name with no transition rule,
-    and names the rule's (abbreviation, offset) pairs. ck-localtime-*: _clock_regular_readable on real
-    files in tmp: a regular file and a symlink to one read True; a directory, an absent path, a dangling
-    symlink, a FIFO and (when not root) a mode 000 file read False. ck-malformed-*: main() with an
-    unparseable or a non-object payload warns on exit 0 and adds no reading for both modes. ck-live: the
-    unreplaced clock gives a line of the known or the unknown shape."""
+    ck-zone-legacy-*: each of the four legacy names in _CLOCK_LEGACY_US_ZONES, on a stand-in zone database
+    that lacks the name and holds the zone it is a link to, is looked up under the name and then under that
+    zone, and is kept. ck-zone-unknown-*: TZ empty (pinned by its own reason), an unknown name, an absent
+    file, TZ unset with /etc/localtime not a readable regular file, a conversion that fails or gives no
+    abbreviation, a zone database offset or abbreviation that differs from the conversion's (the C
+    library's fallback name at offset zero included), the abbreviation -00 through TZ and through
+    /etc/localtime, a TZ that only looks like a POSIX rule (an end transition time whose hours, minutes or
+    seconds are out of range included), and a rule whose names or offsets the conversion does not match
+    each give no local time and the reason for that case. ck-rule-*: _clock_posix_rule accepts and refuses
+    each number just inside and just outside its range (each transition time at the start and at the end of
+    the rule: hours at most 24 and minutes and seconds at most 59, so 24:59:59 is accepted and 25:00 is
+    refused), refuses a daylight name with no transition rule, and names the rule's (abbreviation, offset)
+    pairs. ck-localtime-*: _clock_regular_readable on real files in tmp: a regular file and a symlink to
+    one read True; a directory, an absent path, a dangling symlink, a FIFO and (when not root) a mode 000
+    file read False. ck-malformed-*: main() with an unparseable or a non-object payload warns on exit 0 and
+    adds no reading for both modes. ck-live: the unreplaced clock gives a line of the known or the unknown
+    shape."""
     utc = datetime.timezone.utc
     fixed_now = datetime.datetime(2026, 9, 23, 17, 45, 2, tzinfo=utc)
     edt = datetime.timezone(datetime.timedelta(hours=-4), "EDT")
@@ -2382,6 +2387,39 @@ def _test_clock_inject(failures, tmp):
             failures.append("(ck-zone-known-{}) TZ {!r} read by the C library as {} ({}) must be kept, got {!r} "
                             "and {!r}".format(label, env.get("TZ"), want.utcoffset(), want.tzname(), local,
                                               reason))
+    # ck-zone-legacy-*: a zone database that lacks a legacy name and holds the zone it is a link to. A
+    # stand-in zoneinfo module fixes what the database holds, so each mapping in _CLOCK_LEGACY_US_ZONES is
+    # pinned whatever the host's copy of the database ships, and the row also pins the lookup order.
+    saved_zoneinfo = sys.modules.get("zoneinfo")
+    for name, linked, offset, abbreviation in (("EST5EDT", "America/New_York", td(hours=-4), "EDT"),
+                                               ("CST6CDT", "America/Chicago", td(hours=-5), "CDT"),
+                                               ("MST7MDT", "America/Denver", td(hours=-6), "MDT"),
+                                               ("PST8PDT", "America/Los_Angeles", td(hours=-7), "PDT")):
+        asked = []
+
+        def zone_info(key, linked=linked, offset=offset, abbreviation=abbreviation, asked=asked):
+            asked.append(key)
+            if key != linked:
+                raise KeyError("ck-no-such-zone {}".format(key))
+            return datetime.timezone(offset, abbreviation)
+        stand_in = types.ModuleType("zoneinfo")
+        stand_in.ZoneInfo = zone_info
+        sys.modules["zoneinfo"] = stand_in
+        try:
+            local, reason = aiqt_hooks._clock_local(fixed_now, env={"TZ": name}, readable=lambda _p: True,
+                                                    convert=fixed(offset, abbreviation))
+        finally:
+            if saved_zoneinfo is None:
+                sys.modules.pop("zoneinfo", None)
+            else:
+                sys.modules["zoneinfo"] = saved_zoneinfo
+        want = fixed(offset, abbreviation)(fixed_now)
+        if (reason is not None or local is None or (local, local.tzname()) != (want, want.tzname())
+                or asked != [name, linked]):
+            failures.append("(ck-zone-legacy-{}) TZ {!r}, on a zone database that lacks it and holds {}, must "
+                            "be looked up as {!r} then {!r} and kept as {} ({}), got {!r} and {!r} after the "
+                            "lookups {!r}".format(name.lower(), name, linked, name, linked, offset, abbreviation,
+                                                  local, reason, asked))
 
     def nameless(now):
         return now.astimezone(datetime.timezone(td(hours=2), ""))
@@ -2421,6 +2459,11 @@ def _test_clock_inject(failures, tmp):
             ("rule-minutes-99", {"TZ": "ABC5:99"}, True, fixed(td(hours=-5, minutes=-59), "ABC"), neither),
             ("rule-seconds-99", {"TZ": "ABC5:30:99"}, True,
              fixed(-td(hours=5, minutes=30, seconds=59), "ABC"), neither),
+            ("rule-end-hour-25", {"TZ": "ABC5DEF,M3.2.0,M11.1.0/25"}, True, fixed(td(hours=-4), "DEF"), neither),
+            ("rule-end-minutes-60", {"TZ": "ABC5DEF,M3.2.0,M11.1.0/2:60"}, True, fixed(td(hours=-4), "DEF"),
+             neither),
+            ("rule-end-seconds-60", {"TZ": "ABC5DEF,M3.2.0,M11.1.0/2:00:60"}, True, fixed(td(hours=-4), "DEF"),
+             neither),
             ("rule-name-differs", {"TZ": "ABC5"}, True, fixed(td(hours=-5), "XYZ"), rule_pairs),
             ("rule-offset-differs", {"TZ": "ABC5"}, True, fixed(td(hours=-4), "ABC"), rule_pairs)):
         if not env and os.name != "posix":
@@ -2431,14 +2474,18 @@ def _test_clock_inject(failures, tmp):
             failures.append("(ck-zone-unknown-{}) a zone that cannot be established must give no local time "
                             "and a reason holding {!r}, got {!r} and {!r}".format(label, want, local, reason))
     for text in ("ABC24", "ABC5:59", "ABC5:30:59", "ABC5DEF,J1,J365", "ABC5DEF,0,365", "ABC5DEF,M12.5.6,M1.1.0",
-                 "ABC5DEF,M3.2.0/24,M11.1.0/0:59:59", "ABC5DEF24,M3.2.0,M11.1.0", "<AB+1>5<AB+2>,M3.2.0,M11.1.0"):
+                 "ABC5DEF,M3.2.0/24,M11.1.0/0:59:59", "ABC5DEF,M3.2.0/24:59:59,M11.1.0",
+                 "ABC5DEF,M3.2.0,M11.1.0/24:59:59", "ABC5DEF24,M3.2.0,M11.1.0", "<AB+1>5<AB+2>,M3.2.0,M11.1.0"):
         if aiqt_hooks._clock_posix_rule(text) is None:
             failures.append("(ck-rule-accepts-{}) the complete POSIX TZ rule {!r} must be accepted".format(
                 text, text))
     for text in ("ABC25", "ABC5:60", "ABC5:30:60", "ABC5DEF,J0,J365", "ABC5DEF,J1,J366", "ABC5DEF,0,366",
                  "ABC5DEF,M13.1.0,M11.1.0", "ABC5DEF,M0.1.0,M11.1.0", "ABC5DEF,M3.0.0,M11.1.0",
                  "ABC5DEF,M3.6.0,M11.1.0", "ABC5DEF,M3.2.7,M11.1.0", "ABC5DEF,M3.2.0/25,M11.1.0",
-                 "ABC5DEF,M3.2.0/2:60,M11.1.0", "ABC5DEF,M3.2.0/-2,M11.1.0", "ABC5DEF25,M3.2.0,M11.1.0",
+                 "ABC5DEF,M3.2.0/2:60,M11.1.0", "ABC5DEF,M3.2.0/-2,M11.1.0", "ABC5DEF,M3.2.0/25:00,M11.1.0",
+                 "ABC5DEF,M3.2.0/2:00:60,M11.1.0", "ABC5DEF,M3.2.0,M11.1.0/25", "ABC5DEF,M3.2.0,M11.1.0/25:00",
+                 "ABC5DEF,M3.2.0,M11.1.0/2:60", "ABC5DEF,M3.2.0,M11.1.0/2:00:60", "ABC5DEF,M3.2.0,M11.1.0/-2",
+                 "ABC5DEF25,M3.2.0,M11.1.0",
                  "ABC5DEF", "ABC5garbage", "ABC5DEF,M3.2.0", "ABC5DEF,garbage", "AB5", ":ABC5", "ABC5 ", "ABC"):
         if aiqt_hooks._clock_posix_rule(text) is not None:
             failures.append("(ck-rule-refuses-{}) {!r} is not a complete POSIX TZ rule and must be refused"

@@ -37073,12 +37073,12 @@ def _clock_posix_date_ok(text):
 
 def _clock_posix_rule(tz):
     """The (abbreviation, UTC offset) pairs a TZ value sets when it is a complete POSIX TZ rule, as a set
-    of (str, timedelta), or None when it is not one. Complete means every number is in range (offset
-    hours at most 24, minutes and seconds at most 59, a valid date and a time of at most 24 hours in each
-    transition) and a daylight name comes with its transition rule: with no rule, which transitions
-    apply is left to the implementation (glibc falls back to a default or to a posixrules file), so such
-    a value is not taken as a rule here. A rule time with a sign or hours over 24 (an extension of the
-    rule) is not accepted either."""
+    of (str, timedelta), or None when it is not one. Complete means every number is in range (each offset
+    and each transition time has hours at most 24 and minutes and seconds at most 59, so 24:59:59 is
+    accepted and 25:00 is not, and each transition date is valid) and a daylight name comes with its
+    transition rule: with no rule, which transitions apply is left to the implementation (glibc falls back
+    to a default or to a posixrules file), so such a value is not taken as a rule here. A rule time with a
+    sign or hours over 24 (an extension of the rule) is not accepted either."""
     match = _CLOCK_POSIX_TZ_RE.match(tz)
     if match is None:
         return None
