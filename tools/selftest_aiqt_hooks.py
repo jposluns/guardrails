@@ -6312,6 +6312,10 @@ _DEADLINE_SHAPES = {
     "diff_after": lambda n, base: ("Bash", {"command": _repeat("git ", n, "; git diff")}),
     "push_force_after": lambda n, base: ("Bash", {"command": _repeat("git ", n, "; git push --force origin main")}),
     "noverify_after": lambda n, base: ("Bash", {"command": _repeat("git ", n, "; git commit --no-verify -m x")}),
+    # gate_weakening's check-then-push reading: a long run of known checks with no push (each check once
+    # walked to the end of the command, quadratic in the run), and a push after one long '&&' list of checks.
+    "checks_no_push": lambda n, base: ("Bash", {"command": _repeat("pytest; ", n)}),
+    "check_push_after": lambda n, base: ("Bash", {"command": _repeat("pytest && ", n, "true; git push origin feat")}),
     "subst_after": lambda n, base: ("Bash", {"command": _repeat("git ", n, '; git commit -m "$(id)"')}),
     "breadth_push_after_unbal": lambda n, base: ("Bash", {"command": _repeat(
         "git add x ", n, "; git commit -a -m x; git push origin '")}),
@@ -6446,7 +6450,7 @@ _DEADLINE_CASES = {
     "diff_source_pretool": ("git_words_in_dquotes", "cd_git_fetch_unbal", "git_words", "diff_after"),
     "gate_weakening": ("git_words_unbal_dq", "git_add_unbal", "git_push_words_unbal", "noverify_after",
                        "ansi_c_herestr", "ansi_c_noverify_after", "procsubst_run_after",
-                       "fg_setsid_options"),
+                       "fg_setsid_options", "checks_no_push", "check_push_after"),
     "gensrc_guard": ("write_content", "write_deep_path", "redirects_many", "heredocs", "nest_parens",
                      "tee_operands", "tee_operands_distinct"),
     "git_discard": ("git_segments_reset", "nest_parens", "procsubst_run_after"),
@@ -6480,7 +6484,7 @@ _DEADLINE_DENY_CASES = frozenset((
     ("bash_absolute_paths", "dq_case_substs_after"),
     ("commit_msg_subst", "subst_after"), ("diff_source_pretool", "diff_after"),
     ("gate_weakening", "noverify_after"), ("gate_weakening", "ansi_c_noverify_after"),
-    ("git_explicit_binding", "breadth_push_after_unbal"), ("pgrep_self_match", "pgrep_self_after"),
+    ("gate_weakening", "check_push_after"), ("git_explicit_binding", "breadth_push_after_unbal"), ("pgrep_self_match", "pgrep_self_after"),
     ("protected_line", "push_force_after"), ("protected_line", "mirror_cfg_run_after"),
     ("protected_line", "procsubst_run_after")))
 # The (handler, shape) cases whose note must still arrive, each within its bound. For inline_errexit: on
@@ -6511,8 +6515,8 @@ _DEADLINE_ALLOW_CASES = frozenset((
     ("orch_truncation_guard", "fg_subshells"),
     ("orch_truncation_guard", "fg_nested_glued_substs"),
     ("orch_truncation_guard", "fg_quoted_heredoc_amps"),
-    ("pgrep_self_match", "pgrep_distinct")))
-_DEADLINE_SIZES = (65536, 262144, 1048576)
+    ("pgrep_self_match", "pgrep_distinct"), ("gate_weakening", "checks_no_push")))
+_DEADLINE_SIZES =(65536, 262144, 1048576)
 # CPU seconds one in-process handler call may use on a shape of that size, judged on the calling thread's own
 # CPU clock (time.thread_time, read inside the call by _deadline_timed_call). The figures below were recorded
 # before these rows moved to that clock, on this process's CPU time plus that of the child processes it
@@ -24027,6 +24031,71 @@ def _main_isolated(monitor):
         ]
         for _ct_label, _ct_cmd, _ct_want in _ct:
             gexpect(_ct_label, _ct_cmd, _ct_want)
+        # === gatdis check then push: a known check whose list ends at ';', a newline or '&', then git push ======
+        # The refused rows deny under the change, and each turns red (no longer denies) with the new check
+        # removed: the flip below swaps _check_then_push for a stand-in that finds nothing and restores it. The
+        # allowed rows allow under the change, each with the check in place.
+        _cp_refused = [
+            ("(gw-cp-r1) a self-test then git push after ';' denies",
+             "python3 -I -B tools/selftest_aiqt_hooks.py; git push origin feat"),
+            ("(gw-cp-r2) pytest then git push after a newline denies", "pytest -q\ngit push origin feat"),
+            ("(gw-cp-r3) a trailer between the check and the push denies",
+             "make test; echo done; git push origin feat"),
+            ("(gw-cp-r4) a backgrounded check then git push denies", "pytest & git push origin feat"),
+            ("(gw-cp-r5) check && echo ok, then ';' git push: the push is past the list, denies",
+             "pytest && echo ok; git push origin feat"),
+            ("(gw-cp-r6) a status saved but never tested before the push denies",
+             "pytest; rc=$?; git push origin feat; exit $rc"),
+            ("(gw-cp-r7) a printed copy of the status is not a test, denies",
+             'pytest; echo "exit $?"; git push origin feat'),
+            ("(gw-cp-r8) a push joined by '&&' to an unrelated command denies",
+             "npm test; cd /var/tmp/x && git push origin feat"),
+            ("(gw-cp-r9) the check's output in a file does not guard the push, denies",
+             "pytest > /var/tmp/x/l 2>&1\n\ngit push origin feat"),
+            ("(gw-cp-r10) a blank line and a trailer between check and push deny",
+             "ruff check .\n\necho checked\ngit push origin feat"),
+        ]
+        _cp_allowed = [
+            ("(gw-cp-a1) check && git push allows", "pytest && git push origin feat"),
+            ("(gw-cp-a2) a test of the saved status guards the push, allows",
+             "pytest; [ $? -eq 0 ] && git push origin feat"),
+            ("(gw-cp-a3) a saved status tested with || exit before the push allows",
+             'pytest; rc=$?; [ "$rc" -eq 0 ] || exit "$rc"; git push origin feat'),
+            ("(gw-cp-a4) a push inside an if on the saved status allows",
+             "pytest; if [ $? -eq 0 ]; then git push origin feat; fi"),
+            ("(gw-cp-a5) a push alone allows", "git push origin feat"),
+            ("(gw-cp-a6) a check alone allows", "pytest -q"),
+            ("(gw-cp-a7) check || exit 1 stops a failing check before the push, allows",
+             "pytest || exit 1\ngit push origin feat"),
+            ("(gw-cp-a8) a push before the check allows", "git push origin feat; pytest"),
+            ("(gw-cp-a9) a dry-run push publishes nothing, allows", "pytest; git push --dry-run origin feat"),
+            ("(gw-cp-a10) a backgrounded check waited on with && allows",
+             "pytest & wait $! && git push origin feat"),
+            ("(gw-cp-a11) check && then a newline-continued git push allows", "pytest &&\ngit push origin feat"),
+            ("(gw-cp-a12) a check the hook does not recognise is the disclosed residual, allows",
+             "tools/run_all_checks.sh; git push origin feat"),
+            ("(gw-cp-a13) a push in a group is outside the shape, allows",
+             "pytest; { git push origin feat; }"),
+            ("(gw-cp-a14) a git command other than push after a check allows", "pytest; git status"),
+        ]
+        for _cp_label, _cp_cmd in _cp_refused:
+            gexpect(_cp_label, _cp_cmd, "deny")
+        for _cp_label, _cp_cmd in _cp_allowed:
+            gexpect(_cp_label, _cp_cmd, "allow")
+        gdeny_names("(gw-cp-n1) the reason names the check", "pytest -q; git push origin feat", "'pytest -q'")
+        gdeny_names("(gw-cp-n2) the reason names the push", "pytest -q; git push origin feat",
+                    "'git push origin feat'")
+        gdeny_names("(gw-cp-n3) the reason names the newline", "pytest -q\ngit push origin feat", "a newline")
+        _cp_real = aiqt_hooks._check_then_push
+        aiqt_hooks._check_then_push = lambda records: None
+        try:
+            for _cp_label, _cp_cmd in _cp_refused:
+                _cp_got = _decision(gwg, _cp_cmd)
+                if _cp_got == "deny":
+                    failures.append("{} (flip): with the check-then-push check removed the row still denies, so "
+                                    "the row does not test that check".format(_cp_label))
+        finally:
+            aiqt_hooks._check_then_push = _cp_real
         # Round 4: the deny is held to the canonical shape (a simple first-stage verification run piped through plain
         # filters into a stage that cuts its stdin); every form named in the first QA keeps its new verdict here.
         _ct_r4 = [
