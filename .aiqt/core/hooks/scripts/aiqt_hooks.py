@@ -22809,10 +22809,73 @@ def validate_enumeration(obj):
     return (out, None)
 
 
+# Configuration that runs a program is code, so it passes a trust gate before it runs. A program an
+# orchestration registry names (enumerator.argv, review_dispatch.authority.argv) runs only when the
+# machine-local registry declares that same argv and git's index does not track that file. The committed
+# .aiqt/orchestration.json, and a .aiqt/orchestration.local.json the repository tracks, arrive with a
+# clone, so a repository's committed files never choose a program the hook runs. Every other field of a
+# committed registry keeps working; only the run is withheld, as the caller's cannot-evaluate outcome.
+_ORCH_LOCAL_REGISTRY = _ORCH_REGISTRY_FILES[0]
+_ORCH_COMMITTED_REGISTRY = _ORCH_REGISTRY_FILES[1]
+
+
+def _orch_trusted_argv(root, argv, field):
+    """None when the hook may run argv for the registry at root: the untracked local registry there, read
+    on its own without following a symbolic link at its name, declares exactly argv as field
+    (_orch_declared_argv). Otherwise the one-line reason the hook runs nothing, naming the file and the
+    operator's step. The file name alone does not make the file local, since a repository can commit a file of that
+    name: it counts as untracked only when git's index at root lists no entry for it and none for the
+    .aiqt path holding it (a submodule or a symbolic link there brings the file with a clone), compared
+    without regard to case, because a case-insensitive file system opens a tracked entry spelled in
+    another case under the same name. A git that cannot list the index withholds the run."""
+    local = os.path.join(root, *_ORCH_LOCAL_REGISTRY.split("/"))
+    step = ("an operator who trusts that program puts {} in the untracked local registry {} (it takes "
+            "whole-file precedence over the committed registry for the other orchestration hooks, so it "
+            "carries the whole registry)".format(field, local))
+    status, reg = _orch_registry(root, nofollow=True, files=(_ORCH_LOCAL_REGISTRY,))
+    if status == "absent":
+        return ("{} is declared only by the committed registry {}, which cannot choose a program the hook "
+                "runs; {}".format(
+                    field, os.path.join(root, *_ORCH_COMMITTED_REGISTRY.split("/")), step))
+    if status != "ok":
+        return ("the local registry {} cannot be read as a regular file ({}), so the program its {} would "
+                "name is not run; {}".format(local, reg, field, step))
+    if _orch_declared_argv(reg, field) != argv:
+        return ("the untracked local registry {} does not declare this {} (a committed registry's is never "
+                "run); {}".format(local, field, step))
+    listing = _review_git(root, "ls-files", "-z", "--cached")
+    if listing is None or listing.returncode != 0:
+        return "git cannot list the index of {}, so whether {} is tracked is unknown and the program its " \
+            "{} names is not run".format(root, local, field)
+    names = (_ORCH_LOCAL_REGISTRY.casefold(), _ORCH_LOCAL_REGISTRY.split("/")[0].casefold())
+    for entry in listing.stdout.split(b"\0"):
+        if entry and entry.decode("utf-8", "surrogateescape").casefold() in names:
+            return ("{} is tracked in git's index (entry {!r}), so it came with the repository's committed "
+                    "files and the program its {} names is not run; an operator untracks it (git rm "
+                    "--cached) and keeps it local".format(local, entry.decode("utf-8", "replace"), field))
+    return None
+
+
+def _orch_declared_argv(reg, field):
+    """The argv a registry declares as field (enumerator.argv, or review_dispatch.authority.argv from a
+    well-formed binding), or None: the trust gate's reader."""
+    if field == "enumerator.argv":
+        return _orch_enumerator_argv(reg)
+    return _rdp_authority_argv(reg)
+
+
+def _orch_enumerator_argv(reg):
+    """The enumerator argv a registry declares, or None."""
+    spec = reg.get("enumerator")
+    return spec.get("argv") if isinstance(spec, dict) else None
+
+
 def _orch_enumerate(reg, root):
     """Run the registry enumerator: ('ok', items) or (status, detail) where status is NO_ENUMERATOR or
     ENUMERATOR_ERROR. The enumeration is always FRESH (never a list or a 'drained' claim from the
-    agent's context), via the fixed argv array the registry declares (no shell string)."""
+    agent's context), via the fixed argv array the registry declares (no shell string). That argv runs
+    only through the trust gate (_orch_trusted_argv): one the untracked local registry does not declare
+    is ENUMERATOR_ERROR, a cannot-evaluate, and nothing runs."""
     spec = reg.get("enumerator")
     if not isinstance(spec, dict):
         # a DECLARED enumerator that is not an object is a configuration error, named as such so the
@@ -22826,6 +22889,9 @@ def _orch_enumerate(reg, root):
         return ("ENUMERATOR_ERROR", "enumerator argv is not a list of non-empty strings")
     timeout = spec.get("timeout")
     timeout = timeout if isinstance(timeout, (int, float)) and 0 < timeout <= 600 else 60
+    untrusted = _orch_trusted_argv(root, argv, "enumerator.argv")
+    if untrusted is not None:
+        return ("ENUMERATOR_ERROR", "the enumerator is not run: " + untrusted)
     try:
         result = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, cwd=root)
     except (OSError, subprocess.SubprocessError) as exc:
@@ -26907,6 +26973,12 @@ def _rdp_binding(reg):
                    "argv": list(argv), "timeout": timeout, "max_brief_bytes": max_bytes})
 
 
+def _rdp_authority_argv(reg):
+    """The authority argv of a registry's well-formed review dispatch binding, or None."""
+    binding, cfg = _rdp_binding(reg)
+    return cfg["argv"] if binding == "ok" else None
+
+
 def _rdp_brief_args(args, option):
     """The brief values in a dispatch's arguments: each value after a separate `option` word (None when it
     is the last word) and each `option=VALUE`. A long option also matches each abbreviation of it that a
@@ -27756,7 +27828,10 @@ def _rdp_reconcile(cfg, found, root, brief, repo_default, auth_dir=None):
     message). repo_default is the top level of the repository the dispatch runs in, used when the brief
     names no repository. The authority runs from auth_dir, the top level of the worktree whose registry
     binds the dispatch (root when None), so a relative authority argv is the registry's own, never a copy a
-    linked or nested worktree supplies. The checks run in a fixed order and the first failure decides."""
+    linked or nested worktree supplies, and only when that worktree's untracked local registry declares it
+    (_orch_trusted_argv): a binding from the committed registry, or from a tracked local one, still decides
+    which commands dispatch, but its authority never runs. The checks run in a fixed order and the first
+    failure decides."""
     labels = cfg["labels"]
     pins = found["revision"]
     if not pins:
@@ -27789,6 +27864,11 @@ def _rdp_reconcile(cfg, found, root, brief, repo_default, auth_dir=None):
                 "id, a branch name or HEAD is not accepted".format(pin, width, fmt))
     if _rdp_resolve(repo, pin) != pin:
         return ("unverifiable", "the pin {} does not resolve to that commit in {}".format(pin, repo))
+    # The authority is a program the registry names, so it runs only through the trust gate: an argv the
+    # untracked local registry of the binding's worktree does not declare withholds the dispatch.
+    untrusted = _orch_trusted_argv(auth_dir or root, cfg["argv"], "review_dispatch.authority.argv")
+    if untrusted is not None:
+        return ("unverifiable", "the authority command is not run: " + untrusted)
     auth_timeout = _rdp_time_left(cfg["timeout"])
     if auth_timeout is None:
         return ("unverifiable", "the check ran out of its {} second budget before the authority "

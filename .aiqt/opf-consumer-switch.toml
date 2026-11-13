@@ -114,6 +114,12 @@ keys-read = []
 uses = ["rec.partition"]
 
 [[detect.registry-use]]
+line-anchor = "                \"name is not run; {}\".format(local, reg, field, step))"
+reason = "Here reg holds the local registry's read-error detail string, not the registry; formatting it reads no key."
+keys-read = []
+uses = ["\"the local registry {} cannot be read as a regular file ({}), so the program its {} would \"\n                \"name is not run; {}\".format(local, reg, field, step)"]
+
+[[detect.registry-use]]
 line-anchor = "            return (\"bad\", reg)"
 reason = "Here reg holds the registry read-error detail string, not the registry; returning it reads no key."
 keys-read = []

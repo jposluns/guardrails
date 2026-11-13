@@ -1880,6 +1880,15 @@ expected-check-ids = [
   # fail-open (no-fail-open), and missing or malformed fixture evidence fails the test (fixture-hermetic).
   "gitalias-oracle/no-fail-open",
   "gitalias-oracle/fixture-hermetic",
+  # ---------- a program a registry names runs only from the untracked local registry ----------
+  "exectrust/rdp-committed-authority-not-run",
+  "exectrust/rdp-local-authority-runs",
+  "exectrust/rdp-tracked-local-authority-not-run",
+  "exectrust/enum-committed-argv-not-run",
+  "exectrust/enum-local-argv-runs",
+  "exectrust/enum-tracked-local-argv-not-run",
+  "exectrust/enum-index-entry-case-or-aiqt-path-not-run",
+  "exectrust/enum-index-unlistable-not-run",
   # ---------- the self-test entry point hands the caller's environment back ----------
   "harness/entry-restores-caller-env",
 ]
