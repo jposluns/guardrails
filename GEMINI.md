@@ -462,6 +462,11 @@ reported failure is a missing result, never a pass. A pushed revision, an acknow
 elapsed wait is not evidence the trigger fired; a run is confirmed to exist for the revision under gate
 before anything is read from its outcome.
 
+A refused command or edit never evades the guard (script, subprocess, split calls): hold and report it;
+re-issue only in a form the refusal names that the guard reads whole, or on recorded maintainer
+authorization. Where a guard reads commands, interpreters run programs as files by path, not stdin or
+process substitution.
+
 ## A generated artefact is changed only through its source
 
 A derived or generated artefact is never hand-edited; it changes only by changing its source and
