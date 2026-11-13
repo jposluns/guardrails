@@ -24104,6 +24104,33 @@ def _main_isolated(monitor):
             # A wait operand with unpaired braces is not read as a wait on the check's job.
             ("(gw-cp-r29) a wait on $!} (an unpaired brace) is not credited, denies",
              "pytest & wait $!} && git push origin feat"),
+            # An '|| return' is no stop: at the top level return fails and bash runs on to the push.
+            ("(gw-cp-r30) a check whose list holds '|| return 1' at the top level, denies",
+             "pytest || return 1; git push origin feat"),
+            ("(gw-cp-r31) a redirected '|| return 1' at the top level, denies",
+             "pytest || return 1 2>/dev/null; git push origin feat"),
+            ("(gw-cp-r32) '|| return 1', then a push joined by '&&' to an unrelated command, denies",
+             "pytest || return 1; true && git push origin feat"),
+            ("(gw-cp-r33) a bare '|| return' at the top level, denies",
+             "pytest || return; git push origin feat"),
+            ("(gw-cp-r34) check && echo ok || return 1 at the top level, denies",
+             "pytest && echo ok || return 1; git push origin feat"),
+            ("(gw-cp-r35) '|| return 1' ended by a newline at the top level, denies",
+             "pytest || return 1\ngit push origin feat"),
+            ("(gw-cp-r36) a check after the first command of a function body is refused too, a disclosed "
+             "over-refusal, denies",
+             "f() { true; pytest || return 1; git push origin feat; }; f"),
+            # A -n that is the value of a push option is not --dry-run: git sends it as that value and pushes.
+            ("(gw-cp-r37) git push -o -n sends -n as a push option and pushes, denies",
+             "pytest; git push -o -n origin feat"),
+            ("(gw-cp-r38) git push --push-option -n pushes, denies",
+             "pytest; git push --push-option -n origin feat"),
+            ("(gw-cp-r39) git push --push -n (a prefix git reads as --push-option) pushes, denies",
+             "pytest; git push --push -n origin feat"),
+            ("(gw-cp-r40) a short cluster ending in o takes the next word, -vo -n pushes, denies",
+             "pytest; git push -vo -n origin feat"),
+            ("(gw-cp-r41) -on is the push option n, not a dry run, denies",
+             "pytest; git push -on origin feat"),
         ]
         _cp_allowed = [
             ("(gw-cp-a1) check && git push allows", "pytest && git push origin feat"),
@@ -24138,6 +24165,17 @@ def _main_isolated(monitor):
              "pytest || exit 1 && true | cat; git push origin feat"),
             ("(gw-cp-a20) a test of the kept status with the push in its backgrounded list allows",
              "pytest; [ $? -eq 0 ] && git push origin feat &"),
+            ("(gw-cp-a21) check || exit 1 ended by ';' stops a failing check before the push, allows",
+             "pytest || exit 1; git push origin feat"),
+            ("(gw-cp-a22) a check written right after a function body's '{' is not read as a check, allows",
+             "f() { pytest || return 1; git push origin feat; }; f"),
+            ("(gw-cp-a23) any '||' after a kept status counts as its test, '|| return' too: the disclosed "
+             "residual, allows",
+             "pytest; [ $? -eq 0 ] || return 1; git push origin feat"),
+            ("(gw-cp-a24) a short cluster holding n (-vn) is a dry run, allows", "pytest; git push -vn origin feat"),
+            ("(gw-cp-a25) a -n after the operands is still a dry run, allows", "pytest; git push origin feat -n"),
+            ("(gw-cp-a26) a -n after a push option's value is a dry run, allows",
+             "pytest; git push -o ci.skip -n origin feat"),
         ]
         for _cp_label, _cp_cmd in _cp_refused:
             gexpect(_cp_label, _cp_cmd, "deny")
@@ -24157,6 +24195,28 @@ def _main_isolated(monitor):
                                     "the row does not test that check".format(_cp_label))
         finally:
             aiqt_hooks._check_then_push = _cp_real
+        # With return put back among the stops, every '|| return' row turns red (no longer denies), so each
+        # tests that an '|| return' is not credited as a stop.
+        _cp_stops = aiqt_hooks._GATE_PUSH_STOPS
+        aiqt_hooks._GATE_PUSH_STOPS = frozenset(("exit", "return"))
+        try:
+            for _cp_label, _cp_cmd in _cp_refused:
+                if "|| return" in _cp_cmd and _decision(gwg, _cp_cmd) == "deny":
+                    failures.append("{} (flip): with return counted as a stop the row still denies, so the row "
+                                    "does not test that return is no stop".format(_cp_label))
+        finally:
+            aiqt_hooks._GATE_PUSH_STOPS = _cp_stops
+        # With every -n word read as a dry run again, each row whose -n is an option's value turns red.
+        _cp_dry = aiqt_hooks._gate_push_dry
+        aiqt_hooks._gate_push_dry = lambda args: any(tok in aiqt_hooks._GATE_PUSH_DRY for tok in args)
+        try:
+            for _cp_label, _cp_cmd in _cp_refused:
+                if (_cp_label.startswith(("(gw-cp-r37)", "(gw-cp-r38)", "(gw-cp-r39)", "(gw-cp-r40)"))
+                        and _decision(gwg, _cp_cmd) == "deny"):
+                    failures.append("{} (flip): with every -n read as a dry run the row still denies, so the "
+                                    "row does not test the option-value reading".format(_cp_label))
+        finally:
+            aiqt_hooks._gate_push_dry = _cp_dry
         # Round 4: the deny is held to the canonical shape (a simple first-stage verification run piped through plain
         # filters into a stage that cuts its stdin); every form named in the first QA keeps its new verdict here.
         _ct_r4 = [
