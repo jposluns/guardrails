@@ -4831,7 +4831,13 @@ def diff_source_pretool(data):
     quoted here-document's body that main's lexer reads otherwise (MAIN'S DECISION AS A FLOOR, above
     _MainHashReading), main's segments are judged beside the lex's own where main's reading lexes, and where
     it fails the fallback a lex that fails takes, which never denies, decides in place of this guard's
-    allow."""
+    allow.
+
+    NOT INSPECTED (disclosed in the manifest residue): commands that run where this hook cannot see their
+    text, that is a command inside a script file the Bash command runs (bash FILE, sh FILE, python3 FILE, or a
+    sourced file), a subprocess call made by a program the command runs, and a command built at run time from
+    text that is not in the command; the shared lexer reads the body of a quoted here-document as data, so a
+    command in such a body fed to a shell is not read as a command by that lexer."""
     if data.get("hook_event_name") != PRETOOL:
         return _hard_block("aiqt_hooks: diff_source_pretool wired to unexpected event {!r}; failing "
                            "closed".format(data.get("hook_event_name")))
@@ -5689,7 +5695,13 @@ def commit_identity(data):
     here-document's body that main's lexer reads otherwise (MAIN'S DECISION AS A FLOOR, above
     _MainHashReading), main's segments are read beside the lex's own where main's reading lexes, and where it
     fails the raw fallback a lex that fails takes, which denies or allows, decides in place of this guard's
-    allow."""
+    allow.
+
+    NOT INSPECTED (disclosed in the manifest residue): commands that run where this hook cannot see their
+    text, that is a command inside a script file the Bash command runs (bash FILE, sh FILE, python3 FILE, or
+    a sourced file), a subprocess call made by a program the command runs, and a command built at run time
+    from text that is not in the command; the shared lexer reads the body of a quoted here-document as data,
+    so a command in such a body fed to a shell is not read as a command by that lexer."""
     if data.get("hook_event_name") != PRETOOL:
         return _hard_block("aiqt_hooks: commit_identity wired to unexpected event {!r}; failing closed"
                            .format(data.get("hook_event_name")))
@@ -6887,7 +6899,13 @@ def bash_absolute_paths(data):
     _lex_readings call, each taking time linear in the command's length. Where a lex read a quoted here-document's body
     that main's lexer reads otherwise (MAIN'S DECISION AS A FLOOR, above _MainHashReading), the partial lex
     below returns main's partial reading beside its own, the segments main's lex holds where it lexes and
-    those its partial lex recovers past the body where it fails, so a reason either list carries counts."""
+    those its partial lex recovers past the body where it fails, so a reason either list carries counts.
+
+    NOT INSPECTED (disclosed in the manifest residue): commands that run where this hook cannot see their text, that
+    is a command inside a script file the Bash command runs (bash FILE, sh FILE, python3 FILE, or a sourced file), a
+    subprocess call made by a program the command runs, and a command built at run time from text that is not in the
+    command; the shared lexer reads the body of a quoted here-document as data, so a command in such a body fed to a
+    shell is not read as a command by that lexer."""
     if data.get("hook_event_name") != PRETOOL:
         return _hard_block("aiqt_hooks: bash_absolute_paths wired to unexpected event {!r}; failing "
                            "closed".format(data.get("hook_event_name")))
@@ -8574,7 +8592,13 @@ def git_explicit_binding(data):
     otherwise (MAIN'S DECISION AS A FLOOR, above _MainHashReading), main's segments are judged beside the
     lex's own where main's reading lexes, and where it fails the raw fallback a lex that fails takes
     (_expbnd_fallback_kind) denies after this guard's own deny and before its notes, and decides in place of
-    its allow."""
+    its allow.
+
+    NOT INSPECTED (disclosed in the manifest residue): commands that run where this hook cannot see their
+    text, that is a command inside a script file the Bash command runs (bash FILE, sh FILE, python3 FILE, or a
+    sourced file), a subprocess call made by a program the command runs, and a command built at run time from
+    text that is not in the command; the shared lexer reads the body of a quoted here-document as data, so a
+    command in such a body fed to a shell is not read as a command by that lexer."""
     if data.get("hook_event_name") != PRETOOL:
         return _hard_block("aiqt_hooks: git_explicit_binding wired to unexpected event {!r}; failing "
                            "closed".format(data.get("hook_event_name")))
@@ -8738,7 +8762,13 @@ def git_stash_ref(data):
     pop/apply, and with git_explicit_binding's note on a relocated form (e.g. `cd /x && git stash
     pop`); such sibling notes are consistent, never conflicting.
     Only missing tool_name produces a structured deny;
-    a miswired event hard-blocks and dispatcher errors retain the manifest's fail-closed posture."""
+    a miswired event hard-blocks and dispatcher errors retain the manifest's fail-closed posture.
+
+    NOT INSPECTED (disclosed in the manifest residue): commands that run where this hook cannot see their
+    text, that is a command inside a script file the Bash command runs (bash FILE, sh FILE, python3 FILE, or
+    a sourced file), a subprocess call made by a program the command runs, and a command built at run time
+    from text that is not in the command; the shared lexer reads the body of a quoted here-document as data,
+    so a command in such a body fed to a shell is not read as a command by that lexer."""
     if data.get("hook_event_name") != PRETOOL:
         return _hard_block("aiqt_hooks: git_stash_ref wired to unexpected event {!r}; failing "
                            "closed".format(data.get("hook_event_name")))
@@ -9334,7 +9364,13 @@ def inline_errexit(data):
     change that may not run (true || set -e), or only inside a function body the rest may call, is unseen.
     Another tool silently allows. A tool_name that is missing, empty or not a string, a tool_input that is not
     an object, and a command that is missing, empty or not a string each allow with a note naming that field
-    (_errexit_unreadable), never silently and never with a deny."""
+    (_errexit_unreadable), never silently and never with a deny.
+
+    NOT INSPECTED (disclosed in the manifest residue): commands that run where this hook cannot see their text,
+    that is a command inside a script file the Bash command runs (bash FILE, sh FILE, python3 FILE, or a
+    sourced file), a subprocess call made by a program the command runs, and a command built at run time from
+    text that is not in the command; the shared lexer reads the body of a quoted here-document as data, so a
+    command in such a body fed to a shell is not read as a command by that lexer."""
     if data.get("hook_event_name") != PRETOOL:
         return _hard_block("aiqt_hooks: inline_errexit wired to unexpected event {!r}; failing "
                            "closed".format(data.get("hook_event_name")))
@@ -12542,7 +12578,13 @@ def git_discard(data):
     still act on the unknown cwd. See the recovery block comment above
     _SNAPSHOTTABLE_VERBS. The snapshot cannot capture what the probe cannot see (assume-unchanged/skip-worktree
     marks, submodule.<name>.ignore) or ignored files (git add --all excludes them), so a discard of that
-    content is not recoverable here."""
+    content is not recoverable here.
+
+    NOT INSPECTED (disclosed in the manifest residue): commands that run where this hook cannot see their text, that
+    is a command inside a script file the Bash command runs (bash FILE, sh FILE, python3 FILE, or a sourced file), a
+    subprocess call made by a program the command runs, and a command built at run time from text that is not in the
+    command; the shared lexer reads the body of a quoted here-document as data, so a command in such a body fed to a
+    shell is not read as a command by that lexer."""
     if data.get("hook_event_name") != PRETOOL:
         # A mis-wired event is a broken install: loud (unreachable given the generator's event whitelist).
         return _hard_block("aiqt_hooks: git_discard wired to unexpected event {!r}; failing closed"
@@ -14772,6 +14814,12 @@ def protected_line(data):
     a git option or subcommand position, or after any word naming git, now denies
     ('git -C $D log'; quoting it restores the plain reading), and so does a key literal
     in effect but spelled through an expansion or quote.
+
+    NOT INSPECTED (disclosed in the manifest residue): commands that run where this hook cannot see their text, that
+    is a command inside a script file the Bash command runs (bash FILE, sh FILE, python3 FILE, or a sourced file), a
+    subprocess call made by a program the command runs, and a command built at run time from text that is not in the
+    command; the shared lexer reads the body of a quoted here-document as data, so a command in such a body fed to a
+    shell is not read as a command by that lexer.
     """
     if data.get("hook_event_name") != PRETOOL:
         return _hard_block("aiqt_hooks: protected_line wired to unexpected event {!r}; failing closed"
@@ -15431,7 +15479,13 @@ def branch_root(data):
     too (_git_alias_spelled); a word whose every expansion stands inside double quotes and expands to one word (not a list expansion such as "$@") keeps the plain reading,
     so a value so spelled behind a literal key defines nothing. Disclosed over-refusal: an unquoted variable in a
     git option or subcommand position, or after any word naming git, now denies ('git -C $D log'; quoting it
-    restores the plain reading), and so does a key literal in effect but spelled through an expansion or quote."""
+    restores the plain reading), and so does a key literal in effect but spelled through an expansion or quote.
+
+    NOT INSPECTED (disclosed in the manifest residue): commands that run where this hook cannot see their text, that
+    is a command inside a script file the Bash command runs (bash FILE, sh FILE, python3 FILE, or a sourced file), a
+    subprocess call made by a program the command runs, and a command built at run time from text that is not in the
+    command; the shared lexer reads the body of a quoted here-document as data, so a command in such a body fed to a
+    shell is not read as a command by that lexer."""
     if data.get("hook_event_name") != PRETOOL:
         return _hard_block(
             "aiqt_hooks: branch_root wired to unexpected event {!r}; failing closed"
@@ -18470,7 +18524,13 @@ def gate_weakening(data):
     xargs body; R2 an alias defined in a configuration file, or a shell function; R3 a gate whose name and
     options carry no checker part
     (tools/doctor.py, sha256sum -c, a build); R4 a plain '| grep PATTERN' filter or '| wc', which are not
-    counted as truncating sinks."""
+    counted as truncating sinks.
+
+    NOT INSPECTED (disclosed in the manifest residue): commands that run where this hook cannot see their text, that
+    is a command inside a script file the Bash command runs (bash FILE, sh FILE, python3 FILE, or a sourced file), a
+    subprocess call made by a program the command runs, and a command built at run time from text that is not in the
+    command; the shared lexer reads the body of a quoted here-document as data, so a command in such a body fed to a
+    shell is not read as a command by that lexer."""
     if data.get("hook_event_name") != PRETOOL:
         return _hard_block("aiqt_hooks: gate_weakening wired to unexpected event {!r}; failing closed"
                            .format(data.get("hook_event_name")))
@@ -18912,7 +18972,13 @@ def commit_msg_subst(data):
     DENIES. Where a lex read a quoted here-document's body that main's lexer reads otherwise (MAIN'S DECISION
     AS A FLOOR, above _MainHashReading), main's segments are judged beside the lex's own where main's reading
     lexes, and where it fails the raw fallback a lex that fails takes, which denies or allows, decides in place
-    of this guard's allow."""
+    of this guard's allow.
+
+    NOT INSPECTED (disclosed in the manifest residue): commands that run where this hook cannot see their text,
+    that is a command inside a script file the Bash command runs (bash FILE, sh FILE, python3 FILE, or a
+    sourced file), a subprocess call made by a program the command runs, and a command built at run time from
+    text that is not in the command; the shared lexer reads the body of a quoted here-document as data, so a
+    command in such a body fed to a shell is not read as a command by that lexer."""
     if data.get("hook_event_name") != PRETOOL:
         return _hard_block("aiqt_hooks: commit_msg_subst wired to unexpected event {!r}; failing closed"
                            .format(data.get("hook_event_name")))
@@ -19336,7 +19402,12 @@ def pgrep_self_match(data):
     carry the command text on their command lines. A pattern written as the bracket idiom ([j]ob7) is
     allowed. Hooks never ask. BEST EFFORT: a command word built at run time is not seen; the residue in the hook
     manifest states the shapes read and the misses. A missing tool_name takes the shared deny and a
-    non-string command denies fail-safe, as the sibling deny hooks do."""
+    non-string command denies fail-safe, as the sibling deny hooks do.
+
+    NOT INSPECTED (disclosed in the manifest residue): commands that run where this hook cannot see their text, that
+    is a command inside a script file the Bash command runs (bash FILE, sh FILE, python3 FILE, or a sourced file), a
+    subprocess call made by a program the command runs, and a command built at run time from text that is not in the
+    command; a here-document body fed to a shell is read, since the split reads every here-document body as text."""
     if data.get("hook_event_name") != PRETOOL:
         return _hard_block("aiqt_hooks: pgrep_self_match wired to unexpected event {!r}; failing closed"
                            .format(data.get("hook_event_name")))
@@ -19561,7 +19632,12 @@ def secrets_shift_left(data):
     tool NOT in {Write, Edit, MultiEdit, Bash} is out of scope and allows. The target text is the Write
     content, the Edit new_string, the newline-joined new_string values of a MultiEdit's edits (the text
     being introduced), or the Bash command string (the write-form path, best-effort). A DENY names the
-    pattern label only, never the secret."""
+    pattern label only, never the secret.
+
+    NOT SEEN on the Bash path (disclosed in the manifest residue): a secret written by a command inside a
+    script file the Bash command runs (bash FILE, sh FILE, python3 FILE, or a sourced file), by a
+    subprocess call a program the command runs makes, or by a command built at run time from text not in
+    the command string; a here-document body fed to a shell is part of the raw string and is scanned."""
     if data.get("hook_event_name") != PRETOOL:
         return _hard_block("aiqt_hooks: secrets_shift_left wired to unexpected event {!r}; failing closed"
                            .format(data.get("hook_event_name")))
@@ -21473,7 +21549,13 @@ def gensrc_guard(data):
     gate remains the authoritative backstop. Besides a confirmed registry match, the guard denies fail-closed on
     a missing tool_name (the shared fail-closed contract), a PRESENT-but-unreadable/malformed registry, a
     PRESENT-but-malformed authoring marker on a matching authoring-scoped entry, the Bash payload and detector
-    faults _gensrc_bash lists, and a mis-wired event (a hard block, exit 2)."""
+    faults _gensrc_bash lists, and a mis-wired event (a hard block, exit 2).
+
+    NOT INSPECTED (disclosed in the manifest residue): commands that run where this hook cannot see their text,
+    that is a command inside a script file the Bash command runs (bash FILE, sh FILE, python3 FILE, or a sourced
+    file), a subprocess call made by a program the command runs, and a command built at run time from text that is
+    not in the command; the shared lexer reads the body of a quoted here-document as data, so a command in such a
+    body fed to a shell is not read as a command by that lexer."""
     if data.get("hook_event_name") != PRETOOL:
         return _hard_block("aiqt_hooks: gensrc_guard wired to unexpected event {!r}; failing closed"
                            .format(data.get("hook_event_name")))
@@ -25941,7 +26023,12 @@ def orch_truncation_guard(data):
     _orch_registry_walk), each deny naming the defect and an action that repairs it. Only a plain
     non-Bash string tool_name, and a cwd whose completed walk and git-toplevel union find no registry,
     are out of scope (allow, with the out-of-scope note above for a foreground detach; in
-    registry-required mode that cwd is denied instead)."""
+    registry-required mode that cwd is denied instead).
+
+    NOT INSPECTED (disclosed in the manifest residue): commands that run where this hook cannot see their text, that
+    is a command inside a script file the Bash command runs (bash FILE, sh FILE, python3 FILE, or a sourced file), a
+    subprocess call made by a program the command runs, and a command built at run time from text that is not in the
+    command; a here-document body fed to a shell is read as code by the scan (_orch_foreground_scan)."""
     tool_name = data.get("tool_name")
     if tool_name is None:
         return _deny_missing_tool_name("trkasy")
@@ -26648,7 +26735,13 @@ def orch_untracked_wait_loop(data):
     the truncation guard's generic bare-`&` DENY-and-educate (or its open-quote deny) on the same event.
     Only a positive 'match' DENIES here. This is a specific companion to that generic deny, defence in
     depth on the same event: the truncation guard denies any bare-`&` detach it can read, this denies the
-    specific untracked poll loop with a reason about the stranded poll."""
+    specific untracked poll loop with a reason about the stranded poll.
+
+    NOT INSPECTED (disclosed in the manifest residue): commands that run where this hook cannot see their
+    text, that is a command inside a script file the Bash command runs (bash FILE, sh FILE, python3 FILE, or
+    a sourced file), a subprocess call made by a program the command runs, and a command built at run time
+    from text that is not in the command; a here-document fed to a shell is one of the heredoc forms on which
+    this guard emits nothing and defers to the truncation guard."""
     tool_name = data.get("tool_name")
     if tool_name is None:
         # A missing tool_name is a malformed payload, not another tool: it is denied before the registry
@@ -29710,7 +29803,13 @@ def review_dispatch_pin(data):
     after option-value consumption may be falsely denied (git stash push -m --patch, whose message --patch
     is judged as the patch option); a fail-safe refusal of a harmless form, never an allow.
     Hookless dispatchers run it as a preflight: `aiqt_hooks.py review_dispatch_pin` with the payload on
-    stdin."""
+    stdin.
+
+    NOT INSPECTED (disclosed in the manifest residue): commands that run where this hook cannot see their text, that
+    is a command inside a script file the Bash command runs (bash FILE, sh FILE, python3 FILE, or a sourced file), a
+    subprocess call made by a program the command runs, and a command built at run time from text that is not in the
+    command; a dispatch in a here-document body fed to a shell is not read as one (in a session a binding scopes, a
+    call holding a here-document is not one plain command and is withheld)."""
     tool_name = data.get("tool_name")
     if tool_name is None:
         return _deny_missing_tool_name("vfxcmt")
@@ -32146,7 +32245,14 @@ def review_workdir_hold(data):
     disclosed). Each of these is a residual by design of a hold set built from literal command
     text; no further widening rounds are planned against them.
     Hookless dispatchers and resync tools run it as a preflight: `aiqt_hooks.py review_workdir_hold`
-    with the payload on stdin."""
+    with the payload on stdin.
+
+    NOT INSPECTED (disclosed in the manifest residue): commands that run where this hook cannot see
+    their text, that is a command inside a script file the Bash command runs (bash FILE, sh FILE,
+    python3 FILE, or a sourced file), a subprocess call made by a program the command runs, and a
+    command built at run time from text that is not in the command; the shared lexer reads the body of a
+    quoted here-document as data, so a command in such a body fed to a shell is not read as a command by
+    that lexer."""
     if data.get("hook_event_name") != PRETOOL:
         return _hard_block("aiqt_hooks: review_workdir_hold wired to unexpected event {!r}; failing "
                            "closed".format(data.get("hook_event_name")))
