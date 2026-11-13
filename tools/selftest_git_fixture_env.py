@@ -5034,6 +5034,11 @@ _SCAN_ALLOWED_UNPINNED = (
      " option-table introspection forms (init -q --template= of a scratch probe repo,"
      " --version, and per-subcommand -h / --git-completion-helper probes that exit inside"
      " option parsing), never a real maintenance-triggering run"),
+    ("tools/check_coreutils_environment.py", "probe", ("unresolved",),
+     "cannot-evaluate head: the absolute path a PATH search selected for one program name of"
+     " the reviewed coreutils inventory (or a self-test fixture script), launched with the one"
+     " literal argument --version, no shell and an environment of LC_ALL, LANG and PATH only;"
+     " a --version run is never a maintenance-triggering git run"),
     ("tools/check_newtab.py", "_self_test", ("unresolved",),
      "cannot-evaluate head: the launch iterates a literal command table whose heads are all"
      " sys.executable (the copied-tools self-test children); no git launch"),

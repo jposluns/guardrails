@@ -11,8 +11,9 @@ with exit 2). This gate holds where it runs:
   1. live: the canonical guard runs in this process first, in every mode; a refusal exits 2 by name.
   2. copies: the inline copies in each CLI_COPIES entry (opf/tools/opf.py, tools/check_selftest_execution.py,
      opf/tools/_opf_adopt_complete.py, opf/tools/_opf_adopt_state.py, opf/tools/_opf_import_complete.py,
-     tools/check_gitleaks_pin.py, tools/check_must_deliver.py, tools/_load_bound.py and
-     tools/check_verifier_delivery.py), in opf/tools/_opf_declaration.py and tools/check_opf_declaration.py
+     tools/check_gitleaks_pin.py, tools/check_must_deliver.py, tools/_load_bound.py,
+     tools/check_verifier_delivery.py, tools/render_og_cards.py and tools/check_coreutils_environment.py), in
+     opf/tools/_opf_declaration.py and tools/check_opf_declaration.py
      (the constant and both functions) and in the hooks dispatcher and its generated plugin copy (the constant
      and the probe) are each bound exactly once at module scope, by one top-level definition (an undecorated one
      for a function), and AST-identical (ast.dump, docstrings included) to the canonical text, so a call by that
@@ -29,15 +30,16 @@ with exit 2). This gate holds where it runs:
      _main_exit(lambda: _child_status_refusal_exit("opf.py") or main()) (the guard runs first, and _main_exit
      ends the process by raising SystemExit itself, never through sys.exit), and for every other,
      sys.exit(_child_status_refusal_exit("<basename>") or main()), except that of each SELF_TEST_COPIES entry
-     (the three opf/tools self_test modules above), which is exactly opf.py's canonical --self-test statement
-     (SELF_TEST_ENTRY, held to opf.py's own _ENTRY_STATEMENT) then that second form, with self_test bound once
-     at module scope (the same count), by one undecorated top-level def whose first statement after the
-     docstring is the guard call _child_status_refusal_exit("<basename>"); opf.py's _main_exit, which receives
-     the guard inside that lambda, must call its argument first (one undecorated top-level def _main_exit(main)
-     whose first statement after its docstring is a try whose body is exactly status = main()) and be what the
-     entry line calls: that def is the module's one binding of _main_exit at module scope (the same count), and
-     its own scope holds no yield or yield from (a generator's call runs none of its body); the canonical file's
-     entry ends in its own line of that second form, each
+     (the three opf/tools self_test modules above and tools/check_coreutils_environment.py), which is exactly
+     opf.py's canonical --self-test statement (SELF_TEST_ENTRY, held to opf.py's own _ENTRY_STATEMENT) then
+     that second form, with self_test bound once at module scope (the same count), by one undecorated
+     top-level def whose first statement after the docstring is the guard call
+     _child_status_refusal_exit("<basename>"); opf.py's _main_exit, which receives the guard inside that lambda,
+     must call its argument first (one undecorated top-level def _main_exit(main) whose first statement after
+     its docstring is a try whose body is exactly status = main()) and be what the entry line calls: that def is
+     the module's one binding of _main_exit at module scope (the same count), and its own scope holds no yield or
+     yield from (a generator's call runs none of its body); the canonical file's entry ends in its own line of
+     that second form, each
      SELF_TEST_FIRST_COPIES file (opf/tools/_opf_declaration.py) has the __main__ body exactly opf.py's canonical
      --self-test statement and then that second form (a direct --self-test launch of it is unguarded; the
      self-test runs
@@ -237,7 +239,8 @@ CLI_COPIES = (("opf/tools/opf.py", "opf.py"), ("tools/check_selftest_execution.p
               ("tools/check_gitleaks_pin.py", "check_gitleaks_pin.py"),
               ("tools/check_must_deliver.py", "check_must_deliver.py"), ("tools/_load_bound.py", "_load_bound.py"),
               ("tools/check_verifier_delivery.py", "check_verifier_delivery.py"),
-              ("tools/render_og_cards.py", "render_og_cards.py"))
+              ("tools/render_og_cards.py", "render_og_cards.py"),
+              ("tools/check_coreutils_environment.py", "check_coreutils_environment.py"))
 # The CLI copy whose __main__ body is the one call _entry() (it raises its own exit rather than calling sys.exit):
 # its guard is the first statement of its one top-level _entry(), exactly ENTRY_GUARD.
 ENTRY_COPIES = (("tools/check_opf_declaration.py", "check_opf_declaration.py"),)
@@ -275,9 +278,10 @@ MAIN_EXIT_CALL = "status = main()"
 # The CLI copies that are opf/tools self_test modules: opf.py's aggregator requires their __main__ block to start
 # with its canonical --self-test statement (SELF_TEST_ENTRY, opf.py's _ENTRY_STATEMENT), so their __main__ body is
 # exactly that statement then the CLI entry line, and the guard call SELF_TEST_GUARD is the first statement of
-# self_test() after its docstring, so the --self-test path refuses too.
+# self_test() after its docstring, so the --self-test path refuses too. tools/check_coreutils_environment.py takes
+# the same form, as a gate whose self-test reads its fixtures' exit statuses.
 SELF_TEST_COPIES = ("opf/tools/_opf_adopt_complete.py", "opf/tools/_opf_adopt_state.py",
-                    "opf/tools/_opf_import_complete.py")
+                    "opf/tools/_opf_import_complete.py", "tools/check_coreutils_environment.py")
 SELF_TEST_ENTRY = 'if sys.argv[1:] == ["--self-test"]:\n    sys.exit(self_test())\n'
 SELF_TEST_GUARD = '_child_status_refusal_exit("{}")'
 # The file whose _ENTRY_STATEMENT SELF_TEST_ENTRY copies: it must bind that name once, at the top level, to a string
@@ -2947,7 +2951,10 @@ def _behaviour(probe, base, verdict=None):
             ("behaviour/import-complete-self-test-refuses", "opf/tools/_opf_import_complete.py", ("--self-test",)),
             ("behaviour/gitleaks-pin-refuses", "tools/check_gitleaks_pin.py", ()),
             ("behaviour/must-deliver-refuses", "tools/check_must_deliver.py", ()),
-            ("behaviour/verifier-delivery-refuses", "tools/check_verifier_delivery.py", ())):
+            ("behaviour/verifier-delivery-refuses", "tools/check_verifier_delivery.py", ()),
+            ("behaviour/coreutils-environment-refuses", "tools/check_coreutils_environment.py", ()),
+            ("behaviour/coreutils-environment-self-test-refuses", "tools/check_coreutils_environment.py",
+             ("--self-test",))):
         got = via("ignore", python + [str(ROOT / rel)] + list(args), cwd=str(ROOT))
         out.append((check_id, verdict((refused(got, Path(rel).name), got)), got))
     for check_id, rel, marker in (("control/opf-cli-default-runs", "opf/tools/opf.py", "opf: the OPFiles"),
@@ -3368,6 +3375,8 @@ def self_test(lane, report_path=None):
                                 ("behaviour/import-complete-self-test-refuses", 0),
                                 ("behaviour/gitleaks-pin-refuses", 0), ("behaviour/must-deliver-refuses", 0),
                                 ("behaviour/verifier-delivery-refuses", 0),
+                                ("behaviour/coreutils-environment-refuses", 0),
+                                ("behaviour/coreutils-environment-self-test-refuses", 0),
                                 ("control/opf-cli-default-runs", 0),
                                 ("control/launcher-cli-default-runs", 0), ("control/coverage-gate-default-runs", 0),
                                 ("behaviour/opf-declaration-cli-refuses", 0), ("behaviour/declaration-gate-refuses", 0),

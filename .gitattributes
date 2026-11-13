@@ -163,6 +163,7 @@
 .aiqt/core/rules/trust-trust-recovery-ext.md text eol=lf
 .aiqt/core/skill/skill-source.md text eol=lf
 .aiqt/core/worker-capabilities.toml text eol=lf
+.aiqt/coreutils-tests.json text eol=lf
 .aiqt/enforceability.json text eol=lf
 .aiqt/frozen.json text eol=lf
 .aiqt/gensrc.json text eol=lf
@@ -837,6 +838,7 @@ tools/check_child_status_coverage.py text eol=lf
 tools/check_ci_parity.py text eol=lf
 tools/check_cited_standards.py text eol=lf
 tools/check_clauses.py text eol=lf
+tools/check_coreutils_environment.py text eol=lf
 tools/check_crosswalk.py text eol=lf
 tools/check_dangerous_api.py text eol=lf
 tools/check_derived_command_parameters.py text eol=lf

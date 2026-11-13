@@ -1259,6 +1259,16 @@ jobs:
         shell: bash
         run: python3 -I -B tools/check_child_status_coverage.py
 
+      # The coreutils implementation report: every inventoried program resolved on this step's PATH and on
+      # the removal oracle's fixed /usr/bin:/bin, each on its own. GITHUB_ACTIONS=true puts the live leg in CI
+      # mode, so a recognised implementation other than GNU fails here, where locally it only warns.
+      - name: Coreutils environment self-test
+        shell: bash
+        run: python3 -I -B tools/check_coreutils_environment.py --self-test
+      - name: Coreutils environment
+        shell: bash
+        run: python3 -I -B tools/check_coreutils_environment.py
+
       - name: OPF declaration self-test (execution-reconciled)
         shell: bash
         run: python3 -I -B tools/check_selftest_execution.py --suite opf-declaration-selftest

@@ -50,6 +50,13 @@ run_gate "child-status" python3 -I -B opf/tools/_child_status.py
 run_gate "child-status-selftest" python3 -I -B tools/check_selftest_execution.py --suite child-status-selftest
 run_gate "child-status-coverage-selftest" python3 -I -B tools/check_selftest_execution.py --suite child-status-coverage-selftest
 run_gate "child-status-coverage" python3 -I -B tools/check_child_status_coverage.py
+# The coreutils implementation report, right after the child-status checks: it resolves every program in
+# .aiqt/coreutils-tests.json on this runner's PATH and on the removal oracle's fixed /usr/bin:/bin, each on its
+# own, and probes it. A missing, failed, timed-out or unrecognised probe exits 2 and fails the run; a
+# recognised implementation other than GNU (the CI one) prints a WARNING line and passes, so read that line
+# before taking a local pass as a prediction of CI.
+run_gate "coreutils-environment-selftest" python3 -I -B tools/check_coreutils_environment.py --self-test
+run_gate "coreutils-environment" python3 -I -B tools/check_coreutils_environment.py
 run_gate "secrets"   python3 -I -B tools/check_secrets.py
 run_gate "secrets-selftest" python3 -I -B tools/check_secrets.py --self-test
 

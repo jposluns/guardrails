@@ -343,7 +343,9 @@ missing-mandatory finding, not a silent pass. The
 child-status probe (CHILD_STATUS_PROBE) and its coverage gate are MANDATORY_MEMBERS for
 the same reason: removing either from both runners together is a missing-mandatory
 finding. Where the probe sits in a roster (first) is held by
-tools/check_child_status_coverage.py, not here. The
+tools/check_child_status_coverage.py, not here. The coreutils implementation
+report (COREUTILS_ENVIRONMENT) and its --self-test are MANDATORY_MEMBERS too; where
+they sit in a roster is not held by any gate. The
 extractors implement a disclosed shell and YAML subset; an unknown construct is
 cannot-evaluate rather than a clean pass. Fail-closed cases include an unknown
 top-level or job-level workflow key, an exit outside the exact terminal summary
@@ -885,6 +887,7 @@ MSG_LEAKS_SCAN = "tools/check_msg_leaks.py"  # the live scan (module docstring, 
 # included, so that workflow admits it beside its own scan.
 CHILD_STATUS_PROBE = "opf/tools/_child_status.py"
 CHILD_STATUS_COVERAGE = "tools/check_child_status_coverage.py"
+COREUTILS_ENVIRONMENT = "tools/check_coreutils_environment.py"
 # The only members msg-leaks.yml may run (module docstring, TWO WORKFLOWS): its own scan, that
 # scan's self-test and the child-status probe. Any other member there is a relocation finding,
 # because that workflow's status is separate from the aggregated Quality gates and re-runs on every
@@ -1068,6 +1071,10 @@ MANDATORY_MEMBERS = frozenset({
     # leave every gate reading a lost child exit status as a pass, unseen.
     CHILD_STATUS_PROBE,
     CHILD_STATUS_COVERAGE,
+    # The coreutils implementation report and its self-test: removing both from both rosters together
+    # would let a run pass with no record of which coreutils programs its tests executed.
+    COREUTILS_ENVIRONMENT,
+    COREUTILS_ENVIRONMENT + " --self-test",
 })
 
 INTERPRETERS = frozenset({"python", "python3"})
@@ -5442,6 +5449,9 @@ def self_test():
         # The child-status probe and its coverage gate, mandatory as the contracts are.
         "python3 -I -B opf/tools/_child_status.py",
         "python3 -I -B tools/check_child_status_coverage.py",
+        # The coreutils implementation report and its self-test, mandatory members too.
+        "python3 -I -B tools/check_coreutils_environment.py --self-test",
+        "python3 -I -B tools/check_coreutils_environment.py",
         # The scope tool's self-test, which the pinned SCOPE_JOB fixture body runs on
         # the CI side of every heavy fixture, so both sides carry it everywhere.
         "python3 -I -B tools/ci_site_scope.py --self-test",
@@ -6214,9 +6224,9 @@ def self_test():
         ("missing-mandatory",),
     )
 
-    # Both rosters carry the ci-parity mandatory members but omit the git-option-table pair and the
-    # three repository-contract members, so the only findings are missing-mandatory for those five
-    # (rosters are otherwise matched, no local/ci-only drift).
+    # Both rosters carry the ci-parity mandatory members but omit the git-option-table pair, the
+    # three repository-contract members and the other mandatory members, so the only findings are
+    # missing-mandatory ones (rosters are otherwise matched, no local/ci-only drift).
     git_option_absent = (
         "python3 -I -B tools/check_ci_parity.py --self-test",
         "python3 -I -B tools/check_ci_parity.py",
