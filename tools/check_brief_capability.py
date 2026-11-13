@@ -11,11 +11,11 @@ and for every family, a path outside a declared workdir when the family's row sa
 (P2), or a pinned revision that a git command line of the listed subcommands (P5: clone, checkout, switch,
 reset, fetch, pull, worktree add, merge, rebase, restore --source, archive) reaches through a ref that can move with
 no later cure, or through a dispatch ref that resolves to another commit (P5), or an input the brief declares on an
-INPUT: line that does not exist on the host the lint runs on (P6). The
-signal is structural, not certain: the lint fails closed, so some text a human would pass refuses (see
-RESIDUALS). Every rule that infers a request from free prose (R1, R5, R6, R7) is ADVISORY:
+INPUT: line that does not exist on the host the lint runs on (P6), or a git command line whose subcommand is commit
+or push when the family's row says git-write = "no" (W1). The signal is structural, not certain: the lint fails
+closed, so some text a human would pass refuses (see RESIDUALS). Every rule that infers a request from free prose (R1, R5, R6, R7) is ADVISORY:
 its hits are printed so a human sees them, and it never refuses. For a family that can execute (`yes` or
-`read-only-sandbox`) no execution rule applies; the PREFLIGHT rules below apply to every family.
+`read-only-sandbox`) no execution rule applies; the PREFLIGHT rules and GIT WRITE (W1) below apply to every family.
 
 PREFLIGHT (the input paths a brief names; read over the whole brief, line by line, before scope is applied):
 
@@ -391,6 +391,34 @@ is read as two lines; a tag force-moved after the lint runs is not seen; a dispa
 --repo cannot resolve is only ADVISORY, and the worker then fails closed at the fetch; and, like every rule, it
 helps only where the sender refuses to send on exit 1 or 2.
 
+GIT WRITE (beside the preflight, for every family, before the execution rules' early return for a family that can
+execute):
+
+  W1 git write         HARD. The family's row says git-write = "no" and the text the family is addressed by (scoped
+                       as the S rules scope it) holds a git command line, read with the COMMAND LINE grammar below
+                       (the git command word, optionally behind a directory path, then any number of global options
+                       such as -C or -c with a value), whose subcommand is commit or push. It reads prose lines,
+                       code spans and fences alike, each block sentence by sentence as the S rules read command
+                       lines, and the finding prints the line that holds the command word. The one exemption is the
+                       closed PROHIBITED shape ("Do not run `git push`." or "Never run git commit -a."), voided as
+                       for the S rules when another sentence of its void group asks for anything; a past report
+                       ("CI failed on `git push`.") is no exemption, and free English never decides it. A word that
+                       is not in subcommand position is not read: the ^{commit} of a checkout pin line (the P5 cure,
+                       git -C <dir> checkout --detach <pin>^{commit}), "the commit under review", and a correction
+                       that names a refused commit or push outside subcommand position ("the guard refused a commit
+                       and a push through git -C w; do not retry them") pass. "undeclared" and "yes" never fire, and
+                       the shipped table declares every family "undeclared", so W1 fires only on a table that says
+                       "no". RESIDUALS: the git-write value is a declared copy of the runtime permission policy that
+                       actually admits or denies the command, kept in this table by hand, not a measurement of it,
+                       so the two can drift; splitting or rewording a refused command on the worker's side at run
+                       time is behaviour after the brief is sent and is not visible here; a git alias (git -c
+                       alias.x=commit x, git ci), a shell variable ($GIT commit) and a script that commits or pushes
+                       are outside the grammar; a request in free English ("make a commit", "push the branch") never
+                       refuses; a correction that quotes the refused command in command position (`git commit
+                       --no-verify` was refused) refuses, the S rules' accepted over-refusal, so the sender names it
+                       outside subcommand position or in the PROHIBITED shape; and other writing subcommands (tag,
+                       merge, rebase, reset, branch) are not read.
+
 TEXT. A brief holding a line separator other than LF anywhere (a carriage return, bare or in CRLF, U+0085
 NEXT LINE, U+2028 LINE SEPARATOR, U+2029 PARAGRAPH SEPARATOR), or a format character (Unicode category Cf: a
 byte order mark, zero-width and bidirectional controls) outside a fenced code block, is CANNOT_EVALUATE
@@ -511,11 +539,12 @@ not one, so "do not run, build or install" stays negated.
 Outcomes, printed one finding per line (HARD, INFO, or ADVISORY) and then one summary line:
 
   exit 0  OK               no HARD hit (INFO and ADVISORY findings may be printed).
-  exit 1  REFUSE           at least one HARD hit (S1, S2, S3, P2, P5 or P6). Rewrite the brief, or send the item
-                           to a family that can execute (S1 to S3), name paths it can read (P2) or, after the reach,
-                           add the cure line the hit gives (git -C <dir> checkout --detach <pin>^{commit}) or reach
-                           the pin by a dispatch ref (P5), or provide each missing declared input or correct its
-                           INPUT line (P6).
+  exit 1  REFUSE           at least one HARD hit (S1, S2, S3, P2, P5, P6 or W1). Rewrite the brief, or send the
+                           item to a family that can execute (S1 to S3), name paths it can read (P2) or, after the
+                           reach, add the cure line the hit gives (git -C <dir> checkout --detach <pin>^{commit}) or
+                           reach the pin by a dispatch ref (P5), or provide each missing declared input or correct
+                           its INPUT line (P6), or drop the git commit or push, state it in the PROHIBITED shape, or
+                           send it to a family that can write (W1).
                            When a hit is a command line (S2 or S3), the REFUSE line
                            says how to rewrite: name the function, row or entry instead of embedding the
                            command (quote the def line of X, not the line that runs git push).
@@ -718,6 +747,7 @@ TABLE_VOCABULARY = dict(
 TABLE_VOCABULARY["repo-read"] = ("path",)
 TABLE_VOCABULARY["git-read"] = ("yes", "no", "undeclared")
 TABLE_VOCABULARY["reads-outside-workdir"] = ("yes", "no", "undeclared")
+TABLE_VOCABULARY["git-write"] = ("yes", "no", "undeclared")
 FAMILY_NAME_RE = re.compile(r"[a-z][a-z0-9-]*\Z")
 NEGATION_WINDOW = 60
 R6_SUBJECT_MAX = 200
@@ -3374,6 +3404,99 @@ def rule_p7(names, row, repo):
     return [finding for finding in findings if finding is not None] + advisory
 
 
+# ---------- W1: a git command line that writes, for a family whose row says it cannot ----------
+
+# the subcommands the git-write row governs, matched where GIT_SUBCOMMAND_RE matches a git subcommand
+GIT_WRITE_SUBCOMMAND_RE = re.compile(r"\s+(?:commit|push)(?![\w-])")
+
+
+def denies_git_write(row):
+    """Whether a family's row says it cannot commit or push: git-write = "no". "undeclared" and "yes" never fire."""
+    return row["git-write"] == "no"
+
+
+def git_write_commands(text):
+    """[(start, end)] of the git command lines in `text` whose subcommand is commit or push, read with the grammar the
+    S rules read: the git command word (COMMAND_WORD_RE, optionally behind a directory path), its global options
+    (GIT_OPTION_RE, walked by _option_end), then the subcommand. A word outside subcommand position (the ^{commit} of
+    a checkout pin, the commit under review, a push named after git and an option) is none."""
+    found, memo = [], dict()
+    for word in COMMAND_WORD_RE.finditer(text):
+        if word.group(1) is None:
+            continue
+        target = GIT_WRITE_SUBCOMMAND_RE.match(text, _option_end(text, word.end(), GIT_OPTION_RE, memo))
+        if target:
+            found.append((word.start(), target.end()))
+    return found
+
+
+def w1_exempt(demotion):
+    """Whether a closed shape exempts a git write command line: the PROHIBITED shape alone, never a past report."""
+    return demotion == "prohibited"
+
+
+def _w1_sentences(blocks):
+    """[(block, group, offset, sentence)] of the blocks, prose and fence alike, read as the S rules read sentences."""
+    out = []
+    for block, group in zip(blocks, void_groups(blocks)):
+        for start, raw in sentences(_masked_text(block).replace("\n", " ")):
+            out.append((block, group, start, raw))
+    return out
+
+
+def _w1_voided(read):
+    """The void groups in which a sentence asks for something (sentence_asks, as the S rules read it): a prose
+    sentence that asks, outside a heading, or a fence whose contents ask."""
+    voided, fences = set(), set()
+    for block, group, _, raw in read:
+        if block.kind == "fence":
+            if id(block) not in fences:
+                fences.add(id(block))
+                if fence_asks(block):
+                    voided.add(group)
+        elif asks_in(block) and lint_sentence(raw, block.start, r1_applies(block), command_rule(block))[1]:
+            voided.add(group)
+    return voided
+
+
+def rule_w1(text, row, family, families, scoped=True):
+    """W1 HARD, for every family: the family's row says git-write = "no" (denies_git_write) and the text the family
+    is addressed by (scoped as the S rules scope it) holds a git command line whose subcommand is commit or push
+    (git_write_commands), in a prose line, a code span or a fence, each block read sentence by sentence as the S rules
+    read command lines. The one exemption is the closed PROHIBITED shape (Demotions; w1_exempt), voided as for the S
+    rules when another sentence of its void group asks for anything; free English never decides it. Each finding
+    names the physical line that holds the command word."""
+    if not denies_git_write(row):
+        return []
+    blocks = parse_blocks(text)
+    if scoped:
+        blocks = apply_scope(blocks, family, families)
+    read, hits = _w1_sentences(blocks), []
+    for block, group, start, raw in read:
+        commands = git_write_commands(raw)
+        if not commands:
+            continue
+        line_starts, offset = [], 0
+        for _, line in block.lines:
+            line_starts.append(offset)
+            offset += len(line) + 1
+        demotion = Demotions(Sentence(raw))
+        for begin, end in commands:
+            number, line = block.lines[bisect.bisect_right(line_starts, start + begin) - 1]
+            hits.append((group, w1_exempt(demotion(begin, end)), number, _excerpt(raw[begin:end]), _excerpt(line)))
+    voided = _w1_voided(read) if any(exempt for _, exempt, _, _, _ in hits) else set()
+    findings = []
+    for group, exempt, number, command, line in hits:
+        if exempt and group not in voided:
+            findings.append(("W1", "INFO", number, "git command line {!r}, prohibited: not a request".format(command),
+                             line))
+        else:
+            findings.append(("W1", "HARD", number, "git command line {!r} for a family whose row says git-write = "
+                             "\"no\"{}".format(command, ", prohibited but voided: another sentence of the item or "
+                                               "section asks for something" if exempt else ""), line))
+    return findings
+
+
 def preflight(text, row, repo, raw):
     """The preflight findings (P1 to P7) for a brief's text and its family's row; they apply to every family. `raw`
     is the text before decode_brief removed format characters, which the P5 cure and the P7 declarations read."""
@@ -3395,7 +3518,9 @@ def evaluate(data, family, table, scoped=True, repo=None):
         raise CannotEvaluate("family {!r} is not in the capability table (known: {})".format(
             family, ", ".join(sorted(table))))
     text = decode_brief(data)
-    early = preflight(text, table[family], repo, data.decode("utf-8"))
+    # the preflight and W1 apply to every family, so they run before the return for a family that can execute
+    early = preflight(text, table[family], repo, data.decode("utf-8")) + rule_w1(
+        text, table[family], family, set(table), scoped)
     if can_execute(table[family]):
         early.sort(key=lambda finding: finding[2])
         hard = any(severity == "HARD" for _, severity, _, _, _ in early)
@@ -3443,8 +3568,13 @@ COMMAND_LINE_HINT = ("to ask about a command line, name the function, row or ent
 
 
 PREFLIGHT_RULES = frozenset(("P1", "P2", "P3", "P4", "P5", "P6", "P7"))
+# the rules that apply to every family, whether or not it can execute
+EVERY_FAMILY_RULES = PREFLIGHT_RULES | frozenset(("W1",))
 # added to a REFUSE line when a P6 hit is among the hard hits
 INPUT_HINT = "; provide each missing declared input, or correct its INPUT line, before sending"
+# added to a REFUSE line when a W1 hit is among the hard hits
+GIT_WRITE_HINT = ("; the family's row says git-write = \"no\": drop the git commit or push, state it as a prohibition "
+                  "(Do not run `git push`.), or send it to a family that can write")
 
 
 def run(brief_path, family, table_path, scoped=True, repo=None):
@@ -3458,11 +3588,16 @@ def run(brief_path, family, table_path, scoped=True, repo=None):
         print("{}:{}: {} {}: {}: {}".format(brief_path, line, severity, rule, message, excerpt))
     hard = [rule for rule, severity, _, _, _ in findings if severity == "HARD"]
     missing_input = INPUT_HINT if "P6" in hard else ""
-    if code == EXIT_REFUSE and set(hard) - PREFLIGHT_RULES:
+    git_write = GIT_WRITE_HINT if "W1" in hard else ""
+    if code == EXIT_REFUSE and set(hard) - EVERY_FAMILY_RULES:
         print("REFUSE: family {} cannot execute and the brief carries a structural execution request ({} hard "
-              "hit(s): {}); rewrite the brief or send these items to a family that can execute{}{}".format(
+              "hit(s): {}); rewrite the brief or send these items to a family that can execute{}{}{}".format(
                   family, len(hard), ", ".join("{} x{}".format(r, hard.count(r)) for r in sorted(set(hard))),
-                  "; " + COMMAND_LINE_HINT if set(hard) & {"S2", "S3"} else "", missing_input))
+                  "; " + COMMAND_LINE_HINT if set(hard) & {"S2", "S3"} else "", missing_input, git_write))
+    elif code == EXIT_REFUSE and "W1" in hard:
+        print("REFUSE: family {}: the brief carries a git command line that commits or pushes ({} hard hit(s): {}){}"
+              "{}".format(family, len(hard), ", ".join("{} x{}".format(r, hard.count(r)) for r in sorted(set(hard))),
+                          git_write, missing_input))
     elif code == EXIT_REFUSE and "P5" in hard:
         print("REFUSE: family {}: the brief reaches a pinned revision through a ref that can move ({} hard hit(s): "
               "{}); after the reach, add the line each P5 hit gives ({}), or reach the pin by a dispatch ref{}{}; "
@@ -3557,8 +3692,9 @@ _EXECUTED_SET = set()
 
 
 def _family_row(name, execute, network, git_read, scratch, handback, outside):
+    # every fixture row ships git-write = "undeclared", as the shipped table does; the W1 cases set it per run
     return ('[[family]]\nname = "%s"\nexecute = "%s"\nnetwork = "%s"\nrepo-read = "path"\ngit-read = "%s"\n'
-            'scratch = "%s"\nhandback = "%s"\nreads-outside-workdir = "%s"\n'
+            'scratch = "%s"\nhandback = "%s"\nreads-outside-workdir = "%s"\ngit-write = "undeclared"\n'
             % (name, execute, network, git_read, scratch, handback, outside))
 
 
@@ -3633,6 +3769,17 @@ def _table_outcome(text):
         return sorted(parse_table(text.encode("utf-8")))
     except CannotEvaluate:
         return "CannotEvaluate"
+
+
+def _w1_outcome(text, family="alpha", git_write="no", repo=None):
+    """_outcome for a synthetic brief under TABLE_FIXTURE with every row's git-write set to `git_write`."""
+    table = parse_table(TABLE_FIXTURE.replace('git-write = "undeclared"', 'git-write = "%s"' % git_write).encode(
+        "utf-8"))
+    try:
+        code, findings = evaluate(text.encode("utf-8"), family, table, True, repo)
+    except CannotEvaluate:
+        return "CannotEvaluate"
+    return code, sorted(set((rule, severity) for rule, severity, _, _, _ in findings))
 
 
 def _quiet(fn, *args):
@@ -3923,7 +4070,24 @@ PUNCTUATED_LIST = "Name the stage: lint, gate, test, build or self-test.\n"
 OXFORD_PARENTHESIS = "Quote the line (test, build, or run).\n"
 GIT_PARENTS = "1. Quote the parents of the merge commit as the file headers list them.\n"
 GIT_STATEMENT = "The merge commit's parents are listed in the notes.\n"
-P1_RELATIVE = "The workdir is /w/repo.\nRead docs/notes.md before you answer.\n"
+# W1: a git command line that commits or pushes, for a family whose row says git-write = "no"
+W1_COMMIT = "Record the fix with `git commit -m fix`.\n"
+W1_PUSH = "1. Then publish it: git push origin HEAD\n"
+W1_OPTION_FORMS = ("Use `git -C /w/r commit -m fix`.\n", "Use `git -c user.name=x commit -m fix`.\n",
+                   "Use git -C /w/r -c k=v push origin HEAD.\n")
+W1_ABSOLUTE = "Use `/usr/bin/git commit -m fix`.\n"
+W1_FENCE = "Steps:\n\n```text\ngit add -A\ngit commit -m fix\n```\n"
+W1_PROHIBITED = ("Do not run `git push`.\n", "Never run git commit -a.\n")
+W1_PROHIBITED_VOIDED = "Do not run `git push`. Run it anyway.\n"
+W1_PAST_REPORT = "CI failed on `git push`.\n"
+# the three shapes W1 must not read: the ^{commit} of a checkout pin line (the P5 cure), the commit under review,
+# and a correction naming a refused commit and push outside subcommand position
+W1_CHECKOUT_PIN = "git -C w checkout --detach " + "0123456789" * 4 + "^{commit}\n"
+W1_UNDER_REVIEW = "Quote the commit under review in this git repository and the push it names.\n"
+W1_CORRECTION = "Correction: the guard refused a commit and a push through git -C w; do not retry them.\n"
+W1_CURE = "BRIEF-PIN: {0}\nUse `git clone --no-checkout <url> w`.\n`git -C w checkout --detach {0}^{{commit}}`\n"
+W1_MAIN = "Read the notes.\n\n`git -C w commit -m fix`\n"
+P1_RELATIVE ="The workdir is /w/repo.\nRead docs/notes.md before you answer.\n"
 P1_ABSOLUTE = "The workdir is /w/repo.\nRead /w/repo/docs/notes.md before you answer.\n"
 P1_NO_WORKDIR = "Read docs/notes.md before you answer.\n"
 P1_NOT_A_PATH = "The workdir is /w/repo.\nAnswer yes/no on read/write access under Python 3.14/3.15.\n"
@@ -5703,6 +5867,17 @@ def self_test(report_path=None):
            _table_outcome(TABLE_FIXTURE.replace('reads-outside-workdir = "no"', 'reads-outside-workdir = "maybe"')),
            _table_outcome(TABLE_FIXTURE.replace('reads-outside-workdir = "no"', "reads-outside-workdir = false"))],
           ["CannotEvaluate"] * 3)
+    try:
+        git_write = dict((name, row["git-write"]) for name, row in load_table(ROOT / TABLE_REL).items())
+    except CannotEvaluate as exc:
+        git_write = str(exc)
+    check("table/shipped-git-write-undeclared", git_write,
+          dict(claude="undeclared", codex="undeclared", gemini="undeclared"))
+    check("table/git-write-missing-or-malformed-2",
+          [_table_outcome(TABLE_FIXTURE.replace('git-write = "undeclared"\n', "", 1)),
+           _table_outcome(TABLE_FIXTURE.replace('git-write = "undeclared"', 'git-write = "maybe"', 1)),
+           _table_outcome(TABLE_FIXTURE.replace('git-write = "undeclared"', "git-write = false", 1))],
+          ["CannotEvaluate"] * 3)
     check("table/fixture-loads", _table_outcome(TABLE_FIXTURE), ["alpha", "beta", "gamma"])
     check("table/unknown-key-2",
           _table_outcome(TABLE_FIXTURE.replace('scratch = "none"\n', 'scratch = "none"\ncolour = "x"\n')),
@@ -6498,6 +6673,42 @@ def self_test(report_path=None):
         check("main/manifest-silenced-injection-restored", _tomllib_parsers(), TOMLLIB_PARSERS)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+    # ---------- W1: a git command line that commits or pushes, for a family whose row says git-write = "no" ----------
+    w1_refused = (1, [("W1", "HARD")])
+    check("w1/commit-refused", _w1_outcome(W1_COMMIT), w1_refused)
+    check("w1/push-refused", _w1_outcome(W1_PUSH), w1_refused)
+    check("w1/option-forms-refused", [_w1_outcome(text) for text in W1_OPTION_FORMS], [w1_refused] * 3)
+    check("w1/absolute-git-path-refused", _w1_outcome(W1_ABSOLUTE), w1_refused)
+    check("w1/fence-refused", _w1_outcome(W1_FENCE), w1_refused)
+    check("w1/prohibited-info", [_w1_outcome(text) for text in W1_PROHIBITED], [(0, [("W1", "INFO")])] * 2)
+    check("w1/prohibited-voided-refused", _w1_outcome(W1_PROHIBITED_VOIDED), w1_refused)
+    check("w1/past-report-refused", _w1_outcome(W1_PAST_REPORT), w1_refused)
+    check("w1/non-command-shapes-ok", [_w1_outcome(text) for text in (W1_CHECKOUT_PIN, W1_UNDER_REVIEW,
+                                                                      W1_CORRECTION)], [(0, [])] * 3)
+    check("w1/undeclared-and-yes-never-fire",
+          [_w1_outcome(W1_COMMIT, family, value) for family in ("alpha", "gamma") for value in ("undeclared", "yes")],
+          [(0, [])] * 2 + [(1, [("S3", "HARD")])] * 2)
+    check("w1/every-family", [_w1_outcome(W1_COMMIT, family) for family in ("alpha", "beta", "gamma")],
+          [w1_refused] * 2 + [(1, [("S3", "HARD"), ("W1", "HARD")])])
+    w1_tmp = Path(tempfile.mkdtemp(prefix="aiqt-brief-capability-w1-"))
+    try:
+        with open(w1_tmp / "brief.md", "w", encoding="utf-8") as handle:
+            handle.write(W1_MAIN)
+        with open(w1_tmp / "table.toml", "w", encoding="utf-8") as handle:
+            handle.write(TABLE_FIXTURE.replace('git-write = "undeclared"', 'git-write = "no"'))
+        printed = io.StringIO()
+        with contextlib.redirect_stdout(printed):
+            w1_exit = main(["--family", "alpha", "--table", str(w1_tmp / "table.toml"), str(w1_tmp / "brief.md")])
+        w1_lines = printed.getvalue().splitlines()
+        check("w1/main-prints-line-exit-1",
+              (w1_exit, [line.split(": ", 1)[1] for line in w1_lines if ": HARD W1: " in line],
+               [line.split(";", 1)[0] for line in w1_lines if line.startswith("REFUSE: ")]),
+              (EXIT_REFUSE, ["HARD W1: git command line 'git -C w commit' for a family whose row says git-write = "
+                             "\"no\": `git -C w commit -m fix`"],
+               ["REFUSE: family alpha: the brief carries a git command line that commits or pushes (1 hard hit(s): "
+                "W1 x1)"]))
+    finally:
+        shutil.rmtree(w1_tmp, ignore_errors=True)
     # ---------- red on revert: each blocking rule, form and exemption patched out flips its fixture ----------
     nothing = lambda *args: []  # noqa: E731
     never = re.compile(r"(?!)")
@@ -6586,6 +6797,39 @@ def self_test(report_path=None):
     check("revert/closed-markup-head-red", *flip([code(DASH_PROHIBITION), code(PAREN_PROHIBITION)], [1, 1],
                                                 closed_shape_head=lambda sentence: 0))
     check("revert/closed-command-start-red", *flip([code(ARGUMENT_COMMAND)], [0], Demotions=_AnyStartDemotions))
+
+    def w1_code(text, family="alpha", git_write="no"):
+        return lambda: _w1_outcome(text, family, git_write)[0]
+
+    w1_rule = rule_w1
+    check("revert/w1-red", *flip([w1_code(W1_COMMIT), w1_code(W1_FENCE)], [0, 0], rule_w1=nothing))
+    check("revert/w1-subcommands-red", *flip([w1_code(W1_COMMIT), w1_code(W1_PUSH)], [0, 0],
+                                             GIT_WRITE_SUBCOMMAND_RE=never))
+    check("revert/w1-option-grammar-red", *flip([w1_code(text) for text in W1_OPTION_FORMS], [0, 0, 0],
+                                                _option_end=lambda text, position, option_re, memo: position))
+    check("revert/w1-git-path-red", *flip([w1_code(W1_ABSOLUTE)], [0], COMMAND_WORD_RE=re.compile(
+        COMMAND_WORD_RE.pattern.replace(r"(?:[\w.~-]*/)*+", ""))))
+    check("revert/w1-prohibited-red", *flip([w1_code(text) for text in W1_PROHIBITED], [1, 1],
+                                            w1_exempt=lambda demotion: False))
+    check("revert/w1-past-report-red", *flip([w1_code(W1_PAST_REPORT)], [0],
+                                             w1_exempt=lambda demotion: demotion is not None))
+    check("revert/w1-void-red", *flip([w1_code(W1_PROHIBITED_VOIDED)], [0], _w1_voided=lambda read: set()))
+    write_word = re.compile(r"(?<![\w-])(?:commit|push)(?![\w-])")
+
+    def word_match(text):
+        """The word reading W1 replaces: commit or push anywhere in a sentence that holds a git command word."""
+        return [found.span() for found in write_word.finditer(text)] if COMMAND_WORD_RE.search(text) else []
+
+    check("revert/w1-subcommand-position-red", *flip(
+        [w1_code(text) for text in (W1_CHECKOUT_PIN, W1_UNDER_REVIEW, W1_CORRECTION)], [1, 1, 1],
+        git_write_commands=word_match))
+    check("revert/w1-row-gate-red", *flip(
+        [w1_code(W1_COMMIT, "alpha", "undeclared"), w1_code(W1_COMMIT, "alpha", "yes")], [1, 1],
+        denies_git_write=lambda row: True))
+    check("revert/w1-every-family-red", *flip(
+        [w1_code(W1_COMMIT, "alpha"), w1_code(W1_COMMIT, "beta")], [0, 0],
+        rule_w1=lambda text, row, family, families, scoped=True: [] if can_execute(row) else w1_rule(
+            text, row, family, families, scoped)))
     check("revert/void-word-red", *flip([code(VOID_CONTINUATION), code(PROHIBITION_KIDDING), code(RETRY),
                                         code(KIDDING_PASTE)], [0, 0, 0, 0], VOID_WORD_RE=never))
     check("revert/void-start-word-red", *flip([code(TEST_IT), code(FIX_IT), code(RETEST_IT)], [0, 0, 0],
@@ -6982,6 +7226,8 @@ def self_test(report_path=None):
                                ("preflight/p5-deny-5", P5_DENY[4])):
             check(check_id, p5(text), (1, [("P5", "HARD")]))
         check("preflight/p5-allow-1", p5(P5_ALLOW[0]), (0, []))
+        # the P5 cure's ^{commit} is no git write: a pinned brief carrying its cure passes W1 under git-write = "no"
+        check("w1/cure-pin-line-ok", _w1_outcome(W1_CURE.format(head), "alpha", "no", repo), (0, []))
         check("preflight/p5-allow-2", (p5(P5_ALLOW[1]), p5(P5_DISPATCH_MISSING)), ((0, []), (0, [("P5", "ADVISORY")])))
         check("preflight/p5-allow-3", p5(P5_ALLOW[2]), (0, []))
         check("preflight/p5-allow-4", p5(P5_ALLOW[3]), (0, []))
@@ -8207,7 +8453,7 @@ def self_test(report_path=None):
                 lambda data: data.replace(b"\r\n", b"\n").replace(b"\r", b"\n").split(b"\n", 2)[:2], "replace")))
     finally:
         shutil.rmtree(p7_base, ignore_errors=True)
-    check("revert/every-flip-ran", len(flipped), 230)
+    check("revert/every-flip-ran", len(flipped), 240)
 
     for check_id in sorted(expected - _EXECUTED_SET):
         FAILURES.append("execution-set/missing: {}".format(check_id))
@@ -8229,7 +8475,12 @@ def self_test(report_path=None):
           "that no other sentence of its void group (lazy lines, nested items, indented headings and fence contents "
           "included) voids, quoted source text is not a data context and a command-line refusal says how to "
           "rewrite, and every blocking rule, command-line form, closed-shape "
-          "guard and void patched out flips its fixture; R1, R5, R6 and R7 print ADVISORY lines and never refuse; "
+          "guard and void patched out flips its fixture; W1 refuses, for every family whose row says git-write = "
+          "\"no\" (one that can execute included), a git command line whose subcommand is commit or push, with -C "
+          "or -c options or an absolute git path, in prose, a code span or a fence, printing the line, exempts only "
+          "the PROHIBITED shape, passes a checkout pin's ^{{commit}}, the commit under review and a correction "
+          "naming a refused commit outside subcommand position, never fires for undeclared or yes, and each part "
+          "patched out flips its fixture; R1, R5, R6 and R7 print ADVISORY lines and never refuse; "
           "the preflight, for a family that cannot read outside a declared workdir (P2), judges every slash at a "
           "word's start or after a character that is not a letter, digit, `.` or `_` (a quoted span is one word "
           "with the text glued to it, http and https words skipped, file:// judged) from that slash to the word's "
