@@ -52,12 +52,14 @@ standalone OPF tree carries no gate that does. Each input is opened after a syml
 its regular-file and size checks are made on the opened descriptor, so a parent directory swapped for a
 symlink between that check and the open is a check-to-use race. The live run walks the path the
 interpreter gives for this script one component at a time, as the kernel does (a '..' steps to the parent
-of the directory reached, a link's target included), so the gate checks the tree the kernel opens. It
-refuses that path when a symlink on the walk lies inside the OPF root or has a target that is the root,
-its tools directory or a directory inside the root, even when a later '..' leaves the link again, and it
-resolves any other symlink (one above the root, or one a later '..' leaves for another directory); the
-walk is made once, before the inputs are read, so a component swapped for a symlink after it is the same
-check-to-use race. A run whose working directory is already inside a link's target reaches the tree
+of the directory reached, a link's target included), and walks each symlink's target the same way, so
+the gate checks the tree the kernel opens and meets every symlink the path traverses, at any depth; a
+walk that meets more than 40 symlinks, a loop included, cannot be evaluated. It refuses that path when a
+symlink met at any depth lies inside the OPF root or has a target that is the root, its tools directory
+or a directory inside the root, wherever the link itself lies and even when a later '..' leaves it, and
+it resolves any other symlink (one above the root, or one a later '..' leaves for another directory);
+the walk is made once, before the inputs are read, so a component swapped for a symlink after it is the
+same check-to-use race. A run whose working directory is already inside a link's target reaches the tree
 through no symlink in that path, so it is not refused, and a symlink to the gate file itself is not
 followed, so the tree that holds the link is checked.
 """
@@ -88,9 +90,10 @@ from pathlib import Path
 
 # The OPF root: the directory above this script's tools/ directory. Every path below is relative to it,
 # so the gate reads the same inputs from the authoring repository's opf/ and from a standalone OPF tree.
-# The live run takes it from _opf_root, which refuses a gate path that passes through a symlink at or
-# below the root, even one a later '..' leaves, and resolves a symlink above the root; the self-test
-# copies its fixtures from ROOT.
+# The live run takes it from _opf_root, which refuses a gate path that traverses, at any depth (a link
+# met while another link's target is resolved included), a symlink lying inside the root or one, wherever
+# it lies, whose target is the root, its tools directory or a directory inside the root, even one a later
+# '..' leaves, and resolves any other symlink; the self-test copies its fixtures from ROOT.
 ROOT = Path(__file__).resolve().parents[1]
 PACK_REL = "enforcement"
 REGISTER_REL = PACK_REL + "/residuals.toml"
@@ -138,38 +141,41 @@ def _within(path, top):
     return path == top or path.startswith(top.rstrip("/") + "/")
 
 
-def _opf_root(script):
-    """The OPF root the gate at `script` evaluates (the directory above the directory holding `script`),
-    found by walking the path to that directory one component at a time, as the kernel walks it when it
-    opens `script`: a '.' or empty component is no step, a '..' steps to the parent of the directory the
-    walk has reached (a link's target included, never cancelled as text), and each other name must be a
-    directory or a symlink to one, the walk going on from the link's target; a component that cannot be
-    read or is no directory is CannotEvaluate. CannotEvaluate too when a symlink met on that walk lies
-    inside the root, or has a target that is the root, its tools directory or a directory inside the root,
-    whatever '..' steps follow it: the gate would then read inputs that path does not hold as its own,
-    which the no-symlink rule for paths below the root refuses. A symlink outside the root whose target is
-    outside it too (one above the root, or one a later '..' leaves for another directory) is resolved, as
-    a symlink above the root was when the authoring repository's gate read the OPF root as opf/ under its
-    own resolved root."""
-    try:
-        path = str(script)
-        path = path if os.path.isabs(path) else os.path.join(os.getcwd(), path)
-    except (OSError, ValueError) as exc:
-        raise CannotEvaluate("the gate path %s cannot be made absolute (%r)" % (script, exc))
-    names = path.split("/")[:-1]
-    here, links = "/", []
+# The most symlinks one walk of the gate path follows, at every depth together (the kernel's own limit);
+# a walk that meets more, a link loop included, is refused rather than followed on.
+MAX_LINKS = 40
+
+
+def _walk(here, text, prefix, links, seen):
+    """The directory reached by walking the path `text` from the directory `here`, one component at a time,
+    as the kernel walks it: a '.' or empty component is no step, a '..' steps to the parent of the directory
+    reached (a link's target included, never cancelled as text), and each other name must be a directory or
+    a symlink to one. A symlink's target is walked the same way, from the directory holding the link (from
+    the filesystem root when the target is absolute), and the walk goes on from the directory that target
+    reaches. Every symlink met, at any depth, is appended to `links` as (spelling, its location, the
+    directory its target reaches), the spelling being `prefix` and the path up to the link; `seen` counts
+    the links met, at most MAX_LINKS. A component that cannot be read or is no directory is CannotEvaluate."""
+    names = text.split("/")
     for index, name in enumerate(names):
         if name in ("", "."):
             continue
         if name == "..":
             here = os.path.dirname(here)
             continue
-        spelled = "/".join(names[:index + 1]) or "/"
+        spelled = prefix + ("/".join(names[:index + 1]) or "/")
         entry = os.path.join(here, name)
         try:
             st = os.lstat(entry)
             if stat.S_ISLNK(st.st_mode):
-                target = os.path.realpath(entry, strict=True)
+                seen[0] += 1
+                if seen[0] > MAX_LINKS:
+                    raise CannotEvaluate("the gate path component %s is a symlink past the %d the walk follows "
+                                         "(a link loop or too long a chain)" % (spelled, MAX_LINKS))
+                link = os.readlink(entry)
+                if not link:
+                    raise CannotEvaluate("the gate path component %s is a symlink with an empty target"
+                                         % (spelled,))
+                target = _walk(here if not link.startswith("/") else "/", link, spelled + " -> ", links, seen)
                 links.append((spelled, entry, target))
                 entry, st = target, os.stat(target)
         except (OSError, ValueError) as exc:
@@ -177,6 +183,28 @@ def _opf_root(script):
         if not stat.S_ISDIR(st.st_mode):
             raise CannotEvaluate("the gate path component %s is not a directory" % (spelled,))
         here = entry
+    return here
+
+
+def _opf_root(script):
+    """The OPF root the gate at `script` evaluates (the directory above the directory holding `script`),
+    found by walking the path to that directory with _walk, as the kernel walks it when it opens `script`,
+    each symlink's target walked the same way, so every symlink the path traverses is met, at any depth
+    (MAX_LINKS bounds them; a loop is refused). CannotEvaluate when a symlink met at any depth lies inside
+    the root, or has a target that is the root, its tools directory or a directory inside the root, wherever
+    the link itself lies and whatever '..' steps follow it: the gate would then read inputs that path does
+    not hold as its own, which the no-symlink rule for paths below the root refuses. A symlink outside the
+    root whose target is outside it too (one above the root, or one a later '..' leaves for another
+    directory) is resolved, as a symlink above the root was when the authoring repository's gate read the
+    OPF root as opf/ under its own resolved root. The walk is made once, before any input is read, so a
+    component swapped for a symlink after it is a check-to-use race."""
+    try:
+        path = str(script)
+        path = path if os.path.isabs(path) else os.path.join(os.getcwd(), path)
+    except (OSError, ValueError) as exc:
+        raise CannotEvaluate("the gate path %s cannot be made absolute (%r)" % (script, exc))
+    links = []
+    here = _walk("/", path.rpartition("/")[0], "", links, [0])
     tools, root = here, os.path.dirname(here)
     for spelled, entry, target in links:
         if target == root:
@@ -184,7 +212,8 @@ def _opf_root(script):
         elif target == tools:
             where = "the OPF root's tools directory %s is itself a symlink" % (spelled,)
         elif _within(entry, root) or _within(target, root):
-            where = "the gate path passes through the symlink %s at or below the OPF root %s" % (spelled, root)
+            where = ("the gate path passes through the symlink %s, which lies inside the OPF root %s or has its "
+                     "target there" % (spelled, root))
         else:
             continue
         raise CannotEvaluate("%s (it resolves to %s), so the inputs below it are not the tree's own"
@@ -689,6 +718,71 @@ def _dotdot_root(tree, link):
     return _run_override(os.path.join(str(top), "x", "sub", "..", "opf", "tools", GATE), True)
 
 
+def _nested_root(tree, link):
+    """A layout beside the fixture where bare/opf is a copy of it, repo/opf a symlink to bare/opf when
+    `link` (else another real copy) and alias a symlink to repo/opf/.., so the symlinked repo/opf is met only
+    while alias's target is resolved. The override runs the gate through main() as alias/opf/tools/<gate>."""
+    _runnable(tree)
+    top = tree.parent / (tree.name + "-nested")
+    shutil.copytree(tree, top / "bare" / "opf")
+    (top / "repo").mkdir()
+    if link:
+        os.symlink(os.path.join("..", "bare", "opf"), top / "repo" / "opf")
+    else:
+        shutil.copytree(tree, top / "repo" / "opf")
+    os.symlink(os.path.join("repo", "opf", ".."), top / "alias")
+    return _run_override(str(top) + "/alias/opf/tools/" + GATE, True)
+
+
+def _hidden_inner_link(tree, link):
+    """The _inner_link layout reached through an outer symlink beside the fixture to its tools/out, so the
+    tools/out met inside the root is met only while the outer link's target is resolved. The override runs
+    the gate through main() as <outer link>/<fixture name>/tools/<gate>."""
+    _inner_link(tree, link)
+    outer = tree.parent / (tree.name + "-hidden")
+    os.symlink(os.path.join(tree.name, "tools", "out"), outer)
+    return _run_override(str(outer) + "/" + tree.name + "/tools/" + GATE, True)
+
+
+def _link_chain(tree, count, loop=False):
+    """A layout beside the fixture where real/opf is a copy of it and link1 to link`count` a chain of
+    symlinks above the root, each to the next and the last to real; when `loop`, the last links back to
+    link1 instead. The override runs the gate through main() as link1/opf/tools/<gate>."""
+    _runnable(tree)
+    top = tree.parent / (tree.name + "-chain")
+    shutil.copytree(tree, top / "real" / "opf")
+    for index in range(1, count + 1):
+        last = "link1" if loop else "real"
+        os.symlink(last if index == count else "link%d" % (index + 1,), top / ("link%d" % (index,)))
+    return _run_override(str(top) + "/link1/opf/tools/" + GATE, True)
+
+
+def _into_root(tree, link):
+    """A standalone tree st beside the fixture, a copy of it, whose tools/_vendor is a symlink to the
+    fixture's tools/_vendor when `link` (a link outside the fixture's root whose target is inside it), else
+    a real directory. The override runs the gate through main() as st/tools/_vendor/../<gate>, which the
+    kernel opens from the fixture's tools/ when the link is there and from st's own otherwise."""
+    _runnable(tree)
+    st = tree.parent / (tree.name + "-into") / "st"
+    shutil.copytree(tree, st)
+    if link:
+        (st / "tools" / "_vendor").rmdir()
+        os.symlink(tree / "tools" / "_vendor", st / "tools" / "_vendor")
+    return _run_override(str(st) + "/tools/_vendor/../" + GATE, True)
+
+
+def _sibling_prefix(tree):
+    """A layout beside the fixture where a/opf is a copy of it and a/opfx a symlink to ../b/x, a link whose
+    location shares the root's name as a text prefix but lies outside it. The override runs the gate through
+    main() as a/opfx/../../a/opf/tools/<gate>."""
+    _runnable(tree)
+    top = tree.parent / (tree.name + "-prefix")
+    shutil.copytree(tree, top / "a" / "opf")
+    (top / "b" / "x").mkdir(parents=True)
+    os.symlink(os.path.join("..", "b", "x"), top / "a" / "opfx")
+    return _run_override(str(top) + "/a/opfx/../../a/opf/tools/" + GATE, True)
+
+
 def _second_locator(tree, row):
     """Declare the ci/opf-ci.sh anchor of `row` a locator in the header (with the row id and a reason). A
     register that does not parse here is cannot-evaluate, as it is for the gate."""
@@ -948,6 +1042,35 @@ def _vectors():
         ("live-dotdot-after-file", (lambda tree: _live_plain(tree, "_opf_adopt.py/../" + GATE), "cannot",
                                     "is not a directory"),
          (lambda tree: _live_plain(tree, "_vendor/../" + GATE),) + clean),
+        # a symlink met only while another link's target is resolved is judged as one met directly: a
+        # symlinked opf/ inside alias -> repo/opf/.., and a symlink inside the root behind an outer link to
+        # it; a real directory in the inner link's place is clean.
+        ("live-nested-symlinked-opf", (lambda tree: _nested_root(tree, True), "cannot",
+                                       " -> repo/opf is itself a symlink"),
+         (lambda tree: _nested_root(tree, False),) + clean),
+        ("live-nested-symlink-inside-root", (lambda tree: _hidden_inner_link(tree, True), "cannot",
+                                             "/tools/out, which lies inside the OPF root"),
+         (lambda tree: _hidden_inner_link(tree, False),) + clean),
+        # a symlink outside the root whose target is inside it is refused, a real directory in its place is
+        # clean; a link beside the root whose location shares the root's name as a text prefix is outside the
+        # root, so that layout is clean, and its flip drifts an anchor.
+        ("live-outside-link-into-root", (lambda tree: _into_root(tree, True), "cannot",
+                                         "/st/tools/_vendor, which lies inside the OPF root"),
+         (lambda tree: _into_root(tree, False),) + clean),
+        ("live-sibling-prefix-link", (_sibling_prefix,) + clean,
+         (seq(drift, _sibling_prefix), "finding", "is not present verbatim")),
+        # the walk follows at most MAX_LINKS symlinks: a chain above the root just inside and at the bound
+        # is clean, one link more is cannot-evaluate, and so is a link loop, whose flip is a single link.
+        ("live-link-chain-inside-bound", (lambda tree: _link_chain(tree, MAX_LINKS - 1),) + clean,
+         (lambda tree: _link_chain(tree, MAX_LINKS + 1), "cannot", "past the %d the walk follows" % (MAX_LINKS,))),
+        ("live-link-chain-at-bound", (lambda tree: _link_chain(tree, MAX_LINKS),) + clean,
+         (lambda tree: _link_chain(tree, MAX_LINKS + 1), "cannot", "past the %d the walk follows" % (MAX_LINKS,))),
+        ("live-link-chain-over-bound", (lambda tree: _link_chain(tree, MAX_LINKS + 1), "cannot",
+                                        "past the %d the walk follows" % (MAX_LINKS,)),
+         (lambda tree: _link_chain(tree, MAX_LINKS),) + clean),
+        ("live-link-loop", (lambda tree: _link_chain(tree, 2, loop=True), "cannot",
+                            "past the %d the walk follows" % (MAX_LINKS,)),
+         (lambda tree: _link_chain(tree, 1),) + clean),
         # cannot evaluate: the document shape, the vocabulary, the size bound and unreadable inputs.
         ("format-version-bool", (edit(REGISTER_REL, "format-version = 1\n", "format-version = true\n"), "cannot",
                                  "exact integer format-version"),

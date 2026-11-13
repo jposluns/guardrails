@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "7c0c1b9aae13d68bd50e8edde21148ef6e2bade467185f0055f5dd79d323953e"
+tree-sha256 = "397ec0f027af0f6bf134c7bfbff67ce83fc60a0c236a5ed6384ebc1c3908faaa"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -71,8 +71,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 593712
-sha256 = "0d49727f8807e91c781e52dd30c7b92174d9550dae0c9e37a640429e3cc65260"
+bytes = 594368
+sha256 = "2d2ddaf12ccf1b73e9d7743939a7ced1e8191c5758fe47d469c6b3c65ca8f2ec"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -3436,8 +3436,8 @@ sha256 = "6ad4c80a38549a287e6f2f0fb913566c07a5f239c093995daed7f0a1fb8baaa1"
 
 [[sources]]
 path = "opf/tools/check_opf_enforce_residuals.py"
-bytes = 65890
-sha256 = "7f4a17ec80fab30a861fa11ef65c343378973cd2fd1eda733a988789a2d44137"
+bytes = 73936
+sha256 = "941cc8ce8e3ed8c0d16943d5a3a62496c77352e37038c40a8bf2b6b6daa9dcfa"
 
 [[sources]]
 path = "opf/tools/check_opf_homes.py"
