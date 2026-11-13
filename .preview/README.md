@@ -40,7 +40,9 @@ the authority, and the summary further down this page only points to it.
   followed by the session's elapsed time when a lease is configured. The freshest time value in context
   is then a real reading, not one the model composed. It informs; it blocks nothing. Events:
   `PostToolUse` (after a tool call that succeeded) and `PostToolUseFailure` (after one that started and
-  failed); register both to cover both outcomes.
+  failed); register both to cover both outcomes. The pack's plugin now adds its own host clock line on
+  both events (the `clock-inject-post` and `clock-inject-failure` controls), without the elapsed time;
+  installed beside the plugin, this hook adds a second clock line after each tool call.
 - **`stamp-truth-stop.py`** checks each finished turn. When the assistant's prose carries a timestamp with
   an explicit zone that lies ahead of the clock, or an elapsed-time footer that disagrees with the
   configured lease, it blocks the stop and says why, so the assistant corrects the value before handing
