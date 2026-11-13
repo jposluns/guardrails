@@ -16918,6 +16918,144 @@ def _verification_sink_message(hit):
         "write the full output to a file and read it.".format(label))
 
 
+# --- gatdis check then push: a known check followed, unconditionally, by a git push -------------------------
+# A command that runs a check and then publishes with git push after a ';', a newline or a '&' runs the push
+# whatever the check returned, so a failing check is published as if it had passed; the rule forbids relying on
+# a status a later step overwrites. The refusal reads the segments the deny tier reads, one reading at a time,
+# and is held to one shape (_check_then_push): a known verification run (_is_verification_run, the deny tier's
+# producer allow-list) that is a simple command (_gate_simple) outside any case compound and not piped on, whose
+# and-or list ends at a ';', a newline or a '&', then a git push (_gate_push_argv) later in the same command,
+# every segment from the check to the push plain (_gate_push_plain: no reserved word, no parenthesis). Not
+# refused: a push in the check's own and-or list (check && git push); a check whose list holds '|| exit' or
+# '|| return'; a check whose status the first command after its list keeps (_gate_status_kept) when a '&&' or
+# '||' joins some command from that one up to the push (a test of the saved status); a push with a reserved word
+# or a parenthesis on the way (inside an if, a loop, a case or a group); and a push with no known check before it.
+_GATE_PUSH_LIST_ENDS = frozenset((";", "", "&"))
+_GATE_PUSH_ANDOR = frozenset(("&&", "||"))
+_GATE_PUSH_STOPS = frozenset(("exit", "return"))
+_GATE_PUSH_DRY = frozenset(("-n", "--dry-run"))
+_GATE_PUSH_SEP_TEXT = dict(((";", "a ';'"), ("", "a newline"), ("&", "a '&' (the check runs in the background)")))
+
+
+def _gate_push_argv(seg):
+    """The argv of the git push a segment runs (VAR=value words and the env, nice, timeout and time wrappers
+    peeled, _gate_peel), or None; a push carrying -n or --dry-run publishes nothing, so it is None too."""
+    argv = _gate_peel(seg.argv) if seg.argv else None
+    if not argv or _gate_word(argv[0]) != "git":
+        return None
+    sub, args = _git_subcommand_rest(argv)
+    if sub != "push" or any(tok in _GATE_PUSH_DRY for tok in args):
+        return None
+    return argv
+
+
+def _gate_push_plain(seg):
+    """True when a segment on the way from a check to a push keeps the push at the check's level: no word
+    (a redirection alone), or a first word that is not a reserved word, and not ended by '(' or ')'."""
+    return seg.sep_after not in ("(", ")") and (not seg.argv or seg.argv[0] not in _GATE_RESERVED)
+
+
+def _gate_status_kept(seg, background):
+    """True when the first command after a check's list keeps the check's status for a later test: after a
+    '&', a wait (which returns the background check's status); otherwise a command whose raw text reads '$?'
+    (or '${?}'), unless it is an echo with stdout not redirected (a printed copy is output, not the verdict)."""
+    word = _command_word(seg.argv) if seg.argv else ""
+    if background:
+        return word == "wait"
+    if "$?" not in seg.raw and "${?}" not in seg.raw:
+        return False
+    return not (word == "echo" and not _gate_stdout_redirected(seg))
+
+
+def _gate_push_walk(records):
+    """The facts _check_then_push reads at each index, gathered in one pass from the end so the judgement
+    takes time linear in the records (a walk from each check to the end of the command took time quadratic in
+    a long run of checks): next_word[j], the first index at or after j of a segment with a word or a
+    redirection (len(records) for none); next_push[j], the first such index holding a git push
+    (_gate_push_argv) when every such segment from j to it is _gate_push_plain (len(records) for none);
+    list_end[j], for a segment with a word or a redirection, the index of the last segment of the and-or list
+    it starts or continues (an empty segment after '&&', '||' or a pipe continues it; a pipe joins as a list
+    does here), or None when that list holds a push, an '|| exit' or '|| return', a segment that is not
+    _gate_push_plain, a '(' or ')' separator, or runs off the end; and joins[j], how many such segments
+    before j are ended by '&&' or '||'."""
+    n = len(records)
+    next_word = [n] * (n + 1)
+    next_push = [n] * (n + 1)
+    list_end = [None] * (n + 1)
+    for j in range(n - 1, -1, -1):
+        seg = records[j]
+        if not seg.argv and not seg.redirects:
+            next_word[j], next_push[j] = next_word[j + 1], next_push[j + 1]
+            continue
+        next_word[j] = j
+        plain = _gate_push_plain(seg)
+        pushed = plain and _gate_push_argv(seg) is not None
+        next_push[j] = j if pushed else (next_push[j + 1] if plain else n)
+        sep = seg.sep_after
+        if sep in _GATE_PUSH_LIST_ENDS:
+            list_end[j] = j
+        elif sep not in ("(", ")"):
+            # The list goes on to the next segment with a word: a push there, a segment that is not plain, or an
+            # '|| exit' or '|| return' (the check's failure stops the command there) leaves list_end None.
+            k = next_word[j + 1]
+            nxt = records[k] if k < n else None
+            if (nxt is not None and _gate_push_plain(nxt) and _gate_push_argv(nxt) is None
+                    and not (sep == "||" and _command_word(nxt.argv) in _GATE_PUSH_STOPS)):
+                list_end[j] = list_end[k]
+    joins = [0] * (n + 1)
+    for j, seg in enumerate(records):
+        joins[j + 1] = joins[j] + ((bool(seg.argv) or bool(seg.redirects)) and seg.sep_after in _GATE_PUSH_ANDOR)
+    return next_word, next_push, list_end, joins
+
+
+def _check_then_push(records):
+    """gatdis check then push: (check argv, separator, push argv) for the first known verification run in
+    records (_is_verification_run; a simple command outside any case compound, not piped on) whose and-or list
+    ends at a ';', a newline or a '&' (_gate_push_walk's list_end) and is followed by a git push before any
+    segment that is not _gate_push_plain, or None. A push is not a hit when the first command after the
+    check's list kept the status (_gate_status_kept) and a '&&' or '||' ends some command from that one up to
+    the push (a test of the saved status)."""
+    checks = [i for (i, seg), case_depth in zip(enumerate(records), _gate_case_depths(records))
+              if not case_depth and _gate_simple(seg) and seg.sep_after not in _GATE_PIPES
+              and _is_verification_run(seg.argv)]
+    if not checks:
+        return None
+    n = len(records)
+    next_word, next_push, list_end, joins = _gate_push_walk(records)
+    for i in checks:
+        end = list_end[i]
+        if end is None:
+            continue
+        first = next_word[end + 1]
+        push = next_push[first] if first < n else n
+        if push >= n:
+            continue
+        ended = records[end].sep_after
+        if _gate_status_kept(records[first], ended == "&") and joins[push] > joins[first]:
+            continue   # the status kept right after the list is tested before the push
+        return records[i].argv, ended, _gate_push_argv(records[push])
+    return None
+
+
+def _check_then_push_message(hit):
+    """The (reason, banner) of the deny for a _check_then_push hit, naming the check, the separator that ends
+    its list and the push, and the ways on: a separate call, '&&', or a saved status tested before the push."""
+    check, sep, push = hit
+    check_text = " ".join(check)[:80]
+    push_text = " ".join(push)[:80]
+    return (
+        "AIQT rule gatdis (gate-discipline): this command runs '{}', a known verification run, and after {} "
+        "that ends the check's list it publishes with '{}'. That push runs whatever the check returned, so a "
+        "failing check is published as if it had passed; the rule forbids relying on a status a later step "
+        "overwrites, and the publish stays a separate step until the check's success is seen. Run the check "
+        "alone, read its exit status, then push in a separate call; or join them with '&&' (check && git push) "
+        "so the push runs only when the check passes; or save the status right after the check and test it "
+        "before the push (rc=$?; [ \"$rc\" -eq 0 ] && git push).".format(
+            check_text, _GATE_PUSH_SEP_TEXT.get(sep, repr(sep)), push_text),
+        "AIQT guardrail: denied a git push that runs whatever the check '{}' before it returned (rule gatdis)."
+        .format(check_text[:60]))
+
+
 # The note tier's view of a checker or a sink the canonical deny cannot prove: wrappers beyond the four the
 # deny peels, a checker word right inside a command substitution, a sink anywhere after a later pipe.
 _GATE_NOTE_WRAPPERS = frozenset((
@@ -18466,6 +18604,21 @@ def gate_weakening(data):
     the closed literal grammar (_gate_closed_grammar_scan) denies an expansion in a git command's global options or
     subcommand word, quoted or not ('git -C "$D" log'), as it does one anywhere else on a roster-verb git segment
     outside its one accepted commit-message here-document form (_gate_heredoc_message).
+    CHECK THEN PUSH (_check_then_push) DENIES, after the sink deny and on each reading of an uncertain '#'
+    alone: a known verification run (_is_verification_run, the deny tier's producer allow-list) whose and-or
+    list ends at a ';', a newline or a '&', followed later in the same command by a git push with no reserved
+    word or parenthesis on the way, since that push runs whatever the check returned; the reason names the
+    check, the separator and the push. It allows check && git push, a push after the check's status is kept
+    by the next command and tested by a '&&' or '||' before the push ([ $? -eq 0 ] && git push, or rc=$?;
+    [ "$rc" -eq 0 ] || exit 1; git push), a check whose list holds '|| exit' or '|| return', a push inside an
+    if, a loop, a case or a group, a push carrying -n or --dry-run, and a push with no known check before it.
+    Disclosed residual: a push in a later call, a check run inside a script the hook cannot read (a CI
+    script, bash -c or eval), and a check the hook does not recognise (a checker-shaped command off that
+    allow-list, such as tools/run_all_checks.sh run directly or a wrapper the peel does not resolve) are not
+    refused, nor is a push behind such a wrapper (sudo, command), one joined to the check by '||', or one in
+    a command the lexer cannot parse; a kept status tested by an unrelated '&&' or '||' counts as tested. An
+    inline set -e is not credited (a disclosed over-refusal of set -e; check; git push), since in this tool
+    an inline set -e was seen not to stop a later step (inline_errexit).
     Disclosed residuals: R1 a check inside an sh -c/bash -c, eval or
     xargs body; R2 an alias defined in a configuration file, or a shell function; R3 a gate whose name and
     options carry no checker part
@@ -18749,6 +18902,13 @@ def gate_weakening(data):
                None)
     if hit is not None:
         reason, banner = _verification_sink_message(hit)
+        return _deny(reason, banner)
+    # A known check whose and-or list ends at a ';', a newline or a '&', then a git push later in the same
+    # command: the push runs whatever the check returned (_check_then_push), judged on each reading alone.
+    pushed = next((found for found in (_check_then_push(reading) for reading in readings) if found is not None),
+                  None)
+    if pushed is not None:
+        reason, banner = _check_then_push_message(pushed)
         return _deny(reason, banner)
     if floor:
         # The path main's failed lex takes denies here before any note: a sink main's partial lex proves past
