@@ -793,6 +793,9 @@ ALLOWLIST = (
     ("tools/check_gensrc_failclose.py", "_self_test_main_isolated._evaluate_interrupt", "shell", 1,
      _SAVED + " (the real Popen subclassed by the gc interrupt vector's double, whose wait raises"
      " KeyboardInterrupt once)"),
+    ("tools/check_gensrc_failclose.py", "_self_test_main_isolated._evaluate_gone_bound.evaluate", "shell",
+     1, _SAVED + " (the real Popen subclassed by the gc group-exit bound vector's double, whose wait"
+     " raises KeyboardInterrupt once on its interrupt leg)"),
     ("tools/check_release_build.py", "_self_test_main_isolated", "shell", 1, _SAVED),
     ("tools/check_release_delta.py", "_self_test_main_isolated", "shell", 1, _SAVED),
     ("tools/check_mistakes_register.py", "self_test", "shell", 2,
@@ -866,7 +869,7 @@ ALLOWLIST = (
      "pid capture: types.FunctionType rebuilds the standard library's own Popen._execute_child code"
      " object with its globals copied and only _fork_exec wrapped to record the pid; no external"
      " code"),
-    ("tools/_load_bound.py", "vector_failures", "shell", 14,
+    ("tools/_load_bound.py", "vector_failures", "shell", 15,
      _SAVED + " (the real Popen each vector's fault or recording double subclasses, set back in a"
      " finally; the fork-window vector also reads its _execute_child through that saved class)"),
     ("tools/_load_bound.py", "vector_failures.bounded", "shell", 1,
