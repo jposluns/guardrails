@@ -69,7 +69,6 @@ Fill significant gaps: strengthen capabilities that exist but are too thin to re
 | GD-152 | Not started | A portable way for an adopting project to track review findings to an outcome: queue them, bring overdue ones back at the start of a session, and escalate any left unhandled (M, L) | `[public]` |
 | PYTHON-FLOOR-U7 | Not started | Python 3.14 floor: the release note, written into the changelog in step 1 of the 1.1.1 cut (M, XS) | `[public]` `[adopter]` `[release]` `[1.1.1 cut]` |
 | AIQT-INSTRUCTION-BUDGET | In progress (#392) | Cut the pack's instructions that load in every session from 112,222 to at most 90,000 characters: decide where each rule's detail belongs, move that detail into the layer loaded only on demand, then make the size check enforce the 90,000 limit (H, L) | `[public]` |
-| AIQT-INSTRUCTION-BUDGET-DETAIL | In progress (#392) | Rule detail layer: a place in each rule's source for detail that is loaded only on demand (H, M) | `[public]` |
 | TOOL-MERGE-TRAIN | In progress (#390) | Merge-train tool: after each merge, bring every open pull request up to date with main, regenerate the generated release files, rerun its checks and push the result (M, S) | `[public]` `[tooling]` |
 | ENFORCEMENT-ATTR-SOURCE-DOC | Not started | Name --attr-source among the git value-taking options in the commit-identity hook description (L, S) | `[public]` `[docs]` |
 | PUBLIC-ROADMAP-REFRESH | In progress (#395) | Bring the public roadmap up to date: plain progress words and a row for every open pull request (M, S) | `[public]` `[docs]` |
@@ -122,7 +121,6 @@ Adopter experience: capability and guidance for organizations adopting the pack.
 
 | ID | Status | Item | Tags |
 | --- | --- | --- | --- |
-| OPF-ESTATE-RETIRE | Partly done | Retire the old OPF import and ingest code, keeping the readers that existing import evidence needs (M, L) | `[public]` `[tooling]` |
 | PACK-HOOKS-PROMOTE | Not started | Promote the .preview/ hooks into the pack's hook set (M, L) | `[public]` `[adopter]` |
 | DEV-1 | Planned | Development assistant, planned for the 1.2.0 release: a skill that installs the pack into a project, with a setup wizard, a doctor command that checks the install, and the instruction file each coding assistant expects (H, L) | `[public]` `[adopter]` |
 | DEV-2 | Planned | A skill that adopting projects can use to review work for quality (M, M) | `[public]` `[adopter]` |
