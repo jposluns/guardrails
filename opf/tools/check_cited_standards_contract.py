@@ -54,7 +54,9 @@ respelled epilogue line, a runner with no scaffold, an undecodable runner, the p
 re-read failure (the owning validator stubbed to accept), the usage error, the unexpected-exception
 backstop, the self-test harness backstop and, in a fresh process over a scratch copy whose stub
 collaborator renames validate_pack away, the import-time guard. A for, case or brace group, or a lone
-assignment, takes the same branch as the multi-line if and has no vector of its own.
+assignment, has no vector of its own: each of its lines that does not name the gate takes the same branch
+as the multi-line if, and a one-line form that names the gate takes the branch of the one-line if instead
+(the line mentions check_cited_standards); either way the exit is 2.
 This guards declaration and wiring drift, not environment overrides, a member the gate scans and reads
 short, or the content of recorded exclusions. It reads the OPF runner's text; it does not run the runner,
 and it does not follow a script a roster line launches, so a roster script that itself starts the gate
@@ -370,8 +372,9 @@ def _vectors():
         ("permitted line plus a forbidden line sorting before it",
          _runner_with(_SELF_LINE, _PERMITTED_LINE, _LIVE + '--config "$here/a.toml"'),
          1, "permitted invocation", 1),
-        # The runner grammar. Each runner below carries the permitted line, and bash either skips it or also runs
-        # the gate another way, so a scan that read only lines starting with run_gate would pass it.
+        # The runner grammar. Each grammar vector below carries the permitted line: the first is a passing control,
+        # and every other one is refused, though a scan that read only lines starting with run_gate would pass it.
+        # The undecodable-runner vector after them carries no permitted line and tests the read error instead.
         ("runner grammar: blank, comment and indented lines are read as bash reads them",
          _runner_with(_SELF_LINE, "", "  # a comment naming check_cited_standards.py","\t" + _PERMITTED_LINE),
          0, None, None),
