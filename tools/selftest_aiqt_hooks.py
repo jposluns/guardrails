@@ -16438,13 +16438,17 @@ def _main_isolated(monitor):
         # body out of every segment's argv and raw text (unless it sits inside a double-quoted word), so
         # the per-segment commit scan never read it and each deny shape below read through a parsed
         # command was a silent allow on protected main; each body the lexer skips is now also read on its
-        # own, raw and de-quoted (_commit_command_syntax, _commit_heredoc_bodies). Every row runs on
-        # protected main (plr, the label as written) and on the feature branch (plf, the label with
-        # -plf), since the deny comes before any branch check. Each deny row read through a parsed
-        # command is red with that body read removed; the split operator and the here-string deny
-        # through the unparseable branch, before it. Each allow row with git and a later commit word
-        # outside every body is red under a read of the whole command. Nothing here is run: each command
-        # is only handed to the hook as text.
+        # own, raw and de-quoted, and so is the raw text of each unclassified segment holding '<', where a
+        # body inside a backquote, a ${...:-$(...)} default or a nested $(...) within a double-quoted word
+        # sits (_commit_command_syntax, _commit_heredoc_bodies). A command the tokenizer cannot parse is
+        # read whole, raw, and de-quoted too where it holds '<'. Every row runs on protected main (plr, the
+        # label as written) and on the feature branch (plf, the label with -plf), since the deny comes
+        # before any branch check. Each deny row read through a parsed command is red with the body and
+        # segment read removed, and each dquote- deny row with the segment read alone removed; the split
+        # operator and the here-string deny through the unparseable branch's raw read, and each unparsed-
+        # deny row is red with that branch's de-quoted read removed. Each allow row with git and a later
+        # commit word outside every body is red under a read of the whole command. Nothing here is run:
+        # each command is only handed to the hook as text.
         _plh_grammar = 'segment outside the admitted commit grammar'
         _plh_unparsed = 'incomplete shell parse'
         _plh_rows = (
@@ -16491,6 +16495,41 @@ def _main_isolated(monitor):
              "cat > y.sh <\\\n<'EOF'\ngit commit -m x\nEOF\nbash y.sh", 'deny', _plh_unparsed),
             ('here-string', 'a commit in a here-string fed to bash',
              "bash <<<'git commit -m x'", 'deny', _plh_unparsed),
+            # A split commit in a body on a command the tokenizer cannot parse (the arithmetic '<<' or the
+            # trailing here-string stops it): the unparseable branch reads the whole command de-quoted too.
+            ('unparsed-quote-split', 'a quote-split commit in a quoted heredoc body fed to bash, before an '
+             'arithmetic shift the tokenizer cannot parse',
+             "bash <<'EOF'\ngit co''mmit -m x\nEOF\necho $((1<<2))", 'deny', _plh_unparsed),
+            ('unparsed-continuation-split', 'a continuation-split commit in a quoted heredoc body fed to bash, '
+             'before an arithmetic shift',
+             "bash <<'EOF'\ngit com\\\nmit -m x\nEOF\necho $((1<<2))", 'deny', _plh_unparsed),
+            ('unparsed-quote-git', 'a quote-split git word in a quoted heredoc body fed to bash, before an '
+             'arithmetic shift',
+             "bash <<'EOF'\ng''it commit -m x\nEOF\necho $((1<<2))", 'deny', _plh_unparsed),
+            ('unparsed-cat-bash', 'a double-quote-split commit in a heredoc body written by cat and run by bash, '
+             'before an arithmetic shift',
+             "cat > y.sh <<'EOF'\ngit co\"\"mmit -m x\nEOF\nbash y.sh\necho $((1<<2))", 'deny', _plh_unparsed),
+            ('unparsed-here-string-after', 'a quote-split commit in a quoted heredoc body fed to bash, before '
+             'a here-string',
+             "bash <<'EOF'\ngit co''mmit -m x\nEOF\ncat <<< done", 'deny', _plh_unparsed),
+            # A split commit in a body inside a double-quoted word that the lexer records as no body (inside a
+            # backquote, a ${...:-$(...)} default or a nested $(...)): the raw text of each unclassified
+            # segment holding '<' is read de-quoted too.
+            ('dquote-backquote', 'a quote-split commit in a heredoc body inside a backquote in a double-quoted '
+             'bash -c word',
+             "bash -c \"`cat <<'EOF'\ngit co''mmit -m x\nEOF\n`\"", 'deny', _plh_grammar),
+            ('dquote-default', 'a quote-split commit in a heredoc body inside a ${...:-$(...)} default in a '
+             'double-quoted bash -c word',
+             "bash -c \"${y:-$(cat <<'EOF'\ngit co''mmit -m x\nEOF\n)}\"", 'deny', _plh_grammar),
+            ('dquote-nested', 'a quote-split commit in a heredoc body inside a nested $(...) in a double-quoted '
+             'bash -c word',
+             "bash -c \"$(echo \"$(cat <<'EOF'\ngit co''mmit -m x\nEOF\n)\")\"", 'deny', _plh_grammar),
+            ('dquote-backquote-continuation', 'a continuation-split commit in a heredoc body inside a backquote '
+             'in a double-quoted bash -c word',
+             "bash -c \"`cat <<'EOF'\ngit com\\\nmit -m x\nEOF\n`\"", 'deny', _plh_grammar),
+            ('dquote-split-operator', 'a quote-split commit in a heredoc body whose operator a backslash-newline '
+             'splits, inside a backquote in a double-quoted bash -c word',
+             "bash -c \"`cat <\\\n<'EOF'\ngit co''mmit -m x\nEOF\n`\"", 'deny', _plh_grammar),
             # The disclosed over-refusal, witnessed: prose naming a commit inside a here-document body
             # denies whatever command the body is fed to.
             ('prose', 'commit-shaped prose in a quoted heredoc body fed to cat (a disclosed over-refusal)',
@@ -16505,6 +16544,17 @@ def _main_isolated(monitor):
              "cat > y.sh <<'EOF'\ngit status\nEOF\nbash y.sh", 'allow', None),
             ('bash-stdin-ctl', 'the same bash heredoc with a body naming no commit',
              "bash <<'EOF'\ngit status\nEOF", 'allow', None),
+            ('unparsed-ctl', 'the same bash heredoc before an arithmetic shift, with a body naming no commit',
+             "bash <<'EOF'\ngit status\nEOF\necho $((1<<2))", 'allow', None),
+            ('unparsed-after-ctl', 'git status, a heredoc whose body names no commit, then an arithmetic shift',
+             "git status\ncat <<'EOF'\nnotes\nEOF\necho $((1<<2))", 'allow', None),
+            ('dquote-backquote-ctl', 'the same backquoted heredoc in a double-quoted word, naming no commit',
+             "bash -c \"`cat <<'EOF'\ngit status\nEOF\n`\"", 'allow', None),
+            ('dquote-word-after-ctl', 'git status, a backquoted heredoc in a double-quoted word naming no commit, '
+             'then an echoed commit word',
+             "git status; x=\"`cat <<'EOF'\nnotes\nEOF\n`\"; echo commit", 'allow', None),
+            ('redirect-ctl', 'git status, then a quote-split commit word in a step reading a file through <',
+             "git status; grep -c 'co''mmit' < notes.txt", 'allow', None),
             # A git word and a later commit word outside every body are not paired: a '<<' inside quotes
             # that opens no here-document, a commit word after the body, and one in a comment line.
             ('quoted-operator', "an echoed '<<' that opens no heredoc, git status, then an echoed commit word",

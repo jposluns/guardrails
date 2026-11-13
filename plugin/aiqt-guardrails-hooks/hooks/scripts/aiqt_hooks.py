@@ -13622,13 +13622,18 @@ def _commit_apparent_segment(seg, named=False):
     command's text names a git configuration variable or the hook's environment
     carries one naming an alias (_git_alias_outside, _git_alias_segment).
 
-    A quoted here-document's body is in no segment's argv or raw text (unless it
-    sits inside a double-quoted word), so this scan never reads it;
-    _commit_command_syntax reads each body the lexer skips beside it
-    (_commit_heredoc_bodies), raw and de-quoted, so a commit in a body the same
-    command runs denies, and so does prose naming a commit inside a here-document
-    body (a disclosed over-refusal). Only where the bodies cannot be delimited does
-    it read the whole command instead.
+    A quoted here-document's body is in no segment's argv or raw text unless it sits
+    inside a double-quoted word, so this scan reads such a body only there, with the
+    quotes inside it kept; on a parsed command _commit_command_syntax reads beside
+    it each body the lexer skips (_commit_heredoc_bodies) and the raw text of each
+    unclassified segment holding '<', each raw and de-quoted, so a commit in a body
+    the same command runs denies, a body inside a double-quoted word included, and
+    so does prose naming a commit inside a here-document body (a disclosed
+    over-refusal). Only where the bodies cannot be delimited does it read the whole
+    command instead. On an unparseable command it reads the whole command raw, and
+    de-quoted too where the command holds '<'. Each body is read on its own, so a
+    commit assembled when the command runs from two bodies, or from a body and text
+    outside it, is not read.
 
     This does not discover every renamed executable, alias, function, opaque script,
     or unparseable fragmentation. Detection is not a Bash interpreter.
@@ -13719,12 +13724,18 @@ def _commit_command_syntax(command):
         # Partial records improve detection only. They can NEVER establish a proof. Behind a '#' whose
         # comment reading the lexer could not judge under both readings, the raw commit probe also reads the
         # text with its backslash-newlines, quote characters and backslashes removed (_hash_doubt_scan), and
-        # a command whose quoting that removal does not decode (_hash_doubt_opaque) is an apparent commit.
+        # a command whose quoting that removal does not decode (_hash_doubt_opaque) is an apparent commit. A
+        # command holding '<' may hold a here-document body, whose text the raw read sees only as written, so
+        # its whole text is also read de-quoted (_dequoted_text, its line continuations joined first): a
+        # quote-split or continuation-split commit in a body ('git co''mmit') denies, and so does a git word
+        # and a later commit word anywhere in it once quotes are removed (a disclosed over-refusal, as the raw
+        # read already pairs them as written).
         with _LexStops() as stops:
             partial, _complete, _in_progress = _lex_command(command, partial=True)
         doubt = isinstance(exc, _UncertainHashError)
         scan = _hash_doubt_scan(command) if doubt else command
         apparent = bool(_RAW_COMMIT_RE.search(scan)) or (doubt and _hash_doubt_opaque(command))
+        apparent = apparent or ("<" in command and bool(_RAW_COMMIT_RE.search(_dequoted_text(command))))
         apparent = apparent or not _commit_quote_bytes_known(command)
         # Every git command of a command whose text names a git configuration variable, or that runs under an
         # alias the hook's environment carries, is apparent, the ones the partial lex does not recover included
@@ -13754,15 +13765,24 @@ def _commit_command_syntax(command):
     # (bash <<'EOF', sh -s, cat or tee writing the body to a file a later segment runs, or a substitution
     # capturing it for eval). Each body the lexer skips is therefore read on its own (_commit_heredoc_bodies),
     # its raw text and beside it its de-quoted copy (_dequoted_text), so a quote-split or continuation-split
-    # body ('git co''mmit') is read too. Only the bodies are read: text outside every body is read by the
-    # segment scan above alone. A body naming git and then commit denies whatever command it is fed to (prose
-    # in a body fed to cat too, a disclosed over-refusal). Where the bodies cannot be delimited
-    # (_commit_heredoc_bodies gives None), the whole command is read instead, raw and de-quoted, so a git word
-    # and a later commit word anywhere in it deny (a disclosed over-refusal).
+    # body ('git co''mmit') is read too. A body inside a double-quoted word is in its segment's raw text, but
+    # the lexer records it as a body only in the direct "$(cat <<'EOF' ...)" form, not inside a backquote, a
+    # ${...:-$(...)} default or a nested $(...), and the scan above reads that text with its inner quotes and
+    # continuations kept; so the raw text of each unclassified segment holding '<' (a '<<' split by a
+    # backslash-newline included) is also read, raw and de-quoted. Text outside every body and every such
+    # segment is read by the segment scan above alone. A body naming git and then commit denies whatever
+    # command it is fed to (prose in a body fed to cat too, a disclosed over-refusal), and so does a segment
+    # holding '<' whose de-quoted text names git and then commit. Each body is read on its own, so a commit
+    # assembled when the command runs from two bodies, or from a body and text outside it, is not read (built
+    # at run time, disclosed). Where the bodies cannot be delimited (_commit_heredoc_bodies gives None), the
+    # whole command is read instead, raw and de-quoted, so a git word and a later commit word anywhere in it
+    # deny (a disclosed over-refusal).
     if not hidden and "<" in command:
         bodies = _commit_heredoc_bodies(command)
+        texts = (command,) if bodies is None else tuple(bodies) + tuple(
+            seg.raw for seg, step in zip(records, steps) if step is None and "<" in seg.raw)
         hidden = any(_RAW_COMMIT_RE.search(text) or _RAW_COMMIT_RE.search(_dequoted_text(text))
-                     for text in ((command,) if bodies is None else bodies))
+                     for text in texts)
     if not commits and not hidden:
         return _CommitSyntax("outside", records, steps, (), "no apparent direct commit")
     if (len(records) == 1 and steps[0] is not None
@@ -14800,17 +14820,21 @@ def protected_line(data):
 
     The lexer leaves a quoted here-document's body out of every segment (unless it
     sits inside a double-quoted word), so each body the lexer skips in a parsed
-    command is also read, raw and de-quoted, for git and then commit
+    command, and the raw text of each unclassified segment holding '<' (where a
+    body inside a backquote, a ${...:-$(...)} default or a nested $(...) within
+    double quotes sits), is also read, raw and de-quoted, for git and then commit
     (_commit_command_syntax, _commit_heredoc_bodies): a commit in a body the same
     command runs (bash <<'EOF', sh -s, or cat or tee writing a file a later segment
     runs) denies, and so does prose naming a commit inside a here-document body, a
-    disclosed over-refusal. Text outside every body is read by the segment scan
-    alone. Where the bodies cannot be delimited (a lex that records them raises,
-    such as on a '#' whose comment reading depends on context), the whole command is
-    read instead, so a git word and a later commit word anywhere in it deny, a
-    disclosed over-refusal. A commit run from text this guard reads only as data
-    across separate Bash calls (a file written in one call and run in a later one)
-    or built at run time stays outside it.
+    disclosed over-refusal. Text outside every body and every such segment is read
+    by the segment scan alone. Where the bodies cannot be delimited (a lex that
+    records them raises, such as on a '#' whose comment reading depends on
+    context), the whole command is read instead, so a git word and a later commit
+    word anywhere in it deny, a disclosed over-refusal. An unparseable command is
+    read whole, raw, and de-quoted too where it holds '<'. A commit run from text
+    this guard reads only as data across separate Bash calls (a file written in one
+    call and run in a later one) or built at run time (a commit assembled from two
+    bodies, or from a body and text outside it, included) stays outside it.
 
     A raw-text backstop (_raw_push_guard) scans the unmodified command on every
     call, before any parsing, and denies a force/delete/mirror push spelling paired with a
