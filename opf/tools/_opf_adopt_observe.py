@@ -3747,10 +3747,33 @@ def self_test(vectors_only=False, steady_only=False):
     # How long close_row waits for /proc to show the serving thread asleep
     # in its blocking call.
     BLOCK_WAIT = 10.0
+    # How long close_cases waits, once close() has returned, for the thread
+    # that reads /proc during a case (watch_asleep) to end, and the name that
+    # thread runs under, by which a case it outlives names it.
+    WATCH_JOIN = 10.0
+    WATCHER_NAME = "close_row watch_asleep"
+    # close_row's watcher checks: the join they run a held watcher with, how
+    # long a raising case's watcher read holds it (under WATCH_JOIN), and
+    # the bound on holding a watcher until its case has returned.
+    HELD_JOIN = 0.5
+    RAISE_HOLD = 2.0
+    HOLD_BOUND = 120.0
     # poll(2) and ppoll(2), the system calls in which a Python socket or TLS
     # call with a timeout waits, by machine, as /proc/self/task/<id>/syscall
     # numbers them.
     POLL_SYSCALLS = {"x86_64": ("7", "271"), "aarch64": ("73",)}
+    # Task files close_row writes for asleep_in_poll to read (poll_rule), each
+    # as a wait channel, a system call (None for the first one POLL_SYSCALLS
+    # lists for this machine, or 7 where it lists none), and the reading
+    # required where POLL_SYSCALLS lists the machine and where it does not: both
+    # naming poll; the wait channel alone naming poll, with the thread woken
+    # ("running") or in a call that is not poll (202, futex on x86_64 and accept
+    # on aarch64); and the system call alone being poll.
+    POLL_CHANNEL = "poll_schedule_timeout.constprop.0"
+    POLL_RULE_FILES = ((POLL_CHANNEL, None, True, True),
+                       (POLL_CHANNEL, "running", False, True),
+                       (POLL_CHANNEL, "202 0x0 0x0 0x0 0x0 0x0 0x0 0x0 0x0", False, True),
+                       ("futex_wait_queue", None, False, False))
 
     def asleep_in_poll(thread, task_root="/proc/self/task/"):
         # Whether /proc shows thread asleep in poll(2) or ppoll(2). Its wait
@@ -3844,14 +3867,21 @@ def self_test(vectors_only=False, steady_only=False):
         return ("{}: the serving thread was not seen asleep in its blocking call within "
                 "{} s, so close() was not judged against a blocked call".format(case, wait))
 
+    def watcher_running(case, join):
+        return ("{}: the thread reading /proc for this case ({}) was still running {} s "
+                "after close() returned, so its reads were not judged".format(
+                    case, WATCHER_NAME, join))
+
     def close_cases(context, client_context, server_class,
                     cases=("handshake", "request", "registration"),
-                    asleep=asleep_in_poll, wait=BLOCK_WAIT):
+                    asleep=asleep_in_poll, wait=BLOCK_WAIT, watch_join=WATCH_JOIN):
         # Run the row's cases against server_class, reading /proc with
         # asleep and waiting up to wait seconds to see the thread blocked;
         # returns the failures, the cases not judged, each close()'s time,
         # and the cases whose blocking call close() left to its socket
-        # timeout.
+        # timeout. However a case ends, its watcher is joined for up to
+        # watch_join seconds after close() returns; a case it outlives is
+        # not judged by its reads (watcher_running).
         failures = []
         unjudged = []
         measured = {}
@@ -3874,7 +3904,7 @@ def self_test(vectors_only=False, steady_only=False):
             # until close() has returned and done is set (watch_asleep).
             latest = [None]
             done = threading.Event()
-            watcher = threading.Thread(target=watch_asleep, daemon=True,
+            watcher = threading.Thread(target=watch_asleep, name=WATCHER_NAME, daemon=True,
                                        args=(server, asleep, latest, done))
             try:
                 watcher.start()
@@ -3899,10 +3929,14 @@ def self_test(vectors_only=False, steady_only=False):
                 finally:
                     elapsed = time.monotonic() - start
                     done.set()
-                    if client is not None:
-                        client.close()
-            if watcher.ident is not None:
-                watcher.join(10.0)
+                    try:
+                        if client is not None:
+                            client.close()
+                    finally:
+                        # Joined here, so an exception raised through this
+                        # cleanup does not leave the watcher running.
+                        if watcher.ident is not None:
+                            watcher.join(watch_join)
             if not reached:
                 failures.append(case + ": the serving thread did not reach the point "
                                 "this case closes it at")
@@ -3914,6 +3948,11 @@ def self_test(vectors_only=False, steady_only=False):
                 failures.append(case + ": the serving thread outlived close()")
             if server.errors:
                 failures.append(case + ": fixture server error " + ", ".join(server.errors))
+            if watcher.is_alive():
+                # Its reads may still change latest, so the case is not
+                # judged by them, whatever they show so far.
+                unjudged.append(watcher_running(case, watch_join))
+                continue
             # A close() that did not record shut is judged by when it
             # returned, a later time, which can turn "left" into "early" or
             # "unseen" but never the reverse.
@@ -3949,7 +3988,37 @@ def self_test(vectors_only=False, steady_only=False):
                                     case, elapsed, CLOSE_BOUND, SOCKET_TIMEOUT))
         return failures, unjudged, measured, left
 
-    def close_row(context, certificates):
+    class TaskFiles:
+        # A thread as asleep_in_poll reads it: only its native_id, here the
+        # name of a directory of written task files.
+        def __init__(self, native_id):
+            self.native_id = native_id
+
+    def poll_rule(root):
+        # asleep_in_poll's reading of each POLL_RULE_FILES entry, written
+        # under root and read through its task_root, against the reading
+        # required for this machine: the departures, and any OSError.
+        numbers = POLL_SYSCALLS.get(os.uname().machine)
+        departures = []
+        try:
+            with tempfile.TemporaryDirectory(prefix="opf-poll-rule-", dir=root) as temp:
+                for index, (channel, call, listed, unlisted) in enumerate(POLL_RULE_FILES):
+                    if call is None:
+                        call = (numbers or ("7",))[0] + " 0x0 0x0 0x0 0x0 0x0 0x0 0x0 0x0"
+                    task = Path(temp) / str(index)
+                    task.mkdir()
+                    (task / "wchan").write_text(channel, encoding="ascii")
+                    (task / "syscall").write_text(call + "\n", encoding="ascii")
+                    required = listed if numbers is not None else unlisted
+                    read = asleep_in_poll(TaskFiles(str(index)), task_root=temp + "/")
+                    if read is not required:
+                        departures.append("{} for wait channel {!r} and system call {!r}, "
+                                          "not {}".format(read, channel, call, required))
+        except OSError as exc:
+            return departures, "{}: {}".format(type(exc).__name__, exc)
+        return departures, None
+
+    def close_row(context, certificates, root):
         # close() must end a serving thread blocked in a socket call rather
         # than leave the call to its 2.0 s socket timeout: a client that never
         # sends the TLS handshake, one that completes it and never sends a
@@ -3974,40 +4043,64 @@ def self_test(vectors_only=False, steady_only=False):
         # took, and so do a case not reached, a server error, and a thread
         # still running JOIN_BOUND after close(), named by close()'s own
         # error. A case whose thread was not seen asleep within BLOCK_WAIT is
-        # CANNOT-EVALUATE with that reason before any other. A call that
-        # lasted the timeout is CANNOT-EVALUATE, not INVALID, when the
-        # timeout could have run out before close() ended the connection
-        # (the test thread stalled between close()'s start and the shutdown,
-        # or a slow close()), or when the thread was not seen asleep after it
-        # (the serving thread stalled between being woken and recording the
-        # call's end); so is a registration case whose close() was not seen
-        # within 10 s of the pause. The times still cannot tell apart: a
-        # close() that ends the connection after the timeout could run out
-        # from a test thread stalled as long; a call left blocked while the
-        # watching thread is stalled for all of it from a serving thread
-        # that records its end late (each CANNOT-EVALUATE, so a self-check
-        # run hit by either reads CANNOT-EVALUATE); a stall between ending
-        # the connection and recording Server.shut, which can only turn
-        # "left" into "early"; and a serving thread stalled through the
-        # whole 10 s wait for its case's event, which reads INVALID as a
-        # case not reached, as a handshake moved into the wrap does. Each
-        # close() must also return within CLOSE_BOUND, half the socket
-        # timeout and many times the milliseconds it takes when the host
-        # schedules it promptly. A close() over that bound with no call that
-        # lasted the socket timeout is CANNOT-EVALUATE with the measured
-        # time: the times do not show whether close() or the host was slow.
-        # As its self-check, the row then runs the same cases against
-        # ClosingServer, whose close() closes the connection in flight
-        # instead of shutting it down, and requires a blocking call there to
-        # be judged left to its socket timeout. If none is, the row is
-        # INVALID when that run passed, and CANNOT-EVALUATE when it failed
-        # for another reason or was not judged. It then runs the handshake
-        # and request cases with every /proc read failing and a wait of
-        # twice the socket timeout, so the call normally runs out its
-        # timeout first, and requires each to give the not-seen reason:
-        # another reason fails the row INVALID, and a case that failed
-        # makes it CANNOT-EVALUATE. A call_outcome that departs from
-        # CALL_EDGES fails the row INVALID.
+        # CANNOT-EVALUATE with that reason, checked after a case not reached,
+        # close()'s error, a serving thread alive after close(), a server error,
+        # a watching thread still running (watcher_running, below) and a call
+        # judged left, and before every reason that follows: a case not reached
+        # or still watched gets no not-seen reason, one with a call judged left
+        # fails INVALID instead, and close()'s error, a serving thread alive
+        # after close() and a server error still fail the row alongside it. A
+        # call that lasted the timeout is CANNOT-EVALUATE, not INVALID, when the
+        # timeout could have run out before close() ended the connection (the
+        # test thread stalled between close()'s start and the shutdown, or a
+        # slow close()), or when the thread was not seen asleep after it (the
+        # serving thread stalled between being woken and recording the call's
+        # end); so is a registration case whose close() was not seen within 10 s
+        # of the pause. The times still cannot tell apart: a close() that ends
+        # the connection after the timeout could run out from a test thread
+        # stalled as long; a call left blocked while the watching thread is
+        # stalled for all of it from a serving thread that records its end late
+        # (each CANNOT-EVALUATE, so a self-check run hit by either reads
+        # CANNOT-EVALUATE); a stall between ending the connection and recording
+        # Server.shut, which can turn "left" into "early" or "unseen", never the
+        # reverse; and a serving thread stalled through the whole 10 s wait for
+        # its case's event, which reads INVALID as a case not reached, as a
+        # handshake moved into the wrap does. A case whose watching thread is
+        # still running WATCH_JOIN after close() returned (it is joined however
+        # the case ended) is not judged by its reads, which could still change:
+        # it is CANNOT-EVALUATE, naming that thread (watcher_running), unless it
+        # failed otherwise. Each close() must also return within CLOSE_BOUND,
+        # half the socket timeout and many times the milliseconds it takes when
+        # the host schedules it promptly. A close() over that bound with no call
+        # that lasted the socket timeout is CANNOT-EVALUATE with the measured
+        # time: the times do not show whether close() or the host was slow. As
+        # its self-check, the row then runs the same cases against
+        # ClosingServer, whose close() closes the connection in flight instead
+        # of shutting it down, and requires a blocking call there to be judged
+        # left to its socket timeout. If none is, the row is INVALID when that
+        # run passed, and CANNOT-EVALUATE when it failed for another reason or
+        # was not judged. It then runs the handshake and request cases with
+        # every /proc read failing and a wait of twice the socket timeout, so
+        # the call normally runs out its timeout first, and requires each to
+        # give the not-seen reason: another reason fails the row INVALID, and a
+        # case that failed makes it CANNOT-EVALUATE. A call_outcome that departs
+        # from CALL_EDGES fails the row INVALID. It then holds the watcher of a
+        # registration case, where only the watcher reads /proc, until
+        # close_cases has returned, with a join of HELD_JOIN, and requires
+        # exactly the watcher_running reason; and, in a handshake case, raises
+        # through close_cases' cleanup from the test thread's /proc read while
+        # the watcher's read holds it up to RAISE_HOLD, less than WATCH_JOIN,
+        # and requires the watcher to have ended by the time the exception
+        # leaves close_cases. In each, another reason or a watcher still running
+        # fails the row INVALID, and a case that failed otherwise, or a read
+        # that did not raise, makes it CANNOT-EVALUATE. Last, it writes the task
+        # files POLL_RULE_FILES lists under root and has asleep_in_poll read
+        # each through its task_root (poll_rule), requiring the reading listed
+        # for this machine: where POLL_SYSCALLS lists it, a wait channel naming
+        # poll reads False unless the system call is poll as well, and a poll
+        # system call reads False unless the wait channel names poll. A reading
+        # that departs fails the row INVALID, and task files that could not be
+        # written make it CANNOT-EVALUATE.
         client_context = original_context(cadata=certificates)
         failures, unjudged, measured, _ = close_cases(context, client_context, Server)
         caught, missed, mutant_measured, left = close_cases(
@@ -4040,6 +4133,62 @@ def self_test(vectors_only=False, steady_only=False):
             unjudged.append("unreadable /proc: not judged: " + "; ".join(blind_failed))
         else:
             blind_status = VALID
+        release = threading.Event()
+
+        def held(thread):
+            # A stand-in for asleep_in_poll that holds the watcher until its
+            # case has returned (release), up to HOLD_BOUND.
+            release.wait(HOLD_BOUND)
+            return False
+
+        try:
+            held_failures, held_unjudged, _, _ = close_cases(
+                context, client_context, Server, ("registration",), held,
+                watch_join=HELD_JOIN)
+        finally:
+            release.set()
+        if held_failures:
+            held_status = CANNOT_EVALUATE
+            unjudged.append("held watcher: not judged: " + "; ".join(held_failures))
+        elif held_unjudged != [watcher_running("registration", HELD_JOIN)]:
+            held_status = INVALID
+            failures.append("held watcher: not reported: registration gave "
+                            + ("; ".join(held_unjudged) or "no reason"))
+        else:
+            held_status = VALID
+        caller = threading.current_thread()
+        let_go = threading.Event()
+        holders = []
+
+        class Raised(Exception):
+            pass
+
+        def raising(thread):
+            # A stand-in for asleep_in_poll that raises in the test thread and
+            # holds the watcher up to RAISE_HOLD.
+            if threading.current_thread() is caller:
+                raise Raised()
+            holders.append(threading.current_thread())
+            let_go.wait(RAISE_HOLD)
+            return False
+
+        raised = False
+        try:
+            close_cases(context, client_context, Server, ("handshake",), raising)
+        except Raised:
+            raised = True
+        finally:
+            outlived = [thread for thread in holders if thread.is_alive()]
+            let_go.set()
+        if outlived:
+            raising_status = INVALID
+            failures.append("raising case: its watcher was still running when the "
+                            "exception left close_cases")
+        elif not raised:
+            raising_status = CANNOT_EVALUATE
+            unjudged.append("raising case: the test thread's /proc read was not reached")
+        else:
+            raising_status = VALID
         if left:
             mutant_status = INVALID
         elif caught or missed:
@@ -4053,11 +4202,23 @@ def self_test(vectors_only=False, steady_only=False):
                             "connection instead of shutting it down")
         if any(call_outcome(*times) != outcome for times, outcome in CALL_EDGES):
             failures.append("call_outcome departs from its bounds at CALL_EDGES")
+        departures, unwritten = poll_rule(root)
+        if departures:
+            poll_rule_status = INVALID
+            failures.append("poll rule: asleep_in_poll read " + "; ".join(departures))
+        elif unwritten is not None:
+            poll_rule_status = CANNOT_EVALUATE
+            unjudged.append("poll rule: the task files could not be written: " + unwritten)
+        else:
+            poll_rule_status = VALID
         row = {"id": CLOSE_IDENTITY, "close_seconds": measured,
                "close_bound_seconds": CLOSE_BOUND,
                "self_check_status": mutant_status,
                "self_check_close_seconds": mutant_measured,
                "unreadable_proc_status": blind_status,
+               "held_watcher_status": held_status,
+               "raising_watcher_status": raising_status,
+               "poll_rule_status": poll_rule_status,
                "test_status": (INVALID if failures
                                else CANNOT_EVALUATE if unjudged else VALID)}
         if failures or unjudged:
@@ -5565,7 +5726,7 @@ def self_test(vectors_only=False, steady_only=False):
                 return 1
 
             # The fixture's close() itself, which every run's teardown relies on.
-            executed.append(close_row(contexts[0], fixture_certificates))
+            executed.append(close_row(contexts[0], fixture_certificates, base))
             guard_rows = (_guard_self_test() + _ownership_self_test()
                           + cancellation_rows(_cancellation_self_test))
             executed.extend(guard_rows)
