@@ -16434,6 +16434,91 @@ def _main_isolated(monitor):
         pexpect('(pl-mispair-prose-nested) push-shaped prose in a quoted heredoc nested in a substitution DENIES too (same disclosure)',
                 'echo "$(cat <<\'EOF\'\nDo not run git push --force origin main\nEOF\n)"', 'deny', cwd=plr,
                 detail='raw command text pairs a git push')
+        # A direct commit in a quoted here-document body the same command runs. The lexer leaves such a
+        # body out of every segment's argv and raw text (unless it sits inside a double-quoted word), so
+        # the per-segment commit scan never read it and each deny shape below read through a parsed
+        # command was a silent allow on protected main; each body the lexer skips is now also read on its
+        # own, raw and de-quoted (_commit_command_syntax, _commit_heredoc_bodies). Every row runs on
+        # protected main (plr, the label as written) and on the feature branch (plf, the label with
+        # -plf), since the deny comes before any branch check. Each deny row read through a parsed
+        # command is red with that body read removed; the split operator and the here-string deny
+        # through the unparseable branch, before it. Each allow row with git and a later commit word
+        # outside every body is red under a read of the whole command. Nothing here is run: each command
+        # is only handed to the hook as text.
+        _plh_grammar = 'segment outside the admitted commit grammar'
+        _plh_unparsed = 'incomplete shell parse'
+        _plh_rows = (
+            ('cat-bash', 'a commit in a quoted heredoc body written by cat and run by bash',
+             "cat > y.sh <<'EOF'\ngit commit -m x\nEOF\nbash y.sh", 'deny', _plh_grammar),
+            ('opener-and', 'the same with bash chained on the opener line',
+             "cat > y.sh <<'EOF' && bash y.sh\ngit commit -m x\nEOF", 'deny', _plh_grammar),
+            ('dquote-delim', 'the same with a double-quoted delimiter',
+             'cat > y.sh <<"EOF"\ngit commit -m x\nEOF\nbash y.sh', 'deny', _plh_grammar),
+            ('backslash-delim', 'the same with a backslash-quoted delimiter',
+             "cat > y.sh <<\\EOF\ngit commit -m x\nEOF\nbash y.sh", 'deny', _plh_grammar),
+            ('mixed-delim', 'the same with a delimiter quoted in part (<<"E"OF)',
+             'cat > y.sh <<"E"OF\ngit commit -m x\nEOF\nbash y.sh', 'deny', _plh_grammar),
+            ('tee', 'a commit in a quoted heredoc body written by tee and run by bash',
+             "tee y.sh <<'EOF'\ngit commit -m x\nEOF\nbash y.sh", 'deny', _plh_grammar),
+            ('bash-stdin', 'a commit in a quoted heredoc body fed to bash',
+             "bash <<'EOF'\ngit commit -m x\nEOF", 'deny', _plh_grammar),
+            ('sh-s', 'a commit in a quoted heredoc body fed to sh -s',
+             "sh -s <<'EOF'\ngit commit -m x\nEOF", 'deny', _plh_grammar),
+            ('tab-stripped', 'a commit in a tab-stripped (<<-) quoted heredoc body fed to bash',
+             "bash <<-'EOF'\n\tgit commit -m x\n\tEOF", 'deny', _plh_grammar),
+            ('unterminated', 'a commit in a quoted heredoc body with no delimiter line, fed to bash',
+             "bash <<'EOF'\ngit commit -m x", 'deny', _plh_grammar),
+            ('second-body', 'a commit in the second of two quoted heredoc bodies one line opens',
+             "cat <<'A'; bash <<'B'\nnotes\nA\ngit commit -m x\nB", 'deny', _plh_grammar),
+            ('quote-split', 'a quote-split commit in a quoted heredoc body fed to bash (de-quoted read)',
+             "bash <<'EOF'\ngit co''mmit -m x\nEOF", 'deny', _plh_grammar),
+            ('continuation-split', 'a continuation-split commit in a quoted heredoc body fed to bash',
+             "bash <<'EOF'\ngit com\\\nmit -m x\nEOF", 'deny', _plh_grammar),
+            ('backslash-git', 'a backslash-split git word (g\\it) in a quoted heredoc body fed to bash',
+             "bash <<'EOF'\ng\\it commit -m x\nEOF", 'deny', _plh_grammar),
+            ('continuation-git', 'a continuation-split git word in a quoted heredoc body fed to bash',
+             "bash <<'EOF'\ngi\\\nt commit -m x\nEOF", 'deny', _plh_grammar),
+            ('abs-git', 'an absolute /usr/bin/git commit in a quoted heredoc body fed to bash',
+             "bash <<'EOF'\n/usr/bin/git commit -m x\nEOF", 'deny', _plh_grammar),
+            ('python3', 'a python3 heredoc body that runs git commit through subprocess',
+             "python3 - <<'EOF'\nimport subprocess\nsubprocess.run(['git', 'commit', '-m', 'x'])\nEOF",
+             'deny', _plh_grammar),
+            ('captured-eval', 'a commit in a quoted heredoc body captured by a substitution and then eval-ed',
+             "x=$(cat <<'EOF'\ngit commit -m x\nEOF\n); eval \"$x\"", 'deny', _plh_grammar),
+            ('split-operator', 'a heredoc operator split by a backslash-newline, fed to bash',
+             "bash <\\\n<'EOF'\ngit commit -m x\nEOF", 'deny', _plh_unparsed),
+            ('split-operator-cat', 'the cat-then-bash shape with its operator split by a backslash-newline',
+             "cat > y.sh <\\\n<'EOF'\ngit commit -m x\nEOF\nbash y.sh", 'deny', _plh_unparsed),
+            ('here-string', 'a commit in a here-string fed to bash',
+             "bash <<<'git commit -m x'", 'deny', _plh_unparsed),
+            # The disclosed over-refusal, witnessed: prose naming a commit inside a here-document body
+            # denies whatever command the body is fed to.
+            ('prose', 'commit-shaped prose in a quoted heredoc body fed to cat (a disclosed over-refusal)',
+             "cat <<'EOF'\nplease git commit later\nEOF", 'deny', _plh_grammar),
+            # The disclosed fallback, witnessed: a '#' whose comment reading depends on context (right after
+            # a ')') stops the lex that records the bodies, so the whole command is read and the git and
+            # commit words outside the body deny (a disclosed over-refusal).
+            ('undelimited', 'git and a later commit word outside the body, where the bodies cannot be delimited',
+             "cat <<'EOF'\nnotes\nEOF\necho $(true)# x\ngit status; echo commit", 'deny', _plh_grammar),
+            # Controls: the same shapes whose body names no commit still ALLOW.
+            ('cat-bash-ctl', 'the same cat-then-bash shape with a body naming no commit',
+             "cat > y.sh <<'EOF'\ngit status\nEOF\nbash y.sh", 'allow', None),
+            ('bash-stdin-ctl', 'the same bash heredoc with a body naming no commit',
+             "bash <<'EOF'\ngit status\nEOF", 'allow', None),
+            # A git word and a later commit word outside every body are not paired: a '<<' inside quotes
+            # that opens no here-document, a commit word after the body, and one in a comment line.
+            ('quoted-operator', "an echoed '<<' that opens no heredoc, git status, then an echoed commit word",
+             "echo 'a << b'; git status; echo commit", 'allow', None),
+            ('word-after-body', 'git status, a heredoc whose body names no commit, then an echoed commit word',
+             "git status\ncat <<'EOF'\nnotes\nEOF\necho commit", 'allow', None),
+            ('comment-after-body', 'git diff, a heredoc written to a file, then a comment naming commit',
+             "git diff --stat; cat <<'EOF' > notes.md\nsummary\nEOF\n# commit later", 'allow', None),
+        )
+        for _plh_suffix, _plh_cwd in (('', plr), ('-plf', plf)):
+            for _plh_name, _plh_what, _plh_command, _plh_want, _plh_detail in _plh_rows:
+                pexpect('(pl-heredoc-commit-{}{}) {} {}'.format(
+                            _plh_name, _plh_suffix, _plh_what, 'DENIES' if _plh_want == 'deny' else 'ALLOWS'),
+                        _plh_command, _plh_want, cwd=_plh_cwd, detail=_plh_detail)
 
         # Hidden-shape vectors: the
         # nested-quote lexer is RESTORED, so a push hidden behind a nested-substitution heredoc opener is
@@ -19562,9 +19647,10 @@ def _main_isolated(monitor):
         # top-level here-document naming git diff or git commit after the form with an apostrophe, where main's
         # lex fails and its raw scans read that body: diff_source_pretool notes and commit_msg_subst and
         # protected_line deny there, through their failed-lex floors. paren-heredoc-commit is the same with a
-        # body main reads to an earlier ')' and lexes, which excludes that here-document's body: protected_line
-        # and commit_msg_subst allow there as on main (both denied on the code before this change). The
-        # close-line rows hold the ')"' line in a quoted body, where main's lex fails and gate_weakening and
+        # body main reads to an earlier ')' and lexes, which excludes that here-document's body: commit_msg_subst
+        # allows there as on main (it and protected_line both denied on the code before the change this
+        # paragraph describes), and protected_line, which also reads each quoted here-document body the lexer
+        # skips, denies through the commit prose in the X body (an amended record, below). The close-line rows hold the ')"' line in a quoted body, where main's lex fails and gate_weakening and
         # commit_msg_subst deny through their fallback as main does (bash 5.3.9 reads that line as body text
         # and runs nothing on it, an over-deny main had). On the code before this change 27 rows fail (measured
         # by running this suite on its module): early-close-switch, the case rows, the paren rows, close-diff,
@@ -19617,7 +19703,11 @@ def _main_isolated(monitor):
         _hd_main_rows += [
             ("heredoc-diff", "echo \"$(cat <<'EOF'\n# Don't\nEOF\n)\"\ncat <<'X'\ngit diff\nX", "ANAAAAAAAA"),
             ("heredoc-commit", "echo \"$(cat <<'EOF'\n# Don't\nEOF\n)\"\ncat <<'X'\ngit commit -m y\nX", "AAAAAAAADD"),
-            ("paren-heredoc-commit", "echo \"$(cat <<'EOF'\n)\nEOF\n)\"\ncat <<'X'\ngit commit -m y\nX", "AAAAAAAAAA"),
+            # AMENDED RECORD (one letter): protected_line reads each quoted here-document body the lexer
+            # skips, since the lexer leaves such a body out of every segment, so the commit prose in the X
+            # body denies there (a disclosed over-denial; main allows it). The D at the protected_line
+            # position replaces the recorded A. Every other letter is the record.
+            ("paren-heredoc-commit", "echo \"$(cat <<'EOF'\n)\nEOF\n)\"\ncat <<'X'\ngit commit -m y\nX", "AAAAAAAAAD"),
             ("close-line", "echo \"$(cat <<'EOF'\n)\"; " + _hd_nv + "\nEOF\n)\"", "DAAAAAAADD"),
             ("close-line-apostrophe", "echo \"$(cat <<'EOF'\n# Don't\n)\"; " + _hd_nv + "\nEOF\n)\"", "DAAAAAAADD"),
         ]
@@ -25509,7 +25599,10 @@ def _main_isolated(monitor):
             ('echo "git commit --no-verify -m x"', {"gate_weakening": "deny", "protected_line": "deny"}),
             ("echo 'git push --force origin main'", {"gate_weakening": "deny", "protected_line": "deny"}),
             ("echo '`git diff`'", {"gate_weakening": "deny", "diff_source_pretool": "allow-note"}),
-            ("cat <<'EOF'\nif true; then git commit --no-verify -m x; fi\nEOF", {"gate_weakening": "deny"}))
+            # protected_line reads each quoted here-document body the lexer skips for git and then
+            # commit, so this prose inside a here-document body denies there too (a disclosed over-denial).
+            ("cat <<'EOF'\nif true; then git commit --no-verify -m x; fi\nEOF",
+             {"gate_weakening": "deny", "protected_line": "deny"}))
         for crd_number, (crd_command, crd_decided) in enumerate(crd_controls, 1):
             for crd_guard in crd_guards:
                 crd_want = crd_decided.get(crd_guard, "allow")

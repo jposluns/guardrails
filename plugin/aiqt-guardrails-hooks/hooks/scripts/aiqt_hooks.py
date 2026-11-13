@@ -13272,10 +13272,13 @@ _PUSH_LONG_ARG_OPTS = frozenset((
     "--push-option", "--repo", "--receive-pack", "--exec", "--recurse-submodules"))
 _PUSH_SHORT_ARG_OPTS = frozenset(("o",))  # bare letter: the char-scan tests body chars; '-o <val>' skips its value, attached '-o<val>' does not
 
-# Fallback-only raw-string probes, used when the shared tokenizer cannot parse the command (an unbalanced quote or an unsupported construct);
-# mirrors the _RAW_DIFF_PRODUCER_RE / _RAW_LOSSY_VERB_RE posture: conservative, over-matching, never
-# a silent allow. _RAW_PUSH_RE/_RAW_COMMIT_RE pair git with a LATER verb (a _RawSequence, case-folded,
-# the gap spanning newlines). _RAW_PUSH_FORCE_RE spots a force or sweep spelling: '--for[a-z-]*' covers
+# Raw-string probes, read when the shared tokenizer cannot parse the command (an unbalanced quote or an
+# unsupported construct) and also on parsed commands: the push backstop (_raw_push_match) reads every
+# command, and the commit recognizer reads each unclassified segment and each quoted here-document body
+# the lexer skips, which it leaves out of every segment, or the whole command where those bodies cannot be
+# delimited (_commit_command_syntax). They mirror the _RAW_DIFF_PRODUCER_RE / _RAW_LOSSY_VERB_RE posture:
+# conservative, over-matching, never a silent allow. _RAW_PUSH_RE/_RAW_COMMIT_RE pair git with a LATER
+# verb (a _RawSequence, case-folded, the gap spanning newlines). _RAW_PUSH_FORCE_RE spots a force or sweep spelling: '--for[a-z-]*' covers
 # --for/--force/--force-with-lease/--force-if-includes; the short cluster scan now admits a digit
 # ('-[A-Za-z0-9]*f'), so an ipv4/ipv6 '-4f'/'-6f' clustered with force is caught, and its
 # disclosed false-hit on an attached -o value ending in f ('-of') now also covers '-o4f'; the short
@@ -13619,6 +13622,14 @@ def _commit_apparent_segment(seg, named=False):
     command's text names a git configuration variable or the hook's environment
     carries one naming an alias (_git_alias_outside, _git_alias_segment).
 
+    A quoted here-document's body is in no segment's argv or raw text (unless it
+    sits inside a double-quoted word), so this scan never reads it;
+    _commit_command_syntax reads each body the lexer skips beside it
+    (_commit_heredoc_bodies), raw and de-quoted, so a commit in a body the same
+    command runs denies, and so does prose naming a commit inside a here-document
+    body (a disclosed over-refusal). Only where the bodies cannot be delimited does
+    it read the whole command instead.
+
     This does not discover every renamed executable, alias, function, opaque script,
     or unparseable fragmentation. Detection is not a Bash interpreter.
     """
@@ -13652,6 +13663,43 @@ def _commit_quote_bytes_known(raw):
             quote = c
         i += 1
     return True
+
+
+# The _LexPlaces kinds of a quoted here-document body the lexer skips: "heredoc" for a body whose end it
+# proves is where bash ends it, and "body" for one whose end it cannot prove (_commit_heredoc_bodies).
+_COMMIT_BODY_PLACES = frozenset(("heredoc", "body"))
+
+
+def _commit_heredoc_bodies(command):
+    """The text of every quoted here-document body the shared lexer skips in command, one string per run
+    of bodies, or None where the bodies cannot be delimited.
+
+    The lexer records each body it skips as a _LexPlaces span, from the first line after the line that
+    opens it through its delimiter line (one span covers the bodies a single line opens, delimiter lines
+    included; a body with no delimiter line runs to the end of the command), and the commit message
+    form's body in a substitution from its '<<' to the ')' that closes it. A body skipped between
+    segments is in no segment's argv or raw text; one inside a word (a substitution a double-quoted
+    string holds) is in that segment's raw text too. Where a lex read a body in a substitution that
+    main's skip reads otherwise (MAIN'S DECISION AS A FLOOR, above _MainHashReading), the spans of main's
+    reading are taken beside the lex's own, so text either reading skips is read; inside
+    _SubstHeredocFloor only main's reading is lexed, as _lex_readings lexes only it there. None where a
+    lex that records the spans raises: a '#' whose comment reading depends on context (the lex records
+    one reading only), main's reading failing where it is needed, or any construct the lexer refuses."""
+    readings = []
+    try:
+        misread = True
+        if not _SubstHeredocs.main_lex:
+            with _LexPlaces() as spans:
+                _lexed, misread = _lex_reading(command, False, {})
+            readings.append(spans)
+        if misread:
+            with _LexPlaces() as spans:
+                _main_reading(command, False)
+            readings.append(spans)
+    except ValueError:
+        return None
+    return [command[start:end] for spans in readings for start, end, kind in spans
+            if kind in _COMMIT_BODY_PLACES]
 
 
 def _commit_command_syntax(command):
@@ -13701,6 +13749,20 @@ def _commit_command_syntax(command):
     named = _git_alias_outside(command)
     hidden = any(_commit_apparent_segment(seg, named)
                  for seg, step in zip(records, steps) if step is None)
+    # The lexer leaves a quoted here-document's body out of every segment's argv and raw text (unless the body
+    # sits inside a double-quoted word), so the scan above cannot see a commit in a body the same command runs
+    # (bash <<'EOF', sh -s, cat or tee writing the body to a file a later segment runs, or a substitution
+    # capturing it for eval). Each body the lexer skips is therefore read on its own (_commit_heredoc_bodies),
+    # its raw text and beside it its de-quoted copy (_dequoted_text), so a quote-split or continuation-split
+    # body ('git co''mmit') is read too. Only the bodies are read: text outside every body is read by the
+    # segment scan above alone. A body naming git and then commit denies whatever command it is fed to (prose
+    # in a body fed to cat too, a disclosed over-refusal). Where the bodies cannot be delimited
+    # (_commit_heredoc_bodies gives None), the whole command is read instead, raw and de-quoted, so a git word
+    # and a later commit word anywhere in it deny (a disclosed over-refusal).
+    if not hidden and "<" in command:
+        bodies = _commit_heredoc_bodies(command)
+        hidden = any(_RAW_COMMIT_RE.search(text) or _RAW_COMMIT_RE.search(_dequoted_text(text))
+                     for text in ((command,) if bodies is None else bodies))
     if not commits and not hidden:
         return _CommitSyntax("outside", records, steps, (), "no apparent direct commit")
     if (len(records) == 1 and steps[0] is not None
@@ -14735,6 +14797,20 @@ def protected_line(data):
     apparent commit or push its text names (_hash_doubt_scan) denies, and so does
     text holding quoting that scan does not decode (_hash_doubt_opaque), which the
     commit recognizer reads as an apparent commit.
+
+    The lexer leaves a quoted here-document's body out of every segment (unless it
+    sits inside a double-quoted word), so each body the lexer skips in a parsed
+    command is also read, raw and de-quoted, for git and then commit
+    (_commit_command_syntax, _commit_heredoc_bodies): a commit in a body the same
+    command runs (bash <<'EOF', sh -s, or cat or tee writing a file a later segment
+    runs) denies, and so does prose naming a commit inside a here-document body, a
+    disclosed over-refusal. Text outside every body is read by the segment scan
+    alone. Where the bodies cannot be delimited (a lex that records them raises,
+    such as on a '#' whose comment reading depends on context), the whole command is
+    read instead, so a git word and a later commit word anywhere in it deny, a
+    disclosed over-refusal. A commit run from text this guard reads only as data
+    across separate Bash calls (a file written in one call and run in a later one)
+    or built at run time stays outside it.
 
     A raw-text backstop (_raw_push_guard) scans the unmodified command on every
     call, before any parsing, and denies a force/delete/mirror push spelling paired with a
