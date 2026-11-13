@@ -2268,14 +2268,15 @@ def _test_clock_inject(failures, tmp):
     /etc/localtime, a TZ that only looks like a POSIX rule (an end transition time whose hours, minutes or
     seconds are out of range included), and a rule whose names or offsets the conversion does not match
     each give no local time and the reason for that case. ck-rule-*: _clock_posix_rule accepts and refuses
-    each number just inside and just outside its range (each transition time at the start and at the end of
-    the rule: hours at most 24 and minutes and seconds at most 59, so 24:59:59 is accepted and 25:00 is
-    refused), refuses a daylight name with no transition rule, and names the rule's (abbreviation, offset)
-    pairs. ck-localtime-*: _clock_regular_readable on real files in tmp: a regular file and a symlink to
-    one read True; a directory, an absent path, a dangling symlink, a FIFO and (when not root) a mode 000
-    file read False. ck-malformed-*: main() with an unparseable or a non-object payload warns on exit 0 and
-    adds no reading for both modes. ck-live: the unreplaced clock gives a line of the known or the unknown
-    shape."""
+    each number just inside and just outside its range (in each offset, the daylight offset included, and
+    in each transition time at the start and at the end of the rule, hours are at most 24 and minutes and
+    seconds at most 59; a transition time of 24:59:59 is accepted and 25:00 is refused), refuses a daylight
+    name with no transition rule, and names the rule's (abbreviation, offset) pairs, a daylight offset with
+    minutes among them. ck-localtime-*: _clock_regular_readable on real files in tmp: a regular file and a
+    symlink to one read True; a directory, an absent path, a dangling symlink, a FIFO and (when not root) a
+    mode 000 file read False. ck-malformed-*: main() with an unparseable or a non-object payload warns on
+    exit 0 and adds no reading for both modes. ck-live: the unreplaced clock gives a line of the known or
+    the unknown shape."""
     utc = datetime.timezone.utc
     fixed_now = datetime.datetime(2026, 9, 23, 17, 45, 2, tzinfo=utc)
     edt = datetime.timezone(datetime.timedelta(hours=-4), "EDT")
@@ -2475,7 +2476,8 @@ def _test_clock_inject(failures, tmp):
                             "and a reason holding {!r}, got {!r} and {!r}".format(label, want, local, reason))
     for text in ("ABC24", "ABC5:59", "ABC5:30:59", "ABC5DEF,J1,J365", "ABC5DEF,0,365", "ABC5DEF,M12.5.6,M1.1.0",
                  "ABC5DEF,M3.2.0/24,M11.1.0/0:59:59", "ABC5DEF,M3.2.0/24:59:59,M11.1.0",
-                 "ABC5DEF,M3.2.0,M11.1.0/24:59:59", "ABC5DEF24,M3.2.0,M11.1.0", "<AB+1>5<AB+2>,M3.2.0,M11.1.0"):
+                 "ABC5DEF,M3.2.0,M11.1.0/24:59:59", "ABC5DEF24,M3.2.0,M11.1.0", "ABC5DEF4:59:59,M3.2.0,M11.1.0",
+                 "<AB+1>5<AB+2>,M3.2.0,M11.1.0"):
         if aiqt_hooks._clock_posix_rule(text) is None:
             failures.append("(ck-rule-accepts-{}) the complete POSIX TZ rule {!r} must be accepted".format(
                 text, text))
@@ -2485,13 +2487,15 @@ def _test_clock_inject(failures, tmp):
                  "ABC5DEF,M3.2.0/2:60,M11.1.0", "ABC5DEF,M3.2.0/-2,M11.1.0", "ABC5DEF,M3.2.0/25:00,M11.1.0",
                  "ABC5DEF,M3.2.0/2:00:60,M11.1.0", "ABC5DEF,M3.2.0,M11.1.0/25", "ABC5DEF,M3.2.0,M11.1.0/25:00",
                  "ABC5DEF,M3.2.0,M11.1.0/2:60", "ABC5DEF,M3.2.0,M11.1.0/2:00:60", "ABC5DEF,M3.2.0,M11.1.0/-2",
-                 "ABC5DEF25,M3.2.0,M11.1.0",
+                 "ABC5DEF25,M3.2.0,M11.1.0", "ABC5DEF4:60,M3.2.0,M11.1.0", "ABC5DEF4:30:60,M3.2.0,M11.1.0",
                  "ABC5DEF", "ABC5garbage", "ABC5DEF,M3.2.0", "ABC5DEF,garbage", "AB5", ":ABC5", "ABC5 ", "ABC"):
         if aiqt_hooks._clock_posix_rule(text) is not None:
             failures.append("(ck-rule-refuses-{}) {!r} is not a complete POSIX TZ rule and must be refused"
                             .format(text, text))
     for text, want in (("ABC5DEF,M3.2.0,M11.1.0", {("ABC", td(hours=-5)), ("DEF", td(hours=-4))}),
                        ("ABC5DEF6,J60/2,300/3", {("ABC", td(hours=-5)), ("DEF", td(hours=-6))}),
+                       ("ABC5DEF4:30,M3.2.0,M11.1.0",
+                        {("ABC", td(hours=-5)), ("DEF", -td(hours=4, minutes=30))}),
                        ("<+0530>-5:30", {("+0530", td(hours=5, minutes=30))}),
                        ("ABC-0:00:01", {("ABC", td(seconds=1))})):
         got = aiqt_hooks._clock_posix_rule(text)

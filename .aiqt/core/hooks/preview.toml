@@ -43,8 +43,9 @@ rules = []
 
 # clock-inject stays in the preview channel beside the plugin's clock-inject-post and clock-inject-failure
 # controls (manifest.toml), which add a host clock line without it: the preview also reports the session's
-# elapsed time from a configured lease and stays silent in a worker process, which the plugin controls do
-# not port, and the stamp-truth-stop.py self-test checks the code it shares with clock-inject.py.
+# elapsed time from a configured lease and in a worker process writes nothing to stdout (a skip line to
+# stderr), which the plugin controls do not port, and the stamp-truth-stop.py self-test checks the code it
+# shares with clock-inject.py.
 [[preview]]
 id = "clock-inject"
 rules = ["clmobs", "tstamp"]

@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.0.5"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "0ec883f7671ea36f74bb78f6c55ed9613e552f810387bd190cf831ddbc94b4bd"
+tree-sha256 = "2bd97f30dd696c0a2f97511cfa785031609014260c1756568b711ed0b08817bf"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -82,13 +82,13 @@ sha256 = "d6e9ab43b1c98a9b5cf7023b7b43cfd447607673e6128bfd06c4812551d32c7e"
 
 [[sources]]
 path = ".aiqt/core/hooks/manifest.toml"
-bytes = 497760
-sha256 = "adf5613a1352ab492e33fcb8beeec5f7b1053ff35a64fbbdd0a818526a5ebe28"
+bytes = 497870
+sha256 = "387ff3de1fd4531e3795e0ab4f8e2823b290d87e0be13d67432fd00fbeec3cd5"
 
 [[sources]]
 path = ".aiqt/core/hooks/preview.toml"
-bytes = 20676
-sha256 = "ff20b40fbf9efceed3fe42e53817353c226a790ced27485a04b5c24b56f1a131"
+bytes = 20714
+sha256 = "e7343b8986439298eb8631c2130956133543422c3a476c6774268fabbcde48c4"
 
 [[sources]]
 path = ".aiqt/core/hooks/scripts/aiqt_hooks.py"
@@ -827,8 +827,8 @@ sha256 = "0b38d8d8ebf794ff90d1966dd4032ceb40562575431b9dac1507e41f899aa16f"
 
 [[sources]]
 path = ".aiqt/enforceability.json"
-bytes = 1134289
-sha256 = "29d8ed3750783cf89fd8ed87465eff3db13d7577468a5308373daa69684a9e7b"
+bytes = 1134399
+sha256 = "fd9f7877459ae6d22d4192d8eee837c5f947c4c349f8daff67a8c36ac3e25c7d"
 
 [[sources]]
 path = ".aiqt/frozen.json"
@@ -2392,8 +2392,8 @@ sha256 = "854403d7fd810507f024d0ff23a6db4c8bcf8978ea92210d7536a247d5c0fd28"
 
 [[sources]]
 path = "ENFORCEMENT.md"
-bytes = 663183
-sha256 = "802c3b415c65625dc576e8180519a5fc5be7b12ae5a7522a897e1418c84fe6d7"
+bytes = 663293
+sha256 = "ce01fcd3f87f12d08ce6d402e7fee59a55dcebaefb1119c45b85ae8fdfecfee9"
 
 [[sources]]
 path = "GEMINI.md"
@@ -3957,8 +3957,8 @@ sha256 = "dd0e5f2a6402329e70ad8e81e5cd63557683e24044cd3eb16686a60eaf81cae6"
 
 [[sources]]
 path = "site/enforcement.html"
-bytes = 724647
-sha256 = "5e56211ca6c71e24234871f83b0d55d585d81c5a3aa403063f369dc4dde60112"
+bytes = 724757
+sha256 = "e59989d3501866056cd527d2a499fd4e158689fb7fe0ee1b756eb5ec0778ad46"
 
 [[sources]]
 path = "site/evidence.html"
@@ -4667,8 +4667,8 @@ sha256 = "59f6155486925ab9adea0da0203964283937c0dc7543bcfba335d4ac0820279e"
 
 [[sources]]
 path = "tools/selftest_aiqt_hooks.py"
-bytes = 2335372
-sha256 = "db1230286d2c7bb80b599803817a4d6bd03c11b838bf9564fb6f4ecc5ef5cb57"
+bytes = 2335746
+sha256 = "b51f09169bbcfd33a07aa580927d62f3e8d07c613b03662d69b17e541cd10202"
 
 [[sources]]
 path = "tools/selftest_checks.toml"
