@@ -16942,22 +16942,29 @@ def _verification_sink_message(hit):
 # inside one, where return does end the function, is refused too (f() { cd /x; pytest || return 1; git push;
 # }; f, or a body written over several lines), a disclosed over-refusal; a check written right after the '{'
 # on its line (f() { pytest || return 1; git push; }; f) shares a segment with it, is not read as a check and
-# still allows. Only a bare exit is read as a stop, so an exit behind builtin, command or time (pytest ||
-# builtin exit 1; git push) is refused too, a disclosed over-refusal. Not judged, each a silent allow: a check
-# that pipes onward (pytest | tee log); a push after a parenthesis, so an exit inside a subshell ('|| (echo;
-# exit 1)'), which leaves only the subshell, still lets the push run; any reserved word between the check and
-# the push, even one that closes before it (if true; then :; fi); a check whose list goes on with '||' to a
-# command other than exit, or to an exit piped on (pytest || exit 1 | cat), whose success can hide the check's
-# failure from a later '|| exit', a push later in that list or a kept status; any '&&' or '||' after a kept
-# status counted as its test, whichever way it branches, once its and-or list holds the push or guards, so [ $?
-# -eq 0 ] || return 1; git push still allows though the return fails and the push runs; a function or alias
-# that redefines wait, test, '[' or exit; and a nameref that binds the variable a pid is saved in to another
-# name (declare -n p=_; pytest & p=$!; wait $p && git push, which waits on '_'). The judgement of each list end
-# is made once and shared by every check whose list ends there, so the whole reading takes time linear in the
-# records.
+# still allows. Only an exit that bash runs is read as a stop (_gate_push_stop): the word exactly exit, at most
+# one argument of ASCII digits whose value bash can hold, and every redirection to /dev/null or a duplicate of
+# descriptor 1 or 2, so pytest || /bin/exit 1, || exit abc and || exit 1 < /nonexistent, after which bash runs
+# on to the push, are refused. An exit behind builtin, command or time (pytest || builtin exit 1; git push),
+# exit -- 1, exit 1 1 and an argument that is not literal digits (exit "$rc") are refused too, a disclosed
+# over-refusal. Not judged, each a silent allow: a check that pipes onward (pytest | tee log); a push after a
+# parenthesis, so an exit inside a subshell ('|| (echo; exit 1)'), which leaves only the subshell, still lets
+# the push run; any reserved word between the check and the push, even one that closes before it (if true; then
+# :; fi); a check whose list goes on with '||' to a command other than exit, or to an exit piped on (pytest ||
+# exit 1 | cat), whose success can hide the check's failure from a later '|| exit', a push later in that list
+# or a kept status; any '&&' or '||' after a kept status counted as its test, whichever way it branches, once
+# its and-or list holds the push or guards, so [ $? -eq 0 ] || return 1; git push still allows though the
+# return fails and the push runs; a function or alias that redefines wait, test, '[' or exit; and a nameref
+# that binds the variable a pid is saved in to another name (declare -n p=_; pytest & p=$!; wait $p && git
+# push, which waits on '_'). The judgement of each list end is made once and shared by every check whose list
+# ends there, so the whole reading takes time linear in the records.
 _GATE_PUSH_LIST_ENDS = frozenset((";", "", "&"))
 _GATE_PUSH_ANDOR = frozenset(("&&", "||"))
 _GATE_PUSH_STOPS = frozenset(("exit",))
+# The status argument of an exit that bash reads as a number: ASCII digits (str.isdigit would take other
+# scripts' digits, which bash refuses) whose value fits the intmax_t bash parses it into.
+_GATE_EXIT_DIGITS_RE = re.compile(r"[0-9]+\Z")
+_GATE_EXIT_MAX = "9223372036854775807"
 _GATE_PUSH_DRY = frozenset(("-n", "--dry-run"))
 # The git push long options that take their value as the next word (git-push(1)): a -n after one of them,
 # or after any prefix of one that git may read as it, is that value, not --dry-run (git push -o -n origin
@@ -16989,8 +16996,8 @@ _GATE_PID_SPECIAL = frozenset((
 
 def _gate_push_argv(seg):
     """The argv of the git push a segment runs (VAR=value words and the env, nice, timeout and time wrappers
-    peeled, _gate_peel), or None; a push carrying -n or --dry-run publishes nothing (_gate_push_dry), so it
-    is None too."""
+    peeled, _gate_peel), or None; a push whose options leave a dry run on (_gate_push_dry: a -n or --dry-run
+    that no later --no-dry-run cancels) publishes nothing, so it is None too."""
     argv = _gate_peel(seg.argv) if seg.argv else None
     if not argv or _gate_word(argv[0]) != "git":
         return None
@@ -17001,29 +17008,63 @@ def _gate_push_argv(seg):
 
 
 def _gate_push_dry(args):
-    """True when the options of a git push (args, the words after push) ask for a dry run: a -n or --dry-run
-    word, or a short cluster whose letters reach an n (-vn), read up to a '--' or '--end-of-options' (a word
-    after it is a refspec). A word that is the value of the option before it is skipped: the next word after
-    -o, after a short cluster ending in o, or after a long option with no '=' that is a prefix of a
-    _GATE_PUSH_VALUED option; an o inside a short cluster takes the rest of the word as its value (-on)."""
+    """True when the options of a git push (args, the words after push) leave a dry run on. git honours the
+    last of them, so a dry state is set by a -n word, a short cluster whose letters reach an n (-vn), or
+    --dry-run or a prefix of it git accepts (--dr, --dry), and cleared by --no-dry-run or a prefix of it git
+    accepts (--no-dr, --no-dry; git refuses the shorter --no-d as ambiguous), read up to a '--' or
+    '--end-of-options' (a word after it is the repository or a refspec, never an option). A word that is the
+    value of the option before it is skipped: the next word after -o, after a short cluster ending in o, or
+    after a long option with no '=' that is a prefix of a _GATE_PUSH_VALUED option; an o inside a short
+    cluster takes the rest of the word as its value (-on)."""
+    dry = False
     skip = False
     for tok in args:
         if skip:
             skip = False
             continue
         if tok in ("--", "--end-of-options"):
-            return False
+            break
         if tok in _GATE_PUSH_DRY:
-            return True
-        if tok.startswith("--"):
-            skip = "=" not in tok and any(name.startswith(tok) for name in _GATE_PUSH_VALUED)
+            dry = True
+        elif tok.startswith("--"):
+            if tok.startswith("--dr") and "--dry-run".startswith(tok):
+                dry = True
+            elif tok.startswith("--no-dr") and "--no-dry-run".startswith(tok):
+                dry = False
+            else:
+                skip = "=" not in tok and any(name.startswith(tok) for name in _GATE_PUSH_VALUED)
         elif tok.startswith("-") and len(tok) > 1:
             letters = tok[1:]
             cut = letters.find("o")
             if "n" in (letters if cut < 0 else letters[:cut]):
-                return True
+                dry = True
             skip = cut == len(letters) - 1
-    return False
+    return dry
+
+
+def _gate_push_stop(seg):
+    """True when a segment run after an '||' is an exit that bash runs, so it ends the shell: the word is
+    exactly a _GATE_PUSH_STOPS name (after any VAR=value words; a path such as /bin/exit or ./exit is a
+    command bash looks up, not the builtin), it has at most one argument and that argument is ASCII digits
+    whose value is at most _GATE_EXIT_MAX (bash refuses a word that is not a number it can hold, exit abc or
+    exit 9223372036854775808, and runs on), and every redirection goes to /dev/null or duplicates
+    descriptor 1 or 2 (a redirection that fails, exit 1 < /nonexistent or exit 1 2>&9, keeps the builtin
+    from running). The honest forms exit -- 1 and exit 1 1, which bash does stop at, are refused too, a
+    disclosed over-refusal, as is an argument that is not literal digits (exit $?, exit "$rc")."""
+    argv = seg.argv
+    idx = _command_word_index(argv)
+    if idx >= len(argv) or argv[idx] not in _GATE_PUSH_STOPS:
+        return False
+    rest = argv[idx + 1:]
+    if len(rest) > 1:
+        return False
+    if rest:
+        digits = rest[0].lstrip("0")
+        if _GATE_EXIT_DIGITS_RE.match(rest[0]) is None or len(digits) > len(_GATE_EXIT_MAX) or (
+                len(digits) == len(_GATE_EXIT_MAX) and digits > _GATE_EXIT_MAX):
+            return False
+    return all((r.target_class == "descriptor" and r.target in ("1", "2"))
+               or (r.target_class != "descriptor" and r.target == "/dev/null") for r in seg.redirects)
 
 
 def _gate_push_plain(seg):
@@ -17112,12 +17153,13 @@ def _gate_push_walk(records):
             list_end[j] = j
         elif sep not in ("(", ")"):
             # The list goes on to the next segment with a word: a push there, a segment that is not plain, or an
-            # '|| exit' (the check's failure stops the command there) leaves list_end None. An exit piped on,
-            # or in a list sent to the background, leaves only a subshell, so it does not stop. An '|| return'
-            # does not stop either: at the top level return fails and bash runs on.
+            # '|| exit' that bash runs (_gate_push_stop; the check's failure stops the command there) leaves
+            # list_end None. An exit piped on, or in a list sent to the background, leaves only a subshell, so
+            # it does not stop. An '|| return' does not stop either: at the top level return fails and bash runs
+            # on.
             nxt = records[k] if k < n else None
             if (nxt is not None and _gate_push_plain(nxt) and _gate_push_argv(nxt) is None
-                    and not (sep == "||" and _command_word(nxt.argv) in _GATE_PUSH_STOPS
+                    and not (sep == "||" and _gate_push_stop(nxt)
                              and nxt.sep_after not in _GATE_PIPES and run_end[k] in _GATE_GUARD_ENDS)):
                 list_end[j] = list_end[k]
     joins = [0] * (n + 1)
@@ -18768,33 +18810,39 @@ def gate_weakening(data):
     [ $? -eq 0 ] || exit 1 | cat; git push deny); after a '&' only a wait naming the check's own job, 'wait
     $!' or pid=$!; wait "$pid" (never through '_', which bash resets after every command), since a bare wait
     returns 0 and a wait on another job returns that job's status. It also allows a check whose list holds an '||
-    exit' not piped on, in a list ended by ';' or a newline (pytest || exit 1 & git push and pytest || exit 1 |
-    cat; git push deny), a push with a reserved word or a parenthesis anywhere on the way (an if, a loop, a case
-    or a group, whether or not the push is inside it), a push carrying -n or --dry-run (read up to a '--', and
-    never as the value of -o or another option that takes one, so git push -o -n origin feat denies), and a push
-    with no known check before it. An '|| return' is not credited as a stop, since at the top level return fails
-    and bash runs on (pytest || return 1; git push denies); function bodies are not tracked, so a check inside one
-    denies too (f() { cd /x; pytest || return 1; git push; }; f, or a body written over several lines), a
-    disclosed over-refusal, unless it is written right after the '{' on its line. Only a bare exit is read as a
-    stop, so an exit behind builtin, command or time (pytest || builtin exit 1; git push) denies too, a disclosed
-    over-refusal. Each list end is judged once, however many checks share it, so this reading takes time linear in
-    the lexed segments. Disclosed over-refusal: a wait on the check's job in any other form is not credited, so a
-    job spec (wait %%, wait %+, wait %1), an option (wait -n, wait -- $!), a redirected wait (wait $! 2>/dev/null)
-    and a kept status read through a pipe (printf %s $? | grep -qx 0 && git push) deny even where they keep the
-    check's status. Disclosed residual: a push in a later call, a check run inside a script the hook cannot read
-    (a CI script, bash -c or eval), and a check the hook does not recognise (a checker-shaped command off that
-    allow-list, such as tools/run_all_checks.sh run directly or a wrapper the peel does not resolve) are not
-    refused, nor is a check that pipes onward (pytest | tee log), a push behind such a wrapper (sudo, command),
-    one joined to the check by '||', one after an exit inside a subshell (pytest || (echo fail; exit 1); git push,
-    the exit leaving only the subshell), one after any reserved word, even one that closes before it (if true;
-    then :; fi; git push), one after a check whose list goes on with '||' to a command other than exit, or to an
-    exit piped on (pytest || exit 1 | cat; [ $? -eq 0 ] && git push), when that command's success hides the
-    check's failure from a later '|| exit', a push later in that list or a kept status (pytest || echo failed; git
-    push itself denies), one after a function or alias that redefines wait, test, '[' or exit, one after a nameref
-    that binds the variable a pid is saved in to another name (declare -n p=_; pytest & p=$!; wait $p && git
-    push), or one in a command the lexer cannot parse; any '&&' or '||' after a kept status counts as its test,
-    whichever way it branches, once its and-or list holds the push or guards as above, so [ $? -eq 0 ] || return
-    1; git push allows though at the top level the return fails and the push runs.
+    exit' that bash runs, not piped on, in a list ended by ';' or a newline (pytest || exit 1 & git push and
+    pytest || exit 1 | cat; git push deny), a push with a reserved word or a parenthesis anywhere on the way (an
+    if, a loop, a case or a group, whether or not the push is inside it), a push whose options leave a dry run on
+    (a -n, a short cluster reaching an n, or --dry-run or a prefix git accepts such as --dry, unless a later
+    --no-dry-run or a prefix such as --no-dry cancels it, since git honours the last; read up to a '--' or
+    '--end-of-options', and never as the value of -o or another option that takes one, so git push -o -n origin
+    feat and git push -n --no-dry-run origin feat deny), and a push with no known check before it. An '|| return'
+    is not credited as a stop, since at the top level return fails and bash runs on (pytest || return 1; git push
+    denies); function bodies are not tracked, so a check inside one denies too (f() { cd /x; pytest || return 1;
+    git push; }; f, or a body written over several lines), a disclosed over-refusal, unless it is written right
+    after the '{' on its line. Only an exit that bash runs is read as a stop: the word exactly exit, at most one
+    argument of ASCII digits whose value bash can hold, and every redirection to /dev/null or a duplicate of
+    descriptor 1 or 2, so pytest || /bin/exit 1, || exit abc and || exit 1 < /nonexistent, after which bash runs
+    on, deny. An exit behind builtin, command or time (pytest || builtin exit 1; git push), exit -- 1, exit 1 1
+    and an argument that is not literal digits (exit "$rc") deny too, a disclosed over-refusal. Each list end is
+    judged once, however many checks share it, so this reading takes time linear in the lexed segments. Disclosed
+    over-refusal: a wait on the check's job in any other form is not credited, so a job spec (wait %%, wait %+,
+    wait %1), an option (wait -n, wait -- $!), a redirected wait (wait $! 2>/dev/null) and a kept status read
+    through a pipe (printf %s $? | grep -qx 0 && git push) deny even where they keep the check's status. Disclosed
+    residual: a push in a later call, a check run inside a script the hook cannot read (a CI script, bash -c or
+    eval), and a check the hook does not recognise (a checker-shaped command off that allow-list, such as
+    tools/run_all_checks.sh run directly or a wrapper the peel does not resolve) are not refused, nor is a check
+    that pipes onward (pytest | tee log), a push behind such a wrapper (sudo, command), one joined to the check by
+    '||', one after an exit inside a subshell (pytest || (echo fail; exit 1); git push, the exit leaving only the
+    subshell), one after any reserved word, even one that closes before it (if true; then :; fi; git push), one
+    after a check whose list goes on with '||' to a command other than exit, or to an exit piped on (pytest ||
+    exit 1 | cat; [ $? -eq 0 ] && git push), when that command's success hides the check's failure from a later
+    '|| exit', a push later in that list or a kept status (pytest || echo failed; git push itself denies), one
+    after a function or alias that redefines wait, test, '[' or exit, one after a nameref that binds the variable
+    a pid is saved in to another name (declare -n p=_; pytest & p=$!; wait $p && git push), or one in a command
+    the lexer cannot parse; any '&&' or '||' after a kept status counts as its test, whichever way it branches,
+    once its and-or list holds the push or guards as above, so [ $? -eq 0 ] || return 1; git push allows though at
+    the top level the return fails and the push runs.
     An inline set -e is not credited (a disclosed over-refusal of set -e; check; git push), since in this
     tool an inline set -e was seen not to stop a later step (inline_errexit).
     Disclosed residuals: R1 a check inside an sh -c/bash -c, eval or

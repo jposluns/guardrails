@@ -24131,6 +24131,42 @@ def _main_isolated(monitor):
              "pytest; git push -vo -n origin feat"),
             ("(gw-cp-r41) -on is the push option n, not a dry run, denies",
              "pytest; git push -on origin feat"),
+            # git honours the last of --dry-run and --no-dry-run (or a prefix of either it accepts), so a later
+            # --no-dry-run cancels an earlier -n and git pushes.
+            ("(gw-cp-r42) -n then --no-dry-run pushes, denies", "pytest; git push -n --no-dry-run origin feat"),
+            ("(gw-cp-r43) --dry-run then --no-dry-run pushes, denies",
+             "pytest; git push --dry-run --no-dry-run origin feat"),
+            ("(gw-cp-r44) a cluster -vn then --no-dry-run pushes, denies",
+             "pytest; git push -vn --no-dry-run origin feat"),
+            ("(gw-cp-r45) -nv then the prefix --no-dry pushes, denies",
+             "pytest; git push -nv --no-dry --push-option=x origin feat"),
+            ("(gw-cp-r46) -n then the shortest prefix git accepts, --no-dr, pushes, denies",
+             "pytest; git push -n --no-dr origin feat"),
+            ("(gw-cp-r47) the prefix --dry then --no-dry-run pushes, denies",
+             "pytest; git push --dry --no-dry-run origin feat"),
+            # Only an exit that bash runs stops: a path is a command lookup, a failing redirection keeps the
+            # builtin from running, and an argument bash cannot read as a number makes it run on.
+            ("(gw-cp-r48) '|| /bin/exit 1' is no builtin exit, denies", "pytest || /bin/exit 1; git push origin feat"),
+            ("(gw-cp-r49) '|| ./exit 1' is no builtin exit, denies", "pytest || ./exit 1; git push origin feat"),
+            ("(gw-cp-r50) an exit whose input redirection fails does not run, denies",
+             "pytest || exit 1 < /nonexistent; git push origin feat"),
+            ("(gw-cp-r51) an exit duplicating a closed descriptor does not run, denies",
+             "pytest || exit 1 2>&9; git push origin feat"),
+            ("(gw-cp-r52) an exit whose output file cannot be made does not run, denies",
+             "pytest || exit 1 > /nonexistent/dir/x; git push origin feat"),
+            ("(gw-cp-r53) exit abc is no number, bash runs on, denies", "pytest || exit abc; git push origin feat"),
+            ("(gw-cp-r54) exit 9223372036854775808 overflows, bash runs on, denies",
+             "pytest || exit 9223372036854775808; git push origin feat"),
+            ("(gw-cp-r55) an exit argument in non-ASCII digits is no number to bash, denies",
+             "pytest || exit ١; git push origin feat"),
+            ("(gw-cp-r56) exit -- 1 is refused, a disclosed over-refusal, denies",
+             "pytest || exit -- 1; git push origin feat"),
+            ("(gw-cp-r57) exit 1 1 is refused, a disclosed over-refusal, denies",
+             "pytest || exit 1 1; git push origin feat"),
+            # A word after '--' or '--end-of-options' is the repository or a refspec, never a dry run.
+            ("(gw-cp-r58) a -n after '--' is no dry run, denies", "pytest; git push -- origin -n"),
+            ("(gw-cp-r59) a -n after '--end-of-options' is no dry run, denies",
+             "pytest; git push --end-of-options origin -n"),
         ]
         _cp_allowed = [
             ("(gw-cp-a1) check && git push allows", "pytest && git push origin feat"),
@@ -24176,6 +24212,18 @@ def _main_isolated(monitor):
             ("(gw-cp-a25) a -n after the operands is still a dry run, allows", "pytest; git push origin feat -n"),
             ("(gw-cp-a26) a -n after a push option's value is a dry run, allows",
              "pytest; git push -o ci.skip -n origin feat"),
+            ("(gw-cp-a27) an exit with stderr to /dev/null still stops, allows",
+             "pytest || exit 1 2>/dev/null; git push origin feat"),
+            ("(gw-cp-a28) an exit with output to /dev/null and 2>&1 still stops, allows",
+             "pytest || exit 1 >/dev/null 2>&1; git push origin feat"),
+            ("(gw-cp-a29) exit 9223372036854775807, the largest status bash reads, stops, allows",
+             "pytest || exit 9223372036854775807; git push origin feat"),
+            ("(gw-cp-a30) an exit after an assignment still stops, allows", "pytest || X=1 exit 1; git push origin feat"),
+            ("(gw-cp-a31) --no-dry-run then -n: the last wins, a dry run, allows",
+             "pytest; git push --no-dry-run -n origin feat"),
+            ("(gw-cp-a32) a -n before '--' is a dry run, allows", "pytest; git push -n -- origin feat"),
+            ("(gw-cp-a33) the prefix --dry is a dry run, allows", "pytest; git push --dry origin feat"),
+            ("(gw-cp-a34) the prefix --dry-r is a dry run, allows", "pytest; git push --dry-r origin feat"),
         ]
         for _cp_label, _cp_cmd in _cp_refused:
             gexpect(_cp_label, _cp_cmd, "deny")
@@ -24217,6 +24265,18 @@ def _main_isolated(monitor):
                                     "row does not test the option-value reading".format(_cp_label))
         finally:
             aiqt_hooks._gate_push_dry = _cp_dry
+        # With any word whose basename is exit read as a stop again, whatever its arguments and redirections,
+        # each row whose exit bash does not run turns red.
+        _cp_stop = aiqt_hooks._gate_push_stop
+        aiqt_hooks._gate_push_stop = lambda seg: aiqt_hooks._command_word(seg.argv) in aiqt_hooks._GATE_PUSH_STOPS
+        try:
+            for _cp_label, _cp_cmd in _cp_refused:
+                if (_cp_label.startswith(tuple("(gw-cp-r{})".format(_n) for _n in range(48, 58)))
+                        and _decision(gwg, _cp_cmd) == "deny"):
+                    failures.append("{} (flip): with any exit word read as a stop the row still denies, so the "
+                                    "row does not test the stop reading".format(_cp_label))
+        finally:
+            aiqt_hooks._gate_push_stop = _cp_stop
         # Round 4: the deny is held to the canonical shape (a simple first-stage verification run piped through plain
         # filters into a stage that cuts its stdin); every form named in the first QA keeps its new verdict here.
         _ct_r4 = [
