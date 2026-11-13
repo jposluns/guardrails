@@ -4337,10 +4337,15 @@ def _test_pgrep_self_match(failures):
 # assignments, then the redirections, a here-document body among them; cond-end read the status of the
 # [[ ]] command itself), and so were the for-arith-*, line-continuation, case-second-pattern, case-esac-word,
 # heredoc-strip-later-line, cond-glued-redirect, cond-glued-amp-redirect and ansi-c-escaped rows (the
-# for-arith-and, -or and -pipe rows printed their loop line under bash and nothing under --posix). The
-# in-body-after-subst row read 0 under bash: it pins the documented NOT SEEN limit that a read inside a
-# substitution body is not judged. The remaining rows pin the reading's own quoting, comment and
-# command-boundary rules.
+# for-arith-and, -or and -pipe rows printed their loop line under bash and nothing under --posix), and so were
+# the for-do-*, for-brace-assign-read, time-*, coproc-*, if-*-then-* and while-arith-do-assign fire rows (each
+# read or printed the substitution's status under bash and the earlier status under --posix, where the time -p
+# and time -- rows are a syntax error; the if-*-then-assign and while-arith-do-assign rows read the 1 of
+# $(false) under bash and the condition's 0 under --posix) and the for-do-assignment-only and if-*-then-read
+# quiet rows (the assignment-only command read 0, as above; the if rows read the 0 of the (( )) or [[ ]]
+# condition under both). The in-body-after-subst row read 0 under bash: it pins the documented NOT SEEN limit
+# that a read inside a substitution body is not judged. The remaining rows pin the reading's own quoting,
+# comment and command-boundary rules.
 # No row executes a command here: the handler is called directly.
 _SAS_FIRE_ROWS = (
     ("(sas-fire-a) substitution in double quotes", 'false; echo "x $(true): rc=$?"'),
@@ -4398,6 +4403,40 @@ _SAS_FIRE_ROWS = (
      'false; echo $(case a in b) :;; a) true;; esac) $?'),
     ("(sas-fire-case-esac-word) an esac word inside a case arm",
      'false; echo $(case a in a) echo esac;; b) true;; esac) $?'),
+    ("(sas-fire-for-do-arith-shift) a later line after a << shift in (( )) right after for (( )) do",
+     'for ((k=0; k<1; k++)) do (( y = 1<<2 )); done\nfalse; RC=$? env "SHA=$(true)" printenv RC'),
+    ("(sas-fire-for-do-cond-and) [[ ... && ... ]] right after for (( )) do",
+     'false; for ((k=0; k<1; k++)) do [[ -n "$(true)x" && $? -eq 0 ]] && echo zero; done'),
+    ("(sas-fire-for-do-arith-pipe) | inside (( )) right after for (( )) do",
+     'false; for ((k=0; k<1; k++)) do (( x = $(echo 2) | $? )); echo "x=$x"; done'),
+    ("(sas-fire-for-do-assign-read) leading assignment read right after for (( )) do",
+     'false; for ((k=0; k<1; k++)) do RC=$? env "SHA=$(true)" printenv RC; done'),
+    ("(sas-fire-for-brace-assign-read) leading assignment read right after for (( )) {",
+     'false; for ((k=0; k<1; k++)) { RC=$? env "SHA=$(true)" printenv RC; }'),
+    ("(sas-fire-for-do-for-arith) a for (( )) header right after for (( )) do",
+     'false; for ((k=0; k<1; k++)) do for (( i=$(echo 0); i < 1 && $? == 0; i++ )); do echo zero; done; done'),
+    ("(sas-fire-time-p-for-arith) a for (( )) header after time -p",
+     'false; time -p for (( i=$(echo 0); i < 1 && $? == 0; i++ )); do echo zero; done'),
+    ("(sas-fire-time-dashdash-for-arith) a for (( )) header after time --",
+     'false; time -- for (( i=$(echo 0); i < 1 && $? == 0; i++ )); do echo zero; done'),
+    ("(sas-fire-time-p-dashdash-for-arith) a for (( )) header after time -p --",
+     'false; time -p -- for (( i=$(echo 0); i < 1 && $? == 0; i++ )); do echo zero; done'),
+    ("(sas-fire-time-p-cond) [[ ... && ... ]] after time -p",
+     'false; time -p [[ -n "$(true)x" && $? -eq 0 ]] && echo zero'),
+    ("(sas-fire-time-p-assign-read) leading assignment read after time -p",
+     'false; time -p RC=$? env "SHA=$(true)" printenv RC'),
+    ("(sas-fire-coproc-arith-shift) a later line after a << shift in (( )) after coproc",
+     'coproc (( y = 1<<2 ))\nfalse; RC=$? env "SHA=$(true)" printenv RC'),
+    ("(sas-fire-coproc-for-arith-shift) a later line after a << shift in a for (( )) header after coproc",
+     'coproc for ((i=1<<0; i<1; i++)); do :; done\nfalse; RC=$? env "SHA=$(true)" printenv RC'),
+    ("(sas-fire-if-arith-then-assign) leading assignment read right after if (( )) then",
+     'if (( 1 )) then RC=$? env "SHA=$(false)" printenv RC; fi'),
+    ("(sas-fire-while-arith-do-assign) leading assignment read right after while (( )) do",
+     'k=0; while (( k++ < 1 )) do RC=$? env "SHA=$(false)" printenv RC; done'),
+    ("(sas-fire-if-cond-then-assign) leading assignment read right after if [[ ]] then",
+     'if [[ 1 ]] then RC=$? env "SHA=$(false)" printenv RC; fi'),
+    ("(sas-fire-if-cond-then-arith-shift) a later line after a << shift in (( )) right after if [[ ]] then",
+     'if [[ 1 ]] then (( y = 1<<2 )); fi\nfalse; RC=$? env "SHA=$(true)" printenv RC'),
 )
 _SAS_QUIET_ROWS = (
     ("(sas-quiet-d) read before every substitution", 'false; echo "rc=$? $(true)"'),
@@ -4447,6 +4486,12 @@ _SAS_QUIET_ROWS = (
      "false; echo $(true) $'\\'$?'"),
     ("(sas-quiet-in-body-after-subst) read after a substitution inside a substitution body (not judged)",
      'false; echo "$(echo $(true) $?)"'),
+    ("(sas-quiet-for-do-assignment-only) assignment-only command right after for (( )) do",
+     'false; for ((k=0; k<1; k++)) do x=$(true) rc=$?; echo "rc=$rc"; done'),
+    ("(sas-quiet-if-arith-then-read) read right after if (( )) then, substitution in the (( ))",
+     'false; if (( $(echo 1) )) then echo "rc=$?"; fi'),
+    ("(sas-quiet-if-cond-then-read) read right after if [[ ]] then, substitution in the [[ ]]",
+     'false; if [[ -n "$(echo 1)" ]] then echo "rc=$?"; fi'),
 )
 
 
