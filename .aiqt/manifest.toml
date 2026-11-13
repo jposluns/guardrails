@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.0.5"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "bfdfbf88db095c92dd83885f572ab4ae1b9306b9be33fd0fa677c8332dab670f"
+tree-sha256 = "2b4923b933ef78c4587b062180705d4767be9eebf15dc1aa2da800c2d1a92f7d"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -148,7 +148,7 @@ sha256 = "7396859c9a2b6d18ecec0982f02f9b72a64a5a79ef6d4270df82eab956af0ec7"
 [[sources]]
 path = ".aiqt/core/renderers.toml"
 bytes = 3068
-sha256 = "89fecf78b0440c83ca1b9e76a8ef023cfc15d31d7078f9cf5c87cfb0f2b76436"
+sha256 = "db3d5e007f977eaf9225db97abbdfa025297e91c7055dd81d09f91a8c5719358"
 
 [[sources]]
 path = ".aiqt/core/rules/00-project-integrity.md"
@@ -4577,8 +4577,8 @@ sha256 = "2f19dc1e1f6bac53f5afebb6b1857889467c249b29d566954a89e25687f884c3"
 
 [[sources]]
 path = "tools/gen_skill.py"
-bytes = 148206
-sha256 = "25d3f7f054c0d0d06a6c7ae1359a1689087ac2b8e81789e55d618f33a322f5f6"
+bytes = 154443
+sha256 = "74f2f3e9c14bf334df606d4ce973ff1eb814a8eaa75401b4e3589babec843993"
 
 [[sources]]
 path = "tools/gen_worker_pack.py"

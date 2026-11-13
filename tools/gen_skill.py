@@ -1216,13 +1216,32 @@ def _zip_contract_problems(blob, skill_md, licence):
                                     "(system 3, version 20, extract 20)".format(
                                         name, info.create_system, info.create_version, info.extract_version))
                 if info.external_attr != _CONTRACT_MODE:
-                    problems.append("member {!r} permissions {:#o}, expected {:#o}".format(
-                        name, info.external_attr, _CONTRACT_MODE))
+                    # The unix mode sits in the high 16 bits; print its permission bits (0755, 0644) and
+                    # name any other attribute bits (file type, DOS attributes) separately.
+                    finding = "member {!r} permissions {:04o}, expected {:04o}".format(
+                        name, (info.external_attr >> 16) & 0o7777, _CONTRACT_MODE >> 16)
+                    other = info.external_attr & ~(0o7777 << 16)
+                    if other:
+                        finding += " (other external attribute bits {:#o} set, expected none)".format(other)
+                    problems.append(finding)
                 if info.flag_bits or info.extra or info.comment or info.internal_attr:
                     problems.append("member {!r} carries flags, an extra field, a comment or internal "
                                     "attributes, expected none".format(name))
-                if name in want and zf.read(info) != want[name]:
-                    problems.append("member {!r} bytes differ from the expected {}".format(name, name))
+                if name in want:
+                    # zipfile refuses some members on read rather than returning bytes: an unsupported
+                    # compression method or flag raises NotImplementedError (a RuntimeError subclass, so
+                    # caught first), and an encrypted member (flag bit 0) raises RuntimeError. Each is a
+                    # finding, never an escape.
+                    try:
+                        if zf.read(info) != want[name]:
+                            problems.append("member {!r} bytes differ from the expected {}".format(name, name))
+                    except NotImplementedError as exc:
+                        problems.append("member {!r} cannot be decompressed (method {}: {}), expected STORED "
+                                        "(0)".format(name, info.compress_type, exc))
+                    except RuntimeError as exc:
+                        what = ("is encrypted (flag bit 0 set), expected no encryption" if info.flag_bits & 0x1
+                                else "cannot be read, expected a readable STORED member")
+                        problems.append("member {!r} {} ({}: {})".format(name, what, type(exc).__name__, exc))
     except (zipfile.BadZipFile, zipfile.LargeZipFile, OSError, ValueError, EOFError) as exc:
         problems.append("not a readable zip archive ({}: {})".format(type(exc).__name__, exc))
     if blob != _contract_zip(want):
@@ -1234,8 +1253,13 @@ def _contract_pack(entries):
     """A test archive built with zipfile from (name, data, overrides) entries, in the given order; every
     entry takes the contract metadata unless overrides (ZipInfo attribute values) say otherwise. With no
     overrides and the contract members in sorted order it equals _contract_zip, so each negative fixture
-    differs from a conforming archive only by the property it overrides."""
+    differs from a conforming archive only by the property it overrides. zipfile's writer resets the flags
+    and refuses an unknown compression method, so two overrides are stamped into the headers after the
+    member is written: flag_bits (the general purpose flags) and header_method (the compression method
+    field, the data left STORED). The central directory takes them from the ZipInfo when the archive
+    closes; the local header is patched in place (flags at offset 6, method at offset 8)."""
     buf = io.BytesIO()
+    stamped = []
     with zipfile.ZipFile(buf, "w") as zf:
         for name, data, overrides in entries:
             info = zipfile.ZipInfo(name, date_time=overrides.get("date_time", _CONTRACT_DATE_TIME))
@@ -1243,7 +1267,16 @@ def _contract_pack(entries):
             info.create_system = overrides.get("create_system", _CONTRACT_SYSTEM)
             info.external_attr = overrides.get("external_attr", _CONTRACT_MODE)
             zf.writestr(info, data)
-    return buf.getvalue()
+            if "flag_bits" in overrides:
+                info.flag_bits = overrides["flag_bits"]
+                stamped.append((info.header_offset + 6, overrides["flag_bits"]))
+            if "header_method" in overrides:
+                info.compress_type = overrides["header_method"]
+                stamped.append((info.header_offset + 8, overrides["header_method"]))
+    blob = bytearray(buf.getvalue())
+    for at, value in stamped:
+        struct.pack_into("<H", blob, at, value)
+    return bytes(blob)
 
 _APEX = """---
 corpus-id: prjint1
@@ -2392,9 +2425,11 @@ def self_test_main():
         #     in site/downloads, the stable alias and the version-numbered copy; each archive the generator
         #     writes passes _zip_contract_problems against the SKILL.md it wrote and the fixture LICENSE; the
         #     two names hold identical bytes; and with unchanged skill source and licence the archive is byte
-        #     identical across a regeneration and a fresh tree. Each negative fixture breaks one property and
-        #     must be named for it (and fail the whole-archive comparison); a passing fixture would mean the
-        #     contract no longer sees that change. Differing aliases are also --check drift (exit 1).
+        #     identical across a regeneration and a fresh tree, each of which must exit 0 (a failing run that
+        #     writes nothing is named by its exit code, not passed on the old bytes). Each negative fixture
+        #     breaks one property and must be named for it (and fail the whole-archive comparison); a passing
+        #     fixture would mean the contract no longer sees that change, and an exception escaping the
+        #     checker is a failure too. Differing aliases are also --check drift (exit 1).
         if ZIP_PARTS != _CONTRACT_DOWNLOADS + (_CONTRACT_LATEST,):
             failures.append("the stable download is {!r}, expected {!r}".format(
                 "/".join(ZIP_PARTS), "/".join(_CONTRACT_DOWNLOADS + (_CONTRACT_LATEST,))))
@@ -2418,15 +2453,56 @@ def self_test_main():
                 failures.append("the {} download breaks the archive contract: {}".format(label, "; ".join(problems)))
         if dlc_latest != dlc_versioned:
             failures.append("the stable and version-numbered downloads must hold identical bytes")
-        capture(dlc, False)
+
+        def regeneration_problems(tree, fresh, expected):
+            # Regenerate tree in place, generate the prepared fresh tree, and require each run to exit 0
+            # and leave a stable download byte-identical to expected. The exit code is checked on its own
+            # because a run that fails without writing leaves the old bytes, which the comparison passes.
+            found = []
+            for label, root_ in (("in-place regeneration", tree), ("fresh-tree generate", fresh)):
+                code_, out_ = capture(root_, False)
+                if code_ != 0:
+                    found.append("the {} expected exit 0, got {}\n{}".format(label, code_, out_))
+                try:
+                    same = root_.joinpath(*ZIP_PARTS).read_bytes() == expected
+                except OSError as exc:
+                    found.append("the {} left no readable stable download ({})".format(label, exc))
+                    continue
+                if not same:
+                    found.append("unchanged skill source and licence must give a byte-identical archive, "
+                                 "but the {} changed it".format(label))
+            return found
+
         again = tmp / "download-contract-again"
         again.mkdir()
         _write_fixture(again, good_src)
-        capture(again, False)
-        if (dlc.joinpath(*ZIP_PARTS).read_bytes() != dlc_latest
-                or again.joinpath(*ZIP_PARTS).read_bytes() != dlc_latest):
-            failures.append("unchanged skill source and licence must give a byte-identical archive across a "
-                            "regeneration and a fresh tree")
+        for problem in regeneration_problems(dlc, again, dlc_latest):
+            failures.append("download contract: " + problem)
+        # A regeneration that fails must be named even when it leaves the archive untouched: the in-place
+        # tree's skill source is broken after a clean generate (an unknown corpus-id exits 2 writing
+        # nothing), and separately the fresh tree's.
+        stale = tmp / "download-contract-stale"
+        stale.mkdir()
+        _write_fixture(stale, good_src)
+        code, out = capture(stale, False)
+        stale.joinpath(*SKILL_SRC_PARTS).write_text(bad_src, encoding="utf-8")
+        stale_fresh = tmp / "download-contract-stale-fresh"
+        stale_fresh.mkdir()
+        _write_fixture(stale_fresh, good_src)
+        broken_fresh = tmp / "download-contract-broken-fresh"
+        broken_fresh.mkdir()
+        _write_fixture(broken_fresh, bad_src)
+        if code != 0:
+            failures.append("the failing-regeneration fixture expected a clean first generate, got {}\n{}".format(
+                code, out))
+        for label, tree, fresh, finding in (
+                ("in-place regeneration", stale, stale_fresh, "the in-place regeneration expected exit 0, got 2"),
+                ("fresh-tree generate", dlc, broken_fresh, "the fresh-tree generate expected exit 0, got 2")):
+            problems = regeneration_problems(tree, fresh, dlc_latest)
+            if not any(p.startswith(finding) for p in problems):
+                failures.append("a failing {} must be named ({!r}), got {!r}".format(label, finding, problems))
+        if stale.joinpath(*ZIP_PARTS).read_bytes() != dlc_latest:
+            failures.append("the failing in-place regeneration must leave the old archive (it writes nothing)")
         conforming = [(_CONTRACT_MEMBERS[0], dlc_licence, {}), (_CONTRACT_MEMBERS[1], dlc_skill, {})]
         if _contract_pack(conforming) != dlc_latest:
             failures.append("the negative-fixture packer must reproduce the conforming archive exactly")
@@ -2444,11 +2520,22 @@ def self_test_main():
             ("deflate compression", "compression",
              [(n, d, {"compress_type": zipfile.ZIP_DEFLATED}) for n, d, o in conforming]),
             ("a non-unix creator", "creator", [(n, d, {"create_system": 0}) for n, d, o in conforming]),
-            ("executable permissions", "permissions",
+            ("executable permissions", "permissions 0755, expected 0644",
              [(n, d, {"external_attr": 0o755 << 16}) for n, d, o in conforming]),
+            ("file type bits", "permissions 0644, expected 0644 (other external attribute bits 0o20000000000",
+             [(n, d, {"external_attr": 0o100644 << 16}) for n, d, o in conforming]),
+            ("an encrypted member", "member 'SKILL.md' is encrypted (flag bit 0 set)",
+             [(n, d, {"flag_bits": 0x1}) for n, d, o in conforming]),
+            ("an unsupported compression method", "member 'SKILL.md' cannot be decompressed (method 99",
+             [(n, d, {"header_method": 99}) for n, d, o in conforming]),
         )
         for label, finding, entries in negatives:
-            problems = _zip_contract_problems(_contract_pack(entries), dlc_skill, dlc_licence)
+            try:
+                problems = _zip_contract_problems(_contract_pack(entries), dlc_skill, dlc_licence)
+            except Exception as exc:  # the checker must return a finding, so any escape is itself a failure
+                failures.append("an archive with {} let {}: {} escape the contract checker".format(
+                    label, type(exc).__name__, exc))
+                continue
             if not any(finding in p for p in problems) or not any("archive bytes differ" in p for p in problems):
                 failures.append("an archive with {} must break the contract naming {!r} and the whole-archive "
                                 "comparison, got {!r}".format(label, finding, problems))
@@ -2493,8 +2580,9 @@ def self_test_main():
           "symlinked to a directory inside the root is read; the published download contract holds (both "
           "zip names, exactly LICENSE and SKILL.md at the archive root with the pinned metadata, identical "
           "aliases, and whole-archive bytes equal to an independent packing), and an extra, prefixed, "
-          "reordered or changed member, a changed timestamp, compression, creator or mode, and differing "
-          "aliases each break it.")
+          "reordered or changed member, a changed timestamp, compression, creator, mode or file type bits, "
+          "an encrypted member, an unsupported compression method, and differing aliases each break it; a "
+          "regeneration or fresh generate that fails is named by its exit code even when it wrote nothing.")
     return 0
 
 
