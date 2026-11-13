@@ -2234,6 +2234,157 @@ def _test_stop_dispatch_note_sites(failures, tmp):
          aiqt_hooks.orch_lease_heartbeat_stop(lease_fx.payload("Stop")), "heartbeat gap")
 
 
+# The clock bindings' context line for the fixed reading the ck-* cases inject (2026-09-23T17:45:02Z, read
+# in a fixed UTC-04:00 zone abbreviated EDT), spelled out whole so any change of wording, order or values
+# fails; {event} is the hook event the binding is registered for.
+_CK_KNOWN = ("[aiqt-clock] Host clock reading at this {event} hook event: UTC 2026-09-23T17:45:02Z; local time "
+             "2026-09-23 13:45:02 UTC-04:00 (EDT). It is the host clock at that moment: it goes stale as time "
+             "passes and carries any host clock error, and it is context for a timestamp, not a check of one.")
+_CK_UNKNOWN = ("[aiqt-clock] Host clock reading at this {event} hook event: UTC 2026-09-23T17:45:02Z; local time "
+               "zone unknown (ck-reason), so no local time is given; use the UTC value. It is the host clock "
+               "at that moment: it goes stale as time passes and carries any host clock error, and it is "
+               "context for a timestamp, not a check of one.")
+
+
+def _test_clock_inject(failures):
+    """(ck-*) The two context-only clock bindings, clock_inject_post (PostToolUse) and clock_inject_failure
+    (PostToolUseFailure). ck-wiring-*: each is in HANDLERS and HANDLER_EVENT under its own event, and both
+    events are fail-open. ck-known-*: with the clock fixed by replacing aiqt_hooks._clock_now and the zone
+    fixed by replacing aiqt_hooks._clock_local, each returns exactly its event's context line (_CK_KNOWN:
+    UTC, the local time, its numeric offset and the abbreviation; no permission decision, no note), and
+    ck-dispatch-* holds the same through main(). ck-unknown-text-*: a zone _clock_local cannot establish
+    is named unknown, with no local time.
+    ck-wrong-event-*: a payload naming another event gets a note and no reading. ck-offset: the offset text
+    at and on each side of zero (one second, one microsecond) and at whole and half hours. ck-zone-fixed:
+    _clock_local keeps a fixed injected zone (TZ a POSIX rule). ck-zone-unknown: TZ empty, TZ an unknown
+    name, TZ an absent file, TZ unset with no /etc/localtime, a conversion that fails or that gives no
+    abbreviation, and a zone database offset that differs from the conversion's each give no local time
+    and a reason. ck-malformed-*: main() with an unparseable or a non-object payload warns on exit 0 and
+    adds no reading for both modes. ck-live: the unreplaced clock gives a line of the known or the unknown
+    shape."""
+    utc = datetime.timezone.utc
+    fixed_now = datetime.datetime(2026, 9, 23, 17, 45, 2, tzinfo=utc)
+    edt = datetime.timezone(datetime.timedelta(hours=-4), "EDT")
+    modes = (("clock_inject_post", "PostToolUse"), ("clock_inject_failure", "PostToolUseFailure"))
+    for mode, event in modes:
+        if (aiqt_hooks.HANDLERS.get(mode) is not getattr(aiqt_hooks, mode, None)
+                or aiqt_hooks.HANDLER_EVENT.get(mode) != event or event not in aiqt_hooks.FAIL_OPEN_EVENTS):
+            failures.append("(ck-wiring-{}) {} must be a HANDLERS entry bound to {} in HANDLER_EVENT, and {} "
+                            "must be in FAIL_OPEN_EVENTS".format(mode, mode, event, event))
+    saved = (aiqt_hooks._clock_now, aiqt_hooks._clock_local)
+
+    def dispatch(mode, stdin_text):
+        buf, saved_stdin = io.StringIO(), sys.stdin
+        try:
+            sys.stdin = io.StringIO(stdin_text)
+            with contextlib.redirect_stdout(buf):
+                code = aiqt_hooks.main([mode])
+        finally:
+            sys.stdin = saved_stdin
+        try:
+            return code, json.loads(buf.getvalue())
+        except ValueError:
+            return code, "unparseable stdout " + repr(buf.getvalue())
+    try:
+        aiqt_hooks._clock_now = lambda: fixed_now
+        aiqt_hooks._clock_local = lambda now: (now.astimezone(edt), None)
+        for mode, event in modes:
+            got = aiqt_hooks.HANDLERS[mode]({"hook_event_name": event, "tool_name": "Bash"})
+            want = (0, {"hookSpecificOutput": {"hookEventName": event,
+                                               "additionalContext": _CK_KNOWN.format(event=event)}}, None)
+            if got != want:
+                failures.append("(ck-known-{}) with a fixed clock and zone, {} must return {!r}, got {!r}"
+                                .format(mode, mode, want, got))
+            for kind, stdin_text in (("unparseable", "}{"), ("non-object", "[]")):
+                code, obj = dispatch(mode, stdin_text)
+                if not (code == 0 and isinstance(obj, dict) and set(obj) == {"systemMessage"}
+                        and "unreadable payload" in obj["systemMessage"]):
+                    failures.append("(ck-malformed-{}-{}) main() given the payload {!r} must warn on exit 0 "
+                                    "with no reading, got exit {!r} and {!r}".format(
+                                        mode, kind, stdin_text, code, obj))
+            code, obj = dispatch(mode, json.dumps({"hook_event_name": event, "tool_name": "Read"}))
+            if (code, obj) != (0, want[1]):
+                failures.append("(ck-dispatch-{}) main() given a well-formed {} payload must print {!r} on "
+                                "exit 0, got exit {!r} and {!r}".format(mode, event, want[1], code, obj))
+        aiqt_hooks._clock_local = lambda now: (None, "ck-reason")
+        for mode, event in modes:
+            got = aiqt_hooks.HANDLERS[mode]({"hook_event_name": event, "tool_name": "Bash"})
+            want = (0, {"hookSpecificOutput": {"hookEventName": event,
+                                               "additionalContext": _CK_UNKNOWN.format(event=event)}}, None)
+            if got != want:
+                failures.append("(ck-unknown-text-{}) a zone that cannot be established must be named "
+                                "unknown with no local time: expected {!r}, got {!r}".format(mode, want, got))
+    finally:
+        aiqt_hooks._clock_now, aiqt_hooks._clock_local = saved
+    for mode, event, other in (("clock_inject_post", "PostToolUse", "PostToolUseFailure"),
+                               ("clock_inject_failure", "PostToolUseFailure", "PostToolUse")):
+        for kind, payload in (("other", {"hook_event_name": other}), ("absent", {})):
+            code, obj, err = aiqt_hooks.HANDLERS[mode](payload)
+            if not (_reduce_result(code, obj) == "allow-note" and err is None
+                    and repr(payload.get("hook_event_name")) in obj["systemMessage"]
+                    and "no clock reading was added" in obj["systemMessage"]):
+                failures.append("(ck-wrong-event-{}-{}) {} given a payload naming {!r} must note it and add "
+                                "no reading, got {!r}".format(mode, kind, mode, payload.get("hook_event_name"),
+                                                              (code, obj, err)))
+    td = datetime.timedelta
+    for offset, want in ((td(seconds=-1), "UTC-00:00:01"), (td(0), "UTC+00:00"), (td(seconds=1), "UTC+00:00:01"),
+                         (td(microseconds=-1), "UTC+00:00"), (td(microseconds=1), "UTC+00:00"),
+                         (td(seconds=-60), "UTC-00:01"), (td(seconds=59), "UTC+00:00:59"),
+                         (td(hours=-4), "UTC-04:00"), (td(hours=5, minutes=30), "UTC+05:30"),
+                         (td(hours=14), "UTC+14:00"), (td(hours=-12), "UTC-12:00")):
+        got = aiqt_hooks._clock_offset_text(offset)
+        if got != want:
+            failures.append("(ck-offset-{}) the offset {!r} must read {!r}, got {!r}".format(
+                offset.total_seconds(), offset, want, got))
+    local, reason = aiqt_hooks._clock_local(fixed_now, env={"TZ": "EST5EDT"}, exists=lambda _p: True,
+                                            convert=lambda now: now.astimezone(edt))
+    if reason is not None or local is None or (local.utcoffset(), local.tzname(), local.hour) != (
+            td(hours=-4), "EDT", 13):
+        failures.append("(ck-zone-fixed) a fixed injected zone under a POSIX TZ rule must be kept, got {!r} "
+                        "and {!r}".format(local, reason))
+
+    def nameless(now):
+        return now.astimezone(datetime.timezone(td(hours=2), ""))
+
+    class Nameless(datetime.tzinfo):
+        def utcoffset(self, dt):
+            return td(hours=2)
+
+        def tzname(self, dt):
+            return None
+
+        def dst(self, dt):
+            return td(0)
+
+    def overflowing(now):
+        raise OverflowError("ck-overflow")
+    for label, env, exists, convert in (
+            ("empty", {"TZ": ""}, True, None), ("empty-colon", {"TZ": ":"}, True, None),
+            ("unknown-name", {"TZ": "Ck/NoSuchZone"}, True, None),
+            ("absent-file", {"TZ": ":/nonexistent/ck-zone"}, True, None),
+            ("unset-no-localtime", {}, False, None),
+            ("no-abbreviation", {"TZ": "CKT-2"}, True, nameless),
+            ("none-abbreviation", {"TZ": "CKT-2"}, True, lambda now: now.astimezone(Nameless())),
+            ("conversion-fails", {"TZ": "CKT-2"}, True, overflowing),
+            ("database-differs", {"TZ": "Etc/GMT-3"}, True, lambda now: now.astimezone(edt))):
+        if label == "unset-no-localtime" and os.name != "posix":
+            continue
+        local, reason = aiqt_hooks._clock_local(fixed_now, env=env, exists=lambda _p, e=exists: e,
+                                                convert=convert or (lambda now: now.astimezone(edt)))
+        if local is not None or not (isinstance(reason, str) and reason):
+            failures.append("(ck-zone-unknown-{}) a zone that cannot be established must give no local time "
+                            "and a reason, got {!r} and {!r}".format(label, local, reason))
+    context = aiqt_hooks.clock_inject_post({"hook_event_name": "PostToolUse"})[1]["hookSpecificOutput"][
+        "additionalContext"]
+    if not re.fullmatch(r"\[aiqt-clock\] Host clock reading at this PostToolUse hook event: UTC "
+                        r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z; (local time \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} "
+                        r"UTC[+-]\d{2}:\d{2}(:\d{2})? \([^()]+\)|local time zone unknown \(.+\), so no local "
+                        r"time is given; use the UTC value)\. It is the host clock at that moment: .*", context,
+                        re.ASCII):
+        failures.append("(ck-live) the unreplaced clock must give a line of the known or the unknown shape, got "
+                        "{!r}".format(context))
+
+
 def _git(repo, *args, env_identity=False):
     """Run a git command against repo, raising on failure so a setup fault surfaces as a harness error."""
     cmd = ["git", "-C", str(repo)]
@@ -30512,6 +30663,7 @@ def _main_isolated(monitor):
         _test_deadline_posture(failures, tmp)
         _test_cannot_evaluate_paths(failures, tmp)
         _test_reset_ancestry(failures, tmp)
+        _test_clock_inject(failures)
 
         # === write_scope_guard (wrtscp, EN-8): confine guarded-tool writes to a per-slice scope =========
         # declaration; hard-deny writes to the frozen floor and to other/nested repos as an un-lowerable

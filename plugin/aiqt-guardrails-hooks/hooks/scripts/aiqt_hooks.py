@@ -258,8 +258,8 @@ import sys
 # hooks.json registers. That denies each PreToolUse call a registered matcher selects; blocks every
 # UserPromptSubmit prompt, which FAIL_OPEN_EVENTS below says an error must never do; blocks every Stop, with
 # no cap as above, and every TeammateIdle, the two FAIL_OPEN_EVENTS this file names exit 2 as the block for;
-# on PostToolUse its tool has already run but the recorder records nothing; and SessionStart cannot block at
-# all.
+# on PostToolUse and PostToolUseFailure its tool has already run but no recorder records and no clock
+# reading is added; and SessionStart cannot block at all.
 # The guard's stderr refusal and its stdout warning are best-effort writes, each wrapped and flushed
 # so a stream failure cannot change the exit: with stderr unavailable (a closed descriptor 2 leaves
 # sys.stderr None) the deny path still exits 2 and a fail-open mode still exits 0, rather than
@@ -268,9 +268,9 @@ import sys
 # streams: with a sys.stderr whose write works but whose flush fails, `raise SystemExit` here ended
 # as the interpreter's own exit 120 instead of the refusal exit. Nothing runs before this guard, so
 # os._exit discards no other buffered output; the warning itself is flushed before the exit.
-FLOOR_FAIL_OPEN_MODES = ("diff_wall_stop", "inline_errexit", "orch_dispatch_ledger",
-                         "orch_lease_heartbeat_post", "orch_lease_heartbeat_stop", "orch_prompt_stamp",
-                         "orch_resume_audit", "orch_stop_guard", "orch_teammate_idle")
+FLOOR_FAIL_OPEN_MODES = ("clock_inject_failure", "clock_inject_post", "diff_wall_stop", "inline_errexit",
+                         "orch_dispatch_ledger", "orch_lease_heartbeat_post", "orch_lease_heartbeat_stop",
+                         "orch_prompt_stamp", "orch_resume_audit", "orch_stop_guard", "orch_teammate_idle")
 
 if tuple(sys.version_info[:2]) < (3, 14):
     import os
@@ -326,7 +326,10 @@ STOP_EVENTS = ("Stop", "SubagentStop")
 # return 2 where the platform documents exit 2 as the block: Stop and TeammateIdle). SessionStart
 # cannot block at all; an errored UserPromptSubmit stamp must never block a human prompt; a
 # PostToolUse recorder error must surface as a warning, not a tool failure. Doc-confirmed 2026-08-29.
-FAIL_OPEN_EVENTS = STOP_EVENTS + ("SessionStart", "TeammateIdle", "UserPromptSubmit", "PostToolUse")
+# PostToolUseFailure (its tool has already run and failed) follows PostToolUse by this pack's choice, so
+# an error in its context-only clock reading warns; that line is not doc-confirmed.
+FAIL_OPEN_EVENTS = STOP_EVENTS + ("SessionStart", "TeammateIdle", "UserPromptSubmit", "PostToolUse",
+                                  "PostToolUseFailure")
 # PreToolUse modes that never block a call: every result is an allow or an allow with a note, and only a
 # miswired event hard-blocks. main() gives each one the fail-open posture of a FAIL_OPEN_EVENTS mode on every
 # error path, and keeps its PreToolUse deadline, which then warns on exit 0 instead of failing closed.
@@ -37020,6 +37023,135 @@ def write_scope_guard(data):
                         .format(tool_name, slice_name))                                      # row 21
 
 
+# --- host clock reading (tstamp) ----------------------------------------------------------------------
+# Two context-only bindings, one per post-tool event: clock_inject_post on PostToolUse (after a tool call
+# that ran and succeeded) and clock_inject_failure on PostToolUseFailure (after one that started and
+# failed). Each adds one additionalContext line holding the host clock read at that hook event, so the
+# freshest time value in the assistant's context is a reading, not a figure it recalled. Neither refuses
+# anything: both events are in FAIL_OPEN_EVENTS, so an unreadable payload or a crash takes main()'s
+# warning on exit 0, and a payload that names another event gets a note and no reading. Residual: a
+# message written with no tool call gets no fresh reading, and neither does a call refused before it
+# runs (neither event fires for it); the value is the host clock at the hook event and goes stale as time
+# passes; it is context, not enforcement; and a host clock error carries through.
+# A POSIX TZ rule (a zone name of three or more letters, or one in angle brackets, then an offset that
+# starts with a digit), which the C library reads without a zone file.
+_CLOCK_POSIX_TZ_RE = re.compile(r"(?:[A-Za-z]{3,}|<[A-Za-z0-9+-]{3,}>)[+-]?[0-9]{1,2}(?::[0-9]{1,2}){0,2}"
+                                r"(?:[A-Za-z<][^\s]*)?\Z", re.ASCII)
+
+
+def _clock_now():
+    """The host clock, read once, as an aware UTC datetime (tstamp). The self-test replaces it to fix
+    the reading."""
+    return datetime.datetime.now(datetime.timezone.utc)
+
+
+def _clock_local(now_utc, env=None, exists=None, convert=None):
+    """(local, None) with `local` the aware local time of now_utc, or (None, reason) when the local zone
+    cannot be established, so the caller reports it as unknown rather than guessing. env defaults to
+    os.environ, exists to os.path.exists and convert to datetime.astimezone() (the process zone, as the
+    C library reads it); the self-test passes its own. The zone is unknown when TZ is set but empty
+    (an implementation-defined zone); when TZ is unset on a POSIX host with no /etc/localtime (the C
+    library then falls back to UTC by default, not by configuration); when TZ names an absolute file
+    that is not a regular file; when TZ is neither a POSIX TZ rule nor a zone the zone database holds
+    (glibc reads an unknown name such as Foo/Bar as UTC under the abbreviation Foo), or zoneinfo cannot
+    be imported to check the name; when the zone database's offset for the name differs from the C
+    library's; and when the conversion fails or gives no offset or no abbreviation (the C library gives
+    an empty abbreviation for a zone file it cannot read). Residual: a regular file named by an
+    absolute TZ that is not a valid zone file is checked only through that empty abbreviation, and a
+    host that configures its zone somewhere other than TZ and /etc/localtime is read as libc reads it."""
+    env = os.environ if env is None else env
+    exists = os.path.exists if exists is None else exists
+    tz = env.get("TZ")
+    zone = None
+    if tz is not None:
+        name = tz[1:] if tz.startswith(":") else tz
+        if not name:
+            return None, "TZ is set but empty, which leaves the zone to the implementation"
+        if name.startswith("/"):
+            if not os.path.isfile(name):
+                return None, "TZ names {!r}, which is not a regular file".format(name)
+        elif tz.startswith(":") or not _CLOCK_POSIX_TZ_RE.match(tz):
+            try:
+                import zoneinfo
+                zone = zoneinfo.ZoneInfo(name)
+            except ImportError:
+                return None, "TZ is {!r} and zoneinfo cannot be imported to check it".format(tz)
+            except Exception:
+                return None, ("TZ is {!r}, which is neither a POSIX TZ rule nor a zone the zone database "
+                              "holds".format(tz))
+    elif os.name == "posix" and not exists("/etc/localtime"):
+        return None, "TZ is unset and /etc/localtime is absent, so UTC would be a default, not a setting"
+    try:
+        local = (now_utc.astimezone() if convert is None else convert(now_utc))
+        offset = local.utcoffset()
+        abbreviation = local.tzname()
+    except (OSError, OverflowError, ValueError) as exc:
+        return None, "the local conversion failed ({})".format(type(exc).__name__)
+    if offset is None or not abbreviation:
+        return None, "the C library gave no UTC offset or no zone abbreviation"
+    if zone is not None and now_utc.astimezone(zone).utcoffset() != offset:
+        return None, "the zone database's UTC offset for TZ {!r} differs from the C library's".format(tz)
+    return local, None
+
+
+def _clock_offset_text(offset):
+    """'UTC+HH:MM' for a UTC offset, with ':SS' added only when the offset has whole seconds; a part
+    below one second is dropped toward zero, and a zero offset is always written UTC+00:00."""
+    negative = offset < datetime.timedelta(0)
+    size = -offset if negative else offset
+    total = size.days * 86400 + size.seconds
+    hours, rest = divmod(total, 3600)
+    minutes, seconds = divmod(rest, 60)
+    text = "UTC{}{:02d}:{:02d}".format("-" if negative and total else "+", hours, minutes)
+    return text + (":{:02d}".format(seconds) if seconds else "")
+
+
+def _clock_context(event):
+    """The context line for `event`: the host clock read now, as UTC, beside the local time with its
+    numeric UTC offset and zone abbreviation, or with the local zone named unknown (and no local time)
+    when _clock_local cannot establish it."""
+    now = _clock_now().astimezone(datetime.timezone.utc)
+    local, reason = _clock_local(now)
+    if local is None:
+        where = "local time zone unknown ({}), so no local time is given; use the UTC value".format(reason)
+    else:
+        where = "local time {} {} ({})".format(local.strftime("%Y-%m-%d %H:%M:%S"),
+                                               _clock_offset_text(local.utcoffset()), local.tzname())
+    return ("[aiqt-clock] Host clock reading at this {} hook event: UTC {}; {}. It is the host clock at "
+            "that moment: it goes stale as time passes and carries any host clock error, and it is context "
+            "for a timestamp, not a check of one.".format(event, now.strftime("%Y-%m-%dT%H:%M:%SZ"), where))
+
+
+def _clock_wrong_event(handler_name, bound, event):
+    """The note for a clock binding whose payload names an event other than the one it is bound to."""
+    return ("AIQT guardrail: the {} clock reading is bound to {} but its payload names the event {!r}, so "
+            "no clock reading was added (a non-blocking note).".format(handler_name, bound, event))
+
+
+def clock_inject_post(data):
+    """tstamp, PostToolUse (context only, never blocks): after a tool call that ran and succeeded, add
+    the host clock at this hook event as additionalContext (_clock_context). A payload naming another
+    event gets a note and no reading."""
+    event = data.get("hook_event_name")
+    if event != "PostToolUse":
+        return _allow_note(_clock_wrong_event("clock_inject_post", "PostToolUse", event))
+    return (0, {"hookSpecificOutput": {
+        "hookEventName": "PostToolUse",
+        "additionalContext": _clock_context("PostToolUse")}}, None)
+
+
+def clock_inject_failure(data):
+    """tstamp, PostToolUseFailure (context only, never blocks): after a tool call that started and
+    failed, add the host clock at this hook event as additionalContext (_clock_context). A payload
+    naming another event gets a note and no reading."""
+    event = data.get("hook_event_name")
+    if event != "PostToolUseFailure":
+        return _allow_note(_clock_wrong_event("clock_inject_failure", "PostToolUseFailure", event))
+    return (0, {"hookSpecificOutput": {
+        "hookEventName": "PostToolUseFailure",
+        "additionalContext": _clock_context("PostToolUseFailure")}}, None)
+
+
 # --- dispatcher ---------------------------------------------------------------------------------------
 HANDLERS = {
     "diff_wall_stop": diff_wall_stop,
@@ -37053,6 +37185,8 @@ HANDLERS = {
     "orch_resume_barrier": orch_resume_barrier,
     "orch_lease_heartbeat_post": orch_lease_heartbeat_post,
     "orch_lease_heartbeat_stop": orch_lease_heartbeat_stop,
+    "clock_inject_post": clock_inject_post,
+    "clock_inject_failure": clock_inject_failure,
 }
 
 # Handler -> event class, so the dispatcher can decide its ERROR posture from the argv MODE alone,
@@ -37096,6 +37230,8 @@ HANDLER_EVENT = {
     "orch_resume_barrier": PRETOOL,
     "orch_lease_heartbeat_post": "PostToolUse",
     "orch_lease_heartbeat_stop": "Stop",
+    "clock_inject_post": "PostToolUse",
+    "clock_inject_failure": "PostToolUseFailure",
 }
 
 
@@ -37522,9 +37658,9 @@ def _pending_alarm_message(handler_name, seconds):
 
 def _dispatcher_fail_open_warn(handler_name, detail):
     """A fail-open dispatcher-level error for a Stop/SubagentStop/SessionStart/TeammateIdle/
-    UserPromptSubmit/PostToolUse handler or a NOTE_ONLY_PRETOOL_MODES handler: a non-blocking
-    systemMessage on exit 0, so no error on these paths can wedge a session, trap a teammate, block a
-    human prompt, or turn a note-only check into a block. It prints and flushes
+    UserPromptSubmit/PostToolUse/PostToolUseFailure handler or a NOTE_ONLY_PRETOOL_MODES handler: a
+    non-blocking systemMessage on exit 0, so no error on these paths can wedge a session, trap a
+    teammate, block a human prompt, or turn a note-only check into a block. It prints and flushes
     the note and returns the exit code 0, so main returns it directly (a note constructor's call is
     only ever the direct value of a return). The flush keeps the note out of the buffer os._exit at the
     entry line would discard. A print or flush failure RAISES out of this leaf (the note-shape scan
