@@ -1191,9 +1191,11 @@ def _config_poison_fixture(base):
 # not sized from it. Their MEASURED figures are standalone runs of the pre-split whole self-test
 # (and one of the opf-closure-c member when it held one leg) and their ESTIMATED figure scales
 # the latest whole-self-test run by load alone, not by the SIZING formula (their shared comment
-# gives both; neither sizes an entry now). The other exception is the
+# gives both; neither sizes an entry now). The other exceptions are the
 # tools/check_selftest_execution.py --suite child-status-coverage-selftest entry, whose MEASURED
-# figures are standalone runs (its own comment), fed to the SIZING formula.
+# figures are standalone runs (its own comment), fed to the SIZING formula, and the
+# tools/selftest_aiqt_hooks.py entry, whose MEASURED figures are config-lane runs of that member
+# alone taken after the account (its own comment), fed to the SIZING formula and capped.
 #
 # CONFIG_MEMBER_BOUND_DEFAULT is a DELIBERATE SHORTER DEADLINE, not a bound sized above every
 # member's own end-to-end budget. Budgets the members grant themselves, READ FROM SOURCE (not
@@ -1212,18 +1214,22 @@ def _config_poison_fixture(base):
 # SOURCE, a model part of which is work no deadline bounds (their shared comment).
 # CHOICE: the default is NOT raised above 5766 s, and neither is any entry below but the
 # opf-closure-a to opf-closure-e entries (each but the six tools/check_opf_standalone_closure.py
-# --self-test --ci-job entries, the child-status-coverage-selftest entry and the
-# tools/check_release_cut.py --self-test --red-on-revert entry is sized from config-lane runs
-# MEASURED on this host, see SIZING; those six are set above their members' worst cases READ FROM
-# SOURCE, see their shared comment, that one from standalone runs, see its own comment, and the
+# --self-test --ci-job entries, the child-status-coverage-selftest entry, the
+# tools/check_release_cut.py --self-test --red-on-revert entry and the tools/selftest_aiqt_hooks.py
+# entry is sized from config-lane runs MEASURED on this host, see SIZING; those six are set above
+# their members' worst cases READ FROM SOURCE, see their shared comment, the
+# child-status-coverage-selftest entry from standalone runs, see its own comment, the
 # check_release_cut.py entry from standalone runs with a stated margin, deliberately below the worst
-# case over named terms that its own comment gives); each other entry stays a deliberate shorter
-# deadline relative to the member's self-granted budget, yet each formula-sized entry is sized above
-# the member's measured runs (lane runs, or standalone runs for the child-status-coverage-selftest
-# entry) so that the member finishes under the load the SIZING factor covers; reaching a bound stays
-# cannot-evaluate, attributed to the bound, never a FAIL of that member and never a pass, because
-# this lane owns no member's verdict. Raising those five entries does not keep a config lane inside
-# its CI job's 21600 s limit (their shared comment, JOB LIMIT).
+# case over named terms that its own comment gives, and the selftest_aiqt_hooks.py entry from later
+# config-lane runs by the SIZING formula, capped at 5700 s since the formula gives more than 5766 s,
+# see its own comment); each other entry stays a deliberate shorter deadline relative to the
+# member's self-granted budget, yet each formula-sized entry is sized above the member's measured
+# runs (lane runs, or standalone runs for the child-status-coverage-selftest entry) so that the
+# member finishes under the load the SIZING factor covers, but for the capped selftest_aiqt_hooks.py
+# entry, which covers less (its own comment); reaching a bound stays cannot-evaluate, attributed to
+# the bound, never a FAIL of that member and never a pass, because this lane owns no member's
+# verdict. Raising those five entries does not keep a config lane inside its CI job's 21600 s limit
+# (their shared comment, JOB LIMIT).
 # Every roster member is a registered step or the runner behind a registered --suite step
 # (_registered_selftests reads both CI workflows, both standalone runners and the suite manifest),
 # and that step runs the member to completion under no deadline from this suite, so no member's
@@ -1309,9 +1315,12 @@ def _config_poison_fixture(base):
 # REPORTED by that account as each 62.42 s or less, with no per-member time and no names given.
 # The other account members, which the account does not name, have no recorded time; nor does a
 # member registered after the account unless SIZING_LATER_MEASURED records a measurement of it.
-# Their default bound is NOT sized from a measurement. _roster_figures derives the live counts
-# from these constants (members, malformed-lane members, members outside the account, members
-# with no recorded time, malformed-lane members not measured in that lane), and
+# Their default bound is NOT sized from a measurement. One account member,
+# tools/selftest_aiqt_hooks.py, was later MEASURED in the config lanes at over 1200 s (its own
+# entry); the account's times date from 2026-10-12, so a member that has grown since, as that one
+# did, can sit near or over the default with no figure here showing it. _roster_figures derives
+# the live counts from these constants (members, malformed-lane members, members outside the
+# account, members with no recorded time, malformed-lane members not measured in that lane), and
 # config/member-roster-figures prints them with one line per member outside the account.
 # A bound sized from a measurement taken after the account (an entry whose own comment says it
 # was sized outside SIZING) is allowed only when SIZING_LATER_MEASURED maps its argv to a
@@ -1524,6 +1533,28 @@ CONFIG_MEMBER_BOUNDS = {
     # wall and passed, its replays 12.1 s of it. These runs, with the margin above, size this
     # entry.
     ("tools/check_release_cut.py", "--self-test", "--red-on-revert"): 2700,
+    # Sized outside SIZING, by its formula capped below 5766 s (see CHOICE). The account names no
+    # time for this member: it is not among the nine the account names, and whether it is among the
+    # 75 it reports, unnamed, as 62.42 s or less is not known; no account figure sizes it now.
+    # READ FROM SOURCE: the member states no end-to-end budget of its own. Each of its launches
+    # carries its own bound (a fixed one, such as its 900 s deadline-child limit, or one stretched
+    # with host load through tools/_load_bound.py), and no bound covers the whole run, so this entry
+    # is a DELIBERATE SHORTER DEADLINE like the others (see CHOICE), sized above its measured runs.
+    # REPORTED, not reproduced here (2026-11-13, host load5 about 50 on 96 CPUs): a config-system
+    # lane run reached the then 1200 s default on this member (cannot evaluate); three other runs of
+    # this self-test took 1097.7 s, 1157.0 s and 1180.7 s.
+    # MEASURED (2026-11-13, 15:58:07 to 16:19:04 UTC, 96-CPU host, plain, the bound lifted to
+    # 2400 s): the suite's own _config_results over this one member (so one pool worker busy),
+    # under the combined lane's injected configuration, rebuilt by a copy of that lane's setup code,
+    # took 1257.15 s (load5 55.07 to 56.38); under the system lane's configuration, rebuilt the same
+    # way and run at the same time, 1250.08 s (load5 55.07 to 56.31). Both exited 0 with no hook,
+    # fsmonitor or exposure record. Each is above the 1200 s default.
+    # ESTIMATED: 1257.15 * 20 / 3 = 8381.0, so 8400 s by the formula; that is above 5766 s, which
+    # no entry but opf-closure-a to opf-closure-e may pass (CHOICE), so the entry is 5700 s, the
+    # largest multiple of 300 s below 5766 s. That is about 4.5 times the slowest measured run
+    # (5700 / 1257.15 = 4.534), not the formula's 20 / 3, so this entry covers less load growth than
+    # the formula-sized entries do; reaching it stays cannot-evaluate.
+    ("tools/selftest_aiqt_hooks.py",): 5700,
 }
 # The sizing account's frozen facts (see SIZING above); _roster_figures derives the live figures
 # from them and config/member-roster-figures pins them against _registered_selftests().
@@ -1689,6 +1720,9 @@ SIZING_LATER_MEASURED = {
     ("tools/check_release_cut.py", "--self-test", "--red-on-revert"): (
         "Standalone runs only (2026-11-09), no config-lane time of the member with its census"
         " rows known: see this member's CONFIG_MEMBER_BOUNDS comment."),
+    ("tools/selftest_aiqt_hooks.py",): (
+        "Config-lane runs (2026-11-13, combined 1257.15 s, system 1250.08 s): see this member's"
+        " CONFIG_MEMBER_BOUNDS comment."),
 }
 # After the process-group kill: the bounded drain of output still held by a descendant that left
 # the group (setsid or setpgid), the bounded reap of the leader, and the bounded wait for the group
