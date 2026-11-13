@@ -270,7 +270,7 @@ import sys
 # os._exit discards no other buffered output; the warning itself is flushed before the exit.
 FLOOR_FAIL_OPEN_MODES = ("diff_wall_stop", "inline_errexit", "orch_dispatch_ledger",
                          "orch_lease_heartbeat_post", "orch_lease_heartbeat_stop", "orch_prompt_stamp",
-                         "orch_resume_audit", "orch_stop_guard", "orch_teammate_idle")
+                         "orch_resume_audit", "orch_stop_guard", "orch_teammate_idle", "status_after_subst")
 
 if tuple(sys.version_info[:2]) < (3, 14):
     import os
@@ -331,7 +331,7 @@ FAIL_OPEN_EVENTS = STOP_EVENTS + ("SessionStart", "TeammateIdle", "UserPromptSub
 # miswired event hard-blocks. main() gives each one the fail-open posture of a FAIL_OPEN_EVENTS mode on every
 # error path, and keeps its PreToolUse deadline, which then warns on exit 0 instead of failing closed.
 # tools/gen_hooks.py reads this tuple: such a mode's control must declare the manifest default "warn".
-NOTE_ONLY_PRETOOL_MODES = ("inline_errexit",)
+NOTE_ONLY_PRETOOL_MODES = ("inline_errexit", "status_after_subst")
 # The platform stops a hook command at the timeout tools/gen_hooks.py writes into hooks.json (its
 # TIMEOUT); HOOK_TIMEOUT_SECONDS mirrors that value, and gen_hooks refuses to render (exit 2) when the two
 # differ, so both numbers come from that one source. main() gives every PreToolUse mode that is not
@@ -375,7 +375,7 @@ NOTE_CONSTRUCTORS = (
     "_allow_note", "_context_note", "_stop_warn", "_dispatcher_fail_open_warn", "_diff_source_fallback",
     "_discard_recovery_result", "_errexit_unreadable", "_expbnd_breadth_ask", "_expbnd_fallback",
     "_expbnd_target_ask", "_gate_weakening_fallback", "_gensrc_fail_ask", "_stash_drop_clear_outcome",
-    "_orch_ask_attended", "_orch_oos_unreadable_input_note", "_orch_stop_family")
+    "_orch_ask_attended", "_orch_oos_unreadable_input_note", "_orch_stop_family", "_subst_status_unreadable")
 DENY_CONSTRUCTORS = (
     "_deny", "_abspth_check_required", "_abspth_check_search_root", "_commit_denial",
     "_commit_identity_fallback", "_commit_msg_subst_fallback", "_deny_missing_tool_name", "_deny_relative",
@@ -9363,6 +9363,434 @@ def inline_errexit(data):
     if not exact:
         note += _ERREXIT_PARTIAL_NOTE
     return _allow_note(note)
+
+
+# --- status-after-subst (gatdis): a $? read after a command substitution in the same simple command ------
+# In bash's default mode a command substitution sets $? as the words of its simple command are expanded, so a
+# $? read later in that command reports the substitution's exit, not the earlier command's. A leading
+# assignment word (NAME=, NAME[...]= or NAME+= before the command word) is not counted: bash 5.3.9 read the
+# earlier command's exit in the command's own words after a substitution there. Its subscript is read for at
+# most 256 characters, so each match stays bounded.
+_SUBST_STATUS_ASSIGN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\[[^\]\n]{0,256}\])?\+?=")
+# Words that can come before the command word without being it: reserved words that open or close a construct,
+# and ! and time, which prefix a pipeline. An assignment after one is still a leading assignment.
+_SUBST_STATUS_PREFIX_WORDS = frozenset(("!", "{", "}", "if", "then", "else", "elif", "fi", "do", "done",
+                                        "while", "until", "time"))
+# How many nested constructs ($(...), ${...}, $((...)), a (...) subshell, a <(...) or >(...) process
+# substitution) the reading follows before it stops; far under Python's default recursion limit.
+_SUBST_STATUS_MAX_DEPTH = 64
+# A run of characters that is plain text in a command word: none ends a word, quotes, escapes, expands or
+# redirects. '&' is left out and judged apart, since '&>' is a redirection, not a separator.
+_SUBST_STATUS_PLAIN_RE = re.compile(r"[^ \t\n;|()&\\'\"`$<>]+")
+# The characters inside double quotes, a ${...} operand or a backquote body that the reading stops at.
+_SUBST_STATUS_DQ_RE = re.compile(r"[\"\\`$]")
+_SUBST_STATUS_BACKQUOTE_RE = re.compile(r"[\\`]")
+# Quote and backslash characters, removed from a here-document's delimiter word to give the line that ends it.
+_SUBST_STATUS_QUOTING_RE = re.compile(r"[\\'\"]")
+_SUBST_STATUS_NOTE = (
+    "AIQT guardrail (rule gatdis): this command reads $? after a command substitution ($(...) or a backquote) "
+    "earlier in the same simple command. In bash's default mode, $? there holds the exit status of that "
+    "substitution, not of the command before it, so a status printed or tested this way can read 0 after a "
+    "failure. Save the status in a command of its own first, then use the copy: "
+    "cmd; rc=$?; echo \"... rc=$rc\". In bash's posix mode or under dash the read gives the earlier command's "
+    "status instead; this note does not say that any command failed.")
+_SUBST_STATUS_DEEP_NOTE = (
+    "AIQT guardrail (rule gatdis): this command nests constructs deeper than the $? placement check reads ({} "
+    "levels), and the rest of it past that point holds a $? read that was not checked. This guard never blocks "
+    "a call, so it is allowed: the rest was not checked, not passed.".format(_SUBST_STATUS_MAX_DEPTH))
+# The note for a payload field status_after_subst cannot read (_subst_status_unreadable): the field, then what
+# it held.
+_SUBST_STATUS_UNREADABLE_NOTE = (
+    "AIQT guardrail (rule gatdis): this call's {} was {}, so the $? placement check did not run on it. This "
+    "guard never blocks a call, so it is allowed: the check was not run, not passed.")
+
+
+class _SubstStatusScan:
+    """One forward reading of a Bash command's raw text for status_after_subst, in time linear in its length.
+    It keeps, for the simple command being read, whether a counted command substitution has come yet (seen),
+    and sets fired at the first $? or ${?...} read after one. A substitution counts unless it sits in a
+    leading assignment word or a redirection's target word (bash expands redirections after the words, and
+    5.3.9 read the earlier command's exit in the words after a substitution in one), and wherever it sits in
+    the word: in double quotes, in a ${...} operand or in $((...)). A ;, &, |, newline, ( or ) starts a new
+    simple command; a case pattern's ) is told apart from a closing one. The body of a $(...) or backquote
+    substitution and of a <(...) or >(...) process substitution is read only to find its end: a read inside it
+    is not judged, and a process substitution is not counted, since bash 5.3.9 left $? unchanged after one. A
+    here-document body is skipped as data. Single-quoted text, $'...' text and a backslash-escaped character
+    are never a read. Past _SUBST_STATUS_MAX_DEPTH nested constructs the reading stops and records where
+    (deep)."""
+
+    __slots__ = ("text", "fired", "deep", "heredocs", "seen", "counts", "judge", "depth")
+
+    def __init__(self, text):
+        self.text = text
+        self.fired = False
+        self.deep = None
+        self.heredocs = []  # (delimiter, strip_tabs) for each here-document whose body starts at the next newline
+        self.seen = False
+        self.counts = True  # whether a substitution in the word being read counts
+        self.judge = True  # whether a read here is judged: False inside a substitution body
+        self.depth = 0
+
+    def _read(self):
+        if self.seen and self.judge:
+            self.fired = True
+
+    def _substitution(self):
+        if self.counts:
+            self.seen = True
+
+    def _deeper(self, i):
+        """Whether one more nested construct, opening at i, passes the nesting bound; if so, record i."""
+        if self.depth < _SUBST_STATUS_MAX_DEPTH:
+            return False
+        self.deep = i
+        return True
+
+    def _body(self, i):
+        """Read a substitution body from i to the ')' that closes it, its reads not judged; the index after."""
+        judge = self.judge
+        self.judge = False
+        end = self.commands(i, True)
+        self.judge = judge
+        return end
+
+    def commands(self, i, closed):
+        """Read a command list from i: to the end of the text, or (closed) to the unmatched ')' that ends it,
+        returning the index after that ')' (the length of the text when it ends first). Each simple command
+        starts with no substitution seen; the enclosing command's seen and counts are restored on return."""
+        text = self.text
+        n = len(text)
+        outer = (self.seen, self.counts)
+        self.seen, self.counts = False, True
+        lead = True  # no command word yet: leading assignments, redirections and prefix words only
+        word = -1  # where the word being read starts; -1 between words
+        assign = redirect = target_next = False
+        cases = []  # for each open case: "header" (before its in), "pattern" or "body"
+        while i < n and not self.fired and self.deep is None:
+            ch = text[i]
+            if ch in " \t\n;|()" or (ch == "&" and text[i + 1:i + 2] != ">"):
+                if word >= 0:
+                    short = text[word:i] if i - word <= 5 else ""
+                    if cases and cases[-1] == "header" and short == "in":
+                        cases[-1] = "pattern"
+                    elif cases and short == "esac" and (cases[-1] == "pattern" or lead):
+                        cases.pop()
+                    elif lead and short == "case":
+                        cases.append("header")
+                    if lead and not (assign or redirect) and short not in _SUBST_STATUS_PREFIX_WORDS:
+                        lead = False
+                    word = -1
+                if ch in " \t":
+                    i += 1
+                    continue
+                if ch == ")" and cases and cases[-1] == "pattern":
+                    cases[-1] = "body"  # the ')' that ends a case pattern closes nothing
+                elif ch == ")" and closed:
+                    self.seen, self.counts = outer
+                    return i + 1
+                elif ch == "(" and cases and cases[-1] == "pattern":
+                    pass  # a case pattern's optional opening '('
+                elif ch == "(":
+                    if self._deeper(i):
+                        return n
+                    self.depth += 1
+                    i = self.commands(i + 1, True) - 1
+                    self.depth -= 1
+                elif ch == ";" and cases and cases[-1] == "body" and text[i + 1:i + 2] in (";", "&"):
+                    cases[-1] = "pattern"  # ';;', ';&' or ';;&' ends a case arm
+                    i += 1
+                    if text[i:i + 2] == ";&":
+                        i += 1
+                self.seen, lead, target_next = False, True, False  # a new simple command
+                i = self._heredoc_bodies(i + 1) if ch == "\n" else i + 1
+                continue
+            if word < 0:
+                if ch == "#":
+                    end = text.find("\n", i)
+                    i = n if end < 0 else end
+                    continue
+                word = i
+                assign = lead and _SUBST_STATUS_ASSIGN_RE.match(text, i) is not None
+                redirect, target_next = target_next, False
+                self.counts = not (assign or redirect)
+            if ch == "\\":
+                i += 2
+            elif ch == "'":
+                end = text.find("'", i + 1)
+                i = n if end < 0 else end + 1
+            elif ch == '"':
+                i = self._dquote(i + 1)
+            elif ch == "`":
+                i = self._backquote(i + 1)
+            elif ch == "$":
+                i = self._dollar(i, False)
+            elif ch in "<>" and text[i + 1:i + 2] == "(":
+                if self._deeper(i):
+                    return n
+                self.depth += 1
+                i = self._body(i + 2)  # a process substitution: not counted, its body not judged
+                self.depth -= 1
+            elif ch in "<>&":
+                if lead and not (assign or redirect) and i > word and (
+                        i - word > 5 or not (text[word:i].isdigit()
+                                             or text[word:i] in _SUBST_STATUS_PREFIX_WORDS)):
+                    lead = False  # the command word, glued to its redirection (echo>f)
+                redirect = True
+                self.counts = False
+                if text.startswith("<<", i) and not text.startswith("<<<", i):
+                    i = self._heredoc_operator(i + 2)
+                    continue
+                j = i
+                while j < n and text[j] in "<>&":
+                    j += 1
+                if text[j:j + 1] == "|" and text[j - 1] == ">":
+                    j += 1  # '>|'
+                target_next = j >= n or text[j] in " \t"
+                i = j
+            else:
+                plain = _SUBST_STATUS_PLAIN_RE.match(text, i)
+                i = plain.end() if plain else i + 1
+        return n
+
+    def _dquote(self, i):
+        """Read double-quoted text from i; the index after its closing quote."""
+        text = self.text
+        n = len(text)
+        while i < n and not self.fired and self.deep is None:
+            found = _SUBST_STATUS_DQ_RE.search(text, i)
+            if found is None:
+                return n
+            i = found.start()
+            ch = text[i]
+            if ch == '"':
+                return i + 1
+            if ch == "\\":
+                i += 2
+            elif ch == "`":
+                i = self._backquote(i + 1)
+            else:
+                i = self._dollar(i, True)
+        return n
+
+    def _backquote(self, i):
+        """Skip a backquote substitution's body from i and count the substitution; the index after its
+        closing backquote. A read inside the body is not judged."""
+        text = self.text
+        n = len(text)
+        while i < n:
+            found = _SUBST_STATUS_BACKQUOTE_RE.search(text, i)
+            if found is None:
+                return n
+            i = found.start()
+            if text[i] == "`":
+                self._substitution()
+                return i + 1
+            i += 2
+        return n
+
+    def _dollar(self, i, quoted):
+        """Read the expansion whose '$' is at i (quoted: inside double quotes); the index after it."""
+        text = self.text
+        after = text[i + 1:i + 2]
+        if after == "?":
+            self._read()
+            return i + 2
+        if after == "'" and not quoted:
+            return self._ansi_c(i + 2)
+        if after == '"' and not quoted:
+            return self._dquote(i + 2)
+        if after not in ("{", "("):
+            return i + 1
+        if self._deeper(i):
+            return len(text)
+        self.depth += 1
+        if after == "{":
+            if text[i + 2:i + 3] == "?":
+                self._read()
+            end = self._brace(i + 2, quoted)
+        elif text[i + 2:i + 3] == "(":
+            end = self._arith(i + 3)
+        else:
+            end = self._body(i + 2)
+            self._substitution()
+        self.depth -= 1
+        return end
+
+    def _brace(self, i, quoted):
+        """Read a ${...} expansion from after its '${'; the index after its closing '}'."""
+        text = self.text
+        n = len(text)
+        while i < n and not self.fired and self.deep is None:
+            ch = text[i]
+            if ch == "}":
+                return i + 1
+            if ch == "\\":
+                i += 2
+            elif ch == "'" and not quoted:
+                end = text.find("'", i + 1)
+                i = n if end < 0 else end + 1
+            elif ch == '"':
+                i = self._dquote(i + 1)
+            elif ch == "`":
+                i = self._backquote(i + 1)
+            elif ch == "$":
+                i = self._dollar(i, quoted)
+            else:
+                i += 1
+        return n
+
+    def _arith(self, i):
+        """Read a $((...)) expansion from after its '$(('; the index after its closing '))'."""
+        text = self.text
+        n = len(text)
+        parens = 0
+        while i < n and not self.fired and self.deep is None:
+            ch = text[i]
+            if ch == "(":
+                parens += 1
+                i += 1
+            elif ch == ")":
+                if parens == 0:
+                    return i + 2 if text[i + 1:i + 2] == ")" else i + 1
+                parens -= 1
+                i += 1
+            elif ch == "\\":
+                i += 2
+            elif ch == '"':
+                i = self._dquote(i + 1)
+            elif ch == "`":
+                i = self._backquote(i + 1)
+            elif ch == "$":
+                i = self._dollar(i, False)
+            else:
+                i += 1
+        return n
+
+    def _ansi_c(self, i):
+        """Skip $'...' text from after its opening quote; the index after its closing quote."""
+        text = self.text
+        n = len(text)
+        while i < n:
+            ch = text[i]
+            if ch == "'":
+                return i + 1
+            i += 2 if ch == "\\" else 1
+        return n
+
+    def _heredoc_operator(self, i):
+        """Record the here-document whose '<<' ends at i: its delimiter word with quotes and backslashes
+        removed, and whether '<<-' strips leading tabs from its lines; the index after that word."""
+        text = self.text
+        n = len(text)
+        strip = text[i:i + 1] == "-"
+        if strip:
+            i += 1
+        while i < n and text[i] in " \t":
+            i += 1
+        start = i
+        while i < n and text[i] not in " \t\n;&|()<>":
+            ch = text[i]
+            if ch in "'\"":
+                end = text.find(ch, i + 1)
+                i = n if end < 0 else end + 1
+            else:
+                i += 2 if ch == "\\" else 1
+        delimiter = _SUBST_STATUS_QUOTING_RE.sub("", text[start:min(i, n)])
+        if delimiter:
+            self.heredocs.append((delimiter, strip))
+        return min(i, n)
+
+    def _heredoc_bodies(self, i):
+        """Skip, from i (the start of a line), the body of each here-document recorded on the line just
+        ended: each runs to its delimiter line, or to the end of the text; the index after the last."""
+        text = self.text
+        n = len(text)
+        for delimiter, strip in self.heredocs:
+            while i < n:
+                end = text.find("\n", i)
+                end = n if end < 0 else end
+                line = text[i:end]
+                i = end + 1
+                if (line.lstrip("\t") if strip else line) == delimiter:
+                    break
+        self.heredocs = []
+        return min(i, n)
+
+
+def _subst_status_reading(command):
+    """(fired, deep) for command: fired is True when some simple command reads $? (or ${?...}) after a
+    counted command substitution earlier in it (_SubstStatusScan); deep is where the reading stopped at the
+    nesting bound, or None when it read the whole command. A command holding no '$?' and no '${?' text holds
+    no read, and is not scanned."""
+    if "$?" not in command and "${?" not in command:
+        return False, None
+    scan = _SubstStatusScan(command)
+    scan.commands(0, False)
+    return scan.fired, scan.deep
+
+
+def _subst_status_unreadable(field, present, value, kind):
+    """status_after_subst's outcome on a payload field it cannot read: a missing field, an empty string, or a
+    value that is not `kind`. This note-only guard never denies, so it allows with a note naming the field
+    and what it held, never a silent allow that would read as a checked call."""
+    if not present:
+        held = "missing"
+    elif value == "":
+        held = "empty"
+    else:
+        held = "{}, not {}".format(_orch_json_kind(value), kind)
+    return _allow_note(_SUBST_STATUS_UNREADABLE_NOTE.format(field, held))
+
+
+def status_after_subst(data):
+    """gatdis (integ/gate-discipline), PreToolUse/Bash. NOTE-ONLY: it allows every Bash command, and blocks
+    only when wired to an event other than PreToolUse, a payload with no hook_event_name included (the
+    sibling hard-block convention); main() turns each of its error paths, its deadline included, into a
+    warning on exit 0 (NOTE_ONLY_PRETOOL_MODES). A Bash command in which a $? or ${?} read comes after a
+    command substitution ($(...) or a backquote) earlier in the SAME simple command ALLOWS with one
+    informational note: in bash 5.3.9's default mode, $? there is the substitution's exit, not the earlier
+    command's (a status echo such as echo "at $(git rev-parse HEAD): rc=$?" prints 0 after a failure). The
+    substitution counts inside double quotes, inside a ${...} operand or a $((...)) expansion and in an
+    earlier word, with other expansions between it and the read. The note suggests saving the status first:
+    cmd; rc=$?; echo "... rc=$rc". A read before every substitution, a substitution only in a leading
+    assignment word or in a redirection's target, arithmetic or parameter expansion alone, and a $? that is
+    single-quoted or backslash-escaped do not fire (_SubstStatusScan). Another tool silently allows. A
+    tool_name that is missing, empty or not a string, a tool_input that is not an object, and a command that
+    is missing, empty or not a string each allow with a note naming that field (_subst_status_unreadable),
+    never silently and never with a deny.
+
+    HONEST RESIDUAL: it reads the command text only, one simple command at a time, so it does not see a $?
+    read in a later command or inside a function body after a command that took a substitution's exit (an
+    assignment-only command such as out=$(cmd) leaves that exit in $?, as intended there); code built or run
+    at run time (eval, bash -c, sh -c, aliases, sourced text); or a $? read inside a substitution's own body,
+    which is skipped. An assignment-only command reading $? in a later assignment after a substitution in an
+    earlier one (x=$(cmd) rc=$?) is not noted: bash 5.3.9 gives the substitution's exit there, which is
+    often the status wanted. Where the shell runs in posix mode or is dash, the read gives the earlier
+    command's status and the note is a false alarm; bash versions other than 5.3.9 were not observed. The
+    reading is approximate: a $(( is always read as arithmetic, a here-document body is skipped unread, a
+    process substitution is never counted, a $ and ? split by a line continuation are not seen as a read,
+    and past 64 nested constructs the rest is not read, which notes as unchecked only when that rest holds a
+    $? read (_SUBST_STATUS_DEEP_NOTE)."""
+    if data.get("hook_event_name") != PRETOOL:
+        return _hard_block("aiqt_hooks: status_after_subst wired to unexpected event {!r}; failing "
+                           "closed".format(data.get("hook_event_name")))
+    tool = data.get("tool_name")
+    if not isinstance(tool, str) or not tool:
+        return _subst_status_unreadable("tool_name", "tool_name" in data, tool, "a string")
+    if tool != "Bash":
+        return _allow()  # a present-but-different tool is out of scope (defensive; the matcher governs)
+    tool_input = data.get("tool_input")
+    if not isinstance(tool_input, dict):
+        return _subst_status_unreadable("tool_input", "tool_input" in data, tool_input, "an object")
+    command = tool_input.get("command")
+    if not isinstance(command, str) or not command:
+        return _subst_status_unreadable("command", "command" in tool_input, command, "a string")
+    fired, deep = _subst_status_reading(command)
+    if fired:
+        return _allow_note(_SUBST_STATUS_NOTE)
+    if deep is not None and ("$?" in command[deep:] or "${?" in command[deep:]):
+        return _allow_note(_SUBST_STATUS_DEEP_NOTE)
+    return _allow()
 
 
 def _has_short(tokens, ch):
@@ -37034,6 +37462,7 @@ HANDLERS = {
     "protected_line": protected_line,
     "branch_root": branch_root,
     "gate_weakening": gate_weakening,
+    "status_after_subst": status_after_subst,
     "commit_msg_subst": commit_msg_subst,
     "pgrep_self_match": pgrep_self_match,
     "secrets_shift_left": secrets_shift_left,
@@ -37077,6 +37506,7 @@ HANDLER_EVENT = {
     "protected_line": PRETOOL,
     "branch_root": PRETOOL,
     "gate_weakening": PRETOOL,
+    "status_after_subst": PRETOOL,
     "commit_msg_subst": PRETOOL,
     "pgrep_self_match": PRETOOL,
     "secrets_shift_left": PRETOOL,

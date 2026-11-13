@@ -4324,6 +4324,129 @@ def _test_pgrep_self_match(failures):
         failures.append("(psm-wiring) pgrep_self_match handler/event wiring is missing or wrong")
 
 
+# status_after_subst rows. Each fire row reads $? after a command substitution earlier in the same simple
+# command. The lettered rows (a, b, d, e, f, g, i, k, l, m, q, r, s) are cases of the bash-semantics table the
+# hook rests on: run after a failing command under bash 5.3.9 with --norc --noprofile, the fire rows read the
+# substitution's 0 and the quiet rows the earlier command's 1, while bash --posix read 1 on each of them. The
+# braced-read, arith-body, case-arm, subshell, after-redirect, case-subst, k-assignment-only,
+# redirect-target, procsub, pipeline and then-assign rows were observed in the same shape, literal text aside,
+# under bash 5.3.9 (the assignment-only command read 0, the status often wanted there, so it stays quiet); the
+# remaining rows pin the reading's own quoting, comment, here-document and command-boundary rules. No row
+# executes a command here: the handler is called directly.
+_SAS_FIRE_ROWS = (
+    ("(sas-fire-a) substitution in double quotes", 'false; echo "x $(true): rc=$?"'),
+    ("(sas-fire-b) substitution with an argument", 'false; echo "x $(basename /a/b): rc=$?"'),
+    ("(sas-fire-e) backquote in double quotes", 'false; echo "x `true`: rc=$?"'),
+    ("(sas-fire-g) substitution in an earlier word", 'false; echo $(true) "rc=$?"'),
+    ("(sas-fire-i) substitution in a ${...} operand", 'false; echo "${unset_v:-$(true)} rc=$?"'),
+    ("(sas-fire-q) substitution and read as separate words", "false; printf '%s %s\\n' \"$(true)\" \"$?\""),
+    ("(sas-fire-r) parameter expansion between", 'false; echo "$(true) ${HOME:+h} rc=$?"'),
+    ("(sas-fire-s) arithmetic expansion between", 'false; echo "$(true) $((1+1)) rc=$?"'),
+    ("(sas-fire-seed) status echo after a check", 'python3 tools/check_x.py; echo "at $(git rev-parse '
+                                                  '--short HEAD): rc=$?"'),
+    ("(sas-fire-braced-read) ${?} read", 'false; echo "$(true) rc=${?}"'),
+    ("(sas-fire-arith-body) substitution inside $((...))", 'false; echo "$(( $(true) + 0 )) rc=$?"'),
+    ("(sas-fire-case-arm) inside a case arm", 'case a in a) echo $(true) $?;; esac'),
+    ("(sas-fire-subshell) inside a subshell", '(echo $(true) $?)'),
+    ("(sas-fire-after-redirect) after a glued redirection", 'echo >f $(true) $?'),
+    ("(sas-fire-newline) on a later line", 'false\necho "$(true) rc=$?"'),
+    ("(sas-fire-case-subst) substitution holding a case", 'echo $(case a in a) true;; esac) $?'),
+)
+_SAS_QUIET_ROWS = (
+    ("(sas-quiet-d) read before every substitution", 'false; echo "rc=$? $(true)"'),
+    ("(sas-quiet-f) status saved first", 'false; rc=$?; echo "at $(true): rc=$rc"'),
+    ("(sas-quiet-k) substitution only in a leading assignment", 'false; x=$(true) echo "rc=$?"'),
+    ("(sas-quiet-k-assignment-only) assignment-only command", 'false; x=$(true) rc=$?'),
+    ("(sas-quiet-l) arithmetic expansion alone", 'false; echo "$((1+1)) rc=$?"'),
+    ("(sas-quiet-m) parameter expansion alone", 'false; echo "${HOME} rc=$?"'),
+    ("(sas-quiet-single-quoted) single-quoted read", "false; echo $(true) '$?'"),
+    ("(sas-quiet-escaped) escaped read", 'false; echo $(true) \\$?'),
+    ("(sas-quiet-dq-escaped) escaped read in double quotes", 'false; echo "$(true) \\$?"'),
+    ("(sas-quiet-ansi-c) read in $'...' text", "false; echo $(true) $'$?'"),
+    ("(sas-quiet-comment) read in a comment", 'false; echo $(true) # $?'),
+    ("(sas-quiet-redirect-target) substitution in a redirection target",
+     'false; echo 2>"$(echo /dev/null)" "rc=$?"'),
+    ("(sas-quiet-procsub) process substitution alone", 'false; echo >(true) rc=$?'),
+    ("(sas-quiet-in-body) read inside the substitution body", 'echo "$(false; echo $?)"'),
+    ("(sas-quiet-next-command) read in the next command", 'echo $(true); echo $?'),
+    ("(sas-quiet-pipeline) read in the next pipeline stage", 'false; echo $(true) | echo "rc=$?"'),
+    ("(sas-quiet-heredoc) read in a here-document body", 'cat <<EOF\n$(true) $?\nEOF'),
+    ("(sas-quiet-then-assign) leading assignment after then",
+     'if false; then :; else x=$(true) echo "rc=$?"; fi'),
+    ("(sas-quiet-no-read) no status read", 'echo "$(true)"'),
+)
+
+
+def _test_status_after_subst(failures):
+    """status_after_subst rows (sas-*); no submitted command is executed. Each fire row must allow with the
+    placement note and each quiet row must allow silently; each fire row must also be red with the hook
+    disabled (its reading _subst_status_reading patched to find nothing), so the row pins this hook's
+    decision. The note must name the effect and the saved form, a payload field it cannot read must allow
+    with a note naming that field, another tool and a command with no read must allow silently, a nesting
+    past the bound must note the unread rest, an unexpected event must hard-block, and the mode must be
+    wired as a note-only PreToolUse handler."""
+    handler = aiqt_hooks.status_after_subst
+    for label, command in _SAS_FIRE_ROWS:
+        got = _decision(handler, command)
+        if got != "allow-note":
+            failures.append("{}: expected allow-note, got {}".format(label, got))
+    for label, command in _SAS_QUIET_ROWS:
+        got = _decision(handler, command)
+        if got != "allow":
+            failures.append("{}: expected silent allow, got {}".format(label, got))
+    saved = aiqt_hooks._subst_status_reading
+    aiqt_hooks._subst_status_reading = lambda command: (False, None)
+    try:
+        disabled = [(label, _decision(handler, command)) for label, command in _SAS_FIRE_ROWS]
+    finally:
+        aiqt_hooks._subst_status_reading = saved
+    for label, got in disabled:
+        if got != "allow":
+            failures.append("{}: with the hook disabled this fire row must go red (allow), got {}"
+                            .format(label, got))
+    code, stdout_obj, _stderr = handler({"hook_event_name": aiqt_hooks.PRETOOL, "tool_name": "Bash",
+                                         "tool_input": {"command": _SAS_FIRE_ROWS[0][1]}})
+    note = (stdout_obj or {}).get("systemMessage", "")
+    if ("rule gatdis" not in note or "exit status of that substitution" not in note
+            or "rc=$?; echo" not in note or "posix mode" not in note or "permissionDecision" in str(stdout_obj)):
+        failures.append("(sas-note) the note must name the rule, the substitution's exit, the saved form and "
+                        "the posix-mode limit, with no permission decision, got {!r}".format(stdout_obj))
+    deep = "echo " + "$(" * 100 + "true" + ")" * 100
+    if _decision(handler, deep + " $?") != "allow-note":
+        failures.append("(sas-deep) a $? past the nesting bound must note the unread rest")
+    if _decision(handler, deep) != "allow":
+        failures.append("(sas-deep-no-read) a nesting past the bound with no $? after it must allow silently")
+    for label, data, field in (
+            ("(sas-unreadable-tool-missing)", {"hook_event_name": aiqt_hooks.PRETOOL,
+                                               "tool_input": {"command": "echo $(true) $?"}}, "tool_name"),
+            ("(sas-unreadable-tool-none)", {"hook_event_name": aiqt_hooks.PRETOOL, "tool_name": None,
+                                            "tool_input": {"command": "echo $(true) $?"}}, "tool_name"),
+            ("(sas-unreadable-input)", {"hook_event_name": aiqt_hooks.PRETOOL, "tool_name": "Bash",
+                                        "tool_input": []}, "tool_input"),
+            ("(sas-unreadable-command-missing)", {"hook_event_name": aiqt_hooks.PRETOOL, "tool_name": "Bash",
+                                                  "tool_input": {}}, "command"),
+            ("(sas-unreadable-command-empty)", {"hook_event_name": aiqt_hooks.PRETOOL, "tool_name": "Bash",
+                                                "tool_input": {"command": ""}}, "command"),
+            ("(sas-unreadable-command-number)", {"hook_event_name": aiqt_hooks.PRETOOL, "tool_name": "Bash",
+                                                 "tool_input": {"command": 42}}, "command")):
+        code, stdout_obj, _stderr = handler(data)
+        message = (stdout_obj or {}).get("systemMessage", "")
+        if (_reduce_result(code, stdout_obj) != "allow-note" or "this call's {} was".format(field) not in message
+                or "not run, not passed" not in message):
+            failures.append("{}: expected an allow with a note naming {}, got {!r}".format(label, field,
+                                                                                          stdout_obj))
+    if _decision(handler, "echo $(true) $?", tool="Read") != "allow":
+        failures.append("(sas-other-tool) a different tool must silently allow")
+    code, stdout_obj, stderr = handler({"hook_event_name": "Stop", "tool_name": "Bash",
+                                        "tool_input": {"command": "echo $(true) $?"}})
+    if not (code == 2 and stdout_obj is None and "status_after_subst wired to unexpected event" in (stderr or "")):
+        failures.append("(sas-event) an unexpected event must use the sibling hard-block contract")
+    if (aiqt_hooks.HANDLERS.get("status_after_subst") is not handler or
+            aiqt_hooks.HANDLER_EVENT.get("status_after_subst") != aiqt_hooks.PRETOOL or
+            "status_after_subst" not in aiqt_hooks.NOTE_ONLY_PRETOOL_MODES):
+        failures.append("(sas-wiring) status_after_subst handler/event/note-only wiring is missing or wrong")
+
+
 # === PreToolUse deadline posture ======================================================================
 # main() runs every PreToolUse mode that is not fail-open inside one aiqt_hooks._DeadlineWindow of
 # PRETOOL_BUDGET_SECONDS and fails closed (exit 2) when its check has not decided by then, and the raw
@@ -6380,6 +6503,16 @@ _DEADLINE_SHAPES = {
     "pgrep_distinct": lambda n, base: ("Bash", {"command": "".join(
         "pgrep -x p{:07d}; ".format(k) for k in range(n // 19))}),
     "pgrep_self_after": lambda n, base: ("Bash", {"command": _repeat("true; ", n, "pgrep -f job7 || run job7")}),
+    # status_after_subst: many simple commands each reading $? before its substitution (each read, none
+    # noted); substitutions with parameter and arithmetic expansions, then one read after a substitution at
+    # the end; one $? past nested substitutions far beyond the nesting bound (the unread-rest note); and
+    # here-document bodies holding a read after a substitution, each skipped as data.
+    "status_reads": lambda n, base: ("Bash", {"command": _repeat('echo "$? $(true)"; ', n)}),
+    "status_after": lambda n, base: ("Bash", {"command": _repeat('echo "$(true) ${x:-y} $((1))"; ', n,
+                                                                 'echo "$(true) rc=$?"')}),
+    "status_nest_after": lambda n, base: ("Bash", {"command": "echo " + "$(" * ((n - 12) // 3) + "true"
+                                                   + ")" * ((n - 12) // 3) + " $?"}),
+    "status_heredoc_reads": lambda n, base: ("Bash", {"command": _repeat("cat <<EOF\n$(true) $?\nEOF\n", n)}),
     # Uncertain '#' shapes (_DEADLINE_HASH_SHAPES): a run of separators inside a subshell before four '#'
     # characters whose comment reading depends on context (five readings), the same with each '#' on its own
     # line (sixteen readings), inside three parentheses, inside runs of parentheses on both sides, and with a
@@ -6465,6 +6598,8 @@ _DEADLINE_CASES = {
     "review_dispatch_pin": ("git_add_parsed", "nest_cmdsubst"),
     "review_workdir_hold": ("git_segments_reset", "cd_git_fetch_unbal", "nest_cmdsubst"),
     "secrets_shift_left": ("cd_git_fetch_unbal", "nest_cmdsubst", "write_secretish"),
+    "status_after_subst": ("nest_cmdsubst", "status_reads", "status_after", "status_nest_after",
+                           "status_heredoc_reads"),
     "write_scope_guard": ("write_content", "write_deep_path"),
 }
 # Cases run from the plain cwd, which no orchestration registry scopes, for a handler the table above runs
@@ -6490,12 +6625,14 @@ _DEADLINE_DENY_CASES = frozenset((
 # (fg_detach_after, fg_setsid_options), a construct left open at the end of the scan (the repeated unclosed
 # `$((` openers and the unterminated heredoc body), which the scan reports as unreadable instead of a silent
 # allow, and the `&` in a body under an unquoted delimiter (fg_heredocs_amp), which the in-scope detector
-# reads as a bare detach (an accepted over-note).
+# reads as a bare detach (an accepted over-note). For status_after_subst: the read after a substitution at the
+# end of status_after, and the read past the nesting bound in status_nest_after (the unread-rest note).
 _DEADLINE_NOTE_CASES = frozenset((
     ("inline_errexit", "errexit_note_after"), ("inline_errexit", "errexit_unread_after"),
     ("orch_truncation_guard", "fg_detach_after"), ("orch_truncation_guard", "fg_setsid_options"),
     ("orch_truncation_guard", "fg_arith_open"), ("orch_truncation_guard", "fg_heredoc_ops_open"),
-    ("orch_truncation_guard", "fg_heredocs_amp")))
+    ("orch_truncation_guard", "fg_heredocs_amp"), ("status_after_subst", "status_after"),
+    ("status_after_subst", "status_nest_after")))
 # The (handler, shape) cases whose known outcome outside registry scope is a silent allow, each within its
 # bound: the plain-delimiter heredoc bodies of fg_heredocs_plain (skipped data, every body closed, and no
 # `&` or quote in them, so the in-scope detector reads nothing and the note scan reads the whole command;
@@ -6505,13 +6642,16 @@ _DEADLINE_NOTE_CASES = frozenset((
 # substitutions are all skipped, provably closed or carry no outer
 # detach, so none draws a note; and every `&` of fg_quoted_heredoc_amps lies in a quoted here-document body
 # the detector lifts, which the note scan's lifted mode skips as data. Pinning the outcome keeps these
-# timing shapes from passing a scanner that mistook one for a detach.
+# timing shapes from passing a scanner that mistook one for a detach. status_after_subst's status_reads (each
+# read before its substitution) and status_heredoc_reads (each read in a skipped body) are pinned silent the
+# same way, so a scan that counted either as a read after a substitution goes red.
 _DEADLINE_ALLOW_CASES = frozenset((
     ("orch_truncation_guard", "fg_heredocs_plain"),
     ("orch_truncation_guard", "fg_subshells"),
     ("orch_truncation_guard", "fg_nested_glued_substs"),
     ("orch_truncation_guard", "fg_quoted_heredoc_amps"),
-    ("pgrep_self_match", "pgrep_distinct")))
+    ("pgrep_self_match", "pgrep_distinct"), ("status_after_subst", "status_reads"),
+    ("status_after_subst", "status_heredoc_reads")))
 _DEADLINE_SIZES = (65536, 262144, 1048576)
 # CPU seconds one in-process handler call may use on a shape of that size, judged on the calling thread's own
 # CPU clock (time.thread_time, read inside the call by _deadline_timed_call). The figures below were recorded
@@ -30502,6 +30642,7 @@ def _main_isolated(monitor):
         _test_git_stash_ref(failures)
         _test_inline_errexit(failures, tmp)
         _test_pgrep_self_match(failures)
+        _test_status_after_subst(failures)
         _test_trkasy_no_amp(failures, tmp)
         _test_wait_loop_deny_text(failures, tmp)
         _test_note_literal_sites(failures, tmp)
