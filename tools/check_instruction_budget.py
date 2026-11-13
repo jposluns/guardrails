@@ -61,6 +61,20 @@ character in the Basic Multilingual Plane is one unit, an astral character such 
       either, as PyYAML ends a flow plain scalar at `?`; a quoted string there may hold a comma, and a
       flow sequence splits only on the commas outside quotes). A nested list, a flow mapping, an escape,
       a multi-line value, an unknown or duplicate key, or any other line exits 2.
+  DETAIL. A rule may carry the two-layer split tools/gen_rules.py defines: a `## Detail` body line and the
+      frontmatter keys `detail-trigger` and `detail-reason` (gen_rules.DETAIL_KEYS, part of
+      FRONTMATTER_KEYS). The gate admits those keys and changes nothing else. The generated rule file is
+      a whole copy of its source and the loader reads it whole, so the text below `## Detail`, and the
+      heading itself, is counted in full with the rest of the body: moving text below the split saves no
+      unit until a later change stops it loading, and this gate changes with that change. A detail value
+      is held to the FRONTMATTER grammar above, not to the typed grammar of tools/gen_rules.py, which
+      refuses a malformed value in the source; here a detail line outside the grammar (a duplicate key, a
+      near-miss key such as `detail-triggers`, a `: ` or ` #` in a plain value, an escape, a list item
+      that is not a one-line string) exits 2. The frontmatter must be printable ASCII here, while
+      tools/gen_rules.py admits a non-ASCII letter in a detail value (an accented `e`, U+00E9) and the
+      zero width non-joiner and joiner (U+200C, U+200D, which CHARACTERS refuses anywhere): a rule
+      with non-ASCII detail metadata exits 2 here, a known over-refusal, until its counting and grammar
+      are analysed on their own.
   SCOPE. A file whose frontmatter has a `paths:` key is conditional and its own body is not counted (its
       imports are, as IMPORTS states), unless its globs load everywhere, and only when every entry is a
       string glob: a typed `paths:` value or entry, one YAML would read as null, a boolean, a number, a
@@ -358,8 +372,10 @@ SHA256_RE = re.compile(r"[0-9a-f]{64}")
 # point, or any character Python reads as whitespace, except the CR of a CR-LF pair.
 OFF_ASCII_RE = re.compile("[^\t\n -~]")
 OFF_GRAMMAR_CATEGORIES = frozenset(("Cc", "Cf", "Cn", "Zl", "Zp", "Zs"))
-# The frontmatter keys the grammar admits: those tools/gen_rules.py writes, plus `paths` and `description`.
-FRONTMATTER_KEYS = frozenset(gen_rules.BASE_KEYS | gen_rules.SEQ_KEYS
+# The frontmatter keys the grammar admits: those tools/gen_rules.py writes (its two-layer split keys,
+# DETAIL_KEYS, among them), plus `paths` and `description`. Admitting a key changes no count: the body
+# below a `## Detail` line is counted in full, as every body is (DETAIL in the module docstring).
+FRONTMATTER_KEYS = frozenset(gen_rules.BASE_KEYS | gen_rules.SEQ_KEYS | gen_rules.DETAIL_KEYS
                              | set(("apex", "tier", "facet", "paths", "description")))
 # A plain scalar may not start with a YAML indicator character; a plain flow element may not hold these
 # (PyYAML ends a flow plain scalar at `?` and rejects the block, so a loader may too).
@@ -1370,6 +1386,29 @@ def _hdr(*rels):
     """The modelled header units of the loaded files `rels`, spelled out independently of header_units."""
     return sum(len("Contents of " + rel + " (project instructions, checked into the codebase):\n\n\n\n")
                for rel in rels)
+
+
+# An aiqt rule source in the grammar tools/gen_rules.py reads, with the two-layer split: its frontmatter up
+# to the detail keys, its core (43 units: a 30-character title line, its newline, a blank line, and the
+# 11 units of `Core text.` and its newline), and a detail layer of 1013 units (the 12 units of the blank
+# line, `## Detail` and the blank line after it, then 1000 letters and a newline).
+_DETAIL_FRONT = ("---\ncorpus-id: budget1\norigin: pack\nfamily: aiqt\ntier: 10\nfacet: QUALI\n"
+                 "slug: budget-selftest-detail\n")
+_DETAIL_CORE = "# Budget detail self-test rule\n\nCore text.\n"
+_DETAIL_LAYER = "\n## Detail\n\n" + "Y" * 1000 + "\n"
+_DETAIL_KEYS_OK = "detail-trigger: writing a self-test fixture\ndetail-reason: self-test only, no clause moves\n"
+_DETAIL_REL = ".claude/rules/aiqt/10-QUALI-budget-selftest-detail.md"
+
+
+def _generated(root, keys):
+    """A fixture repository (_tree, no rule file) whose one rule file tools/gen_rules.py generates from an
+    aiqt rule source with the frontmatter lines `keys` and the split body; (root, the generator's exit)."""
+    _tree(root)
+    src = root / ".aiqt" / "core" / "rules"
+    src.mkdir(parents=True)
+    (src / "budget-selftest-detail.md").write_bytes(
+        (_DETAIL_FRONT + keys + "---\n" + _DETAIL_CORE + _DETAIL_LAYER).encode("utf-8"))
+    return root, _quiet(gen_rules.run, root, False)
 
 
 def _quiet(fn, *args):
@@ -2517,6 +2556,57 @@ def self_test(report_path=None):
         (tmp / "escape" / "outside.md").write_bytes(b"outside\n")
         check("exit/import-escaping-repo-2", _quiet(run, escape), 2)
 
+        # The two-layer split (DETAIL): a rule tools/gen_rules.py generates from a valid split source with
+        # ASCII detail keys is read, and its detail layer counts in full (43 core units plus 1013 detail).
+        detail_split, split_gen = _generated(tmp / "detail-split", _DETAIL_KEYS_OK)
+        split_m = _measured(measure, detail_split)
+        split_pack = 1056 + _hdr(_DETAIL_REL, "CLAUDE.md")
+        check("detail/generated-split-ascii-accepted-exact-count",
+              (split_gen, _quiet(gen_rules.run, detail_split, True), _quiet(run, detail_split))
+              + (split_m if isinstance(split_m, str) else (split_m["rules"], split_m["rule_files"], split_m["pack"]),),
+              (0, 0, 0, (1056, 1, split_pack)))
+        # The detail units decide the ratchet: at PACK it passes; one unit under PACK, and at the figure a
+        # count without the detail layer would give, it fails.
+        detail_ratchets = []
+        for case, ratchet in (("at", split_pack), ("one-over", split_pack - 1), ("core-only", split_pack - 1013)):
+            detail_ratchets.append(_generated(tmp / ("detail-ratchet-" + case), _DETAIL_KEYS_OK)[0])
+            (detail_ratchets[-1] / BUDGET_REL).write_bytes(_budget_text(ratchet).encode("utf-8"))
+        check("exit/detail-units-decide-over-ratchet-1", [_quiet(run, r) for r in detail_ratchets], [0, 1, 1])
+        # A detail key line outside the FRONTMATTER grammar exits 2, as any other key line does, each for its
+        # own reason (with the keys unknown every case would read as an unknown key instead).
+        value_reason = "is outside the enumerated grammar (a one-line string or a flat flow sequence"
+        for check_id, case, keys, reason in (
+                ("exit/detail-duplicate-trigger-2", "duplicate",
+                 "detail-trigger: writing a fixture\ndetail-trigger: writing another",
+                 "duplicate frontmatter key 'detail-trigger'"),
+                ("exit/detail-near-miss-key-2", "near-miss", "detail-triggers: writing a fixture",
+                 "frontmatter line 'detail-triggers: writing a fixture' is outside the enumerated grammar"),
+                ("exit/detail-mapping-separator-value-2", "colon", "detail-trigger: writing: a fixture", value_reason),
+                ("exit/detail-comment-in-value-2", "comment", "detail-trigger: writing #a fixture", value_reason),
+                ("exit/detail-quoted-escape-2", "escape", 'detail-trigger: writing\ndetail-reason: "a\\tb"',
+                 value_reason),
+                ("exit/detail-nested-list-item-2", "nested", "detail-trigger:\n  - []",
+                 "frontmatter list item '  - []' is outside the enumerated grammar"),
+                ("exit/detail-flow-mapping-2", "flow-map", "detail-trigger: " + chr(0x7B) + "a", value_reason)):
+            bad = _tree(tmp / ("detail-bad-" + case),
+                        rules={"a.md": "---\n" + keys + "\n---\n# Rule\n\nCore.\n\n## Detail\n\nMore.\n"})
+            code, err = _stderr_of(run, bad)
+            check(check_id, (code, reason in err), (2, True))
+        # Non-ASCII detail metadata, which tools/gen_rules.py accepts, exits 2 here (a disclosed
+        # over-refusal, DETAIL in the module docstring): an accented letter as outside printable ASCII, and
+        # a zero width non-joiner, a format character, already under CHARACTERS.
+        for check_id, case, keys, reason in (
+                ("exit/detail-non-ascii-trigger-2", "accented",
+                 "detail-trigger: reviewing a r" + chr(0xE9) + "sum" + chr(0xE9) + " upload\n",
+                 "U+00E9, outside printable ASCII"),
+                ("exit/detail-non-ascii-reason-joiner-2", "joiner",
+                 "detail-trigger: writing a fixture\ndetail-reason: "
+                 + "".join(map(chr, (0x645, 0x6CC, 0x200C, 0x62E, 0x648, 0x627, 0x647, 0x645))) + "\n",
+                 "character U+200C is outside the enumerated grammar")):
+            wide, wide_gen = _generated(tmp / ("detail-unicode-" + case), keys)
+            code, err = _stderr_of(run, wide)
+            check(check_id, (wide_gen, code, reason in err), (0, 2, True))
+
         # The module docstring states the model the code implements and its disclosed residuals.
         doc = sys.modules[__name__].__doc__ or ""
         check("doc/model-and-residuals-stated",
@@ -2533,7 +2623,8 @@ def self_test(report_path=None):
                                      "not the name the link gives it", "pinned build only", "8.3 short name",
                                      "later loader build", "right after an inline token",
                                      "differ only in case", "not a regular file",
-                                     "an allowlist, not a list of typed forms", "YAML 1.2 core schema")
+                                     "an allowlist, not a list of typed forms", "YAML 1.2 core schema",
+                                     "DETAIL_KEYS", "is counted in full", "non-ASCII detail metadata exits 2")
                if phrase not in doc]
               + [phrase for phrase in ("never missed", "never under", "OVER-COUNT BY CONSTRUCTION", "not dropped")
                  if phrase in doc], [])
@@ -2727,6 +2818,21 @@ def self_test(report_path=None):
         check("revert/budget-checked-before-open-red",
               ([_opened_fifo(run, r) for r in budget_fifos], [_opened_fifo(budget_first.run, r) for r in budget_fifos]),
               ([(2, False)] * 2, [(2, True)] * 2))
+        # The detail keys put back out of FRONTMATTER_KEYS: the valid generated split exits 2 again.
+        old_keys = _mutant(tmp, "gen_rules.SEQ_KEYS | gen_rules.DETAIL_KEYS", "gen_rules.SEQ_KEYS")
+        check("revert/detail-keys-admitted-red",
+              (_quiet(run, detail_split), _quiet(old_keys.run, detail_split)), (0, 2))
+        # A count that drops the detail layer misses the exact count and passes a ratchet only the detail
+        # units exceed.
+        no_detail = _mutant(tmp, "        total += counted_units(body)\n",
+                            '        total += counted_units(body.split("\\n\\n## Detail\\n")[0] + "\\n")\n')
+        dropped = _measured(no_detail.measure, detail_split)
+        check("revert/detail-text-counted-red",
+              (split_m if isinstance(split_m, str) else split_m["rules"],
+               dropped if isinstance(dropped, str) else dropped["rules"]), (1056, 43))
+        check("revert/detail-units-decide-over-ratchet-red",
+              ([_quiet(run, r) for r in detail_ratchets], [_quiet(no_detail.run, r) for r in detail_ratchets]),
+              ([0, 1, 1], [0, 0, 0]))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -2764,8 +2870,9 @@ def self_test(report_path=None):
           "token exits 2 and a `~` in a short name's base exits 2, "
           "CLAUDE.md, .claude/CLAUDE.md and the budget source checked before they are opened, a non-regular rule "
           "file and a Windows 8.3 short name import exit 2 and no read blocking, an "
-          "imported file's scope held to the grammar, and the budget source "
-          "describing PACK); execution set "
+          "imported file's scope held to the grammar, a generated two-layer split rule read with its detail "
+          "layer counted in full and deciding the ratchet, malformed detail keys and non-ASCII detail "
+          "metadata exit 2, and the budget source describing PACK); execution set "
           "reconciled against tools/selftest_checks.toml".format(len(EXECUTED)))
     return 0
 

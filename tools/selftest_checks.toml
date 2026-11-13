@@ -2700,6 +2700,21 @@ expected-check-ids = [
   "exit/git-prose-loader-filter-0",
   "revert/short-name-after-inline-token-red",
   "revert/git-prose-loader-filter-red",
+  # ---------- the two-layer split: detail keys admitted, detail text counted in full ----------
+  "detail/generated-split-ascii-accepted-exact-count",
+  "exit/detail-units-decide-over-ratchet-1",
+  "exit/detail-duplicate-trigger-2",
+  "exit/detail-near-miss-key-2",
+  "exit/detail-mapping-separator-value-2",
+  "exit/detail-comment-in-value-2",
+  "exit/detail-quoted-escape-2",
+  "exit/detail-nested-list-item-2",
+  "exit/detail-flow-mapping-2",
+  "exit/detail-non-ascii-trigger-2",
+  "exit/detail-non-ascii-reason-joiner-2",
+  "revert/detail-keys-admitted-red",
+  "revert/detail-text-counted-red",
+  "revert/detail-units-decide-over-ratchet-red",
 ]
 
 [[suite]]
