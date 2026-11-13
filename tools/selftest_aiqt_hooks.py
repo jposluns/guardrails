@@ -4324,15 +4324,19 @@ def _test_pgrep_self_match(failures):
         failures.append("(psm-wiring) pgrep_self_match handler/event wiring is missing or wrong")
 
 
-# status_after_subst rows. Each fire row reads $? after a command substitution earlier in the same simple
-# command. The lettered rows (a, b, d, e, f, g, i, k, l, m, q, r, s) are cases of the bash-semantics table the
-# hook rests on: run after a failing command under bash 5.3.9 with --norc --noprofile, the fire rows read the
-# substitution's 0 and the quiet rows the earlier command's 1, while bash --posix read 1 on each of them. The
-# braced-read, arith-body, case-arm, subshell, after-redirect, case-subst, k-assignment-only,
-# redirect-target, procsub, pipeline and then-assign rows were observed in the same shape, literal text aside,
-# under bash 5.3.9 (the assignment-only command read 0, the status often wanted there, so it stays quiet); the
-# remaining rows pin the reading's own quoting, comment, here-document and command-boundary rules. No row
-# executes a command here: the handler is called directly.
+# status_after_subst rows. Each fire row reads $? where bash expands it after a command substitution in the
+# same simple command. The lettered rows (a, b, d, e, f, g, i, k, l, m, q, r, s) are cases of the
+# bash-semantics table the hook rests on: run after a failing command under bash 5.3.9 with --norc
+# --noprofile, the fire rows read the substitution's 0 and the quiet rows the earlier command's 1, while bash
+# --posix read 1 on each of them. The braced-read, arith-body, case-arm, subshell, after-redirect, case-subst,
+# k-assignment-only, redirect-target, procsub, pipeline and then-assign rows were observed in the same shape,
+# literal text aside, under bash 5.3.9 (the assignment-only command read 0, the status often wanted there, so
+# it stays quiet), and so were the arith-shift, cond-*, assign-read, after-assign, herestring*,
+# assign-herestring, redirect-redirect, heredoc*, dollar-dollar, redirect-target-separated,
+# assign-read-redirect, redirect-before and assign-no-subst rows (bash expanded the words, then the leading
+# assignments, then the redirections, a here-document body among them; cond-end read the status of the
+# [[ ]] command itself); the remaining rows pin the reading's own quoting, comment and command-boundary rules.
+# No row executes a command here: the handler is called directly.
 _SAS_FIRE_ROWS = (
     ("(sas-fire-a) substitution in double quotes", 'false; echo "x $(true): rc=$?"'),
     ("(sas-fire-b) substitution with an argument", 'false; echo "x $(basename /a/b): rc=$?"'),
@@ -4351,6 +4355,28 @@ _SAS_FIRE_ROWS = (
     ("(sas-fire-after-redirect) after a glued redirection", 'echo >f $(true) $?'),
     ("(sas-fire-newline) on a later line", 'false\necho "$(true) rc=$?"'),
     ("(sas-fire-case-subst) substitution holding a case", 'echo $(case a in a) true;; esac) $?'),
+    ("(sas-fire-arith-shift) a later line after a << shift in (( ))",
+     '(( x = 1<<2 ))\nfalse\nRC=$? env "SHA=$(true)"'),
+    ("(sas-fire-cond-and) [[ ... && ... ]] is one command", 'false; [[ -n "$(true)x" && $? -eq 1 ]]'),
+    ("(sas-fire-cond-or) [[ ... || ... ]] is one command", 'false; [[ "$(true)" == x || $? -eq 1 ]]'),
+    ("(sas-fire-cond-compare) a > comparison inside [[ ]]", 'false; [[ b > "$(true)" && $? -eq 1 ]]'),
+    ("(sas-fire-cond-group) parentheses inside [[ ]]", 'false; [[ ( -n "$(true)x" ) && $? -eq 1 ]]'),
+    ("(sas-fire-cond-newline) a newline inside [[ ]]", 'false; [[ -n "$(true)x" &&\n$? -eq 1 ]]'),
+    ("(sas-fire-assign-read) read in a leading assignment", 'false; RC=$? env "SHA=$(true)"'),
+    ("(sas-fire-after-assign) assignment read after one with a command word", 'false; y=$(true) x=$? env'),
+    ("(sas-fire-herestring) here-string read, substitution in a word", 'false; read -r v <<<"$?" "w$(true)"'),
+    ("(sas-fire-assign-herestring) here-string read after an assignment substitution",
+     'false; x=$(true) read -r v <<<"$?"'),
+    ("(sas-fire-redirect-redirect) read in a later redirection",
+     'false; read -r v </dev/null"$(true)" <<<"$?"'),
+    ("(sas-fire-herestring-word) read later in the same here-string", 'false; read -r v w <<<"x$(true) $?"'),
+    ("(sas-fire-heredoc) read after a substitution in a here-document body",
+     'false; cat <<EOF\n$(true) rc=$?\nEOF'),
+    ("(sas-fire-heredoc-word) here-document body read, substitution in a word",
+     'false; cat $(true) <<EOF\nrc=$?\nEOF'),
+    ("(sas-fire-heredoc-redirect) here-document body read after a redirection substitution",
+     'false; cat 2>/dev/null"$(true)" <<EOF\nrc=$?\nEOF'),
+    ("(sas-fire-heredoc-strip) read in a <<- body", 'false; cat <<-EOF\n\t$(true) rc=$?\n\tEOF'),
 )
 _SAS_QUIET_ROWS = (
     ("(sas-quiet-d) read before every substitution", 'false; echo "rc=$? $(true)"'),
@@ -4370,10 +4396,26 @@ _SAS_QUIET_ROWS = (
     ("(sas-quiet-in-body) read inside the substitution body", 'echo "$(false; echo $?)"'),
     ("(sas-quiet-next-command) read in the next command", 'echo $(true); echo $?'),
     ("(sas-quiet-pipeline) read in the next pipeline stage", 'false; echo $(true) | echo "rc=$?"'),
-    ("(sas-quiet-heredoc) read in a here-document body", 'cat <<EOF\n$(true) $?\nEOF'),
+    ("(sas-quiet-heredoc) read in a quoted here-document body", "cat <<'EOF'\n$(true) $?\nEOF"),
     ("(sas-quiet-then-assign) leading assignment after then",
      'if false; then :; else x=$(true) echo "rc=$?"; fi'),
     ("(sas-quiet-no-read) no status read", 'echo "$(true)"'),
+    ("(sas-quiet-dollar-dollar) $$ then a plain ?", 'false; echo "$(true) $$?"'),
+    ("(sas-quiet-cond-read-first) read before the substitution in [[ ]]",
+     'false; [[ $? -eq 1 && -n "$(true)x" ]]'),
+    ("(sas-quiet-cond-end) read in the command after [[ ]]", 'false; [[ -n "$(true)x" ]] && echo "rc=$?"'),
+    ("(sas-quiet-redirect-target-separated) substitution in a separated redirection target",
+     'false; echo 2> "$(echo /dev/null)" "rc=$?"'),
+    ("(sas-quiet-assign-read-redirect) assignment read, substitution in a redirection",
+     'false; x=$? env </dev/null"$(true)"'),
+    ("(sas-quiet-redirect-before) here-string read before a redirection substitution",
+     'false; read -r v <<<"$?" 2>/dev/null"$(true)"'),
+    ("(sas-quiet-assign-no-subst) assignment read with no substitution", 'false; RC=$? env "SHA=x"'),
+    ("(sas-quiet-heredoc-read-first) read before the substitution in a body",
+     'false; cat <<EOF\nrc=$? $(true)\nEOF'),
+    ("(sas-quiet-heredoc-later-redirect) body read before a later redirection substitution",
+     'false; cat <<EOF 2>/dev/null"$(true)"\nrc=$?\nEOF'),
+    ("(sas-quiet-heredoc-escaped) escaped read in a body", 'false; cat <<EOF\n$(true) rc=\\$?\nEOF'),
 )
 
 
@@ -4407,7 +4449,7 @@ def _test_status_after_subst(failures):
     code, stdout_obj, _stderr = handler({"hook_event_name": aiqt_hooks.PRETOOL, "tool_name": "Bash",
                                          "tool_input": {"command": _SAS_FIRE_ROWS[0][1]}})
     note = (stdout_obj or {}).get("systemMessage", "")
-    if ("rule gatdis" not in note or "exit status of that substitution" not in note
+    if ("rule gatdis" not in note or "exit status of the last command substitution bash ran" not in note
             or "rc=$?; echo" not in note or "posix mode" not in note or "permissionDecision" in str(stdout_obj)):
         failures.append("(sas-note) the note must name the rule, the substitution's exit, the saved form and "
                         "the posix-mode limit, with no permission decision, got {!r}".format(stdout_obj))
@@ -6506,13 +6548,14 @@ _DEADLINE_SHAPES = {
     # status_after_subst: many simple commands each reading $? before its substitution (each read, none
     # noted); substitutions with parameter and arithmetic expansions, then one read after a substitution at
     # the end; one $? past nested substitutions far beyond the nesting bound (the unread-rest note); and
-    # here-document bodies holding a read after a substitution, each skipped as data.
+    # here-document bodies under an unquoted delimiter, each read and each holding a read before its
+    # substitution.
     "status_reads": lambda n, base: ("Bash", {"command": _repeat('echo "$? $(true)"; ', n)}),
     "status_after": lambda n, base: ("Bash", {"command": _repeat('echo "$(true) ${x:-y} $((1))"; ', n,
                                                                  'echo "$(true) rc=$?"')}),
     "status_nest_after": lambda n, base: ("Bash", {"command": "echo " + "$(" * ((n - 12) // 3) + "true"
                                                    + ")" * ((n - 12) // 3) + " $?"}),
-    "status_heredoc_reads": lambda n, base: ("Bash", {"command": _repeat("cat <<EOF\n$(true) $?\nEOF\n", n)}),
+    "status_heredoc_reads": lambda n, base: ("Bash", {"command": _repeat("cat <<EOF\n$? $(true)\nEOF\n", n)}),
     # Uncertain '#' shapes (_DEADLINE_HASH_SHAPES): a run of separators inside a subshell before four '#'
     # characters whose comment reading depends on context (five readings), the same with each '#' on its own
     # line (sixteen readings), inside three parentheses, inside runs of parentheses on both sides, and with a
@@ -6642,9 +6685,9 @@ _DEADLINE_NOTE_CASES = frozenset((
 # substitutions are all skipped, provably closed or carry no outer
 # detach, so none draws a note; and every `&` of fg_quoted_heredoc_amps lies in a quoted here-document body
 # the detector lifts, which the note scan's lifted mode skips as data. Pinning the outcome keeps these
-# timing shapes from passing a scanner that mistook one for a detach. status_after_subst's status_reads (each
-# read before its substitution) and status_heredoc_reads (each read in a skipped body) are pinned silent the
-# same way, so a scan that counted either as a read after a substitution goes red.
+# timing shapes from passing a scanner that mistook one for a detach. status_after_subst's status_reads and
+# status_heredoc_reads (each read before its substitution, in a command or in a here-document body) are pinned
+# silent the same way, so a scan that counted either as a read after a substitution goes red.
 _DEADLINE_ALLOW_CASES = frozenset((
     ("orch_truncation_guard", "fg_heredocs_plain"),
     ("orch_truncation_guard", "fg_subshells"),

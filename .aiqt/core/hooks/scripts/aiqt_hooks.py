@@ -9379,21 +9379,31 @@ _SUBST_STATUS_PREFIX_WORDS = frozenset(("!", "{", "}", "if", "then", "else", "el
 # How many nested constructs ($(...), ${...}, $((...)), a (...) subshell, a <(...) or >(...) process
 # substitution) the reading follows before it stops; far under Python's default recursion limit.
 _SUBST_STATUS_MAX_DEPTH = 64
+# The expansion phases of a simple command, in the order bash 5.3.9 ran them: the command's words, then its
+# leading assignment words, then its redirection words (a here-string included), each phase in text order.
+_SUBST_STATUS_WORDS, _SUBST_STATUS_ASSIGNS, _SUBST_STATUS_REDIRECTS = 0, 1, 2
+# Pending-read bits (_SubstStatusScan.pending): a read in an assignment word, a read in an assignment word
+# after a substitution in an earlier one, and a read in a redirection word, each judged when the command ends.
+_SUBST_STATUS_PEND_ASSIGN, _SUBST_STATUS_PEND_AFTER_ASSIGN, _SUBST_STATUS_PEND_REDIRECT = 1, 2, 4
 # A run of characters that is plain text in a command word: none ends a word, quotes, escapes, expands or
 # redirects. '&' is left out and judged apart, since '&>' is a redirection, not a separator.
 _SUBST_STATUS_PLAIN_RE = re.compile(r"[^ \t\n;|()&\\'\"`$<>]+")
 # The characters inside double quotes, a ${...} operand or a backquote body that the reading stops at.
 _SUBST_STATUS_DQ_RE = re.compile(r"[\"\\`$]")
 _SUBST_STATUS_BACKQUOTE_RE = re.compile(r"[\\`]")
+# The characters a here-document body under an unquoted delimiter is read at: quotes there are plain text.
+_SUBST_STATUS_HEREDOC_RE = re.compile(r"[\\`$]")
 # Quote and backslash characters, removed from a here-document's delimiter word to give the line that ends it.
 _SUBST_STATUS_QUOTING_RE = re.compile(r"[\\'\"]")
 _SUBST_STATUS_NOTE = (
-    "AIQT guardrail (rule gatdis): this command reads $? after a command substitution ($(...) or a backquote) "
-    "earlier in the same simple command. In bash's default mode, $? there holds the exit status of that "
-    "substitution, not of the command before it, so a status printed or tested this way can read 0 after a "
-    "failure. Save the status in a command of its own first, then use the copy: "
-    "cmd; rc=$?; echo \"... rc=$rc\". In bash's posix mode or under dash the read gives the earlier command's "
-    "status instead; this note does not say that any command failed.")
+    "AIQT guardrail (rule gatdis): this command reads $? where bash expands it after a command substitution "
+    "($(...) or a backquote) in the same simple command (bash expands its words, then its leading "
+    "assignments, then its redirections). In bash's default mode, $? there holds the exit status of the last "
+    "command substitution bash ran in that command, not of the command before it, so a status printed or "
+    "tested this way can read 0 after a failure; a substitution in a ${...} operand bash does not expand runs "
+    "nothing, and then this note is a false alarm. Save the status in a command of its own first, then use "
+    "the copy: cmd; rc=$?; echo \"... rc=$rc\". In bash's posix mode or under dash the read gives the earlier "
+    "command's status instead; this note does not say that any command failed.")
 _SUBST_STATUS_DEEP_NOTE = (
     "AIQT guardrail (rule gatdis): this command nests constructs deeper than the $? placement check reads ({} "
     "levels), and the rest of it past that point holds a $? read that was not checked. This guard never blocks "
@@ -9407,37 +9417,70 @@ _SUBST_STATUS_UNREADABLE_NOTE = (
 
 class _SubstStatusScan:
     """One forward reading of a Bash command's raw text for status_after_subst, in time linear in its length.
-    It keeps, for the simple command being read, whether a counted command substitution has come yet (seen),
-    and sets fired at the first $? or ${?...} read after one. A substitution counts unless it sits in a
-    leading assignment word or a redirection's target word (bash expands redirections after the words, and
-    5.3.9 read the earlier command's exit in the words after a substitution in one), and wherever it sits in
-    the word: in double quotes, in a ${...} operand or in $((...)). A ;, &, |, newline, ( or ) starts a new
-    simple command; a case pattern's ) is told apart from a closing one. The body of a $(...) or backquote
-    substitution and of a <(...) or >(...) process substitution is read only to find its end: a read inside it
-    is not judged, and a process substitution is not counted, since bash 5.3.9 left $? unchanged after one. A
-    here-document body is skipped as data. Single-quoted text, $'...' text and a backslash-escaped character
-    are never a read. Past _SUBST_STATUS_MAX_DEPTH nested constructs the reading stops and records where
-    (deep)."""
+    It keeps, for the simple command being read, which expansion phases (its words, its leading assignment
+    words, its redirection words) have held a command substitution so far (subs), and sets fired at a $? or
+    ${?...} read that bash expands after one: later in the same phase, or in a later phase wherever it sits in
+    the text (bash 5.3.9 expanded the words, then the assignments, then the redirections); a read in an
+    assignment after a substitution in an earlier assignment fires only when the command has a command word. A
+    substitution counts wherever it sits in its word: in double quotes, in a ${...} operand or in $((...)). A
+    ;, &, |, newline, ( or ) starts a new simple command, except inside a [[ ... ]] conditional; a case
+    pattern's ) is told apart from a closing one. The body of a $(...) or backquote substitution and of a
+    <(...) or >(...) process substitution is read only to find its end: a read inside it is not judged, and a
+    process substitution is not counted, since bash 5.3.9 left $? unchanged after one. A here-document body
+    under an unquoted delimiter is read as bash expands it, as a redirection of its command; one under a
+    quoted delimiter is skipped as text. Single-quoted text, $'...' text, a backslash-escaped character and
+    the ? after $$ are never a read. Past _SUBST_STATUS_MAX_DEPTH nested constructs the reading stops and
+    records where (deep)."""
 
-    __slots__ = ("text", "fired", "deep", "heredocs", "seen", "counts", "judge", "depth")
+    __slots__ = ("text", "fired", "deep", "heredocs", "phase", "subs", "pending", "judge", "depth")
 
     def __init__(self, text):
         self.text = text
         self.fired = False
         self.deep = None
-        self.heredocs = []  # (delimiter, strip_tabs) for each here-document whose body starts at the next newline
-        self.seen = False
-        self.counts = True  # whether a substitution in the word being read counts
+        self.heredocs = []  # each here-document whose body starts at the next newline (_heredoc_operator)
+        self.phase = _SUBST_STATUS_WORDS  # the expansion phase of the word being read
+        self.subs = [False, False, False]  # per phase: a substitution read so far in this simple command
+        self.pending = 0  # bits: a read that a substitution later in the text, in an earlier phase, can precede
         self.judge = True  # whether a read here is judged: False inside a substitution body
         self.depth = 0
 
     def _read(self):
-        if self.seen and self.judge:
-            self.fired = True
+        """Judge a $? read in the word being read. bash expands a simple command's words, then its leading
+        assignments, then its redirections, each in text order, so a read fires at once after a substitution
+        earlier in its own phase, and is kept pending for a substitution in an earlier phase that may still
+        come later in the text (judged by _end)."""
+        if not self.judge:
+            return
+        phase = self.phase
+        if phase == _SUBST_STATUS_WORDS:
+            if self.subs[phase]:
+                self.fired = True
+        elif phase == _SUBST_STATUS_ASSIGNS:
+            self.pending |= _SUBST_STATUS_PEND_ASSIGN
+            if self.subs[phase]:
+                self.pending |= _SUBST_STATUS_PEND_AFTER_ASSIGN  # judged by whether a command word comes
+        else:
+            self.pending |= _SUBST_STATUS_PEND_REDIRECT
+            if self.subs[phase]:
+                self.fired = True
 
     def _substitution(self):
-        if self.counts:
-            self.seen = True
+        self.subs[self.phase] = True
+
+    def _end(self, command_word):
+        """Close the simple command being read: fire for a pending read that a substitution in an earlier
+        phase precedes, and for a read after a substitution in an earlier assignment when the command has a
+        command word (with none, x=$(cmd) rc=$? is left quiet); then start a new one."""
+        subs, pending = self.subs, self.pending
+        if ((pending & _SUBST_STATUS_PEND_ASSIGN and subs[_SUBST_STATUS_WORDS])
+                or (pending & _SUBST_STATUS_PEND_AFTER_ASSIGN and command_word)
+                or (pending & _SUBST_STATUS_PEND_REDIRECT
+                    and (subs[_SUBST_STATUS_WORDS] or subs[_SUBST_STATUS_ASSIGNS]))) and self.judge:
+            self.fired = True
+        self.subs = [False, False, False]
+        self.pending = 0
+        self.phase = _SUBST_STATUS_WORDS
 
     def _deeper(self, i):
         """Whether one more nested construct, opening at i, passes the nesting bound; if so, record i."""
@@ -9457,20 +9500,28 @@ class _SubstStatusScan:
     def commands(self, i, closed):
         """Read a command list from i: to the end of the text, or (closed) to the unmatched ')' that ends it,
         returning the index after that ')' (the length of the text when it ends first). Each simple command
-        starts with no substitution seen; the enclosing command's seen and counts are restored on return."""
+        starts with no substitution seen; the enclosing command's phase, substitutions and pending reads are
+        restored on return. A [[ ... ]] conditional is one command: its &&, ||, parentheses, < and > and
+        newlines neither end it nor redirect. A (( that opens a command is read as an arithmetic command, so a
+        << inside it is a shift, not a here-document."""
         text = self.text
         n = len(text)
-        outer = (self.seen, self.counts)
-        self.seen, self.counts = False, True
+        outer = (self.phase, self.subs, self.pending)
+        self.phase, self.subs, self.pending = _SUBST_STATUS_WORDS, [False, False, False], 0
         lead = True  # no command word yet: leading assignments, redirections and prefix words only
         word = -1  # where the word being read starts; -1 between words
         assign = redirect = target_next = False
+        cond = -1  # inside a [[ ... ]] conditional: the parentheses open in it; -1 outside one
         cases = []  # for each open case: "header" (before its in), "pattern" or "body"
         while i < n and not self.fired and self.deep is None:
             ch = text[i]
             if ch in " \t\n;|()" or (ch == "&" and text[i + 1:i + 2] != ">"):
                 if word >= 0:
                     short = text[word:i] if i - word <= 5 else ""
+                    if cond >= 0 and short == "]]":
+                        cond = -1
+                    elif lead and not (assign or redirect) and short == "[[":
+                        cond = 0
                     if cases and cases[-1] == "header" and short == "in":
                         cases[-1] = "pattern"
                     elif cases and short == "esac" and (cases[-1] == "pattern" or lead):
@@ -9483,13 +9534,27 @@ class _SubstStatusScan:
                 if ch in " \t":
                     i += 1
                     continue
+                if cond >= 0 and ch in "\n&|()" and not (ch == ")" and cond == 0 and closed):
+                    if ch in "()":
+                        cond += 1 if ch == "(" else -1 if cond else 0
+                    i = self._heredoc_bodies(i + 1) if ch == "\n" else i + 1
+                    continue  # inside [[ ... ]]: one conditional command
                 if ch == ")" and cases and cases[-1] == "pattern":
                     cases[-1] = "body"  # the ')' that ends a case pattern closes nothing
                 elif ch == ")" and closed:
-                    self.seen, self.counts = outer
+                    self._end(not lead)
+                    self.phase, self.subs, self.pending = outer
                     return i + 1
                 elif ch == "(" and cases and cases[-1] == "pattern":
                     pass  # a case pattern's optional opening '('
+                elif ch == "(" and lead and text[i + 1:i + 2] == "(":
+                    if self._deeper(i):
+                        return n
+                    self.depth += 1
+                    i = self._arith(i + 2)  # an arithmetic command: its words, no here-document
+                    self.depth -= 1
+                    lead = False
+                    continue
                 elif ch == "(":
                     if self._deeper(i):
                         return n
@@ -9501,7 +9566,8 @@ class _SubstStatusScan:
                     i += 1
                     if text[i:i + 2] == ";&":
                         i += 1
-                self.seen, lead, target_next = False, True, False  # a new simple command
+                self._end(not lead)
+                lead, target_next, cond = True, False, -1  # a new simple command
                 i = self._heredoc_bodies(i + 1) if ch == "\n" else i + 1
                 continue
             if word < 0:
@@ -9512,7 +9578,8 @@ class _SubstStatusScan:
                 word = i
                 assign = lead and _SUBST_STATUS_ASSIGN_RE.match(text, i) is not None
                 redirect, target_next = target_next, False
-                self.counts = not (assign or redirect)
+                self.phase = (_SUBST_STATUS_ASSIGNS if assign else _SUBST_STATUS_REDIRECTS if redirect
+                              else _SUBST_STATUS_WORDS)
             if ch == "\\":
                 i += 2
             elif ch == "'":
@@ -9530,13 +9597,15 @@ class _SubstStatusScan:
                 self.depth += 1
                 i = self._body(i + 2)  # a process substitution: not counted, its body not judged
                 self.depth -= 1
+            elif cond >= 0 and ch in "<>":
+                i += 1  # a string comparison inside [[ ... ]], not a redirection
             elif ch in "<>&":
                 if lead and not (assign or redirect) and i > word and (
                         i - word > 5 or not (text[word:i].isdigit()
                                              or text[word:i] in _SUBST_STATUS_PREFIX_WORDS)):
                     lead = False  # the command word, glued to its redirection (echo>f)
                 redirect = True
-                self.counts = False
+                self.phase = _SUBST_STATUS_REDIRECTS
                 if text.startswith("<<", i) and not text.startswith("<<<", i):
                     i = self._heredoc_operator(i + 2)
                     continue
@@ -9550,6 +9619,11 @@ class _SubstStatusScan:
             else:
                 plain = _SUBST_STATUS_PLAIN_RE.match(text, i)
                 i = plain.end() if plain else i + 1
+        if self.deep is None:
+            self._end(not lead or (word >= 0 and not (assign or redirect)
+                                   and text[word:n] not in _SUBST_STATUS_PREFIX_WORDS))
+        if closed:
+            self.phase, self.subs, self.pending = outer
         return n
 
     def _dquote(self, i):
@@ -9595,6 +9669,8 @@ class _SubstStatusScan:
         if after == "?":
             self._read()
             return i + 2
+        if after == "$":
+            return i + 2  # $$, the shell's process id: a ? after it is plain text
         if after == "'" and not quoted:
             return self._ansi_c(i + 2)
         if after == '"' and not quoted:
@@ -9695,31 +9771,69 @@ class _SubstStatusScan:
                 i = n if end < 0 else end + 1
             else:
                 i += 2 if ch == "\\" else 1
-        delimiter = _SUBST_STATUS_QUOTING_RE.sub("", text[start:min(i, n)])
+        word = text[start:min(i, n)]
+        delimiter = _SUBST_STATUS_QUOTING_RE.sub("", word)
         if delimiter:
-            self.heredocs.append((delimiter, strip))
+            # An unquoted delimiter leaves the body expanded with the command's redirections, so it is read
+            # with that command's substitutions (its subs list, final once the command ends) and whether a
+            # redirection before this one held one; a quoted delimiter leaves the body literal text.
+            read = self.judge and delimiter == word
+            self.heredocs.append((delimiter, strip, read, self.subs, self.subs[_SUBST_STATUS_REDIRECTS]))
         return min(i, n)
 
     def _heredoc_bodies(self, i):
-        """Skip, from i (the start of a line), the body of each here-document recorded on the line just
-        ended: each runs to its delimiter line, or to the end of the text; the index after the last."""
+        """From i (the start of a line), the body of each here-document recorded on the line just ended: each
+        runs to its delimiter line, or to the end of the text. A body under an unquoted delimiter is read
+        (_heredoc_text); the index after the last body."""
         text = self.text
         n = len(text)
-        for delimiter, strip in self.heredocs:
+        for delimiter, strip, read, owner, redirect_before in self.heredocs:
+            start = i
             while i < n:
                 end = text.find("\n", i)
                 end = n if end < 0 else end
                 line = text[i:end]
-                i = end + 1
                 if (line.lstrip("\t") if strip else line) == delimiter:
                     break
+                i = end + 1
+            if read and not self.fired and self.deep is None:
+                self._heredoc_text(start, min(i, n), owner[_SUBST_STATUS_WORDS] or owner[_SUBST_STATUS_ASSIGNS]
+                                   or redirect_before)
+            i = min(n, text.find("\n", i) + 1 or n) if i < n else n
         self.heredocs = []
         return min(i, n)
 
+    def _heredoc_text(self, start, end, after):
+        """Read the body text[start:end] of a here-document under an unquoted delimiter as bash expands it,
+        in the redirection phase of its command (after: a substitution came before it there): a $(...) or
+        backquote substitution in it counts, and a $? read in it fires after one. Quotes in it are text."""
+        scan = _SubstStatusScan(self.text[start:end])
+        scan.depth = self.depth
+        scan.phase = _SUBST_STATUS_REDIRECTS
+        scan.subs[_SUBST_STATUS_REDIRECTS] = after
+        body = scan.text
+        i, n = 0, len(body)
+        while i < n and not scan.fired and scan.deep is None:
+            found = _SUBST_STATUS_HEREDOC_RE.search(body, i)
+            if found is None:
+                break
+            i = found.start()
+            ch = body[i]
+            if ch == "\\":
+                i += 2
+            elif ch == "`":
+                i = scan._backquote(i + 1)
+            else:
+                i = scan._dollar(i, True)
+        if scan.fired:
+            self.fired = True
+        elif scan.deep is not None:
+            self.deep = start + scan.deep
+
 
 def _subst_status_reading(command):
-    """(fired, deep) for command: fired is True when some simple command reads $? (or ${?...}) after a
-    counted command substitution earlier in it (_SubstStatusScan); deep is where the reading stopped at the
+    """(fired, deep) for command: fired is True when bash expands a $? (or ${?...}) read of some simple
+    command after a command substitution in it (_SubstStatusScan); deep is where the reading stopped at the
     nesting bound, or None when it read the whole command. A command holding no '$?' and no '${?' text holds
     no read, and is not scanned."""
     if "$?" not in command and "${?" not in command:
@@ -9746,31 +9860,41 @@ def status_after_subst(data):
     """gatdis (integ/gate-discipline), PreToolUse/Bash. NOTE-ONLY: it allows every Bash command, and blocks
     only when wired to an event other than PreToolUse, a payload with no hook_event_name included (the
     sibling hard-block convention); main() turns each of its error paths, its deadline included, into a
-    warning on exit 0 (NOTE_ONLY_PRETOOL_MODES). A Bash command in which a $? or ${?} read comes after a
-    command substitution ($(...) or a backquote) earlier in the SAME simple command ALLOWS with one
-    informational note: in bash 5.3.9's default mode, $? there is the substitution's exit, not the earlier
-    command's (a status echo such as echo "at $(git rev-parse HEAD): rc=$?" prints 0 after a failure). The
-    substitution counts inside double quotes, inside a ${...} operand or a $((...)) expansion and in an
-    earlier word, with other expansions between it and the read. The note suggests saving the status first:
-    cmd; rc=$?; echo "... rc=$rc". A read before every substitution, a substitution only in a leading
-    assignment word or in a redirection's target, arithmetic or parameter expansion alone, and a $? that is
-    single-quoted or backslash-escaped do not fire (_SubstStatusScan). Another tool silently allows. A
-    tool_name that is missing, empty or not a string, a tool_input that is not an object, and a command that
-    is missing, empty or not a string each allow with a note naming that field (_subst_status_unreadable),
-    never silently and never with a deny.
+    warning on exit 0 (NOTE_ONLY_PRETOOL_MODES). A Bash command in which bash expands a $? or ${?} read
+    after a command substitution ($(...) or a backquote) in the SAME simple command ALLOWS with one
+    informational note: in bash 5.3.9's default mode, $? there is the exit of the last substitution bash
+    ran, not the earlier command's (a status echo such as echo "at $(git rev-parse HEAD): rc=$?" prints 0
+    after a failure). bash 5.3.9 expanded a simple command's words, then its leading assignments, then its
+    redirections (a here-string and the body of a here-document under an unquoted delimiter among them), each
+    in text order, so a read fires after a substitution earlier in its own phase or anywhere in an earlier
+    one (RC=$? env "SHA=$(cmd)", read v <<<"$?" "$(cmd)"). The substitution counts inside double quotes,
+    inside a ${...} operand or a $((...)) expansion and in an earlier word, with other expansions between it
+    and the read; a [[ ... ]] conditional is one command, its && and || included, and a << inside a (( ))
+    arithmetic command is a shift. The note suggests saving the status first: cmd; rc=$?; echo "... rc=$rc".
+    A read that bash expands before every substitution of its command (in the words before a substitution
+    in a later word, a leading assignment or a redirection; in a leading assignment before one in a
+    redirection), arithmetic or parameter expansion alone, and a $? that is single-quoted, backslash-escaped,
+    in the body of a here-document under a quoted delimiter or a ? after $$ do not fire (_SubstStatusScan).
+    Another tool silently allows. A tool_name that is missing, empty or not a string, a tool_input that is
+    not an object, and a command that is missing, empty or not a string each allow with a note naming that
+    field (_subst_status_unreadable), never silently and never with a deny.
 
     HONEST RESIDUAL: it reads the command text only, one simple command at a time, so it does not see a $?
     read in a later command or inside a function body after a command that took a substitution's exit (an
-    assignment-only command such as out=$(cmd) leaves that exit in $?, as intended there); code built or run
-    at run time (eval, bash -c, sh -c, aliases, sourced text); or a $? read inside a substitution's own body,
-    which is skipped. An assignment-only command reading $? in a later assignment after a substitution in an
-    earlier one (x=$(cmd) rc=$?) is not noted: bash 5.3.9 gives the substitution's exit there, which is
-    often the status wanted. Where the shell runs in posix mode or is dash, the read gives the earlier
-    command's status and the note is a false alarm; bash versions other than 5.3.9 were not observed. The
-    reading is approximate: a $(( is always read as arithmetic, a here-document body is skipped unread, a
-    process substitution is never counted, a $ and ? split by a line continuation are not seen as a read,
-    and past 64 nested constructs the rest is not read, which notes as unchecked only when that rest holds a
-    $? read (_SUBST_STATUS_DEEP_NOTE)."""
+    assignment-only command such as out=$(cmd) leaves that exit in $?, as intended there), the first command
+    of a for loop body after a substitution in its word list and a case arm after one in its subject or
+    patterns included; code built or run at run time (eval, bash -c, sh -c, aliases, sourced text); a $?
+    read inside a substitution's own body, which is read only to find its end; or a read in a redirection
+    after a here-document of the same command whose body holds a substitution. An assignment-only command
+    reading $? after a substitution in the same or an earlier assignment (x=$(cmd) rc=$?, x="$(cmd)$?") is
+    not noted: bash 5.3.9 gives the substitution's exit there, which is often the status wanted. A
+    substitution in a ${...} operand that bash does not expand (${HOME:-$(cmd)} with HOME set,
+    ${unset:+$(cmd)}) runs nothing, so a read after it gives the earlier command's status and the note is a
+    false alarm; so it is where the shell runs in posix mode or is dash. Bash versions other than 5.3.9 were
+    not observed. The reading is approximate: a $(( is always read as arithmetic, and a (( that opens a
+    command as an arithmetic command, never as nested subshells; a process substitution is never counted; a
+    $ and ? split by a line continuation are not seen as a read; and past 64 nested constructs the rest is
+    not read, which notes as unchecked only when that rest holds a $? read (_SUBST_STATUS_DEEP_NOTE)."""
     if data.get("hook_event_name") != PRETOOL:
         return _hard_block("aiqt_hooks: status_after_subst wired to unexpected event {!r}; failing "
                            "closed".format(data.get("hook_event_name")))
