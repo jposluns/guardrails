@@ -2246,7 +2246,7 @@ _CK_UNKNOWN = ("[aiqt-clock] Host clock reading at this {event} hook event: UTC 
                "context for a timestamp, not a check of one.")
 
 
-def _test_clock_inject(failures):
+def _test_clock_inject(failures, tmp):
     """(ck-*) The two context-only clock bindings, clock_inject_post (PostToolUse) and clock_inject_failure
     (PostToolUseFailure). ck-wiring-*: each is in HANDLERS and HANDLER_EVENT under its own event, and both
     events are fail-open. ck-known-*: with the clock fixed by replacing aiqt_hooks._clock_now and the zone
@@ -2256,12 +2256,21 @@ def _test_clock_inject(failures):
     is named unknown, with no local time.
     ck-wrong-event-*: a payload naming another event gets a note and no reading. ck-offset: the offset text
     at and on each side of zero (one second, one microsecond) and at whole and half hours. ck-zone-fixed:
-    _clock_local keeps a fixed injected zone (TZ a POSIX rule). ck-zone-unknown: TZ empty, TZ an unknown
-    name, TZ an absent file, TZ unset with no /etc/localtime, a conversion that fails or that gives no
-    abbreviation, and a zone database offset that differs from the conversion's each give no local time
-    and a reason. ck-malformed-*: main() with an unparseable or a non-object payload warns on exit 0 and
-    adds no reading for both modes. ck-live: the unreplaced clock gives a line of the known or the unknown
-    shape."""
+    _clock_local keeps a fixed injected zone (TZ a POSIX rule). ck-zone-known-*: each TZ the C library
+    reads correctly (unset, UTC, zone database names, an absolute zone file, complete POSIX rules, the
+    legacy EST5EDT) is kept when the injected conversion gives what the C library gives for it.
+    ck-zone-unknown-*: TZ empty (pinned by its own reason), an unknown name, an absent file, TZ unset
+    with /etc/localtime not a readable regular file, a conversion that fails or gives no abbreviation, a
+    zone database offset or abbreviation that differs from the conversion's (the C library's fallback
+    name at offset zero included), the abbreviation -00 through TZ and through /etc/localtime, a TZ that
+    only looks like a POSIX rule, and a rule whose names or offsets the conversion does not match each
+    give no local time and the reason for that case. ck-rule-*: _clock_posix_rule accepts and refuses
+    each number just inside and just outside its range, refuses a daylight name with no transition rule,
+    and names the rule's (abbreviation, offset) pairs. ck-localtime-*: _clock_regular_readable on real
+    files in tmp: a regular file and a symlink to one read True; a directory, an absent path, a dangling
+    symlink, a FIFO and (when not root) a mode 000 file read False. ck-malformed-*: main() with an
+    unparseable or a non-object payload warns on exit 0 and adds no reading for both modes. ck-live: the
+    unreplaced clock gives a line of the known or the unknown shape."""
     utc = datetime.timezone.utc
     fixed_now = datetime.datetime(2026, 9, 23, 17, 45, 2, tzinfo=utc)
     edt = datetime.timezone(datetime.timedelta(hours=-4), "EDT")
@@ -2336,12 +2345,43 @@ def _test_clock_inject(failures):
         if got != want:
             failures.append("(ck-offset-{}) the offset {!r} must read {!r}, got {!r}".format(
                 offset.total_seconds(), offset, want, got))
-    local, reason = aiqt_hooks._clock_local(fixed_now, env={"TZ": "EST5EDT"}, exists=lambda _p: True,
-                                            convert=lambda now: now.astimezone(edt))
+    local, reason = aiqt_hooks._clock_local(fixed_now, env={"TZ": "EST5EDT,M3.2.0,M11.1.0"},
+                                            readable=lambda _p: True, convert=lambda now: now.astimezone(edt))
     if reason is not None or local is None or (local.utcoffset(), local.tzname(), local.hour) != (
             td(hours=-4), "EDT", 13):
         failures.append("(ck-zone-fixed) a fixed injected zone under a POSIX TZ rule must be kept, got {!r} "
                         "and {!r}".format(local, reason))
+
+    def fixed(offset, name):
+        return lambda now: now.astimezone(datetime.timezone(offset, name))
+    ck_dir = Path(tmp) / "ck-localtime"
+    ck_dir.mkdir()
+    zone_file = ck_dir / "zone"
+    zone_file.write_bytes(b"TZif")
+    for label, env, convert in (
+            ("unset", {}, fixed(td(0), "UTC")), ("utc", {"TZ": "UTC"}, fixed(td(0), "UTC")),
+            ("etc-utc", {"TZ": "Etc/UTC"}, fixed(td(0), "UTC")),
+            ("new-york", {"TZ": "America/New_York"}, fixed(td(hours=-4), "EDT")),
+            ("colon-new-york", {"TZ": ":America/New_York"}, fixed(td(hours=-4), "EDT")),
+            ("est5edt", {"TZ": "EST5EDT"}, fixed(td(hours=-4), "EDT")),
+            ("rule-ist", {"TZ": "IST-5:30"}, fixed(td(hours=5, minutes=30), "IST")),
+            ("rule-npt", {"TZ": "NPT-5:45"}, fixed(td(hours=5, minutes=45), "NPT")),
+            ("rule-quoted", {"TZ": "<+0530>-5:30"}, fixed(td(hours=5, minutes=30), "+0530")),
+            ("rule-gmt", {"TZ": "GMT+5"}, fixed(td(hours=-5), "GMT")),
+            ("rule-seconds", {"TZ": "ABC-0:00:01"}, fixed(td(seconds=1), "ABC")),
+            ("rule-full", {"TZ": "ABC5DEF,M3.2.0,M11.1.0"}, fixed(td(hours=-4), "DEF")),
+            ("kolkata", {"TZ": "Asia/Kolkata"}, fixed(td(hours=5, minutes=30), "IST")),
+            ("kathmandu", {"TZ": "Asia/Kathmandu"}, fixed(td(hours=5, minutes=45), "+0545")),
+            ("adelaide", {"TZ": "Australia/Adelaide"}, fixed(td(hours=9, minutes=30), "ACST")),
+            ("london", {"TZ": "Europe/London"}, fixed(td(hours=1), "BST")),
+            ("etc-gmt-plus-5", {"TZ": "Etc/GMT+5"}, fixed(td(hours=-5), "-05")),
+            ("absolute-path", {"TZ": str(zone_file)}, fixed(td(hours=-4), "EDT"))):
+        want = convert(fixed_now)
+        local, reason = aiqt_hooks._clock_local(fixed_now, env=env, readable=lambda _p: True, convert=convert)
+        if reason is not None or local is None or (local, local.tzname()) != (want, want.tzname()):
+            failures.append("(ck-zone-known-{}) TZ {!r} read by the C library as {} ({}) must be kept, got {!r} "
+                            "and {!r}".format(label, env.get("TZ"), want.utcoffset(), want.tzname(), local,
+                                              reason))
 
     def nameless(now):
         return now.astimezone(datetime.timezone(td(hours=2), ""))
@@ -2358,22 +2398,77 @@ def _test_clock_inject(failures):
 
     def overflowing(now):
         raise OverflowError("ck-overflow")
-    for label, env, exists, convert in (
-            ("empty", {"TZ": ""}, True, None), ("empty-colon", {"TZ": ":"}, True, None),
-            ("unknown-name", {"TZ": "Ck/NoSuchZone"}, True, None),
-            ("absent-file", {"TZ": ":/nonexistent/ck-zone"}, True, None),
-            ("unset-no-localtime", {}, False, None),
-            ("no-abbreviation", {"TZ": "CKT-2"}, True, nameless),
-            ("none-abbreviation", {"TZ": "CKT-2"}, True, lambda now: now.astimezone(Nameless())),
-            ("conversion-fails", {"TZ": "CKT-2"}, True, overflowing),
-            ("database-differs", {"TZ": "Etc/GMT-3"}, True, lambda now: now.astimezone(edt))):
-        if label == "unset-no-localtime" and os.name != "posix":
+    empty = "TZ is set but empty, which leaves the zone to the implementation"
+    neither = "which is neither a complete POSIX TZ rule nor a zone the zone database holds"
+    database = "the zone database's UTC offset or abbreviation for TZ"
+    rule_pairs = "are not the ones the POSIX TZ rule"
+    for label, env, readable, convert, want in (
+            ("empty", {"TZ": ""}, True, None, empty), ("empty-colon", {"TZ": ":"}, True, None, empty),
+            ("unknown-name", {"TZ": "Ck/NoSuchZone"}, True, None, neither),
+            ("absent-file", {"TZ": ":/nonexistent/ck-zone"}, True, None, "which is not a regular file"),
+            ("unset-no-localtime", {}, False, None, "/etc/localtime is not a readable regular file"),
+            ("no-abbreviation", {"TZ": "CKT-2"}, True, nameless, "no zone abbreviation"),
+            ("none-abbreviation", {"TZ": "CKT-2"}, True, lambda now: now.astimezone(Nameless()),
+             "no zone abbreviation"),
+            ("conversion-fails", {"TZ": "CKT-2"}, True, overflowing, "conversion failed (OverflowError)"),
+            ("database-differs", {"TZ": "Etc/GMT-3"}, True, None, database),
+            ("database-abbreviation-differs", {"TZ": "Etc/GMT-3"}, True, fixed(td(hours=3), "XYZ"), database),
+            ("database-zero-offset-fallback", {"TZ": "Etc/UTC"}, True, fixed(td(0), "Etc"), database),
+            ("factory-tz", {"TZ": "Factory"}, True, fixed(td(0), "-00"), "abbreviation is -00"),
+            ("factory-localtime", {}, True, fixed(td(0), "-00"), "abbreviation is -00"),
+            ("rule-junk-daylight-name", {"TZ": "ABC5garbage"}, True, fixed(td(hours=-4), "garbage"), neither),
+            ("rule-junk-transitions", {"TZ": "ABC5DEF,garbage"}, True, fixed(td(hours=-4), "DEF"), neither),
+            ("rule-minutes-99", {"TZ": "ABC5:99"}, True, fixed(td(hours=-5, minutes=-59), "ABC"), neither),
+            ("rule-seconds-99", {"TZ": "ABC5:30:99"}, True,
+             fixed(-td(hours=5, minutes=30, seconds=59), "ABC"), neither),
+            ("rule-name-differs", {"TZ": "ABC5"}, True, fixed(td(hours=-5), "XYZ"), rule_pairs),
+            ("rule-offset-differs", {"TZ": "ABC5"}, True, fixed(td(hours=-4), "ABC"), rule_pairs)):
+        if not env and os.name != "posix":
             continue
-        local, reason = aiqt_hooks._clock_local(fixed_now, env=env, exists=lambda _p, e=exists: e,
+        local, reason = aiqt_hooks._clock_local(fixed_now, env=env, readable=lambda _p, r=readable: r,
                                                 convert=convert or (lambda now: now.astimezone(edt)))
-        if local is not None or not (isinstance(reason, str) and reason):
+        if local is not None or not (isinstance(reason, str) and want in reason):
             failures.append("(ck-zone-unknown-{}) a zone that cannot be established must give no local time "
-                            "and a reason, got {!r} and {!r}".format(label, local, reason))
+                            "and a reason holding {!r}, got {!r} and {!r}".format(label, want, local, reason))
+    for text in ("ABC24", "ABC5:59", "ABC5:30:59", "ABC5DEF,J1,J365", "ABC5DEF,0,365", "ABC5DEF,M12.5.6,M1.1.0",
+                 "ABC5DEF,M3.2.0/24,M11.1.0/0:59:59", "ABC5DEF24,M3.2.0,M11.1.0", "<AB+1>5<AB+2>,M3.2.0,M11.1.0"):
+        if aiqt_hooks._clock_posix_rule(text) is None:
+            failures.append("(ck-rule-accepts-{}) the complete POSIX TZ rule {!r} must be accepted".format(
+                text, text))
+    for text in ("ABC25", "ABC5:60", "ABC5:30:60", "ABC5DEF,J0,J365", "ABC5DEF,J1,J366", "ABC5DEF,0,366",
+                 "ABC5DEF,M13.1.0,M11.1.0", "ABC5DEF,M0.1.0,M11.1.0", "ABC5DEF,M3.0.0,M11.1.0",
+                 "ABC5DEF,M3.6.0,M11.1.0", "ABC5DEF,M3.2.7,M11.1.0", "ABC5DEF,M3.2.0/25,M11.1.0",
+                 "ABC5DEF,M3.2.0/2:60,M11.1.0", "ABC5DEF,M3.2.0/-2,M11.1.0", "ABC5DEF25,M3.2.0,M11.1.0",
+                 "ABC5DEF", "ABC5garbage", "ABC5DEF,M3.2.0", "ABC5DEF,garbage", "AB5", ":ABC5", "ABC5 ", "ABC"):
+        if aiqt_hooks._clock_posix_rule(text) is not None:
+            failures.append("(ck-rule-refuses-{}) {!r} is not a complete POSIX TZ rule and must be refused"
+                            .format(text, text))
+    for text, want in (("ABC5DEF,M3.2.0,M11.1.0", {("ABC", td(hours=-5)), ("DEF", td(hours=-4))}),
+                       ("ABC5DEF6,J60/2,300/3", {("ABC", td(hours=-5)), ("DEF", td(hours=-6))}),
+                       ("<+0530>-5:30", {("+0530", td(hours=5, minutes=30))}),
+                       ("ABC-0:00:01", {("ABC", td(seconds=1))})):
+        got = aiqt_hooks._clock_posix_rule(text)
+        if got != want:
+            failures.append("(ck-rule-pairs-{}) the rule {!r} must name {!r}, got {!r}".format(text, text, want,
+                                                                                            got))
+    regular_link, dangling = ck_dir / "regular-link", ck_dir / "dangling-link"
+    regular_link.symlink_to(zone_file)
+    dangling.symlink_to(ck_dir / "absent")
+    rows = [("regular", zone_file, True), ("symlink-to-regular", regular_link, True),
+            ("directory", ck_dir, False), ("absent", ck_dir / "absent", False),
+            ("dangling-symlink", dangling, False)]
+    if hasattr(os, "mkfifo"):
+        os.mkfifo(str(ck_dir / "fifo"))
+        rows.append(("fifo", ck_dir / "fifo", False))
+    if hasattr(os, "geteuid") and os.geteuid() != 0:
+        unreadable = ck_dir / "unreadable"
+        unreadable.write_bytes(b"TZif")
+        unreadable.chmod(0)
+        rows.append(("unreadable", unreadable, False))
+    for label, path, want in rows:
+        if aiqt_hooks._clock_regular_readable(str(path)) is not want:
+            failures.append("(ck-localtime-{}) _clock_regular_readable must give {} for a path that is {}"
+                            .format(label, want, label.replace("-", " ")))
     context = aiqt_hooks.clock_inject_post({"hook_event_name": "PostToolUse"})[1]["hookSpecificOutput"][
         "additionalContext"]
     if not re.fullmatch(r"\[aiqt-clock\] Host clock reading at this PostToolUse hook event: UTC "
@@ -30663,7 +30758,7 @@ def _main_isolated(monitor):
         _test_deadline_posture(failures, tmp)
         _test_cannot_evaluate_paths(failures, tmp)
         _test_reset_ancestry(failures, tmp)
-        _test_clock_inject(failures)
+        _test_clock_inject(failures, tmp)
 
         # === write_scope_guard (wrtscp, EN-8): confine guarded-tool writes to a per-slice scope =========
         # declaration; hard-deny writes to the frozen floor and to other/nested repos as an un-lowerable
