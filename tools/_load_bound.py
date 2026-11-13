@@ -104,7 +104,9 @@ pidfd acquisition included, a bound firing, a fault in the monitoring itself, an
 interrupt) runs the stop before run() leaves: read whether
 the child already exited on its own, kill the child's own process group, kill the child directly, then
 reap it waiting at most REAP_S, and, once the group was signalled and its leader reaped, wait at most
-GROUP_GONE_S for that group to have no process left (signal 0, never a delivered signal): the stop
+GROUP_GONE_S for that group to have no process left (signal 0, never a delivered signal; a group
+left holding only zombies, dead members whose new parent does not reap them, counts as empty where
+/proc shows every one of them as a zombie, and stays present where it cannot be read): the stop
 waits for the group to be confirmed empty or reports why it was not (a group still present at the
 bound or a probe that fails is named in the Hung reason; an interrupt during the wait is held and
 re-raised once the stop ends). No process-table scan selects victims and no stage signals a numeric
@@ -231,14 +233,19 @@ REAP_S = 10.0  # seconds run() waits to reap a SIGKILLed child before leaving it
 # Wall seconds a stop waits, AFTER the leader's reap, for its SIGKILLed process group to have no
 # process left (_await_group_gone). A killed member is not gone when the signal is sent: it still has
 # to be scheduled to run its exit, and on a loaded host it can stay in the process table, command
-# line readable, after the leader was reaped. Sized above the worst exit seen under a deliberately
-# starved member (niceness 19, pinned to one CPU beside eight busy loops: 3.1 s), with margin, and
-# equal to REAP_S, the bound the leader's own exit already gets. The waits of a whole stop are
-# bounded by the sum of the two bounds (REAP_S plus this, 20 s), excluding scheduling and polling
-# overhead and the kill stages themselves; that sum sits under the 25 s stop-vector limits and the
-# 30 s watchdog of the shared vectors.
+# line readable, after the leader was reaped. Set equal to REAP_S, the bound the leader's own exit
+# already gets, with margin over the exit time reported (not measured by any test here) for a
+# deliberately starved member: about 3.1 s at niceness 19, pinned to one CPU beside eight busy
+# loops. The waits of a whole stop are bounded by the sum of the two bounds (REAP_S plus this,
+# 20 s), excluding scheduling and polling overhead and the kill stages themselves; that sum sits
+# under the 25 s stop-vector limits and the 30 s watchdog of the shared vectors.
 GROUP_GONE_S = 10.0
 GROUP_GONE_POLL_S = 0.02
+# A group the signal-0 probe reads as present is checked for holding only zombies (_zombies_only, a
+# /proc scan) on the first such answer of a wait and then on every this-many-th one, so a killed
+# group whose members are dead but unreaped (orphaned to a reaper that does not reap) reads as
+# empty without a full process-table scan on every 20 ms poll.
+ZOMBIE_SCAN_EVERY = 25
 SCAN_S = 5.0  # wall seconds one process-table scan may take; a scan cut short reads as unreadable CPU
 # Bound on the post-stop drain of ONE pipe: a descendant that survived the stop can hold the write end
 # open and feed it, so the non-blocking reads stop at this many bytes and the cut is reported by name.
@@ -590,7 +597,25 @@ def _group_present(proc, pidfd, numeric_only=False):
     misled before the group empties; after that a reused number can only read as PRESENT (a false
     alarm reported by name at the bound, never a signal). EPERM reads as present (a member this
     process may not signal is still a member). Raises OSError where the group cannot be probed at
-    all."""
+    all. Signal 0 also reaches a zombie, a member that is dead but not yet reaped by its new
+    parent, so a group the probe reads as present is then checked for holding only zombies
+    (_zombies_only): where that check reads every member as a zombie the group counts as empty,
+    and where it cannot be read, or sees a member that is not a zombie, or sees no member at all,
+    the group stays present (fail closed). A second item in numeric_only counts the present
+    answers so far and paces that check (the first answer, then every ZOMBIE_SCAN_EVERY-th);
+    without one the check runs on every present answer."""
+    if _signal_probe_present(proc, pidfd, numeric_only):
+        if numeric_only and len(numeric_only) > 1:
+            numeric_only[1] += 1
+            if (numeric_only[1] - 1) % ZOMBIE_SCAN_EVERY:
+                return True
+        return _zombies_only(proc.pid) is not True
+    return False
+
+
+def _signal_probe_present(proc, pidfd, numeric_only):
+    """The signal-0 probe of _group_present: True while the group still has a process (a zombie
+    included), False once it has none; raises OSError where the group cannot be probed."""
     sender = getattr(signal, "pidfd_send_signal", None)
     if pidfd is not None and sender is not None and not (numeric_only and numeric_only[0]):
         try:
@@ -617,21 +642,72 @@ def _group_present(proc, pidfd, numeric_only=False):
         return True
 
 
+def _zombies_only(pgid, root="/proc"):
+    """True when process group pgid has at least one process left and every thread of every
+    process left in it is a zombie (state Z in its /proc stat: dead, holding no memory and no open
+    descriptor, waiting only to be reaped); False when a process of the group that is not a zombie
+    is seen (a thread group whose leader exited while other threads run counts as live), or when
+    no process of the group is seen at all (a probe that found a member this scan cannot see is
+    never read as empty); None where the answer cannot be read: root is not this process's own
+    /proc (its self link does not name this pid, so its pids are of another namespace), a listing
+    or a stat read fails for a reason other than the process having exited meanwhile (ENOENT and
+    ESRCH are absence), or a stat line does not parse. root stands in for /proc, so every outcome
+    is testable on a crafted tree. The scan only reads; nothing is selected or signalled from
+    it."""
+    def stat_of(path):
+        with open(path, "rb") as handle:
+            data = handle.read()
+        _, close, tail = data.decode("ascii", "replace").rpartition(")")
+        fields = tail.split()
+        if not close or len(fields) < 3 or not fields[2].lstrip("-").isdigit():
+            raise ValueError("unparsable stat line in " + path)
+        return fields[0], int(fields[2])
+
+    gone = (errno.ENOENT, errno.ESRCH)
+    try:
+        if os.readlink(os.path.join(root, "self")) != str(os.getpid()):
+            return None
+        names = os.listdir(root)
+        seen = False
+        for name in names:
+            if not name.isdigit():
+                continue
+            entry = os.path.join(root, name)
+            try:
+                state, group = stat_of(os.path.join(entry, "stat"))
+                if group != pgid:
+                    continue
+                if state != "Z":
+                    return False
+                for tid in os.listdir(os.path.join(entry, "task")):
+                    if stat_of(os.path.join(entry, "task", tid, "stat"))[0] != "Z":
+                        return False
+            except OSError as exc:
+                if exc.errno in gone:
+                    continue  # the process was reaped between the listing and the read
+                raise
+            seen = True
+    except (OSError, ValueError):
+        return None
+    return True if seen else False
+
+
 def _await_group_gone(proc, pidfd, bound_s=None, clock=None, sleep=None):
     """After the process group proc leads was SIGKILLed AND its leader reaped (an unreaped leader
     keeps the group present), wait until the group has no process left (_group_present), at most
     bound_s wall seconds (GROUP_GONE_S, read at the call, by default). Without this wait a stop
     would return, or re-raise its interrupt, while a killed member had not yet run its exit: a
     member that is dying, but not yet gone. Returns "" once the group is observed empty (an
-    observation exactly at the bound still counts), else a note naming the failure: the group
-    still had a process when the bound was reached (a member that survives SIGKILL, for example
-    in uninterruptible sleep, or a reused group id), or it could not be probed. clock and sleep
-    stand in for time.monotonic and time.sleep, so the bound's ends are testable without
-    waiting."""
+    observation exactly at the bound still counts; a group left holding only zombies, dead
+    members its new parent has not reaped, counts as empty where /proc shows them all as
+    zombies), else a note naming the failure: the group still had a process when the bound was
+    reached (a member that survives SIGKILL, for example in uninterruptible sleep, or a reused
+    group id), or it could not be probed. clock and sleep stand in for time.monotonic and
+    time.sleep, so the bound's ends are testable without waiting."""
     bound_s = GROUP_GONE_S if bound_s is None else bound_s
     clock = time.monotonic if clock is None else clock
     sleep = time.sleep if sleep is None else sleep
-    numeric_only = [False]
+    numeric_only = [False, 0]
     start = clock()
     while True:
         try:
@@ -1303,13 +1379,21 @@ def vector_failures(python):
     mismatch, collision and outer-stop legs end their children by construction, the reaped-member
     vectors' group members die with the group under test or (on the residual leg, by design)
     through the survivor cleanup, the leaked-descendant vector's descendant sleeps a bounded 60 s,
-    and the group-exit wait's bound legs start no child at all.
+    the group-exit wait's bound legs and the zombie-check legs start no child at all, the
+    unreaped-leader vector's leaders are killed by the stop under test and reaped after it, and
+    the zombie vector's helper runs in its own session under a 60 s bound, its group killed on
+    a timeout.
 
     Group-exit vectors: a stop waits for the group it killed to be confirmed empty or names why
     it was not (a deterministic stand-in probe reports a member still exiting for three probes,
     and the stop must go on until the group is observed empty); a group that never empties ends
-    the stop with the failure named in the Hung reason at the bound; and the bound's ends
-    (elapsed just inside, exactly at and just past it) are driven by an injected clock.
+    the stop with the failure named in the Hung reason at the bound; the bound's ends (elapsed
+    just inside, exactly at and just past it) are driven by an injected clock; the zombie check
+    is driven on crafted /proc trees (zombies only, a live member, a zombie leader with a live
+    thread, no member, a deceptive command name, unreadable, unparsable and vanished entries, a
+    foreign self link) and its pacing and verdicts through stand-ins; a leader left unreaped
+    gets no group probe at all; and a group left holding only zombies under a real subreaper
+    that never reaps reads as empty, with no survivor named.
 
     Added vectors: a fault INSIDE a communicate call, in the first poll and in a later one
     (WHICH poll faulted is asserted), keeps the bytes that call had already read (recovered from
@@ -2792,6 +2876,216 @@ def vector_failures(python):
                                 "empty {}, {} probes and a note holding {!r}, got note {!r}, {} "
                                 "probes, sleeps {!r}".format(label, want_empty, want_probes,
                                                              fragment, note, len(probes), sleeps))
+
+        # A group left holding only ZOMBIES is empty for the stop: signal 0 still reaches a member
+        # that is dead but unreaped (orphaned to a reaper that never reaps), so without the zombie
+        # check the stop would wait out its whole bound and then name a SIGKILL survivor. The
+        # check's outcomes on a crafted /proc tree, each leg (label, entries, self link, want):
+        # an entry is (state, group, {tid: thread state}, command name), or "unreadable" (its
+        # stat is a directory, so the read fails with EISDIR even as root), "vanished" (no stat:
+        # reaped mid-scan), or a raw stat line.
+        own_pid = str(os.getpid())
+        zgroup = 77
+        zombie_legs = (
+            ("zombies only, beside a process of another group", {
+                "501": ("Z", zgroup, {"501": "Z"}, "a"), "502": ("Z", zgroup, {"502": "Z"}, "b"),
+                "600": ("S", 5, {"600": "S"}, "c")}, own_pid, True),
+            ("a member that is not a zombie", {
+                "501": ("Z", zgroup, {"501": "Z"}, "a"), "502": ("S", zgroup, {"502": "S"}, "b")},
+             own_pid, False),
+            ("a zombie leader whose other thread still runs", {
+                "501": ("Z", zgroup, {"501": "Z", "503": "R"}, "a")}, own_pid, False),
+            ("no member of the group seen", {"600": ("S", 5, {"600": "S"}, "c")}, own_pid, False),
+            ("a command name holding a parenthesis and a Z", {
+                "501": ("S", zgroup, {"501": "S"}, "x) Z 1 77 77 (y")}, own_pid, False),
+            ("an unreadable stat beside a zombie", {
+                "501": ("Z", zgroup, {"501": "Z"}, "a"), "502": "unreadable"}, own_pid, None),
+            ("an unparsable stat beside a zombie", {
+                "501": ("Z", zgroup, {"501": "Z"}, "a"), "502": "502 no close paren Z\n"},
+             own_pid, None),
+            ("an entry reaped mid-scan beside a zombie", {
+                "501": ("Z", zgroup, {"501": "Z"}, "a"), "502": "vanished"}, own_pid, True),
+            ("a tree whose self link names another pid", {
+                "501": ("Z", zgroup, {"501": "Z"}, "a")}, str(os.getpid() + 1), None))
+        for label, entries, self_link, want in zombie_legs:
+            try:
+                with tempfile.TemporaryDirectory() as root:
+                    os.symlink(self_link, os.path.join(root, "self"))
+                    for pid, spec in entries.items():
+                        os.makedirs(os.path.join(root, pid, "task"))
+                        if spec == "unreadable":
+                            os.makedirs(os.path.join(root, pid, "stat"))
+                            continue
+                        if spec == "vanished":
+                            continue
+                        if isinstance(spec, str):
+                            with open(os.path.join(root, pid, "stat"), "w") as handle:
+                                handle.write(spec)
+                            continue
+                        state, group, threads, comm = spec
+                        with open(os.path.join(root, pid, "stat"), "w") as handle:
+                            handle.write("{} ({}) {} 1 {} {} 0\n".format(pid, comm, state, group,
+                                                                        group))
+                        for tid, thread_state in threads.items():
+                            os.makedirs(os.path.join(root, pid, "task", tid))
+                            with open(os.path.join(root, pid, "task", tid, "stat"), "w") as handle:
+                                handle.write("{} ({}) {} 1 {} {} 0\n".format(
+                                    tid, comm, thread_state, group, group))
+                    got = _zombies_only(zgroup, root=root)
+            except Exception as exc:  # noqa: BLE001  a crafted-tree fault is this leg failing
+                got = "{}: {}".format(type(exc).__name__, exc)
+            if got is not want:
+                failures.append("_load_bound vector (the zombie check, {}): expected {!r}, got "
+                                "{!r}".format(label, want, got))
+
+        # The zombie check is PACED inside one wait (the first present answer, then every
+        # ZOMBIE_SCAN_EVERY-th: the answer just before, exactly at and just after the second scan
+        # are all driven), runs on every present answer without a pacing counter, and only an
+        # all-zombies answer turns a present group empty (False and an unreadable None stay
+        # present: fail closed).
+        saved_signal_probe, saved_zombies = _signal_probe_present, _zombies_only
+        scanned_at, verdicts = [], []
+        pace = [False, 0]
+
+        def recording_zombies(pgid, root="/proc"):
+            scanned_at.append(pace[1])
+            return verdicts.pop(0) if verdicts else False
+        globals()["_signal_probe_present"] = lambda proc, pidfd, numeric_only: True
+        globals()["_zombies_only"] = recording_zombies
+        stand_in = types.SimpleNamespace(pid=zgroup)
+        try:
+            paced = [_group_present(stand_in, None, pace) for _ in range(ZOMBIE_SCAN_EVERY + 2)]
+            unpaced = [_group_present(stand_in, None) for _ in range(2)]
+            verdicts.extend([True, None, False])
+            judged = [_group_present(stand_in, None) for _ in range(3)]
+        finally:
+            globals()["_signal_probe_present"] = saved_signal_probe
+            globals()["_zombies_only"] = saved_zombies
+        want_scans = [1, ZOMBIE_SCAN_EVERY + 1] + [ZOMBIE_SCAN_EVERY + 2] * 5
+        if (scanned_at, paced, unpaced, judged) != (want_scans, [True] * (ZOMBIE_SCAN_EVERY + 2),
+                                                    [True, True], [False, True, True]):
+            failures.append("_load_bound vector (the zombie check's pacing and verdicts): expected "
+                            "scans at present answers {!r}, every answer present, and verdicts "
+                            "True, None, False read as empty, present, present; got scans {!r}, "
+                            "paced {!r}, unpaced {!r}, judged {!r}".format(
+                                want_scans, scanned_at, paced, unpaced, judged))
+
+        # The group-exit wait runs only once the leader is REAPED: a leader still unreaped after
+        # its bounded reap keeps its group present, so a wait on that group would spend its whole
+        # bound and name a false survivor. A real leader in its own session, killed by the stop,
+        # whose bounded reap is made to time out without reaping, must get NO group probe, and
+        # the unreaped leader is named; the same stop with the real reap probes the group, so the
+        # probe recorder is shown to be wired. Each leader is reaped for real afterwards.
+        guard_probes, guard_results = [], []
+
+        def recording_present(proc, pidfd, numeric_only=False):
+            guard_probes.append(proc.pid)
+            return saved_present(proc, pidfd, numeric_only)
+        for leave_unreaped in (True, False):
+            del guard_probes[:]
+            leader = subprocess.Popen([sys.executable, "-I", "-B", "-c",
+                                       "import time; time.sleep(60)", vector_tag],
+                                      start_new_session=True, stdin=subprocess.DEVNULL,
+                                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            leader_fd = _pidfd_of(leader.pid)
+            if leave_unreaped:
+                def unreaped_wait(timeout=None, leader=leader):
+                    raise subprocess.TimeoutExpired(leader.args, timeout)
+                leader.wait = unreaped_wait
+            globals()["_group_present"] = recording_present
+            globals()["GROUP_GONE_S"] = 0.3
+            try:
+                _, note, interrupt = _stop(leader, leader_fd)
+            except Exception as exc:  # noqa: BLE001  any escape is this vector failing
+                note, interrupt = "{}: {}".format(type(exc).__name__, exc), None
+            finally:
+                globals()["_group_present"] = saved_present
+                globals()["GROUP_GONE_S"] = saved_gone_s
+                leader.__dict__.pop("wait", None)
+                leader.kill()
+                try:
+                    leader.wait(timeout=REAP_S)
+                except subprocess.TimeoutExpired:
+                    pass
+                if leader_fd is not None:
+                    os.close(leader_fd)
+            guard_results.append((leave_unreaped, len(guard_probes), "left unreaped" in note,
+                                  note == "", interrupt is None))
+        if guard_results != [(True, 0, True, False, True), (False, guard_results[1][1] or -1, False,
+                                                            True, True)]:
+            failures.append("_load_bound vector (no group-exit wait while the leader is "
+                            "unreaped): expected no group probe and the unreaped leader named, "
+                            "and with the real reap at least one probe and no note; got (unreaped, "
+                            "probes, named, clean, no interrupt) {!r}".format(guard_results))
+
+        # The same through a REAL non-reaping reaper: a helper process makes itself a child
+        # subreaper (prctl PR_SET_CHILD_SUBREAPER) and never reaps, starts a leader whose forked
+        # member inherits its group, and stops that leader with _stop. The member, SIGKILLed with
+        # the group, is re-parented to the helper and stays a zombie there; the stop must read
+        # the group as empty well inside the helper's 5 s group bound, with no survivor note.
+        # The helper confirms the premise itself (the member is a zombie whose parent is the
+        # helper, and the command-line census sees no survivor), then kills and reaps the
+        # member. Executables reached: this interpreter only (helper, leader and member), no
+        # network and no writes. The helper runs in its own session under a 60 s bound and its
+        # group is killed on a timeout; leftovers carry zombie_tag for the survivor cleanup.
+        zombie_tag = vector_tag + "-zombies"
+        if has_proc and getattr(os, "killpg", None) is not None:
+            import json
+            helper_code = (
+                "import ctypes, json, os, signal, subprocess, sys, time\n"
+                "sys.path.insert(0, sys.argv[1])\n"
+                "import _load_bound as lb\n"
+                "if ctypes.CDLL(None, use_errno=True).prctl(36, 1, 0, 0, 0) != 0:\n"
+                "    print(json.dumps({'subreaper': False}))\n"
+                "    sys.exit(0)\n"
+                "lb.GROUP_GONE_S = 5.0\n"
+                "code = 'import os, time\\nif os.fork() == 0:\\n    print(os.getpid(), "
+                "flush=True)\\ntime.sleep(60)\\n'\n"
+                "proc = subprocess.Popen([sys.executable, '-I', '-B', '-c', code, sys.argv[2]], "
+                "start_new_session=True, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE)\n"
+                "member = int(proc.stdout.readline())\n"
+                "pidfd = lb._pidfd_of(proc.pid)\n"
+                "began = time.monotonic()\n"
+                "own, note, interrupt = lb._stop(proc, pidfd)\n"
+                "took = time.monotonic() - began\n"
+                "with open('/proc/%d/stat' % member, 'rb') as handle:\n"
+                "    fields = handle.read().decode('ascii', 'replace').rpartition(')')[2].split()\n"
+                "census = lb._alive_with(sys.argv[2])\n"
+                "census = None if census is None else [p for p in census if p != os.getpid()]\n"
+                "os.kill(member, signal.SIGKILL)\n"
+                "os.waitpid(member, 0)\n"
+                "proc.stdout.close()\n"
+                "if pidfd is not None:\n"
+                "    os.close(pidfd)\n"
+                "print(json.dumps({'subreaper': True, 'note': note, 'took': took, 'state': "
+                "fields[0], 'parent': int(fields[1]) == os.getpid(), 'census': census, "
+                "'interrupt': interrupt is not None}))\n")
+            helper = subprocess.Popen(
+                [sys.executable, "-I", "-B", "-c", helper_code,
+                 os.path.dirname(os.path.abspath(__file__)), zombie_tag], start_new_session=True,
+                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            try:
+                helper_out, helper_err = helper.communicate(timeout=60)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(helper.pid, _KILL)  # unreaped helper: its group id is still its own
+                except OSError:
+                    pass
+                helper_out, helper_err = helper.communicate()
+            for pid in alive(zombie_tag):
+                _kill_pid(pid)
+            try:
+                seen = json.loads(helper_out.decode("utf-8", "replace").strip().splitlines()[-1])
+            except (ValueError, IndexError):
+                seen = {"unparsed": helper_out[-400:], "stderr": helper_err[-400:]}
+            if not (seen.get("subreaper") is True and seen.get("note") == ""
+                    and isinstance(seen.get("took"), float) and seen["took"] < 5.0
+                    and seen.get("state") == "Z" and seen.get("parent") is True
+                    and seen.get("census") == [] and seen.get("interrupt") is False):
+                failures.append("_load_bound vector (a killed group left holding only unreaped "
+                                "zombies is empty for the stop): expected a subreaper helper, no "
+                                "note, the stop under its 5 s group bound, the member a zombie of "
+                                "the helper and no census survivor; got {!r}".format(seen))
 
         # The kill path a stop takes is OBSERVED: where the kernel accepts the pidfd group-signal
         # flag (probed on this process's own pid record), the stop must take the exact pidfd path
