@@ -891,6 +891,9 @@ ALLOWLIST = (
      _WORD + " (GIT_SUBCOMMAND_RE ends a git subcommand only where no letter of any script"
      " continues it, and PYTHON_TARGET_RE reads a .py path whose segments may be named in any"
      " script)"),
+    ("tools/check_brief_capability.py", "git_write_commands", "regex", 1,
+     _WORD + " (GIT_WRITE_SUBCOMMAND_RE ends commit or push only where no letter of any script"
+     " continues it, as GIT_SUBCOMMAND_RE ends a git subcommand)"),
     ("tools/check_brief_capability.py", "sentence_asks", "regex", 1,
      _WORD + " (a letter after test or fix continues that word)"),
     ("tools/check_brief_capability.py", "unplaced", "regex", 1,
