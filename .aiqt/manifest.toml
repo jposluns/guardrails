@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.0.5"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "92671f74f18d2e99ff56249958b7be0e970d2d07486bda340c7cd514da54b110"
+tree-sha256 = "dd8a68a648a901cca70bd79faa72a2ae4b2508bcecd7d2006b74626d2a6d5d6e"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -72,8 +72,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 591719
-sha256 = "df5ab26ad9358a537edb2e291dd0e1f3617919c2f38eb01076b9a53dd9ba4a52"
+bytes = 592774
+sha256 = "e212936cf36116a701ee0093b059410a8864d2a956177e5d00f717a19f2a1a3a"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -827,8 +827,8 @@ sha256 = "0b38d8d8ebf794ff90d1966dd4032ceb40562575431b9dac1507e41f899aa16f"
 
 [[sources]]
 path = ".aiqt/enforceability.json"
-bytes = 1130689
-sha256 = "2898293054e75a3224296012eef0223c55edf0dc944df81f0590828e16306e4b"
+bytes = 1131744
+sha256 = "c770f5225f671e978e828d7361011da0ec45e22ef7e78011a54a8ea2866dada0"
 
 [[sources]]
 path = ".aiqt/frozen.json"
@@ -2307,8 +2307,8 @@ sha256 = "9e0e365fb1e2813246c724267ec062310de3be1c5ca4ad9cba37fa0ce5691af4"
 
 [[sources]]
 path = ".gitattributes"
-bytes = 53831
-sha256 = "4030055c571dba037d9beaeff8a7e14a032502c882e41f96b0f3ea7c7f62f5db"
+bytes = 53871
+sha256 = "b86c04a540724eece5401f39636fe847e8a9b24aa0a014615cb1ad61bb4c4d1e"
 
 [[sources]]
 path = ".github/copilot-instructions.md"
@@ -2392,8 +2392,8 @@ sha256 = "854403d7fd810507f024d0ff23a6db4c8bcf8978ea92210d7536a247d5c0fd28"
 
 [[sources]]
 path = "ENFORCEMENT.md"
-bytes = 659572
-sha256 = "636289d2618ab81a04d89c076eaa912459862557fff4e75012c5f7096a994224"
+bytes = 660621
+sha256 = "ecffbc8c49fff71bfab6dde72db7db02996b1106ed74cf5a544cd1f43fb817c4"
 
 [[sources]]
 path = "GEMINI.md"
@@ -3957,8 +3957,8 @@ sha256 = "dd0e5f2a6402329e70ad8e81e5cd63557683e24044cd3eb16686a60eaf81cae6"
 
 [[sources]]
 path = "site/enforcement.html"
-bytes = 719913
-sha256 = "7527b2af5590290426643cb574ce71795772a81a37b7c365b419ae290f5326f6"
+bytes = 720977
+sha256 = "d01af256c6f06cd36373eca1478041a1f1aec4cb556db5a5d87189eeff915543"
 
 [[sources]]
 path = "site/evidence.html"
@@ -4064,6 +4064,11 @@ sha256 = "f2fce877697cd18092c161418214980cb151d262daa3fb31a0b00e9bf26888cd"
 path = "tools/_git_fixture_env.py"
 bytes = 10632
 sha256 = "f96440610c978d5138acf597d202323a5c661f90816452c03a38b3e3bf660978"
+
+[[sources]]
+path = "tools/_html_differential.py"
+bytes = 5707
+sha256 = "c18f6236fcba0a0ff07cebb1f71ee5c7e68e085908b6a951658ca0f2d646ed6e"
 
 [[sources]]
 path = "tools/_input_declarations.py"
@@ -4502,8 +4507,8 @@ sha256 = "e732c5633f7a18889d9f71af931cd2eb0131c2b51e53e81087316d976923752c"
 
 [[sources]]
 path = "tools/gen_draft_site.py"
-bytes = 199726
-sha256 = "d8bf63cfb6502a10bc90f5cd9f3920055455ff71c70efb1d756eae7409c1e50e"
+bytes = 204746
+sha256 = "5b8b3439d917e6a20b5bb1db1fd1c7688b3947a1b9e2d63378a8653d4212591c"
 
 [[sources]]
 path = "tools/gen_enforceability.py"
