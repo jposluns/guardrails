@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.0.5"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "8eb2affd0d2dd1940761c988fe8e464e085734aa4e297eba312b805a63124c12"
+tree-sha256 = "bd59ad31690afbd963aaac234e4bc492459e5909b93dfeaf46ad775210be1a7e"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -72,8 +72,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 591719
-sha256 = "df5ab26ad9358a537edb2e291dd0e1f3617919c2f38eb01076b9a53dd9ba4a52"
+bytes = 592612
+sha256 = "32eec5f40943e74c0e1ec1e0147607e2a3aa639ed177561ab414716d6a56f0b0"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -148,7 +148,7 @@ sha256 = "7396859c9a2b6d18ecec0982f02f9b72a64a5a79ef6d4270df82eab956af0ec7"
 [[sources]]
 path = ".aiqt/core/renderers.toml"
 bytes = 3068
-sha256 = "bac58cdc41d56e52809e7e5e5367672164024670474d53ea4e1609da8bda9402"
+sha256 = "db3d5e007f977eaf9225db97abbdfa025297e91c7055dd81d09f91a8c5719358"
 
 [[sources]]
 path = ".aiqt/core/rules/00-project-integrity.md"
@@ -3087,8 +3087,8 @@ sha256 = "6594419bc15c14e7e4844e2a34bc5ef24618b7fccf79e9a0787f4e88d0f976ab"
 
 [[sources]]
 path = "opf/tools/_journal.py"
-bytes = 205890
-sha256 = "fac1e26c0508f571b5a68835860628a6956e1a041585d02bb5c631635f3a90c1"
+bytes = 211929
+sha256 = "95664acbddd168f67176d928ba9d67b5a5731c14e7a01a761db1dcc49ff2ab0f"
 
 [[sources]]
 path = "opf/tools/_opf_absorb.py"
@@ -3102,8 +3102,8 @@ sha256 = "2efb26e11dcc25049792ce7f0a2adaf4dccef94caa888390b69875f32983068a"
 
 [[sources]]
 path = "opf/tools/_opf_adopt_apply.py"
-bytes = 1576038
-sha256 = "bc77914783f397a839ef61b233a6ba08ee46b4b6b8a16fcd0c6e0b85cfb41bd2"
+bytes = 1576165
+sha256 = "6f2b4c8a2e1c1ff20e2c7ac633e31380a3b4c01cbcbfc8629b0fff94657a16e0"
 
 [[sources]]
 path = "opf/tools/_opf_adopt_complete.py"
@@ -4577,8 +4577,8 @@ sha256 = "2f19dc1e1f6bac53f5afebb6b1857889467c249b29d566954a89e25687f884c3"
 
 [[sources]]
 path = "tools/gen_skill.py"
-bytes = 135263
-sha256 = "d697c77a64b2f505bea792b791018e7043affd5b8674bbfee899f74c80049344"
+bytes = 154443
+sha256 = "74f2f3e9c14bf334df606d4ce973ff1eb814a8eaa75401b4e3589babec843993"
 
 [[sources]]
 path = "tools/gen_worker_pack.py"

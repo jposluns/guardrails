@@ -856,7 +856,13 @@ def read_frames(jr_fd, txn_dir, txn_fd=None):
         body = raw[body_start:body_start + length]
         end = body_start + length + 1                     # +1 for the trailing "\n"
         short = len(body) < length or end > len(raw) or raw[end - 1:end] != b"\n"
-        if short or hashlib.sha256(body).hexdigest() != digest or ftype not in FRAME_TYPES:
+        intact = not short and hashlib.sha256(body).hexdigest() == digest
+        if intact and ftype not in FRAME_TYPES:
+            # A whole, checksum-valid frame of a type this reader does not know was written, not torn:
+            # reading it as a torn tail would let recovery truncate it and classify the transaction from
+            # the frames before it, so it is refused wherever it sits.
+            raise JournalError("unknown journal frame type {!r} at offset {} (fail-closed)".format(ftype, off))
+        if not intact:
             if end >= len(raw):
                 return frames, True, off                  # torn tail: treated as never written
             raise JournalError("corrupt frame mid-log at offset {}".format(off))
@@ -3456,11 +3462,110 @@ def _st_descriptor_helper_checks():
     return [name for name, ok in results if ok is not True], len(results)
 
 
+def _st_frame_lay(jroot, raw):
+    """Write `raw` as the frames.log of a fresh txn dir under `jroot`; return the txn dir's path."""
+    import tempfile
+    txn = tempfile.mkdtemp(prefix="txn-", dir=jroot)
+    with open(os.path.join(txn, "frames.log"), "wb") as fh:
+        fh.write(raw)
+    return txn
+
+
+def _st_frame_read(jroot, raw):
+    """Write `raw` as the frames.log of a fresh txn dir under `jroot` and read it back through read_frames
+    on a journal-root descriptor opened here and closed once. Returns ("read", (frames, torn, good_len))
+    or ("refused", message) for a JournalError; any other exception propagates."""
+    txn = _st_frame_lay(jroot, raw)
+    jr_fd = os.open(jroot, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        return "read", read_frames(jr_fd, txn)
+    except JournalError as exc:
+        return "refused", str(exc)
+    finally:
+        os.close(jr_fd)
+
+
+def _st_frame_caller_refuses(jroot, raw):
+    """classify_state and recover over a log whose last frame is a whole, checksum-valid frame of an
+    unknown type: each raises JournalError, and recover leaves the log byte-unchanged (no torn-tail
+    truncation, no terminal frame appended). The INTENT in `raw` lists no ops, so recover, reading the
+    frame as torn, would roll forward without touching the root (jr_fd stands in for it). Returns
+    (classify refused, recover refused with the log unchanged)."""
+    txn = _st_frame_lay(jroot, raw)
+    log = os.path.join(txn, "frames.log")
+    jr_fd = os.open(jroot, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        try:
+            classify_state(jr_fd, txn)
+            classified = False
+        except JournalError:
+            classified = True
+        try:
+            recover(jr_fd, txn, jr_fd)
+            recovered = False
+        except JournalError:
+            recovered = True
+    finally:
+        os.close(jr_fd)
+    with open(log, "rb") as fh:
+        return classified, recovered and fh.read() == raw
+
+
+def _st_frame_classification_checks(base):
+    """read_frames' tail classification, over frames.log files written under `base`:
+      J1  a whole, checksum-valid frame of an unknown type as the LAST frame is refused with a JournalError
+          naming the unknown type, never read as a torn tail; classify_state refuses it rather than
+          reading the transaction as open, and recover refuses it and leaves the log byte-unchanged.
+      J2  the same frame mid-log (a known frame follows it) is refused with the same JournalError.
+      J3  a truly torn last frame (its body short of the declared length, the trailing newline missing),
+          and a last frame whose body matches its checksum but which lacks only its final newline, each
+          still reads as a torn tail with the clean prefix's frames and length, for a known type and for
+          an unknown type alike (a torn frame was never written, whatever its header names).
+      J4  a last frame whose body does not match its checksum still reads as a torn tail, for a known
+          type and for an unknown type alike.
+    Returns (failures, checks)."""
+    jroot = os.path.join(base, "frame-classification")
+    os.makedirs(jroot)
+    intent = _frame(F_INTENT, b'{"ops":[],"txn":"t"}')     # no ops: recover needs no root to act on it
+    unknown = _frame("FUTURE-TYPE", b'{"txn":"t"}')
+    complete = _frame(F_COMPLETE, b'{"txn":"t"}')
+    prefix = ([(F_INTENT, {"ops": [], "txn": "t"})], True, len(intent))
+
+    def bad_digest(frame):
+        head, rest = frame.split(b"\n", 1)
+        flipped = b"0" if head[-1:] != b"0" else b"1"
+        return head[:-1] + flipped + b"\n" + rest
+
+    def refused_unknown(outcome):
+        return outcome[0] == "refused" and "unknown journal frame type 'FUTURE-TYPE'" in outcome[1]
+
+    classified, recovered = _st_frame_caller_refuses(jroot, intent + unknown)
+    results = (("J1-unknown-type-last-frame-refused", refused_unknown(_st_frame_read(jroot, intent + unknown))),
+               ("J1-unknown-type-last-frame-classify-refuses", classified),
+               ("J1-unknown-type-last-frame-recover-refuses-log-unchanged", recovered),
+               ("J2-unknown-type-mid-log-refused",
+                refused_unknown(_st_frame_read(jroot, intent + unknown + complete))),
+               ("J3-short-body-last-frame-torn",
+                _st_frame_read(jroot, intent + complete[:-4]) == ("read", prefix)),
+               ("J3-short-body-unknown-type-last-frame-torn",
+                _st_frame_read(jroot, intent + unknown[:-4]) == ("read", prefix)),
+               ("J3-missing-final-newline-last-frame-torn",
+                _st_frame_read(jroot, intent + complete[:-1]) == ("read", prefix)),
+               ("J3-missing-final-newline-unknown-type-last-frame-torn",
+                _st_frame_read(jroot, intent + unknown[:-1]) == ("read", prefix)),
+               ("J4-bad-checksum-last-frame-torn",
+                _st_frame_read(jroot, intent + bad_digest(complete)) == ("read", prefix)),
+               ("J4-bad-checksum-unknown-type-last-frame-torn",
+                _st_frame_read(jroot, intent + bad_digest(unknown)) == ("read", prefix)))
+    return [name for name, ok in results if ok is not True], len(results)
+
+
 def self_test():
     """The #378 close vectors for the three close helpers (V1, V2), three representative _journal sites,
     and the sibling closes of a cleanup loop (V3), each green and each red under its flip; then the
     descriptor-helper vectors (_st_descriptor_helper_checks) and the stale-listing seam's own vectors
-    (_st_stale_listing_check, counted with them). Returns 0 clean, 1 a failure, 2 cannot-evaluate."""
+    (_st_stale_listing_check, counted with them), and read_frames' tail-classification vectors
+    (_st_frame_classification_checks). Returns 0 clean, 1 a failure, 2 cannot-evaluate."""
     import shutil
     import tempfile
     try:
@@ -3474,6 +3579,7 @@ def self_test():
         drop_failures, drop_runs = _st_watch_drop_check()
         failures, runs = failures + drop_failures, runs + drop_runs
         seam_failures, seam_checks = _st_stale_listing_check(base)
+        frame_failures, frame_checks = _st_frame_classification_checks(base)
     except _StCensusError as exc:
         print("SELF-TEST ERROR: {}".format(exc), file=sys.stderr)
         return 2
@@ -3485,14 +3591,15 @@ def self_test():
         print("SELF-TEST ERROR: {}".format(exc), file=sys.stderr)
         return 2
     helper_failures, checks = helper_failures + seam_failures, checks + seam_checks
-    if failures or helper_failures:
-        print("JOURNAL SELF-TEST: FAIL ({} of {} close-vector runs and {} of {} descriptor-helper checks "
-              "failed)".format(len(failures), runs, len(helper_failures), checks))
-        for f in failures + helper_failures:
+    if failures or helper_failures or frame_failures:
+        print("JOURNAL SELF-TEST: FAIL ({} of {} close-vector runs, {} of {} descriptor-helper checks and {} of "
+              "{} frame-classification checks failed)".format(len(failures), runs, len(helper_failures), checks,
+                                                             len(frame_failures), frame_checks))
+        for f in failures + helper_failures + frame_failures:
             print("  FAILED: {}".format(f))
         return 1
     print("JOURNAL SELF-TEST: PASS ({} close vectors, {} runs including each flip leg red; {} descriptor-helper "
-          "checks)".format(len(vectors), runs, checks))
+          "checks; {} frame-classification checks)".format(len(vectors), runs, checks, frame_checks))
     return 0
 
 
