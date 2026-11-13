@@ -1822,18 +1822,30 @@ def _watchdog_declared_budget_vectors():
     it (nested-timeout and nested-cancel by 1000 s, nested-orders by the
     nine launches and six holds that each pay it), so a raised backstop
     always reaches the figure tools/check_opf_standalone_closure.py reads,
-    and every other declared budget must stay where it was; and every
-    declared budget must be READ by the one regression-runner row that sets
-    its legs' budget (_watchdog_declared_budget_reads), shown refusing by
-    name, on in-memory copies of the runner's source, each of six runners
-    that hold today's figure as a literal: the nested-timeout row's read
-    replaced by it, a literal blocked-isolation write after the read row, a
-    duplicate literal nested-timeout row after the read row in the same
-    update, declared_budgets rebound after its binding, the blocked-isolation
-    read kept only under "if False:" with a literal write in effect, and the
-    safety rows priced at it while the deadline rows keep the read. A
-    vector whose anchor text is not in the runner exactly once is reported
-    as not built, never as a runner the check accepts. [] when all hold."""
+    and every other declared budget must stay where it was; and the
+    regression runner must pass _watchdog_declared_budget_reads, shown
+    refusing by name, on in-memory copies of the runner's source, each of
+    these runners: six that hold today's figure as a literal (the
+    nested-timeout row's read replaced by it, a literal blocked-isolation
+    write after the read row, a duplicate literal nested-timeout row after
+    the read row in the same update, declared_budgets rebound after its
+    binding, the blocked-isolation read kept only under "if False:" with a
+    literal write in effect, and the safety rows priced at it while the
+    deadline rows keep the read); eight whose rows still read while a leg
+    runs under another figure (the blocked-isolation leg-entry text passing
+    today's figure, the entry helper passing a literal for the
+    nested-timeout leg, cases rebuilt with a literal in its leg texts, a
+    nested-timeout leg text passing the blocked-isolation row, a local
+    lambda or a nested def named _watchdog_declared_budgets before the
+    binding, and dict or repr rebound); three whose lost-cleanup row no
+    longer sets a number (set to deadline_budget, replaced by a del,
+    replaced by setdefault()); and one for each rule no other vector
+    isolates, refused by that rule alone (a literal blocked-isolation write
+    through zip(), which cannot be expanded; a literal pipe-stall row after
+    the deadline rows; and the blocked-isolation read only under "if
+    True:"). A vector whose anchor text is not in the runner exactly once
+    is reported as not built, never as a runner the check accepts. [] when
+    all hold."""
     global _TREE_STARTUP_BACKSTOP
     raise_by = 1000
     before = _watchdog_declared_budgets()
@@ -1864,6 +1876,22 @@ def _watchdog_declared_budget_vectors():
     isolation_row = 'budgets["blocked-isolation"] = declared_budgets["blocked-isolation"]\n'
     isolation_literal = 'budgets["blocked-isolation"] = %s\n' % isolation
     safety_rows = "budgets.update((mode, deadline_budget) for mode in safety_modes)"
+    deadline = repr(before.get("deadline-case"))
+    deadline_rows = "budgets = dict((mode, deadline_budget) for mode in deadline_modes)\n"
+    own_rows = ('budgets.update((("lost-cleanup", 16), ("fork-error", 36), '
+                '("poll-error", 36)))\n')
+    own_rest = 'budgets.update((("fork-error", 36), ("poll-error", 36)))\n'
+    isolation_entry = 'repr(budgets.get("blocked-isolation"))'
+    helper_budget = "repr(budgets.get(label))"
+    helper_line = "    def entry(label, case, args):\n"
+    roster = ("cases = [(label, entry(label, case, args), bound(label)) "
+              "for label, case, args in entries]\n")
+    rebuilt = ("    cases = [(label, code.replace(%r, %r), timeout) "
+               "for label, code, timeout in cases]\n" % (nested, "66.0"))
+    other_row = ('    cases.append(("completion-nested-timeout", prefix + "return opf.'
+                 '_watchdog_leg_entry(" + repr(budgets.get("blocked-isolation")) + ", opf.'
+                 '_watchdog_completion_case(\'nested-timeout\'))", '
+                 'bound("completion-nested-timeout")))\n')
     vectors = (
         ("the nested-timeout row holding its figure as a literal",
          'declared_budgets["completion-nested-timeout"]', nested,
@@ -1880,9 +1908,45 @@ def _watchdog_declared_budget_vectors():
          isolation_row, "if False:\n        " + isolation_row + "    " + isolation_literal,
          "blocked-isolation"),
         ("the safety rows priced at a literal while the deadline rows read",
-         safety_rows, safety_rows.replace("deadline_budget",
-                                          repr(before.get("deadline-case"))),
-         "deadline-case"))
+         safety_rows, safety_rows.replace("deadline_budget", deadline), "deadline-case"),
+        # The leg-entry sites and the names the reads resolve through.
+        ("the blocked-isolation leg entry passing its figure as a literal",
+         isolation_entry, "repr(%s)" % isolation, "blocked-isolation"),
+        ("the entry helper passing a literal for the nested-timeout leg",
+         helper_budget, 'repr(%s if label == "completion-nested-timeout" else '
+         "budgets.get(label))" % nested, "binding entry"),
+        ("cases rebuilt with a literal in its leg texts",
+         roster, roster + rebuilt, "binding cases"),
+        ("a nested-timeout leg text passing the blocked-isolation row",
+         roster, roster + other_row, "completion-nested-timeout"),
+        ("a local lambda _watchdog_declared_budgets bound before the binding",
+         bind, "_watchdog_declared_budgets = lambda: %r\n    %s" % (before, bind),
+         "binding _watchdog_declared_budgets"),
+        ("a nested def _watchdog_declared_budgets before the binding",
+         bind, "def _watchdog_declared_budgets():\n        return %r\n\n    %s" % (before, bind),
+         "binding _watchdog_declared_budgets"),
+        ("dict rebound before the budgets binding",
+         deadline_rows, "dict = lambda rows: {mode: %s for mode in deadline_modes}\n    %s"
+         % (deadline, deadline_rows), "binding dict"),
+        ("repr rebound before the entry helper",
+         helper_line, "    repr = lambda value: %r\n\n%s" % (nested, helper_line), "binding repr"),
+        # The legs priced on their own: each later row must set a number.
+        ("the lost-cleanup row set to deadline_budget",
+         own_rows, own_rows.replace("16", "deadline_budget"), "deadline-case"),
+        ("the lost-cleanup row replaced by a del",
+         own_rows, own_rest + '    del budgets["lost-cleanup"]\n', "deadline-case"),
+        ("the lost-cleanup row replaced by setdefault()",
+         own_rows, own_rest + '    budgets.setdefault("lost-cleanup", 16)\n', "deadline-case"),
+        # One runner for each of the three remaining rules, refused by that
+        # rule alone: an unexpandable write, a second row for a
+        # deadline-case leg, and a read off the unconditional path.
+        ("a literal blocked-isolation write through zip()",
+         isolation_row, isolation_row + '    budgets.update(zip(("blocked-isolation",), (%s,)))\n'
+         % isolation, "writes"),
+        ("a literal pipe-stall row after the deadline rows",
+         own_rows, own_rows + '    budgets["pipe-stall"] = %s\n' % deadline, "deadline-case"),
+        ('the blocked-isolation read only under "if True:"',
+         isolation_row, "if True:\n        " + isolation_row, "blocked-isolation"))
     for name, anchor, replacement, label in vectors:
         if runner.count(anchor) != 1:
             missed.append("declared-budget read vector (%s) not built: its anchor %r occurs "
@@ -1897,40 +1961,67 @@ def _watchdog_declared_budget_vectors():
 
 
 def _watchdog_declared_budget_reads(source=None):
-    """Each fault in how the regression runner's budget table takes the
-    budgets _watchdog_declared_budgets declares, judged on the statements
-    that set each leg's budget, never on a read merely appearing somewhere.
-    The runner must bind declared_budgets exactly once, as declared_budgets
-    = _watchdog_declared_budgets(), deadline_budget exactly once, as
-    deadline_budget = declared_budgets["deadline-case"], and budgets exactly
-    once, as budgets = dict((mode, deadline_budget) for mode in
-    deadline_modes), each on the runner's unconditional path (a statement of
-    its own body, under no branch, loop, try, with or nested function, and
-    after no statement of that body that returns or raises), and must never
-    write any of the three names again (a rebinding, a subscript write, a
-    delete or a method call other than a read), except that budgets takes
-    rows through subscript writes, update() and setdefault(). Every such
-    write is expanded into the keys it sets (a constant subscript, or the
-    (key, value) rows of a dict literal, a literal tuple, or a
-    comprehension over literal tuples and the runner's literal rosters); a
-    write this cannot expand could set any leg and is refused. Then every
-    leg of a declared label must be set by exactly one row, on that
-    unconditional path, whose value is the read: declared_budgets["<label>"]
-    for each label but "deadline-case", whose legs are every mode of
-    deadline_modes and safety_modes, each set by its (mode,
-    deadline_budget) row of exactly the two statements budgets =
-    dict((mode, deadline_budget) for mode in deadline_modes) and
+    """Each fault in how the regression runner's budget table and its
+    leg-entry texts take the budgets _watchdog_declared_budgets declares,
+    judged on the runner's statements that set each leg's budget row and on
+    the code that builds the text each leg runs, never on a read merely
+    appearing somewhere. The runner must bind declared_budgets exactly
+    once, as declared_budgets = _watchdog_declared_budgets(),
+    deadline_budget exactly once, as deadline_budget =
+    declared_budgets["deadline-case"], and budgets exactly once, as budgets
+    = dict((mode, deadline_budget) for mode in deadline_modes), each on the
+    runner's unconditional path (a statement of its own body, under no
+    branch, loop, try, with or nested function, and after no bare return or
+    raise statement of that body), and must never write any of the three
+    names again (a rebinding, a subscript write, a delete or a method call
+    other than a read), except that budgets takes rows through subscript
+    writes, update() and setdefault(). Every such write is expanded into
+    the keys it sets (a constant subscript, or the (key, value) rows of a
+    dict literal, a literal tuple, or a comprehension over literal tuples
+    and the runner's literal rosters); a write this cannot expand could set
+    any leg and is refused. Then every leg of a declared label must be set
+    by exactly one row, on that unconditional path, whose value is the
+    read: declared_budgets["<label>"] for each label but "deadline-case",
+    whose legs are every mode of deadline_modes and safety_modes, each set
+    by its (mode, deadline_budget) row of exactly the two statements
+    budgets = dict((mode, deadline_budget) for mode in deadline_modes) and
     budgets.update((mode, deadline_budget) for mode in safety_modes). The
     one exception is the safety legs priced on their own (lost-cleanup,
     fork-error and poll-error), each also set by exactly one row after the
-    second statement. Each fault names its label, or "binding <name>" for a
-    binding. A row holding the same figure as a literal, or recomputing it,
-    matches today's numbers but no longer follows the function the closure
-    gate reads, so this reads the runner's source, not its figures. It reads
-    the runner's own statements only: a write through another name bound to
-    the same dict, or inside a function the runner calls, is not followed.
-    source defaults to the runner's own; [] when every declared budget is
-    the one figure its legs run under."""
+    second statement that assigns it a plain number (a del, a setdefault()
+    or any other value is refused; which number is not checked). The
+    runner must never bind _watchdog_declared_budgets, dict or repr, the
+    names those reads and the leg-entry texts resolve through. A leg runs
+    the text it is given, which passes its budget as the first argument of
+    opf._watchdog_leg_entry, so every string literal of the runner naming
+    _watchdog_leg_entry must end by opening that call and be followed at
+    once by repr(budgets.get(<label>)): either inside the one shared
+    helper entry, bound once exactly as today and called only from the one
+    cases = [...] binding (cases being written again only through append()
+    and extend()), or in a cases.append((<label literal>, text, bound)) on
+    the unconditional path, reading that same label's row. A row or a
+    leg-entry argument holding the same figure as a literal, or recomputing
+    it, matches today's numbers but no longer follows the function the
+    closure gate reads, so this reads the runner's source, not its figures.
+
+    Each fault starts "declared budget <label>: " naming the label it
+    concerns, or "binding <name>" in that place for a binding, "writes"
+    for a write it cannot expand, "leg entry" for a leg-entry text whose
+    label cannot be read, or "source" when no runner can be read.
+
+    It reads the runner's own statements only and does not follow: a write
+    through another name bound to the same dict (an alias,
+    dict.update(budgets, ...) or operator.setitem); a write or binding
+    inside a function the runner calls or at module level
+    (_watchdog_declared_budgets or _watchdog_leg_entry replaced there
+    included); what _watchdog_leg_entry does with the budget it is passed;
+    a leg text built without the whole name _watchdog_leg_entry in one
+    string literal, or derived from another leg's text after it is built; a
+    declared leg launched with no leg-entry text at all; and a return or
+    raise nested under a branch before the bindings. source defaults to the
+    runner's own; [] when no fault above is found: each declared leg's row
+    reads its declared budget and each leg-entry text passes the row of its
+    own label."""
     import ast
     import inspect
     if source is None:
@@ -1963,8 +2054,8 @@ def _watchdog_declared_budget_reads(source=None):
         return index
 
     def writes(name):
-        # Every node of the runner that binds, deletes or writes name, or
-        # calls a method of it other than a read.
+        # Every node of the runner that binds (a def or class included),
+        # deletes or writes name, or calls a method of it other than a read.
         found = []
         for node in ast.walk(runner):
             if isinstance(node, ast.Name):
@@ -1987,6 +2078,9 @@ def _watchdog_declared_budget_reads(source=None):
                     found.append(node)
             elif isinstance(node, ast.alias):
                 if (node.asname or node.name.split(".")[0]) == name:
+                    found.append(node)
+            elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                if node.name == name and node is not runner:
                     found.append(node)
             elif isinstance(node, (ast.ExceptHandler, ast.MatchAs, ast.MatchStar)):
                 if node.name == name:
@@ -2101,6 +2195,10 @@ def _watchdog_declared_budget_reads(source=None):
     for node in row_writes:
         stmt = parent.get(node)
         found = None
+        # setdefault() leaves a row already present in place, so its rows
+        # never count as setting a leg (a del has no value, so neither does).
+        kind = ("setdefault" if isinstance(node, ast.Call) and node.func.attr == "setdefault"
+                else "set")
         if isinstance(node, ast.Name):
             value = stmt.value if isinstance(stmt, ast.Assign) else None
             if isinstance(value, ast.Dict):
@@ -2127,10 +2225,16 @@ def _watchdog_declared_budget_reads(source=None):
                           "could set any declared leg" % node.lineno)
             continue
         for key, value, origin in found:
-            keyed.setdefault(key, []).append((value, (node,) + origin))
+            keyed.setdefault(key, []).append((value, (node,) + origin, kind))
 
-    def reads(value, origin, want):
-        return (value is not None and ast.dump(value) == want
+    def reads(value, origin, want, kind="set"):
+        return (kind == "set" and value is not None and ast.dump(value) == want
+                and all(reached(node) is not None for node in origin))
+
+    def number(value, origin, kind):
+        # A row that sets its leg to a plain number on the unconditional path.
+        return (kind == "set" and isinstance(value, ast.Constant)
+                and type(value.value) in (int, float)
                 and all(reached(node) is not None for node in origin))
 
     declared = _watchdog_declared_budgets()
@@ -2139,7 +2243,7 @@ def _watchdog_declared_budget_reads(source=None):
             continue
         set_by = keyed.get(label, [])
         want = expression("declared_budgets[%r]" % label)
-        good = [origin for value, origin in set_by if reads(value, origin, want)]
+        good = [origin for value, origin, kind in set_by if reads(value, origin, want, kind)]
         if len(set_by) != 1 or len(good) != 1:
             missed.append("declared budget %s: %d regression-runner rows set its leg, %d of them "
                           "reading declared_budgets[%r] on the runner's unconditional path; want "
@@ -2162,17 +2266,107 @@ def _watchdog_declared_budget_reads(source=None):
                 continue
             for mode in modes:
                 set_by = keyed.get(mode, [])
-                mine = [origin for value, origin in set_by
-                        if reached(origin[0]) == at[0] and reads(value, origin, want)]
-                after = [origin for value, origin in set_by
+                mine = [origin for value, origin, kind in set_by
+                        if reached(origin[0]) == at[0] and reads(value, origin, want, kind)]
+                # A leg priced on its own takes one later row that SETS a
+                # plain number: a del, a setdefault() (which leaves the
+                # deadline budget in place) or any other value is no such row.
+                after = [origin for value, origin, kind in set_by
                          if not any(origin is row for row in mine)
-                         and reached(origin[0]) is not None and reached(origin[0]) > at[0]]
+                         and reached(origin[0]) is not None and reached(origin[0]) > at[0]
+                         and number(value, origin, kind)]
                 others = 1 if roster == "safety_modes" and mode in own else 0
                 if len(mine) != 1 or len(after) != others or len(set_by) != 1 + others:
                     missed.append("declared budget deadline-case: leg %s is set by %d "
                                   "regression-runner rows; want only its (mode, deadline_budget) "
                                   "row of %s%s" % (mode, len(set_by), text_,
-                                                   " and one row after it" if others else ""))
+                                                   " and one row after it setting a plain number"
+                                                   if others else ""))
+    # The names the reads above resolve through: a runner that binds
+    # _watchdog_declared_budgets, dict or repr itself (a local function, a
+    # lambda, an import or any other binding) can feed every row a figure
+    # of its own while each row's text still reads.
+    for name in ("_watchdog_declared_budgets", "dict", "repr"):
+        found = writes(name)
+        if found:
+            missed.append("declared budget binding %s: the regression runner must never bind it "
+                          "(%d bindings found, the first at line %d of its source)"
+                          % (name, len(found), getattr(found[0], "lineno", 0)))
+    # The leg-entry sites. The text a leg runs passes its budget as the
+    # first argument of opf._watchdog_leg_entry, so every string literal of
+    # the runner naming _watchdog_leg_entry must end with that call opened
+    # and be followed at once by repr(budgets.get(<the leg's label>)):
+    # either inside the one shared helper entry, bound once as below and
+    # called only from the cases binding below, or in a cases.append of a
+    # (label literal, text, bound) row on the unconditional path. A leg
+    # whose text passes a literal, or that a rebound helper or a rebuilt
+    # cases list can rewrite, no longer runs under the figure its row reads.
+    helper = ('def entry(label, case, args):\n'
+              '    return (prefix + "return opf._watchdog_leg_entry(" + repr(budgets.get(label))\n'
+              '            + ", opf." + case + "".join(", " + repr(arg) for arg in args) + ")")')
+    roster = ("cases = [(label, entry(label, case, args), bound(label)) "
+              "for label, case, args in entries]")
+
+    def top(node):
+        # The runner's own statement holding node.
+        while node is not None and parent.get(node) is not runner:
+            node = parent.get(node)
+        return node
+
+    found = writes("entry")
+    helper_def = found[0] if len(found) == 1 else None
+    if (not isinstance(helper_def, ast.FunctionDef) or ast.dump(helper_def) != statement(helper)
+            or reached(helper_def) is None):
+        missed.append("declared budget binding entry: the regression runner must bind it exactly "
+                      "once, as %s, on its unconditional path and never write it again (%d "
+                      "bindings or writes found)" % (" ".join(helper.split()), len(found)))
+        helper_def = None
+    found = writes("cases")
+    bindings = [node for node in found if not (
+        isinstance(node, ast.Call) and node.func.attr in ("append", "extend"))]
+    stmt = parent.get(bindings[0]) if len(bindings) == 1 else None
+    uses = [node for node in ast.walk(runner) if isinstance(node, ast.Name)
+            and node.id == "entry" and isinstance(node.ctx, ast.Load)]
+    if (not isinstance(stmt, ast.Assign) or ast.dump(stmt) != statement(roster)
+            or reached(stmt) is None or len(uses) != 1 or top(uses[0]) is not stmt):
+        missed.append("declared budget binding cases: the regression runner must bind it exactly "
+                      "once, as %s, on its unconditional path, write it again only through "
+                      "append() and extend(), and call entry only there (%d bindings or writes "
+                      "other than those, %d calls of entry found)"
+                      % (roster, len(bindings), len(uses)))
+    for node in ast.walk(runner):
+        if not (isinstance(node, ast.Constant) and isinstance(node.value, str)
+                and "_watchdog_leg_entry" in node.value):
+            continue
+        up = parent.get(node)
+        over = parent.get(up)
+        budget = (over.right if isinstance(up, ast.BinOp) and isinstance(up.op, ast.Add)
+                  and up.right is node and isinstance(over, ast.BinOp)
+                  and isinstance(over.op, ast.Add) and over.left is up else None)
+        opened = (node.value.endswith("_watchdog_leg_entry(")
+                  and node.value.count("_watchdog_leg_entry") == 1 and budget is not None)
+        if helper_def is not None and any(inner is node for inner in ast.walk(helper_def)):
+            continue
+        chain = node
+        while isinstance(parent.get(chain), ast.BinOp):
+            chain = parent.get(chain)
+        row = parent.get(chain)
+        call = parent.get(row)
+        label = (row.elts[0].value if isinstance(row, ast.Tuple) and len(row.elts) == 3
+                 and row.elts[1] is chain and isinstance(row.elts[0], ast.Constant)
+                 and isinstance(row.elts[0].value, str) else None)
+        appended = (label is not None and isinstance(call, ast.Call) and call.args == [row]
+                    and not call.keywords and isinstance(call.func, ast.Attribute)
+                    and call.func.attr == "append" and isinstance(call.func.value, ast.Name)
+                    and call.func.value.id == "cases" and isinstance(parent.get(call), ast.Expr)
+                    and reached(parent.get(call)) is not None)
+        if (not opened or not appended
+                or ast.dump(budget) != expression("repr(budgets.get(%r))" % label)):
+            missed.append("declared budget %s: the leg-entry text at line %d of the regression "
+                          "runner must open opf._watchdog_leg_entry( and pass "
+                          "repr(budgets.get(%r)) right after it, in a cases.append((label, text, "
+                          "bound)) on the unconditional path, or be the helper entry's"
+                          % (label or "leg entry", node.lineno, label or "<its label>"))
     return missed
 
 

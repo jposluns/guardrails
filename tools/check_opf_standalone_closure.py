@@ -900,9 +900,9 @@ def _declared_budgets_pass_line(check, flips_s):
             "its row; {} and {}, which it leaves out, are not checked here; RED one hundredth over a "
             "row, a budget with no row, a stale row, a NaN budget, three deadline-flips attempts at "
             "{}s, and a tree startup backstop one second over the live one; the import restores "
-            "sys.path, sys.path_importer_cache and sys.modules, loads the requested opf.py over a "
-            "cached opf module, and refuses an opf.py loaded from elsewhere and one missing a "
-            "constant as cannot evaluate)".format(
+            "sys.path, sys.path_importer_cache and sys.modules, loads the requested opf.py and "
+            "_opf_emit over cached opf and _opf_emit modules, and refuses an opf.py loaded from "
+            "elsewhere and one missing a constant as cannot evaluate)".format(
                 check, _DECLARED_BUDGETS_LEFT_OUT[0], _DECLARED_BUDGETS_LEFT_OUT[1], flips_s))
 
 
@@ -915,9 +915,9 @@ def _declared_budgets_self_test(root):
     just outside each row), on a missing or stale row, on the three-attempt deadline-flips formula
     this row was set against and on a tree startup backstop one second over the live one. The import
     behind it restores sys.path, sys.path_importer_cache and sys.modules whole, loads the requested
-    directory's opf.py even when another opf module is cached in sys.modules, and refuses as cannot
-    evaluate (_BoundError) an opf.py loaded from anywhere but the requested directory and one missing
-    a constant it reads."""
+    directory's opf.py and _opf_emit even when another opf or _opf_emit module is cached in
+    sys.modules, and refuses as cannot evaluate (_BoundError) an opf.py loaded from anywhere but the
+    requested directory and one missing a constant it reads."""
     check = "declared-budgets-seen"
     tools_dir = Path(root) / "opf" / "tools"
     # No finder is cached for opf/tools before the read (an earlier check's import may have cached
@@ -963,6 +963,25 @@ def _declared_budgets_self_test(root):
         raise _CheckFailure("closure/{}: with an opf stub cached in sys.modules the declared budgets "
                             "read {!r} (want {!r}) and the stub was {}".format(
                                 check, got, live, "put back" if kept is stub else "not put back"))
+    # The same for a helper module opf.py imports while computing the budgets: a stale _opf_emit
+    # cached in sys.modules (here a stub whose cleanup grace is 1000 s) must be set aside, so the
+    # requested directory's own _opf_emit prices every leg, and it must be back in place afterwards.
+    helper = type(sys)("_opf_emit")
+    helper._FIXTURE_CLEANUP_GRACE = 1000.0
+    cached = sys.modules.get("_opf_emit")
+    sys.modules["_opf_emit"] = helper
+    try:
+        got = _under_test(check, _opf_declared_budgets, tools_dir, refuses=(_BoundError,))
+        kept = sys.modules.get("_opf_emit")
+    finally:
+        if cached is None:
+            sys.modules.pop("_opf_emit", None)
+        else:
+            sys.modules["_opf_emit"] = cached
+    if got != live or kept is not helper:
+        raise _CheckFailure("closure/{}: with an _opf_emit stub cached in sys.modules the declared "
+                            "budgets read {!r} (want {!r}) and the stub was {}".format(
+                                check, got, live, "put back" if kept is helper else "not put back"))
     # An opf.py that lacks a constant the read sets aside is a module that cannot be evaluated
     # (_BoundError), never a raw AttributeError.
     tmp = Path(tempfile.mkdtemp(prefix="opf-closure-budgets-"))
