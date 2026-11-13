@@ -27180,6 +27180,74 @@ def _main_isolated(monitor):
                             "of at least 20 denied at both lengths)".format(
                                 len(_ci_read), _ci_missed[:5], _ci_wordless[:5], len(_ci_fell), _ci_kept[:5]))
 
+        # A pull request title or body that gh pr create, new or edit supplies is read for the AI attribution the
+        # check refuses in a commit message, plus a 'Generated with <tool>' line naming an AI identity: in
+        # --title and --body, in the file --body-file names (a relative one joined to the payload's cwd), and in
+        # the text of the command, so a here-document or here-string body is read. A --body-file the check
+        # cannot read is cannot-evaluate and denies, fail-closed, naming the path. The handler reads the fixture
+        # files in a temporary directory and runs nothing; no executable is reached. These rows are kept off
+        # ciexpect, whose too-long check wants a git word in each denied command.
+        _ci_pr_dir = _fixture_tmpdir("aiqt-prbody-")
+        try:
+            (_ci_pr_dir / "ai-body.md").write_text("Summary\n\nCo-authored-by: Claude <c@x>\n", encoding="utf-8")
+            (_ci_pr_dir / "human-body.md").write_text("Summary\n\nCo-authored-by: Jane Doe <jane@example.com>\n",
+                                                      encoding="utf-8")
+            _ci_pr_gen = "\U0001f916 Generated with [Claude Code](https://claude.com/claude-code)"
+            for _ci_label, _ci_cmd, _ci_want, _ci_reason_want in (
+                    ("(ci-pr1) an AI co-author trailer in --body denies",
+                     'gh pr create --title Fix --body "Fix the parser.\n\nCo-Authored-By: Claude <c@x>"', "deny",
+                     "co-author trailer 'Claude <c@x>'"),
+                    ("(ci-pr2) an AI co-author trailer in --title denies",
+                     'gh pr edit 12 --title "Fix Co-authored-by: Claude <c@x>" --body plain', "deny",
+                     "co-author trailer 'Claude <c@x>"),
+                    ("(ci-pr3) an AI co-author trailer in a --body-file fixture, given relative to cwd, denies",
+                     "gh pr create --title Fix --body-file ai-body.md", "deny", "in --body-file 'ai-body.md'"),
+                    ("(ci-pr4) an AI co-author trailer in a quoted here-document fed to --body-file - denies",
+                     "gh pr create --title Fix --body-file - <<'EOF'\nSummary\n\nCo-authored-by: Claude <c@x>\nEOF\n",
+                     "deny", "in the command text"),
+                    ("(ci-pr5) a 'Generated with' line naming an AI assistant in --body denies",
+                     'gh pr create --title Fix --body "Summary\n\n' + _ci_pr_gen + '"', "deny",
+                     "'Generated with' line"),
+                    ("(ci-pr6) a 'Generated with' line in a here-document inside a --body substitution denies",
+                     "gh pr create --title Fix --body \"$(cat <<'EOF'\nSummary\n\n" + _ci_pr_gen + "\nEOF\n)\"",
+                     "deny", "'Generated with' line"),
+                    ("(ci-pr7) a 'Generated with' line in a here-string, which the tokenizer does not parse, denies "
+                     "through the fallback", "gh pr create --title Fix --body-file - <<< '" + _ci_pr_gen + "'",
+                     "deny", "could not be read in full"),
+                    ("(ci-pr13) a 'Generated with' line in a -t value that shares its option word denies",
+                     "gh pr create -tGenerated\\ with\\ Copilot --body plain", "deny", "'Generated with' line"),
+                    ("(ci-pr8) a plain body allows",
+                     "gh pr create --title Fix --body 'Fixes the parser on long lines.'", "allow", ""),
+                    ("(ci-pr9) a body quoting a person's name in a co-author trailer allows",
+                     'gh pr create --title Fix --body "Thanks to Jane Doe.\n\nCo-authored-by: Jane Doe '
+                     '<jane@example.com>"', "allow", ""),
+                    ("(ci-pr10) a body mentioning the word 'generated' in ordinary prose allows",
+                     "gh pr create --title Fix --body 'The tables are generated with tools/gen_hooks.py, and the "
+                     "claude adapter is unchanged.'", "allow", ""),
+                    ("(ci-pr11) a --body-file whose trailer names a person allows",
+                     "gh pr edit 3 --body-file human-body.md", "allow", ""),
+                    ("(ci-pr12) a --body-file the check cannot read is cannot-evaluate and denies, naming the path",
+                     "gh pr create --title Fix --body-file missing-body.md", "deny",
+                     "--body-file 'missing-body.md'")):
+                _ci_code, _ci_out = cig({"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                                         "tool_input": {"command": _ci_cmd}, "cwd": str(_ci_pr_dir)})[:2]
+                _ci_got = _reduce_result(_ci_code, _ci_out)
+                _ci_reason = ((_ci_out or {}).get("hookSpecificOutput") or {}).get("permissionDecisionReason", "")
+                if _ci_got != _ci_want or _ci_reason_want not in _ci_reason:
+                    failures.append("{}: expected {} with a reason holding {!r}, got {} ({!r})".format(
+                        _ci_label, _ci_want, _ci_reason_want, _ci_got, _ci_reason[:200]))
+            _ci_got = _decision(cig, "gh pr create --title Fix --body-file " + str(_ci_pr_dir))
+            if _ci_got != "deny":
+                failures.append("(ci-pr-unread) a --body-file that is a directory, not a regular file, expected deny "
+                                "(cannot-evaluate), got {}".format(_ci_got))
+            _ci_cmd = "gh pr edit 3 --body 'Summary\n\n" + _ci_pr_gen + "'"
+            _ci_got = _decision(cig, _ci_cmd + " " * (aiqt_hooks._CMTIDN_READ_LIMIT + 1 - len(_ci_cmd)))
+            if _ci_got != "deny":
+                failures.append("(ci-pr-fallback-long) a 'Generated with' AI line in a gh pr command padded past the "
+                                "read limit expected deny through the fallback, got {}".format(_ci_got))
+        finally:
+            shutil.rmtree(_ci_pr_dir, ignore_errors=True)
+
         # secsec (EN-5 PR-C): decision-signal battery for the secrets-shift-left guard.
         # === secrets_shift_left (secsec): an obvious hardcoded secret in a Write/Edit/Bash write-form ==
         # Purely lexical over the target text (the Write content, the Edit new_string, or the Bash

@@ -5448,7 +5448,216 @@ def _cmtidn_run_lines(tokens, k, stop):
             j += 1
 
 
-def find_ai_authorship(command):
+# --- cmtidn: AI attribution in a pull request title or body ------------------------------------------
+# A pull request that gh pr create (or its alias gh pr new) or gh pr edit opens or edits carries a title and
+# a body that land in the repository's history when the pull request merges, so the commit-identity check
+# reads them too, on the segments the shared command reader (_segments_read) gives it and on the run lines it
+# reads (_cmtidn_line_ai). Each word of such a segment, the value of --title or -t and of --body or -b
+# included, is scanned for the co-author trailer it refuses in a commit message (_co_author_ai) and for a
+# line of the form 'Generated with <tool>' whose tool names an AI identity (_GENERATED_WITH_RE); the file
+# that --body-file or -F names is opened and scanned the same way (_gh_body_file_ai); and the text of the
+# command line itself is scanned once, so a body that a here-document or a here-string feeds to --body-file -
+# (whose body the shared lexer skips) or that a $(cat <<'EOF' ...) substitution builds is read. A
+# --body-file the check cannot read (no such file, not a regular file, longer than the read bound, a path
+# the shell expands at run time, or a relative path with no absolute working directory in the payload) is
+# cannot-evaluate, and the check fails closed on it, as it does on a command it cannot read in full. Not
+# read: a body built at run time (an expansion, a command substitution that runs a program, a pipe into
+# --body-file -), a body file that a later step writes or rewrites after the check reads it (an earlier
+# segment of the same command included), a gh api call, and a pull request edited outside the Bash tool.
+# The options of gh pr create and gh pr edit (gh 2.x), read like _CMTIDN_COMMIT_SHORT and _CMTIDN_COMMIT_LONG
+# so that a value-taking option's value word is read as that value and never as an option: 'title' and
+# 'body' are pull request text, 'file' is the path of the body file ('-' is standard input), 'value' is any
+# other value. A boolean option (-d, -f, -w, -e and the long ones) is left out of the short table, so a
+# cluster such as -dF reads past it (_cmtidn_option).
+_GH_PR_SHORT = {"t": "title", "b": "body", "F": "file", "a": "value", "B": "value", "H": "value", "l": "value",
+                "m": "value", "p": "value", "r": "value", "R": "value", "T": "value"}
+_GH_PR_LONG = {
+    "title": "title", "body": "body", "body-file": "file", "assignee": "value", "base": "value", "head": "value",
+    "label": "value", "milestone": "value", "project": "value", "reviewer": "value", "repo": "value",
+    "template": "value", "recover": "value", "add-assignee": "value", "add-label": "value",
+    "add-project": "value", "add-reviewer": "value", "remove-assignee": "value", "remove-label": "value",
+    "remove-project": "value", "remove-reviewer": "value", "draft": None, "fill": None, "fill-first": None,
+    "fill-verbose": None, "web": None, "dry-run": None, "editor": None, "remove-milestone": None}
+_GH_PR_VERBS = frozenset(("create", "new", "edit"))
+# A line of the form 'Generated with <tool>': at the start of a line, or right after a quote character (a
+# --body value or a here-string as the command text spells it), behind at most 16 characters that are not
+# word characters (an emoji, a bullet, a '>' or an indent), in any case. Like CO_AUTHOR_RE it reads the tool,
+# up to 160 characters to the end of its line, in a lookahead, so each line start is read with its own value
+# (_ai_value_match), and the value is judged against AI_IDENTITY_RE: 'Generated with [Claude Code](...)'
+# denies, while 'Generated with tools/gen_hooks.py' and a sentence that only mentions the word 'generated'
+# mid-line do not.
+_GENERATED_WITH_RE = re.compile(
+    r"(?im)(?:^|(?<=[\"'`]))[^\w\n]{0,16}generated[ \t]++with(?!\w)(?=[ \t]*+([^\n]{1,160}))")
+# The fallback's reading of gh pr create, new or edit in a command the reader cannot parse: a gh word (a path
+# to gh included) and a pr create, new or edit pair anywhere in the raw text.
+_GH_WORD_RE = re.compile(r"(?<![\w.-])gh(?![\w.-])")
+_GH_PR_VERB_RE = re.compile(r"(?<![\w.-])pr[ \t]++(?:create|new|edit)(?![\w.-])")
+# A body-file path holding one of these is expanded by the shell at run time (a variable, a substitution, a
+# glob, a brace or tilde expansion), so the check cannot know the file gh reads.
+_GH_BODY_PATH_UNREAD_RE = re.compile(r"[$`*?\[{\\]|^~")
+
+
+class _PrTextHit(str):
+    """A hit label for AI attribution in a pull request title or body (find_ai_authorship), so the handler
+    words its deny for a pull request rather than a git command."""
+
+
+class _PrBodyUnread(_PrTextHit):
+    """A hit label for a --body-file that the check cannot read: cannot-evaluate, and the handler fails
+    closed on it."""
+
+
+def _cmtidn_gh_pr_verb(tokens):
+    """The index of the create, new or edit word of the gh pr command one segment runs, else None. The command
+    word is found as _cmtidn_git_commands finds it, behind leading reserved words, the NAME after function or
+    coproc before a compound body, and VAR=value words: a command word that is gh (a path to gh included) is
+    read, and so is a later gh word when the command word is one of _CMTIDN_GIT_WRAPPERS. After the gh word,
+    words starting with '-' are passed over (-R and --repo with their value) up to pr, and again up to the verb.
+    Each word is read at most twice, so a segment costs time linear in its length."""
+    n = len(tokens)
+    i = 0
+    while i < n and tokens[i] in _CMTIDN_RESERVED:
+        named = tokens[i] in ("function", "coproc")
+        i += 1
+        if named and i + 1 < n and tokens[i + 1] in _CMTIDN_COMPOUND_OPENERS:
+            i += 1
+    while i < n and _ENV_ASSIGN_RE.match(tokens[i]):
+        i += 1
+    if i >= n:
+        return None
+    word = tokens[i].rsplit("/", 1)[-1]
+    if word == "gh":
+        starts = (i,)
+    elif word in _CMTIDN_GIT_WRAPPERS:
+        starts = (j for j in range(i + 1, n) if tokens[j].rsplit("/", 1)[-1] == "gh")
+    else:
+        return None
+    for j in starts:
+        k = j + 1
+        for want in ("pr", None):
+            while k < n and tokens[k].startswith("-") and tokens[k] != "--":
+                k += 2 if tokens[k] in ("-R", "--repo") else 1
+            if k >= n or (tokens[k] != "pr" if want else tokens[k] not in _GH_PR_VERBS):
+                break
+            if want is None:
+                return k
+            k += 1
+    return None
+
+
+def _pr_text_ai(text, judged):
+    """A hit label for the first AI attribution in text, a word or a body file of a pull request: a
+    Co-Authored-By trailer naming an AI identity (_co_author_ai), else a 'Generated with <tool>' line whose tool
+    names one (_GENERATED_WITH_RE), else None. judged caches each result as _co_author_ai does."""
+    hit = _co_author_ai(text, judged)
+    if hit is not None:
+        return hit
+    key = ("generated-with", text)
+    if key not in judged:
+        m = _ai_value_match(_GENERATED_WITH_RE, text)
+        judged[key] = None if m is None else "'Generated with' line {!r}".format(m.group(1).strip()[:80])
+    return judged[key]
+
+
+def _gh_body_file_text(path, cwd):
+    """(text, None) for the body file at path, read as gh reads it, else (None, reason) when the check cannot
+    read it. A relative path is joined to cwd, the working directory the payload names, which must be
+    absolute. The open is os.open(O_RDONLY | O_NONBLOCK | O_NOCTTY | O_CLOEXEC), so a FIFO with no writer opens
+    at once; anything that is not a regular file is refused without a read, and so is a file longer than
+    _CMTIDN_READ_LIMIT bytes (the read asks for at most one byte more). The text is decoded as UTF-8 with each
+    bad byte replaced. The descriptor is closed exactly once. Not bounded here: a path lookup or a read on a
+    stalled filesystem, which the hook deadline bounds."""
+    if not path or "\x00" in path or _GH_BODY_PATH_UNREAD_RE.search(path):
+        return None, "a path the shell expands at run time, or no literal path"
+    if not os.path.isabs(path):
+        if not (isinstance(cwd, str) and os.path.isabs(cwd)):
+            return None, "a relative path, and the payload names no absolute working directory"
+        path = os.path.join(cwd, path)
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOCTTY", 0)
+                     | getattr(os, "O_CLOEXEC", 0))
+    except (OSError, ValueError) as exc:
+        return None, "it cannot be opened ({})".format(type(exc).__name__)
+    chunks, total, reason = [], 0, None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            reason = "it is not a regular file"
+        else:
+            while total <= _CMTIDN_READ_LIMIT:
+                chunk = os.read(fd, _CMTIDN_READ_LIMIT + 1 - total)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                total += len(chunk)
+            if total > _CMTIDN_READ_LIMIT:
+                reason = "it is longer than the {}-byte read bound".format(_CMTIDN_READ_LIMIT)
+    except OSError as exc:
+        reason = "it cannot be read ({})".format(type(exc).__name__)
+    finally:
+        try:
+            os.close(fd)  # once: after a failed close the descriptor number may already be reused
+        except OSError as exc:
+            reason = reason or "it cannot be closed ({})".format(type(exc).__name__)
+    if reason is not None:
+        return None, reason
+    return b"".join(chunks).decode("utf-8", "replace"), None
+
+
+def _gh_body_file_ai(path, judged, cwd):
+    """A hit label for the body file at path (_gh_body_file_text): _PrBodyUnread when the check cannot read it,
+    a _PrTextHit when its text carries AI attribution (_pr_text_ai), else None. '-' is standard input, which
+    the scan of the command line's text reads (_gh_pr_ai). judged caches each path's result."""
+    if path == "-":
+        return None
+    key = ("gh-body-file", path, cwd)
+    if key not in judged:
+        text, reason = _gh_body_file_text(path, cwd)
+        if text is None:
+            judged[key] = _PrBodyUnread("--body-file {!r}: {}".format(path[:120], reason))
+        else:
+            hit = _pr_text_ai(text, judged)
+            judged[key] = None if hit is None else _PrTextHit("{} in --body-file {!r}".format(hit, path[:120]))
+    return judged[key]
+
+
+def _gh_pr_ai(tokens, k, line, judged, cwd):
+    """A hit label (_PrTextHit) for AI attribution in the pull request text of the gh pr command whose verb is
+    the word at index k of one segment of line, else None. Each word after the verb is scanned
+    (_pr_text_ai), and each is read as a gh pr option (_cmtidn_option over _GH_PR_SHORT and _GH_PR_LONG), so
+    the value of --title, -t, --body and -b is scanned whether it shares the option word or is the next word
+    (a short option's '=VALUE' read as VALUE, as gh reads it), and the file that --body-file or -F names is
+    read (_gh_body_file_ai). Then the text of line itself is scanned once, so a here-document or here-string
+    body is read. judged caches each word, file and line."""
+    n = len(tokens)
+    i = k + 1
+    while i < n:
+        tok = tokens[i]
+        hit = _pr_text_ai(tok, judged)
+        if hit is not None:
+            return _PrTextHit(hit)
+        kind, value = _cmtidn_option(tok, _GH_PR_SHORT, _GH_PR_LONG)
+        if kind is not None and value is None and i + 1 < n:
+            i += 1
+            value = tokens[i]  # the option's value word, never read as an option
+        elif value is not None and not tok.startswith("--") and value.startswith("="):
+            value = value[1:]
+        if kind is not None and kind != "file" and value is not None:
+            hit = _pr_text_ai(value, judged)  # a value read alone, so its first line starts at its first character
+            if hit is not None:
+                return _PrTextHit(hit)
+        if kind == "file" and value is not None:
+            hit = _gh_body_file_ai(value, judged, cwd)
+            if hit is not None:
+                return hit
+        i += 1
+    key = ("gh-pr-line", line)
+    if key not in judged:
+        hit = _pr_text_ai(line, judged)
+        judged[key] = None if hit is None else _PrTextHit("{} in the command text".format(hit))
+    return judged[key]
+
+
+def find_ai_authorship(command, cwd=None):
     """Return '<context> <value>' when a segment sets an AI identity for a recorded change, else None:
     an identity-assignment (env var / git config) on ANY segment, or a commit-message context (co-author
     trailer, --author value) on a segment that runs a git commit-family command, found by
@@ -5469,14 +5678,18 @@ def find_ai_authorship(command):
     nothing read sets an AI identity, and ValueError(_CMTIDN_TOO_LONG) at once, before any reading, when the
     command is longer than _CMTIDN_READ_LIMIT characters; the handler turns each into the conservative
     fallback. Raises _ReadingLimitError when the command reading of the command or of any run line spends its
-    body budget (COST above _COMMAND_LEAD_WORDS), never a line left unread, so the handler denies it."""
+    body budget (COST above _COMMAND_LEAD_WORDS), never a line left unread, so the handler denies it.
+
+    On any segment that runs gh pr create, new or edit it also returns AI attribution in the pull request's
+    title or body, as a _PrTextHit, or a _PrBodyUnread for a --body-file the check cannot read, a relative one
+    joined to cwd (_gh_pr_ai)."""
     if len(command) > _CMTIDN_READ_LIMIT:
         raise ValueError(_CMTIDN_TOO_LONG)
     bound = _CMTIDN_RUN_SCALE * len(command) + _CMTIDN_RUN_FLOOR
     unread = [False]
     try:
         hit = _cmtidn_line_ai(command, 0, {True: [bound], False: [bound], None: [bound]}, unread, [True, False],
-                              {})
+                              {}, cwd=cwd)
     except _ReadingLimitError:
         raise
     except ValueError:
@@ -5488,7 +5701,7 @@ def find_ai_authorship(command):
     return hit
 
 
-def _cmtidn_line_ai(command, depth, budgets, unread, paths, judged, from_env=False):
+def _cmtidn_line_ai(command, depth, budgets, unread, paths, judged, from_env=False, cwd=None):
     """find_ai_authorship over one command line at a run-line nesting depth. The line is judged under both
     readings, the locale reading and the literal '$' reading (the locale flag of _segments True and False),
     once when they agree, which they do on a line holding no $". paths lists the readings whose own reading of
@@ -5507,8 +5720,9 @@ def _cmtidn_line_ai(command, depth, budgets, unread, paths, judged, from_env=Fal
     (_co_author_ai). from_env is True when a git alias defined outside a git command's own segment, through a git
     configuration variable the text of a line that encloses this one names (_git_config_env_named) or the hook's
     environment carries (_git_alias_inherited), applies to every git command of that line, which this one runs
-    under. A parse error in the command itself (depth 0) raises: at once when neither reading parses
-    it, and otherwise after the other reading has found nothing."""
+    under. A segment that runs gh pr create, new or edit (_cmtidn_gh_pr_verb) has its pull request text read
+    (_gh_pr_ai), a relative --body-file joined to cwd. A parse error in the command itself (depth 0) raises: at
+    once when neither reading parses it, and otherwise after the other reading has found nothing."""
     readings = []  # (the readings that read the line so, its segments)
     error = None
     for locale in (True, False):
@@ -5546,6 +5760,11 @@ def _cmtidn_line_ai(command, depth, budgets, unread, paths, judged, from_env=Fal
             hit = _identity_assignment_ai(tokens)
             if hit is not None:
                 return hit
+            pr = _cmtidn_gh_pr_verb(tokens)
+            if pr is not None:
+                hit = _gh_pr_ai(tokens, pr, command, judged, cwd)
+                if hit is not None:
+                    return hit
             subs = list(_cmtidn_git_commands(tokens))
             if not subs:
                 continue  # no git command: no commit to read and no run line to build
@@ -5581,7 +5800,7 @@ def _cmtidn_line_ai(command, depth, budgets, unread, paths, judged, from_env=Fal
                         if depth >= _CMTIDN_RUN_DEPTH or all(spent):
                             break
                     hit = _cmtidn_line_ai(line, depth + 1, budgets, unread, [key for key in keys if key is not None],
-                                          judged, line_env)
+                                          judged, line_env, cwd)
                     if hit is not None:
                         return hit
     if error is not None and depth == 0:
@@ -5635,6 +5854,10 @@ def _commit_identity_fallback(command, error):
     the text around a '$' that bash keeps (one inside double quotes, or one escaped), the same safe direction.
     None of these scans reads the git subcommand, so a git command that runs under a git alias the command defines
     (the reader's _git_config_env_named and _git_alias_defined_at) is judged here as a commit-family one is.
+    Last, a command whose raw text holds a gh word and a pr create, new or edit pair (_GH_WORD_RE,
+    _GH_PR_VERB_RE) denies when that text carries a co-author trailer or a 'Generated with' line naming an AI
+    identity (_pr_text_ai), so a here-string or an unquoted here-document body, which the tokenizer does not
+    parse, is judged; a --body-file is not opened here.
     Never silent-allow a plausibly-violating command the check could not read in full."""
     if error == _CMTIDN_TOO_LONG:
         match = _AI_NAME_ANYWHERE_RE.search(_CMTIDN_UNREAD_CHARS_RE.sub("", command))
@@ -5678,6 +5901,15 @@ def _commit_identity_fallback(command, error):
             return _deny(reason,
                          "AIQT guardrail: denied a git command the check could not read in full that "
                          "appears to record an AI commit identity (rule cmtidn, fail-safe).")
+    if _GH_WORD_RE.search(command) and _GH_PR_VERB_RE.search(command):
+        hit = _pr_text_ai(command, {})
+        if hit is not None:
+            reason = ("AIQT rule cmtidn (commit-identity): the command could not be read in full and it runs gh "
+                      "pr create, new or edit with pull request text that carries AI attribution ({}); failing "
+                      "closed. Remove it so the pull request names the maintainer alone.".format(hit))
+            return _deny(reason,
+                         "AIQT guardrail: denied a gh pr command the check could not read in full whose title or "
+                         "body carries AI attribution (rule cmtidn, fail-safe).")
     return _allow()
 
 
@@ -5689,7 +5921,15 @@ def commit_identity(data):
     here-document's body that main's lexer reads otherwise (MAIN'S DECISION AS A FLOOR, above
     _MainHashReading), main's segments are read beside the lex's own where main's reading lexes, and where it
     fails the raw fallback a lex that fails takes, which denies or allows, decides in place of this guard's
-    allow."""
+    allow.
+
+    It also denies a gh pr create, gh pr new or gh pr edit command whose title or body carries a co-author
+    trailer naming an AI identity or a 'Generated with <tool>' line naming one: the --title and --body values,
+    the file --body-file names (a relative path joined to the payload's cwd) and the text of the command line,
+    so a here-document or here-string body is read (_gh_pr_ai). A --body-file the check cannot read is
+    cannot-evaluate and denies, fail-closed, naming the path. Not read (the residue): a body built at run time,
+    a body file written or rewritten by a later step (an earlier segment of the same command included), a gh
+    api call, and a pull request edited outside the Bash tool."""
     if data.get("hook_event_name") != PRETOOL:
         return _hard_block("aiqt_hooks: commit_identity wired to unexpected event {!r}; failing closed"
                            .format(data.get("hook_event_name")))
@@ -5706,7 +5946,7 @@ def commit_identity(data):
             "AIQT guardrail: denied a Bash call with no readable command (rule cmtidn, fail-closed).")
     reads = _SubstHeredocs.reads
     try:
-        hit = find_ai_authorship(command)
+        hit = find_ai_authorship(command, data.get("cwd"))
     except _ReadingLimitError:
         # The command reading spent its body budget: the raw fallback below can allow an identity that main's
         # reading finds, so it denies (COST above _COMMAND_LEAD_WORDS).
@@ -5729,6 +5969,20 @@ def commit_identity(data):
         if _SubstHeredocs.reads != reads:
             return _commit_identity_fallback(command, _SUBST_HEREDOC_MAIN_FAILS)  # main's fallback, in place
         return _allow()
+    if isinstance(hit, _PrBodyUnread):
+        reason = ("AIQT rule cmtidn (commit-identity): this gh pr command takes its body from a file the check "
+                  "cannot read ({}), so whether the body carries AI attribution cannot be evaluated; failing "
+                  "closed. Write the body file in an earlier call, or pass the body with --body.".format(hit))
+        return _deny(reason,
+                     "AIQT guardrail: denied a gh pr command whose --body-file the commit-identity check cannot "
+                     "read (rule cmtidn, cannot-evaluate, fail-closed).")
+    if isinstance(hit, _PrTextHit):
+        reason = ("AIQT rule cmtidn (commit-identity): a pull request title and body carry the human "
+                  "maintainer's own identity, with no AI co-author trailer or 'Generated with' AI line; this gh "
+                  "pr command carries AI attribution ({}). Remove it.".format(hit))
+        return _deny(reason,
+                     "AIQT guardrail: denied a gh pr command whose title or body carries AI attribution "
+                     "(rule cmtidn).")
     reason = ("AIQT rule cmtidn (commit-identity): a recorded change carries the human maintainer's "
               "own identity, with no AI as author, committer, or co-author; this git command sets an "
               "AI identity ({}). Remove it and commit as the maintainer.".format(hit))
