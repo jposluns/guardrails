@@ -291,6 +291,25 @@ directory below, and a declaration there arms slice confinement.
 }
 ```
 
+Where a program is accepted from. Two fields name a program a hook runs: `enumerator.argv` and
+`review_dispatch.authority.argv`. Configuration that runs a program is code, so it passes a trust
+gate before it runs: the hook runs that argv only when the machine-local
+`.aiqt/orchestration.local.json` of the repository holding the registry declares the same argv and
+git's index does not track that file. The file name alone does not decide it, since a repository can
+commit a file of that name: the hook lists the index (`git ls-files`) and treats the file as tracked
+when an entry names it, or names the `.aiqt` path holding it (a submodule or a symbolic link there
+brings the file with a clone), compared without regard to case. An argv that only the committed
+`.aiqt/orchestration.json` declares, or that a tracked local registry declares, never runs: the
+enumerator becomes an `ENUMERATOR_ERROR` (a cannot-evaluate) and the review dispatch is withheld as
+`UNVERIFIABLE:`, each naming the file and telling the operator to put the argv in the untracked local
+registry. A git that cannot list the index withholds the run the same way. Every other field of the
+committed registry keeps working as before. The local registry takes whole-file precedence for the
+other orchestration hooks, so an adopter who moves an argv there copies the whole registry into it. A
+relative argv still names a path in the work tree, so the operator who places it in the local
+registry vouches for that file too. The review dispatch binding record is unchanged by this gate: it
+records a binding on first sight from either registry, and a recorded binding never makes an argv
+runnable.
+
 `state_dir` defaults to `${XDG_STATE_HOME:-$HOME/.local/state}/aiqt-guardrails/orch/<repo-key>/`
 (repo-key is a digest of the root path). The machine-written state there is `dispatch-ledger.jsonl`,
 `guard-events.jsonl`, `turn-state.json`, `resume-barrier.json`, `pending-asks.jsonl`,
@@ -795,9 +814,10 @@ descriptor withholds).
 
 ## The adopter enumeration interface (AEI), protocol v1
 
-The registry names a fixed argv array, never a shell string. The provider enumerates the REAL
-backlog source itself; it must not accept an item list or a completeness assertion from the agent.
-Output on stdout:
+The registry names a fixed argv array, never a shell string, and the hook runs it only from the
+untracked local registry (see "Where a program is accepted from" above). The provider enumerates
+the REAL backlog source itself; it must not accept an item list or a completeness assertion from
+the agent. Output on stdout:
 
 ```json
 {"version": 1, "generated_at_utc": "...",
@@ -845,10 +865,13 @@ malformed.
 - `brief_option` is the option that names the brief file, as `--brief PATH` or `--brief=PATH`.
 - `labels` names the five brief labels, and optionally two more, `draft` and `skip`, declared
   together or not at all, which turn on the worker draft census below. They must be distinct.
-- `authority.argv` is a fixed argv, never a shell string. The hook runs it from the repository root
-  with the brief's absolute path appended and every `GIT_*` variable removed from its environment, as
-  for the hook's own git reads, and it must print exactly one full commit id: the
-  authoritative task revision. `authority.timeout` is in seconds, from 1 to 8 (default 5). The whole
+- `authority.argv` is a fixed argv, never a shell string. The hook runs it only when the untracked
+  local registry declares it (see "Where a program is accepted from"); a binding from the committed
+  registry, or from a tracked local one, still decides which commands dispatch, but each revision
+  dispatch it would reconcile is withheld as `UNVERIFIABLE:` without running it. The hook runs it
+  from the repository root with the brief's absolute path appended and every `GIT_*` variable
+  removed from its environment, as for the hook's own git reads, and it must print exactly one full
+  commit id: the authoritative task revision. `authority.timeout` is in seconds, from 1 to 8 (default 5). The whole
   check, git reads and authority included, runs within 8 seconds, under the 10-second hook timeout;
   when that budget runs out the dispatch is withheld as `UNVERIFIABLE:`. The check runs in a worker
   thread that the hook waits for only until the budget ends, so a read blocked in the kernel cannot

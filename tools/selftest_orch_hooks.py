@@ -479,6 +479,128 @@ def _rdp_kind(result):
     return verdict
 
 
+# A stand-in program for the trust-gate rows: it creates the marker file named by its first argument, so a
+# row tells whether the hook ran it, then prints the enumeration payload file its second argument names,
+# when there is one.
+MARK_STUB = """#!/usr/bin/env python3
+import sys
+open(sys.argv[1], "w").close()
+if len(sys.argv) > 2:
+    sys.stdout.write(open(sys.argv[2]).read())
+"""
+
+
+def _xt_reason(result):
+    """The permissionDecisionReason of a review dispatch result, or '' when it carries none."""
+    obj = result[1] if isinstance(result[1], dict) else {}
+    return obj.get("hookSpecificOutput", {}).get("permissionDecisionReason", "")
+
+
+def _xt_enum_fixture(tmp, name, where):
+    """A Fixture whose enumerator is MARK_STUB, declared in the registry file where names (the local or the
+    committed one, the other removed); returns (fixture, marker path)."""
+    fx = Fixture(tmp, name)
+    stub = fx.root / "mark-stub.py"
+    stub.write_text(MARK_STUB, encoding="utf-8")
+    marker = tmp / (name + "-ran")
+    local = fx.root / ".aiqt" / "orchestration.local.json"
+    reg = json.loads(local.read_text(encoding="utf-8"))
+    reg["enumerator"] = {"argv": [sys.executable, "-I", "-B", str(stub), str(marker), str(fx.enum_payload)],
+                         "timeout": 30}
+    local.unlink()
+    (fx.root / ".aiqt" / where).write_text(json.dumps(reg), encoding="utf-8")
+    return fx, marker
+
+
+def _xt_enum_outcome(fx, marker):
+    """(enum_status, decide_yield verdict, marker present, detail) for a stop judged at fx's root."""
+    root = str(fx.root)
+    ctx = aiqt_hooks._orch_build_ctx(aiqt_hooks._orch_registry(root)[1], root, "stop", {},
+                                     record_checkpoint=False)[0]
+    return (ctx["enum_status"], aiqt_hooks.decide_yield(ctx)[0], marker.exists(), ctx["enum_detail"])
+
+
+def _exec_trust_cases(tmp):
+    """The trust gate on a program an orchestration registry names (exectrust/*): enumerator.argv and
+    review_dispatch.authority.argv run only from the untracked local registry. Every program a row can
+    reach is a stand-in under tmp (MARK_STUB, or AUTH_STUB with its done marker) or git, run on throwaway
+    repositories under tmp with no remote; each negative row asserts its marker is absent."""
+    base = tmp / "exectrust"
+    base.mkdir()
+    # Review dispatch: a binding only the committed registry declares still scopes the session, but the
+    # authority it names never runs and the revision dispatch is withheld, naming both registry files.
+    rc = RdpFixture(base, "committed")
+    rc_ran = rc.briefs / "authority-ran"
+    rc.authority(rc.pin + "\n", done=str(rc_ran))
+    (rc.root / ".aiqt" / "orchestration.local.json").unlink()
+    (rc.root / ".aiqt" / "orchestration.json").write_text(json.dumps(dict(
+        version=1, state_dir=str(rc.briefs / "state"), review_dispatch=rc.binding)), encoding="utf-8")
+    _rdp_git(rc.root, "add", ".aiqt/orchestration.json")
+    _rdp_git(rc.root, "commit", "-q", "-m", "committed registry")
+    result = rc.dispatch(rc.good())
+    reason = _xt_reason(result)
+    check("exectrust/rdp-committed-authority-not-run",
+          (_rdp_kind(result), rc_ran.exists(), "orchestration.json" in reason,
+           "orchestration.local.json" in reason), ("unverifiable", False, True, True))
+    # The same binding in the untracked local registry: the authority runs and the dispatch reconciles.
+    rl = RdpFixture(base, "local")
+    rl_ran = rl.briefs / "authority-ran"
+    rl.authority(rl.pin + "\n", done=str(rl_ran))
+    check("exectrust/rdp-local-authority-runs", (_rdp_kind(rl.dispatch(rl.good())), rl_ran.exists()),
+          ("allow", True))
+    # A local registry the repository tracks came with its committed files: it counts as committed.
+    rt = RdpFixture(base, "tracked")
+    rt_ran = rt.briefs / "authority-ran"
+    rt.authority(rt.pin + "\n", done=str(rt_ran))
+    _rdp_git(rt.root, "add", "-f", ".aiqt/orchestration.local.json")
+    result = rt.dispatch(rt.good())
+    check("exectrust/rdp-tracked-local-authority-not-run",
+          (_rdp_kind(result), rt_ran.exists(), "tracked in git's index" in _xt_reason(result)),
+          ("unverifiable", False, True))
+    # The enumerator equivalents: a committed-registry argv is not run and the stop is withheld as the
+    # cannot-evaluate ENUMERATOR_ERROR; an untracked local one runs and enumerates.
+    ec, ec_ran = _xt_enum_fixture(base, "enum-committed", "orchestration.json")
+    ec._git("add", ".aiqt/orchestration.json")
+    ec._git("-c", "user.name=T", "-c", "user.email=t@example.invalid", "-c", "commit.gpgsign=false",
+            "commit", "-q", "-m", "committed registry")
+    status, verdict, ran, detail = _xt_enum_outcome(ec, ec_ran)
+    check("exectrust/enum-committed-argv-not-run",
+          (status, verdict, ran, "orchestration.json" in detail, "orchestration.local.json" in detail),
+          ("ENUMERATOR_ERROR", "DENY", False, True, True))
+    el, el_ran = _xt_enum_fixture(base, "enum-local", "orchestration.local.json")
+    check("exectrust/enum-local-argv-runs", _xt_enum_outcome(el, el_ran)[:3], ("ok", "ALLOW", True))
+    et, et_ran = _xt_enum_fixture(base, "enum-tracked", "orchestration.local.json")
+    et._git("add", "-f", ".aiqt/orchestration.local.json")
+    status, verdict, ran, detail = _xt_enum_outcome(et, et_ran)
+    check("exectrust/enum-tracked-local-argv-not-run",
+          (status, verdict, ran, "tracked in git's index" in detail), ("ENUMERATOR_ERROR", "DENY", False, True))
+    # An index entry spelled in another case (which a case-insensitive file system opens under the local
+    # name), or one for the .aiqt path itself (a symbolic link or a submodule bringing the file with a
+    # clone), tracks the local registry too; only the index is changed, the untracked file stays in place.
+    content = base / "index-entry.txt"
+    content.write_text("x\n", encoding="utf-8")
+    rows = []
+    for name, entry in (("enum-case", "100644,{},.AIQT/Orchestration.Local.JSON"),
+                        ("enum-aiqt-path", "120000,{},.aiqt")):
+        fx, ran = _xt_enum_fixture(base, name, "orchestration.local.json")
+        blob = _rdp_git(fx.root, "hash-object", "-w", str(content))
+        _rdp_git(fx.root, "update-index", "--add", "--cacheinfo", entry.format(blob))
+        status, verdict, was_run, detail = _xt_enum_outcome(fx, ran)
+        rows.append((status, was_run, "tracked in git's index" in detail))
+    check("exectrust/enum-index-entry-case-or-aiqt-path-not-run", rows,
+          [("ENUMERATOR_ERROR", False, True)] * 2)
+    # A git that cannot list the index cannot show the local registry untracked: nothing runs.
+    eg, eg_ran = _xt_enum_fixture(base, "enum-nogit", "orchestration.local.json")
+    real_git = aiqt_hooks._review_git
+    aiqt_hooks._review_git = lambda *_a, **_k: None
+    try:
+        status, verdict, ran, detail = _xt_enum_outcome(eg, eg_ran)
+    finally:
+        aiqt_hooks._review_git = real_git
+    check("exectrust/enum-index-unlistable-not-run", (status, ran, "cannot list the index" in detail),
+          ("ENUMERATOR_ERROR", False, True))
+
+
 def _rdp_cases(tmp):
     """The review dispatch pin vectors (rdp/*). Each fixture is a throwaway repo under tmp."""
     base = tmp / "rdp"
@@ -12694,12 +12816,14 @@ def _named_text_cases(hooks):
         return subprocess.CompletedProcess(argv, 3, "", ("e" + brk) * 1000)
     for name, run in (("core/enum-detail-failed-to-run-one-line-bounded", fail_run),
                       ("core/enum-detail-exit-stderr-one-line-bounded", exit_run)):
-        saved = hooks.subprocess
+        # The trust gate passes the stand-in argv here, so the row reaches the run outcome it tests.
+        saved, saved_gate = hooks.subprocess, hooks._orch_trusted_argv
         hooks.subprocess = _EnumeratorRunStub(run)
+        hooks._orch_trusted_argv = lambda *_a: None
         try:
             status, d = hooks._orch_enumerate({"enumerator": {"argv": ["selftest-enumerator"]}}, ".")
         finally:
-            hooks.subprocess = saved
+            hooks.subprocess, hooks._orch_trusted_argv = saved, saved_gate
         rows.append((name, (status, _one_line(d), len(d) <= detail_max), ("ENUMERATOR_ERROR", True, True)))
     # keyed by check id so the call site can name every id literally; a repeated id would let one
     # row silently replace another, so it is a failure here
@@ -15875,6 +15999,11 @@ def _main_isolated(report_path=None):
                 bar = json.load(fh)
             return (bar.get("active"), [f for f in bar.get("findings") or [] if "is DENIED" in f] != [])
         _doc_top = _doc.aiqt_hooks._recovery_toplevel
+        # The enumerator here sits in the committed-name registry (the symlink under test), which the trust
+        # gate never runs from; the gate is held open in these runs so the scope deny stays the only
+        # finding, and the gate itself is checked by the exectrust/* rows.
+        _doc_gate = _doc.aiqt_hooks._orch_trusted_argv
+        _doc.aiqt_hooks._orch_trusted_argv = lambda *_a: None
         try:
             _da_code, _da_out = _doc_run(tmp / "doc-above" / "nested", None)
             _du_code, _du_out = _doc_run(_doc_fx.root, None)
@@ -15889,6 +16018,7 @@ def _main_isolated(report_path=None):
             _dt_code, _dt_out = _doc_run(fcb_cwd, None)
         finally:
             _doc.aiqt_hooks._recovery_toplevel = _doc_top
+            _doc.aiqt_hooks._orch_trusted_argv = _doc_gate
             _doc.repo_root = _doc_root
             if _doc_old is None:
                 os.environ.pop(_doc_env, None)
@@ -19323,6 +19453,7 @@ def _main_isolated(report_path=None):
         _rdp_cases(tmp)
         _rwh_cases(tmp)
         _gitalias_oracle_cases(tmp)
+        _exec_trust_cases(tmp)
     finally:
         aiqt_hooks._orch_dirfd_has_registry = saved_probe
         shutil.rmtree(tmp, ignore_errors=True)
