@@ -2131,6 +2131,8 @@ id = "git-fixture-env-core"
 runner = "tools/selftest_git_fixture_env_core.py"
 expected-check-ids = [
   "config/lane-return-fail-closed",
+  "config/member-bound-closure-vectors",
+  "config/member-bound-closure-worst-case",
   "config/member-bound-opf-selftest",
   "config/member-bound-reaches-run",
   "config/member-bound-table",
