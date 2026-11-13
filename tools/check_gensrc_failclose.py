@@ -444,11 +444,13 @@ def _materialize_git(template, real_root, deadline=None):
         # propagates; Popen's own exit handling would only wait briefly on an interrupt, not kill.
         # No parent-death signal is armed here: _load_bound.run (which arms one) refuses a git head,
         # and that signal would reach the gc leader only, not the children in its group.
-        # After a group kill and the leader's reap, neither branch returns or re-raises until the
-        # group has no process left (_load_bound._await_group_gone, at most GROUP_GONE_S): a
-        # SIGKILLed child is not gone until it has run its exit, which a loaded host can delay past
-        # the leader's reap. A group still present at that bound fails the overrun branch closed
-        # and is noted on the propagating interrupt.
+        # After a group kill, each branch reaps the leader (at most _load_bound.REAP_S) and then
+        # waits for the group to be confirmed empty (_load_bound._await_group_gone, at most
+        # GROUP_GONE_S), or reports why it was not: a SIGKILLed child is not gone until it has run
+        # its exit, which a loaded host can delay past the leader's reap. A leader left unreaped,
+        # a group still present at the bound, or a group that could not be probed fails the
+        # overrun branch closed and is noted on the propagating exception, which is never replaced
+        # by a second interrupt during the stop (one landing between stage guards excepted).
         timeout = _setup_timeout(deadline, TEMPLATE_GC_TIMEOUT)
         try:
             proc = subprocess.Popen(
@@ -459,35 +461,71 @@ def _materialize_git(template, real_root, deadline=None):
                 env=env, shell=False, start_new_session=True)
         except OSError as exc:
             return "gc could not be launched ({})".format(exc)
-        with proc:
+
+        def reap():
+            # Every reap after a kill is bounded by _load_bound.REAP_S (read at the call), as the
+            # load-bound stop's own reap is: a leader that outlives SIGKILL (for example in
+            # uninterruptible sleep) is left unreaped and named, never waited on without bound, so
+            # the stop always reaches its end. Returns "" once the leader is reaped, else that name.
             try:
-                rc = proc.wait(timeout=timeout)
+                proc.wait(timeout=_load_bound.REAP_S)
             except subprocess.TimeoutExpired:
-                unsignalled = _load_bound._kill_group(proc, None)  # numeric group id, leader unreaped
-                if unsignalled:
-                    proc.kill()
-                    proc.wait()
-                    # A descendant may still be rewriting template/.git: the template cannot be trusted,
-                    # and that descendant can outlive this process (it is reported, not stopped).
-                    raise OSError("template gc overran its {:g} s bound and its process group could not "
-                                  "be stopped ({}); a gc descendant may still be running; fail-closed"
-                                  .format(timeout, unsignalled))
-                proc.wait()
-                lingering = _load_bound._await_group_gone(proc, None)
-                if lingering:
-                    raise OSError("template gc overran its {:g} s bound and {}; a gc descendant may "
-                                  "still be running; fail-closed".format(timeout, lingering))
-                _remove_gc_debris(template / ".git")
-                return "gc overran its {:g} s bound; its process group was killed".format(timeout)
-            except BaseException as exc:
-                unsignalled = _load_bound._kill_group(proc, None)  # leader unreaped: the id names it
+                return ("its leader outlived SIGKILL for {:g} s and was left unreaped"
+                        .format(_load_bound.REAP_S))
+            return ""
+
+        # No `with proc:` block: Popen's exit handling waits on the leader WITHOUT a bound for any
+        # exception but KeyboardInterrupt, which would undo the bounded reap above. All three
+        # standard streams are DEVNULL, so there is no pipe for that exit handling to close.
+        try:
+            rc = proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            unsignalled = _load_bound._kill_group(proc, None)  # numeric group id, leader unreaped
+            if unsignalled:
                 proc.kill()
-                proc.wait()
-                lingering = unsignalled or _load_bound._await_group_gone(proc, None)
-                if lingering:
-                    exc.add_note("the template gc process group was not confirmed stopped before "
-                                 "this propagated: {}".format(lingering))
-                raise
+                unreaped = reap()
+                # A descendant may still be rewriting template/.git: the template cannot be trusted,
+                # and that descendant can outlive this process (it is reported, not stopped).
+                raise OSError("template gc overran its {:g} s bound and its process group could not "
+                              "be stopped ({}{}); a gc descendant may still be running; fail-closed"
+                              .format(timeout, unsignalled, "; " + unreaped if unreaped else ""))
+            # An unreaped leader keeps its group present, so the group wait runs only after a reap.
+            lingering = reap() or _load_bound._await_group_gone(proc, None)
+            if lingering:
+                raise OSError("template gc overran its {:g} s bound and {}; a gc descendant may "
+                              "still be running; fail-closed".format(timeout, lingering))
+            _remove_gc_debris(template / ".git")
+            return "gc overran its {:g} s bound; its process group was killed".format(timeout)
+        except BaseException as exc:
+            # Each stop stage runs in its own guard, so a second interrupt (or any other exception)
+            # raised during one stage is recorded as a note on exc and the later stages still run;
+            # exc, the original exception, is the one that propagates. Not covered: an interrupt
+            # landing between two stage guards, or after the last one, which replaces exc.
+            notes, signalled = [], False
+            for stage in ("group kill", "direct kill", "reap", "group exit"):
+                try:
+                    if stage == "group kill":
+                        # The leader is unreaped here, so the numeric group id still names it.
+                        note = _load_bound._kill_group(proc, None)
+                        signalled = not note
+                    elif stage == "direct kill":
+                        proc.kill()
+                        note = ""
+                    elif stage == "reap":
+                        note = reap()
+                    elif signalled and proc.returncode is not None:
+                        note = _load_bound._await_group_gone(proc, None)
+                    else:
+                        note = ""  # not signalled or not reaped: already named by an earlier stage
+                    if note:
+                        notes.append(note)
+                except BaseException as again:  # noqa: BLE001  recorded, never raised in place of exc
+                    notes.append("the {} was interrupted by {}({!s})".format(
+                        stage, type(again).__name__, again))
+            if notes:
+                exc.add_note("the template gc process group was not confirmed stopped before "
+                             "this propagated: {}".format("; ".join(notes)))
+            raise
         return "" if rc == 0 else "gc exited {}".format(rc)
 
     if git(template, "init", "-q", "--template=").returncode != 0:
@@ -1681,6 +1719,8 @@ _SELF_TEST_VECTORS = (
     "template gc interrupt",
     "template gc group-exit bound (overrun)",
     "template gc group-exit bound (interrupt)",
+    "template gc unreapable leader",
+    "template gc second interrupt",
     "template setup deadline clamp",
     "injected setup vector",
     "injected None-fixture vector",
@@ -2976,8 +3016,9 @@ def _self_test_main_isolated():
         #     - group-exit bound: with the group-emptiness probe reporting the killed gc group
         #       present on every probe and _load_bound.GROUP_GONE_S cut to 0.3 s, the overrun
         #       branch fails the setup closed naming the group still present at the bound, and an
-        #       interrupt still propagates, carrying that failure as a note (an interrupt is never
-        #       replaced). The real group was killed all the same; the cleanup below kills by token.
+        #       interrupt still propagates, carrying that failure as a note rather than being
+        #       replaced by it. The real group was killed all the same; the cleanup below kills by
+        #       token.
         def _evaluate_gone_bound(interrupting):
             def evaluate(fixture):
                 saved_popen = subprocess.Popen
@@ -3032,6 +3073,181 @@ def _self_test_main_isolated():
                     _gc_branch_fixture("gc-gone-overrun"), _evaluate_gone_bound(False))
         _run_vector(cannot, failures, "template gc group-exit bound (interrupt)",
                     _gc_branch_fixture("gc-gone-interrupt"), _evaluate_gone_bound(True))
+
+        #     - unreapable leader: the gc leader is a double whose reap never returns within its
+        #       bound (_load_bound.REAP_S cut to 0.3 s; each bounded wait after the first sleeps out
+        #       its bound and raises TimeoutExpired without reaping, and a wait with no bound is
+        #       recorded and refused, never entered). An overrun, an overrun whose group cannot be
+        #       signalled, and an interrupt each end within the bound: the overruns fail the setup
+        #       closed naming the unreaped leader, the interrupt propagates carrying that name as a
+        #       note, and no branch probes the group (an unreaped leader keeps it present). The
+        #       leaders are then reaped for real and their groups confirmed empty.
+        def _evaluate_unreapable(fixtures):
+            saved_popen = subprocess.Popen
+            saved_kill_group = _load_bound._kill_group
+            saved_present = _load_bound._group_present
+            saved_reap_s = _load_bound.REAP_S
+            unreaped_name = "its leader outlived SIGKILL for 0.3 s and was left unreaped"
+
+            class _UnboundedReap(Exception):
+                pass
+
+            for (leg, first, refuse), fixture in zip(
+                    (("overrun", subprocess.TimeoutExpired, False),
+                     ("unsignalled overrun", subprocess.TimeoutExpired, True),
+                     ("interrupt", KeyboardInterrupt, False)), fixtures):
+                made, unbounded, probes, notes, raised, err = [], [], [], None, None, ""
+
+                class _Unreapable(saved_popen):
+                    def poll(self):
+                        return None  # never reaped here, so a direct kill's poll reaps nothing
+
+                    def wait(self, timeout=None, first=first, unbounded=unbounded):
+                        if timeout is None:
+                            unbounded.append(self.pid)
+                            raise _UnboundedReap("a reap with no bound was entered")
+                        if not getattr(self, "first_done", False):
+                            self.first_done = True
+                            time.sleep(0.5)  # the stand-in is launched by now
+                            if first is KeyboardInterrupt:
+                                raise KeyboardInterrupt()
+                            raise subprocess.TimeoutExpired(self.args, timeout)
+                        time.sleep(timeout)
+                        raise subprocess.TimeoutExpired(self.args, timeout)
+
+                def _gc_popen(cmd, *a, _cls=_Unreapable, _made=made, **kw):
+                    if kw.get("start_new_session"):  # the template gc alone
+                        proc = _cls(cmd, *a, **kw)
+                        _made.append(proc)
+                        return proc
+                    return saved_popen(cmd, *a, **kw)
+
+                def _recording_present(proc, pidfd, numeric_only=False, _probes=probes):
+                    _probes.append(True)
+                    return saved_present(proc, pidfd, numeric_only)
+
+                subprocess.Popen = _gc_popen
+                _load_bound._group_present = _recording_present
+                _load_bound.REAP_S = 0.3
+                if refuse:
+                    _load_bound._kill_group = lambda proc, pidfd: "injected group-signal refusal"
+                began = time.monotonic()
+                try:
+                    raised, err = _materialize_with_standin(
+                        fixture, _gc_standin("import time; time.sleep(60)"), 60)
+                except KeyboardInterrupt as exc:
+                    notes = list(getattr(exc, "__notes__", ()))
+                finally:
+                    took = time.monotonic() - began
+                    subprocess.Popen = saved_popen
+                    _load_bound._group_present = saved_present
+                    _load_bound._kill_group = saved_kill_group
+                    _load_bound.REAP_S = saved_reap_s
+                    reaped = []
+                    for proc in made:
+                        try:
+                            saved_popen.wait(proc, timeout=_load_bound.REAP_S)
+                            reaped.append(proc)
+                        except subprocess.TimeoutExpired:
+                            pass
+                    if refuse:  # the unsignalled group is left alive by design: stop it first
+                        _cleanup_leaked_descendant(gc_branch_label, failures, cannot)
+                    confirmed = [_load_bound._await_group_gone(proc, None) for proc in reaped]
+                    survivors = [] if refuse else _load_bound._alive_with(gc_branch_label)
+                    _cleanup_leaked_descendant(gc_branch_label, failures, cannot)
+                label = "template gc unreapable leader ({})".format(leg)
+                if unbounded or probes or len(made) != 1 or took > 10:
+                    failures.append("{}: every reap must be bounded and no group probe may run while "
+                                    "the leader is unreaped, got {} unbounded reap(s), {} probe(s), {} "
+                                    "gc launch(es), {:.1f} s".format(label, len(unbounded), len(probes),
+                                                                     len(made), took))
+                if first is KeyboardInterrupt:
+                    if notes is None or not any(unreaped_name in note for note in notes):
+                        failures.append("{}: the interrupt must propagate carrying a note naming the "
+                                        "unreaped leader, got notes {!r}, raised {!r}"
+                                        .format(label, notes, raised))
+                elif (not isinstance(raised, OSError) or unreaped_name not in str(raised)
+                        or "fail-closed" not in str(raised)
+                        or refuse != ("injected group-signal refusal" in str(raised))):
+                    failures.append("{}: the overrun must fail the setup closed naming the unreaped "
+                                    "leader, got {!r}, stderr {!r}".format(label, raised, err))
+                if confirmed != [""] * len(made) or survivors != []:
+                    failures.append("{}: the leader reaped after the leg must leave its group empty "
+                                    "and nothing alive, got {!r}, survivors {!r}"
+                                    .format(label, confirmed, survivors))
+
+        _run_vector(cannot, failures, "template gc unreapable leader",
+                    lambda: tuple(_gc_branch_fixture(name)() for name in
+                                  ("gc-unreaped-overrun", "gc-unreaped-unsignalled",
+                                   "gc-unreaped-interrupt")),
+                    _evaluate_unreapable)
+
+        #     - second interrupt: an original KeyboardInterrupt out of the gc wait, then a second
+        #       exception (a KeyboardInterrupt, then in another leg a RuntimeError) raised by the
+        #       group probe during the group-exit wait. The ORIGINAL interrupt object must be the
+        #       one that propagates, carrying a note naming the second exception; the group was
+        #       killed and its leader reaped before the wait, and the real wait run afterwards
+        #       confirms the group empty before the survivor scan.
+        def _evaluate_second_interrupt(fixtures):
+            saved_popen = subprocess.Popen
+            saved_present = _load_bound._group_present
+            for second, fixture in zip((KeyboardInterrupt("second gc interrupt"),
+                                        RuntimeError("second gc fault")), fixtures):
+                original = KeyboardInterrupt("original gc interrupt")
+                made, probes, caught, raised = [], [], None, None
+
+                class _InterruptedOnce(saved_popen):
+                    def wait(self, timeout=None, original=original):
+                        if timeout is not None and not getattr(self, "first_done", False):
+                            self.first_done = True
+                            time.sleep(0.5)  # the stand-in is launched by now
+                            raise original
+                        return super().wait(timeout)
+
+                def _gc_popen(cmd, *a, _cls=_InterruptedOnce, _made=made, **kw):
+                    if kw.get("start_new_session"):  # the template gc alone
+                        proc = _cls(cmd, *a, **kw)
+                        _made.append(proc)
+                        return proc
+                    return saved_popen(cmd, *a, **kw)
+
+                def _interrupting_present(proc, pidfd, numeric_only=False, _probes=probes,
+                                          _second=second):
+                    _probes.append(True)
+                    raise _second
+
+                subprocess.Popen = _gc_popen
+                _load_bound._group_present = _interrupting_present
+                try:
+                    raised, _err = _materialize_with_standin(
+                        fixture, _gc_standin("import time; time.sleep(60)"), 60)
+                except KeyboardInterrupt as exc:
+                    caught = exc
+                finally:
+                    subprocess.Popen = saved_popen
+                    _load_bound._group_present = saved_present
+                    confirmed = [_load_bound._await_group_gone(proc, None) for proc in made
+                                 if proc.returncode is not None]
+                    survivors = _load_bound._alive_with(gc_branch_label)
+                    _cleanup_leaked_descendant(gc_branch_label, failures, cannot)
+                label = "template gc second interrupt ({})".format(type(second).__name__)
+                want_note = "the group exit was interrupted by {}({})".format(
+                    type(second).__name__, second)
+                notes = list(getattr(caught, "__notes__", ()))
+                if caught is not original or not any(want_note in note for note in notes):
+                    failures.append("{}: the original interrupt must propagate, carrying a note "
+                                    "naming the second exception, got {!r} with notes {!r} (raised "
+                                    "{!r})".format(label, caught, notes, raised))
+                if len(probes) != 1 or len(made) != 1 or confirmed != [""] or survivors != []:
+                    failures.append("{}: the second exception must land in the group wait after "
+                                    "the leader's reap and the group must then empty, got {} "
+                                    "probe(s), {} gc launch(es), real waits {!r}, survivors {!r}"
+                                    .format(label, len(probes), len(made), confirmed, survivors))
+
+        _run_vector(cannot, failures, "template gc second interrupt",
+                    lambda: tuple(_gc_branch_fixture(name)() for name in
+                                  ("gc-second-interrupt", "gc-second-fault")),
+                    _evaluate_second_interrupt)
 
         def _evaluate_setup_clamp(fixture):
             global _now

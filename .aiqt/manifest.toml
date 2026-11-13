@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.0.5"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "a1b38794e3d823551a9525df73526340c533dda14054588f7cd34c1e803bc380"
+tree-sha256 = "f306f381af43005eaf4886e57788a4cbac43d9fdcb855e70c25d431ab3f7c412"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -4077,8 +4077,8 @@ sha256 = "26a3371c747fdfefde2b66126a6df4faaea5c890689347867c7b34f56db8b106"
 
 [[sources]]
 path = "tools/_load_bound.py"
-bytes = 215034
-sha256 = "4d2d596ca7c3c707381703f564289d9ce01646deda5eefd7615cb203190e4aea"
+bytes = 215352
+sha256 = "2eb674c0df933b5245058d6cdab5bc7e7df4c214b9ebf264732d39dcb56287b8"
 
 [[sources]]
 path = "tools/_qa_adapter.py"
@@ -4182,8 +4182,8 @@ sha256 = "0238bb4c907c358a4718a70f8630a92517444f64139b4c0517004bfdbf2321ec"
 
 [[sources]]
 path = "tools/check_dangerous_api.py"
-bytes = 223750
-sha256 = "da51b3063f95f356d9ea2ce8037d5437dc688fb15e2aae326160af9d6a57e9a1"
+bytes = 224292
+sha256 = "92d0c42793322f48b181697f8f04146c30fd53a9d65395ffca2a9510204620d8"
 
 [[sources]]
 path = "tools/check_derived_command_parameters.py"
@@ -4202,8 +4202,8 @@ sha256 = "86cfa0e2453c22a9887cc47ee6eded2d2774a32fc3e47b8e886a863ab26bd9b2"
 
 [[sources]]
 path = "tools/check_gensrc_failclose.py"
-bytes = 213333
-sha256 = "41053dfafe49854b959e61b12de9855b3adaa428abbf36b912d32fe639cde3dd"
+bytes = 226942
+sha256 = "ac98eaabecf2aa678e091c8113c43571e2aff12cb7760971f5a1caa9e7e8c0cc"
 
 [[sources]]
 path = "tools/check_git_option_table.py"

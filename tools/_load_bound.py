@@ -104,9 +104,10 @@ pidfd acquisition included, a bound firing, a fault in the monitoring itself, an
 interrupt) runs the stop before run() leaves: read whether
 the child already exited on its own, kill the child's own process group, kill the child directly, then
 reap it waiting at most REAP_S, and, once the group was signalled and its leader reaped, wait at most
-GROUP_GONE_S for that group to have no process left (signal 0, never a delivered signal), so the stop
-never returns or re-raises while a killed member is still exiting; a group that has not emptied by
-then is named in the Hung reason. No process-table scan selects victims and no stage signals a numeric
+GROUP_GONE_S for that group to have no process left (signal 0, never a delivered signal): the stop
+waits for the group to be confirmed empty or reports why it was not (a group still present at the
+bound or a probe that fails is named in the Hung reason; an interrupt during the wait is held and
+re-raised once the stop ends). No process-table scan selects victims and no stage signals a numeric
 pid that could have been reused: the group kill addresses the group through the leader's own pid
 record (pidfd_send_signal with PIDFD_SIGNAL_PROCESS_GROUP), which a reused pid number never names, so
 it is exact before AND after Popen has reaped the leader; without a usable pidfd, or where the kernel
@@ -232,9 +233,10 @@ REAP_S = 10.0  # seconds run() waits to reap a SIGKILLed child before leaving it
 # to be scheduled to run its exit, and on a loaded host it can stay in the process table, command
 # line readable, after the leader was reaped. Sized above the worst exit seen under a deliberately
 # starved member (niceness 19, pinned to one CPU beside eight busy loops: 3.1 s), with margin, and
-# equal to REAP_S, the bound the leader's own exit already gets; a whole stop (REAP_S plus this)
-# then takes at most 20 s, under the 25 s stop-vector limits and the 30 s watchdog of the shared
-# vectors.
+# equal to REAP_S, the bound the leader's own exit already gets. The waits of a whole stop are
+# bounded by the sum of the two bounds (REAP_S plus this, 20 s), excluding scheduling and polling
+# overhead and the kill stages themselves; that sum sits under the 25 s stop-vector limits and the
+# 30 s watchdog of the shared vectors.
 GROUP_GONE_S = 10.0
 GROUP_GONE_POLL_S = 0.02
 SCAN_S = 5.0  # wall seconds one process-table scan may take; a scan cut short reads as unreadable CPU
@@ -692,10 +694,11 @@ def _stop(proc, pidfd):
     """Stop proc in five stages: read the status it reached on its own, kill the process group it
     leads (_kill_group, through pidfd where one was bound at the spawn), kill it directly, reap it
     (waiting at most REAP_S), then, where the group kill was sent and the leader is reaped, wait
-    at most GROUP_GONE_S for the group to have no process left (_await_group_gone), so the stop
-    does not return, or hand back its interrupt, while a killed member is still exiting. Each
-    stage runs in its own guard: a fault in one is noted and the next still runs, and an
-    interrupt arriving during a stage is held until every stage has been attempted. Returns
+    at most GROUP_GONE_S for the group to have no process left (_await_group_gone): the stop
+    waits for the group to be confirmed empty or names why it was not (bound reached, probe
+    failure, or an interrupt during the wait, which is held like any other). Each stage runs in
+    its own guard: a fault in one is noted and the next still runs, and an interrupt arriving
+    during a stage is held until every stage has been attempted. Returns
     (own_exit, note, interrupt): the status proc reached before the stop or None, "" or a note
     naming each stage that failed, and the first held interrupt or None (the caller re-raises
     it)."""
@@ -1302,11 +1305,11 @@ def vector_failures(python):
     through the survivor cleanup, the leaked-descendant vector's descendant sleeps a bounded 60 s,
     and the group-exit wait's bound legs start no child at all.
 
-    Group-exit vectors: a stop does not return before the group it killed is empty (a
-    deterministic stand-in probe reports a member still exiting for three probes, and the stop
-    must go on until the group is observed empty); a group that never empties ends the stop
-    with the failure named in the Hung reason at the bound; and the bound's ends (elapsed just
-    inside, exactly at and just past it) are driven by an injected clock.
+    Group-exit vectors: a stop waits for the group it killed to be confirmed empty or names why
+    it was not (a deterministic stand-in probe reports a member still exiting for three probes,
+    and the stop must go on until the group is observed empty); a group that never empties ends
+    the stop with the failure named in the Hung reason at the bound; and the bound's ends
+    (elapsed just inside, exactly at and just past it) are driven by an injected clock.
 
     Added vectors: a fault INSIDE a communicate call, in the first poll and in a later one
     (WHICH poll faulted is asserted), keeps the bytes that call had already read (recovered from

@@ -796,6 +796,12 @@ ALLOWLIST = (
     ("tools/check_gensrc_failclose.py", "_self_test_main_isolated._evaluate_gone_bound.evaluate", "shell",
      1, _SAVED + " (the real Popen subclassed by the gc group-exit bound vector's double, whose wait"
      " raises KeyboardInterrupt once on its interrupt leg)"),
+    ("tools/check_gensrc_failclose.py", "_self_test_main_isolated._evaluate_unreapable", "shell", 1,
+     _SAVED + " (the real Popen subclassed by the gc unreapable-leader vector's double, whose bounded"
+     " reaps time out without reaping and whose unbounded reap is refused)"),
+    ("tools/check_gensrc_failclose.py", "_self_test_main_isolated._evaluate_second_interrupt", "shell", 1,
+     _SAVED + " (the real Popen subclassed by the gc second-interrupt vector's double, whose wait raises"
+     " the original KeyboardInterrupt once)"),
     ("tools/check_release_build.py", "_self_test_main_isolated", "shell", 1, _SAVED),
     ("tools/check_release_delta.py", "_self_test_main_isolated", "shell", 1, _SAVED),
     ("tools/check_mistakes_register.py", "self_test", "shell", 2,
