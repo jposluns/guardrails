@@ -445,12 +445,14 @@ def _materialize_git(template, real_root, deadline=None):
         # No parent-death signal is armed here: _load_bound.run (which arms one) refuses a git head,
         # and that signal would reach the gc leader only, not the children in its group.
         # After a group kill, each branch reaps the leader (at most _load_bound.REAP_S) and then
-        # waits for the group to be confirmed empty (_load_bound._await_group_gone, at most
-        # GROUP_GONE_S), or reports why it was not: a SIGKILLed child is not gone until it has run
-        # its exit, which a loaded host can delay past the leader's reap. A leader left unreaped,
-        # a group still present at the bound, or a group that could not be probed fails the
-        # overrun branch closed and is noted on the propagating exception, which is never replaced
-        # by a second interrupt during the stop (one landing between stage guards excepted).
+        # waits for the group to be confirmed empty (_load_bound._await_group_gone, giving up once
+        # GROUP_GONE_S has passed; the bound is checked between probes, so one probe or zombie scan
+        # still running can overrun it), or reports why it was not: a SIGKILLed child is not gone
+        # until it has run its exit, which a loaded host can delay past the leader's reap. A leader
+        # left unreaped, a group still present at the bound, or a group that could not be probed
+        # fails the overrun branch closed and is noted on the propagating exception, which is never
+        # replaced by a second interrupt during the stop (one landing between stage guards
+        # excepted).
         timeout = _setup_timeout(deadline, TEMPLATE_GC_TIMEOUT)
         try:
             proc = subprocess.Popen(

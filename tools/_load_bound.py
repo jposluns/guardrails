@@ -658,9 +658,12 @@ def _zombies_only(pgid, root="/proc"):
     (ENOENT and ESRCH are absence), or a stat line does not parse. Absence is skipped at the level
     where it was read: a process whose stat or task listing is gone was reaped and is skipped
     whole, while a thread whose stat is gone is skipped on its own and every other thread of that
-    process is still read, so a live thread listed after a vanished one is never missed. root
-    stands in for /proc, so every outcome is testable on a crafted tree. The scan only reads;
-    nothing is selected or signalled from it."""
+    process is still read, so a live thread listed after a vanished one is never missed. It
+    reads only what /proc lets this process see: where /proc is mounted with hidepid, a live
+    member hidden from this process is not seen, so a group whose visible members are all zombies
+    can read as empty (the probe still found a member; the bound and the survivor census are
+    unchanged). root stands in for /proc, so every outcome is testable on a crafted tree. The
+    scan only reads; nothing is selected or signalled from it."""
     def stat_of(path):
         with open(path, "rb") as handle:
             data = handle.read()
