@@ -22811,10 +22811,11 @@ def validate_enumeration(obj):
 
 # Configuration that runs a program is code, so it passes a trust gate before it runs. A program an
 # orchestration registry names (enumerator.argv, review_dispatch.authority.argv) runs only when the
-# machine-local registry declares that same argv and git's index does not track that file. The committed
-# .aiqt/orchestration.json, and a .aiqt/orchestration.local.json the repository tracks, arrive with a
-# clone, so a repository's committed files never choose a program the hook runs. Every other field of a
-# committed registry keeps working; only the run is withheld, as the caller's cannot-evaluate outcome.
+# machine-local registry declares that same argv and git tracks that file neither in its index nor in
+# the HEAD commit. The committed .aiqt/orchestration.json, and a .aiqt/orchestration.local.json the
+# repository tracks, arrive with a clone, so a repository's committed files never choose a program the
+# hook runs. Every other field of a committed registry keeps working; only the run is withheld, as the
+# caller's cannot-evaluate outcome.
 _ORCH_LOCAL_REGISTRY = _ORCH_REGISTRY_FILES[0]
 _ORCH_COMMITTED_REGISTRY = _ORCH_REGISTRY_FILES[1]
 
@@ -22822,16 +22823,22 @@ _ORCH_COMMITTED_REGISTRY = _ORCH_REGISTRY_FILES[1]
 def _orch_trusted_argv(root, argv, field):
     """None when the hook may run argv for the registry at root: the untracked local registry there, read
     on its own without following a symbolic link at its name, declares exactly argv as field
-    (_orch_declared_argv). Otherwise the one-line reason the hook runs nothing, naming the file and the
-    operator's step. The file name alone does not make the file local, since a repository can commit a file of that
-    name: it counts as untracked only when git's index at root lists no entry for it and none for the
-    .aiqt path holding it (a submodule or a symbolic link there brings the file with a clone), compared
-    without regard to case, because a case-insensitive file system opens a tracked entry spelled in
-    another case under the same name. A git that cannot list the index withholds the run."""
+    (_orch_declared_argv). Otherwise the one-line reason the hook runs nothing, naming the file and
+    ending in the same operator's step. The file name alone does not make the file local, since a
+    repository can commit a file of that name: it counts as untracked only when neither git's index at
+    root nor the tree of its HEAD commit holds an entry for it or for the .aiqt path holding it (a
+    submodule or a symbolic link there brings the file with a clone), compared without regard to case,
+    because a case-insensitive file system opens a tracked entry spelled in another case under the same
+    name. Names are folded for case only: a file system that also ignores some code points or normalizes
+    names (HFS+) can open a committed entry spelled with them under the local name, which is not checked.
+    HEAD is read as well as the index because a file removed from the index alone (git rm --cached, or a
+    deleted index) is still committed. A git that cannot list the index, or the HEAD tree of a branch
+    that has commits, withholds the run; an unborn branch has no HEAD tree to list (_orch_head_unborn)."""
     local = os.path.join(root, *_ORCH_LOCAL_REGISTRY.split("/"))
-    step = ("an operator who trusts that program puts {} in the untracked local registry {} (it takes "
-            "whole-file precedence over the committed registry for the other orchestration hooks, so it "
-            "carries the whole registry)".format(field, local))
+    step = ("an operator who trusts that program puts {} in the local registry {}, a file git tracks "
+            "neither in its index nor in the HEAD commit (it takes whole-file precedence over the committed "
+            "registry for the other orchestration hooks, so it carries the whole registry)".format(
+                field, local))
     status, reg = _orch_registry(root, nofollow=True, files=(_ORCH_LOCAL_REGISTRY,))
     if status == "absent":
         return ("{} is declared only by the committed registry {}, which cannot choose a program the hook "
@@ -22845,15 +22852,32 @@ def _orch_trusted_argv(root, argv, field):
                 "run); {}".format(local, field, step))
     listing = _review_git(root, "ls-files", "-z", "--cached")
     if listing is None or listing.returncode != 0:
-        return "git cannot list the index of {}, so whether {} is tracked is unknown and the program its " \
-            "{} names is not run".format(root, local, field)
+        return ("git cannot list the index of {}, so whether {} is tracked is unknown and the program its "
+                "{} names is not run; once git can list it, {}".format(root, local, field, step))
+    head = _review_git(root, "ls-tree", "-r", "-z", "--name-only", "--full-tree", "HEAD")
+    if head is None or (head.returncode != 0 and not _orch_head_unborn(root)):
+        return ("git cannot list the HEAD tree of {}, so whether {} is committed is unknown and the program "
+                "its {} names is not run; once git can list it, {}".format(root, local, field, step))
     names = (_ORCH_LOCAL_REGISTRY.casefold(), _ORCH_LOCAL_REGISTRY.split("/")[0].casefold())
-    for entry in listing.stdout.split(b"\0"):
-        if entry and entry.decode("utf-8", "surrogateescape").casefold() in names:
-            return ("{} is tracked in git's index (entry {!r}), so it came with the repository's committed "
-                    "files and the program its {} names is not run; an operator untracks it (git rm "
-                    "--cached) and keeps it local".format(local, entry.decode("utf-8", "replace"), field))
+    for where, out in (("git's index", listing.stdout), ("the HEAD commit", head.stdout)):
+        for entry in out.split(b"\0"):
+            if entry and entry.decode("utf-8", "surrogateescape").casefold() in names:
+                return ("{} is tracked in {} (entry {!r}), so it came with the repository's committed files "
+                        "and the program its {} names is not run; {}".format(
+                            local, where, entry.decode("utf-8", "replace"), field, step))
     return None
+
+
+def _orch_head_unborn(root):
+    """True when HEAD at root names a branch that has no commit yet (a new repository), so there is no
+    HEAD tree to list; False when it cannot be shown, which the trust gate reads as an unlistable HEAD.
+    git show-ref --exists exits 2 only for a reference that does not exist, never for a broken one; a git
+    older than 2.43 lacks that option, so there an unborn branch reads as an unlistable HEAD too."""
+    sym = _review_git(root, "symbolic-ref", "-q", "HEAD")
+    if sym is None or sym.returncode != 0 or not sym.stdout.endswith(b"\n"):
+        return False
+    ref = _review_git(root, "show-ref", "--exists", sym.stdout[:-1].decode("utf-8", "surrogateescape"))
+    return ref is not None and ref.returncode == 2
 
 
 def _orch_declared_argv(reg, field):

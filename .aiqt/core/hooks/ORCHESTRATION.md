@@ -295,20 +295,28 @@ Where a program is accepted from. Two fields name a program a hook runs: `enumer
 `review_dispatch.authority.argv`. Configuration that runs a program is code, so it passes a trust
 gate before it runs: the hook runs that argv only when the machine-local
 `.aiqt/orchestration.local.json` of the repository holding the registry declares the same argv and
-git's index does not track that file. The file name alone does not decide it, since a repository can
-commit a file of that name: the hook lists the index (`git ls-files`) and treats the file as tracked
-when an entry names it, or names the `.aiqt` path holding it (a submodule or a symbolic link there
-brings the file with a clone), compared without regard to case. An argv that only the committed
-`.aiqt/orchestration.json` declares, or that a tracked local registry declares, never runs: the
-enumerator becomes an `ENUMERATOR_ERROR` (a cannot-evaluate) and the review dispatch is withheld as
-`UNVERIFIABLE:`, each naming the file and telling the operator to put the argv in the untracked local
-registry. A git that cannot list the index withholds the run the same way. Every other field of the
-committed registry keeps working as before. The local registry takes whole-file precedence for the
-other orchestration hooks, so an adopter who moves an argv there copies the whole registry into it. A
-relative argv still names a path in the work tree, so the operator who places it in the local
-registry vouches for that file too. The review dispatch binding record is unchanged by this gate: it
-records a binding on first sight from either registry, and a recorded binding never makes an argv
-runnable.
+git tracks that file neither in its index nor in the HEAD commit. The file name alone does not
+decide it, since a repository can commit a file of that name: the hook lists the index
+(`git ls-files`) and the tree of the HEAD commit (`git ls-tree -r HEAD`), and treats the file as
+tracked when an entry in either names it, or names the `.aiqt` path holding it (a submodule or a
+symbolic link there brings the file with a clone), compared without regard to case. HEAD is read
+as well because a file removed from the index alone (`git rm --cached`, or a deleted index) is
+still committed. Names are folded for case only: a file system that also ignores some code points
+or normalizes names (HFS+) can open a committed entry spelled with them under the local name, and
+the hook does not check for that. A local registry that is a symbolic link is not read, so it
+declares no argv. An argv that only the committed `.aiqt/orchestration.json` declares, or that a
+tracked local registry declares, never runs: the enumerator becomes an `ENUMERATOR_ERROR` (a
+cannot-evaluate) and the review dispatch is withheld as `UNVERIFIABLE:`, each naming the file and
+the operator's step: an operator who trusts the program puts the argv in the local registry, a file
+git tracks neither in its index nor in the HEAD commit. A git that cannot list the index, or the
+HEAD tree of a branch that has commits, withholds the run the same way, and its message gives the
+same step for once git can list them; a branch with no commit yet has no HEAD tree, so only its
+index is read. Every other field of the committed registry keeps working as before. The local
+registry takes whole-file precedence for the other orchestration hooks, so an adopter who moves an
+argv there copies the whole registry into it. A relative argv still names a path in the work tree,
+so the operator who places it in the local registry vouches for that file too. The review dispatch
+binding record is unchanged by this gate: it records a binding on first sight from either registry,
+and a recorded binding never makes an argv runnable.
 
 `state_dir` defaults to `${XDG_STATE_HOME:-$HOME/.local/state}/aiqt-guardrails/orch/<repo-key>/`
 (repo-key is a digest of the root path). The machine-written state there is `dispatch-ledger.jsonl`,
@@ -871,12 +879,12 @@ malformed.
   dispatch it would reconcile is withheld as `UNVERIFIABLE:` without running it. The hook runs it
   from the repository root with the brief's absolute path appended and every `GIT_*` variable
   removed from its environment, as for the hook's own git reads, and it must print exactly one full
-  commit id: the authoritative task revision. `authority.timeout` is in seconds, from 1 to 8 (default 5). The whole
-  check, git reads and authority included, runs within 8 seconds, under the 10-second hook timeout;
-  when that budget runs out the dispatch is withheld as `UNVERIFIABLE:`. The check runs in a worker
-  thread that the hook waits for only until the budget ends, so a read blocked in the kernel cannot
-  hold the hook. Every file read also checks the budget before each read, and a result reached after
-  the budget has run out is never an allow.
+  commit id: the authoritative task revision. `authority.timeout` is in seconds, from 1 to 8
+  (default 5). The whole check, git reads and authority included, runs within 8 seconds, under the
+  10-second hook timeout; when that budget runs out the dispatch is withheld as `UNVERIFIABLE:`.
+  The check runs in a worker thread that the hook waits for only until the budget ends, so a read
+  blocked in the kernel cannot hold the hook. Every file read also checks the budget before each
+  read, and a result reached after the budget has run out is never an allow.
 - `max_brief_bytes` caps the brief size (default 1048576).
 
 The hook checks only a provably plain dispatch, decided on the raw characters before any lexing by

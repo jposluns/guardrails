@@ -512,11 +512,13 @@ def _xt_enum_fixture(tmp, name, where):
     return fx, marker
 
 
-def _xt_enum_outcome(fx, marker):
-    """(enum_status, decide_yield verdict, marker present, detail) for a stop judged at fx's root."""
+def _xt_enum_outcome(fx, marker, reg=None):
+    """(enum_status, decide_yield verdict, marker present, detail) for a stop judged at fx's root, with the
+    registry the loader reads there, or with reg when it is given."""
     root = str(fx.root)
-    ctx = aiqt_hooks._orch_build_ctx(aiqt_hooks._orch_registry(root)[1], root, "stop", {},
-                                     record_checkpoint=False)[0]
+    if reg is None:
+        reg = aiqt_hooks._orch_registry(root)[1]
+    ctx = aiqt_hooks._orch_build_ctx(reg, root, "stop", {}, record_checkpoint=False)[0]
     return (ctx["enum_status"], aiqt_hooks.decide_yield(ctx)[0], marker.exists(), ctx["enum_detail"])
 
 
@@ -599,6 +601,79 @@ def _exec_trust_cases(tmp):
         aiqt_hooks._review_git = real_git
     check("exectrust/enum-index-unlistable-not-run", (status, ran, "cannot list the index" in detail),
           ("ENUMERATOR_ERROR", False, True))
+    # A local registry with no binding beside a committed registry with one: the committed binding still
+    # scopes the session, but the local file does not declare its authority argv, so the argv comparison
+    # withholds the dispatch and nothing runs.
+    rn = RdpFixture(base, "local-no-binding")
+    rn_ran = rn.briefs / "authority-ran"
+    rn.authority(rn.pin + "\n", done=str(rn_ran))
+    (rn.root / ".aiqt" / "orchestration.json").write_text(json.dumps(dict(
+        version=1, state_dir=str(rn.briefs / "state"), review_dispatch=rn.binding)), encoding="utf-8")
+    _rdp_git(rn.root, "add", ".aiqt/orchestration.json")
+    _rdp_git(rn.root, "commit", "-q", "-m", "committed registry")
+    rn.write_registry(None)
+    result = rn.dispatch(rn.good())
+    check("exectrust/rdp-local-without-binding-committed-authority-not-run",
+          (_rdp_kind(result), rn_ran.exists(), "does not declare this" in _xt_reason(result)),
+          ("unverifiable", False, True))
+    # The enumerator equivalent: the committed registry's argv reaches the enumerator while the untracked
+    # local registry declares another argv, or none; the gate compares the argv itself, so nothing runs.
+    rows = []
+    for name, local_enum in (("enum-other-argv", True), ("enum-no-local-argv", False)):
+        fx, ran = _xt_enum_fixture(base, name, "orchestration.json")
+        fx._git("add", ".aiqt/orchestration.json")
+        fx._git("-c", "user.name=T", "-c", "user.email=t@example.invalid", "-c", "commit.gpgsign=false",
+                "commit", "-q", "-m", "committed registry")
+        committed = json.loads((fx.root / ".aiqt" / "orchestration.json").read_text(encoding="utf-8"))
+        local_reg = {k: v for k, v in committed.items() if k != "enumerator"}
+        if local_enum:
+            local_reg["enumerator"] = {"argv": [sys.executable, "-I", "-B", str(fx.root / "enum-stub.py"),
+                                                str(fx.enum_payload), str(fx.enum_exit)], "timeout": 30}
+        (fx.root / ".aiqt" / "orchestration.local.json").write_text(json.dumps(local_reg), encoding="utf-8")
+        status, verdict, was_run, detail = _xt_enum_outcome(fx, ran, committed)
+        rows.append((status, verdict, was_run, "does not declare this" in detail))
+    check("exectrust/enum-committed-argv-local-declares-other-not-run", rows,
+          [("ENUMERATOR_ERROR", "DENY", False, True)] * 2)
+    # An index git cannot read (zero bytes, or a header it rejects) makes git ls-files exit nonzero, so
+    # whether the local registry is tracked is unknown and nothing runs.
+    rows = []
+    for name, data in (("enum-index-empty", b""), ("enum-index-corrupt", b"DIRC" + bytes(40))):
+        fx, ran = _xt_enum_fixture(base, name, "orchestration.local.json")
+        (fx.root / ".git" / "index").write_bytes(data)
+        status, verdict, was_run, detail = _xt_enum_outcome(fx, ran)
+        rows.append((status, was_run, "cannot list the index" in detail))
+    check("exectrust/enum-index-unreadable-not-run", rows, [("ENUMERATOR_ERROR", False, True)] * 2)
+    # A local registry that is a symbolic link (here to the committed registry, which declares the argv) is
+    # read without following the link, so it declares nothing and nothing runs.
+    es, es_ran = _xt_enum_fixture(base, "enum-symlink", "orchestration.json")
+    es._git("add", ".aiqt/orchestration.json")
+    es._git("-c", "user.name=T", "-c", "user.email=t@example.invalid", "-c", "commit.gpgsign=false",
+            "commit", "-q", "-m", "committed registry")
+    (es.root / ".aiqt" / "orchestration.local.json").symlink_to("orchestration.json")
+    status, verdict, ran, detail = _xt_enum_outcome(es, es_ran)
+    check("exectrust/enum-symlinked-local-registry-not-run",
+          (status, ran, "cannot be read as a regular file" in detail), ("ENUMERATOR_ERROR", False, True))
+    # A local registry the HEAD commit holds but the index no longer does (git rm --cached, not yet
+    # committed) is still committed, so nothing runs.
+    eh, eh_ran = _xt_enum_fixture(base, "enum-head", "orchestration.local.json")
+    eh._git("add", "-f", ".aiqt/orchestration.local.json")
+    eh._git("-c", "user.name=T", "-c", "user.email=t@example.invalid", "-c", "commit.gpgsign=false",
+            "commit", "-q", "-m", "tracked local registry")
+    eh._git("rm", "-q", "--cached", ".aiqt/orchestration.local.json")
+    status, verdict, ran, detail = _xt_enum_outcome(eh, eh_ran)
+    check("exectrust/enum-head-tracked-local-argv-not-run",
+          (status, verdict, ran, "tracked in the HEAD commit" in detail), ("ENUMERATOR_ERROR", "DENY", False, True))
+    # A HEAD naming a broken branch reference cannot be listed, so whether the file is committed is
+    # unknown and nothing runs.
+    eb, eb_ran = _xt_enum_fixture(base, "enum-broken-head", "orchestration.local.json")
+    (eb.root / ".git" / "refs" / "heads" / "main").write_text("not an object id\n", encoding="utf-8")
+    status, verdict, ran, detail = _xt_enum_outcome(eb, eb_ran)
+    check("exectrust/enum-head-unlistable-not-run", (status, ran, "cannot list the HEAD tree" in detail),
+          ("ENUMERATOR_ERROR", False, True))
+    # A branch with no commit yet has no HEAD tree to list: an untracked local registry's argv runs.
+    eu, eu_ran = _xt_enum_fixture(base, "enum-unborn", "orchestration.local.json")
+    eu._git("update-ref", "-d", "HEAD")
+    check("exectrust/enum-unborn-head-local-argv-runs", _xt_enum_outcome(eu, eu_ran)[:3], ("ok", "ALLOW", True))
 
 
 def _rdp_cases(tmp):
