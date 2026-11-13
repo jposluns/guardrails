@@ -20,7 +20,9 @@ differential self-test of .preview/record-remove-check.py runs Bash. Each progra
 environment on its own, never inferred from another program: the first entry of that PATH, in order, holding a
 regular file of that name that this process may execute is selected (an empty entry is the current directory,
 as execvp reads it; a directory or a non-executable file of that name is passed over). The report names the
-selected absolute path and, separately, its fully resolved symlink target.
+selected absolute path, a relative entry joined to the current directory and nothing normalised (so link/..
+names what the kernel reaches through link, not the directory holding link), and, separately, its fully
+resolved symlink target.
 
 Probe. The selected file is run directly by its absolute path, never through a shell, as <path> --version,
 with stdin from /dev/null, stderr discarded, an environment of exactly LC_ALL=C, LANG=C and the environment's
@@ -32,20 +34,36 @@ The first stdout line must be exactly '<program> (GNU <family>) <version>' or '<
 Outcomes, one per program and environment: OK (a recognised banner), MISSING (no executable of that name on
 that PATH, or PATH unset), PROBE_FAILED (the file could not be started, exited other than 0, or printed more
 than OUTPUT_LIMIT bytes), TIMEOUT, and UNRECOGNIZED (exit 0 but any other first line: another program's
-banner, another family, another implementation, an empty or malformed line).
+banner, another family, another implementation, an empty or malformed line). An UNRECOGNIZED program ran, so
+it is read as an unrecognised implementation, which is not GNU: like a recognised non-GNU program it warns
+locally and fails in CI mode. MISSING, PROBE_FAILED and TIMEOUT identify nothing and are cannot-evaluate.
+
+Supported local hosts. The local runner passes this gate only where every inventoried program, on the runner's
+PATH and on each fixed PATH, starts, exits 0 on --version within PROBE_TIMEOUT and prints at most OUTPUT_LIMIT
+bytes. GNU coreutils and diffutils pass (PASS); uutils coreutils and any other implementation whose programs
+answer --version that way warn (WARNING). A host where any of them rejects --version with a nonzero exit, as
+the native cp of macOS and the BSDs does, is cannot-evaluate (exit 2), so the local runner does not support it
+unless GNU or uutils coreutils (and GNU diffutils) come first on each of those PATH values.
 
 Each run prints one report: a header naming the probe and the mode, one block per environment with its PATH
 and one line per program (name, outcome, path, symlink target, implementation, version and, for a non-OK
 outcome, the reason), then one SCOPE: line (the implementation scope a caller can carry into its own result
 line without probing again) and the verdict line.
 
+Scope record. When the environment variable AIQT_COREUTILS_SCOPE_RECORD is exactly 1 (tools/run_all_checks.sh
+sets it; CI does not), a live run also writes the text of the SCOPE: line it printed, and one newline, to
+.aiqt/coreutils-scope.local (ignored by git), never through a symlink there. A record that cannot be written in
+full makes the run cannot-evaluate (exit 2), so a run that exits 0 has written its own scope; the runner's final
+RESULT: PASS line carries that text.
+
 Exit convention (matches the repo's gates):
-  0  every program in every environment is recognised: all GNU (PASS), or, outside CI mode, at least one
-     recognised non-GNU program (a WARNING line names each; the scope is local, not CI-equivalent)
-  1  CI mode and at least one recognised program is not GNU
+  0  every program in every environment exited 0 within the bounds: all GNU (PASS), or, outside CI mode, at
+     least one program that is not GNU, recognised or UNRECOGNIZED (a WARNING line names each; the scope is
+     local, not CI-equivalent)
+  1  CI mode and at least one program is not GNU, recognised or UNRECOGNIZED
   2  cannot evaluate: the inventory is unreadable, not UTF-8 JSON, repeats a key or leaves its closed schema;
-     any program is MISSING, PROBE_FAILED, TIMEOUT or UNRECOGNIZED in any environment; the arguments are not
-     recognised
+     any program is MISSING, PROBE_FAILED or TIMEOUT in any environment; the arguments are not recognised;
+     the scope record was asked for and could not be written
 
 NOT CHECKED: a version banner is the program's own claim, not an authentication of the binary; matching
 implementations do not imply matching versions or matching behaviour; PATH changes, a file replaced after the
@@ -53,7 +71,8 @@ probe, shell functions, aliases, builtins (the shell's own echo, for one) and wr
 way are outside a startup report; the inventory is a reviewed list, not derived from the tests, so a program a
 test executes that the inventory omits is not probed; a descendant of a probe that closes its stdout and
 outlives the probe is not stopped; a program reached through an absolute path a test hard-codes is probed only
-where an environment's PATH selects that same file.
+where an environment's PATH selects that same file; two runs in one checkout at once can overwrite each other's
+scope record, and a record changed after the gate exits is read as written.
 """
 import sys
 
@@ -92,6 +111,12 @@ OUTPUT_LIMIT = 65536
 CI_OPTION = "--ci"
 CI_VARIABLE = "GITHUB_ACTIONS"
 CI_VALUE = "true"
+# The local runner sets this variable to exactly 1 so that a live run also writes the text of its printed SCOPE
+# line, one line, to the record below, which the runner's final RESULT line carries. CI never sets it.
+SCOPE_RECORD_VARIABLE = "AIQT_COREUTILS_SCOPE_RECORD"
+SCOPE_RECORD_VALUE = "1"
+SCOPE_RECORD_REL = ".aiqt/coreutils-scope.local"
+SCOPE_PREFIX = "SCOPE: "
 OK = "OK"
 MISSING = "MISSING"
 PROBE_FAILED = "PROBE_FAILED"
@@ -206,15 +231,20 @@ def load_inventory(text):
 
 def resolve(name, path_value):
     """The absolute path of the first executable regular file named name in path_value's entries, in order, or
-    None. An empty entry is the current directory, as execvp reads it."""
+    None. An empty entry is the current directory, as execvp reads it. A relative entry is joined to the current
+    directory and nothing is normalised: a lexical collapse of '..' after a symbolic link (link/.. read as the
+    directory holding link) would name a different file from the one the kernel runs, so the path checked,
+    returned and probed is the entry as the kernel walks it."""
     for directory in path_value.split(os.pathsep):
-        candidate = os.path.join(directory or ".", name)
+        candidate = os.path.join(directory, name)
         try:
+            if not os.path.isabs(candidate):
+                candidate = os.path.join(os.getcwd(), candidate)
             info = os.stat(candidate)
         except (OSError, ValueError):
             continue
         if stat.S_ISREG(info.st_mode) and os.access(candidate, os.X_OK):
-            return os.path.abspath(candidate)
+            return candidate
     return None
 
 
@@ -304,20 +334,22 @@ def identify(environment, program, path_value, timeout, limit):
 
 
 def verdict(rows, expected, ci):
-    """(exit code, verdict line, scope) for the rows."""
-    incomplete = [row for row in rows if row.outcome != OK]
+    """(exit code, verdict line, scope) for the rows. A program that ran and printed a banner this gate does not
+    recognise is an unrecognised implementation, not GNU, so it is read as a recognised non-GNU program is."""
+    incomplete = [row for row in rows if row.outcome not in (OK, UNRECOGNIZED)]
     if incomplete:
-        return 2, "CANNOT EVALUATE: {} program probe(s) did not identify an implementation: {}".format(
+        return 2, "CANNOT EVALUATE: {} program(s) could not be probed to an exit 0 within the bounds: {}".format(
             len(incomplete), ", ".join("{} in {} {}".format(row.name, row.environment, row.outcome)
                                        for row in incomplete)), "incomplete"
-    differs = [row for row in rows if row.implementation != expected]
-    named = ", ".join("{} in {} is {} {}".format(row.name, row.environment, row.implementation, row.version)
-                      for row in differs)
+    differs = [row for row in rows if row.outcome != OK or row.implementation != expected]
+    named = ", ".join("{} in {} is {}".format(row.name, row.environment, "{} {}".format(
+        row.implementation, row.version) if row.outcome == OK else "an unrecognised implementation")
+        for row in differs)
     if differs and ci:
         return 1, "FAIL: CI mode requires {} for every program, and {} differ: {}".format(
             expected, len(differs), named), "differs"
     if differs:
-        return 0, ("WARNING: {} recognised program(s) are not {}, the CI implementation, so this local run does "
+        return 0, ("WARNING: {} program(s) are not {}, the CI implementation, so this local run does "
                    "not predict CI: {}".format(len(differs), expected, named)), "differs"
     return 0, "PASS: every program in every environment reports {}".format(expected), "match"
 
@@ -345,7 +377,7 @@ def evaluate(programs, environments, expected, ci, timeout=PROBE_TIMEOUT, limit=
                 row.name, row.outcome, _show(row.path or "-"), _show(row.target or "-"), row.implementation or "-",
                 _show(row.version or "-"), "" if not row.reason else " reason={}".format(json.dumps(row.reason))))
     code, line, scope = verdict(rows, expected, ci)
-    lines.append("SCOPE: " + scope_label(scope, ci, expected))
+    lines.append(SCOPE_PREFIX + scope_label(scope, ci, expected))
     lines.append(line)
     return code, lines, rows, scope
 
@@ -368,8 +400,34 @@ def run(root=ROOT, environ=None, ci=False, timeout=PROBE_TIMEOUT, limit=OUTPUT_L
                          for env_id, path_value in environments)
     ci = ci or environ.get(CI_VARIABLE) == CI_VALUE
     code, lines, _rows, _scope = evaluate(programs, environments, expected, ci, timeout, limit)
+    if environ.get(SCOPE_RECORD_VARIABLE) == SCOPE_RECORD_VALUE:
+        printed = [line[len(SCOPE_PREFIX):] for line in lines if line.startswith(SCOPE_PREFIX)]
+        why = write_scope_record(root, printed[0]) if len(printed) == 1 else "{} SCOPE lines".format(len(printed))
+        if why is not None:
+            # A pass with no fresh record could let the runner carry an earlier run's scope, so this run fails.
+            lines.append("CANNOT EVALUATE: the scope record {} was not written ({}), so the local runner cannot "
+                         "carry this run's scope".format(SCOPE_RECORD_REL, why))
+            code = 2
     print("\n".join(lines))
     return code
+
+
+def write_scope_record(root, text):
+    """Write text and one newline to the scope record under root, never through a symlink there; None when every
+    byte is written, otherwise the reason."""
+    data = (text + "\n").encode("utf-8")
+    try:
+        fd = os.open(str(Path(root) / SCOPE_RECORD_REL), os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW,
+                     0o644)
+    except OSError as exc:
+        return type(exc).__name__
+    try:
+        written = os.write(fd, data)
+    except OSError as exc:
+        return type(exc).__name__
+    finally:
+        os.close(fd)
+    return None if written == len(data) else "a short write of {} of {} bytes".format(written, len(data))
 
 
 # --------------------------------------------------------------------------------------------- self-test
@@ -389,6 +447,8 @@ REVIEWED_PROGRAMS = (
     ("rmdir", "coreutils", "ancillary"), ("mktemp", "coreutils", "ancillary"), ("cmp", "diffutils", "ancillary"),
     ("chmod", "coreutils", "ancillary"))
 REVIEWED_ENVIRONMENTS = (("runner-path", None), ("removal-oracle", "/usr/bin:/bin"))
+# The time limit of the time-limit boundary vectors, whose fixtures finish at 0.6 and at 1.4 times it.
+BOUNDARY_TIMEOUT = 2.0
 
 # Each mutant reverts one handling with one literal substitution of this file's own source, and names the
 # vector that must turn red under it.
@@ -410,10 +470,50 @@ MUTANTS = (
      "        return Row(environment, name, \"\", \"\", \"\", \"\", MISSING, \"no executable {} on this PATH\".format(name))\n",
      "        selected = os.path.join(path_value.split(os.pathsep)[0], name)\n",
      "missing"),
+    ("path-no-collapse",
+     "            return candidate\n",
+     "            return os.path.abspath(candidate)\n",
+     "path-dotdot-symlink"),
+    ("relative-entry-absolute",
+     "                candidate = os.path.join(os.getcwd(), candidate)\n",
+     "                candidate = candidate\n",
+     "path-dotdot-symlink"),
     ("failure-verdict",
-     "    incomplete = [row for row in rows if row.outcome != OK]\n",
+     "    incomplete = [row for row in rows if row.outcome not in (OK, UNRECOGNIZED)]\n",
      "    incomplete = []\n",
      "missing"),
+    ("unrecognised-warns",
+     "    incomplete = [row for row in rows if row.outcome not in (OK, UNRECOGNIZED)]\n",
+     "    incomplete = [row for row in rows if row.outcome != OK]\n",
+     "malformed-output"),
+    ("unrecognised-differs",
+     "    differs = [row for row in rows if row.outcome != OK or row.implementation != expected]\n",
+     "    differs = [row for row in rows if row.outcome == OK and row.implementation != expected]\n",
+     "malformed-output"),
+    ("start-failure-classified",
+     "        return PROBE_FAILED, None, b\"\", \"it could not be started ({})\".format(type(exc).__name__)\n",
+     "        return None, 0, b\"\", \"it could not be started ({})\".format(type(exc).__name__)\n",
+     "cannot-start"),
+    ("output-bound-at",
+     "                if size > limit:\n",
+     "                if size >= limit:\n",
+     "output-limit-boundary"),
+    ("output-bound-over",
+     "                if size > limit:\n",
+     "                if size > limit + 1:\n",
+     "output-limit-boundary"),
+    ("time-bound-under",
+     "        deadline = time.monotonic() + timeout\n",
+     "        deadline = time.monotonic() + timeout * 0.5\n",
+     "time-limit-boundary"),
+    ("time-bound-over",
+     "        deadline = time.monotonic() + timeout\n",
+     "        deadline = time.monotonic() + timeout * 2\n",
+     "time-limit-boundary"),
+    ("cli-ci-option",
+     "        return run(root, environ, ci=True)\n",
+     "        return run(root, environ, ci=False)\n",
+     "cli-ci-option"),
     ("nonzero-exit",
      "    if returncode != 0:\n",
      "    if False:\n",
@@ -442,6 +542,18 @@ MUTANTS = (
      "    ci = ci or environ.get(CI_VARIABLE) == CI_VALUE\n",
      "    ci = ci\n",
      "run-ci-variable"),
+    ("scope-record-written",
+     "    if environ.get(SCOPE_RECORD_VARIABLE) == SCOPE_RECORD_VALUE:\n",
+     "    if False:\n",
+     "scope-record-written"),
+    ("scope-record-no-follow",
+     "os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW,\n",
+     "os.O_WRONLY | os.O_CREAT | os.O_TRUNC,\n",
+     "scope-record-symlink"),
+    ("scope-record-failure-fails",
+     "            code = 2\n",
+     "            code = code\n",
+     "scope-record-symlink"),
 )
 
 
@@ -471,6 +583,18 @@ def _fixtures(base):
             "\"${POSIXLY_CORRECT-unset}\" >> '" + str(log) + "'\n"
     sleeper = "'{}' -I -c 'import time; time.sleep(3)'\n".format(sys.executable)
     flood = "'{}' -I -c 'import sys; sys.stdout.write(\"x\" * 100000)'\n".format(sys.executable)
+
+    def sized(total):
+        # A GNU banner line padded to exactly total bytes of stdout.
+        banner = "cp (GNU coreutils) 9.4\n"
+        return ("'{}' -I -c 'import sys; sys.stdout.buffer.write(b\"cp (GNU coreutils) 9.4\\n\" + b\"x\" * {})'\n"
+                .format(sys.executable, total - len(banner)))
+
+    def paused(factor):
+        # A GNU banner printed after sleeping factor times the boundary vectors' time limit.
+        return ("'{}' -I -c 'import time; time.sleep({!r})'\nprintf 'cp (GNU coreutils) 9.4\\n'\n"
+                .format(sys.executable, BOUNDARY_TIMEOUT * factor))
+
     kinds = {
         "gnu": lambda name, family: "printf '{} (GNU {}) 9.4\\n'\n".format(name, family),
         "uutils": lambda name, family: "printf '{} (uutils {}) 0.2.2\\n'\n".format(name, family),
@@ -482,6 +606,11 @@ def _fixtures(base):
         "other-family": lambda name, family: "printf '{} (GNU diffutils) 3.10\\n'\n".format(name),
         "busybox": lambda name, family: "printf 'BusyBox v1.36.1 (2024-01-01) multi-call binary.\\n'\n",
         "flood": lambda name, family: flood,
+        "out-under": lambda name, family: sized(OUTPUT_LIMIT - 1),
+        "out-at": lambda name, family: sized(OUTPUT_LIMIT),
+        "out-over": lambda name, family: sized(OUTPUT_LIMIT + 1),
+        "time-under": lambda name, family: paused(0.6),
+        "time-over": lambda name, family: paused(1.4),
     }
     dirs = {}
 
@@ -509,6 +638,19 @@ def _fixtures(base):
     make("other-family", "other-family", ("cp",))
     make("busybox", "busybox", ("cp",))
     make("flood", "flood", ("cp",))
+    for key in ("out-under", "out-at", "out-over", "time-under", "time-over"):
+        make(key, key, ("cp",))
+    # An executable file with no shebang line and no binary format: execve refuses it (ENOEXEC), so the probe
+    # cannot start it.
+    make("noshebang", "gnu", ("cp",))
+    Path(dirs["noshebang"], "cp").write_text("cp (GNU coreutils) 9.4\n")
+    # PATH entry dotdot/link/.. with link -> actual/sub: the kernel walks link to actual/sub, then up to
+    # actual, and runs actual/cp (uutils); a lexical collapse of the entry would name dotdot/cp (GNU) instead.
+    make("dotdot", "gnu", ("cp",))
+    make(os.path.join("dotdot", "actual"), "uutils", ("cp",))
+    (Path(dirs["dotdot"]) / "actual" / "sub").mkdir()
+    os.symlink(os.path.join("actual", "sub"), os.path.join(dirs["dotdot"], "link"))
+    dirs["dotdot-entry"] = os.path.join(dirs["dotdot"], "link", "..")
     make("real", "gnu", ("cp",))
     os.rename(os.path.join(dirs["real"], "cp"), os.path.join(dirs["real"], "gnu-cp"))
     linked = Path(base) / "linked"
@@ -589,12 +731,28 @@ def _vectors(m, dirs, log):
     out["timeout"] = ((slow[0], rows_of(slow), elapsed < 2.5), (2, [("cat", "TIMEOUT", "", "")], True))
     flood = m.evaluate((CP,), (("runner", dirs["flood"]),), "GNU", False)
     out["oversized-output"] = ((flood[0], rows_of(flood)), (2, [("cp", "PROBE_FAILED", "", "")]))
+    # A program that ran and printed a banner the gate does not recognise warns locally and fails in CI mode.
     bad = []
     for key in ("malformed", "empty", "other-name", "other-family", "busybox"):
         result = m.evaluate((CP,), (("runner", dirs[key]),), "GNU", False)
-        bad.append((key, result[0], rows_of(result)))
-    out["malformed-output"] = (bad, [(key, 2, [("cp", "UNRECOGNIZED", "", "")])
+        in_ci = m.evaluate((CP,), (("runner", dirs[key]),), "GNU", True)
+        bad.append((key, result[0], result[1][-1].split(":")[0], rows_of(result), in_ci[0],
+                    in_ci[1][-1].split(":")[0]))
+    out["malformed-output"] = (bad, [(key, 0, "WARNING", [("cp", "UNRECOGNIZED", "", "")], 1, "FAIL")
                                      for key in ("malformed", "empty", "other-name", "other-family", "busybox")])
+    unstarted = m.evaluate((CP,), (("runner", dirs["noshebang"]),), "GNU", False)
+    out["cannot-start"] = ((unstarted[0], rows_of(unstarted), unstarted[2][0].reason.split(" (")[0]),
+                           (2, [("cp", "PROBE_FAILED", "", "")], "it could not be started"))
+    # The PATH entry dotdot/link/.. selects actual/cp, as the kernel walks it, given absolute and relative.
+    walked = os.path.join(dirs["dotdot"], "actual", "cp")
+    absolute = m.evaluate((CP,), (("runner", dirs["dotdot-entry"]),), "GNU", True)
+    relative_entry = os.path.join(os.path.relpath(dirs["dotdot"]), "link", "..")
+    relative = m.evaluate((CP,), (("runner", relative_entry),), "GNU", True)
+    out["path-dotdot-symlink"] = (
+        [(result[0], result[2][0].path, result[2][0].target, result[2][0].implementation)
+         for result in (absolute, relative)],
+        [(1, os.path.join(dirs["dotdot-entry"], "cp"), os.path.realpath(walked), "uutils"),
+         (1, os.path.join(os.getcwd(), relative_entry, "cp"), os.path.realpath(walked), "uutils")])
     both = m.evaluate((CP,), (("runner", dirs["gnu"]), ("fixed", dirs["uutils"])), "GNU", False)
     out["two-environments"] = (
         (both[0], [(row.environment, row.implementation) for row in both[2]], both[1][1], both[1][3]),
@@ -604,6 +762,39 @@ def _vectors(m, dirs, log):
                                         else json.dumps(dirs["uutils"]))))
     _log_lines(log)
     return out
+
+
+BOUNDARY_VECTORS = ("output-limit-boundary", "time-limit-boundary")
+
+
+def _boundary_vectors(m, dirs):
+    """{vector name: (got, want)} for module m at the probe's bounds: stdout of OUTPUT_LIMIT - 1 and exactly
+    OUTPUT_LIMIT bytes is read, one byte more fails; a probe finishing at 0.6 times the time limit is read, one
+    still running at 1.4 times it times out."""
+    def outcome(key, **bound):
+        result = m.evaluate((CP,), (("runner", dirs[key]),), "GNU", False, **bound)
+        return result[0], [(row.outcome, row.implementation) for row in result[2]]
+
+    return {
+        "output-limit-boundary": ([outcome(key) for key in ("out-under", "out-at", "out-over")],
+                                  [(0, [("OK", "GNU")]), (0, [("OK", "GNU")]), (2, [("PROBE_FAILED", "")])]),
+        "time-limit-boundary": ([outcome(key, timeout=BOUNDARY_TIMEOUT) for key in ("time-under", "time-over")],
+                                [(0, [("OK", "GNU")]), (2, [("TIMEOUT", "")])]),
+    }
+
+
+def _cli_vectors(m, root, dirs):
+    """{vector name: (got, want)} for m.main over the fixture root, whose runner PATH holds a uutils cp and whose
+    fixed PATH a GNU one: --ci through the argument handling fails (exit 1), no argument warns (exit 0)."""
+    environ = {"PATH": dirs["uutils"]}
+    with open(os.devnull, "w", encoding="utf-8") as sink:
+        saved_stdout = sys.stdout
+        sys.stdout = sink
+        try:
+            got = (m.main([CI_OPTION], root, environ), m.main([], root, environ))
+        finally:
+            sys.stdout = saved_stdout
+    return {"cli-ci-option": (got, (1, 0))}
 
 
 def _run_vectors(base, dirs, log):
@@ -616,6 +807,59 @@ def _run_vectors(base, dirs, log):
                  "programs": [{"name": "cp", "family": "coreutils", "role": "preview-dependency"}]}
     (root / INVENTORY_REL).write_text(json.dumps(inventory), encoding="utf-8")
     return root
+
+
+def _quiet_run(m, root, environ, ci):
+    """m.run(root, environ, ci) with its report sent to /dev/null; the exit code."""
+    with open(os.devnull, "w", encoding="utf-8") as sink:
+        saved_stdout = sys.stdout
+        sys.stdout = sink
+        try:
+            return m.run(root, environ, ci)
+        finally:
+            sys.stdout = saved_stdout
+
+
+def _scope_record_vectors(m, root, dirs):
+    """{vector name: (got, want)} for the scope record module m writes under the fixture root: a stale record
+    replaced by the SCOPE text the run printed, in local and CI mode; no record unless the variable is exactly 1;
+    and a symlink at the record path refused (exit 2, its target untouched)."""
+    out = {}
+    record = Path(root) / SCOPE_RECORD_REL
+    target = Path(root) / "symlink-target"
+
+    def clear():
+        for path in (record, target):
+            if os.path.lexists(str(path)):
+                path.unlink()
+
+    def content():
+        return record.read_text(encoding="utf-8") if os.path.lexists(str(record)) else None
+
+    asked = {"PATH": dirs["uutils"], SCOPE_RECORD_VARIABLE: SCOPE_RECORD_VALUE}
+    clear()
+    record.write_text("stale scope\n", encoding="utf-8")
+    local = _quiet_run(m, root, asked, False)
+    local_text = content()
+    clear()
+    ci = _quiet_run(m, root, asked, True)
+    out["scope-record-written"] = (
+        (local, local_text, ci, content()),
+        (0, "local scope; coreutils differs from CI (GNU); see the per-program report\n",
+         1, "CI scope; coreutils differs from CI (GNU); see the per-program report\n"))
+    clear()
+    unasked = [(_quiet_run(m, root, environ, False), content())
+               for environ in ({"PATH": dirs["uutils"]},
+                               {"PATH": dirs["uutils"], SCOPE_RECORD_VARIABLE: "true"},
+                               {"PATH": dirs["uutils"], SCOPE_RECORD_VARIABLE: ""})]
+    out["scope-record-not-asked"] = (unasked, [(0, None)] * 3)
+    clear()
+    target.write_text("untouched\n", encoding="utf-8")
+    os.symlink(str(target), str(record))
+    linked = _quiet_run(m, root, asked, False)
+    out["scope-record-symlink"] = ((linked, target.read_text(encoding="utf-8")), (2, "untouched\n"))
+    clear()
+    return out
 
 
 def _inventory_vectors(m):
@@ -690,6 +934,9 @@ def self_test():
                 finally:
                     sys.stdout = saved_stdout
             vectors[name] = (got, want)
+        vectors.update(_scope_record_vectors(module, root, dirs))
+        vectors.update(_boundary_vectors(module, dirs))
+        vectors.update(_cli_vectors(module, root, dirs))
         for args, want in ((["--bogus"], 2), (["--ci", "--self-test"], 2), (["--self-test", "--ci"], 2)):
             with open(os.devnull, "w", encoding="utf-8") as sink:
                 saved_stdout = sys.stdout
@@ -703,8 +950,9 @@ def self_test():
             count += 1
             if got != want:
                 failures.append("{}: got {!r}, expected {!r}".format(name, got, want))
-        # Each mutant reverts one handling; its named vector must turn red. run-ci-variable is a run() vector,
-        # so that mutant's red is read through run() over the same fixture root.
+        # Each mutant reverts one handling; its named vector must turn red. run-ci-variable and the scope-record
+        # vectors are run() vectors and cli-ci-option a main() vector, so those mutants' red is read through
+        # run() or main() over the same fixture root; the boundary vectors run only for their own mutants.
         for label, old, new, target in MUTANTS:
             count += 1
             try:
@@ -718,6 +966,15 @@ def self_test():
                         finally:
                             sys.stdout = saved_stdout
                     red = got != 1
+                elif target.startswith("scope-record-"):
+                    got, want = _scope_record_vectors(mutant, root, dirs)[target]
+                    red = got != want
+                elif target in BOUNDARY_VECTORS:
+                    got, want = _boundary_vectors(mutant, dirs)[target]
+                    red = got != want
+                elif target.startswith("cli-"):
+                    got, want = _cli_vectors(mutant, root, dirs)[target]
+                    red = got != want
                 else:
                     got, want = _vectors(mutant, dirs, log)[target]
                     red = got != want
@@ -743,17 +1000,19 @@ def self_test():
     return 0
 
 
-def main(argv=None):
+def main(argv=None, root=ROOT, environ=None):
+    """The exit code for the arguments; root and environ are run()'s, so the self-test can reach --ci through
+    this argument handling over a fixture root."""
     args = sys.argv[1:] if argv is None else argv
     if args == ["--self-test"]:
         return self_test()
     if args == [CI_OPTION]:
-        return run(ci=True)
+        return run(root, environ, ci=True)
     if args:
         print("CANNOT EVALUATE: unrecognized arguments {!r}; only --self-test or {} is accepted".format(
             args, CI_OPTION))
         return 2
-    return run()
+    return run(root, environ)
 
 
 # The child-status guard: an inline copy of the canonical guard in opf/tools/_child_status.py, which

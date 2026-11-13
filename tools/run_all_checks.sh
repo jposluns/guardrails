@@ -28,6 +28,9 @@ notrun=0
 # Gate output does not carry the runner's gate label, so each failure is named as it happens and the
 # names are listed again before RESULT: FAIL; a failing suite never needs a hand re-run to find it.
 failed_names=""
+# Asks the coreutils-environment gate to write the SCOPE line it prints to .aiqt/coreutils-scope.local, which the
+# final RESULT: PASS line below carries. CI never sets it, so the CI step does not write the record.
+export AIQT_COREUTILS_SCOPE_RECORD=1
 
 run_gate() {
   local name="$1"; shift
@@ -52,9 +55,11 @@ run_gate "child-status-coverage-selftest" python3 -I -B tools/check_selftest_exe
 run_gate "child-status-coverage" python3 -I -B tools/check_child_status_coverage.py
 # The coreutils implementation report, right after the child-status checks: it resolves every program in
 # .aiqt/coreutils-tests.json on this runner's PATH and on the removal oracle's fixed /usr/bin:/bin, each on its
-# own, and probes it. A missing, failed, timed-out or unrecognised probe exits 2 and fails the run; a
-# recognised implementation other than GNU (the CI one) prints a WARNING line and passes, so read that line
-# before taking a local pass as a prediction of CI.
+# own, and probes it. A missing, failed or timed-out probe exits 2 and fails the run, so a host whose
+# programs reject --version (the native cp of macOS and the BSDs) is not supported; an implementation other
+# than GNU (the CI one), recognised or not, prints a WARNING line and passes. The final RESULT: PASS line
+# carries the SCOPE text this gate printed in this run, read from the record it writes, so a local pass
+# names its coreutils scope instead of reading like a prediction of CI.
 run_gate "coreutils-environment-selftest" python3 -I -B tools/check_coreutils_environment.py --self-test
 run_gate "coreutils-environment" python3 -I -B tools/check_coreutils_environment.py
 run_gate "secrets"   python3 -I -B tools/check_secrets.py
@@ -384,4 +389,11 @@ if [ "$notrun" -ne 0 ]; then
   echo "RESULT: FAIL: the gitleaks scan did NOT RUN locally (see above)"
   exit 1
 fi
-echo "RESULT: PASS"
+# Every gate passed, the coreutils-environment gate among them, and that gate exits 0 only after writing its
+# SCOPE text to the record, so the record holds this run's scope; it is carried as written, never inferred. A
+# missing, unreadable or empty record is named on the line instead.
+coreutils_scope="could not be read from .aiqt/coreutils-scope.local"
+if IFS= read -r coreutils_line < .aiqt/coreutils-scope.local && [ -n "${coreutils_line}" ]; then
+  coreutils_scope="${coreutils_line}"
+fi
+echo "RESULT: PASS (coreutils scope: ${coreutils_scope}; CI may differ)"

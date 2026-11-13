@@ -380,10 +380,14 @@ assigned to an integer special variable as arithmetic (RANDOM=failed=0 resets
 failed), a compound array subscript assigns (x=([failed=0]=1)), and notrun=0 is
 accepted only at top level before the first gate, where the real runner puts it,
 because a later notrun=0 would clear the NOT RUN state, so its failure could no
-longer fire. Behind that membership,
-each expansion must still be a plain $NAME, ${NAME} or $? of a name the runner
-itself sets or manages (failed, notrun, failed_names, name, rc, gitleaks_rc, HOME,
-PATH): under set -u, a plain expansion of any other, possibly unset, variable
+longer fire. The coreutils scope export (SCOPE_RECORD_EXPORT) is accepted only
+there too, and must appear exactly once whenever the terminal summary reads the
+scope record; the four record-reading lines (SCOPE_TAIL_LINES, the one if IFS=
+read test among them) are accepted only inside the terminal summary tail. Behind
+that membership, each expansion must still be a plain $NAME, ${NAME} or $? of a
+name the runner itself sets or manages (failed, notrun, failed_names, name, rc,
+gitleaks_rc, HOME, PATH, coreutils_scope, coreutils_line): under set -u, a plain
+expansion of any other, possibly unset, variable
 (x=$BASH_ENV) ends the runner mid-roster exactly as an abort expansion does. A
 ${...:?...} abort expansion is refused on ANY runner line, including inside a
 runtime-value flag on a run_gate line, ahead of the gate-word character allowlist
@@ -1600,9 +1604,10 @@ GITLEAKS_FAILURE_UPDATES = (
 
 
 # The only test lines the two real runners use outside run_gate(); every other
-# [ ... ] test, bare or behind if, is outside the allowlist. This exact-shape set is
-# what rejects a -v operand (whose subscript can assign), any NAME[...] subscript
-# operand, and every unlisted operator or operand form.
+# [ ... ] test, bare or behind if, is outside the allowlist, except the one scope
+# record read (SCOPE_READ_LINE), accepted only in the terminal summary tail. This
+# exact-shape set is what rejects a -v operand (whose subscript can assign), any
+# NAME[...] subscript operand, and every unlisted operator or operand form.
 # The HOME guard is the only block in which the real runner appends the
 # user-local gitleaks directory to PATH; extract_local records its frame so
 # the PATH append is accepted only in that guard's then branch, the one
@@ -1680,6 +1685,37 @@ RUNNER_SCAFFOLD_LINES = frozenset({
     'echo "OPF STANDALONE SUBSET: OK"',
 })
 
+# The coreutils scope lines of tools/run_all_checks.sh. The export asks the
+# coreutils-environment gate to write the SCOPE text it prints to the record,
+# and it is accepted only at top level before the first gate, like notrun=0;
+# a runner whose terminal summary reads the record must carry it, because
+# without it the gate writes nothing and an earlier run's record would be
+# carried as this run's scope. The four read lines are accepted only as part
+# of the terminal summary tail below, never elsewhere: the record is read on
+# the pass path alone, after every gate (that one among them) exited 0, and a
+# missing, unreadable or empty record is named on the RESULT line rather than
+# omitted. Each expansion names a variable the read lines themselves set
+# (read sets coreutils_line before the && test reads it), so set -u cannot
+# end the runner there.
+SCOPE_RECORD_EXPORT = "export AIQT_COREUTILS_SCOPE_RECORD=1"
+SCOPE_RECORD_REL = ".aiqt/coreutils-scope.local"
+SCOPE_UNREAD = "could not be read from " + SCOPE_RECORD_REL
+SCOPE_DEFAULT_LINE = 'coreutils_scope="{}"'.format(SCOPE_UNREAD)
+SCOPE_READ_LINE = (
+    'if IFS= read -r coreutils_line < ' + SCOPE_RECORD_REL
+    + ' && [ -n "${coreutils_line}" ]; then')
+SCOPE_TAKE_LINE = 'coreutils_scope="${coreutils_line}"'
+SCOPE_PASS_ECHO = (
+    'echo "RESULT: PASS (coreutils scope: ${coreutils_scope}; CI may differ)"')
+SCOPE_TAIL_LINES = frozenset({
+    SCOPE_DEFAULT_LINE, SCOPE_READ_LINE, SCOPE_TAKE_LINE, SCOPE_PASS_ECHO})
+
+
+def scope_pass_line(scope):
+    """The RESULT: PASS line tools/run_all_checks.sh prints for a scope text."""
+    return "RESULT: PASS (coreutils scope: {}; CI may differ)".format(scope)
+
+
 # Exact executable suffixes that may contain exits. The standalone roster adapter
 # validates and removes its final exit 0 and directory binding before extraction.
 TERMINAL_SUMMARIES = (
@@ -1693,7 +1729,11 @@ TERMINAL_SUMMARIES = (
         'echo "RESULT: FAIL: the gitleaks scan did NOT RUN locally (see above)"',
         "exit 1",
         "fi",
-        'echo "RESULT: PASS"',
+        SCOPE_DEFAULT_LINE,
+        SCOPE_READ_LINE,
+        SCOPE_TAKE_LINE,
+        "fi",
+        SCOPE_PASS_ECHO,
     ),
     (
         'if [ "$failed" -ne 0 ]; then',
@@ -1763,7 +1803,7 @@ def _abort_expansion(code):
 # addition cannot widen the expansion surface unreviewed.
 _RUNNER_SET_NAMES = frozenset({
     "failed", "notrun", "failed_names", "name", "rc", "gitleaks_rc",
-    "HOME", "PATH", "?",
+    "HOME", "PATH", "?", "coreutils_scope", "coreutils_line",
 })
 _PLAIN_EXPANSION_RE = re.compile(
     r"\$(?:(?P<special>\?)|(?P<name>[A-Za-z_][A-Za-z0-9_]*)"
@@ -1958,6 +1998,8 @@ def extract_local(text):
     }
     initialized = set()
     gitleaks_updates = set()
+    scope_exports = 0
+    scope_tail_lines = 0
     for line_number, raw in enumerate(text.splitlines(), 1):
         if line_number == 1 and raw == "#!/usr/bin/env bash":
             continue
@@ -2289,6 +2331,20 @@ def extract_local(text):
             # Only where the real runner puts it: top level, before any gate. A
             # later notrun=0 would clear the NOT RUN state, so its failure could not fire.
             scaffold = not if_stack and not members
+        elif stripped == SCOPE_RECORD_EXPORT:
+            # Only where the real runner puts it: top level, before any gate,
+            # so the coreutils-environment gate's own launch sees it.
+            scaffold = not if_stack and not members
+            if scaffold:
+                scope_exports += 1
+        elif stripped in SCOPE_TAIL_LINES:
+            # Only as part of the terminal summary tail, where the record is
+            # read once on the pass path; a copy anywhere else is unclassified.
+            scaffold = (line_number in terminal_summary_lines
+                        and _runner_set_expansions(stripped)
+                        and _runner_set_expansions(" ".join(tokens)))
+            if scaffold:
+                scope_tail_lines += 1
         elif stripped == PATH_APPEND_LINE:
             # Only where the real runner puts it: the HOME guard's then branch,
             # which has just proven HOME non-empty. The guard's else branch
@@ -2402,6 +2458,18 @@ def extract_local(text):
             0,
             "failure-state-assignment",
             "missing initial {}".format(failure_initializers[variable]),
+        ))
+
+    if scope_tail_lines and scope_exports != 1:
+        diagnostics.append(_diagnostic(
+            source,
+            0,
+            "scope-record",
+            "the terminal summary carries the coreutils scope record, but "
+            "{!r} appears {} times at top level before the first gate, not "
+            "once; without it the gate writes no record and an earlier "
+            "run's scope would be carried as this run's".format(
+                SCOPE_RECORD_EXPORT, scope_exports),
         ))
 
     diagnostics.extend(_shadow_check(text, source, origins))
@@ -4954,11 +5022,12 @@ def _prepare_stubs(root):
     return bin_dir, functions
 
 
-def _run_runner_copy(text, stubs, fail_command="", gitleaks_rc=0):
+def _run_runner_copy(text, stubs, fail_command="", gitleaks_rc=0, scope_record=None):
     """Run text as tools/run_all_checks.sh in a scratch tree; return (rc, stdout lines, calls).
 
     stubs is the shared (bin directory, BASH_ENV file) pair from _prepare_stubs; nothing
-    this writes is executed.
+    this writes is executed. scope_record, when not None, is written as the tree's
+    coreutils scope record before the run (the stub gates write none).
     """
     import os
     import shutil
@@ -4976,6 +5045,9 @@ def _run_runner_copy(text, stubs, fail_command="", gitleaks_rc=0):
         runner.write_text(text, encoding="utf-8")
         log = root / "calls.log"
         log.write_text("", encoding="utf-8")
+        if scope_record is not None:
+            (root / SCOPE_RECORD_REL).parent.mkdir()
+            (root / SCOPE_RECORD_REL).write_text(scope_record, encoding="utf-8")
         env = dict(
             PATH=str(bin_dir) + os.pathsep + os.defpath,
             BASH_ENV=str(functions),
@@ -5290,7 +5362,10 @@ def _scenario_problems(scenario, outcome, expected_calls, expected_headers):
         ["FAILED GATES: " + ", ".join(name for name, status in failures)]
         if failures else []
     )
-    ending = expected_summaries + ["RESULT: FAIL" if failures else "RESULT: PASS"]
+    # The stub gates write no coreutils scope record, so a passing copy names
+    # the record as unreadable on its RESULT: PASS line.
+    ending = expected_summaries + [
+        "RESULT: FAIL" if failures else scope_pass_line(SCOPE_UNREAD)]
     if summaries != expected_summaries or lines[-len(ending):] != ending:
         problems.append("{}: unexpected summary or result {!r}".format(
             label, lines[-len(ending):]))
@@ -6242,6 +6317,44 @@ def self_test():
         ("missing-mandatory",),
     )
 
+    # Exactly the two coreutils legs dropped from both rosters, every other member matched:
+    # the findings must be exactly the four member-specific missing-mandatory ones. The
+    # identities and messages are spelled out rather than read from MANDATORY_MEMBERS, so
+    # dropping the coreutils legs from that set turns this vector red.
+    coreutils_legs = (
+        "python3 -I -B tools/check_coreutils_environment.py --self-test",
+        "python3 -I -B tools/check_coreutils_environment.py",
+    )
+    coreutils_dropped = tuple(c for c in common if c not in coreutils_legs)
+    coreutils_report = evaluate(
+        local_fixture(coreutils_dropped), ci_fixture(coreutils_dropped), ())
+    case(
+        "19c coreutils mandatory members",
+        coreutils_report,
+        1,
+        ("missing-mandatory",),
+        (),
+        (),
+    )
+    count += 1
+    coreutils_want = sorted((
+        ("missing-mandatory", "tools/check_coreutils_environment.py",
+         "mandatory member is absent from CI"),
+        ("missing-mandatory", "tools/check_coreutils_environment.py",
+         "mandatory member is absent from the local runner"),
+        ("missing-mandatory", "tools/check_coreutils_environment.py --self-test",
+         "mandatory member is absent from CI"),
+        ("missing-mandatory", "tools/check_coreutils_environment.py --self-test",
+         "mandatory member is absent from the local runner"),
+    ))
+    coreutils_got = sorted(
+        (finding.kind, finding.identity, finding.message)
+        for finding in coreutils_report.findings)
+    if len(coreutils_dropped) != len(common) - 2 or coreutils_got != coreutils_want:
+        failures.append(
+            "19c coreutils mandatory members: findings {}, expected exactly {}".format(
+                coreutils_got, coreutils_want))
+
     def raising_reader(exc):
         def reader(_path):
             raise exc
@@ -7112,6 +7225,81 @@ def self_test():
         if not runner_naming_problems(silent_runner, first_only=True):
             failures.append(
                 "26 flip: a runner that names no failing gate was not caught")
+
+        # Coreutils scope on the RESULT line (fails without the change): a
+        # scratch copy of the LIVE runner, its gates stubbed, carries the scope
+        # record's text as written (shell syntax in it included, never
+        # expanded), names a missing, empty or blank record as unreadable, and
+        # still ends RESULT: FAIL when a gate fails. The pre-change runner (a
+        # bare RESULT: PASS line) prints no scope there and is refused by the
+        # grammar, and so are the export removed, moved below a gate or
+        # repeated, and a read line copied above the summary.
+        count += 1
+        import tempfile
+        scope_text = ("local scope; coreutils differs from CI (GNU); see the "
+                      "per-program report")
+        hostile = "x $(false) `true` ${PATH} \\ z"
+        pre_change = None
+        default_at = live_runner.find(SCOPE_DEFAULT_LINE + "\n")
+        if default_at != -1:
+            pre_change = live_runner[:default_at] + 'echo "RESULT: PASS"\n'
+        with tempfile.TemporaryDirectory(prefix="ci-parity-scope-") as scope_tmp:
+            scope_stubs = _prepare_stubs(Path(scope_tmp))
+            try:
+                for label, text, record, fail_command, want_rc, want_last in (
+                        ("record carried", live_runner, scope_text + "\n", "",
+                         0, scope_pass_line(scope_text)),
+                        ("shell syntax carried as written", live_runner,
+                         hostile + "\n", "", 0, scope_pass_line(hostile)),
+                        ("record missing", live_runner, None, "", 0,
+                         scope_pass_line(SCOPE_UNREAD)),
+                        ("record empty", live_runner, "", "", 0,
+                         scope_pass_line(SCOPE_UNREAD)),
+                        ("record blank line", live_runner, "\n", "", 0,
+                         scope_pass_line(SCOPE_UNREAD)),
+                        ("gate failing, RESULT: FAIL unchanged", live_runner,
+                         scope_text + "\n", "-I -B tools/check_leaks.py", 1,
+                         "RESULT: FAIL"),
+                        ("pre-change runner prints no scope", pre_change,
+                         scope_text + "\n", "", 0, None)):
+                    if text is None:
+                        failures.append("26 scope fixture drift: " + label)
+                        continue
+                    rc, lines, _calls = _run_runner_copy(
+                        text, scope_stubs, fail_command, 0, record)
+                    last = lines[-1] if lines else None
+                    if want_last is None:
+                        if last == scope_pass_line(scope_text):
+                            failures.append(
+                                "26 scope flip not red: " + label)
+                    elif (rc, last) != (want_rc, want_last):
+                        failures.append(
+                            "26 scope {}: exit {} last line {!r}, expected "
+                            "exit {} last line {!r}".format(
+                                label, rc, last, want_rc, want_last))
+            finally:
+                scope_stubs[0].chmod(0o700)
+        export_line = SCOPE_RECORD_EXPORT + "\n"
+        for label, mutant, code in (
+                ("pre-change pass line", pre_change, "unclassified-line"),
+                ("export removed", mutate((export_line, "")), "scope-record"),
+                ("export moved below the first gate",
+                 mutate((export_line, ""),
+                        (gate_lines[0], gate_lines[0] + export_line)),
+                 "unclassified-line"),
+                ("export repeated", mutate((export_line, export_line * 2)),
+                 "scope-record"),
+                ("read copied above the summary",
+                 mutate((summary, SCOPE_READ_LINE + "\n" + SCOPE_TAKE_LINE
+                         + "\nfi\n" + summary)),
+                 "unclassified-line")):
+            if mutant is None:
+                failures.append("26 scope grammar fixture drift: " + label)
+            elif not any(item.code == code
+                         for item in extract_local(mutant).diagnostics):
+                failures.append(
+                    "26 scope grammar fixture not refused ({}): {}".format(
+                        code, label))
 
     # Stub ordering (ETXTBSY): runner_naming_problems writes every executable stub once,
     # on the main thread, before its scenario pool exists, into one directory shared by
