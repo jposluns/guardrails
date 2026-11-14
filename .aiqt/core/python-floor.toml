@@ -82,6 +82,7 @@ guarded-surfaces = [
     "opf/tools/_opf_worklog.py",
     "opf/tools/_opf_worklog_regressions.py",
     "opf/tools/_opf_write_guard.py",
+    "opf/tools/check_opf_declaration.py",
     "opf/tools/check_opf_doctor.py",
     "opf/tools/check_opf_drift.py",
     "opf/tools/check_opf_homes.py",

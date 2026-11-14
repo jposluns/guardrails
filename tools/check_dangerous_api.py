@@ -871,6 +871,8 @@ ALLOWLIST = (
     ("tools/check_opf_declaration.py", "_copy_mutant", "code", 1,
      _MUTANT + " (each revert of opf/tools/opf.py or of this gate's own source, written to the self-test's"
      " temporary directory first)"),
+    ("opf/tools/check_opf_declaration.py", "_copy_mutant", "code", 1,
+     _MUTANT + " (each revert of this gate's own source, written to the self-test's temporary directory first)"),
     ("tools/_load_bound.py", "_acquiring_popen", "shell", 1,
      "ownership spawn: subclasses the current subprocess.Popen so run() holds the handle before the"
      " fork; the subclass forwards run()'s own argv list and keywords, and no call in this file"

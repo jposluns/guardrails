@@ -129,7 +129,9 @@ SITE_REGENERATED = frozenset({
 # (restating_documents), site pages included; because of that whole-tree walk, the
 # opf-declaration live gate and its self-test also run in the always-run site job, so a
 # site-only change that turns them red fails every lane (the execution-reconciled registration
-# stays in the selftest-execution job).
+# stays in the selftest-execution job); opf/tools/check_opf_declaration.py, OPF's own declaration
+# gate, walks the OPF tree the same way, opf/site/ pages included, so its live gate and its
+# selftest-execution suite run in the always-run site job too.
 # tools/check_python_floor.py reads site/development.html, site/install/index.html,
 # opf/site/adopt.md and opf/site/adopt/index.html; its live gate runs in the always-run registry job in every run and in
 # two of the three config lanes (the malformed lane excludes the bare launch, which stays in the
@@ -137,16 +139,16 @@ SITE_REGENERATED = frozenset({
 # deliberately gives up for a site-only train is every check in the eleven skipped jobs
 # (opf-tooling-a, opf-tooling-b, opf-tooling-c, selftest-execution, git-fixture-env-core,
 # opf-host-patch, the four git-fixture-env host-patch jobs and byte-canon-matrix): every step of
-# those jobs is skipped, and of their commands only the child-status probe, the opf-declaration
-# live gate and its selftest-execution suite, and check_byte_canon.py (live gate and self-test)
-# also run, as the same command, in an always-run job. Every other command in them runs nowhere
-# else in CI on such a train: the OPF tooling live gates and self-tests of the three
-# opf-tooling jobs, the opf.py self-test, check_selftest_execution.py --self-test and every
-# other selftest-execution suite those jobs run, check_entry_guard.py,
-# check_child_status_coverage.py, every git-fixture-env suite, and check_python_host_pin.py
-# beyond the registry job's --jobs-only run. It also gives up the skipped jobs' host,
-# configuration and platform repetitions: the host-patch jobs' exact host Python, the config
-# lanes' hostile git configurations, and byte-canon-matrix's platforms.
+# those jobs is skipped, and of their commands only the child-status probe, the opf-declaration live
+# gate and its selftest-execution suite, the OPF-local declaration live gate and its
+# selftest-execution suite, and check_byte_canon.py (live gate and self-test) also run, as the same
+# command, in an always-run job. Every other command in them runs nowhere else in CI on such a
+# train: the OPF tooling live gates and self-tests of the three opf-tooling jobs, the opf.py
+# self-test, check_selftest_execution.py --self-test and every other selftest-execution suite those
+# jobs run, check_entry_guard.py, check_child_status_coverage.py, every git-fixture-env suite, and
+# check_python_host_pin.py beyond the registry job's --jobs-only run. It also gives up the skipped
+# jobs' host, configuration and platform repetitions: the host-patch jobs' exact host Python, the
+# config lanes' hostile git configurations, and byte-canon-matrix's platforms.
 SITE_HEAVY_READ = frozenset({
     "opf/site/adopt.md",
     "opf/site/adopt/index.html",

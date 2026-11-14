@@ -13,12 +13,12 @@ with exit 2). This gate holds where it runs:
      opf/tools/_opf_adopt_complete.py, opf/tools/_opf_adopt_state.py, opf/tools/_opf_import_complete.py,
      tools/check_gitleaks_pin.py, tools/check_must_deliver.py, tools/_load_bound.py,
      tools/check_verifier_delivery.py, tools/render_og_cards.py and
-     opf/tools/check_opf_selftest_execution.py), in opf/tools/_opf_declaration.py and tools/check_opf_declaration.py
-     (the constant and both functions) and in the hooks dispatcher and its generated plugin copy (the constant
-     and the probe) are each bound exactly once at module scope, by one top-level definition (an undecorated one
-     for a function), and AST-identical (ast.dump, docstrings included) to the canonical text, so a call by that
-     name reaches the copy. The binding count (_bindings) is the one binding counter of legs 2 and 3; it is a
-     static walk of
+     opf/tools/check_opf_selftest_execution.py), in opf/tools/_opf_declaration.py,
+     opf/tools/check_opf_declaration.py and tools/check_opf_declaration.py (the constant and both functions)
+     and in the hooks dispatcher and its generated plugin copy (the constant and the probe) are each bound
+     exactly once at module scope, by one top-level definition (an undecorated one for a function), and
+     AST-identical (ast.dump, docstrings included) to the canonical text, so a call by that name reaches the
+     copy. The binding count (_bindings) is the one binding counter of legs 2 and 3; it is a static walk of
      every node that runs in the module's own scope: nested if, try, with, for, while and match blocks, tuple,
      list and starred targets, walrus, for, with-as, except-as and match names, import and from-import aliases
      (a star import counts), del, and a global declaration of the name in any function. Every attribute or
@@ -38,28 +38,26 @@ with exit 2). This gate holds where it runs:
      whose first statement after its docstring is a try whose body is exactly status = main()) and be what the
      entry line calls: that def is the module's one binding of _main_exit at module scope (the same count), and
      its own scope holds no yield or yield from (a generator's call runs none of its body); the canonical file's
-     entry ends in its own line of that second form, each
-     SELF_TEST_FIRST_COPIES file (opf/tools/_opf_declaration.py) has the __main__ body exactly opf.py's canonical
-     --self-test statement and then that second form (a direct --self-test launch of it is unguarded; the
-     self-test runs
-     that launch under a process-creation audit hook that records the _posixsubprocess.fork_exec event too, so
-     the multiprocessing launches are recorded, and records an import of _interpreters as a launch, as the hook
-     cannot see a subinterpreter's own launches; the hook writes each launch as it happens to a private record
-     stream, a pipe the self-test passes to the driver, which holds it at a descriptor of its own before the
-     self-test runs and checks that descriptor's identity at each launch, so a launch while fd 1 or fd 2 is
-     closed or points at /dev/null is recorded too, and a launch whose record cannot be written ends the run with
-     a failing status before that launch runs; the report prints on stdout at exit, after the exit handlers and
-     thread joins, and the self-test fails on a launch in either, so a launch from a finalizer as the modules are
-     torn down, after the report, fails it too; the audit records accidental launches by the audited self-test
-     until the interpreter clears its audit hooks late in teardown (a finalizer that runs after that, as one
-     reached only from an interpreter-state registry does: the codec search and error registries, at-fork hooks,
-     sys.monitoring callbacks, gc callbacks, warnings filters, is not seen); a launch made below Python (a native
-     extension, ctypes, a Tcl exec through tkinter) is not recorded; and code that deliberately evades an
-     in-process hook (by any means, among them clearing the hooks below Python, reading the record back from
-     the record descriptor (for example through /proc/self/fd), rewriting the driver's own state so the record
-     goes elsewhere, which closing or redirecting the record descriptor alone does not do, as that ends the
-     run, forging or unregistering the report, a subinterpreter not made through _interpreters) is outside
-     what it can see), each ENTRY_COPIES file
+     entry ends in its own line of that second form, each SELF_TEST_FIRST_COPIES file (opf/tools/_opf_declaration.py
+     and opf/tools/check_opf_declaration.py) has the __main__ body exactly opf.py's canonical --self-test statement
+     and then that second form (a direct --self-test launch of it is unguarded; the self-test runs that launch under
+     a process-creation audit hook that records the _posixsubprocess.fork_exec event too, so the multiprocessing
+     launches are recorded, and records an import of _interpreters as a launch, as the hook cannot see a
+     subinterpreter's own launches; the hook writes each launch as it happens to a private record stream, a pipe the
+     self-test passes to the driver, which holds it at a descriptor of its own before the self-test runs and checks
+     that descriptor's identity at each launch, so a launch while fd 1 or fd 2 is closed or points at /dev/null is
+     recorded too, and a launch whose record cannot be written ends the run with a failing status before that launch
+     runs; the report prints on stdout at exit, after the exit handlers and thread joins, and the self-test fails on
+     a launch in either, so a launch from a finalizer as the modules are torn down, after the report, fails it too;
+     the audit records accidental launches by the audited self-test until the interpreter clears its audit hooks
+     late in teardown (a finalizer that runs after that, as one reached only from an interpreter-state registry
+     does: the codec search and error registries, at-fork hooks, sys.monitoring callbacks, gc callbacks, warnings
+     filters, is not seen); a launch made below Python (a native extension, ctypes, a Tcl exec through tkinter) is
+     not recorded; and code that deliberately evades an in-process hook (by any means, among them clearing the hooks
+     below Python, reading the record back from the record descriptor (for example through /proc/self/fd), rewriting
+     the driver's own state so the record goes elsewhere, which closing or redirecting the record descriptor alone
+     does not do, as that ends the run, forging or unregistering the report, a subinterpreter not made through
+     _interpreters) is outside what it can see), each ENTRY_COPIES file
      (tools/check_opf_declaration.py, whose entry raises its own exit rather than calling sys.exit) has the
      __main__ body exactly the single call _entry(), and _entry bound exactly once at module scope (the same
      count), by one undecorated top-level def with no parameters whose first statement is exactly
@@ -247,7 +245,8 @@ ENTRY_GUARD = '_child_status_refusal_exit("{}")'
 # The CLI copy whose __main__ body must open with opf.py's canonical --self-test statement (opf.py's aggregator
 # requires it first in every opf/tools module that binds self_test; that self_test also runs in process under
 # opf.py --self-test, behind opf.py's own guard): its body is exactly that statement and then the CLI entry line.
-SELF_TEST_FIRST_COPIES = (("opf/tools/_opf_declaration.py", "_opf_declaration.py"),)
+SELF_TEST_FIRST_COPIES = (("opf/tools/_opf_declaration.py", "_opf_declaration.py"),
+                          ("opf/tools/check_opf_declaration.py", "check_opf_declaration.py"))
 SELF_TEST_FIRST = 'if sys.argv[1:] == ["--self-test"]:\n    sys.exit(self_test())\n'
 HOOK_COPIES = (".aiqt/core/hooks/scripts/aiqt_hooks.py", "plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py")
 HOOKS_JSON_REL = "plugin/aiqt-guardrails-hooks/hooks/hooks.json"
@@ -2916,6 +2915,8 @@ def _behaviour(probe, base, verdict=None):
             (COVERAGE_REL, ("--usage",), Path(COVERAGE_REL).name, "usage: check_child_status_coverage.py"),
             ("opf/tools/_opf_declaration.py", ("--usage",), "_opf_declaration.py", "usage: _opf_declaration.py"),
             ("tools/check_opf_declaration.py", ("--usage",), "check_opf_declaration.py",
+             "usage: check_opf_declaration.py"),
+            ("opf/tools/check_opf_declaration.py", ("--usage",), "check_opf_declaration.py",
              "usage: check_opf_declaration.py"))
     results = {}
     for rel, args, name, control in clis:
@@ -2935,6 +2936,8 @@ def _behaviour(probe, base, verdict=None):
                                 ("behaviour/opf-declaration-cli-refuses", "opf/tools/_opf_declaration.py",
                                  "_opf_declaration.py"),
                                 ("behaviour/declaration-gate-refuses", "tools/check_opf_declaration.py",
+                                 "check_opf_declaration.py"),
+                                ("behaviour/opf-local-declaration-gate-refuses", "opf/tools/check_opf_declaration.py",
                                  "check_opf_declaration.py")):
         out.append((check_id, verdict((refused(results[rel][0], name), results[rel][0])), results[rel][0]))
     # The other CLI copies under an inherited ignore, each read by its refusal line, not its exit status alone: each
@@ -2960,7 +2963,9 @@ def _behaviour(probe, base, verdict=None):
                                   ("control/opf-declaration-cli-default-runs", "opf/tools/_opf_declaration.py",
                                    "usage: _opf_declaration.py"),
                                   ("control/declaration-gate-default-runs", "tools/check_opf_declaration.py",
-                                   "usage: check_opf_declaration.py")):
+                                   "usage: check_opf_declaration.py"),
+                                  ("control/opf-local-declaration-gate-default-runs",
+                                   "opf/tools/check_opf_declaration.py", "usage: check_opf_declaration.py")):
         out.append((check_id, verdict((ran(results[rel][1], 2, marker), results[rel][1])), results[rel][1]))
 
     pre = json.dumps({"hook_event_name": "PreToolUse", "tool_name": "Read",
@@ -3030,6 +3035,12 @@ def _behaviour(probe, base, verdict=None):
     out.append(("revert/opf-declaration-guard-removed-red", verdict((not refused(got, "_opf_declaration.py")
                                                                      and "usage: _opf_declaration.py" in got[2], got)),
                 got))
+    local_gate = _copy("opf/tools/check_opf_declaration.py", opf_tree, _swap(
+        (ROOT / "opf/tools/check_opf_declaration.py").read_text(encoding="utf-8"),
+        CLI_ENTRY.format("check_opf_declaration.py"), "sys.exit(main())"))
+    got = via("ignore", python + [str(local_gate), "--usage"], cwd=str(opf_tree))
+    out.append(("revert/opf-local-declaration-gate-guard-removed-red", verdict((
+        not refused(got, "check_opf_declaration.py") and "usage: check_opf_declaration.py" in got[2], got)), got))
     hook = _copy(HOOK_COPIES[0], guardless, _swap((ROOT / HOOK_COPIES[0]).read_text(encoding="utf-8"),
                                                   "    unobservable = _child_status_refusal()\n",
                                                   "    unobservable = None\n"))
@@ -3115,6 +3126,12 @@ def _behaviour(probe, base, verdict=None):
     out.append(("behaviour/opf-declaration-self-test-launches-nothing", verdict((
         got[0] == 0 and report == nothing and streamed == [] and "opf declaration self-test: PASS" in got[1], got)),
         got))
+    # The --self-test statement of opf/tools/check_opf_declaration.py runs before its guard too, so that launch is
+    # unguarded as well: it runs under the same audit, which must record no launch.
+    got, report, streamed = audited(str(ROOT / "opf/tools/check_opf_declaration.py"), "--self-test")
+    out.append(("behaviour/opf-local-declaration-self-test-launches-nothing", verdict((
+        got[0] == 0 and report == nothing and streamed == [] and "SELF-TEST PASS: opf-declaration-local" in got[1],
+        got)), got))
     target = str(_copy("audit/forkserver_first.py", base, AUDIT_MULTIPROCESSING_TARGET))
     got, report, streamed = audited(target, declaration, "--self-test")
     out.append(("behaviour/audit-reports-multiprocessing-launch", verdict((
@@ -3377,6 +3394,10 @@ def self_test(lane, report_path=None):
                                 ("control/declaration-gate-default-runs", 0),
                                 ("revert/opf-declaration-guard-removed-red", 0),
                                 ("revert/declaration-gate-guard-removed-red", 0),
+                                ("behaviour/opf-local-declaration-gate-refuses", 0),
+                                ("control/opf-local-declaration-gate-default-runs", 0),
+                                ("revert/opf-local-declaration-gate-guard-removed-red", 0),
+                                ("behaviour/opf-local-declaration-self-test-launches-nothing", 0),
                                 ("behaviour/pretool-refuses", 0), ("behaviour/plugin-pretool-refuses", 0),
                                 ("control/pretool-default-runs", 0), ("control/fail-open-default-runs", 0),
                                 ("behaviour/fail-open-restores", 0), ("behaviour/python-reader-loses-refusal", 0),

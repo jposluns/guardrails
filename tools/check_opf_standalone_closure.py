@@ -155,6 +155,8 @@ _SUBSET = [
     ("opf-init-selftest", "check_opf_init.py", ["--self-test"]),
     ("opf-init-contract-validator-selftest", "_opf_init_contract.py", ["--self-test"]),
     ("opf-init-contract-check-selftest", "check_opf_init_contract.py", ["--self-test"]),
+    ("opf-declaration-check-selftest", "check_opf_declaration.py", ["--self-test"]),
+    ("opf-declaration-check", "check_opf_declaration.py", []),
     ("opf-adopt-selftest", "_opf_adopt.py", ["--self-test"]),
     ("opf-adopt-apply-selftest", "_opf_adopt_apply.py", ["--self-test"]),
     ("opf-adopt-state-selftest", "_opf_adopt_state.py", ["--self-test"]),
@@ -241,6 +243,14 @@ _SUBSET = [
 # plain, one leg at a time, on a 24-CPU host: 1.48 to 1.51 s, each exit 0, load5 5.5 at each start,
 # rounded up. That load is lighter than the run above's (13.7 to 24.6), so the figure is INFERRED at a
 # heavier load, as at any other opf/ tree; the leg's bound is its 1260 s config-lane floor, not this.
+# Two rows come from a later run still: opf-declaration-check-selftest and opf-declaration-check, the
+# legs of OPF's own declaration gate, added after that, carry 1 s each, from three runs of each
+# MEASURED on 2026-11-13 from 03:46Z at opf/ tree 736e0cb93c871a735258357170222c342a5f39cb, each as the
+# gate runs it (python3 -I -B against a copy of opf/ alone, through _materialize and _run_one), plain,
+# one leg at a time, on a 96-CPU host: 0.33 to 0.39 s and 0.19 to 0.23 s, each exit 0, load5 35.3 at
+# each start, rounded up. That load is heavier than the run above's (13.7 to 24.6), but the host
+# differs, so the figures are INFERRED for any other host or opf/ tree; each leg's bound is its
+# 1260 s config-lane floor, not these.
 # _LOAD_HEADROOM is the allowance for a slower or more loaded host than that run's. The multiplier is
 # an INFERENCE, not a measurement, and no observation supports it (one measured run contradicts it, see
 # below): the host carried other work during the run, but a host loaded beyond it adds contention these
@@ -263,9 +273,9 @@ _SUBSET = [
 # 25.1). That is one run at one load: it shows no in-process slowdown here, and says nothing about the
 # heavier load or the host behind the reported figures.
 # The multiplier is capped by the job fit (_job_worst_case_s against each CI job's 21600 s default
-# limit): on this tree the whole roster's worst case is 96395 s at 3 (no one job fits it: the premise
+# limit): on this tree the whole roster's worst case is 101475 s at 3 (no one job fits it: the premise
 # of the split), the per-job worst cases are 21193 s (A), 21420 s (B), 15810 s (C), 19930 s (D),
-# 19302 s (E) and 3490 s (F) at 3, and the same at 4 but for C, 18210 s (at 3 and at 4 the
+# 19302 s (E) and 8570 s (F) at 3, and the same at 4 but for C, 18210 s (at 3 and at 4 the
 # config-lane floors, _LEG_BOUND_FLOOR_S, hold every floored leg's bound above its headroom term,
 # opf-homes-selftest's 1260 s above its 273 s and 364 s included; only opf-adopt-state-selftest and
 # opf-adopt-complete-selftest, both in C, are bounded by the headroom term), and the largest
@@ -321,6 +331,8 @@ _LEG_CEILING_S = {
     "opf-init-selftest": 228,  # INFERRED here (measured at 7bf8107f: 227.4 s at load5 16.3)
     "opf-init-contract-validator-selftest": 1,  # INFERRED here (measured at 7bf8107f: 0.1 s at load5 17.6)
     "opf-init-contract-check-selftest": 1,  # INFERRED here (measured at 7bf8107f: 0.1 s at load5 17.6)
+    "opf-declaration-check-selftest": 1,  # MEASURED 2026-11-13 (0.33 to 0.39 s at load5 35.3, three runs)
+    "opf-declaration-check": 1,  # MEASURED 2026-11-13 (0.19 to 0.23 s at load5 35.3, three runs)
     "opf-adopt-selftest": 152,  # INFERRED here (measured at 7bf8107f: 151.1 s at load5 18.6)
     "opf-adopt-apply-selftest": 9,  # INFERRED here (measured at 7bf8107f: 8.2 s at load5 21.5)
     "opf-adopt-state-selftest": 600,  # INFERRED (main's row; not measured: 7bf8107f has no such leg)
@@ -351,7 +363,7 @@ _LEG_CEILING_S = {
 # added or renamed together with its ceiling row, which leaves the two tables agreeing, is still drift.
 # A deliberate roster change records the new figures here in the same change (the drift line prints
 # them); this pin does not judge whether that change is right.
-_ROSTER_PIN = (29, "de659c6cc4dbdd48fda1f84466b8555da068da3ff4f2c8cc200a9bc6e85393b8")
+_ROSTER_PIN = (31, "7e02e96fe326c30caf6af1ca6dc0ec1b40d5386b842f28a75662929b56621824")
 _LOAD_HEADROOM = 3
 _LAUNCH_MARGIN_S = 60
 # The post-kill cleanup deadline (_kill_and_reap): ONE absolute deadline that the output drain and the
@@ -394,7 +406,10 @@ _MIN_LEG_BOUND_S = 60
 # default, so 1260 s, below the 1560 s its declared waits, 1500 s, plus the margin give on this tree;
 # opf-adopt-apply-selftest, opf-adopt-state-selftest and opf-adopt-complete-selftest), and two legs are
 # no lane member at all (opf-homes-contract and opf-prompt-pack, whose commands carry no self-test
-# flag, so the lane runner's roster does not select them).
+# flag, so the lane runner's roster does not select them). opf-declaration-check carries no such flag
+# either, but its command is the bare runner of a registered self-test suite
+# (opf-declaration-local-selftest), which the lane runner's roster also launches directly, so it is a
+# lane member and carries a row.
 # closure/leg-bound-reaches-the-lane-deadline reads the lane runner's own roster
 # (_registered_selftests) and its deadlines on every self-test run and refuses ANY lane-member
 # leg whose bound sits below its deadline plus the margin, so raising a lane deadline, or registering
@@ -441,7 +456,7 @@ _MIN_LEG_BOUND_S = 60
 # from about 3773 to about 10038 checks) is NOT shown absorbed by this sizing: its lane time must be
 # re-measured and the lanes' deadline for the command re-sized, and once that deadline rises above
 # 1200 s, closure/leg-bound-reaches-the-lane-deadline refuses this floor until it is raised to match.
-# FIT: 21 of the 22 rows below raise their leg's bound; opf-init-contract-check-selftest's 1260 s row
+# FIT: 23 of the 24 rows below raise their leg's bound; opf-init-contract-check-selftest's 1260 s row
 # raises nothing on this tree, since its declared waits, 1200 s, plus the launch margin reach the same
 # 1260 s, so the row only holds that floor should those waits shrink; the self-test still holds the
 # row itself to exactly 1260 s, the lane deadline plus the margin, on every run. The jobs those bounds
@@ -455,6 +470,8 @@ _LEG_BOUND_FLOOR_S = {
     "opf-init-selftest": 1860,
     "opf-init-contract-validator-selftest": 1260,
     "opf-init-contract-check-selftest": 1260,
+    "opf-declaration-check-selftest": 1260,
+    "opf-declaration-check": 1260,
     "opf-adopt-selftest": 1260,
     "opf-adopt-hook-selftest": 1260,
     "opf-import-batch-selftest": 1260,
@@ -501,23 +518,29 @@ _CI_WORKFLOW = Path(".github") / "workflows" / "quality.yml"
 # (_job_worst_case_s over every leg) does not fit one job's time limit with the bound rule above
 # unchanged, and, once every lane-member leg reaches its config-lane deadline plus the launch margin
 # (see _LEG_BOUND_FLOOR_S), it does not fit four. ARITHMETIC on this tree: the legs' two sweeps,
-# their cleanup deadlines and the flip come to 95445 s, and each job adds the 350 s vector allowance
+# their cleanup deadlines and the flip come to 100525 s, and each job adds the 350 s vector allowance
 # and the 600 s setup to them, so four jobs hold at most 4 x (21600 - 950) = 82600 s of that work,
-# 12845 s short; five is the fewest that the total allows, and the sixth, F, holds the one leg the
+# 17925 s short; five is the fewest that the total allows, and the sixth, F, holds the legs the
 # placement below finds no room for in the other five. The worst cases, at a headroom of 3, are
-# 21193 s (A, the flip's job), 21420 s (B), 15810 s (C), 19930 s (D), 19302 s (E) and 3490 s (F),
+# 21193 s (A, the flip's job), 21420 s (B), 15810 s (C), 19930 s (D), 19302 s (E) and 8570 s (F),
 # each within its 21600 s limit. opf-import-complete-selftest, a leg main added, sits in D beside opf-import-batch-selftest:
 # its 1260 s config-lane floor adds 2540 s to a job's worst case (two sweeps and two cleanup
 # deadlines), which A and E cannot hold (nor could B while it held the store-upgrade gate's leg), and D,
 # unlike C, is not moved by the headroom multiplier
-# up to 5.412. opf-release-history-selftest, added after it, sits alone in F: its 1260 s config-lane
+# up to 5.412. opf-release-history-selftest, added after it, sat alone in F: its 1260 s config-lane
 # floor adds the same 2540 s, which D (22470 s), A (23733 s), E (21842 s) and B (23960 s, beside
 # commonmark-headings-selftest) cannot hold. C could (18350 s), but C is the job the headroom
 # multiplier moves: with the leg in C the largest multiplier that fits every job falls from 5.412 to
 # 4.354 (at 4.355, job C's worst case is 21602.0 s), barely above the 4.338 the loaded
 # opf-doctor-selftest run needs (see _LEG_CEILING_S). F, like B and D, is not moved by the headroom
 # multiplier up to 5.412 (the leg's 1260 s floor exceeds its headroom term, 2 s times the
-# multiplier). When the declared waits of opf.py's and _opf_adopt_apply.py's sources grew by 1206 s each
+# multiplier). opf-declaration-check-selftest and opf-declaration-check, the legs of OPF's own
+# declaration gate, added after that, sit in F beside it (F's worst case from 3490 s to 8570 s): each
+# leg's 1260 s config-lane floor adds the same 2540 s, which A to E hold no more than they could for
+# opf-release-history-selftest (C could hold one, as before, but C is the job the headroom multiplier
+# moves), and the gate's two legs share one job. F is still not moved by the headroom multiplier up to
+# 5.412 (each new leg's 1 s ceiling times 5.412 stays below its 1260 s floor).
+# When the declared waits of opf.py's and _opf_adopt_apply.py's sources grew by 1206 s each
 # (the two legs' declared-wait sums from 3554.012 s to 4760.012 s and from 2820 s to 4026 s), the
 # opf-adopt-apply-selftest bound rose by 1206 s (2880 s to 4086 s) and the opf-tooling-selftest bound
 # by 1161 s (from 3660 s, set by its former floor row, to 4821 s), A, which had held
@@ -584,6 +607,8 @@ _CI_JOB_LEGS = {
     }),
     "opf-closure-f": frozenset({
         "opf-release-history-selftest",
+        "opf-declaration-check-selftest",
+        "opf-declaration-check",
     }),
 }
 _CI_JOBS = tuple(sorted(_CI_JOB_LEGS))

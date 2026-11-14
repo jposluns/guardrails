@@ -29,7 +29,19 @@ ships it, never to an installed copy and never taking a field from the documenta
   5. each surface states where the implementation carries the digest (DIGEST_LOCATION, both phrases);
   6. every Markdown or HTML document (a .md or .html file) of the tree (the .git directory aside, and no
      symlinked directory entered) with a line that opens a restatement block is a DOC_SURFACES entry, so a
-     surface dropped from that list is a finding.
+     surface dropped from that list is a finding;
+  7. DOC_SURFACES is exactly OPF_SURFACES, OPF's own surfaces, each under opf/ (opf/RELEASING.md among them),
+     and PARENT_SURFACES, the parent repository's release document RELEASING.md, outside it;
+  8. each surface outside opf/ states the parent's role as a future adopter of a released OPF, not the
+     permanent author of OPF's source (ADOPTER_STATEMENT, every phrase, with each run of whitespace read as
+     one space so a phrase may wrap), so the parent's release document cannot go back to describing the
+     parent as where OPF is authored; a surface under opf/ need not state it.
+
+The findings are reported in two responsibilities kept apart while OPF is nested: OPF-local (rules 1 to 3, 7,
+and 4 to 6 over the surfaces and documents under opf/, which move with that tree) and the parent release
+document (rules 4 to 6 and 8 over the surfaces and documents outside it). The parent restates the declaration
+of the OPF it carries while nested, as a future adopter of a released OPF; OPF's own release procedure is in
+opf/RELEASING.md. Both are checked and either fails the gate.
 
 A restatement is the block of an HTML surface between a line `<div class="tree"><pre id="opf-declaration">`
 and the next line `</pre></div>`, and of a Markdown surface between a line "```toml opf-declaration" and the
@@ -194,8 +206,17 @@ REGISTRY_REL = "tools/selftest_checks.toml"
 DECLARATION_REL = "opf/tools/opf-declaration.toml"
 MODULE_REL = "opf/tools/_opf_declaration.py"
 VERSION_REL = "opf/VERSION"   # OPF's own release version, apart from the pack's root VERSION
-DOC_SURFACES = ("opf/spec/OPF-QUICKSTART.md", "RELEASING.md")
+# The documentation surfaces in two responsibilities kept apart: OPF's own, which lie under OPF_ROOT_REL and
+# move with that tree, and the parent repository's release document, outside it, which restates the
+# declaration of the OPF the parent carries while nested, as a future adopter of a released OPF rather than
+# its author. DOC_SURFACES is their union, in that order.
+OPF_ROOT_REL = "opf"
+OPF_SURFACES = ("opf/spec/OPF-QUICKSTART.md", "opf/RELEASING.md")
+PARENT_SURFACES = ("RELEASING.md",)
+DOC_SURFACES = OPF_SURFACES + PARENT_SURFACES
 DIGEST_LOCATION = (MODULE_REL, "SHIPPED_DECLARATION_SHA256")
+# rule 8: the phrases each surface outside opf/ states, with each run of whitespace read as one space
+ADOPTER_STATEMENT = ("a future adopter of a released OPF", "not the permanent author of OPF's source")
 _HTML_OPEN = '<div class="tree"><pre id="opf-declaration">'
 _HTML_CLOSE = "</pre></div>"
 _MD_OPEN = "```toml opf-declaration"
@@ -540,6 +561,55 @@ def surface_problems(documents):
             "the file".format(rel) for rel in sorted(set(documents) - set(DOC_SURFACES))]
 
 
+def in_opf(rel):
+    """Whether the repo-relative path `rel` lies in OPF's own tree (OPF_ROOT_REL), which moves with OPF."""
+    return rel.startswith(OPF_ROOT_REL + "/")
+
+
+def scope_problems():
+    """The findings of rule 7: each OPF_SURFACES entry lies in OPF's own tree, each PARENT_SURFACES entry lies
+    outside it, and DOC_SURFACES is exactly their union, so no surface is checked under the wrong
+    responsibility or under none."""
+    problems = ["{} is an OPF_SURFACES entry outside {}/, so it would not move with OPF".format(rel, OPF_ROOT_REL)
+                for rel in OPF_SURFACES if not in_opf(rel)]
+    problems += ["{} is a PARENT_SURFACES entry inside {}/, so OPF would carry a parent responsibility".format(
+        rel, OPF_ROOT_REL) for rel in PARENT_SURFACES if in_opf(rel)]
+    if sorted(DOC_SURFACES) != sorted(OPF_SURFACES + PARENT_SURFACES):
+        problems.append("DOC_SURFACES is not exactly OPF_SURFACES and PARENT_SURFACES: {} differ".format(
+            sorted(set(DOC_SURFACES) ^ set(OPF_SURFACES + PARENT_SURFACES))))
+    return problems
+
+
+def adopter_problems(surfaces):
+    """The findings of rule 8 over each surface (rel -> text) outside OPF's own tree: an ADOPTER_STATEMENT phrase
+    it does not state, each run of whitespace in the text and the phrase read as one space. A surface in OPF's
+    own tree is not read."""
+    problems = []
+    for rel, text in surfaces.items():
+        if in_opf(rel):
+            continue
+        flat = " ".join(text.split())
+        missing = [phrase for phrase in ADOPTER_STATEMENT if " ".join(phrase.split()) not in flat]
+        if missing:
+            problems.append("{} does not state the parent's role as a future adopter of a released OPF (missing "
+                            "{})".format(rel, "; ".join(repr(phrase) for phrase in missing)))
+    return problems
+
+
+def split_problems(data, version, surfaces, documents):
+    """The findings of rules 1 to 8 in two responsibilities, (OPF-local, parent release document): rules 1 to 3,
+    rules 4 and 5 over the surfaces in OPF's own tree, rule 6 over the documents in it and rule 7 are OPF-local;
+    rules 4 and 5 over the other surfaces, rule 6 over the other documents and rule 8 are the parent's. A
+    malformed declaration file is reported once, as OPF-local."""
+    local = file_problems(data, version) + doc_problems(
+        data, dict((rel, text) for rel, text in surfaces.items() if in_opf(rel)))
+    local += surface_problems(set(rel for rel in documents if in_opf(rel))) + scope_problems()
+    parent_surfaces = dict((rel, text) for rel, text in surfaces.items() if not in_opf(rel))
+    parent = [problem for problem in doc_problems(data, parent_surfaces) if problem not in local]
+    parent += surface_problems(set(rel for rel in documents if not in_opf(rel))) + adopter_problems(parent_surfaces)
+    return local, parent
+
+
 def run(root):
     try:
         _load()
@@ -559,15 +629,19 @@ def run(root):
         if issubclass(type(exc), KeyboardInterrupt):
             raise
         return _cannot_evaluate("an input the gate needs cannot be read", exc)
-    problems = file_problems(data, version) + doc_problems(data, surfaces) + surface_problems(documents)
-    if problems:
-        print("opf-declaration: FAIL ({} finding(s))".format(len(problems)), file=sys.stderr)
-        for problem in problems:
-            print("  " + problem, file=sys.stderr)
+    local, parent = split_problems(data, version, surfaces, documents)
+    if local or parent:
+        print("opf-declaration: FAIL ({} finding(s): {} OPF-local, {} parent release document)".format(
+            len(local) + len(parent), len(local), len(parent)), file=sys.stderr)
+        for label, problems in (("OPF-local", local), ("parent release document", parent)):
+            for problem in problems:
+                print("  {}: {}".format(label, problem), file=sys.stderr)
         return 1
-    print("opf-declaration: OK ({} sha256 {}; release {}; {} documentation restatements equal)".format(
-        DECLARATION_REL, _opf_declaration.SHIPPED_DECLARATION_SHA256, _opf_declaration.RELEASE_IDENTITY,
-        len(DOC_SURFACES)))
+    print("opf-declaration: OK ({} sha256 {}; release {}; {} documentation restatements equal: {} OPF-local, {} "
+          "parent release document)".format(DECLARATION_REL, _opf_declaration.SHIPPED_DECLARATION_SHA256,
+                                            _opf_declaration.RELEASE_IDENTITY, len(DOC_SURFACES),
+                                            sum(1 for rel in DOC_SURFACES if in_opf(rel)),
+                                            sum(1 for rel in DOC_SURFACES if not in_opf(rel))))
     return 0
 
 
@@ -1252,16 +1326,288 @@ def self_test(report_path=None):
     documents = restating_documents(ROOT)
     check("live/restating-documents-are-the-surfaces", documents == set(DOC_SURFACES),
           sorted(documents ^ set(DOC_SURFACES)))
+    # the parent release document dropped from DOC_SURFACES and from its responsibility, PARENT_SURFACES
     dropped = tuple(rel for rel in DOC_SURFACES if rel != "RELEASING.md")
-    with patch.object(here, "DOC_SURFACES", dropped), contextlib.redirect_stdout(io.StringIO()), \
-            contextlib.redirect_stderr(io.StringIO()) as err:
+    with patch.object(here, "DOC_SURFACES", dropped), patch.object(here, "PARENT_SURFACES", ()), \
+            contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()) as err:
         found, rc = surface_problems(documents), run(ROOT)
     check("live/surface-dropped-red", len(found) == 1 and found[0].startswith("RELEASING.md ") and rc == 1
-          and found[0] in err.getvalue(), (found, rc))
-    with patch.object(here, "DOC_SURFACES", dropped), patch.object(here, "surface_problems", lambda documents: []), \
+          and "parent release document: " + found[0] in err.getvalue(), (found, rc))
+    with patch.object(here, "DOC_SURFACES", dropped), patch.object(here, "PARENT_SURFACES", ()), \
+            patch.object(here, "surface_problems", lambda documents: []), \
             contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
         rc = run(ROOT)
     check("revert/surface-list-check-dropped-red", rc == 0, rc)
+
+    # rule 7 and the two responsibilities: OPF's own surfaces (opf/RELEASING.md among them) lie in its tree and
+    # are reported OPF-local, the parent release document lies outside it and is reported apart, over scratch
+    # trees of the shipped declaration file, opf/VERSION and every surface; each row red under its revert
+    md_block = "{}\n{}{}\n".format(_MD_OPEN, shipped.decode("ascii"), _MD_CLOSE)
+    stale_block = md_block.replace('release = "{}"'.format(version), 'release = "0.0.1"')
+
+    def tree_runs(cases, gate=None):
+        """name -> (run()'s exit status, its stderr) of `gate` (this module unless given) over a scratch tree of
+        the live inputs with the case's edits (rel -> text, or None to leave the file out) applied."""
+        gate = gate or here
+        tmp = tempfile.mkdtemp(prefix="opf-declaration-selftest-")
+        try:
+            runs = {}
+            for name, edits in cases.items():
+                home = Path(tmp, name)
+                for rel in (DECLARATION_REL, VERSION_REL) + DOC_SURFACES:
+                    os.makedirs(Path(home, rel).parent, exist_ok=True)
+                    Path(home, rel).write_bytes((ROOT / rel).read_bytes())
+                for rel, text in edits.items():
+                    os.makedirs(Path(home, rel).parent, exist_ok=True)
+                    Path(home, rel).write_text((ROOT / rel).read_text(encoding="utf-8") if text is None else
+                                               text(Path(home, rel)) if callable(text) else text, encoding="utf-8")
+                with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()) as err:
+                    runs[name] = (gate.run(home), err.getvalue())
+            return runs
+        finally:
+            shutil.rmtree(tmp)
+
+    def edited(rel, old, new):
+        """An edit of the live surface `rel` replacing its one `old` by `new`."""
+        def apply(_path):
+            text = (ROOT / rel).read_text(encoding="utf-8")
+            if text.count(old) != 1:
+                raise AssertionError("edit anchor found {} times in {}".format(text.count(old), rel))
+            return text.replace(old, new)
+        return apply
+
+    split_cases = {
+        "equal": {},
+        "local-stale": {"opf/RELEASING.md": edited("opf/RELEASING.md", md_block, stale_block)},
+        "local-missing": {"opf/RELEASING.md": edited("opf/RELEASING.md", md_block, "")},
+        "local-duplicate": {"opf/RELEASING.md": edited("opf/RELEASING.md", md_block, md_block + "\n" + md_block)},
+        "local-undeclared": {"opf/notes.md": "carried in {} as {}\n\n{}".format(*(DIGEST_LOCATION + (md_block,)))},
+        "parent-stale": {"RELEASING.md": edited("RELEASING.md", md_block.replace("\n", "\n   ").rstrip(" "),
+                                                stale_block.replace("\n", "\n   ").rstrip(" "))},
+        "parent-missing": {"RELEASING.md": edited("RELEASING.md", "   " + _MD_OPEN, "   toml")},
+        "parent-undeclared": {"docs-notes.md": "{}".format(md_block)},
+        "version-differs": {VERSION_REL: version + "-other\n"},
+    }
+    local_line = "  OPF-local: "
+    parent_line = "  parent release document: "
+
+    def labelled(runs, name, label, text):
+        """Whether the run `name` exits 1 with a finding under `label` holding `text`, and none under the other
+        label."""
+        rc, err = runs[name]
+        other = parent_line if label == local_line else local_line
+        return rc == 1 and any(line.startswith(label) and text in line for line in err.splitlines()) \
+            and other not in err
+
+    def split_rows(runs):
+        """case name -> whether its run gives the expected outcome, under the expected responsibility."""
+        return {
+            "equal": runs["equal"][0] == 0 and "opf/RELEASING.md" in OPF_SURFACES,
+            "local-stale": labelled(runs, "local-stale", local_line,
+                                    "opf/RELEASING.md restates the declaration malformed: it gives release = '0.0.1'"),
+            "local-missing": labelled(runs, "local-missing", local_line, "opf/RELEASING.md restates no declaration"),
+            "local-duplicate": labelled(runs, "local-duplicate", local_line,
+                                        "opf/RELEASING.md restates no declaration"),
+            "local-undeclared": labelled(runs, "local-undeclared", local_line,
+                                         "opf/notes.md carries a declaration restatement block"),
+            "version-differs": labelled(runs, "version-differs", local_line, "is not OPF's own release version"),
+            "parent-stale": labelled(runs, "parent-stale", parent_line,
+                                     "RELEASING.md restates the declaration malformed: it gives release = '0.0.1'"),
+            "parent-missing": labelled(runs, "parent-missing", parent_line, "RELEASING.md restates no declaration"),
+            "parent-undeclared": labelled(runs, "parent-undeclared", parent_line,
+                                          "docs-notes.md carries a declaration restatement block"),
+        }
+
+    try:
+        live_rows = split_rows(tree_runs(split_cases))
+    except AssertionError as exc:
+        live_rows = {"anchor": str(exc)}
+    for check_id, case in (
+        ("local/opf-releasing-equal-passes", "equal"),
+        ("local/opf-releasing-stale-red", "local-stale"),
+        ("local/opf-releasing-block-missing-red", "local-missing"),
+        ("local/opf-releasing-block-duplicate-red", "local-duplicate"),
+        ("local/undeclared-opf-document-red", "local-undeclared"),
+        ("local/opf-version-disagreement-red", "version-differs"),
+        ("parent/releasing-stale-red", "parent-stale"),
+        ("parent/releasing-block-missing-red", "parent-missing"),
+        ("parent/undeclared-parent-document-red", "parent-undeclared"),
+    ):
+        check(check_id, live_rows.get(case) is True, (case, live_rows))
+    check("live/surfaces-split-by-tree", scope_problems() == [] and all(in_opf(rel) for rel in OPF_SURFACES)
+          and not any(in_opf(rel) for rel in PARENT_SURFACES) and PARENT_SURFACES == ("RELEASING.md",),
+          (scope_problems(), OPF_SURFACES, PARENT_SURFACES))
+    # the boundary of OPF's tree: just inside (a path under opf/), at it (the bare name, and a name that only
+    # starts with it) and just outside (a parent path, and an opf directory deeper in the parent)
+    boundary = {"opf/RELEASING.md": True, "opf/a/b.md": True, "opf": False, "opfx/RELEASING.md": False,
+                "RELEASING.md": False, "tools/opf/a.md": False}
+    check("local/in-opf-boundary", all(in_opf(rel) is expected for rel, expected in boundary.items()),
+          dict((rel, in_opf(rel)) for rel in boundary))
+    misplaced = {"OPF_SURFACES": OPF_SURFACES + ("RELEASING.md",), "PARENT_SURFACES": (),
+                 "DOC_SURFACES": OPF_SURFACES + ("RELEASING.md",)}
+    inside = {"OPF_SURFACES": ("opf/spec/OPF-QUICKSTART.md",),
+              "PARENT_SURFACES": ("RELEASING.md", "opf/RELEASING.md")}
+    unlisted = {"DOC_SURFACES": OPF_SURFACES}
+    scope_found = []
+    for replaced in (misplaced, inside, unlisted):
+        with contextlib.ExitStack() as stack:
+            for attribute, value in replaced.items():
+                stack.enter_context(patch.object(here, attribute, value))
+            scope_found.append(scope_problems())
+    check("scope/misplaced-surfaces-red", [len(found) for found in scope_found] == [1, 1, 1]
+          and "outside opf/" in scope_found[0][0] and "inside opf/" in scope_found[1][0]
+          and "is not exactly" in scope_found[2][0], scope_found)
+
+    # the reverts: opf/RELEASING.md no surface (the gate before it was added), the responsibilities not split,
+    # a document with two blocks read by its first, rule 7 dropped, and the tree boundary without its slash
+    with patch.object(here, "OPF_SURFACES", ("opf/spec/OPF-QUICKSTART.md",)), \
+            patch.object(here, "DOC_SURFACES", ("opf/spec/OPF-QUICKSTART.md",) + PARENT_SURFACES):
+        try:
+            rows = split_rows(tree_runs(dict((name, split_cases[name]) for name in ("local-stale", "local-missing"))
+                                        | {"equal": {}, "local-duplicate": split_cases["local-duplicate"],
+                                           "local-undeclared": {}, "version-differs": {}, "parent-stale": {},
+                                           "parent-missing": {}, "parent-undeclared": {}}))
+        except AssertionError as exc:
+            rows = {"anchor": str(exc)}
+    check("revert/opf-releasing-not-a-surface-red", not any(rows.get(row, True) for row in (
+        "local-stale", "local-missing", "local-duplicate")), rows)
+    with patch.object(here, "split_problems", lambda data, version, surfaces, documents: (
+            file_problems(data, version) + doc_problems(data, surfaces) + surface_problems(documents), [])):
+        try:
+            rows = split_rows(tree_runs(dict((name, split_cases[name]) for name in (
+                "equal", "local-stale", "local-missing", "local-duplicate", "local-undeclared", "version-differs",
+                "parent-stale", "parent-missing", "parent-undeclared"))))
+        except AssertionError as exc:
+            rows = {"anchor": str(exc)}
+    check("revert/responsibilities-unsplit-red", not any(rows.get(row, True) for row in (
+        "parent-stale", "parent-missing", "parent-undeclared")), rows)
+    tmp = tempfile.mkdtemp(prefix="opf-declaration-selftest-")
+    try:
+        mutants = {}
+        for name, old, new in (
+            ("duplicate", "    if len(opens) != 1:\n        return None\n    start = opens[0]",
+             "    if not opens:\n        return None\n    start = opens[0]"),
+            ("boundary", '    return rel.startswith(OPF_ROOT_REL + ' '"/")', "    return rel.startswith(OPF_ROOT_REL)"),
+        ):
+            module = "opf_declaration_split_mutant_" + name
+            try:
+                mutants[name] = _copy_mutant(tmp, Path(__file__).resolve(), module, old, new)
+            except AssertionError as exc:
+                mutants[name] = str(exc)
+            finally:
+                sys.modules.pop(module, None)
+        duplicate = mutants["duplicate"]
+        rc = duplicate if isinstance(duplicate, str) else tree_runs(
+            {"local-duplicate": split_cases["local-duplicate"]}, duplicate)["local-duplicate"][0]
+        check("revert/duplicate-block-read-by-first-red", rc == 0, rc)
+        bounded = mutants["boundary"]
+        moved = bounded if isinstance(bounded, str) else dict((rel, bounded.in_opf(rel)) for rel in boundary)
+        check("revert/in-opf-boundary-without-slash-red", isinstance(moved, dict) and any(
+            moved[rel] is not expected for rel, expected in boundary.items()), moved)
+    finally:
+        shutil.rmtree(tmp)
+    with patch.object(here, "scope_problems", lambda: []):
+        dropped_scope = []
+        for replaced in (misplaced, inside):
+            with contextlib.ExitStack() as stack:
+                for attribute, value in replaced.items():
+                    stack.enter_context(patch.object(here, attribute, value))
+                with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                    dropped_scope.append(run(ROOT))
+    check("revert/scope-check-dropped-red", dropped_scope == [0, 0], dropped_scope)
+
+    # rule 8: the parent release document states the parent's role as a future adopter of a released OPF, not
+    # the permanent author of OPF's source; a phrase may wrap, and a surface in OPF's own tree is not read
+    role_sentence = ("This repository is a future adopter of a released\n   OPF, not the permanent author of "
+                     "OPF's source.")
+    role_clause = "role as a\n   future adopter of a released OPF;"
+
+    def edited_all(rel, *pairs):
+        """An edit of the live surface `rel` replacing, in turn, each pair's one `old` by its `new`."""
+        def apply(_path):
+            text = (ROOT / rel).read_text(encoding="utf-8")
+            for old, new in pairs:
+                if text.count(old) != 1:
+                    raise AssertionError("edit anchor found {} times in {}".format(text.count(old), rel))
+                text = text.replace(old, new)
+            return text
+        return apply
+
+    adopter_cases = {
+        "adopter-equal": {},
+        "author-claimed": {"RELEASING.md": edited_all(
+            "RELEASING.md", (role_sentence, "This repository authors OPF's source."))},
+        "adopter-dropped": {"RELEASING.md": edited_all("RELEASING.md", (role_sentence, ""), (role_clause, "role;"))},
+    }
+    adopter_text = "RELEASING.md does not state the parent's role as a future adopter of a released OPF"
+
+    def adopter_rows(runs):
+        """case name -> whether its run gives the expected outcome: the live tree passes, and each edit of the
+        parent release document is one parent finding naming exactly the phrases it lost."""
+        return {
+            "adopter-equal": runs["adopter-equal"][0] == 0,
+            "author-claimed": labelled(runs, "author-claimed", parent_line, adopter_text)
+            and "(missing \"not the permanent author of OPF's source\")" in runs["author-claimed"][1],
+            "adopter-dropped": labelled(runs, "adopter-dropped", parent_line, adopter_text)
+            and "(missing 'a future adopter of a released OPF'; \"not the permanent author of OPF's source\")"
+            in runs["adopter-dropped"][1],
+        }
+
+    try:
+        rows = adopter_rows(tree_runs(adopter_cases))
+    except AssertionError as exc:
+        rows = {"anchor": str(exc)}
+    for check_id, case in (
+        ("parent/adopter-statement-live-passes", "adopter-equal"),
+        ("parent/author-claim-red", "author-claimed"),
+        ("parent/adopter-statement-dropped-red", "adopter-dropped"),
+    ):
+        check(check_id, rows.get(case) is True, (case, rows))
+    # the phrase boundary: on one line (just inside), wrapped over lines and tabs (at it), one letter off (just
+    # outside, a finding)
+    phrase_cases = {
+        "one-line": "is a future adopter of a released OPF, not the permanent author of OPF's source.",
+        "wrapped": "is a future\n   adopter of a released OPF,\tnot the permanent\n   author of OPF's source.",
+        "near-miss": "is a future adopter of a releasd OPF, not the permanent author of OPF's source.",
+    }
+    phrase_found = dict((name, adopter_problems({"RELEASING.md": text})) for name, text in phrase_cases.items())
+    check("parent/adopter-statement-wrapped-passes", phrase_found["one-line"] == [] and phrase_found["wrapped"] == []
+          and len(phrase_found["near-miss"]) == 1 and "'a future adopter of a released OPF'" in
+          phrase_found["near-miss"][0] and "permanent author" not in phrase_found["near-miss"][0], phrase_found)
+    opf_only = {"opf/RELEASING.md": "", "opf/spec/OPF-QUICKSTART.md": ""}
+    check("local/adopter-statement-not-required", adopter_problems(opf_only) == [], adopter_problems(opf_only))
+
+    # the reverts: rule 8 dropped, the whitespace read as written, and the surfaces in OPF's own tree read too
+    with patch.object(here, "adopter_problems", lambda surfaces: []):
+        try:
+            rows = adopter_rows(tree_runs(adopter_cases))
+        except AssertionError as exc:
+            rows = {"anchor": str(exc)}
+    check("revert/adopter-check-dropped-red", not any(rows.get(row, True) for row in (
+        "author-claimed", "adopter-dropped")), rows)
+    tmp = tempfile.mkdtemp(prefix="opf-declaration-selftest-")
+    try:
+        mutants = {}
+        for name, old, new in (
+            ("unfolded", '        flat = " ".join(text.split())\n', "        flat = text\n"),
+            ("opf-read", "        if in_opf(rel):\n            continue\n        flat", "        flat"),
+        ):
+            module = "opf_declaration_adopter_mutant_" + name
+            try:
+                mutants[name] = _copy_mutant(tmp, Path(__file__).resolve(), module, old, new)
+            except AssertionError as exc:
+                mutants[name] = str(exc)
+            finally:
+                sys.modules.pop(module, None)
+        unfolded = mutants["unfolded"]
+        found = unfolded if isinstance(unfolded, str) else unfolded.adopter_problems(
+            {"RELEASING.md": phrase_cases["wrapped"]})
+        check("revert/adopter-whitespace-unfolded-red", isinstance(found, list) and len(found) == 1, found)
+        read = mutants["opf-read"]
+        found = read if isinstance(read, str) else read.adopter_problems(opf_only)
+        check("revert/adopter-opf-surface-read-red", isinstance(found, list) and len(found) == 2, found)
+    finally:
+        shutil.rmtree(tmp)
 
     # a helper module that cannot be imported is a cannot-evaluate (exit 2), and escapes (exit 1, a finding) with
     # _load() back outside the try
