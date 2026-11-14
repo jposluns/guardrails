@@ -3980,6 +3980,7 @@ def _self_test_cases(base):
 
     _red_on_revert(base, good)
     _rule_reverts(base)
+    _opf_copy_parity_cases(base)
 
 
 def _tracked_cases(base, demo, unguarded):
@@ -4279,6 +4280,143 @@ def _rule_reverts(base):
     check("revert/every-rule-exercised", exercised == RULES, True)
 
 
+# The OPF tree carries its own copy of this gate, opf/tools/check_python_floor.py, whose rules are this
+# gate's. While the copy exists, opf-copy/parity runs one fixed set of fixtures, drawn from both
+# self-tests' cases, through the rules both gates share (guard, workflow grammar, setup-python step,
+# tomllib site and import fallback), each called with the same explicit inputs, and requires the same
+# verdict and the same findings from each gate; opf-copy/data-byte-equal requires every data file the
+# copy carries from this gate to be byte-equal to this gate's. OPF_COPY_DATA lists those files as
+# (this gate's path, the copy's path) under ROOT. The copy reads only its own floor and host policies
+# and parse-site table, none a copy of a file here, so the list is empty. Both checks are skipped, with
+# the reason printed, only when the copy is absent.
+OPF_COPY_REL = "opf/tools/check_python_floor.py"
+OPF_COPY_DATA = ()
+SKIPPED = {}
+
+
+def _load_opf_copy():
+    """The OPF copy, imported by its plain module name from opf/tools, or None when it is absent. This
+    gate shares that module name, so a module already registered under it is set aside for the import
+    and restored after it, and sys.path is left as it was found."""
+    if not (ROOT / OPF_COPY_REL).is_file():
+        return None
+    directory = str(ROOT / "opf" / "tools")
+    saved = sys.modules.pop("check_python_floor", None)
+    sys.path.insert(0, directory)
+    try:
+        import check_python_floor as copy
+    finally:
+        sys.path.remove(directory)
+        sys.modules.pop("check_python_floor", None)
+        if saved is not None:
+            sys.modules["check_python_floor"] = saved
+    return copy
+
+
+def _parity_outcome(module, rule):
+    """(verdict, findings) of one rule call in module: "pass" with no findings, "finding" with them, or
+    "cannot-evaluate" with the refusal message. A tomllib site's AST nodes are dropped, keeping its
+    line, function, form, text and handling."""
+    try:
+        got = rule(module)
+    except module.CannotEvaluate as exc:
+        return ("cannot-evaluate", [str(exc)])
+    if isinstance(got, tuple):
+        got = [tuple(part for part in site if not isinstance(part, ast.AST)) for site in got[0]]
+    got = [] if got is None else list(got)
+    return ("finding" if got else "pass", got)
+
+
+def _opf_copy_parity(base, copy):
+    """The fixture cases on which this gate and the copy differ, as (case, this gate's outcome, the
+    copy's outcome); [] when every case agrees."""
+    demo = "tools/demo.py"
+    good = guard_text("demo.py", FLOOR)
+    guards = {
+        "guard/canonical": (good + "\nprint(1)\n", ()),
+        "guard/docstring-and-future-first": ("\"\"\"Fixture.\"\"\"\nfrom __future__ import annotations\n"
+                                             + good, ()),
+        "guard/after-other-import": ("import os\n" + good, ()),
+        "guard/older-floor": (guard_text("demo.py", (FLOOR[0], FLOOR[1] - 1)), ()),
+        "guard/absent": ("print(1)\n", ()),
+        "guard/nonblocking-listed": (guard_text("demo.py", FLOOR, code=NONBLOCKING_EXIT), (demo,)),
+        "guard/nonblocking-unlisted": (guard_text("demo.py", FLOOR, code=NONBLOCKING_EXIT), ()),
+    }
+    head = "name: Q\non: push\njobs:\n  q:\n    runs-on: ubuntu-latest\n    steps:\n"
+    setup = "      - uses: actions/setup-python@v5\n"
+    workflows = {
+        "grammar/clean": head + setup + "        with:\n          python-version: '3.14'\n",
+        "grammar/anchor": "a: &anchor b\n",
+        "grammar/tab-indent": head + "\t- run: x\n",
+        "grammar/plain-scalar-continued": head + "      - uses: actions/checkout@v4\n          - x\n",
+        "grammar/duplicate-key": head + "      - run: a\n        run: b\n",
+        "setup/no-version": head + setup,
+        "setup/list-with": head + setup + "        with:\n          - python-version: '3.14'\n",
+    }
+    sites = {
+        "tomllib/unhandled-call": "import tomllib\n\ndef read(text):\n    return tomllib.loads(text)\n",
+        "tomllib/handled-call": ("import tomllib\n\ndef read(text):\n    try:\n        return tomllib.loads(text)\n"
+                                 "    except (ValueError, RecursionError, MemoryError):\n        return None\n"),
+        "tomllib/saved-parser": "import tomllib as t\n\nparse = t.loads\n",
+        "tomllib/star-import": "from tomllib import *\n",
+    }
+    fallbacks = {
+        "fallback/retired-refusal": ("import sys\n\ntry:\n    import tomllib\nexcept ModuleNotFoundError:\n"
+                                     "    sys.stderr.write(\"x\\n\")\n    raise SystemExit(2)\n"),
+        "fallback/plain": "try:\n    import tomllib\nexcept ModuleNotFoundError:\n    tomllib = None\n",
+    }
+    cases = []
+    for case, (text, nonblocking) in guards.items():
+        root = base / "opf-copy-parity" / case
+        _write(root, demo, text)
+        cases.append((case, lambda m, root=root, nonblocking=nonblocking: m.guard_findings(
+            root, [demo], FLOOR, nonblocking)))
+    for case, text in workflows.items():
+        lines = text.split("\n")
+        if case.startswith("setup/"):
+            cases.append((case, lambda m, lines=lines: m._setup_python_findings("q.yml", lines, set())))
+        else:
+            cases.append((case, lambda m, lines=lines: m._grammar_check("q.yml", lines)))
+    for case, text in sites.items():
+        cases.append((case, lambda m, text=text: m.tomllib_sites(ast.parse(text))))
+    for case, text in fallbacks.items():
+        root = base / "opf-copy-parity" / case
+        _write(root, "tools/fb.py", text)
+        cases.append((case, lambda m, root=root: m.fallback_findings(root)))
+    differ = []
+    for case, rule in cases:
+        mine, theirs = _parity_outcome(sys.modules[__name__], rule), _parity_outcome(copy, rule)
+        if mine != theirs:
+            differ.append((case, mine, theirs))
+    return differ
+
+
+def _opf_copy_data_mismatches(root, pairs):
+    """The (this gate's path, the copy's path) pairs under root whose files are not byte-equal, or not
+    both readable."""
+    differ = []
+    for mine, theirs in pairs:
+        try:
+            same = (root / mine).read_bytes() == (root / theirs).read_bytes()
+        except OSError as exc:
+            same = "unreadable: {}".format(exc)
+        if same is not True:
+            differ.append((mine, theirs, same))
+    return differ
+
+
+def _opf_copy_parity_cases(base):
+    copy = _load_opf_copy()
+    if copy is None:
+        reason = "{} is absent, so there is no OPF copy to compare".format(OPF_COPY_REL)
+        for check_id in ("opf-copy/parity", "opf-copy/data-byte-equal"):
+            SKIPPED[check_id] = reason
+            print("SKIPPED {}: {}".format(check_id, reason))
+        return
+    check("opf-copy/parity", _opf_copy_parity(base, copy), [])
+    check("opf-copy/data-byte-equal", _opf_copy_data_mismatches(ROOT, OPF_COPY_DATA), [])
+
+
 def _expected_check_ids():
     try:
         manifest = tomllib.loads(_read_text(CHECKS_MANIFEST))
@@ -4315,7 +4453,7 @@ def self_test(report_path=None):
     expected = _expected_check_ids()
     if expected is None:
         return 2
-    for check_id in sorted(expected - _EXECUTED_SET):
+    for check_id in sorted(expected - _EXECUTED_SET - set(SKIPPED)):
         FAILURES.append("execution-set/missing: {}".format(check_id))
     for check_id in sorted(_EXECUTED_SET - expected):
         FAILURES.append("execution-set/extra: {}".format(check_id))
