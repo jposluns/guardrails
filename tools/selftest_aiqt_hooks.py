@@ -4420,6 +4420,26 @@ def _test_pgrep_self_match(failures):
 # Quiet rows with no read: single-quoted, escaped, dq-escaped, ansi-c, ansi-c-escaped, heredoc and
 # heredoc-escaped printed their $? as literal text; comment printed an empty line; dollar-dollar printed the
 # shell's process id and a ?; no-read holds no $?.
+# The rows case-after-assignment-command-word, case-after-redirect-command-word,
+# case-esac-after-assignment-command-word, case-esac-redirect-target, for-after-assignment-command-word and
+# those whose names start with continuation- were run the same way but with no environment at all (env -i),
+# each in a directory of its own. Fire rows among them that read the substitution's 0 under B and the earlier
+# command's 1 under P, as the printed RC= value or bare status showed: case-after-assignment-command-word and
+# case-after-redirect-command-word (after bash reported case as not found), case-esac-redirect-target (which
+# wrote a file named esac), continuation-dollar-paren, continuation-dquote-dollar-paren,
+# continuation-dollar-bracket and continuation-dollar-arith (after printing 1 for the joined $[1<<0] or
+# $((1<<0))), continuation-heredoc-operator, continuation-heredoc-delimiter (after printing the body x),
+# continuation-quoted-heredoc-body (after printing the body line x with its backslash), continuation-time
+# (time printed its report under both), continuation-dollar-status and continuation-before-equals.
+# case-esac-after-assignment-command-word printed 127 under B (the exit of the substitution, whose arm ran
+# esac as a command bash did not find) and 1 under P; continuation-cond printed zero under B (its $? -eq 1
+# test failed) and one under P; continuation-split-name wrote f0 under B and f1 under P (bash joined $e and
+# true into the empty $etrue). Quiet rows among them: continuation-split-arith printed 1 1 under both (bash
+# joined $( and ( into the arithmetic $((1)), so no substitution ran);
+# continuation-quoted-heredoc-operator and continuation-quoted-heredoc-delimiter printed their bodies as
+# literal text under both (bash joined the << and kept the backslash after EO, so EO and F did not end the
+# body); for-after-assignment-command-word exited 2 under both with a syntax error at the ( after for, and
+# ran nothing.
 _SAS_FIRE_ROWS = (
     ("(sas-fire-a) substitution in double quotes", 'false; echo "x $(true): rc=$?"'),
     ("(sas-fire-b) substitution with an argument", 'false; echo "x $(basename /a/b): rc=$?"'),
@@ -4616,6 +4636,43 @@ _SAS_FIRE_ROWS = (
     ("(sas-fire-subscript-time-after-assignment-command) read in a subscripted assignment after time, in a "
      "command after an assignment-only one, where the only command word is an unquoted substitution",
      'x=1; false; time a[0]=$? $(true); echo "a=${a[0]}"'),
+    ("(sas-fire-case-after-assignment-command-word) a later line after a case that an assignment makes the "
+     "command word, before a << shift in a subscript",
+     'false; x=1 case a in b; a[1<<0]=5\nfalse; RC=$? env "SHA=$(true)" printenv RC'),
+    ("(sas-fire-case-after-redirect-command-word) a later line after a case that a redirection makes the "
+     "command word, before a << shift in a subscript",
+     'false; >/dev/null case a in b; a[1<<0]=5\nfalse; RC=$? env "SHA=$(true)" printenv RC'),
+    ("(sas-fire-case-esac-after-assignment-command-word) read after a substitution whose case arm runs esac "
+     "after an assignment as a command", 'false; echo $(case a in a) x=1 esac ;; b) true;; esac) $?'),
+    ("(sas-fire-case-esac-redirect-target) read after a substitution whose case arm redirects to a file "
+     "named esac", 'false; echo $(case a in a) > esac ;; b) true;; esac) $?'),
+    ("(sas-fire-continuation-dollar-paren) read after a substitution whose $ and ( a line continuation "
+     "splits", 'false; echo $\\\n(true) $?'),
+    ("(sas-fire-continuation-dquote-dollar-paren) read after a substitution whose $ and ( a line "
+     "continuation splits, in double quotes", 'false; echo "$\\\n(true) $?"'),
+    ("(sas-fire-continuation-dollar-bracket) a later line after a $[...] whose $ and [ a line continuation "
+     "splits, holding a << shift", 'echo $\\\n[1<<0]\nfalse; RC=$? env "SHA=$(true)" printenv RC'),
+    ("(sas-fire-continuation-dollar-arith) a later line after a $((...)) whose $ and (( a line continuation "
+     "splits, holding a << shift", 'echo $\\\n((1<<0))\nfalse; RC=$? env "SHA=$(true)" printenv RC'),
+    ("(sas-fire-continuation-heredoc-operator) a body read after a substitution in a word, where a line "
+     "continuation splits the <<", 'false; cat <\\\n<EOF $(true)\n$?\nEOF'),
+    ("(sas-fire-continuation-heredoc-delimiter) a later line after a here-document whose delimiter word a "
+     "line continuation splits", 'cat <<E\\\nOF\nx\nEOF\nfalse; RC=$? env "SHA=$(true)" printenv RC'),
+    ("(sas-fire-continuation-quoted-heredoc-body) a later line after a here-document under a quoted "
+     "delimiter whose body line ends in a backslash",
+     "cat <<'EOF'\nx \\\nEOF\nfalse; RC=$? env \"SHA=$(true)\" printenv RC"),
+    ("(sas-fire-continuation-time) assignment read after time that a line continuation splits",
+     'false; ti\\\nme RC=$? env "SHA=$(true)" printenv RC'),
+    ("(sas-fire-continuation-cond) read after a substitution in a [[ that a line continuation splits",
+     'false; [\\\n[ -n "$(true)x" && $? -eq 1 ]] && echo one || echo zero'),
+    ("(sas-fire-continuation-dollar-status) read whose $ and ? a line continuation splits",
+     'false; echo $(true) $\\\n?'),
+    ("(sas-fire-continuation-split-name) redirection read after a subscripted assignment's substitution "
+     "where a line continuation splits the name of the only command word, an unquoted $e",
+     'false; a[0]=$(true) $e\\\ntrue >"f$?"'),
+    ("(sas-fire-continuation-before-equals) a later line after an assignment whose ] and = a line "
+     "continuation splits, before a << shift in a subscript",
+     'a[1]\\\n=1 b[1<<0]=5\nfalse; RC=$? env "SHA=$(true)" printenv RC'),
 )
 _SAS_QUIET_ROWS = (
     ("(sas-quiet-d) read before every substitution", 'false; echo "rc=$? $(true)"'),
@@ -4775,6 +4832,16 @@ _SAS_QUIET_ROWS = (
     ("(sas-quiet-subscript-continuation-quoted-command-word) redirection read after a subscripted "
      "assignment's substitution where a line continuation joins $e to quoted text",
      'false; a[0]=$(true) $e\\\n"x" >"f$?"'),
+    ("(sas-quiet-continuation-split-arith) a $((...)) whose $( and ( a line continuation splits, not a "
+     "substitution", 'false; echo $(\\\n(1)) $?'),
+    ("(sas-quiet-continuation-quoted-heredoc-operator) a quoted here-document body whose << a line "
+     "continuation splits", 'false; cat <\\\n<"EOF"\n$(true) $?\nEOF'),
+    ("(sas-quiet-continuation-quoted-heredoc-delimiter) a quoted here-document body where a line "
+     "continuation splits a line that would match the delimiter once joined",
+     "cat <<'EOF'\nEO\\\nF\n$(true) $?\nEOF"),
+    ("(sas-quiet-for-after-assignment-command-word) a later line after a for that an assignment makes the "
+     "command word, which bash refuses before running anything",
+     'false; x=1 for ((i=1<<0;i<1;i++)); do :; done\nfalse; RC=$? env "SHA=$(true)" printenv RC'),
 )
 
 
@@ -4825,6 +4892,9 @@ def _test_status_after_subst(failures):
     if _decision(handler, "echo $? " + deep) != "allow":
         failures.append("(sas-deep-no-read) a nesting past the bound with a $? only before it must allow "
                         "silently")
+    if _decision(handler, deep + " $\\\n?") != "allow-note":
+        failures.append("(sas-deep-continuation) a $ and ? split by a line continuation past the nesting bound "
+                        "must note the unread rest, read with the continuation removed")
     for label, data, field in (
             ("(sas-unreadable-tool-missing)", {"hook_event_name": aiqt_hooks.PRETOOL,
                                                "tool_input": {"command": "echo $(true) $?"}}, "tool_name"),

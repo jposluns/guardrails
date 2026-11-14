@@ -9470,6 +9470,20 @@ _SUBST_STATUS_UNREADABLE_NOTE = (
     "guard never blocks a call, so it is allowed: the check was not run, not passed.")
 
 
+def _subst_status_delimiter_line(text, i, delimiter, strip):
+    """The index in text where the first line from i (a line start) that ends a here-document with this
+    delimiter starts (with its leading tabs removed first under <<-, strip), or len(text) when no line does."""
+    n = len(text)
+    while i < n:
+        end = text.find("\n", i)
+        end = n if end < 0 else end
+        line = text[i:end]
+        if (line.lstrip("\t") if strip else line) == delimiter:
+            return i
+        i = end + 1
+    return n
+
+
 class _SubstStatusScan:
     """One forward reading of a Bash command's raw text for status_after_subst, in time linear in its length.
     It keeps, for the simple command being read, which expansion phases (its words, its leading assignment
@@ -9496,10 +9510,13 @@ class _SubstStatusScan:
     character and the ? after $$ are never a read. Past _SUBST_STATUS_MAX_DEPTH nested constructs the reading
     stops and records where (deep)."""
 
-    __slots__ = ("text", "fired", "deep", "heredocs", "phase", "subs", "pending", "judge", "depth", "held")
+    __slots__ = ("text", "raw", "index", "fired", "deep", "heredocs", "phase", "subs", "pending", "judge", "depth",
+                 "held")
 
-    def __init__(self, text):
+    def __init__(self, text, raw=None, index=None):
         self.text = text
+        self.raw = raw  # the command before its line continuations were removed, or None when it held none
+        self.index = index  # for each character of text, its index in raw, then len(raw) (_join_continuations)
         self.fired = False
         self.deep = None
         self.heredocs = []  # each here-document whose body starts at the next newline (_heredoc_operator)
@@ -9609,14 +9626,16 @@ class _SubstStatusScan:
         so a << inside it is a shift, not a here-document, and its &&, || and | do not end a command. A
         reserved word such as then or do right after the )) or ]] that closes one of these ends it, and the
         next word is in command position (for (( ... )) do x=$? ..., if [[ ... ]] then ...); so is the word
-        after time -p, time -- or coproc. A prefix word such as time, ! or then is read as one, and a [[ as a
-        conditional, only before the command's first assignment or redirection word (reserved), as bash 5.3.9
-        did. A word in command position that starts NAME[ (an assignment's subscript, or a command word such as
-        a[1<<0]) has that subscript read to its matching ] (_bracket), as bash 5.3.9 did, so a << there is a
-        shift, not a here-document, and is an assignment when an = or += follows that ] (_subscript); a case
-        pattern or a redirection target is not read that way. A line continuation is removed, as bash removed
-        it: between words it is skipped as a blank, and inside a word it is skipped, though a parameter name is
-        not joined across it (status_after_subst says where that misreads)."""
+        after time -p, time -- or coproc. A prefix word such as time, ! or then is read as one, a [[ as opening
+        a conditional, a case as opening a case, a for as opening a for (( ... )) header and an esac in a case
+        arm as closing its case, only before the command's first assignment or redirection word (reserved) and
+        not as a redirection target, as bash 5.3.9 did. A word in command position that starts NAME[ (an assignment's
+        subscript, or a command word such as a[1<<0]) has that subscript read to its matching ] (_bracket), as
+        bash 5.3.9 did, so a << there is a shift, not a here-document, and is an assignment when an = or +=
+        follows that ] (_subscript); a case pattern or a redirection target is not read that way. The text holds
+        no line continuation that bash removed (_subst_status_reading), except where the join that removed them
+        read the quoting otherwise (status_after_subst says where): such a continuation is skipped, as a blank
+        between words, but the text on its two sides is not joined."""
         text = self.text
         n = len(text)
         outer = (self.phase, self.subs, self.pending, self.held)
@@ -9648,13 +9667,17 @@ class _SubstStatusScan:
                         compound = True
                     elif lead and reserved and not (assign or redirect) and short == "[[":
                         cond = 0
+                    # A case, a for or an esac in a case arm after an assignment or redirection word of its
+                    # command, or as a redirection target, is a command word: bash 5.3.9 ran each as a command
+                    # there (x=1 case a in b, >/dev/null for and x=1 esac each reported the word as not found).
+                    keyword = lead and reserved and not (assign or redirect)
                     if cases and cases[-1] == "header" and short == "in":
                         cases[-1] = "pattern"
-                    elif cases and short == "esac" and (cases[-1] == "pattern" or lead):
+                    elif cases and short == "esac" and (cases[-1] == "pattern" or keyword):
                         cases.pop()
-                    elif lead and short == "case":
+                    elif keyword and short == "case":
                         cases.append("header")
-                    arith_for = lead and not (assign or redirect) and short == "for"
+                    arith_for = keyword and short == "for"
                     option = (short == "-p" and timed == "time") or (short == "--" and timed in ("time", "-p"))
                     prefix = reserved and (option or short in _SUBST_STATUS_PREFIX_WORDS)
                     if not (assign or redirect or bare) and not (lead and prefix):
@@ -10019,25 +10042,26 @@ class _SubstStatusScan:
             # An unquoted delimiter leaves the body expanded with the command's redirections, so it is read
             # with that command's substitutions (its subs list, final once the command ends) and whether a
             # redirection before this one held one; a quoted delimiter leaves the body literal text.
-            read = self.judge and delimiter == word
-            self.heredocs.append((delimiter, strip, read, self.subs, self.subs[_SUBST_STATUS_REDIRECTS]))
+            quoted = delimiter != word
+            read = self.judge and not quoted
+            self.heredocs.append((delimiter, strip, quoted, read, self.subs, self.subs[_SUBST_STATUS_REDIRECTS]))
         return min(i, n)
 
     def _heredoc_bodies(self, i):
         """From i (the start of a line), the body of each here-document recorded on the line just ended: each
         runs to its delimiter line, or to the end of the text. A body under an unquoted delimiter is read
-        (_heredoc_text); the index after the last body."""
+        (_heredoc_text); the index after the last body. bash 5.3.9 removed a line continuation in a body under
+        an unquoted delimiter, as the join before this reading did, but kept one in a body under a quoted
+        delimiter, so such a body's delimiter line is found in the text as it was before that join (raw)."""
         text = self.text
         n = len(text)
-        for delimiter, strip, read, owner, redirect_before in self.heredocs:
+        for delimiter, strip, quoted, read, owner, redirect_before in self.heredocs:
             start = i
-            while i < n:
-                end = text.find("\n", i)
-                end = n if end < 0 else end
-                line = text[i:end]
-                if (line.lstrip("\t") if strip else line) == delimiter:
-                    break
-                i = end + 1
+            if quoted and self.index is not None and 0 < i < n:
+                at = _subst_status_delimiter_line(self.raw, self.index[i - 1] + 1, delimiter, strip)
+                i = bisect.bisect_left(self.index, at)  # the first character at or after that raw line
+            else:
+                i = _subst_status_delimiter_line(text, i, delimiter, strip)
             if read and not self.fired and self.deep is None:
                 self._heredoc_text(start, min(i, n), owner[_SUBST_STATUS_WORDS] or owner[_SUBST_STATUS_ASSIGNS]
                                    or redirect_before)
@@ -10075,14 +10099,24 @@ class _SubstStatusScan:
 
 def _subst_status_reading(command):
     """(fired, deep) for command: fired is True when bash expands a $? (or ${?...}) read of some simple
-    command after a command substitution in it (_SubstStatusScan); deep is where the reading stopped at the
-    nesting bound, or None when it read the whole command. A command holding no '$?' and no '${?' text is not
-    scanned (a ${#?} read, the length of $?, is never taken for one)."""
+    command after a command substitution in it (_SubstStatusScan); deep is the index in command where the
+    reading stopped at the nesting bound, or None when it read the whole command. The scan reads the command
+    with its line continuations removed first (_join_continuations_walk), as bash removed them before it read
+    the words, so a continuation that splits a $ from the (, {, [, (( or ? after it, an operator such as <<, a
+    reserved word or a parameter name is read as the joined text. A command holding no '$?' and no '${?'
+    text once they are removed is not scanned (a ${#?} read, the length of $?, is never taken for one)."""
+    if "$" not in command:
+        return False, None
+    raw, index = None, None
+    if chr(92) + "\n" in command:
+        raw = command
+        command, index = _join_continuations_walk(raw)
     if "$?" not in command and "${?" not in command:
         return False, None
-    scan = _SubstStatusScan(command)
+    scan = _SubstStatusScan(command, raw, index)
     scan.commands(0, False)
-    return scan.fired, scan.deep
+    deep = scan.deep
+    return scan.fired, (index[deep] if index is not None and deep is not None else deep)
 
 
 def _subst_status_unreadable(field, present, value, kind):
@@ -10126,11 +10160,13 @@ def status_after_subst(data):
     $((...)) may not, and a named file descriptor glued to its redirection, as in {fd}>f, is no such word):
     then the subscripted word is read as any leading assignment is, its value before its subscript (false;
     a[$?]=$(exit 3) $e set index 3), as bash 5.3.9 expanded it when those words expanded to nothing, and the
-    note is a false alarm where they expand to a command. A time, !, then or other reserved word after an
-    assignment or redirection word is a command word, as bash 5.3.9 ran it (false; a[0]=$(cmd) time >"f$?" does
-    not fire). Another tool silently allows. A tool_name that is missing, empty or not a string, a tool_input
-    that is not an object, and a command that is missing, empty or not a string each allow with a note naming
-    that field (_subst_status_unreadable), never silently and never with a deny.
+    note is a false alarm where they expand to a command. A time, !, then, case, for or other reserved word
+    (and an esac in a case arm) after an assignment or redirection word is a command word, as bash 5.3.9 ran it
+    (false; a[0]=$(cmd) time >"f$?" does not fire, and false; x=1 case a in b reported case as not found). The
+    command is read with its line continuations removed first, as bash removed them. Another tool silently
+    allows. A tool_name that is missing, empty or not a string, a tool_input that is not an object, and a
+    command that is missing, empty or not a string each allow with a note naming that field
+    (_subst_status_unreadable), never silently and never with a deny.
 
     HONEST RESIDUAL: it reads the command text only, one simple command at a time, so it does not see a $? read
     in a later command or inside a function body after a command that took a substitution's exit (an
@@ -10147,46 +10183,53 @@ def status_after_subst(data):
     after coproc NAME (coproc foo a[1<<0]=5), which bash 5.3.9 read as one word to its matching ] but the scan
     reads as an argument of the command word NAME, so that << is read as a here-document; a << in a subscript
     inside a compound array assignment (a=([1<<0]=5)), whose parentheses the scan reads as a subshell, so that
-    << is read as a here-document; a line continuation inside a word before its = (a[1]<backslash-newline>=1 or
-    x<backslash-newline>=1), which bash removed first, while the scan reads that word as the command word, so a
-    << in a later NAME[ word's subscript is read as a here-document; a ${#?} read (the length of $?), which is
-    never taken for a read (a command with no other $? or ${? text is not scanned at all); a double-quoted list
-    expansion other than $@, ${@} or ${NAME[@]} alone ("${e[@]#x}", "${@:2}", "${!e[@]}") or a brace expansion
-    such as {$e,} as the only word after a subscripted assignment, which bash 5.3.9 expanded to no word where
-    the list or e was empty, while the scan reads it as a command word and does not count that assignment's
-    substitution; a parameter name that a line continuation splits, as the only word after a subscripted
-    assignment ($e<backslash-newline>true or $e<backslash-newline>2), which bash 5.3.9 joined into one empty
-    name ($etrue: false; a[0]=$(true) $e<backslash-newline>true >"f$?" wrote f0), while the scan reads the text
-    after the continuation as making a command word and does not count that assignment's substitution; or a
-    read after an extglob pattern such as @(x|y) under shopt -s extglob, whose | and parentheses are read as
-    separators and a subshell. An assignment-only command reading $? after a substitution in the same or an
-    earlier assignment (x=$(cmd) rc=$?, x="$(cmd)$?", and a[...]=$(cmd) rc=$? whatever the subscript holds,
-    a[$?]=$(cmd) included) is not noted: bash 5.3.9 gives the substitution's exit there, which is often the
-    status wanted. The note is a false alarm where the substitution runs nothing or another command sets $?
-    first: a substitution in a ${...} operand that bash does not expand (${HOME:-$(cmd)} with HOME set,
-    ${unset:+$(cmd)}) or in a [[ ]] operand that && or || skips, and a read in a for (( ... )) header's third
-    expression, which bash evaluates after the loop body; so it is where the shell runs in posix mode or is
-    dash. It is also one after a $[...] whose body holds a ${...} with a ] inside it (echo $[ ${x/]/1}<<0 ]),
-    which bash 5.3.9 ended at that ] and failed at run time, so a read on a later line notes though bash never
-    ran it. It is one for a redirection target shaped like an assignment (false; 2> x=$(cmd) RC=$? env, or 2>
-    a[0]=$(cmd)), which the scan reads as a leading assignment while bash read RC=1, and for a subscripted
-    assignment before command words that may expand to nothing (_SubstStatusScan._end) but expand to a command
-    (e=true; false; a[0]=$(cmd) $e >"f$?" and set -- x; false; a[0]=$(cmd) "$@" >"f$?" each wrote f1), where
-    bash rejected the assignment without expanding it. The scan counts ${e:-x}, ${e:-""} and $0 as possibly
-    empty (e=" "; false; a[0]=$(true) ${e:-x} >"f$?" wrote f0), so the note is also a false alarm where one of
-    them stands there and expands to a word (with e unset, each of the three wrote f1). Bash versions other
-    than 5.3.9 were not observed. The reading is approximate: a $(( is always read as arithmetic, and a (( that
-    opens a command or follows a for that does as arithmetic, never as nested subshells, where a command opens
-    at the start of the text, after a separator, after !, time, time -p, time --, time -p --, coproc or a
-    reserved word such as do or then (each read as such only before the command's first assignment or
-    redirection word, as bash 5.3.9 did), and after a then, do, {, } or similar word right after the )) or ]]
-    that closes a (( )), a for (( ... )) header or a [[ ]] (not after coproc NAME or function NAME); a $[...]
-    expansion, and a NAME[ subscript that starts a word in command position, as one word to the matching ], so
-    a << inside is a shift (not in a compound assignment's subscript or after coproc NAME), and such a word as
-    an assignment when an = or += follows that ], whatever the subscript holds; a process substitution is never
-    counted; a $ and ? split by a line continuation are not seen as a read; and past 64 nested constructs the
-    rest is not read, which notes as unchecked only when that rest holds $? or ${? text, which may not be a
-    read (_SUBST_STATUS_DEEP_NOTE)."""
+    << is read as a here-document, and a substitution there, which is then not counted for its command (false;
+    declare -a arr=($(true)) rc=$? set rc to 0); a line continuation after a single quote in a here-document
+    body (cat <<EOF with it's in its body, then false; echo $<backslash-newline>(true) $? on a later line, read
+    0), where the join that removes continuations (_join_continuations) reads that quote as opening a quoted
+    string and keeps the continuations up to the next single quote or the end of the text, so the text on their
+    two sides is read apart; that join models no here-document and reads a case pattern's ) inside a
+    substitution as closing it, so it can read quoting otherwise after either; a ${#?} read (the length of $?),
+    which is never taken for a read (a command with no other $? or ${? text is not scanned at all); a
+    double-quoted list expansion other than $@, ${@} or ${NAME[@]} alone ("${e[@]#x}", "${@:2}", "${!e[@]}") or
+    a brace expansion such as {$e,} as the only word after a subscripted assignment, which bash 5.3.9 expanded
+    to no word where the list or e was empty, while the scan reads it as a command word and does not count that
+    assignment's substitution; or a read after an extglob pattern such as @(x|y) under shopt -s extglob, whose
+    | and parentheses are read as separators and a subshell. An assignment-only command reading $? after a
+    substitution in the same or an earlier assignment (x=$(cmd) rc=$?, x="$(cmd)$?", and a[...]=$(cmd) rc=$?
+    whatever the subscript holds, a[$?]=$(cmd) included) is not noted: bash 5.3.9 gives the substitution's exit
+    there, which is often the status wanted. The note is a false alarm where the substitution runs nothing or
+    another command sets $? first: a substitution in a ${...} operand that bash does not expand
+    (${HOME:-$(cmd)} with HOME set, ${unset:+$(cmd)}) or in a [[ ]] operand that && or || skips, and a read in
+    a for (( ... )) header's third expression, which bash evaluates after the loop body; so it is where the
+    shell runs in posix mode or is dash. It is also one after a $[...] whose body holds a ${...} with a ]
+    inside it (echo $[ ${x/]/1}<<0 ]), which bash 5.3.9 ended at that ] and failed at run time, so a read on a
+    later line notes though bash never ran it, and for a read after a $(...) whose body starts a command with a
+    redirection word and then case or then, or a case arm with a redirection word and then esac, each read as
+    the command word, as bash 5.3.9 read it in the command, but when bash ran that substitution it reported a
+    syntax error (for case and then, quoting the body with the redirection moved after that word) and ran none
+    of the command (false; echo $(>/dev/null case a in b) $? printed nothing and exited 1). It is one for a
+    redirection target shaped like an assignment (false; 2> x=$(cmd) RC=$? env, or 2> a[0]=$(cmd)), which the
+    scan reads as a leading assignment while bash read RC=1, and for a subscripted assignment before command
+    words that may expand to nothing (_SubstStatusScan._end) but expand to a command (e=true; false;
+    a[0]=$(cmd) $e >"f$?" and set -- x; false; a[0]=$(cmd) "$@" >"f$?" each wrote f1), where bash rejected the
+    assignment without expanding it. The scan counts ${e:-x}, ${e:-""} and $0 as possibly empty (e=" "; false;
+    a[0]=$(true) ${e:-x} >"f$?" wrote f0), so the note is also a false alarm where one of them stands there and
+    expands to a word (with e unset, each of the three wrote f1). Bash versions other than 5.3.9 were not
+    observed. The reading is approximate: a $(( is always read as arithmetic, and a (( that opens a command or
+    follows a for that does as arithmetic, never as nested subshells, where a command opens at the start of the
+    text, after a separator, after !, time, time -p, time --, time -p --, coproc or a reserved word such as do
+    or then (each read as such only before the command's first assignment or redirection word, as bash 5.3.9
+    did, and so are case, for and an esac in a case arm), and after a then, do, {, } or similar word right
+    after the )) or ]] that closes a (( )), a for (( ... )) header or a [[ ]] (not after coproc NAME or
+    function NAME); a $[...] expansion, and a NAME[ subscript that starts a word in command position, as one
+    word to the matching ], so a << inside is a shift (not in a compound assignment's subscript or after coproc
+    NAME), and such a word as an assignment when an = or += follows that ], whatever the subscript holds; a
+    process substitution is never counted; the command is read with its line continuations removed first
+    (_join_continuations), and a here-document body under a quoted delimiter, where bash 5.3.9 kept them, ends
+    at the delimiter line of the text as written; and past 64 nested constructs the rest is not read, which
+    notes as unchecked only when that rest holds $? or ${? text once its line continuations are removed, which
+    may not be a read (_SUBST_STATUS_DEEP_NOTE)."""
     if data.get("hook_event_name") != PRETOOL:
         return _hard_block("aiqt_hooks: status_after_subst wired to unexpected event {!r}; failing "
                            "closed".format(data.get("hook_event_name")))
@@ -10204,7 +10247,8 @@ def status_after_subst(data):
     fired, deep = _subst_status_reading(command)
     if fired:
         return _allow_note(_SUBST_STATUS_NOTE)
-    if deep is not None and ("$?" in command[deep:] or "${?" in command[deep:]):
+    rest = _joined_text(command[deep:]) if deep is not None else ""
+    if "$?" in rest or "${?" in rest:
         return _allow_note(_SUBST_STATUS_DEEP_NOTE)
     return _allow()
 
