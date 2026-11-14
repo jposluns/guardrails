@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.0.5"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "6adf28f904ffbd28a624bcc5abf4d2cadad5132ba6cf5709799502f9d4fbddd1"
+tree-sha256 = "79852f9c024a5a143c3958529bad9e21c3953dcea2b2471ecfa969d6577eabd6"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -4687,8 +4687,8 @@ sha256 = "b51f09169bbcfd33a07aa580927d62f3e8d07c613b03662d69b17e541cd10202"
 
 [[sources]]
 path = "tools/selftest_checks.toml"
-bytes = 240768
-sha256 = "b3de67dd6a542320901038890c5c4babffe769d3c75a869e813697a617864aa3"
+bytes = 240988
+sha256 = "c7922e6f0a785eb094afc55f3c8ba09de8058d11343ec19bdc1518aee932082c"
 
 [[sources]]
 path = "tools/selftest_ci_status.py"
@@ -4697,28 +4697,28 @@ sha256 = "982b66da8d9e1a5d4f0a3c084bc699e32aee547d7fe7d3de1841f6a38e84b02f"
 
 [[sources]]
 path = "tools/selftest_git_fixture_env.py"
-bytes = 476029
-sha256 = "f23b2c4350fa70129d7108ef4d5e89ddabba77d79031052ad5535d00034aa757"
+bytes = 486493
+sha256 = "a07e2a8ee2415159124578ba05fd7dae011d7f74ac10c097038f710c8c2ecdd2"
 
 [[sources]]
 path = "tools/selftest_git_fixture_env_config_combined.py"
-bytes = 16864
-sha256 = "a24680b1c642a5477f9c0a1bb04e50a421a40411d1a4e3251534ab69af1d50ae"
+bytes = 18198
+sha256 = "edad53e519405672b9ea8551c3aa42767b333ed3eba0e12d322872a0db8ba98a"
 
 [[sources]]
 path = "tools/selftest_git_fixture_env_config_malformed.py"
-bytes = 7853
-sha256 = "1afb0a2cda984296a85f4a1fd4e96bfe213d38ebd9f5d5a0b4dc760603bf7358"
+bytes = 9231
+sha256 = "e05d38504eba1ae1407e399392c67e92aeb06e31a715850e31935e22b6f90910"
 
 [[sources]]
 path = "tools/selftest_git_fixture_env_config_system.py"
-bytes = 20290
-sha256 = "99ab55b196362e770f00811e84c2a9f962c1d1ea1d7f871169ca2464d0f84d67"
+bytes = 21699
+sha256 = "06489590ca4f0d9edfbcedd7cb9d1017a1895585381e6ab6dc69917eaff6de8e"
 
 [[sources]]
 path = "tools/selftest_git_fixture_env_core.py"
-bytes = 210344
-sha256 = "406b23dea82036c54d36821652a2e3b006caf41ec4a194a0c0d65afb55c6ac06"
+bytes = 225087
+sha256 = "10a6a4433dd3c1c7d697936df41d0e0105475fab5f40771421f431ed5668219c"
 
 [[sources]]
 path = "tools/selftest_opf_render.py"

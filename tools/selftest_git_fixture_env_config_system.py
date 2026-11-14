@@ -17,6 +17,19 @@ env/lifecycle-probe-timeout-vectors pins that path over scripted launches.
 
   selftest_git_fixture_env_config_system.py                              exit 0 pass, 1 failure
   selftest_git_fixture_env_config_system.py --execution-report ABS_PATH  also write check IDs
+  selftest_git_fixture_env_config_system.py --shard K/N                  run shard K of N only
+  selftest_git_fixture_env_config_system.py --list-shard K/N             print shard K, run none
+
+SHARDS: --shard K/N (1 <= K <= N <= 64; it may stand beside --execution-report) runs the lane's
+controls and lifecycle probes and only the members of shard K, the entries at zero-based roster
+positions i with i mod N = K - 1 in the sorted registered roster (_shard_members), so shards
+1..N together run each member exactly once (roster/shard-partition-real). The checks of a member
+another shard runs are left to that shard, and the OPF lifecycle finding folds in only this
+shard's member runs; a pass covers this shard's members only. --list-shard K/N prints the
+members shard K runs, one command per line, and runs nothing. A malformed or out-of-range value,
+or a shard holding no member in a run, is exit 2, never a full or an empty run. Without --shard
+the lane runs every member as before. RESIDUAL: a shard is never shorter than its longest member
+(each member keeps its own bound, CONFIG_MEMBER_BOUNDS), and every shard repeats the controls.
 
 Exit 2 is cannot-evaluate (a harness/setup error, or a member or lifecycle probe that reached its
 time bound), never a pass; the engine fails closed exactly as the shared module documents."""
@@ -309,7 +322,9 @@ def _opf_home_lifecycles(config_results):
         if (module, entry) not in results:
             problems.append("{}.{}: missing lifecycle observation".format(module, entry))
         check(check_id, results.get((module, entry)), (0, [[[True, True, True, True]], True]))
-    got, cause = _lifecycle_finding(roster, config_results, definite, problems, probes=probes)
+    # A sharded run folds in only the member runs of its own shard (_gfe._shard_scope).
+    got, cause = _lifecycle_finding(_gfe._shard_scope(roster), config_results, definite, problems,
+                                    probes=probes)
     check("env/registered-opf-lifecycles", got, ([], []), cause)
 
 
@@ -322,6 +337,9 @@ def _system_lane(base):
           _LIFECYCLE_TIMEOUT_EXPECTED)
     fx = _config_poison_fixture(base)
     roster, env = fx["roster"], fx["env"]
+    members = _gfe._shard_select(_gfe._config_lane_roster("system", roster))
+    if members is None:
+        return 2
     marker, monitor_marker = fx["marker"], fx["monitor_marker"]
     control, config = fx["control"], fx["config"]
     # The fixture build itself fired the caller hooks and the fsmonitor; clear both markers so
@@ -354,7 +372,7 @@ def _system_lane(base):
                            capture_output=True, timeout=60)
     check("config/system-control", (probe.returncode, bool(monitor_marker.read_bytes())),
           (0, True))
-    system_results = _config_results(roster, system_env, marker, monitor_marker, system=True)
+    system_results = _config_results(members, system_env, marker, monitor_marker, system=True)
     offenders, cause = _registered_offenders(system_results)
     check("config/registered-system", offenders, [], cause)
     _opf_home_lifecycles(system_results)
@@ -362,4 +380,4 @@ def _system_lane(base):
 
 if __name__ == "__main__":
     _gfe.SUITE_ID = SUITE_ID
-    _selftest_exit_report.exit_with(_gfe.main(_gfe._parse_argv(sys.argv[1:]), _system_lane))
+    _selftest_exit_report.exit_with(_gfe._config_lane_main(sys.argv[1:], "system", _system_lane))
