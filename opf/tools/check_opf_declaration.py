@@ -10,13 +10,21 @@
                                                   a usage error (exit 2)
 
 Its root is the OPF tree, the directory above this file's tools/ directory (opf/ while OPF is nested in its parent
-repository, the checkout root once it stands alone). Every path below is relative to that root, and the gate reads
-nothing outside it: it imports only helpers beside this file (_opf_declaration, _opf_store and, for an
-execution-reported self-test, _selftest_exit_report); it opens every input without following a symlink as its
-last component (O_NOFOLLOW); an input whose directory, its symlinks resolved, is not the resolved OPF root or
-under it (_inside_root: a symlinked directory that leads out of the tree) is a cannot-evaluate and is never
-opened; and rule 6's walk enters no symlinked directory. A directory replaced by another process between that
-check and the open is not detected. It applies the section 16.1 rules that move with OPF:
+repository, the checkout root once it stands alone). Every path below is relative to that root. The gate reads
+its inputs (the declaration file, VERSION, the surfaces and rule 6's documents) through _read_input: it opens
+each without following a symlink as its last component (O_NOFOLLOW), and an input whose directory, its symlinks
+resolved, is not the resolved OPF root or under it (_inside_root: a symlinked directory that leads out of the
+tree) is a cannot-evaluate and is never opened; rule 6's walk enters no symlinked directory. It loads its helpers
+the same way: from _load() on, _CheckedFinder, first in sys.meta_path, reads each module the gate imports from
+tools/ (_opf_declaration and _opf_store, and every module they import from there) through _read_input and runs
+those bytes, reading no bytecode cache, so a helper that is a symlink or lies through a symlinked directory is a
+cannot-evaluate and is never run, and a helper in another form (a package, an extension module, a bytecode file)
+cannot be imported. Three limits remain: the execution-report helper _selftest_exit_report is imported the
+ordinary way at start-up, before that finder is installed, so a symlink in its place is followed; a hard link
+inside the tree to a file outside it is a regular file inside the tree and is read (or run) as one; and a
+directory replaced by another process between the containment check and the open is not detected. The
+interpreter and its standard library are read from where they are installed. It applies the section 16.1 rules
+that move with OPF:
 
   1. the declaration file tools/opf-declaration.toml is a regular file whose bytes are well-formed
      (_opf_declaration.parse_declaration: the four fields, typed, in the canonical form) and do not contradict the
@@ -44,10 +52,10 @@ its self-test keeps its own registered checks; this gate is the OPF-local half t
 
 An input that is not a regular file of at most MAX_READ_BYTES bytes (MAX_OPF_VERSION_BYTES for VERSION), lies
 outside the OPF tree through a symlinked directory, cannot be read or (but for the declaration file) is not UTF-8,
-a directory rule 6 cannot list, and a helper module that cannot be imported are each a cannot-evaluate (exit 2),
-never a finding or a clean exit; so is any exception other than a KeyboardInterrupt that leaves the gate body.
-Each such site catches with a bare except and takes the exception with sys.exception(); a KeyboardInterrupt, told
-by its real type, propagates.
+a directory rule 6 cannot list, and a helper module that cannot be imported (one _CheckedFinder refuses included)
+are each a cannot-evaluate (exit 2), never a finding or a clean exit; so is any exception other than a
+KeyboardInterrupt that leaves the gate body. Each such site catches with a bare except and takes the exception
+with sys.exception(); a KeyboardInterrupt, told by its real type, propagates.
 
 Its entry point opens with opf.py's canonical --self-test statement, which opf.py's aggregator requires first in
 every opf/tools module that binds self_test, and then runs the child-status guard, an inline copy of
@@ -57,13 +65,15 @@ direct --self-test launch takes the first statement and so runs unguarded; the s
 
 The self-test runs over scratch copies of this tree's inputs in a temporary directory, each with one edit, and
 shows each rule red on its edit (both digest comparisons of rule 2 each on a carried digest that is not the file's,
-and the containment check on a symlinked directory that leads out of the tree) and each revert it names red, a
-mutant of this file written to a scratch directory and loaded with importlib; the reverts are the ones it names,
-not every possible edit. Its check ids are registered as suite opf-declaration-local-selftest in OPF's own
-tools/selftest_checks.toml, reconciled by tools/check_opf_selftest_execution.py beside this file, which the OPF
-runner tools/run_all_checks.sh launches, and, while OPF is nested, in the parent's tools/selftest_checks.toml,
-reconciled by the parent's tools/check_selftest_execution.py; each reconciles the same list against this file's
-check() sites, so the two lists hold the same ids.
+the containment check on a symlinked directory that leads out of the tree, the helper load on stand-in helpers
+where one is a symlink, where tools/ is one and where one is a package, and its own VERSION read on a VERSION
+just inside, at and one byte over the cap) and each revert it names red, a mutant of this file written to a
+scratch directory and loaded with importlib; the reverts are the ones it names, not every possible edit. Its check
+ids are registered as suite opf-declaration-local-selftest in OPF's own tools/selftest_checks.toml, reconciled by
+tools/check_opf_selftest_execution.py beside this file, which the OPF runner tools/run_all_checks.sh launches, and,
+while OPF is nested, in the parent's tools/selftest_checks.toml, reconciled by the parent's
+tools/check_selftest_execution.py; each reconciles the same list against this file's check() sites, so the two
+lists hold the same ids.
 """
 import sys
 
@@ -80,6 +90,8 @@ if tuple(sys.version_info[:2]) < (3, 14):
     os._exit(2)
 
 import hashlib
+import importlib.abc
+import importlib.machinery
 import importlib.util
 import io
 import os
@@ -469,11 +481,65 @@ def surface_problems(documents):
             "the file".format(rel) for rel in sorted(set(documents) - set(DOC_SURFACES))]
 
 
+class _CheckedSource(importlib.abc.SourceLoader):
+    """The loader of one module beside this file: it runs the source bytes _read_input returned for it and reads
+    nothing else, so no bytecode cache is read (or, with no source timestamp, written)."""
+
+    def __init__(self, path, data):
+        self._path = str(path)
+        self._data = data
+
+    def get_filename(self, fullname):
+        return self._path
+
+    def get_data(self, path):
+        if path != self._path:
+            raise OSError("{} is not the checked source {}".format(path, self._path))
+        return self._data
+
+
+class _CheckedFinder:
+    """The finder, first in sys.meta_path, of the modules in the tools/ directory of the OPF tree `root`: a
+    module the standard path finder finds there as a source file is read through _read_input (the containment
+    check, then a regular, non-symlink file of at most MAX_READ_BYTES bytes, else a CannotEvaluate) and run from
+    those bytes; one it finds there in another form (a package, an extension module, a bytecode file) is an
+    ImportError; a submodule, a namespace portion and a module not found there are left to the other finders."""
+
+    def __init__(self, root):
+        self.root = Path(root)
+
+    def find_spec(self, name, path=None, target=None):
+        if path is not None:
+            return None
+        tools = self.root / "tools"
+        found = importlib.machinery.PathFinder.find_spec(name, [str(tools)])
+        if found is None or found.loader is None:
+            return None
+        rel = "tools/{}.py".format(name)
+        if found.origin != str(self.root / rel) or found.submodule_search_locations is not None:
+            raise ImportError("{} is found in {} as {}, not as the source file {}".format(
+                name, tools, found.origin, rel), name=name)
+        data = _read_input(self.root, rel)
+        return importlib.util.spec_from_file_location(name, self.root / rel,
+                                                      loader=_CheckedSource(self.root / rel, data))
+
+
+HELPERS = ("_opf_declaration", "_opf_store")
+
+
+def _bind_helpers(root):
+    """The helpers (HELPERS) imported with a _CheckedFinder over the OPF tree `root` installed first in
+    sys.meta_path for the rest of the process (unless every helper is already imported), so each of them and
+    every module it imports from tools/ is loaded only through the containment check."""
+    if not all(name in sys.modules for name in HELPERS):
+        sys.meta_path.insert(0, _CheckedFinder(root))
+    return importlib.import_module("_opf_declaration"), importlib.import_module("_opf_store")
+
+
 def _load():
     """Bind the helpers beside this file that the gate reads (_opf_declaration and _opf_store)."""
     global _opf_declaration, _opf_store
-    import _opf_declaration
-    import _opf_store
+    _opf_declaration, _opf_store = _bind_helpers(ROOT)
 
 
 def in_tree(rel):
@@ -586,6 +652,12 @@ def _edited(old, new, count=1):
     return apply
 
 
+def _selftest_version(tree):
+    """OPF's own release version as the self-test reads it from the OPF tree `tree`: VERSION through _read_input
+    under the gate's own MAX_OPF_VERSION_BYTES cap."""
+    return read_opf_version(_read_input(tree, VERSION_REL, MAX_OPF_VERSION_BYTES).decode("utf-8"))
+
+
 def self_test(report_path=None):
     global _REPORT_ARMED
     results = []
@@ -636,7 +708,7 @@ def _self_test_body(results, executed):
 
     here = globals()
     shipped = _opf_declaration.SHIPPED_DECLARATION_BYTES
-    version = read_opf_version(_read_input(ROOT, VERSION_REL, MAX_OPF_VERSION_BYTES).decode("utf-8"))
+    version = _selftest_version(ROOT)
     md_block = "{}\n{}{}\n".format(_MD_OPEN, shipped.decode("ascii"), _MD_CLOSE)
     stale_block = md_block.replace('release = "{}"'.format(version), 'release = "0.0.1"')
 
@@ -855,6 +927,112 @@ def _self_test_body(results, executed):
     root_found = root_boundary(_inside_root)
     check("local/in-root-boundary", root_found == root_expected, root_found)
 
+    # the self-test's own VERSION read keeps the cap: one line just inside, exactly at and just outside
+    # MAX_OPF_VERSION_BYTES
+    def selftest_versions(read):
+        """size -> the value `read` (a _selftest_version) gives for a VERSION of that many bytes, or the
+        refusal it raises."""
+        tmp = tempfile.mkdtemp(prefix="opf-declaration-local-selftest-")
+        try:
+            got = {}
+            for size in (MAX_OPF_VERSION_BYTES - 1, MAX_OPF_VERSION_BYTES, MAX_OPF_VERSION_BYTES + 1):
+                home = Path(tmp, str(size))
+                os.makedirs(home)
+                Path(home, VERSION_REL).write_text("9" * (size - 1) + "\n", encoding="utf-8")
+                try:
+                    got[size] = read(home)
+                except Exception as exc:   # the gate's CannotEvaluate, or a mutant's own class of it
+                    got[size] = ("refused", type(exc).__name__, str(exc))
+            return got
+        finally:
+            shutil.rmtree(tmp)
+
+    capped = selftest_versions(_selftest_version)
+    check("local/selftest-version-size-bound", capped[MAX_OPF_VERSION_BYTES - 1] == "9" * (MAX_OPF_VERSION_BYTES - 2)
+          and capped[MAX_OPF_VERSION_BYTES] == "9" * (MAX_OPF_VERSION_BYTES - 1)
+          and capped[MAX_OPF_VERSION_BYTES + 1] == ("refused", "CannotEvaluate", "{} is not a regular file of at "
+                                                    "most {} bytes".format(VERSION_REL, MAX_OPF_VERSION_BYTES)),
+          capped)
+
+    # the helper load: each module the gate imports from tools/ is read through _read_input and run from those
+    # bytes, so a helper that is a symlink, or reached through a symlinked tools/ that leads out of the tree, is
+    # refused and never run, and one in another form (a package) is an ImportError. The stand-in helpers are two
+    # one-line modules, the first importing the second, so that import goes through the finder too.
+    stand_ins = {HELPERS[0]: "import {}\nMARK = {!r}\n".format(HELPERS[1], HELPERS[0]),
+                 HELPERS[1]: "MARK = {!r}\n".format(HELPERS[1])}
+
+    def helper_loads(bind):
+        """case -> what `bind` (a _bind_helpers) gives over a scratch tree of stand-in helpers: ("loaded",
+        whether each helper is the tree's own file, run from the bytes read for it by the checked loader, which
+        reads no bytecode cache) or ("refused", the exception's type name and message). The helpers' entries in
+        sys.modules, sys.meta_path and sys.path are restored after each case."""
+        tmp = tempfile.mkdtemp(prefix="opf-declaration-local-selftest-")
+        saved_modules = dict((name, sys.modules.pop(name)) for name in HELPERS if name in sys.modules)
+        saved_finders, saved_path = list(sys.meta_path), list(sys.path)
+        try:
+            got = {}
+            for case in ("regular", "linked-file", "linked-tools", "package"):
+                home = Path(tmp, case, "home")
+                tools = Path(home, "tools")
+                os.makedirs(tools)
+                for name, text in stand_ins.items():
+                    Path(tools, name + ".py").write_text(text, encoding="utf-8")
+                moved = Path(tools, HELPERS[1] + ".py")
+                if case == "linked-file":
+                    os.rename(moved, Path(tmp, case, HELPERS[1] + ".py"))
+                    os.symlink(Path(tmp, case, HELPERS[1] + ".py"), moved)
+                elif case == "linked-tools":
+                    os.rename(tools, Path(tmp, case, "elsewhere"))
+                    os.symlink(Path(tmp, case, "elsewhere"), tools)
+                elif case == "package":
+                    os.makedirs(Path(tools, HELPERS[1]))
+                    os.rename(moved, Path(tools, HELPERS[1], "__init__.py"))
+                # as in a fresh gate process: the tree's tools/ first on the path, and no checked finder
+                # installed yet (the self-test's own, over this tree, would otherwise find the helpers)
+                sys.path.insert(0, str(tools))
+                sys.meta_path[:] = [finder for finder in saved_finders if type(finder).__name__ != "_CheckedFinder"]
+                try:
+                    modules = bind(home)
+                except Exception as exc:   # the gate's CannotEvaluate or ImportError, or a mutant's
+                    got[case] = ("refused", type(exc).__name__, str(exc))
+                else:
+                    own = True
+                    for name, module in zip(HELPERS, modules):
+                        spec = module.__spec__
+                        try:
+                            spec.loader.get_data(spec.cached)
+                            own = False
+                        except OSError:
+                            pass
+                        own = own and module.__file__ == str(Path(tools, name + ".py")) and getattr(
+                            module, "MARK", None) == name and type(spec.loader).__name__ == "_CheckedSource"
+                    got[case] = ("loaded", own)
+                finally:
+                    for name in HELPERS:
+                        sys.modules.pop(name, None)
+                    sys.meta_path[:] = saved_finders
+                    sys.path[:] = saved_path
+            return got
+        finally:
+            sys.modules.update(saved_modules)
+            sys.meta_path[:] = saved_finders
+            sys.path[:] = saved_path
+            shutil.rmtree(tmp)
+
+    def helpers_contained(got):
+        """Whether helper_loads shows the regular helpers loaded from the tree's own files and each other case
+        refused for its own reason."""
+        return (got["regular"] == ("loaded", True)
+                and got["linked-file"][:2] == ("refused", "CannotEvaluate")
+                and "{}.py cannot be opened".format(HELPERS[1]) in got["linked-file"][2]
+                and got["linked-tools"][:2] == ("refused", "CannotEvaluate")
+                and "lies outside the OPF tree" in got["linked-tools"][2]
+                and got["package"][:2] == ("refused", "ImportError")
+                and "not as the source file" in got["package"][2])
+
+    loads = helper_loads(_bind_helpers)
+    check("local/helper-load-contained", helpers_contained(loads), loads)
+
     # the reverts: each a mutant of this file loaded from a scratch directory, run over the case its check shows
     tmp = tempfile.mkdtemp(prefix="opf-declaration-local-selftest-")
     try:
@@ -886,6 +1064,11 @@ def _self_test_body(results, executed):
             ("containment", "    if not _inside_root(root, rel):\n", "    if False:\n"),
             ("prefix", ".parent.resolve().is_relative_to(base)\n",
              ".parent.resolve().as_posix().startswith(base.as_posix())\n"),
+            ("selftest-version-bound", "_read_input(tree, VERSION_REL, " "MAX_OPF_VERSION_BYTES)",
+             "_read_input(tree, VERSION_REL)"),
+            ("helper-containment", "        data = _read_input(self.root, " "rel)\n",
+             "        data = (self.root / rel).read_bytes()\n"),
+            ("helper-import", "        sys.meta_path.insert(0, _CheckedFinder(" "root))\n", "        pass\n"),
         ):
             module = "opf_declaration_local_mutant_" + name
             try:
@@ -975,6 +1158,21 @@ def _self_test_body(results, executed):
         prefix_found = prefixed if isinstance(prefixed, str) else root_boundary(prefixed._inside_root)
         check("revert/containment-prefix-red", isinstance(prefix_found, dict)
               and prefix_found["sibling/x.md"] is True, prefix_found)
+        # the self-test's VERSION read without the cap takes a VERSION one byte over it
+        uncapped = mutants["selftest-version-bound"]
+        over = uncapped if isinstance(uncapped, str) else selftest_versions(uncapped._selftest_version)
+        check("revert/selftest-version-size-bound-dropped-red", isinstance(over, dict)
+              and over[MAX_OPF_VERSION_BYTES + 1] == "9" * MAX_OPF_VERSION_BYTES, over)
+        # the helper read without the containment check runs a helper that is a symlink or lies through a
+        # symlinked tools/; the finder never installed imports the helpers the ordinary way, not the tree's own
+        unchecked = mutants["helper-containment"]
+        loose = unchecked if isinstance(unchecked, str) else helper_loads(unchecked._bind_helpers)
+        check("revert/helper-containment-dropped-red", isinstance(loose, dict)
+              and loose["linked-file"] == ("loaded", True) and loose["linked-tools"] == ("loaded", True), loose)
+        unfound = mutants["helper-import"]
+        ordinary = unfound if isinstance(unfound, str) else helper_loads(unfound._bind_helpers)
+        check("revert/helper-ordinary-import-red", isinstance(ordinary, dict)
+              and ordinary["regular"] == ("loaded", False) and ordinary["linked-file"] == ("loaded", False), ordinary)
     finally:
         shutil.rmtree(tmp)
 

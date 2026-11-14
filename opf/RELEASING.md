@@ -28,15 +28,19 @@ value in `tools/_opf_store.py`, the matching field in the declaration file, `SHI
 and `SHIPPED_DECLARATION_SHA256` in `tools/_opf_declaration.py`, and the same three restatements. It
 does not by itself touch `VERSION` or `release`.
 
-The declaration gate, `tools/check_opf_declaration.py` in this tree, then must exit 0. It reads nothing
-outside this tree: it follows no symlinked file, and it refuses to evaluate (exit 2), without reading
-it, an input reached through a symlinked directory that leads out of this tree. It refuses a
-restatement that differs from the file, a missing restatement, a document with more than one
-restatement block, a document in this tree that restates the declaration but is not one of its
-surfaces, a shipped-file digest that is not the file's, and a release other than the version in
-`VERSION`. While OPF is nested, the parent repository's own `tools/check_opf_declaration.py` must exit
-0 as well: it checks the same rules over the whole repository and reports findings in this tree apart
-from findings in the parent's release document.
+The declaration gate, `tools/check_opf_declaration.py` in this tree, then must exit 0. It reads its
+inputs and loads its helpers from this tree, but for the one helper named below: it follows no other
+symlinked input or helper, and it refuses to evaluate (exit 2), without reading or running it, an input
+or helper that is a symlink or is reached through a symlinked directory that leads out of this tree.
+It does not detect three things: a symlink in place of `tools/_selftest_exit_report.py`, the one helper
+it imports the ordinary way (at start-up), which it follows; a hard link in this tree to a file outside
+it, which it reads as a file in this tree; and a directory replaced by another process between its
+check and the open. It refuses a restatement that differs from the file, a missing restatement, a
+document with more than one restatement block, a document in this tree that restates the declaration
+but is not one of its surfaces, a shipped-file digest that is not the file's, and a release other than
+the version in `VERSION`. While OPF is nested, the parent repository's own
+`tools/check_opf_declaration.py` must exit 0 as well: it checks the same rules over the whole
+repository and reports findings in this tree apart from findings in the parent's release document.
 
 This release declares:
 

@@ -49,6 +49,8 @@ expected-check-ids = [
     "local/symlinked-directory-outside-cannot-evaluate",
     "local/symlinked-directory-inside-read",
     "local/in-root-boundary",
+    "local/selftest-version-size-bound",
+    "local/helper-load-contained",
     "revert/duplicate-block-read-by-first-red",
     "revert/comment-check-dropped-red",
     "revert/restatement-compare-dropped-red",
@@ -67,4 +69,7 @@ expected-check-ids = [
     "revert/digest-checks-dropped-red",
     "revert/containment-check-dropped-red",
     "revert/containment-prefix-red",
+    "revert/selftest-version-size-bound-dropped-red",
+    "revert/helper-containment-dropped-red",
+    "revert/helper-ordinary-import-red",
 ]

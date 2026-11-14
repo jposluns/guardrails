@@ -39,7 +39,10 @@ ships it, never to an installed copy and never taking a field from the documenta
      "authors OPF" and "not a future adopter", as whole words in any case, anywhere in the surface, a comment
      included); a surface under opf/ need not state it. The check is lexical: it refuses the statement
      dropped, hidden in a comment or negated as "not a future adopter", and a claim worded as an AUTHOR_CLAIMS
-     phrase; a claim that the parent authors OPF worded any other way is not detected.
+     phrase; a claim that the parent authors OPF worded any other way, or an AUTHOR_CLAIMS phrase split by
+     inline markup or an HTML entity ("where OPF is *authored*", "where OPF&nbsp;is authored"), is not
+     detected, and a statement hidden other than by an HTML comment (in a fence, a link reference or a
+     hidden element) counts as stated.
 
 The findings are reported in two responsibilities kept apart while OPF is nested: OPF-local (rules 1 to 3, 7,
 and 4 to 6 over the surfaces and documents under opf/, which move with that tree) and the parent release
@@ -1690,6 +1693,11 @@ def self_test(report_path=None):
         found = uncommented if isinstance(uncommented, str) else uncommented.adopter_problems(
             {"RELEASING.md": claim_cases["commented"]})
         check("revert/adopter-comment-check-dropped-red", found == [claim_text.format("'authors OPF'")], found)
+        # the comment boundary under the same revert: the statement inside the comment then reads as stated
+        found = uncommented if isinstance(uncommented, str) else dict(
+            (name, uncommented.adopter_problems({"RELEASING.md": text})) for name, text in comment_cases.items())
+        check("revert/adopter-comment-boundary-dropped-red", isinstance(found, dict) and found["inside"] == []
+              and found["next-line"] == [] and found["same-line"] == [], found)
     finally:
         shutil.rmtree(tmp)
 
