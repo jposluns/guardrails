@@ -2076,6 +2076,24 @@
         {
           "class": "c",
           "default": "warn",
+          "event": "PostToolUseFailure",
+          "id": "clock-inject-failure",
+          "matcher": ".*",
+          "platform": "claude-code",
+          "residue": "Context only: after a tool call that started and failed it adds one additionalContext line naming the host clock at this hook event, in UTC beside the local time with its numeric UTC offset and zone abbreviation, or with the local zone reported unknown (and no local time) when it cannot be established; its sibling clock-inject-post covers a call that succeeded. A message written with no tool call gets no fresh reading, and a call refused before it runs (an unknown tool, input failing validation, or a permission denial) gets none either, since neither post-tool event fires for it. The value is the host clock at the hook event and becomes stale as time passes. It is context, not enforcement: the assistant can ignore or mis-copy it, and nothing checks the timestamps it writes. Host clock errors carry through, since a wrong host clock is reproduced faithfully. An unreadable payload or a handler error takes the dispatcher's non-blocking warning and adds no reading, a payload naming another event gets a note and no reading, and a zone configured somewhere other than TZ and /etc/localtime is read as the C library reads it. Unlike the preview clock-inject.py, which in a worker process writes nothing to stdout (a skip line to stderr) and so adds no clock line, this handler adds the line in every process, workers included. The line is added after every tool call that fails, so it costs context on each one, and each call also starts the dispatcher, a new python3 process, which adds its start-up time to the call. Which client versions deliver PostToolUseFailure to a plugin hook has not been verified here; the event name is the one the preview .preview/clock-inject.py registers."
+        },
+        {
+          "class": "c",
+          "default": "warn",
+          "event": "PostToolUse",
+          "id": "clock-inject-post",
+          "matcher": ".*",
+          "platform": "claude-code",
+          "residue": "Context only: after a tool call that ran and succeeded it adds one additionalContext line naming the host clock at this hook event, in UTC beside the local time with its numeric UTC offset and zone abbreviation, or with the local zone reported unknown (and no local time) when it cannot be established; its sibling clock-inject-failure covers a call that started and failed. A message written with no tool call gets no fresh reading, and a call refused before it runs (an unknown tool, input failing validation, or a permission denial) gets none either, since neither post-tool event fires for it. The value is the host clock at the hook event and becomes stale as time passes. It is context, not enforcement: the assistant can ignore or mis-copy it, and nothing checks the timestamps it writes. Host clock errors carry through, since a wrong host clock is reproduced faithfully. An unreadable payload or a handler error takes the dispatcher's non-blocking warning and adds no reading, a payload naming another event gets a note and no reading, and a zone configured somewhere other than TZ and /etc/localtime is read as the C library reads it. Unlike the preview clock-inject.py, which in a worker process writes nothing to stdout (a skip line to stderr) and so adds no clock line, this handler adds the line in every process, workers included. The line is added after every tool call that succeeds, so it costs context on each one, and each call also starts the dispatcher, a new python3 process, which adds its start-up time to the call."
+        },
+        {
+          "class": "c",
+          "default": "warn",
           "event": "UserPromptSubmit",
           "id": "orch-prompt-stamp",
           "platform": "claude-code",

@@ -1125,7 +1125,7 @@ source-path = ".aiqt/core/rules/integ-gate-discipline.md"
 start-line = 17
 end-line = 17
 canonical-text = "Never weaken a gate to obtain a pass; fix the artefact instead."
-source-digest = "be988bd5c3d738d907a3b851e48a15c9d5b9263bfd3bb3b7a05121804f64c94f"
+source-digest = "b2bab95f6edf6f4b93c00b0b8ea49163ed77abef0becf58c1aefc78a5e21c39b"
 layer = "core"
 
 [[clause]]
@@ -1135,7 +1135,7 @@ source-path = ".aiqt/core/rules/integ-gate-discipline.md"
 start-line = 17
 end-line = 17
 canonical-text = "Never weaken a gate to obtain a pass; fix the artefact instead."
-source-digest = "be988bd5c3d738d907a3b851e48a15c9d5b9263bfd3bb3b7a05121804f64c94f"
+source-digest = "b2bab95f6edf6f4b93c00b0b8ea49163ed77abef0becf58c1aefc78a5e21c39b"
 layer = "core"
 
 [[clause]]
@@ -1145,7 +1145,7 @@ source-path = ".aiqt/core/rules/integ-gate-discipline.md"
 start-line = 18
 end-line = 19
 canonical-text = "A failing gate is signal;\nunderstand why it failed before considering any override."
-source-digest = "be988bd5c3d738d907a3b851e48a15c9d5b9263bfd3bb3b7a05121804f64c94f"
+source-digest = "b2bab95f6edf6f4b93c00b0b8ea49163ed77abef0becf58c1aefc78a5e21c39b"
 layer = "core"
 
 [[clause]]
@@ -1155,7 +1155,7 @@ source-path = ".aiqt/core/rules/integ-gate-discipline.md"
 start-line = 19
 end-line = 21
 canonical-text = "A security floor, a deny list, a permission\nfloor, or a required-check set, never shrinks silently: any reduction, whatever motivated it, lands only\nthrough the maintainer's explicit, recorded authorization."
-source-digest = "be988bd5c3d738d907a3b851e48a15c9d5b9263bfd3bb3b7a05121804f64c94f"
+source-digest = "b2bab95f6edf6f4b93c00b0b8ea49163ed77abef0becf58c1aefc78a5e21c39b"
 layer = "core"
 
 [[clause]]
@@ -1165,7 +1165,7 @@ source-path = ".aiqt/core/rules/integ-gate-discipline.md"
 start-line = 19
 end-line = 21
 canonical-text = "A security floor, a deny list, a permission\nfloor, or a required-check set, never shrinks silently: any reduction, whatever motivated it, lands only\nthrough the maintainer's explicit, recorded authorization."
-source-digest = "be988bd5c3d738d907a3b851e48a15c9d5b9263bfd3bb3b7a05121804f64c94f"
+source-digest = "b2bab95f6edf6f4b93c00b0b8ea49163ed77abef0becf58c1aefc78a5e21c39b"
 layer = "core"
 
 [[clause]]
@@ -1175,7 +1175,7 @@ source-path = ".aiqt/core/rules/integ-gate-discipline.md"
 start-line = 19
 end-line = 21
 canonical-text = "A security floor, a deny list, a permission\nfloor, or a required-check set, never shrinks silently: any reduction, whatever motivated it, lands only\nthrough the maintainer's explicit, recorded authorization."
-source-digest = "be988bd5c3d738d907a3b851e48a15c9d5b9263bfd3bb3b7a05121804f64c94f"
+source-digest = "b2bab95f6edf6f4b93c00b0b8ea49163ed77abef0becf58c1aefc78a5e21c39b"
 layer = "core"
 
 [[clause]]
@@ -1185,7 +1185,7 @@ source-path = ".aiqt/core/rules/integ-gate-discipline.md"
 start-line = 38
 end-line = 40
 canonical-text = "A gate verdict is trusted only when it is read from the gate's own unmasked termination status, or from\na structured terminal result bound to the exact revision under gate; a downstream pipeline's status, a\ntruncated delivery, a textual success token, or a result for a different revision is not that verdict."
-source-digest = "be988bd5c3d738d907a3b851e48a15c9d5b9263bfd3bb3b7a05121804f64c94f"
+source-digest = "b2bab95f6edf6f4b93c00b0b8ea49163ed77abef0becf58c1aefc78a5e21c39b"
 layer = "core"
 
 [[clause]]
@@ -1195,7 +1195,7 @@ source-path = ".aiqt/core/rules/integ-gate-discipline.md"
 start-line = 40
 end-line = 43
 canonical-text = "A\npending, missing, ambiguous, malformed, unknown, or unreadable result is unverified, never a pass, and the\ngated action stays a separate step, withheld until terminal success is observed, so a check folded into the\nsame unverified apply or merge does not establish the checkpoint."
-source-digest = "be988bd5c3d738d907a3b851e48a15c9d5b9263bfd3bb3b7a05121804f64c94f"
+source-digest = "b2bab95f6edf6f4b93c00b0b8ea49163ed77abef0becf58c1aefc78a5e21c39b"
 layer = "core"
 
 [[clause]]
@@ -1205,7 +1205,7 @@ source-path = ".aiqt/core/rules/integ-gate-discipline.md"
 start-line = 45
 end-line = 50
 canonical-text = "When a command's own termination status is the evidence a verdict rests on, that status is taken only from a\nconstruct that faithfully propagates the gating command's own exit, never from one that can report success\nwhile the gate failed; sequencing that preserves the gate's failure, such as a short-circuit that runs the\nnext command only on the gate's success or an explicit re-raise of the gate's saved exit, is not this\nhazard, so the test is whether the construct's terminal status still reflects the gate's, not merely whether\nanother command follows it."
-source-digest = "be988bd5c3d738d907a3b851e48a15c9d5b9263bfd3bb3b7a05121804f64c94f"
+source-digest = "b2bab95f6edf6f4b93c00b0b8ea49163ed77abef0becf58c1aefc78a5e21c39b"
 layer = "core"
 
 [[clause]]
@@ -1215,7 +1215,7 @@ source-path = ".aiqt/core/rules/integ-gate-discipline.md"
 start-line = 50
 end-line = 54
 canonical-text = "An always-succeeding trailer appended after the gate, a `true`, a `:`, a\nstatus-printing echo of the prior exit, or any other no-op whose own success overwrites the gate's exit,\nmakes the compound report the trailer's status, not the gate's, so a failing gate reads as a pass; a printed\ncopy of the exit is output, not the verdict, and such a status-masking trailer is never appended to a\ncommand whose exit is relied on."
-source-digest = "be988bd5c3d738d907a3b851e48a15c9d5b9263bfd3bb3b7a05121804f64c94f"
+source-digest = "b2bab95f6edf6f4b93c00b0b8ea49163ed77abef0becf58c1aefc78a5e21c39b"
 layer = "core"
 
 [[clause]]
@@ -1225,7 +1225,7 @@ source-path = ".aiqt/core/rules/integ-gate-discipline.md"
 start-line = 54
 end-line = 57
 canonical-text = "The exit of a launcher, dispatcher, wrapper, or detached background task\ncarries the gate's verdict only where it demonstrably propagates the gate's own exit; a carrier that reports\nits own success regardless of what the gate returned yields the vehicle's status, not the verdict, which is\nthen read from the gate's own result instead."
-source-digest = "be988bd5c3d738d907a3b851e48a15c9d5b9263bfd3bb3b7a05121804f64c94f"
+source-digest = "b2bab95f6edf6f4b93c00b0b8ea49163ed77abef0becf58c1aefc78a5e21c39b"
 layer = "core"
 
 [[clause]]
@@ -1235,7 +1235,7 @@ source-path = ".aiqt/core/rules/integ-gate-discipline.md"
 start-line = 59
 end-line = 62
 canonical-text = "An event-triggered gate is relied on only after its trigger's preconditions are confirmed against\nauthoritative state: a pipeline triggered by a change request needs an open change request for the exact\nrevision and intended base before any run can exist, so where the precondition is unmet the absence of a\nreported failure is a missing result, never a pass."
-source-digest = "be988bd5c3d738d907a3b851e48a15c9d5b9263bfd3bb3b7a05121804f64c94f"
+source-digest = "b2bab95f6edf6f4b93c00b0b8ea49163ed77abef0becf58c1aefc78a5e21c39b"
 layer = "core"
 
 [[clause]]
@@ -1245,7 +1245,7 @@ source-path = ".aiqt/core/rules/integ-gate-discipline.md"
 start-line = 62
 end-line = 64
 canonical-text = "A pushed revision, an acknowledged dispatch, or an\nelapsed wait is not evidence the trigger fired; a run is confirmed to exist for the revision under gate\nbefore anything is read from its outcome."
-source-digest = "be988bd5c3d738d907a3b851e48a15c9d5b9263bfd3bb3b7a05121804f64c94f"
+source-digest = "b2bab95f6edf6f4b93c00b0b8ea49163ed77abef0becf58c1aefc78a5e21c39b"
 layer = "core"
 
 [[clause]]
@@ -1255,7 +1255,7 @@ source-path = ".aiqt/core/rules/integ-gate-discipline.md"
 start-line = 23
 end-line = 24
 canonical-text = "Replacing or removing a control, a gate, a check, a hook, a validator, or another guard, is a set operation,\nso a replacement is treated as a reduction until its coverage is shown."
-source-digest = "be988bd5c3d738d907a3b851e48a15c9d5b9263bfd3bb3b7a05121804f64c94f"
+source-digest = "b2bab95f6edf6f4b93c00b0b8ea49163ed77abef0becf58c1aefc78a5e21c39b"
 layer = "core"
 
 [[clause]]
@@ -1265,7 +1265,7 @@ source-path = ".aiqt/core/rules/integ-gate-discipline.md"
 start-line = 24
 end-line = 26
 canonical-text = "Before such a change is dispatched\nfor review or integrated, the threats or cases the outgoing control covered are enumerated from its own\ncode, its tests, its specification, and its disclosed residual, never from a recollection of its purpose."
-source-digest = "be988bd5c3d738d907a3b851e48a15c9d5b9263bfd3bb3b7a05121804f64c94f"
+source-digest = "b2bab95f6edf6f4b93c00b0b8ea49163ed77abef0becf58c1aefc78a5e21c39b"
 layer = "core"
 
 [[clause]]
@@ -1275,7 +1275,7 @@ source-path = ".aiqt/core/rules/integ-gate-discipline.md"
 start-line = 27
 end-line = 30
 canonical-text = "Each enumerated case is then accounted for in one of three states: covered, shown by a reference to the\nreplacement code that handles it and a case exercised against the replacement and observed to be caught;\nunreachable, shown by the change that removes the capability the case depends on and an observed attempt\nconfirming the path is unavailable; or disclosed as no longer covered."
-source-digest = "be988bd5c3d738d907a3b851e48a15c9d5b9263bfd3bb3b7a05121804f64c94f"
+source-digest = "b2bab95f6edf6f4b93c00b0b8ea49163ed77abef0becf58c1aefc78a5e21c39b"
 layer = "core"
 
 [[clause]]
@@ -1285,7 +1285,7 @@ source-path = ".aiqt/core/rules/integ-gate-discipline.md"
 start-line = 30
 end-line = 31
 canonical-text = "A case disclosed as no longer covered\nis a reduction, and it lands only through the maintainer's explicit, recorded authorization."
-source-digest = "be988bd5c3d738d907a3b851e48a15c9d5b9263bfd3bb3b7a05121804f64c94f"
+source-digest = "b2bab95f6edf6f4b93c00b0b8ea49163ed77abef0becf58c1aefc78a5e21c39b"
 layer = "core"
 
 [[clause]]
@@ -1295,7 +1295,7 @@ source-path = ".aiqt/core/rules/integ-gate-discipline.md"
 start-line = 31
 end-line = 32
 canonical-text = "A case left in\nnone of the three states is a silent reduction, and the change is not dispatched while one remains."
-source-digest = "be988bd5c3d738d907a3b851e48a15c9d5b9263bfd3bb3b7a05121804f64c94f"
+source-digest = "b2bab95f6edf6f4b93c00b0b8ea49163ed77abef0becf58c1aefc78a5e21c39b"
 layer = "core"
 
 [[clause]]
@@ -1305,7 +1305,7 @@ source-path = ".aiqt/core/rules/integ-gate-discipline.md"
 start-line = 32
 end-line = 34
 canonical-text = "The\nenumeration and its accounting are recorded with the change, so a verifier reproduces them rather than\nre-deriving the covered set."
-source-digest = "be988bd5c3d738d907a3b851e48a15c9d5b9263bfd3bb3b7a05121804f64c94f"
+source-digest = "b2bab95f6edf6f4b93c00b0b8ea49163ed77abef0becf58c1aefc78a5e21c39b"
 layer = "core"
 
 [[clause]]
@@ -1315,7 +1315,7 @@ source-path = ".aiqt/core/rules/integ-gate-discipline.md"
 start-line = 34
 end-line = 36
 canonical-text = "Where a case is covered by a surviving sibling control rather than by the\nreplacement, that coverage is cited on the same evidence, and the lost overlap is weighed under the\ndefence-in-depth-default rule rather than assumed free."
-source-digest = "be988bd5c3d738d907a3b851e48a15c9d5b9263bfd3bb3b7a05121804f64c94f"
+source-digest = "b2bab95f6edf6f4b93c00b0b8ea49163ed77abef0becf58c1aefc78a5e21c39b"
 layer = "core"
 
 [[clause]]
@@ -1325,7 +1325,27 @@ source-path = ".aiqt/core/rules/integ-gate-discipline.md"
 start-line = 17
 end-line = 18
 canonical-text = "No bypass flags, no piping a check to a\ntruncating sink, no `|| true`, no deleted tests, no lowered thresholds."
-source-digest = "be988bd5c3d738d907a3b851e48a15c9d5b9263bfd3bb3b7a05121804f64c94f"
+source-digest = "b2bab95f6edf6f4b93c00b0b8ea49163ed77abef0becf58c1aefc78a5e21c39b"
+layer = "core"
+
+[[clause]]
+clause-id = "gatdis.22"
+corpus-id = "gatdis"
+source-path = ".aiqt/core/rules/integ-gate-discipline.md"
+start-line = 66
+end-line = 68
+canonical-text = "A refused command or edit is never re-routed to evade the guard (script, stdin, subprocess, split calls):\nhold its step and report the refusal; re-issue only in a form the refusal names that the guard reads whole,\nor on explicit, recorded maintainer authorization."
+source-digest = "b2bab95f6edf6f4b93c00b0b8ea49163ed77abef0becf58c1aefc78a5e21c39b"
+layer = "core"
+
+[[clause]]
+clause-id = "gatdis.23"
+corpus-id = "gatdis"
+source-path = ".aiqt/core/rules/integ-gate-discipline.md"
+start-line = 68
+end-line = 69
+canonical-text = "Where a guard reads commands, interpreters never run\nprograms from stdin or process substitution."
+source-digest = "b2bab95f6edf6f4b93c00b0b8ea49163ed77abef0becf58c1aefc78a5e21c39b"
 layer = "core"
 
 [[clause]]

@@ -3,15 +3,43 @@
 Verifies the frozen contract constants stay aligned with their source authorities and that the PR1
 contract surface is registered. Fail-closed: exit 2 (CANNOT-EVALUATE) on a missing/unreadable authority
 or a changed source shape that means the contract can no longer be checked; exit 1 (DRIFT) on a concrete
-mismatch; exit 0 clean. Run: python3 -I -B opf/tools/check_opf_init_contract.py [--self-test].
+mismatch; exit 0 clean. Run from any working directory: python3 -I -B <OPF root>/tools/
+check_opf_init_contract.py [--self-test | --parent-integration]. Any other argument list (a misspelled
+or extra flag, also one beside --self-test) is refused with exit 2 before any contract source or
+roster is read, so a misspelled flag never runs the OPF-local mode or the self-test in its place.
+
+Every path is resolved from the OPF root, the directory above this script's own directory, never from
+the calling directory, so the gate runs the same in a standalone OPF tree and in an OPF tree nested in
+a parent repository. The default run's repository inputs all sit under the OPF root, so it does not
+depend on any parent-repository file; that is independence from parent inputs, not confinement (the
+interpreter, its standard library, /proc and the validator child's temporary files are still read).
+The default (OPF-local) run checks the contract sources and the OPF-local rosters: the OPF runner
+tools/run_all_checks.sh must register the validator self-test, this gate's self-test and this gate's
+live run as three separate registrations, and a step of the OPF workflow .github/workflows/quality.yml
+must run that runner, with no if: and no continue-on-error other than false on the step or its job, and
+no BASH_ENV or ENV in the env: of the step, its job or the workflow (a parsed YAML subset; see
+_workflow_runs_runner for the residuals). A workflow outside that subset is refused with exit 2 (cannot
+evaluate), never read line by line: among them a workflow with a folded block scalar (>) or an
+indentation indicator, and one with a carriage return left after reading (CRLF and CR line ends are
+read as LF) or a U+0085, U+2028 or U+2029 character anywhere, characters a YAML 1.1 reader takes as
+line breaks. The roster check reads lines, not shell control flow: a registration line after an exit 0,
+inside an if false block, inside a here-document or inside a function that is never called is not seen
+as dead and still counts, as does a standalone-closure entry line inside a string literal.
+--parent-integration adds the parent repository's rosters, read from the directory above the OPF root:
+the parent runner must register both self-tests and this gate's live run WITH --parent-integration, and
+the parent's standalone-closure roster must register both self-tests. This gate cannot see its own flag
+missing, so the parent's CI parity gate (tools/check_ci_parity.py) holds the flagged run as a mandatory
+member of both the parent runner and the parent workflow. The parent CI workflow is not read here; its
+gate lines are reconciled against the parent runner by that parity gate.
 
 Detection is SEMANTIC, never a bare substring: a constant is matched as a whole module-level line
 (ignoring trailing comments); the pinned view tuple and the reserved-namespace set are parsed with
 comments stripped and compared by membership (so a commented-out literal does not count); the machine
 store path is checked against the store authority's DEFAULT_MACHINE_SUBDIR; and a roster registration
-must appear on an ACTIVE (non-comment) line, with the live gate present in the repo-root runner. The CI
-workflow is not read, so the check holds whichever gates .github/workflows/quality.yml carries; that
-workflow's gate lines are reconciled against the repo-root runner by tools/check_ci_parity.py.
+is a whole registration line (its words, comment dropped), never a mention of a script name. Every
+line is split on LF alone, never at a form feed, a vertical tab, U+001C to U+001E, U+0085, U+2028 or
+U+2029, where neither bash nor Python ends a line, and a shell roster keeps its carriage returns (see
+_decoded).
 """
 import sys
 
@@ -30,7 +58,9 @@ if tuple(sys.version_info[:2]) < (3, 14):
 import re
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[2]
+# The OPF root: the directory above this script's own directory (tools/), whatever the working directory
+# and whether or not a parent repository encloses it.
+ROOT = Path(__file__).resolve().parents[1]
 
 ACTOR_LINE = 'ACTOR_KINDS = ("maintainer", "assistant", "automation", "importer")'
 
@@ -60,16 +90,30 @@ FROZEN_LINES = (
 # the view-tuple compare).
 RESERVED_MEMBERS = (".opf.toml", ".working/imports", ".working/archive")
 
-# Every roster surface that must register BOTH the validator self-test and the consistency gate: the two
-# local runners and the standalone-closure roster. The CI workflow is deliberately absent (see the module
-# docstring).
-ROSTER_FILES = (
-    "tools/run_all_checks.sh",
-    "opf/tools/run_all_checks.sh",
-    "tools/check_opf_standalone_closure.py",
-)
-# Surfaces where the LIVE consistency gate (invoked without --self-test) must run: the repo-root runner.
-LIVE_GATE_FILES = ("tools/run_all_checks.sh",)
+# The two scripts the rosters register, and the self-test argument.
+VALIDATOR_NAME = "_opf_init_contract.py"
+GATE_NAME = "check_opf_init_contract.py"
+SELF_TEST = "--self-test"
+# OPF-local rosters, relative to the OPF root: the OPF runner must register the validator self-test,
+# this gate's self-test and this gate's live run (no argument), each as a registration of its own, with
+# the scripts named from the runner's own directory ($here); the OPF workflow must run that runner.
+LOCAL_ROSTER_FILES = ("tools/run_all_checks.sh",)
+LOCAL_LIVE_GATE_FILES = ("tools/run_all_checks.sh",)
+LOCAL_SCRIPT_DIR = "$here"
+LOCAL_WORKFLOW = ".github/workflows/quality.yml"
+# The OPF runner as a workflow step may name it: from the checkout root, as ./ or under the workspace
+# expression (written without its inner spaces, the form _runs_runner normalises to).
+LOCAL_RUNNER_PATHS = ("tools/run_all_checks.sh", "./tools/run_all_checks.sh",
+                      "${{github.workspace}}/tools/run_all_checks.sh")
+# Parent integration rosters, relative to the OPF root (the parent repository is the directory above
+# it), read only under --parent-integration: the parent runner and the parent's standalone-closure roster
+# must register both self-tests, and the parent runner must run this gate live WITH --parent-integration
+# as its only argument, the scripts named under opf/tools. The parent CI workflow is deliberately absent
+# (see the module docstring).
+PARENT_FLAG = "--parent-integration"
+PARENT_ROSTER_FILES = ("../tools/run_all_checks.sh", "../tools/check_opf_standalone_closure.py")
+PARENT_LIVE_GATE_FILES = ("../tools/run_all_checks.sh",)
+PARENT_SCRIPT_DIR = "opf/tools"
 
 
 def _cant(msg):
@@ -478,15 +522,33 @@ def _read(rel):
     if not p.is_file():
         _cant("missing input: {}".format(rel))
     try:
-        return p.read_text(encoding="utf-8")
+        return _decoded(rel, p.read_bytes())
     except Exception as exc:
         _cant("unreadable {}: {}".format(rel, exc))
+
+
+def _decoded(rel, data):
+    """The UTF-8 text of input rel (its bytes given). A shell roster (.sh) keeps every carriage return:
+    bash ends a line at LF alone and reads a carriage return as part of a word or a comment, so a CR
+    turned into LF here could expose a registration bash never runs. Any other input (Python source or
+    YAML, both of which end a line at CRLF and CR too) has those line ends turned into LF."""
+    text = data.decode("utf-8")
+    if rel.endswith(".sh"):
+        return text
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
+def _lines(text):
+    """The lines of text split on LF alone. str.splitlines also breaks at a form feed, a vertical tab,
+    U+001C to U+001E, U+0085, U+2028 and U+2029, where neither bash nor Python ends a line, so a
+    registration, a constant or a tuple member after one inside a comment would count as live."""
+    return text.split("\n")
 
 
 def _has_line(text, exact):
     """True only if `exact` appears as a whole module-level line, ignoring any trailing #-comment and
     surrounding whitespace, never as a substring (a longer value cannot satisfy a shorter one)."""
-    return any(line.split("#", 1)[0].rstrip() == exact for line in text.splitlines())
+    return any(line.split("#", 1)[0].rstrip() == exact for line in _lines(text))
 
 
 def _quoted_in_tuple(text, name):
@@ -495,7 +557,7 @@ def _quoted_in_tuple(text, name):
     m = re.search(re.escape(name) + r"\s*=\s*\((.*?)\)", text, re.S)
     if not m:
         return None
-    body = "\n".join(line.split("#", 1)[0] for line in m.group(1).splitlines())
+    body = "\n".join(line.split("#", 1)[0] for line in _lines(m.group(1)))
     return set(re.findall(r'"([^"]+)"', body))
 
 
@@ -504,7 +566,7 @@ def _ordered_quoted_in_tuple(text, name):
     m = re.search(re.escape(name) + r"\s*=\s*\((.*?)\)", text, re.S)
     if not m:
         return None
-    body = "\n".join(line.split("#", 1)[0] for line in m.group(1).splitlines())
+    body = "\n".join(line.split("#", 1)[0] for line in _lines(m.group(1)))
     return tuple(re.findall(r'"([^"]+)"', body))
 
 
@@ -516,45 +578,338 @@ def _value_of(text, name):
 
 def _active_line_has(text, needle):
     """True if `needle` appears on a line whose stripped form does not start with '#' (i.e. not commented)."""
-    return any(needle in line and not line.strip().startswith("#") for line in text.splitlines())
+    return any(needle in line and not line.strip().startswith("#") for line in _lines(text))
 
 
 def _active_line_matches(text, pattern):
     """True if `pattern` (a regex) matches on a non-comment line."""
     rx = re.compile(pattern)
-    return any(rx.search(line) and not line.strip().startswith("#") for line in text.splitlines())
+    return any(rx.search(line) and not line.strip().startswith("#") for line in _lines(text))
 
 
-def _runner_drifts(read):
+def _shell_words(line):
+    """The words of one shell line with its # comment dropped (shlex, POSIX rules), or None when the line
+    does not tokenise (an unbalanced quote, say), so such a line never counts as a registration. Words
+    are split at a space or a tab alone, the blanks bash splits at: shlex.split also splits at a carriage
+    return, which bash keeps in the word, so a CRLF-ended registration would count though bash passes
+    its last word with the carriage return."""
+    import shlex
+    lexer = shlex.shlex(line, posix=True)
+    lexer.whitespace = " \t"
+    lexer.whitespace_split = True
+    try:
+        return list(lexer)
+    except ValueError:
+        return None
+
+
+_CLOSURE_ENTRY_RE = re.compile(r'\s*\(\s*"[^"]+"\s*,\s*"([^"]+)"\s*,\s*\[([^\]]*)\]\s*\)\s*,?\s*(?:#.*)?')
+
+
+def _registrations(rel, text, script, directory):
+    """The argument lists with which the roster rel (its text given) registers script, one list per
+    registration. A shell runner (.sh) registers a script on a line whose words, its comment dropped, are
+    exactly run_gate, a gate name, python3, interpreter options (each starting with -), the path
+    directory/script, then the arguments; an echo, a comment or a longer or renamed path is no
+    registration. The standalone-closure roster (.py) registers it as a whole ("name", "script", [args])
+    entry line with only a comment after it. Any other roster suffix registers nothing. Lines are split
+    on LF alone (_lines), as bash splits them."""
+    found = []
+    for line in _lines(text):
+        if rel.endswith(".sh"):
+            words = _shell_words(line)
+            if not words or len(words) < 4 or words[0] != "run_gate" or words[2] != "python3":
+                continue
+            k = 3
+            while k < len(words) and words[k].startswith("-"):
+                k += 1
+            if k < len(words) and words[k] == directory + "/" + script:
+                found.append(words[k + 1:])
+        elif rel.endswith(".py"):
+            m = _CLOSURE_ENTRY_RE.fullmatch(line)
+            if m and m.group(1) == script:
+                found.append(re.findall(r'"([^"]*)"', m.group(2)))
+    return found
+
+
+def _yaml_is_item(line):
+    stripped = line.lstrip(" ")
+    return stripped == "-" or stripped.startswith("- ")
+
+
+_YAML_KEY_RE = re.compile(r"""([A-Za-z0-9_-]+|"[^"]*"|'[^']*'):(?:\s(.*))?""")
+
+
+def _yaml_subset(text):
+    """Parse the block-YAML subset a workflow uses into dicts, lists, strings and None (an empty value):
+    block mappings and sequences by indentation, plain scalars (a plain scalar's " #" comment dropped),
+    quoted scalars kept as the text between their quotes (escapes not decoded), literal block scalars
+    (|, |- or |+, kept as their lines dedented by the first content line's indent and joined by
+    newlines, the result's leading and trailing newlines dropped whatever the chomping indicator) and a
+    one-line flow collection read as a plain scalar, so kept as text. Lines are split on LF alone, so a
+    carriage return (the gate's _read has already turned CRLF and CR line ends into LF), U+0085, U+2028
+    or U+2029 anywhere in the text raises ValueError: a YAML 1.1 reader breaks a line at each, so a key
+    after one would sit unseen on what this parser reads as a comment or a scalar. Raise ValueError as
+    well on a tab in an indent, a duplicate key, a line at an unexpected indent, a document marker, a
+    block scalar as a sequence item, a folded block scalar (>), an indentation indicator, a literal
+    block line indented less than its first content line and a blank line before that first content
+    line longer than its indent, so none of these shapes reads as a runner step. Anchors, aliases and
+    tags are not interpreted: where this parser accepts one, its characters stay in the scalar text. A
+    folded block is refused rather than read line by line: YAML joins its lines of equal indent with
+    spaces (a blank or more-indented line keeps a line break), so a first line # skip followed by the
+    command at the same indent turns the whole value into one shell comment."""
+    if any(mark in text for mark in ("\r", "\x85", "\N{LINE SEPARATOR}", "\N{PARAGRAPH SEPARATOR}")):
+        raise ValueError("a carriage return or a U+0085, U+2028 or U+2029 line break")
+    lines = text.split("\n")
+    n = len(lines)
+    if any(line.lstrip(" ").startswith("\t") for line in lines):
+        raise ValueError("tab indent")
+
+    def indent(k):
+        return len(lines[k]) - len(lines[k].lstrip(" "))
+
+    def skip(k):
+        while k < n and (not lines[k].strip() or lines[k].lstrip(" ").startswith("#")):
+            k += 1
+        return k
+
+    def scalar(raw):
+        raw = raw.strip()
+        if raw[:1] in ("'", '"'):
+            end = raw.find(raw[0], 1)
+            rest = raw[end + 1:].strip() if end > 0 else "unterminated"
+            if rest and not rest.startswith("#"):
+                raise ValueError("quoted scalar")
+            return raw[1:end]
+        if raw[:1] in ("|", ">"):
+            raise ValueError("block scalar in a sequence item")
+        return re.split(r"\s#", raw, maxsplit=1)[0].rstrip()
+
+    def block(k, parent, header):
+        if not re.fullmatch(r"\|[+-]?(?:\s+#.*)?", header):
+            raise ValueError("block scalar header {}".format(header))
+        body = []
+        while k < n and (not lines[k].strip() or indent(k) > parent):
+            body.append(lines[k])
+            k += 1
+        widths = [len(line) - len(line.lstrip(" ")) for line in body if line.strip()]
+        if widths and min(widths) < widths[0]:
+            raise ValueError("block scalar line indented less than its first line")
+        width = widths[0] if widths else 0
+        for line in body:
+            if line.strip():
+                break
+            if widths and len(line) > width:
+                raise ValueError("block scalar blank line longer than its first line's indent")
+        return "\n".join(line[width:] for line in body).strip("\n"), k
+
+    def value(rest, k, ind):
+        rest = rest.strip()
+        if not rest or rest.startswith("#"):
+            j = skip(k)
+            if j < n and indent(j) > ind:
+                return node(j)
+            if j < n and indent(j) == ind and _yaml_is_item(lines[j]):
+                return sequence(j, ind)
+            return None, k
+        if rest[0] in "|>":
+            return block(k, ind, rest)
+        return scalar(rest), k
+
+    def node(k):
+        return sequence(k, indent(k)) if _yaml_is_item(lines[k]) else mapping(k, indent(k))
+
+    def mapping(k, ind):
+        out = {}
+        while True:
+            k = skip(k)
+            if k >= n or indent(k) < ind:
+                return out, k
+            m = _YAML_KEY_RE.fullmatch(lines[k][ind:].rstrip(" "))
+            if indent(k) > ind or _yaml_is_item(lines[k]) or not m:
+                raise ValueError("line {}".format(k + 1))
+            key = m.group(1).strip("'\"") if m.group(1)[:1] in ("'", '"') else m.group(1)
+            if key in out:
+                raise ValueError("duplicate key {}".format(key))
+            out[key], k = value(m.group(2) or "", k + 1, ind)
+
+    def sequence(k, ind):
+        out = []
+        while True:
+            k = skip(k)
+            if k >= n or indent(k) < ind or (indent(k) == ind and not _yaml_is_item(lines[k])):
+                return out, k
+            if indent(k) > ind:
+                raise ValueError("line {}".format(k + 1))
+            content = lines[k][ind + 1:]
+            stripped = content.lstrip(" ")
+            if not stripped or stripped.startswith("#"):
+                j = skip(k + 1)
+                item, k = node(j) if j < n and indent(j) > ind else (None, k + 1)
+            elif stripped[:1] not in ("'", '"') and _YAML_KEY_RE.fullmatch(stripped.rstrip(" ")):
+                column = ind + 1 + len(content) - len(stripped)
+                lines[k] = " " * column + stripped
+                item, k = mapping(k, column)
+            else:
+                item, k = scalar(stripped), k + 1
+            out.append(item)
+
+    start = skip(0)
+    if start >= n:
+        return {}
+    doc, end = node(start)
+    if skip(end) != n:
+        raise ValueError("line {}".format(skip(end) + 1))
+    return doc
+
+
+_WORKSPACE_RE = re.compile(r"\$\{\{\s*github\.workspace\s*\}\}")
+
+
+def _runs_runner(run):
+    """True when a step's run: value is exactly one command (comment and blank lines aside) whose words
+    are the OPF runner's path alone or bash followed by it alone (one of LOCAL_RUNNER_PATHS, a workspace
+    expression normalised first): an echo, a || true or any other trailing word, a renamed or suffixed
+    path (.bak, -old, sh2) or a second command is no run of the runner."""
+    if type(run) is not str:
+        return False
+    commands = [line for line in run.split("\n") if line.strip() and not line.strip().startswith("#")]
+    if len(commands) != 1:
+        return False
+    words = _shell_words(_WORKSPACE_RE.sub("${{github.workspace}}", commands[0]))
+    return any(words in ([path], ["bash", path]) for path in LOCAL_RUNNER_PATHS)
+
+
+def _unconditional(entry):
+    """True when a job or step (a parsed mapping) carries no if: condition and no continue-on-error other
+    than false, either of which can keep the runner from failing the workflow."""
+    return "if" not in entry and entry.get("continue-on-error", "false") == "false"
+
+
+_STARTUP_ENV = ("BASH_ENV", "ENV")
+
+
+def _no_startup_env(entry):
+    """True when a workflow, job or step (a parsed mapping) sets neither BASH_ENV nor ENV: its env: is
+    absent, empty or a mapping without either key. A non-interactive bash sources the file BASH_ENV names
+    before the step's script, and that file can end the step with exit 0 before the runner starts; ENV,
+    the startup file of an interactive POSIX shell, is refused with it as a precaution. An env: this
+    parser keeps as text (a flow mapping or an expression) cannot be read, so it counts as setting one."""
+    env = entry.get("env")
+    return env is None or (isinstance(env, dict) and not any(key in env for key in _STARTUP_ENV))
+
+
+def _workflow_runs_runner(text):
+    """True when the workflow text has a job and a step in it, both unconditional, whose step runs the OPF
+    runner (_runs_runner) with no working-directory and a bash shell (the shell: key absent or bash), and
+    neither that step, its job nor the workflow sets BASH_ENV or ENV (_no_startup_env); None when the
+    text is outside the parsed YAML subset (_yaml_subset); False otherwise. Stated residuals, not
+    checked: the workflow's triggers, job- and workflow-level defaults, a needs: on another job (a
+    needed job that is skipped or fails skips the runner's job), whether a prior step ends the job early
+    or sets BASH_ENV for later steps through the GITHUB_ENV file, and the environment the runner machine
+    itself supplies."""
+    try:
+        doc = _yaml_subset(text)
+    except ValueError:
+        return None
+    jobs = doc.get("jobs") if isinstance(doc, dict) and _no_startup_env(doc) else None
+    for job in (jobs.values() if isinstance(jobs, dict) else ()):
+        if (not isinstance(job, dict) or not _unconditional(job) or not _no_startup_env(job)
+                or not isinstance(job.get("steps"), list)):
+            continue
+        for step in job["steps"]:
+            if (isinstance(step, dict) and _unconditional(step) and _no_startup_env(step)
+                    and "working-directory" not in step and step.get("shell", "bash") == "bash"
+                    and _runs_runner(step.get("run"))):
+                return True
+    return False
+
+
+class _Unparsed(Exception):
+    """A roster input outside the shape this gate parses, so its check cannot be evaluated."""
+
+
+def _runner_drifts(read, parent=False):
     """C-RUNNERS, lazily: yield one drift message per miss, in order, reading each roster file through
-    read(rel) only when it is reached. BOTH scripts must be registered on an ACTIVE (non-comment) line in
-    every ROSTER_FILES surface, and the LIVE consistency gate (no --self-test) in every LIVE_GATE_FILES
-    surface. The live gate passes _read; the self-test passes an in-memory map."""
-    for rel in ROSTER_FILES:
+    read(rel) only when it is reached. The OPF-local rosters always: in every LOCAL_ROSTER_FILES surface
+    the validator self-test and this gate's self-test, each a registration of its own; in every
+    LOCAL_LIVE_GATE_FILES surface this gate's live run with no argument, a third registration; and a
+    step of LOCAL_WORKFLOW that runs the OPF runner (_workflow_runs_runner). With parent, then the parent
+    rosters: both self-tests in every PARENT_ROSTER_FILES surface and the live gate with PARENT_FLAG as
+    its only argument in every PARENT_LIVE_GATE_FILES surface. A LOCAL_WORKFLOW outside the parsed YAML
+    subset raises _Unparsed, which the gate reports as cannot-evaluate (exit 2), not as a drift. The live
+    gate passes _read; the self-test passes an in-memory map."""
+    yield from _roster_drifts(read, LOCAL_ROSTER_FILES, LOCAL_LIVE_GATE_FILES, None, LOCAL_SCRIPT_DIR)
+    runs = _workflow_runs_runner(read(LOCAL_WORKFLOW))
+    if runs is None:
+        raise _Unparsed("{} is outside the workflow shape this gate parses".format(LOCAL_WORKFLOW))
+    if not runs:
+        yield "the OPF runner tools/run_all_checks.sh is not run by {}".format(LOCAL_WORKFLOW)
+    if parent:
+        yield from _roster_drifts(read, PARENT_ROSTER_FILES, PARENT_LIVE_GATE_FILES, PARENT_FLAG,
+                                  PARENT_SCRIPT_DIR)
+
+
+def _roster_drifts(read, rosters, live_files, flag, directory):
+    """One roster set of C-RUNNERS (see _runner_drifts): the validator's and this gate's self-test
+    registrations (--self-test as the only argument) in every rosters surface, then this gate's live
+    registration (no argument when flag is None, else flag alone) in every live_files surface, each found
+    by _registrations with the scripts under directory. The three are distinct registrations, so no one
+    of them can stand in for another."""
+    for rel in rosters:
         text = read(rel)
-        # The validator name is a substring of the gate name, so match it on a word boundary; the gate
-        # name is unique and matched as a plain active-line substring.
-        if not _active_line_matches(text, r"\b_opf_init_contract\.py"):
-            yield "_opf_init_contract.py not actively registered in {}".format(rel)
-        if not _active_line_has(text, "check_opf_init_contract.py"):
-            yield "check_opf_init_contract.py not actively registered in {}".format(rel)
-    for rel in LIVE_GATE_FILES:
-        text = read(rel)
-        live = any("check_opf_init_contract.py" in line and "--self-test" not in line
-                   and not line.strip().startswith("#") for line in text.splitlines())
-        if not live:
-            yield "live consistency gate (no --self-test) not registered in {}".format(rel)
+        if [SELF_TEST] not in _registrations(rel, text, VALIDATOR_NAME, directory):
+            yield "{} {} not actively registered in {}".format(VALIDATOR_NAME, SELF_TEST, rel)
+        if [SELF_TEST] not in _registrations(rel, text, GATE_NAME, directory):
+            yield "{} {} not actively registered in {}".format(GATE_NAME, SELF_TEST, rel)
+    for rel in live_files:
+        if ([] if flag is None else [flag]) not in _registrations(rel, read(rel), GATE_NAME, directory):
+            yield "live consistency gate (no {}{}) not registered in {}".format(
+                SELF_TEST, "" if flag is None else ", with " + flag, rel)
+
+
+def _mode(args):
+    """The run mode for the command-line arguments after the script: False (OPF-local) for none, True for
+    PARENT_FLAG alone, None for anything else, which _checks refuses (exit 2) before reading any input, so
+    a misspelled or extra argument never runs the OPF-local mode in its place."""
+    if not args:
+        return False
+    if list(args) == [PARENT_FLAG]:
+        return True
+    return None
 
 
 def _checks():
-    contract = _read("opf/tools/_opf_init_contract.py")
-    schema = _read("opf/tools/_opf_schema.py")
-    store = _read("opf/tools/_opf_store.py")
-    check = _read("opf/tools/_opf_check.py")
-    init = _read("opf/tools/_opf_init.py")
-    opf = _read("opf/tools/opf.py")
-    spec = _read("opf/spec/OPF-INIT-D2B.md")
-    review = _read("opf/spec/OPF-INIT-D2B-REVIEW.md")
+    parent = _mode(sys.argv[1:])
+    if parent is None:
+        _cant("unknown argument; usage: python3 -I -B check_opf_init_contract.py [{} | {}]".format(
+            SELF_TEST, PARENT_FLAG))
+    _source_checks()
+
+    # C-RUNNERS: see _runner_drifts. The first drift ends the gate, so the reads and their order match a
+    # sequential check: a later roster file is never read once an earlier one has drifted. An input
+    # outside the parsed shape ends the gate as cannot-evaluate (exit 2).
+    try:
+        for message in _runner_drifts(_read, parent=parent):
+            _drift(message)
+    except _Unparsed as exc:
+        _cant(exc.args[0])
+
+    sys.stdout.write("PASS check_opf_init_contract: contract/source consistency{}\n".format(
+        " (with parent integration)" if parent else ""))
+    sys.exit(0)
+
+
+def _source_checks():
+    """The contract/source checks (every check but C-RUNNERS), each ending the gate on its first miss."""
+    contract = _read("tools/_opf_init_contract.py")
+    schema = _read("tools/_opf_schema.py")
+    store = _read("tools/_opf_store.py")
+    check_source = _read("tools/_opf_check.py")
+    init = _read("tools/_opf_init.py")
+    opf = _read("tools/opf.py")
+    spec = _read("spec/OPF-INIT-D2B.md")
+    review = _read("spec/OPF-INIT-D2B-REVIEW.md")
 
     # C-ACTOR: the schema authority holds its shape, and the validator mirrors it exactly.
     if not _has_line(schema, ACTOR_LINE):
@@ -600,7 +955,7 @@ def _checks():
     # checks above cannot see the view comprehension). The child never sets __name__ to __main__, so the
     # validator self-test does not run on load; ANY other ending of the loaded code, an os._exit with any
     # status included, is fail-closed (exit 2), never this gate's status (_validator_missing).
-    for view in _validator_missing(str(ROOT / "opf/tools/_opf_init_contract.py"), src_views):
+    for view in _validator_missing(str(ROOT / "tools/_opf_init_contract.py"), src_views):
         _drift("pinned view not a member of the validator _RESERVED set: .working/{}".format(view))
 
     # C-D2A: the shipped D2a success wording is present (D2b must not silently retrofit an envelope).
@@ -615,21 +970,13 @@ def _checks():
         _cant("_opf_store.py SUPPORTED_SPEC_VERSION changed; re-verify the schema-compat boundary")
 
     # C-CHECKER-ROSTER: the required-checks authority the coupled success contract depends on.
-    if "REQUIRED_CHECKS" not in check:
+    if "REQUIRED_CHECKS" not in check_source:
         _cant("_opf_check.py REQUIRED_CHECKS missing")
 
     # C-REVIEW: the durable review register enumerates F01..F30.
     for n in range(1, 31):
         if "F{:02d}".format(n) not in review:
             _drift("review register missing F{:02d}".format(n))
-
-    # C-RUNNERS: see _runner_drifts. The first drift ends the gate, so the reads and their order match a
-    # sequential check: a later roster file is never read once an earlier one has drifted.
-    for message in _runner_drifts(_read):
-        _drift(message)
-
-    sys.stdout.write("PASS check_opf_init_contract: contract/source consistency\n")
-    sys.exit(0)
 
 
 def _expect(condition, message=None):
@@ -1265,28 +1612,38 @@ def _self_test_loaded_exit_in_child():
 
 
 # In-memory roster surfaces for the C-RUNNERS vectors, in the registration shapes the live files use.
-# There is no CI workflow entry: the check must pass without reading one.
+# Keys are relative to the OPF root, as the live gate reads them; the parent's files sit under "../".
+# There is no parent CI workflow entry: the check must pass without reading one.
+_PARENT_WORKFLOW = "../.github/workflows/quality.yml"
 _RUNNER_FIXTURE = {
     "tools/run_all_checks.sh": (
+        'run_gate "opf-init-contract-selftest"  python3 -I -B "$here/_opf_init_contract.py" --self-test\n'
+        'run_gate "opf-init-contract-check-selftest" python3 -I -B "$here/check_opf_init_contract.py"'
+        ' --self-test\n'
+        'run_gate "opf-init-contract-check"     python3 -I -B "$here/check_opf_init_contract.py"\n'),
+    ".github/workflows/quality.yml": (
+        "jobs:\n"
+        "  opf-checks:\n"
+        "    steps:\n"
+        "      - name: OPF checks\n"
+        "        run: bash tools/run_all_checks.sh\n"),
+    "../tools/run_all_checks.sh": (
         'run_gate "opf-init-contract-selftest" python3 -I -B opf/tools/_opf_init_contract.py --self-test\n'
         'run_gate "opf-init-contract-check-selftest" python3 -I -B opf/tools/check_opf_init_contract.py'
         ' --self-test\n'
-        'run_gate "opf-init-contract-check" python3 -I -B opf/tools/check_opf_init_contract.py\n'),
-    "opf/tools/run_all_checks.sh": (
-        'run_gate "opf-init-contract-selftest"  python3 -I -B "$here/_opf_init_contract.py" --self-test\n'
-        'run_gate "opf-init-contract-check-selftest" python3 -I -B "$here/check_opf_init_contract.py"'
-        ' --self-test\n'),
-    "tools/check_opf_standalone_closure.py": (
+        'run_gate "opf-init-contract-check" python3 -I -B opf/tools/check_opf_init_contract.py'
+        ' --parent-integration\n'),
+    "../tools/check_opf_standalone_closure.py": (
         '    ("opf-init-contract-validator-selftest", "_opf_init_contract.py", ["--self-test"]),\n'
         '    ("opf-init-contract-check-selftest", "check_opf_init_contract.py", ["--self-test"]),\n'),
 }
-_WORKFLOW = ".github/workflows/quality.yml"
+_LOCAL_FIXTURE = {rel: text for rel, text in _RUNNER_FIXTURE.items() if not rel.startswith("../")}
 
 
-def _runner_case(files):
+def _runner_case(files, parent=False):
     """(drift messages, the files read in order) for _runner_drifts over the in-memory map files. A read
     of a file the map lacks is recorded and ends the case with one cannot-evaluate message, as the live
-    _read refuses a missing input."""
+    _read refuses a missing input; so does a workflow outside the parsed shape (_Unparsed)."""
     reads = []
 
     def read(rel):
@@ -1294,51 +1651,245 @@ def _runner_case(files):
         if rel not in files:
             raise LookupError(rel)
         return files[rel]
+    drifts = []
     try:
-        return list(_runner_drifts(read)), reads
+        for message in _runner_drifts(read, parent=parent):
+            drifts.append(message)
     except LookupError as exc:
         return ["cannot evaluate: missing input: {}".format(exc.args[0])], reads
+    except _Unparsed as exc:
+        return drifts + ["cannot evaluate: {}".format(exc.args[0])], reads
+    return drifts, reads
+
+
+def _replaced(files, rel, text):
+    changed = dict(files)
+    changed[rel] = text
+    return changed
 
 
 def _self_test_runner_rosters():
-    """C-RUNNERS vectors over in-memory rosters: the CI workflow is never read (red when it is put back
-    in ROSTER_FILES or LIVE_GATE_FILES), and every local registration the check still guards is red when
-    it is missing, commented out, or (for the live gate) present only as its self-test."""
-    local_reads = list(ROSTER_FILES) + list(LIVE_GATE_FILES)
-    drifts, reads = _runner_case(_RUNNER_FIXTURE)
-    _expect(drifts == [], "runner rosters: a tree with no CI workflow must pass on the local rosters "
-            "alone: {}".format(drifts))
-    _expect(_WORKFLOW not in reads and reads == local_reads,
-            "runner rosters: reads were {}, expected {}".format(reads, local_reads))
-    with_workflow = dict(_RUNNER_FIXTURE)
-    with_workflow[_WORKFLOW] = "name: Quality\njobs: {}\n"
-    drifts, reads = _runner_case(with_workflow)
-    _expect(drifts == [] and _WORKFLOW not in reads,
-            "runner rosters: a CI workflow carrying neither script must not be read or reported: "
+    """C-RUNNERS vectors over in-memory rosters. The OPF-local run reads only the OPF root's own files (a
+    standalone OPF tree with no parent passes; red when a parent path is put back in the local sets); the
+    parent integration run adds exactly the parent runner and closure roster and never the parent CI
+    workflow. Every registration the check guards is red when it is missing, commented out, or (for a
+    live gate) present only as its self-test, and the parent live gate is red without its flag."""
+    local_reads = list(LOCAL_ROSTER_FILES) + list(LOCAL_LIVE_GATE_FILES) + [LOCAL_WORKFLOW]
+    parent_reads = local_reads + list(PARENT_ROSTER_FILES) + list(PARENT_LIVE_GATE_FILES)
+    drifts, reads = _runner_case(_LOCAL_FIXTURE)
+    _expect(drifts == [] and reads == local_reads,
+            "runner rosters: a standalone OPF tree must pass on its own rosters alone: {} (reads {}, "
+            "expected {})".format(drifts, reads, local_reads))
+    _expect(not any(rel.startswith("../") for rel in local_reads),
+            "runner rosters: the OPF-local sets must name no path outside the OPF root")
+    drifts, reads = _runner_case(_RUNNER_FIXTURE, parent=True)
+    _expect(drifts == [] and reads == parent_reads,
+            "runner rosters: reads were {}, expected {} ({})".format(reads, parent_reads, drifts))
+    with_workflow = _replaced(_RUNNER_FIXTURE, _PARENT_WORKFLOW, "name: Quality\njobs: {}\n")
+    drifts, reads = _runner_case(with_workflow, parent=True)
+    _expect(drifts == [] and _PARENT_WORKFLOW not in reads,
+            "runner rosters: a parent CI workflow carrying neither script must not be read or reported: "
             "{} (reads {})".format(drifts, reads))
+    drifts, reads = _runner_case(_LOCAL_FIXTURE, parent=True)
+    _expect(drifts == ["cannot evaluate: missing input: ../tools/run_all_checks.sh"],
+            "runner rosters: --parent-integration without a parent must not pass: {}".format(drifts))
 
-    no_live = dict(_RUNNER_FIXTURE)
-    no_live["tools/run_all_checks.sh"] = "".join(
-        _RUNNER_FIXTURE["tools/run_all_checks.sh"].splitlines(keepends=True)[:2])
-    drifts, _reads = _runner_case(no_live)
-    _expect(drifts == ["live consistency gate (no --self-test) not registered in tools/run_all_checks.sh"],
-            "runner rosters: a repo-root runner with only the self-test lines must drift once: "
-            "{}".format(drifts))
+    local_runner = "tools/run_all_checks.sh"
+    local_live = "live consistency gate (no --self-test) not registered in " + local_runner
+    local_gate_selftest = "check_opf_init_contract.py --self-test not actively registered in " + local_runner
+    local_validator = "_opf_init_contract.py --self-test not actively registered in " + local_runner
+    lines = re.findall(r"[^\n]*\n", _RUNNER_FIXTURE[local_runner])
+    # Each of the three OPF runner registrations is required on its own: dropping any one line (the gate's
+    # self-test included, which the live line names the same script as) drifts exactly once.
+    for index, want in ((0, local_validator), (1, local_gate_selftest), (2, local_live)):
+        kept = "".join(line for k, line in enumerate(lines) if k != index)
+        drifts, _reads = _runner_case(_replaced(_LOCAL_FIXTURE, local_runner, kept))
+        _expect(drifts == [want],
+                "runner rosters: an OPF runner without registration {} must drift once ({}): {}".format(
+                    index, want, drifts))
+    gate_lines = lines[1] + lines[2]
+    for label, text, want in (
+            ("the whole runner commented", "# " + "# ".join(lines), [local_validator, local_gate_selftest,
+                                                                    local_live]),
+            ("the gate self-test as an echo", lines[0] + "echo " + lines[1] + lines[2], [local_gate_selftest]),
+            ("the gate self-test with --self-test only in a comment",
+             lines[0] + lines[2].rstrip("\n") + "  # --self-test\n" + lines[2], [local_gate_selftest]),
+            ("the live gate with an extra argument", lines[0] + lines[1] + lines[2].rstrip("\n") + " -x\n",
+             [local_live]),
+            ("the live gate under a suffixed path", lines[0] + lines[1]
+             + lines[2].replace("check_opf_init_contract.py", "check_opf_init_contract.py.bak"), [local_live]),
+            ("the live gate from another directory", lines[0] + lines[1]
+             + lines[2].replace("$here/", "$here/../"), [local_live]),
+            ("an unbalanced quote on the live line", lines[0] + lines[1] + lines[2].replace('"', "", 1),
+             [local_live]),
+            ("all three registrations intact", lines[0] + gate_lines, [])):
+        drifts, _reads = _runner_case(_replaced(_LOCAL_FIXTURE, local_runner, text))
+        _expect(drifts == want, "runner rosters: an OPF runner with {} must drift {}: {}".format(
+            label, want, drifts))
 
-    commented = dict(_RUNNER_FIXTURE)
-    commented["opf/tools/run_all_checks.sh"] = "# " + _RUNNER_FIXTURE["opf/tools/run_all_checks.sh"]
-    drifts, _reads = _runner_case(commented)
-    _expect(drifts == ["_opf_init_contract.py not actively registered in opf/tools/run_all_checks.sh"],
-            "runner rosters: a commented validator registration in the OPF runner must drift once: "
-            "{}".format(drifts))
+    # The OPF workflow must have a step that runs the runner. Each input with its expected outcome: True
+    # runs the runner (no drift), False does not (one drift), None is outside the parsed YAML subset (one
+    # cannot-evaluate message; the live gate ends exit 2).
+    def workflow(step, job_extra=""):
+        return ("name: OPF Quality\non:\n  push:\n    branches: [main]\njobs:\n  opf-checks:\n"
+                "    runs-on: ubuntu-latest\n" + job_extra + "    steps:\n"
+                "      - uses: actions/checkout@v4\n        with:\n          persist-credentials: false\n"
+                + step)
+    named = "      - name: OPF runner\n        shell: bash\n"
+    runner = "        run: bash tools/run_all_checks.sh\n"
+    # This parser splits lines on LF alone, while a YAML 1.1 reader also breaks a line at a carriage
+    # return, U+0085, U+2028 and U+2029, so a key after one would hide on what reads here as a comment or
+    # a scalar: each is refused in a comment line, in a plain scalar's comment and at job level.
+    line_breaks = []
+    for name, mark in (("a carriage return", "\r"), ("U+0085", "\x85"), ("U+2028", "\N{LINE SEPARATOR}"),
+                       ("U+2029", "\N{PARAGRAPH SEPARATOR}")):
+        line_breaks += [
+            (name + " in a comment line before if: false",
+             workflow(named + "        # note" + mark + "        if: false\n" + runner), None),
+            (name + " in a plain scalar's comment before continue-on-error: true",
+             workflow(named + runner.rstrip("\n") + "  # note" + mark + "        continue-on-error: true\n"),
+             None),
+            (name + " in a job-level comment line before if: false",
+             workflow(named + runner, "    # note" + mark + "    if: false\n"), None)]
+    for label, text, want in tuple(line_breaks) + (
+            ("the live file's shape", workflow(named + "        run: bash tools/run_all_checks.sh\n"), True),
+            ("bash ./ path", workflow(named + "        run: bash ./tools/run_all_checks.sh\n"), True),
+            ("the bare path", workflow(named + "        run: tools/run_all_checks.sh\n"), True),
+            ("a quoted workspace path",
+             workflow(named + '        run: "${{ github.workspace }}/tools/run_all_checks.sh"\n'), True),
+            ("bash and a quoted workspace path",
+             workflow(named + '        run: bash "${{ github.workspace }}/tools/run_all_checks.sh"\n'), True),
+            ("a one-command literal block",
+             workflow(named + "        run: |\n          bash tools/run_all_checks.sh\n"), True),
+            ("a comment after the command", workflow(named + "        run: bash tools/run_all_checks.sh"
+                                                     "  # the OPF runner\n"), True),
+            ("no shell key", workflow("      - run: bash tools/run_all_checks.sh\n"), True),
+            ("absent", "name: Quality\njobs: {}\n", False),
+            ("only commented out", workflow(named + "        # run: bash tools/run_all_checks.sh\n"), False),
+            ("echo", workflow(named + "        run: echo tools/run_all_checks.sh\n"), False),
+            ("|| true", workflow(named + "        run: bash tools/run_all_checks.sh || true\n"), False),
+            (".bak", workflow(named + "        run: bash tools/run_all_checks.sh.bak\n"), False),
+            ("-old", workflow(named + "        run: bash tools/run_all_checks.sh-old\n"), False),
+            ("a longer name", workflow(named + "        run: bash tools/run_all_checks.sh2\n"), False),
+            ("another runner", workflow(named + "        run: bash ../tools/run_all_checks.sh\n"), False),
+            ("the path only in a step name",
+             workflow("      - name: tools/run_all_checks.sh\n        run: echo skipped\n"), False),
+            ("the path only in an inline YAML comment",
+             workflow(named + "        run: echo skipped # tools/run_all_checks.sh\n"), False),
+            ("a step with if: false",
+             workflow(named + "        if: false\n        run: bash tools/run_all_checks.sh\n"), False),
+            ("a step with any if: condition",
+             workflow(named + "        if: always()\n        run: bash tools/run_all_checks.sh\n"), False),
+            ("a job with if: false",
+             workflow(named + "        run: bash tools/run_all_checks.sh\n", "    if: false\n"), False),
+            ("a step with continue-on-error: true", workflow(
+                named + "        continue-on-error: true\n        run: bash tools/run_all_checks.sh\n"), False),
+            ("a step with a working-directory", workflow(
+                named + "        working-directory: sub\n        run: bash tools/run_all_checks.sh\n"), False),
+            ("a step whose shell is not bash", workflow(
+                "      - shell: python\n        run: bash tools/run_all_checks.sh\n"), False),
+            ("a second command first", workflow(named + "        run: |\n          exit 0\n"
+                                                "          bash tools/run_all_checks.sh\n"), False),
+            ("the runner as a scalar sequence item", workflow("      - bash tools/run_all_checks.sh\n"), False),
+            ("a tab indent", workflow(named + "\trun: bash tools/run_all_checks.sh\n"), None),
+            ("a duplicate key", workflow(named + "        run: echo skipped\n"
+                                         "        run: bash tools/run_all_checks.sh\n"), None),
+            ("a line at an unexpected indent",
+             workflow(named + "         run: bash tools/run_all_checks.sh\n"), None),
+            # A folded block joins lines of equal indent with spaces, so a leading comment line comments
+            # out the runner; the literal block of the same lines runs it.
+            ("a literal block with a comment line first", workflow(
+                named + "        run: |\n          # skip runner\n          bash tools/run_all_checks.sh\n"), True),
+            ("a folded block with a comment line first", workflow(
+                named + "        run: >\n          # skip runner\n          bash tools/run_all_checks.sh\n"), None),
+            ("a folded block, strip chomping", workflow(
+                named + "        run: >-\n          # skip runner\n          bash tools/run_all_checks.sh\n"), None),
+            ("a folded block, keep chomping", workflow(
+                named + "        run: >+\n          # skip runner\n          bash tools/run_all_checks.sh\n"), None),
+            ("a folded step name", workflow(
+                "      - name: >\n          OPF runner\n        run: bash tools/run_all_checks.sh\n"), None),
+            ("a literal block, strip chomping", workflow(
+                named + "        run: |-\n          bash tools/run_all_checks.sh\n"), True),
+            ("a literal block with an indentation indicator",
+             workflow(named + "        run: |4\n          bash tools/run_all_checks.sh\n"), None),
+            ("a literal block line indented less than its first line", workflow(
+                named + "        run: |\n            # skip runner\n          bash tools/run_all_checks.sh\n"),
+             None),
+            # A blank line before the first content line may be no longer than that line's indent (10).
+            ("a literal block with a leading blank line of 11 spaces", workflow(
+                named + "        run: |\n" + " " * 11 + "\n          bash tools/run_all_checks.sh\n"), None),
+            ("a literal block with a leading blank line of 10 spaces", workflow(
+                named + "        run: |\n" + " " * 10 + "\n          bash tools/run_all_checks.sh\n"), True),
+            ("a literal block with a leading blank line of 9 spaces", workflow(
+                named + "        run: |\n" + " " * 9 + "\n          bash tools/run_all_checks.sh\n"), True),
+            # bash sources the file BASH_ENV names before the step's script, and that file can end the step
+            # with exit 0, so BASH_ENV (and ENV with it) in the env: of the step, its job or the workflow
+            # keeps the runner from running; an env: kept as text cannot be read and counts as setting it.
+            ("a step env: setting BASH_ENV",
+             workflow(named + "        env:\n          BASH_ENV: tools/skip.sh\n" + runner), False),
+            ("a step env: setting ENV", workflow(named + "        env:\n          ENV: tools/skip.sh\n" + runner),
+             False),
+            ("a step env: setting a quoted BASH_ENV key",
+             workflow(named + '        env:\n          "BASH_ENV": tools/skip.sh\n' + runner), False),
+            ("a step env: as a flow mapping", workflow(named + "        env: {BASH_ENV: tools/skip.sh}\n" + runner),
+             False),
+            ("a step env: setting another variable",
+             workflow(named + "        env:\n          LANG: C\n" + runner), True),
+            ("a job env: setting BASH_ENV",
+             workflow(named + runner, "    env:\n      BASH_ENV: tools/skip.sh\n"), False),
+            ("a job env: setting ENV", workflow(named + runner, "    env:\n      ENV: tools/skip.sh\n"), False),
+            ("a job env: setting another variable", workflow(named + runner, "    env:\n      LANG: C\n"), True),
+            ("a workflow env: setting BASH_ENV",
+             "env:\n  BASH_ENV: tools/skip.sh\n" + workflow(named + runner), False),
+            ("a workflow env: setting ENV", "env:\n  ENV: tools/skip.sh\n" + workflow(named + runner), False),
+            ("a workflow env: setting another variable", "env:\n  LANG: C\n" + workflow(named + runner), True)):
+        _expect(_workflow_runs_runner(text) is want,
+                "runner rosters: an OPF workflow with {} must give {}, got {}".format(
+                    label, want, _workflow_runs_runner(text)))
+        drifts, _reads = _runner_case(_replaced(_LOCAL_FIXTURE, LOCAL_WORKFLOW, text))
+        expected = {True: [], False: ["the OPF runner tools/run_all_checks.sh is not run by " + LOCAL_WORKFLOW],
+                    None: ["cannot evaluate: " + LOCAL_WORKFLOW + " is outside the workflow shape this gate "
+                           "parses"]}[want]
+        _expect(drifts == expected,
+                "runner rosters: an OPF workflow with {} must drift {}: {}".format(label, expected, drifts))
 
-    closure = dict(_RUNNER_FIXTURE)
-    closure["tools/check_opf_standalone_closure.py"] = (
-        _RUNNER_FIXTURE["tools/check_opf_standalone_closure.py"].splitlines(keepends=True)[0])
-    drifts, _reads = _runner_case(closure)
-    _expect(drifts == ["check_opf_init_contract.py not actively registered in "
-                       "tools/check_opf_standalone_closure.py"],
-            "runner rosters: a closure roster without the gate must drift once: {}".format(drifts))
+    parent_runner = "../tools/run_all_checks.sh"
+    parent_live = ("live consistency gate (no --self-test, with --parent-integration) not registered in "
+                   + parent_runner)
+    parent_gate_selftest = "check_opf_init_contract.py --self-test not actively registered in " + parent_runner
+    parent_lines = re.findall(r"[^\n]*\n", _RUNNER_FIXTURE[parent_runner])
+    for label, text, want in (
+            ("the live gate without the flag",
+             "".join(parent_lines[:2]) + parent_lines[2].replace(" --parent-integration", ""), [parent_live]),
+            ("only the self-test lines", "".join(parent_lines[:2]), [parent_live]),
+            ("no gate self-test line", parent_lines[0] + parent_lines[2], [parent_gate_selftest]),
+            ("the flag only in a trailing comment",
+             "".join(parent_lines[:2]) + parent_lines[2].replace(" --parent-integration",
+                                                                 "  # --parent-integration"), [parent_live]),
+            ("the live gate as an echo", "".join(parent_lines[:2]) + "echo " + parent_lines[2], [parent_live]),
+            ("the flag and another argument",
+             "".join(parent_lines[:2]) + parent_lines[2].rstrip("\n") + " --self-tests\n", [parent_live]),
+            ("the live gate named from the OPF runner's directory",
+             "".join(parent_lines[:2]) + parent_lines[2].replace("opf/tools/", "$here/"), [parent_live])):
+        drifts, _reads = _runner_case(_replaced(_RUNNER_FIXTURE, parent_runner, text), parent=True)
+        _expect(drifts == want, "runner rosters: a parent runner with {} must drift {}: {}".format(
+            label, want, drifts))
+
+    closure = "../tools/check_opf_standalone_closure.py"
+    closure_lines = re.findall(r"[^\n]*\n", _RUNNER_FIXTURE[closure])
+    for label, text, want in (
+            ("no gate entry", closure_lines[0], ["check_opf_init_contract.py --self-test not actively "
+                                                 "registered in " + closure]),
+            ("no validator entry", closure_lines[1], ["_opf_init_contract.py --self-test not actively "
+                                                      "registered in " + closure]),
+            ("the gate entry commented out", closure_lines[0] + "    # " + closure_lines[1].lstrip(" "),
+             ["check_opf_init_contract.py --self-test not actively registered in " + closure]),
+            ("the gate entry without --self-test",
+             closure_lines[0] + closure_lines[1].replace('"--self-test"', ""),
+             ["check_opf_init_contract.py --self-test not actively registered in " + closure])):
+        drifts, _reads = _runner_case(_replaced(_RUNNER_FIXTURE, closure, text), parent=True)
+        _expect(drifts == want, "runner rosters: a closure roster with {} must drift {}: {}".format(
+            label, want, drifts))
 
     # Lazy order: the first drift is yielded before any later roster file is read, so the live gate's
     # first _drift ends it exactly where a sequential check would.
@@ -1346,15 +1897,219 @@ def _self_test_runner_rosters():
 
     def read(rel):
         reads.append(rel)
-        return no_live[rel] if rel != "tools/run_all_checks.sh" else ""
-    first = next(_runner_drifts(read), None)
-    _expect(first == "_opf_init_contract.py not actively registered in tools/run_all_checks.sh"
-            and reads == ["tools/run_all_checks.sh"],
+        return _RUNNER_FIXTURE[rel] if rel != local_runner else ""
+    first = next(_runner_drifts(read, parent=True), None)
+    _expect(first == local_validator and reads == [local_runner],
             "runner rosters: the first drift must come before any later read: {} (reads {})".format(
                 first, reads))
 
 
+def _self_test_entry_pins():
+    """ROOT is the OPF root, the parent of this script's own tools/ directory, and _read resolves from it
+    (red when ROOT is moved up a level: this script is then not at ROOT/tools). _mode accepts no argument
+    or PARENT_FLAG alone and refuses anything else, and _checks carries it: the parent run reaches the
+    roster check with parent set, the local run without, an unknown argument ends exit 2 before any input
+    is read, a roster drift ends exit 1 (red when _checks fixes the mode instead of reading it) and a
+    roster input outside the parsed shape (_Unparsed) ends exit 2 as cannot-evaluate. The wiring vectors
+    stub the source checks and the roster generator in this module's globals and restore them, so no
+    parent-repository file is read and the validator child is not started."""
+    import contextlib
+    import io
+    here = Path(__file__).resolve()
+    _expect(ROOT == here.parent.parent and (ROOT / "tools" / here.name).resolve() == here,
+            "entry pins: ROOT must be the OPF root (this script's tools/ directory's parent): {}".format(ROOT))
+    _expect(_read("tools/" + here.name) == here.read_text(encoding="utf-8"),
+            "entry pins: _read must resolve a path from the OPF root")
+    _expect(_mode([]) is False and _mode([PARENT_FLAG]) is True, "entry pins: the two accepted modes")
+    for bad in (["--parent-integraton"], ["--parent"], ["--Parent-Integration"], [PARENT_FLAG, PARENT_FLAG],
+                [PARENT_FLAG, "extra"], ["extra", PARENT_FLAG], [""], ["-p"]):
+        _expect(_mode(bad) is None, "entry pins: argument list {!r} must be refused".format(bad))
+
+    module = globals()
+    saved = (module["_source_checks"], module["_runner_drifts"], sys.argv)
+    for args, drift, want_code, want_seen, want_out, want_err in (
+            ([], (), 0, ["source", False], "PASS check_opf_init_contract: contract/source consistency\n", ""),
+            ([PARENT_FLAG], (), 0, ["source", True],
+             "PASS check_opf_init_contract: contract/source consistency (with parent integration)\n", ""),
+            ([PARENT_FLAG], ("a roster miss",), 1, ["source", True], "", "DRIFT: a roster miss\n"),
+            ([], None, 2, ["source", False], "", "CANNOT-EVALUATE: an unparsed workflow\n"),
+            (["--parent-integraton"], (), 2, [], "", None)):
+        seen = []
+
+        def source_checks():
+            seen.append("source")
+
+        def runner_drifts(read, parent=False, drift=drift):
+            seen.append(parent if read is _read else "another reader")
+            if drift is None:
+                raise _Unparsed("an unparsed workflow")
+            return iter(drift)
+        out, err = io.StringIO(), io.StringIO()
+        code = "no exit"
+        module["_source_checks"], module["_runner_drifts"] = source_checks, runner_drifts
+        sys.argv = [str(here)] + args
+        try:
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                _checks()
+        except SystemExit as exc:
+            code = exc.code
+        finally:
+            module["_source_checks"], module["_runner_drifts"], sys.argv = saved
+        _expect(code == want_code and seen == want_seen and out.getvalue() == want_out
+                and (err.getvalue() == want_err if want_err is not None
+                     else err.getvalue().startswith("CANNOT-EVALUATE: unknown argument")),
+                "entry pins: _checks with {!r} ended {!r} after {!r} ({!r}, {!r})".format(
+                    args, code, seen, out.getvalue(), err.getvalue()))
+
+
+# Argument lists that carry --self-test beside another argument: the real entry must refuse each one
+# with exit 2, never run the self-test (or the gate) in its place.
+_ENTRY_REFUSED_ARGS = (["--parent-integraton", "--self-test"], ["--self-test", "--parent-integraton"],
+                       ["--self-test", "--self-test"], ["--self-test", PARENT_FLAG],
+                       [PARENT_FLAG, "--self-test"])
+
+
+def _self_test_entry_arguments():
+    """The entry's routing, run for real: this self-test runs only when its own argument list is exactly
+    --self-test, or --self-test REPORT_FLAG and an absolute report path under the execution gate, and the
+    script started as a child with each _ENTRY_REFUSED_ARGS list must end 2 with the unknown-argument
+    refusal as its stderr's first line and nothing on stdout. With the entry back to running the
+    self-test whenever --self-test appears anywhere in sys.argv, the child runs the self-test instead,
+    whose leg here stops at its first requirement (the argument list is neither accepted form) and so
+    starts no child of its own; the child ends 1 without the refusal and the vector is red."""
+    import subprocess
+    args = sys.argv[1:]
+    _expect(args == [SELF_TEST] or (len(args) == 3 and args[:2] == [SELF_TEST, REPORT_FLAG]
+                                    and Path(args[2]).is_absolute()),
+            "entry arguments: the self-test must run only for exactly {}, or {} {} <absolute path>, not for "
+            "{!r}".format(SELF_TEST, SELF_TEST, REPORT_FLAG, args))
+    tool = str(Path(__file__).resolve())
+    for args in _ENTRY_REFUSED_ARGS:
+        try:
+            child = subprocess.run([sys.executable, "-I", "-B", tool] + args, capture_output=True, text=True,
+                                   timeout=120)
+        except (OSError, subprocess.SubprocessError) as exc:
+            _expect(False, "entry arguments: {!r} did not run ({})".format(args, type(exc).__name__))
+        _expect(child.returncode == 2 and child.stdout == ""
+                and child.stderr.startswith("CANNOT-EVALUATE: unknown argument"),
+                "entry arguments: {!r} must end 2 with the unknown-argument refusal, got {!r} ({!r}, "
+                "{!r})".format(args, child.returncode, child.stdout[-300:], child.stderr[-300:]))
+
+
+_NON_LF_BREAKS = (("a form feed", "\x0c"), ("a vertical tab", "\x0b"), ("U+001C", "\x1c"), ("U+001D", "\x1d"),
+                  ("U+001E", "\x1e"), ("U+0085", "\x85"), ("U+2028", "\N{LINE SEPARATOR}"),
+                  ("U+2029", "\N{PARAGRAPH SEPARATOR}"))
+
+
+def _self_test_line_ends():
+    """Each line reader splits on LF alone: a comment line whose text goes on past one of _NON_LF_BREAKS
+    (no line end to bash or Python) hides what follows, so a constant, a tuple member, an active line or
+    a registration after one never counts (red when the reader goes back to str.splitlines). A shell
+    roster keeps its carriage returns (_decoded) and splits words at a space or a tab alone
+    (_shell_words), so a registration after a CR in a comment, or one whose line ends in CRLF, is no
+    registration, while Python and YAML inputs still read CRLF and CR as LF."""
+    runner = "tools/run_all_checks.sh"
+    closure = "../tools/check_opf_standalone_closure.py"
+    live = _RUNNER_FIXTURE[runner].split("\n")[2]
+    entry = _RUNNER_FIXTURE[closure].split("\n")[1]
+    gate_selftest = [[SELF_TEST]]
+    for name, mark in _NON_LF_BREAKS:
+        _expect(not _has_line("# note" + mark + "KEEP_SCHEMA = 1\n", "KEEP_SCHEMA = 1"),
+                "line ends: _has_line must not split a comment at {}".format(name))
+        tuple_text = '_RESERVED = (\n# ".x"' + mark + '".y",\n".z",\n)'
+        _expect(_quoted_in_tuple(tuple_text, "_RESERVED") == {".z"},
+                "line ends: _quoted_in_tuple must not split a comment at {}".format(name))
+        _expect(_ordered_quoted_in_tuple(tuple_text, "_RESERVED") == (".z",),
+                "line ends: _ordered_quoted_in_tuple must not split a comment at {}".format(name))
+        _expect(not _active_line_has("# note" + mark + "run x " + GATE_NAME, GATE_NAME),
+                "line ends: _active_line_has must not split a comment at {}".format(name))
+        _expect(not _active_line_matches('# note' + mark + 'run "$here/_opf_init_contract.py" --self-test',
+                                         r"\b_opf_init_contract\.py"),
+                "line ends: _active_line_matches must not split a comment at {}".format(name))
+        for label, text in (("after a comment", "# note" + mark + live + "\n"),
+                            ("after a colon", ":" + mark + live + "\n")):
+            _expect(_registrations(runner, text, GATE_NAME, LOCAL_SCRIPT_DIR) == [],
+                    "line ends: a shell roster line {} and {} must not register: {}".format(
+                        label, name, _registrations(runner, text, GATE_NAME, LOCAL_SCRIPT_DIR)))
+        text = "    # note" + mark + entry + "\n"
+        _expect(_registrations(closure, text, GATE_NAME, LOCAL_SCRIPT_DIR) == [],
+                "line ends: a closure entry after a comment and {} must not register".format(name))
+    _expect(_registrations(runner, live + "\n", GATE_NAME, LOCAL_SCRIPT_DIR) == [[]]
+            and _registrations(closure, entry + "\n", GATE_NAME, LOCAL_SCRIPT_DIR) == gate_selftest,
+            "line ends: the plain registrations must still count")
+    raw = ("# note\r" + live + "\n").encode("utf-8")
+    _expect(_decoded(runner, raw) == raw.decode("utf-8")
+            and _registrations(runner, _decoded(runner, raw), GATE_NAME, LOCAL_SCRIPT_DIR) == [],
+            "line ends: a shell roster must keep a carriage return, so a registration after one in a "
+            "comment does not count")
+    crlf = live + "\r\n"
+    _expect(_registrations(runner, crlf, GATE_NAME, LOCAL_SCRIPT_DIR) == [],
+            "line ends: a CRLF-ended shell registration passes its last word with the carriage return, so "
+            "it must not count: {}".format(_registrations(runner, crlf, GATE_NAME, LOCAL_SCRIPT_DIR)))
+    _expect(_decoded("tools/_opf_store.py", b"A = 1\r\nB = 2\rC = 3\n") == "A = 1\nB = 2\nC = 3\n"
+            and _decoded(LOCAL_WORKFLOW, b"a: 1\r\nb: 2\r") == "a: 1\nb: 2\n",
+            "line ends: Python and YAML inputs must read CRLF and CR line ends as LF")
+
+
+# The execution-report protocol (tools/check_opf_selftest_execution.py, suite SELF_TEST_SUITE in the
+# OPF-local registry tools/selftest_checks.toml): every self-test leg runs through check(), which records
+# its id BEFORE the leg runs, so the gate reconciles the executed set against the registry. A leg's
+# AssertionError is recorded as a failure and the later legs still run.
+SELF_TEST_SUITE = "opf-init-contract-check-selftest"
+REPORT_FLAG = "--execution-report"
+EXECUTED = []
+FAILURES = []
+
+
+def check(cid, leg):
+    """Record cid as executed, then run leg(); an AssertionError it raises is a recorded failure."""
+    EXECUTED.append(cid)
+    try:
+        leg()
+    except AssertionError as exc:
+        FAILURES.append("{}: {}".format(cid, exc))
+
+
 def _self_test():
+    """Every self-test leg, each through check(); 0 when none failed, else 1 after naming each failure.
+    Git-free, not source-free. The matcher, line-end, roster and workflow vectors run on in-memory text,
+    the comment-evasion cases included. The entry pins and the entry-wiring pin read this script's own
+    source; the entry-argument vectors start this script as a child with this interpreter, and the
+    loaded-exit and fault-channel vectors write probe files to a temporary directory and start them as
+    children that load this script."""
+    check("init-contract/matchers", _self_test_matchers)
+    check("init-contract/line-ends", _self_test_line_ends)
+    check("init-contract/runner-rosters", _self_test_runner_rosters)
+    check("init-contract/entry-pins", _self_test_entry_pins)
+    check("init-contract/entry-arguments", _self_test_entry_arguments)
+    check("init-contract/census-errors", _self_test_census_errors)
+    check("init-contract/loaded-exit-in-child", _self_test_loaded_exit_in_child)
+    check("init-contract/fault-channels", _self_test_fault_channels)
+    for failure in FAILURES:
+        sys.stdout.write("FAIL check_opf_init_contract self-test: {}\n".format(failure))
+    if FAILURES:
+        return 1
+    sys.stdout.write("PASS check_opf_init_contract self-test\n")
+    return 0
+
+
+def _report_main():
+    """The self-test under the OPF execution gate, whose bootstrap launches this file as
+    [<this file>, --self-test, --execution-report, <absolute report path>]: arm the report finalizer
+    (tools/_selftest_exit_report.py beside this file) before any leg runs, then exit through it, so the
+    report is written only at interpreter exit with the status the process really ends with. Any other
+    argv is usage, exit 2, with no report."""
+    args = sys.argv[1:]
+    if len(args) != 3 or args[0] != "--self-test" or args[1] != REPORT_FLAG or not Path(args[2]).is_absolute():
+        sys.stderr.write("usage: check_opf_init_contract.py --self-test {} <absolute path>\n".format(REPORT_FLAG))
+        sys.exit(2)
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import _selftest_exit_report
+    _selftest_exit_report.arm(args[2], SELF_TEST_SUITE, EXECUTED)
+    _selftest_exit_report.exit_with(_self_test())
+
+
+def _self_test_matchers():
     # Git-free / source-free: exercise the matchers on in-memory text, including the comment-evasion cases.
     _expect(_has_line("KEEP_SCHEMA = 1  # comment", "KEEP_SCHEMA = 1"), "exact line ignores comment")
     _expect(not _has_line("KEEP_SCHEMA = 10\n", "KEEP_SCHEMA = 1"), "substring must NOT match a longer value")
@@ -1375,12 +2130,6 @@ def _self_test():
     labels = ["F{:02d}".format(n) for n in range(1, 31)]
     _expect(labels[0] == "F01" and labels[-1] == "F30" and len(labels) == 30, "F-range")
     _expect(ACTOR_LINE.count('"') == 8, "actor line shape")
-    _self_test_runner_rosters()
-    _self_test_census_errors()
-    _self_test_loaded_exit_in_child()
-    _self_test_fault_channels()
-    sys.stdout.write("PASS check_opf_init_contract self-test\n")
-    sys.exit(0)
 
 
 
@@ -1963,9 +2712,14 @@ def _flush_window_failures():
 # The entry wiring, checked statically on this file's own source: the final __main__ block must be
 # exactly _ENTRY_WIRING by AST (spacing and comments aside), so a rewiring that keeps _fail_closed_main
 # defined but routes an entry branch around it (a plain sys.exit around the work, say) is red even though
-# the channel probes above drive _fail_closed_main directly.
+# the channel probes above drive _fail_closed_main directly. An argument list carrying REPORT_FLAG goes
+# to _report_main, which runs the self-test only for exactly --self-test REPORT_FLAG <absolute path> and
+# refuses any other with exit 2; otherwise the self-test runs only for exactly --self-test, and every
+# other argument list goes to _checks, which refuses all but none and PARENT_FLAG.
 _ENTRY_WIRING = '''if __name__ == "__main__":
-    if "--self-test" in sys.argv:
+    if REPORT_FLAG in sys.argv:
+        _report_main()
+    if sys.argv[1:] == ["--self-test"]:
         _fail_closed_main(_self_test)
     _fail_closed_main(_checks)
 '''
@@ -2024,6 +2778,8 @@ def _self_test_fault_channels():
 
 
 if __name__ == "__main__":
-    if "--self-test" in sys.argv:
+    if REPORT_FLAG in sys.argv:
+        _report_main()
+    if sys.argv[1:] == ["--self-test"]:
         _fail_closed_main(_self_test)
     _fail_closed_main(_checks)
