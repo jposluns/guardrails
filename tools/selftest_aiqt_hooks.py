@@ -4348,11 +4348,20 @@ def _test_pgrep_self_match(failures):
 # subscript-inner-subst, subscript-quoted-at-command-word, subscript-quoted-brace-at-command-word,
 # subscript-quoted-array-command-word, subscript-quoted-lists-command-word, subscript-named-fd,
 # subscript-named-fd-input, subscript-named-fd-element, subscript-bang-command-word (no background job),
-# subscript-blank-default-command-word, subscript-time-empty-command-word (time printed its report under both)
-# and subscript-subshell-empty-command-word; subscript-then-empty-command-word wrote f3 under B (the exit of
-# $(exit 3)) and f0 under P (the (( 1 )) condition's). Fire rows whose read named an array index, 0 under B and
-# 1 under P: subscript-empty-command-word-subscript-read (declare -p a showed [0]="5", then [1]="5") and
-# subscript-command-word-read (bash reported the command a[0], then a[1], as not found).
+# subscript-blank-default-command-word, subscript-time-empty-command-word (time printed its report under
+# both), subscript-subshell-empty-command-word, subscript-glued-continuation-empty-command-word,
+# subscript-spaced-continuation-empty-command-word and subscript-continuation-blank-empty-command-word;
+# subscript-then-empty-command-word wrote f3 under B (the exit of $(exit 3)) and f0 under P (the (( 1 ))
+# condition's), and subscript-subst-last-word wrote f3 under B and f1 under P. Fire rows whose read named an
+# array index, 0 under B and 1 under P: subscript-empty-command-word-subscript-read (declare -p a showed
+# [0]="5", then [1]="5") and subscript-command-word-read (bash reported the command a[0], then a[1], as not
+# found). Fire rows whose subscript read gave the value's $(exit 3) or `exit 3`, 3 under B and 1 under P, as
+# declare -p a showed [3]="", then [1]="" (bash expanded the value before the subscript):
+# subscript-value-subst-subscript-read, subscript-append-value-subst-subscript-read,
+# subscript-value-subst-braced-subscript-read, subscript-value-backquote-subscript-read and
+# subscript-two-subscripts-value-subst (b showed [1]="5" under both). subscript-subst-later-assign-read printed
+# b=3 under B and b=1 under P, and subscript-time-after-assignment-command printed a=0 under B and a=1 under P
+# (time printed its report under both).
 # Fire rows whose read showed only in what ran: cond-and, cond-or, cond-compare, cond-group and
 # cond-newline exited 1 under B (their $? -eq 1 test failed) and 0 under P; for-arith-and, for-arith-or,
 # for-do-cond-and and for-do-for-arith printed zero under B (their $? == 0 or $? -eq 0 test held) and
@@ -4371,8 +4380,18 @@ def _test_pgrep_self_match(failures):
 # pipeline, then-assign, redirect-target-separated, assign-read-redirect, assign-no-subst,
 # heredoc-read-first, heredoc-later-redirect, for-arith-later-line, cond-glued-redirect,
 # cond-glued-amp-redirect, dollar-bracket-later-line, subscript-later-line, case-pattern-bracket-read,
-# cond-read-first (it exited 0, so its $? -eq 1 test held), redirect-before {; echo "v=$v"}, and in-body
-# (inside the substitution body, after its false).
+# cond-read-first (it exited 0, so its $? -eq 1 test held), redirect-before {; echo "v=$v"}, in-body
+# (inside the substitution body, after its false), subscript-value-read-subscript-subst and
+# subscript-append-value-read-subscript-subst (declare -p a showed [0]="1": the value was expanded before the
+# subscript's $(exit 3)), and subscript-read-glued-redirect-subst (declare -p a showed [1]="x").
+# Quiet rows where time, ! or then after an assignment or a redirection was the command word, not a reserved
+# word, so bash rejected a[0] as not a valid identifier without expanding it and wrote f1 under B, after the
+# time program in PATH reported a missing program or after ! or then was not found, and exited 1 under P:
+# subscript-time-command-word, subscript-bang-word-command-word, subscript-then-command-word,
+# subscript-glued-time-command-word, subscript-redirect-time-command-word and
+# subscript-last-time-command-word. assign-time-option exited 127 under both after the time program reported
+# that it could not run RC=1. assign-cond-command-word and redirect-cond-command-word reported [[, then 127, as
+# not found under both: the read after || gave the exit of the [[ command, a command of its own.
 # Quiet rows that read the earlier command's 1 under B with the subscripted assignment never expanded (bash
 # reported a[0] as not a valid identifier and ran the command word without expanding it); under P the same
 # error ended each with exit 1 before the command word ran: subscript-temp-env and subscript-append-temp-env (B
@@ -4386,8 +4405,8 @@ def _test_pgrep_self_match(failures):
 # subscript-count-command-word, subscript-flags-command-word, subscript-arith-command-word,
 # subscript-dollar-bracket-command-word, subscript-length-command-word, subscript-braced-status-command-word,
 # subscript-ansi-c-command-word, subscript-procsub-command-word, subscript-escaped-command-word,
-# subscript-single-quoted-command-word, subscript-glued-command-word, subscript-glued-argument and
-# subscript-subscript-command-word.
+# subscript-single-quoted-command-word, subscript-glued-command-word, subscript-glued-argument,
+# subscript-subscript-command-word and subscript-continuation-quoted-command-word (after x was not found).
 # Quiet rows whose read bash never ran: case-pattern-heredoc and redirect-target-subscript printed only done
 # under both (the line holding the read was here-document text).
 # Quiet rows that read 0 under both from a command that succeeded: next-command (the echo's 0), cond-end
@@ -4565,6 +4584,38 @@ _SAS_FIRE_ROWS = (
     ("(sas-fire-subscript-subshell-empty-command-word) redirection read after a subscripted assignment's "
      "substitution where the only command word is an unquoted $e, closed by a subshell's )",
      '( false; a[0]=$(true) $e >"f$?" )'),
+    ("(sas-fire-subscript-value-subst-subscript-read) read in an assignment's subscript after a substitution "
+     "in its value, which bash expands first, where the only command word is an unquoted $e",
+     'false; a[$?]=$(exit 3) $e; declare -p a'),
+    ("(sas-fire-subscript-append-value-subst-subscript-read) read in a += assignment's subscript after a "
+     "substitution in its value, where the only command word is an unquoted $e",
+     'false; a[$?]+=$(exit 3) $e; declare -p a'),
+    ("(sas-fire-subscript-value-subst-braced-subscript-read) ${?} read in an assignment's subscript after a "
+     "substitution in its value, where the only command word is an unquoted $e",
+     'false; a[${?}]=$(exit 3) $e; declare -p a'),
+    ("(sas-fire-subscript-value-backquote-subscript-read) read in an assignment's subscript after a backquote "
+     "substitution in its value, where the only command word is an unquoted $e",
+     'false; a[$?]=`exit 3` $e; declare -p a'),
+    ("(sas-fire-subscript-two-subscripts-value-subst) read in a second assignment's subscript after a "
+     "substitution in its value, the first subscript read holding none",
+     'false; b[$?]=5 a[$?]=$(exit 3) $e; declare -p a b'),
+    ("(sas-fire-subscript-subst-later-assign-read) assignment read after a substitution in an earlier "
+     "assignment's subscript, where the only command word is an unquoted $e",
+     'false; a[$(exit 3)]=1 b=$? $e; echo "b=$b"'),
+    ("(sas-fire-subscript-subst-last-word) redirection read before a subscripted assignment whose subscript "
+     "holds a substitution, the assignment ending the text", 'false; >"f$?" a[$(exit 3)]=1'),
+    ("(sas-fire-subscript-glued-continuation-empty-command-word) redirection read after a subscripted "
+     "assignment's substitution where a line continuation is glued to the only command word, an unquoted $e",
+     'false; a[0]=$(true) $e\\\n>"f$?"'),
+    ("(sas-fire-subscript-spaced-continuation-empty-command-word) redirection read after a subscripted "
+     "assignment's substitution where a blank comes before a line continuation after an unquoted $e",
+     'false; a[0]=$(true) $e \\\n>"f$?"'),
+    ("(sas-fire-subscript-continuation-blank-empty-command-word) redirection read after a subscripted "
+     "assignment's substitution where a line continuation glued to an unquoted $e has a blank after it",
+     'false; a[0]=$(true) $e\\\n >"f$?"'),
+    ("(sas-fire-subscript-time-after-assignment-command) read in a subscripted assignment after time, in a "
+     "command after an assignment-only one, where the only command word is an unquoted substitution",
+     'x=1; false; time a[0]=$? $(true); echo "a=${a[0]}"'),
 )
 _SAS_QUIET_ROWS = (
     ("(sas-quiet-d) read before every substitution", 'false; echo "rc=$? $(true)"'),
@@ -4696,6 +4747,34 @@ _SAS_QUIET_ROWS = (
      "a literal command word that ends the text", 'false; a[0]=$? $(true) true'),
     ("(sas-quiet-subscript-subscript-command-word) redirection read after a subscripted assignment's "
      "substitution where the command word starts NAME[", 'false; a[0]=$(true) b[1] >"f$?"'),
+    ("(sas-quiet-subscript-value-read-subscript-subst) read in an assignment's value before a substitution "
+     "in its subscript, which bash expands after the value", 'false; a[$(exit 3)]=$? $e; declare -p a'),
+    ("(sas-quiet-subscript-append-value-read-subscript-subst) read in a += assignment's value before a "
+     "substitution in its subscript", 'false; a[$(exit 3)]+=$? $e; declare -p a'),
+    ("(sas-quiet-subscript-read-glued-redirect-subst) read in an assignment's subscript before a substitution "
+     "in a redirection glued to its value", 'false; a[$?]=x>"g$(exit 3)" $e; declare -p a'),
+    ("(sas-quiet-subscript-time-command-word) redirection read after a subscripted assignment's substitution "
+     "where time after it is the command word, not a reserved word", 'false; a[0]=$(true) time >"f$?"'),
+    ("(sas-quiet-subscript-bang-word-command-word) redirection read after a subscripted assignment's "
+     "substitution where ! after it is the command word", 'false; a[0]=$(true) ! >"f$?"'),
+    ("(sas-quiet-subscript-then-command-word) redirection read after a subscripted assignment's substitution "
+     "where then after it is the command word", 'false; a[0]=$(true) then >"f$?"'),
+    ("(sas-quiet-subscript-glued-time-command-word) redirection read after a subscripted assignment's "
+     "substitution where time after it is the command word, glued to a redirection",
+     'false; a[0]=$(true) time>"f$?"'),
+    ("(sas-quiet-subscript-redirect-time-command-word) redirection read after a subscripted assignment's "
+     "substitution where time after a redirection is the command word", 'false; a[0]=$(true) >g time >"f$?"'),
+    ("(sas-quiet-subscript-last-time-command-word) redirection read before a subscripted assignment's "
+     "substitution where time ending the text is the command word", 'false; >"f$?" a[0]=$(true) time'),
+    ("(sas-quiet-assign-time-option) time -p after an assignment, where time is the command word and -p and "
+     "RC=$? its arguments", 'false; x=1 time -p RC=$? env "SHA=$(true)" printenv RC'),
+    ("(sas-quiet-assign-cond-command-word) [[ after an assignment, where [[ is the command word and || ends "
+     "it", 'false; x=1 [[ "$(true)" || $? ]]'),
+    ("(sas-quiet-redirect-cond-command-word) [[ after a redirection, where [[ is the command word and || "
+     "ends it", 'false; >/dev/null [[ "$(true)" || $? ]]'),
+    ("(sas-quiet-subscript-continuation-quoted-command-word) redirection read after a subscripted "
+     "assignment's substitution where a line continuation joins $e to quoted text",
+     'false; a[0]=$(true) $e\\\n"x" >"f$?"'),
 )
 
 
