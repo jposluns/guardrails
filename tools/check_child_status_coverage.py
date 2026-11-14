@@ -12,8 +12,8 @@ with exit 2). This gate holds where it runs:
   2. copies: the inline copies in each CLI_COPIES entry (opf/tools/opf.py, tools/check_selftest_execution.py,
      opf/tools/_opf_adopt_complete.py, opf/tools/_opf_adopt_state.py, opf/tools/_opf_import_complete.py,
      tools/check_gitleaks_pin.py, tools/check_must_deliver.py, tools/_load_bound.py,
-     tools/check_verifier_delivery.py, tools/render_og_cards.py and
-     opf/tools/check_opf_selftest_execution.py), in opf/tools/_opf_declaration.py and tools/check_opf_declaration.py
+     tools/check_verifier_delivery.py, tools/render_og_cards.py, opf/tools/check_opf_selftest_execution.py and
+     opf/tools/selftest_palette.py), in opf/tools/_opf_declaration.py and tools/check_opf_declaration.py
      (the constant and both functions) and in the hooks dispatcher and its generated plugin copy (the constant
      and the probe) are each bound exactly once at module scope, by one top-level definition (an undecorated one
      for a function), and AST-identical (ast.dump, docstrings included) to the canonical text, so a call by that
@@ -239,7 +239,8 @@ CLI_COPIES = (("opf/tools/opf.py", "opf.py"), ("tools/check_selftest_execution.p
               ("tools/check_must_deliver.py", "check_must_deliver.py"), ("tools/_load_bound.py", "_load_bound.py"),
               ("tools/check_verifier_delivery.py", "check_verifier_delivery.py"),
               ("tools/render_og_cards.py", "render_og_cards.py"),
-              ("opf/tools/check_opf_selftest_execution.py", "check_opf_selftest_execution.py"))
+              ("opf/tools/check_opf_selftest_execution.py", "check_opf_selftest_execution.py"),
+              ("opf/tools/selftest_palette.py", "selftest_palette.py"))
 # The CLI copy whose __main__ body is the one call _entry() (it raises its own exit rather than calling sys.exit):
 # its guard is the first statement of its one top-level _entry(), exactly ENTRY_GUARD.
 ENTRY_COPIES = (("tools/check_opf_declaration.py", "check_opf_declaration.py"),)
@@ -534,6 +535,11 @@ DYNAMIC_LOADS_REVIEWED = (
      ("importlib.util.spec_from_file_location('_opf_enforce_platforms_hook', str(path))",
       "spec.loader.exec_module(module)"),
      ("opf/enforcement/claude/pretooluse_deny.py",), "the Claude Code deny hook, loaded and never run"),
+    ("tools/check_baseline_pin.py",
+     ("importlib.util.spec_from_file_location('_opf_baseline_pin_copy', str(path))",
+      "spec.loader.exec_module(module)"),
+     ("opf/tools/check_baseline_pin.py",), "the OPF tree's copy of this gate, loaded in its self-test's parity "
+     "check and run in process, never launched"),
     ("tools/check_python_host_pin.py",
      ("importlib.util.spec_from_file_location(name, base / (name + '.py'))", "spec.loader.exec_module(module)"),
      ("tools/check_python_floor.py", "tools/check_python_host_pin.py"),

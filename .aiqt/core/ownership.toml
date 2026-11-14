@@ -461,6 +461,24 @@ class = "pack-immutable"
 path = ".baseline/check_palette.py"
 class = "pack-immutable"
 
+# The OPF copy of the same palette gate, vendored unchanged so the OPF tree checks its own site palette without
+# any parent file; run by opf/tools/run_all_checks.sh and pinned by its self-test, opf/tools/selftest_palette.py.
+[[release-class]]
+path = "opf/.baseline/check_palette.py"
+class = "pack-immutable"
+
+# The OPF tree's own baseline pin: the same files as .baseline/opfiles-pin.toml, at OPF-root paths, plus the
+# OPF palette gate copy; read by opf/tools/check_baseline_pin.py.
+[[release-class]]
+path = "opf/.baseline/pin.toml"
+class = "pack-immutable"
+
+# The OPF tree's own attribution record for the site template copy it carries; read by
+# opf/tools/check_baseline_pin.py.
+[[release-class]]
+path = "opf/attribution.toml"
+class = "pack-immutable"
+
 # --- concern-1: the opfiles.ai site subtree (opf/site) -------------------------------------------------
 # The opfiles.ai website: the served site pages live directly under opf/site (Cloudflare Pages builds
 # opf/site as the site root). Hand-authored shippable site content, same class as the site/ pages above.

@@ -4564,6 +4564,11 @@ OPF_LIFECYCLE_EXEMPTIONS = {
     "opf/tools/_opf_init_contract.py": "KEEP contract validation over synthetic models.",
     "opf/tools/_opf_pack_manifest.py": "Pack parsing and digest vectors over filesystem fixtures.",
     "opf/tools/_opf_release_history.py": "Pure history parsing, canonical emission and digest vectors over in-memory bytes.",
+    "opf/tools/_walk.py": "Tree-walk vectors over a temporary directory, some with a patched os.scandir; no git.",
+    "opf/tools/check_baseline_pin.py": ("Pin, copy-root and attribution vectors over temporary directory trees, "
+                                        "some through a patched tomllib.loads; no git."),
+    "opf/tools/check_leaks.py": ("Leak-scan vectors over temporary directory trees, some through patched stat "
+                                 "and read seams; no git."),
     "opf/tools/check_opf_homes.py": "Homes contract and schema boundary vectors.",
     "opf/tools/check_opf_init_contract.py": "Git-free contract matcher vectors.",
     "opf/tools/check_opf_init_observe.py": "Observation vectors with mocked git subprocesses.",
@@ -4578,6 +4583,8 @@ OPF_LIFECYCLE_EXEMPTIONS = {
                                                   "os.devnull. Neither path runs git."),
     "opf/tools/selftest_commonmark_conformance.py": "CommonMark parser conformance vectors.",
     "opf/tools/selftest_commonmark_headings.py": "Heading selection and vendor-manifest fixtures.",
+    "opf/tools/selftest_palette.py": ("Palette-gate vectors that run the vendored opf/.baseline/check_palette.py "
+                                      "as a python3 -I -B child over temporary sheets and copy trees; no git."),
 }
 
 

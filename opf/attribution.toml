@@ -1,0 +1,26 @@
+# attribution.toml: the OPF tree's own record of the third-party material it carries a pinned copy of, so
+# the record travels with the OPF tree once OPF is the root of its own repository. Paths are relative to
+# the OPF root.
+#
+# tools/check_baseline_pin.py (under the OPF root) reads the [vendored."site-template"] table: every
+# baseline pin must name its version, its homepage must end in that version's archive name, and its name,
+# component, licence, licence-url, copyright and note must each be a non-empty string. The values below
+# are copied from the parent repository's .aiqt/attribution.toml table of the same name, with only the
+# component paths rebased to the OPF root; keep the two tables in agreement until the parent's copy of
+# this material is retired.
+#
+# This file records the site template only. It records no licence or attribution for the hash denylist the
+# leak check reads; whether that list may be licensed, and how it is attributed, is an open question that
+# nothing here answers or grants.
+
+[vendored."site-template"]
+name = "Shared site template (baseline package)"
+component = "Pinned copy of the site template's runtime and licence files, under site/draft/assets/baseline/, with an unchanged copy of its palette gate at .baseline/check_palette.py, both pinned in .baseline/pin.toml"
+version = "1.7.0"
+licence = "CC0 1.0 Universal, except the fonts and marks named below"
+licence-url = "https://creativecommons.org/publicdomain/zero/1.0/"
+copyright = "Jeff Posluns, dedicated to the public domain under CC0 1.0"
+homepage = "https://posluns.ca/baseline/baseline-1.7.0.tar.gz"
+note = "The 4 fonts (Newsreader, Public Sans, JetBrains Mono, Dancing Script) are licensed by their authors under the SIL Open Font License 1.1; each family's licence file is copied beside the fonts. The GitHub Invertocat, LinkedIn [in] bug and ORCID iD marks are trademarks of their owners, used under their owners' terms as recorded in marks/NOTICE.md, and are not part of the CC0 grant. The package's own NOTICE.md and LICENSE are copied unchanged with the files."
+verified = true
+verified-date = "2026-11-04"

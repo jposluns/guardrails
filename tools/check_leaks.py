@@ -781,7 +781,16 @@ def main():
 #      read error, not the CANNOT EVALUATE line); 6b. a symlink to a regular file is followed and its
 #      target scanned (exit 1); 6c. a symlinked directory is CANNOT EVALUATE (exit 2, naming it), never
 #      silently dropped; 6d. a dangling symlink fails closed (exit 2),
-#   7. an unreadable file (injected PermissionError) fails closed (exit 2).
+#   7. an unreadable file (injected PermissionError) fails closed (exit 2),
+#   8. the OPF copy's parity, while opf/tools/check_leaks.py and opf/tools/leak-hashes.txt exist: 8a.
+#      the copy, loaded by a plain import from the repository's opf/tools directory with its sibling
+#      _walk.py, gives this gate's exit and output on every parity fixture tree (each structural rule
+#      just inside and just outside its match, the hash layer on either side of its '# maxn' bound,
+#      the malformed, non-UTF-8 and unreadable denylist cases of the copy's self-test, the decodes,
+#      the archive cases with the member-count bound at and just past it, the skipped directories and
+#      the symlink rules), which together give exits 0, 1 and 2; 8b. opf/tools/leak-hashes.txt is
+#      byte-equal to tools/leak-hashes.txt. The case is skipped, its reason printed, only when both OPF
+#      files are absent; one without the other is a failure.
 # Cases 1 through 6 each fail on the original scan. Against the first revision this replaces,
 # 2b, 3b, 3c and 6c are new findings or named skips, 6 and 7 run where that revision skipped, and 4b,
 # 4c, 5b, 6b and 6d pin behaviours a mutant could drop (the denylist walk, the suffixless decode, the
@@ -1710,6 +1719,161 @@ def self_test_main():
             module._read_bytes = saved_read
         if rc != 2:
             failures.append("an unreadable file expected exit 2, fail-closed (got {}: {!r})".format(rc, out))
+
+        # 8. the OPF copy's parity, while opf/tools/check_leaks.py and opf/tools/leak-hashes.txt exist:
+        #    (a) the copy's run() gives this gate's exit and output on every parity fixture tree, and (b)
+        #    its denylist is byte-equal to this gate's. Skipped, its reason printed, only when both files
+        #    are absent; one without the other is a failure. The copy is loaded by a plain import of its
+        #    literal name with the repository's opf/tools directory first on sys.path, after this
+        #    process's check_leaks and _walk modules are set aside so the import reads the copy and its
+        #    own sibling walk; sys.path and those modules are restored after it.
+        here = Path(__file__).resolve()
+        opf_tools = here.parents[1] / "opf" / "tools"
+        opf_names = ("check_leaks.py", "leak-hashes.txt")
+        opf_present = [os.path.lexists(opf_tools / name) for name in opf_names]
+        if not any(opf_present):
+            print("case 8 (OPF copy parity) skipped: the OPF copy is absent (neither opf/tools/check_leaks.py "
+                  "nor opf/tools/leak-hashes.txt exists), so there is no copy to compare")
+        elif not all(opf_present):
+            failures.append("8: the OPF copy is incomplete: opf/tools/{} exists without opf/tools/{} (the "
+                            "parity check is skipped only when both are absent)"
+                            .format(*(opf_names if opf_present[0] else opf_names[::-1])))
+        else:
+            # 8b. the two denylists are byte-equal.
+            try:
+                if (here.parent / "leak-hashes.txt").read_bytes() != (opf_tools / "leak-hashes.txt").read_bytes():
+                    failures.append("8b: opf/tools/leak-hashes.txt is not byte-equal to tools/leak-hashes.txt")
+            except OSError as exc:
+                failures.append("8b: the two denylists cannot both be read to compare them: {}".format(exc))
+            # 8a. load the copy, then compare the two scanners on every parity fixture tree.
+            opf_gate = opf_walk = None
+            saved_path = list(sys.path)
+            saved_bytecode = sys.dont_write_bytecode
+            saved_modules = {name: sys.modules.pop(name) for name in ("check_leaks", "_walk")
+                             if name in sys.modules}
+            sys.dont_write_bytecode = True
+            sys.path.insert(0, str(opf_tools))
+            try:
+                import check_leaks as opf_gate
+                import _walk as opf_walk
+            except Exception as exc:
+                failures.append("8a: the OPF copy cannot be imported: {!r}".format(exc))
+            finally:
+                sys.path[:] = saved_path
+                sys.dont_write_bytecode = saved_bytecode
+                for name in ("check_leaks", "_walk"):
+                    sys.modules.pop(name, None)
+                sys.modules.update(saved_modules)
+            if opf_gate is not None and (
+                    opf_gate is sys.modules[__name__]
+                    or Path(opf_gate.__file__).resolve() != (opf_tools / "check_leaks.py").resolve()
+                    or Path(opf_walk.__file__).resolve() != (opf_tools / "_walk.py").resolve()
+                    or opf_gate.walk_files is not opf_walk.walk_files):
+                failures.append("8a: the import did not load the OPF copy with its sibling walk (got {!r} "
+                                "walking with {!r})".format(getattr(opf_gate, "__file__", None),
+                                                            getattr(opf_walk, "__file__", None)))
+                opf_gate = None
+            if opf_gate is not None:
+                def capture(runner, root):
+                    out, err = io.StringIO(), io.StringIO()
+                    with redirect_stdout(out), redirect_stderr(err):
+                        rc = runner(root)
+                    return rc, out.getvalue() + err.getvalue()
+
+                def line(text):
+                    return (text + "\n").encode("ascii")
+
+                ip_line = line("ip " + _PRIVATE_IP)
+                host_line = line("at " + _HOST_PATH)
+                hashed = term_hash("fixture codename")
+                plain = zip_blob((("a.txt", b"plain text\n"),), method=zipfile.ZIP_STORED)
+                members_at = [("m{}.txt".format(i), b"x\n") for i in range(MAX_ARCHIVE_MEMBERS)]
+                # (tree name, files added to the clean tree). Each structural rule is planted just inside
+                # and just outside its match, the hash layer with its '# maxn' bound on either side, and
+                # the denylist, decode, archive and skipped-directory cases of both self-tests.
+                parity_fixtures = (
+                    ("clean", {}),
+                    ("ip-10", {"site/data.csv": line("1," + _PRIVATE_IP), "docs/b.md": line("10." + "256.1.1")}),
+                    ("ip-172", {"docs/b.md": line("172." + "16.0.1"), "docs/c.md": line("172." + "31.255.255"),
+                                "docs/d.md": line("172." + "15.0.1"), "docs/e.md": line("172." + "32.0.1")}),
+                    ("ip-192", {"docs/b.md": line("192." + "168.1.1"), "docs/c.md": line("192." + "169.1.1")}),
+                    ("host-paths", {"docs/b.md": host_line, "docs/c.md": line("/" + "var/lib/fixture"),
+                                    "docs/d.md": line("/" + "mnt/fixture"), "docs/e.md": line("/" + "home/fixture"),
+                                    "docs/f.md": line("/" + "srv/fixture"), "docs/g.md": line("x/" + "opt/fixture")}),
+                    ("leak-allow", {"docs/b.md": line("ip " + _PRIVATE_IP + " leak-allow")}),
+                    ("tokens", {"docs/b.md": line("github_" + "pat_" + "A" * 20),
+                                "docs/c.md": line("github_" + "pat_" + "A" * 19),
+                                "docs/d.md": line("gh" + "p_" + "B" * 20), "docs/e.md": line("gh" + "s_" + "B" * 19)}),
+                    ("account-shape", {"docs/b.md": line("co" + "dex" + "_" + "pro" + "_" + "z9"),
+                                       "docs/c.md": line("co" + "dex" + "_" + "lite" + "_" + "z9")}),
+                    ("codename", {"tools/leak-hashes.txt": line(hashed), "notes/latin1.txt": b"caf\xe9 FixtureCodename\n"}),
+                    ("maxn-1", {"tools/leak-hashes.txt": line("# maxn 1\n" + hashed),
+                                "notes/plan.md": line("The FixtureCodename rollout.")}),
+                    ("maxn-2", {"tools/leak-hashes.txt": line("# maxn 2\n" + hashed),
+                                "notes/plan.md": line("The FixtureCodename rollout.")}),
+                    ("denylist-scanned", {"tools/leak-hashes.txt": line("# near " + _PRIVATE_IP)}),
+                    ("denylist-plaintext", {"tools/leak-hashes.txt": line("fixture codename")}),
+                    ("denylist-trailing-token", {"tools/leak-hashes.txt": line(hashed + " x")}),
+                    ("denylist-63-hex", {"tools/leak-hashes.txt": line(hashed[:63])}),
+                    ("denylist-65-hex", {"tools/leak-hashes.txt": line(hashed + "0")}),
+                    ("denylist-upper-case", {"tools/leak-hashes.txt": line(hashed.upper())}),
+                    ("denylist-mixed", {"tools/leak-hashes.txt": line(hashed + "\nfixture codename"),
+                                        "notes/plan.md": line("The FixtureCodename rollout.")}),
+                    ("maxn-0", {"tools/leak-hashes.txt": line("# maxn 0")}),
+                    ("maxn-100", {"tools/leak-hashes.txt": line("# maxn 100")}),
+                    ("maxn-101", {"tools/leak-hashes.txt": line("# maxn 101")}),
+                    ("maxn-1000", {"tools/leak-hashes.txt": line("# maxn 1000")}),
+                    ("maxn-word", {"tools/leak-hashes.txt": line("# maxn three")}),
+                    ("maxn-missing", {"tools/leak-hashes.txt": line("# maxn")}),
+                    ("maxn-duplicate", {"tools/leak-hashes.txt": line("# maxn 3\n# maxn 3")}),
+                    ("denylist-latin1", {"tools/leak-hashes.txt": b"# caf\xe9\n" + line(hashed)}),
+                    ("latin1", {"site/t.tsv": b"caf\xe9\t" + ip_line, "docs/l.md": b"caf\xe9 " + host_line,
+                                "README.MD": b"caf\xe9 " + host_line, "LICENSE": b"caf\xe9 " + host_line}),
+                    ("utf16", {"docs/w.txt": ("\ufeffat " + _HOST_PATH + "\n").encode("utf-16-le")}),
+                    ("utf32", {"docs/w.txt": ("\ufeffat " + _HOST_PATH + "\n").encode("utf-32-be")}),
+                    ("utf16-odd", {"docs/w.txt": b"\xff\xfe" + b"A"}),
+                    ("skipped-dirs", {".git/config": ip_line, "node_modules/x/a.js": ip_line,
+                                      "pkg/__pycache__/a.pyc": ip_line}),
+                    ("zip-corrupt", {"site/downloads/pack.zip": b"PK\x03\x04\xff\xfe\x00binary",
+                                     "site/downloads/pack2.ZIP": b"not an archive\xff\xfe\x00binary"}),
+                    ("zip-member", {"site/downloads/pack.zip": zip_blob((("plant.txt", ip_line),))}),
+                    ("zip-clean", {"site/downloads/pack.zip": zip_blob((("a.txt", b"plain\n"),))}),
+                    ("zip-signature", {"site/downloads/pack.bin": zip_blob((("plant.txt", host_line),))}),
+                    ("zip-comment", {"site/downloads/pack.zip": zip_blob((("a.txt", b"plain\n"),),
+                                                                         comment=ip_line)}),
+                    ("zip-members-at", {"site/downloads/many.zip": zip_blob(members_at)}),
+                    ("zip-members-outside", {"site/downloads/many.zip": zip_blob(members_at + [("m.txt", b"x\n")])}),
+                    ("zip-bzip2", {"site/downloads/pack.zip": patch_directory(plain, 0, 10, "<H", 12)}),
+                    ("zip-nested", {"site/downloads/pack.zip": zip_blob((("a.txt", b"x\n"),
+                                                                         ("inner.zip", b"not an archive\n")))}),
+                    ("zip-trailing", {"site/downloads/pack.zip": plain + b"tail"}))
+                parity_roots = [tree("parity-" + name, dict(clean_files, **files)) for name, files in parity_fixtures]
+                (tmp / "parity-target.txt").write_bytes(ip_line)
+                base = tree("parity-symlink-file", dict(clean_files))
+                os.symlink(str(tmp / "parity-target.txt"), str(base / "docs" / "linked.txt"))
+                parity_roots.append(base)
+                base = tree("parity-symlink-dir", dict(clean_files))
+                (tmp / "parity-behind").mkdir(exist_ok=True)
+                os.symlink(str(tmp / "parity-behind"), str(base / "docs" / "linkdir"))
+                parity_roots.append(base)
+                base = tree("parity-symlink-dangling", dict(clean_files))
+                os.symlink(str(base / "docs" / "gone.md"), str(base / "docs" / "dangling.md"))
+                parity_roots.append(base)
+                base = tree("parity-denylist-unreadable", dict(clean_files))
+                (base / "tools" / "leak-hashes.txt").mkdir(parents=True)
+                parity_roots.append(base)
+                exits = set()
+                for base in parity_roots:
+                    want = capture(run, base)
+                    got = capture(opf_gate.run, base)
+                    exits.add(want[0])
+                    if got != want:
+                        failures.append("8a: the OPF copy and this gate differ on the parity tree {} (this gate "
+                                        "{}: {!r}; the OPF copy {}: {!r})".format(base.name, want[0], want[1],
+                                                                                   got[0], got[1]))
+                if exits != {0, 1, 2}:
+                    failures.append("8a: the parity trees must give this gate each of exit 0, 1 and 2, so the "
+                                    "comparison covers every verdict (got {})".format(sorted(exits)))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -1750,7 +1914,9 @@ def self_test_main():
           "refuses a CRC-failing member, bytes ahead of the records and an archive over the size bound with "
           "the reason and member the scan names; and a dangling symlink, "
           "an injected unreadable file, and a BOM-declared stream that decodes as neither declared "
-          "candidate each fail closed (exit 2, naming the file)")
+          "candidate each fail closed (exit 2, naming the file); and, while the OPF copy exists, it gives "
+          "this gate's exit and output on every parity fixture tree and its denylist is byte-equal to this "
+          "gate's")
     return 0
 
 

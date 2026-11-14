@@ -1,0 +1,7 @@
+# SHA-256 hashes of internal terms banned from public content. Generated from the private
+# store denylist by store/gen-leak-hashes.py; the words themselves are never here.
+# maxn 3
+9bf558cf47fd57b0ad02a89e8b135c1ef619ddf5b842ac1746bc8a8a271cd460
+bac7e14836fdc2d7d9fc27e54966be496d16da4be2a10b32149268db17352fbf
+e2ff0d83fd3671538402ce197dd65f0a32ea09982e97d06ad39e32fdff32c749
+fef967059037e09051b34d347c7651c3621ce9d1ff8223fbdf966d07874d226e

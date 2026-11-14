@@ -592,9 +592,12 @@ REPO_GATES = frozenset({
 })
 
 # The pinned build gates copied from the shared site template package, each named; no general .baseline
-# executable allowance. The pin gate (tools/check_baseline_pin.py) holds their bytes.
+# executable allowance. The pin gate (tools/check_baseline_pin.py) holds the parent copy's bytes, and
+# opf/tools/selftest_palette.py holds the bytes of the OPF tree's unchanged copy, which the standalone
+# runner launches as "$here/../.baseline/check_palette.py" (adapt_standalone_runner rebases it).
 PINNED_BUILD_GATES = frozenset({
     ".baseline/check_palette.py",
+    "opf/.baseline/check_palette.py",
 })
 
 # The one status branch protection requires. In a workflow with more than one job,
@@ -1813,12 +1816,14 @@ def _text_format_diagnostic(text, source):
 # The standalone OPF runner is held to the same grammar as the local runner
 # after ONE adaptation, shared by vector 26 and
 # tools/selftest_git_fixture_env.py: the validated directory binding and the
-# terminal exit 0 are removed and the "$here/ paths are rebased. The
-# character screen runs FIRST, on the RAW text: splitlines() below breaks a
-# line at the very characters the screen exists to refuse (\v, \f, \x1c,
-# \x1d, \x1e, \x85, U+2028, U+2029), and the newline rejoin would erase
-# them, so screening only the adapted text would validate lines bash never
-# runs.
+# terminal exit 0 are removed and the "$here/ paths are rebased: "$here/../
+# (the OPF root) to "opf/ first, then "$here/ (opf/tools) to "opf/tools/, so
+# each names its repository path; a target that climbs further keeps a ..
+# component and normalize refuses it. The character screen runs FIRST, on
+# the RAW text: splitlines() below breaks a line at the very characters the
+# screen exists to refuse (\v, \f, \x1c, \x1d, \x1e, \x85, U+2028, U+2029),
+# and the newline rejoin would erase them, so screening only the adapted
+# text would validate lines bash never runs.
 STANDALONE_SOURCE = "opf/tools/run_all_checks.sh"
 # The checked directory binding: dirname's status, then a non-empty name, then
 # the cd; each guard exits 2 before any gate (vector 44 runs each guard red).
@@ -1911,7 +1916,8 @@ def adapt_standalone_runner(text):
     for index in range(starts[0], starts[0] + width):
         lines[index] = "# validated standalone directory binding"
     lines[-1] = "# validated terminal exit"
-    return "\n".join(lines).replace('"$here/', '"opf/tools/'), None
+    return ("\n".join(lines).replace('"$here/../', '"opf/')
+            .replace('"$here/', '"opf/tools/'), None)
 
 
 def extract_local(text):
@@ -6513,6 +6519,51 @@ def self_test():
                     failures.append(
                         "26 form feed in the standalone runner was not "
                         "refused on the raw text")
+            # The OPF root rebase: "$here/../ names the OPF root, so a
+            # target under it names its repository path (the pinned OPF
+            # palette copy, or an opf/tools file spelled through the root),
+            # while a target that climbs above the OPF root or names an
+            # unpinned .baseline file is refused. The first two fail without
+            # the "$here/../ rebase, as the target keeps its .. component.
+            for label, line, want in (
+                    ("pinned OPF palette copy",
+                     'run_gate "rebase-copy" python3 -I -B '
+                     '"$here/../.baseline/check_palette.py" --site opfiles',
+                     "opf/.baseline/check_palette.py --site opfiles"),
+                    ("opf/tools spelled through the OPF root",
+                     'run_gate "rebase-tools" python3 -I -B '
+                     '"$here/../tools/rebase_probe.py"',
+                     "opf/tools/rebase_probe.py"),
+                    ("target above the OPF root",
+                     'run_gate "rebase-above" python3 -I -B '
+                     '"$here/../../tools/rebase_probe.py"', None),
+                    ("unpinned OPF .baseline file",
+                     'run_gate "rebase-unpinned" python3 -I -B '
+                     '"$here/../.baseline/other.py"', None)):
+                fixture = opf_runner.replace(
+                    '\nrun_gate "opf-homes-selftest"',
+                    "\n" + line + '\nrun_gate "opf-homes-selftest"', 1)
+                rebased, rebase_diagnostic = adapt_standalone_runner(fixture)
+                if fixture == opf_runner or rebase_diagnostic is not None:
+                    failures.append("26 standalone rebase fixture ({}) did "
+                                    "not adapt: {!r}".format(
+                                        label, rebase_diagnostic))
+                    continue
+                rebase_extraction = extract_local(rebased)
+                if want is not None and (
+                        rebase_extraction.diagnostics
+                        or want not in rebase_extraction.members):
+                    failures.append(
+                        "26 standalone rebase ({}) did not give member {!r}:"
+                        " {!r}".format(label, want,
+                                       rebase_extraction.diagnostics))
+                if want is None and [
+                        diagnostic.code for diagnostic
+                        in rebase_extraction.diagnostics] != ["gate-target"]:
+                    failures.append(
+                        "26 standalone rebase ({}) was not refused as a gate "
+                        "target: {!r}".format(
+                            label, rebase_extraction.diagnostics))
         def mutate(*edits):
             """Apply (old, new) edits to the live runner; None if an old text is not unique."""
             mutant = live_runner

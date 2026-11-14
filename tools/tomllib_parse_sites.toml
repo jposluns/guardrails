@@ -1083,6 +1083,29 @@ count = 1
 class = "EXEMPT"
 reason = "test-code"
 
+# the self-test's parity check saves tomllib.loads and restores it around the same injected RecursionError
+# and MemoryError, applied to this gate and to the OPF copy alike over 1 fixture tree, so both gates' parse
+# sites are reached by the same case and their exit codes compared; transitional, removed with the parity
+# check when the OPF tree leaves this repository
+[[site]]
+path = "tools/check_baseline_pin.py"
+function = "_parity_codes"
+form = "alias"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+# the OPF copy of the same gate: its self-test saves tomllib.loads and restores it around the same injected
+# RecursionError and MemoryError at each of its two parse calls (parse_pin and parse_attribution), so the
+# handler at each parse site is exercised; this row leaves this registry with the OPF tree
+[[site]]
+path = "opf/tools/check_baseline_pin.py"
+function = "_self_test"
+form = "alias"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
 # the self-test seam that reads tomllib.loads and tomllib.load as bound: the injection saves and restores
 # them around an injected MemoryError at the parse call (real memory exhaustion cannot be provoked
 # safely), and the restoration checks compare them with the pair bound at import

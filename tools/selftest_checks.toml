@@ -5153,6 +5153,20 @@ expected-check-ids = [
   "homepage/not-string-refused",
   "exit/codes-0-1-2",
   "live/real-tree-passes",
+  # transitional: the parity/ ids leave with the gate's OPF pair (see tools/check_baseline_pin.py)
+  "parity/verdict-divergence-detected",
+  "parity/shared-case-gap-detected",
+  "parity/pin-identical-after-strip-passes",
+  "parity/pin-file-digest-divergence-detected",
+  "parity/pin-path-prefix-divergence-detected",
+  "parity/pin-tool-digest-divergence-detected",
+  "parity/pin-version-divergence-detected",
+  "parity/absent-copy-skips",
+  "parity/unloadable-copy-fails",
+  "parity/copy-present-loads",
+  "parity/shared-cases-covered",
+  "parity/copy-gives-parent-verdict",
+  "parity/pin-matches-parent-pin",
 ]
 
 [[suite]]

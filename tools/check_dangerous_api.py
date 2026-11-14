@@ -724,6 +724,16 @@ ALLOWLIST = (
      "self-test mutant loader: exec_module of a copy, written under the self-test's temporary"
      " directory, of this gate's own source (read from __file__) with reviewed literal"
      " substitutions, or of the repository's own tools/check_python_floor.py; no external input"),
+    ("tools/check_baseline_pin.py", "_load_opf_copy", "code", 1,
+     "parity loader: exec_module of the repository's own opf/tools/check_baseline_pin.py under ROOT,"
+     " the OPF copy of this gate, never registered in sys.modules and never launched (the equivalent"
+     " of an import), or of a fixture file the self-test writes under its temporary directory; no"
+     " external input"),
+    ("opf/tools/selftest_palette.py", "_audited_run", "code", 1,
+     "self-test read audit: runpy.run_path, in a child this self-test launches, of the palette gate"
+     " copy it has just copied from the repository's own opf/.baseline/check_palette.py (whose bytes"
+     " it pins) into its temporary directory, under an audit hook that records the paths the run"
+     " reads; the same trust as running that copy directly with python3; no external input"),
     ("tools/gen_crosswalk.py", "_fdopen_vectors.flipped", "code", 1,
      _MUTANT + " (each fdopen close revert, loaded by exec_module from a scratch file)"),
     ("tools/selftest_aiqt_hooks.py", "_ie_mutant_handlers", "code", 1,

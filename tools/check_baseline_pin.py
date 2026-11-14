@@ -36,6 +36,26 @@ not TOML, a missing [vendored."site-template"] table, a version there that is mi
 string, a homepage there that is missing, not a string or not ending that way, a pin whose version
 differs from the recorded version, and 2 pins that name different versions are cannot-evaluate (exit 2).
 The gate reads only the repository; it never touches the network.
+
+While the OPF tree's copy of this gate (opf/tools/check_baseline_pin.py) exists, the self-test also holds it
+to this gate: it loads the copy in process (never launching it), runs both gates over one fixture tree per
+case the two self-tests share (each tree also meets the copy's own required licence, notice, tool and
+attribution rules) and requires the copy's exit code to equal this gate's on every case; and it requires
+opf/.baseline/pin.toml to equal .baseline/opfiles-pin.toml with the opf/ prefix removed from each path (the
+same version and copy-root digests, and the palette-tool entry compared by digest). A copy that is present
+but cannot be loaded fails the self-test; only an absent copy skips the parity checks, with a printed
+reason, and the execution gate then reports their ids as not run.
+
+The OPF pair is transitional. PINS[1] with .baseline/opfiles-pin.toml, and the parity checks above, exist
+only while the OPF tree lives in this repository. Once the OPF tree's own gate is accepted and the OPF tree
+moves to its own repository, they are removed together in one change: the PINS[1] entry, the file
+.baseline/opfiles-pin.toml, the parity section (OPF_COPY_REL through _parity_self_test) and its call in
+_self_test, the parity/ check ids under baseline-pin-selftest in tools/selftest_checks.toml, the rows
+recorded for the parity load (this file's DYNAMIC_LOADS_REVIEWED row in tools/check_child_status_coverage.py,
+its _load_opf_copy row in tools/check_dangerous_api.py and its _parity_codes row in
+tools/tomllib_parse_sites.toml), and that registry's row for the OPF copy's own _self_test. The gate's check
+of PINS[0] (.baseline/pin.toml over site/draft/assets/baseline), its build-tool check and its attribution
+and homepage checks stay. Nothing here is removed before that move.
 """
 import sys
 
@@ -53,16 +73,19 @@ if tuple(sys.version_info[:2]) < (3, 14):
 
 import contextlib
 import hashlib
+import importlib.util
 import io
 import os
 import re
 import stat
 import tempfile
 import tomllib
+import types
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-# Every pin and the 1 copy root it is bound to, in check order; both columns are unique.
+# Every pin and the 1 copy root it is bound to, in check order; both columns are unique. The second pair,
+# the OPF copy's, is transitional and is removed when the OPF tree leaves this repository (module docstring).
 PINS = (
     (".baseline/pin.toml", "site/draft/assets/baseline"),
     (".baseline/opfiles-pin.toml", "opf/site/draft/assets/baseline"),
@@ -496,6 +519,461 @@ def _scan_case(files=None, pin=None, mutate=None, pins=FIXTURE_PINS, second=None
         return scan(tmp, pins)
 
 
+# The OPF tree's copy of this gate and its pin. While the copy exists, the self-test holds it to this gate's
+# exit code on the fixture cases both self-tests share, and holds its pin to this repository's OPF pin with
+# OPF_PREFIX removed from each path. This section through _parity_self_test is transitional: it is removed
+# with PINS[1] when the OPF tree leaves this repository (module docstring).
+OPF_COPY_REL = "opf/tools/check_baseline_pin.py"
+OPF_PIN_REL = "opf/.baseline/pin.toml"
+OPF_PREFIX = "opf/"
+# The names the parity check reads from the copy: its gate entry, the paths and keys its fixtures must meet,
+# its self-test's check ids, and the 3 readers a case may make fail (patched in both gates alike).
+OPF_COPY_NAMES = ("run_gate", "ATTRIBUTION_REL", "REQUIRED_NOTICES", "ATTRIBUTION_TEXT_KEYS", "EXPECTED",
+                  "_read_pin_bytes", "_read_attribution_bytes", "_sha256")
+PARITY_READERS = ("_read_pin_bytes", "_read_attribution_bytes", "_sha256")
+# The shared check ids with no parity case, each with the reason: a registry or tool constant each gate pins
+# for its own tree, and each gate's own live tree (the pin comparison covers the OPF copy's). Every other
+# shared id is a parity case, and every case compares the 2 exit codes, so exit/codes-0-1-2 is covered by
+# requiring all 3 codes among the cases.
+PARITY_EXCLUDED = {
+    "registry/live-pairs": "each gate registers its own pins",
+    "tool/registered-path": "a constant of each gate",
+    "exit/codes-0-1-2": "every case compares the 2 exit codes",
+    "live/real-tree-passes": "each gate's own live tree; the pin comparison holds the copy's pin",
+}
+PARITY_ROOT_LINK = "elsewhere"
+
+
+def _load_opf_copy(root):
+    """(module, None) for the OPF copy under root, (None, None) when it is absent, or (None, the reason) when
+    it is present but cannot be loaded: not a regular file, unreadable, failing to import, or without a name
+    the parity check reads. The copy is loaded in process and never launched."""
+    path = Path(root) / OPF_COPY_REL
+    try:
+        mode = os.lstat(path).st_mode
+    except FileNotFoundError:
+        return None, None
+    except OSError as exc:
+        return None, "{}: cannot stat ({})".format(OPF_COPY_REL, exc)
+    if not stat.S_ISREG(mode):
+        return None, "{}: not a regular file".format(OPF_COPY_REL)
+    try:
+        spec = importlib.util.spec_from_file_location("_opf_baseline_pin_copy", str(path))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+    except (Exception, SystemExit) as exc:
+        return None, "{}: does not load ({}: {})".format(OPF_COPY_REL, type(exc).__name__, exc)
+    missing = [name for name in OPF_COPY_NAMES if not hasattr(module, name)]
+    if missing:
+        return None, "{}: does not define {}".format(OPF_COPY_REL, ", ".join(missing))
+    paths = (module.ATTRIBUTION_REL,) + tuple(module.REQUIRED_NOTICES)
+    if not all(_safe_rel(rel) for rel in paths) or not all(
+            isinstance(key, str) and key for key in module.ATTRIBUTION_TEXT_KEYS):
+        return None, "{}: an attribution path, notice path or attribution key is misshapen".format(OPF_COPY_REL)
+    return module, None
+
+
+def _parity_files(copy):
+    """The fixture copy: FIXTURE_FILES plus each licence or notice file the copy requires every pin to list."""
+    files = dict(FIXTURE_FILES)
+    for rel in copy.REQUIRED_NOTICES:
+        files.setdefault(rel, "notice {}\n".format(rel).encode("utf-8"))
+    return files
+
+
+def _parity_attribution(copy, **kwargs):
+    """_attribution_text(**kwargs) with each attribution key the copy requires, as a non-empty string, added
+    to the last table (the named block) where this gate's fixture does not already set it."""
+    text = _attribution_text(**kwargs)
+    present = ("name", "version", "homepage", "verified")
+    return text + "".join('"{}" = "parity {}"\n'.format(key, key)
+                          for key in copy.ATTRIBUTION_TEXT_KEYS if key not in present)
+
+
+def _parity_link_file(tmp, _attributions):
+    target = tmp / FIXTURE_ROOT / "baseline.css"
+    os.unlink(target)
+    os.symlink(tmp / PIN_REL, target)
+
+
+def _parity_link_dir(tmp, _attributions):
+    os.symlink(tmp / FIXTURE_ROOT / "fonts", tmp / FIXTURE_ROOT / "fonts2")
+
+
+def _parity_link_root(tmp, _attributions):
+    os.rename(tmp / FIXTURE_ROOT, tmp / PARITY_ROOT_LINK)
+    os.symlink(tmp / PARITY_ROOT_LINK, tmp / FIXTURE_ROOT)
+
+
+def _parity_fifo(tmp, _attributions):
+    os.mkfifo(tmp / FIXTURE_ROOT / "pipe")
+
+
+def _parity_link_tool(tmp, _attributions):
+    os.rename(tmp / TOOL_REL, tmp / "real-tool.py")
+    os.symlink(tmp / "real-tool.py", tmp / TOOL_REL)
+
+
+def _parity_fifo_tool(tmp, _attributions):
+    os.unlink(tmp / TOOL_REL)
+    os.mkfifo(tmp / TOOL_REL)
+
+
+def _parity_link_attribution(tmp, attributions):
+    for number, rel in enumerate(attributions):
+        real = tmp / "real-attribution-{}.toml".format(number)
+        os.rename(tmp / rel, real)
+        os.symlink(real, tmp / rel)
+
+
+def _deny_reader(_original):
+    def _deny(path):
+        raise PermissionError(13, "read refused by the self-test", str(path))
+    return _deny
+
+
+def _deny_tool_reader(original):
+    def _deny(path):
+        if str(path).endswith(TOOL_REL):
+            raise PermissionError(13, "read refused by the self-test", str(path))
+        return original(path)
+    return _deny
+
+
+def _own_readers():
+    """This gate's 3 readers, in PARITY_READERS order."""
+    return (_read_pin_bytes, _read_attribution_bytes, _sha256)
+
+
+def _bind_own_readers(readers):
+    """Bind this gate's 3 readers, in PARITY_READERS order (a parity case's reader failure, then the originals)."""
+    global _read_pin_bytes, _read_attribution_bytes, _sha256
+    _read_pin_bytes, _read_attribution_bytes, _sha256 = readers
+
+
+def _copy_readers(copy):
+    """The copy's 3 readers, in PARITY_READERS order."""
+    return (copy._read_pin_bytes, copy._read_attribution_bytes, copy._sha256)
+
+
+def _bind_copy_readers(copy, readers):
+    """Bind the copy's 3 readers, in PARITY_READERS order."""
+    copy._read_pin_bytes, copy._read_attribution_bytes, copy._sha256 = readers
+
+
+def _parity_cases(copy):
+    """[(shared check id, case)] mirroring each fixture case of this gate's self-test that the copy's
+    self-test shares, built so the exact tree also meets the copy's own rules. A case is a dict of
+    _parity_codes inputs; an absent key takes the exact fixture's value."""
+    files = _parity_files(copy)
+    good = _pin_text(files, tools=FIXTURE_TOOLS)
+    second = _pin_text(files, root=SECOND_ROOT, tools=FIXTURE_TOOLS)
+    both = {"pins": TWO_PINS, "second": (files, second)}
+    attribution = _parity_attribution(copy)
+    css_digest = hashlib.sha256(files["baseline.css"]).hexdigest()
+    css_key = '"{}/baseline.css"'.format(FIXTURE_ROOT)
+    tool_digest = hashlib.sha256(FIXTURE_TOOLS[TOOL_REL]).hexdigest()
+    version_line = 'version = "{}"'.format(FIXTURE_VERSION)
+    archive = "https://example.org/baseline/baseline-{}.tar.gz".format(FIXTURE_VERSION)
+    ending = "/baseline-{}.tar.gz".format(FIXTURE_VERSION)
+    pin_pad = MAX_PIN_BYTES - len(good.encode("utf-8"))
+    attribution_pad = MAX_ATTRIBUTION_BYTES - len(attribution.encode("utf-8"))
+    cases = [
+        ("pass/fixture-exact", {}),
+        ("refuse/differing-file", {"files": dict(files, **{"baseline.css": b"body{ }\n"})}),
+        ("refuse/differing-file-same-length", {"files": dict(files, **{"fonts/a.woff2": b"wOF2\x00\x02"})}),
+        ("refuse/missing-file", {"files": {rel: data for rel, data in files.items() if rel != "marks/NOTICE.md"}}),
+        ("refuse/stray-file", {"files": dict(files, **{"search.js": b"x\n"})}),
+        ("refuse/stray-file-nested", {"files": dict(files, **{"reference/landing.html": b"<p>\n"})}),
+        ("refuse/symlink-file", {"mutate": _parity_link_file}),
+        ("refuse/symlink-dir", {"mutate": _parity_link_dir}),
+        ("refuse/symlink-root", {"mutate": _parity_link_root}),
+        ("refuse/fifo-not-regular", {"mutate": _parity_fifo}),
+        ("refuse/root-missing", {"files": {}}),
+        ("refuse/pin-missing-cannot-evaluate", {"pin": False}),
+        ("refuse/pin-unreadable-cannot-evaluate", {"deny": ("_read_pin_bytes", _deny_reader)}),
+        ("refuse/file-unreadable-cannot-evaluate", {"deny": ("_sha256", _deny_reader)}),
+        ("malformed/not-utf8", {"pin": good.encode("utf-8") + b"# \xff\n"}),
+        ("malformed/not-toml", {"pin": good + "[files\n"}),
+        ("malformed/version-missing", {"pin": good.replace(version_line + "\n", "")}),
+        ("malformed/version-not-string", {"pin": good.replace(version_line, "version = 1")}),
+        ("malformed/version-shape", {"pin": _pin_text(files, version="1.2", tools=FIXTURE_TOOLS)}),
+        ("malformed/unknown-key", {"pin": _pin_text(files, extra='colour = "blue"', tools=FIXTURE_TOOLS)}),
+        ("malformed/no-files", {"pin": version_line + "\n"}),
+        ("malformed/files-not-table", {"pin": version_line + '\nfiles = "baseline.css"\n'}),
+        ("malformed/outside-copy-root",
+         {"pin": _pin_text(files, root="site/draft/assets/other", tools=FIXTURE_TOOLS)}),
+        ("malformed/copy-dir-inside-a-name",
+         {"pin": _pin_text(files, root="site/draft/xassets/baseline", tools=FIXTURE_TOOLS)}),
+        ("malformed/absolute-path",
+         {"pin": _pin_text(files, root="/site/draft/assets/baseline", tools=FIXTURE_TOOLS)}),
+        ("malformed/unsafe-path", {"pin": good.replace(css_key, '"{}/../baseline.css"'.format(FIXTURE_ROOT))}),
+        ("malformed/short-digest", {"pin": good.replace(css_digest, css_digest[:-1])}),
+        ("malformed/upper-digest", {"pin": good.replace(css_digest, css_digest.upper())}),
+        ("malformed/duplicate-path", {"pin": good + '{} = "{}"\n'.format(css_key, "0" * 64)}),
+        ("malformed/two-copy-roots", {"pin": good + '"site/assets/baseline/x" = "{}"\n'.format("0" * 64)}),
+        ("malformed/recursion-error", {"loads": (RecursionError, "[files]")}),
+        ("malformed/memory-error", {"loads": (MemoryError, "[files]")}),
+        ("version/attribution-recursion-error", {"loads": (RecursionError, "[vendored.")}),
+        ("version/attribution-memory-error", {"loads": (MemoryError, "[vendored.")}),
+        ("bound/pin-size-under", {"pin": good + "#" + "x" * (pin_pad - 3) + "\n"}),
+        ("bound/pin-size-at", {"pin": good + "#" + "x" * (pin_pad - 2) + "\n"}),
+        ("bound/pin-size-over", {"pin": good + "#" + "x" * (pin_pad - 1) + "\n"}),
+        ("registry/two-pairs-pass", both),
+        ("registry/second-copy-differing",
+         dict(both, second=(dict(files, **{"baseline.css": b"body{ }\n"}), second))),
+        ("registry/second-copy-stray", dict(both, second=(dict(files, **{"search.js": b"x\n"}), second))),
+        ("registry/second-pin-missing", dict(both, second=(files, False))),
+        ("registry/pin-names-other-root", dict(both, second=(files, good))),
+        ("registry/first-pin-names-second-root", dict(both, pin=second)),
+        ("registry/duplicate-root", dict(both, pins=((PIN_REL, FIXTURE_ROOT), (SECOND_PIN, FIXTURE_ROOT)))),
+        ("registry/duplicate-pin", dict(both, pins=((PIN_REL, FIXTURE_ROOT), (PIN_REL, SECOND_ROOT)))),
+        ("registry/empty", dict(both, pins=())),
+        ("tool/pinned-passes", {}),
+        ("tool/both-pins-pass", both),
+        ("tool/differing-refused", {"tools": {TOOL_REL: b"import os\n"}}),
+        ("tool/missing-refused", {"tools": {}}),
+        ("tool/symlink-refused", {"mutate": _parity_link_tool}),
+        ("tool/fifo-not-regular-refused", {"mutate": _parity_fifo_tool}),
+        ("tool/unreadable-cannot-evaluate", {"deny": ("_sha256", _deny_tool_reader)}),
+        ("tool/other-baseline-path-malformed",
+         {"pin": good.replace('"{}"'.format(TOOL_REL), '".baseline/check_other.py"')}),
+        ("tool/near-miss-path-malformed",
+         {"pin": good.replace('"{}"'.format(TOOL_REL), '"baseline/check_palette.py"')}),
+        ("tool/only-tool-malformed", {"pin": '{}\n\n[files]\n"{}" = "{}"\n'.format(version_line, TOOL_REL,
+                                                                                    tool_digest)}),
+        ("tool/upper-digest-malformed", {"pin": good.replace(tool_digest, tool_digest.upper())}),
+        ("version/pin-differs-from-attribution", {"attribution": _parity_attribution(copy, version="1.2.2")}),
+        ("version/both-pins-differ-from-attribution",
+         dict(both, attribution=_parity_attribution(copy, version="1.2.2"))),
+        ("version/pins-disagree",
+         dict(both, second=(files, _pin_text(files, root=SECOND_ROOT, version="1.2.2", tools=FIXTURE_TOOLS)))),
+        ("version/attribution-missing", {"attribution": False}),
+        ("version/attribution-unreadable", {"deny": ("_read_attribution_bytes", _deny_reader)}),
+        ("version/attribution-not-regular", {"mutate": _parity_link_attribution}),
+        ("version/attribution-not-utf8", {"attribution": attribution.encode("utf-8") + b"# \xff\n"}),
+        ("version/attribution-not-toml", {"attribution": attribution + "[vendored\n"}),
+        ("version/attribution-block-missing", {"attribution": _parity_attribution(copy, block="other-template")}),
+        ("version/attribution-vendored-not-table", {"attribution": 'vendored = "site-template"\n'}),
+        ("version/attribution-block-not-table",
+         {"attribution": '[vendored]\n"site-template" = "{}"\n'.format(FIXTURE_VERSION)}),
+        ("version/attribution-version-missing", {"attribution": attribution.replace(version_line + "\n", "")}),
+        ("version/attribution-version-not-string",
+         {"attribution": attribution.replace(version_line, "version = 1")}),
+        ("version/attribution-version-shape", {"attribution": _parity_attribution(copy, version="1.2")}),
+        ("bound/attribution-size-at", {"attribution": attribution + "#" + "x" * (attribution_pad - 2) + "\n"}),
+        ("bound/attribution-size-over",
+         {"attribution": attribution + "#" + "x" * (attribution_pad - 1) + "\n"}),
+        ("homepage/matching-passes", {"attribution": _parity_attribution(copy, homepage=archive)}),
+        ("homepage/other-version-refused",
+         {"attribution": _parity_attribution(copy, homepage=archive.replace(FIXTURE_VERSION, "1.2.2"))}),
+        ("homepage/missing-refused", {"attribution": _parity_attribution(copy, homepage=False)}),
+        ("homepage/other-file-name-refused",
+         {"attribution": _parity_attribution(copy, homepage=archive.replace(".tar.gz", ".zip"))}),
+        ("homepage/name-prefix-refused",
+         {"attribution": _parity_attribution(copy, homepage=archive.replace(ending, "/x" + ending[1:]))}),
+        ("homepage/trailing-suffix-refused", {"attribution": _parity_attribution(copy, homepage=archive + ".sig")}),
+        ("homepage/not-string-refused",
+         {"attribution": attribution.replace('homepage = "{}"'.format(archive), "homepage = 1")}),
+    ]
+    return cases
+
+
+def _parity_codes(copy, case):
+    """[this gate's exit code, the copy's] (run_gate) over 1 fresh fixture tree for case, with the case's
+    reader failure or parser error applied to both gates alike; their report lines go to a buffer."""
+    files = case.get("files", _parity_files(copy))
+    attribution = case.get("attribution", _parity_attribution(copy))
+    attributions = (ATTRIBUTION_REL, copy.ATTRIBUTION_REL)
+    own, copied = _own_readers(), _copy_readers(copy)
+    original_loads = tomllib.loads
+    with tempfile.TemporaryDirectory(prefix="baseline-pin-parity-") as tmp, \
+            contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+        _fixture(tmp, files, case.get("pin", _pin_text(_parity_files(copy), tools=FIXTURE_TOOLS)),
+                 attribution=attribution, tools=case.get("tools", FIXTURE_TOOLS))
+        if attribution is not False:
+            target = Path(tmp) / copy.ATTRIBUTION_REL
+            os.makedirs(target.parent, exist_ok=True)
+            with open(target, "wb") as handle:
+                handle.write(attribution.encode("utf-8") if isinstance(attribution, str) else attribution)
+        if case.get("second") is not None:
+            _fixture(tmp, case["second"][0], case["second"][1], root=SECOND_ROOT, pin_rel=SECOND_PIN,
+                     attribution=False, tools={})
+        if case.get("mutate") is not None:
+            case["mutate"](Path(tmp), attributions)
+        try:
+            if case.get("deny") is not None:
+                name, make = case["deny"]
+                index = PARITY_READERS.index(name)
+                _bind_own_readers(tuple(make(reader) if number == index else reader
+                                        for number, reader in enumerate(own)))
+                _bind_copy_readers(copy, tuple(make(reader) if number == index else reader
+                                               for number, reader in enumerate(copied)))
+            if case.get("loads") is not None:
+                exc_type, marker = case["loads"]
+
+                def _raise(text, _exc_type=exc_type, _marker=marker, _loads=original_loads):
+                    if _marker not in text:
+                        return _loads(text)
+                    raise _exc_type("raised by the self-test")
+
+                tomllib.loads = _raise
+            pins = case.get("pins", FIXTURE_PINS)
+            return [run_gate(tmp, pins), copy.run_gate(tmp, pins)]
+        finally:
+            tomllib.loads = original_loads
+            _bind_own_readers(own)
+            _bind_copy_readers(copy, copied)
+
+
+def _parity_mismatches(copy, cases):
+    """([(case id, this gate's exit code, the copy's exit code)] for each case where they differ, the set of
+    this gate's exit codes over the cases)."""
+    mismatches, seen = [], set()
+    for name, case in cases:
+        codes = _parity_codes(copy, case)
+        seen.add(codes[0])
+        if codes[0] != codes[1]:
+            mismatches.append((name, codes[0], codes[1]))
+    return mismatches, seen
+
+
+def _parity_case_gaps(shared, cases):
+    """Lines naming each shared check id with neither a parity case nor a PARITY_EXCLUDED reason, each case
+    that is not a shared id, and each exclusion that is not a shared id."""
+    names = [name for name, _case in cases]
+    gaps = ["{}: a shared case with no parity case".format(name)
+            for name in sorted(set(shared) - set(names) - set(PARITY_EXCLUDED))]
+    gaps.extend("{}: a parity case that is not shared by both self-tests".format(name)
+                for name in sorted(set(names) - set(shared)))
+    gaps.extend("{}: excluded but not shared by both self-tests".format(name)
+                for name in sorted(set(PARITY_EXCLUDED) - set(shared)))
+    gaps.extend("{}: more than 1 parity case".format(name) for name in sorted({n for n in names
+                                                                              if names.count(n) > 1}))
+    return gaps
+
+
+def _opf_pin_problems(root):
+    """Lines naming each way the OPF pin under root differs from this repository's OPF pin (PINS[1]) with
+    OPF_PREFIX removed from each path: the version, the copy root, each copy-root file's digest, and each
+    pinned build tool, whose 2 entries name different files (this repository's and the OPF tree's palette
+    gate) and are compared by digest. A pin that is missing or does not parse is 1 problem."""
+    parsed = []
+    for rel in (PINS[1][0], OPF_PIN_REL):
+        path = Path(root) / rel
+        try:
+            if not stat.S_ISREG(os.lstat(path).st_mode):
+                return ["{}: not a regular file".format(rel)]
+            parsed.append(parse_pin(_read_pin_bytes(path), rel))
+        except OSError as exc:
+            return ["{}: unreadable ({})".format(rel, exc)]
+        except CannotEvaluate as exc:
+            return [str(exc)]
+    (parent_version, parent_roots, parent_tools), (opf_version, opf_roots, opf_tools) = parsed
+    problems = []
+    if parent_version != opf_version:
+        problems.append("{} names version {} but {} names version {}".format(
+            OPF_PIN_REL, opf_version, PINS[1][0], parent_version))
+    (parent_root, parent_files), (opf_root, opf_files) = parent_roots[0], opf_roots[0]
+    if parent_root != OPF_PREFIX + opf_root:
+        problems.append("{} names the copy root {}, but {} with {} removed is {}".format(
+            OPF_PIN_REL, opf_root, parent_root, OPF_PREFIX, parent_root.removeprefix(OPF_PREFIX)))
+    for rel in sorted(set(parent_files) | set(opf_files)):
+        if parent_files.get(rel) != opf_files.get(rel):
+            problems.append("{}/{}: {} in {} but {} in {}".format(
+                opf_root, rel, opf_files.get(rel, "absent"), OPF_PIN_REL, parent_files.get(rel, "absent"),
+                PINS[1][0]))
+    for rel in sorted(set(parent_tools) | set(opf_tools)):
+        if parent_tools.get(rel) != opf_tools.get(rel):
+            problems.append("{}: digest {} in {} but {} in {}".format(
+                rel, opf_tools.get(rel, "absent"), OPF_PIN_REL, parent_tools.get(rel, "absent"), PINS[1][0]))
+    return problems
+
+
+def _parity_pin_case(parent_pin, opf_pin):
+    """_opf_pin_problems over a tree holding only the 2 given pin texts."""
+    with tempfile.TemporaryDirectory(prefix="baseline-pin-parity-") as tmp:
+        for rel, text in ((PINS[1][0], parent_pin), (OPF_PIN_REL, opf_pin)):
+            os.makedirs((Path(tmp) / rel).parent, exist_ok=True)
+            with open(Path(tmp) / rel, "wb") as handle:
+                handle.write(text.encode("utf-8"))
+        return _opf_pin_problems(tmp)
+
+
+def _parity_self_test(shared_ids):
+    """The parity checks: each comparison's own refusal over fixtures (always run), then, while the OPF copy
+    exists, the copy against this gate on the shared cases and the OPF pin against this repository's."""
+    # A stand-in copy that passes every tree: the verdict comparison must name its divergence.
+    stand_in = types.SimpleNamespace(run_gate=lambda root, pins: 0, ATTRIBUTION_REL="attribution.toml",
+                                     REQUIRED_NOTICES=(), ATTRIBUTION_TEXT_KEYS=(), EXPECTED=frozenset(),
+                                     _read_pin_bytes=_read_pin_bytes,
+                                     _read_attribution_bytes=_read_attribution_bytes, _sha256=_sha256)
+    mismatches, _seen = _parity_mismatches(stand_in, _parity_cases(stand_in))
+    check("parity/verdict-divergence-detected", ("refuse/differing-file", 1, 0) in mismatches
+          and ("malformed/not-toml", 2, 0) in mismatches and not any(
+              name == "pass/fixture-exact" for name, _parent, _copy in mismatches), mismatches)
+
+    cases = _parity_cases(stand_in)
+    shared = set(name for name, _case in cases) | set(PARITY_EXCLUDED) | {"refuse/unlisted-case"}
+    gaps = _parity_case_gaps(shared, cases)
+    check("parity/shared-case-gap-detected", gaps == ["refuse/unlisted-case: a shared case with no parity case"],
+          gaps)
+
+    files = _parity_files(stand_in)
+    parent_pin = _pin_text(files, root=OPF_PREFIX + FIXTURE_ROOT, tools=FIXTURE_TOOLS)
+    opf_pin = _pin_text(files, tools=FIXTURE_TOOLS)
+    css_digest = hashlib.sha256(files["baseline.css"]).hexdigest()
+    tool_digest = hashlib.sha256(FIXTURE_TOOLS[TOOL_REL]).hexdigest()
+    problems = _parity_pin_case(parent_pin, opf_pin)
+    check("parity/pin-identical-after-strip-passes", problems == [], problems)
+    problems = _parity_pin_case(parent_pin, opf_pin.replace(css_digest, "0" * 64))
+    check("parity/pin-file-digest-divergence-detected", len(problems) == 1
+          and problems[0].startswith(FIXTURE_ROOT + "/baseline.css: " + "0" * 64), problems)
+    problems = _parity_pin_case(parent_pin, _pin_text(files, root=OPF_PREFIX + FIXTURE_ROOT, tools=FIXTURE_TOOLS))
+    check("parity/pin-path-prefix-divergence-detected", len(problems) == 1
+          and "names the copy root " + OPF_PREFIX + FIXTURE_ROOT in problems[0], problems)
+    problems = _parity_pin_case(parent_pin, opf_pin.replace(tool_digest, "0" * 64))
+    check("parity/pin-tool-digest-divergence-detected", problems == ["{}: digest {} in {} but {} in {}".format(
+        TOOL_REL, "0" * 64, OPF_PIN_REL, tool_digest, PINS[1][0])], problems)
+    problems = _parity_pin_case(parent_pin, opf_pin.replace(FIXTURE_VERSION, "1.2.2", 1))
+    check("parity/pin-version-divergence-detected", len(problems) == 1 and "names version 1.2.2" in problems[0],
+          problems)
+
+    # Absent skips; present but not loadable (a directory, a file that does not import, a file without the
+    # names the check reads) fails.
+    with tempfile.TemporaryDirectory(prefix="baseline-pin-parity-") as tmp:
+        absent = _load_opf_copy(tmp)
+        target = Path(tmp) / OPF_COPY_REL
+        os.makedirs(target)
+        broken = [_load_opf_copy(tmp)]
+        os.rmdir(target)
+        for text in ("def broken(:\n", "raise SystemExit(3)\n", "ATTRIBUTION_REL = 'attribution.toml'\n"):
+            with open(target, "w", encoding="utf-8") as handle:
+                handle.write(text)
+            broken.append(_load_opf_copy(tmp))
+    check("parity/absent-copy-skips", absent == (None, None), absent)
+    check("parity/unloadable-copy-fails", len(broken) == 4 and all(
+        module is None and isinstance(reason, str) and reason.startswith(OPF_COPY_REL + ": ")
+        for module, reason in broken), broken)
+
+    copy, reason = _load_opf_copy(ROOT)
+    if copy is None and reason is None:
+        print("SKIP: parity with the OPF copy: {} is absent, so no copy is held to this gate's verdicts or "
+              "pin".format(OPF_COPY_REL))
+        return
+    check("parity/copy-present-loads", copy is not None, reason)
+    if copy is None:
+        return
+    cases = _parity_cases(copy)
+    shared = set(shared_ids) & set(copy.EXPECTED)
+    gaps = _parity_case_gaps(shared, cases)
+    check("parity/shared-cases-covered", gaps == [], gaps)
+    mismatches, seen = _parity_mismatches(copy, cases)
+    check("parity/copy-gives-parent-verdict", mismatches == [] and seen == {0, 1, 2}, (mismatches, seen))
+    problems = _opf_pin_problems(ROOT)
+    check("parity/pin-matches-parent-pin", problems == [], problems)
+
+
 def _self_test():
     findings, errors = _scan_case()
     check("pass/fixture-exact", findings == [] and errors == [], (findings, errors))
@@ -862,6 +1340,8 @@ def _self_test():
     got = run_gate(ROOT)
     check("live/real-tree-passes", got == 0, got)
 
+    _parity_self_test(list(EXECUTED))
+
     if FAILURES:
         print("SELF-TEST FAIL: check_baseline_pin {} of {} check(s) failed".format(len(FAILURES), len(EXECUTED)))
         for failure in FAILURES:
@@ -881,7 +1361,9 @@ def _self_test():
           "a missing or misshapen version there are cannot-evaluate; a homepage ending in the recorded "
           "version's archive name passes, and one naming another version, another file name or a prefixed "
           "name, missing or not a string is cannot-evaluate; the exit codes are 0, 1 and 2; the "
-          "live tree passes)".format(len(EXECUTED)))
+          "live tree passes; each parity comparison names a divergence, and while the OPF copy exists it "
+          "loads, gives this gate's exit code on every shared case and its pin equals the OPF pin with "
+          "the opf/ prefix removed)".format(len(EXECUTED)))
     return 0
 
 
