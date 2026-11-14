@@ -3752,13 +3752,16 @@ def self_test(vectors_only=False, steady_only=False):
     # thread runs under, by which a case it outlives names it.
     WATCH_JOIN = 10.0
     WATCHER_NAME = "close_row watch_asleep"
-    # The join each of close_row's three stand-in checks passes to close_cases
-    # (watch_join). The three differ from each other and from WATCH_JOIN, so a
+    # The join each of close_row's four stand-in checks passes to close_cases
+    # (watch_join). The four differ from each other and from WATCH_JOIN, so a
     # join with any fixed timeout, WATCH_JOIN or none included, matches at
     # most one of them and fails the others, while a join with watch_join
-    # matches each. The name is used nowhere else in self_test, whose later
-    # names would rebind it before close_row runs.
-    CHECK_JOINS = {"unreadable": 0.75, "held": 0.5, "raising": 0.25}
+    # matches each. The first three are below WATCH_JOIN, where a join that
+    # clamps watch_join to at most WATCH_JOIN still matches them; the last is
+    # an hour, above WATCH_JOIN, so such a clamp fails it (a stand-in's join
+    # does not wait, so its size costs nothing). The name is used nowhere else
+    # in self_test, whose later names would rebind it before close_row runs.
+    CHECK_JOINS = {"unreadable": 0.75, "held": 0.5, "raising": 0.25, "clamped": 3600.0}
     # poll(2) and ppoll(2), the system calls in which a Python socket or TLS
     # call with a timeout waits, by machine, as /proc/self/task/<id>/syscall
     # numbers them.
@@ -4088,7 +4091,7 @@ def self_test(vectors_only=False, steady_only=False):
         # of shutting it down, and requires a blocking call there to be judged
         # left to its socket timeout. If none is, the row is INVALID when that
         # run passed, and CANNOT-EVALUATE when it failed for another reason or
-        # was not judged. The three runs that follow make each watcher through
+        # was not judged. The four runs that follow make each watcher through
         # watcher_class as RecordedWatcher, a stand-in that runs nothing, so
         # what they judge does not depend on how a watcher thread is scheduled.
         # Each stand-in reads as alive from its start until it is joined, and
@@ -4108,12 +4111,16 @@ def self_test(vectors_only=False, steady_only=False):
         # Then, in a handshake case whose test thread /proc read raises,
         # close_cases must join the watcher before the exception leaves it,
         # which a join after the cleanup does not (on a return such a join
-        # behaves the same, so only this case tells it apart); a read that did
-        # not raise makes the check CANNOT-EVALUATE before the join is judged. A
-        # join that is missing when the call ends, repeated, given another
+        # behaves the same, so only this case tells it apart); a read not
+        # reached, or one that raised but whose exception close_cases caught
+        # and returned from, makes the check CANNOT-EVALUATE, naming which,
+        # before the join is judged. Between those two, a registration case
+        # joined with CHECK_JOINS' entry above WATCH_JOIN is judged by its join
+        # alone, so a join that clamps watch_join to at most WATCH_JOIN fails
+        # it. A join that is missing when the call ends, repeated, given another
         # timeout or made before done is set fails the row INVALID, naming
         # which. A call_outcome that departs from CALL_EDGES fails the row
-        # INVALID. Only the runs before those three use real watcher threads:
+        # INVALID. Only the runs before those four use real watcher threads:
         # there a watcher still running WATCH_JOIN after close() returned makes
         # its case CANNOT-EVALUATE (watcher_running) unless it failed otherwise,
         # and in the self-check such a case is not judged left, so such a
@@ -4136,7 +4143,7 @@ def self_test(vectors_only=False, steady_only=False):
 
         class RecordedWatcher:
             # A stand-in for close_cases' watcher thread (watcher_class) in
-            # the three checks below. It runs nothing, so what it records does
+            # the four checks below. It runs nothing, so what it records does
             # not depend on scheduling: for each join call, its timeout,
             # whether done was already set (the cleanup had begun) and
             # whether escaped was (the call to close_cases had ended). Once
@@ -4254,18 +4261,44 @@ def self_test(vectors_only=False, steady_only=False):
                             + ("; ".join(held_unjudged) or "no reason"))
         else:
             held_status = VALID
+        # A join that clamps watch_join, to WATCH_JOIN or below, still
+        # matches the other three CHECK_JOINS entries, all below WATCH_JOIN;
+        # this registration case passes the entry above it, and is judged by
+        # its join alone: however else the case ends, close_cases joins its
+        # watcher in the cleanup.
+        clamped_made = []
+        clamped_escaped = threading.Event()
+        try:
+            close_cases(context, client_context, Server, ("registration",),
+                        watch_join=CHECK_JOINS["clamped"],
+                        watcher_class=functools.partial(
+                            RecordedWatcher, clamped_made, False, clamped_escaped))
+        finally:
+            clamped_escaped.set()
+        clamped_defect = join_defect(clamped_made, ("registration",), CHECK_JOINS["clamped"],
+                                     "before close_cases returned")
+        if clamped_defect is not None:
+            clamped_status = INVALID
+            failures.append("clamped join: " + clamped_defect)
+        else:
+            clamped_status = VALID
         caller = threading.current_thread()
 
         class Raised(Exception):
             pass
 
+        raising_reads = []
+
         def raising(thread):
             # A stand-in for asleep_in_poll that raises in the test thread's
             # read (wait_blocked), so the exception leaves close_cases through
-            # its cleanup. It reads False in any other thread, which only a
-            # watcher made without watcher_class would be.
+            # its cleanup, and records each such read in raising_reads, so a
+            # read that raised is told apart from one never made. It reads
+            # False in any other thread, which only a watcher made without
+            # watcher_class would be.
             if threading.current_thread() is not caller:
                 return False
+            raising_reads.append(thread)
             raise Raised()
 
         raising_made = []
@@ -4282,7 +4315,15 @@ def self_test(vectors_only=False, steady_only=False):
             raising_escaped.set()
         raising_defect = join_defect(raising_made, ("handshake",), CHECK_JOINS["raising"],
                                      "before the exception left close_cases")
-        if not raised:
+        if not raised and raising_reads:
+            # The read raised, but close_cases returned: it caught the
+            # exception, so no exception left it for the join to precede.
+            raising_status = CANNOT_EVALUATE
+            unjudged.append("raising case: the test thread's /proc read was reached and "
+                            "raised {} time(s), but close_cases caught the exception and "
+                            "returned, so no join before an exception leaving it was "
+                            "judged".format(len(raising_reads)))
+        elif not raised:
             raising_status = CANNOT_EVALUATE
             unjudged.append("raising case: the test thread's /proc read was not reached")
         elif raising_defect is not None:
@@ -4319,6 +4360,7 @@ def self_test(vectors_only=False, steady_only=False):
                "unreadable_proc_status": blind_status,
                "held_watcher_status": held_status,
                "raising_watcher_status": raising_status,
+               "clamped_join_status": clamped_status,
                "poll_rule_status": poll_rule_status,
                "test_status": (INVALID if failures
                                else CANNOT_EVALUATE if unjudged else VALID)}
