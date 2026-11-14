@@ -1227,9 +1227,10 @@ def _config_poison_fixture(base):
 # selftest_aiqt_hooks.py entry from later config-lane runs by the SIZING formula, capped at 5700 s
 # since the formula gives more than 5766 s, see its own comment, and the _opf_adopt_apply.py entry
 # from later config-lane runs by the SIZING formula, capped at 3900 s since the closure gate
-# refuses an entry for that command above 4026 s, see its own comment); each other entry stays a
-# deliberate shorter deadline relative to the member's self-granted budget, yet each formula-sized
-# entry is sized above the member's measured runs (lane runs, or standalone runs for the
+# refuses an entry for that command above 4026 s while no floor row (_LEG_BOUND_FLOOR_S) raises
+# its opf-adopt-apply-selftest leg, see its own comment); each other entry stays a deliberate
+# shorter deadline relative to the member's self-granted budget, yet each formula-sized entry is
+# sized above the member's measured runs (lane runs, or standalone runs for the
 # child-status-coverage-selftest entry) so that the member finishes under the load the SIZING
 # factor covers, but for the two capped entries, selftest_aiqt_hooks.py and _opf_adopt_apply.py,
 # which cover less (their own comments); reaching a bound stays cannot-evaluate, attributed to the
@@ -1559,11 +1560,22 @@ CONFIG_MEMBER_BOUNDS = {
     # took 1257.15 s (load5 55.07 to 56.38); under the system lane's configuration, rebuilt the same
     # way and run at the same time, 1250.08 s (load5 55.07 to 56.31). Both exited 0 with no hook,
     # fsmonitor or exposure record. Each is above the 1200 s default.
-    # ESTIMATED: 1257.15 * 20 / 3 = 8381.0, so 8400 s by the formula; that is above 5766 s, which
-    # no entry but opf-closure-a to opf-closure-e may pass (CHOICE), so the entry is 5700 s, the
-    # largest multiple of 300 s below 5766 s. That is about 4.5 times the slowest measured run
-    # (5700 / 1257.15 = 4.534), not the formula's 20 / 3, so this entry covers less load growth than
-    # the formula-sized entries do; reaching it stays cannot-evaluate.
+    # REPORTED, not reproduced here (2026-11-14, the same 96-CPU host, 1-minute load 50.7 to 70.2
+    # sampled every 10 s, plain, the bound lifted to 3300 s; the timing account behind the
+    # _opf_adopt_apply.py --self-test entry's MEASURED runs below, started with them): two later
+    # runs, each through the system lane's own setup (its poison fixture, simulated system config
+    # and git wrapper, then _config_results over this one member), took 1306.6 s and 1298.1 s wall
+    # for the member's whole pass. The 1306.6 s run exited 1 because the member's own
+    # gw-lin-dq-roster timing check failed under that load (doubling its input scaled the scan
+    # 3.26x, above its 3x limit), not because of the injected configuration; the 1298.1 s run exited
+    # 0; neither left an exposure record. That gw-lin timing check failing under load is a known
+    # issue, tracked separately.
+    # ESTIMATED: 1257.15 * 20 / 3 = 8381.0, so 8400 s by the formula (1306.6 s would give 8710.7, so
+    # 9000 s); either is above 5766 s, which no entry but opf-closure-a to opf-closure-e may pass
+    # (CHOICE), so the entry is 5700 s, the largest multiple of 300 s below 5766 s. That is about
+    # 4.4 times the slowest run known (5700 / 1306.6 = 4.36, the REPORTED run above; 5700 / 1257.15
+    # = 4.534 for the slowest MEASURED one), not the formula's 20 / 3, so this entry covers less
+    # load growth than the formula-sized entries do; reaching it stays cannot-evaluate.
     ("tools/selftest_aiqt_hooks.py",): 5700,
     # Sized outside SIZING, by its formula capped below the closure gate's limit (see CHOICE). The
     # account names no time for this member: it is not among the nine the account names, and
