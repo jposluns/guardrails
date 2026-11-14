@@ -100,25 +100,27 @@ pull request (CLAUDE.md, Gates and CI).
    and `python3 tools/gen_gensrc.py` (`.aiqt/gensrc.json`). Finally run each generator with `--check`
    (again `gen_manifest.py --check` last); every one must exit 0.
 
-   OPF declaration checklist (OPF-SPEC section 16.1). The reference tooling's declaration file is
+   OPF declaration checklist (OPF-SPEC section 16.1). This repository is a future adopter of a released
+   OPF, not the permanent author of OPF's source. OPF's own release procedure, release identity, release
+   manifest and digest publication are in `opf/RELEASING.md`, which moves with the `opf/` tree. While OPF
+   is nested here, this repository carries that tree until it adopts a released OPF in its place, and this
+   document restates the declaration of the OPF it carries. The reference tooling's declaration file is
    `opf/tools/opf-declaration.toml`, and the shipped-file digest is carried in
    `opf/tools/_opf_declaration.py` as `SHIPPED_DECLARATION_SHA256`. Its `release` is OPF's own release
-   version in `opf/VERSION`, which moves independently of the pack release version in `VERSION`, so each
-   change of OPF's version sets, in one change: `opf/VERSION`; `release` in that file;
-   `SHIPPED_DECLARATION_BYTES` and `SHIPPED_DECLARATION_SHA256` in `_opf_declaration.py`; and the
-   restatement below and in `opf/spec/OPF-QUICKSTART.md`. A change of the supported `spec_version`, homes generation or worklog
-   storage generation changes its value in `_opf_store.py`, the matching field in
-   `opf/tools/opf-declaration.toml`, `SHIPPED_DECLARATION_BYTES` and `SHIPPED_DECLARATION_SHA256` in
-   `_opf_declaration.py`, and the restatement below and in `opf/spec/OPF-QUICKSTART.md`; it does not by
-   itself touch `opf/VERSION` or `release`. `python3 -I -B
+   version in `opf/VERSION`, which moves independently of the pack release version in `VERSION`. A change
+   of OPF's version, or of the supported `spec_version`, homes generation or worklog storage generation,
+   follows `opf/RELEASING.md`, which names every place it sets; the restatement below is one of them, with
+   the ones in `opf/RELEASING.md` and in `opf/spec/OPF-QUICKSTART.md`. `python3 -I -B
    tools/check_opf_declaration.py` must then exit 0. It refuses a restatement that differs from the file
-   and a release other than the version in `opf/VERSION`; a pack release that leaves OPF's version
-   unchanged changes none of these places. `RELEASE_IDENTITY` is read from `opf/VERSION` when the module
-   loads, and a missing or malformed `opf/VERSION` leaves the build without one, so every gated verb
-   refuses. Adoption is bound to OPF's own version: `python3 tools/gen_manifest.py` records `opf/VERSION`
-   as the release manifest's `opf-version`, and the `opf adopt` trust gate checks the plan's release
-   version against that `opf-version`, never the pack manifest's `release-version` (taken from the root
-   `VERSION`), refusing a manifest that records none. This release declares:
+   and a release other than the version in `opf/VERSION`, reports the findings under `opf/` apart from
+   those in this document, and refuses this document if it no longer states this repository's role as a
+   future adopter of a released OPF; a pack release that leaves OPF's version unchanged changes none of
+   these places. `RELEASE_IDENTITY` is read from `opf/VERSION` when the module loads, and a missing or
+   malformed `opf/VERSION` leaves the build without one, so every gated verb refuses. Adoption is bound to
+   OPF's own version: `python3 tools/gen_manifest.py` records `opf/VERSION` as the release manifest's
+   `opf-version`, and the `opf adopt` trust gate checks the plan's release version against that
+   `opf-version`, never the pack manifest's `release-version` (taken from the root `VERSION`), refusing a
+   manifest that records none. This release declares:
 
    ```toml opf-declaration
    release = "1.0.5"

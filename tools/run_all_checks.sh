@@ -148,6 +148,8 @@ run_gate "opf-init" python3 -I -B opf/tools/check_opf_init.py
 run_gate "opf-init-contract-selftest" python3 -I -B opf/tools/_opf_init_contract.py --self-test
 run_gate "opf-init-contract-check-selftest" python3 -I -B opf/tools/check_opf_init_contract.py --self-test
 run_gate "opf-init-contract-check" python3 -I -B opf/tools/check_opf_init_contract.py --parent-integration
+run_gate "opf-declaration-check-selftest" python3 -I -B opf/tools/check_opf_declaration.py --self-test
+run_gate "opf-declaration-check" python3 -I -B opf/tools/check_opf_declaration.py
 run_gate "opf-record-selftest" python3 -I -B opf/tools/check_opf_record.py --self-test --red-on-revert
 run_gate "opf-adopt-selftest" python3 -I -B opf/tools/_opf_adopt.py --self-test
 run_gate "opf-adopt-apply-selftest" python3 -I -B opf/tools/_opf_adopt_apply.py --self-test
@@ -270,6 +272,7 @@ run_gate "entry-guard" python3 -I -B tools/check_entry_guard.py
 run_gate "verifier-delivery-selftest" python3 -I -B tools/check_selftest_execution.py --suite verifier-delivery-selftest
 run_gate "opf-declaration-selftest" python3 -I -B tools/check_selftest_execution.py --suite opf-declaration-selftest
 run_gate "opf-declaration" python3 -I -B tools/check_opf_declaration.py
+run_gate "opf-declaration-local-selftest" python3 -I -B tools/check_selftest_execution.py --suite opf-declaration-local-selftest
 run_gate "record-drift-selftest" python3 -I -B tools/check_record_drift.py --self-test
 run_gate "record-drift"          python3 -I -B tools/check_record_drift.py
 run_gate "record-readers-selftest" python3 -I -B tools/check_selftest_execution.py --suite record-readers-selftest

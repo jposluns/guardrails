@@ -1186,12 +1186,11 @@ def _config_poison_fixture(base):
 # (derived by the SIZING formula), REPORTED (an earlier account, not reproduced here) or
 # READ FROM SOURCE (read from the member's own code, not measured). The exceptions are the six
 # tools/check_opf_standalone_closure.py --self-test --ci-job entries, set outside SIZING: the
-# opf-closure-a to opf-closure-e entries sized from their members' worst cases READ FROM SOURCE,
-# and opf-closure-f's 3600 s a kept value above its member's worst case READ FROM SOURCE (1620 s),
-# not sized from it. Their MEASURED figures are standalone runs of the pre-split whole self-test
-# (and one of the opf-closure-c member when it held one leg) and their ESTIMATED figure scales
-# the latest whole-self-test run by load alone, not by the SIZING formula (their shared comment
-# gives both; neither sizes an entry now). The other exceptions are the
+# opf-closure-a to opf-closure-f entries sized from their members' worst cases READ FROM SOURCE.
+# Their MEASURED figures are standalone runs of the pre-split whole self-test (and one of the
+# opf-closure-c member when it held one leg) and their ESTIMATED figure scales the latest
+# whole-self-test run by load alone, not by the SIZING formula (their shared comment gives both;
+# neither sizes an entry now). The other exceptions are the
 # tools/check_selftest_execution.py --suite child-status-coverage-selftest entry, whose MEASURED
 # figures are standalone runs (its own comment), fed to the SIZING formula, the
 # tools/selftest_aiqt_hooks.py entry, whose MEASURED figures are config-lane runs of that member
@@ -1402,12 +1401,13 @@ CONFIG_MEMBER_BOUNDS = {
     # sweeps only its own part of the current roster, plus the same fast vectors, so each part's
     # sweep is a proper part of the whole self-test's over the same tree; that is NOT a subset of
     # what the measured pre-split runs below swept, since opf-closure-c holds two legs
-    # (opf-adopt-state-selftest and opf-adopt-complete-selftest) and opf-closure-f one
-    # (opf-release-history-selftest) absent from the tree those runs measured.
+    # (opf-adopt-state-selftest and opf-adopt-complete-selftest) and opf-closure-f three
+    # (opf-release-history-selftest, opf-declaration-check-selftest and opf-declaration-check)
+    # absent from the tree those runs measured.
     # SIZED ABOVE EACH MEMBER'S WORST CASE AS ITS OWN BUDGET MODEL GIVES IT (the kill-timeout rule,
     # see CHOICE), so no entry here is meant as a shorter deadline: each is that worst case, READ
     # FROM SOURCE (not measured), plus the member's 60 s launch margin, rounded up to a multiple of
-    # 300 s, and an entry already above that figure is kept (opf-closure-f's 3600 s). That worst case
+    # 300 s, and an entry already above that figure is kept (none is, on this tree). That worst case
     # is the source's budget model, NOT a bound the member enforces: part of its vector allowance is
     # work no deadline bounds (UNBOUNDED PART, below), so no entry is shown to outlast every run.
     # config/member-bound-closure-worst-case recomputes each worst case below through that module on
@@ -1427,11 +1427,14 @@ CONFIG_MEMBER_BOUNDS = {
     #   opf-closure-c   7380      0     5 x 10       350         7780     7840    8100
     #   opf-closure-d   9420      0     7 x 10       350         9840     9900    9900
     #   opf-closure-e   9126      0     5 x 10       350         9526     9586    9600
-    #   opf-closure-f   1260      0     1 x 10       350         1620     1680    3600 (kept)
+    #   opf-closure-f   3780      0     3 x 10       350         4160     4220    4500
     # opf-closure-a's sweep is its opf-tooling-selftest leg bound, 5691 s, and its
     # opf-doctor-selftest leg bound, 1560 s. Each CI job's own worst case (two sweeps, the flip, the
     # cleanups, the vectors and 600 s of setup; _job_worst_case_s in the member) is larger: 21193 s,
-    # 21420 s, 15810 s, 19930 s, 19302 s and 3490 s.
+    # 21420 s, 15810 s, 19930 s, 19302 s and 8570 s.
+    # opf-closure-f's entry was a kept 3600 s while its member swept opf-release-history-selftest
+    # alone (worst case 1620 s); the two legs of OPF's own declaration gate joined that job, its worst
+    # case rose above the kept value, and the entry was sized like the others.
     # UNBOUNDED PART: the 350 s vector allowance is the member's own budget for work no leg bound
     # covers (its comment beside _VECTOR_ALLOWANCE_S): 311 s of deadlines its vectors hold, READ FROM
     # SOURCE, plus 38.4 s for work NO DEADLINE BOUNDS (its bound checks and wait scans, and each
@@ -1472,7 +1475,8 @@ CONFIG_MEMBER_BOUNDS = {
     # lane's roster (every member outside CONFIG_EXCLUSIONS["malformed"]), with every member at its
     # bound, that lane's four workers alone run 65100 s in roster order (56700 s with these five at
     # 3600 s): a schedule of this table's entries, not a measured time, and the other lanes' rosters
-    # differ. A lane that reaches the job limit is ended by it and fails with no member named.
+    # differ. A lane that reaches the job limit is ended by it and fails with no member named. The
+    # 65100 s schedule predates opf-closure-f's rise from 3600 s to 4500 s and is not recomputed here.
     # HISTORY (no entry is sized from these figures now).
     # Sized outside SIZING (no config-lane time of this member is known: the lane runs below
     # reached the 1200 s default, so they have no known length and none is fed to the formula).
@@ -1505,7 +1509,7 @@ CONFIG_MEMBER_BOUNDS = {
     ("tools/check_opf_standalone_closure.py", "--self-test", "--ci-job", "opf-closure-c"): 8100,
     ("tools/check_opf_standalone_closure.py", "--self-test", "--ci-job", "opf-closure-d"): 9900,
     ("tools/check_opf_standalone_closure.py", "--self-test", "--ci-job", "opf-closure-e"): 9600,
-    ("tools/check_opf_standalone_closure.py", "--self-test", "--ci-job", "opf-closure-f"): 3600,
+    ("tools/check_opf_standalone_closure.py", "--self-test", "--ci-job", "opf-closure-f"): 4500,
     # Sized outside SIZING, by its formula (no config-lane time of this member is known: its lane
     # runs reached the 1200 s default in two of three config lanes of one CI run, so they have no
     # known length and none is fed to the formula; the same lanes had passed on the same tree in an
@@ -4564,6 +4568,8 @@ OPF_LIFECYCLE_EXEMPTIONS = {
     "opf/tools/_opf_init_contract.py": "KEEP contract validation over synthetic models.",
     "opf/tools/_opf_pack_manifest.py": "Pack parsing and digest vectors over filesystem fixtures.",
     "opf/tools/_opf_release_history.py": "Pure history parsing, canonical emission and digest vectors over in-memory bytes.",
+    "opf/tools/check_opf_declaration.py": ("Declaration file and restatement vectors over temporary copies of the "
+                                           "OPF tree's inputs, and in-process mutants of the gate; no git."),
     "opf/tools/check_opf_homes.py": "Homes contract and schema boundary vectors.",
     "opf/tools/check_opf_init_contract.py": "Git-free contract matcher vectors.",
     "opf/tools/check_opf_init_observe.py": "Observation vectors with mocked git subprocesses.",

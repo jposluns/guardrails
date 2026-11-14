@@ -179,6 +179,11 @@ class = "pack-immutable"
 note = "OPF's own release version, one line, apart from the pack's root VERSION; tools/check_opf_declaration.py holds RELEASE_IDENTITY in opf/tools/_opf_declaration.py equal to it. Shipped pack content, byte-exact, like VERSION. No new class family."
 
 [[release-class]]
+path = "opf/RELEASING.md"
+class = "pack-immutable"
+note = "OPF's own release document, which moves with the opf/ tree; tools/check_opf_declaration.py holds its declaration restatement equal to opf/tools/opf-declaration.toml as an OPF-local surface. Shipped pack content, byte-exact, like RELEASING.md, and never an exclusion like opf/README.md: every OPF release ships its exact bytes. This parent entry stands only while OPF is nested here; once OPF has a release inventory of its own, that inventory carries the class instead. No new class family."
+
+[[release-class]]
 pattern = ".preview/**"
 class = "pack-immutable"
 note = "The public hooks preview channel: standalone hook files, their README.md install page, and SHA256SUMS, byte-exact shipped content like the other top-level surfaces. Removed with the directory when the last preview hook moves into the plugin."

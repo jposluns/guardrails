@@ -2104,7 +2104,7 @@ def _member_bound_checks(roster):
 
     overrides = {record: 5100, opf_selftest: 3600, adopt_observe: 1800, release_delta: 1800,
                  opf_init: 1800, closure_a: 13500, closure_b: 10800, closure_c: 8100,
-                 closure_d: 9900, closure_e: 9600, closure_f: 3600, coverage_suite: 5400,
+                 closure_d: 9900, closure_e: 9600, closure_f: 4500, coverage_suite: 5400,
                  release_cut: 2700, aiqt_hooks: 5700, adopt_apply: 3900}
     check("config/member-bound-table",
           (sorted(key for key in CONFIG_MEMBER_BOUNDS if key not in roster),
@@ -2134,7 +2134,7 @@ def _member_bound_checks(roster):
            (" ".join(adopt_observe), 1800), (" ".join(release_delta), 1800),
            (" ".join(opf_init), 1800), (" ".join(closure_a), 13500), (" ".join(closure_b), 10800),
            (" ".join(closure_c), 8100), (" ".join(closure_d), 9900), (" ".join(closure_e), 9600),
-           (" ".join(closure_f), 3600), (" ".join(coverage_suite), 5400),
+           (" ".join(closure_f), 4500), (" ".join(coverage_suite), 5400),
            (" ".join(release_cut), 2700), (" ".join(aiqt_hooks), 5700),
            (" ".join(adopt_apply), 3900), ("opf/tools/opf.py", 1200)])
 
