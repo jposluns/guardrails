@@ -4,9 +4,11 @@ authoring host patch. Two policy files beside this gate are the only authorities
 tools/python-floor.toml (the floor and every OPF surface that states or carries it) and
 tools/python-host.toml (the exact CPython patch release the OPF authoring host-patch jobs run). The
 tomllib parse-site table tools/tomllib_parse_sites.toml is OPF's own too. Every path is relative to the
-OPF root (the directory above this file's tools/). The gate opens no path outside that root: there is no
-parent mode and no fallback to a parent repository's policy, so a missing OPF policy file is
-cannot-evaluate even where a parent repository has one.
+OPF root (the directory above this file's tools/). The gate names no path outside that root: there is
+no parent mode and no fallback to a parent repository's policy, so a missing OPF policy file is
+cannot-evaluate even where a parent repository has one. That confinement is lexical, a property of the
+path text, not physical: a path is joined to the OPF root without resolving it, so a symlinked
+directory inside the root (tools/, for one) can lead a read outside it before any finding is reported.
 
 This gate holds the policy, not the surfaces' content beyond the statements listed below: the guard,
 dynamic, fallback, tomllib-handling and claims checks of each named file are the floor gate's, and the
@@ -51,14 +53,22 @@ Modes:
   check_opf_python_floor_policy.py --self-test   fixture trees for every rule, red-on-revert vectors (for
                                                  each rule, the gate with that rule removed from RULES
                                                  passes a fixture the intact gate refuses) and a check
-                                                 that a live run opens nothing outside the OPF root.
+                                                 that every path a live run on a copy of the OPF tree
+                                                 opens or lists starts with the copy's path: a lexical
+                                                 prefix check on the audited path text, not a check of
+                                                 physical confinement.
 
 Exit: 0 pass; 1 a finding; 2 usage or cannot-evaluate.
 
 DISCLOSED RESIDUAL. The scans read a file's text with fixed patterns: a pin or floor statement spelled
 another way, or in a file that is not UTF-8 text, is not seen, and a symlink or other non-regular file in
-the tree is not read. A pin is attributed to a file, not to a job: which job of the host-patch workflow
-may pin the host patch is the host-pin gate's to hold. Table rows are checked as data, not rescanned.
+the tree is not read. A .py file that is not UTF-8 is cannot-evaluate, but scan() skips any other file
+that is not UTF-8 without a finding, so a workflow file that is not UTF-8 passes this gate; the OPF floor
+gate (tools/check_python_floor.py) reads each workflow-files entry as UTF-8 and refuses one that is not
+(cannot-evaluate), so the two gates together cover the workflows. A pin is attributed to a file, not to
+a job: which job of the host-patch workflow may pin the host patch is the host-pin gate's to hold, and
+this gate checks that each host-patch-jobs entry is a job id, not that the job exists. Table rows are
+checked as data, not rescanned.
 
 Run this gate isolated: python3 -I -B opf/tools/check_opf_python_floor_policy.py
 """
@@ -102,7 +112,9 @@ FILE_LISTS = ("guarded-surfaces", "nonblocking-surfaces", "workflow-files", "ado
               "doctor-templates", "declaration-files")
 SORTED_LISTS = FILE_LISTS + ("excluded-trees", "host-patch-jobs")
 SKIPPED_DIR_NAMES = frozenset((".git", "__pycache__", ".venv", "venv", "node_modules"))
-FLOOR_RE = re.compile(r"([1-9][0-9]*)\.(0|[1-9][0-9]*)")
+# At most four digits in each component, as PATCH_RE: a longer component past CPython's int-string limit
+# would make int() raise ValueError, a traceback in place of cannot-evaluate.
+FLOOR_RE = re.compile(r"([1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})")
 PATCH_RE = re.compile(r"([1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})")
 JOB_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_-]*")
 PART_RE = re.compile(r"[A-Za-z0-9_.-]+")
@@ -180,8 +192,8 @@ def load_policy(root):
         _keys(data, POLICY_KEYS, POLICY_REL)
         _keys(host, HOST_KEYS, HOST_POLICY_REL)
         if FLOOR_RE.fullmatch(data["python-floor"]) is None:
-            raise CannotEvaluate("{}: python-floor must be a \"MAJOR.MINOR\" string, got {!r}".format(
-                POLICY_REL, data["python-floor"]))
+            raise CannotEvaluate("{}: python-floor must be a \"MAJOR.MINOR\" string with at most four digits "
+                                 "in each component, got {!r:.60}".format(POLICY_REL, data["python-floor"]))
         if PATCH_RE.fullmatch(host["python-host-patch"]) is None:
             raise CannotEvaluate("{}: python-host-patch must be a \"MAJOR.MINOR.PATCH\" string, got "
                                  "{!r}".format(HOST_POLICY_REL, host["python-host-patch"]))
@@ -534,7 +546,8 @@ def table_findings(root, policy):
 
 
 def evaluate(root):
-    """Every finding for the OPF tree at root; CannotEvaluate propagates. Nothing outside root is read."""
+    """Every finding for the OPF tree at root; CannotEvaluate propagates. Every path read is named under
+    root (a lexical bound; see the module docstring)."""
     policy, host, findings = load_policy(root)
     findings += floor_findings(policy)
     findings += host_patch_findings(policy, host)
@@ -679,6 +692,17 @@ def _schema_cases(base):
           "cannot-evaluate")
     check("schema/floor-format-cannot-evaluate",
           _outcome(_opf_fixture(base, policy=_policy_text(**{"python-floor": '"3.14.1"'}))), "cannot-evaluate")
+    # The floor's component bound, at each end: four digits pass the schema (and the floor rule finds the
+    # floor wrong), five are cannot-evaluate, and so is a 5001-digit component, past CPython's int-string
+    # limit, where int() would raise ValueError; with the schema rule removed, the floor rule reads that
+    # floor as a finding, never a traceback.
+    check("schema/floor-component-digit-bound", [_outcome(_opf_fixture(
+        base, policy=_policy_text(**{"python-floor": '"' + floor + '"'}),
+        host='format-version = 1\npython-host-patch = "9999.9999.0"\n')) for floor in (
+            "9999.9999", "10000.14", "3.10000", "1" * 5001 + ".14")],
+          ["finding", "cannot-evaluate", "cannot-evaluate", "cannot-evaluate"])
+    check("schema/floor-5001-digits-found-by-floor-rule-without-schema", _without("schema", _opf_fixture(
+        base, policy=_policy_text(**{"python-floor": '"' + "1" * 5001 + '.14"'}))), "finding")
     unsorted = _opf_fixture(base, policy=_policy_text(**{"guarded-surfaces": _toml_list(
         ["tools/b.py", "tools/a.py", "tools/doctor.py"])}))
     check("schema/unsorted-surfaces-finding", _outcome(unsorted), "finding")
@@ -858,7 +882,8 @@ def _audit(event, args):
 
 def _live_copy_cases(base):
     """The live OPF tree copied alone into a directory with no parent repository files: the gate passes
-    there, and every path it opens or lists while doing so lies under the copy."""
+    there, and every path it opens or lists while doing so starts with the copy's path (a lexical
+    prefix check on the audited path text, not physical confinement)."""
     global AUDIT_LOG
     copy = Path(tempfile.mkdtemp(dir=base)) / "opf"
     shutil.copytree(OPF_ROOT, copy, symlinks=True, ignore=shutil.ignore_patterns(*SKIPPED_DIR_NAMES))

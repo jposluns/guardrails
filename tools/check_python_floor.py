@@ -489,7 +489,9 @@ OLDER_CLAIM_RE = re.compile(
 # empty, . or .. segment and a leading /. load_source also refuses a . or .. segment by splitting on /,
 # a second layer.
 SURFACE_RE = re.compile(r"\.?[A-Za-z0-9_][A-Za-z0-9_.-]*(?:/\.?[A-Za-z0-9_][A-Za-z0-9_.-]*)*\.py")
-FLOOR_RE = re.compile(r"([1-9][0-9]*)\.(0|[1-9][0-9]*)")
+# At most four digits in each component, as HOST_PATCH_RE: a longer component past CPython's int-string
+# limit would make int() raise ValueError, a traceback in place of cannot-evaluate.
+FLOOR_RE = re.compile(r"([1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})")
 FLAG_SETS = ((), ("-O",), ("-OO",))
 CHILD_TIMEOUT = 60
 CONTINUED = "CONTINUED"
@@ -665,8 +667,8 @@ def load_source(root):
     floor_text = data["python-floor"]
     match = FLOOR_RE.fullmatch(floor_text) if isinstance(floor_text, str) else None
     if match is None:
-        raise CannotEvaluate("{}: python-floor must be a \"MAJOR.MINOR\" string, got {!r}".format(
-            SOURCE_REL, floor_text))
+        raise CannotEvaluate("{}: python-floor must be a \"MAJOR.MINOR\" string with at most four digits in "
+                             "each component, got {!r:.60}".format(SOURCE_REL, floor_text))
     for key in ("completeness-check", "documentation-check"):
         if type(data[key]) is not bool:
             raise CannotEvaluate("{}: {} must be a boolean".format(SOURCE_REL, key))
@@ -2338,6 +2340,14 @@ def _source_text(floor="3.14", surfaces=(), completeness=False, documentation=Tr
                 "true" if completeness else "false", "true" if documentation else "false", extra))
 
 
+def _floor_read(base, floor):
+    """The (major, minor) load_source reads from a source naming floor, or "cannot-evaluate"."""
+    try:
+        return load_source(_fixture(base, source=_source_text(floor=floor)))["floor"]
+    except CannotEvaluate:
+        return "cannot-evaluate"
+
+
 def _write(root, rel, text):
     path = root / rel
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -2961,6 +2971,11 @@ def _self_test_cases(base):
         base, source=_source_text().replace("format-version = 1", "format-version = true")))[0], 2)
     check("source/malformed-floor-cannot-evaluate",
           evaluate(_fixture(base, source=_source_text(floor="3.14.0")))[0], 2)
+    # The floor's component bound, at each end: four digits are read, five are cannot-evaluate, and so
+    # is a 5001-digit component, past CPython's int-string limit, where int() would raise ValueError.
+    check("source/floor-component-digit-bound", [_floor_read(base, floor) for floor in (
+        "9999.9999", "10000.14", "3.10000", "1" * 5001 + ".14")],
+        [(9999, 9999), "cannot-evaluate", "cannot-evaluate", "cannot-evaluate"])
     check("source/non-bool-switch-cannot-evaluate", evaluate(_fixture(
         base, source=_source_text().replace("completeness-check = false", "completeness-check = 0")))[0],
           2)

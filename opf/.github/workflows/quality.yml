@@ -43,10 +43,12 @@ jobs:
   # policies and HOST_TOOLS (a job name, runs-on ubuntu-24.04, this checkout step, one Python setup step,
   # the gate, the run lines, each held step with name, shell: bash and run only, no env: or if:), and this
   # workflow's top-level keys to name, on, permissions and jobs. The jobs leg also runs outside this job,
-  # in the OPF runner's --binding-only line in opf-checks, so an edit here cannot silence every run of
-  # it. runs-on is ubuntu-24.04 because, as the parent repository's host-patch jobs record, on 2026-10-12
-  # the Python versions manifest listed Linux x64 builds of the host patch for Ubuntu 22.04 and 24.04
-  # only, so ubuntu-latest could fail this job on an image without one.
+  # in a --binding-only run, so an edit here cannot silence every run of it: while OPF is nested and this
+  # workflow is inert, the parent repository's runner and quality workflow (its opf-tooling-a job) run
+  # that line and the checker's self-test; once OPF is its own root, the OPF runner's --binding-only line
+  # in opf-checks does. runs-on is ubuntu-24.04 because, as the parent repository's host-patch jobs
+  # record, on 2026-10-12 the Python versions manifest listed Linux x64 builds of the host patch for
+  # Ubuntu 22.04 and 24.04 only, so ubuntu-latest could fail this job on an image without one.
   opf-host-patch:
     name: OPF tooling (host patch)
     runs-on: ubuntu-24.04

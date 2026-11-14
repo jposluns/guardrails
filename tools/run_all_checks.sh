@@ -166,6 +166,8 @@ run_gate "opf-python-floor-policy-selftest" python3 -I -B opf/tools/check_opf_py
 run_gate "opf-python-floor-policy" python3 -I -B opf/tools/check_opf_python_floor_policy.py
 run_gate "opf-python-floor-selftest" python3 -I -B opf/tools/check_python_floor.py --self-test
 run_gate "opf-python-floor" python3 -I -B opf/tools/check_python_floor.py
+run_gate "opf-host-pin-selftest" python3 -I -B opf/tools/check_opf_host_pin.py --self-test
+run_gate "opf-host-pin-binding" python3 -I -B opf/tools/check_opf_host_pin.py --binding-only
 run_gate "opf-enforce-platforms-selftest" python3 -I -B tools/check_opf_enforce_platforms.py --self-test
 run_gate "opf-enforce-platforms" python3 -I -B tools/check_opf_enforce_platforms.py
 run_gate "opf-enforce-residuals-selftest" python3 -I -B tools/check_opf_enforce_residuals.py --self-test

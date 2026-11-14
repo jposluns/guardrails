@@ -6,6 +6,8 @@ binds that patch to the running interpreter, binds each host-patch job the OPF f
 job in the OPF workflow (host-patch-workflow there) to the patch, this gate and those run lines. Every
 path is relative to the OPF root (the directory that holds this tools/ directory), and the checker opens
 no file of a parent repository: a missing OPF policy is cannot-evaluate, never a read of a parent's.
+That bound is lexical, on the path text: a path is joined to the OPF root without resolving it, so a
+symlinked directory inside the root can lead a read outside it.
 
 Legs, in order:
   source       tools/python-host.toml is a regular UTF-8 file that parses and carries exactly the keys
@@ -14,9 +16,10 @@ Legs, in order:
                is a regular UTF-8 file that parses and carries python-floor (a "MAJOR.MINOR" string),
                host-patch-jobs (a nonempty list of unique job ids, each a plain [A-Za-z_][A-Za-z0-9_-]*
                key), guarded-surfaces (a list of strings) and host-patch-workflow (a relative path with no
-               empty, "." or ".." part). Anything else is cannot-evaluate, and so is a source that tomllib
-               refuses with a RecursionError (deep nesting), a bare ValueError (an over-long integer) or a
-               MemoryError. The floor policy's other keys, and the full schema of both files, are held by
+               empty, "." or ".." part and no NUL character, refused before any filesystem call reads
+               it). Anything else is cannot-evaluate, and so is a source that tomllib refuses with a
+               RecursionError (deep nesting), a bare ValueError (an over-long integer) or a MemoryError.
+               The floor policy's other keys, and the full schema of both files, are held by
                tools/check_opf_python_floor_policy.py; this checker reads only the four keys it binds.
   patch        the host patch is a patch release of the floor: its MAJOR.MINOR equals python-floor. A
                mismatched patch is a finding.
@@ -38,10 +41,18 @@ Legs, in order:
                workflow top-level key other than name, on, permissions and jobs (a workflow env: or
                defaults: reaches every step) are each a finding, and so is a HOST_TOOLS run line that is
                not plain YAML text, which no workflow line can carry as written. A policy job with no
-               HOST_TOOLS row is the binding leg's finding and this leg skips it. Residual: the leg reads
-               lines, not YAML, so it accepts no host-patch job but JOB_TEMPLATE's text; another job is
-               read only for a host-patch pin written as a literal, and a pin through an expression or a
-               matrix value is not seen there (the floor gates judge the workflow's pin lines).
+               HOST_TOOLS row is the binding leg's finding and this leg skips it. A line anywhere in the
+               workflow that opens a flow collection ([ or {) as a value or list item and does not close
+               it on that line (FLOW_START_RE, _flow_closes) is cannot-evaluate. Residual: the leg reads
+               lines, not YAML, so it accepts no host-patch job but JOB_TEMPLATE's text, but outside the
+               host-patch jobs it does not validate YAML: a line nested under a top-level key other than
+               jobs, or in another job, is held only to the line model and the flow rule, so other
+               malformed YAML there is not detected. Another job is read only for a host-patch pin
+               written as a literal (PIN_VALUE_RE: the python-version key in any case, the value quoted
+               or not, with or without leading blanks), and a pin through an expression or a matrix
+               value is not seen there (the floor gates judge the workflow's pin lines). A line inside a
+               block scalar is read as a line too, so a script line there that opens a bracket and does
+               not close it on that line is cannot-evaluate, a disclosed over-rejection.
   interpreter  the running interpreter (sys.version_info) is the host patch, a final release. A difference
                is a finding: run locally, this interpreter is not the committed host patch, so a passing
                local run does not predict the host-patch job; run in a host-patch job, that job did not
@@ -69,9 +80,11 @@ and HOST_TOOLS, so any departure is a finding without a rule of its own. Not car
 emulation vectors, which exist for the parent's workflow parser.
 
 Exit convention: 0 every leg run passes; 1 a finding; 2 usage or cannot-evaluate (a missing, unreadable,
-non-regular, symlinked, non-UTF-8 or malformed policy or workflow, a bound tool that is not a regular
-file, a run line shlex cannot tokenize, a workflow line outside the jobs leg's line model, unavailable
-temporary storage).
+non-regular, symlinked or non-UTF-8 policy or workflow, a malformed policy, a host-patch-workflow path
+with a NUL character, a bound tool that is not a regular file, a run line shlex cannot tokenize, a
+workflow line outside the jobs leg's line model or opening a flow collection it does not close,
+unavailable temporary storage). A workflow is malformed for this checker only in those ways; see the
+jobs leg's residual.
 
 Run this checker isolated: python3 -I -B tools/check_opf_host_pin.py
 """
@@ -148,7 +161,14 @@ NAME_RE = re.compile(r"[A-Za-z0-9(][A-Za-z0-9 ,.()/_+-]*[A-Za-z0-9)]")
 PLAIN_RUN_RE = re.compile(r"[A-Za-z0-9_./=+-]+(?: [A-Za-z0-9_./=+-]+)*")
 TOP_KEY_RE = re.compile(r"([A-Za-z_][A-Za-z0-9_-]*):(?: .*)?")
 JOB_HEADER_RE = re.compile(r"  ([A-Za-z_][A-Za-z0-9_-]*):")
-PIN_VALUE_RE = re.compile(r"python-version['\"]?[ ]*:[ ]*['\"]?([0-9][0-9.]*)")
+# A literal pin in another job: the key in any case, an optional quote around the key and the value, and
+# blanks around the colon and before the value, so a pin spelled differently only in those ways is still
+# seen; whether a runner would honour such a spelling is not judged here.
+PIN_VALUE_RE = re.compile(r"python-version['\"]?[ ]*:[ ]*['\"]?[ ]*([0-9][0-9.]*)", re.IGNORECASE)
+# A value or list item that opens a flow collection: optional list markers, then an optional plain or
+# quoted key with no colon or comment in it and a colon, then [ or {. The collection must close on its
+# line (_flow_closes); this line model does not read YAML across lines.
+FLOW_START_RE = re.compile(r"(?:- +)*(?:(?:'[^']*'|\"[^\"]*\"|[^ '\"#:\[{][^#:]*?) *: +)?(?P<flow>[\[{].*)")
 # Characters a YAML reader may read as a line break or indentation this line model does not.
 REFUSED_CHARS = {"\r": "a carriage return", "\t": "a tab", "\f": "a form feed", "\v": "a vertical tab",
                  "\x85": "U+0085 (next line)", "\u2028": "U+2028 (line separator)",
@@ -222,6 +242,10 @@ def load_floor_binding(root):
     if not all(isinstance(item, str) for item in surfaces):
         raise CannotEvaluate("{}: guarded-surfaces must be a list of strings".format(FLOOR_SOURCE_REL))
     workflow = data["host-patch-workflow"]
+    # Refused here, before any filesystem call: os.lstat raises ValueError, not OSError, on a NUL.
+    if "\x00" in workflow:
+        raise CannotEvaluate("{}: host-patch-workflow carries a NUL character, which no path can hold, got "
+                             "{!r:.60}".format(FLOOR_SOURCE_REL, workflow))
     outside = workflow.startswith("/") or "\\" in workflow or any(part in ("", ".", "..")
                                                                   for part in workflow.split("/"))
     if outside:
@@ -276,6 +300,35 @@ def binding_findings(root, jobs, surfaces):
     return findings
 
 
+def _flow_closes(flow):
+    """True when flow, text that opens with [ or {, closes that collection, with its brackets matched and
+    quotes respected, followed by nothing but blanks or a comment."""
+    closers, quote, index = [], None, 0
+    while index < len(flow):
+        char = flow[index]
+        if quote == "'":
+            if char == "'" and flow[index + 1:index + 2] == "'":
+                index += 1
+            elif char == "'":
+                quote = None
+        elif quote == "\"":
+            if char == "\\":
+                index += 1
+            elif char == "\"":
+                quote = None
+        elif char in "'\"":
+            quote = char
+        elif char in "[{":
+            closers.append("]" if char == "[" else "}")
+        elif char in "]}":
+            if not closers or closers.pop() != char:
+                return False
+            if not closers:
+                return re.fullmatch(r"(?: +#.*| *)", flow[index + 1:]) is not None
+        index += 1
+    return False
+
+
 def _workflow_lines(rel, text):
     """The workflow's top-level keys in order, each job's lines as (line number, line) with blank and
     comment lines dropped, and the ids of jobs defined more than once. The line model: a column-0 line is
@@ -292,6 +345,10 @@ def _workflow_lines(rel, text):
         body = line.lstrip(" ")
         if not body or body.startswith("#"):
             continue
+        flow = FLOW_START_RE.fullmatch(body)
+        if flow is not None and not _flow_closes(flow.group("flow")):
+            raise CannotEvaluate("{}:{}: {!r:.60} opens a flow collection that does not close on its line, "
+                                 "which this line model does not read".format(rel, number, line))
         indent = len(line) - len(body)
         if indent == 0:
             match = TOP_KEY_RE.fullmatch(line)
@@ -474,6 +531,9 @@ REVERTS = {
                       "        elif indent == 1 or current is None:\n            continue\n        elif False:\n"),
     "plain-run": ("        unplain = [run for run in HOST_TOOLS[job] if not PLAIN_RUN_RE.fullmatch(run)]\n",
                   "        unplain = []\n"),
+    "flow-close": ("        if flow is not None and not _flow_closes(flow.group(\"flow\")):\n", "        if False:\n"),
+    "pin-any-case": ("[0-9][0-9.]*)\", re.IGNORECASE)", "[0-9][0-9.]*)\")"),
+    "pin-blanks": ("['\\\"]?[ ]*([0-9][0-9.]*)\", re", "['\\\"]?([0-9][0-9.]*)\", re"),
 }
 
 
@@ -856,7 +916,29 @@ def _jobs_cases(base, me):
             ("jobs/line-before-job-cannot-evaluate", (("jobs:\n", "jobs:\n    stray: 1\n"),), "belongs to no job",
              (2, True)),
             ("jobs/one-space-line-cannot-evaluate", ((_HOST_HEADER, _HOST_HEADER + " x: 1\n"),),
-             "belongs to no job", (2, True))):
+             "belongs to no job", (2, True)),
+            # A flow collection must close on its own line, quotes respected: unclosed on the on: key and
+            # nested under it, closed with text after it, or closed by the wrong bracket is cannot-evaluate;
+            # one closed on its line, brackets inside quotes and a trailing comment included, passes.
+            ("jobs/flow-on-key-unclosed-cannot-evaluate", (("on:\n  push:\n", "on: [\n  push:\n"),),
+             "opens a flow collection", (2, True)),
+            ("jobs/flow-nested-unclosed-cannot-evaluate", (("    branches: [main]\n", "    branches: [main\n"),),
+             "opens a flow collection", (2, True)),
+            ("jobs/flow-text-after-close-cannot-evaluate",
+             (("    branches: [main]\n", "    branches: [main] x\n"),), "opens a flow collection", (2, True)),
+            ("jobs/flow-wrong-closer-cannot-evaluate", (("    branches: [main]\n", "    branches: [main}\n"),),
+             "opens a flow collection", (2, True)),
+            ("jobs/flow-closed-on-its-line-passes", (("on:\n  push:\n    branches: [main]\n", "on: [push]\n"),),
+             "opens a flow collection", (0, False)),
+            ("jobs/flow-quoted-brackets-pass",
+             (("    branches: [main]\n", "    branches: ['ma]in', \"x[\", {a: b}]  # c\n"),),
+             "opens a flow collection", (0, False)),
+            # A literal host-patch pin in another job, its key in another case or its value led by blanks.
+            ("jobs/other-job-pin-key-any-case",
+             (("  # The host-patch job.\n", _OTHER_JOB.replace("python-version", "Python-Version").format("3.14.4")),),
+             "job other pins the host patch 3.14.4", (1, True)),
+            ("jobs/other-job-pin-leading-blanks", (("  # The host-patch job.\n", _OTHER_JOB.format("  3.14.4")),),
+             "job other pins the host patch 3.14.4", (1, True))):
         check(check_id, _outcome(me, _workflow_fixture(base, edits), HOST, marker), want)
     check("jobs/host-job-absent", _outcome(me, _without_host_job(base), HOST,
                                            "host-patch job opf-host-patch is missing"), (1, True))
@@ -870,6 +952,10 @@ def _jobs_cases(base, me):
                                ("jobs/workflow-empty-part-cannot-evaluate", ".github//workflows/quality.yml")):
         check(check_id, _outcome(me, _fixture(base, floor=_floor_text(workflow=workflow)), HOST,
                                  "host-patch-workflow must be a relative path"), (2, True))
+    # A NUL character, written as a TOML escape, is refused before any filesystem call reads the path.
+    check("jobs/workflow-nul-cannot-evaluate",
+          _outcome(me, _fixture(base, floor=_floor_text(workflow=".github/workflows/q\\u0000.yml")), HOST,
+                   "carries a NUL character"), (2, True))
     check("jobs/workflow-key-missing-cannot-evaluate",
           _outcome(me, _fixture(base, floor="python-floor = \"3.14\"\nhost-patch-jobs = [\"opf-host-patch\"]\n"
                                             "guarded-surfaces = [\"tools/opf.py\"]\n"), HOST,
@@ -924,6 +1010,10 @@ def _jobs_revert_cases(base, me, mutants):
     colon = _workflow_fixture(base, ((_HOST_NAME, "    name: OPF: host patch\n"),))
     stray = _workflow_fixture(base, (("jobs:\n", "jobs:\n    stray: 1\n"),))
     moved = _fixture(base, host=_host_text("3.14.5"))
+    unclosed = _workflow_fixture(base, (("on:\n  push:\n", "on: [\n  push:\n"),))
+    any_case = _workflow_fixture(base, (("  # The host-patch job.\n", _OTHER_JOB.replace(
+        "python-version", "Python-Version").format("3.14.4")),))
+    blanks = _workflow_fixture(base, (("  # The host-patch job.\n", _OTHER_JOB.format("  3.14.4")),))
     # A parent's workflow one level above the OPF root never stands in for the OPF one.
     dotdot = _fixture(base, floor=_floor_text(workflow="../.github/workflows/quality.yml"))
     _write(dotdot.parent, FIXTURE_WORKFLOW, _workflow_text())
@@ -940,7 +1030,10 @@ def _jobs_revert_cases(base, me, mutants):
             ("revert/line-breaks", "line-breaks", carriage, HOST, (2, 1)),
             ("revert/name-text", "name-text", colon, HOST, (1, 0)),
             ("revert/pin-from-policy", "pin-from-policy", moved, (3, 14, 5, "final"), (0, 1)),
-            ("revert/unplaced-line", "unplaced-line", stray, HOST, (2, 0))):
+            ("revert/unplaced-line", "unplaced-line", stray, HOST, (2, 0)),
+            ("revert/flow-close", "flow-close", unclosed, HOST, (2, 0)),
+            ("revert/pin-any-case", "pin-any-case", any_case, HOST, (1, 0)),
+            ("revert/pin-blanks", "pin-blanks", blanks, HOST, (1, 0))):
         check(check_id, (me.evaluate(root, version)[0], mutants[name].evaluate(root, version)[0]), want)
     # A HOST_TOOLS line that is not plain YAML text, its fixture written after the override so the job
     # carries that line: the intact checker refuses it; the copy without the rule compares and passes.

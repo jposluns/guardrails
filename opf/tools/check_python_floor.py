@@ -4,6 +4,8 @@ tools/python-host.toml, name the Python floor of the OPF tree's executable tooli
 release its authoring host-patch jobs run, and every OPF statement and pin of either agrees with them.
 Every path is relative to the OPF root (the directory that holds this tools/ directory), and the gate
 reads no file of a parent repository, so it runs the same in a nested checkout and in an OPF-only tree.
+That holds for the path text, not physically: a path is joined to the OPF root without resolving it,
+so a symlinked directory inside the root can lead a read outside it.
 
 The legs are those of the parent repository's tools/check_python_floor.py, whose docstring states each
 leg's rules in full: source, switch, pins, guard, dynamic, fallback, tomllib, completeness, documentation
@@ -48,8 +50,11 @@ OPF surfaces included: the parent's single source, workflows, declaration files 
 the hook form of the parent's hook surfaces; the host-patch jobs of the parent workflow and their
 source; and the execution report its self-test writes for tools/check_selftest_execution.py. The full
 line-model and grammar vectors stay in the parent self-test, which exercises the same function bodies;
-this copy's self-test covers each leg and each adaptation, and the parent's self-test holds the rules
-both gates share to the same verdicts while this copy exists.
+this copy's self-test covers each leg and each adaptation. While this copy exists, the parent's
+self-test (opf-copy/parity) holds five rule groups both gates share to the same verdicts and findings
+on one fixed set of fixtures: the guard (guard_findings), the workflow grammar (_grammar_check), the
+setup-python step (_setup_python_findings), the tomllib parse sites (tomllib_sites) and the import
+fallback (fallback_findings). No other shared function is compared there.
 
   check_python_floor.py              run every leg over the OPF tree
   check_python_floor.py --self-test  fixture trees for every leg and adaptation, each red with its
@@ -225,7 +230,9 @@ OLDER_CLAIM_RE = re.compile(
 # empty, . or .. segment and a leading /. load_source also refuses a . or .. segment by splitting on /,
 # a second layer.
 SURFACE_RE = re.compile(r"\.?[A-Za-z0-9_][A-Za-z0-9_.-]*(?:/\.?[A-Za-z0-9_][A-Za-z0-9_.-]*)*\.py")
-FLOOR_RE = re.compile(r"([1-9][0-9]*)\.(0|[1-9][0-9]*)")
+# At most four digits in each component, as HOST_PATCH_RE: a longer component past CPython's int-string
+# limit would make int() raise ValueError, a traceback in place of cannot-evaluate.
+FLOOR_RE = re.compile(r"([1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})")
 FLAG_SETS = ((), ("-O",), ("-OO",))
 CHILD_TIMEOUT = 60
 CONTINUED = "CONTINUED"
@@ -459,8 +466,8 @@ def load_source(root):
     floor_text = data["python-floor"]
     match = FLOOR_RE.fullmatch(floor_text)
     if match is None:
-        raise CannotEvaluate("{}: python-floor must be a \"MAJOR.MINOR\" string, got {!r}".format(
-            SOURCE_REL, floor_text))
+        raise CannotEvaluate("{}: python-floor must be a \"MAJOR.MINOR\" string with at most four digits in "
+                             "each component, got {!r:.60}".format(SOURCE_REL, floor_text))
     for key in POLICY_LISTS:
         if not all(isinstance(item, str) for item in data[key]) or data[key] != sorted(set(data[key])):
             raise CannotEvaluate("{}: {} must be a sorted, unique list of strings".format(SOURCE_REL, key))
@@ -2191,6 +2198,15 @@ def _write(root, rel, text):
     path.write_bytes(text.encode("utf-8"))
 
 
+def _floor_read(base, floor):
+    """The (major, minor) load_source reads from a fixture whose policy names floor and whose host policy
+    names floor's .0 patch, or "cannot-evaluate"."""
+    try:
+        return load_source(_fixture(base, policy=_policy_text(floor=floor), host=_host_text(floor + ".0")))["floor"]
+    except CannotEvaluate:
+        return "cannot-evaluate"
+
+
 _FIXTURES = []
 
 
@@ -2501,6 +2517,11 @@ def _self_test_cases(base):
     code, lines = evaluate(_fixture(base, policy=_policy_text(copies="{\"site/adopt.md\" = 1}")))
     check("source/declaration-copies-below-two-cannot-evaluate", (code, _has(lines, "declaration-copies")),
           (2, True))
+    # The floor's component bound, at each end: four digits are read, five are cannot-evaluate, and so
+    # is a 5001-digit component, past CPython's int-string limit, where int() would raise ValueError.
+    check("source/floor-component-digit-bound", [_floor_read(base, floor) for floor in (
+        "9999.9999", "10000.14", "3.10000", "1" * 5001 + ".14")],
+        [(9999, 9999), "cannot-evaluate", "cannot-evaluate", "cannot-evaluate"])
     # No parent file: a fixture holds only the OPF tree, so each pass above read no parent path; neither
     # live policy names a parent path as a value either.
     check("source/no-parent-path-in-live-policy",
