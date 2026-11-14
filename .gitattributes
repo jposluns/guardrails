@@ -688,6 +688,7 @@ opf/tools/_vendor/marko/patterns.py text eol=lf
 opf/tools/_vendor/marko/py.typed binary
 opf/tools/_vendor/marko/renderer.py text eol=lf
 opf/tools/_vendor/marko/source.py text eol=lf
+opf/tools/check_dangerous_api.py text eol=lf
 opf/tools/check_opf_doctor.py text eol=lf
 opf/tools/check_opf_drift.py text eol=lf
 opf/tools/check_opf_homes.py text eol=lf

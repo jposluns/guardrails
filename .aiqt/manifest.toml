@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.0.5"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "9131a7203dbd0f790dbe872b1532b4ef56ac69589066b2cf891d73659c47f458"
+tree-sha256 = "fb29a280989f5e3807e03c4c375542d2fd36ca504aa5b7dc1a161d94a6ce31b1"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -132,8 +132,8 @@ sha256 = "7665572c121fb72a7493bbcff903b66e61dcd6255baf0b82c23dd3c47f2d0897"
 
 [[sources]]
 path = ".aiqt/core/python-floor.toml"
-bytes = 9566
-sha256 = "c948b0a96a42821d86d0d58f6c27f2665a2bd029ddf94b6abaf18e741bfac642"
+bytes = 9606
+sha256 = "a3809cac0ab281152f37efdf470297533fc45248d161071a5bc43f27cce95068"
 
 [[sources]]
 path = ".aiqt/core/references.toml"
@@ -2307,8 +2307,8 @@ sha256 = "9e0e365fb1e2813246c724267ec062310de3be1c5ca4ad9cba37fa0ce5691af4"
 
 [[sources]]
 path = ".gitattributes"
-bytes = 53975
-sha256 = "2d16ca810fc72d77ef3c01857296f8a9382e9d5e50f064b000ad55f3af6f988a"
+bytes = 54020
+sha256 = "f93ae9ec7e0f7c5e635d4d57d8a8df55b24823a3a43aa9dc88feea54c7f921ae"
 
 [[sources]]
 path = ".github/copilot-instructions.md"
@@ -3431,6 +3431,11 @@ bytes = 5554
 sha256 = "363663005882dabe4f01b43e28926f4093bce4d718a4e67bfa13b7318a9a3247"
 
 [[sources]]
+path = "opf/tools/check_dangerous_api.py"
+bytes = 203091
+sha256 = "d369360125085090347737192c546d3b7eff0204e7d3145062b62680bc509005"
+
+[[sources]]
 path = "opf/tools/check_opf_doctor.py"
 bytes = 383508
 sha256 = "207a220396bbcee94423f1e2c8a5543e6979dd51d3597993c18d190ead6c7b95"
@@ -3497,8 +3502,8 @@ sha256 = "55526c18bda5a9036ad9c5f9580405d1f1a349b004ccc79da7856fc33ce299a2"
 
 [[sources]]
 path = "opf/tools/run_all_checks.sh"
-bytes = 5738
-sha256 = "8d4f60ef0352e26310621e1fe166d9caffa7e0c3f03a19a15033270d7a8bf9bd"
+bytes = 5918
+sha256 = "52c608dde4da8d68d885efe2998b3bbbb160589b236cbe3ba3f687905959e4d3"
 
 [[sources]]
 path = "opf/tools/selftest_checks.toml"
@@ -4197,8 +4202,8 @@ sha256 = "0238bb4c907c358a4718a70f8630a92517444f64139b4c0517004bfdbf2321ec"
 
 [[sources]]
 path = "tools/check_dangerous_api.py"
-bytes = 224837
-sha256 = "c5e1cd5b71012f7b2240b4640c06bd0698cc64d1afc03a1389d6406fbb93c9e5"
+bytes = 259826
+sha256 = "f5c17c77c50ce74fe40eda78645d2f353ba4cb05ba36e445454a58aa20df9f3a"
 
 [[sources]]
 path = "tools/check_derived_command_parameters.py"
