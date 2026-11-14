@@ -4737,6 +4737,28 @@ def _test_pgrep_self_match(failures):
 # literal text under both (bash joined the << and kept the backslash after EO, so EO and F did not end the
 # body); for-after-assignment-command-word exited 2 under both with a syntax error at the ( after for, and
 # ran nothing.
+# The rows continuation-heredoc-dquote-comment, continuation-unquoted-heredoc-dquote-comment,
+# continuation-heredoc-backquote-comment, continuation-unquoted-heredoc-backquote-comment,
+# continuation-heredoc-message-comment, continuation-heredoc-apostrophe, continuation-heredoc-comment-body,
+# continuation-heredoc-hash-read, continuation-heredoc-hash-subst, continuation-dollar-paren-hash,
+# continuation-dollar-ansi-c, continuation-procsub-hash, continuation-heredoc-chain,
+# continuation-heredoc-strip-body, continuation-heredoc-escaped-backslash,
+# continuation-heredoc-strip-delimiter, continuation-quoted-heredoc-quoted-next-line,
+# continuation-two-heredocs-comment, esac-after-redirect-command-word, for-after-redirect-command-word,
+# arith-after-assignment-command-word, arith-after-redirect-command-word, heredoc-empty-quoted-delimiter,
+# heredoc-empty-dquoted-delimiter and heredoc-empty-quoted-strip-delimiter were run the same way (env -i, a
+# directory of its own), each run also in a session of its own. Each fire row among them printed the
+# substitution's 0 under B and the earlier command's 1 under P as its last line, after the output of its
+# earlier commands (its here-document bodies, or the ' of continuation-dollar-ansi-c), and
+# continuation-unquoted-heredoc-backquote-comment after bash reported a bad substitution in its body,
+# continuation-heredoc-message-comment after rc=1, continuation-heredoc-comment-body after the joined body line
+# # a EOF and the line cat <<X (it then exited 127 when X was not found as a command),
+# continuation-heredoc-strip-body after the joined body line x, a tab and EOF, continuation-procsub-hash after
+# /dev/fd/63#x, and esac-after-redirect-command-word after bash reported esac as not found. Quiet rows among
+# them: for-after-redirect-command-word, arith-after-assignment-command-word and
+# arith-after-redirect-command-word exited 2 under both with a syntax error at the (, and ran nothing;
+# heredoc-empty-quoted-delimiter, heredoc-empty-dquoted-delimiter and heredoc-empty-quoted-strip-delimiter
+# printed the body line $(true) $? as literal text, then done, under both.
 _SAS_FIRE_ROWS = (
     ("(sas-fire-a) substitution in double quotes", 'false; echo "x $(true): rc=$?"'),
     ("(sas-fire-b) substitution with an argument", 'false; echo "x $(basename /a/b): rc=$?"'),
@@ -4970,6 +4992,60 @@ _SAS_FIRE_ROWS = (
     ("(sas-fire-continuation-before-equals) a later line after an assignment whose ] and = a line "
      "continuation splits, before a << shift in a subscript",
      'a[1]\\\n=1 b[1<<0]=5\nfalse; RC=$? env "SHA=$(true)" printenv RC'),
+    ("(sas-fire-continuation-heredoc-dquote-comment) a later line after a comment whose line ends in a "
+     "backslash, after a here-document under a quoted delimiter whose body holds an unbalanced double quote",
+     "cat <<'EOF'\nHe said \"hi\nEOF\n# note \\\nfalse; echo $(true) $?"),
+    ("(sas-fire-continuation-unquoted-heredoc-dquote-comment) a later line after a comment whose line ends in "
+     "a backslash, after a here-document under an unquoted delimiter whose body holds a double quote",
+     "cat <<EOF\nscreen 5\" wide\nEOF\n# note \\\nfalse; echo $(true) $?"),
+    ("(sas-fire-continuation-heredoc-backquote-comment) a later line after a comment whose line ends in a "
+     "backslash, after a here-document under a quoted delimiter whose body holds an unbalanced backquote",
+     "cat <<'EOF'\nrun `make\nEOF\n# note \\\nfalse; echo $(true) $?"),
+    ("(sas-fire-continuation-unquoted-heredoc-backquote-comment) a later line after a comment whose line ends "
+     "in a backslash, after a here-document under an unquoted delimiter whose body holds an unbalanced "
+     "backquote", "cat <<EOF\nrun `make\nEOF\n# note \\\nfalse; echo $(true) $?"),
+    ("(sas-fire-continuation-heredoc-message-comment) a later line after a comment whose line ends in a "
+     "backslash, after a message here-document whose body holds a double quote and a status echo",
+     "cat >/dev/null <<'EOF'\nset 5\" pane\nEOF\nfalse; echo \"rc=$?\"\n# check status \\\n"
+     "false; echo $(true) $?"),
+    ("(sas-fire-continuation-heredoc-apostrophe) a later line whose $ and ( a line continuation splits, after "
+     "a here-document under an unquoted delimiter whose body holds an apostrophe",
+     "cat <<EOF\nit's\nEOF\nfalse; echo $\\\n(true) $?"),
+    ("(sas-fire-continuation-heredoc-comment-body) a later line after a here-document whose body line starts "
+     "with # and ends in a backslash, joined to the next line as bash joined it",
+     'cat <<EOF\n# a \\\nEOF\ncat <<X\nEOF\nfalse; RC=$? env "SHA=$(true)" printenv RC\nX'),
+    ("(sas-fire-continuation-heredoc-hash-read) a body read whose $ and ? a line continuation splits after a "
+     "# in the body, with a substitution in a word", "false; cat <<EOF $(true)\nissue #4 $\\\n?\nEOF"),
+    ("(sas-fire-continuation-heredoc-hash-subst) a body read after a substitution whose $ and ( a line "
+     "continuation splits after a # in the body", "false; cat <<EOF\nissue #4 $\\\n(true) $?\nEOF"),
+    ("(sas-fire-continuation-dollar-paren-hash) read whose $ and ? a line continuation splits, after a "
+     "substitution whose $ and ( one splits and a # glued after its )", "false; echo $\\\n(true)#x $\\\n?"),
+    ("(sas-fire-continuation-dollar-ansi-c) read after a substitution, after an ANSI-C quote whose $ and ' a "
+     "line continuation splits, holding an escaped quote", "echo $\\\n'\\''; false; echo $\\\n(true) $?"),
+    ("(sas-fire-continuation-procsub-hash) read whose $ and ? a line continuation splits, after a process "
+     "substitution whose < and ( one splits and a # glued after its )",
+     "false; echo $(true) <\\\n(true)#x $\\\n?"),
+    ("(sas-fire-continuation-heredoc-chain) a later line after five here-documents, each opened by a << that "
+     "a line continuation splits after a body holding an apostrophe",
+     "cat <\\\n<E\nit's\nE\n" * 5 + "false; echo $(true) $?"),
+    ("(sas-fire-continuation-heredoc-strip-body) a later line after a <<- body line ending in a backslash, "
+     "joined to a tab-led delimiter line that then does not end the body",
+     "cat <<-EOF\n\tx \\\n\tEOF\nEOF\nfalse; echo $\\\n(true) $?"),
+    ("(sas-fire-continuation-heredoc-escaped-backslash) a later line after a here-document body line holding "
+     "an apostrophe and ending in an escaped backslash, which bash did not join",
+     "cat <<EOF\nit's\\\\\nEOF\nfalse; RC=$? env \"SHA=$(true)\" printenv RC"),
+    ("(sas-fire-continuation-heredoc-strip-delimiter) a later line after a <<- body that a tab-led delimiter "
+     "line ends, in a command holding a line continuation",
+     'true \\\n; cat <<-EOF\n\tx\n\tEOF\nfalse; RC=$? env "SHA=$(true)" printenv RC'),
+    ("(sas-fire-continuation-quoted-heredoc-quoted-next-line) a later line that starts with a quote, after a "
+     "here-document under a quoted delimiter whose body line ends in a backslash",
+     "cat <<'EOF'\nx \\\nEOF\n'false'; echo $(true) $?"),
+    ("(sas-fire-continuation-two-heredocs-comment) a later line after a comment whose line ends in a "
+     "backslash, after two here-documents on one line whose bodies hold a double quote and an apostrophe",
+     "cat <<'A' <<B\nsay \"hi\nA\nit's \\\nx\nB\n# c \\\nfalse; echo $(true) $?"),
+    ("(sas-fire-esac-after-redirect-command-word) a later line in a case arm after an esac that a redirection "
+     "makes the command word",
+     'case a in a) >/dev/null esac\nfalse; RC=$? env "SHA=$(true)" printenv RC\n;; esac'),
 )
 _SAS_QUIET_ROWS = (
     ("(sas-quiet-d) read before every substitution", 'false; echo "rc=$? $(true)"'),
@@ -5139,6 +5215,21 @@ _SAS_QUIET_ROWS = (
     ("(sas-quiet-for-after-assignment-command-word) a later line after a for that an assignment makes the "
      "command word, which bash refuses before running anything",
      'false; x=1 for ((i=1<<0;i<1;i++)); do :; done\nfalse; RC=$? env "SHA=$(true)" printenv RC'),
+    ("(sas-quiet-for-after-redirect-command-word) a later line after a for that a redirection makes the "
+     "command word, which bash refuses before running anything",
+     'false; >/dev/null for ((i=1<<0;i<1;i++)); do :; done\nfalse; RC=$? env "SHA=$(true)" printenv RC'),
+    ("(sas-quiet-arith-after-assignment-command-word) a later line after a (( that an assignment makes a "
+     "syntax error, which bash refuses before running anything",
+     'false; x=1 ((i=1<<0))\nfalse; RC=$? env "SHA=$(true)" printenv RC'),
+    ("(sas-quiet-arith-after-redirect-command-word) a later line after a (( that a redirection makes a "
+     "syntax error, which bash refuses before running anything",
+     'false; >/dev/null ((i=1<<0))\nfalse; RC=$? env "SHA=$(true)" printenv RC'),
+    ("(sas-quiet-heredoc-empty-quoted-delimiter) a body under an empty single-quoted delimiter, which ends at "
+     "the first empty line", "false; cat <<''\n$(true) $?\n\necho done"),
+    ("(sas-quiet-heredoc-empty-dquoted-delimiter) a body under an empty double-quoted delimiter",
+     'false; cat <<""\n$(true) $?\n\necho done'),
+    ("(sas-quiet-heredoc-empty-quoted-strip-delimiter) a body under an empty quoted delimiter with <<-, which "
+     "ends at the first line of tabs", "false; cat <<-''\n$(true) $?\n\t\necho done"),
 )
 
 
@@ -5192,6 +5283,17 @@ def _test_status_after_subst(failures):
     if _decision(handler, deep + " $\\\n?") != "allow-note":
         failures.append("(sas-deep-continuation) a $ and ? split by a line continuation past the nesting bound "
                         "must note the unread rest, read with the continuation removed")
+    # The rest past the bound is the slice of the whole command's join: an apostrophe inside double quotes
+    # before it opens no quoted string there (bash 5.3.9 printed it's 0 under B and it's 1 under P).
+    if _decision(handler, 'false; echo "' + "$(" * 70 + "true" + ")" * 70 + " it's $\\\n?\"") != "allow-note":
+        failures.append("(sas-deep-quoted-rest) a $ and ? split by a line continuation past the nesting bound, "
+                        "after an apostrophe inside double quotes, must note the unread rest")
+    # Line continuations before the bound and a $? just before the 65th $(: the index where the reading
+    # stopped must be mapped back to the command as written, or the rest would take in that $?.
+    mapped = "true " + "\\\n" * 3 + "; echo " + "$(" * 64 + "$?" + "$(" * 36 + "true" + ")" * 100
+    if _decision(handler, mapped) != "allow":
+        failures.append("(sas-deep-mapped) a $? before the nesting bound, after line continuations, must allow "
+                        "silently: the rest past the bound starts where the reading stopped in the command")
     for label, data, field in (
             ("(sas-unreadable-tool-missing)", {"hook_event_name": aiqt_hooks.PRETOOL,
                                                "tool_input": {"command": "echo $(true) $?"}}, "tool_name"),
