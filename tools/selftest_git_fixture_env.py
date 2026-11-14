@@ -4480,10 +4480,17 @@ OPF_LIFECYCLE_EXEMPTIONS = {
     "opf/tools/_opf_pack_manifest.py": "Pack parsing and digest vectors over filesystem fixtures.",
     "opf/tools/_opf_release_history.py": "Pure history parsing, canonical emission and digest vectors over in-memory bytes.",
     "opf/tools/check_opf_homes.py": "Homes contract and schema boundary vectors.",
-    "opf/tools/check_opf_init_contract.py": "Source-free contract matcher vectors.",
+    "opf/tools/check_opf_init_contract.py": "Git-free contract matcher vectors.",
     "opf/tools/check_opf_init_observe.py": "Observation vectors with mocked git subprocesses.",
     "opf/tools/check_opf_init_p0.py": "P0 store validation and runner registration vectors.",
     "opf/tools/check_opf_prompt_pack.py": "Prompt-pack schema and drift vectors over filesystem fixtures.",
+    "opf/tools/check_opf_selftest_execution.py": ("Execution-registry gate. Its self-test runs synthetic OPF roots "
+                                                  "whose fake runners only record check ids; its --suite run "
+                                                  "launches a registered runner, here the Git-free "
+                                                  "check_opf_init_contract.py self-test, under a child "
+                                                  "environment that pins HOME and XDG_CONFIG_HOME to a fresh "
+                                                  "empty directory and git's global and system config to "
+                                                  "os.devnull. Neither path runs git."),
     "opf/tools/selftest_commonmark_conformance.py": "CommonMark parser conformance vectors.",
     "opf/tools/selftest_commonmark_headings.py": "Heading selection and vendor-manifest fixtures.",
 }
