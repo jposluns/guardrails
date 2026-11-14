@@ -5393,8 +5393,10 @@ def self_test():
 
         def _mask_left(start):
             # Toggles SIGUSR2's membership in the mask it finds, so it leaves the mask changed whatever the
-            # mask was (a fork starts with none pending, so the unblock has none to deliver). Its code is 0
-            # only when it finds the start its vector set, so each vector runs the branch it names.
+            # mask was (a fork child starts with none of its parent's pending signals, so the unblock has
+            # none of those to deliver; a SIGUSR2 queued to the child after the fork while it is blocked
+            # stays pending, and the unblock would deliver it). Its code is 0 only when it finds the start
+            # its vector set, so each vector runs the branch it names.
             def _borrow():
                 held = signal.SIGUSR2 in signal.pthread_sigmask(signal.SIG_BLOCK, ())
                 signal.pthread_sigmask(signal.SIG_UNBLOCK if held else signal.SIG_BLOCK, {signal.SIGUSR2})
@@ -5434,6 +5436,12 @@ def self_test():
                               ("mask-left-sigusr2-blocked", signal.SIG_BLOCK)):
             check("self-test-caller-timer-mask-clause-sees-" + _name,
                   _lost_on(_mask_left(_start), "mask", "", _start))
+        # A start-state mismatch: the borrow that expects SIGUSR2 blocked runs from it unblocked, so it
+        # must return code 1. A borrow that returns 0 whatever start it finds goes red here.
+        _mismatch = (_timer_vector(_mask_left(signal.SIG_BLOCK), signal.SIG_UNBLOCK) for _ in range(3))
+        check("self-test-caller-timer-mask-clause-sees-mask-left-start-mismatch",
+              any(seen.startswith("LOST code=1 failed=mask ") and seen.endswith(" calls=")
+                  for seen in _mismatch))
 
     # ----- Deep values: a finding message renders a parsed value through the bounded
     # _safe_display. tomllib builds a dotted table header iteratively, so a 100,000-part header parses into a
