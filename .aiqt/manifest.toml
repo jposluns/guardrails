@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.0.5"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "fb29a280989f5e3807e03c4c375542d2fd36ca504aa5b7dc1a161d94a6ce31b1"
+tree-sha256 = "93ecac41d5224f38299ad95350e0a7c8ecd07ed14fc7534e36a95f12c50d16d2"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -3432,8 +3432,8 @@ sha256 = "363663005882dabe4f01b43e28926f4093bce4d718a4e67bfa13b7318a9a3247"
 
 [[sources]]
 path = "opf/tools/check_dangerous_api.py"
-bytes = 203091
-sha256 = "d369360125085090347737192c546d3b7eff0204e7d3145062b62680bc509005"
+bytes = 203498
+sha256 = "04f0654b380b73a26ca1f95e2deffac42f05c97fe74d7f4eef6b58b5f6dc502a"
 
 [[sources]]
 path = "opf/tools/check_opf_doctor.py"
@@ -4202,8 +4202,8 @@ sha256 = "0238bb4c907c358a4718a70f8630a92517444f64139b4c0517004bfdbf2321ec"
 
 [[sources]]
 path = "tools/check_dangerous_api.py"
-bytes = 259826
-sha256 = "f5c17c77c50ce74fe40eda78645d2f353ba4cb05ba36e445454a58aa20df9f3a"
+bytes = 268857
+sha256 = "94bae259ef49bbf90e3c351706d15c03954d3e0c3e53bcd472843f757338a168"
 
 [[sources]]
 path = "tools/check_derived_command_parameters.py"

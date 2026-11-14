@@ -210,9 +210,10 @@ any other OPF string literal in code, and on any OPF path outside OPF_TOOLS_ROOT
 roots, the excluded directories, the rows and the tree vectors' files, rows and setup paths.
 So the cleanup is: point the missing-root tree vector, which names OPF_TOOLS_ROOT, at a root
 that stays; delete OPF_TOOLS_ROOT, _OPF, every other line that uses either name and the code
-only those lines reach (the root and its exclusion, the transitional-root and literal checks,
-the parity check with its vectors, the vendored-tree admission case, the self-test's report of
-them); delete the opf/ rows; and edit the prose. It touches nothing else.
+only those lines reach (the root and its exclusion, the transitional-root and literal checks
+with the check that the self-test runs them on the shipped data, the parity check with its
+vectors, the vendored-tree admission case, the self-test's report of them); delete the opf/
+rows; and edit the prose. It touches nothing else; the admission count it prints is computed.
 
 Out of scope: this lint guards against ACCIDENTAL use of a dangerous API in the repository's
 own code written the ordinary way, so code deliberately built to hide a sink is not claimed:
@@ -2434,7 +2435,7 @@ def scan_tree(root, allowlist=ALLOWLIST, disabled=()):
             raise CannotEvaluate("cannot read " + rel + ": " + str(exc))
         try:
             found = scan_source(source, rel, disabled, modules)
-        except (SyntaxError, ValueError, RecursionError) as exc:
+        except (SyntaxError, ValueError, RecursionError, MemoryError) as exc:
             if "fail-parse" in disabled:
                 continue
             raise CannotEvaluate("cannot parse " + rel + ": " + type(exc).__name__ + " " + str(exc))
@@ -3519,6 +3520,9 @@ TREE_VECTORS = (
      CE, "fail-nonregular", 0),
     ("parser ValueError", {"tools/a.py": _SITE}, (), _parse_raises(ValueError), CE,
      "fail-parse", 0),
+    # A parser stack overflow raises MemoryError, which is cannot-evaluate as a parse failure.
+    ("parser MemoryError", {"tools/a.py": _SITE}, (), _parse_raises(MemoryError), CE,
+     "fail-parse", 0),
     ("allowlist count drift", {"tools/a.py": _SITE}, (_ENTRY[:3] + (2, _REASON),), None,
      2, "allowlist-stale", 0),
     ("allowlist entry vanished", {"tools/a.py": b"x = 1\n"}, (_ENTRY,), None, 1,
@@ -3561,9 +3565,14 @@ TREE_VECTORS = (
 )
 
 # Parity with the OPF copy, opf/tools/check_dangerous_api.py. While the copy exists, it and this
-# gate must hold the same verdict-deciding code and reach the same verdicts, in four parts:
+# gate must decide verdicts with the same code and reach the same verdicts, in four parts:
 #   definitions: each top-level statement of the copy's source must equal this gate's by AST,
-#     except the names declared below as differing on purpose, each with how it is compared;
+#     the __main__ block the OPF runner launches included, except the names declared below as
+#     differing on purpose, each with how it is compared; the statements read only as data or
+#     not compared (ALLOWLIST, TREE_VECTORS) may call no function at import but one both
+#     files define and this part compares (bytes and str join aside) and bind no name by a
+#     walrus, and the copy's self_test must have this gate's header (decorators, parameters
+#     and annotations), so nothing the comparison skips runs code at import;
 #   values: the copy's SCAN_ROOTS and EXCLUDED_DIRS, literals in its source, must equal this
 #     gate's entries at or under OPF_TOOLS_ROOT with the leading opf/ dropped;
 #   allowlist: the copy's ALLOWLIST must equal this gate's opf/ rows with that prefix dropped,
@@ -3574,7 +3583,7 @@ TREE_VECTORS = (
 # Drift vectors feed each part a patched copy and require it to fail, so no part can go vacuous
 # unseen. With no copy in the repository the check is skipped and the reason printed. The
 # parity check is transitional and leaves with OPF_TOOLS_ROOT.
-_OPF =OPF_TOOLS_ROOT.split("/")[0] + "/"
+_OPF = OPF_TOOLS_ROOT.split("/")[0] + "/"
 _OPF_COPY_PATH = OPF_TOOLS_ROOT + "/check_dangerous_api.py"
 # Edge paths for the transitional-root check, each with whether it lies outside OPF_TOOLS_ROOT:
 # the root itself and a path under it are inside; a sibling sharing its prefix, another OPF
@@ -3644,6 +3653,40 @@ def _opf_literals(source):
             and (_OPF in node.value or node.value == _OPF.rstrip("/"))]
 
 
+# The self-test's calls of the two checks above on the shipped data. Each must stay as written:
+# replaced by an empty result, its check would pass whatever the shipped data holds.
+_OPF_SHIPPED_CHECKS = (
+    "stray = _opf_transitional_stray()",
+    "literals = _opf_literals(Path(__file__).read_text(encoding=\"utf-8\"))",
+)
+
+
+def _opf_shipped_gaps(source):
+    """Each _OPF_SHIPPED_CHECKS statement that self_test in source does not hold exactly once,
+    as its only binding of that name, directly followed by an if on that name whose body
+    records a failure."""
+    tests = [node for node in ast.parse(source).body
+             if isinstance(node, ast.FunctionDef) and node.name == "self_test"]
+    body = tests[0].body if len(tests) == 1 else []
+    gaps = []
+    for text in _OPF_SHIPPED_CHECKS:
+        want = ast.dump(ast.parse(text).body[0])
+        name = text.split(" = ")[0]
+        spots = [index for index, stmt in enumerate(body) if ast.dump(stmt) == want]
+        stores = [inner for stmt in body for inner in ast.walk(stmt)
+                  if isinstance(inner, ast.Name) and inner.id == name
+                  and isinstance(inner.ctx, ast.Store)]
+        after = body[spots[0] + 1] if len(spots) == 1 and spots[0] + 1 < len(body) else None
+        if len(spots) != 1 or len(stores) != 1 or not (
+                isinstance(after, ast.If) and isinstance(after.test, ast.Name)
+                and after.test.id == name and len(after.body) == 1
+                and isinstance(after.body[0], ast.Expr)
+                and isinstance(after.body[0].value, ast.Call)
+                and ast.unparse(after.body[0].value.func) == "failures.append"):
+            gaps.append(text)
+    return gaps
+
+
 # The admission cases both self-tests run outside their tree tables, as an OPF tree and its rows.
 _PARITY_ADMISSION = (
     ({"tools/a.py": b"class C:\n    def f(self, text):\n        exec(text)\n"},
@@ -3665,12 +3708,13 @@ _PARITY_ADMISSION = (
 # machinery.
 _OPF_PARITY_GATE_ONLY = frozenset({
     "OPF_TOOLS_ROOT", "PLUGIN_ROOT", "PLUGIN_SCRIPTS", "_OPF", "_OPF_COPY_PATH",
-    "_TRANSITIONAL_EDGES", "_opf_transitional_stray", "_opf_literals", "_PARITY_ADMISSION",
-    "_OPF_PARITY_GATE_ONLY", "_OPF_PARITY_COPY_ONLY", "_OPF_PARITY_BY_VALUE",
-    "_OPF_PARITY_UNCOMPARED", "_OPF_PARITY_DROPPED", "_OPF_PARITY_REWRITES", "_MAIN_TEST",
-    "_OPF_PARITY_DRIFTS", "_load_opf_copy", "_opf_rebased", "_opf_unrebased", "_parity_tree",
-    "_parity_source", "_opf_parity_sources", "_opf_parity_trees", "_opf_definitions",
-    "_opf_expected", "_opf_copy_definitions", "_opf_reroot", "_opf_literal", "_opf_copy_values",
+    "_TRANSITIONAL_EDGES", "_opf_transitional_stray", "_opf_literals", "_OPF_SHIPPED_CHECKS",
+    "_opf_shipped_gaps", "_PARITY_ADMISSION", "_OPF_PARITY_GATE_ONLY", "_OPF_PARITY_COPY_ONLY",
+    "_OPF_PARITY_BY_VALUE", "_OPF_PARITY_UNCOMPARED", "_OPF_PARITY_DROPPED",
+    "_OPF_PARITY_REWRITES", "_MAIN_TEST", "_OPF_PARITY_DRIFTS", "_load_opf_copy",
+    "_opf_rebased", "_opf_unrebased", "_parity_tree", "_parity_source", "_opf_parity_sources",
+    "_opf_parity_trees", "_opf_definitions", "_opf_expected", "_opf_import_code",
+    "_opf_copy_definitions", "_opf_reroot", "_opf_literal", "_opf_copy_values",
     "_opf_copy_allowlist", "_opf_copy_behaviour", "_opf_parity_drift_vectors",
     "_opf_copy_parity"})
 # Defined only in the copy: the scope test behind its allowlist-root check (the copy has one
@@ -3678,12 +3722,11 @@ _OPF_PARITY_GATE_ONLY = frozenset({
 _OPF_PARITY_COPY_ONLY = frozenset({"_in_scope"})
 # Compared by value in the values part, since this gate spells them through OPF_TOOLS_ROOT.
 _OPF_PARITY_BY_VALUE = ("SCAN_ROOTS", "EXCLUDED_DIRS")
-# Not compared here: the module docstring (prose), ALLOWLIST (the allowlist part), the
-# self-test (self_test and TREE_VECTORS; the copy's tree vectors run in the behaviour part) and
-# the __main__ block (the copy's opens with the canonical self-test entry the OPF runner
-# checks).
-_OPF_PARITY_UNCOMPARED = frozenset({"__doc__", "ALLOWLIST", "TREE_VECTORS", "self_test",
-                                    "__main__"})
+# Not compared by AST here: the module docstring (prose), ALLOWLIST (the allowlist part) and
+# the self-test (self_test and TREE_VECTORS; the copy's tree vectors run in the behaviour
+# part). Each is still checked for code it runs at import: ALLOWLIST and TREE_VECTORS by their
+# calls and walruses, self_test by its header.
+_OPF_PARITY_UNCOMPARED = frozenset({"__doc__", "ALLOWLIST", "TREE_VECTORS", "self_test"})
 # The plugin walk the copy drops: in each named definition, each statement of its body that
 # binds or reads one of these names is removed from this gate's before the comparison (at
 # least one must be).
@@ -3692,9 +3735,14 @@ _OPF_PARITY_DROPPED = (
                                  "PLUGIN_SCRIPTS"})),
 )
 # Text in this gate's definition and the text the copy holds instead, each found exactly once
-# and replaced before the comparison: the description, the plugin fixture directory, and the
-# copy's allowlist-root check.
+# and replaced before the comparison: the description, the plugin fixture directory, the
+# copy's allowlist-root check, and the canonical self-test entry the OPF runner requires at
+# the head of the copy's __main__ block (so the rest of that block, which decides the exit
+# status the runner reads, must be this gate's sys.exit(main()) alone).
 _OPF_PARITY_REWRITES = (
+    ("__main__", "    sys.exit(main())",
+     "    if sys.argv[1:] == [\"--self-test\"]:\n        sys.exit(self_test())\n"
+     "    sys.exit(main())"),
     ("main", "this repo's Python", "the OPF tree's Python"),
     ("_write_tree", "(PLUGIN_ROOT + \"/p/hooks/scripts\", \"outside\")", "(\"outside\",)"),
     ("CHECKS", "\"allowlist-shape\", \"site-column\"",
@@ -3733,6 +3781,28 @@ _OPF_PARITY_DRIFTS = (
      "\n\ndef _extra():\n    return 0\n\n\ndef run(root):\n", "_extra"),
     ("an extra top-level statement", "\n\ndef run(root):\n",
      "\n\nsys.setrecursionlimit(100)\n\n\ndef run(root):\n", "statement"),
+    # The __main__ block decides the exit status the OPF runner reads, and the copy runs it
+    # only as a script, never when parity imports it.
+    ("an exit status dropped by __main__", "\n    sys.exit(main())\n", "\n    main()\n",
+     "__main__"),
+    ("cannot-evaluate exited as a pass by __main__", "\n    sys.exit(main())\n",
+     "\n    sys.exit(main() == 1)\n", "__main__"),
+    ("an excluded directory rebound in __main__", "\n    sys.exit(main())\n",
+     "\n    EXCLUDED_DIRS = EXCLUDED_DIRS | {\"tools/legacy\"}\n    sys.exit(main())\n",
+     "__main__"),
+    ("a second __main__ block", "\n\nif __name__ == \"__main__\":\n",
+     "\n\nif __name__ == \"__main__\":\n    EXCLUDED_DIRS = frozenset()\n\n\n"
+     "if __name__ == \"__main__\":\n", "__main__"),
+    # Statements the comparison skips still run at import, so they may run no other code.
+    ("a call run at import in TREE_VECTORS", "\nTREE_VECTORS = (\n",
+     "\nTREE_VECTORS = globals().update(EXCLUDED_DIRS=EXCLUDED_DIRS | {\"tools/zz\"}) or (\n",
+     "TREE_VECTORS"),
+    ("a walrus in ALLOWLIST", "\nALLOWLIST = (\n",
+     "\nALLOWLIST = (EXCLUDED_DIRS := {\"tools/_vendor\", \"tools/legacy\"}) and (\n",
+     "ALLOWLIST"),
+    ("a self_test default run at import", "\ndef self_test():\n",
+     "\ndef self_test(_held=globals().update(EXCLUDED_DIRS=EXCLUDED_DIRS | {\"tools/zz\"})):\n",
+     "self_test"),
 )
 
 
@@ -3909,13 +3979,57 @@ def _opf_expected(key, nodes, gate_source, problems):
     return [ast.dump(node) for node in nodes]
 
 
+def _opf_import_code(key, gate_nodes, copy_nodes, compared):
+    """The code the copy's statements under key, which the definitions part does not compare
+    by AST, can run at import: under a def of this gate, a header (decorators, parameters,
+    annotations) other than this gate's; otherwise a walrus, or a call of anything but a
+    function in compared (each defined in both files and compared by AST) or a bytes or str
+    join. The module docstring is a constant and runs nothing."""
+    if key == "__doc__":
+        return []
+    defs = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+    if any(isinstance(node, defs) for node in gate_nodes):
+        def header(nodes):
+            return [(type(node).__name__,
+                     [ast.dump(inner) for inner in getattr(node, "decorator_list", [])],
+                     ast.dump(node.args) if hasattr(node, "args") else None,
+                     ast.dump(node.returns) if getattr(node, "returns", None) else None,
+                     [ast.dump(inner) for inner in getattr(node, "type_params", [])])
+                    for node in nodes]
+        if header(copy_nodes) == header(gate_nodes):
+            return []
+        return ["OPF copy parity: the copy's " + key + " has a header (decorators, parameters,"
+                " annotations) other than this gate's, which runs code at import"]
+    out = []
+    for inner in (inner for node in copy_nodes for inner in ast.walk(node)):
+        if isinstance(inner, ast.NamedExpr):
+            out.append("OPF copy parity: the copy's " + key + " binds a name by a walrus at"
+                       " import: line " + str(inner.lineno) + " " + ast.unparse(inner.target))
+        elif isinstance(inner, ast.Call) and not (
+                isinstance(inner.func, ast.Name) and inner.func.id in compared
+                or isinstance(inner.func, ast.Attribute) and inner.func.attr == "join"
+                and isinstance(inner.func.value, ast.Constant)
+                and isinstance(inner.func.value.value, (str, bytes))):
+            out.append("OPF copy parity: the copy's " + key + " calls at import what the"
+                       " definitions part does not compare: line " + str(inner.lineno) + " "
+                       + ast.unparse(inner.func))
+    return out
+
+
 def _opf_copy_definitions(gate_source, copy_source):
     """The definitions part: each top-level statement where the copy's source and this gate's
-    differ, outside the declared differences."""
+    differ, outside the declared differences, and each declaration that no longer applies."""
     failures = []
     gate, copy = _opf_definitions(gate_source), _opf_definitions(copy_source)
     both = _OPF_PARITY_UNCOMPARED | frozenset(_OPF_PARITY_BY_VALUE)
-    for key in sorted(set(gate) | set(copy) | _OPF_PARITY_GATE_ONLY | _OPF_PARITY_COPY_ONLY | both):
+    declared = _OPF_PARITY_GATE_ONLY | _OPF_PARITY_COPY_ONLY | both
+    edited = frozenset(name for name, *_rest in _OPF_PARITY_REWRITES + _OPF_PARITY_DROPPED)
+    compared = frozenset(key for key in set(gate) & set(copy) if key not in declared
+                         and all(isinstance(node, ast.FunctionDef) for node in copy[key]))
+    for key in sorted(edited & declared):
+        failures.append("OPF copy parity: " + key + " is declared rewritten or dropped, but is"
+                        " not compared by AST")
+    for key in sorted(set(gate) | set(copy) | declared | edited):
         where = ("this gate" if key in gate else "") + (" and " if key in gate and key in copy
                                                          else "") + ("the copy" if key in copy
                                                                      else "")
@@ -3931,6 +4045,8 @@ def _opf_copy_definitions(gate_source, copy_source):
                             + (where or "neither") + ", outside the declared differences")
             continue
         if key in both:
+            if key in _OPF_PARITY_UNCOMPARED:
+                failures.extend(_opf_import_code(key, gate[key], copy[key], compared))
             continue
         expected = _opf_expected(key, gate[key], gate_source, failures)
         if [ast.dump(node) for node in copy[key]] != expected:
@@ -4044,6 +4160,24 @@ def _opf_parity_drift_vectors(opf_copy, gate_source, copy_source, failures):
             _opf_copy_values(copy_source)
     finally:
         EXCLUDED_DIRS = held
+    # This gate's declarations: a rewrite or a drop naming a definition in neither file, and a
+    # rewrite of a statement the definitions part does not compare by AST.
+    module = sys.modules[__name__]
+    declaration_drifts = (
+        ("a declared rewrite of a definition in neither file", "_OPF_PARITY_REWRITES",
+         ("_no_such_definition", "old", "new")),
+        ("a declared drop from a definition in neither file", "_OPF_PARITY_DROPPED",
+         ("_no_such_definition", frozenset({"name"}))),
+        ("a declared rewrite of a statement not compared by AST", "_OPF_PARITY_REWRITES",
+         ("TREE_VECTORS", "old", "new")),
+    )
+    for name, attr, extra in declaration_drifts:
+        real = getattr(module, attr)
+        setattr(module, attr, real + (extra,))
+        try:
+            found[name, extra[0]] = _opf_copy_definitions(gate_source, copy_source)
+        finally:
+            setattr(module, attr, real)
     real_scan = opf_copy.scan_source
 
     def blind(*args, **kwargs):
@@ -4072,7 +4206,7 @@ def _opf_parity_drift_vectors(opf_copy, gate_source, copy_source, failures):
         if not any(part in line for line in lines):
             failures.append("OPF parity drift " + name + ": no failure names " + repr(part)
                             + " (got " + repr(lines[:2]) + ")")
-    return len(_OPF_PARITY_DRIFTS) + 1 + len(module_drifts)
+    return len(_OPF_PARITY_DRIFTS) + 1 + len(declaration_drifts) + len(module_drifts)
 
 
 def _opf_copy_parity(failures):
@@ -4127,15 +4261,17 @@ def self_test():
             failures.append("tree " + name + ": without " + check + " expected " + repr(without)
                             + ", got " + repr(got))
     method = b"class C:\n    def f(self, text):\n        exec(text)\n"
-    if _tree_outcome({"tools/a.py": method},
-                     (("tools/a.py", "C.f", "code", 1, _REASON),)) != 0:
-        failures.append("tree: a reviewed method site (class-qualified) is not admitted")
-    if _tree_outcome({"tools/__pycache__/a.py": _SITE}) != 1:
-        failures.append("tree: a __pycache__ directory is not scanned")
-    if _tree_outcome({OPF_TOOLS_ROOT + "/_vendor/v.py": _SITE}) != 0:
-        failures.append("tree: the vendored tree is not excluded")
-    if _tree_outcome({"tools/a.py": _SITE}) != 1:
-        failures.append("tree: an unreviewed site passes")
+    # Admission vectors: (files, allowlist, expected outcome, the failure when it differs).
+    admission = (
+        ({"tools/a.py": method}, (("tools/a.py", "C.f", "code", 1, _REASON),), 0,
+         "a reviewed method site (class-qualified) is not admitted"),
+        ({"tools/__pycache__/a.py": _SITE}, (), 1, "a __pycache__ directory is not scanned"),
+        ({OPF_TOOLS_ROOT + "/_vendor/v.py": _SITE}, (), 0, "the vendored tree is not excluded"),
+        ({"tools/a.py": _SITE}, (), 1, "an unreviewed site passes"),
+    )
+    for files, allowlist, expected, message in admission:
+        if _tree_outcome(files, allowlist) != expected:
+            failures.append("tree: " + message)
     # A literal import of a module file the tree holds is the ordinary way to reach the
     # repository's code; the same literal with no such file is counted (the flip above in
     # TREE_VECTORS proves the check carries it).
@@ -4265,6 +4401,16 @@ def self_test():
                           ("x = " + repr(_OPF.rstrip("/") + "x") + "\n", 0)):
         if len(_opf_literals(source)) != count:
             failures.append("OPF literal check: expected " + str(count) + " in " + repr(source))
+    # The two calls above on the shipped data stay as written; each replaced by an empty result
+    # is a gap.
+    own = Path(__file__).read_text(encoding="utf-8")
+    shipped = _opf_shipped_gaps(own)
+    if shipped:
+        failures.append("transitional checks not run on the shipped data as written: "
+                        + "; ".join(shipped))
+    for text in _OPF_SHIPPED_CHECKS:
+        if _opf_shipped_gaps(own.replace(text, text.split(" = ")[0] + " = []")) != [text]:
+            failures.append("shipped-call check: " + text + " replaced by an empty result passes")
     parity = _opf_copy_parity(failures)
     if isinstance(parity, str):
         print("SKIP: dangerous-api OPF copy parity: " + parity)
@@ -4273,7 +4419,7 @@ def self_test():
         return 1
     print("SELF-TEST PASS: dangerous-api: {} positive vectors and {} generated sink-set vectors"
           " (each fails without its check), {} negatives, {} fail-closed and allowlist tree"
-          " vectors (each changes outcome without its check), 4 admission vectors, {} literal-"
+          " vectors (each changes outcome without its check), {} admission vectors, {} literal-"
           "import vectors (the repository module file and the emptied stdlib roster flip"
           " them), {} reimporter sys.path vectors (each loses its code-syspath with the"
           " reimporters dropped from the scope registration), {} \\z vectors"
@@ -4282,10 +4428,11 @@ def self_test():
           " clearing ASCII, {} getattr(x, \"getattr\") and {} __builtins__ vectors that pass"
           " without that reading; every OPF path named (scan roots, excluded directories, rows,"
           " tree vectors' files, rows and setup paths) lies under the transitional root {}"
-          " ({} edge paths, each as a row and as a tree vector's file, row and setup path), and"
-          " no other OPF string literal is in the code.".format(
+          " ({} edge paths, each as a row and as a tree vector's file, row and setup path), no"
+          " other OPF string literal is in the code, and the self-test runs both checks on the"
+          " shipped data as written (each call replaced by an empty result fails).".format(
               len(POSITIVE_VECTORS), len(generated), len(NEGATIVE_VECTORS), len(TREE_VECTORS),
-              2 + len(_IMPORT_STDLIB), len(_SYSPATH_REIMPORTERS),
+              len(admission), 2 + len(_IMPORT_STDLIB), len(_SYSPATH_REIMPORTERS),
               len(_REGEX_END_Z), len(_REGEX_LEADING_COMMENT) + len(_REGEX_LEADING_ASCII),
               len(_REGEX_SCOPE_U), len(_GETATTR_BY_NAME),
               len(_BUILTINS_DUNDER) + len(_BUILTINS_BOUND), OPF_TOOLS_ROOT,

@@ -15,7 +15,8 @@ the site, the spec and every non-.py file are outside the scope, as they are out
 authoring copy's. OPF has no plugin tree, so this copy has no plugin root. Its ALLOWLIST is the
 authoring copy's rows for opf/tools/ paths, re-rooted (see the comment above it). The rule text
 and checks below are the authoring copy's, with these differences: the scan roots are the OPF
-tools/ directory alone; the fail-closed paragraph drops the plugin text and adds the
+tools/ directory alone, so the paragraph on what the scan parses drops the authoring copy's
+plugin/*/hooks/scripts trees; the fail-closed paragraph drops the plugin text and adds the
 allowlist-root refusal; the residuals name tools/_vendor and enforcement/ where the authoring
 copy names opf/tools/_vendor and .preview; and the allowlist-root check is this copy's own. A
 tools/ path the text names that this tree does not hold (tools/_standards.py,
@@ -2120,7 +2121,7 @@ def scan_tree(root, allowlist=ALLOWLIST, disabled=()):
             raise CannotEvaluate("cannot read " + rel + ": " + str(exc))
         try:
             found = scan_source(source, rel, disabled, modules)
-        except (SyntaxError, ValueError, RecursionError) as exc:
+        except (SyntaxError, ValueError, RecursionError, MemoryError) as exc:
             if "fail-parse" in disabled:
                 continue
             raise CannotEvaluate("cannot parse " + rel + ": " + type(exc).__name__ + " " + str(exc))
@@ -3194,6 +3195,9 @@ TREE_VECTORS = (
      CE, "fail-nonregular", 0),
     ("parser ValueError", {"tools/a.py": _SITE}, (), _parse_raises(ValueError), CE,
      "fail-parse", 0),
+    # A parser stack overflow raises MemoryError, which is cannot-evaluate as a parse failure.
+    ("parser MemoryError", {"tools/a.py": _SITE}, (), _parse_raises(MemoryError), CE,
+     "fail-parse", 0),
     ("allowlist count drift", {"tools/a.py": _SITE}, (_ENTRY[:3] + (2, _REASON),), None,
      2, "allowlist-stale", 0),
     ("allowlist entry vanished", {"tools/a.py": b"x = 1\n"}, (_ENTRY,), None, 1,
@@ -3278,18 +3282,20 @@ def self_test():
             failures.append("tree " + name + ": without " + check + " expected " + repr(without)
                             + ", got " + repr(got))
     method = b"class C:\n    def f(self, text):\n        exec(text)\n"
-    if _tree_outcome({"tools/a.py": method},
-                     (("tools/a.py", "C.f", "code", 1, _REASON),)) != 0:
-        failures.append("tree: a reviewed method site (class-qualified) is not admitted")
-    if _tree_outcome({"tools/__pycache__/a.py": _SITE}) != 1:
-        failures.append("tree: a __pycache__ directory is not scanned")
-    if _tree_outcome({"tools/_vendor/v.py": _SITE}) != 0:
-        failures.append("tree: the vendored tree is not excluded")
-    if _tree_outcome({"tools/a.py": _SITE}) != 1:
-        failures.append("tree: an unreviewed site passes")
-    # A re-rooted row names its site from the OPF root and admits it, in a subdirectory too.
-    if _tree_outcome({"tools/sub/a.py": _SITE}, (("tools/sub/a.py",) + _ENTRY[1:],)) != 0:
-        failures.append("tree: a re-rooted row in a subdirectory does not admit its site")
+    # Admission vectors: (files, allowlist, expected outcome, the failure when it differs). In
+    # the last, a re-rooted row names its site from the OPF root and admits it in a subdirectory.
+    admission = (
+        ({"tools/a.py": method}, (("tools/a.py", "C.f", "code", 1, _REASON),), 0,
+         "a reviewed method site (class-qualified) is not admitted"),
+        ({"tools/__pycache__/a.py": _SITE}, (), 1, "a __pycache__ directory is not scanned"),
+        ({"tools/_vendor/v.py": _SITE}, (), 0, "the vendored tree is not excluded"),
+        ({"tools/a.py": _SITE}, (), 1, "an unreviewed site passes"),
+        ({"tools/sub/a.py": _SITE}, (("tools/sub/a.py",) + _ENTRY[1:],), 0,
+         "a re-rooted row in a subdirectory does not admit its site"),
+    )
+    for files, allowlist, expected, message in admission:
+        if _tree_outcome(files, allowlist) != expected:
+            failures.append("tree: " + message)
     # A literal import of a module file the tree holds is the ordinary way to reach the
     # repository's code; the same literal with no such file is counted (the flip above in
     # TREE_VECTORS proves the check carries it).
@@ -3389,7 +3395,7 @@ def self_test():
         return 1
     print("SELF-TEST PASS: dangerous-api: {} positive vectors and {} generated sink-set vectors"
           " (each fails without its check), {} negatives, {} fail-closed and allowlist tree"
-          " vectors (each changes outcome without its check), 5 admission vectors, {} literal-"
+          " vectors (each changes outcome without its check), {} admission vectors, {} literal-"
           "import vectors (the repository module file and the emptied stdlib roster flip"
           " them), {} reimporter sys.path vectors (each loses its code-syspath with the"
           " reimporters dropped from the scope registration), {} \\z vectors"
@@ -3398,7 +3404,7 @@ def self_test():
           " clearing ASCII, {} getattr(x, \"getattr\") and {} __builtins__ vectors that pass"
           " without that reading.".format(
               len(POSITIVE_VECTORS), len(generated), len(NEGATIVE_VECTORS), len(TREE_VECTORS),
-              2 + len(_IMPORT_STDLIB), len(_SYSPATH_REIMPORTERS),
+              len(admission), 2 + len(_IMPORT_STDLIB), len(_SYSPATH_REIMPORTERS),
               len(_REGEX_END_Z), len(_REGEX_LEADING_COMMENT) + len(_REGEX_LEADING_ASCII),
               len(_REGEX_SCOPE_U), len(_GETATTR_BY_NAME),
               len(_BUILTINS_DUNDER) + len(_BUILTINS_BOUND)))
