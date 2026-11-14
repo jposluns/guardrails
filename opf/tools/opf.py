@@ -1843,19 +1843,23 @@ def _watchdog_declared_budget_vectors(source=None, copies=True):
     through "".join(), its separator literal formatted with % to add that
     literal, a second read of its row, and a read of the nested-timeout
     row); three whose lost-cleanup row no longer sets a number (set to
-    deadline_budget, replaced by a del, replaced by setdefault()); and one
-    for each rule no other vector isolates, refused by that rule alone (a
+    deadline_budget, replaced by a del, replaced by setdefault()); one for
+    each rule no other vector isolates, refused by that rule alone (a
     literal blocked-isolation write through zip(), which cannot be
     expanded; a literal pipe-stall row after the deadline rows; and the
-    blocked-isolation read only under "if True:"). A vector whose anchor
-    text is not in the runner exactly once is reported as not built, never
-    as a runner the check accepts. With copies false, only the backstop
-    moves and the read check on source are judged. That read check is
-    itself shown judging the source it is given: this function with copies
-    false, given a runner copy whose blocked-isolation leg-entry text
-    passes today's figure as a literal, must refuse it by that label, so a
-    read check removed from here, or reading a source other than the one
-    given, is a miss. [] when all hold."""
+    blocked-isolation read only under "if True:"); and three whose
+    flip_missed.extend(_watchdog_launch_vectors(cases)) statement no longer
+    reaches the run's verdict (removed, flip_missed rebound after it, and
+    moved after the verdict that reads flip_missed), each refused as
+    "launch vectors". A vector whose anchor text is not in the runner
+    exactly once is reported as not built, never as a runner the check
+    accepts. With copies false, only the backstop moves and the read check
+    on source are judged. That read check is itself shown judging the
+    source it is given: this function with copies false, given a runner
+    copy whose blocked-isolation leg-entry text passes today's figure as a
+    literal, must refuse it by that label, so a read check removed from
+    here, or reading a source other than the one given, is a miss. [] when
+    all hold."""
     global _TREE_STARTUP_BACKSTOP
     raise_by = 1000
     before = _watchdog_declared_budgets()
@@ -1988,6 +1992,27 @@ def _watchdog_declared_budget_vectors(source=None, copies=True):
                          runner.replace(anchor, replacement))):
             missed.append("declared budget %s: a runner with %s is not refused by that name"
                           % (label, name))
+    # The launch check's vectors kept out of the run's verdict: their
+    # statement removed, flip_missed rebound after it, or the statement
+    # moved after the verdict that reads flip_missed.
+    wiring = "    flip_missed.extend(_watchdog_launch_vectors(cases))\n"
+    tail = "    return _watchdog_run_legs(cases, launch)\n"
+    for name, changes in (
+            ("the launch vectors' statement removed", ((wiring, ""),)),
+            ("flip_missed rebound after the launch vectors' statement",
+             ((wiring, wiring + "    flip_missed = []\n"),)),
+            ("the launch vectors' statement moved after the verdict",
+             ((wiring, ""), (tail, wiring + tail)))):
+        copy = runner
+        for anchor, replacement in changes:
+            copy = copy.replace(anchor, replacement)
+        if any(runner.count(anchor) != 1 for anchor, _replacement in changes):
+            missed.append("declared-budget read vector (%s) not built: an anchor does not occur "
+                          "exactly once in the regression runner" % name)
+        elif not any(miss.startswith("declared budget launch vectors: ")
+                     for miss in _watchdog_declared_budget_reads(copy)):
+            missed.append("declared budget launch vectors: a runner with %s is not refused by "
+                          "that name" % name)
     # The read check on the live runner, above, passes on today's runner
     # whether it runs or not; handed a runner copy whose leg entry passes a
     # literal, this function must refuse it, so that check cannot be
@@ -2055,12 +2080,18 @@ def _watchdog_declared_budget_reads(source=None):
     unconditional path, reading that same label's row. A row or a leg-entry
     argument holding the same figure as a literal, or recomputing it,
     matches today's numbers but no longer follows the function the closure
-    gate reads, so this reads the runner's source, not its figures.
+    gate reads, so this reads the runner's source, not its figures. The
+    runner must also run flip_missed.extend(_watchdog_launch_vectors(cases))
+    exactly once as a statement of its unconditional path, after its one
+    binding of flip_missed and before its if floor or flip_missed: verdict,
+    and write flip_missed otherwise only through append() and extend(), so
+    the launch check's own vectors fail the run when they miss.
 
     Each fault starts "declared budget <label>: " naming the label it
     concerns, or "binding <name>" in that place for a binding, "writes"
     for a write it cannot expand, "leg entry" for a leg-entry text whose
-    label cannot be read, or "source" when no runner can be read.
+    label cannot be read, "launch vectors" for that statement, or "source"
+    when no runner can be read.
 
     It reads the runner's own statements only and does not follow: a write
     through another name bound to the same dict (an alias,
@@ -2438,6 +2469,25 @@ def _watchdog_declared_budget_reads(source=None):
                           "cases.append((label, text, bound)) on the unconditional path, or be "
                           "the helper entry's"
                           % (label or "leg entry", node.lineno, label or "<its label>"))
+    # The launch check's own vectors must run on the runner's cases where
+    # their misses fail the run: one statement of the unconditional path
+    # after flip_missed's one binding and before the verdict that reads it,
+    # with flip_missed otherwise written only through append() and extend().
+    wiring = "flip_missed.extend(_watchdog_launch_vectors(cases))"
+    at = [index for index, stmt in enumerate(body) if ast.dump(stmt) == statement(wiring)]
+    verdict = [index for index, stmt in enumerate(body) if isinstance(stmt, ast.If)
+               and ast.dump(stmt.test) == expression("floor or flip_missed")]
+    found = [node for node in writes("flip_missed") if not (
+        isinstance(node, ast.Call) and node.func.attr in ("append", "extend"))]
+    bound_at = reached(top(found[0])) if len(found) == 1 else None
+    if (len(at) != 1 or reached(body[at[0]]) is None or len(verdict) != 1
+            or not at[0] < verdict[0] or bound_at is None or not bound_at < at[0]):
+        missed.append("declared budget launch vectors: the regression runner must run %s "
+                      "exactly once as a statement of its unconditional path, after its one "
+                      "binding of flip_missed and before its if floor or flip_missed: verdict, "
+                      "and write flip_missed otherwise only through append() and extend() (%d "
+                      "such statements, %d bindings or other writes of flip_missed found)"
+                      % (wiring, len(at), len(found)))
     return missed
 
 
@@ -2447,33 +2497,49 @@ def _watchdog_declared_budget_reads(source=None):
 _WATCHDOG_OWN_PRICED_LEGS = ("lost-cleanup", "fork-error", "poll-error")
 
 
-def _watchdog_launch_faults(cases, _declared=_watchdog_declared_budgets):
+def _watchdog_launch_faults(cases, _declared=_watchdog_declared_budgets,
+                            _directory=str(Path(__file__).resolve().parent)):
     """Each fault in the budget a leg of cases, the (label, text, bound) rows
     the regression runner is about to launch, would run under, judged on the
     text each leg will run and the bound it will be killed at, never on how
     the runner built them. This is the guarantee that every declared leg
     runs under the budget of its own declared row, and _watchdog_run_legs
-    applies it before it launches any leg; _watchdog_declared_budget_reads
-    is an earlier lint over the runner's source, with disclosed residuals.
+    applies it before it launches any leg, launching from the very rows it
+    judged; _watchdog_declared_budget_reads is an earlier lint over the
+    runner's source, with disclosed residuals.
+
+    cases must be a plain list or tuple, read once, and each row a plain
+    tuple of three: a str label, a str text and an int or float bound
+    (never a bool). The types are exact, never isinstance: a subclass can
+    answer a length, a comparison or a second unpacking with something
+    other than what a launch receives (a text empty to len() alone, a text
+    or bound equal to anything, a row that unpacks to another row the
+    second time), so any other cases or row is refused as leg <unreadable>.
 
     A leg's text must be, character for character, one of the forms the
     runner builds, rendered here again from the values read out of that
     text: a leg entry (the runner's import prefix for this file's
     directory, then return opf._watchdog_leg_entry(<number>, opf.<case>,
     <string>, ...)), the blocked-isolation entry, or a ledger vector; or
-    empty (a leg that runs nothing, which fails at launch). The <number>
-    is a literal, so it is the budget _watchdog_leg_entry receives when the
-    leg runs: a text with anything else in its place or around it (a joined
-    term, another statement, a rebinding, another import directory) is no
-    form and is refused. A leg's row follows from the case its text runs,
-    never from its label: a deadline case, and a safety case not in
+    empty. The directory is the one this file was imported from, taken at
+    import, so a prefix naming any other directory, even one a rebound
+    __file__ now names, is no form. The <number> is a literal, so it is the
+    budget _watchdog_leg_entry receives when the leg runs: a text with
+    anything else in its place or around it (a joined term, another
+    statement, a rebinding, another import directory) is no form and is
+    refused. A leg's row follows from the case its text runs, never from
+    its label: a deadline case, and a safety case not in
     _WATCHDOG_OWN_PRICED_LEGS, runs under the "deadline-case" row; a
     completion case whose "completion-<mode>" label is declared runs under
     that row; the blocked-isolation entry under its own. Each leg must
     carry the label its case is launched under (its mode, or
     "<family>-<mode>"), the budget a declared leg passes must equal its row
     of _watchdog_declared_budgets read now, and every leg's bound must be
-    exactly the budget its text passes plus _WATCHDOG_LAUNCH_MARGIN.
+    exactly the budget its text passes plus _WATCHDOG_LAUNCH_MARGIN. An
+    empty text runs no case and passes no budget, so the label and row
+    rules have nothing to judge for it and its budget is 0: its bound must
+    be exactly _WATCHDOG_LAUNCH_MARGIN, and the leg fails at launch, since
+    a fixture with no body does not compile.
 
     The rows are read through the function bound when this module was
     imported, and a module whose _watchdog_declared_budgets name has been
@@ -2489,16 +2555,26 @@ def _watchdog_launch_faults(cases, _declared=_watchdog_declared_budgets):
     that replaces this function, _watchdog_run_legs or a builtin this
     function calls; module constants rewritten in memory before the rows
     are read (which moves the declared rows themselves); and a declared leg
-    left out of cases. Each fault starts "leg <label>: ", or "declared
+    left out of cases. Each fault starts "leg <label>: ", "leg
+    <unreadable>: " for cases or a row of other types, or "declared
     budgets: " for the replaced function; [] when none is found."""
     import ast
     faults = []
     if globals().get("_watchdog_declared_budgets") is not _declared:
         faults.append("declared budgets: _watchdog_declared_budgets has been replaced in this "
                       "module since import; the legs are judged against the function bound then")
+    # Read once, by exact type: a list or tuple subclass can iterate to
+    # other rows on another pass.
+    if type(cases) is tuple:
+        rows = cases
+    elif type(cases) is list:
+        rows = tuple(cases)
+    else:
+        faults.append("leg <unreadable>: the cases are not a plain list or tuple of rows, so "
+                      "they cannot be read once as the legs that launch")
+        return faults
     declared = _declared()
-    prefix = ("import sys; sys.path.insert(0, %r); import opf; "
-              % (str(Path(__file__).resolve().parent),))
+    prefix = "import sys; sys.path.insert(0, %r); import opf; " % (_directory,)
     entry_head = prefix + "return opf._watchdog_leg_entry("
     isolation_head = (prefix + "import signal; signal.signal(signal.SIGALRM, signal.SIG_IGN); "
                       "signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGALRM}); "
@@ -2585,30 +2661,34 @@ def _watchdog_launch_faults(cases, _declared=_watchdog_declared_budgets):
                     return "ledger-" + mode, None, seconds
         return None
 
-    for row in cases:
-        if not (isinstance(row, tuple) and len(row) == 3 and isinstance(row[0], str)
-                and isinstance(row[1], str)):
-            faults.append("leg <unreadable>: a case is not a (label, text, bound) row of a "
-                          "label and a text")
+    for row in rows:
+        # Exact types, so neither the unpacking below nor any comparison or
+        # length this check takes can be answered by the value's own method.
+        if not (type(row) is tuple and len(row) == 3 and type(row[0]) is str
+                and type(row[1]) is str and (type(row[2]) is int or type(row[2]) is float)):
+            faults.append("leg <unreadable>: a case is not a plain tuple of a str label, a str "
+                          "text and an int or float bound")
             continue
         label, text, bound = row
-        if not text:
-            continue
-        found = launched(text)
-        if found is None:
-            faults.append("leg %s: its text is none of the forms the regression runner launches "
-                          "(a leg entry, the blocked-isolation entry or a ledger vector, each "
-                          "exactly as the runner builds it), so it is not known to pass its "
-                          "budget as a literal" % label)
-            continue
-        own, declared_row, budget = found
-        if own != label:
-            faults.append("leg %s: its text runs the case of the %s leg, which only that label "
-                          "launches" % (label, own))
-        if declared_row is not None and budget != declared.get(declared_row):
-            faults.append("leg %s: its text passes %r to _watchdog_leg_entry, but its declared "
-                          "row %s is %r, read now from _watchdog_declared_budgets"
-                          % (label, budget, declared_row, declared.get(declared_row)))
+        if text:
+            found = launched(text)
+            if found is None:
+                faults.append("leg %s: its text is none of the forms the regression runner "
+                              "launches (a leg entry, the blocked-isolation entry or a ledger "
+                              "vector, each exactly as the runner builds it), so it is not known "
+                              "to pass its budget as a literal" % label)
+                continue
+            own, declared_row, budget = found
+            if own != label:
+                faults.append("leg %s: its text runs the case of the %s leg, which only that "
+                              "label launches" % (label, own))
+            if declared_row is not None and budget != declared.get(declared_row):
+                faults.append("leg %s: its text passes %r to _watchdog_leg_entry, but its "
+                              "declared row %s is %r, read now from _watchdog_declared_budgets"
+                              % (label, budget, declared_row, declared.get(declared_row)))
+        else:
+            # An empty text runs no case and passes no budget.
+            budget = 0
         if not _watchdog_finite_seconds(bound) or bound != budget + _WATCHDOG_LAUNCH_MARGIN:
             faults.append("leg %s: its kill bound %r is not the budget %r its text passes plus "
                           "the %r s launch margin" % (label, bound, budget,
@@ -2630,13 +2710,24 @@ def _watchdog_launch_vectors(cases):
     ledger text with a statement added; a ledger text whose verdict
     comparison takes any type; a comment after the blocked-isolation figure
     hiding the rest of its text; the blocked-isolation kill bound raised;
-    and the nested-timeout kill bound a second short. A runner that has
+    the nested-timeout kill bound a second short; and an empty
+    nested-timeout text with its kill bound raised. A runner that has
     replaced _watchdog_declared_budgets in this module with a function
     giving the nested-timeout leg another figure, and passes that figure,
-    must be refused both for the replacement and by that leg's label. And
-    _watchdog_run_legs, handed the first changed copy, must refuse it
-    before launching any leg. A vector whose copy does not differ from the
-    cases is reported as not built. [] when all hold."""
+    must be refused both for the replacement and by that leg's label; and
+    texts importing opf from the directory a rebound __file__ names, judged
+    while that name is rebound, must be refused by the nested-timeout
+    label. _watchdog_run_legs must refuse the first changed copy before
+    launching any leg, and must refuse, naming leg <unreadable> and
+    launching no leg, each copy holding a value whose own methods could
+    answer the check: a nested-timeout text empty to len() passing another
+    figure, a text equal to any other rebinding _watchdog_leg_entry, a kill
+    bound of 99999.0 equal to any other, a row that unpacks to another row
+    the second time, a bool kill bound, an extra leg x whose label is equal
+    to any other running the nested-timeout case, and the cases in a list
+    subclass. And a launch that rewrites a later row of the list it was
+    handed must change nothing launched. A vector whose copy does not
+    differ from the cases is reported as not built. [] when all hold."""
     import contextlib
     import io
     missed = ["launched legs: %s" % fault for fault in _watchdog_launch_faults(cases)]
@@ -2711,7 +2802,9 @@ def _watchdog_launch_vectors(cases):
         ("the blocked-isolation kill bound raised",
          changed(bounds=[("blocked-isolation", 99999.0)]), ("blocked-isolation",)),
         ("the nested-timeout kill bound a second short",
-         changed(bounds=[(nested, nested_bound - 1)]), (nested,)))
+         changed(bounds=[(nested, nested_bound - 1)]), (nested,)),
+        ("an empty nested-timeout text with its kill bound raised",
+         changed([(nested, "")], [(nested, 99999.0)]), (nested,)))
     for name, copy, labels in vectors:
         if copy == rows:
             missed.append("launched-leg vector (%s) not built: the copy equals the cases" % name)
@@ -2749,6 +2842,112 @@ def _watchdog_launch_vectors(cases):
         missed.append("launched legs: _watchdog_run_legs, given cases with %s, returned %r "
                       "after launching %d legs; want %r before any launch, naming leg %s"
                       % (vectors[0][0], got, len(started), EXIT_FINDING, nested))
+    # A runner that rebinds this module's __file__ before it builds its
+    # prefix: its texts import opf from the directory the rebound name
+    # gives, and must still be judged against the directory of the import.
+    here = globals().get("__file__")
+    insert = "sys.path.insert(0, %r)" % (str(Path(here).resolve().parent),)
+    moved = "/nonexistent-dir"
+    copy = changed([(row[0], row[1].replace(insert, "sys.path.insert(0, %r)" % (moved,)))
+                    for row in rows if type(row[1]) is str])
+    try:
+        globals()["__file__"] = moved + "/opf.py"
+        faults = _watchdog_launch_faults(copy)
+    finally:
+        globals()["__file__"] = here
+    if copy == rows or not any(fault.startswith("leg %s: " % nested) for fault in faults):
+        missed.append("leg %s: cases built under a __file__ rebound to %s are not refused by "
+                      "that name" % (nested, moved))
+    # Values whose own methods would answer the check's length, comparison
+    # or unpacking with something other than what a launch receives, each
+    # refused as leg <unreadable> with no leg launched.
+    rigged = nested_text.replace(head, "_watchdog_leg_entry(%r, " % (other,))
+    rebinding = nested_text.replace(
+        "return opf._watchdog_leg_entry(",
+        "_f = opf._watchdog_leg_entry; opf._watchdog_leg_entry = lambda b, *a: _f(%r, *a); "
+        "return opf._watchdog_leg_entry(" % (other,))
+
+    class Hollow(str):
+        # A text empty to len() and to truth whose characters still launch.
+        def __len__(self):
+            return 0
+
+    class AgreeingText(str):
+        # A text equal to every other and unequal to none.
+        __hash__ = str.__hash__
+
+        def __eq__(self, other):
+            return True
+
+        def __ne__(self, other):
+            return False
+
+    class AgreeingBound(float):
+        # A bound equal to every other and unequal to none.
+        __hash__ = float.__hash__
+
+        def __eq__(self, other):
+            return True
+
+        def __ne__(self, other):
+            return False
+
+    class Rows(list):
+        # A list subclass, whose iteration can give other rows each pass.
+        pass
+
+    def twice(first, then):
+        # A row that unpacks to first the first time and to then after.
+        passes = []
+
+        class Twice(tuple):
+            def __iter__(self):
+                passes.append(None)
+                return tuple.__iter__(first if len(passes) == 1 else then)
+        return Twice(first)
+
+    def swap(row):
+        return [row if each[0] == nested else each for each in rows]
+
+    typed = (
+        ("a nested-timeout text empty to len() passing another figure",
+         swap((nested, Hollow(rigged), _WATCHDOG_LAUNCH_MARGIN))),
+        ("a nested-timeout text equal to any other, rebinding _watchdog_leg_entry",
+         swap((nested, AgreeingText(rebinding), nested_bound))),
+        ("a nested-timeout kill bound of 99999.0 equal to any other",
+         swap((nested, nested_text, AgreeingBound(99999.0)))),
+        ("a nested-timeout row unpacking to another row the second time",
+         swap(twice(found[nested], (nested, rigged, other + _WATCHDOG_LAUNCH_MARGIN)))),
+        ("a nested-timeout kill bound that is a bool", swap((nested, nested_text, True))),
+        ("a leg x, its label equal to any other, running the nested-timeout case",
+         rows + [(AgreeingText("x"), nested_text, nested_bound)]),
+        ("cases held in a list subclass", Rows(rows)))
+    for name, copy in typed:
+        del started[:]
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            got = _watchdog_run_legs(copy, launch)
+        if got != EXIT_FINDING or started or "leg <unreadable>: " not in out.getvalue():
+            missed.append("leg <unreadable>: _watchdog_run_legs, given cases with %s, returned %r "
+                          "after launching %d legs; want %r before any launch, naming leg "
+                          "<unreadable>" % (name, got, len(started), EXIT_FINDING))
+    # The launches read the rows judged, never the list they came from
+    # again: a launch that rewrites a later row of that list after the
+    # check changes nothing launched.
+    import subprocess
+    judged = [found[nested], found["pipe-stall"]]
+    pair = list(judged)
+    seen = []
+
+    def rewriting(label, code, timeout):
+        seen.append((label, code, timeout))
+        pair[1] = ("pipe-stall", rigged, 99999.0)
+        return subprocess.CompletedProcess([label], EXIT_OK, "", "")
+    with contextlib.redirect_stdout(io.StringIO()):
+        _watchdog_run_legs(pair, rewriting)
+    if seen != judged:
+        missed.append("launched legs: _watchdog_run_legs, its list rewritten during the first "
+                      "launch, launched %r, want the rows it judged, %r"
+                      % ([(row[0], row[2]) for row in seen], [(row[0], row[2]) for row in judged]))
     return missed
 
 
@@ -7015,7 +7214,9 @@ def _watchdog_completion_case(mode, tree=None):
             # "held" ONLY when that last poll, made after the post-bound
             # reading, found no receipt. A host stall can carry the clock
             # past the bound before the first poll, so the loop's polls
-            # alone never establish "held": the post-loop poll always runs.
+            # alone never establish "held": the post-loop poll runs
+            # whenever the loop ends without finding a receipt, which is
+            # the only path that can return "held".
             while time.monotonic() < bound:
                 if proc.poll() is not None:
                     return "expired" if proc.timed_out else "unexpired"
@@ -17505,18 +17706,22 @@ def _watchdog_run_legs(cases, launch):
     when any leg failed, else EXIT_OK. Before any launch, the cases are
     judged by _watchdog_launch_faults (each leg's text and bound against the
     budget of its declared row): any fault fails the run with EXIT_FINDING,
-    naming each leg, and no leg is launched."""
+    naming each leg, and no leg is launched. The cases are read once, a
+    plain list or tuple into one tuple of rows, and that tuple is both what
+    is judged and what the launches read, so a row the check passed (a
+    plain tuple of a str, a str and an int or float) is exactly the row
+    launched, whatever later becomes of the list it came from."""
     import subprocess
     import _opf_emit
-    cases = list(cases)
-    faults = _watchdog_launch_faults(cases)
+    rows = tuple(cases) if type(cases) is list or type(cases) is tuple else cases
+    faults = _watchdog_launch_faults(rows)
     if faults:
         print("opf watchdog regressions: FAIL (refused before any leg launched: %s)"
               % "; ".join(faults))
         return EXIT_FINDING
     failed = False
     unevaluated = []
-    for label, code, timeout in cases:
+    for label, code, timeout in rows:
         try:
             result = launch(label, code, timeout)
             verdict = _watchdog_completion_verdict(result.returncode, result.stdout)
@@ -18474,7 +18679,8 @@ def _watchdog_regression_self_test():
             (dict(a=_opf_emit.ChildStatusUnavailable("lost descendant ownership")),
              EXIT_FINDING)):
         with contextlib.redirect_stdout(io.StringIO()):
-            got = _watchdog_run_legs([(label, "", 1) for label in outcomes], scripted(outcomes))
+            got = _watchdog_run_legs([(label, "", _WATCHDOG_LAUNCH_MARGIN) for label in outcomes],
+                                     scripted(outcomes))
         if got != want:
             flip_missed.append("leg aggregate %r -> %r, want %r" % (sorted(outcomes), got, want))
     # The window exercise's own classification (red-on-revert): only the
