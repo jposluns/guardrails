@@ -14693,23 +14693,17 @@ def _main_isolated(report_path=None):
             else:
                 os.environ[_rr] = _rr_old
         # The guard reads a foreground detach through the shared lexer beside the raw scan
-        # (_orch_foreground_detach_lexed), on one of two paths; every allow row below takes one of them but
-        # the commit-template row, which takes neither. (1) In a command that is nothing but plain
-        # `cat > FILE <<'DELIM'` writes, the scan itself reads each body as data up to its delimiter line (the
-        # body skip, rows further below), so it reads no detach and, on the registry path these rows run, the
-        # lexer's narrowing is never reached: the cat-write row allows on the scan alone. Its body's apostrophe
-        # after the `&` makes it deny without the body skip: the scan then reads that `&` as a bare detach
-        # and ends inside the apostrophe's quote, so the narrowing, which needs the scan to read the whole
-        # command, cannot lift it. (2) In any other command the scan reads a here-document body as code, so
-        # it reads each `&` in the cat to standard output row, the commit-heredoc row and the three
-        # quote-shift rows as a bare detach; the lexer places that `&` in one of the three shapes that alone
-        # lift the scan's deny: a quoted here-document body (<<'EOF', <<"EOF", the commit-message form's
-        # body), a single- or double-quoted string (the scan's quote state shifted by a body quote), and a
-        # comment. Each of those rows denies with the guard reading the scan alone; the first is a cat to
-        # standard output, not a cat write, so that its body takes this path. The commit-template row's `&`
-        # lies inside the scan's double-quote state (the double-quoted "$(...)" that holds the body), so the
-        # scan reads no detach whether or not it skips bodies, the narrowing is never reached, and the row
-        # allows with either the body skip or the narrowing reverted.
+        # (_orch_foreground_detach_lexed). (1) A command proved a safe data-writing shape
+        # (_orch_heredoc_data_shape: nothing but plain cat writes, or cat to standard output, and allowlist
+        # readers) reads each body as data up to its delimiter line, so a quoted body's `&` reads as no detach
+        # and, on the registry path these rows run, the lexer's narrowing is never reached: the cat-write and
+        # cat-to-standard-output rows allow on the scan alone. (2) The commit-message form's `&` lies inside
+        # the scan's double-quote state (the double-quoted "$(...)" that holds the body), so the scan reads no
+        # detach whether or not it skips bodies, and the row allows. (3) But a command that is NOT a data
+        # shape because it holds a quote or a `#` comment outside the bodies (echo 'a & b', echo "a & b", a
+        # trailing comment) reads each here-document body as its consumer's COMMANDS, so a body apostrophe
+        # leaves the scan unbalanced and the command denies: the three quote-shift rows now OVER-REFUSE these
+        # safe commands (bash runs no background job), the accepted, disclosed side of the narrow proof.
         check("trunc/fg-quoted-heredoc-amp-allows",
               [_verdict(bg("cat <<'EOF'\nFix A & B\nEOF", rib=False)),
                _verdict(bg('cat <<"EOF"\nFix A & B\nEOF', rib=False))], ["allow", "allow"])
@@ -14718,13 +14712,13 @@ def _main_isolated(report_path=None):
                _verdict(bg('cat > f <<"EOF"\nFix A & B\'s\nEOF', rib=False))], ["allow", "allow"])
         check("trunc/fg-commit-heredoc-quoted-amp-allows",
               _verdict(bg("git commit -m \"$(cat <<'EOF'\nsay \"a & b\"\nEOF\n)\"", rib=False)), "allow")
-        check("trunc/fg-quote-shift-single-quoted-amp-allows",
-              _verdict(bg("cat <<'A'\nit's\nA\necho 'a & b'\ncat <<'B'\nit's\nB", rib=False)), "allow")
-        check("trunc/fg-quote-shift-double-quoted-amp-allows",
+        check("trunc/fg-quote-shift-single-quoted-amp-denies",
+              _verdict(bg("cat <<'A'\nit's\nA\necho 'a & b'\ncat <<'B'\nit's\nB", rib=False)), "deny")
+        check("trunc/fg-quote-shift-double-quoted-amp-denies",
               _verdict(bg("cat <<'A'\nsay \"hi\nA\necho \"a & b\"\ncat <<'B'\nsay \"bye\nB", rib=False)),
-              "allow")
-        check("trunc/fg-quote-shift-comment-amp-allows",
-              _verdict(bg("cat <<'EOF'\nit's\nEOF\necho ok # it's a & b", rib=False)), "allow")
+              "deny")
+        check("trunc/fg-quote-shift-comment-amp-denies",
+              _verdict(bg("cat <<'EOF'\nit's\nEOF\necho ok # it's a & b", rib=False)), "deny")
         check("trunc/fg-commit-template-amp-allows",
               _verdict(bg("git commit -m \"$(cat <<'EOF'\nFix A & B\nEOF\n)\"", rib=False)), "allow")
         # Every other case where the lexer and the scan disagree still denies: an `&` the lexer places in a

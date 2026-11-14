@@ -24101,9 +24101,9 @@ def _orch_foreground_scan(command, bash_word_starts, amps=None, skip_bodies=True
     holds an `&` (body); a quote it closes nowhere hides nothing after the body, but a shell reading that
     body with other text (a later body appended to one file, or the file run) can pair it, so once a body
     leaves one open (body_open) every bare `&` this pass reads in the command is "unbalanced", never a
-    detach the lexer could lift as a quoted body's `&` nor no detach. A body read on its own whose consumer
-    is not shown to be data (_orch_heredoc_body_is_data: a shell, a consumer this pass cannot name, or a
-    file the command then runs) is read as that consumer's COMMANDS: a quote it leaves open returns
+    detach the lexer could lift as a quoted body's `&` nor no detach. A body read on its own, unless the
+    WHOLE command is proved a safe data-writing shape (_orch_heredoc_data_shape), is read as its consumer's
+    COMMANDS: a quote it leaves open returns
     "unbalanced", as a quote left open in the command's own text does, and a bare `&` in it returns
     "detach" even when amps is given, so no lift reads it as a quoted body's `&`. A body this pass
     does not read on its own is read as shell text, as every body is when skip_bodies is False: one opened
@@ -24139,6 +24139,9 @@ def _orch_foreground_scan(command, bash_word_starts, amps=None, skip_bodies=True
                   default=len(command))
     # Whether the whole command is nothing but plain cat writes, the one case whose bodies are data.
     data_command = skip_bodies and _orch_heredoc_data_command(command)
+    # Whether the WHOLE command is a safe data-writing shape, proved once over the outer text: when it is,
+    # every here-document body is data; when it is not, every body is read as its consumer's commands.
+    data_shape = skip_bodies and _orch_heredoc_data_shape(command)
     i, n = 0, len(command)
     while i < n:
         ch = command[i]
@@ -24223,12 +24226,12 @@ def _orch_foreground_scan(command, bash_word_starts, amps=None, skip_bodies=True
                           else _orch_heredoc_body_spans(command, i + 1, n, specs))
             if spans is not None:
                 for (start, stop), (op_at, seg) in zip(spans, ats):
-                    # A body whose consumer is a shell, one this pass cannot name, or a file the command
-                    # then runs is read as COMMANDS (_orch_heredoc_body_is_data False): a quote it leaves
-                    # open is the "unbalanced" a quote left open in the command's own text gives, and a
-                    # bare '&' in it is a detach no lift reads as quoted body text, so the pass returns it
-                    # even when amps is given.
-                    runs = not _orch_heredoc_body_is_data(command, op_at, seg, end, read_bodies)
+                    # Unless the WHOLE command is a safe data-writing shape (_orch_heredoc_data_shape, proved
+                    # once as data_shape), every body is read as its consumer's COMMANDS: a quote it leaves
+                    # open is the "unbalanced" a quote left open in the command's own text gives, and a bare
+                    # '&' in it is a detach no lift reads as quoted body text, so the pass returns it even
+                    # when amps is given.
+                    runs = not data_shape
                     found = [] if amps is not None else None
                     kind = _orch_foreground_scan(command[start:stop], bash_word_starts, found, False, True)
                     if kind == "open" and not runs:
@@ -24369,114 +24372,157 @@ def _orch_heredoc_body_spans(command, i, n, specs):
     return spans, i
 
 
-# The one simple command whose here-document body _orch_heredoc_body_is_data reads as data: `cat`, then
-# only blanks, `>` or `>>` (fd 1 after a blank, or none) to a plain word, and `<<` or `<<-` with a
-# delimiter word made of plain characters, single- or double-quoted runs of them and backslash-escaped
-# ones (EOF, 'EOF', "EOF", \EOF, EO'F'); no other word, quote, '$', backquote or operator.
-_ORCH_HEREDOC_CAT_SEGMENT_RE = re.compile(
-    r"[ \t]*cat(?:(?:[ \t]*|[ \t]+1)>>?[ \t]*[A-Za-z0-9_./+,:@%=-]+"
-    r"|[ \t]*<<-?[ \t]*(?:[A-Za-z0-9_.+-]|'[A-Za-z0-9_.+-]*'|\"[A-Za-z0-9_.+-]*\"|\\[A-Za-z0-9_.+-])+)+[ \t]*")
-_ORCH_HEREDOC_CAT_TARGET_RE = re.compile(r">>?[ \t]*([A-Za-z0-9_./+,:@%=-]+)")
-# What can make the word cat run something else when it stands in the command's own text (here-document
-# bodies left out) before that cat: a hash, alias, enable, function, builtin, command, exec, eval or source
-# word, a lone '.', a function named cat, or any assignment (PATH=... included).
-_ORCH_CAT_RENAME_RE = re.compile(
-    r"(?<![\w.-])(?:hash|alias|enable|function|builtin|command|exec|eval|source)(?![\w.-])"
-    r"|(?<![\w.-])cat[ \t]*\(|[A-Za-z_][A-Za-z0-9_]*\+?=|(?<![^\s;|&({`])\.(?=[ \t])")
-# Commands that read, list, hash or change the mode of a file operand and never run it (git reads one, as
-# in git commit -F FILE, and runs none it is given). A mention of a
-# written file in any other command (a shell, source, '.', an interpreter, env, xargs, a mv, cp or ln that
-# can give it another name), as that command's first word (./FILE), or in a command piped onward runs it.
-_ORCH_FILE_READERS = frozenset((
-    "cat", "sha256sum", "sha1sum", "sha224sum", "sha384sum", "sha512sum", "md5sum", "b2sum", "cksum",
-    "wc", "head", "tail", "grep", "egrep", "fgrep", "ls", "stat", "file", "diff", "cmp", "sort", "uniq",
-    "cut", "od", "xxd", "hexdump", "rm", "chmod", "touch", "test", "[", "echo", "printf", "du", "nl", "tac",
-    "mkdir", "realpath", "readlink", "basename", "dirname", "cd", "git"))
-_ORCH_PYTHON_RE = re.compile(r"python[0-9.]*")
-# Cost bounds of the consumer reading, each failing toward reading a body as commands: the text a run
-# search splits (_orch_written_file_runs) and the bodies one scan pass reads on its own before a later one
-# is read as commands unread (_orch_heredoc_body_is_data), so a long command of many bodies stays linear.
-_ORCH_RUN_TEXT_LIMIT = 65536
+# A short allowlist of command words a safe data-writing command may hold besides the cat that writes a
+# here-document body (_orch_heredoc_data_shape): each reads, lists, hashes, makes a directory or tests, and
+# runs or renames no file it names. cat writes the bodies. An interpreter (python3 and the like), git, cp,
+# mv, ln, eval, exec, source, a lone '.', read and printf are NOT here: each can run or rename a file.
+_ORCH_DATA_SHAPE_ALLOWED = frozenset((
+    "cat", "echo", "mkdir", "sha256sum", "sha1sum", "sha224sum", "sha384sum", "sha512sum", "md5sum",
+    "b2sum", "cksum", "wc", "ls", "stat", "cmp", "diff", "test", "true"))
+# A plain word of a data-writing command: no quote, backslash, '$', backquote, parenthesis, brace, glob,
+# pipe, '&' or redirection character (a cat write target and a here-document delimiter use these bytes).
+_ORCH_DATA_SHAPE_WORD_RE = re.compile(r"[A-Za-z0-9_./+,:@%=-]+")
+# An assignment at a command word's start (NAME= or NAME+=), anchored to the word so the scan stays linear.
+_ORCH_DATA_SHAPE_ASSIGN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\+?=")
+# One here-document delimiter word: plain characters and single-, double- or backslash-quoted runs of them
+# (EOF, 'EOF', "EOF", \EOF, EO'F'); the value is the delimiter with its quoting removed.
+_ORCH_DATA_SHAPE_DELIM_RE = re.compile(
+    r"[A-Za-z0-9_.+-]+|'[A-Za-z0-9_.+-]*'|\"[A-Za-z0-9_.+-]*\"|\\[A-Za-z0-9_.+-]")
+# Cost ceilings of the proof, each failing TOWARD reading the bodies as commands (the safe side): a command
+# longer than this many characters, or holding more here-documents than this, is not proved a data shape.
+# The proof is one left-to-right pass, so its work is linear in the command length within these ceilings.
+_ORCH_DATA_SHAPE_TEXT_LIMIT = 65536
 _ORCH_DATA_BODY_LIMIT = 64
 
 
-def _orch_written_file_runs(text, target):
-    """True when text, the command after a cat write to target, may run the written file. text is split
-    into words and operators the way a POSIX shell splits it (shlex, with ; & | ( ) < > and newline as
-    operators, no comment reading); a word that names target (its whole path, or its last component as a
-    word or after a '/') is a mention. A mention runs the file unless its simple command's first word is a
-    reader (_ORCH_FILE_READERS) or a python interpreter whose -c string comes before every mention, and
-    that command is not piped onward ('|'). The first word itself naming the file (./FILE) runs it. Text
-    this split cannot read (a quote left open), and text longer than _ORCH_RUN_TEXT_LIMIT that names the
-    file, is read as running it."""
-    base = posixpath.basename(target.rstrip("/"))
-    if not base or base not in text:
-        return False
-    if len(text) > _ORCH_RUN_TEXT_LIMIT:
-        return True
-    named = re.compile(r"(?<![\w.-])" + re.escape(base) + r"(?![\w.-])")
-    lexer = shlex.shlex(text, posix=True, punctuation_chars=";&|()<>\n")
-    lexer.whitespace = " \t\r"
-    lexer.commenters = ""
-    lexer.whitespace_split = True
-    try:
-        tokens = list(lexer)
-    except ValueError:
-        return True
-    words = []
-    for token in tokens + ["\n"]:
-        if token and all(ch in ";&|()<>\n" for ch in token) and any(ch in ";&|()\n" for ch in token):
-            mentions = [k for k, word in enumerate(words) if target in word or named.search(word)]
-            if mentions:
-                if "|" in token and token != "||":
-                    return True
-                first = posixpath.basename(words[0])
-                if 0 in mentions:
-                    return True
-                if first in _ORCH_FILE_READERS:
-                    words = []
-                    continue
-                code = words.index("-c") if "-c" in words else -1
-                if not (_ORCH_PYTHON_RE.fullmatch(first) and code != -1 and min(mentions) > code + 1):
-                    return True
-            words = []
+def _orch_data_shape_delim(command, i, n):
+    """Parse a here-document delimiter word at command[i:n] (just past '<<' or '<<-' and any blanks) as
+    (delimiter with quoting removed, index past it), or (None, i) when no delimiter word begins there."""
+    parts, start = [], i
+    while i < n:
+        match = _ORCH_DATA_SHAPE_DELIM_RE.match(command, i)
+        if match is None:
+            break
+        token = match.group()
+        if token[0] in "'\"":
+            parts.append(token[1:-1])
+        elif token[0] == "\\":
+            parts.append(token[1:])
         else:
-            words.append(token)
-    return False
+            parts.append(token)
+        i = match.end()
+    if i == start:
+        return None, i
+    return "".join(parts), i
 
 
-def _orch_heredoc_body_is_data(command, at, seg_start, end, read_bodies):
-    """True when the body of the here-document opened at command[at] is DATA, which the scan reads on its
-    own for its bare `&` alone (_orch_foreground_scan): the simple command holding that `<<`, from seg_start
-    (just past the last unquoted ';', '|', '&' or newline before it) to the first ';', '&&', '||' or the end
-    of its line, is `cat` with only `>`/`>>` writes to plain words and here-document operators
-    (_ORCH_HEREDOC_CAT_SEGMENT_RE), not piped onward; the command's own text before it, bodies read on their
-    own (read_bodies) left out, holds nothing that can make cat run something else (_ORCH_CAT_RENAME_RE);
-    and no file it writes is run by the rest of the command (_orch_written_file_runs, reading the rest of
-    that line and the text from end, past the bodies). False otherwise: the consumer is a shell (bash, sh,
-    dash, zsh, source /dev/stdin and the like), one this reading cannot name, or a written file the command
-    then runs, so the body is read as that consumer's commands; False too, unread, once one scan pass has
-    read _ORCH_DATA_BODY_LIMIT bodies on their own (read_bodies)."""
-    if len(read_bodies) >= _ORCH_DATA_BODY_LIMIT:
+def _orch_heredoc_data_shape(command):
+    """True when the WHOLE command is a safe data-writing shape in which every here-document body is DATA (the
+    scan then reads each body on its own for its bare `&` alone, apart from the command's quote state), proved
+    by ONE left-to-right pass over the command with each body skipped unread. The proof is positive and narrow
+    and fails toward reading the bodies as commands (the safe, over-refusing side) on anything it does not
+    recognise: every simple command outside the bodies is made only of plain words (no quote, backslash, '$',
+    backquote, parenthesis, brace, glob, pipe, bare '&' or redirection other than a cat write target), none is
+    an assignment, and the only separators are ';', '&&', '||' and newline, so none sits in a group, compound
+    command, pipeline or substitution; the command holding each body is a plain cat (its only words `cat`, its
+    only redirections '>'/'>>' to plain targets, writing to those files or, with none, to standard output);
+    and every other simple command's first word is in _ORCH_DATA_SHAPE_ALLOWED, a short list of readers and
+    the like that run or rename no file they name. A cat, python3 -c or any interpreter, git, echo or printf
+    writing to a file, cp, mv, ln, eval, exec, source, a dot, read or printf -v fails the proof, so its body
+    is read as commands. The work is linear in the command length within two cost ceilings, each failing
+    toward commands: a command longer than _ORCH_DATA_SHAPE_TEXT_LIMIT characters, or holding more than
+    _ORCH_DATA_BODY_LIMIT here-documents."""
+    n = len(command)
+    if n > _ORCH_DATA_SHAPE_TEXT_LIMIT:
         return False
-    line_end = command.find("\n", at)
-    line_end = len(command) if line_end == -1 else line_end
-    match = _ORCH_HEREDOC_CAT_SEGMENT_RE.match(command, seg_start, line_end)
-    if not match or match.end() <= at:
-        return False
-    rest = command[match.end():line_end]
-    if rest and not ((rest[0] == ";" and rest[:2] != ";;") or rest[:2] in ("&&", "||")):
-        return False
-    outer, last = [], 0
-    for start, stop in read_bodies:
-        outer.append(command[last:start])
-        last = stop
-    outer.append(command[last:seg_start])
-    if _ORCH_CAT_RENAME_RE.search("".join(outer)):
-        return False
-    after = rest + "\n" + command[end:]
-    return not any(_orch_written_file_runs(after, target)
-                   for target in _ORCH_HEREDOC_CAT_TARGET_RE.findall(match.group()))
+    i, bodies = 0, 0
+    first_word, is_cat, has_heredoc, has_redirect, extra_word = None, False, False, False, False
+    pending = []  # (delimiter, strip_tabs) for the here-documents opened on the current line
+
+    def segment_ok():
+        if first_word is None:
+            return not has_heredoc and not has_redirect
+        if has_heredoc:
+            return is_cat and not extra_word
+        if has_redirect:
+            return False
+        return first_word in _ORCH_DATA_SHAPE_ALLOWED
+
+    while i < n:
+        ch = command[i]
+        if ch in " \t":
+            i += 1
+            continue
+        if ch == "\n":
+            i += 1
+            if pending:
+                for delimiter, strip_tabs in pending:
+                    found = False
+                    while i < n:
+                        nl = command.find("\n", i)
+                        line = command[i:(n if nl == -1 else nl)]
+                        i = n if nl == -1 else nl + 1
+                        if (line.lstrip("\t") if strip_tabs else line) == delimiter:
+                            found = True
+                            break
+                    if not found:
+                        return False  # a body whose delimiter line never comes is not a clean data shape
+                pending = []
+            if not segment_ok():
+                return False
+            first_word, is_cat, has_heredoc, has_redirect, extra_word = None, False, False, False, False
+            continue
+        if ch in ";&|":
+            if ch == ";" and command.startswith(";;", i):
+                return False
+            if ch in "&|" and not command.startswith(ch * 2, i):
+                return False
+            i += 2 if ch in "&|" else 1
+            if not segment_ok():
+                return False
+            first_word, is_cat, has_heredoc, has_redirect, extra_word = None, False, False, False, False
+            continue
+        if ch == ">":
+            i += 2 if command.startswith(">>", i) else 1
+            has_redirect = True
+            while i < n and command[i] in " \t":
+                i += 1
+            match = _ORCH_DATA_SHAPE_WORD_RE.match(command, i)
+            if match is None:
+                return False
+            i = match.end()
+            continue
+        if ch == "<":
+            if command.startswith("<<<", i) or not command.startswith("<<", i):
+                return False
+            strip_tabs = command.startswith("<<-", i)
+            i += 3 if strip_tabs else 2
+            while i < n and command[i] in " \t":
+                i += 1
+            delimiter, i = _orch_data_shape_delim(command, i, n)
+            if delimiter is None:
+                return False
+            has_heredoc = True
+            bodies += 1
+            if bodies > _ORCH_DATA_BODY_LIMIT:
+                return False
+            pending.append((delimiter, strip_tabs))
+            continue
+        match = _ORCH_DATA_SHAPE_WORD_RE.match(command, i)
+        if match is None:
+            return False  # a forbidden character: a quote, '$', backquote, '(', '{', a glob and the like
+        word = match.group()
+        i = match.end()
+        if first_word is None:
+            if _ORCH_DATA_SHAPE_ASSIGN_RE.match(word):
+                return False
+            first_word, is_cat = word, word == "cat"
+        else:
+            extra_word = True
+        continue
+    if pending:
+        return False  # a here-document opened on the last line with no body and delimiter line after it
+    return segment_ok()
 
 
 def _orch_foreground_detach_kind(command, skip_bodies=True):
@@ -24628,9 +24674,9 @@ def _orch_foreground_detach_lexed(command, lifts=None):
     the delimiter and holds the closer anywhere after it, or at a backquote inside backquotes, running
     what this lex would read as body, so such a body records as "body" and is never
     lifted, fail closed), or the commit message form's body in "$(cat <<'EOF' ... EOF)", whose exact
-    close the lex itself resolves; a body whose consumer is a shell, one the scan cannot name or a file
-    the command runs is never lifted, since the scan reads it as commands and gives its `&` as a detach
-    even when listing each bare `&` (_orch_foreground_scan); (2)
+    close the lex itself resolves; a body in a command not proved a safe data-writing shape
+    (_orch_heredoc_data_shape) is never lifted, since the scan reads it as commands and gives its `&` as a
+    detach even when listing each bare `&` (_orch_foreground_scan); (2)
     a single- or double-quoted string; or (3) a '#' comment. Every other case where the lexer and the scan
     disagree still denies: an `&` the lexer places in a substitution or expansion that a double-quoted string
     holds (one in a quoted string or comment nested there included, since the lexer skips it whole), in an
@@ -24730,31 +24776,33 @@ def _orch_foreground_detach(command):
     is a disclosed residual; where such a construct still leaves an unquoted bare `&`, or leaves the scan
     inside an unbalanced quote at the end, it errs toward the DENY, but a detacher that carries no bare `&`
     (setsid worker, a nested `bash -c '... &'`) is NOT caught here and is a silent-allow residual disclosed
-    in the manifest. A here-document body it reads on its own whose consumer is a shell, a consumer it
-    cannot name, or a written file the command then runs (`bash <<'EOF'` then `job &`, `cat <<'EOF' |
-    bash`, `cat > s.sh <<'EOF'` then `bash s.sh`) is read as that consumer's commands, so the guard's lexer
-    narrowing never lifts its `&`; a shell run the consumer reading misses (_orch_heredoc_body_is_data)
-    keeps the earlier reading, a silent allow disclosed in the manifest.
+    in the manifest. A here-document body it reads on its own, in a command not proved a safe data-writing
+    shape (_orch_heredoc_data_shape: `bash <<'EOF'` then `job &`, `cat <<'EOF' | bash`, `cat > s.sh <<'EOF'`
+    then `bash s.sh`), is read as its consumer's commands, so the guard's lexer narrowing never lifts its
+    `&`; a written file run without the command naming it there keeps the earlier reading, a silent allow
+    disclosed in the manifest.
 
     OVER-REFUSAL RESIDUAL (disclosed): this scan skips a here-document body as data only when the WHOLE
-    command is nothing but one or more plain cat writes (_orch_heredoc_data_command): each a line holding
-    only cat, one output redirect to a plain file and one quoted here-document operator (<<'EOF' or
-    <<"EOF") it parses, opened with no '(', backquote or '$[' anywhere before it and nothing open, then its
-    body and a line that is, whole, its delimiter, the writes separated only by newlines, with no other
-    command word anywhere. Only in such a command does a quote, `&` or substitution in a body (`cat > f
-    <<'EOF'` then `the user's file`) read as no detach. Every other body can be a shell's input, so its
-    bare `&` is read: a body opened at the top level with nothing open, under a delimiter the scan parses
-    and ended at its delimiter line, it reads ON ITS OWN, as a shell reading that text would, apart from
-    the command's quote state (_orch_foreground_scan), so a body apostrophe (`cat <<'EOF'` to standard
-    output then `it's`, or the same under an unquoted delimiter) no longer leaves the command's quote
-    open. Such a body whose consumer is a shell (bash, sh, dash, zsh, source /dev/stdin, a cat piped
-    onward), a consumer the scan cannot name (anything but a plain cat writing to standard output or to
-    files, after no text that can rename cat), or a file the same command then runs (bash FILE, sh FILE,
-    source FILE, ./FILE, python3 FILE) is read as those COMMANDS (_orch_heredoc_body_is_data): a quote it
-    leaves open denies beside an `&` or a runtime start form, as one in the command's own text does, with
-    or without an apostrophe elsewhere, and its bare `&` is never lifted. That over-refuses a body `&`
-    under a consumer that does not run it (`git commit -F -`, the no-op `:`) and a written file a
-    command that is not a listed reader names without running it. Every other body it reads as CODE at
+    command is proved a safe data-writing shape, by ONE positive proof over the outer text
+    (_orch_heredoc_data_shape): every simple command outside the bodies made only of plain words (no quote,
+    backslash, '$', backquote, parenthesis, brace, glob, pipe, bare '&' or redirection other than a cat
+    write target), none an assignment, none in a group, compound command, pipeline or substitution; the
+    command holding each body a plain cat writing to plain targets or to standard output; and every other
+    simple command's first word in a short allowlist of readers that run or rename no file they name (mkdir,
+    the checksum tools, wc, ls, stat, cmp, diff, test, true, echo). Only in such a command does a quote, `&`
+    or substitution in a body (`cat > f <<'EOF'` then `the user's file`) read as no detach. In every other
+    command a body can be a shell's input, so its bare `&` is read: a body opened at the top level with
+    nothing open, under a delimiter the scan parses and ended at its delimiter line, it reads ON ITS OWN, as
+    a shell reading that text would, apart from the command's quote state (_orch_foreground_scan), so a body
+    apostrophe (`cat <<'EOF'` to standard output then `it's`, or the same under an unquoted delimiter) no
+    longer leaves the command's quote open. A body fed to a shell (bash, sh, dash, zsh, source /dev/stdin, a
+    cat piped onward), under a consumer the proof does not accept (a python3 -c or any interpreter, git,
+    echo or printf writing to a file, cp, mv, ln, eval, exec, source, a dot, read or printf -v), or written
+    to a file the same command then runs (bash FILE, sh FILE, source FILE, ./FILE, python3 FILE) is read as
+    those COMMANDS: a quote it leaves open denies beside an `&` or a runtime start form, as one in the
+    command's own text does, with or without an apostrophe elsewhere, and its bare `&` is never lifted. That
+    over-refuses a body `&` under a consumer that does not run it (`git commit -F -`, the no-op `:`) and a
+    written file a reader not on the allowlist names without running it. Every other body it reads as CODE at
     the outer quoting level: the commit-message form's in "$(cat <<'EOF' ... EOF)", one in a subshell or
     after any '(' or backquote, one after a body read as code, one with no delimiter line, and an unquoted
     delimiter's holding a command substitution, a '${' that holds more than a name or a backslash-newline
@@ -26461,10 +26509,11 @@ def orch_truncation_guard(data):
                 "one opened after a '(' or backquote, an unquoted delimiter's holding a command "
                 "substitution, so quote the delimiter (<<'EOF') where the body needs no expansion, or one "
                 "whose quote stays open over an '&') or an ANSI-C $'...' "
-                "quote; a here-document body fed to a shell or to a program this guard cannot name, or "
-                "written to a file the same command then runs, is read as commands, so a quote it leaves "
-                "open counts as one. Balance the quoting, put a blank before such a '#' outside any grouping or "
-                "substitution, or write the text to a file and pass the file.",
+                "quote; a here-document body fed to a shell or to a consumer this guard does not accept as a "
+                "plain cat write, or written to a file the same command then runs, is read as commands, so a "
+                "quote it leaves open counts as one. Balance the quoting, put a blank before such a '#' outside "
+                "any grouping or substitution, or write the text with cat in a call of its own and run any "
+                "other command in a separate call.",
                 "AIQT guardrail: denied a foreground command whose quoting or comments this guard could not "
                 "read to the end (rule trkasy, fail-closed).")
         # COST: the classifier below lexes the command again, so it runs ONCE per detach deny, and
@@ -26513,10 +26562,11 @@ def orch_truncation_guard(data):
                 "wait for it. If the detached result and completion are genuinely not needed, drop the '&' "
                 "and run it foreground. If this '&' is not a detach at all (for example a bitwise AND in an "
                 "arithmetic expansion, an '&' in the body of a here-document whose delimiter is unquoted or "
-                "whose consumer this guard cannot show to be a plain cat (git commit -F -), "
+                "whose command this guard does not accept as a safe data-writing shape (git commit -F -), "
                 "or one inside a substitution in a double-quoted string), quote the here-document "
-                "delimiter (<<'EOF') where its body needs no expansion, or write the text to a file and "
-                "pass the file instead; the background-dispatch advice applies only to a real detach.",
+                "delimiter (<<'EOF') where its body needs no expansion, or write the text with cat in a call "
+                "of its own and run any other command separately; the background-dispatch advice applies "
+                "only to a real detach.",
                 "AIQT guardrail: denied a foreground bare-& detach (untracked asynchronous work, rule "
                 "trkasy); use the tracked background dispatch or run it in the foreground.")
         return _allow()  # foreground without a bare-& detach operator is out of scope by design

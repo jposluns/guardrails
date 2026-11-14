@@ -4054,31 +4054,32 @@ _TAB = "\t"
 # decision): the base decision is the guard's before the scan read a body apart from the command's quote
 # state, and every row whose two decisions differ must give its base decision under the reverted mutant.
 _TRKASY_HEREDOC_BODY_ROWS = (
-    # A body quote no longer leaves the command's quote open, so a runtime start form after or inside the
-    # body (source, the word the adopter's body holds) no longer denies on that quote.
-    ("hdb-adopter-exact", _TRKASY_HEREDOC_ADOPTER, "allow", "deny"),
+    # A DATA body's quote never leaves the command's quote open: a plain cat write (or cat to standard output)
+    # followed only by a reader of the data-writing allowlist (sha256sum, ls and the like) still allows, its
+    # delimiter form and apostrophe notwithstanding. A command holding anything else (the adopter's python3,
+    # a source, a coproc) is not a data shape, so its body is read as commands (_orch_heredoc_data_shape).
+    ("hdb-adopter-exact", _TRKASY_HEREDOC_ADOPTER, "deny", "deny"),
     ("hdb-unquoted-apostrophe-source", "cat > /tmp/k.txt <<EOF\na'b\nsource\nEOF", "allow", "deny"),
-    ("hdb-single-quoted-delim", "cat > /abs/f <<'EOF'\nit's\nEOF\nsource /abs/g", "allow", "deny"),
-    ("hdb-double-quoted-delim", "cat > /abs/f <<\"EOF\"\nit's\nEOF\nsource /abs/g", "allow", "deny"),
-    ("hdb-backslash-delim", "cat > /abs/f <<\\EOF\nit's\nEOF\nsource /abs/g", "allow", "deny"),
-    ("hdb-dash-tabs-unquoted", "cat <<-EOF\n" + _TAB + "it's\n" + _TAB + "EOF\nsource /abs/f", "allow", "deny"),
-    ("hdb-dash-tabs-quoted", "cat <<-'EOF'\n" + _TAB + "it's\n" + _TAB + "EOF\nsource /abs/f", "allow", "deny"),
-    ("hdb-two-on-one-line", "cat <<A <<'B'\nit's\nA\nsay \"hi\nB\nsource /abs/f", "allow", "deny"),
-    ("hdb-double-quote-body", "cat <<EOF\nsay \"hi\nEOF\nsource /abs/f", "allow", "deny"),
-    ("hdb-plain-brace-body", "cat <<EOF\nit's ${HOME}\nEOF\nsource /abs/f", "allow", "deny"),
-    ("hdb-escaped-substitutions", "cat <<EOF\nit's \\$(date) \\`date\\`\nEOF\nsource /abs/f", "allow", "deny"),
-    ("hdb-and-list-after-body", "cat > /abs/f <<'EOF'\nit's\nEOF\ncd /abs && sha256sum f", "allow", "deny"),
+    ("hdb-single-quoted-delim", "cat > /abs/f <<'EOF'\nit's\nEOF\nsha256sum /abs/g", "allow", "allow"),
+    ("hdb-double-quoted-delim", "cat > /abs/f <<\"EOF\"\nit's\nEOF\nsha256sum /abs/g", "allow", "allow"),
+    ("hdb-backslash-delim", "cat > /abs/f <<\\EOF\nit's\nEOF\nsha256sum /abs/g", "allow", "allow"),
+    ("hdb-dash-tabs-unquoted", "cat <<-EOF\n" + _TAB + "it's\n" + _TAB + "EOF\nsha256sum /abs/f", "allow", "allow"),
+    ("hdb-dash-tabs-quoted", "cat <<-'EOF'\n" + _TAB + "it's\n" + _TAB + "EOF\nsha256sum /abs/f", "allow", "allow"),
+    ("hdb-two-on-one-line", "cat <<A <<'B'\nit's\nA\nsay \"hi\nB\nsha256sum /abs/f", "allow", "allow"),
+    ("hdb-double-quote-body", "cat <<EOF\nsay \"hi\nEOF\nsha256sum /abs/f", "allow", "allow"),
+    ("hdb-plain-brace-body", "cat <<EOF\nit's ${HOME}\nEOF\nsha256sum /abs/f", "allow", "allow"),
+    ("hdb-escaped-substitutions", "cat <<EOF\nit's \\$(date) \\`date\\`\nEOF\nsha256sum /abs/f", "allow", "allow"),
+    ("hdb-and-list-after-body", "cat > /abs/f <<'EOF'\nit's\nEOF\nls /abs && sha256sum /abs/f", "allow", "allow"),
     # The quote a body left open hid a real bare '&' after the delimiter line (QUOTE SHIFT): now read.
     ("hdb-amp-between-bodies", "cat <<A\nit's\nA\nsleep 5 & cat <<B\nx'\nB", "deny", "allow"),
     ("hdb-amp-before-stray-quote", "cat <<EOF\nit's\nEOF\nsleep 5 & echo '", "deny", "allow"),
-    # DISCLOSED RESIDUALS the fix opens, pinned at their current allow: a quote one data body opens and a
-    # later data body closes is not read across the two (the command never runs the file they share; a cat
-    # reading both prints them), and a coproc after a data body is the plain coproc silent allow, which only
-    # the body's leaked quote denied. A body a shell reads, or a written file the command runs, is read as
-    # commands instead (_TRKASY_HEREDOC_CONSUMER_ROWS).
+    # DISCLOSED RESIDUAL the fix keeps, pinned at its current allow: a quote one data body opens and a later
+    # data body closes is not read across the two (the command never runs the file they share; a cat reading
+    # both prints them). A body a shell reads, a coproc after the body, or a written file the command runs
+    # makes the command not a data shape, so its body is read as commands (_TRKASY_HEREDOC_CONSUMER_ROWS).
     ("hdb-residual-cross-body-pair",
      "cat > /abs/s <<A\nit's\nA\ncat >> /abs/s <<B\nx'; sleep 5 & echo '\nB\nsha256sum /abs/s", "allow", "deny"),
-    ("hdb-residual-coproc-after-body", "cat <<EOF\nit's\nEOF\ncoproc sleep 5", "allow", "deny"),
+    ("hdb-residual-coproc-after-body", "cat <<EOF\nit's\nEOF\ncoproc sleep 5", "deny", "deny"),
     # Unchanged denies: a substitution an unquoted body runs, read as today (as shell text); a body whose
     # delimiter line never comes; a bare '&' after the delimiter line; a body fed to a shell; an open body
     # quote hiding an '&'; an uncertain '#' in a body; and a body this scan does not read on its own.
@@ -4224,12 +4225,12 @@ def _hdc_rows(label, head, body_names, tail=""):
                  for kind, expected in body_names)
 
 
-# A here-document body whose consumer is a shell, one the scan cannot name, or a written file the same
-# command then runs is read as that consumer's commands (_orch_heredoc_body_is_data): a quote it leaves open
-# denies beside a runtime start form, as in the command's own text, and a bare '&' in it denies, never lifted
-# as quoted body text. The same body with no apostrophe and no '&' is the plain start form's silent allow.
-# Each row is (label, command, expected decision, decision before the body's consumer was read); every row
-# whose two decisions differ must give the earlier one under the mutant that reads every consumer as data.
+# Unless the WHOLE command is a safe data-writing shape (_orch_heredoc_data_shape), a here-document body is
+# read as its consumer's commands: a quote it leaves open denies beside a runtime start form, as in the
+# command's own text, and a bare '&' in it denies, never lifted as quoted body text. The same body with no
+# apostrophe and no '&' is the plain start form's silent allow. Each row is (label, command, expected
+# decision, decision before the consumer was read); every row whose two decisions differ must give the
+# earlier one under the mutant that reads every body as data.
 _HDC_SHELL_APOS = (("apos", "deny"), ("plain", "allow"))
 _HDC_SHELL_ALL = _HDC_SHELL_APOS + (("amp", "deny"),)
 _TRKASY_HEREDOC_CONSUMER_ROWS = tuple(
@@ -4274,22 +4275,24 @@ _TRKASY_HEREDOC_CONSUMER_ROWS = tuple(
            ("hdc-write-sourced-single-quoted", "cat > /abs/f <<'EOF'\nit's\nEOF\nsource /abs/f", "deny"),
            ("hdc-write-sourced-double-quoted", "cat > /abs/f <<\"EOF\"\nit's\nEOF\nsource /abs/f", "deny"),
            ("hdc-write-sourced-backslash", "cat > /abs/f <<\\EOF\nit's\nEOF\nsource /abs/f", "deny"))
-        # The cost bounds, each end just inside, at and just outside: a scan pass reads a body after 64
-        # bodies read on their own as commands unread, and a written file's run search reads text of more
-        # than 65536 characters naming the file as a run.
+        # The cost ceilings, each end just inside, at and just outside (_orch_heredoc_data_shape fails toward
+        # commands): a command holding more than 64 here-documents is not proved a data shape, and neither is
+        # one longer than 65536 characters (here, a plain cat write with an '&' body padded to that length).
         + tuple(("hdc-body-limit-{}".format(count), "cat <<'E'\nx\nE\n" * count + "cat <<'E'\n" + _HDC_AMP + "E",
                  expected) for count, expected in ((63, "allow"), (64, "deny"), (65, "deny")))
         + tuple(("hdc-run-text-limit-{}".format(size),
-                 "cat > /abs/s <<'E'\n" + _HDC_AMP + "E\nsha256sum /abs/s " + "a" * (size - 18), expected)
+                 "cat > /abs/s <<'E'\n" + _HDC_AMP + "E\nsha256sum /" + "a" * (size - 42), expected)
                 for size, expected in ((65535, "allow"), (65536, "allow"), (65537, "deny")))
     )
 ) + tuple((label, command, expected, before) for label, command, expected, before in (
-    # Unchanged (the -plain rows above too): the plain start form with no apostrophe and no '&' is the
+    # Unchanged allows (the -plain rows above too): the plain start form with no apostrophe and no '&' is the
     # silent allow (as in the command's own text), an apostrophe with no start form or '&' is allowed, a
     # quoted '&' in a shell's body is quoted text, an unquoted shell body's '&' and a shell body's '&'
-    # before an apostrophe were denied already, and a data body (a cat write never run, a cat to standard
-    # output, a file only read, hashed or passed to python3 -c as an argument) keeps its reading: its quote
-    # opens nothing and the lexer lifts its quoted '&'.
+    # before an apostrophe were denied already, and a data body (a plain cat write followed only by a reader,
+    # or a cat to standard output) keeps its allow: its quote opens nothing and the lexer lifts its quoted
+    # '&'. A python3 -c reading the file, a bash run of another written file, and the adopter (python3 after
+    # the write) are NOT data shapes, so their bodies read as commands and now deny; 'cat1>f' is the word
+    # cat1 with an fd-1 redirect, not cat, so it is not a data shape either.
     ("hdc-bash-apostrophe-no-start-form", "bash <<'EOF'\necho it's\nEOF", "allow", "allow"),
     ("hdc-bash-quoted-amp-text", "bash <<'EOF'\necho 'a & b'\nEOF", "allow", "allow"),
     ("hdc-bash-unquoted-amp", "bash <<EOF\n" + _HDC_AMP + "EOF", "deny", "deny"),
@@ -4301,16 +4304,17 @@ _TRKASY_HEREDOC_CONSUMER_ROWS = tuple(
     ("hdc-write-hashed-amp", "cat > /abs/n.txt <<'EOF'\n" + _HDC_AMP + "EOF\nsha256sum /abs/n.txt", "allow",
      "allow"),
     ("hdc-write-python3-c-argument", "mkdir -p /abs; cat > /abs/k.txt <<'EOF'\n" + _HDC_APOS
-     + "EOF\npython3 -I -c \"import sys; print(open(sys.argv[1]).read())\" /abs/k.txt", "allow", "allow"),
-    ("hdc-write-other-file-run", "cat > /abs/n.txt <<'EOF'\n" + _HDC_APOS + "EOF\nbash /abs/other.sh", "allow",
+     + "EOF\npython3 -I -c \"import sys; print(open(sys.argv[1]).read())\" /abs/k.txt", "deny", "allow"),
+    ("hdc-write-other-file-run", "cat > /abs/n.txt <<'EOF'\n" + _HDC_APOS + "EOF\nbash /abs/other.sh", "deny",
      "allow"),
+    ("hdc-cat1-fd-redirect", "cat1>/abs/f <<'E'\n" + _HDC_AMP + "E", "deny", "allow"),
     ("hdc-cat-partly-quoted-delim-amp", "cat <<EO'F'\n" + _HDC_AMP + "EOF", "allow", "allow"),
     ("hdc-bash-partly-quoted-delim-amp", "bash <<EO'F'\n" + _HDC_AMP + "EOF", "deny", "allow"),
-    ("hdc-adopter-exact", _TRKASY_HEREDOC_ADOPTER, "allow", "allow"),
+    ("hdc-adopter-exact", _TRKASY_HEREDOC_ADOPTER, "deny", "allow"),
     ("hdc-adopter-unquoted", "cat > /tmp/k.txt <<EOF\na'b\nsource\nEOF", "allow", "allow"),
 ))
-# The mutant reads every consumer as data, the reading before the consumer was named.
-_TRKASY_HDC_MUTANT_ANCHOR = "runs = not _orch_heredoc_body_is_data(command, op_at, seg, end, read_bodies)"
+# The mutant reads every body as data (the reading before the command's data shape was proved).
+_TRKASY_HDC_MUTANT_ANCHOR = "runs = not data_shape"
 _TRKASY_HDC_MUTANT_REPLACEMENT = "runs = False"
 
 
