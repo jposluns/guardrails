@@ -4954,9 +4954,15 @@ expected-check-ids = [
   "parent/adopter-statement-dropped-red",
   "parent/adopter-statement-wrapped-passes",
   "local/adopter-statement-not-required",
+  "parent/adopter-negated-red",
+  "parent/adopter-commented-red",
+  "parent/author-claim-appended-red",
+  "parent/adopter-comment-boundary",
   "revert/adopter-check-dropped-red",
   "revert/adopter-whitespace-unfolded-red",
   "revert/adopter-opf-surface-read-red",
+  "revert/author-claims-check-dropped-red",
+  "revert/adopter-comment-check-dropped-red",
 ]
 
 [[suite]]
@@ -4981,6 +4987,11 @@ expected-check-ids = [
   "local/in-tree-boundary",
   "local/surface-outside-tree-red",
   "local/helper-missing-cannot-evaluate",
+  "local/file-digest-mismatch-red",
+  "local/carried-digest-not-of-bytes-red",
+  "local/symlinked-directory-outside-cannot-evaluate",
+  "local/symlinked-directory-inside-read",
+  "local/in-root-boundary",
   "revert/duplicate-block-read-by-first-red",
   "revert/comment-check-dropped-red",
   "revert/restatement-compare-dropped-red",
@@ -4994,6 +5005,11 @@ expected-check-ids = [
   "revert/in-tree-boundary-components-red",
   "revert/scope-check-dropped-red",
   "revert/helper-cannot-evaluate-as-finding-red",
+  "revert/file-digest-check-dropped-red",
+  "revert/carried-digest-check-dropped-red",
+  "revert/digest-checks-dropped-red",
+  "revert/containment-check-dropped-red",
+  "revert/containment-prefix-red",
 ]
 
 [[suite]]

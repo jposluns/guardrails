@@ -33,9 +33,13 @@ ships it, never to an installed copy and never taking a field from the documenta
   7. DOC_SURFACES is exactly OPF_SURFACES, OPF's own surfaces, each under opf/ (opf/RELEASING.md among them),
      and PARENT_SURFACES, the parent repository's release document RELEASING.md, outside it;
   8. each surface outside opf/ states the parent's role as a future adopter of a released OPF, not the
-     permanent author of OPF's source (ADOPTER_STATEMENT, every phrase, with each run of whitespace read as
-     one space so a phrase may wrap), so the parent's release document cannot go back to describing the
-     parent as where OPF is authored; a surface under opf/ need not state it.
+     permanent author of OPF's source (ADOPTER_STATEMENT, every phrase, as whole words with each run of
+     whitespace read as one space so a phrase may wrap, at a point no HTML comment may hold open as the
+     restatement reader below reads comments), and states none of AUTHOR_CLAIMS ("where OPF is authored",
+     "authors OPF" and "not a future adopter", as whole words in any case, anywhere in the surface, a comment
+     included); a surface under opf/ need not state it. The check is lexical: it refuses the statement
+     dropped, hidden in a comment or negated as "not a future adopter", and a claim worded as an AUTHOR_CLAIMS
+     phrase; a claim that the parent authors OPF worded any other way is not detected.
 
 The findings are reported in two responsibilities kept apart while OPF is nested: OPF-local (rules 1 to 3, 7,
 and 4 to 6 over the surfaces and documents under opf/, which move with that tree) and the parent release
@@ -217,6 +221,9 @@ DOC_SURFACES = OPF_SURFACES + PARENT_SURFACES
 DIGEST_LOCATION = (MODULE_REL, "SHIPPED_DECLARATION_SHA256")
 # rule 8: the phrases each surface outside opf/ states, with each run of whitespace read as one space
 ADOPTER_STATEMENT = ("a future adopter of a released OPF", "not the permanent author of OPF's source")
+# rule 8: the phrases no surface outside opf/ may state (whole words, any case, anywhere): each describes the parent
+# as where OPF is authored or negates its adopter role
+AUTHOR_CLAIMS = ("where OPF is authored", "authors OPF", "not a future adopter")
 _HTML_OPEN = '<div class="tree"><pre id="opf-declaration">'
 _HTML_CLOSE = "</pre></div>"
 _MD_OPEN = "```toml opf-declaration"
@@ -580,19 +587,41 @@ def scope_problems():
     return problems
 
 
+def _phrase_pattern(phrase, flags=0):
+    """A pattern matching `phrase` as whole words, each run of whitespace in it matching any run of whitespace in
+    the text, so a phrase may wrap."""
+    return re.compile(r"\b" + r"\s+".join(re.escape(word) for word in phrase.split()) + r"\b", flags)
+
+
+def _stated_outside_comment(rel, text, phrase):
+    """Whether `phrase` (_phrase_pattern) occurs in the text of the surface `rel` at a point no HTML comment may
+    hold open, as the restatement reader reads comments (_in_comment over the lines before it and the part of its
+    own line before it)."""
+    lines = text.split("\n")
+    for found in _phrase_pattern(phrase).finditer(text):
+        row = text.count("\n", 0, found.start())
+        column = found.start() - (text.rfind("\n", 0, found.start()) + 1)
+        if not _in_comment(rel, lines[:row] + ([lines[row][:column]] if column else [])):
+            return True
+    return False
+
+
 def adopter_problems(surfaces):
     """The findings of rule 8 over each surface (rel -> text) outside OPF's own tree: an ADOPTER_STATEMENT phrase
-    it does not state, each run of whitespace in the text and the phrase read as one space. A surface in OPF's
-    own tree is not read."""
+    it does not state outside an HTML comment, and an AUTHOR_CLAIMS phrase it states anywhere (any case, a comment
+    included). A surface in OPF's own tree is not read."""
     problems = []
     for rel, text in surfaces.items():
         if in_opf(rel):
             continue
-        flat = " ".join(text.split())
-        missing = [phrase for phrase in ADOPTER_STATEMENT if " ".join(phrase.split()) not in flat]
+        missing = [phrase for phrase in ADOPTER_STATEMENT if not _stated_outside_comment(rel, text, phrase)]
         if missing:
             problems.append("{} does not state the parent's role as a future adopter of a released OPF (missing "
                             "{})".format(rel, "; ".join(repr(phrase) for phrase in missing)))
+        claimed = [phrase for phrase in AUTHOR_CLAIMS if _phrase_pattern(phrase, re.IGNORECASE).search(text)]
+        if claimed:
+            problems.append("{} describes the parent as where OPF is authored (states {})".format(
+                rel, "; ".join(repr(phrase) for phrase in claimed)))
     return problems
 
 
@@ -1543,11 +1572,14 @@ def self_test(report_path=None):
 
     def adopter_rows(runs):
         """case name -> whether its run gives the expected outcome: the live tree passes, and each edit of the
-        parent release document is one parent finding naming exactly the phrases it lost."""
+        parent release document is a parent finding naming exactly the phrases it lost (and, where it claims
+        authorship, one naming the AUTHOR_CLAIMS phrase it states)."""
         return {
             "adopter-equal": runs["adopter-equal"][0] == 0,
             "author-claimed": labelled(runs, "author-claimed", parent_line, adopter_text)
-            and "(missing \"not the permanent author of OPF's source\")" in runs["author-claimed"][1],
+            and "(missing \"not the permanent author of OPF's source\")" in runs["author-claimed"][1]
+            and "RELEASING.md describes the parent as where OPF is authored (states 'authors OPF')"
+            in runs["author-claimed"][1],
             "adopter-dropped": labelled(runs, "adopter-dropped", parent_line, adopter_text)
             and "(missing 'a future adopter of a released OPF'; \"not the permanent author of OPF's source\")"
             in runs["adopter-dropped"][1],
@@ -1577,7 +1609,45 @@ def self_test(report_path=None):
     opf_only = {"opf/RELEASING.md": "", "opf/spec/OPF-QUICKSTART.md": ""}
     check("local/adopter-statement-not-required", adopter_problems(opf_only) == [], adopter_problems(opf_only))
 
-    # the reverts: rule 8 dropped, the whitespace read as written, and the surfaces in OPF's own tree read too
+    # the statement kept in words but negated, followed by a claim of authorship, or hidden in a comment beside
+    # one: each a finding, the claim named by its AUTHOR_CLAIMS phrase
+    claim_text = "RELEASING.md describes the parent as where OPF is authored (states {})"
+    claim_cases = {
+        "negated": "This repository is not a future adopter of a released OPF, not the permanent author of OPF's "
+                   "source; it is where OPF is authored.\n",
+        "commented": "<!-- This repository is a future adopter of a released OPF, not the permanent author of OPF's "
+                     "source. -->\nThis repository authors OPF.\n",
+    }
+    appended = "This repository is where OPF is authored and every OPF release is cut.\n"
+    claim_found = dict((name, adopter_problems({"RELEASING.md": text})) for name, text in claim_cases.items())
+    check("parent/adopter-negated-red", claim_found["negated"] == [claim_text.format(
+        "'where OPF is authored'; 'not a future adopter'")], claim_found)
+    check("parent/adopter-commented-red", claim_found["commented"] == [
+        adopter_text + " (missing 'a future adopter of a released OPF'; \"not the permanent author of OPF's "
+        "source\")", claim_text.format("'authors OPF'")], claim_found)
+    try:
+        rows = tree_runs({"appended": {"RELEASING.md": lambda _path: (ROOT / "RELEASING.md").read_text(
+            encoding="utf-8") + appended}})
+        appended_ok = labelled(rows, "appended", parent_line, claim_text.format("'where OPF is authored'")) \
+            and adopter_text not in rows["appended"][1]
+    except AssertionError as exc:
+        rows, appended_ok = {"anchor": str(exc)}, False
+    check("parent/author-claim-appended-red", appended_ok, rows)
+    # the comment boundary: the statement on the line after a closed comment and after one closed on its own line
+    # (just outside: stated), and inside the comment (a finding)
+    statement = "This repository is a future adopter of a released OPF, not the permanent author of OPF's source."
+    comment_cases = {
+        "next-line": "<!-- a note -->\n" + statement + "\n",
+        "same-line": "<!-- a note --> " + statement + "\n",
+        "inside": "<!-- a note\n" + statement + "\n-->\n",
+    }
+    comment_found = dict((name, adopter_problems({"RELEASING.md": text})) for name, text in comment_cases.items())
+    check("parent/adopter-comment-boundary", comment_found["next-line"] == [] and comment_found["same-line"] == []
+          and len(comment_found["inside"]) == 1 and comment_found["inside"][0].startswith(adopter_text),
+          comment_found)
+
+    # the reverts: rule 8 dropped, the whitespace read as written, the surfaces in OPF's own tree read too, the
+    # AUTHOR_CLAIMS check dropped, and a phrase inside a comment counted as stated
     with patch.object(here, "adopter_problems", lambda surfaces: []):
         try:
             rows = adopter_rows(tree_runs(adopter_cases))
@@ -1589,8 +1659,11 @@ def self_test(report_path=None):
     try:
         mutants = {}
         for name, old, new in (
-            ("unfolded", '        flat = " ".join(text.split())\n', "        flat = text\n"),
-            ("opf-read", "        if in_opf(rel):\n            continue\n        flat", "        flat"),
+            ("unfolded", '    return re.compile(r"\\b" + r"\\s+".join(', '    return re.compile(r"\\b" + " ".join('),
+            ("opf-read", "        if in_opf(rel):\n            continue\n        missing", "        missing"),
+            ("claims", "        if claimed:\n", "        if False:\n"),
+            ("commented", "        if not _in_comment(" "rel, lines[:row]",
+             "        if True or not _in_comment(rel, lines[:row]"),
         ):
             module = "opf_declaration_adopter_mutant_" + name
             try:
@@ -1606,6 +1679,17 @@ def self_test(report_path=None):
         read = mutants["opf-read"]
         found = read if isinstance(read, str) else read.adopter_problems(opf_only)
         check("revert/adopter-opf-surface-read-red", isinstance(found, list) and len(found) == 2, found)
+        unclaimed = mutants["claims"]
+        found = unclaimed if isinstance(unclaimed, str) else dict(
+            (name, unclaimed.adopter_problems({"RELEASING.md": text})) for name, text in (
+                ("negated", claim_cases["negated"]),
+                ("appended", (ROOT / "RELEASING.md").read_text(encoding="utf-8") + appended)))
+        check("revert/author-claims-check-dropped-red", isinstance(found, dict) and found["negated"] == []
+              and found["appended"] == [], found)
+        uncommented = mutants["commented"]
+        found = uncommented if isinstance(uncommented, str) else uncommented.adopter_problems(
+            {"RELEASING.md": claim_cases["commented"]})
+        check("revert/adopter-comment-check-dropped-red", found == [claim_text.format("'authors OPF'")], found)
     finally:
         shutil.rmtree(tmp)
 

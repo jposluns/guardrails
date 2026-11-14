@@ -19,3 +19,52 @@ expected-check-ids = [
     "init-contract/loaded-exit-in-child",
     "init-contract/fault-channels",
 ]
+
+# OPF's own declaration gate. The parent repository's tools/selftest_checks.toml registers the same suite
+# while OPF is nested; both lists are reconciled against the same check() sites, so they hold the same ids.
+[[suite]]
+id = "opf-declaration-local-selftest"
+runner = "tools/check_opf_declaration.py"
+expected-check-ids = [
+    "live/real-tree-passes",
+    "live/restating-documents-are-the-surfaces",
+    "local/equal-passes",
+    "local/releasing-stale-red",
+    "local/releasing-block-missing-red",
+    "local/releasing-block-duplicate-red",
+    "local/releasing-block-commented-red",
+    "local/quickstart-stale-red",
+    "local/digest-location-missing-red",
+    "local/undeclared-document-red",
+    "local/version-disagreement-red",
+    "local/declaration-bytes-differ-red",
+    "local/version-unterminated-cannot-evaluate",
+    "local/surface-absent-cannot-evaluate",
+    "local/version-size-bound",
+    "local/in-tree-boundary",
+    "local/surface-outside-tree-red",
+    "local/helper-missing-cannot-evaluate",
+    "local/file-digest-mismatch-red",
+    "local/carried-digest-not-of-bytes-red",
+    "local/symlinked-directory-outside-cannot-evaluate",
+    "local/symlinked-directory-inside-read",
+    "local/in-root-boundary",
+    "revert/duplicate-block-read-by-first-red",
+    "revert/comment-check-dropped-red",
+    "revert/restatement-compare-dropped-red",
+    "revert/quickstart-compare-dropped-red",
+    "revert/digest-location-check-dropped-red",
+    "revert/undeclared-document-check-dropped-red",
+    "revert/version-check-dropped-red",
+    "revert/file-rules-dropped-red",
+    "revert/input-cannot-evaluate-as-finding-red",
+    "revert/version-size-bound-dropped-red",
+    "revert/in-tree-boundary-components-red",
+    "revert/scope-check-dropped-red",
+    "revert/helper-cannot-evaluate-as-finding-red",
+    "revert/file-digest-check-dropped-red",
+    "revert/carried-digest-check-dropped-red",
+    "revert/digest-checks-dropped-red",
+    "revert/containment-check-dropped-red",
+    "revert/containment-prefix-red",
+]

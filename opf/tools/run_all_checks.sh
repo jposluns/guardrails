@@ -57,6 +57,7 @@ run_gate "opf-selftest-registry"       python3 -I -B "$here/check_opf_selftest_e
 run_gate "opf-init-contract-check-selftest-execution" python3 -I -B "$here/check_opf_selftest_execution.py" --suite opf-init-contract-check-selftest
 run_gate "opf-declaration-check-selftest" python3 -I -B "$here/check_opf_declaration.py" --self-test
 run_gate "opf-declaration-check"       python3 -I -B "$here/check_opf_declaration.py"
+run_gate "opf-declaration-local-selftest-execution" python3 -I -B "$here/check_opf_selftest_execution.py" --suite opf-declaration-local-selftest
 run_gate "opf-adopt-selftest"          python3 -I -B "$here/_opf_adopt.py" --self-test
 run_gate "opf-adopt-apply-selftest"    python3 -I -B "$here/_opf_adopt_apply.py" --self-test
 run_gate "opf-adopt-state-selftest"    python3 -I -B "$here/_opf_adopt_state.py" --self-test

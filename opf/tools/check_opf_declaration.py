@@ -12,7 +12,11 @@
 Its root is the OPF tree, the directory above this file's tools/ directory (opf/ while OPF is nested in its parent
 repository, the checkout root once it stands alone). Every path below is relative to that root, and the gate reads
 nothing outside it: it imports only helpers beside this file (_opf_declaration, _opf_store and, for an
-execution-reported self-test, _selftest_exit_report). It applies the section 16.1 rules that move with OPF:
+execution-reported self-test, _selftest_exit_report); it opens every input without following a symlink as its
+last component (O_NOFOLLOW); an input whose directory, its symlinks resolved, is not the resolved OPF root or
+under it (_inside_root: a symlinked directory that leads out of the tree) is a cannot-evaluate and is never
+opened; and rule 6's walk enters no symlinked directory. A directory replaced by another process between that
+check and the open is not detected. It applies the section 16.1 rules that move with OPF:
 
   1. the declaration file tools/opf-declaration.toml is a regular file whose bytes are well-formed
      (_opf_declaration.parse_declaration: the four fields, typed, in the canonical form) and do not contradict the
@@ -38,11 +42,12 @@ parent repository's tools/check_opf_declaration.py documents, carried here line 
 that parent gate still checks the same rules over the whole repository and the parent's own release document, and
 its self-test keeps its own registered checks; this gate is the OPF-local half that moves with the OPF tree.
 
-An input that is not a regular file of at most MAX_READ_BYTES bytes (MAX_OPF_VERSION_BYTES for VERSION), cannot be
-read or (but for the declaration file) is not UTF-8, a directory rule 6 cannot list, and a helper module that cannot
-be imported are each a cannot-evaluate (exit 2), never a finding or a clean exit; so is any exception other than a
-KeyboardInterrupt that leaves the gate body. Each such site catches with a bare except and takes the exception with
-sys.exception(); a KeyboardInterrupt, told by its real type, propagates.
+An input that is not a regular file of at most MAX_READ_BYTES bytes (MAX_OPF_VERSION_BYTES for VERSION), lies
+outside the OPF tree through a symlinked directory, cannot be read or (but for the declaration file) is not UTF-8,
+a directory rule 6 cannot list, and a helper module that cannot be imported are each a cannot-evaluate (exit 2),
+never a finding or a clean exit; so is any exception other than a KeyboardInterrupt that leaves the gate body.
+Each such site catches with a bare except and takes the exception with sys.exception(); a KeyboardInterrupt, told
+by its real type, propagates.
 
 Its entry point opens with opf.py's canonical --self-test statement, which opf.py's aggregator requires first in
 every opf/tools module that binds self_test, and then runs the child-status guard, an inline copy of
@@ -50,11 +55,15 @@ _child_status.py that the parent's tools/check_child_status_coverage.py pins to 
 main(): where this process cannot read a child's exit status it writes a refusal naming this gate and exits 2. A
 direct --self-test launch takes the first statement and so runs unguarded; the self-test starts no child process.
 
-The self-test runs over scratch copies of this tree's inputs, each with one edit, and shows each rule red on its
-edit and each revert red, a mutant of this file written to a scratch directory and loaded with importlib. Its check
-ids are registered in the parent's tools/selftest_checks.toml (suite opf-declaration-local-selftest) and reconciled
-by tools/check_selftest_execution.py while OPF is nested; in a standalone OPF tree the plain --self-test runs them
-all with no registry to reconcile against.
+The self-test runs over scratch copies of this tree's inputs in a temporary directory, each with one edit, and
+shows each rule red on its edit (both digest comparisons of rule 2 each on a carried digest that is not the file's,
+and the containment check on a symlinked directory that leads out of the tree) and each revert it names red, a
+mutant of this file written to a scratch directory and loaded with importlib; the reverts are the ones it names,
+not every possible edit. Its check ids are registered as suite opf-declaration-local-selftest in OPF's own
+tools/selftest_checks.toml, reconciled by tools/check_opf_selftest_execution.py beside this file, which the OPF
+runner tools/run_all_checks.sh launches, and, while OPF is nested, in the parent's tools/selftest_checks.toml,
+reconciled by the parent's tools/check_selftest_execution.py; each reconciles the same list against this file's
+check() sites, so the two lists hold the same ids.
 """
 import sys
 
@@ -208,6 +217,23 @@ def _read_regular(path, rel, limit=MAX_READ_BYTES):
         raise CannotEvaluate("{} grew past {} bytes while read".format(rel, limit))
     finally:
         os.close(fd)
+
+
+def _inside_root(root, rel):
+    """Whether the directory holding the OPF-relative entry `rel`, its symlinks resolved, is the resolved OPF tree
+    `root` or lies under it, compared by path component (a sibling whose name only starts with the root's is
+    outside)."""
+    base = Path(root).resolve()
+    return (Path(root) / rel).parent.resolve().is_relative_to(base)
+
+
+def _read_input(root, rel, limit=MAX_READ_BYTES):
+    """The bytes of the input `rel` of the OPF tree `root` (_read_regular); an input whose directory resolves
+    outside that tree, through a symlinked directory, is a CannotEvaluate and is never opened."""
+    if not _inside_root(root, rel):
+        raise CannotEvaluate("{} lies outside the OPF tree: its directory resolves outside {}".format(
+            rel, Path(root).resolve()))
+    return _read_regular(Path(root) / rel, rel, limit)
 
 
 def _scan_markers(text, is_open):
@@ -430,7 +456,7 @@ def restating_documents(root):
             if not name.endswith(DOC_SUFFIXES):
                 continue
             rel = (Path(directory) / name).relative_to(root).as_posix()
-            text = _read_regular(Path(directory) / name, rel).decode("utf-8")
+            text = _read_input(root, rel).decode("utf-8")
             if any(line.strip() in (_HTML_OPEN, _MD_OPEN) for line in text.split("\n")):
                 found.add(rel)
     return found
@@ -478,11 +504,9 @@ def run(root):
             raise
         return _cannot_evaluate("a helper module cannot be loaded", exc)
     try:
-        data = _read_regular(Path(root) / DECLARATION_REL, DECLARATION_REL)
-        version = read_opf_version(_read_regular(Path(root) / VERSION_REL, VERSION_REL,
-                                                 MAX_OPF_VERSION_BYTES).decode("utf-8"))
-        surfaces = dict((rel, _read_regular(Path(root) / rel, rel).decode("utf-8")) for rel in DOC_SURFACES
-                        if in_tree(rel))
+        data = _read_input(root, DECLARATION_REL)
+        version = read_opf_version(_read_input(root, VERSION_REL, MAX_OPF_VERSION_BYTES).decode("utf-8"))
+        surfaces = dict((rel, _read_input(root, rel).decode("utf-8")) for rel in DOC_SURFACES if in_tree(rel))
         documents = restating_documents(root)
     except:   # a CannotEvaluate, a UnicodeDecodeError, an OSError, or any other exception while the inputs are read
         exc = sys.exception()
@@ -503,15 +527,18 @@ def run(root):
 
 # --- self-test ---------------------------------------------------------------------------------------------
 
-def _copy_mutant(directory, name, old, new):
-    """A copy of this file with `old` (present exactly once) replaced by `new`, written to its own scratch
-    directory and loaded with importlib as `name`; the caller removes any sys.modules entry under that name."""
+def _copy_mutant(directory, name, old, new, *more):
+    """A copy of this file with `old` (present exactly once) replaced by `new`, and each further (old, new) pair
+    in `more` likewise, written to its own scratch directory and loaded with importlib as `name`; the caller
+    removes any sys.modules entry under that name."""
     source = Path(__file__).resolve().read_text(encoding="utf-8")
-    if source.count(old) != 1:
-        raise AssertionError("revert anchor found {} times: {!r}".format(source.count(old), old[:60]))
+    for anchor, replacement in ((old, new),) + more:
+        if source.count(anchor) != 1:
+            raise AssertionError("revert anchor found {} times: {!r}".format(source.count(anchor), anchor[:60]))
+        source = source.replace(anchor, replacement)
     home = Path(directory) / name
     home.mkdir()
-    (home / (name + ".py")).write_text(source.replace(old, new), encoding="utf-8")
+    (home / (name + ".py")).write_text(source, encoding="utf-8")
     spec = importlib.util.spec_from_file_location(name, home / (name + ".py"))
     module = importlib.util.module_from_spec(spec)
     saved = list(sys.path)
@@ -594,8 +621,9 @@ def self_test(report_path=None):
         return 1
     print("SELF-TEST PASS: opf-declaration-local {} checks (each rule red on a stale, missing, duplicate or "
           "commented-out restatement, a missing digest location, an undeclared restating document, a release "
-          "other than VERSION, a changed declaration file and a surface outside the OPF tree; an unreadable input "
-          "or helper a cannot-evaluate; each check's revert red)".format(len(results)))
+          "other than VERSION, a changed declaration file, a carried digest that is not the file's and a surface "
+          "outside the OPF tree; an input through a symlinked directory outside the tree, an unreadable input or "
+          "helper a cannot-evaluate; each named revert red)".format(len(results)))
     return 0
 
 
@@ -608,7 +636,7 @@ def _self_test_body(results, executed):
 
     here = globals()
     shipped = _opf_declaration.SHIPPED_DECLARATION_BYTES
-    version = read_opf_version(_read_regular(ROOT / VERSION_REL, VERSION_REL).decode("utf-8"))
+    version = read_opf_version(_read_input(ROOT, VERSION_REL, MAX_OPF_VERSION_BYTES).decode("utf-8"))
     md_block = "{}\n{}{}\n".format(_MD_OPEN, shipped.decode("ascii"), _MD_CLOSE)
     stale_block = md_block.replace('release = "{}"'.format(version), 'release = "0.0.1"')
 
@@ -732,6 +760,101 @@ def _self_test_body(results, executed):
     check("local/helper-missing-cannot-evaluate", helper_rc == 2 and "CANNOT EVALUATE: a helper module cannot be "
           "loaded" in err.getvalue(), (helper_rc, err.getvalue()))
 
+    # rule 2's two digest comparisons, each on its own finding: the implementation carries a digest that is
+    # neither the file's nor that of SHIPPED_DECLARATION_BYTES, while the file's bytes still equal those bytes
+    file_digest = "has sha256 {}, but {} carries the shipped-file digest {}".format(
+        hashlib.sha256(shipped).hexdigest(), MODULE_REL, "0" * 64)
+    carried_digest = "{}: SHIPPED_DECLARATION_SHA256 is not the digest of SHIPPED_DECLARATION_BYTES".format(MODULE_REL)
+    # the two comparisons as file_problems states them, the anchors of their reverts below
+    digest_check = "    if digest != _opf_declaration.SHIPPED_DECLARATION_SHA256:\n"
+    carried_check = ("    if hashlib.sha256(_opf_declaration.SHIPPED_DECLARATION_BYTES).hexdigest() != \\\n"
+                     "            _opf_declaration.SHIPPED_DECLARATION_SHA256:\n")
+
+    def digest_runs(gate):
+        """The exit status and stderr of `gate` over a scratch copy of the live inputs, with the carried digest
+        replaced by 64 zeros for the run alone."""
+        saved_digest = _opf_declaration.SHIPPED_DECLARATION_SHA256
+        _opf_declaration.SHIPPED_DECLARATION_SHA256 = "0" * 64
+        try:
+            return _tree_runs({"equal": {}}, gate)["equal"]
+        finally:
+            _opf_declaration.SHIPPED_DECLARATION_SHA256 = saved_digest
+
+    def digest_findings(outcome):
+        """(exit status, the file-digest finding present, the carried-digest finding present, the byte finding
+        present) of a digest_runs outcome."""
+        rc, err = outcome
+        lines = [line for line in err.splitlines() if line.startswith("  ")]
+        return (rc, any(file_digest in line for line in lines), any(carried_digest in line for line in lines),
+                any("differs from SHIPPED_DECLARATION_BYTES" in line for line in lines))
+
+    digest_live = digest_findings(digest_runs(run))
+    check("local/file-digest-mismatch-red", digest_live[0] == 1 and digest_live[1] and not digest_live[3],
+          digest_live)
+    check("local/carried-digest-not-of-bytes-red", digest_live[0] == 1 and digest_live[2] and not digest_live[3],
+          digest_live)
+
+    # the containment check: an input reached through a symlinked directory that leads out of the OPF tree is a
+    # cannot-evaluate, never read; one that stays inside the tree is read as any other (rule 6 then reports the
+    # real directory's restating document, which is no surface)
+    surface_dir = "spec"
+    if not any(rel.startswith(surface_dir + "/") for rel in DOC_SURFACES):
+        raise AssertionError("no surface lies under {}/ to link".format(surface_dir))
+
+    def linked_runs(gate):
+        """name -> (exit status, stderr) of `gate` over scratch copies of the live inputs whose surface_dir is a
+        symlink: to a directory outside the tree ("outside") and to one inside it ("inside")."""
+        tmp = tempfile.mkdtemp(prefix="opf-declaration-local-selftest-")
+        try:
+            runs = {}
+            for name in ("outside", "inside"):
+                home = Path(tmp, name, "home")
+                for rel in (DECLARATION_REL, VERSION_REL) + tuple(rel for rel in DOC_SURFACES if in_tree(rel)):
+                    os.makedirs(Path(home, rel).parent, exist_ok=True)
+                    Path(home, rel).write_bytes((ROOT / rel).read_bytes())
+                target = Path(tmp, name, "elsewhere") if name == "outside" else Path(home, "real-" + surface_dir)
+                os.rename(Path(home, surface_dir), target)
+                os.symlink(target, Path(home, surface_dir))
+                with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()) as err:
+                    runs[name] = (gate(home), err.getvalue())
+            return runs
+        finally:
+            shutil.rmtree(tmp)
+
+    def linked_outside(runs):
+        """Whether the "outside" run is the cannot-evaluate naming the surface outside the tree."""
+        rc, err = runs["outside"]
+        return rc == 2 and "CANNOT EVALUATE: an input the gate needs cannot be read" in err \
+            and "lies outside the OPF tree" in err
+
+    linked = linked_runs(run)
+    check("local/symlinked-directory-outside-cannot-evaluate", linked_outside(linked), linked)
+    inside_rc, inside_err = linked["inside"]
+    check("local/symlinked-directory-inside-read", inside_rc == 1 and "CANNOT EVALUATE" not in inside_err
+          and "real-{}/".format(surface_dir) in inside_err and "is not in DOC_SURFACES" in inside_err, linked)
+
+    # _inside_root at its boundary: the root itself and a real or linked directory inside it (inside or at it);
+    # a linked sibling whose name only starts with the root's and a link to the root's parent (just outside)
+    def root_boundary(inside_root):
+        """rel -> inside_root(root, rel) over a scratch root with those links."""
+        tmp = tempfile.mkdtemp(prefix="opf-declaration-local-selftest-")
+        try:
+            home = Path(tmp, "home")
+            os.makedirs(Path(home, "real"))
+            os.makedirs(Path(tmp, "home-outside"))
+            os.symlink(Path(home, "real"), Path(home, "linked-in"))
+            os.symlink(Path(tmp, "home-outside"), Path(home, "sibling"))
+            os.symlink(Path(tmp), Path(home, "up"))
+            return dict((rel, inside_root(home, rel)) for rel in (
+                "VERSION", "real/x.md", "linked-in/x.md", "sibling/x.md", "up/x.md"))
+        finally:
+            shutil.rmtree(tmp)
+
+    root_expected = {"VERSION": True, "real/x.md": True, "linked-in/x.md": True, "sibling/x.md": False,
+                     "up/x.md": False}
+    root_found = root_boundary(_inside_root)
+    check("local/in-root-boundary", root_found == root_expected, root_found)
+
     # the reverts: each a mutant of this file loaded from a scratch directory, run over the case its check shows
     tmp = tempfile.mkdtemp(prefix="opf-declaration-local-selftest-")
     try:
@@ -756,8 +879,13 @@ def _self_test_body(results, executed):
              "        return 1\n"),
             ("input", "        return _cannot_evaluate(\"an input the gate needs cannot be read\", exc)\n",
              "        return 1\n"),
-            ("version-bound", "VERSION_REL,\n                                                 MAX_OPF_VERSION_BYTES)",
-             "VERSION_REL)"),
+            ("version-bound", "_read_input(root, VERSION_REL, " "MAX_OPF_VERSION_BYTES)",
+             "_read_input(root, VERSION_REL)"),
+            ("digest-file", digest_check, "    if False:\n"),
+            ("digest-carried", carried_check, "    if False:\n"),
+            ("containment", "    if not _inside_root(root, rel):\n", "    if False:\n"),
+            ("prefix", ".parent.resolve().is_relative_to(base)\n",
+             ".parent.resolve().as_posix().startswith(base.as_posix())\n"),
         ):
             module = "opf_declaration_local_mutant_" + name
             try:
@@ -766,6 +894,15 @@ def _self_test_body(results, executed):
                 mutants[name] = str(exc)
             finally:
                 sys.modules.pop(module, None)
+        # both digest comparisons dropped at once: the file and the carried digest are then never compared
+        module = "opf_declaration_local_mutant_digest_both"
+        try:
+            mutants["digest-both"] = _copy_mutant(tmp, module, digest_check, "    if False:\n",
+                                                  (carried_check, "    if False:\n"))
+        except AssertionError as exc:
+            mutants["digest-both"] = str(exc)
+        finally:
+            sys.modules.pop(module, None)
 
         def reverted(name, case):
             """(the case's rows entry, exit status, stderr) under the named mutant, or why it could not run."""
@@ -813,6 +950,31 @@ def _self_test_body(results, executed):
             with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
                 helper_reverted = helper.run(ROOT)
         check("revert/helper-cannot-evaluate-as-finding-red", helper_reverted == 1, helper_reverted)
+
+        def mutant_digest(name):
+            """digest_findings under the named mutant, or why it could not run."""
+            mutant = mutants[name]
+            return mutant if isinstance(mutant, str) else digest_findings(digest_runs(mutant.run))
+
+        # each comparison dropped alone loses its own finding and keeps the other; both dropped pass clean
+        dropped = mutant_digest("digest-file")
+        check("revert/file-digest-check-dropped-red", isinstance(dropped, tuple) and dropped[0] == 1
+              and not dropped[1] and dropped[2], dropped)
+        dropped = mutant_digest("digest-carried")
+        check("revert/carried-digest-check-dropped-red", isinstance(dropped, tuple) and dropped[0] == 1
+              and dropped[1] and not dropped[2], dropped)
+        dropped = mutant_digest("digest-both")
+        check("revert/digest-checks-dropped-red", isinstance(dropped, tuple) and dropped[0] == 0, dropped)
+        # the containment check dropped reads the surface outside the tree and passes clean; compared as text,
+        # a sibling whose name only starts with the root's reads as inside
+        contained = mutants["containment"]
+        escaped = contained if isinstance(contained, str) else linked_runs(contained.run)
+        check("revert/containment-check-dropped-red", isinstance(escaped, dict) and escaped["outside"][0] == 0,
+              escaped)
+        prefixed = mutants["prefix"]
+        prefix_found = prefixed if isinstance(prefixed, str) else root_boundary(prefixed._inside_root)
+        check("revert/containment-prefix-red", isinstance(prefix_found, dict)
+              and prefix_found["sibling/x.md"] is True, prefix_found)
     finally:
         shutil.rmtree(tmp)
 

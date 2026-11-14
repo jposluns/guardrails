@@ -29,12 +29,14 @@ and `SHIPPED_DECLARATION_SHA256` in `tools/_opf_declaration.py`, and the same th
 does not by itself touch `VERSION` or `release`.
 
 The declaration gate, `tools/check_opf_declaration.py` in this tree, then must exit 0. It reads nothing
-outside this tree. It refuses a restatement that differs from the file, a missing restatement, a
-document with more than one restatement block, a document in this tree that restates the declaration
-but is not one of its surfaces, and a release other than the version in `VERSION`. While OPF is nested,
-the parent repository's own `tools/check_opf_declaration.py` must exit 0 as well: it checks the same
-rules over the whole repository and reports findings in this tree apart from findings in the parent's
-release document.
+outside this tree: it follows no symlinked file, and it refuses to evaluate (exit 2), without reading
+it, an input reached through a symlinked directory that leads out of this tree. It refuses a
+restatement that differs from the file, a missing restatement, a document with more than one
+restatement block, a document in this tree that restates the declaration but is not one of its
+surfaces, a shipped-file digest that is not the file's, and a release other than the version in
+`VERSION`. While OPF is nested, the parent repository's own `tools/check_opf_declaration.py` must exit
+0 as well: it checks the same rules over the whole repository and reports findings in this tree apart
+from findings in the parent's release document.
 
 This release declares:
 

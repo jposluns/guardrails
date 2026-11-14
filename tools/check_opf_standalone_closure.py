@@ -245,12 +245,13 @@ _SUBSET = [
 # heavier load, as at any other opf/ tree; the leg's bound is its 1260 s config-lane floor, not this.
 # Two rows come from a later run still: opf-declaration-check-selftest and opf-declaration-check, the
 # legs of OPF's own declaration gate, added after that, carry 1 s each, from three runs of each
-# MEASURED on 2026-11-13 from 03:46Z at opf/ tree 736e0cb93c871a735258357170222c342a5f39cb, each as the
-# gate runs it (python3 -I -B against a copy of opf/ alone, through _materialize and _run_one), plain,
-# one leg at a time, on a 96-CPU host: 0.33 to 0.39 s and 0.19 to 0.23 s, each exit 0, load5 35.3 at
-# each start, rounded up. That load is heavier than the run above's (13.7 to 24.6), but the host
-# differs, so the figures are INFERRED for any other host or opf/ tree; each leg's bound is its
-# 1260 s config-lane floor, not these.
+# MEASURED on 2026-11-14 from 14:32Z at opf/ tree 8b08408e91c19d27acaf5328a713cc1d7b204f95 (the tree
+# this change gives opf/; compare `git rev-parse HEAD:opf` with it), each as the gate runs it
+# (python3 -I -B against a copy of opf/ alone, through _materialize and _run_one), plain, one leg at a
+# time, on a 96-CPU host: 0.52 to 0.66 s and 0.22 to 0.29 s, each exit 0, load5 62.7 at each start,
+# rounded up. That load is heavier than the run above's (13.7 to 24.6), but the host differs, so the
+# figures are INFERRED for any other host or opf/ tree; each leg's bound is its 1260 s config-lane
+# floor, not these.
 # _LOAD_HEADROOM is the allowance for a slower or more loaded host than that run's. The multiplier is
 # an INFERENCE, not a measurement, and no observation supports it (one measured run contradicts it, see
 # below): the host carried other work during the run, but a host loaded beyond it adds contention these
@@ -331,8 +332,8 @@ _LEG_CEILING_S = {
     "opf-init-selftest": 228,  # INFERRED here (measured at 7bf8107f: 227.4 s at load5 16.3)
     "opf-init-contract-validator-selftest": 1,  # INFERRED here (measured at 7bf8107f: 0.1 s at load5 17.6)
     "opf-init-contract-check-selftest": 1,  # INFERRED here (measured at 7bf8107f: 0.1 s at load5 17.6)
-    "opf-declaration-check-selftest": 1,  # MEASURED 2026-11-13 (0.33 to 0.39 s at load5 35.3, three runs)
-    "opf-declaration-check": 1,  # MEASURED 2026-11-13 (0.19 to 0.23 s at load5 35.3, three runs)
+    "opf-declaration-check-selftest": 1,  # MEASURED 2026-11-14 at 8b08408e (0.52 to 0.66 s at load5 62.7, three runs)
+    "opf-declaration-check": 1,  # MEASURED 2026-11-14 at 8b08408e (0.22 to 0.29 s at load5 62.7, three runs)
     "opf-adopt-selftest": 152,  # INFERRED here (measured at 7bf8107f: 151.1 s at load5 18.6)
     "opf-adopt-apply-selftest": 9,  # INFERRED here (measured at 7bf8107f: 8.2 s at load5 21.5)
     "opf-adopt-state-selftest": 600,  # INFERRED (main's row; not measured: 7bf8107f has no such leg)
