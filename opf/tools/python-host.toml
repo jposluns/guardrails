@@ -1,0 +1,18 @@
+# opf/tools/python-host.toml
+#
+# The OPF tree's own host-patch policy: the exact CPython patch release the OPF authoring host runs.
+# Hand-authored SOURCE, owned by OPF and required beside tools/python-floor.toml; no OPF check reads a
+# parent repository's host policy in its place. opf/tools/check_opf_python_floor_policy.py checks it.
+#
+# python-host-patch   "MAJOR.MINOR.PATCH", a patch release of python-floor in tools/python-floor.toml. The
+#                     host-patch jobs that policy names (host-patch-jobs in host-patch-workflow) pin exactly
+#                     this release. It is the authoring host's choice only: the adopter CI template and
+#                     the doctor template pin the floor, never this patch. When the host interpreter
+#                     changes, change this value and those jobs' pins together, in one reviewed change.
+#
+# The initial value was read from the parent repository's .aiqt/python-host.toml line 14 at commit
+# 97fc6a272dc41a294da696a67c7499c1c1df20df, the patch the parent's opf-host-patch job runs the OPF
+# self-test on. From then on this file, not the parent's, decides it.
+
+format-version = 1
+python-host-patch = "3.14.4"

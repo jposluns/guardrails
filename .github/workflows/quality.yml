@@ -524,6 +524,22 @@ jobs:
         shell: bash
         run: python3 -I -B opf/tools/check_opf_prompt_pack.py
 
+      - name: OPF Python-floor policy self-test
+        shell: bash
+        run: python3 -I -B opf/tools/check_opf_python_floor_policy.py --self-test
+
+      - name: OPF Python-floor and host-patch policies (OPF tree only)
+        shell: bash
+        run: python3 -I -B opf/tools/check_opf_python_floor_policy.py
+
+      - name: OPF Python-floor gate copy self-test
+        shell: bash
+        run: python3 -I -B opf/tools/check_python_floor.py --self-test
+
+      - name: OPF Python-floor gate copy, over the OPF tree
+        shell: bash
+        run: python3 -I -B opf/tools/check_python_floor.py
+
       - name: OPF adoption schema and read-only planning self-test
         shell: bash
         run: python3 -I -B opf/tools/_opf_adopt.py --self-test

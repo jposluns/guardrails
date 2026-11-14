@@ -5,7 +5,8 @@ name: OPF Quality
 # parent's workflow runs OPF gates by path under opf/tools/ (not every OPF runner line verbatim), and
 # the OPF init contract gate requires a step of this file to run the OPF runner. Once OPF is the root of
 # its own repository this workflow runs that runner, tools/run_all_checks.sh, which resolves every gate
-# from its own directory. The Python floor is 3.14, as each OPF tool declares at its entry.
+# from its own directory. The Python floor is 3.14, as each OPF tool declares at its entry; the
+# opf-host-patch job alone sets up the host patch instead.
 
 on:
   pull_request:
@@ -33,3 +34,35 @@ jobs:
       - name: OPF runner (every OPF gate, the live init contract gate included)
         shell: bash
         run: bash tools/run_all_checks.sh
+
+  # The host-patch job: the one job here that sets up the exact patch release tools/python-host.toml
+  # names rather than the floor. host-patch-jobs in tools/python-floor.toml names it, and HOST_TOOLS in
+  # tools/check_opf_host_pin.py binds it to its run lines. It runs that checker first, in full mode, so
+  # the interpreter leg fails the job when the setup step did not give it that release, then those run
+  # lines. The checker's jobs leg holds this job, blank and comment lines aside, line for line to the
+  # policies and HOST_TOOLS (a job name, runs-on ubuntu-24.04, this checkout step, one Python setup step,
+  # the gate, the run lines, each held step with name, shell: bash and run only, no env: or if:), and this
+  # workflow's top-level keys to name, on, permissions and jobs. The jobs leg also runs outside this job,
+  # in the OPF runner's --binding-only line in opf-checks, so an edit here cannot silence every run of
+  # it. runs-on is ubuntu-24.04 because, as the parent repository's host-patch jobs record, on 2026-10-12
+  # the Python versions manifest listed Linux x64 builds of the host patch for Ubuntu 22.04 and 24.04
+  # only, so ubuntu-latest could fail this job on an image without one.
+  opf-host-patch:
+    name: OPF tooling (host patch)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14.4'
+
+      - name: OPF host pin (every leg, the interpreter leg included)
+        shell: bash
+        run: python3 -I -B tools/check_opf_host_pin.py
+
+      - name: OPF tooling self-test (host patch)
+        shell: bash
+        run: python3 -I -B tools/opf.py --self-test

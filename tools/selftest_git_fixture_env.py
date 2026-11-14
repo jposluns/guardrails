@@ -4565,10 +4565,15 @@ OPF_LIFECYCLE_EXEMPTIONS = {
     "opf/tools/_opf_pack_manifest.py": "Pack parsing and digest vectors over filesystem fixtures.",
     "opf/tools/_opf_release_history.py": "Pure history parsing, canonical emission and digest vectors over in-memory bytes.",
     "opf/tools/check_opf_homes.py": "Homes contract and schema boundary vectors.",
+    "opf/tools/check_opf_host_pin.py": ("Host-patch policy, job binding, workflow host-patch job and interpreter "
+                                        "vectors over filesystem fixtures with injected interpreter versions; "
+                                        "no git."),
     "opf/tools/check_opf_init_contract.py": "Git-free contract matcher vectors.",
     "opf/tools/check_opf_init_observe.py": "Observation vectors with mocked git subprocesses.",
     "opf/tools/check_opf_init_p0.py": "P0 store validation and runner registration vectors.",
     "opf/tools/check_opf_prompt_pack.py": "Prompt-pack schema and drift vectors over filesystem fixtures.",
+    "opf/tools/check_opf_python_floor_policy.py": "Floor-policy schema and reconciliation vectors over filesystem "
+                                                  "fixtures; no git.",
     "opf/tools/check_opf_selftest_execution.py": ("Execution-registry gate. Its self-test runs synthetic OPF roots "
                                                   "whose fake runners only record check ids; its --suite run "
                                                   "launches a registered runner, here the Git-free "

@@ -595,6 +595,13 @@ ALLOWLIST = (
      "self-test probe: exec_module of the repository's own NEWTAB contract script (a fixture"
      " copy of .github/check_newtab_contract.py), opf/enforcement/claude/pretooluse_deny.py or"
      " tools/_gen_common.py, the equivalent of an import; no external input"),
+    ("opf/tools/check_python_floor.py", "_tomllib_catches", "code", 1,
+     "static analysis: getattr(builtins, name) resolves an except-clause name in a scanned"
+     " file's AST and accepts it only as an exception class for issubclass; never called"),
+    ("opf/tools/check_python_floor.py", "_mutant", "code", 1,
+     _MUTANT + " (a scratch copy of this gate with one leg or adaptation reverted)"),
+    ("opf/tools/check_opf_host_pin.py", "_mutant", "code", 1,
+     _MUTANT + " (a scratch copy of this checker with one rule reverted)"),
     ("opf/tools/_opf_adopt_discover.py",
      "self_test.DiscoveryTests.test_change_during_discovery_is_cannot_evaluate.os_hook", "shell", 1,
      "self-test fault injector: mock.patch.object(os, attribute) where every caller passes the"
