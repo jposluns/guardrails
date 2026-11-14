@@ -4337,9 +4337,10 @@ def _test_pgrep_self_match(failures):
 # newline, arith-shift, assign-read, after-assign, line-continuation, heredoc, heredoc-word,
 # heredoc-redirect, heredoc-strip, heredoc-strip-later-line, for-arith-shift, case-second-pattern,
 # case-esac-word, for-do-arith-shift, for-do-assign-read, for-brace-assign-read, coproc-arith-shift,
-# coproc-for-arith-shift, if-cond-then-arith-shift, dollar-bracket-shift, subscript-shift and
-# subscript-quoted-bracket, and herestring, assign-herestring and redirect-redirect {; echo "v=$v"} and
-# herestring-word {; echo "v=$v w=$w"}.
+# coproc-for-arith-shift, if-cond-then-arith-shift, dollar-bracket-shift, subscript-shift,
+# subscript-quoted-bracket, subscript-long-assign, subscript-quoted-assign, subscript-newline-assign,
+# case-pattern-bracket, subscript-dquote-bracket and subscript-nested-bracket, and herestring,
+# assign-herestring and redirect-redirect {; echo "v=$v"} and herestring-word {; echo "v=$v w=$w"}.
 # Fire rows whose read showed only in what ran: cond-and, cond-or, cond-compare, cond-group and
 # cond-newline exited 1 under B (their $? -eq 1 test failed) and 0 under P; for-arith-and, for-arith-or,
 # for-do-cond-and and for-do-for-arith printed zero under B (their $? == 0 or $? -eq 0 test held) and
@@ -4357,16 +4358,22 @@ def _test_pgrep_self_match(failures):
 # Quiet rows that read the earlier command's 1 under both: d, f, k, l, m, redirect-target, procsub,
 # pipeline, then-assign, redirect-target-separated, assign-read-redirect, assign-no-subst,
 # heredoc-read-first, heredoc-later-redirect, for-arith-later-line, cond-glued-redirect,
-# cond-glued-amp-redirect, dollar-bracket-later-line, subscript-later-line, cond-read-first (it exited 0,
-# so its $? -eq 1 test held), redirect-before {; echo "v=$v"}, and in-body (inside the substitution body,
-# after its false).
+# cond-glued-amp-redirect, dollar-bracket-later-line, subscript-later-line, case-pattern-bracket-read,
+# cond-read-first (it exited 0, so its $? -eq 1 test held), redirect-before {; echo "v=$v"}, and in-body
+# (inside the substitution body, after its false).
+# Quiet row that read the earlier command's 1 under B with its substitution never run: subscript-temp-env
+# (bash reported a[0] as not a valid identifier and ran env without expanding it); under P the same error
+# ended it with exit 1 before env ran.
+# Quiet rows whose read bash never ran: case-pattern-heredoc and redirect-target-subscript printed only done
+# under both (the line holding the read was here-document text).
 # Quiet rows that read 0 under both from a command that succeeded: next-command (the echo's 0), cond-end
 # (the [[ ]] command's own 0), and if-arith-then-read and if-cond-then-read (the (( )) or [[ ]] condition's
 # 0).
 # Quiet rows that read the substitution's 0 under B and 1 under P, quiet by design: k-assignment-only
-# {; echo "rc=$rc"} and for-do-assignment-only (an assignment-only command leaves its substitution's exit
-# in $?, often the status wanted), and in-body-after-subst (a read inside a substitution body is not
-# judged, the documented NOT SEEN limit).
+# {; echo "rc=$rc"}, for-do-assignment-only, subscript-quoted-assignment-only and
+# subscript-long-assignment-only (an assignment-only command leaves its substitution's exit in $?, often
+# the status wanted), and in-body-after-subst (a read inside a substitution body is not judged, the
+# documented NOT SEEN limit).
 # Quiet rows with no read: single-quoted, escaped, dq-escaped, ansi-c, ansi-c-escaped, heredoc and
 # heredoc-escaped printed their $? as literal text; comment printed an empty line; dollar-dollar printed the
 # shell's process id and a ?; no-read holds no $?.
@@ -4466,6 +4473,21 @@ _SAS_FIRE_ROWS = (
      'a[1<<0]=5\nfalse; RC=$? env "SHA=$(true)" printenv RC'),
     ("(sas-fire-subscript-quoted-bracket) a later line after a << in a subscript holding a quoted ]",
      "declare -A h; h[']<<x']=1\nfalse; RC=$? env \"SHA=$(true)\" printenv RC"),
+    ("(sas-fire-subscript-long-assign) a later line after a << in a subscript after an assignment whose "
+     "subscript runs past 256 characters",
+     'a[' + '0+' * 140 + '0]=1 b[1<<0]=5\nfalse; RC=$? env "SHA=$(true)" printenv RC'),
+    ("(sas-fire-subscript-quoted-assign) a later line after a << in a subscript after an assignment whose "
+     "subscript holds a quoted ]",
+     "declare -A h; h[']']=1 b[1<<0]=5\nfalse; RC=$? env \"SHA=$(true)\" printenv RC"),
+    ("(sas-fire-subscript-newline-assign) a later line after a << in a subscript after an assignment whose "
+     "subscript holds a newline",
+     'a[1\n]=1 b[1<<0]=5\nfalse; RC=$? env "SHA=$(true)" printenv RC'),
+    ("(sas-fire-case-pattern-bracket) a read in a case arm whose pattern holds an unmatched [",
+     "false\ncase 'a[' in\na[) RC=$? env \"SHA=$(true)\" printenv RC;;\nesac"),
+    ("(sas-fire-subscript-dquote-bracket) a later line after a << in a subscript holding a double-quoted ]",
+     'declare -A h; h["]"<<0]=5\nfalse; RC=$? env "SHA=$(true)" printenv RC'),
+    ("(sas-fire-subscript-nested-bracket) a later line after a << in a subscript holding a nested [...]",
+     'a[b[1]<<0]=5\nfalse; RC=$? env "SHA=$(true)" printenv RC'),
 )
 _SAS_QUIET_ROWS = (
     ("(sas-quiet-d) read before every substitution", 'false; echo "rc=$? $(true)"'),
@@ -4525,6 +4547,21 @@ _SAS_QUIET_ROWS = (
      'echo "$(true)" $[1<<0]\nfalse; echo "rc=$?"'),
     ("(sas-quiet-subscript-later-line) a read on a later line after a << shift in an assignment subscript",
      'a[1<<0]=5 b="$(true)"\nfalse; echo "rc=$?"'),
+    ("(sas-quiet-subscript-quoted-assignment-only) assignment-only command whose subscript holds a quoted ]",
+     "declare -A h; false; h[']']=$(true) rc=$?; echo \"rc=$rc\""),
+    ("(sas-quiet-subscript-long-assignment-only) assignment-only command whose subscript runs past 256 "
+     "characters",
+     'false; a[' + '0+' * 140 + '0]=$(true) rc=$?; echo "rc=$rc"'),
+    ("(sas-quiet-subscript-temp-env) read after a substitution in a subscripted assignment before a command "
+     "word", 'false; a[0]=$(true) RC=$? env printenv RC'),
+    ("(sas-quiet-case-pattern-bracket-read) read before a substitution in a case arm whose pattern holds an "
+     "unmatched [", "false; case 'a[' in\na[) x=$(true) echo \"rc=$?\";;\nesac"),
+    ("(sas-quiet-case-pattern-heredoc) a later line in the body of a here-document opened in a case arm "
+     "after a pattern holding an unmatched [",
+     'case x in b) ;; a[) <<EOF ] ;; esac\nfalse; RC=$? env "SHA=$(true)" printenv RC\nEOF\necho done'),
+    ("(sas-quiet-redirect-target-subscript) a later line in the body of a here-document opened by a << in "
+     "a redirection target that starts NAME[",
+     '> a[1<<0] echo hi\nfalse; RC=$? env "SHA=$(true)" printenv RC\n0]\necho done'),
 )
 
 
