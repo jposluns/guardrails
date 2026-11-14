@@ -4339,8 +4339,15 @@ def _test_pgrep_self_match(failures):
 # case-esac-word, for-do-arith-shift, for-do-assign-read, for-brace-assign-read, coproc-arith-shift,
 # coproc-for-arith-shift, if-cond-then-arith-shift, dollar-bracket-shift, subscript-shift,
 # subscript-quoted-bracket, subscript-long-assign, subscript-quoted-assign, subscript-newline-assign,
-# case-pattern-bracket, subscript-dquote-bracket and subscript-nested-bracket, and herestring,
-# assign-herestring and redirect-redirect {; echo "v=$v"} and herestring-word {; echo "v=$v w=$w"}.
+# case-pattern-bracket, subscript-dquote-bracket, subscript-nested-bracket, subscript-append-assign,
+# subscript-empty-command-word-assign-read (b=), subscript-empty-command-word-array-read and
+# subscript-empty-command-word-array-read-after (a=), and herestring, assign-herestring and
+# redirect-redirect {; echo "v=$v"} and herestring-word {; echo "v=$v w=$w"}.
+# Fire rows whose read named the file a redirection wrote, f0 under B and f1 under P (e unset):
+# subscript-no-command-word, subscript-empty-command-word, subscript-empty-brace-command-word and
+# subscript-inner-subst. Fire rows whose read named an array index, 0 under B and 1 under P:
+# subscript-empty-command-word-subscript-read (declare -p a showed [0]="5", then [1]="5") and
+# subscript-command-word-read (bash reported the command a[0], then a[1], as not found).
 # Fire rows whose read showed only in what ran: cond-and, cond-or, cond-compare, cond-group and
 # cond-newline exited 1 under B (their $? -eq 1 test failed) and 0 under P; for-arith-and, for-arith-or,
 # for-do-cond-and and for-do-for-arith printed zero under B (their $? == 0 or $? -eq 0 test held) and
@@ -4361,9 +4368,12 @@ def _test_pgrep_self_match(failures):
 # cond-glued-amp-redirect, dollar-bracket-later-line, subscript-later-line, case-pattern-bracket-read,
 # cond-read-first (it exited 0, so its $? -eq 1 test held), redirect-before {; echo "v=$v"}, and in-body
 # (inside the substitution body, after its false).
-# Quiet row that read the earlier command's 1 under B with its substitution never run: subscript-temp-env
-# (bash reported a[0] as not a valid identifier and ran env without expanding it); under P the same error
-# ended it with exit 1 before env ran.
+# Quiet rows that read the earlier command's 1 under B with the subscripted assignment never expanded (bash
+# reported a[0] as not a valid identifier and ran the command word without expanding it); under P the same
+# error ended each with exit 1 before the command word ran: subscript-temp-env and subscript-append-temp-env
+# (B printed 1), subscript-literal-command-word and subscript-quoted-empty-command-word (B wrote f1, the
+# second after a command named by the empty "$e" was not found), and subscript-array-read-command-word (B
+# printed a= with a[0] never set).
 # Quiet rows whose read bash never ran: case-pattern-heredoc and redirect-target-subscript printed only done
 # under both (the line holding the read was here-document text).
 # Quiet rows that read 0 under both from a command that succeeded: next-command (the echo's 0), cond-end
@@ -4488,6 +4498,27 @@ _SAS_FIRE_ROWS = (
      'declare -A h; h["]"<<0]=5\nfalse; RC=$? env "SHA=$(true)" printenv RC'),
     ("(sas-fire-subscript-nested-bracket) a later line after a << in a subscript holding a nested [...]",
      'a[b[1]<<0]=5\nfalse; RC=$? env "SHA=$(true)" printenv RC'),
+    ("(sas-fire-subscript-no-command-word) redirection read after a subscripted assignment's substitution "
+     "with no command word", 'false; a[0]=$(true) >"f$?"'),
+    ("(sas-fire-subscript-empty-command-word) redirection read after a subscripted assignment's substitution "
+     "where the only command word is an unquoted $e", 'false; a[0]=$(true) $e >"f$?"'),
+    ("(sas-fire-subscript-empty-brace-command-word) redirection read after a subscripted assignment's "
+     "substitution where the only command word is an unquoted ${e:-}", 'false; a[0]=$(true) ${e:-} >"f$?"'),
+    ("(sas-fire-subscript-empty-command-word-assign-read) assignment read after a subscripted assignment's "
+     "substitution where the only command word is an unquoted $e", 'false; a[0]=$(true) b=$? $e; echo "b=$b"'),
+    ("(sas-fire-subscript-empty-command-word-array-read) read in a subscripted assignment where the only "
+     "command word is an unquoted substitution", 'false; a[0]=$? $(true); echo "a=${a[0]}"'),
+    ("(sas-fire-subscript-empty-command-word-array-read-after) read in a subscripted assignment after an "
+     "assignment's substitution where the only command word is an unquoted $e",
+     'false; x=$(true) a[0]=$? $e; echo "a=${a[0]}"'),
+    ("(sas-fire-subscript-empty-command-word-subscript-read) read after a substitution in a subscript of an "
+     "assignment where the only command word is an unquoted $e", 'false; a[$(true)$?]=5 $e; declare -p a'),
+    ("(sas-fire-subscript-command-word-read) read after a substitution in the subscript of a command word",
+     'false; a[$(true)$?] x'),
+    ("(sas-fire-subscript-inner-subst) redirection read after a substitution inside an assignment's subscript",
+     'false; a[$(true)]=1 >"f$?"'),
+    ("(sas-fire-subscript-append-assign) a later line after a << in a subscript after a += assignment",
+     'a[1]+=1 b[1<<0]=5\nfalse; RC=$? env "SHA=$(true)" printenv RC'),
 )
 _SAS_QUIET_ROWS = (
     ("(sas-quiet-d) read before every substitution", 'false; echo "rc=$? $(true)"'),
@@ -4562,6 +4593,15 @@ _SAS_QUIET_ROWS = (
     ("(sas-quiet-redirect-target-subscript) a later line in the body of a here-document opened by a << in "
      "a redirection target that starts NAME[",
      '> a[1<<0] echo hi\nfalse; RC=$? env "SHA=$(true)" printenv RC\n0]\necho done'),
+    ("(sas-quiet-subscript-append-temp-env) read after a substitution in a subscripted += assignment before a "
+     "command word", 'false; a[0]+=$(true) RC=$? env printenv RC'),
+    ("(sas-quiet-subscript-literal-command-word) redirection read after a subscripted assignment's "
+     "substitution where an unquoted $e comes before a literal command word",
+     'false; a[0]=$(true) $e true >"f$?"'),
+    ("(sas-quiet-subscript-quoted-empty-command-word) redirection read after a subscripted assignment's "
+     'substitution where the command word is a quoted "$e"', 'false; a[0]=$(true) "$e" >"f$?"'),
+    ("(sas-quiet-subscript-array-read-command-word) read in a subscripted assignment before a literal command "
+     "word, with a substitution in a later word", 'false; a[0]=$? true $(true); echo "a=${a[0]}"'),
 )
 
 
