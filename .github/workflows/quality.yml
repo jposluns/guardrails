@@ -430,6 +430,17 @@ jobs:
         shell: bash
         run: python3 -I -B tools/gen_draft_site.py --check
 
+      # The OPF site renderer reads the opf/site/ pages and their opf/site/draft-src/ sources as verdict
+      # inputs, so it runs here, in an always-run job, beside the parent generator that owns those pages:
+      # a site-only change that turns it red fails every lane.
+      - name: OPF site renderer self-test (the OPF copy of the opfiles.ai page rendering)
+        shell: bash
+        run: python3 -I -B opf/tools/_site_render.py --self-test
+
+      - name: OPF site renderer drift (the 9 opfiles.ai pages rendered from the OPF root)
+        shell: bash
+        run: python3 -I -B opf/tools/_site_render.py --check
+
       - name: Site baseline pin self-test (execution-reconciled)
         shell: bash
         run: python3 -I -B tools/check_selftest_execution.py --suite baseline-pin-selftest
@@ -523,6 +534,18 @@ jobs:
       - name: OPF prompt-pack manifest drift gate
         shell: bash
         run: python3 -I -B opf/tools/check_opf_prompt_pack.py
+
+      - name: OPF site generator self-test
+        shell: bash
+        run: python3 -I -B opf/tools/gen_draft_site.py --self-test
+
+      - name: OPF site generator drift check
+        shell: bash
+        run: python3 -I -B opf/tools/gen_draft_site.py --check
+
+      - name: OPF site generator parent comparison
+        shell: bash
+        run: python3 -I -B opf/tools/gen_draft_site.py --parent-integration
 
       - name: OPF adoption schema and read-only planning self-test
         shell: bash

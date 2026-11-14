@@ -162,6 +162,11 @@ run_gate "opf-adopt-observe-selftest" python3 -I -B opf/tools/_opf_adopt_observe
 run_gate "opf-adopt-discover-selftest" python3 -I -B opf/tools/_opf_adopt_discover.py --self-test
 run_gate "opf-prompt-pack-selftest" python3 -I -B opf/tools/check_opf_prompt_pack.py --self-test
 run_gate "opf-prompt-pack" python3 -I -B opf/tools/check_opf_prompt_pack.py
+run_gate "opf-site-render-selftest" python3 -I -B opf/tools/_site_render.py --self-test
+run_gate "opf-site-render-check" python3 -I -B opf/tools/_site_render.py --check
+run_gate "opf-site-gen-selftest" python3 -I -B opf/tools/gen_draft_site.py --self-test
+run_gate "opf-site-gen-check" python3 -I -B opf/tools/gen_draft_site.py --check
+run_gate "opf-site-gen-parent-integration" python3 -I -B opf/tools/gen_draft_site.py --parent-integration
 run_gate "opf-enforce-platforms-selftest" python3 -I -B tools/check_opf_enforce_platforms.py --self-test
 run_gate "opf-enforce-platforms" python3 -I -B tools/check_opf_enforce_platforms.py
 run_gate "opf-enforce-residuals-selftest" python3 -I -B tools/check_opf_enforce_residuals.py --self-test

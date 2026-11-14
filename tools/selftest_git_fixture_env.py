@@ -4564,6 +4564,8 @@ OPF_LIFECYCLE_EXEMPTIONS = {
     "opf/tools/_opf_init_contract.py": "KEEP contract validation over synthetic models.",
     "opf/tools/_opf_pack_manifest.py": "Pack parsing and digest vectors over filesystem fixtures.",
     "opf/tools/_opf_release_history.py": "Pure history parsing, canonical emission and digest vectors over in-memory bytes.",
+    "opf/tools/_site_render.py": ("Page render and refusal vectors over the live site sources and a temporary "
+                                  "OPF-only copy checked by a --check child; no git."),
     "opf/tools/check_opf_homes.py": "Homes contract and schema boundary vectors.",
     "opf/tools/check_opf_init_contract.py": "Git-free contract matcher vectors.",
     "opf/tools/check_opf_init_observe.py": "Observation vectors with mocked git subprocesses.",
@@ -4576,6 +4578,7 @@ OPF_LIFECYCLE_EXEMPTIONS = {
                                                   "environment that pins HOME and XDG_CONFIG_HOME to a fresh "
                                                   "empty directory and git's global and system config to "
                                                   "os.devnull. Neither path runs git."),
+    "opf/tools/gen_draft_site.py": "Site generation, status-line and drift vectors over OPF-only filesystem copies; no git.",
     "opf/tools/selftest_commonmark_conformance.py": "CommonMark parser conformance vectors.",
     "opf/tools/selftest_commonmark_headings.py": "Heading selection and vendor-manifest fixtures.",
 }
