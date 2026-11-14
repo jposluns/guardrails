@@ -129,7 +129,14 @@ SITE_REGENERATED = frozenset({
 # (restating_documents), site pages included; because of that whole-tree walk, the
 # opf-declaration live gate and its self-test also run in the always-run site job, so a
 # site-only change that turns them red fails every lane (the execution-reconciled registration
-# stays in the selftest-execution job).
+# stays in the selftest-execution job). opf/tools/gen_draft_site.py (self-test, --check and
+# --parent-integration, the opf-tooling-a job) reads the 9 OPF pages under opf/site/, the
+# opf/site/draft-src/ sources and the status line in opf/site/llms.txt as verdict inputs and needs
+# no exclusion: its pages are opf/tools/_site_render.py's render, whose self-test and --check run
+# in the always-run site job over the same inputs, and its llms.txt status line is the one
+# tools/gen_draft_site.py --check, also in the always-run site job, generates by the same rule
+# from the same files, so a site-only change that turns it red turns an always-run sibling red
+# too; what a site-only train gives up there is its parent comparison and its own self-test cases.
 # tools/check_python_floor.py reads site/development.html, site/install/index.html,
 # opf/site/adopt.md and opf/site/adopt/index.html; its live gate runs in the always-run registry job in every run and in
 # two of the three config lanes (the malformed lane excludes the bare launch, which stays in the

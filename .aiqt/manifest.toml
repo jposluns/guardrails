@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.0.5"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "1516cfad776bd18d63567659ddb33343a691f1589bdbd674140ee23fe7c8461a"
+tree-sha256 = "31c2f466870373fe9f0d4f7778c791c47ec749721b6d1a559934eafe5081c9b2"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -72,8 +72,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 601945
-sha256 = "f0b60fbabfe73f1a2f9bb88b242fa23d10abc9d56ba8f17b850f8414e9ad6df6"
+bytes = 602727
+sha256 = "9f10e26f4a5498d57195ef4b96e2f4a91d98ef544286c6eb9388d69c304beb24"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -3287,8 +3287,8 @@ sha256 = "eeaf84ff6f52265afaada78685614553c864d42cfb1ec5331fa0a89fbe159a8c"
 
 [[sources]]
 path = "opf/tools/_site_render.py"
-bytes = 79542
-sha256 = "30ece4ceb463a77762aad3b7efa690f49e2c63e950800495baa6ea5fc5cb6725"
+bytes = 88446
+sha256 = "b6c67129995ec116bbe86f5e298a850cc80539e4b66940d0fac23837cc75a006"
 
 [[sources]]
 path = "opf/tools/_vendor/commonmark-spec-0.31.2/spec-0.31.2-examples.json"
@@ -3492,8 +3492,8 @@ sha256 = "a44f372fad4d953c52bf577aacec2823eea90df73d7eb7041cc642ad1b78edb0"
 
 [[sources]]
 path = "opf/tools/gen_draft_site.py"
-bytes = 26583
-sha256 = "51927923cdcdefb31f57487f042367d35e06fc9d77ab1f9ce328c77dc18f1435"
+bytes = 30309
+sha256 = "8b54f7248b8d9ee9b5f41613653acc2f6f7a17fc05cd46dbc5a8a73b84b3cea4"
 
 [[sources]]
 path = "opf/tools/opf-declaration.toml"
@@ -4472,8 +4472,8 @@ sha256 = "1e9bd4c85c3e549d35a8d43cbe5e3449f17cc7c8c4e396bd5d31fc914dd891a0"
 
 [[sources]]
 path = "tools/ci_site_scope.py"
-bytes = 58719
-sha256 = "5c11ec76c34975264d4070560859c8d77d451af47eb2ca655cb24a5a6d25b94d"
+bytes = 59438
+sha256 = "7d85854e16e63a8eced2d57274face84b8c43b34e2c06ccac5a59783db10760c"
 
 [[sources]]
 path = "tools/conformance.py"

@@ -9,10 +9,13 @@ renders its own pages from its own inputs, with no import from the parent reposi
 
 Scope. This module renders; it writes nothing. tools/gen_draft_site.py in the parent repository stays the
 one owner (the writer and the drift gate) of the 9 pages under opf/site/ and of the status lines, so a page
-that differs here and not there is a defect in this copy, and --check reports it. Every path resolves from
+that differs here and not there is a defect in this copy, and --check reports it. Every path is named from
 the OPF root (the parent of this file's directory): the page data under site/draft-src/, the committed
 pages under site/, the kept live paths under site/, and VERB_STATUS in tools/opf.py for the $OPF_STATUS
-token. Only the standard library is imported.
+token. A page data directory that resolves outside the OPF root (a symbolic link out of it) is refused, and
+every page data file, committed page and tools/opf.py must be a regular file, not a symbolic link; a
+directory above a committed page or tools/opf.py is followed as the file system resolves it, and a kept
+live path is checked only for existence. Only the standard library is imported.
 
 Copied unchanged from tools/gen_draft_site.py: the page shell (render_page: head, top bar, light and dark
 switch, family footer, live region), the About region, every component that an opfiles.ai page can use,
@@ -22,7 +25,9 @@ which reads the AIQT VERSION and changelog.toml), the mappings bodies (mappings,
 corpus and standards manifests through gen_mappings, gen_rules and gen_agents) and the $HOOK_COUNT token
 (which reads .aiqt/core/hooks/manifest.toml). A page data file naming either component, or carrying the
 $HOOK_COUNT token in any string value (a TOML escape included, since the check runs on parsed values), is
-refused (exit 2) with a message naming it as AIQT-only, never rendered with a guess.
+refused (exit 2) with a message naming it as AIQT-only, never rendered with a guess. Refused here and not
+by the parent: a component name that is not a string, a page data directory outside the OPF root, and a
+tools/opf.py that is not a regular file or is larger than MAX_STATUS_SOURCE_BYTES (each exit 2).
 """
 import sys
 
@@ -267,8 +272,8 @@ PLAN_VARIANTS = ("", "one", "three")
 
 
 def _need(doc, where, required, optional=()):
-    """The table as a dict after shape checks: every required key present, no unknown key, string values
-    (a key listed with a trailing marker in `required`/`optional` is checked by its own caller)."""
+    """The table as a dict after its key checks: every required key present and no unknown key. Value types
+    are not checked here; each caller checks its own (_text, _flag, _items and the component renderers)."""
     unknown = sorted(set(doc) - set(required) - set(optional))
     if unknown:
         raise RefusedPage("{}: unknown key(s) {}".format(where, ", ".join(unknown)))
@@ -380,17 +385,29 @@ def _aiqt_token_where(doc, where):
 STATUS_SOURCE = "tools/opf.py"
 STATUS_PREFIX = "Reference CLI status. "
 _STATUS_KINDS = ("available", "partial", "in progress")
+# The largest tools/opf.py read for VERB_STATUS (the file is about 1.4 MB today).
+MAX_STATUS_SOURCE_BYTES = 1 << 23
 
 
 def verb_status(root=ROOT):
     """VERB_STATUS from tools/opf.py under root, read as a literal: a tuple of (verb, status, scope)
-    rows. RefusedPage when the file cannot be read or parsed, binds it other than once at top level, or
-    holds a row that is not 3 strings with a known status."""
+    rows. RefusedPage when the file is not a regular file (a symbolic link, a FIFO or any other entry,
+    checked with lstat before it is opened, so a FIFO cannot block the read), is larger than
+    MAX_STATUS_SOURCE_BYTES, cannot be read or parsed, binds it other than once at top level, or holds a
+    row that is not 3 strings with a known status."""
     path = Path(root) / STATUS_SOURCE
     import ast
     try:
-        with open(path, encoding="utf-8") as handle:
-            source = handle.read()
+        info = os.lstat(path)
+        if not stat.S_ISREG(info.st_mode):
+            raise OSError("{} is not a regular file (a symbolic link, a FIFO or another entry)".format(path))
+        if info.st_size > MAX_STATUS_SOURCE_BYTES:
+            raise ValueError("{} is larger than {} bytes".format(path, MAX_STATUS_SOURCE_BYTES))
+        with open(path, "rb") as handle:
+            data = handle.read(MAX_STATUS_SOURCE_BYTES + 1)
+        if len(data) > MAX_STATUS_SOURCE_BYTES:
+            raise ValueError("{} is larger than {} bytes".format(path, MAX_STATUS_SOURCE_BYTES))
+        source = data.decode("utf-8")
         tree = ast.parse(source, str(path))
         nodes = [node.value for node in tree.body if isinstance(node, ast.Assign)
                  and any(isinstance(t, ast.Name) and t.id == "VERB_STATUS" for t in node.targets)]
@@ -775,7 +792,8 @@ def _fig_node(x, y, width, node):
 
 
 def _fig_lines(text, limit):
-    """The words of `text` greedily packed into lines of at most `limit` characters."""
+    """The words of `text` greedily packed into lines of at most `limit` characters; a word longer than
+    `limit` is kept whole on a line of its own, so that line is longer than `limit`."""
     lines = []
     for word in text.split():
         if lines and len(lines[-1]) + 1 + len(word) <= limit:
@@ -919,6 +937,9 @@ def _page_from_doc(doc, where):
     for position, component in enumerate(body, 1):
         comp_where = "{}.body[{}]".format(where, position)
         name = component.get("component")
+        # A malformed name (an array or a table) is refused here, before it is looked up by value.
+        if not isinstance(name, str):
+            raise RefusedPage("{}: component must be a string, not {}".format(comp_where, type(name).__name__))
         if name in AIQT_ONLY_COMPONENTS:
             raise RefusedPage("{}: {!r} is an AIQT-only component (it reads AIQT inputs); an OPF page "
                               "cannot carry it".format(comp_where, name))
@@ -1287,11 +1308,19 @@ def build(pages=None, site=SITE, tree=ROOT):
     """{target path relative to the OPF root: text} for every page of the site. The pages are loaded from
     the site's data directory under `tree` unless a fixture `pages` list is given; with the default page
     set the built set must equal OPF_PAGES. Every kept live path must exist under the site's live root in
-    `tree` before anything renders."""
+    `tree` before anything renders. The site's data directory must resolve inside `tree`: one that leads
+    out of it (a symbolic link to a directory elsewhere) is refused, so no page is rendered from outside the
+    OPF root."""
     missing = _kept_live_missing(site, tree)
     if missing:
         raise RefusedPage("kept live path(s) with no target under {}/: {}".format(site["live"], ", ".join(missing)))
     declared = pages is None
+    if declared:
+        root = Path(os.path.realpath(tree))
+        src = Path(os.path.realpath(Path(tree) / site["src"]))
+        if src != root and root not in src.parents:
+            raise RefusedPage("{}: the page data directory resolves to {}, outside the OPF root {}".format(
+                site["src"], src, root))
     site_pages = _load_pages(Path(tree) / site["src"], site["src"]) if declared else pages
     outputs = {}
     for page in site_pages:
@@ -1406,6 +1435,9 @@ def _self_test():
             if needle not in str(exc):
                 failures.append("{}: refused without {!r}: {}".format(name, needle, exc))
             return
+        except Exception as exc:  # a crash where a refusal is due is a failure of this check, not of the run
+            failures.append("{}: raised {} instead of a refusal: {}".format(name, type(exc).__name__, exc))
+            return
         failures.append("{}: not refused".format(name))
 
     # The 9 pages render byte for byte as the committed pages the parent generator writes and holds.
@@ -1451,11 +1483,94 @@ def _self_test():
             handle.write('path = "index.html"\ntitle = "Fixture"\nkind = "landing"\n[[body]]\n'
                          'component = "region"\nlabel = "L"\nhtml = "<p>\\u0024HOOK_COUNT</p>"\n')
         refused("hook-count/toml-escape-refused", "AIQT-only", _load_pages, tmp)
+    # The token in a table key is refused as AIQT-only by the page walk itself, before the key checks
+    # would refuse it as an unknown key.
+    refused("hook-count/key-refused", "AIQT-only", _page_from_doc, dict(page, **{"x$HOOK_COUNT": "x"}),
+            "fixture.toml")
     try:
         note, rendered = status_note(verb_status(ROOT)), _inline(SITE, "$OPF_STATUS")
     except RefusedPage as exc:
         note, rendered = None, str(exc)
     expect("status/opf-status-rendered", note is not None and rendered == note, rendered)
+
+    # A component name that is not a string (an array, or an array of names) is refused as malformed
+    # input, never looked up by value.
+    for label, value in (("empty-array", []), ("array-of-names", ["region"]), ("table", {"name": "region"})):
+        refused("page/component-not-string-refused " + label, "component must be a string", _page_from_doc,
+                dict(page, body=[{"component": value, "label": "L", "html": "<p>x</p>"}]), "fixture.toml")
+
+    # Page data files: a file larger than MAX_PAGE_BYTES is refused and one of exactly MAX_PAGE_BYTES loads;
+    # a symbolic link to a page and a directory named like a page are refused as not regular files.
+    page_text = ('path = "index.html"\ntitle = "Fixture"\nkind = "landing"\n[[body]]\n'
+                 'component = "region"\nlabel = "L"\nhtml = "<p>x</p>"\n#')
+    with tempfile.TemporaryDirectory() as tmp:
+        for name, size in (("at-limit", MAX_PAGE_BYTES), ("over-limit", MAX_PAGE_BYTES + 1)):
+            os.makedirs(Path(tmp) / name)
+            with open(Path(tmp) / name / "page.toml", "w", encoding="utf-8") as handle:
+                handle.write(page_text + "x" * (size - len(page_text) - 1) + "\n")
+        try:
+            loaded = [page["rel"] for page in _load_pages(Path(tmp) / "at-limit")]
+        except RefusedPage as exc:
+            loaded = str(exc)
+        expect("load/page-at-size-limit-loads", loaded == ["index.html"], loaded)
+        refused("load/page-over-size-limit-refused", "larger than", _load_pages, Path(tmp) / "over-limit")
+        os.makedirs(Path(tmp) / "linked")
+        os.symlink(Path(tmp) / "at-limit" / "page.toml", Path(tmp) / "linked" / "page.toml")
+        refused("load/page-symlink-refused", "not a regular file", _load_pages, Path(tmp) / "linked")
+        os.makedirs(Path(tmp) / "nested" / "page.toml")
+        refused("load/page-directory-refused", "not a regular file", _load_pages, Path(tmp) / "nested")
+
+    # tools/opf.py: a file of exactly MAX_STATUS_SOURCE_BYTES is read and a larger one refused, both before
+    # parsing; a symbolic link is refused as not a regular file.
+    status_text = 'VERB_STATUS = (("fixture_verb", "available", ""),)\n#'
+    with tempfile.TemporaryDirectory() as tmp:
+        for name, size in (("at-limit", MAX_STATUS_SOURCE_BYTES), ("over-limit", MAX_STATUS_SOURCE_BYTES + 1)):
+            os.makedirs(Path(tmp) / name / "tools")
+            with open(Path(tmp) / name / STATUS_SOURCE, "w", encoding="utf-8") as handle:
+                handle.write(status_text + "x" * (size - len(status_text) - 1) + "\n")
+        try:
+            table = verb_status(Path(tmp) / "at-limit")
+        except RefusedPage as exc:
+            table = str(exc)
+        expect("status/source-at-size-limit-read", table == (("fixture_verb", "available", ""),), table)
+        refused("status/source-over-size-limit-refused", "larger than", verb_status, Path(tmp) / "over-limit")
+        os.makedirs(Path(tmp) / "linked" / "tools")
+        os.symlink(Path(tmp) / "at-limit" / STATUS_SOURCE, Path(tmp) / "linked" / STATUS_SOURCE)
+        refused("status/source-symlink-refused", "not a regular file", verb_status, Path(tmp) / "linked")
+
+    # $OPF_STATUS reads VERB_STATUS from the tree build() is given, never from the live OPF root: a fixture
+    # tree whose table names only fixture_verb renders that table, through _inline and through build().
+    with tempfile.TemporaryDirectory() as tmp:
+        os.makedirs(Path(tmp) / "tools")
+        with open(Path(tmp) / STATUS_SOURCE, "w", encoding="utf-8") as handle:
+            handle.write('VERB_STATUS = (("fixture_verb", "available", ""),)\n')
+        for path in SITE["kept"]:
+            os.makedirs((Path(tmp) / SITE["live"] / path.lstrip("/")).parent, exist_ok=True)
+            with open(Path(tmp) / SITE["live"] / path.lstrip("/"), "w", encoding="utf-8") as handle:
+                handle.write("kept\n")
+        fixture_note = "Reference CLI status. Available: fixture_verb."
+        try:
+            inline = _inline(dict(SITE, tree=Path(tmp)), "$OPF_STATUS")
+            model = _page_from_doc(dict(page, body=[{"component": "region", "label": "L",
+                                                     "html": "<p>$OPF_STATUS</p>"}]), "fixture.toml")
+            built = build([model], tree=Path(tmp)).get("site/index.html", "")
+        except RefusedPage as exc:
+            inline = built = str(exc)
+        expect("status/explicit-tree-inline", inline == fixture_note, inline)
+        expect("status/explicit-tree-build", "<p>{}</p>".format(fixture_note) in built, built[:300])
+
+    # The page data directory must resolve inside the OPF root: a site/draft-src that is a symbolic link to
+    # a directory outside it is refused, though the pages there are the committed ones.
+    with tempfile.TemporaryDirectory() as tmp:
+        dest = Path(tmp) / "opf"
+        try:
+            _opf_only_copy(dest)
+            shutil.copytree(dest / SITE["src"], Path(tmp) / "outside-src")
+            shutil.rmtree(dest / SITE["src"])
+            os.symlink(Path(tmp) / "outside-src", dest / SITE["src"])
+        except OSError as exc:
+            failures.append("src/outside-root: cannot build the fixture: {}".format(exc))
+        refused("src/outside-root-refused", "outside the OPF root", build, None, SITE, dest)
 
     # Imports: only the standard library, and a copy holding nothing of the parent renders and checks clean
     # from an unrelated working directory; the same copy with 1 page changed is drift (exit 1).
@@ -1479,6 +1594,16 @@ def _self_test():
                 handle.write(b"\n")
             code, out = _run_child(dest / "tools" / "_site_render.py", Path(tmp) / "elsewhere")
         expect("standalone/drift-red", code == 1 and "drift: site/model/index.html" in out, (code, out))
+        # A FIFO in place of tools/opf.py is refused (exit 2) before it is opened; opening it would block
+        # until a writer came, so the check runs in the bounded child, where a hang reads as a timeout.
+        if hasattr(os, "mkfifo"):
+            try:
+                os.unlink(dest / STATUS_SOURCE)
+                os.mkfifo(dest / STATUS_SOURCE)
+                code, out = _run_child(dest / "tools" / "_site_render.py", Path(tmp) / "elsewhere")
+            except OSError as exc:
+                code, out = None, "cannot build the FIFO fixture: {}".format(exc)
+            expect("standalone/status-source-fifo-refused", code == 2 and "not a regular file" in out, (code, out))
 
     if failures:
         for failure in failures:
@@ -1486,7 +1611,8 @@ def _self_test():
         print("{} of {} checks failed".format(len(failures), count[0]), file=sys.stderr)
         return 1
     print("ok: {} checks (the 9 OPF pages render as committed, the AIQT-only components and $HOOK_COUNT are "
-          "refused, and an OPF-only copy imports, renders and checks without the parent)".format(count[0]))
+          "refused, malformed, oversized and non-regular inputs are refused, $OPF_STATUS reads the given tree, "
+          "and an OPF-only copy imports, renders and checks without the parent)".format(count[0]))
     return 0
 
 

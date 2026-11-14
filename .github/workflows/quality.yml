@@ -133,6 +133,14 @@ jobs:
   # the whole tree decoding every .md and .html file, site pages included, so that gate and its
   # self-test also run in the always-run site job below and a site-only change that turns them red
   # fails every lane (the execution-reconciled registration stays in selftest-execution).
+  # opf/tools/gen_draft_site.py (self-test, --check and --parent-integration, opf-tooling-a)
+  # reads the 9 OPF pages under opf/site/, the opf/site/draft-src/ sources and the status line in
+  # opf/site/llms.txt as verdict inputs and needs no exclusion: its pages are
+  # opf/tools/_site_render.py's render, whose self-test and --check run in the always-run site job
+  # below over the same inputs, and its llms.txt status line is the one tools/gen_draft_site.py
+  # --check, also in the site job, generates by the same rule from the same files, so a site-only
+  # change that turns it red turns an always-run sibling red too; a site-only train gives up only
+  # its parent comparison and its own self-test cases.
   # git-fixture-env-core runs the core suite, whose inputs are tools/ modules and generated
   # fixtures, never site/ or opf/site/; git-fixture-env-core-host-patch is that same core suite
   # repeated on the pinned host Python. The three git-fixture-env config host jobs rerun the

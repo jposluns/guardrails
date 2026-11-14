@@ -17,10 +17,12 @@ opf/ tree from its own inputs through the OPF site renderer (_site_render.py bes
 Ownership. While opf/ is nested in the parent repository, the parent's tools/gen_draft_site.py is the one
 writer and the one drift gate of these 12 outputs. This generator never writes them in place: there is no
 default write mode, and --out refuses a directory inside the OPF root. A difference between its bytes and
-the committed bytes is a defect in this copy or a stale output, and --check reports it. Every input path
-resolves from the OPF root (the parent of this file's directory): the page data and committed pages under
-site/, VERB_STATUS in tools/opf.py, and the 3 status line files. Only --parent-integration reads a parent
-file.
+the committed bytes is a defect in this copy or a stale output, and --check reports it. Every input path is
+named from the OPF root (the parent of this file's directory): the page data and committed pages under
+site/, VERB_STATUS in tools/opf.py, and the 3 status line files. The renderer refuses a page data directory
+that resolves outside the OPF root, and each file read must be a regular file, not a symbolic link; a
+directory above a committed page, tools/opf.py or a status line file is followed as the file system
+resolves it. Only --parent-integration reads a parent file.
 """
 import sys
 
@@ -119,7 +121,9 @@ def generate(tree=None):
 
 def check(tree=None):
     """Compare every generated output with the committed bytes under `tree`: 0 when all match, 1 on drift
-    (a missing output is drift), 2 when a page is refused or an input or output cannot be read."""
+    (a missing page is drift), 2 when a page is refused or an input or output cannot be read. A missing
+    status line file is not drift but a refusal (2): its line is generated inside the committed file, so
+    there is nothing to generate it from."""
     tree = ROOT if tree is None else Path(tree)
     try:
         outputs = generate(tree)
@@ -195,12 +199,25 @@ def _load_parent():
 def parent_integration():
     """0 when the parent generator's 9 OPF pages and its 3 status lines (for the live table and 2 fixture
     tables, each written by it into a disposable copy) equal this generator's bytes, 1 on a difference, 2
-    when the parent generator cannot be loaded or refuses."""
+    when the parent generator cannot be loaded (it is absent, or loading it raises) or refuses (its own
+    RefusedPage, a class distinct from the renderer's), or this generator refuses."""
     try:
         parent = _load_parent()
+    except render.RefusedPage as exc:
+        print("error: refused: {}".format(exc), file=sys.stderr)
+        return 2
+    except Exception as exc:  # any failure to load the parent is a refusal (2), never a traceback
+        print("error: refused: cannot load the parent generator {} ({}: {})".format(
+            ROOT.parent / PARENT_GENERATOR, type(exc).__name__, exc), file=sys.stderr)
+        return 2
+    parent_refused = getattr(parent, "RefusedPage", None)
+    refusals = (render.RefusedPage,)
+    if isinstance(parent_refused, type) and issubclass(parent_refused, Exception):
+        refusals += (parent_refused,)
+    try:
         parent_pages = parent.build()
         local = generate(ROOT)
-    except render.RefusedPage as exc:
+    except refusals as exc:
         print("error: refused: {}".format(exc), file=sys.stderr)
         return 2
     findings = []
@@ -400,6 +417,45 @@ def _self_test():
                 code = exc
             expect(name, code == 1, code)
 
+    # Malformed page data: a component given as an array of names is refused (exit 2), never a crash.
+    with tempfile.TemporaryDirectory(prefix="opf-gen-draft-site-malformed-") as tmp:
+        tree = Path(tmp) / "opf"
+        try:
+            _opf_only_copy(tree)
+            src = tree / render.SITE["src"]
+            page = src / sorted(name for name in os.listdir(src) if name.endswith(".toml"))[0]
+            text = _read(page).decode("utf-8")
+            start = text.index('component = "')
+            _write(page, (text[:start] + 'component = ["region"]' + text[text.index("\n", start):]).encode("utf-8"))
+            code = check(tree)
+        except (OSError, ValueError, IndexError) as exc:
+            code = "cannot build the fixture: {}".format(exc)
+        except Exception as exc:  # the crash this check guards against is its failure, not the run's
+            code = "raised {}: {}".format(type(exc).__name__, exc)
+        expect("check/component-array-refused", code == 2, code)
+
+    # --parent-integration refuses (exit 2), never with a traceback, when the parent generator raises while
+    # it loads or refuses with its own RefusedPage class (distinct from the renderer's). Each parent is a
+    # stand-in written beside an OPF-only copy, which runs as a bounded child from an unrelated directory.
+    stand_ins = (
+        ("load-raises", 'raise RuntimeError("stand-in parent cannot load")\n', "cannot load the parent generator"),
+        ("refuses", 'class RefusedPage(Exception):\n    pass\n\n\nSTATUS_LINES = ()\n\n\ndef build():\n'
+                    '    raise RefusedPage("stand-in parent refuses")\n', "stand-in parent refuses"),
+    )
+    for name, body, needle in stand_ins:
+        with tempfile.TemporaryDirectory(prefix="opf-gen-draft-site-parent-") as tmp:
+            tree, elsewhere = Path(tmp) / "opf", Path(tmp) / "elsewhere"
+            try:
+                _opf_only_copy(tree)
+                os.makedirs(elsewhere)
+                os.makedirs((Path(tmp) / PARENT_GENERATOR).parent)
+                _write(Path(tmp) / PARENT_GENERATOR, body.encode("utf-8"))
+                code, out = _run_child(tree / "tools" / "gen_draft_site.py", ["--parent-integration"], elsewhere)
+            except OSError as exc:
+                code, out = None, "cannot build the stand-in parent: {}".format(exc)
+            expect("parent/{}-refused".format(name), code == 2 and needle in out and "Traceback" not in out,
+                   (code, out))
+
     # Imports: the standard library and the renderer only.
     with open(__file__, encoding="utf-8") as handle:
         source = handle.read()
@@ -454,7 +510,8 @@ def _self_test():
         print("{} of {} checks failed".format(len(failures), count[0]), file=sys.stderr)
         return 1
     print("ok: {} checks (the 9 pages and 3 status lines generate as committed and repeat, drift is named, "
-          "nothing is written in place, and an OPF-only copy generates and checks without the parent)".format(
+          "nothing is written in place, a malformed page and a parent that fails to load or refuses exit 2, "
+          "and an OPF-only copy generates and checks without the parent)".format(
               count[0]))
     return 0
 
