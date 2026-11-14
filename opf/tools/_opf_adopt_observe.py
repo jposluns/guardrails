@@ -3752,15 +3752,11 @@ def self_test(vectors_only=False, steady_only=False):
     # thread runs under, by which a case it outlives names it.
     WATCH_JOIN = 10.0
     WATCHER_NAME = "close_row watch_asleep"
-    # close_row's watcher checks: the join they run a held watcher with, how
-    # long a raising case's watcher read holds it once the test thread's read
-    # has raised (under WATCH_JOIN), the bound on holding a watcher until its
-    # case has returned or that read has raised, and how long that read waits
-    # for the watcher to enter its hold.
-    HELD_JOIN = 0.5
-    RAISE_HOLD = 2.0
-    HOLD_BOUND = 120.0
-    HOLD_WAIT = 10.0
+    # The join close_row's watcher checks pass to close_cases (watch_join),
+    # unlike WATCH_JOIN so that a join ignoring its argument is seen. Its
+    # name is used nowhere else in self_test, whose later names would rebind
+    # it before close_row runs.
+    CHECK_JOIN = 0.5
     # poll(2) and ppoll(2), the system calls in which a Python socket or TLS
     # call with a timeout waits, by machine, as /proc/self/task/<id>/syscall
     # numbers them.
@@ -3877,14 +3873,17 @@ def self_test(vectors_only=False, steady_only=False):
 
     def close_cases(context, client_context, server_class,
                     cases=("handshake", "request", "registration"),
-                    asleep=asleep_in_poll, wait=BLOCK_WAIT, watch_join=WATCH_JOIN):
+                    asleep=asleep_in_poll, wait=BLOCK_WAIT, watch_join=WATCH_JOIN,
+                    watcher_class=threading.Thread):
         # Run the row's cases against server_class, reading /proc with
         # asleep and waiting up to wait seconds to see the thread blocked;
         # returns the failures, the cases not judged, each close()'s time,
         # and the cases whose blocking call close() left to its socket
         # timeout. However a case ends, its watcher is joined for up to
         # watch_join seconds after close() returns; a case it outlives is
-        # not judged by its reads (watcher_running).
+        # not judged by its reads (watcher_running). Each watcher is made by
+        # watcher_class: a thread, except in close_row's watcher checks,
+        # which pass a stand-in that records its joins (RecordedWatcher).
         failures = []
         unjudged = []
         measured = {}
@@ -3907,8 +3906,8 @@ def self_test(vectors_only=False, steady_only=False):
             # until close() has returned and done is set (watch_asleep).
             latest = [None]
             done = threading.Event()
-            watcher = threading.Thread(target=watch_asleep, name=WATCHER_NAME, daemon=True,
-                                       args=(server, asleep, latest, done))
+            watcher = watcher_class(target=watch_asleep, name=WATCHER_NAME, daemon=True,
+                                    args=(server, asleep, latest, done))
             try:
                 watcher.start()
                 client = socket.create_connection(("127.0.0.1", server.port), timeout=10.0)
@@ -4091,26 +4090,33 @@ def self_test(vectors_only=False, steady_only=False):
         # the call normally runs out its timeout first, and requires each to
         # give the not-seen reason: another reason fails the row INVALID, and a
         # case that failed makes it CANNOT-EVALUATE. A call_outcome that departs
-        # from CALL_EDGES fails the row INVALID. It then holds the watcher of a
-        # registration case, where only the watcher reads /proc, until
-        # close_cases has returned, with a join of HELD_JOIN, and requires
-        # exactly the watcher_running reason. And in a handshake case, the test
-        # thread's /proc read finds the case's watcher by its name, waits up to
-        # HOLD_WAIT for that watcher's read to enter its hold, and raises
-        # through close_cases' cleanup; the watcher's read holds it until then
-        # and up to RAISE_HOLD after, less than WATCH_JOIN, and that watcher
-        # must have ended by the time the exception leaves close_cases. In each,
-        # a case that failed otherwise, a hold its watcher did not enter (before
-        # the read raised, in the handshake case), no one watcher found by its
-        # name, or a read that did not raise makes it CANNOT-EVALUATE, before
-        # any other reading; otherwise another reason or a watcher still running
-        # fails the row INVALID. Last, it writes the task files POLL_RULE_FILES
-        # lists under root and has asleep_in_poll read each through its
-        # task_root (poll_rule), requiring the reading listed for this machine:
-        # where POLL_SYSCALLS lists it, a wait channel naming poll reads False
-        # unless the system call is poll as well, and a poll system call reads
-        # False unless the wait channel names poll. A reading that departs fails
-        # the row INVALID, and task files that could not be written make it
+        # from CALL_EDGES fails the row INVALID. It then checks close_cases'
+        # join of its watcher, and its watcher_running reason, through
+        # watcher_class with RecordedWatcher, a stand-in that runs nothing, so
+        # neither check depends on scheduling. In a registration case whose
+        # stand-in still reads as alive after its join, close_cases must join it
+        # once, with CHECK_JOIN, after done is set and before it returns, and
+        # then give exactly the watcher_running reason. In a handshake case
+        # whose test thread /proc read raises, it must join it the same way
+        # before the exception leaves close_cases. A join that is missing,
+        # repeated, given another timeout, made before done is set, or not made
+        # before that exception left (as a join after the cleanup is not; on a
+        # return such a join behaves the same, so only the handshake case tells
+        # it apart) fails the row INVALID, naming which. In the registration
+        # case that is judged first; then a case that failed otherwise makes the
+        # check CANNOT-EVALUATE, and any reason but that one fails the row
+        # INVALID. In the handshake case a read that did not raise makes the
+        # check CANNOT-EVALUATE before the join is judged. Neither check shows
+        # how a real watcher thread is scheduled; in the cases run above, with
+        # real watcher threads, a watcher still running WATCH_JOIN after close()
+        # returned makes its case CANNOT-EVALUATE (watcher_running), not
+        # INVALID. Last, it writes the task files POLL_RULE_FILES lists under
+        # root and has asleep_in_poll read each through its task_root
+        # (poll_rule), requiring the reading listed for this machine: where
+        # POLL_SYSCALLS lists it, a wait channel naming poll reads False unless
+        # the system call is poll as well, and a poll system call reads False
+        # unless the wait channel names poll. A reading that departs fails the
+        # row INVALID, and task files that could not be written make it
         # CANNOT-EVALUATE.
         client_context = original_context(cadata=certificates)
         failures, unjudged, measured, _ = close_cases(context, client_context, Server)
@@ -4144,100 +4150,108 @@ def self_test(vectors_only=False, steady_only=False):
             unjudged.append("unreadable /proc: not judged: " + "; ".join(blind_failed))
         else:
             blind_status = VALID
-        release = threading.Event()
-        held_entered = threading.Event()
 
-        def held(thread):
-            # A stand-in for asleep_in_poll that records that the watcher
-            # entered it and holds the watcher until its case has returned
-            # (release), up to HOLD_BOUND.
-            held_entered.set()
-            release.wait(HOLD_BOUND)
-            return False
+        class RecordedWatcher:
+            # A stand-in for close_cases' watcher thread (watcher_class) in
+            # the two checks below. It runs nothing, so what it records does
+            # not depend on scheduling: for each join call, its timeout,
+            # whether done was already set (the cleanup had begun) and
+            # whether escaped was (the call to close_cases had ended). Once
+            # started it reads as alive when alive is True, as a watcher still
+            # running when its join returns does.
+            def __init__(self, made, alive, escaped, *, target, name, daemon, args):
+                self.alive = alive
+                self.escaped = escaped
+                self.done = args[3]
+                self.ident = None
+                self.joins = []
+                made.append(self)
 
+            def start(self):
+                self.ident = 0
+
+            def join(self, timeout=None):
+                self.joins.append((timeout, self.done.is_set(), self.escaped.is_set()))
+
+            def is_alive(self):
+                return self.ident is not None and self.alive
+
+        def join_defect(made, ending):
+            # How close_cases' join of the one RecordedWatcher it made departs
+            # from a single join with CHECK_JOIN, after done was set and before
+            # the call ended (ending names how it ended); None if it does not.
+            if len(made) != 1:
+                return "{} watchers made through watcher_class, not one".format(len(made))
+            if made[0].ident is None:
+                return "its watcher was not started"
+            if not made[0].joins:
+                return "its watcher was not joined " + ending
+            if len(made[0].joins) != 1:
+                return "its watcher was joined {} times, not once".format(len(made[0].joins))
+            timeout, cleanup, escaped = made[0].joins[0]
+            if timeout != CHECK_JOIN:
+                return "its watcher was joined with timeout {!r}, not watch_join ({})".format(
+                    timeout, CHECK_JOIN)
+            if not cleanup:
+                return "its watcher was joined before done was set, outside the cleanup"
+            if escaped:
+                return "its watcher was joined after the call to close_cases ended"
+            return None
+
+        held_made = []
+        held_escaped = threading.Event()
         try:
             held_failures, held_unjudged, _, _ = close_cases(
-                context, client_context, Server, ("registration",), held,
-                watch_join=HELD_JOIN)
-            # Read before the release: a watcher scheduled so late that it found
-            # done already set never entered the hold, and ended without being
-            # held.
-            entered_hold = held_entered.is_set()
+                context, client_context, Server, ("registration",), watch_join=CHECK_JOIN,
+                watcher_class=functools.partial(RecordedWatcher, held_made, True, held_escaped))
         finally:
-            release.set()
-        if held_failures:
+            held_escaped.set()
+        held_defect = join_defect(held_made, "before close_cases returned")
+        if held_defect is not None:
+            held_status = INVALID
+            failures.append("held watcher: " + held_defect)
+        elif held_failures:
             held_status = CANNOT_EVALUATE
             unjudged.append("held watcher: not judged: " + "; ".join(held_failures))
-        elif not entered_hold:
-            held_status = CANNOT_EVALUATE
-            unjudged.append("held watcher: not judged: the registration case's watcher did "
-                            "not enter its hold before the case returned (scheduling)")
-        elif held_unjudged != [watcher_running("registration", HELD_JOIN)]:
+        elif held_unjudged != [watcher_running("registration", CHECK_JOIN)]:
             held_status = INVALID
             failures.append("held watcher: not reported: registration gave "
                             + ("; ".join(held_unjudged) or "no reason"))
         else:
             held_status = VALID
         caller = threading.current_thread()
-        holding = threading.Event()
-        thrown = threading.Event()
-        let_go = threading.Event()
-        holders = []
-        found = []
-        entered_first = []
 
         class Raised(Exception):
             pass
 
         def raising(thread):
-            # A stand-in for asleep_in_poll. In the watcher, it records the
-            # thread, sets holding and holds the watcher until the test thread's
-            # read has raised (thrown), up to HOLD_BOUND, and then up to
-            # RAISE_HOLD. In the test thread, it finds the case's watcher by its
-            # name, among the threads started since close_cases was called (the
-            # watcher is started before this read), waits up to HOLD_WAIT for a
-            # watcher's read to enter its hold, records whether one had, and
-            # raises.
+            # A stand-in for asleep_in_poll that raises in the test thread's
+            # read (wait_blocked), so the exception leaves close_cases through
+            # its cleanup. It reads False in any other thread, which only a
+            # watcher made without watcher_class would be.
             if threading.current_thread() is not caller:
-                holders.append(threading.current_thread())
-                holding.set()
-                thrown.wait(HOLD_BOUND)
-                let_go.wait(RAISE_HOLD)
                 return False
-            found.extend(candidate for candidate in threading.enumerate()
-                         if candidate.name == WATCHER_NAME and candidate not in before)
-            entered_first.append(holding.wait(HOLD_WAIT))
-            thrown.set()
             raise Raised()
 
+        raising_made = []
+        raising_escaped = threading.Event()
         raised = False
-        before = set(threading.enumerate())
         try:
-            close_cases(context, client_context, Server, ("handshake",), raising)
+            close_cases(context, client_context, Server, ("handshake",), raising,
+                        watch_join=CHECK_JOIN,
+                        watcher_class=functools.partial(
+                            RecordedWatcher, raising_made, False, raising_escaped))
         except Raised:
             raised = True
         finally:
-            # The watcher found by its name, checked directly as the
-            # exception leaves close_cases, whatever its reads did.
-            outlived = [watcher for watcher in found if watcher.is_alive()]
-            thrown.set()
-            let_go.set()
+            raising_escaped.set()
+        raising_defect = join_defect(raising_made, "before the exception left close_cases")
         if not raised:
             raising_status = CANNOT_EVALUATE
             unjudged.append("raising case: the test thread's /proc read was not reached")
-        elif len(found) != 1:
-            raising_status = CANNOT_EVALUATE
-            unjudged.append("raising case: not judged: {} threads named {!r} were started "
-                            "for the case, not one".format(len(found), WATCHER_NAME))
-        elif not entered_first[0] or holders[:1] != found:
-            raising_status = CANNOT_EVALUATE
-            unjudged.append("raising case: not judged: its watcher did not enter its hold "
-                            "within {} s of the test thread's /proc read, before that "
-                            "read raised (scheduling)".format(HOLD_WAIT))
-        elif outlived:
+        elif raising_defect is not None:
             raising_status = INVALID
-            failures.append("raising case: its watcher was still running when the "
-                            "exception left close_cases")
+            failures.append("raising case: " + raising_defect)
         else:
             raising_status = VALID
         if left:
