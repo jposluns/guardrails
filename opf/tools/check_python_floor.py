@@ -2200,11 +2200,13 @@ def _write(root, rel, text):
 
 def _floor_read(base, floor):
     """The (major, minor) load_source reads from a fixture whose policy names floor and whose host policy
-    names floor's .0 patch, or "cannot-evaluate"."""
+    names floor's .0 patch; "floor refused" when the python-floor rule refuses it, or "other refusal"
+    when anything else does (a host patch past its own bound, say), so only FLOOR_RE's bound can give
+    "floor refused"."""
     try:
         return load_source(_fixture(base, policy=_policy_text(floor=floor), host=_host_text(floor + ".0")))["floor"]
-    except CannotEvaluate:
-        return "cannot-evaluate"
+    except CannotEvaluate as exc:
+        return "floor refused" if "python-floor must be" in str(exc) else "other refusal"
 
 
 _FIXTURES = []
@@ -2517,11 +2519,12 @@ def _self_test_cases(base):
     code, lines = evaluate(_fixture(base, policy=_policy_text(copies="{\"site/adopt.md\" = 1}")))
     check("source/declaration-copies-below-two-cannot-evaluate", (code, _has(lines, "declaration-copies")),
           (2, True))
-    # The floor's component bound, at each end: four digits are read, five are cannot-evaluate, and so
-    # is a 5001-digit component, past CPython's int-string limit, where int() would raise ValueError.
+    # The floor's component bound, at each end: four digits are read, five are refused by the python-floor
+    # rule itself (not by the host patch's bound, which a five-digit floor's patch also breaks), and so is
+    # a 5001-digit component, past CPython's int-string limit, where int() would raise ValueError.
     check("source/floor-component-digit-bound", [_floor_read(base, floor) for floor in (
         "9999.9999", "10000.14", "3.10000", "1" * 5001 + ".14")],
-        [(9999, 9999), "cannot-evaluate", "cannot-evaluate", "cannot-evaluate"])
+        [(9999, 9999), "floor refused", "floor refused", "floor refused"])
     # No parent file: a fixture holds only the OPF tree, so each pass above read no parent path; neither
     # live policy names a parent path as a value either.
     check("source/no-parent-path-in-live-policy",

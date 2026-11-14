@@ -41,18 +41,37 @@ Legs, in order:
                workflow top-level key other than name, on, permissions and jobs (a workflow env: or
                defaults: reaches every step) are each a finding, and so is a HOST_TOOLS run line that is
                not plain YAML text, which no workflow line can carry as written. A policy job with no
-               HOST_TOOLS row is the binding leg's finding and this leg skips it. A line anywhere in the
-               workflow that opens a flow collection ([ or {) as a value or list item and does not close
-               it on that line (FLOW_START_RE, _flow_closes) is cannot-evaluate. Residual: the leg reads
-               lines, not YAML, so it accepts no host-patch job but JOB_TEMPLATE's text, but outside the
-               host-patch jobs it does not validate YAML: a line nested under a top-level key other than
-               jobs, or in another job, is held only to the line model and the flow rule, so other
-               malformed YAML there is not detected. Another job is read only for a host-patch pin
-               written as a literal (PIN_VALUE_RE: the python-version key in any case, the value quoted
-               or not, with or without leading blanks), and a pin through an expression or a matrix
-               value is not seen there (the floor gates judge the workflow's pin lines). A line inside a
-               block scalar is read as a line too, so a script line there that opens a bracket and does
-               not close it on that line is cannot-evaluate, a disclosed over-rejection.
+               HOST_TOOLS row is the binding leg's finding and this leg skips it. Every line of the
+               workflow but a blank line, a comment line and the lines of a run: block scalar is read by
+               _line_refusal, and a line it does not read is cannot-evaluate: it reads list markers
+               ("- "), then an optional block mapping key (plain or quoted) and its colon, then a value
+               that is empty, a comment, a plain scalar, a quoted scalar or flow collection that closes
+               on that line with only blanks or a comment after it, or, on a run: key alone, a block
+               scalar header (| or >, an optional chomping indicator, no indentation indicator). So these
+               are cannot-evaluate: a node that opens with & (an anchor), ! (a tag), * (an alias) or ?
+               (an explicit key), in or out of a flow collection; a block mapping key holding a colon;
+               a double-quoted scalar holding a backslash escape; a quoted scalar or flow collection that
+               does not close on its line or is followed by other text (in a flow collection a # after a
+               blank, or where a node starts, begins a comment, so a closer after it does not count); and
+               a block scalar on any key but run:. A quote opens a quoted scalar only where a node
+               starts, so an apostrophe inside a plain scalar is text. The lines after a run: block
+               scalar header that are blank or more indented than its key are script text, skipped by
+               every rule here. Residual: the leg reads lines, not YAML, so it accepts no host-patch job
+               but JOB_TEMPLATE's text, but outside the host-patch jobs it does not validate YAML: a line
+               nested under a top-level key other than jobs, or in another job, is held only to the line
+               model and _line_refusal, so other malformed YAML there (a plain scalar holding ": ", say)
+               is not detected. Over-rejection, disclosed: valid YAML in those shapes is refused too, and
+               a continuation line of a plain scalar spread over lines is read as a line of its own, so
+               one that opens with a bracket and is not a flow collection closed on its line (a shell
+               test such as [ -f x ] && echo ok written as a continued plain scalar) is cannot-evaluate;
+               write such a script as a run: block scalar. Another job is read for a host-patch pin
+               written as a literal (PIN_VALUE_RE, every match on a line: the python-version key in any
+               case, the value plain, single-quoted or double-quoted, with or without leading blanks); a
+               python-version key whose value does not start on its line (PIN_LATER_RE) is
+               cannot-evaluate, and so, by the rules above, is a pin with an anchor, tag or alias, under
+               an explicit key, in a block scalar or in a double-quoted scalar with an escape. A pin
+               through an expression, a matrix value, a version range opening with an operator (>=, say)
+               or a version file (python-version-file) is not seen there.
   interpreter  the running interpreter (sys.version_info) is the host patch, a final release. A difference
                is a finding: run locally, this interpreter is not the committed host patch, so a passing
                local run does not predict the host-patch job; run in a host-patch job, that job did not
@@ -60,9 +79,10 @@ Legs, in order:
 
   check_opf_host_pin.py                 run every leg over the OPF tree
   check_opf_host_pin.py --binding-only  run the source, patch, binding and jobs legs and skip the
-                                        interpreter leg, for a run on any interpreter (the OPF runner,
-                                        which runs on the floor, not the host patch, and so judges the
-                                        host-patch job from outside it)
+                                        interpreter leg, for a run on any interpreter: the OPF runner
+                                        and the parent repository's runner (tools/run_all_checks.sh) and
+                                        quality workflow job opf-tooling-a, which need not run on the host
+                                        patch and so judge the host-patch job from outside it
   check_opf_host_pin.py --self-test     fixture trees for every leg, each acceptance case at its
                                         boundaries, and red-on-revert: a scratch copy of this checker,
                                         loaded through importlib, with one rule removed passes the fixture
@@ -82,9 +102,9 @@ emulation vectors, which exist for the parent's workflow parser.
 Exit convention: 0 every leg run passes; 1 a finding; 2 usage or cannot-evaluate (a missing, unreadable,
 non-regular, symlinked or non-UTF-8 policy or workflow, a malformed policy, a host-patch-workflow path
 with a NUL character, a bound tool that is not a regular file, a run line shlex cannot tokenize, a
-workflow line outside the jobs leg's line model or opening a flow collection it does not close,
-unavailable temporary storage). A workflow is malformed for this checker only in those ways; see the
-jobs leg's residual.
+workflow line outside the jobs leg's line model or one _line_refusal does not read, a python-version key
+in another job whose value does not start on its line, unavailable temporary storage). A workflow is
+malformed for this checker only in those ways; see the jobs leg's residual.
 
 Run this checker isolated: python3 -I -B tools/check_opf_host_pin.py
 """
@@ -163,12 +183,20 @@ TOP_KEY_RE = re.compile(r"([A-Za-z_][A-Za-z0-9_-]*):(?: .*)?")
 JOB_HEADER_RE = re.compile(r"  ([A-Za-z_][A-Za-z0-9_-]*):")
 # A literal pin in another job: the key in any case, an optional quote around the key and the value, and
 # blanks around the colon and before the value, so a pin spelled differently only in those ways is still
-# seen; whether a runner would honour such a spelling is not judged here.
+# seen; whether a runner would honour such a spelling is not judged here. Every match on a line is read.
 PIN_VALUE_RE = re.compile(r"python-version['\"]?[ ]*:[ ]*['\"]?[ ]*([0-9][0-9.]*)", re.IGNORECASE)
-# A value or list item that opens a flow collection: optional list markers, then an optional plain or
-# quoted key with no colon or comment in it and a colon, then [ or {. The collection must close on its
-# line (_flow_closes); this line model does not read YAML across lines.
-FLOW_START_RE = re.compile(r"(?:- +)*(?:(?:'[^']*'|\"[^\"]*\"|[^ '\"#:\[{][^#:]*?) *: +)?(?P<flow>[\[{].*)")
+# A python-version key whose value does not start on its line (blanks or a comment follow the colon), so
+# no match of PIN_VALUE_RE can read it.
+PIN_LATER_RE = re.compile(r"python-version['\"]?[ ]*:[ ]*(?:#.*)?$", re.IGNORECASE)
+# A character YAML reads, where a node starts, as a node property (an anchor or a tag), an alias or an
+# explicit key; this line model reads none of them.
+NODE_MARKS = {"&": "an anchor (&)", "!": "a tag (!)", "*": "an alias (*)", "?": "an explicit key (?)"}
+# The one key whose value may be a block scalar: | or >, an optional chomping indicator, then blanks or a
+# comment. Its more indented lines below are script text, not read as YAML.
+BLOCK_KEY = "run"
+BLOCK_HEADER_RE = re.compile(r"[|>][+-]?(?: +#.*| *)")
+# What may follow a flow collection or quoted scalar closed on its line: blanks, or blanks and a comment.
+LINE_END_RE = re.compile(r"(?: +#.*| *)")
 # Characters a YAML reader may read as a line break or indentation this line model does not.
 REFUSED_CHARS = {"\r": "a carriage return", "\t": "a tab", "\f": "a form feed", "\v": "a vertical tab",
                  "\x85": "U+0085 (next line)", "\u2028": "U+2028 (line separator)",
@@ -300,33 +328,110 @@ def binding_findings(root, jobs, surfaces):
     return findings
 
 
-def _flow_closes(flow):
-    """True when flow, text that opens with [ or {, closes that collection, with its brackets matched and
-    quotes respected, followed by nothing but blanks or a comment."""
-    closers, quote, index = [], None, 0
-    while index < len(flow):
-        char = flow[index]
-        if quote == "'":
-            if char == "'" and flow[index + 1:index + 2] == "'":
-                index += 1
-            elif char == "'":
-                quote = None
-        elif quote == "\"":
-            if char == "\\":
-                index += 1
-            elif char == "\"":
-                quote = None
-        elif char in "'\"":
-            quote = char
-        elif char in "[{":
+def _quoted_end(text, start):
+    """The index just past the quoted scalar that opens at text[start], or None when it does not close on
+    the line; a backslash in a double-quoted scalar escapes the character after it."""
+    quote, index = text[start], start + 1
+    while index < len(text):
+        if quote == "\"" and text[index] == "\\":
+            index += 2
+        elif quote == "'" and text[index:index + 2] == "''":
+            index += 2
+        elif text[index] == quote:
+            return index + 1
+        else:
+            index += 1
+    return None
+
+
+def _flow_refusal(text, start):
+    """(None, end) when the flow collection that opens at text[start] closes on the line, its brackets
+    matched, end the index just past it; otherwise (reason, None). A node starts at an opening bracket,
+    after a comma and after a separating colon: only there does a quote open a quoted scalar and is &, !,
+    * or ? refused, and a # there or after a blank starts a comment, so a closer after it does not count."""
+    closers, index, node = [], start, True
+    while index < len(text):
+        char = text[index]
+        if char == "#" and (node or text[index - 1] == " "):
+            break
+        if char in "[{":
             closers.append("]" if char == "[" else "}")
+            node = True
         elif char in "]}":
-            if not closers or closers.pop() != char:
-                return False
+            if closers.pop() != char:
+                break
             if not closers:
-                return re.fullmatch(r"(?: +#.*| *)", flow[index + 1:]) is not None
+                return None, index + 1
+            node = False
+        elif char == "," or (char == ":" and (text[index + 1:index + 2] in ("", " ", ",", "[", "]", "{", "}")
+                                              or text[index - 1] in "'\"")):
+            node = True
+        elif node and char in NODE_MARKS:
+            return "carries {} in a flow collection".format(NODE_MARKS[char]), None
+        elif node and char in "'\"":
+            end = _quoted_end(text, index)
+            if end is None:
+                break
+            if char == "\"" and "\\" in text[index:end]:
+                return "carries a double-quoted scalar with a backslash escape", None
+            index, node = end, False
+            continue
+        elif char != " ":
+            node = False
         index += 1
-    return False
+    return "opens a flow collection that does not close on its line", None
+
+
+def _line_refusal(body):
+    """How the line model reads body, a line's text after its indentation, neither blank nor a comment:
+    (reason, None) when it does not read the line, otherwise (None, column), column the offset in body of
+    a run: key whose value is a block scalar, else None. Read: list markers ("- "), then an optional
+    block mapping key (plain or quoted, holding no colon) and its colon, then a value: nothing, a comment,
+    a plain scalar, a quoted scalar or flow collection closed on the line and followed by blanks or a
+    comment only, or, for a run: key alone, a block scalar header. A node opening with &, !, * or ?, a
+    double-quoted scalar with a backslash escape, and any other block scalar are refused."""
+    index, key, column = 0, None, None
+    while body[index:index + 2] == "- " or body[index:] == "-":
+        index += 1
+        while body[index:index + 1] == " ":
+            index += 1
+    while True:
+        char = body[index:index + 1]
+        if char in ("", "#"):
+            return None, None
+        if char in NODE_MARKS:
+            return "carries " + NODE_MARKS[char], None
+        if char in "[{":
+            reason, end = _flow_refusal(body, index)
+            if reason is None and not LINE_END_RE.fullmatch(body[end:]):
+                reason = "opens a flow collection that does not close on its line"
+            return reason, None
+        if char in "|>":
+            if key != BLOCK_KEY:
+                return "opens a block scalar on a key other than run:", None
+            if not BLOCK_HEADER_RE.fullmatch(body[index:]):
+                return "opens a block scalar with an indentation indicator or text after its header", None
+            return None, column
+        if char in "'\"":
+            end = _quoted_end(body, index)
+            if end is None:
+                return "opens a quoted scalar that does not close on its line", None
+            if char == "\"" and "\\" in body[index:end]:
+                return "carries a double-quoted scalar with a backslash escape", None
+            colon = re.match(r" *:(?= |$)", body[end:])
+            if key is not None or colon is None:
+                return (None if LINE_END_RE.fullmatch(body[end:]) else "carries text after a quoted scalar"), None
+            found, after = body[index + 1:end - 1], end + colon.end()
+        else:
+            separator = re.search(r":(?= |$)| #", body[index:])
+            if key is not None or separator is None or separator.group() == " #":
+                return None, None
+            found, after = body[index:index + separator.start()].rstrip(" "), index + separator.end()
+        if ":" in found:
+            return "has a key holding a colon", None
+        key, column, index = found, index, after
+        while body[index:index + 1] == " ":
+            index += 1
 
 
 def _workflow_lines(rel, text):
@@ -334,22 +439,29 @@ def _workflow_lines(rel, text):
     comment lines dropped, and the ids of jobs defined more than once. The line model: a column-0 line is
     a top-level key line, the jobs region is what follows a line that is exactly jobs:, in that region a
     two-space line is exactly a job header, two spaces, a plain id and a colon, and every deeper line
-    belongs to the job above it. Any other line is cannot-evaluate, never skipped."""
+    belongs to the job above it. Any other line is cannot-evaluate, never skipped, and so is a line
+    _line_refusal does not read; the lines of a run: block scalar, each blank or more indented than its
+    key, are script text and are skipped."""
     top, jobs, twice, current = [], {}, [], None
-    in_jobs = False
+    in_jobs, block = False, None
     for number, line in enumerate(text.split("\n"), 1):
         for char, label in REFUSED_CHARS.items():
             if char in line:
                 raise CannotEvaluate("{}:{}: carries {}, which a YAML reader may read as a line break or "
                                      "indentation this line model does not".format(rel, number, label))
         body = line.lstrip(" ")
+        indent = len(line) - len(body)
+        if block is not None and (not body or indent > block):
+            continue
+        block = None
         if not body or body.startswith("#"):
             continue
-        flow = FLOW_START_RE.fullmatch(body)
-        if flow is not None and not _flow_closes(flow.group("flow")):
-            raise CannotEvaluate("{}:{}: {!r:.60} opens a flow collection that does not close on its line, "
-                                 "which this line model does not read".format(rel, number, line))
-        indent = len(line) - len(body)
+        reason, column = _line_refusal(body)
+        if reason is not None:
+            raise CannotEvaluate("{}:{}: {!r:.60} {}, which this line model does not read".format(
+                rel, number, line, reason))
+        if column is not None:
+            block = indent + column
         if indent == 0:
             match = TOP_KEY_RE.fullmatch(line)
             if match is None:
@@ -438,10 +550,13 @@ def job_findings(root, rel, patch, jobs):
         if job in jobs:
             continue
         for number, line in lines:
-            match = PIN_VALUE_RE.search(line)
-            if match is not None and match.group(1) == _patch_text(patch):
-                findings.append("{}:{}: job {} pins the host patch {}, but it is not a host-patch-jobs entry of "
-                                "{}".format(rel, number, job, _patch_text(patch), FLOOR_SOURCE_REL))
+            if PIN_LATER_RE.search(line):
+                raise CannotEvaluate("{}:{}: {!r:.60} has a python-version key whose value does not start on "
+                                     "its line, which this line model does not read".format(rel, number, line))
+            for match in PIN_VALUE_RE.finditer(line):
+                if match.group(1) == _patch_text(patch):
+                    findings.append("{}:{}: job {} pins the host patch {}, but it is not a host-patch-jobs entry "
+                                    "of {}".format(rel, number, job, _patch_text(patch), FLOOR_SOURCE_REL))
     return findings
 
 
@@ -520,8 +635,7 @@ REVERTS = {
     "top-keys": ("        if key not in WORKFLOW_TOP_KEYS:\n", "        if False:\n"),
     "top-twice": ("    for key in sorted({key for key in top if top.count(key) > 1}):\n", "    for key in ():\n"),
     "job-twice": ("    for job in sorted(set(twice)):\n", "    for job in ():\n"),
-    "outside-pin": ("            if match is not None and match.group(1) == _patch_text(patch):\n",
-                    "            if False:\n"),
+    "outside-pin": ("                if match.group(1) == _patch_text(patch):\n", "                if False:\n"),
     "workflow-path": ("    if outside:\n", "    if False:\n"),
     "line-breaks": ("        for char, label in REFUSED_CHARS.items():\n", "        for char, label in ():\n"),
     "name-text": ("        elif line.startswith(want[index][1]) and NAME_RE.fullmatch(line[len(want[index][1]):]):\n",
@@ -531,9 +645,29 @@ REVERTS = {
                       "        elif indent == 1 or current is None:\n            continue\n        elif False:\n"),
     "plain-run": ("        unplain = [run for run in HOST_TOOLS[job] if not PLAIN_RUN_RE.fullmatch(run)]\n",
                   "        unplain = []\n"),
-    "flow-close": ("        if flow is not None and not _flow_closes(flow.group(\"flow\")):\n", "        if False:\n"),
+    "flow-close": ("            reason, end = _flow_refusal(body, index)\n", "            return None, None\n"),
     "pin-any-case": ("[0-9][0-9.]*)\", re.IGNORECASE)", "[0-9][0-9.]*)\")"),
     "pin-blanks": ("['\\\"]?[ ]*([0-9][0-9.]*)\", re", "['\\\"]?([0-9][0-9.]*)\", re"),
+    "flow-comment": ("        if char == \"#\" and (node or text[index - 1] == \" \"):\n            break\n", ""),
+    "flow-token-quote": ("        elif node and char in \"'\\\"\":\n", "        elif char in \"'\\\"\":\n"),
+    "flow-node-marks": ("        elif node and char in NODE_MARKS:\n", "        elif False:\n"),
+    "flow-escape": ("            if char == \"\\\"\" and \"\\\\\" in text[index:end]:\n", "            if False:\n"),
+    "node-marks": ("        if char in NODE_MARKS:\n", "        if False:\n"),
+    "key-colon": ("        if \":\" in found:\n", "        if False:\n"),
+    "quoted-close": ("                return \"opens a quoted scalar that does not close on its line\", None\n",
+                     "                return None, None\n"),
+    "quoted-escape": ("            if char == \"\\\"\" and \"\\\\\" in body[index:end]:\n", "            if False:\n"),
+    "block-key": ("            if key != BLOCK_KEY:\n", "            if False:\n"),
+    "block-header": ("            if not BLOCK_HEADER_RE.fullmatch(body[index:]):\n", "            if False:\n"),
+    "block-content": ("            continue\n        block = None\n", "            pass\n        block = None\n"),
+    "block-end": ("        block = None\n        if not body", "        if not body"),
+    "pin-every-match": ("            for match in PIN_VALUE_RE.finditer(line):\n",
+                        "            for match in filter(None, [PIN_VALUE_RE.search(line)]):\n"),
+    "pin-later": ("            if PIN_LATER_RE.search(line):\n", "            if False:\n"),
+    "flow-text-after": ("            if reason is None and not LINE_END_RE.fullmatch(body[end:]):\n",
+                        "            if False:\n"),
+    "quoted-text-after": ("(None if LINE_END_RE.fullmatch(body[end:]) else \"carries text after a quoted scalar\")",
+                          "None"),
 }
 
 
@@ -816,6 +950,18 @@ _HOST_PIN = "          python-version: '3.14.4'\n"
 _HOST_NAME = "    name: OPF tooling (host patch)\n"
 _OTHER_JOB = ("  other:\n    runs-on: ubuntu-24.04\n    steps:\n      - uses: actions/setup-python@v5\n"
               "        with:\n          python-version: '{}'\n\n  # The host-patch job.\n")
+_BRANCHES = "    branches: [main]\n"
+
+
+def _other_job(steps):
+    """The edit that places a job other, its steps the given lines, before the host-patch job."""
+    return ("  # The host-patch job.\n",
+            "  other:\n    runs-on: ubuntu-24.04\n    steps:\n" + "".join(steps) + "\n  # The host-patch job.\n")
+
+
+def _setup_with(text):
+    """The edit that places a job other whose Python setup step's with: block holds text."""
+    return _other_job(("      - uses: actions/setup-python@v5\n", "        with:\n", "          " + text + "\n"))
 
 
 def _workflow_fixture(base, edits, host=None):
@@ -917,9 +1063,10 @@ def _jobs_cases(base, me):
              (2, True)),
             ("jobs/one-space-line-cannot-evaluate", ((_HOST_HEADER, _HOST_HEADER + " x: 1\n"),),
              "belongs to no job", (2, True)),
-            # A flow collection must close on its own line, quotes respected: unclosed on the on: key and
-            # nested under it, closed with text after it, or closed by the wrong bracket is cannot-evaluate;
-            # one closed on its line, brackets inside quotes and a trailing comment included, passes.
+            # A flow collection must close on its own line, a quote read where a node starts: unclosed on
+            # the on: key and nested under it, closed with text after it, or closed by the wrong bracket is
+            # cannot-evaluate; one closed on its line, brackets inside quotes and a trailing comment
+            # included, passes.
             ("jobs/flow-on-key-unclosed-cannot-evaluate", (("on:\n  push:\n", "on: [\n  push:\n"),),
              "opens a flow collection", (2, True)),
             ("jobs/flow-nested-unclosed-cannot-evaluate", (("    branches: [main]\n", "    branches: [main\n"),),
@@ -938,7 +1085,82 @@ def _jobs_cases(base, me):
              (("  # The host-patch job.\n", _OTHER_JOB.replace("python-version", "Python-Version").format("3.14.4")),),
              "job other pins the host patch 3.14.4", (1, True)),
             ("jobs/other-job-pin-leading-blanks", (("  # The host-patch job.\n", _OTHER_JOB.format("  3.14.4")),),
-             "job other pins the host patch 3.14.4", (1, True))):
+             "job other pins the host patch 3.14.4", (1, True)),
+            # A node property, alias or explicit key, a key holding a colon, a quoted scalar left open or
+            # with an escape or text after it, and a block scalar on any key but run: are each refused.
+            ("jobs/flow-anchor-on-key-cannot-evaluate", (("on:\n  push:\n", "on: &a [\n  push:\n"),),
+             "carries an anchor (&)", (2, True)),
+            ("jobs/flow-tag-on-key-cannot-evaluate", (("on:\n  push:\n", "on: !!seq [\n  push:\n"),),
+             "carries a tag (!)", (2, True)),
+            ("jobs/flow-anchor-nested-cannot-evaluate", ((_BRANCHES, "    branches: &b [main\n"),),
+             "carries an anchor (&)", (2, True)),
+            ("jobs/key-with-colon-unclosed-cannot-evaluate", ((_BRANCHES, "    a:b: [main\n"),),
+             "has a key holding a colon", (2, True)),
+            ("jobs/key-with-colon-cannot-evaluate", ((_BRANCHES, "    a:b: [main]\n"),), "has a key holding a colon",
+             (2, True)),
+            ("jobs/quoted-key-with-colon-cannot-evaluate", ((_BRANCHES, "    'a:b': [main]\n"),),
+             "has a key holding a colon", (2, True)),
+            ("jobs/explicit-key-cannot-evaluate", ((_BRANCHES, "    ? [main\n"),), "carries an explicit key (?)",
+             (2, True)),
+            ("jobs/alias-cannot-evaluate", ((_BRANCHES, "    branches: *b\n"),), "carries an alias (*)", (2, True)),
+            ("jobs/flow-closer-in-comment-cannot-evaluate", ((_BRANCHES, "    branches: [main # ]\n"),),
+             "opens a flow collection", (2, True)),
+            ("jobs/flow-anchor-inside-cannot-evaluate", ((_BRANCHES, "    branches: [main, &a b]\n"),),
+             "carries an anchor (&) in a flow collection", (2, True)),
+            ("jobs/flow-apostrophe-in-plain-scalar-passes", ((_BRANCHES, "    branches: [it's, main]\n"),),
+             "which this line model does not read", (0, False)),
+            ("jobs/quoted-unclosed-cannot-evaluate", ((_BRANCHES, "    branches: 'main\n"),),
+             "opens a quoted scalar that does not close", (2, True)),
+            ("jobs/quoted-text-after-cannot-evaluate", ((_BRANCHES, "    branches: 'main' x\n"),),
+             "carries text after a quoted scalar", (2, True)),
+            ("jobs/quoted-escape-cannot-evaluate", ((_BRANCHES, "    branches: \"m\\x61in\"\n"),),
+             "carries a double-quoted scalar with a backslash escape", (2, True)),
+            ("jobs/block-scalar-not-run-cannot-evaluate",
+             (_other_job(("      - name: |\n", "          x\n")),), "opens a block scalar on a key other than run:",
+             (2, True)),
+            ("jobs/block-scalar-indentation-indicator-cannot-evaluate",
+             (_other_job(("      - run: |2\n", "          echo a\n")),), "an indentation indicator", (2, True)),
+            # The lines of a run: block scalar are script text, not read: brackets, braces, quotes and pin
+            # text in them pass, in a list item step and in a step's later key; a line at or left of the
+            # key's column ends the block, so a pin after it is read.
+            ("jobs/run-block-script-text-passes",
+             (_other_job(("      - name: x\n", "        shell: bash\n", "        run: |-  # c\n",
+                          "          [ -f x ] && echo ok\n", "          [[ -n x ]] && echo ok\n", "\n",
+                          "          { echo a; } > /dev/null\n", "          [ x = it's ]\n",
+                          "          echo python-version: 3.14.4\n", "      - run: >\n",
+                          "          [ -f x ] && b\n")),),
+             "which this line model does not read", (0, False)),
+            ("jobs/run-block-ends-pin-after-read",
+             (_other_job(("      - run: |\n", "          [ -f x ] && echo ok\n",
+                          "      - uses: actions/setup-python@v5\n", "        with:\n",
+                          "          python-version: '3.14.4'\n")),),
+             "job other pins the host patch 3.14.4", (1, True)),
+            # Pin shapes in another job: each spelling this line model does not read is refused; every
+            # literal pin on a line is read.
+            ("jobs/other-job-pin-anchor-cannot-evaluate", (_setup_with("python-version: &p '3.14.4'"),),
+             "carries an anchor (&)", (2, True)),
+            ("jobs/other-job-pin-tag-cannot-evaluate", (_setup_with("python-version: !!str 3.14.4"),),
+             "carries a tag (!)", (2, True)),
+            ("jobs/other-job-pin-block-scalar-cannot-evaluate",
+             (_setup_with("python-version: |-\n            3.14.4"),), "opens a block scalar on a key other than run:",
+             (2, True)),
+            ("jobs/other-job-pin-escape-cannot-evaluate", (_setup_with("python-version: \"\\x33.14.4\""),),
+             "carries a double-quoted scalar with a backslash escape", (2, True)),
+            ("jobs/other-job-pin-escaped-key-cannot-evaluate", (_setup_with("\"python-v\\x65rsion\": 3.14.4"),),
+             "carries a double-quoted scalar with a backslash escape", (2, True)),
+            ("jobs/other-job-pin-flow-escape-cannot-evaluate", (_setup_with("{python-version: \"\\x33.14.4\"}"),),
+             "carries a double-quoted scalar with a backslash escape", (2, True)),
+            ("jobs/other-job-pin-line-continuation-cannot-evaluate",
+             (_setup_with("python-version: \"3.14.\\\n            4\""),), "opens a quoted scalar that does not close",
+             (2, True)),
+            ("jobs/other-job-pin-explicit-key-cannot-evaluate",
+             (_setup_with("? python-version\n          : '3.14.4'"),), "carries an explicit key (?)", (2, True)),
+            ("jobs/other-job-pin-value-on-later-line-cannot-evaluate",
+             (_setup_with("python-version:\n            3.14.4"),), "whose value does not start on its line",
+             (2, True)),
+            ("jobs/other-job-two-pins-on-one-line",
+             (_other_job(("      - [{uses: a, with: {python-version: '3.14'}}, {uses: a, with: {python-version: "
+                          "'3.14.4'}}]\n",)),), "job other pins the host patch 3.14.4", (1, True))):
         check(check_id, _outcome(me, _workflow_fixture(base, edits), HOST, marker), want)
     check("jobs/host-job-absent", _outcome(me, _without_host_job(base), HOST,
                                            "host-patch job opf-host-patch is missing"), (1, True))
@@ -1014,6 +1236,26 @@ def _jobs_revert_cases(base, me, mutants):
     any_case = _workflow_fixture(base, (("  # The host-patch job.\n", _OTHER_JOB.replace(
         "python-version", "Python-Version").format("3.14.4")),))
     blanks = _workflow_fixture(base, (("  # The host-patch job.\n", _OTHER_JOB.format("  3.14.4")),))
+    shapes = {name:_workflow_fixture(base, (edit,)) for name, edit in (
+        ("comment", (_BRANCHES, "    branches: [main # ]\n")),
+        ("apostrophe", (_BRANCHES, "    branches: [it's]\n")),
+        ("flow-anchor", (_BRANCHES, "    branches: [main, &a b]\n")),
+        ("flow-escape", _setup_with("{python-version: \"\\x33.14.4\"}")),
+        ("anchor", ("on:\n  push:\n", "on: &a [\n  push:\n")),
+        ("key-colon", (_BRANCHES, "    a:b: [main]\n")),
+        ("continued", _setup_with("python-version: \"3.14.\\\n            4\"")),
+        ("escape", _setup_with("python-version: \"\\x33.14.4\"")),
+        ("block-pin", _setup_with("python-version: |-\n            3.14.4")),
+        ("indicator", _other_job(("      - run: |2\n", "          echo a\n"))),
+        ("script", _other_job(("      - run: |\n", "          [ -f x ] && echo ok\n"))),
+        ("after-block", _other_job(("      - run: |\n", "          [ -f x ] && echo ok\n",
+                                    "      - uses: actions/setup-python@v5\n", "        with:\n",
+                                    "          python-version: '3.14.4'\n"))),
+        ("two-pins", _other_job(("      - [{uses: a, with: {python-version: '3.14'}}, {uses: a, with: "
+                                 "{python-version: '3.14.4'}}]\n",))),
+        ("later", _setup_with("python-version:\n            3.14.4")),
+        ("flow-text", (_BRANCHES, "    branches: [main] x\n")),
+        ("quoted-text", (_BRANCHES, "    branches: 'main' x\n")))}
     # A parent's workflow one level above the OPF root never stands in for the OPF one.
     dotdot = _fixture(base, floor=_floor_text(workflow="../.github/workflows/quality.yml"))
     _write(dotdot.parent, FIXTURE_WORKFLOW, _workflow_text())
@@ -1033,8 +1275,28 @@ def _jobs_revert_cases(base, me, mutants):
             ("revert/unplaced-line", "unplaced-line", stray, HOST, (2, 0)),
             ("revert/flow-close", "flow-close", unclosed, HOST, (2, 0)),
             ("revert/pin-any-case", "pin-any-case", any_case, HOST, (1, 0)),
-            ("revert/pin-blanks", "pin-blanks", blanks, HOST, (1, 0))):
+            ("revert/pin-blanks", "pin-blanks", blanks, HOST, (1, 0)),
+            ("revert/flow-comment", "flow-comment", shapes["comment"], HOST, (2, 0)),
+            ("revert/flow-token-quote", "flow-token-quote", shapes["apostrophe"], HOST, (0, 2)),
+            ("revert/flow-node-marks", "flow-node-marks", shapes["flow-anchor"], HOST, (2, 0)),
+            ("revert/flow-escape", "flow-escape", shapes["flow-escape"], HOST, (2, 0)),
+            ("revert/node-marks", "node-marks", shapes["anchor"], HOST, (2, 0)),
+            ("revert/key-colon", "key-colon", shapes["key-colon"], HOST, (2, 0)),
+            ("revert/quoted-close", "quoted-close", shapes["continued"], HOST, (2, 0)),
+            ("revert/quoted-escape", "quoted-escape", shapes["escape"], HOST, (2, 0)),
+            ("revert/block-key", "block-key", shapes["block-pin"], HOST, (2, 0)),
+            ("revert/block-header", "block-header", shapes["indicator"], HOST, (2, 0)),
+            ("revert/block-content", "block-content", shapes["script"], HOST, (0, 2)),
+            ("revert/pin-every-match", "pin-every-match", shapes["two-pins"], HOST, (1, 0)),
+            ("revert/pin-later", "pin-later", shapes["later"], HOST, (2, 0)),
+            ("revert/flow-text-after", "flow-text-after", shapes["flow-text"], HOST, (2, 0)),
+            ("revert/quoted-text-after", "quoted-text-after", shapes["quoted-text"], HOST, (2, 0))):
         check(check_id, (me.evaluate(root, version)[0], mutants[name].evaluate(root, version)[0]), want)
+    # A block scalar that never ends: the copy that keeps skipping deeper lines misses the pin after the
+    # block (and reports the host-patch job's skipped lines instead, so the pin finding is compared).
+    check("revert/block-end", tuple(_has(module.evaluate(shapes["after-block"], HOST)[1],
+                                         "job other pins the host patch 3.14.4")
+                                    for module in (me, mutants["block-end"])), (True, False))
     # A HOST_TOOLS line that is not plain YAML text, its fixture written after the override so the job
     # carries that line: the intact checker refuses it; the copy without the rule compares and passes.
     runs = ("python3 -I -B tools/opf.py --name 'a b'",)

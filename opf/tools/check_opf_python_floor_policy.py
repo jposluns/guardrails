@@ -43,7 +43,8 @@ Rules (RULES), each a finding (exit 1) unless noted:
   declarations  the documentation is enumerated exactly: declaration-files is the set of non-.py files
                 outside excluded-trees that state the floor phrase ("Python", MAJOR.MINOR, "or newer");
                 each states it declaration-copies times (once by default), naming the floor and no
-                patch release.
+                patch release; a major or minor of more than four digits (PHRASE_COMPONENT_RE, the
+                floor's bound) is a finding without being read as an integer.
   table         the parse-site table parses with its schema (format-version = 1 and [[site]] rows of
                 class CALLER or EXEMPT; a schema break is cannot-evaluate), each row's path is a
                 regular file under the OPF root, and no (path, function, form) row repeats.
@@ -127,6 +128,10 @@ PIN_LINE_RE = re.compile(r"[ \t]*(?:-[ \t]+)?" + PIN_KEY + r"[ \t]*:(?P<rest>.*)
 SEP = r"(?:\s|&nbsp;|&#160;)+"
 PHRASE_RE = re.compile(r"Python" + SEP + r"(?P<major>[0-9]+)\.(?P<minor>[0-9]+)(?P<patch>\.[0-9]+)?" + SEP
                        + r"or" + SEP + r"newer", re.IGNORECASE)
+# A phrase's major or minor that is read as an integer: at most four digits, FLOOR_RE's bound. A longer one
+# is a finding without int(), which raises ValueError past CPython's int-string limit (a traceback in
+# place of a finding). PHRASE_RE itself stays unbounded, so such a phrase is still seen.
+PHRASE_COMPONENT_RE = re.compile(r"[0-9]{1,4}")
 TABLE_ROW_KEYS = {"CALLER": frozenset(("path", "function", "form", "count", "class", "caller")),
                   "EXEMPT": frozenset(("path", "function", "form", "count", "class", "reason"))}
 TABLE_EXEMPT_REASONS = frozenset(("test-code", "self-emitted-bytes", "already-validated",
@@ -494,7 +499,11 @@ def declaration_findings(root, policy, phrases):
         if len(found) != want:
             findings.append("{}: states the floor phrase {} time(s), want {}".format(rel, len(found), want))
         for major, minor, patch in found:
-            if floor is None or (int(major), int(minor)) != (int(floor.group(1)), int(floor.group(2))) \
+            if not (PHRASE_COMPONENT_RE.fullmatch(major) and PHRASE_COMPONENT_RE.fullmatch(minor)):
+                findings.append("{}: states the floor phrase with a major or minor of more than four digits "
+                                "({:.12}...); the floor is {}".format(rel, major + "." + minor,
+                                                                      policy["python-floor"]))
+            elif floor is None or (int(major), int(minor)) != (int(floor.group(1)), int(floor.group(2))) \
                     or patch is not None:
                 findings.append("{}: states Python {}.{}{} or newer; the floor is {}".format(
                     rel, major, minor, patch or "", policy["python-floor"]))
@@ -864,6 +873,17 @@ def _surface_cases(base):
     twice = _opf_fixture(base, policy=_policy_text(**{"declaration-copies": '{"spec/QUICK.md" = 2}'}))
     _write(twice, "spec/QUICK.md", "Python 3.14 or newer; again Python 3.14 or newer.\n")
     check("declarations/declared-copies-pass", _outcome(twice), "pass")
+    # The phrase component bound, at each end: a four-digit major or minor is read as an integer (here a
+    # zero-padded floor, which passes), a five-digit one is a finding without int(), and so is a
+    # 5001-digit one, past CPython's int-string limit, where int() would raise ValueError.
+    for check_id, text, want in (
+            ("declarations/phrase-four-digit-components-read", "Python 0003.0014 or newer", "pass"),
+            ("declarations/phrase-five-digit-major-finding", "Python 00003.14 or newer", "finding"),
+            ("declarations/phrase-five-digit-minor-finding", "Python 3.00014 or newer", "finding"),
+            ("declarations/phrase-5001-digit-major-finding", "Python " + "1" * 5001 + ".14 or newer", "finding")):
+        bounded = _opf_fixture(base)
+        _write(bounded, "spec/QUICK.md", text + ".\n")
+        check(check_id, _outcome(bounded), want)
     bad_table = _opf_fixture(base, table="format-version = 2\n")
     check("table/schema-cannot-evaluate", _outcome(bad_table), "cannot-evaluate")
     deep_table = _opf_fixture(base, table="x = " + "[" * 5000 + "]" * 5000 + "\n")
