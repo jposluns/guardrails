@@ -5430,9 +5430,14 @@ def _gate_runtime_cost_failures(cost_inputs):
 _GW_FLOOR = 0.1
 _GW_SIZES = 9
 # The most a gw-lin row's t_2n/t_n may be, and how many timings of each size a ratio over it may take: a ratio
-# over the bound times both sizes again and compares the least time of each (_gw_scan_ratio).
+# over the bound times both sizes again and compares the least time of each (_gw_scan_ratio). The retimes
+# alternate the two sizes, pause _GW_RETIME_PAUSE seconds between pairs and start no new pair once
+# _GW_RETIME_BUDGET seconds have passed since the first pair, so they are spread over a span that one
+# episode of host contention is less likely to cover than three back-to-back pairs (about 2 to 3 s).
 _GW_RATIO = 3.0
-_GW_TIMINGS = 3
+_GW_TIMINGS = 9
+_GW_RETIME_BUDGET = 20.0
+_GW_RETIME_PAUSE = 0.5
 # The getrusage fields a gw-lin row reports, then (name, format) for each reported reading, in order: user and
 # system CPU time, minor page faults, involuntary context switches, and the collector's collection count.
 _GW_RUSAGE_FIELDS = ("ru_utime", "ru_stime", "ru_minflt", "ru_nivcsw")
@@ -5482,16 +5487,22 @@ def _gw_scan_once(cmd, scan):
     return t, decision, tuple(None if a is None or b is None else b - a for a, b in zip(u0, _gw_usage()))
 
 
-def _gw_scan_ratio(unit, prefix, suffix, scan, once=_gw_scan_once):
+def _gw_scan_ratio(unit, prefix, suffix, scan, once=_gw_scan_once, clock=time.monotonic, pause=time.sleep):
     """Double n (from 4000, at most _GW_SIZES sizes) until t_n clears the _GW_FLOOR floor, then compare
-    t_2n/t_n. While that ratio is over _GW_RATIO, both sizes are timed again (at most _GW_TIMINGS timings of
-    each) and the least time of each is compared, so one call charged for stray work cannot fail a linear scan,
-    while a scan that grows faster than its input in every timing still fails. Returns (ratio, t_n, t_2n,
-    length_2n, decisions, (usage_n, usage_2n), timings), the times and usages being those of the least timing
-    of each size and timings how many of each were taken, or (None, t_n, None, length, decisions, None, 1) when
-    the floor was never cleared in the bound, so the caller fails 'linearity not evaluated'; decisions lists
-    every timed scan's decision, in order. The input is a command string for the whole-command scan or a word
-    list for the dequoted-word scan; once times one scan (a check stands in scripted times through it)."""
+    t_2n/t_n. While that ratio is over _GW_RATIO, both sizes are timed again, one pair at a time with a pause
+    of _GW_RETIME_PAUSE before each pair (at most _GW_TIMINGS timings of each, and no new pair once
+    _GW_RETIME_BUDGET seconds of clock have passed since the first pair), and the least time of each is
+    compared. Stray work and host contention only add time, so the least of each size never falls below the
+    scan's own cost at that size: a linear scan needs one clean timing of each size to pass, and a scan whose
+    true ratio r is over _GW_RATIO fails unless every base timing taken was inflated by a factor of at least
+    r / _GW_RATIO (4/3 for a quadratic scan). Returns (ratio, t_n, t_2n, length_2n, decisions, (usage_n, usage_2n),
+    timings, (times_n, times_2n), spent), the times and usages being those of the least timing of each size,
+    timings how many of each were taken, times_n and times_2n every timing of each size in order and spent the
+    clock seconds from the end of the first pair to the end of the retiming, or (None, t_n, None, length,
+    decisions, None, 1, None, 0.0) when the floor was never cleared in the bound, so the caller fails
+    'linearity not evaluated'; decisions lists every timed scan's decision, in order. The input is a command
+    string for the whole-command scan or a word list for the dequoted-word scan; once times one scan, clock
+    reads the retiming's clock and pause waits between pairs (a check stands in scripted ones through them)."""
     reps = 4000
     decisions = []
     for _ in range(_GW_SIZES):
@@ -5502,30 +5513,56 @@ def _gw_scan_ratio(unit, prefix, suffix, scan, once=_gw_scan_once):
             cmd_2n = prefix + unit * (reps * 2) + suffix
             t_2n, decision, use_2n = once(cmd_2n, scan)
             decisions.append(decision)
+            times_n, times_2n = [t_n], [t_2n]
             timings = 1
-            while t_2n / t_n > _GW_RATIO and timings < _GW_TIMINGS:
+            started = clock()
+            while (t_2n / t_n > _GW_RATIO and timings < _GW_TIMINGS
+                   and clock() - started < _GW_RETIME_BUDGET):
+                pause(_GW_RETIME_PAUSE)
                 timings += 1
                 again_n, decision, again_use_n = once(cmd_n, scan)
                 decisions.append(decision)
                 again_2n, decision, again_use_2n = once(cmd_2n, scan)
                 decisions.append(decision)
+                times_n.append(again_n)
+                times_2n.append(again_2n)
                 if again_n < t_n:
                     t_n, use_n = again_n, again_use_n
                 if again_2n < t_2n:
                     t_2n, use_2n = again_2n, again_use_2n
-            return t_2n / t_n, t_n, t_2n, len(cmd_2n), decisions, (use_n, use_2n), timings
+            spent = clock() - started
+            return (t_2n / t_n, t_n, t_2n, len(cmd_2n), decisions, (use_n, use_2n), timings, (times_n, times_2n),
+                    spent)
         reps *= 2
-    return None, t_n, None, len(prefix + unit * reps + suffix), decisions, None, 1
+    return None, t_n, None, len(prefix + unit * reps + suffix), decisions, None, 1, None, 0.0
 
 
-def _gw_lin_failures(cases):
+def _gw_contention_text(times_n, times_2n, spent, loadavg=None):
+    """The contention clause of a gw-lin row still over _GW_RATIO after its retimes: the range of each size's
+    timings (a scan's own cost repeats closely, while host contention spreads the timings it hits), the clock
+    seconds the retiming took, and the host's 1, 5 and 15 minute load averages from loadavg (os.getloadavg
+    when None), or 'load average unavailable' when the host cannot give them."""
+    reader = getattr(os, "getloadavg", None) if loadavg is None else loadavg
+    try:
+        load = "load average {:.2f} {:.2f} {:.2f}".format(*reader()) if reader is not None else None
+    except (OSError, TypeError, ValueError, IndexError):
+        load = None
+    return ("base timings {:.3f}s to {:.3f}s, doubled timings {:.3f}s to {:.3f}s, over {:.1f}s of retiming, {}"
+            .format(min(times_n), max(times_n), min(times_2n), max(times_2n), spent,
+                    "load average unavailable" if load is None else load))
+
+
+def _gw_lin_failures(cases, clock=time.monotonic, pause=time.sleep):
     """What the gw-lin timing rows got wrong: cases are (label, unit, prefix, suffix, scan, want) rows, each
-    timed by _gw_scan_ratio, and a row fails on a decision other than want, on a t_n that never cleared the
-    floor, or on a ratio of the least timings over _GW_RATIO (reporting the usage of the two calls those
-    least timings came from)."""
+    timed by _gw_scan_ratio (with clock and pause), and a row fails on a decision other than want, on a t_n
+    that never cleared the floor, or on a ratio of the least timings over _GW_RATIO. That last failure stays a
+    failure however the retimes ended, worded 'super-linear or host-contended' since timings alone cannot
+    tell the two apart, and reports the usage of the two calls the least timings came from and the
+    contention readings (_gw_contention_text)."""
     out = []
     for label, unit, prefix, suffix, scan, want in cases:
-        ratio, t_n, t_2n, length_2n, got, use, timings = _gw_scan_ratio(unit, prefix, suffix, scan)
+        ratio, t_n, t_2n, length_2n, got, use, timings, times, spent = _gw_scan_ratio(
+            unit, prefix, suffix, scan, clock=clock, pause=pause)
         wrong = [decision for decision in got if decision != want]
         if wrong:
             out.append("({}) the timed scan decided {!r} on {} of its {} inputs, expected {!r}"
@@ -5534,43 +5571,90 @@ def _gw_lin_failures(cases):
             out.append("({}) linearity not evaluated: t_n stayed under the {}s floor through "
                        "{} sizes (last {:.4f}s)".format(label, _GW_FLOOR, _GW_SIZES, t_n))
         elif ratio > _GW_RATIO:
-            out.append("({}) doubling the input scaled the scan {:.2f}x (>3x, super-linear): "
-                       "{:.3f}s then {:.3f}s, the least of {} timings of each, for an input of length {} ({})"
-                       .format(label, ratio, t_n, t_2n, timings, length_2n, _gw_usage_text(*use)))
+            out.append("({}) doubling the input scaled the scan {:.2f}x (>3x, super-linear or host-contended): "
+                       "{:.3f}s then {:.3f}s, the least of {} timings of each, for an input of length {} ({}; {})"
+                       .format(label, ratio, t_n, t_2n, timings, length_2n, _gw_usage_text(*use),
+                               _gw_contention_text(times[0], times[1], spent)))
     return out
 
 
 def _gw_retime_failures():
-    """(gw-lin-retime-edge) _gw_scan_ratio over scripted times (no scan runs): the first size's time clears the
-    floor, then each pair is (t_n, t_2n) for one timing of both sizes. A first ratio just under or exactly at
-    _GW_RATIO is final with one timing; one just over it retimes, and a retimed pair at the bound ends the
-    retiming. One slow timing of either size is outvoted by the least of the others (the CI shape: 0.109 s then
-    0.328 s, then 0.115 s then 0.230 s), a slow retimed t_n never replaces a faster one, a ratio over the bound
-    in all but the last allowed timing passes on that last one, and a ratio over the bound in every timing stops
-    at _GW_TIMINGS timings of each and stays over it."""
+    """(gw-lin-retime-edge, gw-lin-retime-settings, gw-lin-retime-contention) _gw_scan_ratio over scripted
+    times (no scan runs) and a scripted clock that each timing and each pause advances by its own length: the
+    first size's time clears the floor, then each pair is (t_n, t_2n) for one timing of both sizes. The
+    retiming's settings are pinned (9 timings of each at most, a 20 s budget, a 0.5 s pause). A first ratio just under or exactly at _GW_RATIO is final with one
+    timing; one just over it retimes, and a retimed pair at the bound ends the retiming. One slow timing of
+    either size is outvoted by the least of the others (the CI shape: 0.109 s then 0.328 s, then 0.115 s then
+    0.230 s), a slow retimed t_n never replaces a faster one, a ratio over the bound in all but the last
+    allowed timing passes on that last one, and a ratio over the bound in every timing stops at 9 timings of
+    each and stays over it, also when contention inflates some timings of both sizes but not every base timing
+    (the least of each stays at the true cost, so the quadratic ratio stays 4). The budget: a pair still starts
+    when the clock since the first pair reads just under 20 s, and none starts when it reads exactly 20 s or
+    just over. Every retimed pair follows one pause, and the contention clause reports each size's range, the
+    retiming's seconds and the load average, or 'load average unavailable' when the reading fails."""
     out = []
+    pinned = (_GW_RATIO, _GW_TIMINGS, _GW_RETIME_BUDGET, _GW_RETIME_PAUSE)
+    if pinned != (3.0, 9, 20.0, 0.5):
+        out.append("(gw-lin-retime-settings) the retiming's bound, timing cap, budget and pause are {!r}, want "
+                   "(3.0, 9, 20.0, 0.5)".format(pinned))
+    tick = 2.0 ** -20
+    contended = [(0.15, 0.7), (0.1, 0.6), (0.18, 0.4), (0.13, 0.55), (0.1, 0.9), (0.2, 0.45), (0.1, 0.4),
+                 (0.16, 0.5), (0.12, 0.41), (0.1, 0.1)]
     for name, pairs, want_ratio, want_timings in (
             ("under", [(0.25, 0.7499)], 0.7499 / 0.25, 1),
             ("at", [(0.25, 0.75)], 0.75 / 0.25, 1),
             ("over-then-at", [(0.25, 0.7501), (0.25, 0.75)], 0.75 / 0.25, 2),
             ("slow-2n", [(0.109, 0.328), (0.115, 0.230)], 0.230 / 0.109, 2),
             ("slow-n-retimed", [(0.109, 0.33), (0.3, 0.22), (0.11, 0.44)], 0.22 / 0.109, 2),
-            ("over-until-last", [(0.25, 0.7501), (0.25, 0.7502), (0.25, 0.5)], 0.5 / 0.25, _GW_TIMINGS),
-            ("quadratic", [(0.11, 0.44), (0.12, 0.46), (0.115, 0.45), (0.1, 0.1)], 0.44 / 0.11, _GW_TIMINGS)):
+            ("over-until-last", [(0.25, 0.7501)] * 8 + [(0.25, 0.5)], 0.5 / 0.25, 9),
+            ("quadratic", [(0.11, 0.44), (0.12, 0.46), (0.115, 0.45)] + [(0.12, 0.47)] * 6 + [(0.1, 0.1)],
+             0.44 / 0.11, 9),
+            ("quadratic-contended", contended, 0.4 / 0.1, 9),
+            ("budget-inside", [(0.25, 1.0), (0.25, 19.25 - tick), (0.25, 0.5)], 0.5 / 0.25, 3),
+            ("budget-at", [(0.25, 1.0), (0.25, 19.25), (0.25, 0.5)], 1.0 / 0.25, 2),
+            ("budget-over", [(0.25, 1.0), (0.25, 19.25 + tick), (0.25, 0.5)], 1.0 / 0.25, 2)):
         times = [t for pair in pairs for t in pair]
         taken = []
+        paused = []
+        now = [0.0]
 
         def once(cmd, _scan):
             taken.append(len(cmd))
+            now[0] += times[len(taken) - 1]
             return times[len(taken) - 1], None, (len(taken),) * len(_GW_USAGE_LABELS)
 
-        ratio, _t_n, _t_2n, length_2n, decisions, _use, timings = _gw_scan_ratio("x", "", "", None, once)
+        def pause(seconds):
+            paused.append(seconds)
+            now[0] += seconds
+
+        ratio, _t_n, _t_2n, length_2n, decisions, _use, timings, seen, spent = _gw_scan_ratio(
+            "x", "", "", None, once, clock=lambda: now[0], pause=pause)
+        want_spent = sum(times[2:2 * timings]) + _GW_RETIME_PAUSE * (timings - 1)
         if (ratio is None or abs(ratio - want_ratio) > 1e-9 or timings != want_timings
-                or taken != [4000, 8000] * timings or len(decisions) != 2 * timings or length_2n != 8000):
+                or taken != [4000, 8000] * timings or len(decisions) != 2 * timings or length_2n != 8000
+                or paused != [0.5] * (timings - 1) or abs(spent - want_spent) > 1e-9
+                or seen != (times[0:2 * timings:2], times[1:2 * timings:2])):
             out.append("(gw-lin-retime-edge) {}: the scripted times {} gave ratio {!r} over {} timings of lengths "
-                       "{}, want {!r} over {} timings of 4000 then 8000".format(
-                           name, pairs, ratio, timings, taken, want_ratio, want_timings))
+                       "{} with pauses {} and {!r}s of retiming, want {!r} over {} timings of 4000 then 8000, "
+                       "a 0.5 s pause before each retimed pair and {!r}s".format(
+                           name, pairs, ratio, timings, taken, paused, spent, want_ratio, want_timings, want_spent))
+    for name, loadavg, want in (
+            ("read", lambda: (1.0, 2.5, 3.25),
+             "base timings 0.100s to 0.150s, doubled timings 0.400s to 0.700s, over 1.5s of retiming, "
+             "load average 1.00 2.50 3.25"),
+            ("unreadable", _gw_loadavg_unreadable,
+             "base timings 0.100s to 0.150s, doubled timings 0.400s to 0.700s, over 1.5s of retiming, "
+             "load average unavailable")):
+        got = _gw_contention_text([0.15, 0.1], [0.4, 0.7], 1.5, loadavg)
+        if got != want:
+            out.append("(gw-lin-retime-contention) {}: the contention clause is {!r}, want {!r}"
+                       .format(name, got, want))
     return out
+
+
+def _gw_loadavg_unreadable():
+    """A stand-in for os.getloadavg on a host that cannot read its load average."""
+    raise OSError("load average unobtainable")
 
 
 def _gw_spin_scan(power):
@@ -5600,18 +5684,69 @@ def _gw_slow_once_scan(power):
     return scan
 
 
+def _gw_square_scan(cmd):
+    """A stand-in scan whose work is quadratic in the input's length (no timed spin): a count of an absent
+    character from every 16th position to the end, so doubling the input about quadruples its cost."""
+    hits = 0
+    for start in range(0, len(cmd), 16):
+        hits += cmd.count("y", start)
+    return None if hits == 0 else hits
+
+
+def _gw_fail_pattern(label, usage=r"[^;]*", timings=r"\d+", length=r"\d+", spent=r"\d+\.\d"):
+    """The whole failure line of a gw-lin row over _GW_RATIO, as a regex whose groups are its ratio, its
+    timings, its usage clause and its retiming seconds; each argument is the regex its part must match."""
+    return re.compile(r"\(" + re.escape(label) + r"\) doubling the input scaled the scan (\d+\.\d\d)x "
+                      r"\(>3x, super-linear or host-contended\): \d+\.\d{3}s then \d+\.\d{3}s, the least of ("
+                      + timings + r") timings of each, for an input of length " + length + r" \((" + usage
+                      + r"); base timings \d+\.\d{3}s to \d+\.\d{3}s, doubled timings \d+\.\d{3}s to "
+                      r"\d+\.\d{3}s, over (" + spent + r")s of retiming, load average "
+                      r"(?:\d+\.\d\d \d+\.\d\d \d+\.\d\d|unavailable)\)\Z")
+
+
+def _gw_retimed_failure_problem(label, got):
+    """None when got is exactly one failure line of the label's row, worded 'super-linear or host-contended'
+    with its contention readings, after 9 timings of each or after fewer once the 20 s budget ran out, and
+    over at least the 0.5 s pause before each retimed pair in real clock time; otherwise what is wrong."""
+    match = _gw_fail_pattern(label).match(got[0]) if len(got) == 1 else None
+    if match is None:
+        return "the rows gave {!r}, want only the {} row's failure line".format(got, label)
+    timings, spent = int(match.group(2)), float(match.group(4))
+    if not (timings == 9 or (timings < 9 and spent >= 20.0)) or spent < 0.5 * (timings - 1):
+        return ("the {} row stopped after {} timings of each over {}s of retiming, want 9 timings (or fewer only "
+                "once 20 s ran out) and at least 0.5 s of pause before each retimed pair".format(
+                    label, timings, spent))
+    return None
+
+
 def _gw_retime_cpu_failures():
-    """(gw-lin-retime-linear, gw-lin-retime-super) The retiming in CPU time: with one timing of the doubled input
-    charged 0.2 s more (a first ratio of about 3.7 for a linear stand-in), the linear row still passes on its
-    least timings and the quadratic one still fails after _GW_TIMINGS timings of each."""
-    out = []
+    """(gw-lin-retime-linear, gw-lin-retime-super) The retiming in CPU time and real clock time: with one timing
+    of the doubled input charged 0.2 s more (a first ratio of about 3.7 for a linear stand-in), the linear row
+    still passes on its least timings and the quadratic one still fails, worded 'super-linear or
+    host-contended' with its contention readings, after 9 timings of each spread by real pauses (or fewer only
+    once the 20 s budget ran out)."""
     got = _gw_lin_failures((("gw-lin-retime-linear", "x", "", "", _gw_slow_once_scan(1), None),
                             ("gw-lin-retime-super", "x", "", "", _gw_slow_once_scan(2), None)))
-    if len(got) != 1 or not got[0].startswith("(gw-lin-retime-super) doubling the input scaled the scan ") \
-            or ", the least of {} timings of each, ".format(_GW_TIMINGS) not in got[0]:
-        out.append("(gw-lin-retime-linear/super) the rows gave {!r}, want only the quadratic row's failure after "
-                   "{} timings of each".format(got, _GW_TIMINGS))
-    return out
+    problem = _gw_retimed_failure_problem("gw-lin-retime-super", got)
+    return [] if problem is None else ["(gw-lin-retime-linear/super) " + problem]
+
+
+def _gw_retime_quadratic_failures():
+    """(gw-lin-retime-quadratic) A scan whose work is truly quadratic (_gw_square_scan, no timed spin) still
+    fails under the spread retiming: contention only adds time, so the least of each size stays at or above
+    the scan's own cost and the ratio stays near 4, over the bound after every pair. The row must give its
+    failure line with a ratio over _GW_RATIO, after 9 timings of each (or fewer only once the budget ran out),
+    never a pass and never a contention excuse in place of the failure."""
+    got = _gw_lin_failures((("gw-lin-retime-quadratic", "x", "", "", _gw_square_scan, None),))
+    problem = _gw_retimed_failure_problem("gw-lin-retime-quadratic", got)
+    if problem is None and not float(_gw_fail_pattern("gw-lin-retime-quadratic").match(got[0]).group(1)) > 3.0:
+        problem = "the row's failure line {!r} gives a ratio at or under 3".format(got[0])
+    return [] if problem is None else ["(gw-lin-retime-quadratic) " + problem]
+
+
+def _gw_no_pause(_seconds):
+    """A pause between retimed pairs that does not wait."""
+    return None
 
 
 @contextlib.contextmanager
@@ -5637,7 +5772,10 @@ def _gw_lin_usage_failures():
     usage field for both timed calls. With no resource module, with a getrusage result missing a field and
     with collector statistics without 'collections' (each stood in through sys.modules), the rows still reach
     their verdict instead of raising: a linear row passes and a super-linear one fails reporting 'usage
-    unavailable' for each reading it lost and the readings it kept."""
+    unavailable' for each reading it lost and the readings it kept. The failure is worded 'super-linear or
+    host-contended' after 9 timings of each, with its contention readings; these rows read a clock that never
+    advances and skip the pauses (gw-lin-retime-edge and gw-lin-retime-super pin the budget and the pauses),
+    so the timing cap alone ends their retiming."""
     pair_s = r"\d+\.\d{3}s then \d+\.\d{3}s"
     pair = r"\d+ then \d+"
     lost = "usage unavailable"
@@ -5661,15 +5799,13 @@ def _gw_lin_usage_failures():
             ("gw-lin-usage-no-collections", "gc", no_collections,
              "user CPU {0}, system CPU {0}, minor page faults {1}, involuntary context switches {1}, "
              "cyclic collections {2}".format(pair_s, pair, lost))):
-        want = re.compile(r"\(" + re.escape(label + "-super") + r"\) doubling the input scaled the scan "
-                          r"\d+\.\d\dx \(>3x, super-linear\): \d+\.\d{3}s then \d+\.\d{3}s, the least of "
-                          + str(_GW_TIMINGS) + r" timings of each, for an input of length 8000 \(" + clause + r"\)\Z")
+        want = _gw_fail_pattern(label + "-super", usage=clause, timings="9", length="8000", spent=r"0\.0")
         rows = ((label + "-super", "x", "", "", _gw_spin_scan(2), None),)
         if module is not None:
             rows = ((label + "-linear", "x", "", "", _gw_spin_scan(1), None),) + rows
         try:
             with _gw_module_as(module, stand_in) if module is not None else contextlib.nullcontext():
-                got = _gw_lin_failures(rows)
+                got = _gw_lin_failures(rows, clock=lambda: 0.0, pause=_gw_no_pause)
         except Exception as exc:
             out.append("({}) the gw-lin rows raised {}: {} instead of reaching their verdict"
                        .format(label, type(exc).__name__, exc))
@@ -22970,8 +23106,21 @@ def _main_isolated(monitor):
         # and judges the least time of each size: stray work only adds time, so the least timing is the one
         # nearest the scan's own cost, a linear row needs one clean timing of each size to pass, and a scan that
         # grows faster than its input fails on every timing. A passing first ratio is final, so a passing run
-        # times what it did before. gw-lin-retime-edge pins the retiming over scripted times (each end of the
-        # bound, a slow timing of either size, the timing cap) and gw-lin-retime-linear/super in CPU time.
+        # times what it did before. CI later failed gw-lin-runtime-tilde at 3.66x (0.195 s then 0.713 s, the
+        # least of 3) where 44 local runs of the same, unchanged scan gave about 2.0x per doubling. That fits
+        # host contention inflating all three doubled timings, which ran back to back within 2 to 3 s, a span
+        # one episode can cover. The retimes are now spread: at most 9 pairs, each after a 0.5 s pause, and no
+        # new pair once 20 s have passed. The decision rule is unchanged (the least t_2n over the least t_n above 3 fails),
+        # so a failure is still a failure when the retimes run out, worded 'super-linear or host-contended'
+        # with the contention readings. More retimes cannot hide a super-linear scan: contention only adds
+        # time, so the least of each size stays at or above the scan's own cost; a scan whose true ratio r is
+        # over 3 can pass only if every base timing taken was inflated by at least r / 3 (4/3 for a quadratic
+        # one, whose ratio stays near 4), and a budget that ends the retiming early leaves it failing.
+        # gw-lin-retime-edge pins the retiming over scripted times and a scripted clock (each end of the bound
+        # and of the budget, a slow timing of either size, the timing cap, the pauses, a contended quadratic),
+        # gw-lin-retime-settings its settings and gw-lin-retime-contention the contention clause,
+        # gw-lin-retime-linear/super pin it in CPU and clock time, and gw-lin-retime-quadratic times a scan
+        # whose work is truly quadratic.
         # A ROSTER-verb-dense line is still super-linear by design and relies on the deadline's fail-closed,
         # as the scan docstring states.
         # gw-dq-lin-sq / gw-dq-lin-dq: the two originals, linear before this change and here.
@@ -23044,6 +23193,7 @@ def _main_isolated(monitor):
         failures.extend(_gw_lin_usage_failures())
         failures.extend(_gw_retime_failures())
         failures.extend(_gw_retime_cpu_failures())
+        failures.extend(_gw_retime_quadratic_failures())
 
         # A glob character can match a filename that becomes an option word (a file named -n makes
         # 'git commit *-n' hand git a bare -n), so a glob or a quote glued to one denies.
