@@ -4621,6 +4621,608 @@ def _test_pgrep_self_match(failures):
         failures.append("(psm-wiring) pgrep_self_match handler/event wiring is missing or wrong")
 
 
+# status_after_subst rows. Each fire row reads $? where bash expands it after a command substitution in the
+# same simple command; each quiet row does not. The lettered rows (a, b, d, e, f, g, i, k, l, m, q, r, s)
+# are cases of the bash-semantics table the hook rests on. No row executes a command here: the handler is
+# called directly, and this self-test runs no bash and does not re-check the readings below. They were taken
+# once, outside it, by running each row's command text as written with GNU bash 5.3.9, as bash --norc
+# --noprofile -c (B below) and again with --posix added (P), in an empty directory with only PATH, HOME and
+# LC_ALL=C set. Where a row prints nothing that shows its read, that run appended the printing suffix given
+# in braces, which is not part of the row. Each row is named without its sas-fire- or sas-quiet- prefix.
+# Fire rows that read the substitution's 0 under B and the earlier command's 1 under P, as the printed rc=,
+# RC=, x=, y=, v= or w= value or bare status showed: a, b, e, g, i, q, r, s, braced-read, arith-body,
+# newline, arith-shift, assign-read, after-assign, line-continuation, heredoc, heredoc-word,
+# heredoc-redirect, heredoc-strip, heredoc-strip-later-line, for-arith-shift, case-second-pattern,
+# case-esac-word, for-do-arith-shift, for-do-assign-read, for-brace-assign-read, coproc-arith-shift,
+# coproc-for-arith-shift, if-cond-then-arith-shift, dollar-bracket-shift, subscript-shift,
+# subscript-quoted-bracket, subscript-long-assign, subscript-quoted-assign, subscript-newline-assign,
+# case-pattern-bracket, subscript-dquote-bracket, subscript-nested-bracket, subscript-append-assign,
+# subscript-empty-command-word-assign-read (b=), subscript-empty-command-word-array-read,
+# subscript-empty-command-word-array-read-after and subscript-quoted-at-array-read (a=), and herestring,
+# assign-herestring and redirect-redirect {; echo "v=$v"} and herestring-word {; echo "v=$v w=$w"}.
+# Fire rows whose read named the file a redirection wrote, f0 under B and f1 under P (e unset, no arguments):
+# subscript-no-command-word, subscript-empty-command-word, subscript-empty-brace-command-word,
+# subscript-inner-subst, subscript-quoted-at-command-word, subscript-quoted-brace-at-command-word,
+# subscript-quoted-array-command-word, subscript-quoted-lists-command-word, subscript-named-fd,
+# subscript-named-fd-input, subscript-named-fd-element, subscript-bang-command-word (no background job),
+# subscript-blank-default-command-word, subscript-time-empty-command-word (time printed its report under
+# both), subscript-subshell-empty-command-word, subscript-glued-continuation-empty-command-word,
+# subscript-spaced-continuation-empty-command-word and subscript-continuation-blank-empty-command-word;
+# subscript-then-empty-command-word wrote f3 under B (the exit of $(exit 3)) and f0 under P (the (( 1 ))
+# condition's), and subscript-subst-last-word wrote f3 under B and f1 under P. Fire rows whose read named an
+# array index, 0 under B and 1 under P: subscript-empty-command-word-subscript-read (declare -p a showed
+# [0]="5", then [1]="5") and subscript-command-word-read (bash reported the command a[0], then a[1], as not
+# found). Fire rows whose subscript read gave the value's $(exit 3) or `exit 3`, 3 under B and 1 under P, as
+# declare -p a showed [3]="", then [1]="" (bash expanded the value before the subscript):
+# subscript-value-subst-subscript-read, subscript-append-value-subst-subscript-read,
+# subscript-value-subst-braced-subscript-read, subscript-value-backquote-subscript-read and
+# subscript-two-subscripts-value-subst (b showed [1]="5" under both). subscript-subst-later-assign-read printed
+# b=3 under B and b=1 under P, and subscript-time-after-assignment-command printed a=0 under B and a=1 under P
+# (time printed its report under both).
+# Fire rows whose read showed only in what ran: cond-and, cond-or, cond-compare, cond-group and
+# cond-newline exited 1 under B (their $? -eq 1 test failed) and 0 under P; for-arith-and, for-arith-or,
+# for-do-cond-and and for-do-for-arith printed zero under B (their $? == 0 or $? -eq 0 test held) and
+# nothing under P; for-arith-pipe printed x=2 under B and nothing under P; for-do-arith-pipe printed x=2
+# under B and x=3 under P (2 | 0, then 2 | 1).
+# Fire rows reading 0 under B where P did not run the same command: time-p-for-arith,
+# time-dashdash-for-arith and time-p-dashdash-for-arith printed zero under B and were a syntax error (exit 2)
+# under P; time-p-cond printed zero and time-p-assign-read printed 0 under B, and under P each exited 127
+# with a No such file or directory error naming [[ or RC=1 (so the read there gave 1).
+# Fire rows that read the 1 of $(false) under B and the condition's 0 under P: if-arith-then-assign,
+# while-arith-do-assign and if-cond-then-assign.
+# Fire rows these runs do not tell apart, since no command failed before them: case-arm, subshell and
+# case-subst printed 0 under both, and after-redirect {; cat f} wrote 0 under both. seed printed rc=128
+# (the exit of git) under B and rc=2 (the exit of python3) under P.
+# Quiet rows that read the earlier command's 1 under both: d, f, k, l, m, redirect-target, procsub,
+# pipeline, then-assign, redirect-target-separated, assign-read-redirect, assign-no-subst,
+# heredoc-read-first, heredoc-later-redirect, for-arith-later-line, cond-glued-redirect,
+# cond-glued-amp-redirect, dollar-bracket-later-line, subscript-later-line, case-pattern-bracket-read,
+# cond-read-first (it exited 0, so its $? -eq 1 test held), redirect-before {; echo "v=$v"}, in-body
+# (inside the substitution body, after its false), subscript-value-read-subscript-subst and
+# subscript-append-value-read-subscript-subst (declare -p a showed [0]="1": the value was expanded before the
+# subscript's $(exit 3)), and subscript-read-glued-redirect-subst (declare -p a showed [1]="x").
+# Quiet rows where time, ! or then after an assignment or a redirection was the command word, not a reserved
+# word, so bash rejected a[0] as not a valid identifier without expanding it and wrote f1 under B, after the
+# time program in PATH reported a missing program or after ! or then was not found, and exited 1 under P:
+# subscript-time-command-word, subscript-bang-word-command-word, subscript-then-command-word,
+# subscript-glued-time-command-word, subscript-redirect-time-command-word and
+# subscript-last-time-command-word. assign-time-option exited 127 under both after the time program reported
+# that it could not run RC=1. assign-cond-command-word and redirect-cond-command-word reported [[, then 127, as
+# not found under both: the read after || gave the exit of the [[ command, a command of its own.
+# Quiet rows that read the earlier command's 1 under B with the subscripted assignment never expanded (bash
+# reported a[0] as not a valid identifier and ran the command word without expanding it); under P the same
+# error ended each with exit 1 before the command word ran: subscript-temp-env and subscript-append-temp-env (B
+# printed 1), subscript-literal-command-word and subscript-quoted-empty-command-word (B wrote f1, the second
+# after a command named by the empty "$e" was not found), subscript-array-read-command-word (B printed a= with
+# a[0] never set), subscript-array-read-last-word {; echo "a=${a[0]}"} (B printed a=), and these, where B wrote
+# f1: subscript-quoted-star-command-word, subscript-quoted-array-star-command-word,
+# subscript-quoted-at-prefix-command-word, subscript-quoted-at-empty-quotes-command-word,
+# subscript-spaced-fd-command-word, subscript-digit-fd-command-word, subscript-amp-fd-command-word (exit 127
+# with no error shown, its &> sending stderr to f1), subscript-status-command-word, subscript-pid-command-word,
+# subscript-count-command-word, subscript-flags-command-word, subscript-arith-command-word,
+# subscript-dollar-bracket-command-word, subscript-length-command-word, subscript-braced-status-command-word,
+# subscript-ansi-c-command-word, subscript-procsub-command-word, subscript-escaped-command-word,
+# subscript-single-quoted-command-word, subscript-glued-command-word, subscript-glued-argument,
+# subscript-subscript-command-word and subscript-continuation-quoted-command-word (after x was not found).
+# Quiet rows whose read bash never ran: case-pattern-heredoc and redirect-target-subscript printed only done
+# under both (the line holding the read was here-document text).
+# Quiet rows that read 0 under both from a command that succeeded: next-command (the echo's 0), cond-end
+# (the [[ ]] command's own 0), and if-arith-then-read and if-cond-then-read (the (( )) or [[ ]] condition's
+# 0).
+# Quiet rows that read the substitution's 0 under B and 1 under P, quiet by design: k-assignment-only
+# {; echo "rc=$rc"}, for-do-assignment-only, subscript-quoted-assignment-only and
+# subscript-long-assignment-only (an assignment-only command leaves its substitution's exit in $?, often
+# the status wanted), and in-body-after-subst (a read inside a substitution body is not judged, the
+# documented NOT SEEN limit).
+# Quiet rows with no read: single-quoted, escaped, dq-escaped, ansi-c, ansi-c-escaped, heredoc and
+# heredoc-escaped printed their $? as literal text; comment printed an empty line; dollar-dollar printed the
+# shell's process id and a ?; no-read holds no $?.
+# The rows case-after-assignment-command-word, case-after-redirect-command-word,
+# case-esac-after-assignment-command-word, case-esac-redirect-target, for-after-assignment-command-word and
+# those whose names start with continuation- were run the same way but with no environment at all (env -i),
+# each in a directory of its own. Fire rows among them that read the substitution's 0 under B and the earlier
+# command's 1 under P, as the printed RC= value or bare status showed: case-after-assignment-command-word and
+# case-after-redirect-command-word (after bash reported case as not found), case-esac-redirect-target (which
+# wrote a file named esac), continuation-dollar-paren, continuation-dquote-dollar-paren,
+# continuation-dollar-bracket and continuation-dollar-arith (after printing 1 for the joined $[1<<0] or
+# $((1<<0))), continuation-heredoc-operator, continuation-heredoc-delimiter (after printing the body x),
+# continuation-quoted-heredoc-body (after printing the body line x with its backslash), continuation-time
+# (time printed its report under both), continuation-dollar-status and continuation-before-equals.
+# case-esac-after-assignment-command-word printed 127 under B (the exit of the substitution, whose arm ran
+# esac as a command bash did not find) and 1 under P; continuation-cond printed zero under B (its $? -eq 1
+# test failed) and one under P; continuation-split-name wrote f0 under B and f1 under P (bash joined $e and
+# true into the empty $etrue). Quiet rows among them: continuation-split-arith printed 1 1 under both (bash
+# joined $( and ( into the arithmetic $((1)), so no substitution ran);
+# continuation-quoted-heredoc-operator and continuation-quoted-heredoc-delimiter printed their bodies as
+# literal text under both (bash joined the << and kept the backslash after EO, so EO and F did not end the
+# body); for-after-assignment-command-word exited 2 under both with a syntax error at the ( after for, and
+# ran nothing.
+_SAS_FIRE_ROWS = (
+    ("(sas-fire-a) substitution in double quotes", 'false; echo "x $(true): rc=$?"'),
+    ("(sas-fire-b) substitution with an argument", 'false; echo "x $(basename /a/b): rc=$?"'),
+    ("(sas-fire-e) backquote in double quotes", 'false; echo "x `true`: rc=$?"'),
+    ("(sas-fire-g) substitution in an earlier word", 'false; echo $(true) "rc=$?"'),
+    ("(sas-fire-i) substitution in a ${...} operand", 'false; echo "${unset_v:-$(true)} rc=$?"'),
+    ("(sas-fire-q) substitution and read as separate words", "false; printf '%s %s\\n' \"$(true)\" \"$?\""),
+    ("(sas-fire-r) parameter expansion between", 'false; echo "$(true) ${HOME:+h} rc=$?"'),
+    ("(sas-fire-s) arithmetic expansion between", 'false; echo "$(true) $((1+1)) rc=$?"'),
+    ("(sas-fire-seed) status echo after a check", 'python3 tools/check_x.py; echo "at $(git rev-parse '
+                                                  '--short HEAD): rc=$?"'),
+    ("(sas-fire-braced-read) ${?} read", 'false; echo "$(true) rc=${?}"'),
+    ("(sas-fire-arith-body) substitution inside $((...))", 'false; echo "$(( $(true) + 0 )) rc=$?"'),
+    ("(sas-fire-case-arm) inside a case arm", 'case a in a) echo $(true) $?;; esac'),
+    ("(sas-fire-subshell) inside a subshell", '(echo $(true) $?)'),
+    ("(sas-fire-after-redirect) after a glued redirection", 'echo >f $(true) $?'),
+    ("(sas-fire-newline) on a later line", 'false\necho "$(true) rc=$?"'),
+    ("(sas-fire-case-subst) substitution holding a case", 'echo $(case a in a) true;; esac) $?'),
+    ("(sas-fire-arith-shift) a later line after a << shift in (( ))",
+     '(( x = 1<<2 ))\nfalse\nRC=$? env "SHA=$(true)"'),
+    ("(sas-fire-cond-and) [[ ... && ... ]] is one command", 'false; [[ -n "$(true)x" && $? -eq 1 ]]'),
+    ("(sas-fire-cond-or) [[ ... || ... ]] is one command", 'false; [[ "$(true)" == x || $? -eq 1 ]]'),
+    ("(sas-fire-cond-compare) a > comparison inside [[ ]]", 'false; [[ b > "$(true)" && $? -eq 1 ]]'),
+    ("(sas-fire-cond-group) parentheses inside [[ ]]", 'false; [[ ( -n "$(true)x" ) && $? -eq 1 ]]'),
+    ("(sas-fire-cond-newline) a newline inside [[ ]]", 'false; [[ -n "$(true)x" &&\n$? -eq 1 ]]'),
+    ("(sas-fire-assign-read) read in a leading assignment", 'false; RC=$? env "SHA=$(true)"'),
+    ("(sas-fire-after-assign) assignment read after one with a command word", 'false; y=$(true) x=$? env'),
+    ("(sas-fire-herestring) here-string read, substitution in a word", 'false; read -r v <<<"$?" "w$(true)"'),
+    ("(sas-fire-assign-herestring) here-string read after an assignment substitution",
+     'false; x=$(true) read -r v <<<"$?"'),
+    ("(sas-fire-redirect-redirect) read in a later redirection",
+     'false; read -r v </dev/null"$(true)" <<<"$?"'),
+    ("(sas-fire-herestring-word) read later in the same here-string", 'false; read -r v w <<<"x$(true) $?"'),
+    ("(sas-fire-heredoc) read after a substitution in a here-document body",
+     'false; cat <<EOF\n$(true) rc=$?\nEOF'),
+    ("(sas-fire-heredoc-word) here-document body read, substitution in a word",
+     'false; cat $(true) <<EOF\nrc=$?\nEOF'),
+    ("(sas-fire-heredoc-redirect) here-document body read after a redirection substitution",
+     'false; cat 2>/dev/null"$(true)" <<EOF\nrc=$?\nEOF'),
+    ("(sas-fire-heredoc-strip) read in a <<- body", 'false; cat <<-EOF\n\t$(true) rc=$?\n\tEOF'),
+    ("(sas-fire-heredoc-strip-later-line) a later line after a <<- body ended by a tab-led delimiter",
+     'cat <<-EOF\n\tx\n\tEOF\nfalse; RC=$? env "SHA=$(true)"'),
+    ("(sas-fire-for-arith-shift) a later line after a << shift in a for (( )) header",
+     'for ((i=1<<0; i<1; i++)); do :; done\nfalse; RC=$? env "SHA=$(true)"'),
+    ("(sas-fire-for-arith-and) && inside a for (( )) header",
+     'false; for (( i=$(echo 0); i < 1 && $? == 0; i++ )); do echo zero; done'),
+    ("(sas-fire-for-arith-or) || inside a for (( )) header",
+     'false; for (( i=$(echo 0); i > 0 || $? == 0; i++ )); do echo zero; break; done'),
+    ("(sas-fire-for-arith-pipe) | inside a for (( )) header",
+     'false; for ((x = $(echo 2) | $?; x < 3; x++)); do echo "x=$x"; done'),
+    ("(sas-fire-line-continuation) a line continuation between leading assignments",
+     'false; x=$(true) \\\ny=$? env'),
+    ("(sas-fire-case-second-pattern) a read after a case with a second pattern",
+     'false; echo $(case a in b) :;; a) true;; esac) $?'),
+    ("(sas-fire-case-esac-word) an esac word inside a case arm",
+     'false; echo $(case a in a) echo esac;; b) true;; esac) $?'),
+    ("(sas-fire-for-do-arith-shift) a later line after a << shift in (( )) right after for (( )) do",
+     'for ((k=0; k<1; k++)) do (( y = 1<<2 )); done\nfalse; RC=$? env "SHA=$(true)" printenv RC'),
+    ("(sas-fire-for-do-cond-and) [[ ... && ... ]] right after for (( )) do",
+     'false; for ((k=0; k<1; k++)) do [[ -n "$(true)x" && $? -eq 0 ]] && echo zero; done'),
+    ("(sas-fire-for-do-arith-pipe) | inside (( )) right after for (( )) do",
+     'false; for ((k=0; k<1; k++)) do (( x = $(echo 2) | $? )); echo "x=$x"; done'),
+    ("(sas-fire-for-do-assign-read) leading assignment read right after for (( )) do",
+     'false; for ((k=0; k<1; k++)) do RC=$? env "SHA=$(true)" printenv RC; done'),
+    ("(sas-fire-for-brace-assign-read) leading assignment read right after for (( )) {",
+     'false; for ((k=0; k<1; k++)) { RC=$? env "SHA=$(true)" printenv RC; }'),
+    ("(sas-fire-for-do-for-arith) a for (( )) header right after for (( )) do",
+     'false; for ((k=0; k<1; k++)) do for (( i=$(echo 0); i < 1 && $? == 0; i++ )); do echo zero; done; done'),
+    ("(sas-fire-time-p-for-arith) a for (( )) header after time -p",
+     'false; time -p for (( i=$(echo 0); i < 1 && $? == 0; i++ )); do echo zero; done'),
+    ("(sas-fire-time-dashdash-for-arith) a for (( )) header after time --",
+     'false; time -- for (( i=$(echo 0); i < 1 && $? == 0; i++ )); do echo zero; done'),
+    ("(sas-fire-time-p-dashdash-for-arith) a for (( )) header after time -p --",
+     'false; time -p -- for (( i=$(echo 0); i < 1 && $? == 0; i++ )); do echo zero; done'),
+    ("(sas-fire-time-p-cond) [[ ... && ... ]] after time -p",
+     'false; time -p [[ -n "$(true)x" && $? -eq 0 ]] && echo zero'),
+    ("(sas-fire-time-p-assign-read) leading assignment read after time -p",
+     'false; time -p RC=$? env "SHA=$(true)" printenv RC'),
+    ("(sas-fire-coproc-arith-shift) a later line after a << shift in (( )) after coproc",
+     'coproc (( y = 1<<2 ))\nfalse; RC=$? env "SHA=$(true)" printenv RC'),
+    ("(sas-fire-coproc-for-arith-shift) a later line after a << shift in a for (( )) header after coproc",
+     'coproc for ((i=1<<0; i<1; i++)); do :; done\nfalse; RC=$? env "SHA=$(true)" printenv RC'),
+    ("(sas-fire-if-arith-then-assign) leading assignment read right after if (( )) then",
+     'if (( 1 )) then RC=$? env "SHA=$(false)" printenv RC; fi'),
+    ("(sas-fire-while-arith-do-assign) leading assignment read right after while (( )) do",
+     'k=0; while (( k++ < 1 )) do RC=$? env "SHA=$(false)" printenv RC; done'),
+    ("(sas-fire-if-cond-then-assign) leading assignment read right after if [[ ]] then",
+     'if [[ 1 ]] then RC=$? env "SHA=$(false)" printenv RC; fi'),
+    ("(sas-fire-if-cond-then-arith-shift) a later line after a << shift in (( )) right after if [[ ]] then",
+     'if [[ 1 ]] then (( y = 1<<2 )); fi\nfalse; RC=$? env "SHA=$(true)" printenv RC'),
+    ("(sas-fire-dollar-bracket-shift) a later line after a << shift in $[...]",
+     'echo $[1<<0]\nfalse; RC=$? env "SHA=$(true)" printenv RC'),
+    ("(sas-fire-subscript-shift) a later line after a << shift in an assignment subscript",
+     'a[1<<0]=5\nfalse; RC=$? env "SHA=$(true)" printenv RC'),
+    ("(sas-fire-subscript-quoted-bracket) a later line after a << in a subscript holding a quoted ]",
+     "declare -A h; h[']<<x']=1\nfalse; RC=$? env \"SHA=$(true)\" printenv RC"),
+    ("(sas-fire-subscript-long-assign) a later line after a << in a subscript after an assignment whose "
+     "subscript runs past 256 characters",
+     'a[' + '0+' * 140 + '0]=1 b[1<<0]=5\nfalse; RC=$? env "SHA=$(true)" printenv RC'),
+    ("(sas-fire-subscript-quoted-assign) a later line after a << in a subscript after an assignment whose "
+     "subscript holds a quoted ]",
+     "declare -A h; h[']']=1 b[1<<0]=5\nfalse; RC=$? env \"SHA=$(true)\" printenv RC"),
+    ("(sas-fire-subscript-newline-assign) a later line after a << in a subscript after an assignment whose "
+     "subscript holds a newline",
+     'a[1\n]=1 b[1<<0]=5\nfalse; RC=$? env "SHA=$(true)" printenv RC'),
+    ("(sas-fire-case-pattern-bracket) a read in a case arm whose pattern holds an unmatched [",
+     "false\ncase 'a[' in\na[) RC=$? env \"SHA=$(true)\" printenv RC;;\nesac"),
+    ("(sas-fire-subscript-dquote-bracket) a later line after a << in a subscript holding a double-quoted ]",
+     'declare -A h; h["]"<<0]=5\nfalse; RC=$? env "SHA=$(true)" printenv RC'),
+    ("(sas-fire-subscript-nested-bracket) a later line after a << in a subscript holding a nested [...]",
+     'a[b[1]<<0]=5\nfalse; RC=$? env "SHA=$(true)" printenv RC'),
+    ("(sas-fire-subscript-no-command-word) redirection read after a subscripted assignment's substitution "
+     "with no command word", 'false; a[0]=$(true) >"f$?"'),
+    ("(sas-fire-subscript-empty-command-word) redirection read after a subscripted assignment's substitution "
+     "where the only command word is an unquoted $e", 'false; a[0]=$(true) $e >"f$?"'),
+    ("(sas-fire-subscript-empty-brace-command-word) redirection read after a subscripted assignment's "
+     "substitution where the only command word is an unquoted ${e:-}", 'false; a[0]=$(true) ${e:-} >"f$?"'),
+    ("(sas-fire-subscript-empty-command-word-assign-read) assignment read after a subscripted assignment's "
+     "substitution where the only command word is an unquoted $e", 'false; a[0]=$(true) b=$? $e; echo "b=$b"'),
+    ("(sas-fire-subscript-empty-command-word-array-read) read in a subscripted assignment where the only "
+     "command word is an unquoted substitution", 'false; a[0]=$? $(true); echo "a=${a[0]}"'),
+    ("(sas-fire-subscript-empty-command-word-array-read-after) read in a subscripted assignment after an "
+     "assignment's substitution where the only command word is an unquoted $e",
+     'false; x=$(true) a[0]=$? $e; echo "a=${a[0]}"'),
+    ("(sas-fire-subscript-empty-command-word-subscript-read) read after a substitution in a subscript of an "
+     "assignment where the only command word is an unquoted $e", 'false; a[$(true)$?]=5 $e; declare -p a'),
+    ("(sas-fire-subscript-command-word-read) read after a substitution in the subscript of a command word",
+     'false; a[$(true)$?] x'),
+    ("(sas-fire-subscript-inner-subst) redirection read after a substitution inside an assignment's subscript",
+     'false; a[$(true)]=1 >"f$?"'),
+    ("(sas-fire-subscript-append-assign) a later line after a << in a subscript after a += assignment",
+     'a[1]+=1 b[1<<0]=5\nfalse; RC=$? env "SHA=$(true)" printenv RC'),
+    ("(sas-fire-subscript-quoted-at-command-word) redirection read after a subscripted assignment's "
+     'substitution where the only command word is a quoted "$@"', 'false; a[0]=$(true) "$@" >"f$?"'),
+    ("(sas-fire-subscript-quoted-brace-at-command-word) redirection read after a subscripted assignment's "
+     'substitution where the only command word is a quoted "${@}"', 'false; a[0]=$(true) "${@}" >"f$?"'),
+    ("(sas-fire-subscript-quoted-array-command-word) redirection read after a subscripted assignment's "
+     'substitution where the only command word is a quoted "${e[@]}"', 'false; a[0]=$(true) "${e[@]}" >"f$?"'),
+    ("(sas-fire-subscript-quoted-lists-command-word) redirection read after a subscripted assignment's "
+     'substitution where the only command word joins "$@${e[@]}" and $e',
+     'false; a[0]=$(true) "$@${e[@]}"$e >"f$?"'),
+    ("(sas-fire-subscript-quoted-at-array-read) read in a subscripted assignment where the command words are "
+     'a quoted "$@" and an unquoted substitution', 'false; a[0]=$? "$@" $(true); echo "a=${a[0]}"'),
+    ("(sas-fire-subscript-named-fd) redirection read after a subscripted assignment's substitution where a "
+     "named file descriptor is glued to the redirection", 'false; a[0]=$(true) {fd}>"f$?"'),
+    ("(sas-fire-subscript-named-fd-input) redirection read after a subscripted assignment's substitution "
+     "after a named file descriptor glued to a < redirection", 'false; a[0]=$(true) {fd}</dev/null >"f$?"'),
+    ("(sas-fire-subscript-named-fd-element) redirection read after a subscripted assignment's substitution "
+     "where a named file descriptor with a subscript is glued to the redirection",
+     'false; a[0]=$(true) {b[0]}>"f$?"'),
+    ("(sas-fire-subscript-bang-command-word) redirection read after a subscripted assignment's substitution "
+     "where the only command word is $!, empty with no background job", 'false; a[0]=$(true) $! >"f$?"'),
+    ("(sas-fire-subscript-blank-default-command-word) redirection read after a subscripted assignment's "
+     "substitution where the only command word is ${e:-x} with e holding a blank",
+     'e=" "; false; a[0]=$(true) ${e:-x} >"f$?"'),
+    ("(sas-fire-subscript-then-empty-command-word) redirection read after a subscripted assignment's "
+     "substitution right after if (( )) then, where the only command word is an unquoted $e",
+     'if (( 1 )) then a[0]=$(exit 3) $e >"f$?"; fi'),
+    ("(sas-fire-subscript-time-empty-command-word) redirection read after a subscripted assignment's "
+     "substitution after time, where the only command word is an unquoted $e",
+     'false; time a[0]=$(true) $e >"f$?"'),
+    ("(sas-fire-subscript-subshell-empty-command-word) redirection read after a subscripted assignment's "
+     "substitution where the only command word is an unquoted $e, closed by a subshell's )",
+     '( false; a[0]=$(true) $e >"f$?" )'),
+    ("(sas-fire-subscript-value-subst-subscript-read) read in an assignment's subscript after a substitution "
+     "in its value, which bash expands first, where the only command word is an unquoted $e",
+     'false; a[$?]=$(exit 3) $e; declare -p a'),
+    ("(sas-fire-subscript-append-value-subst-subscript-read) read in a += assignment's subscript after a "
+     "substitution in its value, where the only command word is an unquoted $e",
+     'false; a[$?]+=$(exit 3) $e; declare -p a'),
+    ("(sas-fire-subscript-value-subst-braced-subscript-read) ${?} read in an assignment's subscript after a "
+     "substitution in its value, where the only command word is an unquoted $e",
+     'false; a[${?}]=$(exit 3) $e; declare -p a'),
+    ("(sas-fire-subscript-value-backquote-subscript-read) read in an assignment's subscript after a backquote "
+     "substitution in its value, where the only command word is an unquoted $e",
+     'false; a[$?]=`exit 3` $e; declare -p a'),
+    ("(sas-fire-subscript-two-subscripts-value-subst) read in a second assignment's subscript after a "
+     "substitution in its value, the first subscript read holding none",
+     'false; b[$?]=5 a[$?]=$(exit 3) $e; declare -p a b'),
+    ("(sas-fire-subscript-subst-later-assign-read) assignment read after a substitution in an earlier "
+     "assignment's subscript, where the only command word is an unquoted $e",
+     'false; a[$(exit 3)]=1 b=$? $e; echo "b=$b"'),
+    ("(sas-fire-subscript-subst-last-word) redirection read before a subscripted assignment whose subscript "
+     "holds a substitution, the assignment ending the text", 'false; >"f$?" a[$(exit 3)]=1'),
+    ("(sas-fire-subscript-glued-continuation-empty-command-word) redirection read after a subscripted "
+     "assignment's substitution where a line continuation is glued to the only command word, an unquoted $e",
+     'false; a[0]=$(true) $e\\\n>"f$?"'),
+    ("(sas-fire-subscript-spaced-continuation-empty-command-word) redirection read after a subscripted "
+     "assignment's substitution where a blank comes before a line continuation after an unquoted $e",
+     'false; a[0]=$(true) $e \\\n>"f$?"'),
+    ("(sas-fire-subscript-continuation-blank-empty-command-word) redirection read after a subscripted "
+     "assignment's substitution where a line continuation glued to an unquoted $e has a blank after it",
+     'false; a[0]=$(true) $e\\\n >"f$?"'),
+    ("(sas-fire-subscript-time-after-assignment-command) read in a subscripted assignment after time, in a "
+     "command after an assignment-only one, where the only command word is an unquoted substitution",
+     'x=1; false; time a[0]=$? $(true); echo "a=${a[0]}"'),
+    ("(sas-fire-case-after-assignment-command-word) a later line after a case that an assignment makes the "
+     "command word, before a << shift in a subscript",
+     'false; x=1 case a in b; a[1<<0]=5\nfalse; RC=$? env "SHA=$(true)" printenv RC'),
+    ("(sas-fire-case-after-redirect-command-word) a later line after a case that a redirection makes the "
+     "command word, before a << shift in a subscript",
+     'false; >/dev/null case a in b; a[1<<0]=5\nfalse; RC=$? env "SHA=$(true)" printenv RC'),
+    ("(sas-fire-case-esac-after-assignment-command-word) read after a substitution whose case arm runs esac "
+     "after an assignment as a command", 'false; echo $(case a in a) x=1 esac ;; b) true;; esac) $?'),
+    ("(sas-fire-case-esac-redirect-target) read after a substitution whose case arm redirects to a file "
+     "named esac", 'false; echo $(case a in a) > esac ;; b) true;; esac) $?'),
+    ("(sas-fire-continuation-dollar-paren) read after a substitution whose $ and ( a line continuation "
+     "splits", 'false; echo $\\\n(true) $?'),
+    ("(sas-fire-continuation-dquote-dollar-paren) read after a substitution whose $ and ( a line "
+     "continuation splits, in double quotes", 'false; echo "$\\\n(true) $?"'),
+    ("(sas-fire-continuation-dollar-bracket) a later line after a $[...] whose $ and [ a line continuation "
+     "splits, holding a << shift", 'echo $\\\n[1<<0]\nfalse; RC=$? env "SHA=$(true)" printenv RC'),
+    ("(sas-fire-continuation-dollar-arith) a later line after a $((...)) whose $ and (( a line continuation "
+     "splits, holding a << shift", 'echo $\\\n((1<<0))\nfalse; RC=$? env "SHA=$(true)" printenv RC'),
+    ("(sas-fire-continuation-heredoc-operator) a body read after a substitution in a word, where a line "
+     "continuation splits the <<", 'false; cat <\\\n<EOF $(true)\n$?\nEOF'),
+    ("(sas-fire-continuation-heredoc-delimiter) a later line after a here-document whose delimiter word a "
+     "line continuation splits", 'cat <<E\\\nOF\nx\nEOF\nfalse; RC=$? env "SHA=$(true)" printenv RC'),
+    ("(sas-fire-continuation-quoted-heredoc-body) a later line after a here-document under a quoted "
+     "delimiter whose body line ends in a backslash",
+     "cat <<'EOF'\nx \\\nEOF\nfalse; RC=$? env \"SHA=$(true)\" printenv RC"),
+    ("(sas-fire-continuation-time) assignment read after time that a line continuation splits",
+     'false; ti\\\nme RC=$? env "SHA=$(true)" printenv RC'),
+    ("(sas-fire-continuation-cond) read after a substitution in a [[ that a line continuation splits",
+     'false; [\\\n[ -n "$(true)x" && $? -eq 1 ]] && echo one || echo zero'),
+    ("(sas-fire-continuation-dollar-status) read whose $ and ? a line continuation splits",
+     'false; echo $(true) $\\\n?'),
+    ("(sas-fire-continuation-split-name) redirection read after a subscripted assignment's substitution "
+     "where a line continuation splits the name of the only command word, an unquoted $e",
+     'false; a[0]=$(true) $e\\\ntrue >"f$?"'),
+    ("(sas-fire-continuation-before-equals) a later line after an assignment whose ] and = a line "
+     "continuation splits, before a << shift in a subscript",
+     'a[1]\\\n=1 b[1<<0]=5\nfalse; RC=$? env "SHA=$(true)" printenv RC'),
+)
+_SAS_QUIET_ROWS = (
+    ("(sas-quiet-d) read before every substitution", 'false; echo "rc=$? $(true)"'),
+    ("(sas-quiet-f) status saved first", 'false; rc=$?; echo "at $(true): rc=$rc"'),
+    ("(sas-quiet-k) substitution only in a leading assignment", 'false; x=$(true) echo "rc=$?"'),
+    ("(sas-quiet-k-assignment-only) assignment-only command", 'false; x=$(true) rc=$?'),
+    ("(sas-quiet-l) arithmetic expansion alone", 'false; echo "$((1+1)) rc=$?"'),
+    ("(sas-quiet-m) parameter expansion alone", 'false; echo "${HOME} rc=$?"'),
+    ("(sas-quiet-single-quoted) single-quoted read", "false; echo $(true) '$?'"),
+    ("(sas-quiet-escaped) escaped read", 'false; echo $(true) \\$?'),
+    ("(sas-quiet-dq-escaped) escaped read in double quotes", 'false; echo "$(true) \\$?"'),
+    ("(sas-quiet-ansi-c) read in $'...' text", "false; echo $(true) $'$?'"),
+    ("(sas-quiet-comment) read in a comment", 'false; echo $(true) # $?'),
+    ("(sas-quiet-redirect-target) substitution in a redirection target",
+     'false; echo 2>"$(echo /dev/null)" "rc=$?"'),
+    ("(sas-quiet-procsub) process substitution alone", 'false; echo >(true) rc=$?'),
+    ("(sas-quiet-in-body) read inside the substitution body", 'echo "$(false; echo $?)"'),
+    ("(sas-quiet-next-command) read in the next command", 'echo $(true); echo $?'),
+    ("(sas-quiet-pipeline) read in the next pipeline stage", 'false; echo $(true) | echo "rc=$?"'),
+    ("(sas-quiet-heredoc) read in a quoted here-document body", "cat <<'EOF'\n$(true) $?\nEOF"),
+    ("(sas-quiet-then-assign) leading assignment after then",
+     'if false; then :; else x=$(true) echo "rc=$?"; fi'),
+    ("(sas-quiet-no-read) no status read", 'echo "$(true)"'),
+    ("(sas-quiet-dollar-dollar) $$ then a plain ?", 'false; echo "$(true) $$?"'),
+    ("(sas-quiet-cond-read-first) read before the substitution in [[ ]]",
+     'false; [[ $? -eq 1 && -n "$(true)x" ]]'),
+    ("(sas-quiet-cond-end) read in the command after [[ ]]", 'false; [[ -n "$(true)x" ]] && echo "rc=$?"'),
+    ("(sas-quiet-redirect-target-separated) substitution in a separated redirection target",
+     'false; echo 2> "$(echo /dev/null)" "rc=$?"'),
+    ("(sas-quiet-assign-read-redirect) assignment read, substitution in a redirection",
+     'false; x=$? env </dev/null"$(true)"'),
+    ("(sas-quiet-redirect-before) here-string read before a redirection substitution",
+     'false; read -r v <<<"$?" 2>/dev/null"$(true)"'),
+    ("(sas-quiet-assign-no-subst) assignment read with no substitution", 'false; RC=$? env "SHA=x"'),
+    ("(sas-quiet-heredoc-read-first) read before the substitution in a body",
+     'false; cat <<EOF\nrc=$? $(true)\nEOF'),
+    ("(sas-quiet-heredoc-later-redirect) body read before a later redirection substitution",
+     'false; cat <<EOF 2>/dev/null"$(true)"\nrc=$?\nEOF'),
+    ("(sas-quiet-heredoc-escaped) escaped read in a body", 'false; cat <<EOF\n$(true) rc=\\$?\nEOF'),
+    ("(sas-quiet-for-arith-later-line) a later line after a << shift in a for (( )) header",
+     'for ((i=1<<0; i<1; i++)); do :; done\necho "$(true)" >/dev/null; false; echo "rc=$?"'),
+    ("(sas-quiet-cond-glued-redirect) read after a ]] glued to a redirection",
+     'false; [[ -z "$(true)x" ]]>/dev/null || echo "rc=$?"'),
+    ("(sas-quiet-cond-glued-amp-redirect) read after a ]] glued to an &> redirection",
+     'false; [[ -z "$(true)x" ]]&>/dev/null || echo "rc=$?"'),
+    ("(sas-quiet-ansi-c-escaped) read after an escaped quote in $'...' text",
+     "false; echo $(true) $'\\'$?'"),
+    ("(sas-quiet-in-body-after-subst) read after a substitution inside a substitution body (not judged)",
+     'false; echo "$(echo $(true) $?)"'),
+    ("(sas-quiet-for-do-assignment-only) assignment-only command right after for (( )) do",
+     'false; for ((k=0; k<1; k++)) do x=$(true) rc=$?; echo "rc=$rc"; done'),
+    ("(sas-quiet-if-arith-then-read) read right after if (( )) then, substitution in the (( ))",
+     'false; if (( $(echo 1) )) then echo "rc=$?"; fi'),
+    ("(sas-quiet-if-cond-then-read) read right after if [[ ]] then, substitution in the [[ ]]",
+     'false; if [[ -n "$(echo 1)" ]] then echo "rc=$?"; fi'),
+    ("(sas-quiet-dollar-bracket-later-line) a read on a later line after a << shift in $[...]",
+     'echo "$(true)" $[1<<0]\nfalse; echo "rc=$?"'),
+    ("(sas-quiet-subscript-later-line) a read on a later line after a << shift in an assignment subscript",
+     'a[1<<0]=5 b="$(true)"\nfalse; echo "rc=$?"'),
+    ("(sas-quiet-subscript-quoted-assignment-only) assignment-only command whose subscript holds a quoted ]",
+     "declare -A h; false; h[']']=$(true) rc=$?; echo \"rc=$rc\""),
+    ("(sas-quiet-subscript-long-assignment-only) assignment-only command whose subscript runs past 256 "
+     "characters",
+     'false; a[' + '0+' * 140 + '0]=$(true) rc=$?; echo "rc=$rc"'),
+    ("(sas-quiet-subscript-temp-env) read after a substitution in a subscripted assignment before a command "
+     "word", 'false; a[0]=$(true) RC=$? env printenv RC'),
+    ("(sas-quiet-case-pattern-bracket-read) read before a substitution in a case arm whose pattern holds an "
+     "unmatched [", "false; case 'a[' in\na[) x=$(true) echo \"rc=$?\";;\nesac"),
+    ("(sas-quiet-case-pattern-heredoc) a later line in the body of a here-document opened in a case arm "
+     "after a pattern holding an unmatched [",
+     'case x in b) ;; a[) <<EOF ] ;; esac\nfalse; RC=$? env "SHA=$(true)" printenv RC\nEOF\necho done'),
+    ("(sas-quiet-redirect-target-subscript) a later line in the body of a here-document opened by a << in "
+     "a redirection target that starts NAME[",
+     '> a[1<<0] echo hi\nfalse; RC=$? env "SHA=$(true)" printenv RC\n0]\necho done'),
+    ("(sas-quiet-subscript-append-temp-env) read after a substitution in a subscripted += assignment before a "
+     "command word", 'false; a[0]+=$(true) RC=$? env printenv RC'),
+    ("(sas-quiet-subscript-literal-command-word) redirection read after a subscripted assignment's "
+     "substitution where an unquoted $e comes before a literal command word",
+     'false; a[0]=$(true) $e true >"f$?"'),
+    ("(sas-quiet-subscript-quoted-empty-command-word) redirection read after a subscripted assignment's "
+     'substitution where the command word is a quoted "$e"', 'false; a[0]=$(true) "$e" >"f$?"'),
+    ("(sas-quiet-subscript-array-read-command-word) read in a subscripted assignment before a literal command "
+     "word, with a substitution in a later word", 'false; a[0]=$? true $(true); echo "a=${a[0]}"'),
+    ("(sas-quiet-subscript-quoted-star-command-word) redirection read after a subscripted assignment's "
+     'substitution where the command word is a quoted "$*"', 'false; a[0]=$(true) "$*" >"f$?"'),
+    ("(sas-quiet-subscript-quoted-array-star-command-word) redirection read after a subscripted assignment's "
+     'substitution where the command word is a quoted "${e[*]}"', 'false; a[0]=$(true) "${e[*]}" >"f$?"'),
+    ("(sas-quiet-subscript-quoted-at-prefix-command-word) redirection read after a subscripted assignment's "
+     'substitution where the command word is a quoted "x$@"', 'false; a[0]=$(true) "x$@" >"f$?"'),
+    ("(sas-quiet-subscript-quoted-at-empty-quotes-command-word) redirection read after a subscripted "
+     'assignment\'s substitution where the command word is "$@" followed by ""',
+     'false; a[0]=$(true) "$@""" >"f$?"'),
+    ("(sas-quiet-subscript-spaced-fd-command-word) redirection read after a subscripted assignment's "
+     "substitution where a {fd} word is followed by a blank", 'false; a[0]=$(true) {fd} >"f$?"'),
+    ("(sas-quiet-subscript-digit-fd-command-word) redirection read after a subscripted assignment's "
+     "substitution where a {1fd} word, not a name, is glued to the redirection", 'false; a[0]=$(true) {1fd}>"f$?"'),
+    ("(sas-quiet-subscript-amp-fd-command-word) redirection read after a subscripted assignment's "
+     "substitution where a {fd} word is glued to an &> redirection", 'false; a[0]=$(true) {fd}&>"f$?"'),
+    ("(sas-quiet-subscript-status-command-word) redirection read after a subscripted assignment's "
+     "substitution where the command word is $?", 'false; a[0]=$(true) $? >"f$?"'),
+    ("(sas-quiet-subscript-pid-command-word) redirection read after a subscripted assignment's substitution "
+     "where the command word is $$", 'false; a[0]=$(true) $$ >"f$?"'),
+    ("(sas-quiet-subscript-count-command-word) redirection read after a subscripted assignment's "
+     "substitution where the command word is $#", 'false; a[0]=$(true) $# >"f$?"'),
+    ("(sas-quiet-subscript-flags-command-word) redirection read after a subscripted assignment's "
+     "substitution where the command word is $-", 'false; a[0]=$(true) $- >"f$?"'),
+    ("(sas-quiet-subscript-arith-command-word) redirection read after a subscripted assignment's "
+     "substitution where the command word is $((0))", 'false; a[0]=$(true) $((0)) >"f$?"'),
+    ("(sas-quiet-subscript-dollar-bracket-command-word) redirection read after a subscripted assignment's "
+     "substitution where the command word is $[0]", 'false; a[0]=$(true) $[0] >"f$?"'),
+    ("(sas-quiet-subscript-length-command-word) redirection read after a subscripted assignment's "
+     "substitution where the command word is ${#e}", 'false; a[0]=$(true) ${#e} >"f$?"'),
+    ("(sas-quiet-subscript-braced-status-command-word) redirection read after a subscripted assignment's "
+     "substitution where the command word is ${?}", 'false; a[0]=$(true) ${?} >"f$?"'),
+    ("(sas-quiet-subscript-ansi-c-command-word) redirection read after a subscripted assignment's "
+     "substitution where the command word is $'x'", "false; a[0]=$(true) $'x' >\"f$?\""),
+    ("(sas-quiet-subscript-procsub-command-word) redirection read after a subscripted assignment's "
+     "substitution where the command word is a process substitution", 'false; a[0]=$(true) <(true) >"f$?"'),
+    ("(sas-quiet-subscript-escaped-command-word) redirection read after a subscripted assignment's "
+     "substitution where the command word is an escaped $", 'false; a[0]=$(true) \\$ >"f$?"'),
+    ("(sas-quiet-subscript-single-quoted-command-word) redirection read after a subscripted assignment's "
+     "substitution where the command word is single-quoted", "false; a[0]=$(true) 'x' >\"f$?\""),
+    ("(sas-quiet-subscript-glued-command-word) redirection read after a subscripted assignment's "
+     "substitution where a literal command word is glued to the redirection", 'false; a[0]=$(true) true>"f$?"'),
+    ("(sas-quiet-subscript-glued-argument) redirection read after a subscripted assignment's substitution "
+     "where an unquoted $e comes before a literal word glued to the redirection",
+     'false; a[0]=$(true) $e x>"f$?"'),
+    ("(sas-quiet-subscript-array-read-last-word) read in a subscripted assignment before a substitution and "
+     "a literal command word that ends the text", 'false; a[0]=$? $(true) true'),
+    ("(sas-quiet-subscript-subscript-command-word) redirection read after a subscripted assignment's "
+     "substitution where the command word starts NAME[", 'false; a[0]=$(true) b[1] >"f$?"'),
+    ("(sas-quiet-subscript-value-read-subscript-subst) read in an assignment's value before a substitution "
+     "in its subscript, which bash expands after the value", 'false; a[$(exit 3)]=$? $e; declare -p a'),
+    ("(sas-quiet-subscript-append-value-read-subscript-subst) read in a += assignment's value before a "
+     "substitution in its subscript", 'false; a[$(exit 3)]+=$? $e; declare -p a'),
+    ("(sas-quiet-subscript-read-glued-redirect-subst) read in an assignment's subscript before a substitution "
+     "in a redirection glued to its value", 'false; a[$?]=x>"g$(exit 3)" $e; declare -p a'),
+    ("(sas-quiet-subscript-time-command-word) redirection read after a subscripted assignment's substitution "
+     "where time after it is the command word, not a reserved word", 'false; a[0]=$(true) time >"f$?"'),
+    ("(sas-quiet-subscript-bang-word-command-word) redirection read after a subscripted assignment's "
+     "substitution where ! after it is the command word", 'false; a[0]=$(true) ! >"f$?"'),
+    ("(sas-quiet-subscript-then-command-word) redirection read after a subscripted assignment's substitution "
+     "where then after it is the command word", 'false; a[0]=$(true) then >"f$?"'),
+    ("(sas-quiet-subscript-glued-time-command-word) redirection read after a subscripted assignment's "
+     "substitution where time after it is the command word, glued to a redirection",
+     'false; a[0]=$(true) time>"f$?"'),
+    ("(sas-quiet-subscript-redirect-time-command-word) redirection read after a subscripted assignment's "
+     "substitution where time after a redirection is the command word", 'false; a[0]=$(true) >g time >"f$?"'),
+    ("(sas-quiet-subscript-last-time-command-word) redirection read before a subscripted assignment's "
+     "substitution where time ending the text is the command word", 'false; >"f$?" a[0]=$(true) time'),
+    ("(sas-quiet-assign-time-option) time -p after an assignment, where time is the command word and -p and "
+     "RC=$? its arguments", 'false; x=1 time -p RC=$? env "SHA=$(true)" printenv RC'),
+    ("(sas-quiet-assign-cond-command-word) [[ after an assignment, where [[ is the command word and || ends "
+     "it", 'false; x=1 [[ "$(true)" || $? ]]'),
+    ("(sas-quiet-redirect-cond-command-word) [[ after a redirection, where [[ is the command word and || "
+     "ends it", 'false; >/dev/null [[ "$(true)" || $? ]]'),
+    ("(sas-quiet-subscript-continuation-quoted-command-word) redirection read after a subscripted "
+     "assignment's substitution where a line continuation joins $e to quoted text",
+     'false; a[0]=$(true) $e\\\n"x" >"f$?"'),
+    ("(sas-quiet-continuation-split-arith) a $((...)) whose $( and ( a line continuation splits, not a "
+     "substitution", 'false; echo $(\\\n(1)) $?'),
+    ("(sas-quiet-continuation-quoted-heredoc-operator) a quoted here-document body whose << a line "
+     "continuation splits", 'false; cat <\\\n<"EOF"\n$(true) $?\nEOF'),
+    ("(sas-quiet-continuation-quoted-heredoc-delimiter) a quoted here-document body where a line "
+     "continuation splits a line that would match the delimiter once joined",
+     "cat <<'EOF'\nEO\\\nF\n$(true) $?\nEOF"),
+    ("(sas-quiet-for-after-assignment-command-word) a later line after a for that an assignment makes the "
+     "command word, which bash refuses before running anything",
+     'false; x=1 for ((i=1<<0;i<1;i++)); do :; done\nfalse; RC=$? env "SHA=$(true)" printenv RC'),
+)
+
+
+def _test_status_after_subst(failures):
+    """status_after_subst rows (sas-*); no submitted command is executed. Each fire row must allow with the
+    placement note and each quiet row must allow silently; each fire row must also be red with the hook
+    disabled (its reading _subst_status_reading patched to find nothing), so the row pins this hook's
+    decision. The note must name the effect and the saved form, a payload field it cannot read must allow
+    with a note naming that field, another tool and a command with no read must allow silently, a nesting
+    past the bound must note the unread rest, an unexpected event must hard-block, and the mode must be
+    wired as a note-only PreToolUse handler."""
+    handler = aiqt_hooks.status_after_subst
+    for label, command in _SAS_FIRE_ROWS:
+        got = _decision(handler, command)
+        if got != "allow-note":
+            failures.append("{}: expected allow-note, got {}".format(label, got))
+    for label, command in _SAS_QUIET_ROWS:
+        got = _decision(handler, command)
+        if got != "allow":
+            failures.append("{}: expected silent allow, got {}".format(label, got))
+    saved = aiqt_hooks._subst_status_reading
+    aiqt_hooks._subst_status_reading = lambda command: (False, None)
+    try:
+        disabled = [(label, _decision(handler, command)) for label, command in _SAS_FIRE_ROWS]
+    finally:
+        aiqt_hooks._subst_status_reading = saved
+    for label, got in disabled:
+        if got != "allow":
+            failures.append("{}: with the hook disabled this fire row must go red (allow), got {}"
+                            .format(label, got))
+    code, stdout_obj, _stderr = handler({"hook_event_name": aiqt_hooks.PRETOOL, "tool_name": "Bash",
+                                         "tool_input": {"command": _SAS_FIRE_ROWS[0][1]}})
+    note = (stdout_obj or {}).get("systemMessage", "")
+    if ("rule gatdis" not in note or "exit status of the last command substitution bash ran" not in note
+            or "rc=$?; echo" not in note or "posix mode" not in note or "permissionDecision" in str(stdout_obj)):
+        failures.append("(sas-note) the note must name the rule, the substitution's exit, the saved form and "
+                        "the posix-mode limit, with no permission decision, got {!r}".format(stdout_obj))
+    deep = "echo " + "$(" * 100 + "true" + ")" * 100
+    code, stdout_obj, _stderr = handler({"hook_event_name": aiqt_hooks.PRETOOL, "tool_name": "Bash",
+                                         "tool_input": {"command": deep + " $?"}})
+    note = (stdout_obj or {}).get("systemMessage", "")
+    if (_reduce_result(code, stdout_obj) != "allow-note" or "rule gatdis" not in note
+            or "({} levels)".format(aiqt_hooks._SUBST_STATUS_MAX_DEPTH) not in note
+            or "holds $? text that was not checked (it may or may not be a read)" not in note
+            or "not checked, not passed" not in note or "permissionDecision" in str(stdout_obj)):
+        failures.append("(sas-deep) a $? past the nesting bound must note the unread rest as $? text that may "
+                        "not be a read, with the bound and no permission decision, got {!r}".format(stdout_obj))
+    if _decision(handler, "echo $? " + deep) != "allow":
+        failures.append("(sas-deep-no-read) a nesting past the bound with a $? only before it must allow "
+                        "silently")
+    if _decision(handler, deep + " $\\\n?") != "allow-note":
+        failures.append("(sas-deep-continuation) a $ and ? split by a line continuation past the nesting bound "
+                        "must note the unread rest, read with the continuation removed")
+    for label, data, field in (
+            ("(sas-unreadable-tool-missing)", {"hook_event_name": aiqt_hooks.PRETOOL,
+                                               "tool_input": {"command": "echo $(true) $?"}}, "tool_name"),
+            ("(sas-unreadable-tool-none)", {"hook_event_name": aiqt_hooks.PRETOOL, "tool_name": None,
+                                            "tool_input": {"command": "echo $(true) $?"}}, "tool_name"),
+            ("(sas-unreadable-input)", {"hook_event_name": aiqt_hooks.PRETOOL, "tool_name": "Bash",
+                                        "tool_input": []}, "tool_input"),
+            ("(sas-unreadable-command-missing)", {"hook_event_name": aiqt_hooks.PRETOOL, "tool_name": "Bash",
+                                                  "tool_input": {}}, "command"),
+            ("(sas-unreadable-command-empty)", {"hook_event_name": aiqt_hooks.PRETOOL, "tool_name": "Bash",
+                                                "tool_input": {"command": ""}}, "command"),
+            ("(sas-unreadable-command-number)", {"hook_event_name": aiqt_hooks.PRETOOL, "tool_name": "Bash",
+                                                 "tool_input": {"command": 42}}, "command")):
+        code, stdout_obj, _stderr = handler(data)
+        message = (stdout_obj or {}).get("systemMessage", "")
+        if (_reduce_result(code, stdout_obj) != "allow-note" or "this call's {} was".format(field) not in message
+                or "not run, not passed" not in message):
+            failures.append("{}: expected an allow with a note naming {}, got {!r}".format(label, field,
+                                                                                          stdout_obj))
+    if _decision(handler, "echo $(true) $?", tool="Read") != "allow":
+        failures.append("(sas-other-tool) a different tool must silently allow")
+    code, stdout_obj, stderr = handler({"hook_event_name": "Stop", "tool_name": "Bash",
+                                        "tool_input": {"command": "echo $(true) $?"}})
+    if not (code == 2 and stdout_obj is None and "status_after_subst wired to unexpected event" in (stderr or "")):
+        failures.append("(sas-event) an unexpected event must use the sibling hard-block contract")
+    if (aiqt_hooks.HANDLERS.get("status_after_subst") is not handler or
+            aiqt_hooks.HANDLER_EVENT.get("status_after_subst") != aiqt_hooks.PRETOOL or
+            "status_after_subst" not in aiqt_hooks.NOTE_ONLY_PRETOOL_MODES):
+        failures.append("(sas-wiring) status_after_subst handler/event/note-only wiring is missing or wrong")
+
+
 # === PreToolUse deadline posture ======================================================================
 # main() runs every PreToolUse mode that is not fail-open inside one aiqt_hooks._DeadlineWindow of
 # PRETOOL_BUDGET_SECONDS and fails closed (exit 2) when its check has not decided by then, and the raw
@@ -6677,6 +7279,17 @@ _DEADLINE_SHAPES = {
     "pgrep_distinct": lambda n, base: ("Bash", {"command": "".join(
         "pgrep -x p{:07d}; ".format(k) for k in range(n // 19))}),
     "pgrep_self_after": lambda n, base: ("Bash", {"command": _repeat("true; ", n, "pgrep -f job7 || run job7")}),
+    # status_after_subst: many simple commands each reading $? before its substitution (each read, none
+    # noted); substitutions with parameter and arithmetic expansions, then one read after a substitution at
+    # the end; one $? past nested substitutions far beyond the nesting bound (the unread-rest note); and
+    # here-document bodies under an unquoted delimiter, each read and each holding a read before its
+    # substitution.
+    "status_reads": lambda n, base: ("Bash", {"command": _repeat('echo "$? $(true)"; ', n)}),
+    "status_after": lambda n, base: ("Bash", {"command": _repeat('echo "$(true) ${x:-y} $((1))"; ', n,
+                                                                 'echo "$(true) rc=$?"')}),
+    "status_nest_after": lambda n, base: ("Bash", {"command": "echo " + "$(" * ((n - 12) // 3) + "true"
+                                                   + ")" * ((n - 12) // 3) + " $?"}),
+    "status_heredoc_reads": lambda n, base: ("Bash", {"command": _repeat("cat <<EOF\n$? $(true)\nEOF\n", n)}),
     # Uncertain '#' shapes (_DEADLINE_HASH_SHAPES): a run of separators inside a subshell before four '#'
     # characters whose comment reading depends on context (five readings), the same with each '#' on its own
     # line (sixteen readings), inside three parentheses, inside runs of parentheses on both sides, and with a
@@ -6762,6 +7375,8 @@ _DEADLINE_CASES = {
     "review_dispatch_pin": ("git_add_parsed", "nest_cmdsubst"),
     "review_workdir_hold": ("git_segments_reset", "cd_git_fetch_unbal", "nest_cmdsubst"),
     "secrets_shift_left": ("cd_git_fetch_unbal", "nest_cmdsubst", "write_secretish"),
+    "status_after_subst": ("nest_cmdsubst", "status_reads", "status_after", "status_nest_after",
+                           "status_heredoc_reads"),
     "write_scope_guard": ("write_content", "write_deep_path"),
 }
 # Cases run from the plain cwd, which no orchestration registry scopes, for a handler the table above runs
@@ -6787,12 +7402,14 @@ _DEADLINE_DENY_CASES = frozenset((
 # (fg_detach_after, fg_setsid_options), a construct left open at the end of the scan (the repeated unclosed
 # `$((` openers and the unterminated heredoc body), which the scan reports as unreadable instead of a silent
 # allow, and the `&` in a body under an unquoted delimiter (fg_heredocs_amp), which the in-scope detector
-# reads as a bare detach (an accepted over-note).
+# reads as a bare detach (an accepted over-note). For status_after_subst: the read after a substitution at the
+# end of status_after, and the read past the nesting bound in status_nest_after (the unread-rest note).
 _DEADLINE_NOTE_CASES = frozenset((
     ("inline_errexit", "errexit_note_after"), ("inline_errexit", "errexit_unread_after"),
     ("orch_truncation_guard", "fg_detach_after"), ("orch_truncation_guard", "fg_setsid_options"),
     ("orch_truncation_guard", "fg_arith_open"), ("orch_truncation_guard", "fg_heredoc_ops_open"),
-    ("orch_truncation_guard", "fg_heredocs_amp")))
+    ("orch_truncation_guard", "fg_heredocs_amp"), ("status_after_subst", "status_after"),
+    ("status_after_subst", "status_nest_after")))
 # The (handler, shape) cases whose known outcome outside registry scope is a silent allow, each within its
 # bound: the plain-delimiter heredoc bodies of fg_heredocs_plain (skipped data, every body closed, and no
 # `&` or quote in them, so the in-scope detector reads nothing and the note scan reads the whole command;
@@ -6802,13 +7419,16 @@ _DEADLINE_NOTE_CASES = frozenset((
 # substitutions are all skipped, provably closed or carry no outer
 # detach, so none draws a note; and every `&` of fg_quoted_heredoc_amps lies in a quoted here-document body
 # the detector lifts, which the note scan's lifted mode skips as data. Pinning the outcome keeps these
-# timing shapes from passing a scanner that mistook one for a detach.
+# timing shapes from passing a scanner that mistook one for a detach. status_after_subst's status_reads and
+# status_heredoc_reads (each read before its substitution, in a command or in a here-document body) are pinned
+# silent the same way, so a scan that counted either as a read after a substitution goes red.
 _DEADLINE_ALLOW_CASES = frozenset((
     ("orch_truncation_guard", "fg_heredocs_plain"),
     ("orch_truncation_guard", "fg_subshells"),
     ("orch_truncation_guard", "fg_nested_glued_substs"),
     ("orch_truncation_guard", "fg_quoted_heredoc_amps"),
-    ("pgrep_self_match", "pgrep_distinct")))
+    ("pgrep_self_match", "pgrep_distinct"), ("status_after_subst", "status_reads"),
+    ("status_after_subst", "status_heredoc_reads")))
 _DEADLINE_SIZES = (65536, 262144, 1048576)
 # CPU seconds one in-process handler call may use on a shape of that size, judged on the calling thread's own
 # CPU clock (time.thread_time, read inside the call by _deadline_timed_call). The figures below were recorded
@@ -30799,6 +31419,7 @@ def _main_isolated(monitor):
         _test_git_stash_ref(failures)
         _test_inline_errexit(failures, tmp)
         _test_pgrep_self_match(failures)
+        _test_status_after_subst(failures)
         _test_trkasy_no_amp(failures, tmp)
         _test_wait_loop_deny_text(failures, tmp)
         _test_note_literal_sites(failures, tmp)
