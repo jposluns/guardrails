@@ -4346,7 +4346,7 @@ def _test_trkasy_heredoc_consumer(failures, tmp):
                             "data, so it pins the consumer reading; got {}".format(label, before, got))
 
 
-_WAIT_LOOP_DENY_COMMAND ="while true; do gh run view 1; sleep 30; done &"
+_WAIT_LOOP_DENY_COMMAND = "while true; do gh run view 1; sleep 30; done &"
 
 
 _WAIT_LOOP_CHECKS_API_COMMANDS = ("gh pr checks", "gh pr status", "gh run watch")
