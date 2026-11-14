@@ -877,6 +877,10 @@ def _vectors():
          "nothing on this platform enforces", 1),
         ("tier-claim-cursor", append(CURSOR, "\nThis rule is enforced by Cursor.\n"),
          "nothing on this platform enforces", 1),
+        ("tier-claim-guarantee", append(CODEX, "\nCodex guarantees that the paths above stay unchanged.\n"),
+         "nothing on this platform enforces", 1),
+        ("tier-claim-prevent", append(GEMINI, "\nThis instruction prevents writes to the paths above.\n"),
+         "nothing on this platform enforces", 1),
         ("tier-claim-code-span-exempt", append(CODEX, "\nThe Claude Code hook file is `pretooluse_deny.py`.\n"),
          None, 0),
         # deny hook: the member must be the canonical hook path exactly, at a registration destination.

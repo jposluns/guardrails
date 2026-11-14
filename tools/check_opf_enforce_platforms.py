@@ -108,12 +108,14 @@ these rules:
               that lacks a contract file rather than fall back to the subtree; evaluate given that
               release must give the same result without the duplicated pack path. Each COEXISTENCE_ONLY
               part is marked so in its docstring, and with every one of them replaced by a stub that
-              raises, the release cases still give their results. While the OPF tree's own copy of the
-              pack-local path (opf/tools/check_opf_enforce_platforms.py) exists, each fixture mutant
-              also runs through that copy at the fixture's opf/ tree, and the copy must give
-              evaluate_pack's finding count, or cannot evaluate where evaluate_pack cannot (the
-              coexistence-only source-copy parity); where that file is absent the comparison is skipped
-              and the self-test prints why.
+              raises, two extracted-state release cases (a clean release and one with a roster drift, each
+              with the opf/ subtree removed) still give their results from the parent integration path and
+              from evaluate given the release; the eight release-contract acceptance cases run with those
+              parts in place. While the OPF tree's own copy of the pack-local path
+              (opf/tools/check_opf_enforce_platforms.py) exists, each fixture mutant also runs through
+              that copy at the fixture's opf/ tree, and the copy must give evaluate_pack's finding count,
+              or cannot evaluate where evaluate_pack cannot (the coexistence-only source-copy parity);
+              where that file is absent the comparison is skipped and the self-test prints why.
 
 Exit convention (the repository's gates): 0 clean, 1 a finding, 2 cannot evaluate (an unreadable or
 malformed input, a hook that cannot be loaded, a generator literal that cannot be read).
@@ -132,11 +134,15 @@ record of a tested deny mechanism; it does not itself verify a platform's docume
 read after a symlinked-parent check and a regular-file check, so a file swapped between those checks and
 the read is a check-to-use race. The release argument names a release tree its caller has already
 verified: this gate checks neither its digest nor its identity nor its pin, which the adoption route
-owns, and the command line still reads the opf/ subtree. This gate checks the pack's text and the
-loaded hook's behaviour on the probes above; it does not prove that any platform follows an
-instructions member, and it does not make the Codex and Gemini CLI members coexist with the AIQT
-pack's generated AGENTS.md and GEMINI.md (an unresolved adoption prerequisite, stated in those members
-and in the roster).
+owns, and the command line still reads the opf/ subtree. Given a release, the gate relies on that
+release's own gate (its tools/check_opf_enforce_platforms.py) for roster coverage and path containment:
+a row whose member or destination is not a contained relative path (a parent-relative destination such
+as ../AGENTS.md included) is skipped, and the roster-level findings (keys, platform, duplicate, means
+and coverage) are not reported, so a dropped roster row passes. This gate checks the pack's text and the
+loaded hook's behaviour on the probes above; it does not prove that any platform follows an instructions
+member, and it does not make the Codex and Gemini CLI members coexist with the AIQT pack's generated
+AGENTS.md and GEMINI.md (an unresolved adoption prerequisite, stated in those members and in the
+roster).
 """
 import sys
 
@@ -1063,6 +1069,10 @@ def _vectors():
          "nothing on this platform enforces", 1),
         ("tier-claim-cursor", append(CURSOR, "\nThis rule is enforced by Cursor.\n"),
          "nothing on this platform enforces", 1),
+        ("tier-claim-guarantee", append(CODEX, "\nCodex guarantees that the paths above stay unchanged.\n"),
+         "nothing on this platform enforces", 1),
+        ("tier-claim-prevent", append(GEMINI, "\nThis instruction prevents writes to the paths above.\n"),
+         "nothing on this platform enforces", 1),
         ("tier-claim-code-span-exempt", append(CODEX, "\nThe Claude Code hook file is `pretooluse_deny.py`.\n"),
          None, 0),
         ("cursor-frontmatter", edit(CURSOR, "alwaysApply: true", "alwaysApply: false"), "frontmatter", 1),
@@ -1228,7 +1238,8 @@ _SPLIT = {
     "hook-no-render-verb": (None, 0), "hook-one-guarded-tree": (None, 0), "hook-tree-outside-root": (None, 0),
     "member-markers-missing": (2, 0), "marker-begin-duplicate": (2, 0), "marker-end-duplicate": (2, 0),
     "tier-line-missing": (1, 0), "tier-line-twice": (1, 0), "tier-claim-codex": (1, 0),
-    "tier-claim-cursor": (1, 0), "tier-claim-code-span-exempt": (0, 0), "cursor-frontmatter": (0, 1),
+    "tier-claim-cursor": (1, 0), "tier-claim-guarantee": (1, 0), "tier-claim-prevent": (1, 0),
+    "tier-claim-code-span-exempt": (0, 0), "cursor-frontmatter": (0, 1),
     "deny-hook-codex": (2, 1), "deny-hook-gemini": (2, 1), "deny-hook-tested-renderer": (0, 0),
     "deny-member-not-hook": (1, 0), "deny-member-byte-identical-copy": (1, 0),
     "deny-member-relocated-copy": (1, 0), "deny-destination-unpinned": (1, 0), "deny-member-missing": (1, 0),
