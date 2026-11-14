@@ -651,7 +651,7 @@ def validate_version(data):
         return VersionValidation(INVALID, findings + ["[[summary]] is not an array of tables"])
 
     ledger_versions = []                  # released version strings, in row order (for covers-token lookup)
-    imported_versions = set()             # the versions of imported-flagged rows (for the summary flag)
+    imported_positions = set()            # ledger_versions indexes of imported-flagged rows (summary flag)
     prev_key = None
     for i, row in enumerate(releases):
         where = "release #{}".format(i + 1)
@@ -678,9 +678,11 @@ def validate_version(data):
                                 "(versions are monotonic, spec 6.1)".format(where, version))
             prev_key = key if (prev_key is None or prev_key < key) else prev_key
         if "version" in row:
-            ledger_versions.append(version)
+            # Record the row's position, not its version string: with a duplicated version a string set
+            # would read a witnessed row as imported because another row with that version is imported.
             if row.get("imported") is True and isinstance(version, str):
-                imported_versions.add(version)
+                imported_positions.add(len(ledger_versions))
+            ledger_versions.append(version)
 
         if "date" in row and not _valid_timestamp(row.get("date")):
             findings.append("{}: date must be an RFC 3339 UTC timestamp (spec 6.1)".format(where))
@@ -695,7 +697,7 @@ def validate_version(data):
     # Imported rows sit only as a prefix of the ledger, before any witnessed row (spec 6.1).
     findings.extend(_imported_prefix_findings(releases))
 
-    _validate_summaries(summaries, ledger_versions, imported_versions, findings)
+    _validate_summaries(summaries, ledger_versions, imported_positions, findings)
 
     return VersionValidation(INVALID if findings else VALID, findings, releases, summaries)
 
@@ -740,14 +742,16 @@ def _covers_range(parsed, ledger_versions):
     return None
 
 
-def _imported_summary_findings(row, where, parsed, ledger_versions, imported_versions):
+def _imported_summary_findings(row, where, parsed, ledger_versions, imported_positions):
     """The findings for the optional `imported` flag of one summary-row table (spec 6.1, 14.3); empty
     when the row carries no flag or carries it legally. A present flag is a finding unless its value is
     exactly the boolean true (an integer 1 or any other truthy value is not), unless the row's status is
-    published or superseded, unless covers is not 'unreleased', and unless every version the row covers
-    is an imported-flagged release row. `parsed` is the row's resolved covers token, or None when covers
-    is absent or malformed (already a finding of _validate_summaries). Removing the flag from an existing
-    row is a curator act (spec 6.1), so no rule here compares against an earlier ledger."""
+    published or superseded, unless covers is not 'unreleased', and unless every ledger position the row
+    covers is an imported-flagged release row. `parsed` is the row's resolved covers token, or None when
+    covers is absent or malformed (already a finding of _validate_summaries). `imported_positions` holds
+    the ledger_versions indexes of imported-flagged rows, so a duplicated version is judged by the row
+    the covers token resolves to. Removing the flag from an existing row is a curator act (spec 6.1), so
+    no rule here compares against an earlier ledger."""
     if "imported" not in row:
         return []
     findings = []
@@ -765,10 +769,9 @@ def _imported_summary_findings(row, where, parsed, ledger_versions, imported_ver
                             "no imported release (spec 6.1)".format(where))
         else:
             lo, hi = _covers_range(parsed, ledger_versions)
-            # A version may be an unhashable malformed value (already a release-row finding); gate the set
-            # membership on isinstance(str) so it reads as not imported rather than raising TypeError.
-            witnessed = [v for v in ledger_versions[lo:hi + 1]
-                         if not (isinstance(v, str) and v in imported_versions)]
+            # Match by ledger position: a non-string version is never recorded as imported (already a
+            # release-row finding), so it reads as not imported.
+            witnessed = [ledger_versions[i] for i in range(lo, hi + 1) if i not in imported_positions]
             if witnessed:
                 findings.append("{}: an imported summary must cover only imported release rows; {} not "
                                 "imported (spec 6.1/14.3)".format(
@@ -776,10 +779,10 @@ def _imported_summary_findings(row, where, parsed, ledger_versions, imported_ver
     return findings
 
 
-def _validate_summaries(summaries, ledger_versions, imported_versions, findings):
+def _validate_summaries(summaries, ledger_versions, imported_positions, findings):
     """Validate the [[summary]] rows structurally (spec 6.1). See the summary-row ambiguity note; the
-    tile-the-ledger-exactly and heading-1:1 FACTS gates are U5's. `imported_versions` is the set of
-    versions on imported-flagged release rows, read by _imported_summary_findings."""
+    tile-the-ledger-exactly and heading-1:1 FACTS gates are U5's. `imported_positions` is the set of
+    ledger_versions indexes of imported-flagged release rows, read by _imported_summary_findings."""
     seen_covers = set()
     seen_unreleased = False
     # Pre-pass: map each well-formed covers token to its parsed (kind, detail), so a superseded row's
@@ -896,7 +899,7 @@ def _validate_summaries(summaries, ledger_versions, imported_versions, findings)
                 where, _safe_display(status)))
 
         # The optional imported flag rests a summary digest on imported provenance (spec 6.1, 14.3).
-        findings.extend(_imported_summary_findings(row, where, resolved, ledger_versions, imported_versions))
+        findings.extend(_imported_summary_findings(row, where, resolved, ledger_versions, imported_positions))
 
 
 # --- worklog.toml validation (spec 6.2) --------------------------------------------------------------
@@ -2299,6 +2302,18 @@ def self_test():
           and _sum_int_rel.findings[0].startswith("release #2: imported must be exactly true")
           and _sum_int_rel.findings[1].startswith("summary #1: ")
           and "cover only imported release rows; '0.9.0' not" in _sum_int_rel.findings[1])
+    # Imported rows are matched by ledger position, not by version string: in a ledger where 1.0.0 is
+    # both a witnessed row and a later imported row, the covers token resolves to the witnessed row, so a
+    # flagged summary over it is refused beside the uniqueness and prefix findings the ledger already has.
+    _sum_dup = validate_version({"schema": 1, "release": [_imp_wit, imp_row("1.0.0")],
+                                 "summary": [sum_row(covers="1.0.0")]})
+    _sum_dup_sum = [f for f in _sum_dup.findings if f.startswith("summary #1: ")]
+    check("sum-imported-duplicate-version-witnessed-refused",
+          _sum_dup.status == INVALID
+          and any("release #2: version '1.0.0' is not unique" in f for f in _sum_dup.findings)
+          and len(prefix_findings(_sum_dup)) == 1
+          and len(_sum_dup_sum) == 1
+          and "cover only imported release rows; '1.0.0' not" in _sum_dup_sum[0])
     # Admitting the optional key leaves the summary keyset closed: any other key is still refused, beside a
     # legal flag or without one.
     check("sum-other-unknown-key-still-refused",
