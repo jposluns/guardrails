@@ -5365,8 +5365,10 @@ def self_test():
 
         # A run through all six spied attributes, each required by name; a borrow through the signal.signal
         # wrapper bound before the spies, seen through _signal.signal; and a borrow for each clause the
-        # vectors above leave unpinned, each failing that clause and no other. The mask borrow runs once from
-        # SIGUSR2 unblocked and once from it blocked, so its verdict does not rest on the caller's mask.
+        # vectors above leave unpinned, each failing that clause and no other. The mask borrow runs from
+        # SIGUSR2 unblocked and from it blocked, each expecting the start it finds, so its verdict does not
+        # rest on the caller's mask, and once more from it unblocked while expecting it blocked, which pins
+        # its start-state comparison.
         # What the two elapsed-leg borrows pin: the slow-restore borrow leaves the countdown over the
         # ceiling's reference by 0.3 seconds plus any stall between its two timer calls, and the shortening
         # borrow leaves it under the floor's by 0.3 seconds plus any stall between its began reading and its
