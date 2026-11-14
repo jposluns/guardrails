@@ -3728,9 +3728,13 @@ def _psm_oracle(failures, handler):
 
 
 # Foreground trkasy rows with no '&' byte anywhere: a quoted here-document write followed by another command
-# reads its body as code, so an apostrophe there left the scan open and the guard denied a detach the
+# had its body read as code, so an apostrophe there left the scan open and the guard denied a detach the
 # command cannot hold. The full row has the shape of a real markdown brief (quotes, backquotes, parentheses,
-# a '#' heading) written with cat, then hashed.
+# a '#' heading) written with cat, then hashed. The scan now reads such a body apart from the command's
+# quote state, so the raw scan no longer reads those two rows as open; the rows the raw scan still reads as
+# open (_TRKASY_NOAMP_FLIP_ROWS: a stray quote, a body whose delimiter line never comes, and an unquoted
+# delimiter's body holding a command substitution, which the scan still reads as shell text) pin the no-'&'
+# branch instead.
 _TRKASY_NOAMP_FULL = (
     "cat > /abs/qa/brief.md <<'EOF'\n# Verify the fix (the ci-status check)\n\n"
     "You are an independent reviewer. Check that the findings are fixed; do not just confirm.\n\n"
@@ -3739,8 +3743,12 @@ _TRKASY_NOAMP_FULL = (
     "2. A present null head_sha was reported as \"missing required field\".\n"
     "Keep this well under one hour; the branch's newest commit holds the fix.\nEOF\n"
     "sha256sum /abs/qa/brief.md")
-_TRKASY_NOAMP_ALLOW_ROWS = (
+_TRKASY_NOAMP_FLIP_ROWS = (
     ("trkasy-noamp-min", "'"),
+    ("trkasy-noamp-heredoc-unterminated", "cat > /abs/f <<'EOF'\nit's\nsha256sum /abs/f"),
+    ("trkasy-noamp-heredoc-unquoted-subst", "cat > /abs/f <<EOF\nit's $(date)\nEOF\nsha256sum /abs/f"),
+)
+_TRKASY_NOAMP_ALLOW_ROWS = _TRKASY_NOAMP_FLIP_ROWS + (
     ("trkasy-noamp-heredoc-min", "cat > /abs/f <<'EOF'\nit's\nEOF\nsha256sum /abs/f"),
     ("trkasy-noamp-full", _TRKASY_NOAMP_FULL),
 )
@@ -3751,9 +3759,10 @@ _TRKASY_REAL_AMP_DENY_ROWS = (
     ("trkasy-amp-after-noamp-full", _TRKASY_NOAMP_FULL + "\nsleep 5 &"),
 )
 # Runtime start forms that can start a background job with no '&' byte, each beside an apostrophe in a
-# here-document body read as code and beside an uncertain '#': the open quote or '#' still denies, since
-# the guard takes the no-'&' allow only for a command holding no such form. The plain forms are the
-# disclosed silent allow and are not rows here.
+# here-document body the scan still reads as code (an unquoted delimiter's body holding a command
+# substitution) and beside an uncertain '#': the open quote or '#' still denies, since the guard takes the
+# no-'&' allow only for a command holding no such form. The plain forms are the disclosed silent allow and
+# are not rows here.
 _TRKASY_RUNTIME_START_FORMS = (
     ("coproc", "coproc sleep 5"),
     ("eval-runtime-amp", "eval \"sleep 5 $(printf '\\x26')\""),
@@ -3832,8 +3841,8 @@ _TRKASY_RUNTIME_START_QUOTED_FORMS = (
 
 def _trkasy_start_rows(forms, contexts=("heredoc-apos", "uncertain-hash")):
     """Deny rows for runtime start forms, each beside the named contexts: an apostrophe in a here-document body
-    read as code, and an uncertain '#'."""
-    prefixes = {"heredoc-apos": "cat <<'EOF'\nit's\nEOF\n", "uncertain-hash": "(true)# x\n"}
+    the scan still reads as code, and an uncertain '#'."""
+    prefixes = {"heredoc-apos": "cat <<EOF\nit's $(date)\nEOF\n", "uncertain-hash": "(true)# x\n"}
     return tuple(("trkasy-start-" + context + "-" + label, prefixes[context] + form)
                  for label, form in forms for context in contexts)
 
@@ -3941,7 +3950,7 @@ def _test_trkasy_no_amp(failures, tmp):
         return fixed(command, lifts)
     aiqt_hooks._orch_foreground_detach_lexed = unfixed
     try:
-        for label, command in _TRKASY_NOAMP_ALLOW_ROWS:
+        for label, command in _TRKASY_NOAMP_FLIP_ROWS:
             got = _decision(handler, command, cwd=str(root))
             if got != "deny":
                 failures.append("({}-flip) the row must deny with the no-'&' branch reading the raw scan, "
@@ -3950,7 +3959,394 @@ def _test_trkasy_no_amp(failures, tmp):
         aiqt_hooks._orch_foreground_detach_lexed = fixed
 
 
-_WAIT_LOOP_DENY_COMMAND = "while true; do gh run view 1; sleep 30; done &"
+# The adopter's refused command as submitted, with only its absolute host path prefix replaced by /abs/proj/
+# (a tracked file holds no host path): a mkdir, then a quoted here-document write whose body holds
+# apostrophes and the word source (a runtime start form), then a python3 -c command. It holds no '&'.
+_TRKASY_HEREDOC_ADOPTER = (
+    "mkdir -p /abs/proj/tmp/t217-220/fix4prep; cat > "
+    "/abs/proj/tmp/t217-220/fix4prep/keep-list.txt <<'EOF'\n"
+    "Keep list for fix 4 of the staged TODO 217 and TODO 220 change to dispatch-when-free.sh\n"
+    "The staged fix 3 candidate passed the orchestrator's own staging runs: test 699 of 699, with fixtures 713 "
+    "of 713,\n"
+    "mutants as expected (67 named killed, each with the guard passing), every earlier finding and both older "
+    "defects gone.\n"
+    "Each item below was validated at source by the orchestrator, most by a reproduction kept in ctx/. Fix each "
+    "across its\n"
+    "class, not only at the cited line. Every new or changed check gets a test case that fails without it and a "
+    "named\n"
+    "mutant that a case kills.\n"
+    "\n"
+    "f. dispatch-retry.sh line 10 computes its output path as "
+    '/abs/proj/tmp/dispatch-$FAMILY-$(basename "$BRIEF"\n'
+    "   .md).out. For a relative brief name starting with a hyphen, basename prints an error and the path is\n"
+    "   dispatch-claude-.out; for a name ending in a line feed, command substitution drops it. Either way the "
+    "retry script\n"
+    "   reads, keeps aside and renames another file than the one the wrapper writes. Reproduced "
+    "(ctx/val-extra.sh, E2):\n"
+    "   with an earlier output at the wrapper's path, a retry copy run for -dash.md and for tail.md LF kept "
+    "nothing aside\n"
+    "   and the wrapper overwrote the earlier output, which the retry script promises never to happen (M-87). "
+    "Compute the\n"
+    "   path with the same name rules as the wrapper (hyphen-leading names, trailing line feeds kept), and with "
+    "the same\n"
+    "   folder rule, so the two paths are equal for every brief argument.\n"
+    "g. The case reply-ok-en-US-unreadable-quote runs under en_US.UTF-8, and every other case under C.UTF-8, "
+    "both host\n"
+    "   locales. Reproduced (ctx/locale-probe.sh): with the locale name replaced by one not installed, the "
+    "candidate fails\n"
+    "   that case on a bash setlocale warning in stderr, and the reply-ok-locale-removed mutant is killed only "
+    "by that\n"
+    "   warning, not by the shape check. Make the test independent of what the host happens to have installed: "
+    "either pick\n"
+    "   at run time an installed locale that is shown to make the check matter and fail closed, naming the gap, "
+    "when there\n"
+    "   is none, or use a construction that does not depend on a host locale. The class is every case whose "
+    "locale the\n"
+    "   test sets or defaults.\n"
+    "h. Defects found at staging:\n"
+    "   1. The output path of 1 brief can be the same file as another brief of the same call. Reproduced "
+    "(ctx/val-extra.sh,\n"
+    "      E1a and E1b): with briefs y.md and <out>/dispatch-claude-y.out, the first dispatch overwrites the "
+    "second brief\n"
+    "      before its dispatch, which then sends that output as its prompt; in the reverse order the second "
+    "dispatch\n"
+    "      overwrites the first brief after its dispatch, so the brief is lost. Both exit 0. The class is any "
+    "output path\n"
+    "      of 1 call that is the same file as any brief of that call, however the 2 are spelled.\n"
+    "   2. dispatch-retry.sh prints its output path and its keep-aside path raw, in 3 lines. Reproduced "
+    "(ctx/val-extra3.sh,\n"
+    '      E3): a brief name holding a line feed splits the line "kept the earlier output as ..." over 2 lines. '
+    "The wrapper's\n"
+    "      rule (each byte outside printable ASCII shown as 1 ?) applies to every path these lines print.\n"
+    '   3. NOTES.txt line 35 says the en_US.UTF-8 case "passes either way" on a host without that locale; it '
+    "fails either\n"
+    "      way, on the stderr warning (item g). Make the sentence true for the code handed back.\n"
+    '   4. NOTES.txt line 44 says "test-dispatch-rc.sh is unchanged"; the staged copy differs from the live one '
+    "by its added\n"
+    "      Time line. Make it true.\n"
+    '   5. Test line 830 reads "accepted =ref[0]" (missing space). The mutant branch for a mutant whose guard '
+    "passed but\n"
+    "      some cases were not run cannot be reached (a case is NOT RUN only when the guard failed) and would "
+    'print "guard\n'
+    '      failed (guard passed, but N cases not run)", which contradicts itself. Fix the spacing; remove the '
+    "branch or make\n"
+    "      its text true.\n"
+    "Observation for the orchestrator, not a keep item: dist/edit-scripts/discovery-launch.sh, the only caller "
+    "of\n"
+    'dispatch-retry.sh, names its 3 launch logs by $(basename "$BRIEF" .md) without --. Its names stay '
+    "consistent between\n"
+    "the write and the read, so the effect is basename error text on its stderr for a hyphen-leading name. It "
+    "is not a file\n"
+    "of this hand-back; leave it unchanged and name it in NOTES.txt as a sibling for the orchestrator.\n"
+    "EOF\n"
+    'python3 -I -c "\n'
+    "import sys,hashlib,re\n"
+    "d=open(sys.argv[1],'rb').read(); print(hashlib.sha256(d).hexdigest(), len(d), d.count(b'\\n'), 'nonascii', "
+    "sum(b>127 for b in d), 'longest', max(len(l) for l in d.split(b'\\n')))\n"
+    '" /abs/proj/tmp/t217-220/fix4prep/keep-list.txt\n'
+)
+_TAB = "\t"
+# Here-document forms from the bash manual (Here Documents): bash reads no quote, comment or operator in a
+# body, under a quoted delimiter ('EOF', "EOF", \EOF) or an unquoted one, where only parameter expansion,
+# command substitution, arithmetic expansion and the backslash before '$', a backquote, a backslash or a
+# newline apply; <<- strips leading tabs from each body line and from the delimiter line; the bodies of two
+# here-documents on one line follow it in order. Each row is (label, command, expected decision, base
+# decision): the base decision is the guard's before the scan read a body apart from the command's quote
+# state, and every row whose two decisions differ must give its base decision under the reverted mutant.
+_TRKASY_HEREDOC_BODY_ROWS = (
+    # A body quote no longer leaves the command's quote open, so a runtime start form after or inside the
+    # body (source, the word the adopter's body holds) no longer denies on that quote.
+    ("hdb-adopter-exact", _TRKASY_HEREDOC_ADOPTER, "allow", "deny"),
+    ("hdb-unquoted-apostrophe-source", "cat > /tmp/k.txt <<EOF\na'b\nsource\nEOF", "allow", "deny"),
+    ("hdb-single-quoted-delim", "cat > /abs/f <<'EOF'\nit's\nEOF\nsource /abs/g", "allow", "deny"),
+    ("hdb-double-quoted-delim", "cat > /abs/f <<\"EOF\"\nit's\nEOF\nsource /abs/g", "allow", "deny"),
+    ("hdb-backslash-delim", "cat > /abs/f <<\\EOF\nit's\nEOF\nsource /abs/g", "allow", "deny"),
+    ("hdb-dash-tabs-unquoted", "cat <<-EOF\n" + _TAB + "it's\n" + _TAB + "EOF\nsource /abs/f", "allow", "deny"),
+    ("hdb-dash-tabs-quoted", "cat <<-'EOF'\n" + _TAB + "it's\n" + _TAB + "EOF\nsource /abs/f", "allow", "deny"),
+    ("hdb-two-on-one-line", "cat <<A <<'B'\nit's\nA\nsay \"hi\nB\nsource /abs/f", "allow", "deny"),
+    ("hdb-double-quote-body", "cat <<EOF\nsay \"hi\nEOF\nsource /abs/f", "allow", "deny"),
+    ("hdb-plain-brace-body", "cat <<EOF\nit's ${HOME}\nEOF\nsource /abs/f", "allow", "deny"),
+    ("hdb-escaped-substitutions", "cat <<EOF\nit's \\$(date) \\`date\\`\nEOF\nsource /abs/f", "allow", "deny"),
+    ("hdb-and-list-after-body", "cat > /abs/f <<'EOF'\nit's\nEOF\ncd /abs && sha256sum f", "allow", "deny"),
+    # The quote a body left open hid a real bare '&' after the delimiter line (QUOTE SHIFT): now read.
+    ("hdb-amp-between-bodies", "cat <<A\nit's\nA\nsleep 5 & cat <<B\nx'\nB", "deny", "allow"),
+    ("hdb-amp-before-stray-quote", "cat <<EOF\nit's\nEOF\nsleep 5 & echo '", "deny", "allow"),
+    # DISCLOSED RESIDUALS the fix opens, pinned at their current allow: a quote one data body opens and a
+    # later data body closes is not read across the two (the command never runs the file they share; a cat
+    # reading both prints them), and a coproc after a data body is the plain coproc silent allow, which only
+    # the body's leaked quote denied. A body a shell reads, or a written file the command runs, is read as
+    # commands instead (_TRKASY_HEREDOC_CONSUMER_ROWS).
+    ("hdb-residual-cross-body-pair",
+     "cat > /abs/s <<A\nit's\nA\ncat >> /abs/s <<B\nx'; sleep 5 & echo '\nB\nsha256sum /abs/s", "allow", "deny"),
+    ("hdb-residual-coproc-after-body", "cat <<EOF\nit's\nEOF\ncoproc sleep 5", "allow", "deny"),
+    # Unchanged denies: a substitution an unquoted body runs, read as today (as shell text); a body whose
+    # delimiter line never comes; a bare '&' after the delimiter line; a body fed to a shell; an open body
+    # quote hiding an '&'; an uncertain '#' in a body; and a body this scan does not read on its own.
+    ("hdb-subst-amp-apostrophe", "cat <<EOF\nit's $(sleep 5 &)\nEOF", "deny", "deny"),
+    ("hdb-subst-amp", "cat <<EOF\n$(sleep 5 &)\nEOF", "deny", "deny"),
+    ("hdb-backquote-amp-apostrophe", "cat <<EOF\nit's `sleep 5 &`\nEOF", "deny", "deny"),
+    ("hdb-brace-subst-amp", "cat <<EOF\nit's ${x:-$(sleep 5 &)}\nEOF", "deny", "deny"),
+    ("hdb-subst-setsid-apostrophe", "cat <<EOF\nit's $(setsid -f sleep 5)\nEOF", "deny", "deny"),
+    ("hdb-subst-source-apostrophe", "cat <<EOF\nit's $(date)\nEOF\nsource /abs/f", "deny", "deny"),
+    ("hdb-unterminated-quoted", "cat <<'EOF'\nit's\nsource /abs/f", "deny", "deny"),
+    ("hdb-unterminated-unquoted-amp", "cat <<EOF\nit's\nsleep 5 &", "deny", "deny"),
+    ("hdb-indented-delim-unterminated", "cat <<EOF\nit's\n EOF\nsource /abs/f", "deny", "deny"),
+    ("hdb-amp-after-quoted", "cat <<'EOF'\nit's\nEOF\nsleep 5 &", "deny", "deny"),
+    ("hdb-amp-after-unquoted", "cat <<EOF\nit's\nEOF\nsleep 5 &", "deny", "deny"),
+    ("hdb-shell-body-amp", "bash <<EOF\nsleep 5 &\nEOF", "deny", "deny"),
+    ("hdb-shell-body-closed-quote-amp", "bash <<EOF\nit's\nx'\nsleep 5 &\nEOF", "deny", "deny"),
+    # A body left with a quote open makes every bare '&' in the command unreadable, so the lexer's lift of a
+    # quoted body's '&' never frees one that a shell running the body detaches.
+    ("hdb-shell-body-amp-then-apostrophe", "bash <<'EOF'\nsleep 5 &\necho it's\nEOF", "deny", "deny"),
+    ("hdb-written-file-run",
+     "cat > /abs/s.sh <<'EOF'\nsleep 5 &\nEOF\ncat > /abs/n.txt <<'EOF'\nit's\nEOF\nbash /abs/s.sh", "deny", "deny"),
+    ("hdb-open-quote-hides-amp", "cat <<EOF\nit's & more\nEOF", "deny", "deny"),
+    ("hdb-uncertain-hash-body", "cat <<'EOF'\n(x #y)\nEOF\nsource /abs/f", "deny", "deny"),
+    ("hdb-after-paren", "(true); cat <<'EOF'\nit's\nEOF\nsource /abs/f", "deny", "deny"),
+    ("hdb-backslash-newline-unquoted", "cat <<EOF\nit's \\\nEOF\nsource /abs/f", "deny", "deny"),
+    ("hdb-in-substitution", "x=$(cat <<EOF\nit's\nEOF\n); source /abs/f", "deny", "deny"),
+    ("hdb-appended-bodies-amp",
+     "cat > /abs/s <<A\nit's\nA\ncat >> /abs/s <<B\nx'; sleep 5 &\nB\nbash /abs/s", "deny", "deny"),
+    # Unchanged allows: a body quote that hides an '&' a shell reading the body also hides, a plain cat write
+    # call, and the commit message form.
+    ("hdb-shell-body-quoted-amp", "bash <<EOF\necho 'a & b'\nEOF", "allow", "allow"),
+    ("hdb-data-command", "cat > /abs/f <<'EOF'\nit's & so\nEOF", "allow", "allow"),
+    ("hdb-commit-form", "git commit -m \"$(cat <<'EOF'\nDon't merge & go\nEOF\n)\"", "allow", "allow"),
+)
+# The mutant reverts the fix: the scan never reads a body on its own, so every body it does not skip as a
+# plain cat write is read as shell text again, its quotes shifting the command's quote state.
+_TRKASY_HEREDOC_MUTANT_ANCHOR = "else _orch_heredoc_body_spans(command, i + 1, n, specs))"
+_TRKASY_HEREDOC_MUTANT_REPLACEMENT = "else (None, i))"
+_TRKASY_HEREDOC_MUTANT_CHILD = (
+    "import importlib.util, json, resource, sys\n"
+    "limit = int(sys.argv[3])\n"
+    "resource.setrlimit(resource.RLIMIT_AS, (limit, limit))\n"
+    "spec = importlib.util.spec_from_file_location(sys.argv[2], sys.argv[1])\n"
+    "module = importlib.util.module_from_spec(spec)\n"
+    "spec.loader.exec_module(module)\n"
+    "job = json.loads(sys.stdin.read())\n"
+    "out = []\n"
+    "for command in job['commands']:\n"
+    "    data = {'hook_event_name': 'PreToolUse', 'tool_name': 'Bash', 'tool_input': {'command': command},\n"
+    "            'cwd': job['cwd']}\n"
+    "    _code, obj, _err = module.orch_truncation_guard(data)\n"
+    "    hso = obj.get('hookSpecificOutput') if isinstance(obj, dict) else None\n"
+    "    out.append(hso.get('permissionDecision', 'allow') if isinstance(hso, dict) else 'allow')\n"
+    "sys.stdout.write(json.dumps(out))\n"
+)
+_TRKASY_HEREDOC_MUTANT_AS_LIMIT = 2 * 1024 ** 3
+_TRKASY_HEREDOC_MUTANT_TIMEOUT = 300
+
+
+def _trkasy_heredoc_mutant_decisions(failures, tmp, root, commands, anchor=_TRKASY_HEREDOC_MUTANT_ANCHOR,
+                                     replacement=_TRKASY_HEREDOC_MUTANT_REPLACEMENT, tag="hdb"):
+    """The reverted mutant's decision for each command, run in a child of its own session (process group)
+    under RLIMIT_AS and a wall-clock timeout, the whole group killed when it ends; None (with a failure
+    appended) when the anchor is not found exactly once or the child does not give one decision per
+    command. The mutant is the hook source with anchor replaced by replacement; tag names its failures and
+    its directory."""
+    source = Path(aiqt_hooks.__file__).read_text(encoding="utf-8")
+    if source.count(anchor) != 1:
+        failures.append("({}-mutant-anchor) the mutant anchor {!r} occurs {} times in the hook source, expected "
+                        "once".format(tag, anchor, source.count(anchor)))
+        return None
+    mutant_dir = tmp / ("trkasy-" + tag + "-mutant")
+    os.makedirs(mutant_dir, exist_ok=True)
+    module_name = tag + "_mutant_aiqt_hooks"
+    path = mutant_dir / (module_name + ".py")
+    path.write_text(source.replace(anchor, replacement), encoding="utf-8")
+    payload = json.dumps({"commands": list(commands), "cwd": str(root)})
+    proc = subprocess.Popen(
+        [sys.executable, "-I", "-B", "-c", _TRKASY_HEREDOC_MUTANT_CHILD, str(path), module_name,
+         str(_TRKASY_HEREDOC_MUTANT_AS_LIMIT)],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        start_new_session=True)
+    try:
+        out, err = proc.communicate(payload, timeout=_TRKASY_HEREDOC_MUTANT_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        out, err = None, "timed out after {} s".format(_TRKASY_HEREDOC_MUTANT_TIMEOUT)
+    finally:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+        proc.wait(timeout=30)
+        for stream in (proc.stdin, proc.stdout, proc.stderr):
+            if stream is not None and not stream.closed:
+                stream.close()
+    try:
+        decisions = json.loads(out) if out else None
+    except ValueError:
+        decisions = None
+    if not isinstance(decisions, list) or len(decisions) != len(commands):
+        failures.append("({}-mutant-run) the reverted mutant gave no decision per row (exit {!r}, stderr {!r})"
+                        .format(tag, proc.returncode, (err or "")[-400:]))
+        return None
+    return decisions
+
+
+def _test_trkasy_heredoc_body_data(failures, tmp):
+    """Foreground trkasy rows in registry scope for here-document bodies (_TRKASY_HEREDOC_BODY_ROWS): each row
+    gives its expected decision, and each row whose decision the fix changed gives its base decision under
+    the reverted mutant (_trkasy_heredoc_mutant_decisions), so every such row fails with the fix reverted."""
+    root = tmp / "trkasy-heredoc-body"
+    (root / ".aiqt").mkdir(parents=True)
+    (root / ".aiqt" / "orchestration.local.json").write_text(json.dumps({"version": 1}), encoding="utf-8")
+    handler = aiqt_hooks.orch_truncation_guard
+    for label, command, expected, _base in _TRKASY_HEREDOC_BODY_ROWS:
+        got = _decision(handler, command, cwd=str(root))
+        if got != expected:
+            failures.append("({}) expected {} in registry scope; got {}".format(label, expected, got))
+    changed = [(label, command, base) for label, command, expected, base in _TRKASY_HEREDOC_BODY_ROWS
+               if expected != base]
+    if not changed:
+        failures.append("(hdb-changed-rows) no row pins a changed decision")
+        return
+    decisions = _trkasy_heredoc_mutant_decisions(failures, tmp, root, [command for _l, command, _b in changed])
+    if decisions is None:
+        return
+    for (label, _command, base), got in zip(changed, decisions):
+        if got != base:
+            failures.append("({}-mutant) the row must give its base decision {} with the fix reverted, so it "
+                            "pins the fix; got {}".format(label, base, got))
+
+
+_HDC_APOS = "coproc sleep 5\necho it's\n"  # a runtime start form beside an apostrophe, no '&'
+_HDC_PLAIN = "coproc sleep 5\necho its\n"  # the same with no apostrophe
+_HDC_AMP = "sleep 5 &\n"  # a bare '&'
+
+
+def _hdc_rows(label, head, body_names, tail=""):
+    """One row per body kind for a here-document whose consumer line is head and whose delimiter is EOF:
+    (label-kind, command, expected) for each (kind, expected) in body_names."""
+    bodies = {"apos": _HDC_APOS, "plain": _HDC_PLAIN, "amp": _HDC_AMP}
+    return tuple(("hdc-{}-{}".format(label, kind), head + "\n" + bodies[kind] + "EOF" + tail, expected)
+                 for kind, expected in body_names)
+
+
+# A here-document body whose consumer is a shell, one the scan cannot name, or a written file the same
+# command then runs is read as that consumer's commands (_orch_heredoc_body_is_data): a quote it leaves open
+# denies beside a runtime start form, as in the command's own text, and a bare '&' in it denies, never lifted
+# as quoted body text. The same body with no apostrophe and no '&' is the plain start form's silent allow.
+# Each row is (label, command, expected decision, decision before the body's consumer was read); every row
+# whose two decisions differ must give the earlier one under the mutant that reads every consumer as data.
+_HDC_SHELL_APOS = (("apos", "deny"), ("plain", "allow"))
+_HDC_SHELL_ALL = _HDC_SHELL_APOS + (("amp", "deny"),)
+_TRKASY_HEREDOC_CONSUMER_ROWS = tuple(
+    (label, command, expected, "allow")
+    for label, command, expected in (
+        _hdc_rows("bash-unquoted", "bash <<EOF", _HDC_SHELL_APOS)
+        + _hdc_rows("bash-quoted", "bash <<'EOF'", _HDC_SHELL_ALL)
+        + _hdc_rows("bash-dq", "bash <<\"EOF\"", _HDC_SHELL_ALL)
+        + _hdc_rows("bash-s", "bash -s <<'EOF'", _HDC_SHELL_ALL)
+        + _hdc_rows("sh", "sh <<'EOF'", _HDC_SHELL_ALL)
+        + _hdc_rows("dash", "dash <<'EOF'", _HDC_SHELL_ALL)
+        + _hdc_rows("zsh", "zsh <<'EOF'", _HDC_SHELL_ALL)
+        + _hdc_rows("abs-bash", "/bin/bash <<'EOF'", _HDC_SHELL_ALL)
+        + _hdc_rows("env-bash", "env bash <<'EOF'", _HDC_SHELL_ALL)
+        + _hdc_rows("source-stdin", "source /dev/stdin <<'EOF'", _HDC_SHELL_ALL)
+        + _hdc_rows("dot-stdin", ". /dev/stdin <<'EOF'", _HDC_SHELL_ALL)
+        + _hdc_rows("bash-dash-tabs", "bash <<-'EOF'", _HDC_SHELL_ALL)
+        + _hdc_rows("cat-piped-to-bash", "cat <<'EOF' | bash", _HDC_SHELL_ALL)
+        + _hdc_rows("after-and-list", "cd /abs && bash <<'EOF'", _HDC_SHELL_ALL)
+        + _hdc_rows("unnamed", "runner <<'EOF'", _HDC_SHELL_ALL)
+        + _hdc_rows("git-commit-file-stdin", "git commit -F - <<'EOF'", (("amp", "deny"),))
+        + _hdc_rows("cat-renamed", "hash -p /usr/bin/bash cat; cat <<'EOF'", _HDC_SHELL_ALL)
+        + _hdc_rows("write-bash", "cat > /abs/s.sh <<'EOF'", _HDC_SHELL_ALL, "\nbash /abs/s.sh")
+        + _hdc_rows("write-sh", "cat > /abs/s.sh <<'EOF'", _HDC_SHELL_ALL, "\nsh /abs/s.sh")
+        + _hdc_rows("write-source", "cat > /abs/s.sh <<'EOF'", _HDC_SHELL_ALL, "\nsource /abs/s.sh")
+        + _hdc_rows("write-dot", "cat > /abs/s.sh <<'EOF'", _HDC_SHELL_ALL, "\n. /abs/s.sh")
+        + _hdc_rows("write-dot-slash", "cat > s.sh <<'EOF'", _HDC_SHELL_ALL, "\nchmod +x s.sh; ./s.sh")
+        + _hdc_rows("write-python3", "cat > /abs/s.py <<'EOF'", _HDC_SHELL_ALL, "\npython3 /abs/s.py")
+        + _hdc_rows("write-same-line-bash", "cat > /abs/s.sh <<'EOF'; bash /abs/s.sh", _HDC_SHELL_ALL)
+        + _hdc_rows("write-redirect-into-bash", "cat > /abs/s.sh <<'EOF'", _HDC_SHELL_ALL, "\nbash < /abs/s.sh")
+        + _hdc_rows("write-piped-to-bash", "cat > /abs/s.sh <<'EOF'", _HDC_SHELL_ALL, "\ncat /abs/s.sh | bash")
+        + _hdc_rows("write-bash-c", "cat > /abs/s.sh <<'EOF'", _HDC_SHELL_ALL,
+                    "\nbash -c 'source /abs/s.sh'")
+        + _hdc_rows("write-python3-c-exec", "cat > /abs/s.py <<'EOF'", _HDC_SHELL_ALL,
+                    "\npython3 -c \"exec(open('/abs/s.py').read())\"")
+        + _hdc_rows("write-mv-then-run", "cat > /abs/s.sh <<'EOF'", _HDC_SHELL_ALL,
+                    "\nmv /abs/s.sh /abs/t.sh; bash /abs/t.sh")
+        + (("hdc-two-shell-bodies-rebalance", "bash <<'EOF'\n" + _HDC_APOS + "EOF\nbash <<'EOF'\necho it's\nEOF",
+            "deny"),
+           ("hdc-write-run-cross-body-pair",
+            "cat > /abs/s <<A\nit's\nA\ncat >> /abs/s <<B\nx'; sleep 5 & echo '\nB\nbash /abs/s", "deny"),
+           ("hdc-write-sourced-single-quoted", "cat > /abs/f <<'EOF'\nit's\nEOF\nsource /abs/f", "deny"),
+           ("hdc-write-sourced-double-quoted", "cat > /abs/f <<\"EOF\"\nit's\nEOF\nsource /abs/f", "deny"),
+           ("hdc-write-sourced-backslash", "cat > /abs/f <<\\EOF\nit's\nEOF\nsource /abs/f", "deny"))
+        # The cost bounds, each end just inside, at and just outside: a scan pass reads a body after 64
+        # bodies read on their own as commands unread, and a written file's run search reads text of more
+        # than 65536 characters naming the file as a run.
+        + tuple(("hdc-body-limit-{}".format(count), "cat <<'E'\nx\nE\n" * count + "cat <<'E'\n" + _HDC_AMP + "E",
+                 expected) for count, expected in ((63, "allow"), (64, "deny"), (65, "deny")))
+        + tuple(("hdc-run-text-limit-{}".format(size),
+                 "cat > /abs/s <<'E'\n" + _HDC_AMP + "E\nsha256sum /abs/s " + "a" * (size - 18), expected)
+                for size, expected in ((65535, "allow"), (65536, "allow"), (65537, "deny")))
+    )
+) + tuple((label, command, expected, before) for label, command, expected, before in (
+    # Unchanged (the -plain rows above too): the plain start form with no apostrophe and no '&' is the
+    # silent allow (as in the command's own text), an apostrophe with no start form or '&' is allowed, a
+    # quoted '&' in a shell's body is quoted text, an unquoted shell body's '&' and a shell body's '&'
+    # before an apostrophe were denied already, and a data body (a cat write never run, a cat to standard
+    # output, a file only read, hashed or passed to python3 -c as an argument) keeps its reading: its quote
+    # opens nothing and the lexer lifts its quoted '&'.
+    ("hdc-bash-apostrophe-no-start-form", "bash <<'EOF'\necho it's\nEOF", "allow", "allow"),
+    ("hdc-bash-quoted-amp-text", "bash <<'EOF'\necho 'a & b'\nEOF", "allow", "allow"),
+    ("hdc-bash-unquoted-amp", "bash <<EOF\n" + _HDC_AMP + "EOF", "deny", "deny"),
+    ("hdc-bash-amp-then-apostrophe", "bash <<'EOF'\nsleep 5 &\necho it's\nEOF", "deny", "deny"),
+    ("hdc-cat-stdout-apos", "cat <<'EOF'\n" + _HDC_APOS + "EOF\necho done", "allow", "allow"),
+    ("hdc-cat-stdout-amp", "cat <<'EOF'\n" + _HDC_AMP + "EOF\necho done", "allow", "allow"),
+    ("hdc-write-hashed-apos", "cat > /abs/n.txt <<'EOF'\n" + _HDC_APOS + "EOF\nsha256sum /abs/n.txt", "allow",
+     "allow"),
+    ("hdc-write-hashed-amp", "cat > /abs/n.txt <<'EOF'\n" + _HDC_AMP + "EOF\nsha256sum /abs/n.txt", "allow",
+     "allow"),
+    ("hdc-write-python3-c-argument", "mkdir -p /abs; cat > /abs/k.txt <<'EOF'\n" + _HDC_APOS
+     + "EOF\npython3 -I -c \"import sys; print(open(sys.argv[1]).read())\" /abs/k.txt", "allow", "allow"),
+    ("hdc-write-other-file-run", "cat > /abs/n.txt <<'EOF'\n" + _HDC_APOS + "EOF\nbash /abs/other.sh", "allow",
+     "allow"),
+    ("hdc-cat-partly-quoted-delim-amp", "cat <<EO'F'\n" + _HDC_AMP + "EOF", "allow", "allow"),
+    ("hdc-bash-partly-quoted-delim-amp", "bash <<EO'F'\n" + _HDC_AMP + "EOF", "deny", "allow"),
+    ("hdc-adopter-exact", _TRKASY_HEREDOC_ADOPTER, "allow", "allow"),
+    ("hdc-adopter-unquoted", "cat > /tmp/k.txt <<EOF\na'b\nsource\nEOF", "allow", "allow"),
+))
+# The mutant reads every consumer as data, the reading before the consumer was named.
+_TRKASY_HDC_MUTANT_ANCHOR = "runs = not _orch_heredoc_body_is_data(command, op_at, seg, end, read_bodies)"
+_TRKASY_HDC_MUTANT_REPLACEMENT = "runs = False"
+
+
+def _test_trkasy_heredoc_consumer(failures, tmp):
+    """Foreground trkasy rows in registry scope for a here-document body's consumer
+    (_TRKASY_HEREDOC_CONSUMER_ROWS): each row gives its expected decision, and each row whose decision
+    reading the consumer changed gives its earlier decision under the mutant that reads every consumer as
+    data (_trkasy_heredoc_mutant_decisions), so every such row fails with that change reverted."""
+    root = tmp / "trkasy-heredoc-consumer"
+    (root / ".aiqt").mkdir(parents=True)
+    (root / ".aiqt" / "orchestration.local.json").write_text(json.dumps({"version": 1}), encoding="utf-8")
+    handler = aiqt_hooks.orch_truncation_guard
+    labels = [row[0] for row in _TRKASY_HEREDOC_CONSUMER_ROWS]
+    if len(set(labels)) != len(labels):
+        failures.append("(hdc-labels) the consumer rows repeat a label")
+    for label, command, expected, _before in _TRKASY_HEREDOC_CONSUMER_ROWS:
+        got = _decision(handler, command, cwd=str(root))
+        if got != expected:
+            failures.append("({}) expected {} in registry scope; got {}".format(label, expected, got))
+    changed = [(label, command, before) for label, command, expected, before in _TRKASY_HEREDOC_CONSUMER_ROWS
+               if expected != before]
+    if not changed:
+        failures.append("(hdc-changed-rows) no row pins a changed decision")
+        return
+    decisions = _trkasy_heredoc_mutant_decisions(
+        failures, tmp, root, [command for _l, command, _b in changed], _TRKASY_HDC_MUTANT_ANCHOR,
+        _TRKASY_HDC_MUTANT_REPLACEMENT, "hdc")
+    if decisions is None:
+        return
+    for (label, _command, before), got in zip(changed, decisions):
+        if got != before:
+            failures.append("({}-mutant) the row must give its earlier decision {} with every consumer read as "
+                            "data, so it pins the consumer reading; got {}".format(label, before, got))
+
+
+_WAIT_LOOP_DENY_COMMAND ="while true; do gh run view 1; sleep 30; done &"
 
 
 _WAIT_LOOP_CHECKS_API_COMMANDS = ("gh pr checks", "gh pr status", "gh run watch")
@@ -30503,6 +30899,8 @@ def _main_isolated(monitor):
         _test_inline_errexit(failures, tmp)
         _test_pgrep_self_match(failures)
         _test_trkasy_no_amp(failures, tmp)
+        _test_trkasy_heredoc_body_data(failures, tmp)
+        _test_trkasy_heredoc_consumer(failures, tmp)
         _test_wait_loop_deny_text(failures, tmp)
         _test_note_literal_sites(failures, tmp)
         _test_stop_dispatch_note_sites(failures, tmp)
