@@ -23,6 +23,12 @@
 #               directory it is given) with execute, network and scratch all closed, so it has no
 #               other route to a file. claude and codex can run commands, which this file does not
 #               bound to the workdir, so they stay undeclared.
+#   git-write   "yes", "no", or "undeclared": whether the runtime permission policy the family runs under
+#               admits a git commit or push. "no" makes the lint refuse a brief that holds a git command
+#               line whose subcommand is commit or push (W1). This value is a declared copy of that runtime
+#               policy, kept here by hand, not a measurement of it. Undeclared means nobody has shown it
+#               either way, so no rule relies on it; every family ships undeclared, so W1 never fires on
+#               this file, and a sender that knows its live policy passes --table with a copy that says "no".
 format-version = 1
 
 [[family]]
@@ -34,6 +40,7 @@ git-read = "yes"
 scratch = "persistent"
 handback = "yes"
 reads-outside-workdir = "undeclared"
+git-write = "undeclared"
 
 [[family]]
 name = "codex"
@@ -44,6 +51,7 @@ git-read = "yes"
 scratch = "per-command"
 handback = "no"
 reads-outside-workdir = "undeclared"
+git-write = "undeclared"
 
 [[family]]
 name = "gemini"
@@ -54,3 +62,4 @@ git-read = "undeclared"
 scratch = "none"
 handback = "no"
 reads-outside-workdir = "no"
+git-write = "undeclared"
