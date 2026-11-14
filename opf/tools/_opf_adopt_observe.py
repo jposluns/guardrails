@@ -3753,11 +3753,14 @@ def self_test(vectors_only=False, steady_only=False):
     WATCH_JOIN = 10.0
     WATCHER_NAME = "close_row watch_asleep"
     # close_row's watcher checks: the join they run a held watcher with, how
-    # long a raising case's watcher read holds it (under WATCH_JOIN), and
-    # the bound on holding a watcher until its case has returned.
+    # long a raising case's watcher read holds it once the test thread's read
+    # has raised (under WATCH_JOIN), the bound on holding a watcher until its
+    # case has returned or that read has raised, and how long that read waits
+    # for the watcher to enter its hold.
     HELD_JOIN = 0.5
     RAISE_HOLD = 2.0
     HOLD_BOUND = 120.0
+    HOLD_WAIT = 10.0
     # poll(2) and ppoll(2), the system calls in which a Python socket or TLS
     # call with a timeout waits, by machine, as /proc/self/task/<id>/syscall
     # numbers them.
@@ -3933,8 +3936,12 @@ def self_test(vectors_only=False, steady_only=False):
                         if client is not None:
                             client.close()
                     finally:
-                        # Joined here, so an exception raised through this
-                        # cleanup does not leave the watcher running.
+                        # Joined here for up to watch_join seconds, however the
+                        # case ends, an exception raised through this cleanup
+                        # included. A watcher still running after that is named
+                        # when the case is judged (watcher_running), not when an
+                        # exception leaves; as a daemon thread, it does not hold
+                        # process exit.
                         if watcher.ident is not None:
                             watcher.join(watch_join)
             if not reached:
@@ -4087,20 +4094,24 @@ def self_test(vectors_only=False, steady_only=False):
         # from CALL_EDGES fails the row INVALID. It then holds the watcher of a
         # registration case, where only the watcher reads /proc, until
         # close_cases has returned, with a join of HELD_JOIN, and requires
-        # exactly the watcher_running reason; and, in a handshake case, raises
-        # through close_cases' cleanup from the test thread's /proc read while
-        # the watcher's read holds it up to RAISE_HOLD, less than WATCH_JOIN,
-        # and requires the watcher to have ended by the time the exception
-        # leaves close_cases. In each, another reason or a watcher still running
-        # fails the row INVALID, and a case that failed otherwise, or a read
-        # that did not raise, makes it CANNOT-EVALUATE. Last, it writes the task
-        # files POLL_RULE_FILES lists under root and has asleep_in_poll read
-        # each through its task_root (poll_rule), requiring the reading listed
-        # for this machine: where POLL_SYSCALLS lists it, a wait channel naming
-        # poll reads False unless the system call is poll as well, and a poll
-        # system call reads False unless the wait channel names poll. A reading
-        # that departs fails the row INVALID, and task files that could not be
-        # written make it CANNOT-EVALUATE.
+        # exactly the watcher_running reason. And in a handshake case, the test
+        # thread's /proc read finds the case's watcher by its name, waits up to
+        # HOLD_WAIT for that watcher's read to enter its hold, and raises
+        # through close_cases' cleanup; the watcher's read holds it until then
+        # and up to RAISE_HOLD after, less than WATCH_JOIN, and that watcher
+        # must have ended by the time the exception leaves close_cases. In each,
+        # a case that failed otherwise, a hold its watcher did not enter (before
+        # the read raised, in the handshake case), no one watcher found by its
+        # name, or a read that did not raise makes it CANNOT-EVALUATE, before
+        # any other reading; otherwise another reason or a watcher still running
+        # fails the row INVALID. Last, it writes the task files POLL_RULE_FILES
+        # lists under root and has asleep_in_poll read each through its
+        # task_root (poll_rule), requiring the reading listed for this machine:
+        # where POLL_SYSCALLS lists it, a wait channel naming poll reads False
+        # unless the system call is poll as well, and a poll system call reads
+        # False unless the wait channel names poll. A reading that departs fails
+        # the row INVALID, and task files that could not be written make it
+        # CANNOT-EVALUATE.
         client_context = original_context(cadata=certificates)
         failures, unjudged, measured, _ = close_cases(context, client_context, Server)
         caught, missed, mutant_measured, left = close_cases(
@@ -4134,10 +4145,13 @@ def self_test(vectors_only=False, steady_only=False):
         else:
             blind_status = VALID
         release = threading.Event()
+        held_entered = threading.Event()
 
         def held(thread):
-            # A stand-in for asleep_in_poll that holds the watcher until its
-            # case has returned (release), up to HOLD_BOUND.
+            # A stand-in for asleep_in_poll that records that the watcher
+            # entered it and holds the watcher until its case has returned
+            # (release), up to HOLD_BOUND.
+            held_entered.set()
             release.wait(HOLD_BOUND)
             return False
 
@@ -4145,11 +4159,19 @@ def self_test(vectors_only=False, steady_only=False):
             held_failures, held_unjudged, _, _ = close_cases(
                 context, client_context, Server, ("registration",), held,
                 watch_join=HELD_JOIN)
+            # Read before the release: a watcher scheduled so late that it found
+            # done already set never entered the hold, and ended without being
+            # held.
+            entered_hold = held_entered.is_set()
         finally:
             release.set()
         if held_failures:
             held_status = CANNOT_EVALUATE
             unjudged.append("held watcher: not judged: " + "; ".join(held_failures))
+        elif not entered_hold:
+            held_status = CANNOT_EVALUATE
+            unjudged.append("held watcher: not judged: the registration case's watcher did "
+                            "not enter its hold before the case returned (scheduling)")
         elif held_unjudged != [watcher_running("registration", HELD_JOIN)]:
             held_status = INVALID
             failures.append("held watcher: not reported: registration gave "
@@ -4157,36 +4179,65 @@ def self_test(vectors_only=False, steady_only=False):
         else:
             held_status = VALID
         caller = threading.current_thread()
+        holding = threading.Event()
+        thrown = threading.Event()
         let_go = threading.Event()
         holders = []
+        found = []
+        entered_first = []
 
         class Raised(Exception):
             pass
 
         def raising(thread):
-            # A stand-in for asleep_in_poll that raises in the test thread and
-            # holds the watcher up to RAISE_HOLD.
-            if threading.current_thread() is caller:
-                raise Raised()
-            holders.append(threading.current_thread())
-            let_go.wait(RAISE_HOLD)
-            return False
+            # A stand-in for asleep_in_poll. In the watcher, it records the
+            # thread, sets holding and holds the watcher until the test thread's
+            # read has raised (thrown), up to HOLD_BOUND, and then up to
+            # RAISE_HOLD. In the test thread, it finds the case's watcher by its
+            # name, among the threads started since close_cases was called (the
+            # watcher is started before this read), waits up to HOLD_WAIT for a
+            # watcher's read to enter its hold, records whether one had, and
+            # raises.
+            if threading.current_thread() is not caller:
+                holders.append(threading.current_thread())
+                holding.set()
+                thrown.wait(HOLD_BOUND)
+                let_go.wait(RAISE_HOLD)
+                return False
+            found.extend(candidate for candidate in threading.enumerate()
+                         if candidate.name == WATCHER_NAME and candidate not in before)
+            entered_first.append(holding.wait(HOLD_WAIT))
+            thrown.set()
+            raise Raised()
 
         raised = False
+        before = set(threading.enumerate())
         try:
             close_cases(context, client_context, Server, ("handshake",), raising)
         except Raised:
             raised = True
         finally:
-            outlived = [thread for thread in holders if thread.is_alive()]
+            # The watcher found by its name, checked directly as the
+            # exception leaves close_cases, whatever its reads did.
+            outlived = [watcher for watcher in found if watcher.is_alive()]
+            thrown.set()
             let_go.set()
-        if outlived:
+        if not raised:
+            raising_status = CANNOT_EVALUATE
+            unjudged.append("raising case: the test thread's /proc read was not reached")
+        elif len(found) != 1:
+            raising_status = CANNOT_EVALUATE
+            unjudged.append("raising case: not judged: {} threads named {!r} were started "
+                            "for the case, not one".format(len(found), WATCHER_NAME))
+        elif not entered_first[0] or holders[:1] != found:
+            raising_status = CANNOT_EVALUATE
+            unjudged.append("raising case: not judged: its watcher did not enter its hold "
+                            "within {} s of the test thread's /proc read, before that "
+                            "read raised (scheduling)".format(HOLD_WAIT))
+        elif outlived:
             raising_status = INVALID
             failures.append("raising case: its watcher was still running when the "
                             "exception left close_cases")
-        elif not raised:
-            raising_status = CANNOT_EVALUATE
-            unjudged.append("raising case: the test thread's /proc read was not reached")
         else:
             raising_status = VALID
         if left:
