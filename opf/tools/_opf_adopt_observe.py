@@ -3756,11 +3756,13 @@ def self_test(vectors_only=False, steady_only=False):
     # (watch_join). The four differ from each other and from WATCH_JOIN, so a
     # join with any fixed timeout, WATCH_JOIN or none included, matches at
     # most one of them and fails the others, while a join with watch_join
-    # matches each. The first three are below WATCH_JOIN, where a join that
-    # clamps watch_join to at most WATCH_JOIN still matches them; the last is
-    # an hour, above WATCH_JOIN, so such a clamp fails it (a stand-in's join
-    # does not wait, so its size costs nothing). The name is used nowhere else
-    # in self_test, whose later names would rebind it before close_row runs.
+    # matches each. The first three are at most 0.75 s, so a join that clamps
+    # watch_join to a cap from 0.75 s up to (not including) an hour matches
+    # them; the last is an hour, so such a clamp fails it, a cap below 0.75 s
+    # already fails one of the first three, and a cap of an hour or more is the
+    # disclosed limit (a stand-in's join does not wait, so its size costs
+    # nothing). The name is used nowhere else in self_test, whose later names
+    # would rebind it before close_row runs.
     CHECK_JOINS = {"unreadable": 0.75, "held": 0.5, "raising": 0.25, "clamped": 3600.0}
     # poll(2) and ppoll(2), the system calls in which a Python socket or TLS
     # call with a timeout waits, by machine, as /proc/self/task/<id>/syscall
@@ -4261,9 +4263,9 @@ def self_test(vectors_only=False, steady_only=False):
                             + ("; ".join(held_unjudged) or "no reason"))
         else:
             held_status = VALID
-        # A join that clamps watch_join, to WATCH_JOIN or below, still
-        # matches the other three CHECK_JOINS entries, all below WATCH_JOIN;
-        # this registration case passes the entry above it, and is judged by
+        # A join that clamps watch_join to a cap from 0.75 s up to an hour
+        # still matches the other three CHECK_JOINS entries (at most 0.75 s);
+        # this registration case passes the hour entry, and is judged by
         # its join alone: however else the case ends, close_cases joins its
         # watcher in the cleanup.
         clamped_made = []
