@@ -1193,9 +1193,12 @@ def _config_poison_fixture(base):
 # the latest whole-self-test run by load alone, not by the SIZING formula (their shared comment
 # gives both; neither sizes an entry now). The other exceptions are the
 # tools/check_selftest_execution.py --suite child-status-coverage-selftest entry, whose MEASURED
-# figures are standalone runs (its own comment), fed to the SIZING formula, and the
+# figures are standalone runs (its own comment), fed to the SIZING formula, the
 # tools/selftest_aiqt_hooks.py entry, whose MEASURED figures are config-lane runs of that member
-# alone taken after the account (its own comment), fed to the SIZING formula and capped.
+# alone taken after the account (its own comment), fed to the SIZING formula and capped, and the
+# opf/tools/_opf_adopt_apply.py --self-test entry, whose MEASURED figures are later config-lane
+# runs of that member beside two runs of the hooks member (its own comment), fed to the SIZING
+# formula and capped.
 #
 # CONFIG_MEMBER_BOUND_DEFAULT is a DELIBERATE SHORTER DEADLINE, not a bound sized above every
 # member's own end-to-end budget. Budgets the members grant themselves, READ FROM SOURCE (not
@@ -1215,21 +1218,24 @@ def _config_poison_fixture(base):
 # CHOICE: the default is NOT raised above 5766 s, and neither is any entry below but the
 # opf-closure-a to opf-closure-e entries (each but the six tools/check_opf_standalone_closure.py
 # --self-test --ci-job entries, the child-status-coverage-selftest entry, the
-# tools/check_release_cut.py --self-test --red-on-revert entry and the tools/selftest_aiqt_hooks.py
-# entry is sized from config-lane runs MEASURED on this host, see SIZING; those six are set above
-# their members' worst cases READ FROM SOURCE, see their shared comment, the
-# child-status-coverage-selftest entry from standalone runs, see its own comment, the
-# check_release_cut.py entry from standalone runs with a stated margin, deliberately below the worst
-# case over named terms that its own comment gives, and the selftest_aiqt_hooks.py entry from later
-# config-lane runs by the SIZING formula, capped at 5700 s since the formula gives more than 5766 s,
-# see its own comment); each other entry stays a deliberate shorter deadline relative to the
-# member's self-granted budget, yet each formula-sized entry is sized above the member's measured
-# runs (lane runs, or standalone runs for the child-status-coverage-selftest entry) so that the
-# member finishes under the load the SIZING factor covers, but for the capped selftest_aiqt_hooks.py
-# entry, which covers less (its own comment); reaching a bound stays cannot-evaluate, attributed to
-# the bound, never a FAIL of that member and never a pass, because this lane owns no member's
-# verdict. Raising those five entries does not keep a config lane inside its CI job's 21600 s limit
-# (their shared comment, JOB LIMIT).
+# tools/check_release_cut.py --self-test --red-on-revert entry, the tools/selftest_aiqt_hooks.py
+# entry and the opf/tools/_opf_adopt_apply.py --self-test entry is sized from config-lane runs
+# MEASURED on this host, see SIZING; those six are set above their members' worst cases READ FROM
+# SOURCE, see their shared comment, the child-status-coverage-selftest entry from standalone runs,
+# see its own comment, the check_release_cut.py entry from standalone runs with a stated margin,
+# deliberately below the worst case over named terms that its own comment gives, the
+# selftest_aiqt_hooks.py entry from later config-lane runs by the SIZING formula, capped at 5700 s
+# since the formula gives more than 5766 s, see its own comment, and the _opf_adopt_apply.py entry
+# from later config-lane runs by the SIZING formula, capped at 3900 s since the closure gate
+# refuses an entry for that command above 4026 s, see its own comment); each other entry stays a
+# deliberate shorter deadline relative to the member's self-granted budget, yet each formula-sized
+# entry is sized above the member's measured runs (lane runs, or standalone runs for the
+# child-status-coverage-selftest entry) so that the member finishes under the load the SIZING
+# factor covers, but for the two capped entries, selftest_aiqt_hooks.py and _opf_adopt_apply.py,
+# which cover less (their own comments); reaching a bound stays cannot-evaluate, attributed to the
+# bound, never a FAIL of that member and never a pass, because this lane owns no member's verdict.
+# Raising those five entries does not keep a config lane inside its CI job's 21600 s limit (their
+# shared comment, JOB LIMIT).
 # Every roster member is a registered step or the runner behind a registered --suite step
 # (_registered_selftests reads both CI workflows, both standalone runners and the suite manifest),
 # and that step runs the member to completion under no deadline from this suite, so no member's
@@ -1295,10 +1301,11 @@ def _config_poison_fixture(base):
 # may overstate the timed members still registered by up to two, so the count of members with no
 # recorded time may understate by up to two. The runs and times recorded here are unchanged.
 # NOT MEASURED in the account, though these bounds govern those reruns all the same: the system
-# lane (one member, tools/selftest_aiqt_hooks.py, was MEASURED in it later; its own entry); the
-# malformed lane's configuration for every member of that lane outside SIZING_MALFORMED_MEASURED;
-# and the fsmonitor pass's own configuration (fsmonitor set in both config files, ignore and
-# attributes files removed, its four members run one at a time).
+# lane (two members, tools/selftest_aiqt_hooks.py and opf/tools/_opf_adopt_apply.py --self-test,
+# were MEASURED in it later; their own entries); the malformed lane's configuration for every
+# member of that lane outside SIZING_MALFORMED_MEASURED; and the fsmonitor pass's own
+# configuration (fsmonitor set in both config files, ignore and attributes files removed, its four
+# members run one at a time).
 # The opf.py --self-test times above and below and its 3600 s entry were sized before the
 # 2026-10-13 merge added the opf-write-guard delegate to opf.py --self-test; the delegate's own
 # self-test, MEASURED standalone on the merged tree (2026-10-13), exited 0 in 0.23 s wall, so the
@@ -1316,14 +1323,15 @@ def _config_poison_fixture(base):
 # REPORTED by that account as each 62.42 s or less, with no per-member time and no names given.
 # The other account members, which the account does not name, have no recorded time; nor does a
 # member registered after the account unless SIZING_LATER_MEASURED records a measurement of it.
-# Their default bound is NOT sized from a measurement. One account member,
-# tools/selftest_aiqt_hooks.py, was later MEASURED in the config lanes at over 1200 s (its own
-# entry); the account's times date from 2026-10-12, so a member that has grown since can sit near
-# or over the default with no figure here showing it. That this member grew past the default since
-# then is INFERRED, not measured: the account gives no time for it (its own entry). _roster_figures
-# derives the live counts from these constants (members, malformed-lane members, members outside
-# the account, members with no recorded time, malformed-lane members not measured in that lane),
-# and config/member-roster-figures prints them with one line per member outside the account.
+# Their default bound is NOT sized from a measurement. Two account members,
+# tools/selftest_aiqt_hooks.py and opf/tools/_opf_adopt_apply.py --self-test, were later MEASURED
+# in the config lanes at over 1200 s (their own entries); the account's times date from
+# 2026-10-12, so a member that has grown since can sit near or over the default with no figure
+# here showing it. That these members grew past the default since then is INFERRED, not measured:
+# the account gives no time for either (their own entries). _roster_figures derives the live
+# counts from these constants (members, malformed-lane members, members outside the account,
+# members with no recorded time, malformed-lane members not measured in that lane), and
+# config/member-roster-figures prints them with one line per member outside the account.
 # A bound sized from a measurement taken after the account (an entry whose own comment says it
 # was sized outside SIZING) is allowed only when SIZING_LATER_MEASURED maps its argv to a
 # one-line citation of that measurement; _roster_figures reports any other CONFIG_MEMBER_BOUNDS
@@ -1461,7 +1469,7 @@ CONFIG_MEMBER_BOUNDS = {
     # after the other on one worker: at their entries that is at least 8100 + 9600 = 17700 s (the
     # two smallest, c and e), after whatever that worker ran before them. On the malformed-config
     # lane's roster (every member outside CONFIG_EXCLUSIONS["malformed"]), with every member at its
-    # bound, that lane's four workers alone run 64500 s in roster order (56100 s with these five at
+    # bound, that lane's four workers alone run 65100 s in roster order (56700 s with these five at
     # 3600 s): a schedule of this table's entries, not a measured time, and the other lanes' rosters
     # differ. A lane that reaches the job limit is ended by it and fails with no member named.
     # HISTORY (no entry is sized from these figures now).
@@ -1557,6 +1565,32 @@ CONFIG_MEMBER_BOUNDS = {
     # (5700 / 1257.15 = 4.534), not the formula's 20 / 3, so this entry covers less load growth than
     # the formula-sized entries do; reaching it stays cannot-evaluate.
     ("tools/selftest_aiqt_hooks.py",): 5700,
+    # Sized outside SIZING, by its formula capped below the closure gate's limit (see CHOICE). The
+    # account names no time for this member: it is not among the nine the account names, and
+    # whether it is among the 75 it reports, unnamed, as 62.42 s or less is not known; no account
+    # figure sizes it now.
+    # REPORTED, not reproduced here (2026-11-14, the same 96-CPU host, 1-minute load about 41 to
+    # 74): the member reached the then 1200 s default in two full system-lane runs (cannot
+    # evaluate), so neither run has a known length and neither is fed to the formula.
+    # MEASURED (2026-11-14, 02:51:50 to 03:16:20 UTC, 96-CPU host, 1-minute load 45.4 to 70.2
+    # sampled every 10 s, plain, the bound lifted to 3300 s): two runs started together, beside two
+    # runs of tools/selftest_aiqt_hooks.py started at the same time, each through the system lane's
+    # own setup (its poison fixture, simulated system config and git wrapper, then _config_results
+    # over this one member), took 1469.7 s and 1467.2 s wall for the member's whole pass (its
+    # poison copy, positive control and run); both exited 0, with no hook, fsmonitor or exposure
+    # record. Each is above the 1200 s default.
+    # ESTIMATED: 1469.7 * 20 / 3 = 9798.0, so 9900 s by the formula. The closure gate caps this
+    # entry lower: its opf-adopt-apply-selftest leg runs this same command, and
+    # closure/leg-bound-reaches-the-lane-deadline (tools/check_opf_standalone_closure.py) refuses
+    # that leg's bound when it sits below this entry plus its 60 s launch margin. That bound is
+    # 4086 s on this tree (the leg's declared waits, 4026 s, plus the margin; READ FROM SOURCE
+    # through its _leg_bounds), so this entry stays at or below 4026 s, where the leg needs no floor
+    # row; a higher entry needs one, which raises job opf-closure-e's worst case (19302 s of its
+    # 21600 s limit) by twice the rise and the opf-closure-e member's worst case by the rise. The
+    # entry is 3900 s, the largest multiple of 300 s at or below 4026 s. That is about 2.65 times
+    # the slowest measured run (3900 / 1469.7 = 2.654), not the formula's 20 / 3, so this entry
+    # covers less load growth than the formula-sized entries do; reaching it stays cannot-evaluate.
+    ("opf/tools/_opf_adopt_apply.py", "--self-test"): 3900,
 }
 # The sizing account's frozen facts (see SIZING above); _roster_figures derives the live figures
 # from them and config/member-roster-figures pins them against _registered_selftests().
@@ -1725,6 +1759,9 @@ SIZING_LATER_MEASURED = {
     ("tools/selftest_aiqt_hooks.py",): (
         "Config-lane runs (2026-11-13, combined 1257.15 s, system 1250.08 s): see this member's"
         " CONFIG_MEMBER_BOUNDS comment."),
+    ("opf/tools/_opf_adopt_apply.py", "--self-test"): (
+        "Config-lane runs under the system lane's setup (2026-11-14, 1469.7 s and 1467.2 s):"
+        " see this member's CONFIG_MEMBER_BOUNDS comment."),
 }
 # After the process-group kill: the bounded drain of output still held by a descendant that left
 # the group (setsid or setpgid), the bounded reap of the leader, and the bounded wait for the group
