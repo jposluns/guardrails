@@ -197,6 +197,15 @@ directory, valid or broken), a missing root, and a non-regular *.py entry are ca
 (exit 2), never a clean pass. Every directory under a scanned root is walked, __pycache__
 included; only the vendored opf/tools/_vendor tree is excluded.
 
+Transitional OPF coverage: while the OPF tree is nested at opf/, this gate also scans its tools/
+directory (OPF_TOOLS_ROOT, its vendored tree excluded), carries the reviewed rows for paths
+under it, and its self-test checks parity with the OPF copy, opf/tools/check_dangerous_api.py.
+That coverage holds only while both trees share this repository: the copy, with its own
+re-rooted rows, is the OPF tree's own gate. The root, its exclusion, its rows and the parity
+check stay until the cleanup after the OPF tree is extracted, which removes them together. The
+self-test fails on any OPF path this gate names outside OPF_TOOLS_ROOT, so that cleanup touches
+nothing else.
+
 Out of scope: this lint guards against ACCIDENTAL use of a dangerous API in the repository's
 own code written the ordinary way, so code deliberately built to hide a sink is not claimed:
 a string-assembled or string-literal module name is not followed to a SINK (sys.modules[...];
@@ -333,10 +342,13 @@ import tempfile
 import tokenize
 from pathlib import Path
 
-SCAN_ROOTS = ("tools", "opf/tools", ".aiqt/core/hooks/scripts")
+# Transitional (see "Transitional OPF coverage" above): OPF_TOOLS_ROOT, its exclusion and every
+# ALLOWLIST row under it leave this gate together after the OPF tree is extracted.
+OPF_TOOLS_ROOT = "opf/tools"
+SCAN_ROOTS = ("tools", OPF_TOOLS_ROOT, ".aiqt/core/hooks/scripts")
 PLUGIN_ROOT = "plugin"
 PLUGIN_SCRIPTS = ("hooks", "scripts")
-EXCLUDED_DIRS = frozenset({"opf/tools/_vendor"})
+EXCLUDED_DIRS = frozenset({OPF_TOOLS_ROOT + "/_vendor"})
 
 KIND_RULES = {
     "deserialize": ("secdsz",),
@@ -518,7 +530,9 @@ CHECKS = ("alias", "scope", "chain", "star-import", "module-escape", "dsz-ref", 
 
 # The reviewed allowlist: (path, enclosing qualname, kind, exact count, reason). Every entry
 # names a current legitimate site and why it is safe; a count that no longer matches the
-# scan is a finding, so a new site in a reviewed function still needs its own review.
+# scan is a finding, so a new site in a reviewed function still needs its own review. The rows
+# under OPF_TOOLS_ROOT are transitional: the OPF copy carries them re-rooted as its own, and
+# they leave this list with that root.
 _MUTANT = ("self-test mutant: compiles this repository's own source text with one reviewed"
            " literal substitution, so a reverted guard is shown to fail; no external input")
 _SAVED = ("self-test stub: keeps the real subprocess.run or Popen to delegate to or restore after"
@@ -3528,6 +3542,227 @@ TREE_VECTORS = (
      (("tools/a.py", "probe", "code", 1, _REASON),), None, 3, "code-syspath", 0),
 )
 
+# Parity with the OPF copy, opf/tools/check_dangerous_api.py. While the copy exists, it and this
+# gate must reach the same verdict and the same findings on one fixed fixture set built from
+# both self-tests' cases: each OPF tree is written under opf/ for this gate and at the root for
+# the copy, and this gate's findings are read with the leading opf/ dropped. The copy's
+# ALLOWLIST must equal this gate's opf/ rows with that prefix dropped, in order; the copy reads
+# no other allowlist or data file. With no copy in the repository the check is skipped and the
+# reason printed. The parity check is transitional and leaves with OPF_TOOLS_ROOT.
+_OPF = "opf/"
+# Edge paths for the transitional-root check, each with whether it lies outside OPF_TOOLS_ROOT:
+# the root itself and a path under it are inside; a sibling sharing its prefix, another OPF
+# path and the bare opf directory are outside; a path outside opf/ is not an OPF path at all.
+_TRANSITIONAL_EDGES = (
+    (OPF_TOOLS_ROOT, False),
+    (OPF_TOOLS_ROOT + "/a.py", False),
+    (OPF_TOOLS_ROOT + "a.py", True),
+    (OPF_TOOLS_ROOT + "-x/a.py", True),
+    ("opf/a.py", True),
+    ("opf", True),
+    ("opfx/a.py", False),
+    ("tools/a.py", False),
+)
+
+
+def _opf_transitional_stray(roots=None, excluded=None, allowlist=None):
+    """Each OPF path this gate names (a scan root, an excluded directory, an ALLOWLIST row's
+    path) that does not lie at or under OPF_TOOLS_ROOT. While none does, retiring the
+    transitional OPF coverage removes that root's entries and nothing else."""
+    roots = SCAN_ROOTS if roots is None else roots
+    excluded = EXCLUDED_DIRS if excluded is None else excluded
+    allowlist = ALLOWLIST if allowlist is None else allowlist
+    paths = [("scan root", root) for root in roots]
+    paths += [("excluded directory", path) for path in sorted(excluded)]
+    paths += [("allowlist row", row[0]) for row in allowlist
+              if isinstance(row, tuple) and row and isinstance(row[0], str)]
+    return [kind + " " + path for kind, path in paths
+            if path.split("/")[0] == _OPF.rstrip("/")
+            and path != OPF_TOOLS_ROOT and not path.startswith(OPF_TOOLS_ROOT + "/")]
+
+
+# The admission cases both self-tests run outside their tree tables, as an OPF tree and its rows.
+_PARITY_ADMISSION = (
+    ({"tools/a.py": b"class C:\n    def f(self, text):\n        exec(text)\n"},
+     (("tools/a.py", "C.f", "code", 1, _REASON),)),
+    ({"tools/__pycache__/a.py": _SITE}, ()),
+    ({"tools/_vendor/v.py": _SITE}, ()),
+    ({"tools/a.py": _SITE}, ()),
+    ({"tools/helper.py": b"x = 1\n", "tools/a.py": _IMPORT_REPO}, ()),
+    ({"tools/a.py": _IMPORT_REPO}, ()),
+    ({"tools/sub/a.py": _SITE}, (("tools/sub/a.py",) + _ENTRY[1:],)),
+)
+
+
+def _load_opf_copy():
+    """The OPF copy as a module, or None when the repository holds no file at its path. It is
+    loaded by a plain import of its literal name from the repository's own opf/tools, with no
+    bytecode written; a parent loaded under the same name is set back in sys.modules after."""
+    tools = Path(__file__).resolve().parent.parent / "opf" / "tools"
+    target = tools / "check_dangerous_api.py"
+    if not os.path.lexists(target):
+        return None
+    held = sys.modules.pop("check_dangerous_api", None)
+    bytecode = sys.dont_write_bytecode
+    sys.dont_write_bytecode = True
+    sys.path.insert(0, str(tools))
+    try:
+        import check_dangerous_api as opf_copy
+    finally:
+        sys.path.remove(str(tools))
+        sys.dont_write_bytecode = bytecode
+        sys.modules.pop("check_dangerous_api", None)
+        if held is not None:
+            sys.modules["check_dangerous_api"] = held
+    if Path(opf_copy.__file__).resolve() != target.resolve():
+        raise ImportError("check_dangerous_api resolved to " + str(opf_copy.__file__)
+                          + ", not " + str(target))
+    return opf_copy
+
+
+def _opf_rebased(allowlist):
+    """allowlist with each row's path moved under opf/; a malformed row, and a list in place
+    of the tuple, are kept as written so the shape checks see the same input."""
+    rows = [(_OPF + row[0],) + row[1:] if isinstance(row, tuple) and row
+            and isinstance(row[0], str) else row for row in allowlist]
+    return rows if isinstance(allowlist, list) else tuple(rows)
+
+
+def _opf_unrebased(lines):
+    """This gate's findings with the leading opf/ dropped from each path; a finding on any
+    other path is marked, so it can never equal one of the copy's."""
+    out = []
+    for line in lines:
+        for lead in ("", "allowlist entry "):
+            if line.startswith(lead + _OPF):
+                out.append(lead + line[len(lead) + len(_OPF):])
+                break
+        else:
+            out.append("outside opf/: " + line)
+    return out
+
+
+def _parity_tree(module, files, allowlist, disabled, setup, nested):
+    """One gate's outcome on an OPF fixture tree: its findings, cannot-evaluate, or the crash.
+    nested writes the tree under opf/ (this gate) rather than at the root (the copy). A setup
+    that patches its own module (sys.modules[__name__]) is pointed at the gate under test."""
+    with tempfile.TemporaryDirectory() as base:
+        tree = os.path.join(base, "opf") if nested else base
+        if nested:
+            files = {_OPF + rel: data for rel, data in files.items()}
+            allowlist = _opf_rebased(allowlist)
+        module._write_tree(base, files)
+        undo = None
+        if setup:
+            name = setup.__module__
+            held = sys.modules.get(name)
+            sys.modules[name] = module
+            try:
+                undo = setup(tree)
+            finally:
+                if held is None:
+                    sys.modules.pop(name, None)
+                else:
+                    sys.modules[name] = held
+        try:
+            found = module.scan_tree(base, allowlist, disabled)
+            return _opf_unrebased(found) if nested else found
+        except module.CannotEvaluate:
+            return CE
+        except Exception as exc:
+            return "crash " + type(exc).__name__
+        finally:
+            if undo:
+                undo()
+
+
+def _parity_source(module, source, disabled):
+    try:
+        return module.scan_source(source, disabled=disabled)
+    except Exception as exc:
+        return "error " + type(exc).__name__
+
+
+def _opf_parity_sources(module):
+    """One self-test's source cases: every vector it scans, with the checks it disables."""
+    cases = [(source, tuple(checks)) for source, checks in module.POSITIVE_VECTORS]
+    cases += [(source, (check,)) for source, check in module._sink_vectors()]
+    for group in (module.NEGATIVE_VECTORS, module._IMPORT_STDLIB, (module._IMPORT_REPO,),
+                  module._SYSPATH_REIMPORTERS, module._REGEX_END_Z,
+                  module._REGEX_LEADING_COMMENT, module._REGEX_LEADING_ASCII,
+                  module._REGEX_SCOPE_U, module._GETATTR_BY_NAME, module._BUILTINS_DUNDER,
+                  module._BUILTINS_BOUND):
+        cases += [(source, ()) for source in group]
+    return cases
+
+
+def _opf_parity_trees(opf_copy):
+    """The tree cases of both self-tests as OPF trees: every tree vector of the copy, each tree
+    vector of this gate with no setup whose files and rows all lie under tools/ (the copy's
+    root) and that the copy does not hold as written, and both admission sets."""
+    def under_tools(files, allowlist):
+        return (all(rel.startswith("tools/") for rel in files)
+                and all(not (isinstance(row, tuple) and row and isinstance(row[0], str))
+                        or row[0].startswith("tools/") for row in allowlist))
+    trees = [(name, files, allowlist, setup, check)
+             for name, files, allowlist, setup, _expected, check, _without
+             in opf_copy.TREE_VECTORS]
+    held = {repr((files, allowlist)) for _name, files, allowlist, _setup, _check in trees}
+    for name, files, allowlist, setup, _expected, check, _without in TREE_VECTORS:
+        if setup is None and under_tools(files, allowlist) \
+                and repr((files, allowlist)) not in held:
+            trees.append((name, files, allowlist, None, check))
+    for index, (files, allowlist) in enumerate(_PARITY_ADMISSION):
+        trees.append(("admission case " + str(index + 1), files, allowlist, None, None))
+    return trees
+
+
+def _opf_copy_parity(failures):
+    """Compare this gate with the OPF copy; return the skip reason, or the case counts."""
+    try:
+        opf_copy = _load_opf_copy()
+    except Exception as exc:
+        failures.append("OPF copy parity: cannot load the copy: " + type(exc).__name__ + " "
+                        + str(exc))
+        return None
+    if opf_copy is None:
+        return "opf/tools/check_dangerous_api.py is absent, so there is no copy to compare"
+    expected = tuple((row[0][len(_OPF):],) + row[1:] for row in ALLOWLIST
+                     if row[0].startswith(_OPF))
+    if opf_copy.ALLOWLIST != expected:
+        missing = [row[:4] for row in expected if row not in opf_copy.ALLOWLIST]
+        extra = [row[:4] for row in opf_copy.ALLOWLIST if row not in expected]
+        failures.append("OPF copy parity: the copy's ALLOWLIST is not this gate's opf/ rows"
+                        " re-rooted: missing " + repr(missing) + ", not in this gate "
+                        + repr(extra) + (", order differs" if not missing and not extra else ""))
+    sources = {}
+    for source, checks in _opf_parity_sources(sys.modules[__name__]) \
+            + _opf_parity_sources(opf_copy):
+        sources.setdefault(source, set()).update(checks)
+    for source, checks in sources.items():
+        for disabled in [()] + [(check,) for check in sorted(checks)]:
+            ours = _parity_source(sys.modules[__name__], source, disabled)
+            theirs = _parity_source(opf_copy, source, disabled)
+            if ours != theirs:
+                failures.append("OPF copy parity: source " + repr(source) + " with "
+                                + repr(disabled) + " disabled: this gate " + repr(ours)
+                                + ", the copy " + repr(theirs))
+    trees = _opf_parity_trees(opf_copy)
+    for name, files, allowlist, setup, check in trees:
+        # A check only the copy has (allowlist-root refuses a row outside its one root, which
+        # this gate, whose roots hold every OPF path, can only report stale) is compared off.
+        runs = [(check,)] if check and check not in CHECKS else [()]
+        if check in CHECKS:
+            runs.append((check,))
+        for disabled in runs:
+            ours = _parity_tree(sys.modules[__name__], files, allowlist, disabled, setup, True)
+            theirs = _parity_tree(opf_copy, files, allowlist, disabled, setup, False)
+            if ours != theirs:
+                failures.append("OPF copy parity: tree " + name + " with " + repr(disabled)
+                                + " disabled: this gate " + repr(ours) + ", the copy "
+                                + repr(theirs))
+    return (len(sources), len(trees), len(expected))
+
 
 def self_test():
     failures = []
@@ -3658,6 +3893,17 @@ def self_test():
         _check_allowlist(ALLOWLIST)
     except CannotEvaluate as exc:
         failures.append("shipped allowlist malformed: " + str(exc))
+    stray = _opf_transitional_stray()
+    if stray:
+        failures.append("OPF paths outside the transitional root " + OPF_TOOLS_ROOT + ": "
+                        + ", ".join(stray))
+    for path, outside in _TRANSITIONAL_EDGES:
+        if bool(_opf_transitional_stray((), (), ((path,) + _ENTRY[1:],))) != outside:
+            failures.append("transitional-root edge " + repr(path) + ": expected "
+                            + ("outside" if outside else "not outside") + " " + OPF_TOOLS_ROOT)
+    parity = _opf_copy_parity(failures)
+    if isinstance(parity, str):
+        print("SKIP: dangerous-api OPF copy parity: " + parity)
     if failures:
         print("SELF-TEST FAIL:\n  " + "\n  ".join(failures))
         return 1
@@ -3670,12 +3916,19 @@ def self_test():
           " that pass without \\z as an end anchor, {} leading comment-group vectors that flip"
           " with only flag groups read as leading, {} scoped u vectors that pass with u not"
           " clearing ASCII, {} getattr(x, \"getattr\") and {} __builtins__ vectors that pass"
-          " without that reading.".format(
+          " without that reading; every OPF path named lies under the transitional root {}"
+          " ({} edge paths).".format(
               len(POSITIVE_VECTORS), len(generated), len(NEGATIVE_VECTORS), len(TREE_VECTORS),
               2 + len(_IMPORT_STDLIB), len(_SYSPATH_REIMPORTERS),
               len(_REGEX_END_Z), len(_REGEX_LEADING_COMMENT) + len(_REGEX_LEADING_ASCII),
               len(_REGEX_SCOPE_U), len(_GETATTR_BY_NAME),
-              len(_BUILTINS_DUNDER) + len(_BUILTINS_BOUND)))
+              len(_BUILTINS_DUNDER) + len(_BUILTINS_BOUND), OPF_TOOLS_ROOT,
+              len(_TRANSITIONAL_EDGES)))
+    if not isinstance(parity, str):
+        print("SELF-TEST PASS: dangerous-api OPF copy parity: the same verdict and findings as"
+              " opf/tools/check_dangerous_api.py on {} source vectors (each also with each of its"
+              " checks disabled) and {} OPF trees (each also with its check disabled), and the"
+              " copy's ALLOWLIST equal to this gate's {} opf/ rows re-rooted.".format(*parity))
     return 0
 
 

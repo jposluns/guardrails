@@ -75,6 +75,8 @@ run_gate "opf-init-operation-selftest" python3 -I -B "$here/_opf_init_operation.
 run_gate "opf-init-p0-selftest"        python3 -I -B "$here/check_opf_init_p0.py" --self-test --red-on-revert
 run_gate "commonmark-headings-selftest" python3 -I -B "$here/selftest_commonmark_headings.py"
 run_gate "commonmark-conformance"      python3 -I -B "$here/selftest_commonmark_conformance.py"
+run_gate "opf-dangerous-api-selftest"  python3 -I -B "$here/check_dangerous_api.py" --self-test
+run_gate "opf-dangerous-api"           python3 -I -B "$here/check_dangerous_api.py"
 
 if [ "$failed" -ne 0 ]; then
   echo "FAILED GATES: ${failed_names}"
