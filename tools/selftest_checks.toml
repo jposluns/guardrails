@@ -5167,6 +5167,13 @@ expected-check-ids = [
   "parity/shared-cases-covered",
   "parity/copy-gives-parent-verdict",
   "parity/pin-matches-parent-pin",
+  "parity/source-drift-detected",
+  "parity/own-rule-drift-detected",
+  "parity/copy-source-matches-parent",
+  "parity/copy-keeps-own-rules",
+  "parity/drift-version-re-detected",
+  "parity/drift-required-entries-detected",
+  "parity/drift-attribution-keys-detected",
 ]
 
 [[suite]]

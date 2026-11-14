@@ -160,6 +160,9 @@ run_gate "opf-release-history-selftest" python3 -I -B opf/tools/_opf_release_his
 run_gate "opf-walk-selftest" python3 -I -B opf/tools/_walk.py --self-test
 run_gate "opf-leaks" python3 -I -B opf/tools/check_leaks.py
 run_gate "opf-leaks-selftest" python3 -I -B opf/tools/check_leaks.py --self-test
+run_gate "opf-palette-selftest" python3 -I -B opf/tools/selftest_palette.py
+run_gate "opf-baseline-pin-selftest" python3 -I -B opf/tools/check_baseline_pin.py --self-test
+run_gate "opf-baseline-pin" python3 -I -B opf/tools/check_baseline_pin.py
 run_gate "opf-pack-manifest-selftest" python3 -I -B opf/tools/_opf_pack_manifest.py --self-test
 run_gate "opf-adopt-observe-selftest" python3 -I -B opf/tools/_opf_adopt_observe.py --self-test
 run_gate "opf-adopt-discover-selftest" python3 -I -B opf/tools/_opf_adopt_discover.py --self-test

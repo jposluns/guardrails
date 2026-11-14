@@ -462,13 +462,15 @@ path = ".baseline/check_palette.py"
 class = "pack-immutable"
 
 # The OPF copy of the same palette gate, vendored unchanged so the OPF tree checks its own site palette without
-# any parent file; run by opf/tools/run_all_checks.sh and pinned by its self-test, opf/tools/selftest_palette.py.
+# any parent file; run by opf/tools/run_all_checks.sh, and its bytes pinned by its self-test,
+# opf/tools/selftest_palette.py, and by opf/.baseline/pin.toml, both also run by this repository's CI.
 [[release-class]]
 path = "opf/.baseline/check_palette.py"
 class = "pack-immutable"
 
-# The OPF tree's own baseline pin: the same files as .baseline/opfiles-pin.toml, at OPF-root paths, plus the
-# OPF palette gate copy; read by opf/tools/check_baseline_pin.py.
+# The OPF tree's own baseline pin: the same entries as .baseline/opfiles-pin.toml at OPF-root paths, so its
+# palette gate entry (the same key, .baseline/check_palette.py, and the same digest) names the OPF tree's own
+# copy; read by opf/tools/check_baseline_pin.py.
 [[release-class]]
 path = "opf/.baseline/pin.toml"
 class = "pack-immutable"

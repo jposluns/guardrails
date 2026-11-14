@@ -19,19 +19,26 @@ with an explicit argv, a timeout and captured output; nothing is loaded into thi
     hold the same two files before and after it, the record must name both files, and every recorded path,
     resolved through symbolic links, must lie under that OPF root or in the interpreter's standard library,
     so a gate that reads any other file fails here; the same run given the live palettes.css, which lies
-    outside that tree, must record that file as its one outside read, so a hook that records nothing fails.
+    outside that tree, must record that file as its one outside read, so a hook that records nothing fails;
+  - the audited-run mode refusing, with exit 2 and before it runs, a script whose bytes are not the pinned
+    copy's;
+  - a copy of this suite, run from an OPF tree whose runner is a directory or is not UTF-8, ending with
+    exit 2 and a CANNOT EVALUATE line.
 
-The audited runs launch this file as a child in its AUDIT_ARG mode (not a user command), which arms the hook
-and runs the copy as __main__ in that child with runpy, then writes the recorded paths to a report file
-outside the tree. Every check id is a string literal and the set that ran is reconciled against EXPECTED at
-the end. Runs as:
+The audited runs launch this file as a child in its AUDIT_ARG mode, which arms the hook and runs the copy as
+__main__ in that child with runpy, then writes the recorded paths to a report file outside the tree. That
+mode can be started from a command line too, but it runs only a file whose bytes have the pinned SHA-256
+(COPY_SHA256) and refuses any other with exit 2, so it runs nothing a direct run of the pinned copy would
+not. Every check id is a string literal and the set that ran is reconciled against EXPECTED at the end.
+Runs as:
 
     python3 -I -B opf/tools/selftest_palette.py
 
-Exit 0 clean, 1 on a failed check, 2 when the suite cannot evaluate (the copy is not a readable file, or a
-child's exit status cannot be read here: the entry line runs the inline child-status guard first). A child
-that cannot be started or does not finish inside CHILD_TIMEOUT seconds counts as neither a pass nor a
-failure of the gate, so every check that ran it is red.
+Exit 0 clean, 1 on a failed check, 2 when the suite cannot evaluate (the copy is not a readable file, the
+copy or the OPF runner cannot be read, the runner is not UTF-8, the copy or palettes.css cannot be copied
+into the standalone tree, or a child's exit status cannot be read here: the entry line runs the inline
+child-status guard first). A child that cannot be started or does not finish inside CHILD_TIMEOUT seconds
+counts as neither a pass nor a failure of the gate, so every check that ran it is red.
 """
 import sys
 
@@ -98,6 +105,8 @@ EXPECTED = {
     "malformed/unknown-site",
     "standalone/reads-only-opf-tree",
     "standalone/outside-read-is-seen",
+    "audit/foreign-script-refused",
+    "cannot-evaluate/runner-unreadable",
 }
 
 _ran = []
@@ -147,6 +156,19 @@ def _cannot_check(outcome):
     return rc == 1 and "RESULT: fail (the input could not be checked)" in text
 
 
+class CannotEvaluate(Exception):
+    """An input this suite must read and cannot: the copy or the OPF runner unreadable or not UTF-8."""
+
+
+def _read_input(path, what, text=False):
+    """The bytes (or, with text, the UTF-8 text) of an input; CannotEvaluate when it cannot be read."""
+    try:
+        data = _read_bytes(path)
+        return data.decode("utf-8") if text else data
+    except (OSError, UnicodeDecodeError) as exc:
+        raise CannotEvaluate("%s cannot be read: %s: %s" % (what, type(exc).__name__, exc)) from None
+
+
 def run_checks(tmp):
     copy_path = os.path.join(OPF_ROOT, COPY_REL)
     palettes = os.path.join(OPF_ROOT, PALETTES_REL)
@@ -154,10 +176,10 @@ def run_checks(tmp):
     def run(argv):
         return _run(copy_path, argv, tmp)
 
-    digest = hashlib.sha256(_read_bytes(copy_path)).hexdigest()
+    digest = hashlib.sha256(_read_input(copy_path, "the palette gate copy")).hexdigest()
     check("copy/sha256-unchanged", digest == COPY_SHA256, digest)
 
-    runner = _read_bytes(os.path.join(OPF_ROOT, RUNNER_REL)).decode("utf-8").splitlines()
+    runner = _read_input(os.path.join(OPF_ROOT, RUNNER_REL), "the OPF runner " + RUNNER_REL, text=True).splitlines()
     check("runner/registers-selftest", runner.count(RUNNER_LINES[0]) == 1, RUNNER_LINES[0])
     check("runner/registers-live-scan", runner.count(RUNNER_LINES[1]) == 1, RUNNER_LINES[1])
 
@@ -217,9 +239,40 @@ def run_checks(tmp):
     outcome = run(["--site", "nosuchsite", "--palettes", palettes])
     check("malformed/unknown-site", _cannot_check(outcome) and "unknown site 'nosuchsite'" in outcome[1], outcome)
 
-    only_ok, seen_ok = _standalone(tmp, palettes, copy_path)
+    try:
+        only_ok, seen_ok = _standalone(tmp, palettes, copy_path)
+    except OSError as exc:
+        raise CannotEvaluate("the palette gate copy or %s cannot be copied into the standalone tree: %s: %s"
+                             % (PALETTES_REL, type(exc).__name__, exc)) from None
     check("standalone/reads-only-opf-tree", only_ok, "see the lines above")
     check("standalone/outside-read-is-seen", seen_ok, "see the lines above")
+
+    # The audited-run mode runs only a file holding the pinned copy's bytes: a script with any other bytes,
+    # given on the command line, is refused with exit 2 before it runs (its marker file is never written).
+    foreign = site("foreign.py", "open(%r, 'w').close()\n" % os.path.join(tmp, "foreign-ran"))
+    rc, text = _run(os.path.abspath(__file__), [AUDIT_ARG, os.path.join(tmp, "foreign-reads.json"), foreign],
+                    tmp)
+    check("audit/foreign-script-refused", rc == 2 and "is not the pinned palette gate copy" in text
+          and not os.path.lexists(os.path.join(tmp, "foreign-ran"))
+          and not os.path.lexists(os.path.join(tmp, "foreign-reads.json")), (rc, text[-300:]))
+
+    # An OPF runner this suite cannot read (a directory in its place, so the case holds under uid 0 too, or
+    # bytes that are not UTF-8) ends a copy of this suite run from its own OPF tree with exit 2 and a
+    # CANNOT EVALUATE line, never a traceback or a pass.
+    outcomes = []
+    for name, make in (("runner-directory", lambda path: os.makedirs(path)),
+                       ("runner-not-utf8", lambda path: _write(path, b"run_gate \xff\n"))):
+        root = os.path.join(tmp, name, "opf")
+        os.makedirs(os.path.join(root, "tools"))
+        os.makedirs(os.path.join(root, ".baseline"))
+        shutil.copyfile(os.path.abspath(__file__), os.path.join(root, "tools", "selftest_palette.py"))
+        shutil.copyfile(copy_path, os.path.join(root, COPY_REL))
+        make(os.path.join(root, RUNNER_REL))
+        rc, text = _run(os.path.join(root, "tools", "selftest_palette.py"), [], root)
+        outcomes.append((name, rc, text[-300:]))
+    check("cannot-evaluate/runner-unreadable", all(
+        rc == 2 and "CANNOT EVALUATE: the OPF runner " + RUNNER_REL + " cannot be read" in text
+        and "Traceback" not in text for _name, rc, text in outcomes), outcomes)
 
 
 def _tree(top):
@@ -304,10 +357,23 @@ def _audited_run(report, copy_path, argv):
     """This file's AUDIT_ARG mode: run the gate copy at copy_path as __main__ in this process, with argv as
     its arguments, under an audit hook that records each path a READ_EVENTS event names (made absolute
     against the working directory), then write those paths to report as a JSON list and return the copy's
-    exit status. The report is opened before the hook records anything and written after it stops, so it is
-    never among the recorded paths; the copy's own file is, since runpy opens it by path. An exception the
-    copy does not catch still writes the report, then ends this process with status 1 and a traceback."""
+    exit status. Only a file whose bytes have the pinned SHA-256 (COPY_SHA256) is run: any other file, or
+    one that cannot be read, is refused with exit 2 before anything runs and no report is written. The
+    digest is taken on one read and runpy reads the file again by path, so a file replaced between the two
+    reads runs as replaced; the suite's own runs use a copy inside its private temporary directory. The
+    report is opened before the hook records anything and written after it stops, so it is never among the
+    recorded paths; the copy's own file is, since runpy opens it by path. An exception the copy does not
+    catch still writes the report, then ends this process with status 1 and a traceback."""
     import runpy
+    try:
+        digest = hashlib.sha256(_read_bytes(copy_path)).hexdigest()
+    except OSError as exc:
+        print("CANNOT EVALUATE: %s cannot be read: %s" % (copy_path, exc), file=sys.stderr)
+        return 2
+    if digest != COPY_SHA256:
+        print("CANNOT EVALUATE: %s is not the pinned palette gate copy (SHA-256 %s, pinned %s); %s runs only "
+              "that copy" % (copy_path, digest, COPY_SHA256, AUDIT_ARG), file=sys.stderr)
+        return 2
     seen = []
     armed = []
 
@@ -351,6 +417,9 @@ def main():
     tmp = tempfile.mkdtemp(prefix="opf-palette-selftest-")
     try:
         run_checks(tmp)
+    except CannotEvaluate as exc:
+        print("CANNOT EVALUATE: %s" % exc)
+        return 2
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     ran = set(_ran)

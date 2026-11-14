@@ -789,8 +789,13 @@ def main():
 #      the malformed, non-UTF-8 and unreadable denylist cases of the copy's self-test, the decodes,
 #      the archive cases with the member-count bound at and just past it, the skipped directories and
 #      the symlink rules), which together give exits 0, 1 and 2; 8b. opf/tools/leak-hashes.txt is
-#      byte-equal to tools/leak-hashes.txt. The case is skipped, its reason printed, only when both OPF
-#      files are absent; one without the other is a failure.
+#      byte-equal to tools/leak-hashes.txt; 8c. every top-level statement of the copy (each definition,
+#      constant, import and guard) is AST-equal to this gate's of the same name, outside a declared list
+#      (the module docstring, main and self_test_main differ, and live_root is the copy's own); 8d. a
+#      copy patched with each drift the parity trees do not reach (the account-id rule narrowed, the
+#      GitHub token prefix narrowed, the archive total-size bound raised) is an 8c difference naming the
+#      statement it changed. The case is skipped, its reason printed, only when both OPF files are
+#      absent; one without the other is a failure.
 # Cases 1 through 6 each fail on the original scan. Against the first revision this replaces,
 # 2b, 3b, 3c and 6c are new findings or named skips, 6 and 7 run where that revision skipped, and 4b,
 # 4c, 5b, 6b and 6d pin behaviours a mutant could drop (the denylist walk, the suffixless decode, the
@@ -1721,12 +1726,14 @@ def self_test_main():
             failures.append("an unreadable file expected exit 2, fail-closed (got {}: {!r})".format(rc, out))
 
         # 8. the OPF copy's parity, while opf/tools/check_leaks.py and opf/tools/leak-hashes.txt exist:
-        #    (a) the copy's run() gives this gate's exit and output on every parity fixture tree, and (b)
-        #    its denylist is byte-equal to this gate's. Skipped, its reason printed, only when both files
-        #    are absent; one without the other is a failure. The copy is loaded by a plain import of its
-        #    literal name with the repository's opf/tools directory first on sys.path, after this
-        #    process's check_leaks and _walk modules are set aside so the import reads the copy and its
-        #    own sibling walk; sys.path and those modules are restored after it.
+        #    (a) the copy's run() gives this gate's exit and output on every parity fixture tree, (b) its
+        #    denylist is byte-equal to this gate's, (c) its top-level statements are AST-equal to this
+        #    gate's outside the declared differences, and (d) each drift the trees do not reach is a (c)
+        #    difference. Skipped, its reason printed, only when both files are absent; one without the
+        #    other is a failure. The copy is loaded by a plain import of its literal name with the
+        #    repository's opf/tools directory first on sys.path, after this process's check_leaks and
+        #    _walk modules are set aside so the import reads the copy and its own sibling walk; sys.path
+        #    and those modules are restored after it.
         here = Path(__file__).resolve()
         opf_tools = here.parents[1] / "opf" / "tools"
         opf_names = ("check_leaks.py", "leak-hashes.txt")
@@ -1745,6 +1752,79 @@ def self_test_main():
                     failures.append("8b: opf/tools/leak-hashes.txt is not byte-equal to tools/leak-hashes.txt")
             except OSError as exc:
                 failures.append("8b: the two denylists cannot both be read to compare them: {}".format(exc))
+            # 8c. the copy's source: every top-level statement of the copy (each definition, constant,
+            #     import and guard) is AST-equal to this gate's statement of the same name, so a rule the
+            #     parity trees never reach (a narrowed pattern, a raised bound) is still a difference. The
+            #     names that differ on purpose are declared here: the module docstring, main (the copy
+            #     scans live_root()) and self_test_main differ, and live_root exists only in the copy.
+            #     Any other name in one source and not the other is a difference too.
+            import ast
+
+            source_differs = ("<module docstring>", "main", "self_test_main")
+            source_copy_only = ("live_root",)
+
+            def source_keys(text):
+                """{key: [ast.dump of each top-level statement with that key]}: a def or class by its
+                name, an assignment by its target names, the module docstring by its own key, and any
+                other statement (an import, a guard) by its own dump."""
+                keys = {}
+                for index, node in enumerate(ast.parse(text).body):
+                    if (index == 0 and isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant)
+                            and isinstance(node.value.value, str)):
+                        names = [source_differs[0]]
+                    elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                        names = [node.name]
+                    elif isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+                        targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                        names = sorted({part.id for target in targets for part in ast.walk(target)
+                                        if isinstance(part, ast.Name)}) or [ast.dump(node)]
+                    else:
+                        names = [ast.dump(node)]
+                    for name in names:
+                        keys.setdefault(name, []).append(ast.dump(node))
+                return keys
+
+            def source_drift(parent_text, copy_text):
+                """The keys whose top-level statements differ between the two sources, outside the
+                declared differences; a source that does not parse is a difference named as such."""
+                try:
+                    parent_keys, copy_keys = source_keys(parent_text), source_keys(copy_text)
+                except (SyntaxError, ValueError, RecursionError, MemoryError) as exc:
+                    return ["a source does not parse ({})".format(type(exc).__name__)]
+                drift = []
+                for name in sorted(set(parent_keys) | set(copy_keys)):
+                    if name in source_differs or (name in source_copy_only and name not in parent_keys):
+                        continue
+                    if parent_keys.get(name) != copy_keys.get(name):
+                        drift.append(name[:120])
+                return drift
+
+            parent_source = copy_source = None
+            try:
+                parent_source = here.read_bytes().decode("utf-8")
+                copy_source = (opf_tools / "check_leaks.py").read_bytes().decode("utf-8")
+            except (OSError, UnicodeDecodeError) as exc:
+                failures.append("8c: the two gate sources cannot both be read to compare them: {}".format(exc))
+            if copy_source is not None:
+                drift = source_drift(parent_source, copy_source)
+                if drift:
+                    failures.append("8c: the OPF copy's source differs from this gate's outside the declared "
+                                    "differences {} and {}: {}".format(source_differs, source_copy_only, drift))
+                # 8d. each drift the parity trees do not reach, fed in as a patched copy, is a difference
+                #     naming exactly the statement it changed.
+                for label, old, new, want in (
+                        ("the account-id rule narrowed", "(?:claude|codex)", "(?:codex)", ["STRUCTURAL"]),
+                        ("the GitHub token prefix narrowed", "gh[pousr]_", "gh[ps]_", ["STRUCTURAL"]),
+                        ("the archive total-size bound raised", "MAX_ARCHIVE_TOTAL_SIZE = 16 * 1024 * 1024",
+                         "MAX_ARCHIVE_TOTAL_SIZE = 32 * 1024 * 1024", ["MAX_ARCHIVE_TOTAL_SIZE"])):
+                    if copy_source.count(old) != 1:
+                        failures.append("8d: the drift vector ({}) does not apply: {!r} is not in the copy "
+                                        "exactly once".format(label, old))
+                        continue
+                    got = source_drift(parent_source, copy_source.replace(old, new))
+                    if got != want:
+                        failures.append("8d: a copy with {} gave the source difference {!r}, expected "
+                                        "{!r}".format(label, got, want))
             # 8a. load the copy, then compare the two scanners on every parity fixture tree.
             opf_gate = opf_walk = None
             saved_path = list(sys.path)
@@ -1915,8 +1995,10 @@ def self_test_main():
           "the reason and member the scan names; and a dangling symlink, "
           "an injected unreadable file, and a BOM-declared stream that decodes as neither declared "
           "candidate each fail closed (exit 2, naming the file); and, while the OPF copy exists, it gives "
-          "this gate's exit and output on every parity fixture tree and its denylist is byte-equal to this "
-          "gate's")
+          "this gate's exit and output on every parity fixture tree, its denylist is byte-equal to this "
+          "gate's, its top-level statements are AST-equal to this gate's outside the declared differences, "
+          "and a narrowed account-id rule or GitHub token prefix or a raised archive bound in it is a "
+          "difference")
     return 0
 
 

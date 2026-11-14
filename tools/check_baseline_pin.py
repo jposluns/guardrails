@@ -42,20 +42,28 @@ to this gate: it loads the copy in process (never launching it), runs both gates
 case the two self-tests share (each tree also meets the copy's own required licence, notice, tool and
 attribution rules) and requires the copy's exit code to equal this gate's on every case; and it requires
 opf/.baseline/pin.toml to equal .baseline/opfiles-pin.toml with the opf/ prefix removed from each path (the
-same version and copy-root digests, and the palette-tool entry compared by digest). A copy that is present
-but cannot be loaded fails the self-test; only an absent copy skips the parity checks, with a printed
-reason, and the execution gate then reports their ids as not run.
+same version and copy-root digests, and the palette-tool entry compared by digest). Since an exit code on a
+shared case cannot see a rule no case reaches, it also compares the two sources: every top-level statement
+the copy shares with this gate must be AST-equal, outside the names declared in OPF_SOURCE_DIFFERS,
+OPF_SOURCE_COPY_ONLY and OPF_SOURCE_PARENT_ONLY. And it holds the copy's own rules, which this gate does
+not have: the copy's required tools, required licence and notice files and attribution keys must equal
+OPF_REQUIRED_TOOLS, OPF_REQUIRED_NOTICES and OPF_ATTRIBUTION_TEXT_KEYS, and the copy must refuse each one
+left out of a fixture tree. A copy patched with each drift no shared case reaches (VERSION_RE loosened, the
+_required_entries call removed, ATTRIBUTION_TEXT_KEYS emptied) must fail these checks. A copy that is
+present but cannot be loaded fails the self-test; only an absent copy skips the parity checks that need it,
+with a printed reason, and the execution gate then reports their ids as not run.
 
 The OPF pair is transitional. PINS[1] with .baseline/opfiles-pin.toml, and the parity checks above, exist
 only while the OPF tree lives in this repository. Once the OPF tree's own gate is accepted and the OPF tree
 moves to its own repository, they are removed together in one change: the PINS[1] entry, the file
-.baseline/opfiles-pin.toml, the parity section (OPF_COPY_REL through _parity_self_test) and its call in
-_self_test, the parity/ check ids under baseline-pin-selftest in tools/selftest_checks.toml, the rows
-recorded for the parity load (this file's DYNAMIC_LOADS_REVIEWED row in tools/check_child_status_coverage.py,
-its _load_opf_copy row in tools/check_dangerous_api.py and its _parity_codes row in
-tools/tomllib_parse_sites.toml), and that registry's row for the OPF copy's own _self_test. The gate's check
-of PINS[0] (.baseline/pin.toml over site/draft/assets/baseline), its build-tool check and its attribution
-and homepage checks stay. Nothing here is removed before that move.
+.baseline/opfiles-pin.toml, the parity section (OPF_COPY_REL through _parity_self_test), its ast,
+importlib.util and types imports and its call in _self_test, the parity/ check ids under
+baseline-pin-selftest in tools/selftest_checks.toml, the rows recorded for the parity load (this file's
+DYNAMIC_LOADS_REVIEWED row in tools/check_child_status_coverage.py, its _load_opf_copy row in
+tools/check_dangerous_api.py and its _parity_codes row in tools/tomllib_parse_sites.toml), and that
+registry's row for the OPF copy's own _self_test. The gate's check of PINS[0] (.baseline/pin.toml over
+site/draft/assets/baseline), its build-tool check and its attribution and homepage checks stay. Nothing
+here is removed before that move.
 """
 import sys
 
@@ -71,6 +79,7 @@ if tuple(sys.version_info[:2]) < (3, 14):
         pass
     os._exit(2)
 
+import ast
 import contextlib
 import hashlib
 import importlib.util
@@ -526,10 +535,10 @@ def _scan_case(files=None, pin=None, mutate=None, pins=FIXTURE_PINS, second=None
 OPF_COPY_REL = "opf/tools/check_baseline_pin.py"
 OPF_PIN_REL = "opf/.baseline/pin.toml"
 OPF_PREFIX = "opf/"
-# The names the parity check reads from the copy: its gate entry, the paths and keys its fixtures must meet,
-# its self-test's check ids, and the 3 readers a case may make fail (patched in both gates alike).
-OPF_COPY_NAMES = ("run_gate", "ATTRIBUTION_REL", "REQUIRED_NOTICES", "ATTRIBUTION_TEXT_KEYS", "EXPECTED",
-                  "_read_pin_bytes", "_read_attribution_bytes", "_sha256")
+# The names the parity check reads from the copy: its gate entry, the paths, tools and keys its fixtures must
+# meet, its self-test's check ids, and the 3 readers a case may make fail (patched in both gates alike).
+OPF_COPY_NAMES = ("run_gate", "ATTRIBUTION_REL", "REQUIRED_TOOLS", "REQUIRED_NOTICES", "ATTRIBUTION_TEXT_KEYS",
+                  "EXPECTED", "_read_pin_bytes", "_read_attribution_bytes", "_sha256")
 PARITY_READERS = ("_read_pin_bytes", "_read_attribution_bytes", "_sha256")
 # The shared check ids with no parity case, each with the reason: a registry or tool constant each gate pins
 # for its own tree, and each gate's own live tree (the pin comparison covers the OPF copy's). Every other
@@ -542,6 +551,61 @@ PARITY_EXCLUDED = {
     "live/real-tree-passes": "each gate's own live tree; the pin comparison holds the copy's pin",
 }
 PARITY_ROOT_LINK = "elsewhere"
+# The source comparison: every top-level statement the copy shares with this gate (a definition or class by
+# its name, an assignment by its targets, an import or guard by its own text) must be AST-equal, so a rule
+# no fixture case reaches (a loosened pattern, a moved bound) is still a difference. These names differ on
+# purpose, each with the reason; a name only the copy defines must be in OPF_SOURCE_COPY_ONLY, and a name
+# only this gate defines must be in OPF_SOURCE_PARENT_ONLY or this parity section (OPF_COPY_REL through
+# _parity_self_test).
+OPF_SOURCE_DIFFERS = {
+    "<module docstring>": "each gate describes its own tree",
+    "ATTRIBUTION_REL": "the OPF tree's attribution file sits at its own root",
+    "PINS": "the OPF tree registers its one pin at OPF-root paths",
+    "SECOND_PIN": "a fixture path of each self-test",
+    "SECOND_ROOT": "a fixture path of each self-test",
+    "FIXTURE_FILES": "the copy's fixture also holds its required licence and notice files",
+    "_pin_text": "a fixture writer of each self-test",
+    "_attribution_text": "the copy's fixture also writes its required attribution keys",
+    "_fixture": "a fixture writer of each self-test",
+    "parse_attribution": "the copy also requires each ATTRIBUTION_TEXT_KEYS key (held by the own-rule cases)",
+    "_scan_pin": "the copy also calls _required_entries (held by the own-rule cases)",
+    "run_gate": "the copy's pass line names its extra rules",
+    "_self_test": "each gate's own self-test",
+    "main": "each gate's own entry",
+    "<main guard>": "this gate hands its exit status to the self-test execution reporter when one is loaded",
+}
+OPF_SOURCE_COPY_ONLY = {
+    "REQUIRED_TOOLS": "an own rule, held by the own-rule cases",
+    "REQUIRED_NOTICES": "an own rule, held by the own-rule cases",
+    "ATTRIBUTION_TEXT_KEYS": "an own rule, held by the own-rule cases",
+    "_required_entries": "an own rule, held by the own-rule cases",
+    "EXPECTED": "the copy's self-test reconciles its check ids itself",
+    "RUNNER_REL": "the copy's self-test reads the OPF runner",
+    "RUNNER_LINES": "the copy's self-test reads the OPF runner",
+    "import shutil": "the copy's self-test copies an OPF-only tree",
+}
+OPF_SOURCE_PARENT_ONLY = {
+    "SUITE_ID": "this gate's self-test reads its check ids from the execution registry",
+    "import ast": "the source comparison",
+    "import importlib.util": "the parity loader",
+    "import types": "the parity stand-in copy",
+}
+# The copy's own rules beyond this gate's, as the copy must keep them: each build tool and each licence or
+# notice file a pin does not list is a finding (exit 1), and each attribution key missing or empty is
+# cannot-evaluate (exit 2). The copy's constants must equal these, and each entry is run as an own-rule case
+# against the copy alone, so dropping a rule or emptying its list is a difference.
+OPF_REQUIRED_TOOLS = (".baseline/check_palette.py",)
+OPF_REQUIRED_NOTICES = ("LICENSE", "NOTICE.md", "fonts/dancing-script-LICENSE.txt",
+                        "fonts/jetbrains-mono-LICENSE.txt", "fonts/newsreader-LICENSE.txt",
+                        "fonts/public-sans-LICENSE.txt", "marks/NOTICE.md")
+OPF_ATTRIBUTION_TEXT_KEYS = ("name", "component", "licence", "licence-url", "copyright", "note")
+# The drift vectors, each (old text, new text) patched into the copy's source: changes no shared fixture case
+# reaches, each of which the parity checks must still fail (a version pattern accepting leading zeros, the
+# own-rule call dropped, the attribution keys emptied).
+DRIFT_VERSION_RE = ('VERSION_RE = re.compile(r"(0|[1-9][0-9]*)', 'VERSION_RE = re.compile(r"([0-9]+)')
+DRIFT_REQUIRED_ENTRIES = ("    _required_entries(pin_rel, roots, tools, findings)\n", "")
+DRIFT_ATTRIBUTION_KEYS = ('ATTRIBUTION_TEXT_KEYS = ("name", "component", "licence", "licence-url", "copyright", '
+                          '"note")', "ATTRIBUTION_TEXT_KEYS = ()")
 
 
 def _load_opf_copy(root):
@@ -900,12 +964,131 @@ def _parity_pin_case(parent_pin, opf_pin):
         return _opf_pin_problems(tmp)
 
 
+def _source_keys(text):
+    """({key: [ast.dump of each top-level statement with that key]}, the keys of this gate's parity section)
+    for a gate source: a def or class keyed by its name, an assignment by its target names, the module
+    docstring by "<module docstring>", the if __name__ == "__main__" block by "<main guard>" and any other
+    statement (an import, the version guard) by its own text. The parity section runs from the statement
+    assigning OPF_COPY_REL through def _parity_self_test."""
+    keys, section, inside = {}, set(), False
+    for index, node in enumerate(ast.parse(text).body):
+        if (index == 0 and isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant)
+                and isinstance(node.value.value, str)):
+            names = ["<module docstring>"]
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            names = [node.name]
+        elif isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            names = sorted({part.id for target in targets for part in ast.walk(target)
+                            if isinstance(part, ast.Name)}) or [ast.unparse(node)]
+        elif isinstance(node, ast.If) and ast.unparse(node.test) == "__name__ == '__main__'":
+            names = ["<main guard>"]
+        else:
+            names = [ast.unparse(node)]
+        inside = inside or "OPF_COPY_REL" in names
+        for name in names:
+            keys.setdefault(name, []).append(ast.dump(node))
+            if inside:
+                section.add(name)
+        if names == ["_parity_self_test"]:
+            inside = False
+    return keys, section
+
+
+def _source_drift(parent_text, copy_text):
+    """The keys whose top-level statements differ between this gate's source and the copy's: outside
+    OPF_SOURCE_DIFFERS, a key only the copy has unless OPF_SOURCE_COPY_ONLY lists it, a key only this gate
+    has unless OPF_SOURCE_PARENT_ONLY lists it or it is in the parity section, and a shared key whose
+    statements are not AST-equal. A source that does not parse is 1 difference."""
+    try:
+        (parent, section), (copy, _section) = _source_keys(parent_text), _source_keys(copy_text)
+    except (SyntaxError, ValueError, RecursionError, MemoryError) as exc:
+        return ["a source does not parse ({})".format(type(exc).__name__)]
+    drift = []
+    for name in sorted(set(parent) | set(copy)):
+        if name in OPF_SOURCE_DIFFERS or (name not in parent and name in OPF_SOURCE_COPY_ONLY):
+            continue
+        if name not in copy and (name in OPF_SOURCE_PARENT_ONLY or name in section):
+            continue
+        if parent.get(name) != copy.get(name):
+            drift.append(name.splitlines()[0][:120])
+    return drift
+
+
+def _read_source(path):
+    """The UTF-8 text of the source at path."""
+    with open(path, "rb") as handle:
+        return handle.read().decode("utf-8")
+
+
+def _own_attribution(copy, drop=None, empty=None):
+    """A fixture attribution text with each key the copy's ATTRIBUTION_TEXT_KEYS or OPF_ATTRIBUTION_TEXT_KEYS
+    names set to a non-empty string in the named block, except drop (left out) and empty (an empty string)."""
+    text = _attribution_text()
+    if drop == "name":
+        text = text.replace('name = "Shared site template (baseline package)"\n', "", 1)
+    present = ("name", "version", "homepage", "verified")
+    keys = dict.fromkeys(tuple(copy.ATTRIBUTION_TEXT_KEYS) + OPF_ATTRIBUTION_TEXT_KEYS)
+    return text + "".join('"{}" = "{}"\n'.format(key, "" if key == empty else "parity " + key)
+                          for key in keys if key not in present and key != drop)
+
+
+def _own_rule_cases(copy):
+    """[(label, case, the exit code the copy's own rule gives)]: each OPF_REQUIRED_TOOLS path absent and
+    unlisted, each OPF_REQUIRED_NOTICES file absent and unlisted (each a finding, exit 1; this gate passes
+    both), each OPF_ATTRIBUTION_TEXT_KEYS key missing and the licence key empty (each cannot-evaluate)."""
+    files = _parity_files(copy)
+    cases = []
+    for rel in OPF_REQUIRED_TOOLS:
+        tools = {path: data for path, data in FIXTURE_TOOLS.items() if path != rel}
+        cases.append(("tool-unlisted " + rel, {"tools": tools, "pin": _pin_text(files, tools=tools)}, 1))
+    for rel in OPF_REQUIRED_NOTICES:
+        kept = {path: data for path, data in files.items() if path != rel}
+        cases.append(("notice-unlisted " + rel, {"files": kept, "pin": _pin_text(kept, tools=FIXTURE_TOOLS)}, 1))
+    for key in OPF_ATTRIBUTION_TEXT_KEYS:
+        cases.append(("attribution-key-missing " + key, {"attribution": _own_attribution(copy, drop=key)}, 2))
+    cases.append(("attribution-key-empty licence", {"attribution": _own_attribution(copy, empty="licence")}, 2))
+    return cases
+
+
+def _own_rule_problems(copy):
+    """Lines naming each of the copy's own-rule constants that differs from its declaration here, and each
+    own-rule case on which the copy does not give its own rule's exit code."""
+    problems = []
+    for name, want in (("REQUIRED_TOOLS", OPF_REQUIRED_TOOLS), ("REQUIRED_NOTICES", OPF_REQUIRED_NOTICES),
+                       ("ATTRIBUTION_TEXT_KEYS", OPF_ATTRIBUTION_TEXT_KEYS)):
+        got = getattr(copy, name, None)
+        if type(got) is not tuple or got != want:
+            problems.append("{}: {!r} in the copy, {!r} declared here".format(name, got, want))
+    for label, case, want in _own_rule_cases(copy):
+        got = _parity_codes(copy, case)[1]
+        if got != want:
+            problems.append("{}: the copy gives exit {}, its own rule gives {}".format(label, got, want))
+    return problems
+
+
+def _patched_copy(source, old, new):
+    """(the patched source, module, reason): the copy source with old replaced by new, loaded by
+    _load_opf_copy from a temporary tree. old must occur exactly once, or no module is loaded."""
+    if source.count(old) != 1:
+        return None, None, "{!r} is not in the copy exactly once".format(old)
+    patched = source.replace(old, new)
+    with tempfile.TemporaryDirectory(prefix="baseline-pin-drift-") as tmp:
+        target = Path(tmp) / OPF_COPY_REL
+        os.makedirs(target.parent)
+        with open(target, "w", encoding="utf-8") as handle:
+            handle.write(patched)
+        module, reason = _load_opf_copy(tmp)
+    return patched, module, reason
+
+
 def _parity_self_test(shared_ids):
     """The parity checks: each comparison's own refusal over fixtures (always run), then, while the OPF copy
     exists, the copy against this gate on the shared cases and the OPF pin against this repository's."""
     # A stand-in copy that passes every tree: the verdict comparison must name its divergence.
     stand_in = types.SimpleNamespace(run_gate=lambda root, pins: 0, ATTRIBUTION_REL="attribution.toml",
-                                     REQUIRED_NOTICES=(), ATTRIBUTION_TEXT_KEYS=(), EXPECTED=frozenset(),
+                                     REQUIRED_TOOLS=(), REQUIRED_NOTICES=(), ATTRIBUTION_TEXT_KEYS=(),
+                                     EXPECTED=frozenset(),
                                      _read_pin_bytes=_read_pin_bytes,
                                      _read_attribution_bytes=_read_attribution_bytes, _sha256=_sha256)
     mismatches, _seen = _parity_mismatches(stand_in, _parity_cases(stand_in))
@@ -938,6 +1121,22 @@ def _parity_self_test(shared_ids):
     problems = _parity_pin_case(parent_pin, opf_pin.replace(FIXTURE_VERSION, "1.2.2", 1))
     check("parity/pin-version-divergence-detected", len(problems) == 1 and "names version 1.2.2" in problems[0],
           problems)
+
+    # The source comparison names a drift: this gate's own source against itself is no difference, with its
+    # VERSION_RE loosened to accept leading zeros it is exactly that statement, and a source that does not
+    # parse is a difference. The stand-in copy, which keeps no own rule, fails every own-rule case and
+    # every own-rule constant.
+    own_source = _read_source(__file__)
+    loose = own_source.replace(DRIFT_VERSION_RE[0], DRIFT_VERSION_RE[1], 1)
+    drift = (_source_drift(own_source, own_source), _source_drift(own_source, loose),
+             _source_drift(own_source, "def broken(:\n"))
+    check("parity/source-drift-detected", drift == ([], ["VERSION_RE"], ["a source does not parse (SyntaxError)"]),
+          drift)
+    problems = _own_rule_problems(stand_in)
+    labels = [label for label, _case, _want in _own_rule_cases(stand_in)]
+    check("parity/own-rule-drift-detected", len(problems) == 3 + len(labels) and len(labels) == (
+        len(OPF_REQUIRED_TOOLS) + len(OPF_REQUIRED_NOTICES) + len(OPF_ATTRIBUTION_TEXT_KEYS) + 1) and all(
+            any(line.startswith(label + ": ") for line in problems) for label in labels), problems)
 
     # Absent skips; present but not loadable (a directory, a file that does not import, a file without the
     # names the check reads) fails.
@@ -972,6 +1171,43 @@ def _parity_self_test(shared_ids):
     check("parity/copy-gives-parent-verdict", mismatches == [] and seen == {0, 1, 2}, (mismatches, seen))
     problems = _opf_pin_problems(ROOT)
     check("parity/pin-matches-parent-pin", problems == [], problems)
+
+    # The copy's source against this gate's (the source of the file just loaded, so the comparison and the
+    # verdict cases hold the same bytes), and the copy's own rules against their declarations here.
+    try:
+        own_source, copy_source = _read_source(__file__), _read_source(copy.__file__)
+    except (OSError, UnicodeDecodeError) as exc:
+        own_source = copy_source = None
+        drift = ["the two gate sources cannot both be read ({}: {})".format(type(exc).__name__, exc)]
+    else:
+        drift = _source_drift(own_source, copy_source)
+    check("parity/copy-source-matches-parent", drift == [], drift)
+    problems = _own_rule_problems(copy)
+    check("parity/copy-keeps-own-rules", problems == [], problems)
+
+    # Each drift no shared fixture case reaches, fed in as a patched copy, fails the parity checks: a
+    # loosened VERSION_RE is a source difference naming it; the _required_entries call removed fails every
+    # tool and notice own-rule case; ATTRIBUTION_TEXT_KEYS emptied fails its constant and every key case.
+    results = {}
+    for name, (old, new) in (("version", DRIFT_VERSION_RE), ("entries", DRIFT_REQUIRED_ENTRIES),
+                             ("keys", DRIFT_ATTRIBUTION_KEYS)):
+        results[name] = (None, None, "the copy's source cannot be read") if copy_source is None else (
+            _patched_copy(copy_source, old, new))
+    patched, module, reason = results["version"]
+    got = None if patched is None else _source_drift(own_source, patched)
+    check("parity/drift-version-re-detected", module is not None and got == ["VERSION_RE"], (got, reason))
+    patched, module, reason = results["entries"]
+    got = None if module is None else _own_rule_problems(module)
+    want = ["tool-unlisted " + rel for rel in OPF_REQUIRED_TOOLS] + [
+        "notice-unlisted " + rel for rel in OPF_REQUIRED_NOTICES]
+    check("parity/drift-required-entries-detected", got is not None and sorted(
+        line.split(": ", 1)[0] for line in got) == sorted(want), (got, reason))
+    patched, module, reason = results["keys"]
+    got = None if module is None else _own_rule_problems(module)
+    want = ["ATTRIBUTION_TEXT_KEYS", "attribution-key-empty licence"] + [
+        "attribution-key-missing " + key for key in OPF_ATTRIBUTION_TEXT_KEYS]
+    check("parity/drift-attribution-keys-detected", got is not None and sorted(
+        line.split(": ", 1)[0] for line in got) == sorted(want), (got, reason))
 
 
 def _self_test():
@@ -1362,8 +1598,10 @@ def _self_test():
           "version's archive name passes, and one naming another version, another file name or a prefixed "
           "name, missing or not a string is cannot-evaluate; the exit codes are 0, 1 and 2; the "
           "live tree passes; each parity comparison names a divergence, and while the OPF copy exists it "
-          "loads, gives this gate's exit code on every shared case and its pin equals the OPF pin with "
-          "the opf/ prefix removed)".format(len(EXECUTED)))
+          "loads, gives this gate's exit code on every shared case, its pin equals the OPF pin with "
+          "the opf/ prefix removed, its source is AST-equal to this gate's outside the declared names, it "
+          "keeps its own rules, and a loosened VERSION_RE, a removed _required_entries call or emptied "
+          "ATTRIBUTION_TEXT_KEYS in it fails these checks)".format(len(EXECUTED)))
     return 0
 
 

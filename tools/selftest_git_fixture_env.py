@@ -4584,7 +4584,12 @@ OPF_LIFECYCLE_EXEMPTIONS = {
     "opf/tools/selftest_commonmark_conformance.py": "CommonMark parser conformance vectors.",
     "opf/tools/selftest_commonmark_headings.py": "Heading selection and vendor-manifest fixtures.",
     "opf/tools/selftest_palette.py": ("Palette-gate vectors that run the vendored opf/.baseline/check_palette.py "
-                                      "as a python3 -I -B child over temporary sheets and copy trees; no git."),
+                                      "as a python3 -I -B child over temporary sheets and copy trees; two "
+                                      "relaunches of itself in its --audited-run mode, which run that copy "
+                                      "in process under an audit hook, and one that refuses a foreign "
+                                      "script; copies of itself run over temporary OPF trees with an "
+                                      "unreadable runner; and the entry line's child-status probe, a "
+                                      "forked child that exits at once; no git."),
 }
 
 

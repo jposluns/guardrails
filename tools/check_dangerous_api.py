@@ -730,10 +730,13 @@ ALLOWLIST = (
      " of an import), or of a fixture file the self-test writes under its temporary directory; no"
      " external input"),
     ("opf/tools/selftest_palette.py", "_audited_run", "code", 1,
-     "self-test read audit: runpy.run_path, in a child this self-test launches, of the palette gate"
-     " copy it has just copied from the repository's own opf/.baseline/check_palette.py (whose bytes"
-     " it pins) into its temporary directory, under an audit hook that records the paths the run"
-     " reads; the same trust as running that copy directly with python3; no external input"),
+     "self-test read audit: runpy.run_path, under an audit hook that records the paths the run"
+     " reads, of a file named on this mode's command line (by the self-test, its own copy of"
+     " opf/.baseline/check_palette.py in its temporary directory) only when that file's bytes have"
+     " the pinned SHA-256 COPY_SHA256 of the palette gate copy; any other file is refused with exit 2"
+     " before it runs, so the mode runs nothing but the pinned copy (a file replaced between the"
+     " digest read and the run is the caller's own race); the same trust as running that copy"
+     " directly with python3"),
     ("tools/gen_crosswalk.py", "_fdopen_vectors.flipped", "code", 1,
      _MUTANT + " (each fdopen close revert, loaded by exec_module from a scratch file)"),
     ("tools/selftest_aiqt_hooks.py", "_ie_mutant_handlers", "code", 1,

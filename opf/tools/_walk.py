@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Shared fail-closed tree walk for the OPF tooling (OPF-SELF-CONTAIN).
+"""Shared fail-closed tree walk for the OPF tooling.
 
 The OPF tree's own copy of the parent repository's tools/_walk.py, so an OPF tool can walk a tree
 without importing from the parent tools/ directory once opf/ is its own repository. walk_files is the

@@ -619,6 +619,17 @@ jobs:
         shell: bash
         run: python3 -I -B opf/tools/check_leaks.py
 
+      - name: OPF palette gate copy self-test (its pinned bytes, its OPF runner lines and its live scan)
+        shell: bash
+        run: python3 -I -B opf/tools/selftest_palette.py
+
+      - name: OPF baseline pin self-test (the OPF copy of the baseline pin gate)
+        shell: bash
+        run: python3 -I -B opf/tools/check_baseline_pin.py --self-test
+      - name: OPF baseline pin (the OPF root, with its own pin and attribution record)
+        shell: bash
+        run: python3 -I -B opf/tools/check_baseline_pin.py
+
       - name: OPF source-only init gate self-test
         shell: bash
         run: python3 -I -B opf/tools/check_opf_init.py --self-test
