@@ -1,0 +1,127 @@
+# opf/tools/python-floor.toml
+#
+# The OPF tree's own Python-floor policy: the oldest Python minor version every OPF entrypoint supports,
+# and every OPF surface that states or carries it. Hand-authored SOURCE, owned by OPF and required: no OPF
+# check reads a parent repository's policy in its place. Every path is relative to the OPF root (the
+# directory that holds this tools/ directory). opf/tools/check_opf_python_floor_policy.py checks it,
+# together with the host-patch policy beside it (tools/python-host.toml), and holds each surface list
+# equal to what it finds in the OPF tree.
+#
+# python-floor          "MAJOR.MINOR", the decided floor.
+# guarded-surfaces      the authoring tools: every OPF .py file outside excluded-trees with a module-level
+#                       main block, each carrying the canonical refusal guard, sorted and unique.
+# nonblocking-surfaces  the guarded-surfaces entries whose guard exits 1 instead of 2 (none in OPF).
+# completeness-check    true: an OPF entrypoint missing from guarded-surfaces is a finding.
+# documentation-check   true: each declaration file must state the floor and name no older version.
+# workflow-dir          the OPF tree's own workflow directory (inert while OPF is nested).
+# workflow-files        every file in workflow-dir; a workflow pins the floor, or the host patch in the
+#                       host-patch jobs of host-patch-workflow.
+# host-patch-workflow   the workflow that holds the host-patch jobs.
+# host-patch-jobs       the OPF authoring host-patch jobs, which run the exact patch release
+#                       tools/python-host.toml names; at least one is required.
+# adopter-templates     the CI template an adopter copies; it pins the floor, never the host patch.
+# doctor-templates      the doctor's inline copy of that template; it pins the floor, never the host patch.
+# declaration-files     the OPF documentation that states the floor, every non-.py file outside
+#                       excluded-trees that does.
+# declaration-copies    a declaration file that states the floor more than once, with its count (none).
+# excluded-trees        trees no floor scan walks.
+# tomllib-table         the OPF tomllib parse-site table.
+#
+# The initial values were read from the parent repository's policy at commit
+# 97fc6a272dc41a294da696a67c7499c1c1df20df: python-floor, completeness-check and documentation-check
+# from .aiqt/core/python-floor.toml lines 37, 221 and 222; guarded-surfaces from its opf/ entries (lines
+# 50 to 98), with this policy's own gate, the OPF floor gate copy (tools/check_python_floor.py) and the
+# OPF host-pin checker (tools/check_opf_host_pin.py) added; nonblocking-surfaces from lines 216 to 220
+# (no opf/ entry); the templates from PIN_FILES in tools/check_python_floor.py line 373; the
+# declarations from its DECLARATION_FILES (lines 461 to 463) and DECLARATION_COPIES (line 467), extended
+# to every OPF file that states the floor; excluded-trees from its EXCLUDED_TREES (line 455); and the
+# host-patch job from HOST_JOBS (lines 380 and 381) and HOST_WORKFLOW_REL (line 379), whose
+# opf-host-patch job runs the OPF self-test. From then on this file, not the parent's, decides them.
+
+format-version = 1
+python-floor = "3.14"
+guarded-surfaces = [
+    "enforcement/claude/pretooluse_deny.py",
+    "tools/_child_status.py",
+    "tools/_journal.py",
+    "tools/_opf_absorb.py",
+    "tools/_opf_adopt.py",
+    "tools/_opf_adopt_apply.py",
+    "tools/_opf_adopt_complete.py",
+    "tools/_opf_adopt_discover.py",
+    "tools/_opf_adopt_hook.py",
+    "tools/_opf_adopt_observe.py",
+    "tools/_opf_adopt_plan.py",
+    "tools/_opf_adopt_state.py",
+    "tools/_opf_changelog.py",
+    "tools/_opf_check.py",
+    "tools/_opf_declaration.py",
+    "tools/_opf_emit.py",
+    "tools/_opf_fuzz.py",
+    "tools/_opf_import_batch.py",
+    "tools/_opf_import_complete.py",
+    "tools/_opf_init.py",
+    "tools/_opf_init_contract.py",
+    "tools/_opf_init_operation.py",
+    "tools/_opf_init_substrate.py",
+    "tools/_opf_observe.py",
+    "tools/_opf_oplock.py",
+    "tools/_opf_pack_manifest.py",
+    "tools/_opf_record.py",
+    "tools/_opf_release.py",
+    "tools/_opf_release_history.py",
+    "tools/_opf_schema.py",
+    "tools/_opf_store.py",
+    "tools/_opf_views.py",
+    "tools/_opf_worklog.py",
+    "tools/_opf_worklog_regressions.py",
+    "tools/_opf_write_guard.py",
+    "tools/check_opf_doctor.py",
+    "tools/check_opf_drift.py",
+    "tools/check_opf_homes.py",
+    "tools/check_opf_host_pin.py",
+    "tools/check_opf_init.py",
+    "tools/check_opf_init_contract.py",
+    "tools/check_opf_init_observe.py",
+    "tools/check_opf_init_p0.py",
+    "tools/check_opf_init_qa.py",
+    "tools/check_opf_prompt_pack.py",
+    "tools/check_opf_python_floor_policy.py",
+    "tools/check_opf_record.py",
+    "tools/check_opf_selftest_execution.py",
+    "tools/check_python_floor.py",
+    "tools/opf.py",
+    "tools/selftest_commonmark_conformance.py",
+    "tools/selftest_commonmark_headings.py",
+]
+nonblocking-surfaces = []
+completeness-check = true
+documentation-check = true
+workflow-dir = ".github/workflows"
+workflow-files = [
+    ".github/workflows/quality.yml",
+]
+host-patch-workflow = ".github/workflows/quality.yml"
+host-patch-jobs = [
+    "opf-host-patch",
+]
+adopter-templates = [
+    "enforcement/ci/github-actions.yml",
+]
+doctor-templates = [
+    "tools/check_opf_doctor.py",
+]
+declaration-files = [
+    "README.md",
+    "prompt-pack/adopt/SKILL.md",
+    "prompt-pack/import/SKILL.md",
+    "site/adopt.md",
+    "site/adopt/index.html",
+    "site/draft-src/adopt.toml",
+    "spec/OPF-QUICKSTART.md",
+]
+declaration-copies = {}
+excluded-trees = [
+    "tools/_vendor/",
+]
+tomllib-table = "tools/tomllib_parse_sites.toml"
