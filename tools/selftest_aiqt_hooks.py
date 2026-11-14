@@ -4759,6 +4759,10 @@ def _test_pgrep_self_match(failures):
 # arith-after-redirect-command-word exited 2 under both with a syntax error at the (, and ran nothing;
 # heredoc-empty-quoted-delimiter, heredoc-empty-dquoted-delimiter and heredoc-empty-quoted-strip-delimiter
 # printed the body line $(true) $? as literal text, then done, under both.
+# The rows heredoc-delimiter-subst, heredoc-delimiter-subst-body, heredoc-delimiter-backquote and
+# heredoc-delimiter-subst-quoted were run the same way (env -i, a directory and a session of its own): each
+# fire row's output under B differed from its output under P, and the quiet row's output, exit status and
+# files were the same under both.
 _SAS_FIRE_ROWS = (
     ("(sas-fire-a) substitution in double quotes", 'false; echo "x $(true): rc=$?"'),
     ("(sas-fire-b) substitution with an argument", 'false; echo "x $(basename /a/b): rc=$?"'),
@@ -5046,6 +5050,15 @@ _SAS_FIRE_ROWS = (
     ("(sas-fire-esac-after-redirect-command-word) a later line in a case arm after an esac that a redirection "
      "makes the command word",
      'case a in a) >/dev/null esac\nfalse; RC=$? env "SHA=$(true)" printenv RC\n;; esac'),
+    ("(sas-fire-heredoc-delimiter-subst) a read after a substitution on the operator line of a here-document "
+     "whose unquoted delimiter word holds a $(...) and a #",
+     "false; echo <<$(true)#x $(true) $?\nbody\n$(true)#x"),
+    ("(sas-fire-heredoc-delimiter-subst-body) a later line after a here-document whose unquoted delimiter "
+     "word holds a $(...) and ends its line, its body holding a $ line and an apostrophe",
+     "false; cat <<$(true)#\n$\n'\n$(true)#\nfalse; echo $(true) $?"),
+    ("(sas-fire-heredoc-delimiter-backquote) a read after a substitution on the operator line of a "
+     "here-document whose unquoted delimiter word holds a backquote with a blank inside it",
+     "false; echo <<`echo a`#x $(true) $?\nbody\n`echo a`#x"),
 )
 _SAS_QUIET_ROWS = (
     ("(sas-quiet-d) read before every substitution", 'false; echo "rc=$? $(true)"'),
@@ -5230,6 +5243,9 @@ _SAS_QUIET_ROWS = (
      'false; cat <<""\n$(true) $?\n\necho done'),
     ("(sas-quiet-heredoc-empty-quoted-strip-delimiter) a body under an empty quoted delimiter with <<-, which "
      "ends at the first line of tabs", "false; cat <<-''\n$(true) $?\n\t\necho done"),
+    ("(sas-quiet-heredoc-delimiter-subst-quoted) a body under a delimiter word that holds a $(...) and a "
+     "quote, which makes it a quoted delimiter whose body is text",
+     "false; cat <<$(x)'q'\n$(true) $?\n$(x)q\necho done"),
 )
 
 
@@ -5251,7 +5267,7 @@ def _test_status_after_subst(failures):
         if got != "allow":
             failures.append("{}: expected silent allow, got {}".format(label, got))
     saved = aiqt_hooks._subst_status_reading
-    aiqt_hooks._subst_status_reading = lambda command: (False, None)
+    aiqt_hooks._subst_status_reading = lambda command: (False, "")
     try:
         disabled = [(label, _decision(handler, command)) for label, command in _SAS_FIRE_ROWS]
     finally:
@@ -5288,12 +5304,70 @@ def _test_status_after_subst(failures):
     if _decision(handler, 'false; echo "' + "$(" * 70 + "true" + ")" * 70 + " it's $\\\n?\"") != "allow-note":
         failures.append("(sas-deep-quoted-rest) a $ and ? split by a line continuation past the nesting bound, "
                         "after an apostrophe inside double quotes, must note the unread rest")
-    # Line continuations before the bound and a $? just before the 65th $(: the index where the reading
-    # stopped must be mapped back to the command as written, or the rest would take in that $?.
+    # Line continuations before the bound and a $? just before the 65th $(: the rest past the bound must start
+    # where the reading stopped in the joined text it read, or it would take in that $?.
     mapped = "true " + "\\\n" * 3 + "; echo " + "$(" * 64 + "$?" + "$(" * 36 + "true" + ")" * 100
     if _decision(handler, mapped) != "allow":
         failures.append("(sas-deep-mapped) a $? before the nesting bound, after line continuations, must allow "
                         "silently: the rest past the bound starts where the reading stopped in the command")
+    # A command that reaches the nesting bound is joined and scanned once, its rest sliced from that reading,
+    # so the deep path costs no more than any other command.
+    scans = []
+    saved_scan = aiqt_hooks._subst_status_scan
+
+    def counted_scan(command):
+        scans.append(len(command))
+        return saved_scan(command)
+    aiqt_hooks._subst_status_scan = counted_scan
+    try:
+        got = _decision(handler, "cat <\\\n<E\nit's\nE\n" * 3 + deep + " $\\\n?")
+    finally:
+        aiqt_hooks._subst_status_scan = saved_scan
+    if got != "allow-note" or len(scans) != 1:
+        failures.append("(sas-deep-one-scan) a command past the nesting bound must note its unread rest after "
+                        "one join-and-scan reading, got {} after {} readings".format(got, len(scans)))
+    # The join-and-scan passes read at most _SUBST_STATUS_JOIN_WORK characters in all, and one pass a longer
+    # command: five here-documents each found only once the body before it is joined need six passes, so the
+    # pass count is the bound's at each length, checked at, just under and just over the 2-pass and 1-pass
+    # edges, and six below them.
+    work = aiqt_hooks._SUBST_STATUS_JOIN_WORK
+    chain = "cat <\\\n<E\nit's\nE\n" * 5 + "false; echo $(true) $?"
+    joins = []
+    saved_join = aiqt_hooks._subst_status_join
+
+    def counted_join(command, bodies):
+        joins.append(len(command))
+        return saved_join(command, bodies)
+    aiqt_hooks._subst_status_join = counted_join
+    try:
+        for length, want in ((4096, 6), (work // 2 - 1, 2), (work // 2, 2), (work // 2 + 1, 1), (work - 1, 1),
+                             (work, 1), (work + 1, 1)):
+            del joins[:]
+            _decision(handler, " " * (length - len(chain)) + chain)
+            if len(joins) != want or sum(joins) > max(work, length):
+                failures.append("(sas-join-bound) a {}-character command holding five split here-documents must "
+                                "be joined {} times, reading at most {} characters, got {} joins of {} characters"
+                                .format(length, want, max(work, length), len(joins), sum(joins)))
+    finally:
+        aiqt_hooks._subst_status_join = saved_join
+    # A command longer than _SUBST_STATUS_MAX_CHARS is not scanned: with $? text it notes as unchecked, and
+    # without it allows silently; one of that length or less is read, checked just under, at and just over.
+    longest = aiqt_hooks._SUBST_STATUS_MAX_CHARS
+    read = "false; echo $(true) $?"
+    for length, want in ((longest - 1, "read"), (longest, "read"), (longest + 1, "long")):
+        code, stdout_obj, _stderr = handler({"hook_event_name": aiqt_hooks.PRETOOL, "tool_name": "Bash",
+                                             "tool_input": {"command": " " * (length - len(read)) + read}})
+        note = (stdout_obj or {}).get("systemMessage", "")
+        long_note = "longer than the $? placement check reads ({} characters)".format(longest)
+        bad = (_reduce_result(code, stdout_obj) != "allow-note" or (long_note in note) != (want == "long")
+               or ("the command was not checked, not passed" in note) != (want == "long")
+               or "permissionDecision" in str(stdout_obj))
+        if bad:
+            failures.append("(sas-long) a {}-character command with a read after a substitution must allow with "
+                            "the {} note, got {!r}".format(length, "unchecked" if want == "long" else "placement",
+                                                           stdout_obj))
+    if _decision(handler, " " * (longest + 1 - len("echo $(true)")) + "echo $(true)") != "allow":
+        failures.append("(sas-long-no-read) a command longer than the bound with no $? text must allow silently")
     for label, data, field in (
             ("(sas-unreadable-tool-missing)", {"hook_event_name": aiqt_hooks.PRETOOL,
                                                "tool_input": {"command": "echo $(true) $?"}}, "tool_name"),
@@ -7392,6 +7466,16 @@ _DEADLINE_SHAPES = {
     "status_nest_after": lambda n, base: ("Bash", {"command": "echo " + "$(" * ((n - 12) // 3) + "true"
                                                    + ")" * ((n - 12) // 3) + " $?"}),
     "status_heredoc_reads": lambda n, base: ("Bash", {"command": _repeat("cat <<EOF\n$? $(true)\nEOF\n", n)}),
+    # Line continuations, which the scan removes by a join it redoes once per here-document body it finds, up
+    # to its work bound (_SUBST_STATUS_JOIN_WORK): a run of short commands, then three here-documents each
+    # opened by a << that a continuation splits after a body holding an apostrophe (each found only once the
+    # body before it is joined), then a read after a substitution; and a run of words joined by continuations,
+    # then a $ and ? split by one past the nesting bound (the unread-rest note, its rest taken from the same
+    # joined text).
+    "status_continued_heredocs": lambda n, base: ("Bash", {"command": _repeat(": a b c d\n", n, (
+        "cat <\\\n<E\nit's\nE\n" * 3) + "false; echo $(true) $?")}),
+    "status_continued_nest_after": lambda n, base: ("Bash", {"command": _repeat(": a b c d \\\n", n, (
+        "; echo " + "$(" * 70 + "true" + ")" * 70 + " $\\\n?"))}),
     # Uncertain '#' shapes (_DEADLINE_HASH_SHAPES): a run of separators inside a subshell before four '#'
     # characters whose comment reading depends on context (five readings), the same with each '#' on its own
     # line (sixteen readings), inside three parentheses, inside runs of parentheses on both sides, and with a
@@ -7478,7 +7562,7 @@ _DEADLINE_CASES = {
     "review_workdir_hold": ("git_segments_reset", "cd_git_fetch_unbal", "nest_cmdsubst"),
     "secrets_shift_left": ("cd_git_fetch_unbal", "nest_cmdsubst", "write_secretish"),
     "status_after_subst": ("nest_cmdsubst", "status_reads", "status_after", "status_nest_after",
-                           "status_heredoc_reads"),
+                           "status_heredoc_reads", "status_continued_heredocs", "status_continued_nest_after"),
     "write_scope_guard": ("write_content", "write_deep_path"),
 }
 # Cases run from the plain cwd, which no orchestration registry scopes, for a handler the table above runs
@@ -7505,13 +7589,15 @@ _DEADLINE_DENY_CASES = frozenset((
 # `$((` openers and the unterminated heredoc body), which the scan reports as unreadable instead of a silent
 # allow, and the `&` in a body under an unquoted delimiter (fg_heredocs_amp), which the in-scope detector
 # reads as a bare detach (an accepted over-note). For status_after_subst: the read after a substitution at the
-# end of status_after, and the read past the nesting bound in status_nest_after (the unread-rest note).
+# end of status_after, and the read past the nesting bound in status_nest_after and status_continued_nest_after
+# (the unread-rest note). status_continued_heredocs is not pinned: how many of its bodies the scan finds
+# depends on how many passes its length allows.
 _DEADLINE_NOTE_CASES = frozenset((
     ("inline_errexit", "errexit_note_after"), ("inline_errexit", "errexit_unread_after"),
     ("orch_truncation_guard", "fg_detach_after"), ("orch_truncation_guard", "fg_setsid_options"),
     ("orch_truncation_guard", "fg_arith_open"), ("orch_truncation_guard", "fg_heredoc_ops_open"),
     ("orch_truncation_guard", "fg_heredocs_amp"), ("status_after_subst", "status_after"),
-    ("status_after_subst", "status_nest_after")))
+    ("status_after_subst", "status_nest_after"), ("status_after_subst", "status_continued_nest_after")))
 # The (handler, shape) cases whose known outcome outside registry scope is a silent allow, each within its
 # bound: the plain-delimiter heredoc bodies of fg_heredocs_plain (skipped data, every body closed, and no
 # `&` or quote in them, so the in-scope detector reads nothing and the note scan reads the whole command;
