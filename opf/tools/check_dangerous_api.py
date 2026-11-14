@@ -13,10 +13,13 @@ files the authoring repository's copy scans under opf/tools/. Nothing else in th
 scanned: enforcement/claude/pretooluse_deny.py, the extensionless enforcement/precommit/pre-commit,
 the site, the spec and every non-.py file are outside the scope, as they are outside the
 authoring copy's. OPF has no plugin tree, so this copy has no plugin root. Its ALLOWLIST is the
-authoring copy's rows for opf/tools/ paths, re-rooted (see the comment above it). The rule text,
-checks and residuals below are carried from the authoring copy unchanged; a tools/ path they
-name that this tree does not hold (tools/_standards.py, tools/check_secrets.py,
-tools/check_leaks.py) names the authoring repository's file.
+authoring copy's rows for opf/tools/ paths, re-rooted (see the comment above it). The rule text
+and checks below are the authoring copy's, with these differences: the scan roots are the OPF
+tools/ directory alone; the fail-closed paragraph drops the plugin text and adds the
+allowlist-root refusal; the residuals name tools/_vendor and enforcement/ where the authoring
+copy names opf/tools/_vendor and .preview; and the allowlist-root check is this copy's own. A
+tools/ path the text names that this tree does not hold (tools/_standards.py,
+tools/check_secrets.py, tools/check_leaks.py) names the authoring repository's file.
 
 Rule text: "parsing cannot become execution" (secdsz), "certificate and hostname validation
 stay on" (seccry), and the operating-system command and code injection classes prevented by
@@ -2994,21 +2997,26 @@ def _write_tree(base, files):
         Path(base, rel).write_bytes(data)
 
 
+# Each tree-vector setup carries the tree paths it touches as setup.paths, so a check over the
+# tree vectors can read them.
 def _link(rel, target):
     def setup(base):
         os.symlink(os.path.join(base, target), os.path.join(base, rel))
+    setup.paths = (rel, target)
     return setup
 
 
 def _drop(rel):
     def setup(base):
         shutil.rmtree(os.path.join(base, rel))
+    setup.paths = (rel,)
     return setup
 
 
 def _fifo(rel):
     def setup(base):
         os.mkfifo(os.path.join(base, rel))
+    setup.paths = (rel,)
     return setup
 
 
@@ -3040,6 +3048,7 @@ def _unlisted(rel):
             os.listdir = real_list
             os.chmod(path, 0o755)
         return undo
+    setup.paths = (rel,)
     return setup
 
 
@@ -3062,6 +3071,7 @@ def _unstatable(rel, child="a.py"):
             os.lstat = real
             os.chmod(path, 0o755)
         return undo
+    setup.paths = (rel, rel + "/" + child)
     return setup
 
 
@@ -3084,6 +3094,7 @@ def _unreadable(rel):
             module._read_bytes = real
             os.chmod(path, 0o644)
         return undo
+    setup.paths = (rel,)
     return setup
 
 
@@ -3102,6 +3113,7 @@ def _stat_refused(rel):
         def undo():
             os.stat = real
         return undo
+    setup.paths = (rel,)
     return setup
 
 
@@ -3118,6 +3130,7 @@ def _parse_raises(exc_type):
         def undo():
             module.scan_source = real
         return undo
+    setup.paths = ()
     return setup
 
 
