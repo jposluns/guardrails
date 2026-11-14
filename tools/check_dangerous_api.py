@@ -637,6 +637,10 @@ ALLOWLIST = (
      " external input"),
     ("opf/tools/check_opf_init_p0.py", "red_on_revert", "code", 1,
      _MUTANT + " (each guard revert, matched exactly once)"),
+    ("opf/tools/check_opf_enforce_platforms.py", "load_hook", "code", 1,
+     "check harness: loads the OPF tree's own Claude Code deny hook as a private module, never"
+     " entered in sys.modules and its main() never called, the equivalent of an import; no external"
+     " input"),
     ("opf/tools/check_opf_prompt_pack.py", "_close_vectors", "code", 1,
      _MUTANT + " (the _read_regular close revert)"),
     ("opf/tools/check_opf_prompt_pack.py", "_load_sibling", "code", 1,

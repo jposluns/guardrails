@@ -71,12 +71,49 @@ these rules:
               opf/tools/check_opf_doctor.py launches the hook against its own denial vectors.
   Cursor      the Cursor member opens with the always-apply frontmatter tools/gen_cursor.py emits.
 
+  paths       the rules above fall into two validation paths, and the gate reports their union.
+              evaluate_pack is the pack-local path: the roster, the residuals and evidence, contained
+              paths, the canonical deny-hook member at a registration the hook protects, member names,
+              the one list, the tier and the behavioural probes. It reads only the roster, its
+              members, the hook and opf/tools/_opf_adopt.py, never an AIQT generator.
+              evaluate_adapters is the parent integration path, for the generator-derived rules
+              (PARENT_INTEGRATION_CHECKS): the deny-hook platform (tools/gen_hooks.py), the location
+              and the pruned subtree, the Cursor frontmatter and the coexistence line. These rules are
+              this repository's checks of how its own adapter generators install the pack's members;
+              they make no generator an authority over OPF. The path reads the four AIQT generators
+              and the OPF release contract (the roster, its instructions members and _opf_adopt.py),
+              never the hook, and leaves the roster-level findings to the pack path. The contract
+              comes from the opf/ subtree while the two coexist, and after extraction from the root of
+              the pinned OPF release (the release argument), with no fallback to the subtree. Given a
+              release, evaluate runs this path alone over that release's contract.
+  cleanup     OPF's own acceptance of its pack is opf/tools/check_opf_enforce_platforms.py
+              (OPF_GATE_REL), which reads nothing from this repository. Two parts of this gate are
+              coexistence-only (COEXISTENCE_ONLY): evaluate_pack, the duplicated pack path run on the
+              opf/ subtree, and _parity_failure, the self-test's source-copy parity of that path with
+              OPF_GATE_REL. Neither is an authority over OPF; both are removed by the later cleanup
+              step that removes the opf/ subtree (COEXISTENCE_CLEANUP). No check is removed yet.
+
   check_opf_enforce_platforms.py              check the real tree
   check_opf_enforce_platforms.py --self-test  fixture copies of the inputs; each enforced rule above is
               held red by at least one fixture mutant, and each behavioural probe leg (store, evidence,
               archive, view, frozen source, pack tree, registration, exemption, keep-disposed source,
               unlisted file, and the refusal when the rule raises) by a hook rule-logic mutant that
-              leaves every rendered constant unchanged.
+              leaves every rendered constant unchanged. Each fixture mutant also runs through each
+              path on its own (_SPLIT pins its finding count per path, and the union must equal the
+              gate's findings), each generator-derived rule is held by a mutant of that generator's
+              literal, and each path stays clean with the other path's inputs removed. Each generator
+              PARENT_INTEGRATION_CHECKS names must be read by the parent integration path alone, and
+              acceptance cases run that path against a separate release tree with the opf/ subtree
+              removed or stale: it must read the release, follow a drift there, and refuse a release
+              that lacks a contract file rather than fall back to the subtree; evaluate given that
+              release must give the same result without the duplicated pack path. Each COEXISTENCE_ONLY
+              part is marked so in its docstring, and with every one of them replaced by a stub that
+              raises, the release cases still give their results. While the OPF tree's own copy of the
+              pack-local path (opf/tools/check_opf_enforce_platforms.py) exists, each fixture mutant
+              also runs through that copy at the fixture's opf/ tree, and the copy must give
+              evaluate_pack's finding count, or cannot evaluate where evaluate_pack cannot (the
+              coexistence-only source-copy parity); where that file is absent the comparison is skipped
+              and the self-test prints why.
 
 Exit convention (the repository's gates): 0 clean, 1 a finding, 2 cannot evaluate (an unreadable or
 malformed input, a hook that cannot be loaded, a generator literal that cannot be read).
@@ -93,10 +130,13 @@ lexical: it reads words, not meaning, skips inline code spans and the rendered b
 claim worded without the listed words. The deny-hook rule reads tools/gen_hooks.py PLATFORMS as the repository's
 record of a tested deny mechanism; it does not itself verify a platform's documentation. Input files are
 read after a symlinked-parent check and a regular-file check, so a file swapped between those checks and
-the read is a check-to-use race. This gate checks the pack's text and the loaded hook's behaviour on
-the probes above; it does not prove that any platform follows an instructions member, and it does not
-make the Codex and Gemini CLI members coexist with the AIQT pack's generated AGENTS.md and GEMINI.md
-(an unresolved adoption prerequisite, stated in those members and in the roster).
+the read is a check-to-use race. The release argument names a release tree its caller has already
+verified: this gate checks neither its digest nor its identity nor its pin, which the adoption route
+owns, and the command line still reads the opf/ subtree. This gate checks the pack's text and the
+loaded hook's behaviour on the probes above; it does not prove that any platform follows an
+instructions member, and it does not make the Codex and Gemini CLI members coexist with the AIQT
+pack's generated AGENTS.md and GEMINI.md (an unresolved adoption prerequisite, stated in those members
+and in the roster).
 """
 import sys
 
@@ -123,16 +163,49 @@ import tomllib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-PACK_REL = "opf/enforcement"
-ROSTER_REL = PACK_REL + "/platforms.toml"
+# The OPF release contract the parent's adapters consume, as paths inside the OPF tree: the opf/
+# subtree of this repository while the two coexist, the root of the pinned OPF release after
+# extraction (module docstring, "paths").
+OPF_PREFIX = "opf/"
+CONTRACT_PACK_REL = "enforcement"
+CONTRACT_ROSTER_REL = CONTRACT_PACK_REL + "/platforms.toml"
+CONTRACT_VOCABULARY_REL = "tools/_opf_adopt.py"
+PACK_REL = OPF_PREFIX + CONTRACT_PACK_REL
+ROSTER_REL = OPF_PREFIX + CONTRACT_ROSTER_REL
 HOOK_REL = PACK_REL + "/claude/pretooluse_deny.py"
-ADOPT_REL = "opf/tools/_opf_adopt.py"
+ADOPT_REL = OPF_PREFIX + CONTRACT_VOCABULARY_REL
 GEN_HOOKS_REL = "tools/gen_hooks.py"
 GEN_AGENTS_REL = "tools/gen_agents.py"
 GEN_ADAPTERS_REL = "tools/gen_adapters.py"
 GEN_CURSOR_REL = "tools/gen_cursor.py"
-INPUT_RELS = (ROSTER_REL, HOOK_REL, ADOPT_REL, GEN_HOOKS_REL, GEN_AGENTS_REL, GEN_ADAPTERS_REL, GEN_CURSOR_REL)
+# The generator-derived adapter checks are parent integration responsibilities: each tests how one of
+# this repository's own adapter generators installs the OPF pack's members, never what the pack itself
+# must hold, so no generator here is an authority over OPF. Each row names the rules and the parent
+# generator they read.
+PARENT_INTEGRATION_CHECKS = (
+    ("the deny-hook platform", GEN_HOOKS_REL),
+    ("the Codex location and coexistence line", GEN_AGENTS_REL),
+    ("the Gemini CLI location and coexistence line", GEN_ADAPTERS_REL),
+    ("the Cursor location, pruned subtree and frontmatter", GEN_CURSOR_REL),
+)
+# The pack-local path (evaluate_pack) reads only the pack inputs; the parent integration path
+# (evaluate_adapters) reads the OPF release contract (the roster, its instructions members and the
+# vocabulary source) plus the generators PARENT_INTEGRATION_CHECKS names, and never the hook.
+PACK_INPUT_RELS = (ROSTER_REL, HOOK_REL, ADOPT_REL)
+ADAPTER_INPUT_RELS = tuple(rel for _, rel in PARENT_INTEGRATION_CHECKS)
+INPUT_RELS = PACK_INPUT_RELS + ADAPTER_INPUT_RELS
 MAX_INPUT_BYTES = 4 * 1024 * 1024
+# OPF's own acceptance of its pack, the OPF tree's copy of the pack-local path, run from the OPF root
+# (the directory holding enforcement/ and tools/). It reads nothing from this repository.
+OPF_GATE_REL = OPF_PREFIX + "tools/check_opf_enforce_platforms.py"
+# The parts of this gate that exist only while the OPF tree lives here as the opf/ subtree (module
+# docstring, "cleanup"): each is marked so in its docstring, none is an authority over OPF, and the
+# step below removes them all. The parent integration path must not need any of them.
+COEXISTENCE_CLEANUP = "the parent cleanup step that removes the opf/ subtree"
+COEXISTENCE_ONLY = (
+    ("evaluate_pack", "the duplicated pack-local path, run on the opf/ subtree"),
+    ("_parity_failure", "the source-copy parity of evaluate_pack with OPF_GATE_REL"),
+)
 
 ROW_KEYS = frozenset(("platform", "means", "member", "destination", "residuals", "evidence"))
 DENY_MEANS = "deny-hook"
@@ -462,27 +535,43 @@ def _behaviour_findings(hook, root, pack_rels, registrations):
     return findings
 
 
-def _vocabulary(root):
-    adopt = _literals(_input(root, ADOPT_REL, "the vocabulary source"),
+def _pack_vocabulary(root, prefix=OPF_PREFIX):
+    """The pack-local vocabulary, read from the OPF tree's tools/_opf_adopt.py alone (`prefix` is the
+    OPF tree's place under `root`): the supported platforms, the means each allows, the residual
+    vocabulary and the residuals each means requires."""
+    rel = prefix + CONTRACT_VOCABULARY_REL
+    adopt = _literals(_input(root, rel, "the vocabulary source"),
                       ("ENFORCEMENT_MEANS", "ENFORCEMENT_RESIDUALS", "ENFORCEMENT_REQUIRED_RESIDUALS"))
+    means = adopt["ENFORCEMENT_MEANS"]
+    if not isinstance(means, dict) or not all(isinstance(v, tuple) for v in means.values()) \
+            or not all(isinstance(m, str) for v in means.values() for m in v):
+        raise CannotEvaluate("%s ENFORCEMENT_MEANS is not a table of string tuples" % (rel,))
+    residuals = adopt["ENFORCEMENT_RESIDUALS"]
+    if not isinstance(residuals, tuple) or not all(isinstance(r, str) for r in residuals):
+        raise CannotEvaluate("%s ENFORCEMENT_RESIDUALS is not a tuple of strings" % (rel,))
+    required = adopt["ENFORCEMENT_REQUIRED_RESIDUALS"]
+    if not isinstance(required, dict) or not all(isinstance(v, tuple) for v in required.values()) \
+            or not all(isinstance(r, str) for v in required.values() for r in v):
+        raise CannotEvaluate("%s ENFORCEMENT_REQUIRED_RESIDUALS is not a table of string tuples"
+                             % (rel,))
+    return dict(
+        platforms=tuple(p for p, allowed in means.items() if DENY_MEANS in allowed),
+        means=means,
+        residuals=residuals,
+        required=required,
+    )
+
+
+def _adapter_vocabulary(root):
+    """The parent integration vocabulary, read statically from the AIQT generators alone: the
+    platforms with a tested deny mechanism, each instructions platform's generated location, and the
+    Cursor frontmatter."""
     hooks = _literals(_input(root, GEN_HOOKS_REL, "the hook-platform source"), ("PLATFORMS",))
     agents = _literals(_input(root, GEN_AGENTS_REL, "the Codex adapter generator"), ("GENSRC_OUTPUTS",))
     adapters = _literals(_input(root, GEN_ADAPTERS_REL, "the Gemini CLI adapter generator"),
                          ("GENSRC_OUTPUTS",))
     cursor = _literals(_input(root, GEN_CURSOR_REL, "the Cursor adapter generator"),
                        ("OUT_PARTS", "FRONTMATTER"))
-    means = adopt["ENFORCEMENT_MEANS"]
-    if not isinstance(means, dict) or not all(isinstance(v, tuple) for v in means.values()) \
-            or not all(isinstance(m, str) for v in means.values() for m in v):
-        raise CannotEvaluate("%s ENFORCEMENT_MEANS is not a table of string tuples" % (ADOPT_REL,))
-    residuals = adopt["ENFORCEMENT_RESIDUALS"]
-    if not isinstance(residuals, tuple) or not all(isinstance(r, str) for r in residuals):
-        raise CannotEvaluate("%s ENFORCEMENT_RESIDUALS is not a tuple of strings" % (ADOPT_REL,))
-    required = adopt["ENFORCEMENT_REQUIRED_RESIDUALS"]
-    if not isinstance(required, dict) or not all(isinstance(v, tuple) for v in required.values()) \
-            or not all(isinstance(r, str) for v in required.values() for r in v):
-        raise CannotEvaluate("%s ENFORCEMENT_REQUIRED_RESIDUALS is not a table of string tuples"
-                             % (ADOPT_REL,))
     deny_platforms = hooks["PLATFORMS"]
     if not isinstance(deny_platforms, (set, frozenset, tuple)) \
             or not all(isinstance(p, str) for p in deny_platforms):
@@ -504,10 +593,6 @@ def _vocabulary(root):
     if not isinstance(parts, tuple) or len(parts) < 2 or not all(isinstance(p, str) for p in parts):
         raise CannotEvaluate("%s OUT_PARTS is not a tuple of path parts" % (GEN_CURSOR_REL,))
     return dict(
-        platforms=tuple(p for p, allowed in means.items() if DENY_MEANS in allowed),
-        means=means,
-        residuals=residuals,
-        required=required,
         deny_platforms=deny_platforms,
         # (kind, location, generator, the subtree that generator rewrites and prunes, or None)
         locations=dict((
@@ -527,10 +612,10 @@ def _contained(rel):
     return all(p not in ("", ".", "..") for p in rel.split("/")) and not any(ord(c) < 0x20 for c in rel)
 
 
-def _member_findings(where, text, block, frontmatter=None):
+def _member_findings(where, text, block):
+    """The pack-local findings for one instructions member's text: the rendered block, the tier line
+    and the claim scan."""
     findings = []
-    if frontmatter is not None and not text.startswith(frontmatter):
-        findings.append("%s: does not open with the always-apply Cursor frontmatter %r" % (where, frontmatter))
     if text.count(BEGIN) != 1 or text.count(END) != 1 or text.index(END) < text.index(BEGIN):
         findings.append("%s: carries no single BEGIN and END protected-path marker pair" % (where,))
     else:
@@ -554,9 +639,11 @@ def _member_findings(where, text, block, frontmatter=None):
     return findings
 
 
-def _row_findings(root, vocab, block, where, row):
-    """The findings for one well-formed roster row of a known, first-seen platform."""
-    platform, means, member, destination = row["platform"], row["means"], row["member"], row["destination"]
+def _row_pack_findings(root, vocab, block, where, row):
+    """The pack-local findings for one well-formed roster row of a known, first-seen platform: its
+    residuals and evidence, contained paths, the canonical deny-hook member at a registration the hook
+    protects, and an instructions member's name, rendered block, tier line and claim scan."""
+    means, member, destination = row["means"], row["member"], row["destination"]
     findings = []
     residuals = row["residuals"]
     if not isinstance(residuals, list) or len(set(map(repr, residuals))) != len(residuals) \
@@ -573,10 +660,6 @@ def _row_findings(root, vocab, block, where, row):
         return findings
     member_path = _input(root, PACK_REL + "/" + member, "the member")
     if means == DENY_MEANS:
-        if platform not in vocab["deny_platforms"]:
-            findings.append("%s: a deny-hook row needs a deny mechanism this repository documents and tests, "
-                            "and %s PLATFORMS %s does not name %s; use the instructions tier"
-                            % (where, GEN_HOOKS_REL, sorted(vocab["deny_platforms"]), platform))
         if PACK_REL + "/" + member != HOOK_REL:
             findings.append("%s: member %r is not %r, the canonical deny hook path %s: the roster's "
                             "deny-hook member must be the hook this gate loads, renders and probes, never "
@@ -586,6 +669,31 @@ def _row_findings(root, vocab, block, where, row):
         if destination not in vocab["registrations"]:
             findings.append("%s: destination %r is not a hook registration path the deny hook itself "
                             "protects %s" % (where, destination, vocab["registrations"]))
+        return findings
+    parts = member.split("/")
+    if parts[-1] in LOADED_NAMES or any(p.startswith(".cursor") for p in parts):
+        findings.append("%s: member %r carries a name its platform loads; the pack tree would apply it to "
+                        "sessions working on the pack" % (where, member))
+    text = _text(member_path, "the instructions member")
+    findings.extend(_member_findings(PACK_REL + "/" + member, text, block))
+    return findings
+
+
+def _row_adapter_findings(root, vocab, where, row, prefix=OPF_PREFIX):
+    """The parent integration findings for one well-formed roster row of a known, first-seen
+    platform: a deny-hook row's platform has a tested deny mechanism, and an instructions row installs
+    at the location its AIQT generator writes, outside the subtree it prunes, with the Cursor
+    frontmatter and the coexistence line. The member is read from the OPF tree at `prefix` under
+    `root`. A row whose paths are not contained is the pack path's finding alone."""
+    platform, means, member, destination = row["platform"], row["means"], row["member"], row["destination"]
+    findings = []
+    if not _contained(member) or not _contained(destination):
+        return findings
+    if means == DENY_MEANS:
+        if platform not in vocab["deny_platforms"]:
+            findings.append("%s: a deny-hook row needs a deny mechanism this repository documents and tests, "
+                            "and %s PLATFORMS %s does not name %s; use the instructions tier"
+                            % (where, GEN_HOOKS_REL, sorted(vocab["deny_platforms"]), platform))
         return findings
     location = vocab["locations"].get(platform)
     if location is None:
@@ -600,45 +708,39 @@ def _row_findings(root, vocab, block, where, row):
         findings.append("%s: destination %r lies inside %s, the subtree %s rewrites and orphan-prunes, so a "
                         "regeneration would delete it; install it under %s outside that subtree"
                         % (where, destination, pruned, generator, spot))
-    parts = member.split("/")
-    if parts[-1] in LOADED_NAMES or any(p.startswith(".cursor") for p in parts):
-        findings.append("%s: member %r carries a name its platform loads; the pack tree would apply it to "
-                        "sessions working on the pack" % (where, member))
-    text = _text(member_path, "the instructions member")
-    findings.extend(_member_findings(PACK_REL + "/" + member, text, block,
-                                     vocab["frontmatter"] if kind == "mdc" else None))
+    member_rel = prefix + CONTRACT_PACK_REL + "/" + member
+    text = _text(_input(root, member_rel, "the member"), "the instructions member")
+    if kind == "mdc" and not text.startswith(vocab["frontmatter"]):
+        findings.append("%s: does not open with the always-apply Cursor frontmatter %r"
+                        % (member_rel, vocab["frontmatter"]))
     if kind == "file" and text.split("\n").count(COEXIST_LINE % (generator, spot)) != 1:
         findings.append("%s: does not state exactly once, on a line of its own, that %s regenerates %s whole "
                         "and coexistence is unresolved: %r"
-                        % (PACK_REL + "/" + member, generator, spot, COEXIST_LINE % (generator, spot)))
+                        % (member_rel, generator, spot, COEXIST_LINE % (generator, spot)))
     return findings
 
 
-def evaluate(root, hook=None):
-    """The findings for the tree at `root` (a list, empty when clean), or CannotEvaluate. `hook` is the
-    loaded deny hook (loaded from `root` when None)."""
-    root = Path(root)
-    vocab = _vocabulary(root)
-    if hook is None:
-        hook = load_hook(_input(root, HOOK_REL, "the Claude Code deny hook"))
-    registrations = _registration_rels(hook)
-    vocab["registrations"] = registrations
-    pack_rels = _pack_rels(hook, root)
-    block = render_block(hook, root)
-    findings = _behaviour_findings(hook, root, pack_rels, registrations)
+def _roster_rows(root, vocab, prefix=OPF_PREFIX):
+    """(findings, rows) for the roster of the OPF tree at `prefix` under `root`: the roster-level
+    findings (keys, platform, duplicate, means and coverage), and (where, row) for every well-formed
+    row of a known, first-seen platform whose means that platform allows. A roster that does not parse
+    or carries another schema is CannotEvaluate."""
+    roster_rel = prefix + CONTRACT_ROSTER_REL
     try:
-        doc = tomllib.loads(_text(_input(root, ROSTER_REL, "the platform roster"), "the platform roster"))
+        doc = tomllib.loads(_text(_input(root, roster_rel, "the platform roster"), "the platform roster"))
     except (tomllib.TOMLDecodeError, ValueError, RecursionError, MemoryError) as exc:
-        raise CannotEvaluate("%s does not parse (%s)" % (ROSTER_REL, exc))
+        raise CannotEvaluate("%s does not parse (%s)" % (roster_rel, exc))
     version = doc.get("format-version")
     if set(doc) != frozenset(("format-version", "platform")) or type(version) is not int \
             or version != 1 or not isinstance(doc.get("platform"), list):
         raise CannotEvaluate("%s carries no exact integer format-version = 1 and [[platform]] rows only "
                              "(a boolean true, a float 1.0 or another near-1 spelling is refused)"
-                             % (ROSTER_REL,))
+                             % (roster_rel,))
+    findings = []
+    rows = []
     seen = []
     for index, row in enumerate(doc["platform"], 1):
-        where = "%s row %d" % (ROSTER_REL, index)
+        where = "%s row %d" % (roster_rel, index)
         if not isinstance(row, dict) or set(row) != ROW_KEYS:
             findings.append("%s: keys must be exactly %s" % (where, sorted(ROW_KEYS)))
             continue
@@ -655,11 +757,67 @@ def evaluate(root, hook=None):
             findings.append("%s: means %r is not one %s allows %s"
                             % (where, means, platform, list(vocab["means"][platform])))
             continue
-        findings.extend(_row_findings(root, vocab, block, where, row))
+        rows.append((where, row))
     if tuple(seen) != vocab["platforms"]:
         findings.append("%s: rows must cover %s once each, in that order (found %s)"
-                        % (ROSTER_REL, list(vocab["platforms"]), seen))
+                        % (roster_rel, list(vocab["platforms"]), seen))
+    return findings, rows
+
+
+def evaluate_pack(root, hook=None):
+    """Coexistence-only (COEXISTENCE_ONLY): this duplicates OPF_GATE_REL, OPF's own acceptance of its
+    pack, and is removed by COEXISTENCE_CLEANUP. The pack-local findings for the tree at `root` (a
+    list, empty when clean), or CannotEvaluate: the behavioural probes, the roster and every row's
+    pack-local rules. It reads only PACK_INPUT_RELS and the members the roster names, never an AIQT
+    generator. `hook` is the loaded deny hook (loaded from `root` when None)."""
+    root = Path(root)
+    vocab = _pack_vocabulary(root)
+    if hook is None:
+        hook = load_hook(_input(root, HOOK_REL, "the Claude Code deny hook"))
+    registrations = _registration_rels(hook)
+    vocab["registrations"] = registrations
+    pack_rels = _pack_rels(hook, root)
+    block = render_block(hook, root)
+    findings = _behaviour_findings(hook, root, pack_rels, registrations)
+    roster_findings, rows = _roster_rows(root, vocab)
+    for where, row in rows:
+        findings.extend(_row_pack_findings(root, vocab, block, where, row))
+    return findings + roster_findings
+
+
+def evaluate_adapters(root, release=None):
+    """The parent integration findings for the tree at `root` (a list, empty when clean), or
+    CannotEvaluate: every rule derived from an AIQT generator (PARENT_INTEGRATION_CHECKS), over the
+    rows the roster walk admits. It reads the generators under `root` and the OPF release contract
+    (the roster, its instructions members and the vocabulary source), never the hook; the
+    roster-level findings are the pack path's alone. The contract is read from the root of the OPF
+    release at `release` when one is given, and never then from the opf/ subtree under `root`; when
+    `release` is None it is read from that subtree, as while the two coexist."""
+    root = Path(root)
+    if release is None:
+        base, prefix = root, OPF_PREFIX
+    else:
+        base, prefix = Path(release), ""
+    vocab = _pack_vocabulary(base, prefix)
+    vocab.update(_adapter_vocabulary(root))
+    findings = []
+    for where, row in _roster_rows(base, vocab, prefix)[1]:
+        findings.extend(_row_adapter_findings(base, vocab, where, row, prefix))
     return findings
+
+
+def evaluate(root, hook=None, release=None):
+    """The findings for the tree at `root` (a list, empty when clean), or CannotEvaluate. With no
+    `release`, while the two coexist: the union of the parent integration and the pack-local findings,
+    the adapter inputs read first. With `release`, the root of the pinned OPF release: the parent
+    integration findings over that release's contract alone, since the duplicated pack path is
+    coexistence-only and a release's own pack acceptance is its OPF_GATE_REL. `hook` is the loaded deny
+    hook for the pack path (loaded from `root` when None)."""
+    root = Path(root)
+    adapter_findings = evaluate_adapters(root, release)
+    if release is not None:
+        return adapter_findings
+    return evaluate_pack(root, hook) + adapter_findings
 
 
 def main(argv):
@@ -1026,7 +1184,156 @@ def _vectors():
          "OUT_PARTS is not a tuple", None),
         ("generator-literal-missing", edit(GEN_CURSOR_REL, "\nOUT_PARTS = ", "\nOUT_PARTS_X = "),
          "CANNOT EVALUATE", None),
+        # adapter-derived constraints: each is read from its AIQT generator, so a generator literal moved
+        # under an unchanged roster and pack turns the gate red through the parent-adapter path alone.
+        ("gen-hooks-no-claude-code", edit(GEN_HOOKS_REL, "PLATFORMS = " + chr(123) + '"claude-code"' + chr(125),
+                                          "PLATFORMS = " + chr(123) + '"other-platform"' + chr(125)),
+         "needs a deny mechanism", 1),
+        ("gen-agents-target-moved", edit(GEN_AGENTS_REL, '{"target": "AGENTS.md", "kind": "file",',
+                                         '{"target": "docs/AGENTS.md", "kind": "file",'),
+         "is not the location", 2),
+        ("gen-adapters-target-moved", edit(GEN_ADAPTERS_REL, '{"target": "GEMINI.md", "kind": "file",',
+                                           '{"target": "docs/GEMINI.md", "kind": "file",'),
+         "is not the location", 2),
+        ("gen-adapters-no-single-output", edit(GEN_ADAPTERS_REL, '{"target": "GEMINI.md", "kind": "file",',
+                                               '{"target": "GEMINI2.md", "kind": "file",'),
+         "declares no single", None),
+        ("gen-cursor-rules-dir-moved", edit(GEN_CURSOR_REL, 'OUT_PARTS = (".cursor", "rules", "aiqt-guardrails")',
+                                            'OUT_PARTS = (".cursor", "rulesets", "aiqt-guardrails")'),
+         "is not the location", 1),
+        ("gen-cursor-pruned-widened", edit(GEN_CURSOR_REL, 'OUT_PARTS = (".cursor", "rules", "aiqt-guardrails")',
+                                           'OUT_PARTS = (".cursor", "rules")'),
+         "orphan-prunes", 1),
+        ("gen-cursor-frontmatter-changed", edit(GEN_CURSOR_REL, r'FRONTMATTER = "---\nalwaysApply: true\n---\n\n"',
+                                                r'FRONTMATTER = "---\nalwaysApply: true\nglobs: x\n---\n\n"'),
+         "frontmatter", 1),
     )
+
+
+# The responsibility split of every vector: (pack-local, parent-adapter), each the exact finding count of
+# evaluate_pack and evaluate_adapters, or None where that path cannot evaluate. A vector missing here,
+# or a rule reported by the other path, turns the self-test red, and so does a union that differs from
+# evaluate.
+_SPLIT = {
+    "clean": (0, 0), "codex-list-drops-line": (1, 0), "gemini-list-adds-line": (1, 0),
+    "cursor-list-drops-line": (1, 0), "hook-registration-leaf": (3, 0), "hook-working-name": (3, 0),
+    "hook-archive": (3, 0), "hook-frozen-dispositions": (3, 0), "hook-writer-verbs": (3, 0),
+    "hook-leaf-pattern": (3, 0), "hook-pack-tree": (3, 0), "hook-unloadable": (None, 0),
+    "hook-store-logic": (1, 0), "hook-evidence-logic": (1, 0), "hook-archive-logic": (1, 0),
+    "hook-frozen-logic": (1, 0), "hook-retire-logic": (1, 0), "hook-views-logic": (1, 0),
+    "hook-guard-logic": (2, 0), "hook-registration-logic": (2, 0), "hook-exemption-logic": (2, 0),
+    "hook-every-source-frozen": (1, 0), "hook-deny-all": (4, 0), "hook-rule-raises": (None, 0),
+    "hook-leaf-pattern-unprobeable": (None, 0), "hook-no-kept-disposition": (None, 0),
+    "hook-registration-order": (0, 0), "hook-registration-outside-probe": (None, 0),
+    "hook-no-render-verb": (None, 0), "hook-one-guarded-tree": (None, 0), "hook-tree-outside-root": (None, 0),
+    "member-markers-missing": (2, 0), "marker-begin-duplicate": (2, 0), "marker-end-duplicate": (2, 0),
+    "tier-line-missing": (1, 0), "tier-line-twice": (1, 0), "tier-claim-codex": (1, 0),
+    "tier-claim-cursor": (1, 0), "tier-claim-code-span-exempt": (0, 0), "cursor-frontmatter": (0, 1),
+    "deny-hook-codex": (2, 1), "deny-hook-gemini": (2, 1), "deny-hook-tested-renderer": (0, 0),
+    "deny-member-not-hook": (1, 0), "deny-member-byte-identical-copy": (1, 0),
+    "deny-member-relocated-copy": (1, 0), "deny-destination-unpinned": (1, 0), "deny-member-missing": (1, 0),
+    "means-outside-vocabulary": (1, 0), "residual-required-missing": (3, 0), "residual-unknown": (1, 0),
+    "residual-duplicate": (1, 0), "evidence-empty": (1, 0), "platform-missing": (1, 0),
+    "platform-order-swapped": (1, 0), "platform-duplicate": (2, 0), "platform-unknown": (2, 0),
+    "row-extra-key": (2, 0), "roster-format-version-bool": (None, None),
+    "roster-format-version-float": (None, None), "roster-extra-top-table": (None, None),
+    "roster-oversize": (None, None), "destination-codex": (0, 1), "destination-gemini": (0, 1),
+    "destination-cursor": (0, 1), "destination-not-contained": (1, 0),
+    "destination-cursor-pruned-subtree": (0, 1), "destination-cursor-pruned-subtree-case": (0, 1),
+    "destination-cursor-beside-subtree": (0, 0), "coexist-line-missing": (0, 1),
+    "coexist-line-wrong-generator": (0, 1), "coexist-line-twice": (0, 1), "coexist-line-embedded": (0, 1),
+    "coexist-line-wrong-destination-codex": (0, 1), "coexist-line-wrong-destination-gemini": (0, 1),
+    "member-loaded-name": (1, 0), "member-dot-cursor-component": (1, 0), "member-absent": (None, None),
+    "member-is-directory": (None, None), "member-symlinked-parent": (None, None),
+    "member-not-contained": (1, 0), "roster-unparseable": (None, None),
+    "adopt-vocabulary-unreadable": (None, None), "adopt-means-not-table": (None, None),
+    "adopt-required-not-table": (None, None), "gen-agents-outputs-not-sequence": (0, None),
+    "gen-agents-no-single-output": (0, None), "gen-hooks-doubled-literal": (0, None),
+    "gen-cursor-frontmatter-not-string": (0, None), "gen-cursor-out-parts-not-tuple": (0, None),
+    "generator-literal-missing": (0, None), "gen-hooks-no-claude-code": (0, 1),
+    "gen-agents-target-moved": (0, 2), "gen-adapters-target-moved": (0, 2),
+    "gen-adapters-no-single-output": (0, None), "gen-cursor-rules-dir-moved": (0, 1),
+    "gen-cursor-pruned-widened": (0, 1), "gen-cursor-frontmatter-changed": (0, 1),
+}
+
+
+def _split_failure(case_id, tree):
+    """None when evaluate_pack and evaluate_adapters at `tree` give the counts _SPLIT names for `case_id`
+    and, where both evaluate, their union equals evaluate's findings; else the failure text."""
+    expected = _SPLIT.get(case_id, "undeclared")
+    got = []
+    for path in (evaluate_pack, evaluate_adapters):
+        try:
+            got.append(path(tree))
+        except CannotEvaluate:
+            got.append(None)
+    counts = tuple(None if g is None else len(g) for g in got)
+    if counts != expected:
+        return "split: expected (pack-local, parent-adapter) %r, got %r" % (expected, counts)
+    if None not in got:
+        try:
+            union = evaluate(tree)
+        except CannotEvaluate as exc:
+            return "split: both paths evaluate but evaluate cannot (%s)" % (exc,)
+        if sorted(map(_untemp, union)) != sorted(map(_untemp, got[0] + got[1])):
+            return "split: the union of both paths differs from evaluate"
+    return None
+
+
+def _opf_gate():
+    """The OPF tree's copy of the pack-local path (OPF_GATE_REL) as a module, or None when the repository
+    holds no such file. It is loaded by a plain import of its literal name, with its own directory first
+    on sys.path for that import alone and no bytecode written. A module of that name that is not that
+    file (this gate, imported under its own name earlier) is CannotEvaluate, so the comparison never
+    runs this gate against itself."""
+    path = ROOT / OPF_GATE_REL
+    if not os.path.lexists(path):
+        return None
+    here = str(path.parent)
+    saved = sys.dont_write_bytecode
+    sys.path.insert(0, here)
+    sys.dont_write_bytecode = True
+    try:
+        import check_opf_enforce_platforms as opf_gate
+    except Exception as exc:  # noqa: BLE001  a copy that cannot be imported cannot be compared
+        raise CannotEvaluate("%s cannot be imported (%r)" % (OPF_GATE_REL, exc))
+    finally:
+        sys.dont_write_bytecode = saved
+        if sys.path and sys.path[0] == here:
+            del sys.path[0]
+    loaded = getattr(opf_gate, "__file__", None)
+    if not isinstance(loaded, str) or os.path.realpath(loaded) != os.path.realpath(path):
+        raise CannotEvaluate("the module imported as check_opf_enforce_platforms is %r, not %s"
+                             % (loaded, OPF_GATE_REL))
+    return opf_gate
+
+
+def _parity_failure(opf_gate, tree):
+    """Coexistence-only (COEXISTENCE_ONLY): this holds the duplicated pack path to OPF_GATE_REL and is
+    removed with it by COEXISTENCE_CLEANUP. None when evaluate_pack at the fixture `tree` and the OPF
+    copy's evaluate at the fixture's opf/ tree give the same finding count, or both cannot evaluate;
+    else the failure text."""
+    got = []
+    for path, root, refusal in ((evaluate_pack, tree, CannotEvaluate),
+                                (opf_gate.evaluate, tree / OPF_PREFIX, opf_gate.CannotEvaluate)):
+        try:
+            got.append(len(path(root)))
+        except refusal:
+            got.append(None)
+    if got[0] != got[1]:
+        return ("opf-parity: evaluate_pack gives %s and %s gives %s (a count is the number of findings, "
+                "None is cannot evaluate)" % (got[0], OPF_GATE_REL, got[1]))
+    return None
+
+
+# tempfile names a directory with its prefix plus letters, digits and underscores.
+_BEHAVIOUR_TEMP_RE = re.compile(r"opf-enforce-behaviour-[A-Za-z0-9_]+")
+
+
+def _untemp(finding):
+    """A finding with its throwaway behavioural fixture directory name replaced, so the findings of two
+    evaluations compare equal."""
+    return _BEHAVIOUR_TEMP_RE.sub("opf-enforce-behaviour-*", finding)
 
 
 def self_test():
@@ -1068,6 +1375,19 @@ def self_test():
             got = "raised %r" % (exc,)
         if got != expect:
             failures.append("%s: expected %r, got %r" % (case_id, expect, got))
+    # The OPF tree's copy of the pack-local path, compared with evaluate_pack on every fixture mutant
+    # below; skipped, with its reason printed, only when that file is absent. This source-copy parity
+    # is coexistence-only (COEXISTENCE_ONLY) and goes with evaluate_pack at COEXISTENCE_CLEANUP.
+    opf_gate = None
+    if os.path.lexists(ROOT / OPF_GATE_REL):
+        runs += 1
+        try:
+            opf_gate = _opf_gate()
+        except CannotEvaluate as exc:
+            failures.append("opf-parity-load: %s" % (exc,))
+    else:
+        print("check_opf_enforce_platforms --self-test: SKIP opf-parity: %s is absent, so there is no OPF "
+              "copy of the pack-local path to compare with evaluate_pack" % (OPF_GATE_REL,))
     with tempfile.TemporaryDirectory(prefix="opf-enforce-platforms-") as base:
         for case_id, mutate, expect, count in _vectors():
             runs += 1
@@ -1090,6 +1410,159 @@ def self_test():
             elif isinstance(got, str) or len(got) != count or not any(expect in f for f in got):
                 failures.append("%s: expected %d finding(s), one containing %r, got %r"
                                 % (case_id, count, expect, got))
+            # The same mutated tree through each responsibility path on its own.
+            runs += 1
+            split = _split_failure(case_id, tree)
+            if split is not None:
+                failures.append("%s: %s" % (case_id, split))
+            # The same mutated tree through the OPF tree's copy of the pack-local path.
+            if opf_gate is not None:
+                runs += 1
+                parity = _parity_failure(opf_gate, tree)
+                if parity is not None:
+                    failures.append("%s: %s" % (case_id, parity))
+        # The pack-local path never reads an AIQT generator, and the parent-adapter path never reads the
+        # hook: each stays clean on the real inputs with the other path's inputs removed, while the
+        # other path then cannot evaluate.
+        for case_id, absent, clean_path, other_path in (
+                ("pack-path-without-generators", ADAPTER_INPUT_RELS, evaluate_pack, evaluate_adapters),
+                ("adapter-path-without-hook", (HOOK_REL,), evaluate_adapters, evaluate_pack)):
+            runs += 1
+            try:
+                tree = _fixture(base, case_id)
+                for rel in absent:
+                    (tree / rel).unlink()
+                got = clean_path(tree)
+            except (AssertionError, OSError, ValueError, CannotEvaluate) as exc:
+                got = "raised %r" % (exc,)
+            try:
+                other = other_path(tree)
+            except CannotEvaluate:
+                other = None
+            if got != [] or other is not None:
+                failures.append("%s: expected %s clean and %s unable to evaluate, got %r and %r"
+                                % (case_id, clean_path.__name__, other_path.__name__, got, other))
+        # Each generator PARENT_INTEGRATION_CHECKS names is a parent integration input: removing it
+        # leaves the pack-local path clean and makes the parent integration path unable to evaluate,
+        # naming that generator.
+        for rule, rel in PARENT_INTEGRATION_CHECKS:
+            runs += 1
+            case_id = "parent-integration-named"
+            try:
+                tree = _fixture(base, "%s-%s" % (case_id, Path(rel).stem))
+                (tree / rel).unlink()
+                got = evaluate_pack(tree)
+            except (AssertionError, OSError, ValueError, CannotEvaluate) as exc:
+                got = "raised %r" % (exc,)
+            try:
+                other = evaluate_adapters(tree)
+            except CannotEvaluate as exc:
+                other = str(exc)
+            if got != [] or not isinstance(other, str) or rel not in other:
+                failures.append("%s: %s (%s): expected evaluate_pack clean and evaluate_adapters unable to "
+                                "evaluate naming %s, got %r and %r" % (case_id, rule, rel, rel, got, other))
+        # Acceptance after extraction: a retained parent adapter check consumes the OPF release contract
+        # (the roster, its instructions members and the vocabulary, at the root of the pinned release),
+        # never the parent's opf/ subtree. Each case edits the subtree and the release apart, then gives
+        # the parent integration path's result with the release supplied and on the subtree alone: an
+        # exact finding count and a fragment of one finding, or None where it cannot evaluate. The gate
+        # given the release (release-gate) must give the release result alone: the duplicated pack path
+        # is coexistence-only, so a pack-local defect left in the subtree is not its finding.
+        moved = (CONTRACT_ROSTER_REL, 'destination = "AGENTS.md"', 'destination = "docs/AGENTS.md"')
+        coexist = (CONTRACT_PACK_REL + "/codex/AGENTS.opf.md",
+                   COEXIST_LINE % (GEN_AGENTS_REL, "AGENTS.md") + "\n", "")
+        tier_dropped = (CONTRACT_PACK_REL + "/gemini-cli/GEMINI.opf.md", TIER_LINE + "\n", "")
+        for case_id, source_edit, release_edit, with_release, source_only in (
+                ("release-contract-after-extraction", "extract", None, (0, None), None),
+                ("release-contract-over-stale-source", moved, None, (0, None), (1, "is not the location")),
+                ("release-contract-over-stale-pack", tier_dropped, None, (0, None), (0, None)),
+                ("release-contract-roster-drift", None, moved, (1, "is not the location"), (0, None)),
+                ("release-contract-member-drift", None, coexist, (1, "coexistence is unresolved"), (0, None)),
+                ("release-contract-roster-absent", None, CONTRACT_ROSTER_REL, None, (0, None)),
+                ("release-contract-vocabulary-absent", None, CONTRACT_VOCABULARY_REL, None, (0, None)),
+                ("release-contract-member-absent", None, CONTRACT_PACK_REL + "/gemini-cli/GEMINI.opf.md",
+                 None, (0, None))):
+            runs += 1
+            results = []
+            try:
+                tree = _fixture(base, case_id)
+                release = Path(base) / (case_id + "-release")
+                shutil.copytree(tree / OPF_PREFIX, release)
+                for opf_root, change in ((tree / OPF_PREFIX, source_edit), (release, release_edit)):
+                    if change == "extract":
+                        shutil.rmtree(opf_root)
+                    elif isinstance(change, str):
+                        (opf_root / change).unlink()
+                    elif change is not None:
+                        _edit(opf_root, *change)
+                for supplied in (release, None):
+                    try:
+                        results.append(evaluate_adapters(tree, supplied))
+                    except CannotEvaluate:
+                        results.append(None)
+            except (AssertionError, OSError, ValueError) as exc:
+                failures.append("%s: fixture setup failed (%s)" % (case_id, exc))
+                continue
+            runs += 1
+            try:
+                gate = evaluate(tree, release=release)
+            except CannotEvaluate:
+                gate = None
+            if gate != results[0]:
+                failures.append("%s: release-gate: evaluate with the release expected %r, got %r"
+                                % (case_id, results[0], gate))
+            for got, expect, how in ((results[0], with_release, "with the release"),
+                                     (results[1], source_only, "on the opf/ subtree alone")):
+                if expect is None:
+                    ok = got is None
+                else:
+                    ok = got is not None and len(got) == expect[0] and (
+                        expect[1] is None or any(expect[1] in f for f in got))
+                if not ok:
+                    failures.append("%s: %s expected %r, got %r" % (case_id, how, expect, got))
+        # The coexistence-only parts (COEXISTENCE_ONLY) are marked and removable: each names a function
+        # here whose docstring opens with the mark and names COEXISTENCE_CLEANUP, and with every one of
+        # them replaced by a stub that raises, the parent integration path and the gate given a release
+        # still give the extracted-state results (clean, then one roster-drift finding).
+        for name, what in COEXISTENCE_ONLY:
+            runs += 1
+            part = globals().get(name)
+            doc = getattr(part, "__doc__", None) or ""
+            if not callable(part) or not doc.startswith("Coexistence-only (COEXISTENCE_ONLY)") \
+                    or "COEXISTENCE_CLEANUP" not in doc:
+                failures.append("coexistence-only-marked: %s (%s) is not a function here whose docstring "
+                                "marks it coexistence-only and names COEXISTENCE_CLEANUP" % (name, what))
+
+        def removed(*args, **kwargs):
+            raise AssertionError("a coexistence-only part was called after its removal")
+
+        for case_id, release_edit, expect in (("coexistence-only-removable-clean", None, 0),
+                                              ("coexistence-only-removable-drift", moved, 1)):
+            runs += 1
+            scope = globals()
+            saved = dict((name, scope.get(name)) for name, _ in COEXISTENCE_ONLY)
+            try:
+                tree = _fixture(base, case_id)
+                release = Path(base) / (case_id + "-release")
+                shutil.copytree(tree / OPF_PREFIX, release)
+                shutil.rmtree(tree / OPF_PREFIX)
+                if release_edit is not None:
+                    _edit(release, *release_edit)
+                for name in saved:
+                    scope[name] = removed
+                got = [len(evaluate_adapters(tree, release)), len(evaluate(tree, release=release))]
+            except (AssertionError, OSError, ValueError, CannotEvaluate) as exc:
+                got = "raised %r" % (exc,)
+            finally:
+                for name, value in saved.items():
+                    if value is None:
+                        scope.pop(name, None)
+                    else:
+                        scope[name] = value
+            if got != [expect, expect]:
+                failures.append("%s: expected %d finding(s) from evaluate_adapters and from evaluate with "
+                                "the release, every coexistence-only part removed, got %r"
+                                % (case_id, expect, got))
         # Why the deny-hook member must be the canonical path (deny-member-relocated-copy): the same
         # bytes at another depth guard other trees, so the copy allows a write the canonical hook denies.
         runs += 1
