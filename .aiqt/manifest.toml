@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.0.5"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "77c6159949698ed1cd57d77eb4a48af95a4b5a2e64dd2e8b2c42b51677e04410"
+tree-sha256 = "f90e2c734e6328c644edeb7fdbe93506a42d70b7451c851d5313515136fee1cf"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -73,7 +73,7 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
 bytes = 596758
-sha256 = "26b1e94d1fe7622e62d8e5c7d32269a12e3fd53b940feaa0a9b87ed626d58181"
+sha256 = "0af9236280d658fb6486b5218d6acc0c792a4ec46bf36c58f23e397580f31c40"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -4048,7 +4048,7 @@ sha256 = "3a7c8983ab9fca0e04dc69f88afef82b0ff9e533dc150c86f250aae2c3a4d3d3"
 [[sources]]
 path = "site/tech-details.html"
 bytes = 22774
-sha256 = "6a6bc010c6eaf387fca8e509c2c7f471060402c9670531121fa2e9176488e9ca"
+sha256 = "769c96564fee014813645558f229988369b0188ce696222446bbeafcb783ddda"
 
 [[sources]]
 path = "site/theme.js"
@@ -4323,7 +4323,7 @@ sha256 = "b1680dac0bca7cdd6be05e454bbcc7b034f7d66859119863e2df1caee2c06694"
 [[sources]]
 path = "tools/check_overclaim.py"
 bytes = 283851
-sha256 = "933db584f80854e68ef4be88aac0a247b74b76f66443cf8653d89eb37106f02b"
+sha256 = "dc85b05328462b53474e38ad12b4fe86e6833207b1ac6edcdd49ba41076191c3"
 
 [[sources]]
 path = "tools/check_portability.py"
@@ -4418,7 +4418,7 @@ sha256 = "23e7cb6a038248d77cf7e44822f2880299f1e37524da52e345adf71beb1ee7bd"
 [[sources]]
 path = "tools/check_site_versions.py"
 bytes = 22186
-sha256 = "1175d7eaddb28a6c59696b2ef6501b576ce1c92fd21d35507ec5d10912be411f"
+sha256 = "6c420b0e314c571738363f79fc57bd9164bdb132c7a76ec94383b199a4dc0422"
 
 [[sources]]
 path = "tools/check_sitemap.py"
