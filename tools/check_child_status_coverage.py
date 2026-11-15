@@ -79,8 +79,9 @@ with exit 2). This gate holds where it runs:
      value, a trailing comment, a tab in the indentation) is a finding, never a pass. Inside it, every value
      that names Python sits in a step with a run: key, after its job's one setup-python step and the probe
      step right after that; the probe step is exactly PROBE_STEP (its name, shell: bash and run, and no
-     other key, so no if: and no continue-on-error). In the five host-patch jobs (HOST_PATCH_JOBS) of the
-     one workflow HOST_PATCH_WORKFLOW only, the Python host pin step, exactly HOST_PIN_STEP, may stand
+     other key, so no if: and no continue-on-error). In the host-patch jobs (HOST_PATCH_JOBS: the OPF job,
+     the git-fixture-env core job and each shard job of the three git-fixture-env config lanes) of the one
+     workflow HOST_PATCH_WORKFLOW only, the Python host pin step, exactly HOST_PIN_STEP, may stand
      between setup-python and the probe (tools/check_python_host_pin.py holds that step as the one right
      after setup-python there), and the probe step right after it is then exactly HOST_PROBE_STEP (the same
      shape, its name saying it runs after that gate); in the scope job SCOPE_JOB_ID of that same workflow
@@ -310,15 +311,21 @@ WORKFLOWS_REL = ".github/workflows"
 # The probe step, exactly: these keys in this order with these values, and no other key.
 PROBE_STEP = (("name", "Child exit status observable (before any gate)"), ("shell", "bash"),
               ("run", "python3 -I -B " + CANONICAL_REL))
-# The five host-patch jobs, the one workflow they live in and the Python host pin step, exactly:
+# The host-patch jobs, the one workflow they live in and the Python host pin step, exactly:
 # tools/check_python_host_pin.py holds that step as the one right after each of these jobs' setup-python
 # step, so in these jobs of HOST_PATCH_WORKFLOW only, exactly that step may stand between setup-python and
 # the probe, and the probe step right after it is HOST_PROBE_STEP, the probe with the name that placement
 # makes true. The exception is keyed on the workflow path and the job id together, so a job with any of these
-# ids in any other workflow gets the plain reading; the exactness of both steps is the bound.
+# ids in any other workflow gets the plain reading; the exactness of both steps is the bound. The jobs are the
+# OPF job, the git-fixture-env core job, then each shard job of the three git-fixture-env config lanes:
+# HOST_PATCH_SHARDS maps each lane's suite id to its shard count N, and shard K of N runs as job
+# <suite id>-shard-K-host-patch.
 HOST_PATCH_WORKFLOW = WORKFLOWS_REL + "/quality.yml"
-HOST_PATCH_JOBS = ("opf-host-patch", "git-fixture-env-core-host-patch", "git-fixture-env-config-combined-host-patch",
-                   "git-fixture-env-config-malformed-host-patch", "git-fixture-env-config-system-host-patch")
+HOST_PATCH_SHARDS = {"git-fixture-env-config-combined": 12, "git-fixture-env-config-malformed": 12,
+                     "git-fixture-env-config-system": 19}
+HOST_PATCH_JOBS = ("opf-host-patch", "git-fixture-env-core-host-patch",
+                   *("{}-shard-{}-host-patch".format(lane, shard) for lane, count in HOST_PATCH_SHARDS.items()
+                     for shard in range(1, count + 1)))
 HOST_PIN_STEP = (("name", "Python host pin"), ("shell", "bash"),
                  ("run", "python3 -I -B tools/check_python_host_pin.py"))
 HOST_PROBE_STEP = (("name", "Child exit status observable (after the host pin gate)"), ("shell", "bash"),
@@ -2249,10 +2256,16 @@ def _vectors(module, trees, texts, canonical_tree):
     def quality_workflow(key):
         return m.workflow_findings(m.HOST_PATCH_WORKFLOW, texts[key])
 
-    # The five host-patch job ids, written out so that an id added to or dropped from HOST_PATCH_JOBS turns a
-    # vector red; each id is held by the host-pin order under it, accepted in quality.yml only.
-    host_jobs = ("opf-host-patch", "git-fixture-env-core-host-patch", "git-fixture-env-config-combined-host-patch",
-                 "git-fixture-env-config-malformed-host-patch", "git-fixture-env-config-system-host-patch")
+    # The host-patch job ids, built here from their own literal lane table (suite id to shard count), never
+    # from HOST_PATCH_JOBS or HOST_PATCH_SHARDS, so that an id added to or dropped from HOST_PATCH_JOBS turns a
+    # vector red; each id is held by the host-pin order under it, accepted in quality.yml only. Each config
+    # lane's vector holds every shard job of that lane, so a shard dropped anywhere in a lane is red.
+    host_shards = {"git-fixture-env-config-combined": 12, "git-fixture-env-config-malformed": 12,
+                   "git-fixture-env-config-system": 19}
+    host_lanes = {lane: tuple("{}-shard-{}-host-patch".format(lane, shard) for shard in range(1, count + 1))
+                  for lane, count in host_shards.items()}
+    host_jobs = ("opf-host-patch", "git-fixture-env-core-host-patch",
+                 *(job for jobs in host_lanes.values() for job in jobs))
 
     def host_job_held(job):
         text = texts["host-pin-before-probe"].replace("opf-host-patch", job, 1)
@@ -2405,9 +2418,12 @@ def _vectors(module, trees, texts, canonical_tree):
         ("launchers/workflow-host-pin-jobs-exact", lambda: sorted(m.HOST_PATCH_JOBS) == sorted(host_jobs)),
         ("launchers/workflow-host-pin-job-opf", lambda: host_job_held(host_jobs[0])),
         ("launchers/workflow-host-pin-job-core", lambda: host_job_held(host_jobs[1])),
-        ("launchers/workflow-host-pin-job-config-combined", lambda: host_job_held(host_jobs[2])),
-        ("launchers/workflow-host-pin-job-config-malformed", lambda: host_job_held(host_jobs[3])),
-        ("launchers/workflow-host-pin-job-config-system", lambda: host_job_held(host_jobs[4])),
+        ("launchers/workflow-host-pin-job-config-combined",
+         lambda: all(host_job_held(job) for job in host_lanes["git-fixture-env-config-combined"])),
+        ("launchers/workflow-host-pin-job-config-malformed",
+         lambda: all(host_job_held(job) for job in host_lanes["git-fixture-env-config-malformed"])),
+        ("launchers/workflow-host-pin-job-config-system",
+         lambda: all(host_job_held(job) for job in host_lanes["git-fixture-env-config-system"])),
         ("launchers/workflow-scope-decide-before-probe", lambda: not quality_workflow("scope-decide-before-probe")),
         ("launchers/workflow-scope-decide-other-job", lambda: quality_workflow("scope-decide-other-job")
          == [not_probe_in(m.HOST_PATCH_WORKFLOW, "lone")]),
@@ -2685,13 +2701,19 @@ MUTANTS = (
     ("host-patch-job-extra", '("opf-host-patch", ', '("opf-host-patch", "git-fixture-env-host-patch", ',
      "launchers/workflow-host-pin-jobs-exact"),
     ("host-patch-job-opf", '("opf-host-patch", ', "(", "launchers/workflow-host-pin-job-opf"),
-    ("host-patch-job-core", '"git-fixture-env-core-host-patch", ', "", "launchers/workflow-host-pin-job-core"),
-    ("host-patch-job-config-combined", '"git-fixture-env-config-combined-host-patch",', "",
+    ("host-patch-job-core", '"git-fixture-env-core-host-patch",', "", "launchers/workflow-host-pin-job-core"),
+    ("host-patch-job-config-combined", '{"git-fixture-env-config-combined": 12, ', "{",
      "launchers/workflow-host-pin-job-config-combined"),
-    ("host-patch-job-config-malformed", '"git-fixture-env-config-malformed-host-patch", ', "",
+    ("host-patch-job-config-malformed", '"git-fixture-env-config-malformed": 12,', "",
      "launchers/workflow-host-pin-job-config-malformed"),
-    ("host-patch-job-config-system", ', "git-fixture-env-config-system-host-patch")', ")",
+    ("host-patch-job-config-system", '"git-fixture-env-config-system": 19}', "}",
      "launchers/workflow-host-pin-job-config-system"),
+    # One shard job dropped from a lane: the last (the shard count reduced) and one in the middle.
+    ("host-patch-job-last-shard", '"git-fixture-env-config-system": 19}', '"git-fixture-env-config-system": 18}',
+     "launchers/workflow-host-pin-job-config-system"),
+    ("host-patch-job-middle-shard", "for shard in range(1, count + 1)))",
+     'for shard in range(1, count + 1) if (lane, shard) != ("git-fixture-env-config-malformed", 6)))',
+     "launchers/workflow-host-pin-job-config-malformed"),
     ("workflow-scope-decide-accept",
      "elif (rel == HOST_PATCH_WORKFLOW and job == SCOPE_JOB_ID and probe < len(steps)\n"
      "                and _step_pairs(steps[probe]) == SCOPE_DECIDE_STEP):",

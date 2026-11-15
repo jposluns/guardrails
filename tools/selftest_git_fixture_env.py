@@ -66,6 +66,9 @@ nothing and exits 2 (cannot evaluate).
   <runner>.py                              exit 0 on pass, 1 on assertion failure
   <runner>.py --execution-report ABS_PATH  also write the executed check IDs as JSON
 
+The three config-lane runners also take --shard K/N (run shard K of N of the lane's members) and
+--list-shard K/N (print that shard, run nothing); see _config_lane_main and their docstrings.
+
 Exit 2 is cannot-evaluate: a harness/setup error, including bad arguments, no git binary, no writable
 temp directory, a failed report write, or an unreadable, malformed, or suite-missing expectation
 manifest; and a bounded child that reached its time bound (see _run_bounded): a config-injection
@@ -764,6 +767,23 @@ def _command_identity(argv):
     return (script, *argv[1:])
 
 
+def _suite_identity(argv):
+    """_command_identity, except that one shard of a sharded suite (the execution gate's
+    --suite <id> --shard K/N, <id> in its SHARD_COUNTS and N that suite's registered count) reads
+    as the plain --suite <id> launch it is a part of, so a CI shard line gets the same recursion
+    exclusion as the plain suite line. Any other --shard line keeps its whole identity, which the
+    roster refuses as an unparseable suite invocation."""
+    identity = _command_identity(argv)
+    if (len(identity) == 5 and identity[0] == "tools/check_selftest_execution.py"
+            and identity[1] == "--suite" and identity[3] == "--shard"):
+        from check_selftest_execution import SHARD_COUNTS, _parse_shard
+        shard = _parse_shard(identity[4])
+        if (identity[2] in SHARD_COUNTS and shard is not None
+                and shard[1] == SHARD_COUNTS[identity[2]]):
+            return identity[:3]
+    return identity
+
+
 def _registered_selftests(root=ROOT):
     """Parse every registry before selecting self-tests; preserve exact script arguments.
     Reuse CI-parity's fail-closed shell/YAML grammar. The standalone runner is
@@ -846,9 +866,9 @@ def _registered_selftests(root=ROOT):
         raise ValueError("cannot read suite runner registry")
     runners = {row["id"]: row["runner"] for row in suites}
     for argv in sorted(commands):
-        identity = _command_identity(argv)
+        identity = _suite_identity(argv)
         if identity[0] == "tools/check_selftest_execution.py" and "--suite" in identity:
-            if len(argv) != 3 or argv[1] != "--suite" or argv[2] not in runners:
+            if len(identity) != 3 or argv[1] != "--suite" or argv[2] not in runners:
                 raise ValueError("unparseable suite invocation: {!r}".format(argv))
             if identity not in CONFIG_EXCLUSIONS["all"]:
                 commands.add((runners[argv[2]],))
@@ -858,13 +878,13 @@ def _registered_selftests(root=ROOT):
     for suite_id, direct in CONFIG_DIRECT_SELFTESTS.items():
         if suite_id not in runners or direct not in commands:
             raise ValueError("stale direct self-test entry: {!r}".format(suite_id))
-    identities = {_command_identity(argv) for argv in commands}
+    identities = {_suite_identity(argv) for argv in commands}
     for lane, exclusions in CONFIG_EXCLUSIONS.items():
         for argv, reason in exclusions.items():
             if argv not in identities or not reason.strip():
                 raise ValueError("stale or unreasoned {} exclusion: {!r}".format(lane, argv))
     commands = {argv for argv in commands
-                if _command_identity(argv) not in CONFIG_EXCLUSIONS["all"]}
+                if _suite_identity(argv) not in CONFIG_EXCLUSIONS["all"]}
     if not commands:
         raise ValueError("empty config-injection roster")
     for argv in commands:
@@ -1070,6 +1090,215 @@ def _member_result(results, member, column):
         return "missing registered member: " + member
     want = 0 if column == 0 else b""
     return want if all(value == want for value in values) else values
+
+
+# ---------- shards of a config lane (--shard K/N, --list-shard K/N) ----------
+# A config lane runs every member of its roster in one command, hours at a loaded host, which
+# can pass a per-command bound. --shard K/N runs only shard K of N of the lane's members, so N
+# commands carry the lane; --list-shard K/N prints that shard's members and runs nothing
+# (_config_lane_main). SHARD is (K, N) in a sharded run and None otherwise; _shard_select records
+# the lane's members and this run's shard of them in SHARD_RUN; SHARD_LEFT collects the check ids
+# of the members another shard runs (_shard_leaves), which _execution_set_findings excuses.
+SHARD_MAX = 64
+SHARD = None
+SHARD_RUN = {}
+SHARD_LEFT = set()
+_CONFIG_USAGE = (
+    "usage: a git-fixture-env config-lane runner accepts [--shard K/N] [--execution-report "
+    "ABS_PATH] (each at most once, in either order), or --list-shard K/N alone; K and N are "
+    "decimal integers with 1 <= K <= N <= {} and the report path must be absolute".format(
+        SHARD_MAX))
+
+
+def _parse_shard(text):
+    """(K, N) for the text K/N, each written in ASCII decimal digits with no sign, space or
+    leading zero, and 1 <= K <= N <= SHARD_MAX; None for any other text, which the runner refuses
+    as a usage error (exit 2), never a full or an empty run."""
+    if not isinstance(text, str) or text.count("/") != 1:
+        return None
+    parts = text.split("/")
+    if not all(part and part[0] in "123456789" and len(part) <= len(str(SHARD_MAX))
+               and all(char in "0123456789" for char in part) for part in parts):
+        return None
+    k, n = int(parts[0]), int(parts[1])
+    return (k, n) if 1 <= k <= n <= SHARD_MAX else None
+
+
+def _shard_members(roster, k, n):
+    """The entries of roster that shard k of n runs, in roster order: the entry at zero-based
+    position i belongs to shard (i mod n) + 1. The rule reads only positions in the order given
+    (the registered roster is sorted, _registered_selftests), never a hash, clock or environment
+    value, so every run deals the same entries to the same shard; dealing in turn spreads
+    neighbouring entries across the shards, whose sizes differ by at most one entry."""
+    return tuple(argv for index, argv in enumerate(roster) if index % n == k - 1)
+
+
+def _shard_partition_problems(roster, n, members=None):
+    """The problems with shards 1..n of roster (dealt by members, default _shard_members) as a
+    partition of it: an entry in more shards than the roster holds it, a roster entry in no shard,
+    a shard entry outside the roster; [] when the shards together are exactly the roster and no
+    entry is in two of them."""
+    members = _shard_members if members is None else members
+    roster = tuple(roster)
+    homes = {}
+    for k in range(1, n + 1):
+        for argv in members(roster, k, n):
+            homes.setdefault(argv, []).append(k)
+    problems = []
+    for argv, shards in homes.items():
+        if argv not in roster:
+            problems.append("not in the roster: {!r} (shards {})".format(argv, shards))
+        elif len(shards) != roster.count(argv):
+            problems.append("in shards {}: {!r}".format(shards, argv))
+    problems.extend("in no shard: {!r}".format(argv) for argv in roster if argv not in homes)
+    return problems
+
+
+def _config_lane_roster(lane, roster):
+    """The members lane runs, in roster order: every member of roster (the registered roster,
+    _registered_selftests()) for the combined and system lanes, and every member outside
+    CONFIG_EXCLUSIONS["malformed"] for the malformed lane."""
+    if lane not in ("combined", "malformed", "system"):
+        raise ValueError("unknown config lane: {!r}".format(lane))
+    excluded = CONFIG_EXCLUSIONS["malformed"] if lane == "malformed" else {}
+    return tuple(argv for argv in roster if _command_identity(argv) not in excluded)
+
+
+def _shard_select(members, sink=None):
+    """members (the lane's roster, _config_lane_roster) as this run executes them: all of them,
+    unchanged, in an unsharded run (SHARD None); else shard K of N of them (_shard_members),
+    recorded in SHARD_RUN for _shard_leaves and _shard_scope and announced on a SHARD line, or
+    None, after a harness error line on sink (default sys.stderr), when that shard holds no
+    member: an empty shard is refused (the lane returns 2), never run as a pass."""
+    if SHARD is None:
+        return members
+    k, n = SHARD
+    selected = _shard_members(members, k, n)
+    if not selected:
+        print("SELF-TEST HARNESS ERROR: shard {}/{} holds no member of the {}-member lane roster;"
+              " nothing was run (cannot evaluate)".format(k, n, len(members)),
+              file=sys.stderr if sink is None else sink)
+        return None
+    SHARD_RUN.update(members=tuple(members), selected=selected)
+    print("SHARD {}/{}: this run executes {} of the lane's {} members; the other shards run the"
+          " rest".format(k, n, len(selected), len(members)), flush=True)
+    return selected
+
+
+def _shard_leaves(member, check_ids):
+    """True when this sharded run leaves member (a registered script path) to another shard,
+    after adding check_ids, the lane's checks of that member, to SHARD_LEFT: the lane's roster
+    holds the member and this run's shard holds none of its registered argument variants. False
+    in an unsharded run, for a member this shard runs (its checks then cover the variants this
+    shard holds) and for a member outside the lane's roster, which is then treated exactly as an
+    unsharded run treats it: the _member_result loops report it missing, and the malformed
+    fsmonitor loop runs (member, "--self-test") directly (_run_config_member) rather than through
+    _member_result, as it does unsharded."""
+    if SHARD is None:
+        return False
+    if "selected" not in SHARD_RUN:
+        raise ValueError("a sharded lane asked about a member before selecting its shard")
+    held = {_command_identity(argv)[0] for argv in SHARD_RUN["selected"]}
+    lane = {_command_identity(argv)[0] for argv in SHARD_RUN["members"]}
+    if member in held or member not in lane:
+        return False
+    SHARD_LEFT.update(check_ids)
+    return True
+
+
+def _shard_scope(roster):
+    """The entries of roster this run's shard executes, in roster order: roster itself in an
+    unsharded run."""
+    if SHARD is None:
+        return roster
+    if "selected" not in SHARD_RUN:
+        raise ValueError("a sharded lane scoped a roster before selecting its shard")
+    selected = set(SHARD_RUN["selected"])
+    return [argv for argv in roster if argv in selected]
+
+
+def _execution_set_findings(expected, executed, left):
+    """The execution-set findings of a run: each expected check id neither executed nor left to
+    another shard (left, SHARD_LEFT), each executed id outside expected, and, in a sharded run,
+    each left id outside expected or also executed. An unsharded run leaves nothing, so its
+    findings are the missing and extra ids alone. RESIDUAL: excusal is per run. Nothing here, or
+    anywhere in this repository yet, confirms that the shard a left id was left to ran, at the same
+    commit and with the same N, so a lane counts as fully covered only when every shard 1..N
+    passed at one commit; a single sharded pass covers that shard alone."""
+    return (["execution-set/missing: {}".format(check_id)
+             for check_id in sorted(expected - executed - left)]
+            + ["execution-set/extra: {}".format(check_id)
+               for check_id in sorted(executed - expected)]
+            + ["execution-set/left-unexpected: {}".format(check_id)
+               for check_id in sorted(left - expected)]
+            + ["execution-set/left-and-run: {}".format(check_id)
+               for check_id in sorted(left & executed)])
+
+
+def _config_argv(argv):
+    """(report_path, shard, list_only) for a config-lane runner's arguments, or None for a usage
+    error. Accepted: none; --execution-report ABS_PATH; --shard K/N; those two once each in either
+    order; or --list-shard K/N alone. A shard value _parse_shard refuses, a repeated or unknown
+    option, a missing value, a relative report path, or --list-shard beside anything else is a
+    usage error."""
+    argv = list(argv)
+    if len(argv) == 2 and argv[0] == "--list-shard":
+        shard = _parse_shard(argv[1])
+        return None if shard is None else (None, shard, True)
+    if len(argv) % 2:
+        return None
+    report_path, shard, seen = None, None, set()
+    for option, value in zip(argv[0::2], argv[1::2]):
+        if option in seen:
+            return None
+        seen.add(option)
+        if option == "--execution-report" and os.path.isabs(value):
+            report_path = value
+        elif option == "--shard" and _parse_shard(value) is not None:
+            shard = _parse_shard(value)
+        else:
+            return None
+    return (report_path, shard, False)
+
+
+def _list_shard(lane, shard, out=None, err=None):
+    """--list-shard K/N: print shard K of N of lane's members (_config_lane_roster over
+    _registered_selftests(), dealt by _shard_members, the selection a --shard K/N run executes),
+    one registered command per line on out (default sys.stdout), then a count line on err
+    (default sys.stderr). Nothing is run. Returns 0, an empty shard included (the listing is the
+    answer), or 2, after a harness error line naming the exception type, when building the roster
+    raises an Exception (fail closed; KeyboardInterrupt and SystemExit still propagate)."""
+    k, n = shard
+    try:
+        members = _config_lane_roster(lane, _registered_selftests())
+    except Exception as exc:
+        print("SELF-TEST HARNESS ERROR: cannot build the config roster: {}: {}".format(
+            type(exc).__name__, exc), file=sys.stderr if err is None else err)
+        return 2
+    selected = _shard_members(members, k, n)
+    for argv in selected:
+        print(" ".join(argv), file=sys.stdout if out is None else out)
+    print("shard {}/{} of the {} lane: {} of {} members (nothing was run)".format(
+        k, n, lane, len(selected), len(members)), file=sys.stderr if err is None else err)
+    return 0
+
+
+def _config_lane_main(argv, lane, lanes):
+    """A config-lane runner's entry over its arguments (_config_argv; a usage error prints the
+    usage and exits 2 with nothing run): --list-shard K/N prints that shard of the lane
+    (_list_shard) and runs nothing; otherwise main() runs the lane, shard K of N of its members
+    when --shard K/N was given, and every member, exactly as before the option existed, when it
+    was not."""
+    global SHARD
+    parsed = _config_argv(argv)
+    if parsed is None:
+        print(_CONFIG_USAGE, file=sys.stderr)
+        sys.exit(2)
+    report_path, shard, list_only = parsed
+    if list_only:
+        return _list_shard(lane, shard)
+    SHARD = shard
+    return main(report_path, lanes)
 
 
 def _system_pin_probe(base, lifecycle):
@@ -2681,7 +2910,11 @@ _GROUP_MEMBER_FIXTURE = "\n".join((
 # the scenario itself, deliberate (_DELIBERATE_EMPTY_SEND), so nothing stands down in a
 # healthy run and a producer tied to those facts on code this run executes, not also
 # dependent on any other state that differs from a slow "failed" run, mismatches
-# definitely (what it does not reach is THE RESIDUAL stated in _allowlist_producers);
+# definitely (THE RESIDUAL, stated in _allowlist_producers, is not what this run misses
+# but what neither net catches: a producer that leaves every compared field at its want
+# in every scenario run within its bounds, this one included, and that the producer-map
+# oracle neither refuses ("unrecognized") nor sees through a change to a pinned
+# signature);
 # only a positive control slower than its 60 s bound is recorded (as the reached bound
 # "positive control a observed") and stands the run down, cannot-evaluate, never definite. Every
 # wait the child makes is bounded, and an expiry is recorded under one of two keys by WHO sets
@@ -4022,8 +4255,11 @@ def _allowlist_producers(source=None):
     "failed-refused" took to release its lock holders, a length no scenario arranges and a
     slow positive control, which leaves stalls empty, does not produce); round 25's
     pinned_version, above. The nine residual probes are recorded in "producer-oracle" at
-    their empty diff, so an oracle or scenario change that starts catching one fails that
-    pin and must update this text. Only a run in which the residual producer's condition
+    their empty diff, so an oracle change that alters a pinned producer difference (one of
+    these nine leaving its empty diff included) fails that pin and must update this text; a
+    scenario change is not detected by these static probes (each only parses a mutated
+    child source, none runs a scenario), so it needs the runtime residual, THE RESIDUAL
+    above, reassessed by hand. Only a run in which the residual producer's condition
     holds where the producer runs can catch it (a slow positive control is one such run,
     for a condition it alters: a "failed" run whose member-a positive control reaches its
     60 s bound can leave the field wrong beside the recorded timeout and, the allowlist
@@ -4311,8 +4547,12 @@ def _slow_control_record(source=None):
     reads as a missing report, not a timeout; and any change to how the report is written
     (a rebinding or replacement of print, sys.stdout or json.dumps). THE NOT READ CLASS,
     exact by construction: this reader does not read ANY edit, by any route, that changes
-    what the pinned try or the gate evaluates, or whether the record reaches the printed
-    report, without a change it parses as a fact that does not hold (it then still gives
+    what the pinned try or the gate evaluates, or whether the record reaches the extras the
+    parent decodes (_member_close_controls in tools/selftest_git_fixture_env_core.py takes
+    the text after the LAST "PROBE-REPORT " in the child's stdout, the whole stdout when it
+    has none, up to the next newline, and json.loads it as the five fields outcome,
+    registered, states, timely and extra; a decode or unpack failure is "no report"),
+    without a change it parses as a fact that does not hold (it then still gives
     []); every route named above is an EXAMPLE of that class, not its bound. The probes
     exceptbind and ctxclass (the rebinding route), wildcard and mainattr (the wildcard and
     own-globals routes), exitafter, clsname (the attribute-store route) and funcglobals
@@ -7841,10 +8081,10 @@ def _suite_main(report_path, lanes):
     expected = _expected_check_ids()
     if expected is None:
         return 2
-    for check_id in sorted(expected - _EXECUTED_SET):
-        FAILURES.append("execution-set/missing: {}".format(check_id))
-    for check_id in sorted(_EXECUTED_SET - expected):
-        FAILURES.append("execution-set/extra: {}".format(check_id))
+    FAILURES.extend(_execution_set_findings(expected, _EXECUTED_SET, SHARD_LEFT))
+    if SHARD is not None:
+        print("SHARD {}/{}: {} check(s) left to the other shards; a verdict covers this shard's"
+              " members only".format(SHARD[0], SHARD[1], len(SHARD_LEFT)), flush=True)
     # 0 here is not yet a pass: main() prints the PASS line only after its close (_final_verdict).
     return _verdict(FAILURES, CANNOT_EVALUATE, TIMEOUT_CAUSED)
 
