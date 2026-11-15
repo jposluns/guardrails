@@ -12341,7 +12341,8 @@ def _gitalias_oracle_cases(tmp):
 # the doctor) so a reworded line fails the hook-coverage checks.
 _HOOK_COVERAGE_HONESTY = ("coverage of the named files only; which files the session loads is decided by "
                           "Claude Code, which this check does not observe; only the script's file name is "
-                          "checked (any path ending /aiqt_hooks.py counts), not that it is the pack's dispatcher")
+                          "checked (a path counts on its file name alone), not that it is the pack's dispatcher, "
+                          "and a variable in the path whose value begins with \"-\" is not caught")
 # This repository's .claude/settings.json as of SEED-SESSION-HOOK-COVERAGE, pinned as text: the launch-directory
 # shape that registers gensrc_guard and nothing else (no orch_ask_guard).
 _HOOK_COVERAGE_GRC_SETTINGS = {"hooks": {"PreToolUse": [{"matcher": "Write|Edit|MultiEdit|Bash", "hooks": [
@@ -12541,6 +12542,95 @@ def _hook_coverage_cases(tmp):
     check("hook-coverage/require-second-word-is-a-file-exits-2",
           (code, honest, "HOOK COVERAGE: cannot evaluate: gensrc-edit-guard: cannot be read" in text),
           (2, True, True))
+
+    def _coverage_rows(prefix, obj_for, cases):
+        rows = []
+        for label, value in cases:
+            code, text, honest = _run(plain_root, "--hook-coverage",
+                                      _write("{}-{}.json".format(prefix, label), obj_for(value)),
+                                      "--require", "orch-ask-unattended")
+            rows.append((label, code, honest, "MISSING: orch-ask-unattended:" in text,
+                         "covered: orch-ask-unattended" in text))
+        return rows
+
+    def _ask_plugin(script):
+        return {"hooks": {"PreToolUse": [{"matcher": "AskUserQuestion", "hooks": [
+            {"type": "command", "command": "python3", "args": ["-I", script, "orch_ask_guard"], "timeout": 10}]}]}}
+
+    # An expansion's value is unknown to the check, so an unset one in front of an option word leaves python3
+    # running -c or -m code and no script (QA round 2 N1): the path must start with "/", "./" or an expansion
+    # followed directly by "/", and every expansion must be followed directly by "/". Each form reads MISSING
+    # and exits 1, in the settings and the plugin shape.
+    settings_unset = (
+        ("unset-before-c", 'python3 -I "$AIQT_REVIEW_UNSET"-c"import sys; print(1)#/aiqt_hooks.py" orch_ask_guard'),
+        ("unset-braced-before-c",
+         'python3 -I "${AIQT_REVIEW_UNSET}"-c"import sys; print(1)#/aiqt_hooks.py" orch_ask_guard'),
+        ("unset-before-m", 'python3 -I "$AIQT_REVIEW_UNSET"-mthis"#/aiqt_hooks.py" orch_ask_guard'),
+        ("option-inside-quotes", 'python3 -I "$AIQT_REVIEW_UNSET-c"/aiqt_hooks.py orch_ask_guard'),
+        ("relative", "python3 -I plugin/x/aiqt_hooks.py orch_ask_guard"))
+    check("hook-coverage/settings-unset-expansion-not-covered-exits-1",
+          _coverage_rows("unset-settings", _with_ask_command, settings_unset),
+          [(label, 1, True, True, False) for label, _cmd in settings_unset])
+    plugin_unset = (
+        ("unset-braced-before-c", "${AIQT_REVIEW_UNSET}-cpass #/hooks/scripts/aiqt_hooks.py"),
+        ("unset-before-c", "$AIQT_REVIEW_UNSET-cpass #/hooks/scripts/aiqt_hooks.py"),
+        ("leading-space", " -cpass #/hooks/scripts/aiqt_hooks.py"),
+        ("dollar-outside-expansion", "$(true)/hooks/scripts/aiqt_hooks.py"))
+    check("hook-coverage/plugin-unset-expansion-not-covered-exits-1",
+          _coverage_rows("unset-plugin", _ask_plugin, plugin_unset),
+          [(label, 1, True, True, False) for label, _arg in plugin_unset])
+    # Their passing twin: an expansion followed directly by "/" (outside or inside the quotes), a "./" path, and
+    # the plugin's ${CLAUDE_PLUGIN_ROOT} and $NAME forms each still read covered.
+    twin_settings = (
+        ("rendered", ask_cmd),
+        ("braced", 'python3 -I "${CLAUDE_PROJECT_DIR}"/plugin/x/hooks/scripts/aiqt_hooks.py orch_ask_guard'),
+        ("inside-quotes", 'python3 -I "$CLAUDE_PROJECT_DIR/plugin/x/aiqt_hooks.py" orch_ask_guard'),
+        ("dot-slash", "python3 -I ./plugin/x/aiqt_hooks.py orch_ask_guard"))
+    twin_plugin = (("plugin-rendered", "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/aiqt_hooks.py"),
+                   ("plugin-plain", "$CLAUDE_PLUGIN_ROOT/hooks/scripts/aiqt_hooks.py"))
+    check("hook-coverage/expansion-then-slash-twin-exits-0",
+          _coverage_rows("twin-settings", _with_ask_command, twin_settings)
+          + _coverage_rows("twin-plugin", _ask_plugin, twin_plugin),
+          [(label, 0, True, False, True) for label, _v in twin_settings + twin_plugin])
+    # The disclosure matches the check (QA round 2 N1, N3): ORCHESTRATION.md and the honesty line say a variable
+    # whose value begins with "-" is not caught, and neither keeps a sentence the check does not hold (that a
+    # path beginning with "-" never counts in either shape, or that any path ending /aiqt_hooks.py counts, which
+    # refused shell text such as /dev/null;#/aiqt_hooks.py does not). The twin elements: the identity paragraph
+    # is still there, and that shell-text path still reads MISSING.
+    code, text, honest = _run(plain_root, "--hook-coverage", _write("n3-shell-text.json", _with_ask_command(
+        "python3 -I /dev/null;#/aiqt_hooks.py orch_ask_guard")), "--require", "orch-ask-unattended")
+    check("hook-coverage/value-residual-disclosed-no-overclaim",
+          ("For the same reason a variable whose value itself begins with `-` is not caught" in orch_doc,
+           'whose value begins with "-" is not caught' in text,
+           "In either shape a path that begins with `-` (an option to `python3`) never counts." in orch_doc,
+           "any path ending /aiqt_hooks.py counts" in orch_doc,
+           "any path ending /aiqt_hooks.py counts" in text,
+           "The script's identity is not checked." in orch_doc, code, honest,
+           "MISSING: orch-ask-unattended:" in text),
+          (True, True, False, False, False, True, 1, True, True))
+    # The coverage comments in tools/gen_hooks.py claim no more than the check does (QA round 2 N2): the
+    # self-test summary names a script not named aiqt_hooks.py, not "another script" (a different file of that
+    # name counts), and the parser comment no longer says nothing that could run anything but the dispatcher
+    # counts. The twin element: the parser comment still says the file name alone is checked.
+    gen_src = (repo_root() / "tools" / "gen_hooks.py").read_text(encoding="utf-8")
+    check("hook-coverage/gen-hooks-comments-no-overclaim",
+          ("never counts a handler under a script not named aiqt_hooks.py" in gen_src,
+           "never counts a handler under another script" in gen_src,
+           "could run anything but the dispatcher never counts" in gen_src,
+           "Only the script's FILE NAME is checked" in gen_src),
+          (True, False, False, True))
+    # Wrapping (QA round 2 N4): every prose line of ORCHESTRATION.md's hook-coverage section stays within 110
+    # characters (the indented command and honesty line are exempt), and the reader's docstring has no short
+    # interior line. The twin element: the section and the docstring are found.
+    lines = orch_doc.split("\n")
+    heads = ("## Hook coverage at launch and resume", "## Platforms without hooks")
+    start, end = (lines.index(head) if head in lines else 0 for head in heads)
+    section = [line for line in lines[start:end] if not line.startswith("    ")]
+    read_doc = [line.strip() for line in (doc._hook_coverage_read.__doc__ or "").split("\n")]
+    check("hook-coverage/doc-and-docstring-wrapped",
+          (len(section) > 20, [line for line in section if len(line) > 110], len(read_doc) > 2,
+           [line for line in read_doc[:-1] if len(line) < 80]),
+          (True, [], True, []))
 
     # T9: read-only. Against a root carrying a registry, a state directory and a resume barrier, the mode leaves
     # every byte of the state directory unchanged; against one whose state directory is absent, it stays absent

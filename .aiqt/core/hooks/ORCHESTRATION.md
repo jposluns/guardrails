@@ -1700,13 +1700,20 @@ other shell text: the path may join unquoted runs of letters, digits and `_ . / 
 runs whose only expansion is `$NAME` or `${NAME}` (the rendered `"$CLAUDE_PROJECT_DIR"/...` form), and any
 other shell character (a list operator, comment, pipe, redirection, substitution, glob, unquoted variable
 or single quote, or another expansion inside the quotes) makes the entry unrecognized, so it never counts.
-In either shape a path that begins with `-` (an option to `python3`) never counts.
+In either shape the path, read as the shell reads it (quotes removed), counts only when it starts with
+`/` or `./`, or with a `$NAME` or `${NAME}` expansion followed directly by `/`, and every expansion in it
+is followed directly by `/`; in a plugin `hooks.json` every `$` must start such an expansion. So an
+expansion that is empty, or whose value does not itself begin with `-`, cannot leave an option to `python3`
+(such as `-c` or `-m`) or other code in front of the script, and a path written to begin with `-` never
+counts.
 
-The script's identity is not checked. A registration counts on the script's file name alone: any path
-ending `/aiqt_hooks.py` in a settings file, or `/hooks/scripts/aiqt_hooks.py` in a plugin `hooks.json`,
-is accepted, wherever it points. The check does not resolve the path (it cannot see the values of
-`$CLAUDE_PROJECT_DIR` or `${CLAUDE_PLUGIN_ROOT}` in the session) and does not compare the file with the
-pack's dispatcher, so a file of that name elsewhere, or one whose content differs, reads as covered.
+The script's identity is not checked. A registration counts on the script's file name alone: any such
+path ending `/aiqt_hooks.py` in a settings file, or `/hooks/scripts/aiqt_hooks.py` in a plugin
+`hooks.json`, is accepted, wherever it points. The check does not resolve the path (it cannot see the
+values of `$CLAUDE_PROJECT_DIR` or `${CLAUDE_PLUGIN_ROOT}` in the session) and does not compare the file
+with the pack's dispatcher, so a file of that name elsewhere, or one whose content differs, reads as
+covered. For the same reason a variable whose value itself begins with `-` is not caught: `python3` would
+read the expanded path as an option, yet the entry reads as covered.
 
 The exit is 0 when every required control is covered, 1 on any finding, and 2 when the check cannot
 evaluate: no file named, a file that cannot be read, is not strict JSON (`NaN`, `Infinity` and
@@ -1714,7 +1721,7 @@ evaluate: no file named, a file that cannot be read, is not strict JSON (`NaN`, 
 loaded. The check writes nothing: it reads neither the registry nor the state directory and never touches
 `resume-barrier.json`. Every run prints this line:
 
-    coverage of the named files only; which files the session loads is decided by Claude Code, which this check does not observe; only the script's file name is checked (any path ending /aiqt_hooks.py counts), not that it is the pack's dispatcher
+    coverage of the named files only; which files the session loads is decided by Claude Code, which this check does not observe; only the script's file name is checked (a path counts on its file name alone), not that it is the pack's dispatcher, and a variable in the path whose value begins with "-" is not caught
 
 The launcher contract, which each orchestrator implements in its own launch and resume procedures:
 
@@ -1725,8 +1732,8 @@ The launcher contract, which each orchestrator implements in its own launch and 
 
 The pack cannot observe what Claude Code actually loads: settings precedence, managed policy and plugin
 enablement are decided by the platform. A clean exit therefore means only that the named files register
-the required controls through a script of the dispatcher's name. Even a loaded control acts only where its own scope finds a registry (see The
-registry above).
+the required controls through a script of the dispatcher's name. Even a loaded control acts only where
+its own scope finds a registry (see The registry above).
 
 ## Platforms without hooks
 

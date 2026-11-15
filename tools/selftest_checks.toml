@@ -1920,6 +1920,12 @@ expected-check-ids = [
   "hook-coverage/script-identity-unchecked-disclosed",
   "hook-coverage/documented-require-form-matches-parser",
   "hook-coverage/require-second-word-is-a-file-exits-2",
+  "hook-coverage/settings-unset-expansion-not-covered-exits-1",
+  "hook-coverage/plugin-unset-expansion-not-covered-exits-1",
+  "hook-coverage/expansion-then-slash-twin-exits-0",
+  "hook-coverage/value-residual-disclosed-no-overclaim",
+  "hook-coverage/gen-hooks-comments-no-overclaim",
+  "hook-coverage/doc-and-docstring-wrapped",
   "hook-coverage/state-and-barrier-byte-identical",
   "hook-coverage/absent-state-dir-not-created",
   # ---------- the self-test entry point hands the caller's environment back ----------

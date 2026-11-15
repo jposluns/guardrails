@@ -10,7 +10,8 @@ contract, and the state directory; and re-run the resume audit to clear (or re-a
                                  With no --require, every enforce-stage PreToolUse control whose default is
                                  block is required. Each --require names one id; repeat it for more. It
                                  never reads the registry or the state directory. Only the script's file
-                                 name is checked, not that it is the pack's dispatcher.
+                                 name is checked, not that it is the pack's dispatcher, and a variable in
+                                 the path whose value begins with "-" is not caught.
   An interpreter older than Python 3.14 that can start this file is refused at exit 2 before anything
   runs. One that cannot start it fails with Python's own error first, and that exit is Python's: 1 for a
   compile failure, which reads as findings, or 2 for an interpreter predating -I when run with it.
@@ -61,7 +62,8 @@ def _guard_scope_lines(root):
 # that, so every run prints HOOK_COVERAGE_HONESTY, whatever its exit.
 HOOK_COVERAGE_HONESTY = ("coverage of the named files only; which files the session loads is decided by "
                          "Claude Code, which this check does not observe; only the script's file name is "
-                         "checked (any path ending /aiqt_hooks.py counts), not that it is the pack's dispatcher")
+                         "checked (a path counts on its file name alone), not that it is the pack's dispatcher, "
+                         "and a variable in the path whose value begins with \"-\" is not caught")
 HOOK_COVERAGE_MAX_BYTES = 16 * 1024 * 1024
 
 
@@ -78,8 +80,8 @@ def _hook_coverage_no_constant(name):
 def _hook_coverage_read(path):
     """The parsed JSON object in the file at path. Raises _CoverageError unless it is a regular file of at most
     HOOK_COVERAGE_MAX_BYTES holding strict UTF-8 JSON (no NaN, Infinity or -Infinity) whose top level is an
-    object. The open is non-blocking, so a
-    FIFO with no writer is refused as not a regular file instead of hanging the check; nothing is written."""
+    object. The open is non-blocking, so a FIFO with no writer is refused as not a regular file instead of
+    hanging the check; nothing is written."""
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0))
     except OSError as exc:

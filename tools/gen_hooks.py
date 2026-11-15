@@ -561,18 +561,48 @@ def render_project_settings(hooks, ids=PROJECT_HOOK_IDS):
 # one shell word built only from unquoted runs of path characters (letters, digits and _ . / + -) and
 # double-quoted runs whose only expansion is a plain variable reference ($NAME or ${NAME}); any other character
 # outside quotes (; | & # ( ) < > ` $ * ? [ ] ~ ' \ or whitespace) and, inside quotes, a backtick, a backslash,
-# a control character or any other $ form ($( ), $1, ${NAME:-...}) makes the entry unrecognized, so a string
-# that could run anything but the dispatcher never counts. In either form a path that begins with "-" (which
-# python3 would read as an option, such as -c) is unrecognized. Any other entry is ignored, so it can never
-# count as coverage. Only the script's FILE NAME is checked: any path ending /aiqt_hooks.py (or
-# /hooks/scripts/aiqt_hooks.py in the plugin form) counts, and which file that path names when the session
-# runs (the pack's dispatcher or another file of that name) is not checked. These functions say what the
-# parsed files register, never what a session loaded.
+# a control character or any other $ form ($( ), $1, ${NAME:-...}) makes the entry unrecognized, so no shell
+# text but that one python3 command line counts. In either form the path counts only when, read as the shell
+# reads it (quotes removed, each $NAME or ${NAME} an expansion whose name ends at its closing quote), it
+# starts with "/" or "./", or with an expansion followed directly by "/", and every expansion in it is
+# followed directly by "/" (in the plugin form, where nothing is quoted, every "$" must start a $NAME or
+# ${NAME} expansion). So no expansion, empty or not, can leave an option word (such as -c or -m, which python3
+# would run instead of any script) or other code in front of the script, except that a variable whose VALUE
+# itself begins with "-" is not caught, because the check never sees the session's values. Any other entry
+# is ignored, so it can never count as coverage. Only the script's FILE NAME is checked: any such path ending
+# /aiqt_hooks.py (or /hooks/scripts/aiqt_hooks.py in the plugin form) counts, and which file that path names
+# when the session runs (the pack's dispatcher or another file of that name) is not checked. These functions
+# say what the parsed files register, never what a session loaded.
 _COVERAGE_PLUGIN_SCRIPT_TAIL = "/hooks/scripts/" + SCRIPT_NAME
 _COVERAGE_HANDLER_RE = re.compile(r"[a-z][a-z0-9_]*", re.ASCII)
 _COVERAGE_SETTINGS_RE = re.compile(
     r'python3 -I ((?:[A-Za-z0-9_./+-]+|"(?:[^"$`\\\x00-\x1f\x7f]|\$[A-Za-z_][A-Za-z0-9_]*'
     r'|\$\{[A-Za-z_][A-Za-z0-9_]*\})*")+) ([a-z][a-z0-9_]*)', re.ASCII)
+# One piece of a path as the shell reads it: an expansion, a lone "$" (no recognized expansion), a double
+# quote, or one other character. A name is greedy but cannot run past a quote, as in the shell.
+_COVERAGE_PATH_PIECE_RE = re.compile(
+    r'\$\{[A-Za-z_][A-Za-z0-9_]*\}|\$[A-Za-z_][A-Za-z0-9_]*|\$|"|.', re.ASCII | re.DOTALL)
+
+
+def _coverage_path_counts(text, tail, quoted):
+    """Whether a launcher path counts: text read piece by piece (double quotes dropped when quoted is true,
+    kept as literal characters otherwise), each $NAME or ${NAME} an expansion of unknown value. It counts only
+    when it starts with "/", "./" or an expansion, every expansion is followed directly by a literal "/", no
+    "$" stands outside a recognized expansion, and it ends in the literal tail."""
+    pieces = []
+    for match in _COVERAGE_PATH_PIECE_RE.finditer(text):
+        piece = match.group(0)
+        if piece == '"' and quoted:
+            continue
+        if piece == "$":
+            return False
+        pieces.append(None if piece.startswith("$") else piece)
+    for i, piece in enumerate(pieces):
+        if piece is None and pieces[i + 1:i + 2] != ["/"]:
+            return False
+    if not (pieces[:1] in (["/"], [None]) or pieces[:2] == [".", "/"]):
+        return False
+    return pieces[-len(tail):] == list(tail)
 
 
 def _coverage_handler(launcher):
@@ -587,15 +617,12 @@ def _coverage_handler(launcher):
         args = launcher["args"]
         if (command == "python3" and isinstance(args, list) and len(args) == 3
                 and all(isinstance(a, str) for a in args) and args[0] == "-I"
-                and args[1].endswith(_COVERAGE_PLUGIN_SCRIPT_TAIL) and not args[1].startswith("-")
+                and _coverage_path_counts(args[1], _COVERAGE_PLUGIN_SCRIPT_TAIL, False)
                 and _COVERAGE_HANDLER_RE.fullmatch(args[2])):
             return args[2]
         return None
     match = _COVERAGE_SETTINGS_RE.fullmatch(command)
-    if match is None:
-        return None
-    path = match.group(1).replace('"', "")
-    if path.startswith("-") or not path.endswith("/" + SCRIPT_NAME):
+    if match is None or not _coverage_path_counts(match.group(1), "/" + SCRIPT_NAME, True):
         return None
     return match.group(2)
 
@@ -967,8 +994,10 @@ def main():
 #      controls; a handler under a script that is not aiqt_hooks.py, a settings string that is not the
 #      anchored isolated launcher, one carrying any other shell text (a list operator, comment, pipe,
 #      redirection, substitution, glob, unquoted variable or single quotes, or a quoted expansion other than
-#      $NAME or ${NAME}), and an option-shaped path in either shape never count while each twin under
-#      aiqt_hooks.py (the rendered "$CLAUDE_PROJECT_DIR" path and a ${NAME} path among them) does; another
+#      $NAME or ${NAME}), an option-shaped path, and a path that does not start with "/", "./" or an
+#      expansion, or has an expansion (such as an unset one before -c) not followed directly by "/", in
+#      either shape never count while each twin under aiqt_hooks.py (the rendered "$CLAUDE_PROJECT_DIR"
+#      path, a ${NAME} path, a "./" path and an expansion inside the quotes among them) does; another
 #      matcher reads matcher-differs; an unknown required id raises ValueError.
 # Every vector that removes the entries its own faults caused (cases 20b, 21b, 27 and 28)
 # does so by PROVENANCE, never by message text: each named entry from the staged cleanup,
@@ -4202,6 +4231,46 @@ def self_test_main(_nested=False):
                 # The handler argument is the whole word: one with a trailing newline names no handler (a "$"
                 # anchor would accept it).
                 ("plugin handler trailing newline", _cov_plugin_obj(SCRIPT_PLUGIN_PATH, "gensrc_guard\n"), "missing"),
+                # An expansion is read as the shell reads it (its name ends at a quote) and its value is
+                # unknown, so an unset one before an option word leaves python3 running -c or -m code and no
+                # script (QA round 2 N1): the path must start with "/", "./" or an expansion, and every
+                # expansion must be followed directly by "/", in either shape.
+                ("settings unset expansion before -c", _cov_settings(
+                    'python3 -I "$AIQT_REVIEW_UNSET"-c"import sys; print(1)#/aiqt_hooks.py" gensrc_guard'),
+                 "missing"),
+                ("settings unset braced expansion before -c", _cov_settings(
+                    'python3 -I "${AIQT_REVIEW_UNSET}"-c"import sys; print(1)#/aiqt_hooks.py" gensrc_guard'),
+                 "missing"),
+                ("settings unset expansion before -m", _cov_settings(
+                    'python3 -I "$AIQT_REVIEW_UNSET"-mthis"#/aiqt_hooks.py" gensrc_guard'), "missing"),
+                ("settings expansion then option inside quotes", _cov_settings(
+                    'python3 -I "$AIQT_REVIEW_UNSET-c"/aiqt_hooks.py gensrc_guard'), "missing"),
+                ("settings expansion name ends at the quote", _cov_settings(
+                    'python3 -I "$X"abc/aiqt_hooks.py gensrc_guard'), "missing"),
+                ("settings two adjacent expansions", _cov_settings('python3 -I "$A$B"/aiqt_hooks.py gensrc_guard'),
+                 "missing"),
+                ("settings mid-path expansion not before slash", _cov_settings(
+                    'python3 -I /opt/"$X"-c/aiqt_hooks.py gensrc_guard'), "missing"),
+                ("settings relative path", _cov_settings("python3 -I plugin/x/aiqt_hooks.py gensrc_guard"), "missing"),
+                ("settings parent-relative path", _cov_settings("python3 -I ../x/aiqt_hooks.py gensrc_guard"),
+                 "missing"),
+                ("plugin unset braced expansion before -c", _cov_plugin_obj(
+                    "${AIQT_REVIEW_UNSET}-cpass #/hooks/scripts/aiqt_hooks.py"), "missing"),
+                ("plugin unset expansion before -c", _cov_plugin_obj(
+                    "$AIQT_REVIEW_UNSET-cpass #/hooks/scripts/aiqt_hooks.py"), "missing"),
+                ("plugin leading space", _cov_plugin_obj(" -cpass #/hooks/scripts/aiqt_hooks.py"), "missing"),
+                ("plugin dollar outside an expansion", _cov_plugin_obj("$(true)/hooks/scripts/aiqt_hooks.py"),
+                 "missing"),
+                ("plugin relative path", _cov_plugin_obj("x/hooks/scripts/aiqt_hooks.py"), "missing"),
+                ("twin settings dot-slash path", _cov_settings("python3 -I ./x/aiqt_hooks.py gensrc_guard"),
+                 "covered"),
+                ("twin settings expansion inside quotes", _cov_settings(
+                    'python3 -I "$CLAUDE_PROJECT_DIR/plugin/x/aiqt_hooks.py" gensrc_guard'), "covered"),
+                ("twin settings mid-path expansion", _cov_settings(
+                    'python3 -I /opt/"$X"/aiqt_hooks.py gensrc_guard'), "covered"),
+                ("twin plugin plain expansion", _cov_plugin_obj("$CLAUDE_PLUGIN_ROOT/hooks/scripts/aiqt_hooks.py"),
+                 "covered"),
+                ("twin plugin absolute path", _cov_plugin_obj("/opt/p/hooks/scripts/aiqt_hooks.py"), "covered"),
                 ("twin settings rendered path", _cov_settings(
                     "python3 -I {} gensrc_guard".format(PROJECT_SCRIPT_PATH)), "covered"),
                 ("twin settings braced variable", _cov_settings(
@@ -4358,8 +4427,10 @@ def self_test_main(_nested=False):
           "under a moved margin), a warn hook, a bake-stage hook and a second hook each refused at 9 "
           "and generating at 11, while with it off or absent 9, 10 and 11 still render the default; "
           "the hook-coverage parser reads both renders back as covering their controls (every manifest id "
-          "for hooks.json), never counts a handler under another script, an unanchored settings string, a "
-          "settings string carrying other shell text or an option-shaped path, "
+          "for hooks.json), never counts a handler under a script not named aiqt_hooks.py, an unanchored "
+          "settings string, a settings string carrying other shell text, an option-shaped path or a path "
+          "where an expansion (set or unset) is not followed directly by \"/\" or that does not start with "
+          "\"/\", \"./\" or such an expansion, in either shape, "
           "reads another matcher as matcher-differs, and refuses an unknown required id"
           + note)
     return 0
