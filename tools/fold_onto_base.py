@@ -95,13 +95,17 @@ def _git_env():
 
 
 def _git(root, *args, data=None):
-    """Run git bound to root with -C, under _git_env, bytes in and out. Only GIT_SUBCOMMANDS run."""
+    """Run git bound to root with -C, under _git_env, bytes in and out. Only GIT_SUBCOMMANDS run. The
+    automatic-maintenance pins (gc.auto=0, gc.autoDetach=false, maintenance.auto=false) ride the argv in
+    option position, the form tools/selftest_git_fixture_env.py's maintenance-pin scan reads, so no call
+    can start a detached gc or maintenance child."""
     if not args or args[0] not in GIT_SUBCOMMANDS:
         raise CannotEvaluate("internal: git subcommand {!r} is outside the helper's closed set".format(
             args[0] if args else None))
     try:
         return subprocess.run(
-            ["git", "-C", os.fspath(root), *args],
+            ["git", "-c", "gc.auto=0", "-c", "gc.autoDetach=false", "-c", "maintenance.auto=false",
+             "-C", os.fspath(root), *args],
             input=data,
             capture_output=True,
             timeout=TIMEOUT,
@@ -928,21 +932,15 @@ def self_test():
     return 0
 
 
-def _sigchld_ignored():
-    """True when SIGCHLD is ignored (inherited across exec from an ignoring parent): the kernel then
-    reaps every child and a failed git reads as exit 0. A disposition read only; SA_NOCLDWAIT set
-    without SIG_IGN is not seen (tools/check_child_status_coverage.py lists this entry point as a
-    direct-launch residual until it carries the canonical guard)."""
-    import signal
-    return hasattr(signal, "SIGCHLD") and signal.getsignal(signal.SIGCHLD) == signal.SIG_IGN
-
-
 def main(argv=None):
-    if _sigchld_ignored():
-        print("ERROR: fold-onto-base cannot evaluate: SIGCHLD is ignored, so a failed git child would read "
-              "as a success; nothing was run", file=sys.stderr)
-        return 2
-    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv is None:
+        # The process entry, reached only after the child-status guard on the entry line: the command
+        # line, ended through the execution-report finalizer when the self-test armed it. In-process
+        # callers (the self-test's _cli) pass their own argv and get the returned code.
+        _code = main(sys.argv[1:])
+        _finalizer = sys.modules.get("_selftest_exit_report")
+        (sys.exit if _finalizer is None else _finalizer.exit_with)(_code)
+    argv = list(argv)
     # The execution gate appends `--execution-report ABS_PATH` to the self-test launch; accepted only in
     # that trailing two-token form, with an absolute path, alone or after --self-test.
     report_path = None
@@ -987,7 +985,60 @@ def main(argv=None):
     return run(root, args.protected, args.message_file, args.expect_base)
 
 
+# The child-status guard: an inline copy of the canonical guard in opf/tools/_child_status.py, which
+# tools/check_child_status_coverage.py pins this copy to by AST. This tool starts git and reads its exit
+# status (subprocess), so under an ignored SIGCHLD a failed git would read as a success; the guard runs at
+# the entry line, before main() dispatches.
+# The status the probe child exits with; any value other than 0 and the refusal exit would do.
+_CHILD_STATUS_PROBE_CODE = 77
+
+
+def _child_status_refusal():
+    """None when this process can read a child's exit status, otherwise the reason it cannot."""
+    import os
+    import signal
+    if not hasattr(signal, "SIGCHLD"):
+        return None
+    disposition = signal.getsignal(signal.SIGCHLD)
+    if disposition is not signal.SIG_DFL:
+        return ("SIGCHLD is ignored (SIG_IGN) in this process" if disposition is signal.SIG_IGN
+                else "SIGCHLD is not at its default disposition in this process")
+    if not hasattr(os, "fork"):
+        return None
+    try:
+        pid = os.fork()
+    except OSError as exc:
+        return "the child-status probe could not fork ({})".format(type(exc).__name__)
+    if pid == 0:
+        os._exit(_CHILD_STATUS_PROBE_CODE)
+    try:
+        waited, status = os.waitpid(pid, 0)
+    except ChildProcessError:
+        return "the probe child was reaped before its exit status could be read (ECHILD)"
+    except OSError as exc:
+        return "the probe child's exit status could not be read ({})".format(type(exc).__name__)
+    if waited != pid or os.waitstatus_to_exitcode(status) != _CHILD_STATUS_PROBE_CODE:
+        return "a probe child that exited {} was read back as wait status {}".format(
+            _CHILD_STATUS_PROBE_CODE, status)
+    return None
+
+
+def _child_status_refusal_exit(name):
+    """0 when a child's exit status is observable; otherwise write the named refusal and exit 2 at once
+    (os._exit, so no exit-time stream flush can replace the status)."""
+    import os
+    reason = _child_status_refusal()
+    if reason is None:
+        return 0
+    try:
+        sys.stderr.write("error: {} refuses to run: {}, so a failed child would read as a success. Nothing "
+                         "was run (cannot evaluate). Start it from a parent that leaves SIGCHLD at "
+                         "SIG_DFL.\n".format(name, reason))
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
+
+
 if __name__ == "__main__":
-    _code = main()
-    _finalizer = sys.modules.get("_selftest_exit_report")
-    (sys.exit if _finalizer is None else _finalizer.exit_with)(_code)
+    sys.exit(_child_status_refusal_exit("fold_onto_base.py") or main())

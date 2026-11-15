@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.0.5"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "3e6f28ec60eda56921717e0c0c6bdecf1df8b3529f1336b60f4d941c108a112d"
+tree-sha256 = "f228fc2e9f2eeda9a16738f2ab2615f0a2b5c5e2fe77484870aedc0ebafeb0f9"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -4182,8 +4182,8 @@ sha256 = "9387831df89640649d02a6382c5714bbcd2afc7079a5ccba60c8632d3f3349d2"
 
 [[sources]]
 path = "tools/check_child_status_coverage.py"
-bytes = 228723
-sha256 = "9df660ae812e902f0daf95335d4a426bed52ab6151110ae17c2f1f76cb7a8783"
+bytes = 228781
+sha256 = "c7f5a198ec0aeb0eb5bbd2295188115791cdf07ad6ac1fda354f418f498676aa"
 
 [[sources]]
 path = "tools/check_ci_parity.py"
@@ -4487,8 +4487,8 @@ sha256 = "230d565106563d57e02769f666f1a62ae9ae3c858a4025419c5b53fc9dbedbde"
 
 [[sources]]
 path = "tools/fold_onto_base.py"
-bytes = 47092
-sha256 = "a3924bc16074a11de3d96efe6e35f18c1c7bb86f7c06349adfd17ef20f9c4211"
+bytes = 49536
+sha256 = "e79b03dca9c09bb76737a637377c152951213c399eaac0e68276f4c6b15199af"
 
 [[sources]]
 path = "tools/gen_adapters.py"
