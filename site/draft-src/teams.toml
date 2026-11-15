@@ -1,16 +1,16 @@
-# The aiqt.ai Teams and Enterprise page, restored from the pre-cutover site/teams.html. Published but linked
-# from nowhere (not the nav, the footer, any page, the sitemap or llms.txt) by the maintainer's ruling of
-# 2026-11-15: it describes a future feature.
-path = "teams.html"
+# The aiqt.ai Teams and Enterprise page, restored from the pre-cutover site/teams.html. By the maintainer's
+# rulings of 2026-11-15 it is listed in sitemap.xml but linked from no page, the nav, the footer or
+# llms.txt, and its team features are "Planned", the same features and wording as the future plans page.
+path = "teams/index.html"
 title = "Teams & Enterprise"
 kind = "document"
 label = "For teams and organizations"
 heading = "One standard your whole team can work to."
-description = "AIQT gives a team one shared governance standard for AI-assisted work, designed to be portable across the tools they use, with claims that trace to evidence and overrides that are logged. Plus the ideas we are considering for organizations."
+description = "AIQT gives a team one shared governance standard for AI-assisted work, designed to be portable across tools, that asks for claims traced to evidence and overrides logged. Management and monitoring, performance metrics, and guardrail bundles for teams are planned, not yet available."
 
 [[body]]
 component = "lead"
-html = '''Ask two colleagues what their AI assistant means by "done" and you will get two answers. Today the quality of your team's AI-assisted work depends on who did it and which tool they used. AIQT replaces that with a single governance standard intended to reach across Claude, ChatGPT, and Copilot, so a colleague on one assistant is meant to work to the same rules as a colleague on another. That cross-assistant reach is the intent, not a verified result yet: the evidence page marks every platform pending, with ChatGPT, Gemini, and Copilot not yet tested. Contributing a fix back is Rule 5's voluntary Guardrail-Seed give-back, separate from the software licence, so a fix one team contributes can strengthen every other team's guardrails. Adoption today is human-led: each person adds AIQT to their own assistant, under a rollout your team runs. Central deployment, policy enforcement, and cross-team reporting do not exist today; two of them are ideas we are considering.'''
+html = '''Ask two colleagues what their AI assistant means by "done" and you will get two answers. Today the quality of your team's AI-assisted work depends on who did it and which tool they used. AIQT offers a single governance standard intended to reach across Claude, ChatGPT, and Copilot, so a colleague on one assistant is meant to work to the same rules as a colleague on another. That cross-assistant reach is the intent, not a verified result yet: the evidence page marks every platform pending, with ChatGPT, Gemini, and Copilot not yet tested. Adoption today is human-led: each person adds AIQT to their own assistant, under a rollout your team runs. Team features, such as management and monitoring, performance metrics, and guardrail bundles, are planned and not yet available.'''
 
 [[body]]
 component = "prose"
@@ -25,7 +25,7 @@ rail = "Today"
 
 [[body]]
 component = "prose"
-html = '''<p>One definition of "done", intended for every assistant on the team, with a record behind it. Most teams already have people using AI assistants, each with their own habits and their own idea of what "done" means; AIQT replaces that spread with one ordering, decided in advance.</p>'''
+html = '''<p>One definition of "done", intended for every assistant on the team, with a record behind it. Most teams already have people using AI assistants, each with their own habits and their own idea of what "done" means; AIQT gives them one ordering, decided in advance.</p>'''
 
 [[body]]
 component = "subhead"
@@ -33,7 +33,7 @@ heading = "Consistency you did not have to police"
 
 [[body]]
 component = "prose"
-html = '''<p>The quality-versus-speed argument happens once, in advance, instead of on every deadline. Every assistant on the team is meant to work to the same ordering, so the call is already made before the pressure arrives.</p>'''
+html = '''<p>The quality-versus-speed argument is settled once, in advance, instead of on every deadline. Every assistant on the team is meant to work to the same ordering, so the call is already made before the pressure arrives.</p>'''
 
 [[body]]
 component = "subhead"
@@ -41,27 +41,27 @@ heading = "Sign-off backed by evidence you can check"
 
 [[body]]
 component = "prose"
-html = '''<p>Claims trace to sources, catches are named, and overrides are logged. With the 1.0.6 chat Skill, that record lives in the conversation itself: the stated sources, the named catches, and the logged overrides you can scroll back to. Repository-level records are part of the 1.2.0 design, in development, and aggregate reporting across a team is an idea we are considering.</p>'''
+html = '''<p>The standard asks the assistant to trace claims to sources, say what a guardrail caught, and log overrides. With the 1.0.6 chat Skill, that record lives in the conversation itself: the stated sources, the named catches, and the logged overrides you can scroll back to. Repository-level records are part of the 1.2.0 design, in development. Reporting across a team is planned, as <a href="#planned">performance metrics</a>.</p>'''
 
 [[body]]
 component = "subhead"
-heading = "A standard that survives tool changes"
+heading = "A standard designed to survive tool changes"
 
 [[body]]
 component = "prose"
-html = '''<p>The standard is designed to be portable across assistants and toolchains. Swap Claude for ChatGPT, or add Copilot, and the rules travel; your team's definition of "done" is not locked to any vendor.</p>'''
+html = '''<p>The standard is designed to be portable across assistants and toolchains, so that swapping Claude for ChatGPT, or adding Copilot, keeps the same rules and your team's definition of "done" is not locked to any vendor. That is the design intent, not a tested result: ChatGPT and Copilot are not yet tested.</p>'''
 
 [[body]]
 component = "subhead"
-heading = "Improvements that compound, opt-in"
+heading = "Gaps turned into guardrails"
 
 [[body]]
 component = "prose"
-html = '''<p>When a gap lets an issue through, the guardrail is improved so it should not recur, and teams that opt in can contribute the portable fix back. Sharing is opt-in, a voluntary Rule 5 Guardrail-Seed give-back separate from the software licence, so one team's lesson can become every team's guardrail.</p>'''
+html = '''<p>When the assistant's own gap lets an issue through, Rule 5 asks it to propose a guardrail so the issue should not recur, and to draft it if you ask. That guardrail protects your own work first. Sending the lesson back to AIQT, so one team's lesson can become every team's guardrail, is part of the 1.2.0 design: an opt-in step, Rule 5's voluntary Guardrail-Seed give-back, separate from the software licence.</p>'''
 
 [[body]]
 component = "prose"
-html = '''<p>Teams that write code have a version on the way: the <a href="/development">development assistant</a> (1.2.0, in development) installs the same standard into a project, keeps to its own directory, and integrates with your CI.</p>'''
+html = '''<p>Teams that write code have a version in development: the <a href="/development">development assistant</a> (1.2.0) is designed to install the same standard into a project, keep to its own directory, and integrate with your CI. It is not available yet.</p>'''
 
 [[body]]
 component = "section"
@@ -72,7 +72,7 @@ rail = "Not available today"
 
 [[body]]
 component = "prose"
-html = '''<p>Said plainly, so you can plan around it.</p><ul><li>Central deployment of the Skill to a team.</li><li>Technical enforcement of the standard: it is a behavioural standard the assistant follows, not a control that blocks a model.</li><li>A shared or aggregate record across people.</li><li>Admin controls, policy management, and cross-team reporting.</li><li>Commercial support and service levels.</li></ul><p>Three of these lead to the two ideas we are considering, below: the shared record to the web console, and central deployment and admin controls to enterprise management. The other two, technical enforcement and commercial support, are not among them.</p>'''
+html = '''<p>Said plainly, so you can plan around it.</p><ul><li>Central deployment of the Skill to a team.</li><li>Technical enforcement of the standard: it is a behavioural standard the assistant follows, not a control that blocks a model.</li><li>A shared or aggregate record across people.</li><li>Admin controls, policy management, and cross-team reporting.</li><li>Commercial support and service levels.</li></ul><p>Three of these lead to the <a href="#planned">planned features</a> below: central deployment, admin controls, and policy management to guardrail bundles that the team or enterprise rolls out; the shared record and cross-team reporting to management and monitoring, and to performance metrics. The other two, technical enforcement and commercial support, are not among the planned features.</p>'''
 
 [[body]]
 component = "section"
@@ -83,7 +83,7 @@ rail = "Start a team pilot"
 
 [[body]]
 component = "prose"
-html = '''<p>Today's team path is a human-led pilot: a small group, the assistants they already use, and a few weeks of normal work. Here is a shape that works.</p>'''
+html = '''<p>Today's team path is a human-led pilot: a small group, the assistants they already use, and a few weeks of normal work. Here is one way to run it.</p>'''
 
 [[body]]
 component = "steps"
@@ -101,38 +101,33 @@ html = '''<p>Questions, or want to share what you found? <a href="https://github
 
 [[body]]
 component = "section"
-lbl = "Ideas"
-heading = "Ideas we are considering for organizations"
-id = "ideas"
-rail = "Ideas"
+lbl = "Planned"
+heading = "What is coming for teams and enterprises"
+id = "planned"
+rail = "Planned"
 
 [[body]]
 component = "prose"
-html = '''<p>The two directions below are ideas under consideration. We are sharing them so you can see where our thinking is heading, and so you can tell us whether they would help your organization. There are no dates attached and no commitment behind them; they may change shape or may never ship.</p>'''
+html = '''<p>Everything in this section is planned. None of it ships today; AIQT today is the standard, the skill, and the pack you add to each project yourself. The <a href="$BASE/future/">future plans page</a> lists the same plans.</p>'''
 
 [[body]]
-component = "label"
-text = "Ideas we are considering"
+component = "clauses"
 
-[[body]]
-component = "subhead"
-heading = "A web console for governance activity"
+[[body.items]]
+n = "1"
+html = "<p><strong>Management and monitoring.</strong> One view of every project using AIQT: which guardrails each runs, at which version, and where an update is waiting.</p>"
 
-[[body]]
-component = "prose"
-html = '''<p>A web console would show governance activity across your projects without requiring a terminal. The benefit for a team lead: one place to see what the guardrails caught, what was overridden, and how the standard is holding across the work, in a form the whole team can read, including the people who never open a command line.</p>'''
+[[body.items]]
+n = "2"
+html = "<p><strong>Performance metrics.</strong> How often each guardrail fires and what it stopped, per project and per team, so you can see where the standard is earning its place.</p>"
 
-[[body]]
-component = "label"
-text = "Ideas we are considering"
-
-[[body]]
-component = "subhead"
-heading = "Enterprise management"
+[[body.items]]
+n = "3"
+html = "<p><strong>Guardrail bundles.</strong> Pre-built sets of guardrails per project type or purpose, curated, versioned, and rolled out by the team or enterprise, so every project starts from the same agreed baseline.</p>"
 
 [[body]]
 component = "prose"
-html = '''<p>Enterprise management would cover what an organization needs beyond an individual: central policy, shared configuration, and reporting across teams. The benefit: an organization could set its standard once and have every team inherit it, keep configuration consistent from one source, and see across teams how the standard is being applied.</p>'''
+html = '''<p>For a team lead, these would give one place to see what the guardrails stopped and how the standard is holding across the work. For an organization, they would let the standard be set once, as a bundle, so every team starts from it.</p>'''
 
 [[body]]
 component = "section"
@@ -143,7 +138,7 @@ rail = "How we decide"
 
 [[body]]
 component = "prose"
-html = '''<p>We move an idea into a release only when we can say what it does and point to the evidence behind it, marking what is still pending rather than implying it. That rule is why this page separates today's capabilities from ideas so firmly: the same standard AIQT holds an assistant to, we hold ourselves to. A claim about the product should trace to evidence, and "available" should mean a check actually ran.</p>'''
+html = '''<p>We move a planned feature into a release only when we can say what it does and point to the evidence behind it, marking what is still pending rather than implying it. That rule is why this page separates what is available today from what is planned: the same standard AIQT holds an assistant to, we hold ourselves to. A claim about the product should trace to evidence, and "available" should mean a check actually ran.</p>'''
 
 [[body]]
 component = "section"
@@ -154,4 +149,4 @@ rail = "Open source"
 
 [[body]]
 component = "prose"
-html = '''<p>The guardrails are designed to be portable across toolchains, so adopting the standard leaves your team free to change tools without changing rules. Contributing an improvement back is Rule 5's voluntary Guardrail-Seed give-back, separate from the software licence, so a fix one team contributes can strengthen every other team's guardrails. Contribution is opt-in. Start with the <a href="$BASE/">overview on the home page</a>, or go straight to the source.</p><p><a href="https://github.com/jposluns/guardrails" target="_blank" rel="noopener noreferrer">View on GitHub<span class="vh"> (opens in a new tab)</span></a>. <a href="https://github.com/jposluns/guardrails/blob/main/ROADMAP.md" target="_blank" rel="noopener noreferrer">See where each stage stands: the roadmap<span class="vh"> (opens in a new tab)</span></a>.</p>'''
+html = '''<p>The guardrails are designed to be portable across toolchains, so that adopting the standard leaves your team free to change tools without changing rules. Sending an improvement back is Rule 5's voluntary Guardrail-Seed give-back, separate from the software licence; the route for it, a seed pull request, is part of the 1.2.0 design. Start with the <a href="$BASE/">overview on the home page</a>, or go straight to the source.</p><p><a href="https://github.com/jposluns/guardrails" target="_blank" rel="noopener noreferrer">View on GitHub<span class="vh"> (opens in a new tab)</span></a>. <a href="https://github.com/jposluns/guardrails/blob/main/ROADMAP.md" target="_blank" rel="noopener noreferrer">See where each stage stands: the roadmap<span class="vh"> (opens in a new tab)</span></a>.</p>'''

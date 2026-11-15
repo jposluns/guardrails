@@ -395,7 +395,7 @@ path = "site/standard/index.html"
 class = "pack-immutable"
 
 [[release-class]]
-path = "site/teams.html"
+path = "site/teams/index.html"
 class = "pack-immutable"
 
 [[release-class]]

@@ -575,7 +575,7 @@
         "tools/gen_draft_site.py",
         "site/draft-src/teams.toml"
       ],
-      "target": "site/teams.html"
+      "target": "site/teams/index.html"
     }
   ],
   "version": 1
