@@ -904,6 +904,17 @@ A self-test confidentiality rule body.
 """
 
 
+def _add_pack_version(base):
+    """Give a fixture tree the root VERSION the skill and hooks generators read for the component/pack version
+    alignment rule. VERSION is a declared input of that rule, so a tree without one cannot be evaluated
+    (gen_skill.build_outputs and gen_hooks.build_desired raise, C2 skill and C5 read MALFORMED). The value is
+    below gen_skill.PACK_ALIGN_FIRST_VERSION, so the fixture skill and plugin versions stay independent of it.
+    A VERSION a caller already wrote is never clobbered."""
+    version = base.joinpath(*gen_skill.PACK_VERSION_PARTS)
+    if not version.exists():
+        version.write_bytes(b"1.0.5\n")
+
+
 def _add_skill_surface(base):
     """Install a VALID generated chat-skill surface onto a tree already built by _build_conformant: the
     reserved site/downloads/aiqt/* files, the standalone aiqt-instructions.txt, and the two deterministic,
@@ -935,6 +946,7 @@ def _add_skill_surface(base):
     licence = base.joinpath(*gen_skill.LICENSE_PARTS)
     if not licence.exists():
         licence.write_text("Apache License 2.0\n\n(conformance fixture licence text)\n", encoding="utf-8")
+    _add_pack_version(base)
     reserved_map, standalone, binary = gen_skill.build_outputs(base)
     reserved_dir = base.joinpath(*gen_skill.RESERVED_PARTS)
     reserved_dir.mkdir(parents=True, exist_ok=True)
@@ -1071,6 +1083,7 @@ def _build_hooks(base):
     (hooks_src / "scripts").mkdir(parents=True)
     (hooks_src / "scripts" / gen_hooks.SCRIPT_NAME).write_text(_HOOKS_SCRIPT, encoding="utf-8")
     (hooks_src / "manifest.toml").write_text(_HOOKS_MANIFEST, encoding="utf-8")
+    _add_pack_version(base)
     for rel, content in gen_hooks.build_desired(base, hooks_src).items():
         target = base / rel
         target.parent.mkdir(parents=True, exist_ok=True)

@@ -39,7 +39,8 @@ Threat model: the generator defends against hostile STATIC tree state, anything 
 hostile commit can plant (a symlink at any component, a hard link, a FIFO or device, a wrong type, an orphan,
 an unknown entry), and fails closed on it: such an entry is refused or named, never read through, written
 through or deleted. That holds for every output and for every other input this generator reads: LICENSE,
-skill-source.md, the hooks manifest and the evidence page are each read through the descriptor-anchored reader
+skill-source.md, the hooks manifest, the evidence page and the root VERSION (read only for the skill/pack
+version alignment rule; an absent VERSION is exit 2) are each read through the descriptor-anchored reader
 (O_NOFOLLOW on every component, O_NONBLOCK, fstat a regular file with exactly one link), so a hard link at a
 declared output or at one of those four inputs is refused, never read and accepted (so a hard-link-copied
 checkout, made with cp -al, is refused; an input's refusal says to break the link by copying the file and
@@ -121,10 +122,63 @@ ZIP_PARTS = ("site", "downloads", "aiqt-skill.zip")       # a standalone named B
 ZIP_VERSIONED_PARTS = ("site", "downloads", "aiqt-skill-1.0.6.zip")  # the version-numbered copy the site
 # links to. The literal version here is tied to the skill meta version (skill-source.md) by a fail-closed
 # assertion in build_outputs, so a skill bump that forgets to update this name fails closed.
-# Skill version policy: the skill is versioned on its own today (skill 1.0.6 under pack release 1.0.5). From
-# the 1.1.1 pack release on, the skill version equals the pack version; the check that mirrors the two lands
-# with the 1.1.1 cut, not here.
+# Skill version policy: the skill is versioned on its own before the 1.1.1 pack release (skill 1.0.6 under
+# pack release 1.0.5). From the 1.1.1 pack release on, the skill version equals the pack version: build_outputs
+# refuses (exit 2) a skill meta version that differs from the root VERSION once VERSION is at or above
+# PACK_ALIGN_FIRST_VERSION (pack_alignment_problem). Below it the two stay independent, so a tree at pack
+# 1.0.5 with skill 1.0.6 still builds.
 SKILL_SRC_PARTS = (".aiqt", "core", "skill", "skill-source.md")
+# The pack version file (generated from changelog.toml by tools/gen_changelog.py), read for the alignment rule.
+PACK_VERSION_PARTS = ("VERSION",)
+# The first pack version from which a component version (the chat skill here, the hooks plugin in
+# tools/gen_hooks.py, which imports this constant) must equal the pack version. One constant for both rules,
+# so the two cannot start at different releases. Exact MAJOR.MINOR.PATCH, compared numerically.
+PACK_ALIGN_FIRST_VERSION = "1.1.1"
+# A pack VERSION file is exactly a bare MAJOR.MINOR.PATCH and one LF (the grammar tools/gen_manifest.py and
+# tools/check_versions.py hold it to): [0-9] never \d, no leading zero, \Z never $.
+_PACK_VERSION_FILE = re.compile(r"((?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*))\n\Z")
+_PLAIN_SEMVER = re.compile(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\Z")
+
+
+def _semver_tuple(text):
+    """(MAJOR, MINOR, PATCH) as integers for a strict plain SemVer string, or None for anything else."""
+    if not isinstance(text, str) or not _PLAIN_SEMVER.match(text):
+        return None
+    return tuple(int(part) for part in text.split("."))
+
+
+def parse_pack_version(raw, where="VERSION"):
+    """The pack version a VERSION file's raw text declares. Raises ValueError unless the text is exactly a
+    bare MAJOR.MINOR.PATCH followed by one LF (no CR, no other whitespace, no prefix or suffix)."""
+    m = _PACK_VERSION_FILE.match(raw) if isinstance(raw, str) else None
+    if m is None:
+        raise ValueError("{} {!r} is not a bare MAJOR.MINOR.PATCH followed by one newline; fail-closed".format(
+            where, raw))
+    return m.group(1)
+
+
+def pack_alignment_problem(component, component_version, pack_version, first=None):
+    """None when the alignment rule is satisfied, else the refusal message. VERSION is a declared input of
+    the rule, so pack_version None (no VERSION file in the tree) means the rule cannot be evaluated: it raises
+    ValueError (exit 2, per the check-fails-closed-on-unreadable rule), never a silent pass that would let
+    deleting VERSION turn the rule off. A pack version below first (PACK_ALIGN_FIRST_VERSION when None)
+    leaves the component independently versioned. At or above it, the component version must equal the
+    pack version exactly."""
+    if pack_version is None:
+        raise ValueError("{} version alignment cannot be evaluated: the pack VERSION file is absent (VERSION is "
+                         "a declared input of the rule; tools/gen_changelog.py generates it); fail-closed".format(
+                             component))
+    first = PACK_ALIGN_FIRST_VERSION if first is None else first
+    first_t = _semver_tuple(first)
+    pack_t = _semver_tuple(pack_version)
+    if first_t is None or pack_t is None:
+        raise ValueError("pack alignment: cannot compare pack version {!r} with first version {!r}".format(
+            pack_version, first))
+    if pack_t < first_t or component_version == pack_version:
+        return None
+    return ("{} version {!r} differs from the pack version {!r} (VERSION); from pack {} on the {} version "
+            "equals the pack version, so set it to {}".format(
+                component, component_version, pack_version, first, component, pack_version))
 CORPUS_PARTS = (".aiqt", "core", "rules")
 # The single canonical operator-identity source (the same file the hooks generator and the portability
 # gate read from). The public attribution line is built from the [plugin] author-name here plus
@@ -896,7 +950,8 @@ def build_outputs(root, root_fd=None):
     Parameterized on root so the conformance suite and the self-test can call it off the real tree. The
     inputs this generator reads itself (skill-source.md, the hooks manifest, LICENSE) are read through the
     descriptor-anchored reader from root_fd, the run's root descriptor (opened here when None); the corpus is
-    read by gen_rules.load_corpus (see the module threat model)."""
+    read by gen_rules.load_corpus (see the module threat model). The root VERSION is read the same way, for
+    the skill/pack alignment rule only (it changes no output byte)."""
     if root_fd is None:
         own_fd = _open_root(root)
         try:
@@ -915,6 +970,18 @@ def build_outputs(root, root_fd=None):
             "versioned zip name {!r} does not match the skill meta version {!r} (expected {!r}); bump "
             "ZIP_VERSIONED_PARTS and its GENSRC_OUTPUTS target when the skill version changes".format(
                 ZIP_VERSIONED_PARTS[-1], data["meta"]["version"], expected_basename))
+    # Fail-closed skill/pack alignment (pack_alignment_problem): from pack PACK_ALIGN_FIRST_VERSION on, the
+    # skill meta version must equal the root VERSION. VERSION is read through the descriptor-anchored reader
+    # (a symlink, hard link, FIFO or other non-regular entry at it is refused, exit 2); a malformed VERSION is
+    # exit 2; an absent one is a missing declared input, so the rule cannot be evaluated (exit 2, raised by
+    # pack_alignment_problem).
+    pack_raw = _read_output(root_fd, root, root.joinpath(*PACK_VERSION_PARTS), False, single_link=True,
+                            is_input=True)
+    pack_version = None if pack_raw is None else parse_pack_version(pack_raw)
+    problem = pack_alignment_problem("skill", data["meta"]["version"], pack_version)
+    if problem is not None:
+        raise ValueError("{} in {} (meta version), with ZIP_VERSIONED_PARTS and the rest of RELEASING.md's "
+                         "skill version bump checklist".format(problem, "/".join(SKILL_SRC_PARTS)))
     name, homepage = plugin_identity(root, root_fd)
     data["identity_name"] = name
     data["identity_homepage"] = homepage
@@ -1402,6 +1469,10 @@ def _write_fixture(root, skill_src_text):
     manifest.parent.mkdir(parents=True, exist_ok=True)
     manifest.write_text('[plugin]\nauthor-name = "Self Test Operator"\nhomepage = "https://example.test"\n',
                         encoding="utf-8")
+    # The root VERSION is a declared input of the skill/pack alignment rule (an absent one is exit 2), so a
+    # well-formed fixture carries one below PACK_ALIGN_FIRST_VERSION, where the skill stays independent (the
+    # state of main before the 1.1.1 cut). Legs that need another pack version overwrite it.
+    (root / "VERSION").write_bytes(b"1.0.5\n")
     # build_outputs packs the pack-root LICENSE into the zip (fail-closed if absent); a well-formed
     # fixture therefore ships one so regeneration succeeds.
     (root / "LICENSE").write_text("Apache License 2.0\n\n(self-test fixture licence text)\n",
@@ -1604,6 +1675,128 @@ def self_test_main():
         if code != 2:
             failures.append("skill version mismatched to the versioned-zip literal expected exit 2, "
                             "got {}\n{}".format(code, out))
+
+        # 7b. Skill/pack version alignment. The first pack version is pinned here as a literal, so moving it is a
+        #     deliberate edit of this suite too. Below it the skill is independent (VERSION 1.0.5 with the
+        #     shipped skill version builds clean, the state of main before the 1.1.1 cut). At or above it, a skill
+        #     version that differs from VERSION fails closed (exit 2) in both modes even when the skill source,
+        #     the versioned-zip literal and every generated output agree with one another (the tree is generated
+        #     clean at VERSION 1.0.5 first, then VERSION moves to 1.1.1), and the outputs are left unchanged. The
+        #     equal twin at 1.1.1 builds and checks clean end to end. A malformed, symlinked or hard-linked
+        #     VERSION is exit 2, and so is an ABSENT one: VERSION is a declared input, so a missing VERSION is
+        #     cannot-evaluate, never a skip that would let deleting VERSION turn the rule off (every fixture
+        #     carries VERSION through _write_fixture). Removing the alignment check turns the differing-version
+        #     and malformed legs red; treating an absent VERSION as outside the rule turns the absent legs red;
+        #     comparing the versions as strings instead of numbers turns the 1.10.0 vector red.
+        if PACK_ALIGN_FIRST_VERSION != "1.1.1":
+            failures.append("PACK_ALIGN_FIRST_VERSION must be 1.1.1 (the documented first aligned pack "
+                            "release), got {!r}".format(PACK_ALIGN_FIRST_VERSION))
+
+        def pack_fixture(label, src):
+            fx = tmp / ("pack-align-" + label)
+            fx.mkdir()
+            _write_fixture(fx, src)
+            return fx
+
+        below = pack_fixture("below-first", good_src)
+        (below / "VERSION").write_bytes(b"1.0.5\n")
+        for chk in (False, True):
+            code, out = capture(below, chk)
+            if code != 0:
+                failures.append("VERSION 1.0.5 with skill {} (below the first aligned release) expected exit 0 "
+                                "({}), got {}\n{}".format(zip_versioned_version(), "--check" if chk else "generate",
+                                                          code, out))
+        differ = pack_fixture("differ", good_src)
+        code, out = capture(differ, False)
+        if code != 0:
+            failures.append("the alignment fixture expected a clean first generate at VERSION 1.0.5, got {}\n{}"
+                            .format(code, out))
+        before = {p: p.read_bytes() for p in sorted(differ.joinpath(*ZIP_PARTS[:-1]).rglob("*")) if p.is_file()}
+        (differ / "VERSION").write_bytes(b"1.1.1\n")
+        for chk in (True, False):
+            code, out = capture(differ, chk)
+            if code != 2 or "differs from the pack version '1.1.1'" not in out:
+                failures.append("VERSION 1.1.1 with skill {} (outputs mirroring that source) expected exit 2 "
+                                "naming the pack version ({}), got {}\n{}".format(
+                                    zip_versioned_version(), "--check" if chk else "generate", code, out))
+        after = {p: p.read_bytes() for p in sorted(differ.joinpath(*ZIP_PARTS[:-1]).rglob("*")) if p.is_file()}
+        if after != before:
+            failures.append("a refused skill/pack alignment must write nothing")
+        real_parts = ZIP_VERSIONED_PARTS
+        try:
+            globals()["ZIP_VERSIONED_PARTS"] = ("site", "downloads", versioned_zip_basename("1.1.1"))
+            equal = pack_fixture("equal", _SKILL_SRC.replace("__ZIPVER__", "1.1.1"))
+            (equal / "VERSION").write_bytes(b"1.1.1\n")
+            for chk in (False, True):
+                code, out = capture(equal, chk)
+                if code != 0:
+                    failures.append("VERSION 1.1.1 with skill 1.1.1 expected exit 0 ({}), got {}\n{}".format(
+                        "--check" if chk else "generate", code, out))
+            above = pack_fixture("above", _SKILL_SRC.replace("__ZIPVER__", "1.1.1"))
+            (above / "VERSION").write_bytes(b"1.2.0\n")
+            code, out = capture(above, False)
+            if code != 2 or "differs from the pack version '1.2.0'" not in out:
+                failures.append("VERSION 1.2.0 with skill 1.1.1 expected exit 2 (the rule holds past the first "
+                                "release), got {}\n{}".format(code, out))
+        finally:
+            globals()["ZIP_VERSIONED_PARTS"] = real_parts
+        for label, raw in (("no-newline", b"1.0.5"), ("crlf", b"1.0.5\r\n"), ("prefixed", b"v1.0.5\n"),
+                           ("leading-zero", b"01.0.5\n"), ("two-newlines", b"1.0.5\n\n"),
+                           ("prerelease", b"1.0.5-rc1\n"), ("empty", b"")):
+            bad = pack_fixture("malformed-" + label, good_src)
+            (bad / "VERSION").write_bytes(raw)
+            code, out = capture(bad, False)
+            if code != 2 or "not a bare MAJOR.MINOR.PATCH" not in out:
+                failures.append("a malformed VERSION ({}) expected exit 2 naming its grammar, got {}\n{}".format(
+                    label, code, out))
+        linked = pack_fixture("symlink", good_src)
+        (linked / "VERSION").unlink()
+        (tmp / "outside-VERSION").write_bytes(b"1.0.5\n")
+        os.symlink(str(tmp / "outside-VERSION"), str(linked / "VERSION"))
+        code, out = capture(linked, False)
+        if code != 2:
+            failures.append("a symlinked VERSION expected exit 2 (never read through), got {}\n{}".format(code, out))
+        hard = pack_fixture("hardlink", good_src)
+        os.link(str(hard / "VERSION"), str(tmp / "hardlink-VERSION-twin"))
+        code, out = capture(hard, False)
+        if code != 2 or "hard links" not in out:
+            failures.append("a hard-linked VERSION expected exit 2 naming the hard link, got {}\n{}".format(code, out))
+        # An absent VERSION cannot be evaluated: exit 2 in both modes, naming the missing input, writing nothing.
+        # The tree is generated clean at VERSION 1.0.5 first, so its outputs are drift-clean; deleting VERSION
+        # must not turn the rule off.
+        absent = pack_fixture("absent", good_src)
+        code, out = capture(absent, False)
+        if code != 0:
+            failures.append("the absent-VERSION fixture expected a clean first generate at VERSION 1.0.5, got "
+                            "{}\n{}".format(code, out))
+        (absent / "VERSION").unlink()
+        before = {p: p.read_bytes() for p in sorted(absent.joinpath(*ZIP_PARTS[:-1]).rglob("*")) if p.is_file()}
+        for chk in (True, False):
+            code, out = capture(absent, chk)
+            if code != 2 or "the pack VERSION file is absent" not in out:
+                failures.append("an absent VERSION expected exit 2 (cannot evaluate; {}), got {}\n{}".format(
+                    "--check" if chk else "generate", code, out))
+        after = {p: p.read_bytes() for p in sorted(absent.joinpath(*ZIP_PARTS[:-1]).rglob("*")) if p.is_file()}
+        if after != before:
+            failures.append("a refused absent-VERSION run must write nothing")
+        for comp, pack, first, want_problem in (
+                ("1.1.1", "1.2.0", None, True), ("1.2.0", "1.2.0", None, False), ("1.0.6", "1.1.0", None, False),
+                ("1.0.6", "1.1.1", None, True), ("1.1.1", "1.1.1", None, False),
+                ("1.0.0", "1.10.0", "1.9.0", True), ("1.0.0", "1.9.9", "1.10.0", False)):
+            got = pack_alignment_problem("skill", comp, pack, first) is not None
+            if got != want_problem:
+                failures.append("pack_alignment_problem(skill {}, pack {}, first {}) expected {}, got {}".format(
+                    comp, pack, first or PACK_ALIGN_FIRST_VERSION, "a problem" if want_problem else "none",
+                    "a problem" if got else "none"))
+        for first in (None, "1.9.0"):
+            try:
+                pack_alignment_problem("skill", "1.0.0", None, first)
+                failures.append("pack_alignment_problem with no pack version (first {}) must raise "
+                                "(cannot evaluate), not pass".format(first or PACK_ALIGN_FIRST_VERSION))
+            except ValueError as exc:
+                if "the pack VERSION file is absent" not in str(exc):
+                    failures.append("pack_alignment_problem with no pack version raised for another reason: "
+                                    "{}".format(exc))
 
         # 8. The generator never deletes a file under site/downloads, and the top level is ALLOW-LISTED:
         #    a stale versioned zip, any aiqt-skill variant (case, separator, prefix, suffix, 'v', 'latest',
@@ -2557,6 +2750,9 @@ def self_test_main():
         return 1
     print("SELF-TEST PASS: well-formed source round-trips clean (SKILL.md and the zips); an unknown "
           "corpus-id, an invalid-UTF-8 target, and a version/zip-literal mismatch each fail closed (exit 2); "
+          "from pack 1.1.1 on a skill version that differs from VERSION fails closed (exit 2, writing nothing) "
+          "while the equal twin builds clean and a pack below 1.1.1 leaves the skill independent, and a "
+          "malformed, symlinked, hard-linked or absent VERSION fails closed (exit 2); "
           "a drifted SKILL.md is caught (exit 1); nothing is ever deleted: an orphan reserved entry and a "
           "stale versioned zip plus fourteen other undeclared top-level entries (the allow-list) are kept "
           "and named for removal, git rm if tracked or rm if untracked (normal run exit 2 writing nothing, "
