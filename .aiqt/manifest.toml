@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.0.5"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "6e7a8039b7daa8d9c9850db29576d0b3de0d0c119a164b994a6fabece3efb6b1"
+tree-sha256 = "20f4a1cd4951d9e51a91866811b443d02b7a79c6a7e96d1bcdea0e713ed31e51"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -57,8 +57,8 @@ sha256 = "566cdd353538798199eff9aef9aadb403e31ba9dda366b41d8abcc1ee560761c"
 
 [[sources]]
 path = ".aiqt/core/enforcement-roadmap.toml"
-bytes = 12681
-sha256 = "e7988345a662ec108b0dcdfe5e3556a071ec3b9fadd33cf2e31414bc5e3c4d47"
+bytes = 12680
+sha256 = "2f2f07056a58935fe831daaebd8d3387dd4f319e120e3592619d50c5a2acd5a4"
 
 [[sources]]
 path = ".aiqt/core/gates/byte-canon.toml"
@@ -72,8 +72,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 597007
-sha256 = "4c01134d847e5e8e732edc391c3486dcfa545f4e798f1615811370abb93efaa2"
+bytes = 597104
+sha256 = "76a05e1d392ede4a33f7dc302379b590977b9cc7fd3f8485a835b8b8ac31764b"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -82,8 +82,8 @@ sha256 = "d6e9ab43b1c98a9b5cf7023b7b43cfd447607673e6128bfd06c4812551d32c7e"
 
 [[sources]]
 path = ".aiqt/core/hooks/manifest.toml"
-bytes = 506950
-sha256 = "537b301b5fa2b1c5ab5ee9ea0c82e8d7b44ce2b30aa2d721a102799d0ea6193c"
+bytes = 506908
+sha256 = "9308bc014a0819eb71fca1f674998c56815724f573d0fa61881ce6cf00106c1a"
 
 [[sources]]
 path = ".aiqt/core/hooks/preview.toml"
@@ -827,8 +827,8 @@ sha256 = "622683b912a6c2720502d096f737f59326fa2b6319776dfdaf029cdd2243d1b7"
 
 [[sources]]
 path = ".aiqt/enforceability.json"
-bytes = 1157415
-sha256 = "ae95b48b46738b11c35828745420fa320990590638cc1abfc6df7a3c2d5d1ff8"
+bytes = 1157472
+sha256 = "2f6ad8e36111b54b5b412bd8ffeb28a9ee23e9e90cc8e958cdf645dcec019667"
 
 [[sources]]
 path = ".aiqt/frozen.json"
@@ -2392,8 +2392,8 @@ sha256 = "30c84d62560ba96bcdbcdf216b160b2d7de898cb25c30fdbef3ee337a47fdbe1"
 
 [[sources]]
 path = "ENFORCEMENT.md"
-bytes = 672371
-sha256 = "0b6e9cffcd7924d78e2592a45fb12078198a6a6b08c419903d21c371cf2bb359"
+bytes = 672489
+sha256 = "626993132a0d491adcfe823425e22f1cef3a6a9799e8aa3a11b3bdea91c5e369"
 
 [[sources]]
 path = "GEMINI.md"
@@ -3972,8 +3972,8 @@ sha256 = "dd0e5f2a6402329e70ad8e81e5cd63557683e24044cd3eb16686a60eaf81cae6"
 
 [[sources]]
 path = "site/enforcement.html"
-bytes = 733950
-sha256 = "c3bb0ee8f6d9bf0acb6db6435e5816aa74d5335817b9e508b045443631cafb1f"
+bytes = 734068
+sha256 = "86421b3b1100b287fe9750996c92c9262e6b384388584757122beb04bcccaaaa"
 
 [[sources]]
 path = "site/evidence.html"
