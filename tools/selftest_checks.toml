@@ -83,7 +83,7 @@ expected-check-ids = [
   "stop/pending-decisions-line-endings-read",
   "resume-surface/handoff-line-endings-same-findings",
   "resume-surface/findings-line-endings-same-findings",
-  # ---------- the Stop path fails closed on input it cannot read (fix round 1) ----------
+  # ---------- the Stop path fails closed on input it cannot read ----------
   "recovery/undecodable-toplevel-snapshot-unresolved",
   "stop/undecodable-toplevel-holds",
   "stop/undecodable-toplevel-idle-holds",
@@ -123,7 +123,7 @@ expected-check-ids = [
   "stop/lease-holder-open-vanished-not-live",
   "stop/lease-absent-reads-not-live",
   "stop/lease-absent-holder-mode-not-live",
-  # fix round 3: 'unreadable' follows the precedence 'cannot' uses (a live mode record wins)
+  # a live mode record outranks an unreadable lease: 'unreadable' follows the precedence 'cannot' uses
   "stop/lease-unreadable-mode-record-live",
   "stop/lease-unreadable-mode-record-stop-allows",
   "stop/lease-enotdir-mode-record-live",
@@ -143,6 +143,7 @@ expected-check-ids = [
   "stop/state-dir-nul-holds",
   "stop/state-dir-nul-idle-holds",
   "stop/state-dir-nul-loop-signal-releases",
+  "stop/state-dir-nul-loop-signal-note-names-state-dir",
   "stop/state-dir-nul-escape-inactive",
   "stop/state-dir-nul-dispatcher-denies-stop",
   "yield/state-dir-nul-no-raise",

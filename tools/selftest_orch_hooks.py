@@ -12800,9 +12800,10 @@ def _named_text_cases(hooks):
 
 
 def _stop_unreadable_input_cases(tmp):
-    """The Stop path fails closed on input it cannot read (fix round 1 of the fail-closed hooks PR).
-    Each reader below once raised out of the Stop handler, or answered out of scope, on input it could
-    not read; a raise there is a handler crash, which the Stop dispatcher turns into a warning and an
+    """The Stop path fails closed on input it cannot read: an undecodable toplevel, NUL paths, a
+    non-UTF-8 merge-base answer and a UTF-8 enumerator answer under the C locale. Each reader below
+    once raised out of the Stop handler, or answered out of scope, on input it could not read; a raise
+    there is a handler crash, which the Stop dispatcher turns into a warning and an
     allowed stop. _try returns a raised exception as a named result, so a reader that raises is a red
     check, never a crashed suite."""
     import builtins
@@ -12876,8 +12877,8 @@ def _stop_unreadable_input_cases(tmp):
         fn_regp.write_text(json.dumps(reg), encoding="utf-8")
         return reg
 
-    # (c) the lease path: unreadable, a cannot-evaluate 'unreadable' scope (fix round 2; never 'lease
-    # not live', see _stop_state_and_lease_hold_cases); a CONTROL lease at a readable path is live
+    # (c) the lease path: unreadable, a cannot-evaluate 'unreadable' scope (never 'lease not live',
+    # see _stop_state_and_lease_hold_cases); a CONTROL lease at a readable path is live
     lease_nul = fn_write(lease={"path": "lea\u0000se", "max_age_hours": 24})
     check("stop/nul-lease-path-unreadable",
           _try(lambda: aiqt_hooks._orch_scope_live(lease_nul, str(fn.root), "s1")), "unreadable")
@@ -13017,12 +13018,13 @@ def _stop_unreadable_input_cases(tmp):
 
 
 def _stop_state_and_lease_hold_cases(tmp):
-    """Fix round 2 of the fail-closed hooks PR (orchestrator decisions of 2026-11-15). (1) A declared
-    lease path that cannot be read for any reason other than genuine absence (a NUL or an unencodable
-    character in the path, a permission error, a non-directory component, a path that is not a regular
-    file) is the 'unreadable' scope, a cannot-evaluate HOLD under the row id lease:path with its own
-    detail naming the lease and the reason, never 'lease not live'; a genuinely absent lease stays not
-    live. Fix round 3 (orchestrator decision of 2026-11-15T19:09Z): 'unreadable' follows the precedence
+    """An unreadable lease and an unresolvable state_dir hold the Stop path (orchestrator decisions of
+    2026-11-15). (1) A declared lease path that cannot be read for any reason other than genuine absence
+    (a NUL or an unencodable character in the path, a permission error, a non-directory component, a path
+    that is not a regular file) is the 'unreadable' scope, a cannot-evaluate HOLD under the row id
+    lease:path with its own detail naming the lease and the reason, never 'lease not live'; a genuinely
+    absent lease stays not live. A live mode record outranks it (orchestrator decision of
+    2026-11-15T19:09Z): 'unreadable' follows the precedence
     'cannot' uses, so a live mode record wins over it and it holds only where 'cannot' would (in holder
     mode a caller with no session id is a non-holder). (2) A registry state_dir realpath cannot resolve
     (a NUL, or a character the filesystem encoding cannot encode) HOLDS the Stop family, the loop signal releasing, never an exception out of the
@@ -13159,9 +13161,10 @@ def _stop_state_and_lease_hold_cases(tmp):
     reg = write(lease={"path": absent, "max_age_hours": 24, "holder_is_session_id": True})
     check("stop/lease-absent-holder-mode-not-live", (scope_live(reg), _v(stop())), (False, "allow"))
     lh.set_items([])
-    # fix round 3 (orchestrator decision of 2026-11-15T19:09Z): an unreadable lease follows the precedence
-    # 'cannot' uses, so a live mode record wins over it (the stop allows on an empty backlog, with no
-    # lease:path hold), for every unreadable shape and in holder mode; an absent one defers to it too
+    # a live mode record outranks an unreadable lease (orchestrator decision of 2026-11-15T19:09Z):
+    # it follows the precedence 'cannot' uses, so a live mode record wins over it (the stop allows on an
+    # empty backlog, with no lease:path hold), for every unreadable shape and in holder mode; an absent
+    # one defers to it too
     lh.mode.write_text("Operating-mode: unattended\n", encoding="utf-8")
     check("stop/lease-unreadable-mode-record-live",
           scope_eval(write(lease={"path": nul, "max_age_hours": 24})), (True, None))
@@ -13247,8 +13250,13 @@ def _stop_state_and_lease_hold_cases(tmp):
     check("stop/state-dir-nul-holds",
           (_v(res), "state directory" in _msg(res), "st\\x00ate" in _msg(res)), ("block2", True, True))
     check("stop/state-dir-nul-idle-holds", _v(idle(reset=False)), "block2")
-    check("stop/state-dir-nul-loop-signal-releases",
-          _v(stop(extra={"stop_hook_active": True}, reset=False)), "warn")
+    res = stop(extra={"stop_hook_active": True}, reset=False)
+    check("stop/state-dir-nul-loop-signal-releases", _v(res), "warn")
+    # the loop-signal release is the _stop_warn note site for this hold: it names the loop signal and
+    # the state directory it could not resolve (the hooks suite's ns-stop-state-dir-loop pins its shape)
+    check("stop/state-dir-nul-loop-signal-note-names-state-dir",
+          ("loop signal set" in _msg(res), "state directory" in _msg(res), "st\\x00ate" in _msg(res)),
+          (True, True, True))
     check("stop/state-dir-nul-escape-inactive",
           _try(lambda: aiqt_hooks._orch_escape_active(reg, str(lh.root))), (False, None))
     lh_home = tmp / "lh-home"
