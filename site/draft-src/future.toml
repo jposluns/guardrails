@@ -4,11 +4,11 @@ title = "Future plans"
 kind = "document"
 label = "Planned"
 heading = "What is coming for teams and enterprises"
-meta = "Planned, not yet available: management and monitoring across projects, performance metrics, and guardrail bundles per project or purpose, managed by the team or enterprise."
+meta = "Planned, with no dates yet, and not available today: management and monitoring across projects, performance metrics, and guardrail bundles per project or purpose, managed by the team or enterprise."
 
 [[body]]
 component = "prose"
-html = "<p>Everything on this page is planned. None of it ships today; AIQT today is the standard, the skill, and the pack you add to each project yourself.</p>"
+html = "<p>Everything on this page is planned, with no dates yet. None of it ships today. What you can use today is the AIQT 1.0.5 chat assistant (its chat Skill is version 1.0.6), which each person adds to their own assistant, and the pack, which is open to read in full on GitHub.</p>"
 
 [[body]]
 component = "clauses"

@@ -567,6 +567,15 @@
         "site/draft-src/standard.toml"
       ],
       "target": "site/standard/index.html"
+    },
+    {
+      "kind": "file",
+      "regenerate": "python3 tools/gen_draft_site.py",
+      "sources": [
+        "tools/gen_draft_site.py",
+        "site/draft-src/teams.toml"
+      ],
+      "target": "site/teams/index.html"
     }
   ],
   "version": 1
