@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.0.5"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "981fc93ce21b3568c6f35e5e5a869096c3ea1852bc6adaaf2012e962d6516d7e"
+tree-sha256 = "d144863a14f4dabfdfc889e5353990af7437fa08341463b1a81095e23b1b8853"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -4177,8 +4177,8 @@ sha256 = "67e62a14af79157216e7fd88dfcbf9787a57b6a99aef3b37d90c1dd1689b583d"
 
 [[sources]]
 path = "tools/check_ci_parity.py"
-bytes = 486697
-sha256 = "6faf2c9a356f3a77390f30672a7f1741aeb2a92083cd749c7cde54235a668d9a"
+bytes = 494468
+sha256 = "4a9b50ced7cf5070f21699c93c8c3d7c9b2693b05870b7c8fc4fcc62f67444e4"
 
 [[sources]]
 path = "tools/check_cited_standards.py"
@@ -4187,8 +4187,8 @@ sha256 = "0a30385485f8ee7db5d200846b72e264130ad489752c736c1f5d280cb3a2ee3c"
 
 [[sources]]
 path = "tools/check_clauses.py"
-bytes = 255940
-sha256 = "e06cc6647c60c3eca96d5491c5e784bc9a4f47d91b72381a908ef4cd88ea86a5"
+bytes = 277702
+sha256 = "df621f8ed34ccddb5f6958f29a66896de9876e71a21083d6b5dd0143ff0dec3b"
 
 [[sources]]
 path = "tools/check_crosswalk.py"
@@ -4197,8 +4197,8 @@ sha256 = "0238bb4c907c358a4718a70f8630a92517444f64139b4c0517004bfdbf2321ec"
 
 [[sources]]
 path = "tools/check_dangerous_api.py"
-bytes = 224837
-sha256 = "c5e1cd5b71012f7b2240b4640c06bd0698cc64d1afc03a1389d6406fbb93c9e5"
+bytes = 227781
+sha256 = "29d1fc0ba2143722db3ff04ad8f173eaeb314b3e2d9ce92802d4579712696a2e"
 
 [[sources]]
 path = "tools/check_derived_command_parameters.py"
