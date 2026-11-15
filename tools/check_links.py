@@ -1,25 +1,61 @@
 #!/usr/bin/env python3
 """Fail on repository links whose target does not exist.
 
-Two kinds of link are checked:
+The Markdown forms read, line by line as CommonMark and GitHub Flavored Markdown render them:
 
-1. A relative inline link [text](path) in a Markdown file resolves against the file's directory and must
-   exist.
-2. An own-site link: an absolute http or https URL on a host this project's sites are served at, in an
-   inline Markdown link, or an href in a generated-Markdown source (GENERATED_MD_SOURCES, where a
-   root-relative '/path' is joined to the source's site_base exactly as its generator renders it into the
-   Markdown). The host picks the site tree that serves it (SITE_ROOTS, the same host model as
-   tools/check_site.py: aiqt.ai and www.aiqt.ai, or the AIQT_SITE_HOST host and its www., serve site/;
-   opfiles.ai and www.opfiles.ai serve opf/site/), and the URL path must name a page of that tree: a
-   regular file inside it at the path as written, at path + ".html", or at path/index.html ("/" is
-   index.html), or a rule in that tree's _redirects whose source matches the path (exactly, or through a
-   trailing * splat or a /:name placeholder). A tree absent from the checkout is not checked (an adopter
-   vendoring this gate has no site/). The fragment and query are not checked; tools/check_site.py
-   validates anchors inside the HTML.
+- an inline link [text](dest) or image ![alt](dest), the destination read as CommonMark reads it: either
+  <...> in angle brackets, or a run with no space or control character in which parentheses must
+  balance (so [Guide](https://aiqt.ai/guide(v1)) reads https://aiqt.ai/guide(v1)), with backslash
+  escapes and an optional title;
+- a link reference definition [label]: dest, whose destination may stand on the next line; checking
+  every definition checks the target of every reference-style link [text][label], [label][] or [label]
+  and every reference-style image that uses it (an undefined reference renders as text, not a link);
+- an autolink <scheme:...>;
+- a bare URL, read as GitHub's extended autolink reads it: http://, https:// or www. at the start of a
+  line or after whitespace, *, _, ~ or (, running to whitespace or <, less trailing ?!.,:*_~, an
+  unbalanced trailing ) and a trailing entity reference (a www. URL renders as http://).
+
+Code spans and fenced code blocks are read like any other text, so an own-site URL written in code is
+checked too. A link whose text or destination spans two lines is not read.
+
+Two kinds of target are checked:
+
+1. A relative destination of an inline link, inline image or reference definition resolves against the
+   file's directory and must exist.
+2. An own-site link: an absolute http or https URL, in any form above, on a host this project's sites
+   are served at, or an href in a generated-Markdown source (GENERATED_MD_SOURCES), joined exactly as
+   that source's generator renders it into the Markdown. tools/gen_roadmap.py renders every
+   stage[].links[].href as site_base + href, whatever the href, so an href there must start with a
+   single "/"; tools/gen_disclosure.py renders every row[].evidence[].href as the href itself when it
+   starts with "https://" and as site_base + href otherwise, so an href there must be an https URL
+   with a host or start with a single "/". An href the generator would render wrongly (one that does
+   not start with "/", starts with "//" or, for roadmap.toml, is already absolute), an href that is
+   not a string, a site_base that is not an http or https origin without a trailing "/", query or
+   fragment, or a source shaped other than its generator reads, is malformed: exit 2. An href key
+   elsewhere in a source is not rendered and is not read. The host picks the site tree that serves it
+   (SITE_ROOTS, the same host model as tools/check_site.py: aiqt.ai and www.aiqt.ai, or the
+   AIQT_SITE_HOST host and its www., serve site/; opfiles.ai and www.opfiles.ai serve opf/site/), and
+   the URL path must name a page of that tree: a regular file inside it at the path as written, at
+   path + ".html", or at path/index.html ("/" is index.html), or else the first rule in that tree's
+   _redirects whose source matches the path (exactly, through a trailing * splat or through a /:name
+   placeholder), when that rule counts. A rule counts only when its status is a redirect (301, 302,
+   303, 307 or 308; a rule with no status is a 302) or a 200 rewrite, and its destination itself
+   resolves: a destination path or own-site URL resolves by these same rules (a chain that returns to
+   a path it has visited, or runs past MAX_REDIRECT_HOPS, loops and does not count); an external
+   destination counts for a redirect (whether it is live is out of scope) and never for a 200 rewrite
+   (the host serves no rewrite to another origin). Splats and placeholders: a rule whose source holds
+   a * splat or a :name placeholder counts only when its destination carries every value it captures
+   (:splat for the *, :name for each placeholder), and the destination is then resolved with those
+   values substituted for the link being checked; a rule that sends every match to one fixed
+   destination, such as /* /index.html 200, is a catch-all that serves something for any path and
+   proves no page, so it never counts and a link it matches fails. A _redirects line that is not
+   "source destination [status]" with a numeric status is malformed: exit 2. A tree absent from the
+   checkout is not checked (an adopter vendoring this gate has no site/). The fragment and query are
+   not checked; tools/check_site.py validates anchors inside the HTML.
 
 Other external URLs, mailto and tel links, and pure anchors are out of scope: this gate answers "does the
-target exist in this checkout", not "is the URL live". A reference-style link, an autolink and a bare URL
-are not read.
+target exist in this checkout", not "is the URL live". An autolink or bare URL is checked only when it is
+own-site.
 
 PENDING_DECISION_ALLOWLIST names own-site links knowingly broken while a maintainer decides their fate.
 Each entry is temporary, honoured only for its exact resolved URL, and printed on every run; an entry
@@ -51,9 +87,20 @@ from urllib.parse import unquote, urlsplit
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _walk import walk_files  # noqa: E402  fail-closed tree walk (os.walk, not rglob)
 
-LINK = re.compile(r"(?<!\!)\[[^\]]*\]\(([^)]+)\)")
 SKIP_DIRS = {".git", "node_modules", "__pycache__"}
 NOT_RELATIVE = ("http://", "https://", "mailto:", "tel:", "#")
+
+# CommonMark: a backslash escapes any ASCII punctuation character.
+_ESCAPABLE = frozenset("!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~")
+# CommonMark autolink: <scheme:...> with a 2 to 32 character scheme and no space, control, < or >.
+_AUTOLINK = re.compile(r"<([A-Za-z][A-Za-z0-9+.\-]{1,31}:[^\x00-\x20<>]*)>")
+# GitHub extended autolink: http://, https:// or www., then a domain with at least one period, then any
+# run of characters other than whitespace and <; it starts a line or follows whitespace, *, _, ~ or (.
+_BARE_URL = re.compile(r"(?<![^\s*_~(])((?:https?://|www\.)[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)+[^\s<]*)",
+                       re.IGNORECASE)
+_TRAILING_ENTITY = re.compile(r"&[A-Za-z0-9]+;$")
+# CommonMark link reference definition: up to three spaces, [label], a colon, then the destination.
+_DEFINITION = re.compile(r"^ {0,3}\[((?:[^\[\]\\]|\\.){1,999})\]:(.*)$")
 
 # The hosts this project's sites are served at, each mapped to the tree that serves it. The site/ host
 # follows tools/check_site.py (AIQT_SITE_HOST, default and empty-value fallback aiqt.ai, lowercased); the
@@ -66,13 +113,11 @@ SITE_ROOTS = {
     "www.opfiles.ai": "opf/site",
 }
 
-# Sources whose generator renders their href fields into a committed Markdown file, each with the
-# site_base its generator uses when the source sets none (tools/gen_roadmap.py render_md and
-# tools/gen_disclosure.py DEFAULT_BASE). A root-relative href there becomes site_base + href.
-GENERATED_MD_SOURCES = {
-    "roadmap.toml": "https://aiqt.ai",
-    "disclosure.toml": "https://aiqt.ai",
-}
+# _redirects statuses (Cloudflare Pages): a rule with no status is a 302.
+REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
+REWRITE_STATUS = 200
+DEFAULT_STATUS = 302
+MAX_REDIRECT_HOPS = 16
 
 # Own-site links knowingly broken pending a maintainer decision. TEMPORARY: each entry is keyed by the
 # exact resolved URL (another spelling, host, scheme, case, trailing slash or fragment is not covered) and
@@ -86,11 +131,215 @@ PENDING_DECISION_ALLOWLIST = {
 }
 
 _PLACEHOLDER = re.compile(r"(\*|(?<=/):[A-Za-z_][A-Za-z0-9_]*)")
+_DEST_NAME = re.compile(r":([A-Za-z_][A-Za-z0-9_]*)")
 
 
 class ScanError(Exception):
     """A tree or source this gate must read cannot be read as declared (exit 2)."""
 
+
+# ---------------------------------------------------------------------------------------------------
+# Markdown reading
+
+def _parse_destination(text, i):
+    """The CommonMark link destination starting at text[i] as (destination, end index), or None.
+
+    <...>: no line ending and no unescaped < or >. Otherwise: a nonempty run with no ASCII space or
+    control character, in which unescaped parentheses must balance. Backslash escapes are removed."""
+    n = len(text)
+    out = []
+    if i < n and text[i] == "<":
+        j = i + 1
+        while j < n:
+            ch = text[j]
+            if ch == "\\" and j + 1 < n and text[j + 1] in _ESCAPABLE:
+                out.append(text[j + 1])
+                j += 2
+                continue
+            if ch == ">":
+                return "".join(out), j + 1
+            if ch in "<\n\r":
+                return None
+            out.append(ch)
+            j += 1
+        return None
+    depth = 0
+    j = i
+    while j < n:
+        ch = text[j]
+        if ch == "\\" and j + 1 < n and text[j + 1] in _ESCAPABLE:
+            out.append(text[j + 1])
+            j += 2
+            continue
+        if ord(ch) <= 0x20 or ord(ch) == 0x7F:
+            break
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            if depth == 0:
+                break
+            depth -= 1
+        out.append(ch)
+        j += 1
+    if j == i or depth != 0:
+        return None
+    return "".join(out), j
+
+
+def _skip_space(text, i):
+    while i < len(text) and text[i] in " \t":
+        i += 1
+    return i
+
+
+def _parse_title(text, i):
+    """The end index of a CommonMark link title starting at text[i] ("...", '...' or (...)), or None."""
+    if i >= len(text) or text[i] not in "\"'(":
+        return None
+    close = ")" if text[i] == "(" else text[i]
+    j = i + 1
+    while j < len(text):
+        ch = text[j]
+        if ch == "\\":
+            j += 2
+            continue
+        if ch == close:
+            return j + 1
+        if close == ")" and ch == "(":
+            return None
+        j += 1
+    return None
+
+
+def _parse_inline_tail(text, i):
+    """Parse '(dest "title")' after the ']' of a link, from the index just past '('. Returns
+    (destination, end index past ')') or None when it is not an inline link."""
+    i = _skip_space(text, i)
+    if i < len(text) and text[i] == ")":
+        return "", i + 1
+    parsed = _parse_destination(text, i)
+    if parsed is None:
+        return None
+    dest, j = parsed
+    k = _skip_space(text, j)
+    if k < len(text) and text[k] != ")":
+        if k == j:
+            return None
+        end = _parse_title(text, k)
+        if end is None:
+            return None
+        k = _skip_space(text, end)
+    if k < len(text) and text[k] == ")":
+        return dest, k + 1
+    return None
+
+
+def _match_bracket(text, i):
+    """The index of the ']' that closes the '[' at text[i] (nested brackets balance, backslash escapes
+    are skipped), or None."""
+    depth = 0
+    j = i
+    while j < len(text):
+        ch = text[j]
+        if ch == "\\":
+            j += 2
+            continue
+        if ch == "[":
+            depth += 1
+        elif ch == "]":
+            depth -= 1
+            if depth == 0:
+                return j
+        j += 1
+    return None
+
+
+def _gfm_trim(url):
+    """Drop what GitHub's extended autolink leaves out at the end of a bare URL."""
+    while url:
+        last = url[-1]
+        if last in "?!.,:*_~":
+            url = url[:-1]
+        elif last == ")" and url.count(")") > url.count("("):
+            url = url[:-1]
+        elif last == ";" and _TRAILING_ENTITY.search(url):
+            url = url[:_TRAILING_ENTITY.search(url).start()]
+        else:
+            break
+    return url
+
+
+def line_targets(line):
+    """Every (kind, target) one Markdown line links to, in reading order. kind is "inline" (an inline
+    link or image destination), "autolink" or "bare"."""
+    targets, masked = [], []
+    n = len(line)
+    i = 0
+    while i < n:
+        span = next((end for start, end in masked if start <= i < end), None)
+        if span is not None:
+            i = span
+            continue
+        ch = line[i]
+        if ch == "\\":
+            i += 2
+            continue
+        if ch == "[":
+            close = _match_bracket(line, i)
+            if close is not None and close + 1 < n and line[close + 1] == "(":
+                parsed = _parse_inline_tail(line, close + 2)
+                if parsed is not None:
+                    dest, end = parsed
+                    if dest:
+                        targets.append((i, "inline", dest))
+                    masked.append((close + 1, end))
+            i += 1
+            continue
+        if ch == "<":
+            match = _AUTOLINK.match(line, i)
+            if match:
+                targets.append((i, "autolink", match.group(1)))
+                masked.append((i, match.end()))
+                i = match.end()
+                continue
+        i += 1
+    for match in _BARE_URL.finditer(line):
+        if any(start <= match.start() < end for start, end in masked):
+            continue
+        url = _gfm_trim(match.group(1))
+        if url.lower().startswith("www."):
+            url = "http://" + url
+        targets.append((match.start(), "bare", url))
+    return [(kind, target) for _, kind, target in sorted(targets, key=lambda item: item[0])]
+
+
+def definition_at(lines, index):
+    """(destination, lines used) when lines[index] opens a link reference definition, else None."""
+    match = _DEFINITION.match(lines[index])
+    if match is None or not match.group(1).strip():
+        return None
+    rest, used = match.group(2), 1
+    if not rest.strip():
+        if index + 1 >= len(lines) or not lines[index + 1].strip():
+            return None
+        rest, used = lines[index + 1], 2
+    i = _skip_space(rest, 0)
+    parsed = _parse_destination(rest, i)
+    if parsed is None:
+        return None
+    dest, j = parsed
+    k = _skip_space(rest, j)
+    if k < len(rest):
+        if k == j:
+            return None
+        end = _parse_title(rest, k)
+        if end is None or _skip_space(rest, end) < len(rest):
+            return None
+    return dest, used
+
+
+# ---------------------------------------------------------------------------------------------------
+# Site trees and _redirects
 
 def own_site_target(url, site_roots):
     """(tree, path) when url is an http or https URL on an own-site host, else None."""
@@ -107,15 +356,27 @@ def own_site_target(url, site_roots):
     return tree, unquote(parts.path) or "/"
 
 
-def _rule_matches(source, path):
-    pattern = "".join(
-        ".*" if piece == "*" else "[^/]+" if piece.startswith(":") and len(piece) > 1 else re.escape(piece)
-        for piece in _PLACEHOLDER.split(source))
-    return re.fullmatch(pattern, path) is not None
+def _rule_pattern(source, where):
+    """(compiled full-match pattern, captured names) for a _redirects source."""
+    names, pieces = [], []
+    for piece in _PLACEHOLDER.split(source):
+        if piece == "*":
+            names.append("splat")
+            pieces.append("(?P<splat>.*)")
+        elif piece.startswith(":") and len(piece) > 1:
+            names.append(piece[1:])
+            pieces.append("(?P<{}>[^/]+)".format(piece[1:]))
+        else:
+            pieces.append(re.escape(piece))
+    try:
+        return re.compile("".join(pieces)), names
+    except re.error as exc:
+        raise ScanError("{}: source {!r} cannot be matched ({})".format(where, source, exc)) from None
 
 
-def load_redirect_sources(tree_dir):
-    """The source path of every rule in tree_dir/_redirects (none when the file is absent)."""
+def load_redirect_rules(tree_dir):
+    """Every rule in tree_dir/_redirects as (line, source, destination, status, pattern, names), in file
+    order (none when the file is absent). A line that is not 'source destination [status]' is malformed."""
     path = tree_dir / "_redirects"
     if not path.exists():
         return []
@@ -125,18 +386,25 @@ def load_redirect_sources(tree_dir):
         text = path.read_text(encoding="utf-8")
     except UnicodeDecodeError as exc:
         raise ScanError("{} is not UTF-8 ({})".format(path, exc)) from None
-    sources = []
-    for line in text.splitlines():
+    rules = []
+    for number, line in enumerate(text.splitlines(), 1):
         stripped = line.strip()
-        if stripped and not stripped.startswith("#"):
-            sources.append(stripped.split()[0])
-    return sources
+        if not stripped or stripped.startswith("#"):
+            continue
+        where = "{}:{}".format(path, number)
+        fields = stripped.split()
+        if len(fields) not in (2, 3):
+            raise ScanError("{}: a rule is 'source destination [status]', not {!r}".format(where, stripped))
+        if len(fields) == 3 and not (fields[2].isascii() and fields[2].isdigit()):
+            raise ScanError("{}: status {!r} is not a number".format(where, fields[2]))
+        status = int(fields[2]) if len(fields) == 3 else DEFAULT_STATUS
+        pattern, names = _rule_pattern(fields[0], where)
+        rules.append((number, fields[0], fields[1], status, pattern, names))
+    return rules
 
 
-def page_present(tree_dir, path, redirect_sources):
-    """True when tree_dir serves path: a matching file, path + .html, path/index.html, or a _redirects rule."""
-    if any(_rule_matches(source, path) for source in redirect_sources):
-        return True
+def file_present(tree_dir, path):
+    """True when tree_dir holds a regular file for path: as written, path + .html or path/index.html."""
     rel = path.lstrip("/")
     if rel == "" or rel.endswith("/"):
         candidates = [tree_dir / rel / "index.html"]
@@ -150,18 +418,147 @@ def page_present(tree_dir, path, redirect_sources):
     return False
 
 
-def _source_hrefs(value):
-    """Every string href in a parsed TOML document, in document order."""
-    if isinstance(value, dict):
-        for key, item in value.items():
-            if key == "href" and isinstance(item, str):
-                yield item
-            else:
-                yield from _source_hrefs(item)
-    elif isinstance(value, list):
-        for item in value:
-            yield from _source_hrefs(item)
+class Sites:
+    """The site trees of one checkout, each read once."""
 
+    def __init__(self, root, site_roots):
+        self.root = root
+        self.site_roots = site_roots
+        self.trees = {}
+
+    def state(self, tree):
+        """(tree_dir, rules), or None when the tree is absent from the checkout."""
+        if tree not in self.trees:
+            tree_dir = self.root / tree
+            self.trees[tree] = (tree_dir, load_redirect_rules(tree_dir)) if tree_dir.is_dir() else None
+        return self.trees[tree]
+
+    def missing(self, tree, path, visited=()):
+        """None when tree serves path (or the tree is absent), else why it does not."""
+        state = self.state(tree)
+        if state is None:
+            return None
+        tree_dir, rules = state
+        if file_present(tree_dir, path):
+            return None
+        for number, source, dest, status, pattern, names in rules:
+            match = pattern.fullmatch(path)
+            if match is None:
+                continue
+            rule = "{}/_redirects line {} ({} {} {})".format(tree, number, source, dest, status)
+            if status not in REDIRECT_STATUSES and status != REWRITE_STATUS:
+                return "{} has status {}, neither a redirect nor a 200 rewrite".format(rule, status)
+            carried = set(_DEST_NAME.findall(dest))
+            if not set(names) <= carried:
+                return ("{} is a catch-all: its destination does not carry what its source captures, so it "
+                        "proves no page".format(rule))
+            target = _DEST_NAME.sub(
+                lambda m: match.group(m.group(1)) if m.group(1) in names else m.group(0), dest)
+            try:
+                parts = urlsplit(target)
+            except ValueError:
+                return "{} has a destination that is not a URL".format(rule)
+            if parts.scheme or parts.netloc:
+                own = own_site_target(target, self.site_roots)
+                if own is None:
+                    if status == REWRITE_STATUS:
+                        return "{} rewrites to another origin, which is not served".format(rule)
+                    return None
+                next_hop = own
+            elif target.startswith("/"):
+                next_hop = (tree, unquote(parts.path) or "/")
+            else:
+                return "{} has a destination that is neither a /path nor an absolute URL".format(rule)
+            chain = visited + ((tree, path),)
+            if next_hop in chain or len(chain) > MAX_REDIRECT_HOPS:
+                return "{} loops".format(rule)
+            why = self.missing(next_hop[0], next_hop[1], chain)
+            if why is None:
+                return None
+            return "{} leads to {}, which is missing: {}".format(rule, target, why)
+        return "no file, no .html, no index.html, no _redirects rule"
+
+
+# ---------------------------------------------------------------------------------------------------
+# Generated-Markdown sources
+
+def _root_relative(href):
+    return href.startswith("/") and not href.startswith("//")
+
+
+def _roadmap_links(data, base):
+    """(href, rendered URL) as tools/gen_roadmap.py render_md renders each: always base + href."""
+    stages = data.get("stage")
+    if not isinstance(stages, list) or not all(isinstance(stage, dict) for stage in stages):
+        raise ScanError("has no [[stage]] array of tables, which gen_roadmap.py reads")
+    for stage in stages:
+        links = stage.get("links", [])
+        if not isinstance(links, list):
+            raise ScanError("a stage's links is not an array")
+        for link in links:
+            if not isinstance(link, dict) or not isinstance(link.get("href"), str):
+                raise ScanError("a stage link has no string href")
+            href = link["href"]
+            if not _root_relative(href):
+                raise ScanError("href {!r} does not start with a single '/'; gen_roadmap.py renders base + "
+                                "href, so it would render as {!r}".format(href, base + href))
+            yield href, base + href
+
+
+def _disclosure_links(data, base):
+    """(href, rendered URL) as tools/gen_disclosure.py render_md renders each: the href itself when it
+    starts with https://, else base + href."""
+    rows = data.get("row")
+    if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
+        raise ScanError("has no [[row]] array of tables, which gen_disclosure.py reads")
+    for row in rows:
+        evidence = row.get("evidence")
+        if not isinstance(evidence, list):
+            raise ScanError("a row's evidence is not an array")
+        for item in evidence:
+            if not isinstance(item, dict) or not isinstance(item.get("href"), str):
+                raise ScanError("an evidence entry has no string href")
+            href = item["href"]
+            if href.startswith("https://"):
+                try:
+                    host = urlsplit(href).hostname
+                except ValueError:
+                    host = None
+                if not host:
+                    raise ScanError("href {!r} is an https URL with no host".format(href))
+                yield href, href
+            elif _root_relative(href):
+                yield href, base + href
+            else:
+                raise ScanError("href {!r} is neither an https URL nor a single-'/' path; gen_disclosure.py "
+                                "would render it as {!r}".format(href, base + href))
+
+
+# Sources whose generator renders their hrefs into a committed Markdown file: each with the site_base its
+# generator uses when the source sets none (tools/gen_roadmap.py render_md and tools/gen_disclosure.py
+# DEFAULT_BASE) and the reader that yields each href with the URL that generator renders from it.
+GENERATED_MD_SOURCES = {
+    "roadmap.toml": ("https://aiqt.ai", _roadmap_links),
+    "disclosure.toml": ("https://aiqt.ai", _disclosure_links),
+}
+
+
+def _check_base(base):
+    """Raise ScanError unless base is an http or https origin that base + '/path' renders correctly."""
+    if not isinstance(base, str):
+        raise ScanError("site_base is not a string")
+    try:
+        parts = urlsplit(base)
+        good = parts.scheme.lower() in ("http", "https") and bool(parts.hostname)
+    except ValueError:
+        good = False
+    if not good or base.endswith("/") or "?" in base or "#" in base:
+        raise ScanError("site_base {!r} is not an http or https origin without a trailing '/', query or "
+                        "fragment, so base + '/path' would render wrongly".format(base))
+
+
+# ---------------------------------------------------------------------------------------------------
+# Scan
 
 def scan(root, site_roots=None, sources=None, allowlist=None):
     """Return (findings, notes) for the tree at root. Raises OSError or ScanError when it cannot read it."""
@@ -169,28 +566,34 @@ def scan(root, site_roots=None, sources=None, allowlist=None):
     sources = GENERATED_MD_SOURCES if sources is None else sources
     allowlist = PENDING_DECISION_ALLOWLIST if allowlist is None else allowlist
     findings, notes = [], []
-    trees = {}
-
-    def tree_state(tree):
-        if tree not in trees:
-            tree_dir = root / tree
-            trees[tree] = (tree_dir, load_redirect_sources(tree_dir)) if tree_dir.is_dir() else None
-        return trees[tree]
+    sites = Sites(root, site_roots)
 
     def check_own_site(where, shown, url):
         target = own_site_target(url, site_roots)
         if target is None:
             return False
         tree, path = target
-        state = tree_state(tree)
-        if state is None or page_present(state[0], path, state[1]):
+        why = sites.missing(tree, path)
+        if why is None:
             return True
         if url in allowlist:
             notes.append("{}: allowlisted pending decision ({}) -> {}".format(where, allowlist[url], shown))
             return True
-        findings.append("{}: broken own-site link -> {} (no page for {} under {}/: no file, no .html, no "
-                        "index.html, no _redirects rule)".format(where, shown, path, tree))
+        findings.append("{}: broken own-site link -> {} (no page for {} under {}/: {})".format(
+            where, shown, path, tree, why))
         return True
+
+    def check_target(where, path, kind, target):
+        if check_own_site(where, target, target):
+            return
+        if kind in ("autolink", "bare") or target.startswith(NOT_RELATIVE):
+            return
+        clean = unquote(target.split("#", 1)[0])
+        if not clean:
+            return
+        resolved = (path.parent / clean).resolve()
+        if not resolved.exists():
+            findings.append(f"{where}: broken link -> {target}")
 
     for path in sorted(walk_files(root, SKIP_DIRS, suffixes={".md"})):
         rel = path.relative_to(root)
@@ -201,23 +604,22 @@ def scan(root, site_roots=None, sources=None, allowlist=None):
             # read error; keep it a finding (exit 1). An OSError (unreadable) fails closed.
             findings.append(f"{rel}: cannot read as utf-8 (UnicodeDecodeError)")
             continue
-        for number, line in enumerate(text.splitlines(), 1):
-            for target in LINK.findall(line):
-                target = target.split()[0].strip()
-                if not target:
-                    continue
-                if check_own_site(f"{rel}:{number}", target, target):
-                    continue
-                if target.startswith(NOT_RELATIVE):
-                    continue
-                clean = unquote(target.split("#", 1)[0])
-                if not clean:
-                    continue
-                resolved = (path.parent / clean).resolve()
-                if not resolved.exists():
-                    findings.append(f"{rel}:{number}: broken link -> {target}")
+        lines = text.splitlines()
+        index = 0
+        while index < len(lines):
+            number = index + 1
+            definition = definition_at(lines, index)
+            if definition is not None:
+                dest, used = definition
+                if dest:
+                    check_target(f"{rel}:{number}", path, "inline", dest)
+                index += used
+                continue
+            for kind, target in line_targets(lines[index]):
+                check_target(f"{rel}:{number}", path, kind, target)
+            index += 1
 
-    for name, default_base in sources.items():
+    for name, (default_base, links) in sources.items():
         source = root / name
         if not source.exists():
             continue
@@ -228,17 +630,19 @@ def scan(root, site_roots=None, sources=None, allowlist=None):
             # ValueError covers tomllib.TOMLDecodeError and UnicodeDecodeError; a nesting bomb raises
             # RecursionError and a huge document MemoryError. Each is cannot-evaluate (exit 2).
             raise ScanError("{} cannot be parsed ({}: {})".format(name, type(exc).__name__, exc)) from None
-        base = data.get("site_base", default_base)
-        if not isinstance(base, str):
-            raise ScanError("{}: site_base is not a string".format(name))
+        try:
+            base = data.get("site_base", default_base)
+            _check_base(base)
+            rendered = list(links(data, base))
+        except ScanError as exc:
+            raise ScanError("{}: {}".format(name, exc)) from None
         lines = text.splitlines()
         cursor = 0
-        for href in _source_hrefs(data):
+        for href, url in rendered:
             number = next((i + 1 for i in range(cursor, len(lines)) if '"{}"'.format(href) in lines[i]
                            or "'{}'".format(href) in lines[i]), 0)
             cursor = number if number else cursor
             where = "{}:{}".format(name, number) if number else name
-            url = base + href if href.startswith("/") and not href.startswith("//") else href
             shown = href if url == href else "{} (renders as {})".format(href, url)
             check_own_site(where, shown, url)
 
@@ -246,8 +650,7 @@ def scan(root, site_roots=None, sources=None, allowlist=None):
         target = own_site_target(url, site_roots)
         if target is None:
             continue
-        state = tree_state(target[0])
-        if state is not None and page_present(state[0], target[1], state[1]):
+        if sites.state(target[0]) is not None and sites.missing(target[0], target[1]) is None:
             findings.append("allowlist entry {} ({}) is stale: the page now exists under {}/; remove the "
                             "entry".format(label, url, target[0]))
     return findings, notes
@@ -275,11 +678,14 @@ def main() -> int:
 # output must hold). Each runs the script under test as a child process inside its own fixture tree, so
 # the production constants (hosts, sources, allowlist) are what is exercised.
 _SITE = {"site/index.html": "<title>t</title>"}
+_DISCLOSURE = 'site_base = "https://aiqt.ai"\n[[row]]\nevidence = [{{ text = "x", href = "{}" }}]\n'
+_ROADMAP = '[[stage]]\nlinks = [{{ text = "x", href = "{}" }}]\n'
 SELF_TEST_VECTORS = (
     ("relative/present-passes", {"README.md": "[a](docs/a.md)\n", "docs/a.md": "x\n"}, 0, ()),
     ("relative/missing-fails", {"README.md": "[a](docs/none.md)\n"}, 1, ("broken link -> docs/none.md",)),
     ("own-site/missing-page-fails", {**_SITE, "README.md": "[t](https://aiqt.ai/missing)\n"}, 1,
-     ("README.md:1: broken own-site link -> https://aiqt.ai/missing", "no page for /missing under site/")),
+     ("README.md:1: broken own-site link -> https://aiqt.ai/missing", "no page for /missing under site/",
+      "FAIL: 1 broken link(s)")),
     ("own-site/www-host-missing-fails", {**_SITE, "README.md": "[t](https://www.aiqt.ai/missing)\n"}, 1,
      ("broken own-site link -> https://www.aiqt.ai/missing",)),
     ("own-site/present-page-passes", {**_SITE, "site/present.html": "p", "README.md":
@@ -289,28 +695,89 @@ SELF_TEST_VECTORS = (
      "[a](https://aiqt.ai/dir/) [b](https://aiqt.ai/dir)\n"}, 0, ()),
     ("own-site/directory-without-index-fails", {**_SITE, "site/bare/other.html": "o", "README.md":
      "[a](https://aiqt.ai/bare/)\n"}, 1, ("no page for /bare/ under site/",)),
-    ("own-site/redirect-rule-passes", {**_SITE, "site/_redirects": "/old /index.html 301\n/blog/* / 301\n"
-     "/u/:id / 301\n", "README.md": "[a](https://aiqt.ai/old) [b](https://aiqt.ai/blog/x/y) "
-     "[c](https://aiqt.ai/u/7)\n"}, 0, ()),
-    ("own-site/redirect-rule-not-a-prefix-fails", {**_SITE, "site/_redirects": "/old /index.html 301\n",
-     "README.md": "[a](https://aiqt.ai/older)\n"}, 1, ("no page for /older under site/",)),
     ("own-site/escape-out-of-tree-fails", {**_SITE, "README.md": "[a](https://aiqt.ai/../README.md)\n"}, 1,
      ("broken own-site link",)),
     ("external/not-checked", {**_SITE, "README.md": "[a](https://example.com/missing) "
-     "[b](https://notaiqt.ai/missing) [c](https://aiqt.ai.example.com/missing) [d](mailto:x@example.com)\n"},
-     0, ()),
+     "[b](https://notaiqt.ai/missing) [c](https://aiqt.ai.example.com/missing) [d](mailto:x@example.com) "
+     "<https://example.com/missing> https://example.com/missing <x@example.com>\n"}, 0, ()),
     ("opfiles/served-by-opf-site-only-fails", {**_SITE, "site/model.html": "m", "opf/site/index.html": "i",
      "README.md": "[a](https://opfiles.ai/model)\n"}, 1, ("no page for /model under opf/site/",)),
     ("opfiles/present-in-opf-site-passes", {**_SITE, "opf/site/model/index.html": "m", "README.md":
      "[a](https://opfiles.ai/model/) [b](https://www.opfiles.ai/model)\n"}, 0, ()),
     ("tree-absent/not-checked", {"README.md": "[a](https://aiqt.ai/missing) [b](https://opfiles.ai/x)\n"},
      0, ()),
+    # (1) a destination is read as CommonMark reads it: balanced parentheses, <...>, escapes and a title.
+    ("destination/balanced-parens-present-passes", {**_SITE, "site/guide(v1).html": "g", "docs/a b.md": "x",
+     "docs/a(1).md": "x", "README.md": "[Guide](https://aiqt.ai/guide(v1)) [b](docs/a(1).md) "
+     "[c](<docs/a b.md>) [d](https://aiqt.ai/guide\\(v1\\) \"Title\") [e](<https://aiqt.ai/guide(v1)> 'T')\n"},
+     0, ()),
+    ("destination/balanced-parens-missing-fails", {**_SITE, "site/guide(v1).html": "g", "README.md":
+     "[Guide](https://aiqt.ai/guide(v2)) [b](docs/a(2).md)\n"}, 1,
+     ("broken own-site link -> https://aiqt.ai/guide(v2) (", "broken link -> docs/a(2).md\n")),
+    # (2) a _redirects rule counts only when it redirects or rewrites to a destination that resolves.
+    ("redirects/counting-rules-pass", {**_SITE, "site/present.html": "p", "site/news/x/y.html": "n",
+     "site/people/7.html": "p", "site/_redirects": "# comment\n/old /index.html 301\n"
+     "/blog/* /news/:splat 301\n/u/:id /people/:id 308\n/r /present 200\n/two /old 302\n"
+     "/ext https://example.com/x 301\n/plain /present\n/frag /present#a 303\n", "README.md":
+     "[a](https://aiqt.ai/old) [b](https://aiqt.ai/blog/x/y) [c](https://aiqt.ai/u/7) "
+     "[d](https://aiqt.ai/r) [e](https://aiqt.ai/two) [f](https://aiqt.ai/ext) [g](https://aiqt.ai/plain) "
+     "[h](https://aiqt.ai/frag)\n"}, 0, ()),
+    ("redirects/rule-not-a-prefix-fails", {**_SITE, "site/_redirects": "/old /index.html 301\n",
+     "README.md": "[a](https://aiqt.ai/older)\n"}, 1, ("no page for /older under site/",)),
+    ("redirects/non-redirect-status-fails", {**_SITE, "site/_redirects": "/gone /index.html 404\n",
+     "README.md": "[a](https://aiqt.ai/gone)\n"}, 1, ("has status 404, neither a redirect nor a 200 rewrite",)),
+    ("redirects/missing-destination-fails", {**_SITE, "site/_redirects": "/old /also-missing 301\n"
+     "/r /nothing 200\n", "README.md": "[a](https://aiqt.ai/old) [b](https://aiqt.ai/r)\n"}, 1,
+     ("leads to /also-missing, which is missing", "leads to /nothing, which is missing")),
+    ("redirects/splat-destination-missing-fails", {**_SITE, "site/_redirects": "/blog/* /news/:splat 301\n",
+     "README.md": "[a](https://aiqt.ai/blog/zzz)\n"}, 1, ("leads to /news/zzz, which is missing",)),
+    ("redirects/loop-fails", {**_SITE, "site/_redirects": "/a /b 301\n/b /a 302\n/self /self 301\n",
+     "README.md": "[a](https://aiqt.ai/a) [b](https://aiqt.ai/self)\n"}, 1,
+     ("site/_redirects line 2 (/b /a 302) loops", "site/_redirects line 3 (/self /self 301) loops")),
+    ("redirects/splat-catch-all-fails", {**_SITE, "site/_redirects": "/* /index.html 200\n", "README.md":
+     "[a](https://aiqt.ai/nope)\n"}, 1, ("(/* /index.html 200) is a catch-all",)),
+    ("redirects/rewrite-to-another-origin-fails", {**_SITE, "site/_redirects": "/p https://example.com/ 200\n",
+     "README.md": "[a](https://aiqt.ai/p)\n"}, 1, ("rewrites to another origin",)),
+    ("redirects/malformed-rule-cannot-evaluate", {**_SITE, "site/_redirects": "/x /y moved\n",
+     "README.md": "x\n"}, 2, ("status 'moved' is not a number",)),
+    # (3) autolinks, reference-style links and images, inline images and bare URLs are read.
+    ("forms/present-pass", {**_SITE, "site/present.html": "p", "docs/i.png": "i", "README.md":
+     "<https://aiqt.ai/present> [r][ref] ![i][img] [s] ![j](docs/i.png) [![k](docs/i.png)](https://aiqt.ai/)\n"
+     "See https://aiqt.ai/present. (also www.aiqt.ai/present), https://opfiles.ai/x is absent here.\n"
+     "\n[ref]: https://aiqt.ai/present \"Title\"\n[img]: <docs/i.png>\n[s]:\n  https://aiqt.ai/present\n"},
+     0, ()),
+    ("forms/autolink-missing-fails", {**_SITE, "README.md": "<https://aiqt.ai/nope>\n"}, 1,
+     ("README.md:1: broken own-site link -> https://aiqt.ai/nope (", "FAIL: 1 broken link(s)")),
+    ("forms/reference-link-missing-fails", {**_SITE, "README.md": "[a][r]\n\n[r]: https://aiqt.ai/nope\n"}, 1,
+     ("README.md:3: broken own-site link -> https://aiqt.ai/nope (", "FAIL: 1 broken link(s)")),
+    ("forms/reference-image-missing-fails", {"README.md": "![i][img]\n\n[img]: <docs/missing.png> 'T'\n"}, 1,
+     ("README.md:3: broken link -> docs/missing.png",)),
+    ("forms/inline-image-missing-fails", {"README.md": "![i](docs/none.png)\n"}, 1,
+     ("README.md:1: broken link -> docs/none.png",)),
+    ("forms/bare-url-missing-fails", {**_SITE, "README.md": "See https://aiqt.ai/nope.\n(www.aiqt.ai/gone)\n"},
+     1, ("README.md:1: broken own-site link -> https://aiqt.ai/nope (",
+         "README.md:2: broken own-site link -> http://www.aiqt.ai/gone (", "FAIL: 2 broken link(s)")),
+    # (4) a generated source's href is joined exactly as its generator renders it.
     ("source/root-relative-href-missing-fails", {**_SITE, "roadmap.toml":
      'title = "T"\n[[stage]]\nlinks = [{ text = "x", href = "/gone" }]\n'}, 1,
      ("roadmap.toml:3: broken own-site link -> /gone (renders as https://aiqt.ai/gone)",)),
-    ("source/root-relative-href-present-passes", {**_SITE, "site/here.html": "h", "disclosure.toml":
+    ("source/root-relative-href-present-passes", {**_SITE, "site/here.html": "h", "roadmap.toml":
+     _ROADMAP.format("/here#a") + 'other = { href = "not rendered" }\n', "disclosure.toml":
      'site_base = "https://aiqt.ai"\n[[row]]\nevidence = [{ text = "x", href = "/here#a" },'
-     ' { text = "y", href = "https://example.com/z" }]\n'}, 0, ()),
+     ' { text = "y", href = "https://example.com/z" }, { text = "z", href = "https://aiqt.ai/here" }]\n'},
+     0, ()),
+    ("source/roadmap-relative-href-malformed", {**_SITE, "roadmap.toml": _ROADMAP.format("nope")}, 2,
+     ("href 'nope' does not start with a single '/'", "'https://aiqt.ainope'")),
+    ("source/roadmap-absolute-href-malformed", {**_SITE, "roadmap.toml": _ROADMAP.format("https://aiqt.ai/")},
+     2, ("'https://aiqt.aihttps://aiqt.ai/'",)),
+    ("source/roadmap-non-string-href-malformed", {**_SITE, "roadmap.toml":
+     '[[stage]]\nlinks = [{ text = "x", href = 5 }]\n'}, 2, ("a stage link has no string href",)),
+    ("source/site-base-trailing-slash-malformed", {**_SITE, "roadmap.toml":
+     'site_base = "https://aiqt.ai/"\n' + _ROADMAP.format("/x")}, 2, ("site_base 'https://aiqt.ai/'",)),
+    ("source/disclosure-relative-href-malformed", {**_SITE, "disclosure.toml": _DISCLOSURE.format("here")}, 2,
+     ("href 'here' is neither an https URL nor a single-'/' path",)),
+    ("source/disclosure-http-href-malformed", {**_SITE, "disclosure.toml":
+     _DISCLOSURE.format("http://aiqt.ai/")}, 2, ("href 'http://aiqt.ai/' is neither",)),
     ("source/malformed-cannot-evaluate", {**_SITE, "roadmap.toml": "title = \n"}, 2, ()),
     ("allowlist/exact-url-honoured", {**_SITE, "README.md": "[t](https://aiqt.ai/teams)\n", "roadmap.toml":
      '[[stage]]\nlinks = [{ text = "t", href = "/teams" }]\n'}, 0,
@@ -326,6 +793,8 @@ SELF_TEST_VECTORS = (
      ("broken own-site link -> http://aiqt.ai/teams",)),
     ("allowlist/stale-entry-fails", {**_SITE, "site/teams.html": "t"}, 1,
      ("allowlist entry roadmap-teams-link (https://aiqt.ai/teams) is stale",)),
+    ("allowlist/catch-all-does-not-make-it-stale", {**_SITE, "site/_redirects": "/* /index.html 200\n"}, 0,
+     ()),
 )
 
 
