@@ -190,6 +190,7 @@ that run, never refuses the commit and keeps no `--wait` polling), so a head wit
 reads as missing (exit 1), never as passing. It also refuses a commit with any non-success run other
 than an advisory one, a cancelled one included, so a cancelled run on a live head (a label added while its run is in progress, the `merge-train` label
 re-applied included, or a push back to an earlier head) needs a new head commit, labelled again.
+Before a merge, `tools/ci-status.sh --main-health` reads main's own health from the newest completed push run of `.github/workflows/quality.yml` on `main` (exit 0 success, 1 red, 2 cannot evaluate, advisory runs only named), and after it `--main-health --merge-commit <full sha>` waits, bounded by `CI_STATUS_TIMEOUT`, for main's push run on that merge commit and exits 1 loudly when it is red (see the script's THE MAIN HEALTH).
 
 The maintainer authorized on 2026-10-25 what member heads no longer get from CI; each still runs once, on
 the train head: every Quality job. Since the maintainer's decision of 2026-10-27, the train pull
