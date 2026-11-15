@@ -466,13 +466,17 @@ HOOKS_SOURCE = ".aiqt/core/hooks/manifest.toml"
 
 def hook_count(root=ROOT):
     """The number of [[hook]] entries in the hooks manifest under root whose platform is "claude-code".
-    RefusedPage when the manifest cannot be read or parsed, when its hook key is not an array of tables
-    each with a string platform, or when it holds no Claude Code hook. Before the open, each directory on
-    the manifest's path below root is checked with lstat, from root down, and refused unless it is a
-    directory (a symbolic link to a directory is refused), and the manifest path itself is checked with
-    lstat and refused unless it is a regular file. The open does not follow a symbolic link at the manifest
-    path and does not wait on a FIFO, and the opened descriptor is refused unless fstat reports a regular
-    file. The descriptor is closed once, whether the read succeeds or is refused."""
+    RefusedPage when the manifest cannot be read, when it is larger than MAX_PAGE_BYTES (the read stops
+    one byte past that bound), when it is not UTF-8 or not valid TOML, when its hook key is not an array
+    of tables each with a string platform, or when it holds no Claude Code hook. Before the open, each
+    directory on the manifest's path below root is checked with lstat, from root down, and refused unless
+    it is a directory (a symbolic link to a directory is refused), and the manifest path itself is checked
+    with lstat and refused unless it is a regular file. The open does not follow a symbolic link at the
+    manifest path and does not wait on a FIFO, and the opened descriptor is refused unless fstat reports a
+    regular file. The descriptor is closed once, whether the read succeeds or is refused. RESIDUAL: the
+    lstat checks run before the open, and O_NOFOLLOW applies to the manifest path's last component only,
+    so a directory on that path replaced by a symbolic link after its check is followed by the open, not
+    refused."""
     path = Path(root) / HOOKS_SOURCE
     try:
         # These lstat checks run before the open: a directory replaced by a symbolic link after its check
@@ -3076,10 +3080,14 @@ def _self_test():
             done.set()
             feeder.join(15)
     # One row per layer of hook_count's read, each failing when only its layer is removed. The race each
-    # layer guards is driven in process: os.lstat, os.open or os.close is replaced, for 1 call, by a
-    # stand-in that acts on the manifest path (or the descriptor opened for it) and calls the real function
-    # for every other path or descriptor. Each stand-in is patched under its literal attribute name, and the
-    # patch restores the real function when its with statement ends.
+    # layer guards is driven in process: os.lstat, os.open or both os.open and os.close are replaced by
+    # stand-ins for the whole of one hook_count call (every call hook_count makes to them in that time goes
+    # to the stand-in). An os.lstat or os.open stand-in either substitutes its own result for the manifest
+    # path or records the call and passes it to the real function, and it calls the real function for every
+    # other path; the os.close stand-in records every descriptor it is given and closes each with the real
+    # os.close. Each stand-in is patched under its literal attribute name, and the patch restores the real
+    # function when its with statement ends. The symbolically linked parent row replaces no function: it
+    # puts the symbolic link on disk.
     import contextlib
     from unittest import mock
     real_lstat, real_open, real_close = os.lstat, os.open, os.close
@@ -3201,7 +3209,9 @@ def _self_test():
                (opened, closes))
 
     def row_closed_once_on_success():
-        # A valid manifest is counted and the descriptor opened for it is closed exactly once.
+        # A valid manifest is counted and the descriptor opened for it is closed exactly once. A refusal of
+        # that manifest fails this row, naming the refusal, rather than ending the self-test.
+        got, refusal = None, ""
         with tempfile.TemporaryDirectory(prefix="gen-draft-site-hooks-") as tmp:
             target, real = hooks_tree(tmp)
             with open(target, "w", encoding="utf-8") as handle:
@@ -3219,10 +3229,13 @@ def _self_test():
                 closes.append(fd)
                 real_close(fd)
             with mock.patch.object(os, "open", open_recorder), mock.patch.object(os, "close", close_recorder):
-                got = hook_count(tmp)
+                try:
+                    got = hook_count(tmp)
+                except RefusedPage as exc:
+                    refusal = "refused: {}".format(exc)
         expect("hooks/descriptor-closed-once-on-success",
-               got == 1 and len(opened) == 1 and [fd for fd in closes if fd in opened] == opened,
-               (got, opened, closes))
+               not refusal and got == 1 and len(opened) == 1 and [fd for fd in closes if fd in opened] == opened,
+               (got, refusal, opened, closes))
 
     def row_symlinked_parent_refused():
         # A directory on the manifest's path that is a symbolic link to a directory holding a valid manifest

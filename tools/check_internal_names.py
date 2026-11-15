@@ -1003,7 +1003,11 @@ def scan_tracked_roles(root, relpaths):
     is scanned as a text file's text is, an internal-allow marker exempting its one line, and the text of
     each binary chunk (iCCP and every chunk the rule cannot classify, each byte above 0x7F already replaced
     so it is never part of a word) is scanned with no internal-allow exemption, a finding naming the chunk
-    and the line within its text. Any other file that is not valid UTF-8,
+    and the line within its text. A file whose suffix is TRACKED_WOFF2_SUFFIX goes through verify_woff2
+    whether or not its bytes decode as UTF-8: one it refuses (over MAX_WOFF2_FILE_SIZE, or not starting
+    with the WOFF2 signature) is unevaluable, named with its reason; in one it accepts, the whole file
+    (each byte above 0x7F already replaced) is scanned with no internal-allow exemption, a finding naming
+    "font bytes" and the line within it. Any other file that is not valid UTF-8,
     whatever its suffix, and a tracked path absent from the working tree are unevaluable too. A tracked path
     that is present but not a regular file raises OSError (exit 2) through _present, before any open, and so
     does a read error."""
