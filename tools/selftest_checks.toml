@@ -2236,6 +2236,7 @@ expected-check-ids = [
   "roster/registered-arguments",
   "roster/shard-argv-parse",
   "roster/shard-assignment-fixed",
+  "roster/shard-lane-main",
   "roster/shard-lane-scope",
   "roster/shard-lane-wiring",
   "roster/shard-list-cli",

@@ -23,13 +23,14 @@ env/lifecycle-probe-timeout-vectors pins that path over scripted launches.
 SHARDS: --shard K/N (1 <= K <= N <= 64; it may stand beside --execution-report) runs the lane's
 controls and lifecycle probes and only the members of shard K, the entries at zero-based roster
 positions i with i mod N = K - 1 in the sorted registered roster (_shard_members), so shards
-1..N together run each member exactly once (roster/shard-partition-real). The checks of a member
-another shard runs are left to that shard, and the OPF lifecycle finding folds in only this
-shard's member runs; a pass covers this shard's members only. --list-shard K/N prints the
-members shard K runs, one command per line, and runs nothing. A malformed or out-of-range value,
-or a shard holding no member in a run, is exit 2, never a full or an empty run. Without --shard
-the lane runs every member as before. RESIDUAL: a shard is never shorter than its longest member
-(each member keeps its own bound, CONFIG_MEMBER_BOUNDS), and every shard repeats the controls.
+1..N together run each member exactly once (roster/shard-partition-real). This lane has no
+per-member check loop, so its sharding selects members only and leaves no checks to another
+shard; the OPF lifecycle finding folds in only this shard's member runs, and a pass covers this
+shard's members only. --list-shard K/N prints the members shard K runs, one command per line,
+and runs nothing. A malformed or out-of-range value, or a shard holding no member in a run, is
+exit 2, never a full or an empty run. Without --shard the lane runs every member as before.
+RESIDUAL: a shard is never shorter than its longest member (each member keeps its own bound,
+CONFIG_MEMBER_BOUNDS), and every shard repeats the controls.
 
 Exit 2 is cannot-evaluate (a harness/setup error, or a member or lifecycle probe that reached its
 time bound), never a pass; the engine fails closed exactly as the shared module documents."""

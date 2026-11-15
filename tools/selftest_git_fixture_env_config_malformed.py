@@ -20,7 +20,10 @@ poison cannot see.
 SHARDS: --shard K/N (1 <= K <= N <= 64; it may stand beside --execution-report) runs the lane's
 controls and only the members of shard K, the entries at zero-based positions i with
 i mod N = K - 1 in this lane's roster (the sorted registered roster less the four members named
-above, _config_lane_roster; dealt by _shard_members), so shards 1..N together run each member
+here, CONFIG_EXCLUSIONS["malformed"]: tools/check_release_build.py --self-test and
+tools/check_release_delta.py --self-test, the archive readers, and bare
+tools/check_python_floor.py and tools/check_child_status_coverage.py, the listing gates;
+_config_lane_roster; dealt by _shard_members), so shards 1..N together run each member
 exactly once (roster/shard-partition-real). The malformed checks and fsmonitor probes of a member
 another shard runs are left to that shard; a pass covers this shard's members only.
 --list-shard K/N prints the members shard K runs, one command per line, and runs nothing. A

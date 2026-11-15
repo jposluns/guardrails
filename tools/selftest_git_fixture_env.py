@@ -1173,8 +1173,10 @@ def _shard_leaves(member, check_ids):
     after adding check_ids, the lane's checks of that member, to SHARD_LEFT: the lane's roster
     holds the member and this run's shard holds none of its registered argument variants. False
     in an unsharded run, for a member this shard runs (its checks then cover the variants this
-    shard holds) and for a member outside the lane's roster, whose checks then report it missing
-    exactly as an unsharded run does."""
+    shard holds) and for a member outside the lane's roster, which is then treated exactly as an
+    unsharded run treats it: the _member_result loops report it missing, and the malformed
+    fsmonitor loop runs (member, "--self-test") directly (_run_config_member) rather than through
+    _member_result, as it does unsharded."""
     if SHARD is None:
         return False
     if "selected" not in SHARD_RUN:
@@ -1202,7 +1204,10 @@ def _execution_set_findings(expected, executed, left):
     """The execution-set findings of a run: each expected check id neither executed nor left to
     another shard (left, SHARD_LEFT), each executed id outside expected, and, in a sharded run,
     each left id outside expected or also executed. An unsharded run leaves nothing, so its
-    findings are the missing and extra ids alone."""
+    findings are the missing and extra ids alone. RESIDUAL: excusal is per run. Nothing here, or
+    anywhere in this repository yet, confirms that the shard a left id was left to ran, at the same
+    commit and with the same N, so a lane counts as fully covered only when every shard 1..N
+    passed at one commit; a single sharded pass covers that shard alone."""
     return (["execution-set/missing: {}".format(check_id)
              for check_id in sorted(expected - executed - left)]
             + ["execution-set/extra: {}".format(check_id)
@@ -1244,13 +1249,14 @@ def _list_shard(lane, shard, out=None, err=None):
     _registered_selftests(), dealt by _shard_members, the selection a --shard K/N run executes),
     one registered command per line on out (default sys.stdout), then a count line on err
     (default sys.stderr). Nothing is run. Returns 0, an empty shard included (the listing is the
-    answer), or 2 when the roster cannot be built."""
+    answer), or 2, after a harness error line naming the exception type, when building the roster
+    raises any exception (fail closed)."""
     k, n = shard
     try:
         members = _config_lane_roster(lane, _registered_selftests())
-    except (OSError, ValueError) as exc:
-        print("SELF-TEST HARNESS ERROR: cannot build the config roster: {}".format(exc),
-              file=sys.stderr if err is None else err)
+    except Exception as exc:
+        print("SELF-TEST HARNESS ERROR: cannot build the config roster: {}: {}".format(
+            type(exc).__name__, exc), file=sys.stderr if err is None else err)
         return 2
     selected = _shard_members(members, k, n)
     for argv in selected:

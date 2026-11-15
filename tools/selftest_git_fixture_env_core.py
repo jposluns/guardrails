@@ -347,12 +347,18 @@ def _shard_checks(base, runners=None):
     SHARD_MAX, partition it, and each lane roster is exactly the one the lane ran before the
     option. roster/shard-lane-scope: _shard_select, _shard_leaves,
     _shard_scope and _execution_set_findings over fixture rows, unsharded and sharded.
+    roster/shard-lane-main: _config_lane_main, over a recording stand-in for the engine main()
+    and a recording stand-in lane (no git, no config member), sets SHARD for a valid --shard K/N,
+    runs only the members of shard K of a fixture roster, forwards the execution report and the
+    lane, returns main()'s result, and selects the whole roster without --shard.
     roster/shard-lane-wiring: each runner's source calls them as _shard_wiring_problems requires.
     roster/shard-list-cli: each runner (runners, default _SHARD_RUNNERS), launched as a child,
     lists through --list-shard exactly the in-process shards for N = 1 and 2, and refuses an
     out-of-range --list-shard and --shard value with exit 2 and nothing on stdout; these
     children read the registries and launch nothing (no git, no member), with TMPDIR inside the
-    suite's scratch, and a child that reaches its bound is cannot-evaluate."""
+    suite's scratch, and a child that reaches its bound is cannot-evaluate. In process,
+    _list_shard returns 2, prints nothing on out and names the exception type on err when
+    building the roster raises an exception outside OSError and ValueError (KeyError)."""
     import contextlib
     import io
     from unittest.mock import patch
@@ -468,6 +474,35 @@ def _shard_checks(base, runners=None):
                        ["execution-set/extra: d", "execution-set/left-unexpected: e"],
                        ["execution-set/left-and-run: b"]])])
 
+    # _config_lane_main itself, over a recording stand-in for the engine main() it hands off to
+    # and a recording stand-in lane, so no git, temp tree or config member is ever involved.
+    fixture = tuple(("tools/{}.py".format(name), "--self-test") for name in "abcde")
+    lane_main = []
+    for argv in (["--shard", "2/3", "--execution-report", "/abs/report"],
+                 ["--execution-report", "/abs/report", "--shard", "3/3"], [],
+                 ["--execution-report", "/abs/report"]):
+        calls, ran = [], []
+
+        def recording_lane(lane_base, ran=ran):
+            members = this._shard_select(this._config_lane_roster("combined", fixture))
+            ran.extend(members or ())
+            return None if members else 2
+
+        def stand_in_main(report_path, lanes, calls=calls):
+            calls.append((report_path, this.SHARD, lanes is recording_lane, lanes(base)))
+            return 0
+
+        with patch.object(this, "main", stand_in_main), patch.object(this, "SHARD", None), \
+                patch.object(this, "SHARD_RUN", {}), patch.object(this, "SHARD_LEFT", set()), \
+                contextlib.redirect_stdout(io.StringIO()):
+            lane_main.append((this._config_lane_main(argv, "combined", recording_lane), calls,
+                              ran))
+    check("roster/shard-lane-main", lane_main, [
+        (0, [("/abs/report", (2, 3), True, None)], [fixture[1], fixture[4]]),
+        (0, [("/abs/report", (3, 3), True, None)], [fixture[2]]),
+        (0, [(None, None, True, None)], list(fixture)),
+        (0, [("/abs/report", None, True, None)], list(fixture))])
+
     try:
         # Python sources parsed for ast, never runner or workflow text; read as bytes so no new
         # text-read site joins check_ci_parity's reviewed read-API allowlist.
@@ -500,8 +535,18 @@ def _shard_checks(base, runners=None):
                         ("1/1", members), ("1/2", this._shard_members(members, 1, 2)),
                         ("2/2", this._shard_members(members, 2, 2)))],
                     bool(members), launches["0/2"][1], launches["run 3/2"][1]))
+    out, err = io.StringIO(), io.StringIO()
+
+    def roster_fault():
+        raise KeyError("injected roster fault")
+
+    with patch.object(this, "_registered_selftests", roster_fault):
+        cli.append(("roster-error", {"rc": this._list_shard("combined", (1, 2), out, err)},
+                    out.getvalue(), err.getvalue()))
     want = [(lane, {"1/1": 0, "1/2": 0, "2/2": 0, "0/2": 2, "run 3/2": 2}, [True, True, True],
-             True, [], []) for lane, _, _ in runners]
+             True, [], []) for lane, _, _ in runners] + [
+        ("roster-error", {"rc": 2}, "", "SELF-TEST HARNESS ERROR: cannot build the config roster:"
+                                        " KeyError: 'injected roster fault'\n")]
     check("roster/shard-list-cli", cli, want,
           tuple(timeouts) if timeouts and all(
               got == expected or any(_is_timeout(value) for value in got[1].values())
