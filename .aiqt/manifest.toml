@@ -3,7 +3,17 @@ format-version = 1
 release-version = "1.0.5"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "c77371797eef6f3d59f6fcd00b588bd16138cc45efb4fa051e9741a538723afa"
+tree-sha256 = "6bfbb63edcc7352907904899c95849a243e9e63f3ee43f3d556af7ff01fcb085"
+
+[[sources]]
+path = ".aiqt/LICENSE"
+bytes = 11358
+sha256 = "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+
+[[sources]]
+path = ".aiqt/NOTICE"
+bytes = 11968
+sha256 = "4e25f91d723d0b329a2af16a82abcc891ce6a506ff2874a149e6c4bf58d353db"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -122,8 +132,8 @@ sha256 = "f1625261cc219e8a08ac893874d74d2f1e435683d9e552d877fefcdde6880f9d"
 
 [[sources]]
 path = ".aiqt/core/ownership.toml"
-bytes = 27113
-sha256 = "a686289a76be89145cfd71e28570556371f4381ff2ee3b51e7db4d53a8f96ccc"
+bytes = 27683
+sha256 = "0f568d66a51f0f6b0d05b2d86e10a4a005be332cd3568224bcce423d2421ea9a"
 
 [[sources]]
 path = ".aiqt/core/profiles/worker-pack.md"
@@ -837,8 +847,8 @@ sha256 = "0bef727083ae24ef1aea29a2e2b1a3593deaaf0238ec5785e01112f50112e104"
 
 [[sources]]
 path = ".aiqt/gensrc.json"
-bytes = 14742
-sha256 = "01fbaafabf788759715426672e0281c086fa194bd362d7279a3d04ad778f1b88"
+bytes = 15436
+sha256 = "02ec3378819b80b01d28f53e98389ec6c742586f3c7af42e2b34ce6453d98b43"
 
 [[sources]]
 path = ".aiqt/record-sections.toml.example"
@@ -2307,8 +2317,8 @@ sha256 = "9e0e365fb1e2813246c724267ec062310de3be1c5ca4ad9cba37fa0ce5691af4"
 
 [[sources]]
 path = ".gitattributes"
-bytes = 54047
-sha256 = "8051c4ad954331fe592a72aa7b2ea2b8375135af98cb3dd2b237a801766d8a18"
+bytes = 54195
+sha256 = "633db175882147f6a69e7c1e792b4411e85eed1de37a47b8641b33e7da205a7e"
 
 [[sources]]
 path = ".github/copilot-instructions.md"
@@ -3521,6 +3531,16 @@ bytes = 288
 sha256 = "6a019cab82e0df55d88b44b1199d10bf95d37c5bd959fffd57b7aa36df84c591"
 
 [[sources]]
+path = "plugin/aiqt-guardrails-hooks/LICENSE"
+bytes = 11358
+sha256 = "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+
+[[sources]]
+path = "plugin/aiqt-guardrails-hooks/NOTICE"
+bytes = 11968
+sha256 = "4e25f91d723d0b329a2af16a82abcc891ce6a506ff2874a149e6c4bf58d353db"
+
+[[sources]]
 path = "plugin/aiqt-guardrails-hooks/hooks/hooks.json"
 bytes = 11798
 sha256 = "9097238d890a3a42897b598a1fa1a904cef5f4666b1a9b1a279d9f6748e8b9ca"
@@ -4337,8 +4357,8 @@ sha256 = "3aba6654e5757854a967398ac9e512d9b614b6b6c2012fba0d76eae55685ebff"
 
 [[sources]]
 path = "tools/check_portability.py"
-bytes = 198729
-sha256 = "ec1cf77885f467ad74e94587104a53d2460b907802225a47ba5e6991f9701a79"
+bytes = 203950
+sha256 = "5c13689b931667d9ac7b7b485b05ad2e4f1c0f0f8bacec1fd63f06a309facfea"
 
 [[sources]]
 path = "tools/check_python_floor.py"
@@ -4552,8 +4572,8 @@ sha256 = "5fe2069fa9978b5df1ae5cd65211c9d88d4c59f580dfeb4e3c876bbe2ebe1f29"
 
 [[sources]]
 path = "tools/gen_hooks.py"
-bytes = 265337
-sha256 = "8185924d956852fe62d4d8558650cb26567821bb1b7a9588105113ec71734122"
+bytes = 275396
+sha256 = "cbb4e9f001879c4cbda59963f517983875bccf974255a7612973b392762f5250"
 
 [[sources]]
 path = "tools/gen_manifest.py"

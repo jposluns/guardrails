@@ -23,6 +23,9 @@ What portability adds beyond the leak gate (nothing here duplicates it):
      surface still trips C1 (a wrong count is itself a placement finding). An @-prefixed operator personal
      handle (find_handle) is also a C1 finding, while the bare owner segment inside a legitimate source URL
      (github.com/<owner>/...) is not, so the attribution URL and the shipped mappings stay clean.
+     A third, NARROW exemption (NOTICE_COPIES) skips the name and email match in the plugin's NOTICE copy
+     ONLY while its bytes equal the repository-root NOTICE it copies (Apache License 2.0 section 4(d)); a
+     copy that differs in any byte is scanned like any other file.
   C2 repo-operational vocabulary: the terms are public (they appear in the repo CLAUDE.md), so obscurity is
      the wrong tool; a small in-gate plaintext list is matched with the SAME n-gram normalization the leak
      gate uses (imported _tokens/ngram_forms), so spaced/hyphenated/camelCase variants all match one term.
@@ -265,9 +268,36 @@ TEXT_SUFFIXES = {".md", ".mdc", ".py", ".sh", ".yml", ".yaml", ".toml", ".json",
                  ".html", ".css", ".js", ".cfg", ".ini", ".conf", ".svg", ".csv"}
 
 # Shipped text files whose NAME is fixed by an outside convention and so carries no text suffix: git runs a
-# hook only under its exact name, so the enforcement pack's pre-commit hook is named pre-commit. Each is an
-# exact path, scanned as text like any TEXT_SUFFIXES file.
-TEXT_PATHS = frozenset(("opf/enforcement/precommit/pre-commit",))
+# hook only under its exact name, so the enforcement pack's pre-commit hook is named pre-commit; the plugin's
+# LICENSE and NOTICE copies (tools/gen_hooks.py) carry the conventional names Apache License 2.0 section 4
+# recipients look for. Each is an exact path, scanned as text like any TEXT_SUFFIXES file.
+TEXT_PATHS = frozenset(("opf/enforcement/precommit/pre-commit",
+                        "plugin/aiqt-guardrails-hooks/LICENSE",
+                        "plugin/aiqt-guardrails-hooks/NOTICE"))
+
+# The NOTICE copy exemption (NARROW and REVIEWED, like GD-56): Apache License 2.0 section 4(d) requires a
+# redistributed work to carry the NOTICE, and the root NOTICE names the operator as author and trademark owner,
+# so the plugin's copy carries the operator NAME by design. The copy is exempt from the C1 operator NAME and EMAIL
+# match ONLY while its bytes equal the repository-root source named here (the file tools/gen_hooks.py copies byte
+# for byte); a copy that differs in any byte is scanned whole like any other file, and an unreadable copy or
+# source fails closed (exit 2). The personal-handle C1 match, C2 and C5 still apply to the copy.
+NOTICE_COPIES = {"plugin/aiqt-guardrails-hooks/NOTICE": "NOTICE"}
+
+
+def notice_copy_matches(root, rel, opener=open):
+    """True when rel is a NOTICE_COPIES member whose bytes equal its repository-root source; False for any
+    other rel or a copy that differs. Raises GateError (exit 2) when either file cannot be read."""
+    source_rel = NOTICE_COPIES.get(rel)
+    if source_rel is None:
+        return False
+    try:
+        with opener(root / rel, "rb") as handle:
+            copy = handle.read()
+        with opener(root / source_rel, "rb") as handle:
+            source = handle.read()
+    except OSError as exc:
+        raise GateError("cannot read the NOTICE copy {} or its source {} ({})".format(rel, source_rel, exc))
+    return copy == source
 
 
 # --- pure logic (always run in --self-test) ---------------------------------------------------------
@@ -403,7 +433,8 @@ def _mask_plugin_json_identity(text):
     return "".join(out)
 
 
-def scan_text(rel, text, ident_forms, ident_maxn, term_grams, maxn, attribution=None, header_line=None):
+def scan_text(rel, text, ident_forms, ident_maxn, term_grams, maxn, attribution=None, header_line=None,
+              notice_copy=False):
     """Scan one file's text for C1 (operator identity), C2 (operational vocabulary), and C5 (exemption
     marker). For the two attribution files the operator-identity VALUE spans are masked first (that identity
     ships by design); the identity is then matched over the WHOLE remaining document, so a same-line comment,
@@ -415,7 +446,9 @@ def scan_text(rel, text, ident_forms, ident_maxn, term_grams, maxn, attribution=
     (a wrong count also raises a placement finding). An @-prefixed operator personal handle is flagged too.
     A per-line pass names the exact line for a match sitting on one line; a whole-document pass then adds any
     form that only appears split across lines. C2 and C5 apply to the whole document. Masking a malformed
-    attribution file is fail-closed (GateError -> exit 2). Returns a list of finding strings."""
+    attribution file is fail-closed (GateError -> exit 2). notice_copy (set by scan_file only for a
+    NOTICE_COPIES member byte-identical to its source) skips the operator name and email match alone.
+    Returns a list of finding strings."""
     findings = []
     masked = mask_identity_attribution(rel, text)
     if attribution and rel in ATTRIBUTION_EXEMPT_FILES:
@@ -441,6 +474,8 @@ def scan_text(rel, text, ident_forms, ident_maxn, term_grams, maxn, attribution=
     if find_handle(masked):
         findings.append("{}: operator personal handle (@{}) in shipped content (portability C1)".format(
             rel, PERSONAL_HANDLE))
+    if notice_copy:
+        masked = ""  # the NOTICE copy exemption: the name and email match alone is skipped (see NOTICE_COPIES)
     seen = set()
     for number, line in enumerate(masked.splitlines(), 1):
         for hit in find_identity(line, ident_forms, ident_maxn):
@@ -720,7 +755,8 @@ def scan_file(root, path, ident_forms, ident_maxn, term_grams, maxn, opener=open
                         "(portability C3)".format(rel))
         return findings
     findings.extend(scan_text(rel, text, ident_forms, ident_maxn, term_grams, maxn, attribution=attribution,
-                              header_line=header_line))
+                              header_line=header_line,
+                              notice_copy=notice_copy_matches(root, rel, opener)))
     return findings
 
 
@@ -3024,6 +3060,49 @@ def _self_test_main_isolated(_vectors=True, _mkdtemp=None, _symlink=None, _which
     if not scan_text(".claude/rules/m.md", "this line carries a leak-allow marker", ident_forms,
                      ident_maxn, term_grams, maxn):
         failures.append("a shipped leak-allow marker (C5) was not flagged")
+
+    # The NOTICE copy exemption: only a NOTICE_COPIES member byte-identical to its root source skips the
+    # operator name and email match; a copy differing by one byte, any other path, and an unreadable copy or
+    # source each keep the gate closed. The C5 marker and the personal handle still flag in an exempt copy.
+    notice_rel = "plugin/aiqt-guardrails-hooks/NOTICE"
+    notice_bytes = "AIQT Guardrails is authored and maintained by {}.\n".format(name).encode("utf-8")
+
+    def _notice_opener(files):
+        def _open(path, _mode="rb"):
+            key = Path(path).relative_to(iw_root).as_posix()
+            if key not in files:
+                raise OSError("injected unreadable {}".format(key))
+            return io.BytesIO(files[key])
+        return _open
+    import io
+    if not notice_copy_matches(iw_root, notice_rel,
+                               _notice_opener({notice_rel: notice_bytes, "NOTICE": notice_bytes})):
+        failures.append("NOTICE copy: a byte-identical copy must match its root source")
+    if notice_copy_matches(iw_root, notice_rel,
+                           _notice_opener({notice_rel: notice_bytes + b"x", "NOTICE": notice_bytes})):
+        failures.append("NOTICE copy: a copy differing by one byte must not match")
+    if notice_copy_matches(iw_root, ".claude/rules/NOTICE",
+                           _notice_opener({".claude/rules/NOTICE": notice_bytes, "NOTICE": notice_bytes})):
+        failures.append("NOTICE copy: a path off NOTICE_COPIES must never be exempt")
+    for missing in (notice_rel, "NOTICE"):
+        files = {notice_rel: notice_bytes, "NOTICE": notice_bytes}
+        del files[missing]
+        try:
+            notice_copy_matches(iw_root, notice_rel, _notice_opener(files))
+            failures.append("NOTICE copy: an unreadable {} did not fail closed".format(missing))
+        except GateError:
+            pass
+    notice_text = notice_bytes.decode("utf-8")
+    if not any("portability C1" in f for f in scan_text(notice_rel, notice_text, ident_forms, ident_maxn,
+                                                        term_grams, maxn)):
+        failures.append("NOTICE copy: without the exemption the operator name must flag C1")
+    if scan_text(notice_rel, notice_text, ident_forms, ident_maxn, term_grams, maxn, notice_copy=True):
+        failures.append("NOTICE copy: an exempt copy must not flag the operator name")
+    exempt_extra = scan_text(notice_rel, notice_text + "a leak-allow marker\n@{}\n".format(PERSONAL_HANDLE),
+                             ident_forms, ident_maxn, term_grams, maxn, notice_copy=True)
+    if not any("C5" in f for f in exempt_extra) or not any("personal handle" in f for f in exempt_extra):
+        failures.append("NOTICE copy: the exemption must leave the C5 marker and the personal handle flagged, "
+                        "got {!r}".format(exempt_extra))
 
     # --- real-surface end-to-end layer (a NOT RUN failure where no writable tempdir exists) --------
     # Cases (a)-(n) use an injected tracked-entry roster over real files. Case (o) uses a real git index

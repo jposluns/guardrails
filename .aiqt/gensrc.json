@@ -1,6 +1,22 @@
 {
   "generated": [
     {
+      "kind": "file",
+      "regenerate": "python3 tools/gen_hooks.py",
+      "sources": [
+        "LICENSE"
+      ],
+      "target": ".aiqt/LICENSE"
+    },
+    {
+      "kind": "file",
+      "regenerate": "python3 tools/gen_hooks.py",
+      "sources": [
+        "NOTICE"
+      ],
+      "target": ".aiqt/NOTICE"
+    },
+    {
       "kind": "block",
       "regenerate": "python3 tools/gen_secret_patterns.py",
       "sources": [
@@ -366,6 +382,22 @@
         ".aiqt/core/hooks/scripts/aiqt_hooks.py"
       ],
       "target": "plugin/aiqt-guardrails-hooks/.claude-plugin/plugin.json"
+    },
+    {
+      "kind": "file",
+      "regenerate": "python3 tools/gen_hooks.py",
+      "sources": [
+        "LICENSE"
+      ],
+      "target": "plugin/aiqt-guardrails-hooks/LICENSE"
+    },
+    {
+      "kind": "file",
+      "regenerate": "python3 tools/gen_hooks.py",
+      "sources": [
+        "NOTICE"
+      ],
+      "target": "plugin/aiqt-guardrails-hooks/NOTICE"
     },
     {
       "kind": "tree",
