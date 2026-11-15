@@ -2201,6 +2201,8 @@ expected-check-ids = [
   "revert/regenerated-widened-red",
   "revert/heavy-read-exclusion-dropped-red",
   "revert/train-prefix-dropped-red",
+  "revert/mergetag-continuation-parent-read-red",
+  "revert/parent-read-honours-replace-red",
   # ---------- the CLI over synthetic repos ----------
   "cli/site-only-true-exit-0",
   "cli/empty-diff-false-exit-0",
@@ -2227,8 +2229,11 @@ expected-check-ids = [
   "cidecide/parent-read-causes-false-and-named",
   "cidecide/gpgsig-merge-true",
   "cidecide/mergetag-merge-true",
+  "cidecide/mergetag-raw-parents-exact",
   "cidecide/grafted-parents-raw-object-true",
   "cidecide/replaced-base-raw-object-true",
+  "cidecide/replaced-head-raw-object-true",
+  "cidecide/replaced-head-raw-parents-exact",
   "cidecide/no-output-exit-1",
   "cidecide/unwritable-output-exit-1",
   # ---------- launch shapes ----------
