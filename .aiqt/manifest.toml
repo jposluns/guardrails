@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.0.5"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "01054be802e482c57ad71fd92a7aada7dc3a5438dea80c4bfa5ae5dee49060bb"
+tree-sha256 = "39cf92e1267888c982c94897329973fff2de938eed42934bf3b307509940fbb8"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -4262,8 +4262,8 @@ sha256 = "3ea2a730b0db77fa92869a20454869ea240d0010f9e11a89a7f0ef22f57224b6"
 
 [[sources]]
 path = "tools/check_links.py"
-bytes = 84313
-sha256 = "66f72605bcb0c410463c9f15d8468810e81f366ff58cb8884c901eb5deba7428"
+bytes = 87733
+sha256 = "49b3a3bb34a5dd9958634112af8fb8d684e9b8b990c42eaf13c8fe9da469a667"
 
 [[sources]]
 path = "tools/check_manifest.py"
