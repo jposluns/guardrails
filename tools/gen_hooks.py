@@ -146,7 +146,7 @@ LICENCE_HOMES = (PLUGIN_ROOT_REL, ".aiqt")
 # roster statically (read_authoring_roster with SCOPED_ROSTER_NAME) and scopes their registry entries
 # "authoring", so gensrc_guard honours them only where the authoring marker is exact, matching run(), which
 # never touches them in an adopter tree. gen_manifest.cross_check_exclusions exempts only scoped entries that are
-# also on AUTHORING_ONLY_REL, so an EXACT [[exclusion]] literal for one of these copies is still refused as
+# also on AUTHORING_ONLY_REL, so an EXACT [[exclusion]] literal for one of these copies is refused as
 # swallowing a gensrc target. The same binding rules as AUTHORING_ONLY_REL apply: a tuple of str literals bound
 # once by one plain top-level assignment.
 AUTHORING_SCOPED_REL = (".aiqt/LICENSE", ".aiqt/NOTICE", "plugin/aiqt-guardrails-hooks/LICENSE",

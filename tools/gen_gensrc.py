@@ -93,10 +93,9 @@ ROSTER_NAME = "AUTHORING_ONLY_REL"
 # exactly like the never-shipped roster's, so gensrc_guard leaves an adopter tree's copies alone as gen_hooks
 # does. Unlike AUTHORING_ONLY_REL this roster carries NO never-ship duty: gen_manifest.check_authoring_only reads
 # AUTHORING_ONLY_REL alone, so these paths keep their release class, and gen_manifest.cross_check_exclusions
-# exempts a scoped entry only when it is on AUTHORING_ONLY_REL, so it still refuses an exact [[exclusion]]
-# literal for one of them. It is OPTIONAL (a gen_hooks.py
-# binding no such name has none, as every synthetic fixture); one that binds it is held to every static rule of
-# AUTHORING_ONLY_REL.
+# exempts a scoped entry only when it is on AUTHORING_ONLY_REL, so it refuses an exact [[exclusion]] literal
+# for one of them. It is OPTIONAL (a gen_hooks.py binding no such name has none, as every synthetic fixture); one
+# that binds it is held to every static rule of AUTHORING_ONLY_REL.
 SCOPED_ROSTER_NAME = "AUTHORING_SCOPED_REL"
 SCOPE_AUTHORING = "authoring"
 
@@ -1208,9 +1207,10 @@ def self_test_main():
                                                or hit[3] != ("authoring", None)):
                         failures.append("licence copies: in {} {} must match its scoped entry, got {!r}".format(
                             label, rel, hit))
-                    # The Bash channel's two other scope-aware matchers, each given the copy's own entry alone
-                    # (an unscoped entry in the same directory would otherwise answer first): _gensrc_holds for
-                    # the directory holding the copy, and _gensrc_mentions for a command naming it by path.
+                    # The Bash channel's two other scope-aware matchers, each given the copy's own entry alone so
+                    # that entry's scope is what is tested: _gensrc_holds for the directory holding the copy (with
+                    # the full registry an unscoped entry in that directory answers first), and _gensrc_mentions
+                    # for a command naming it by path (with the full registry, see the basename case below).
                     own = [e for e in loaded if e[1] == rel]
                     held = guard._gensrc_holds(own, os.path.realpath((adopter / rel).parent), root_c)
                     named = guard._gensrc_mentions(own, "cp x {}".format(rel), root_c)
@@ -1225,6 +1225,18 @@ def self_test_main():
                                                  or named is None or named[0] != rel):
                         failures.append("licence copies: in {} the directory and a command naming {} must "
                                         "match its scoped entry, got {!r} and {!r}".format(label, rel, held, named))
+                    # The full shipped registry in the adopter-shaped tree: _gensrc_mentions bounds an entry's name
+                    # only by characters that cannot continue a path word, and '/' is not one of them, so the name
+                    # of the unscoped root NOTICE entry matches the basename of either NOTICE copy in a command,
+                    # which still matches that entry (a fail-safe over-denial: an uncleared write naming it is
+                    # denied). No unscoped entry is named LICENSE, so a command naming either LICENSE copy
+                    # matches none (the twin). A change to either outcome fails here.
+                    if marker is None:
+                        full = guard._gensrc_mentions(loaded, "cp x {}".format(rel), root_c)
+                        want_full = "NOTICE" if rel.endswith("/NOTICE") else None
+                        if (None if full is None else full[0]) != want_full:
+                            failures.append("licence copies: {} with the full registry: a command naming {} "
+                                            "must match {!r}, got {!r}".format(label, rel, want_full, full))
     finally:
         if unread_tools is not None:
             os.chmod(unread_tools, 0o755)  # restore even on an unexpected early exit
@@ -1259,8 +1271,11 @@ def self_test_main():
           ".working component (an OPF store path) fails closed (exit 2); the AUTHORING_SCOPED_REL roster scopes "
           "its declared entry \"authoring\" and an undeclared, tree-covered or rebound one fails closed (exit 2); "
           "and the real registry scopes the four shipped LICENSE and NOTICE copies \"authoring\" (off the "
-          "never-ship roster), so gensrc_guard (its file matcher, _gensrc_holds and _gensrc_mentions) treats "
-          "none as generated in an adopter-shaped tree and matches each in the authoring tree"
+          "never-ship roster), so gensrc_guard's file matcher treats none as generated in an adopter-shaped "
+          "tree and matches each in the authoring tree, as do _gensrc_holds and _gensrc_mentions given each "
+          "copy's own entry; with the full registry in the adopter-shaped tree, _gensrc_mentions still matches "
+          "a command naming either NOTICE copy to the unscoped root NOTICE entry, whose name is that copy's "
+          "basename (a fail-safe over-denial), and matches none for either LICENSE copy"
           + note)
     return 0
 

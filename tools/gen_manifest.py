@@ -1409,13 +1409,21 @@ def _self_test_main_isolated():
                  None),
                 ("a pattern exclusion over the settings",
                  '\n[[exclusion]]\npattern = ".claude/**"\nreason = "r"\n' + _EXCL_MARKER, None),
-                ("the settings tracked without the marker", _EXCL_SETTINGS, no_marker),
-                ("an exact exclusion of a gensrc target off the roster",
-                 _EXCL_SETTINGS + _EXCL_MARKER + '\n[[exclusion]]\npath = "local-out.txt"\nreason = "r"\n',
-                 None))):
-            fx = _roster_fixture(tmp / "roster-bad{}".format(i), _LOCAL_OUT_CLASS * (i != 4) + extra, files)
+                ("the settings tracked without the marker", _EXCL_SETTINGS, no_marker))):
+            fx = _roster_fixture(tmp / "roster-bad{}".format(i), _LOCAL_OUT_CLASS + extra, files)
             if fx is None or run_quiet(fx, check=False) != 2:
                 failures.append("authoring-only roster: {} expected exit 2".format(label))
+        # An exact exclusion of a gensrc target off the roster (local-out.txt, unscoped) is refused by the swallow
+        # guard itself: exit 2 with exactly its one refusal on stderr, naming the third [[exclusion]] row and the
+        # swallowed target, so an exit 2 from any other gate cannot pass this vector.
+        fx = _roster_fixture(tmp / "roster-bad4", _EXCL_SETTINGS + _EXCL_MARKER
+                             + '\n[[exclusion]]\npath = "local-out.txt"\nreason = "r"\n')
+        rc, err = run_stderr(fx) if fx is not None else (None, "")
+        want_err = ("error: {} [[exclusion]] #3: exclusion 'local-out.txt' would swallow the gensrc/portability "
+                    "surface 'local-out.txt'; fail-closed\n".format(OWNERSHIP_REL))
+        if rc != 2 or err != want_err:
+            failures.append("authoring-only roster: an exact exclusion of a gensrc target off the roster expected "
+                            "exit 2 with stderr {!r}, got {!r} with {!r}".format(want_err, rc, err))
         gone = _roster_fixture(tmp / "roster-gone", _LOCAL_OUT_CLASS + _EXCL_SETTINGS + _EXCL_MARKER)
         if gone is not None:
             (gone / ".aiqt" / "authoring.toml").unlink()
@@ -1676,7 +1684,8 @@ def _self_test_main_isolated():
           "is a loud exit 2 that writes no output; the authoring-only roster "
           "excluded by exact literals passes and never reaches the manifest, while a roster path given a "
           "class, a pattern exclusion over it, the settings without the marker, an exact exclusion of a "
-          "gensrc target off the roster, a tracked marker missing on disk, and a shipped roster path given a "
+          "gensrc target off the roster (with exactly the swallow refusal naming it on stderr), a tracked "
+          "marker missing on disk, and a shipped roster path given a "
           "class under a tree roster that omits it or in a tree with none, a path aliasing either roster path "
           "by case, the upcase fold, Unicode normalization or an NTFS stream suffix on it or its directory, a "
           "roster path that is a symlink on disk whether the tree roster names or omits it, and a roster path "
