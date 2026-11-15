@@ -5208,10 +5208,12 @@ expected-check-ids = [
 ]
 
 [[suite]]
-# The branch fold helper (tools/fold_onto_base.py): vectors H1 to H16 and Q10 in temporary
-# repositories, then each listed mutant run against its own vector in a private sink.
+# The branch fold helper (tools/fold_onto_base.py): vectors H1 to H22 and Q10 in temporary
+# repositories, then each listed mutant run against its own vector in a private sink. The helper
+# accepts --execution-report only after --self-test, so the row forwards it.
 id = "fold-onto-base-selftest"
 runner = "tools/fold_onto_base.py"
+args = ["--self-test"]
 expected-check-ids = [
   "fold/h1-valid-fold",
   "fold/h1-recovery-ref-create-only",
@@ -5244,8 +5246,30 @@ expected-check-ids = [
   "fold/h15-hooks-allow-command",
   "fold/h16-ambient-git-env-scrubbed",
   "fold/q10-failed-signature-refused",
+  "fold/h17-twin-no-graft-folds-onto-base",
+  "fold/h17-graft-file-ignored",
+  "fold/h18-undo-plain-branch-inside-repo",
+  "fold/h18-undo-shell-punctuation-outside-repo",
+  "fold/h19-fsmonitor-not-run",
+  "fold/h19-hooks-not-run",
+  "fold/h19-path-decoy-not-run",
+  "fold/h19-twin-hostile-settings-live",
+  "fold/h20-verify-accepts-good-commit",
+  "fold/h20-verify-wrong-parent-cannot-evaluate",
+  "fold/h20-verify-wrong-tree-cannot-evaluate",
+  "fold/h20-post-swap-reread-fires",
+  "fold/h20-recovery-collision-refused",
+  "fold/h21-local-trunk-refused",
+  "fold/h21-local-trunk-via-remote-head-refused",
+  "fold/h21-twin-work-branch-folds",
+  "fold/h22-tag-and-branch-ambiguous-refused",
+  "fold/h22-local-origin-main-ambiguous-refused",
+  "fold/h22-twin-full-ref-folds",
   "cli/usage-and-unresolvable-exit-2",
   "cli/closed-git-subcommands",
+  "cli/execution-report-alone-usage",
+  "cli/execution-report-after-self-test-accepted",
+  "cli/help-explains-options-exits-and-rewrite",
   "mutant/parent-is-protected-tip",
   "mutant/tree-from-index",
   "mutant/swap-without-old-value",
@@ -5256,6 +5280,17 @@ expected-check-ids = [
   "mutant/dirty-allowed",
   "mutant/ambient-git-env-kept",
   "mutant/signing-config-ignored",
+  "mutant/graft-file-honoured",
+  "mutant/undo-unquoted-unbound",
+  "mutant/fsmonitor-pin-dropped",
+  "mutant/hooks-pin-dropped",
+  "mutant/git-looked-up-per-call",
+  "mutant/verify-call-dropped",
+  "mutant/verify-ignores-parent",
+  "mutant/post-swap-reread-dropped",
+  "mutant/recovery-ref-overwrites",
+  "mutant/local-copy-allowed",
+  "mutant/ambiguous-protected-allowed",
 ]
 
 [[suite]]

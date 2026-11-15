@@ -11,20 +11,37 @@ refs/aiqt-fold/<branch>/<utc>, and then moves the branch from H to N with a comp
 update-ref. It never pushes, fetches, rebases or resets, and never touches the index or worktree:
 because N's tree equals H's tree, the checkout stays consistent after the update.
 
-Refused (exit 1) unless: HEAD is symbolic to a branch other than main, master or the protected ref
-itself; the index and worktree carry no tracked change; no merge, rebase, cherry-pick, revert,
-bisect or sequencer state is present; the branch and the protected ref have exactly one merge base B,
-B is not H, and B equals --expect-base when that is given; and B..H holds no merge commit. A
-compare-and-swap that loses (the branch moved after it was read) is refused too, leaving the branch
-where the other writer put it. A shallow repository, a git failure, a failed commit signature the
-repository's own signing configuration asks for, or a malformed argument is cannot-evaluate (exit 2).
+Refused (exit 1) unless: HEAD is symbolic to a branch other than main, master, the protected ref
+itself or the local copy of the protected line (for --protected origin/trunk, the local trunk); the
+--protected name is not ambiguous; the index and worktree carry no tracked change; no merge, rebase,
+cherry-pick, revert, bisect or sequencer state is present; the branch and the protected ref have
+exactly one merge base B, B is not H, and B equals --expect-base when that is given; and B..H holds no
+merge commit. A compare-and-swap that loses (the branch moved after it was read) is refused too,
+leaving the branch where the other writer put it. A shallow repository, a git failure, a failed commit
+signature the repository's own signing configuration asks for, or a malformed argument is
+cannot-evaluate (exit 2).
 
   fold_onto_base.py --protected REF --message-file ABS_PATH [--expect-base FULL_SHA] [--root DIR]
   fold_onto_base.py --self-test
 
-Every git call binds the repository with -C and runs with every ambient GIT_ variable removed (the
-environment of tools/check_branch_root.py: no system config, no lazy fetch, no prompt, no optional
-locks, no replace objects). Exit: 0 folded; 1 refused; 2 usage or cannot-evaluate.
+Every git call runs the git executable resolved once, to an absolute path, when this module loads; it
+binds the repository with -C and runs with every ambient GIT_ variable removed (the environment of
+tools/check_branch_root.py: no system config, no lazy fetch, no prompt, no optional locks, no replace
+objects), with GIT_GRAFT_FILE naming a path that cannot exist (so an info/grafts file cannot change a
+parent or the merge base), and with core.fsmonitor=false, core.hooksPath set to that same nonexistent
+path (no hook runs, the reference-transaction hook included), core.commitGraph=false,
+protocol.allow=never and core.warnAmbiguousRefs=true in option position. The printed undo command
+quotes every argument for a POSIX shell and binds the repository with git -C.
+
+Not neutralized, and disclosed: a decoy git that is already first on PATH when this module loads is the
+git it resolves; the repository's own signing configuration (commit.gpgSign, gpg.program,
+user.signingKey) is honoured on purpose; a clean or process filter driver from the repository's or the
+user's configuration can run during git status; index bits (assume-unchanged, skip-worktree) and
+settings such as core.fileMode or core.ignoreStat can hide a worktree change from the dirty check (the
+fold changes no index or worktree file and reads the tree from the commit, so such a change stays in the
+worktree). A lost compare-and-swap leaves the recovery ref, its reflog and the unreferenced folded
+commit, and a recovery-ref creation that fails leaves the unreferenced folded commit; both are
+documented residue. Exit: 0 folded; 1 refused; 2 usage or cannot-evaluate.
 Stdlib only.
 """
 import sys
@@ -47,6 +64,7 @@ import datetime
 import io
 import json
 import os
+import shlex
 import shutil
 import stat
 import subprocess
@@ -57,12 +75,34 @@ TIMEOUT = 30
 MESSAGE_MAX_BYTES = 65536
 PROTECTED_BRANCHES = ("refs/heads/main", "refs/heads/master")
 RECOVERY_PREFIX = "refs/aiqt-fold/"
+# A path that cannot exist: a child of the null device, which is not a directory, so an open of it
+# fails with ENOTDIR, which git reads as "absent" without a warning. GIT_GRAFT_FILE and core.hooksPath
+# name it, so no graft file is read and no hook runs.
+NO_SUCH_PATH = os.path.join(os.devnull, "aiqt-fold-no-such-path")
 # The closed set of git subcommands this helper runs. push, fetch, pull, rebase, reset, checkout,
 # switch, merge, commit, add and write-tree are deliberately absent: the helper never moves anything
 # but the one branch ref (and creates its recovery ref), and never builds a tree from the index.
 GIT_SUBCOMMANDS = frozenset((
     "rev-parse", "symbolic-ref", "status", "merge-base", "rev-list", "cat-file", "commit-tree",
-    "update-ref", "check-ref-format", "config"))
+    "update-ref", "check-ref-format", "config", "for-each-ref"))
+# Configuration pinned in option position on every git call, after the maintenance pins: no fsmonitor
+# program, no hook (core.hooksPath names a path that cannot exist), no commit-graph cache (it records
+# parents), no transport, and an ambiguous ref name reported rather than silently resolved.
+HARDENING = ("--no-replace-objects", "-c", "core.fsmonitor=false",
+             "-c", "core.hooksPath=" + str(NO_SUCH_PATH), "-c", "core.commitGraph=false",
+             "-c", "protocol.allow=never", "-c", "core.warnAmbiguousRefs=true")
+
+
+def _resolve_git():
+    """The git executable as an absolute path, resolved once when this module loads, so a PATH change
+    later in the process (or a relative PATH entry and a cwd change) cannot select another git. A decoy
+    already first on PATH at load is what this resolves (disclosed); the bare name is the fallback only
+    when no git is on PATH."""
+    found = shutil.which("git")
+    return os.path.abspath(found) if found else "git"
+
+
+_GIT = _resolve_git()
 # Repository states in which a fold would race an operation in progress (each a git-path name).
 IN_PROGRESS = ("MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "BISECT_LOG", "rebase-merge",
                "rebase-apply", "sequencer")
@@ -82,7 +122,9 @@ class Refused(RuntimeError):
 def _git_env():
     """The scrubbed environment of tools/check_branch_root.py: every ambient GIT_ variable removed
     (GIT_DIR, GIT_INDEX_FILE, GIT_WORK_TREE, GIT_CONFIG_* and the rest), then an offline,
-    non-interactive posture reasserted, with replace refs disabled so a graft cannot change the base."""
+    non-interactive posture reasserted. Replace refs are disabled (GIT_NO_REPLACE_OBJECTS) and
+    GIT_GRAFT_FILE names a path that cannot exist, so neither a replace ref nor an info/grafts file can
+    change a parent or the merge base: GIT_NO_REPLACE_OBJECTS alone leaves info/grafts in force."""
     env = dict(os.environ)
     for key in [key for key in env if key.startswith("GIT_")]:
         env.pop(key, None)
@@ -91,21 +133,22 @@ def _git_env():
     env["GIT_TERMINAL_PROMPT"] = "0"
     env["GIT_OPTIONAL_LOCKS"] = "0"
     env["GIT_NO_REPLACE_OBJECTS"] = "1"
+    env["GIT_GRAFT_FILE"] = NO_SUCH_PATH
     return env
 
 
 def _git(root, *args, data=None):
-    """Run git bound to root with -C, under _git_env, bytes in and out. Only GIT_SUBCOMMANDS run. The
+    """Run _GIT bound to root with -C, under _git_env, bytes in and out. Only GIT_SUBCOMMANDS run. The
     automatic-maintenance pins (gc.auto=0, gc.autoDetach=false, maintenance.auto=false) ride the argv in
     option position, the form tools/selftest_git_fixture_env.py's maintenance-pin scan reads, so no call
-    can start a detached gc or maintenance child."""
+    can start a detached gc or maintenance child; HARDENING follows them, also in option position."""
     if not args or args[0] not in GIT_SUBCOMMANDS:
         raise CannotEvaluate("internal: git subcommand {!r} is outside the helper's closed set".format(
             args[0] if args else None))
     try:
         return subprocess.run(
-            ["git", "-c", "gc.auto=0", "-c", "gc.autoDetach=false", "-c", "maintenance.auto=false",
-             "-C", os.fspath(root), *args],
+            [_GIT, "-c", "gc.auto=0", "-c", "gc.autoDetach=false", "-c", "maintenance.auto=false",
+             *HARDENING, "-C", os.fspath(root), *args],
             input=data,
             capture_output=True,
             timeout=TIMEOUT,
@@ -165,10 +208,51 @@ def _branch(root):
     return ref
 
 
-def _protected_full_name(root, protected):
+def _dwim_candidates(name):
+    """The full ref names git's short-name rules try for name, in git's order."""
+    return [name, "refs/" + name, "refs/tags/" + name, "refs/heads/" + name, "refs/remotes/" + name,
+            "refs/remotes/" + name + "/HEAD"]
+
+
+def _protected_ref(root, protected):
+    """The full ref name --protected names, or "" when it names no ref (a commit id or an expression).
+    Refused when more than one ref matches the name under git's short-name rules (a tag main beside the
+    branch main, a local branch origin/main beside the remote-tracking one): git would silently pick
+    one, which may not be the protected line."""
     # fold() refuses a protected name that starts with '-', so it cannot be read as an option here.
+    listed = _git(root, "for-each-ref", "--format=%(refname)", *_dwim_candidates(protected))
+    if listed.returncode != 0:
+        raise CannotEvaluate("git for-each-ref failed ({})".format(_diag(listed)))
+    present = set(os.fsdecode(line) for line in listed.stdout.split(b"\n") if line)
+    matches = [name for name in _dwim_candidates(protected) if name in present]
+    if len(matches) > 1:
+        raise Refused("--protected {!r} is ambiguous: it matches {}; pass the full ref name of the "
+                      "protected line (for example {})".format(protected, ", ".join(matches), matches[-1]))
     probe = _git(root, "rev-parse", "--symbolic-full-name", protected)
-    return os.fsdecode(probe.stdout.strip()) if probe.returncode == 0 else ""
+    full = os.fsdecode(probe.stdout.strip()) if probe.returncode == 0 else ""
+    if matches and not full:
+        # git names no ref for a name that matches one (a symbolic remote HEAD resolves to its target,
+        # so only an empty answer is a disagreement).
+        raise CannotEvaluate("--protected {!r} matches {} but git names no ref for it ({})".format(
+            protected, matches[0], _diag(probe)))
+    return full
+
+
+def _local_copies(root, protected_ref):
+    """The local branch names that are a copy of the protected line: the protected ref itself when it is
+    a local branch; for a remote-tracking ref refs/remotes/<remote>/<name>, refs/heads/<name> for every
+    way of splitting a remote name off the front (a remote name may hold a slash); a remote's symbolic
+    HEAD is followed to the ref it names first."""
+    if protected_ref.startswith("refs/remotes/") and protected_ref.endswith("/HEAD"):
+        probe = _git(root, "symbolic-ref", "-q", protected_ref)
+        if probe.returncode == 0 and probe.stdout.strip():
+            protected_ref = os.fsdecode(probe.stdout.strip())
+    if protected_ref.startswith("refs/heads/"):
+        return {protected_ref}
+    if not protected_ref.startswith("refs/remotes/"):
+        return set()
+    parts = protected_ref[len("refs/remotes/"):].split("/")
+    return {"refs/heads/" + "/".join(parts[index:]) for index in range(1, len(parts))}
 
 
 def _signing(root):
@@ -331,10 +415,14 @@ def _verify(root, new_sha, tree, base):
             new_sha, base))
 
 
+def _stamp():
+    """The UTC time stamp that names a recovery ref (a function so a vector can fix it)."""
+    return datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+
+
 def _recovery(root, branch_ref, head_sha):
     """Create refs/aiqt-fold/<branch>/<utc> -> head_sha, create-only (the zero old value)."""
-    stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
-    name = "{}{}/{}".format(RECOVERY_PREFIX, branch_ref[len("refs/heads/"):], stamp)
+    name = "{}{}/{}".format(RECOVERY_PREFIX, branch_ref[len("refs/heads/"):], _stamp())
     if _git(root, "check-ref-format", name).returncode != 0:
         raise CannotEvaluate("the recovery ref name {!r} is not a valid ref name".format(name))
     zero = "0" * len(head_sha)
@@ -351,6 +439,18 @@ def _swap(root, branch_ref, new_sha, old_sha, reason):
     return _git(root, "update-ref", "-m", reason, branch_ref, new_sha, old_sha).returncode == 0
 
 
+def _check_swapped(root, branch_ref, new_sha):
+    """The post-swap re-read: the branch must hold the folded commit after the update."""
+    if _resolve(root, branch_ref, "branch") != new_sha:
+        raise CannotEvaluate("{} does not hold the folded commit after the update".format(branch_ref))
+
+
+def _undo_command(root, branch_ref, head_sha, new_sha):
+    """The undo command line for a POSIX shell: every argument quoted, the repository bound with -C."""
+    return " ".join(shlex.quote(item) for item in (
+        "git", "-C", os.fspath(root), "update-ref", branch_ref, head_sha, new_sha))
+
+
 def fold(root, protected, message_file, expect_base=None):
     """Fold the checked-out branch onto its merge base with protected. Returns a dict of the result;
     raises Refused or CannotEvaluate."""
@@ -363,8 +463,12 @@ def fold(root, protected, message_file, expect_base=None):
     branch_ref = _branch(root)
     if branch_ref in PROTECTED_BRANCHES:
         raise Refused("HEAD is on {}, a protected branch; fold only a work branch".format(branch_ref))
-    if _protected_full_name(root, protected) == branch_ref:
+    protected_ref = _protected_ref(root, protected)
+    if protected_ref == branch_ref:
         raise Refused("the checked-out branch {} is the protected ref itself".format(branch_ref))
+    if branch_ref in _local_copies(root, protected_ref):
+        raise Refused("the checked-out branch {} is the local copy of the protected line {}; fold only a "
+                      "work branch".format(branch_ref, protected_ref))
     busy = _in_progress(root)
     if busy:
         raise Refused("an operation is in progress ({}); finish or abort it first".format(", ".join(busy)))
@@ -374,7 +478,7 @@ def fold(root, protected, message_file, expect_base=None):
         raise CannotEvaluate("the repository is shallow, so the merge base may be missing history; "
                              "fetch the full history first")
     head_sha = _resolve(root, branch_ref, "branch")
-    protected_sha = _resolve(root, protected, "protected ref")
+    protected_sha = _resolve(root, protected_ref or protected, "protected ref")
     base = _single_base(_merge_bases(root, head_sha, protected_sha))
     if base == head_sha:
         raise Refused("the branch has no commits of its own over the merge base {}; nothing to fold".format(base))
@@ -397,10 +501,9 @@ def fold(root, protected, message_file, expect_base=None):
         raise Refused("{} moved after it was read (the compare-and-swap from {} lost); the branch was "
                       "not changed by this helper; the recovery ref {} keeps {}".format(
                           branch_ref, head_sha, recovery, head_sha))
-    if _resolve(root, branch_ref, "branch") != new_sha:
-        raise CannotEvaluate("{} does not hold the folded commit after the update".format(branch_ref))
-    return {"branch": branch_ref, "head": head_sha, "protected": protected_sha, "base": base,
-            "new": new_sha, "recovery": recovery, "folded": folded}
+    _check_swapped(root, branch_ref, new_sha)
+    return {"root": os.fspath(root), "branch": branch_ref, "head": head_sha, "protected": protected_sha,
+            "base": base, "new": new_sha, "recovery": recovery, "folded": folded}
 
 
 def run(root, protected, message_file, expect_base=None):
@@ -418,8 +521,8 @@ def run(root, protected, message_file, expect_base=None):
     print("  B (merge base)    {}".format(result["base"]))
     print("  N (folded)        {}".format(result["new"]))
     print("  recovery ref      {} -> {}".format(result["recovery"], result["head"]))
-    print("Nothing was pushed. To undo: git update-ref {} {} {}".format(
-        result["branch"], result["head"], result["new"]))
+    print("Nothing was pushed. To undo: {}".format(
+        _undo_command(result["root"], result["branch"], result["head"], result["new"])))
     return 0
 
 
@@ -800,6 +903,230 @@ def _q10(temp):
           and _fixture_git(root, "for-each-ref", "refs/aiqt-fold/") == "", (code, err))
 
 
+@contextlib.contextmanager
+def _patched(**replacements):
+    """Module globals replaced for the body of a with block (a vector's seam), then restored."""
+    saved = {name: globals()[name] for name in replacements}
+    globals().update(replacements)
+    try:
+        yield
+    finally:
+        globals().update(saved)
+
+
+def _fixture_env():
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from _git_fixture_env import git_fixture_env
+    return git_fixture_env(GIT_NO_LAZY_FETCH="1", GIT_TERMINAL_PROMPT="0", GIT_OPTIONAL_LOCKS="0",
+                           GIT_NO_REPLACE_OBJECTS="1")
+
+
+def _moved_main(temp, name):
+    """main at B, feature (two commits over B) checked out, then main moves on: a commit that changes
+    shared.txt and one more, M2. Returns (root, B, the feature's first commit, H, M2)."""
+    root, base, head = _feature(temp, name)
+    first = _rev(root, head + "^")
+    _fixture_git(root, "switch", "-q", "main")
+    _commit(root, "shared.txt", "main's change\n")
+    moved = _commit(root, "main2.txt", "main two\n")
+    _fixture_git(root, "switch", "-q", "feature")
+    return root, base, first, head, moved
+
+
+def _h17(temp):
+    """F1: an info/grafts file that makes the feature's first commit a child of the moved tip M2 must not
+    change the merge base; the fold's parent stays B. The twin, the same graph without the graft file,
+    folds onto B too."""
+    root, base, _first, _head, _moved = _moved_main(temp, "h17-twin")
+    code, _out, err = _fold_cli(root, temp, "h17-twin")
+    check("fold/h17-twin-no-graft-folds-onto-base", code == 0
+          and _parents(root, _rev(root, "refs/heads/feature")) == [base], (code, err))
+    root, base, first, head, moved = _moved_main(temp, "h17")
+    git_dir = Path(_fixture_git(root, "rev-parse", "--absolute-git-dir"))
+    (git_dir / "info").mkdir(exist_ok=True)
+    (git_dir / "info" / "grafts").write_text("{} {}\n".format(first, moved), encoding="ascii")
+    code, _out, err = _fold_cli(root, temp, "h17")
+    new = _rev(root, "refs/heads/feature")
+    check("fold/h17-graft-file-ignored", code == 0 and _parents(root, new) == [base]
+          and _rev(root, new + "^{tree}") == _rev(root, head + "^{tree}"),
+          (code, err, _parents(root, new), base, moved))
+
+
+def _undo_run(root, temp, name, cwd):
+    """Fold, then run the printed undo command through /bin/sh from cwd. Returns (fold code, undo code,
+    the branch's value after the undo, the old tip, the undo command)."""
+    head = _rev(root, "HEAD")
+    code, out, err = _fold_cli(root, temp, name)
+    lines = [line for line in out.splitlines() if "To undo: " in line]
+    if code != 0 or len(lines) != 1:
+        return code, None, None, head, (out, err)
+    command = lines[0].split("To undo: ", 1)[1]
+    proc = subprocess.run(["/bin/sh", "-c", command], capture_output=True, timeout=TIMEOUT, cwd=str(cwd),
+                          env=_fixture_env())
+    branch = _fixture_git(root, "symbolic-ref", "HEAD")
+    return code, proc.returncode, _rev(root, branch), head, command
+
+
+def _h18(temp):
+    """The printed undo command restores the old tip when run through /bin/sh from outside
+    the repository (cwd another repository), with a branch name holding shell punctuation; the other
+    repository is untouched. The twin: a plain branch name, run from inside the repository."""
+    root, _base, _head = _feature(temp, "h18-twin")
+    code, undo, after, head, command = _undo_run(root, temp, "h18-twin", root)
+    check("fold/h18-undo-plain-branch-inside-repo", code == 0 and undo == 0 and after == head,
+          (code, undo, command))
+    root = _repo(temp, "h18")
+    _commit(root, "main1.txt", "main one\n")
+    _fixture_git(root, "switch", "-q", "-c", "fold;false'$(q)'&x")
+    _commit(root, "f1.txt", "feature one\n")
+    other = _repo(temp, "h18-other")
+    other_refs = _fixture_git(other, "for-each-ref", "--format=%(refname) %(objectname)")
+    code, undo, after, head, command = _undo_run(root, temp, "h18", other)
+    check("fold/h18-undo-shell-punctuation-outside-repo", code == 0 and undo == 0 and after == head
+          and _fixture_git(other, "for-each-ref", "--format=%(refname) %(objectname)") == other_refs,
+          (code, undo, command))
+
+
+def _script(path, body):
+    """An executable /bin/sh script."""
+    Path(path).write_text("#!/bin/sh\n" + body, encoding="utf-8")
+    os.chmod(path, 0o755)
+    return str(path)
+
+
+def _h19(temp):
+    """F2: a repository-local core.fsmonitor program and a core.hooksPath reference-transaction hook never
+    run, and a decoy git put first on PATH after the helper loaded never runs; the fold itself succeeds.
+    The twins show each hostile setting is live for git outside the helper's pins."""
+    root, base, _head = _feature(temp, "h19")
+    marks = Path(temp) / "h19-marks"
+    marks.mkdir()
+    hooks = Path(temp) / "h19-hooks"
+    hooks.mkdir()
+    decoy = Path(temp) / "h19-decoy"
+    decoy.mkdir()
+    real = shutil.which("git") or "git"
+    _fixture_git(root, "config", "core.fsmonitor", _script(Path(temp) / "h19-fsmonitor",
+                                                           "echo ran >> '{}'\n".format(marks / "fsmonitor")))
+    _script(hooks / "reference-transaction", "echo ran >> '{}'\n".format(marks / "hook"))
+    _fixture_git(root, "config", "core.hooksPath", str(hooks))
+    _script(decoy / "git", "echo ran >> '{}'\nexec '{}' \"$@\"\n".format(marks / "decoy", real))
+    saved = os.environ.get("PATH", "")
+    os.environ["PATH"] = str(decoy) + os.pathsep + saved
+    try:
+        code, _out, err = _fold_cli(root, temp, "h19")
+    finally:
+        os.environ["PATH"] = saved
+    folded = code == 0 and _parents(root, _rev(root, "refs/heads/feature")) == [base]
+    check("fold/h19-fsmonitor-not-run", folded and not (marks / "fsmonitor").exists(), (code, err))
+    check("fold/h19-hooks-not-run", folded and not (marks / "hook").exists(), (code, err))
+    check("fold/h19-path-decoy-not-run", folded and not (marks / "decoy").exists(), (code, err))
+    env = _git_env()
+    subprocess.run(["git", "-C", str(root), "status", "--porcelain"], capture_output=True, timeout=TIMEOUT,
+                   env=env)
+    subprocess.run(["git", "-C", str(root), "update-ref", "refs/h19/twin", base], capture_output=True,
+                   timeout=TIMEOUT, env=env)
+    check("fold/h19-twin-hostile-settings-live", (marks / "fsmonitor").exists() and (marks / "hook").exists()
+          and shutil.which("git", path=str(decoy) + os.pathsep + saved) == str(decoy / "git"),
+          sorted(os.listdir(marks)))
+
+
+def _h20(temp):
+    """F3: the last checks fire. A folded commit with the protected tip as parent, or with another tree,
+    is cannot-evaluate in _verify before any ref moves; an update that reports success without moving the
+    branch is caught by the post-swap re-read; and a recovery ref name that already exists is never
+    overwritten (create-only). The twin: _verify accepts a correct folded commit."""
+    root, base, _first, head, moved = _moved_main(temp, "h20")
+    tree = _rev(root, head + "^{tree}")
+    good = _fixture_git(root, "commit-tree", tree, "-p", base, data=b"good\n")
+    try:
+        _verify(root, good, tree, base)
+        accepted = True
+    except CannotEvaluate as exc:
+        accepted = exc
+    check("fold/h20-verify-accepts-good-commit", accepted is True, accepted)
+
+    def tip_commit(fold_root, fold_tree, _parent, message):
+        return _fixture_git(fold_root, "commit-tree", fold_tree, "-p", moved, data=message)
+
+    def base_tree_commit(fold_root, _tree, parent, message):
+        return _fixture_git(fold_root, "commit-tree", _rev(fold_root, base + "^{tree}"), "-p", parent,
+                            data=message)
+
+    for name, seam in (("fold/h20-verify-wrong-parent-cannot-evaluate", tip_commit),
+                       ("fold/h20-verify-wrong-tree-cannot-evaluate", base_tree_commit)):
+        with _patched(_commit_tree=seam):
+            code, _out, err = _fold_cli(root, temp, name.rsplit("/", 1)[1])
+        check(name, code == 2 and "folded commit" in err and _rev(root, "refs/heads/feature") == head
+              and _fixture_git(root, "for-each-ref", "refs/aiqt-fold/") == "", (code, err))
+
+    def silent_swap(_root, _branch_ref, _new_sha, _old_sha, _reason):
+        return True
+
+    with _patched(_swap=silent_swap):
+        code, _out, err = _fold_cli(root, temp, "h20-reread")
+    check("fold/h20-post-swap-reread-fires", code == 2 and "does not hold the folded commit" in err
+          and _rev(root, "refs/heads/feature") == head, (code, err))
+    stamp = "20000101T000000000000Z"
+    taken = "{}feature/{}".format(RECOVERY_PREFIX, stamp)
+    for line in _fixture_git(root, "for-each-ref", "--format=%(refname)", "refs/aiqt-fold/").splitlines():
+        _fixture_git(root, "update-ref", "-d", line)
+    _fixture_git(root, "update-ref", taken, base)
+    with _patched(_stamp=lambda: stamp):
+        code, _out, err = _fold_cli(root, temp, "h20-collision")
+    check("fold/h20-recovery-collision-refused", code == 2 and "could not be created" in err
+          and _rev(root, taken) == base and _rev(root, "refs/heads/feature") == head, (code, err))
+
+
+def _h21(temp):
+    """F4: in a clone whose protected line is trunk, the checked-out local trunk (two commits ahead of
+    origin/trunk) is refused as the local copy of the protected line, by --protected origin/trunk and
+    by --protected origin (the remote's HEAD, followed); the twin, a work branch in the same clone,
+    folds."""
+    src = _repo(temp, "h21-src")
+    _fixture_git(src, "branch", "-q", "-m", "main", "trunk")
+    _commit(src, "t.txt", "trunk\n")
+    clone = Path(temp) / "h21"
+    _fixture_git(temp, "clone", "-q", "file://{}".format(src), str(clone))
+    for key, value in (("user.name", "Fold Self Test"), ("user.email", "fold@example.invalid"),
+                       ("commit.gpgsign", "false")):
+        _fixture_git(clone, "config", key, value)
+    _commit(clone, "a.txt", "a\n")
+    head = _commit(clone, "b.txt", "b\n")
+    for name, protected in (("fold/h21-local-trunk-refused", "origin/trunk"),
+                            ("fold/h21-local-trunk-via-remote-head-refused", "origin")):
+        code, _out, err = _fold_cli(clone, temp, "h21-" + protected.replace("/", "-"), protected=protected)
+        check(name, code == 1 and "local copy of the protected line" in err
+              and _rev(clone, "refs/heads/trunk") == head, (code, err))
+    base = _rev(clone, "origin/trunk")
+    _fixture_git(clone, "switch", "-q", "-c", "work", base)
+    _commit(clone, "w1.txt", "w1\n")
+    _commit(clone, "w2.txt", "w2\n")
+    code, _out, err = _fold_cli(clone, temp, "h21-work", protected="origin/trunk")
+    check("fold/h21-twin-work-branch-folds", code == 0
+          and _parents(clone, _rev(clone, "refs/heads/work")) == [base]
+          and _rev(clone, "refs/heads/trunk") == head, (code, err))
+
+
+def _h22(temp):
+    """F5: an ambiguous --protected name is refused by name: a tag main beside the branch main, and a
+    local branch origin/main beside refs/remotes/origin/main. The twin: the full ref name, with the tag
+    still present, folds onto the merge base with the branch."""
+    root, base, head = _feature(temp, "h22")
+    _fixture_git(root, "tag", "main", base + "^")
+    code, _out, err = _fold_cli(root, temp, "h22-tag")
+    check("fold/h22-tag-and-branch-ambiguous-refused", code == 1 and "ambiguous" in err
+          and "refs/tags/main" in err and _rev(root, "refs/heads/feature") == head, (code, err))
+    _fixture_git(root, "update-ref", "refs/remotes/origin/main", base)
+    _fixture_git(root, "update-ref", "refs/heads/origin/main", base + "^")
+    code, _out, err = _fold_cli(root, temp, "h22-origin", protected="origin/main")
+    check("fold/h22-local-origin-main-ambiguous-refused", code == 1 and "ambiguous" in err
+          and "refs/heads/origin/main" in err and _rev(root, "refs/heads/feature") == head, (code, err))
+    code, _out, err = _fold_cli(root, temp, "h22-full", protected="refs/heads/main")
+    check("fold/h22-twin-full-ref-folds", code == 0
+          and _parents(root, _rev(root, "refs/heads/feature")) == [base], (code, err))
+
+
 def _usage(temp):
     root, _base, head = _feature(temp, "usage")
     results = [
@@ -815,9 +1142,26 @@ def _usage(temp):
     check("cli/closed-git-subcommands", not GIT_SUBCOMMANDS & {
         "push", "fetch", "pull", "rebase", "reset", "checkout", "switch", "merge", "commit", "add",
         "write-tree", "read-tree"}, sorted(GIT_SUBCOMMANDS))
+    # F7: --execution-report is accepted only as the trailing option after --self-test (the suite's
+    # args); alone it is a usage error and never starts the self-test.
+    alone = _cli(["--execution-report", str(Path(temp) / "report.json")])
+    check("cli/execution-report-alone-usage", alone[0] == 2 and "--execution-report" in alone[2]
+          and "SELF-TEST" not in alone[1] and not (Path(temp) / "report.json").exists(), alone)
+    try:
+        split = _split_report(["--self-test", "--execution-report", str(Path(temp) / "report.json")])
+    except ValueError as exc:
+        split = exc
+    check("cli/execution-report-after-self-test-accepted",
+          split == (str(Path(temp) / "report.json"), ["--self-test"]), split)
+    code, out, _err = _cli(["--help"])
+    check("cli/help-explains-options-exits-and-rewrite", code == 0 and all(word in out for word in (
+        "--root DIR", "--protected REF", "--message-file ABS_PATH", "--expect-base FULL_SHA", "--self-test",
+        "exit codes:", "REWRITES", "force push", "residue", "local copy", "ambiguous", "Not neutralized")),
+          out)
 
 
-VECTORS = (_h1, _h2, _h3, _h4, _h5, _h6, _h7, _h8, _h9, _h10, _h11, _h12, _h13, _h15, _h16, _q10, _usage)
+VECTORS = (_h1, _h2, _h3, _h4, _h5, _h6, _h7, _h8, _h9, _h10, _h11, _h12, _h13, _h15, _h16, _q10, _h17,
+           _h18, _h19, _h20, _h21, _h22, _usage)
 
 
 def _with_home(body):
@@ -891,6 +1235,51 @@ def _mutants():
     def unsigned(_root):
         return False
 
+    scrubbed_env = _git_env
+
+    def graft_env():
+        env = scrubbed_env()
+        env.pop("GIT_GRAFT_FILE", None)
+        return env
+
+    def unquoted_undo(_root, branch_ref, head_sha, new_sha):
+        return "git update-ref {} {} {}".format(branch_ref, head_sha, new_sha)
+
+    def without(*dropped):
+        items, kept = list(HARDENING), []
+        while items:
+            pair = items[:2] if items[0] == "-c" else items[:1]
+            del items[:len(pair)]
+            if pair[-1] not in dropped:
+                kept.extend(pair)
+        return tuple(kept)
+
+    def no_verify(_root, _new_sha, _tree, _base):
+        return None
+
+    def verify_tree_only(root, new_sha, tree, _base):
+        probe = _git(root, "cat-file", "commit", new_sha)
+        header = probe.stdout.split(b"\n\n", 1)[0].split(b"\n")
+        if [_oid(line[5:]) for line in header if line.startswith(b"tree ")] != [tree]:
+            raise CannotEvaluate("the folded commit {} does not record the tip's tree".format(new_sha))
+
+    def no_reread(_root, _branch_ref, _new_sha):
+        return None
+
+    def overwriting_recovery(root, branch_ref, head_sha):
+        name = "{}{}/{}".format(RECOVERY_PREFIX, branch_ref[len("refs/heads/"):], _stamp())
+        if _git(root, "update-ref", name, head_sha).returncode != 0:
+            raise CannotEvaluate("the recovery ref {} could not be created".format(name))
+        return name
+
+    def no_local_copies(_root, _protected_ref):
+        return set()
+
+    def ambiguity_ignored(root, protected):
+        # The pinned behaviour: no ambiguity check, so git's own short-name order picks silently.
+        probe = _git(root, "rev-parse", "--symbolic-full-name", protected)
+        return os.fsdecode(probe.stdout.strip()) if probe.returncode == 0 else ""
+
     for name, replacements, vector, red in (
             ("mutant/parent-is-protected-tip", {"_fold_parent": tip_parent}, _h2,
              "fold/h2-protected-moved-parent-is-base"),
@@ -903,7 +1292,27 @@ def _mutants():
             ("mutant/merges-allowed", {"_merge_count": no_merges}, _h10, "fold/h10-merge-in-range-refused"),
             ("mutant/dirty-allowed", {"_dirty": never_dirty}, _h4, "fold/h4-dirty-worktree-refused"),
             ("mutant/ambient-git-env-kept", {"_git_env": ambient_env}, _h16, "fold/h16-ambient-git-env-scrubbed"),
-            ("mutant/signing-config-ignored", {"_signing": unsigned}, _q10, "fold/q10-failed-signature-refused")):
+            ("mutant/signing-config-ignored", {"_signing": unsigned}, _q10, "fold/q10-failed-signature-refused"),
+            ("mutant/graft-file-honoured", {"_git_env": graft_env}, _h17, "fold/h17-graft-file-ignored"),
+            ("mutant/undo-unquoted-unbound", {"_undo_command": unquoted_undo}, _h18,
+             "fold/h18-undo-shell-punctuation-outside-repo"),
+            ("mutant/fsmonitor-pin-dropped", {"HARDENING": without("core.fsmonitor=false")}, _h19,
+             "fold/h19-fsmonitor-not-run"),
+            ("mutant/hooks-pin-dropped", {"HARDENING": without("core.hooksPath=" + str(NO_SUCH_PATH))}, _h19,
+             "fold/h19-hooks-not-run"),
+            ("mutant/git-looked-up-per-call", {"_GIT": "git"}, _h19, "fold/h19-path-decoy-not-run"),
+            ("mutant/verify-call-dropped", {"_verify": no_verify}, _h20,
+             "fold/h20-verify-wrong-parent-cannot-evaluate"),
+            ("mutant/verify-ignores-parent", {"_verify": verify_tree_only}, _h20,
+             "fold/h20-verify-wrong-parent-cannot-evaluate"),
+            ("mutant/post-swap-reread-dropped", {"_check_swapped": no_reread}, _h20,
+             "fold/h20-post-swap-reread-fires"),
+            ("mutant/recovery-ref-overwrites", {"_recovery": overwriting_recovery}, _h20,
+             "fold/h20-recovery-collision-refused"),
+            ("mutant/local-copy-allowed", {"_local_copies": no_local_copies}, _h21,
+             "fold/h21-local-trunk-refused"),
+            ("mutant/ambiguous-protected-allowed", {"_protected_ref": ambiguity_ignored}, _h22,
+             "fold/h22-tag-and-branch-ambiguous-refused")):
         failures = _mutated(replacements, vector)
         check(name, any(entry.startswith(red + ":") for entry in failures),
               "the mutant left {} green ({})".format(red, failures))
@@ -921,15 +1330,66 @@ def self_test():
         for failure in FAILURES:
             print("  - " + failure)
         return 1
-    print("SELF-TEST PASS: fold_onto_base {} checks (H1 to H16 and Q10 in temporary repositories: a valid "
+    print("SELF-TEST PASS: fold_onto_base {} checks (H1 to H22 and Q10 in temporary repositories: a valid "
           "fold with a create-only recovery ref; a protected tip moved from a sibling worktree folds onto the "
           "merge base and passes the branch-root gate, while a fold onto the tip is REVERTS there; "
           "--expect-base narrows only; dirty, staged, criss-cross, detached, protected-branch, merge-in-range, "
           "in-progress and nothing-to-fold states are refused; a shallow clone and a failed signature are "
           "cannot-evaluate; a lost compare-and-swap leaves the other writer's commit; awkward paths keep the "
-          "tree; ambient GIT_ variables are scrubbed; every Bash PreToolUse hook allows the command; each "
-          "listed mutant turns its vector red)".format(len(EXECUTED)))
+          "tree; ambient GIT_ variables are scrubbed; every Bash PreToolUse hook allows the command; an "
+          "info/grafts file cannot move the base; the printed undo command restores the tip through /bin/sh "
+          "from another repository with shell punctuation in the branch name; a repository fsmonitor "
+          "program, a reference-transaction hook and a later PATH decoy git never run; _verify, the post-swap "
+          "re-read and the create-only recovery ref each fire; the local copy of the protected line and an "
+          "ambiguous --protected name are refused; --execution-report needs --self-test; --help explains "
+          "the options, exits and rewrite; each listed mutant turns its vector red)".format(len(EXECUTED)))
     return 0
+
+
+HELP_DESCRIPTION = """\
+Fold the checked-out branch into one commit on its merge base with the protected ref.
+
+This REWRITES the branch's history: the branch's commits since the merge base B are replaced by one new
+commit N whose tree is the old tip H's tree and whose one parent is B (never the protected line's tip,
+which may have moved). The old tip stays reachable under a create-only recovery ref
+refs/aiqt-fold/<branch>/<utc>. A branch already pushed now differs from its remote copy, so publishing
+it needs a force push, which this helper never does: it never pushes, fetches, rebases or resets, and
+never touches the index or the worktree."""
+
+HELP_EPILOG = """\
+exit codes:
+  0  folded; the branch now holds N, and the output names H, the protected tip, B, N, the recovery ref
+     and an undo command quoted for a POSIX shell (git -C <repository> update-ref <branch> H N)
+  1  refused, nothing was changed: HEAD detached or on main, master, the protected ref or its
+     local copy (for --protected origin/trunk, the local trunk); an ambiguous --protected name; tracked
+     changes in the index or worktree; a merge, rebase, cherry-pick, revert, bisect or sequencer in
+     progress; no merge base, several merge bases, nothing to fold, a merge commit in B..H, or a base
+     other than --expect-base. A lost compare-and-swap (the branch moved after it was read) is also
+     exit 1; it leaves the branch where the other writer put it, and leaves the recovery ref, its
+     reflog and the unreferenced folded commit behind (documented, intended residue).
+  2  usage error or cannot evaluate: a bad option or message file, a shallow repository, a git
+     failure, or a failed commit signature that the repository's signing configuration asks for.
+
+hardening: every git call runs the git resolved to an absolute path when the helper starts, with every
+ambient GIT_ variable removed, no system configuration, replace refs and info/grafts disabled, no
+fsmonitor program, no hook, no commit-graph cache and no transport. Not neutralized: a decoy git
+already first on PATH at start; the repository's own signing configuration (honoured on purpose); a
+clean or process filter driver run by git status; index bits (assume-unchanged, skip-worktree) or
+settings such as core.fileMode that hide a worktree change from the dirty check (such a change stays
+in the worktree, since the fold changes no worktree file)."""
+
+
+def _split_report(argv):
+    """(report path or None, argv). The execution gate launches the self-test as `--self-test
+    --execution-report ABS_PATH` (the suite's args); that trailing form, with an absolute path, is the
+    only one accepted. --execution-report anywhere else, or without --self-test, is a usage error."""
+    if "--execution-report" not in argv and not any(item.startswith("--execution-report=") for item in argv):
+        return None, argv
+    if len(argv) == 3 and argv[0] == "--self-test" and argv[1] == "--execution-report" \
+            and os.path.isabs(argv[2]):
+        return argv[2], ["--self-test"]
+    raise ValueError("--execution-report ABS_PATH is accepted only as the trailing option after "
+                     "--self-test")
 
 
 def main(argv=None):
@@ -940,21 +1400,33 @@ def main(argv=None):
         _code = main(sys.argv[1:])
         _finalizer = sys.modules.get("_selftest_exit_report")
         (sys.exit if _finalizer is None else _finalizer.exit_with)(_code)
-    argv = list(argv)
-    # The execution gate appends `--execution-report ABS_PATH` to the self-test launch; accepted only in
-    # that trailing two-token form, with an absolute path, alone or after --self-test.
-    report_path = None
-    if len(argv) >= 2 and argv[-2] == "--execution-report" and os.path.isabs(argv[-1]) \
-            and argv[:-2] in ([], ["--self-test"]):
-        report_path, argv = argv[-1], ["--self-test"]
+    try:
+        report_path, argv = _split_report(list(argv))
+    except ValueError as exc:
+        print("usage: fold_onto_base.py --self-test [--execution-report ABS_PATH]", file=sys.stderr)
+        print("error: {}".format(exc), file=sys.stderr)
+        return 2
     parser = argparse.ArgumentParser(
         prog="fold_onto_base.py",
-        description="Fold the checked-out branch into one commit on its merge base with the protected ref.")
-    parser.add_argument("--root")
-    parser.add_argument("--protected")
-    parser.add_argument("--message-file")
-    parser.add_argument("--expect-base")
-    parser.add_argument("--self-test", action="store_true")
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description=HELP_DESCRIPTION,
+        epilog=HELP_EPILOG)
+    parser.add_argument("--root", metavar="DIR", help=(
+        "the repository to fold in (any directory inside it); default the current directory. Every git "
+        "call and the printed undo command bind its top level with git -C."))
+    parser.add_argument("--protected", metavar="REF", help=(
+        "the protected line the branch was cut from, for example origin/main or refs/remotes/origin/main "
+        "(required). A name that matches more than one ref (a tag main beside the branch main, a local "
+        "branch origin/main beside the remote-tracking one) is refused; pass the full ref name then."))
+    parser.add_argument("--message-file", metavar="ABS_PATH", help=(
+        "an absolute path to a regular file holding the folded commit's message: nonempty UTF-8, no NUL "
+        "byte, at most {} bytes, not a symbolic link (required).".format(MESSAGE_MAX_BYTES)))
+    parser.add_argument("--expect-base", metavar="FULL_SHA", help=(
+        "the full lowercase hex commit id the merge base must equal (40 or 64 characters, never "
+        "abbreviated); it only narrows: a different derived base is refused and nothing changes."))
+    parser.add_argument("--self-test", action="store_true", help=(
+        "run the vectors and mutants in temporary repositories and exit; takes no other option except a "
+        "trailing --execution-report ABS_PATH, which the execution gate appends."))
     try:
         args = parser.parse_args(argv)
     except SystemExit as exc:
