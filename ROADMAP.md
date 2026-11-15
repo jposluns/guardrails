@@ -1,6 +1,6 @@
 # AIQT Guardrails roadmap
 
-What you can use today, what is being built, and what is only an idea, each labelled. The label changes only when the thing itself does.
+What you can use today, what is being built, and what is planned, each labelled. The label changes only when the thing itself does.
 
 ## Available now: The chat assistant
 
@@ -10,6 +10,6 @@ You can have this today. AIQT 1.0.5 packages the governance core for a chat assi
 
 Version 1.2.0, in development, installs the same governance core into a project. It generates the file each coding agent expects, sets itself up through a wizard, and ships a doctor that verifies the install. It writes only inside its own directory, so nothing else in your repository changes without your say-so. [Read about the development assistant.](https://aiqt.ai/development)
 
-## Ideas we are considering: Teams and Enterprise
+## Planned: Teams and Enterprise
 
-A web console would show governance activity across projects without requiring a terminal. Enterprise management would cover what an organization needs beyond an individual: central policy, shared configuration, and reporting across teams. No dates and no commitments. [Read about Teams & Enterprise.](https://aiqt.ai/teams)
+The plans cover management and monitoring across projects, performance metrics, and guardrail bundles per project or purpose, managed by the team or enterprise. No dates yet, and none of it is available today. [See the future plans.](https://aiqt.ai/future/)

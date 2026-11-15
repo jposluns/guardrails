@@ -217,14 +217,10 @@ HOST_CONFIG_FILES = frozenset({"_headers", "_redirects"})
 
 # Own-site links knowingly broken pending a maintainer decision. TEMPORARY: each entry is keyed by the
 # exact resolved URL (another spelling, host, scheme, case, trailing slash or fragment is not covered) and
-# is named in every run's output.
-PENDING_DECISION_ALLOWLIST = {
-    # roadmap-teams-link: roadmap.toml links "Read about Teams & Enterprise." to /teams, which ROADMAP.md
-    # renders as https://aiqt.ai/teams. The site cutover removed docs/teams.md and site/teams.html, and
-    # site/_redirects has no rule for /teams. Restoring a page, adding a redirect or dropping the link is
-    # a maintainer decision; remove this entry in the change that makes it.
-    "https://aiqt.ai/teams": "roadmap-teams-link",
-}
+# is named in every run's output. Empty now: the one entry it held (roadmap-teams-link, for
+# https://aiqt.ai/teams) was removed once the Teams page was restored at site/teams/index.html. The
+# self-test exercises the mechanism with a fixture-only entry (_FIXTURE_ALLOWLIST), never this one.
+PENDING_DECISION_ALLOWLIST = {}
 
 # A protocol-relative destination: exactly two slashes, then a host.
 _PROTOCOL_RELATIVE = re.compile(r"//[^/\\]")
@@ -1040,9 +1036,14 @@ def main() -> int:
 
 
 # Fixture vectors: (name, {relative path: content or None for a directory}, expected exit, substrings the
-# output must hold). Each runs the script under test as a child process inside its own fixture tree, so
-# the production constants (hosts, sources, allowlist) are what is exercised.
+# output must hold[, allowlist]). Each runs the script under test as a child process inside its own fixture
+# tree, so the production constants (hosts, sources, allowlist) are what is exercised. A vector that names
+# an allowlist runs a copy of the script whose PENDING_DECISION_ALLOWLIST line is replaced by that
+# allowlist, so the mechanism is tested while the production allowlist is empty.
 _SITE = {"site/index.html": "<title>t</title>"}
+_FIXTURE_ALLOWLIST = {"https://aiqt.ai/pending": "fixture-pending-link"}
+# The production allowlist line the self-test replaces; it must appear exactly once, at a line start.
+_ALLOWLIST_LINE = re.compile(r"^PENDING_DECISION_ALLOWLIST = \{\}$", re.MULTILINE)
 _DISCLOSURE = 'site_base = "https://aiqt.ai"\n[[row]]\nevidence = [{{ text = "x", href = "{}" }}]\n'
 _ROADMAP = '[[stage]]\nlinks = [{{ text = "x", href = "{}" }}]\n'
 SELF_TEST_VECTORS = (
@@ -1128,8 +1129,10 @@ SELF_TEST_VECTORS = (
      "[a](https://aiqt.ai/nope)\n"}, 1, ("(/* /index.html 200) is a catch-all",)),
     ("redirects/rewrite-to-another-origin-fails", {**_SITE, "site/_redirects": "/p https://example.com/ 200\n",
      "README.md": "[a](https://aiqt.ai/p)\n"}, 1, ("rewrites to another origin",)),
+    # A malformed rule is cannot-evaluate even when no checked link matches it: the own-site link to / only
+    # makes the scan read site/ (a tree is read only when something names a host it serves).
     ("redirects/malformed-rule-cannot-evaluate", {**_SITE, "site/_redirects": "/x /y moved\n",
-     "README.md": "x\n"}, 2, ("status 'moved' is not a number",)),
+     "README.md": "[a](https://aiqt.ai/)\n"}, 2, ("status 'moved' is not a number",)),
     # (7) a _redirects rule is evaluated before a file at the same path, as Cloudflare Pages follows a
     # redirect even when an asset matches; the path passes only when the rule's final destination resolves.
     ("redirects/rule-over-present-file-missing-destination-fails", {**_SITE, "site/present.html": "p",
@@ -1394,22 +1397,25 @@ SELF_TEST_VECTORS = (
     ("source/disclosure-http-href-malformed", {**_SITE, "disclosure.toml":
      _DISCLOSURE.format("http://aiqt.ai/")}, 2, ("href 'http://aiqt.ai/' is neither",)),
     ("source/malformed-cannot-evaluate", {**_SITE, "roadmap.toml": "title = \n"}, 2, ()),
-    ("allowlist/exact-url-honoured", {**_SITE, "README.md": "[t](https://aiqt.ai/teams)\n", "roadmap.toml":
-     '[[stage]]\nlinks = [{ text = "t", href = "/teams" }]\n'}, 0,
-     ("temporarily allowlisted pending decision (roadmap-teams-link) -> https://aiqt.ai/teams",
-      "roadmap.toml:2: temporarily allowlisted pending decision (roadmap-teams-link) -> /teams")),
-    ("allowlist/trailing-slash-not-honoured", {**_SITE, "README.md": "[t](https://aiqt.ai/teams/)\n"}, 1,
-     ("broken own-site link -> https://aiqt.ai/teams/",)),
-    ("allowlist/other-host-not-honoured", {**_SITE, "README.md": "[t](https://www.aiqt.ai/teams)\n"}, 1,
-     ("broken own-site link -> https://www.aiqt.ai/teams",)),
-    ("allowlist/fragment-not-honoured", {**_SITE, "README.md": "[t](https://aiqt.ai/teams#x)\n"}, 1,
-     ("broken own-site link -> https://aiqt.ai/teams#x",)),
-    ("allowlist/other-scheme-not-honoured", {**_SITE, "README.md": "[t](http://aiqt.ai/teams)\n"}, 1,
-     ("broken own-site link -> http://aiqt.ai/teams",)),
-    ("allowlist/stale-entry-fails", {**_SITE, "site/teams.html": "t"}, 1,
-     ("allowlist entry roadmap-teams-link (https://aiqt.ai/teams) is stale",)),
+    ("allowlist/exact-url-honoured", {**_SITE, "README.md": "[t](https://aiqt.ai/pending)\n", "roadmap.toml":
+     '[[stage]]\nlinks = [{ text = "t", href = "/pending" }]\n'}, 0,
+     ("temporarily allowlisted pending decision (fixture-pending-link) -> https://aiqt.ai/pending",
+      "roadmap.toml:2: temporarily allowlisted pending decision (fixture-pending-link) -> /pending"),
+     _FIXTURE_ALLOWLIST),
+    ("allowlist/production-copy-not-honoured", {**_SITE, "README.md": "[t](https://aiqt.ai/pending)\n"}, 1,
+     ("broken own-site link -> https://aiqt.ai/pending",)),
+    ("allowlist/trailing-slash-not-honoured", {**_SITE, "README.md": "[t](https://aiqt.ai/pending/)\n"}, 1,
+     ("broken own-site link -> https://aiqt.ai/pending/",), _FIXTURE_ALLOWLIST),
+    ("allowlist/other-host-not-honoured", {**_SITE, "README.md": "[t](https://www.aiqt.ai/pending)\n"}, 1,
+     ("broken own-site link -> https://www.aiqt.ai/pending",), _FIXTURE_ALLOWLIST),
+    ("allowlist/fragment-not-honoured", {**_SITE, "README.md": "[t](https://aiqt.ai/pending#x)\n"}, 1,
+     ("broken own-site link -> https://aiqt.ai/pending#x",), _FIXTURE_ALLOWLIST),
+    ("allowlist/other-scheme-not-honoured", {**_SITE, "README.md": "[t](http://aiqt.ai/pending)\n"}, 1,
+     ("broken own-site link -> http://aiqt.ai/pending",), _FIXTURE_ALLOWLIST),
+    ("allowlist/stale-entry-fails", {**_SITE, "site/pending.html": "t"}, 1,
+     ("allowlist entry fixture-pending-link (https://aiqt.ai/pending) is stale",), _FIXTURE_ALLOWLIST),
     ("allowlist/catch-all-does-not-make-it-stale", {**_SITE, "site/_redirects": "/* /index.html 200\n"}, 0,
-     ()),
+     ("PASS: all internal Markdown links and own-site links resolve",), _FIXTURE_ALLOWLIST),
 )
 
 
@@ -1422,11 +1428,24 @@ def self_test(script=None):
     walk = Path(__file__).resolve().parent / "_walk.py"
     env = {k: v for k, v in os.environ.items() if k != "AIQT_SITE_HOST"}
     failures = []
-    for name, files, want_exit, want_text in SELF_TEST_VECTORS:
+    for name, files, want_exit, want_text, *fixture in SELF_TEST_VECTORS:
         with tempfile.TemporaryDirectory(prefix="check_links_selftest_") as tmp:
             root = Path(tmp)
             (root / "tools").mkdir()
-            shutil.copyfile(script, root / "tools" / "check_links.py")
+            if fixture:
+                # replace the production allowlist line with the vector's fixture allowlist; a script
+                # without exactly one such line cannot run the vector, which is a self-test failure
+                source = script.read_bytes().decode("utf-8")
+                lines = _ALLOWLIST_LINE.findall(source)
+                if len(lines) != 1:
+                    failures.append("{}: cannot inject the fixture allowlist: the script has {} "
+                                    "'PENDING_DECISION_ALLOWLIST = {{}}' line(s), not 1".format(name, len(lines)))
+                    continue
+                injected = _ALLOWLIST_LINE.sub(
+                    lambda _m: "PENDING_DECISION_ALLOWLIST = " + repr(dict(fixture[0])), source)
+                (root / "tools" / "check_links.py").write_bytes(injected.encode("utf-8"))
+            else:
+                shutil.copyfile(script, root / "tools" / "check_links.py")
             shutil.copyfile(walk, root / "tools" / "_walk.py")
             for rel, content in files.items():
                 (root / rel).parent.mkdir(parents=True, exist_ok=True)
@@ -1442,7 +1461,7 @@ def self_test(script=None):
             if proc.returncode != want_exit or missing:
                 failures.append("{}: expected exit {} got {}; missing {}; output {!r}".format(
                     name, want_exit, proc.returncode, missing, out))
-    if PENDING_DECISION_ALLOWLIST != {"https://aiqt.ai/teams": "roadmap-teams-link"}:
+    if PENDING_DECISION_ALLOWLIST != {}:
         failures.append("allowlist/pinned: PENDING_DECISION_ALLOWLIST changed without updating the self-test")
     if failures:
         print("FAIL: check_links self-test")
