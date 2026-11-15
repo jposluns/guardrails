@@ -27,12 +27,14 @@ name the characters in its own source without flagging itself; it writes them on
 
 Exit: 0 clean; 1 a finding; 2 cannot evaluate (an unreadable tree, a scoped tree that is there but is not a
 directory or a symlink to a directory inside the repository, a scoped file that is not valid UTF-8, a malformed
-policy, a bad argument). Each scoped file that is not valid UTF-8 is named on stderr and the run exits 2, never 0
-and never 1, even when another file holds a finding (the findings are still printed). --default-parity exits 0
-when the two are equal,
-and also, saying SKIP, when the file is absent; 1 when they differ; 2 when the file cannot be used. An adopter's
-own policy differs from this repository's by design, so only this repository's check roster runs that mode;
-the self-test never reads the repository's policy file.
+policy, a bad argument). Each scoped file that is not valid UTF-8 is named on its own line on stderr and the run
+exits 2, never 0 and never 1, even when another file holds a finding, whose line is still printed on stdout. One
+case prints less: when listing or reading the scoped files raises an OSError (a tree that cannot be walked or is
+not a directory, a scoped file that cannot be read), the scan stops at once with one "cannot scan the tree" line
+on stderr and exit 2, and it prints no finding and names no file that is not valid UTF-8. --default-parity exits
+0 when the two are equal, and also, saying SKIP, when the file is absent; 1 when they differ; 2 when the file
+cannot be used. An adopter's own policy differs from this repository's by design, so only this repository's
+check roster runs that mode; the self-test never reads the repository's policy file.
 """
 import sys
 
@@ -417,6 +419,17 @@ def _self_test():
             failures.append(f"{label}: want exit {want}" + (f" and {needle!r}" if needle else "")
                             + f", got {rc}: {out.strip()[:200]!r}")
 
+    def expect_streams(label, root, want, out_lines=(), err_lines=(), err_has=(), out_lacks=(), err_lacks=()):
+        """Like expect(), but per stream: each of out_lines and err_lines must be a whole line of stdout or
+        stderr, each of err_has a substring of stderr, and no out_lacks or err_lacks substring may appear."""
+        rc, out, err = scan(root)
+        out_split, err_split = out.splitlines(), err.splitlines()
+        if (rc != want or any(line not in out_split for line in out_lines)
+                or any(line not in err_split for line in err_lines) or any(text not in err for text in err_has)
+                or any(text in out for text in out_lacks) or any(text in err for text in err_lacks)):
+            failures.append(f"{label}: want exit {want}, got {rc}: stdout {out.strip()[:200]!r}, "
+                            f"stderr {err.strip()[:200]!r}")
+
     def policy(**changes):
         data = {"version": 1, "id": "fixture", "chars": {quote: "left double quotation mark"},
                 "scope": [{"tree": ".", "suffixes": [".md"]}]}
@@ -558,35 +571,40 @@ def _self_test():
         # G8 encoding: a scoped file that is not UTF-8 cannot be scanned, so it is named and the run exits 2,
         # never skipped with exit 0; that exit 2 wins over a finding in another file (exit 1), whose line is still
         # printed. A file outside the scope is never read, so its bytes do not matter.
+        def not_utf8_line(rel):
+            return f"error: {rel} is not valid UTF-8, so it cannot be scanned (cannot evaluate); fail-closed"
+
         not_utf8 = "error: d/a.md is not valid UTF-8"
         expect("G8A UTF-8", tree({"d/a.md": em.encode("utf-8")}), 1)
-        g8b = tree({"d/a.md": em.encode("utf-8") + b"\xff"})
-        expect("G8B not UTF-8", g8b, 2, not_utf8)
+        expect("G8B not UTF-8", tree({"d/a.md": em.encode("utf-8") + b"\xff"}), 2, not_utf8)
         expect("G8C not UTF-8 beside a finding", tree({"d/a.md": b"\xff", "d/b.md": em}), 2, not_utf8)
         expect("G8C finding still printed", tree({"d/a.md": b"\xff", "d/b.md": em}), 2, "d/b.md:1:1: em dash")
         expect("G8D not UTF-8 out of scope", tree({"d/a.txt": b"\xff", "d/b.md": "x\n"}), 0)
-        # G8R revert: a copy of this gate whose undecodable branch is put back to the old skip (print SKIP and
-        # continue) passes G8B's tree with exit 0, so G8B tells the fail-closed branch from the skip. The edit
-        # must match exactly once; the needle spans a line break, so the string literals below never match it.
-        revert_from = "except UnicodeDecodeError:\n" + " " * 16 + "undecodable" + ".append(path.relative_to(root))\n"
-        revert_to = ("except UnicodeDecodeError:\n" + " " * 16
-                     + 'print(f"SKIP (not utf-8): {path.relative_to(root)}")\n')
-        reverted = os.path.join(g8b, "tools")
-        os.makedirs(reverted)
-        here = Path(__file__).resolve().parent
-        source = (here / "check_no_dashes.py").read_text(encoding="utf-8")
-        if source.count(revert_from) != 1:
-            failures.append(f"G8R revert: the fail-closed branch occurs {source.count(revert_from)} times, not once")
-        else:
-            with open(os.path.join(reverted, "check_no_dashes.py"), "w", encoding="utf-8") as handle:
-                handle.write(source.replace(revert_from, revert_to))
-            for name in ("_walk.py", "_standards.py"):
-                shutil.copyfile(here / name, os.path.join(reverted, name))
-            done = subprocess.run([sys.executable, "-I", "-B", os.path.join(reverted, "check_no_dashes.py")],
-                                  capture_output=True, text=True, timeout=120)
-            if done.returncode != 0 or "SKIP (not utf-8): d/a.md" not in done.stdout:
-                failures.append(f"G8R revert: want exit 0 and the old SKIP line from the reverted copy, got "
-                                f"{done.returncode}: {(done.stdout + done.stderr).strip()[:200]!r}")
+        # G8E to G8G pin the docstring's stream and naming claims line by line, since expect() searches stdout and
+        # stderr together. G8E: each of two undecodable files gets its own stderr line, and neither is on stdout.
+        expect_streams("G8E each undecodable file named on stderr",
+                       tree({"d/a.md": b"\xff", "d/b.md": b"x\xfe\n", "d/c.md": "x\n"}), 2,
+                       err_lines=[not_utf8_line("d/a.md"), not_utf8_line("d/b.md")], out_lacks=["not valid UTF-8"])
+        # G8F: beside an undecodable file, a finding and its FAIL header are printed on stdout, and only there.
+        expect_streams("G8F finding on stdout beside an undecodable file", tree({"d/a.md": b"\xff", "d/b.md": em}),
+                       2, out_lines=['FAIL: 1 character(s) forbidden by the "no-dashes" character policy found',
+                                     "  d/b.md:1:1: em dash"],
+                       err_lines=[not_utf8_line("d/a.md")], out_lacks=["not valid UTF-8"], err_lacks=["em dash"])
+        # G8G: an OSError while reading the scoped files stops the scan at once; the undecodable file read before
+        # it is not named and the finding read before it is not printed (skipped when running as root).
+        if hasattr(os, "geteuid") and os.geteuid() != 0:
+            stopped = tree({"d/a.md": b"\xff", "d/b.md": em, "d/c.md": "x\n"})
+            os.chmod(os.path.join(stopped, "d", "c.md"), 0)
+            expect_streams("G8G an unreadable scoped file stops the scan", stopped, 2,
+                           err_lacks=["not valid UTF-8"], out_lacks=["em dash", "FAIL"],
+                           err_has=["error: cannot scan the tree ("])
+        # G8R revert pair: the same clean text, once as UTF-8 (exit 0 with PASS) and once with one invalid byte
+        # added (exit 2, named, no PASS). Put back the old skip (print SKIP, continue) and the second exits 0 with
+        # PASS, so this vector fails; it checks the scan's behaviour, not this file's source text.
+        expect_streams("G8R clean UTF-8 twin", tree({"d/a.md": b"x\n"}), 0,
+                       out_lines=['PASS: no en dash or em dash in the files the "no-dashes" character policy scopes'])
+        expect_streams("G8R the same text with one invalid byte", tree({"d/a.md": b"x\xff\n"}), 2,
+                       err_lines=[not_utf8_line("d/a.md")], out_lacks=["PASS"])
         # G9 order and duplicates: overlapping entries report a file once, in its first entry's place.
         overlap = policy(scope=[{"tree": "b", "suffixes": [".md"]}, {"tree": ".", "suffixes": [".md"]}])
         rc, out, _ = scan(tree({"a.md": quote, "b/c.md": quote}, overlap))
