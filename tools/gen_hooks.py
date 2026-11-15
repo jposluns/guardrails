@@ -23,11 +23,11 @@ repository's project settings must not oblige. Validation is
 fail-closed: every manifest `rules` entry must name a real corpus-id in .aiqt/core/rules/ (via
 gen_rules.load_corpus), the event must be on the known-event whitelist, a tool event must carry a
 compilable matcher and a non-tool event must not, `default` must be an allowed keyword with the
-non-blocking `warn` legal only on a WARN_EVENTS event (PostToolUse, UserPromptSubmit, Stop,
-SubagentStop, SessionStart), under an explicit bake stage, or for a PreToolUse handler the dispatcher
-lists in NOTE_ONLY_PRETOOL_MODES (whose control must declare it), the named handler must exist in the
-source script, and `residue` must be non-empty, so a typo can never silently no-op an enforcement
-control.
+non-blocking `warn` legal only on a WARN_EVENTS event (PostToolUse, PostToolUseFailure,
+UserPromptSubmit, Stop, SubagentStop, SessionStart, TeammateIdle), under an explicit bake stage, or for
+a PreToolUse handler the dispatcher lists in NOTE_ONLY_PRETOOL_MODES (whose control must declare it),
+the named handler must exist in the source script, and `residue` must be non-empty, so a typo can never
+silently no-op an enforcement control.
 
 Per-hook timeout and derived onFailure, OFF by default. A [[hook]] may author an optional integer
 `timeout` (TIMEOUT_MIN to TIMEOUT_MAX seconds), and the [plugin] table may author
@@ -127,11 +127,14 @@ AUTHORING_MARKER_MAX_BYTES = 1_000_000
 AUTHORING_ONLY_REL = (AUTHORING_MARKER_REL, PROJECT_SETTINGS_REL)
 
 # The event whitelist, in the fixed render order (doc-confirmed event names, 2026-08-17; SessionStart
-# and TeammateIdle re-confirmed against the hooks reference 2026-08-29). A typo'd event must fail
-# closed here, never silently produce a hook no platform will fire.
-KNOWN_EVENTS = ("PreToolUse", "PostToolUse", "UserPromptSubmit", "Stop", "SubagentStop",
-                "SessionStart", "TeammateIdle")
-TOOL_EVENTS = {"PreToolUse", "PostToolUse"}  # these require a matcher; the others must omit it
+# and TeammateIdle re-confirmed against the hooks reference 2026-08-29). PostToolUseFailure, the tool
+# event fired after a tool call that started and failed, is the name the preview .preview/clock-inject.py
+# documents and registers; it was not re-confirmed against the hooks reference for this list. A typo'd
+# event must fail closed here, never silently produce a hook no platform will fire.
+KNOWN_EVENTS = ("PreToolUse", "PostToolUse", "PostToolUseFailure", "UserPromptSubmit", "Stop",
+                "SubagentStop", "SessionStart", "TeammateIdle")
+# these require a matcher; the others must omit it
+TOOL_EVENTS = {"PreToolUse", "PostToolUse", "PostToolUseFailure"}
 # A non-blocking "warn" default is legal on every event EXCEPT PreToolUse: on a PreToolUse control a
 # silent non-decision would weaken an enforcement point, so warn there requires the explicit,
 # recorded stage = "bake" posture below, or a handler the dispatcher names in NOTE_ONLY_PRETOOL_MODES: such
@@ -140,8 +143,8 @@ TOOL_EVENTS = {"PreToolUse", "PostToolUse"}  # these require a matcher; the othe
 # SessionStart cannot block at the platform (exit 2 only shows
 # stderr, doc-confirmed 2026-08-29), so a SessionStart control MUST declare warn: a block/ask claim
 # there would be an overclaim the platform cannot honour.
-WARN_EVENTS = {"PostToolUse", "UserPromptSubmit", "Stop", "SubagentStop", "SessionStart",
-               "TeammateIdle"}
+WARN_EVENTS = {"PostToolUse", "PostToolUseFailure", "UserPromptSubmit", "Stop", "SubagentStop",
+               "SessionStart", "TeammateIdle"}
 NONBLOCK_EVENTS = {"SessionStart"}  # the platform cannot block these: default must be "warn"
 STAGES = {"bake", "enforce"}  # stage is optional authoring metadata; absent means "enforce"
 NOTE_ONLY_NAME = "NOTE_ONLY_PRETOOL_MODES"  # the dispatcher's tuple of note-only PreToolUse handlers
@@ -1768,9 +1771,10 @@ def self_test_main(_nested=False):
         os.chmod(manifest, 0o644)  # restore so cleanup can remove it
 
         # 11. The FULL "warn" default policy, table-driven across every known event. warn is a
-        #     non-blocking default legal on the WARN_EVENTS (PostToolUse, UserPromptSubmit, Stop,
-        #     SubagentStop, SessionStart), so the generator must REJECT it (exit 2) on every other event
-        #     outside a bake stage and ACCEPT it on each WARN_EVENTS event, regenerating drift-clean.
+        #     non-blocking default legal on the WARN_EVENTS (PostToolUse, PostToolUseFailure,
+        #     UserPromptSubmit, Stop, SubagentStop, SessionStart, TeammateIdle), so the generator must
+        #     REJECT it (exit 2) on every other event outside a bake stage and ACCEPT it on each
+        #     WARN_EVENTS event, regenerating drift-clean.
         #     Converting the base tool hook to a non-tool event also drops the now-forbidden matcher,
         #     matching a real Stop/UserPromptSubmit control.
         tool_block = 'event = "PreToolUse"\nmatcher = "Bash"\nhandler = "test_handler"\ndefault = "block"'
@@ -1793,6 +1797,48 @@ def self_test_main(_nested=False):
             elif run_quiet(warntree, check=True) != 2:
                 failures.append("'warn' default on non-warn event {} expected exit 2 (fail-closed)"
                                 .format(event))
+
+        # 11b. PostToolUseFailure, spelled literally here rather than read from the event sets, so a
+        #      revert of any one of its set entries fails: a warn hook on it with an all-tools matcher,
+        #      beside a PostToolUse and a UserPromptSubmit hook, generates and checks drift-clean, and
+        #      hooks.json renders it, with that matcher, between those two events; the same hook with
+        #      no matcher fails closed (exit 2), as on any tool event.
+        if not ("PostToolUseFailure" in KNOWN_EVENTS and "PostToolUseFailure" in TOOL_EVENTS
+                and "PostToolUseFailure" in WARN_EVENTS):
+            failures.append("PostToolUseFailure must be in KNOWN_EVENTS, TOOL_EVENTS and WARN_EVENTS")
+        ptuf_hooks = (
+            '\n[[hook]]\nid = "selftest-post"\nrules = ["tsthk1"]\nplatform = "claude-code"\n'
+            'event = "PostToolUse"\nmatcher = "Bash"\nhandler = "post_handler"\ndefault = "warn"\n'
+            'class = "c"\nresidue = "A self-test PostToolUse control catches nothing real."\n'
+            '\n[[hook]]\nid = "selftest-prompt"\nrules = ["tsthk1"]\nplatform = "claude-code"\n'
+            'event = "UserPromptSubmit"\nhandler = "prompt_handler"\ndefault = "warn"\nclass = "c"\n'
+            'residue = "A self-test UserPromptSubmit control catches nothing real."\n')
+        ptuf_handlers = ("\ndef post_handler(data):\n    return (0, None, None)\n"
+                         "\ndef prompt_handler(data):\n    return (0, None, None)\n")
+        for label, matcher, want_exit in (("ptuf-warn", 'matcher = ".*"\n', 0), ("ptuf-no-matcher", "", 2)):
+            ptuf = tmp / label
+            ptuf.mkdir()
+            _build_tree(ptuf)
+            _mutate(ptuf, tool_block, 'event = "PostToolUseFailure"\n{}handler = "test_handler"\n'
+                    'default = "warn"'.format(matcher))
+            hsrc = ptuf / ".aiqt" / "core" / "hooks"
+            for path, tail in ((hsrc / "manifest.toml", ptuf_hooks), (hsrc / "scripts" / SCRIPT_NAME,
+                                                                       ptuf_handlers)):
+                path.write_text(path.read_text(encoding="utf-8") + tail, encoding="utf-8")
+            if want_exit:
+                if run_quiet(ptuf, check=True) != 2:
+                    failures.append("a PostToolUseFailure hook with no matcher expected exit 2 (a tool "
+                                    "event requires one)")
+                continue
+            if run_quiet(ptuf, check=False) != 0 or run_quiet(ptuf, check=True) != 0:
+                failures.append("a warn PostToolUseFailure hook with matcher '.*' expected a clean generate "
+                                "and a drift-clean check")
+                continue
+            rendered = json.loads((ptuf / HOOKS_JSON_REL).read_text(encoding="utf-8"))["hooks"]
+            if list(rendered) != ["PostToolUse", "PostToolUseFailure", "UserPromptSubmit"] or [
+                    group.get("matcher") for group in rendered["PostToolUseFailure"]] != [".*"]:
+                failures.append("hooks.json must render PostToolUseFailure, with its matcher '.*', between "
+                                "PostToolUse and UserPromptSubmit, got {!r}".format(rendered))
 
         # 12. Render byte-identity: the default is authoring metadata, never rendered into hooks.json, so
         #     an otherwise-identical Stop hook must render the SAME bytes whether its default is "block"
@@ -4044,7 +4090,9 @@ def self_test_main(_nested=False):
           "the script, a missing handler script, an unreadable manifest, and a malformed default keyword "
           "all fail closed; the full 'warn' default policy holds across every known event (rejected on "
           "every non-warn event, accepted on every WARN_EVENTS event, plus warn+stage=bake on "
-          "PreToolUse and the SessionStart-cannot-block overclaim); a note-only PreToolUse handler must "
+          "PreToolUse and the SessionStart-cannot-block overclaim); a warn PostToolUseFailure hook with an "
+          "all-tools matcher renders between PostToolUse and UserPromptSubmit and one with no matcher "
+          "fails closed; a note-only PreToolUse handler must "
           "declare warn and no other PreToolUse handler may without a bake stage; a Stop hook renders "
           "byte-identical hooks.json whether its default is 'block' or 'warn'; the dispatcher's "
           "PreToolUse deadline must mirror TIMEOUT and leave a margin from DEADLINE_MIN_MARGIN up to just "

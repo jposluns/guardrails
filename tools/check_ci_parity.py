@@ -248,6 +248,22 @@ group step put back into quality.yml, and the whole self-test removed,
 repeated or moved out of the heavy jobs each turn the self-test red. The rule
 runs in the self-test, which reads the live files, not in the gate's own run.
 Not checked: which HEAVY_JOBS job runs the whole self-test.
+SHARDS. The local runner runs each config suite of SHARDED_SUITES as its one
+plain tools/check_selftest_execution.py --suite <id> line; quality.yml runs it
+as N lines, --suite <id> --shard K/N for K = 1..N, N the suite's count there,
+each in its own heavy job (SHARD_JOBS, in HEAVY_JOBS and read by the Quality
+gates job's HEAVY_RESULTS line, so every shard must succeed). The set parity
+reads CI through _shard_set_view: exactly that shard set matches the plain
+local line, so neither side is a difference. A shard of 1..N with no line, a
+--shard line of the suite outside 1..N of N (a respelled or other-N line
+among them), the plain line run in CI, and shard lines with no plain local
+line are each a shard-set finding (exit 1), and the shard lines then stay
+ci-only. Each shard command is in HEAVY_COMMANDS, so a shard line in a job
+without the pinned if: is a lane finding. The self-test holds SHARDED_SUITES
+equal to the SHARD_COUNTS of tools/check_selftest_execution.py (read with
+ast from the live file). Not checked here: a shard line run twice (the
+member set keeps no count; tools/check_python_host_pin.py holds each shard
+job to its one suite step).
 CHECKOUT CREDENTIALS. Unless its persist-credentials input is false,
 actions/checkout writes the job token into the git config of the checkout,
 where every later step of the job, each gate this repository runs among
@@ -343,7 +359,10 @@ missing-mandatory finding, not a silent pass. The
 child-status probe (CHILD_STATUS_PROBE) and its coverage gate are MANDATORY_MEMBERS for
 the same reason: removing either from both runners together is a missing-mandatory
 finding. Where the probe sits in a roster (first) is held by
-tools/check_child_status_coverage.py, not here. The
+tools/check_child_status_coverage.py, not here. The OPF init contract gate's
+--parent-integration run is a MANDATORY_MEMBERS entry too: without the flag that gate
+checks only the OPF-local rosters and cannot see its own flag missing, so the flag
+dropped from both runners is a missing-mandatory finding. The
 extractors implement a disclosed shell and YAML subset; an unknown construct is
 cannot-evaluate rather than a clean pass. Fail-closed cases include an unknown
 top-level or job-level workflow key, an exit outside the exact terminal summary
@@ -635,6 +654,22 @@ RESULT_MASKING_JOB_KEYS = dict((
 # not close defaults.run.working-directory (module docstring, Step shell).
 STEP_SHELL_LINE = "shell: bash"
 
+# The sharded config suites (module docstring, SHARDS): suite id -> N, the shard count
+# tools/check_selftest_execution.py registers for it in its SHARD_COUNTS (the self-test
+# holds the two equal). quality.yml runs each as N heavy host-patch jobs, the job
+# SHARD_JOB_FORMAT names for shard K running SHARD_SUITE_COMMAND + id + " --shard K/N",
+# and the local runner runs the plain SHARD_SUITE_COMMAND + id line once.
+SHARDED_SUITES = {"git-fixture-env-config-combined": 12, "git-fixture-env-config-malformed": 12,
+                  "git-fixture-env-config-system": 19}
+SHARD_SUITE_COMMAND = "tools/check_selftest_execution.py --suite "
+SHARD_JOB_FORMAT = "{}-shard-{}-host-patch"
+# Every shard job id, suite by suite in SHARDED_SUITES order, shard 1 to N.
+SHARD_JOBS = tuple(SHARD_JOB_FORMAT.format(suite, k)
+                   for suite, count in SHARDED_SUITES.items() for k in range(1, count + 1))
+# Every shard command, the CI side of the SHARDS rule.
+SHARD_COMMANDS = tuple("{}{} --shard {}/{}".format(SHARD_SUITE_COMMAND, suite, k, count)
+                       for suite, count in SHARDED_SUITES.items() for k in range(1, count + 1))
+
 # The Quality gates job, pinned line for line after its job-id line. Blank and
 # whole-line comment lines are ignored, and the needs: key with its nested lines is
 # compared as the one slot line below, because needs: is checked against the job set
@@ -677,13 +712,8 @@ REQUIRED_STATUS_JOB = (
     "${{ needs.git-fixture-env-core.result || 'missing' }} "
     "${{ needs.opf-host-patch.result || 'missing' }} "
     "${{ needs.git-fixture-env-core-host-patch.result || 'missing' }} "
-    "${{ needs.git-fixture-env-config-combined-host-patch.result || "
-    "'missing' }} "
-    "${{ needs.git-fixture-env-config-malformed-host-patch.result || "
-    "'missing' }} "
-    "${{ needs.git-fixture-env-config-system-host-patch.result || "
-    "'missing' }} "
-    "${{ needs.byte-canon-matrix.result || 'missing' }}",
+    + "".join("${{ needs.%s.result || 'missing' }} " % job for job in SHARD_JOBS)
+    + "${{ needs.byte-canon-matrix.result || 'missing' }}",
     "        run: |",
     "          set -euo pipefail",
     '          echo "Needed job results: ${RESULTS}"',
@@ -768,10 +798,8 @@ SCOPE_JOB_ID = "scope"
 HEAVY_JOBS = frozenset({
     "opf-tooling-a", "opf-tooling-b", "opf-tooling-c", "selftest-execution",
     "git-fixture-env-core",
-    "opf-host-patch", "git-fixture-env-core-host-patch",
-    "git-fixture-env-config-combined-host-patch",
-    "git-fixture-env-config-malformed-host-patch",
-    "git-fixture-env-config-system-host-patch", "byte-canon-matrix",
+    "opf-host-patch", "git-fixture-env-core-host-patch", "byte-canon-matrix",
+    *SHARD_JOBS,
 })
 
 # The scope job, pinned line for line after its job-id line as REQUIRED_STATUS_JOB pins
@@ -871,6 +899,7 @@ HEAVY_COMMANDS = frozenset({
     "tools/check_selftest_execution.py --suite git-fixture-env-config-combined",
     "tools/check_selftest_execution.py --suite git-fixture-env-config-malformed",
     "tools/check_selftest_execution.py --suite git-fixture-env-config-system",
+    *SHARD_COMMANDS,
 })
 
 # The opf.py self-test groups (module docstring, OPF GROUPS): the file that names them in its
@@ -885,6 +914,8 @@ MSG_LEAKS_SCAN = "tools/check_msg_leaks.py"  # the live scan (module docstring, 
 # included, so that workflow admits it beside its own scan.
 CHILD_STATUS_PROBE = "opf/tools/_child_status.py"
 CHILD_STATUS_COVERAGE = "tools/check_child_status_coverage.py"
+# The OPF init contract gate run with the flag that adds its parent-repository roster checks.
+OPF_INIT_CONTRACT_PARENT = "opf/tools/check_opf_init_contract.py --parent-integration"
 # The only members msg-leaks.yml may run (module docstring, TWO WORKFLOWS): its own scan, that
 # scan's self-test and the child-status probe. Any other member there is a relocation finding,
 # because that workflow's status is separate from the aggregated Quality gates and re-runs on every
@@ -1068,6 +1099,9 @@ MANDATORY_MEMBERS = frozenset({
     # leave every gate reading a lost child exit status as a pass, unseen.
     CHILD_STATUS_PROBE,
     CHILD_STATUS_COVERAGE,
+    # The OPF init contract gate's parent-integration run: without the flag the gate checks only the
+    # OPF-local rosters, and it cannot see its own flag missing, so both runners must carry it.
+    OPF_INIT_CONTRACT_PARENT,
 })
 
 INTERPRETERS = frozenset({"python", "python3"})
@@ -4025,12 +4059,57 @@ def _opf_group_wiring_faults(groups, local, ci, heavy=HEAVY_COMMANDS, ci_jobs=No
     return faults
 
 
+def _shard_set_view(local, ci, sharded=None):
+    """The CI member set as the SHARDS rule reads it (module docstring, SHARDS), and its findings.
+    For each suite of `sharded` (SHARDED_SUITES when None) with count N, CI's lines
+    SHARD_SUITE_COMMAND + id + " --shard K/N" for K = 1..N, exactly that set with no other
+    --shard line of the suite, together match the local runner's one plain SHARD_SUITE_COMMAND
+    + id line: they leave the view and the plain line takes their place. Anything else is a
+    shard-set finding and the shard lines stay in the view (so each is also ci-only): a shard
+    of 1..N with no line, a --shard line of the suite outside 1..N of N, the plain line run in
+    CI (one job running the whole lane), and a shard set with no plain local line."""
+    sharded = SHARDED_SUITES if sharded is None else sharded
+    view, findings = set(ci), []
+    for suite, count in sorted(sharded.items()):
+        plain = SHARD_SUITE_COMMAND + suite
+        prefix = plain + " --shard "
+        held = {member for member in ci if member.startswith(prefix)}
+        wanted = {"{}{}/{}".format(prefix, k, count) for k in range(1, count + 1)}
+        if plain in ci:
+            findings.append(Finding(
+                "shard-set", plain,
+                "CI runs the whole sharded suite on one line; it runs only as its {} shard "
+                "lines ({}K/{})".format(count, prefix, count)))
+        for member in sorted(held - wanted):
+            findings.append(Finding(
+                "shard-set", member,
+                "a --shard line of {} outside shards 1..{} of its registered count {}".format(
+                    suite, count, count)))
+        absent = sorted(int(member[len(prefix):].split("/")[0]) for member in wanted - held)
+        if held and absent:
+            findings.append(Finding(
+                "shard-set", plain,
+                "CI runs no line for shard(s) {} of {} ({}K/{})".format(
+                    ", ".join(str(k) for k in absent), count, prefix, count)))
+        if held and plain not in local:
+            findings.append(Finding(
+                "shard-set", plain,
+                "CI runs shard lines of {} but the local runner has no plain line for "
+                "them to match".format(suite)))
+        if held == wanted and plain in local and plain not in ci:
+            view = (view - wanted) | {plain}
+    return frozenset(view), findings
+
+
 def reconcile(local_extraction, ci_extraction, allowlist=ALLOWLIST):
-    """Compare extracted sets and reconcile the embedded exceptions."""
+    """Compare extracted sets and reconcile the embedded exceptions. CI's member set is read
+    through _shard_set_view (module docstring, SHARDS), so a complete shard set matches its
+    plain local line."""
     entries, allow_diagnostics = _validate_allowlist(allowlist)
 
     local = frozenset(local_extraction.members)
-    ci = frozenset(ci_extraction.members)
+    ci_raw = frozenset(ci_extraction.members)
+    ci, shard_findings = _shard_set_view(local, ci_raw)
     diagnostics = _dedupe_diagnostics(
         list(local_extraction.diagnostics)
         + list(ci_extraction.diagnostics)
@@ -4134,6 +4213,7 @@ def reconcile(local_extraction, ci_extraction, allowlist=ALLOWLIST):
                 "mandatory member is absent from CI",
             ))
 
+    findings.extend(shard_findings)
     findings.extend(ci_extraction.findings)
 
     findings = tuple(sorted(
@@ -5442,6 +5522,8 @@ def self_test():
         # The child-status probe and its coverage gate, mandatory as the contracts are.
         "python3 -I -B opf/tools/_child_status.py",
         "python3 -I -B tools/check_child_status_coverage.py",
+        # The OPF init contract gate's parent-integration run, mandatory the same way.
+        "python3 -I -B " + OPF_INIT_CONTRACT_PARENT,
         # The scope tool's self-test, which the pinned SCOPE_JOB fixture body runs on
         # the CI side of every heavy fixture, so both sides carry it everywhere.
         "python3 -I -B tools/ci_site_scope.py --self-test",
@@ -5630,7 +5712,8 @@ def self_test():
             ".github/check_cited_standards_contract.py --self-test",
             ".github/check_newtab_contract.py",
             "opf/tools/_child_status.py",
-            "tools/check_child_status_coverage.py"):
+            "tools/check_child_status_coverage.py",
+            "opf/tools/check_opf_init_contract.py --parent-integration"):
         count += 1
         if member not in MANDATORY_MEMBERS:
             failures.append(
@@ -5645,6 +5728,23 @@ def self_test():
              1, ("missing-mandatory",), (),
              ("opf/tools/_child_status.py",)
              if member == "opf/tools/_child_status.py" else ())
+    # The OPF init contract gate run WITHOUT its --parent-integration flag checks only the OPF-local
+    # rosters and cannot see the flag missing: the flag dropped from both runners together, or from
+    # either one, is a finding here, never a pass.
+    opf_flagged = "python3 -I -B opf/tools/check_opf_init_contract.py --parent-integration"
+    opf_unflagged = "python3 -I -B opf/tools/check_opf_init_contract.py"
+    opf_dropped = tuple(c if c != opf_flagged else opf_unflagged for c in common)
+    case("01l OPF init contract gate without its flag in both runners",
+         evaluate(local_fixture(opf_dropped), ci_fixture(opf_dropped), ()),
+         1, ("missing-mandatory",), (), ())
+    case("01l OPF init contract gate without its flag in the local runner",
+         evaluate(local_fixture(opf_dropped), ci_fixture(common), ()),
+         1, ("missing-mandatory", "ci-only", "local-only"),
+         ("opf/tools/check_opf_init_contract.py",), (OPF_INIT_CONTRACT_PARENT,))
+    case("01l OPF init contract gate without its flag in CI",
+         evaluate(local_fixture(common), ci_fixture(opf_dropped), ()),
+         1, ("missing-mandatory", "ci-only", "local-only"),
+         (OPF_INIT_CONTRACT_PARENT,), ("opf/tools/check_opf_init_contract.py",))
     unknown = "python3 -I -B .github/unrecognized.py"
     case("01f unknown repository executable refused",
          evaluate(local_fixture(common + (unknown,)),
@@ -9096,14 +9196,18 @@ def self_test():
               evaluate(multi_local,
                        lane_ci(drop_heavy=("byte-canon-matrix",)), ()),
               1, "heavy job 'byte-canon-matrix' is missing")
-    # Each git-fixture-env lane's host-patch job is a heavy job of its own
-    # (the four run as parallel jobs): removing any one of them is a lane
-    # finding. While HEAVY_JOBS named one serial host-patch job for the four
-    # suites, none of these ids was heavy, so each fixture passed with exit 0.
+    # The core suite's host-patch job and each config lane's shard jobs are
+    # heavy jobs of their own (they run as parallel jobs): removing any one of
+    # them is a lane finding. The first and last shard job of each lane are
+    # written out here, not read from SHARD_JOBS, so a revert of HEAVY_JOBS to
+    # the one job per lane turns these rows red (each fixture then passes).
     for lane_job in ("git-fixture-env-core-host-patch",
-                     "git-fixture-env-config-combined-host-patch",
-                     "git-fixture-env-config-malformed-host-patch",
-                     "git-fixture-env-config-system-host-patch"):
+                     "git-fixture-env-config-combined-shard-1-host-patch",
+                     "git-fixture-env-config-combined-shard-12-host-patch",
+                     "git-fixture-env-config-malformed-shard-1-host-patch",
+                     "git-fixture-env-config-malformed-shard-12-host-patch",
+                     "git-fixture-env-config-system-shard-1-host-patch",
+                     "git-fixture-env-config-system-shard-19-host-patch"):
         lane_case("39j a removed git-fixture-env host-patch job is a lane "
                   "finding: " + lane_job,
                   evaluate(multi_local, lane_ci(drop_heavy=(lane_job,)), ()),
@@ -9128,15 +9232,13 @@ def self_test():
                   lane_ci(light_commands=common + (
                       "python3 tools/a.py", heavy_member)), ()),
               1, "job 'secrets' of {} runs heavy member(s)".format(CI_SOURCE))
-    # The combined, malformed and system git-fixture-env suites run in CI only
-    # in their host-patch jobs, and the core suite also in the '3.14' canary
-    # job: each stays a heavy command, so a '3.14' copy put back into an
+    # The core git-fixture-env suite runs in CI in its host-patch job and in
+    # the '3.14' canary job: it stays a heavy command, so a copy put into an
     # unconditioned job is a lane finding, and in a job carrying the pinned
-    # if: it passes. The suite names are written out here, not read from
-    # HEAVY_COMMANDS, so a revert of that set cannot empty these vectors.
-    for suite in ("git-fixture-env-core", "git-fixture-env-config-combined",
-                  "git-fixture-env-config-malformed",
-                  "git-fixture-env-config-system"):
+    # if: it passes. The suite name is written out here, not read from
+    # HEAVY_COMMANDS, so a revert of that set cannot empty these vectors. The
+    # config suites run in CI only as shard lines (41s below).
+    for suite in ("git-fixture-env-core",):
         suite_member = ("python3 -I -B tools/check_selftest_execution.py "
                         "--suite " + suite)
         suite_local = local_fixture(common + (
@@ -9159,10 +9261,18 @@ def self_test():
     # reverted to hold these ids, each fixture declares the id twice (the
     # renamed job and lane_ci's own heavy job), so each row stays red through
     # the duplicate-job cannot-evaluate (exit 2) rather than passing.
+    # The config lanes' single host-patch jobs, replaced by their shard jobs,
+    # are removed the same way, and so are a shard job past a lane's count and
+    # a shard job id respelled with a leading zero.
     for removed_job in ("opf", "opf-adopt", "opf-init",
                         "git-fixture-env-config-combined",
                         "git-fixture-env-config-malformed",
-                        "git-fixture-env-config-system"):
+                        "git-fixture-env-config-system",
+                        "git-fixture-env-config-combined-host-patch",
+                        "git-fixture-env-config-malformed-host-patch",
+                        "git-fixture-env-config-system-host-patch",
+                        "git-fixture-env-config-system-shard-20-host-patch",
+                        "git-fixture-env-config-combined-shard-01-host-patch"):
         lane_case("39j a removed heavy job id carrying the pinned if: is a "
                   "lane finding: " + removed_job,
                   evaluate(multi_local, lane_ci(
@@ -9172,6 +9282,107 @@ def self_test():
                       ()),
                   1, "job {!r} of {} carries a job-level if:".format(
                       removed_job, CI_SOURCE))
+
+    # 41s SHARDS: a sharded config suite runs locally as its one plain line
+    # and in CI as its N shard lines, K = 1..N of the registered N, each a
+    # heavy command (module docstring, SHARDS). The complete set matches the
+    # plain local line and passes; a missing, extra or respelled shard line,
+    # a set of another N, the plain line run in CI and a shard set with no
+    # plain local line are each a shard-set finding, and a shard line in an
+    # unconditioned job is a lane finding. The suites and counts are written
+    # out here, not read from SHARDED_SUITES, so a changed count turns the
+    # control rows red.
+    def shard_case(name, report, want_code, needle):
+        case(name, report, want_code, kinds=("shard-set",))
+        if not any(needle in finding.message for finding in report.findings
+                   if finding.kind == "shard-set"):
+            failures.append("{}: no shard-set finding mentions {!r}: {!r}".format(
+                name, needle, report.findings))
+
+    for suite, shards in (("git-fixture-env-config-combined", 12),
+                          ("git-fixture-env-config-malformed", 12),
+                          ("git-fixture-env-config-system", 19)):
+        plain = "python3 -I -B tools/check_selftest_execution.py --suite " + suite
+        lines = tuple("{} --shard {}/{}".format(plain, k, shards)
+                      for k in range(1, shards + 1))
+        shard_local = local_fixture(common + (
+            "python3 tools/a.py", "python3 tools/b.py", plain))
+        lane_case("41s control: the complete shard set in a heavy job matches "
+                  "the plain local line: " + suite,
+                  evaluate(shard_local, lane_ci(
+                      opf_commands=("python3 tools/b.py",) + lines), ()), 0)
+        lane_case("41s a shard line in an unconditioned job is a lane "
+                  "finding: " + suite,
+                  evaluate(shard_local, lane_ci(
+                      light_commands=common + ("python3 tools/a.py", lines[0]),
+                      opf_commands=("python3 tools/b.py",) + lines[1:]), ()),
+                  1, "job 'secrets' of {} runs heavy member(s) "
+                  "tools/check_selftest_execution.py --suite {} --shard 1/{}".format(
+                      CI_SOURCE, suite, shards))
+        shard_case("41s a missing shard line is a shard-set finding: " + suite,
+                   evaluate(shard_local, lane_ci(
+                       opf_commands=("python3 tools/b.py",) + lines[:2] + lines[3:]), ()),
+                   1, "CI runs no line for shard(s) 3 of {}".format(shards))
+        shard_case("41s an extra shard line is a shard-set finding: " + suite,
+                   evaluate(shard_local, lane_ci(
+                       opf_commands=("python3 tools/b.py",) + lines
+                       + ("{} --shard {}/{}".format(plain, shards + 1, shards + 1),)), ()),
+                   1, "outside shards 1..{} of its registered count {}".format(
+                       shards, shards))
+        shard_case("41s a respelled shard line is a shard-set finding: " + suite,
+                   evaluate(shard_local, lane_ci(
+                       opf_commands=("python3 tools/b.py",) + lines[:2]
+                       + ("{} --shard 03/{}".format(plain, shards),) + lines[3:]), ()),
+                   1, "CI runs no line for shard(s) 3 of {}".format(shards))
+        shard_case("41s a shard set of another count is a shard-set finding: " + suite,
+                   evaluate(shard_local, lane_ci(
+                       opf_commands=("python3 tools/b.py",) + tuple(
+                           "{} --shard {}/{}".format(plain, k, shards - 1)
+                           for k in range(1, shards))), ()),
+                   1, "CI runs no line for shard(s) {} of {}".format(
+                       ", ".join(str(k) for k in range(1, shards + 1)), shards))
+        shard_case("41s the plain line run in CI beside the shard set is a "
+                   "shard-set finding: " + suite,
+                   evaluate(shard_local, lane_ci(
+                       opf_commands=("python3 tools/b.py", plain) + lines), ()),
+                   1, "CI runs the whole sharded suite on one line")
+        shard_case("41s a shard set with no plain local line is a shard-set "
+                   "finding: " + suite,
+                   evaluate(local_fixture(common + (
+                       "python3 tools/a.py", "python3 tools/b.py")), lane_ci(
+                           opf_commands=("python3 tools/b.py",) + lines), ()),
+                   1, "the local runner has no plain line")
+    # The shard counts this gate holds are the ones the execution gate
+    # registers: tools/check_selftest_execution.py's top-level SHARD_COUNTS,
+    # read with ast from the live file and never run.
+    # It is source, not runner text (it carries non-ASCII bytes the runner
+    # reader refuses), so it is read as vector 29 reads source: bytes, decoded.
+    count += 1
+    try:
+        import ast
+        gate_source = (ROOT / "tools" / "check_selftest_execution.py").read_bytes().decode(
+            "utf-8")
+        registered = [ast.literal_eval(node.value) for node in ast.parse(gate_source).body
+                      if isinstance(node, ast.Assign)
+                      and [getattr(target, "id", None) for target in node.targets]
+                      == ["SHARD_COUNTS"]]
+    except (OSError, UnicodeDecodeError, SyntaxError, ValueError, RecursionError,
+            MemoryError) as exc:
+        registered = [exc]
+    if registered != [SHARDED_SUITES]:
+        failures.append("41s SHARDED_SUITES {!r} differs from the SHARD_COUNTS of "
+                        "tools/check_selftest_execution.py: {!r}".format(
+                            SHARDED_SUITES, registered))
+    # The Quality gates job's HEAVY_RESULTS line reads every heavy job's
+    # result exactly once, a shard job's among them, and no other job's.
+    count += 1
+    heavy_line = [line for line in REQUIRED_STATUS_JOB
+                  if line.lstrip().startswith("HEAVY_RESULTS:")]
+    read_jobs = re.findall(r"needs\.([A-Za-z0-9_-]+)\.result", "".join(heavy_line))
+    if (len(heavy_line) != 1 or sorted(read_jobs) != sorted(HEAVY_JOBS)
+            or len(read_jobs) != len(set(read_jobs))):
+        failures.append("41s HEAVY_RESULTS reads {!r}, not each of HEAVY_JOBS {!r} "
+                        "once".format(read_jobs, sorted(HEAVY_JOBS)))
     # 39k the Quality gates exemption is the quality.yml job's alone: the
     # same job name in another workflow exempts nothing, so an if: on the
     # scan job stays a lane finding whatever the job is named. Before the

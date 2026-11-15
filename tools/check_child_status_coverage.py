@@ -11,8 +11,9 @@ with exit 2). This gate holds where it runs:
   1. live: the canonical guard runs in this process first, in every mode; a refusal exits 2 by name.
   2. copies: the inline copies in each CLI_COPIES entry (opf/tools/opf.py, tools/check_selftest_execution.py,
      opf/tools/_opf_adopt_complete.py, opf/tools/_opf_adopt_state.py, opf/tools/_opf_import_complete.py,
-     tools/check_gitleaks_pin.py, tools/check_must_deliver.py, tools/_load_bound.py and
-     tools/check_verifier_delivery.py), in opf/tools/_opf_declaration.py and tools/check_opf_declaration.py
+     tools/check_gitleaks_pin.py, tools/check_must_deliver.py, tools/_load_bound.py,
+     tools/check_verifier_delivery.py, tools/render_og_cards.py and
+     opf/tools/check_opf_selftest_execution.py), in opf/tools/_opf_declaration.py and tools/check_opf_declaration.py
      (the constant and both functions) and in the hooks dispatcher and its generated plugin copy (the constant
      and the probe) are each bound exactly once at module scope, by one top-level definition (an undecorated one
      for a function), and AST-identical (ast.dump, docstrings included) to the canonical text, so a call by that
@@ -29,7 +30,7 @@ with exit 2). This gate holds where it runs:
      _main_exit(lambda: _child_status_refusal_exit("opf.py") or main()) (the guard runs first, and _main_exit
      ends the process by raising SystemExit itself, never through sys.exit), and for every other,
      sys.exit(_child_status_refusal_exit("<basename>") or main()), except that of each SELF_TEST_COPIES entry
-     (the three opf/tools self_test modules above), which is exactly opf.py's canonical --self-test statement
+     (the four opf/tools self_test modules above), which is exactly opf.py's canonical --self-test statement
      (SELF_TEST_ENTRY, held to opf.py's own _ENTRY_STATEMENT) then that second form, with self_test bound once
      at module scope (the same count), by one undecorated top-level def whose first statement after the
      docstring is the guard call _child_status_refusal_exit("<basename>"); opf.py's _main_exit, which receives
@@ -78,8 +79,9 @@ with exit 2). This gate holds where it runs:
      value, a trailing comment, a tab in the indentation) is a finding, never a pass. Inside it, every value
      that names Python sits in a step with a run: key, after its job's one setup-python step and the probe
      step right after that; the probe step is exactly PROBE_STEP (its name, shell: bash and run, and no
-     other key, so no if: and no continue-on-error). In the five host-patch jobs (HOST_PATCH_JOBS) of the
-     one workflow HOST_PATCH_WORKFLOW only, the Python host pin step, exactly HOST_PIN_STEP, may stand
+     other key, so no if: and no continue-on-error). In the host-patch jobs (HOST_PATCH_JOBS: the OPF job,
+     the git-fixture-env core job and each shard job of the three git-fixture-env config lanes) of the one
+     workflow HOST_PATCH_WORKFLOW only, the Python host pin step, exactly HOST_PIN_STEP, may stand
      between setup-python and the probe (tools/check_python_host_pin.py holds that step as the one right
      after setup-python there), and the probe step right after it is then exactly HOST_PROBE_STEP (the same
      shape, its name saying it runs after that gate); in the scope job SCOPE_JOB_ID of that same workflow
@@ -237,7 +239,8 @@ CLI_COPIES = (("opf/tools/opf.py", "opf.py"), ("tools/check_selftest_execution.p
               ("tools/check_gitleaks_pin.py", "check_gitleaks_pin.py"),
               ("tools/check_must_deliver.py", "check_must_deliver.py"), ("tools/_load_bound.py", "_load_bound.py"),
               ("tools/check_verifier_delivery.py", "check_verifier_delivery.py"),
-              ("tools/render_og_cards.py", "render_og_cards.py"))
+              ("tools/render_og_cards.py", "render_og_cards.py"),
+              ("opf/tools/check_opf_selftest_execution.py", "check_opf_selftest_execution.py"))
 # The CLI copy whose __main__ body is the one call _entry() (it raises its own exit rather than calling sys.exit):
 # its guard is the first statement of its one top-level _entry(), exactly ENTRY_GUARD.
 ENTRY_COPIES = (("tools/check_opf_declaration.py", "check_opf_declaration.py"),)
@@ -277,7 +280,7 @@ MAIN_EXIT_CALL = "status = main()"
 # exactly that statement then the CLI entry line, and the guard call SELF_TEST_GUARD is the first statement of
 # self_test() after its docstring, so the --self-test path refuses too.
 SELF_TEST_COPIES = ("opf/tools/_opf_adopt_complete.py", "opf/tools/_opf_adopt_state.py",
-                    "opf/tools/_opf_import_complete.py")
+                    "opf/tools/_opf_import_complete.py", "opf/tools/check_opf_selftest_execution.py")
 SELF_TEST_ENTRY = 'if sys.argv[1:] == ["--self-test"]:\n    sys.exit(self_test())\n'
 SELF_TEST_GUARD = '_child_status_refusal_exit("{}")'
 # The file whose _ENTRY_STATEMENT SELF_TEST_ENTRY copies: it must bind that name once, at the top level, to a string
@@ -308,15 +311,21 @@ WORKFLOWS_REL = ".github/workflows"
 # The probe step, exactly: these keys in this order with these values, and no other key.
 PROBE_STEP = (("name", "Child exit status observable (before any gate)"), ("shell", "bash"),
               ("run", "python3 -I -B " + CANONICAL_REL))
-# The five host-patch jobs, the one workflow they live in and the Python host pin step, exactly:
+# The host-patch jobs, the one workflow they live in and the Python host pin step, exactly:
 # tools/check_python_host_pin.py holds that step as the one right after each of these jobs' setup-python
 # step, so in these jobs of HOST_PATCH_WORKFLOW only, exactly that step may stand between setup-python and
 # the probe, and the probe step right after it is HOST_PROBE_STEP, the probe with the name that placement
 # makes true. The exception is keyed on the workflow path and the job id together, so a job with any of these
-# ids in any other workflow gets the plain reading; the exactness of both steps is the bound.
+# ids in any other workflow gets the plain reading; the exactness of both steps is the bound. The jobs are the
+# OPF job, the git-fixture-env core job, then each shard job of the three git-fixture-env config lanes:
+# HOST_PATCH_SHARDS maps each lane's suite id to its shard count N, and shard K of N runs as job
+# <suite id>-shard-K-host-patch.
 HOST_PATCH_WORKFLOW = WORKFLOWS_REL + "/quality.yml"
-HOST_PATCH_JOBS = ("opf-host-patch", "git-fixture-env-core-host-patch", "git-fixture-env-config-combined-host-patch",
-                   "git-fixture-env-config-malformed-host-patch", "git-fixture-env-config-system-host-patch")
+HOST_PATCH_SHARDS = {"git-fixture-env-config-combined": 12, "git-fixture-env-config-malformed": 12,
+                     "git-fixture-env-config-system": 19}
+HOST_PATCH_JOBS = ("opf-host-patch", "git-fixture-env-core-host-patch",
+                   *("{}-shard-{}-host-patch".format(lane, shard) for lane, count in HOST_PATCH_SHARDS.items()
+                     for shard in range(1, count + 1)))
 HOST_PIN_STEP = (("name", "Python host pin"), ("shell", "bash"),
                  ("run", "python3 -I -B tools/check_python_host_pin.py"))
 HOST_PROBE_STEP = (("name", "Child exit status observable (after the host pin gate)"), ("shell", "bash"),
@@ -2247,10 +2256,16 @@ def _vectors(module, trees, texts, canonical_tree):
     def quality_workflow(key):
         return m.workflow_findings(m.HOST_PATCH_WORKFLOW, texts[key])
 
-    # The five host-patch job ids, written out so that an id added to or dropped from HOST_PATCH_JOBS turns a
-    # vector red; each id is held by the host-pin order under it, accepted in quality.yml only.
-    host_jobs = ("opf-host-patch", "git-fixture-env-core-host-patch", "git-fixture-env-config-combined-host-patch",
-                 "git-fixture-env-config-malformed-host-patch", "git-fixture-env-config-system-host-patch")
+    # The host-patch job ids, built here from their own literal lane table (suite id to shard count), never
+    # from HOST_PATCH_JOBS or HOST_PATCH_SHARDS, so that an id added to or dropped from HOST_PATCH_JOBS turns a
+    # vector red; each id is held by the host-pin order under it, accepted in quality.yml only. Each config
+    # lane's vector holds every shard job of that lane, so a shard dropped anywhere in a lane is red.
+    host_shards = {"git-fixture-env-config-combined": 12, "git-fixture-env-config-malformed": 12,
+                   "git-fixture-env-config-system": 19}
+    host_lanes = {lane: tuple("{}-shard-{}-host-patch".format(lane, shard) for shard in range(1, count + 1))
+                  for lane, count in host_shards.items()}
+    host_jobs = ("opf-host-patch", "git-fixture-env-core-host-patch",
+                 *(job for jobs in host_lanes.values() for job in jobs))
 
     def host_job_held(job):
         text = texts["host-pin-before-probe"].replace("opf-host-patch", job, 1)
@@ -2403,9 +2418,12 @@ def _vectors(module, trees, texts, canonical_tree):
         ("launchers/workflow-host-pin-jobs-exact", lambda: sorted(m.HOST_PATCH_JOBS) == sorted(host_jobs)),
         ("launchers/workflow-host-pin-job-opf", lambda: host_job_held(host_jobs[0])),
         ("launchers/workflow-host-pin-job-core", lambda: host_job_held(host_jobs[1])),
-        ("launchers/workflow-host-pin-job-config-combined", lambda: host_job_held(host_jobs[2])),
-        ("launchers/workflow-host-pin-job-config-malformed", lambda: host_job_held(host_jobs[3])),
-        ("launchers/workflow-host-pin-job-config-system", lambda: host_job_held(host_jobs[4])),
+        ("launchers/workflow-host-pin-job-config-combined",
+         lambda: all(host_job_held(job) for job in host_lanes["git-fixture-env-config-combined"])),
+        ("launchers/workflow-host-pin-job-config-malformed",
+         lambda: all(host_job_held(job) for job in host_lanes["git-fixture-env-config-malformed"])),
+        ("launchers/workflow-host-pin-job-config-system",
+         lambda: all(host_job_held(job) for job in host_lanes["git-fixture-env-config-system"])),
         ("launchers/workflow-scope-decide-before-probe", lambda: not quality_workflow("scope-decide-before-probe")),
         ("launchers/workflow-scope-decide-other-job", lambda: quality_workflow("scope-decide-other-job")
          == [not_probe_in(m.HOST_PATCH_WORKFLOW, "lone")]),
@@ -2683,13 +2701,19 @@ MUTANTS = (
     ("host-patch-job-extra", '("opf-host-patch", ', '("opf-host-patch", "git-fixture-env-host-patch", ',
      "launchers/workflow-host-pin-jobs-exact"),
     ("host-patch-job-opf", '("opf-host-patch", ', "(", "launchers/workflow-host-pin-job-opf"),
-    ("host-patch-job-core", '"git-fixture-env-core-host-patch", ', "", "launchers/workflow-host-pin-job-core"),
-    ("host-patch-job-config-combined", '"git-fixture-env-config-combined-host-patch",', "",
+    ("host-patch-job-core", '"git-fixture-env-core-host-patch",', "", "launchers/workflow-host-pin-job-core"),
+    ("host-patch-job-config-combined", '{"git-fixture-env-config-combined": 12, ', "{",
      "launchers/workflow-host-pin-job-config-combined"),
-    ("host-patch-job-config-malformed", '"git-fixture-env-config-malformed-host-patch", ', "",
+    ("host-patch-job-config-malformed", '"git-fixture-env-config-malformed": 12,', "",
      "launchers/workflow-host-pin-job-config-malformed"),
-    ("host-patch-job-config-system", ', "git-fixture-env-config-system-host-patch")', ")",
+    ("host-patch-job-config-system", '"git-fixture-env-config-system": 19}', "}",
      "launchers/workflow-host-pin-job-config-system"),
+    # One shard job dropped from a lane: the last (the shard count reduced) and one in the middle.
+    ("host-patch-job-last-shard", '"git-fixture-env-config-system": 19}', '"git-fixture-env-config-system": 18}',
+     "launchers/workflow-host-pin-job-config-system"),
+    ("host-patch-job-middle-shard", "for shard in range(1, count + 1)))",
+     'for shard in range(1, count + 1) if (lane, shard) != ("git-fixture-env-config-malformed", 6)))',
+     "launchers/workflow-host-pin-job-config-malformed"),
     ("workflow-scope-decide-accept",
      "elif (rel == HOST_PATCH_WORKFLOW and job == SCOPE_JOB_ID and probe < len(steps)\n"
      "                and _step_pairs(steps[probe]) == SCOPE_DECIDE_STEP):",

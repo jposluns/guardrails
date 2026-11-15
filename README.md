@@ -9,7 +9,7 @@ main, and each push to main, against the rules the gates cite, a subset of the s
 and built to be read.
 
 <!-- COUNTS-PROOF:BEGIN (generated) -->
-**133 rules. 128 CI gates that check this repository. 31 Claude Code hooks shipped as an opt-in plugin. Mapped to 17 frameworks.**
+**133 rules. 128 CI gates that check this repository. 33 Claude Code hooks shipped as an opt-in plugin. Mapped to 17 frameworks.**
 <!-- COUNTS-PROOF:END -->
 
 The full pack and per-assistant setup guides live at [aiqt.ai](https://aiqt.ai).
@@ -19,7 +19,7 @@ The full pack and per-assistant setup guides live at [aiqt.ai](https://aiqt.ai).
 | Where | What you get | Tag |
 | --- | --- | --- |
 | **In a chat assistant** | Add AIQT to Claude, ChatGPT, Gemini, or Copilot in the form each assistant supports: a skill, a Gem, an agent, or an uploaded instruction file. The standard guides every conversation: instructions are context the assistant follows, not an enforcement mechanism. | Available |
-| **In a coding assistant** | For Claude Code, Codex, Cursor, or Copilot in the editor, the governance core is published to inspect and use as preview instructions today, and the repository ships its Claude Code enforcement hooks as a generated plugin. The generated adapters, a guided install, and a setup doctor arrive with the 1.1.0 developer release, in development. | Preview |
+| **In a coding assistant** | For Claude Code, Codex, Cursor, or Copilot in the editor, the governance core is published to inspect and use as preview instructions today, and the repository ships its Claude Code enforcement hooks as a generated plugin. The generated adapters, a guided install, and a setup doctor arrive with the 1.2.0 developer release, in development. | Preview |
 
 ## 02. What is inside.
 
@@ -27,7 +27,7 @@ The full pack and per-assistant setup guides live at [aiqt.ai](https://aiqt.ai).
 | Piece | In one breath | Tag |
 | --- | --- | --- |
 | **The standard** | 133 clear, single-behaviour rules across the four AIQT facets, plus a security floor covering confidentiality, integrity, availability, and privacy. | Rules |
-| **Technical controls** | 128 CI gates that check this repository and 31 Claude Code hooks shipped as an opt-in plugin (23 blocking, 8 warning). Today 40 of the 133 rules are linked to at least one shipped gate or hook; [ENFORCEMENT.md](ENFORCEMENT.md) lists each rule's status. | Controls |
+| **Technical controls** | 128 CI gates that check this repository and 33 Claude Code hooks shipped as an opt-in plugin (23 blocking, 10 warning). Today 40 of the 133 rules are linked to at least one shipped gate or hook; [ENFORCEMENT.md](ENFORCEMENT.md) lists each rule's status. | Controls |
 | **Generated adapters** | The Claude, AGENTS.md, Gemini, Copilot, and Cursor surfaces are generated from one source and drift-checked in CI. | Generated |
 | **A standards crosswalk** | Mappings from the rules to 17 pinned external control catalogues, for teams that report against a framework. | Mappings |
 <!-- COUNTS-TABLE:END -->

@@ -793,6 +793,15 @@ ALLOWLIST = (
     ("tools/check_gensrc_failclose.py", "_self_test_main_isolated._evaluate_interrupt", "shell", 1,
      _SAVED + " (the real Popen subclassed by the gc interrupt vector's double, whose wait raises"
      " KeyboardInterrupt once)"),
+    ("tools/check_gensrc_failclose.py", "_self_test_main_isolated._evaluate_gone_bound.evaluate", "shell",
+     1, _SAVED + " (the real Popen subclassed by the gc group-exit bound vector's double, whose wait"
+     " raises KeyboardInterrupt once on its interrupt leg)"),
+    ("tools/check_gensrc_failclose.py", "_self_test_main_isolated._evaluate_unreapable", "shell", 1,
+     _SAVED + " (the real Popen subclassed by the gc unreapable-leader vector's double, whose bounded"
+     " reaps time out without reaping and whose unbounded reap is refused)"),
+    ("tools/check_gensrc_failclose.py", "_self_test_main_isolated._evaluate_second_interrupt", "shell", 1,
+     _SAVED + " (the real Popen subclassed by the gc second-interrupt vector's double, whose wait raises"
+     " the original KeyboardInterrupt once)"),
     ("tools/check_release_build.py", "_self_test_main_isolated", "shell", 1, _SAVED),
     ("tools/check_release_delta.py", "_self_test_main_isolated", "shell", 1, _SAVED),
     ("tools/check_mistakes_register.py", "self_test", "shell", 2,
@@ -831,6 +840,10 @@ ALLOWLIST = (
     ("tools/_selftest_exit_report.py", "_bootstrap_main", "code", 1,
      "execution-report bootstrap: runs the runner script named in its own argv as __main__ under its"
      " audit hook, the same trust as running that script directly with python3; no other input"),
+    ("opf/tools/_selftest_exit_report.py", "_bootstrap_main", "code", 1,
+     "the OPF-local copy of the execution-report bootstrap: runs the runner script named in its own"
+     " argv as __main__ under its audit hook, the same trust as running that script directly with"
+     " python3; no other input"),
     ("tools/check_opf_enforce_platforms.py", "load_hook", "code", 1,
      "check harness: loads the repository's own Claude Code deny hook as a private module, never"
      " entered in sys.modules and its main() never called, the equivalent of an import; no external"
@@ -866,7 +879,7 @@ ALLOWLIST = (
      "pid capture: types.FunctionType rebuilds the standard library's own Popen._execute_child code"
      " object with its globals copied and only _fork_exec wrapped to record the pid; no external"
      " code"),
-    ("tools/_load_bound.py", "vector_failures", "shell", 14,
+    ("tools/_load_bound.py", "vector_failures", "shell", 15,
      _SAVED + " (the real Popen each vector's fault or recording double subclasses, set back in a"
      " finally; the fork-window vector also reads its _execute_child through that saved class)"),
     ("tools/_load_bound.py", "vector_failures.bounded", "shell", 1,
@@ -891,6 +904,9 @@ ALLOWLIST = (
      _WORD + " (GIT_SUBCOMMAND_RE ends a git subcommand only where no letter of any script"
      " continues it, and PYTHON_TARGET_RE reads a .py path whose segments may be named in any"
      " script)"),
+    ("tools/check_brief_capability.py", "git_write_commands", "regex", 1,
+     _WORD + " (GIT_WRITE_SUBCOMMAND_RE ends commit or push only where no letter of any script"
+     " continues it, as GIT_SUBCOMMAND_RE ends a git subcommand)"),
     ("tools/check_brief_capability.py", "sentence_asks", "regex", 1,
      _WORD + " (a letter after test or fix continues that word)"),
     ("tools/check_brief_capability.py", "unplaced", "regex", 1,

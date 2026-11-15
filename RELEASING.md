@@ -26,9 +26,8 @@ pull request (CLAUDE.md, Gates and CI).
    release other than the one `.aiqt/python-host.toml` names (the python-host-pin gate), so run it on that
    release; when the host interpreter has changed, first land one change that updates `python-host-patch`
    there and the `python-version` pin of every host-patch job (`opf-host-patch`,
-   `git-fixture-env-core-host-patch`, `git-fixture-env-config-combined-host-patch`,
-   `git-fixture-env-config-malformed-host-patch` and `git-fixture-env-config-system-host-patch`) in
-   `.github/workflows/quality.yml` together. After the freeze the
+   `git-fixture-env-core-host-patch` and the 43 config shard jobs
+   `git-fixture-env-config-<lane>-shard-K-host-patch`) in `.github/workflows/quality.yml` together. After the freeze the
    release artifacts (the version-numbered `site/downloads/aiqt-skill-<skill version>.zip`, which the site
    links to, and `site/downloads/aiqt-instructions.txt`) and their generating inputs (the corpus and
    `tools/gen_skill.py`) do not change; `site/downloads/aiqt-skill.zip` is a stable "latest" alias kept

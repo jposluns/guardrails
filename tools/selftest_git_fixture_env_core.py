@@ -10,7 +10,8 @@ lifecycle system-pin checks); layer 2, the per-member routing, function-scoped r
 restore probe's wrapper check over the lifecycle's wrapper and mutants of it, and its argument
 check over synthetic entry points) and
 real-repository trust checks; the registry roster checks (including the prefixed-recursion
-exclusion over all four git-fixture-env suite ids); the OPF lifecycle graph checks; the
+exclusion over all four git-fixture-env suite ids) and the config lanes' shard checks
+(_shard_checks, which run no config member); the OPF lifecycle graph checks; the
 member-timeout, member-close and verdict controls for the bounded config-member machinery; the
 gen-manifest fixture-setup guards; and layer 3, the end-to-end caller-repository leak probe.
 
@@ -266,7 +267,317 @@ def _roster_checks():
                   or ("./tools/check_selftest_execution.py", "--suite", suite_id) in roster
                   for suite_id in lane_ids)
           and not any((runner,) in roster for runner in lane_runners), True)
+
+    # A shard line of a sharded config suite (--suite <id> --shard K/N, N that suite's registered
+    # count, the form the CI shard jobs run) is part of that suite's launch, so it gets the plain
+    # line's recursion exclusion: neither the shard line nor a lane runner joins the roster. A shard
+    # line with any other N is no launch the execution gate accepts, so the roster refuses it.
+    shard_counts = sorted(check_selftest_execution.SHARD_COUNTS.items())
+    extra = "".join(
+        '\nrun_gate "recursive-shard-{}-{}" python3 -I -B ./tools/check_selftest_execution.py'
+        ' --suite {} --shard {}/{}\n'.format(index, k, suite_id, k, count)
+        for index, (suite_id, count) in enumerate(shard_counts) for k in (1, count))
+    read = disk_reader("roster-shard-recursion", local, add_local(extra))
+    with patch.object(check_ci_parity, "read_runner_text", read):
+        roster = _registered_selftests()
+    check("roster/shard-launch-recursion-excluded",
+          len(shard_counts) == 3
+          and not any(argv[1:2] == ("--suite",) and argv[2:3] == (suite_id,)
+                      for argv in roster for suite_id, _ in shard_counts)
+          and not any((runner,) in roster for runner in lane_runners), True)
+    suite_id, count = shard_counts[0]
+    extra = ('\nrun_gate "other-count-shard" python3 -I -B ./tools/check_selftest_execution.py'
+             ' --suite {} --shard 1/{}\n'.format(suite_id, count + 1))
+    with patch.object(check_ci_parity, "read_runner_text",
+                      disk_reader("roster/shard-launch-other-count-refused", local, add_local(extra))):
+        got = refusal()
+    check("roster/shard-launch-other-count-refused",
+          got.startswith("unparseable suite invocation:") and "--shard" in got, True)
     shutil.rmtree(scratch, ignore_errors=True)
+
+
+_SHARD_RUNNERS = (
+    ("combined", "tools/selftest_git_fixture_env_config_combined.py", "_combined_lane"),
+    ("malformed", "tools/selftest_git_fixture_env_config_malformed.py", "_malformed_lane"),
+    ("system", "tools/selftest_git_fixture_env_config_system.py", "_system_lane"),
+)
+
+
+def _shard_wiring_problems(lane, source, lane_name, engine_source):
+    """The problems with one config runner's shard wiring, read from its source (nothing runs):
+    its entry is _gfe._config_lane_main over its own lane; its lane function selects its members
+    once through _gfe._shard_select over _gfe._config_lane_roster for its lane and hands exactly
+    those to its one _config_results call; every per-member check loop first leaves a member to
+    its shard (_gfe._shard_leaves over that loop's own check ids); the system lane folds only
+    its shard into the lifecycle finding; and the engine's _suite_main reconciles through
+    _execution_set_findings with SHARD_LEFT."""
+    problems = []
+    tree = ast.parse(source)
+    entries = [ast.unparse(node) for node in ast.walk(tree) if isinstance(node, ast.Call)
+               and ast.unparse(node.func) == "_gfe._config_lane_main"]
+    if entries != ["_gfe._config_lane_main(sys.argv[1:], {!r}, {})".format(lane, lane_name)]:
+        problems.append("entry: {!r}".format(entries))
+    functions = {node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)}
+    body = functions.get(lane_name)
+    if body is None:
+        return problems + ["no lane function {}".format(lane_name)]
+    selects = [ast.unparse(node) for node in ast.walk(body) if isinstance(node, ast.Assign)
+               and "_shard_select" in ast.unparse(node.value)]
+    if selects != ["members = _gfe._shard_select(_gfe._config_lane_roster({!r}, roster))".format(
+            lane)]:
+        problems.append("selection: {!r}".format(selects))
+    runs = [ast.unparse(node.args[0]) if node.args else None for node in ast.walk(body)
+            if isinstance(node, ast.Call) and ast.unparse(node.func) == "_config_results"]
+    if runs != ["members"]:
+        problems.append("member runs: {!r}".format(runs))
+    loops = 0
+    for node in ast.walk(body):
+        if not (isinstance(node, ast.For) and isinstance(node.target, ast.Tuple)
+                and "member" in [ast.unparse(elt) for elt in node.target.elts]):
+            continue
+        loops += 1
+        ids = [ast.unparse(elt) for elt in node.target.elts if ast.unparse(elt) != "member"]
+        want = "if _gfe._shard_leaves(member, ({}{})):\n    continue".format(
+            ", ".join(ids), "," if len(ids) == 1 else "")
+        if ast.unparse(node.body[0]) != want:
+            problems.append("loop over {}: first statement {!r}".format(
+                ids, ast.unparse(node.body[0])))
+    if loops != {"combined": 1, "malformed": 2, "system": 0}[lane]:
+        problems.append("{} per-member loops".format(loops))
+    if lane == "system":
+        folds = [ast.unparse(node.args[0])
+                 for node in ast.walk(functions.get("_opf_home_lifecycles", ast.Pass()))
+                 if isinstance(node, ast.Call) and ast.unparse(node.func) == "_lifecycle_finding"]
+        if folds != ["_gfe._shard_scope(roster)"]:
+            problems.append("lifecycle fold: {!r}".format(folds))
+    engine = {node.name: node for node in ast.parse(engine_source).body
+              if isinstance(node, ast.FunctionDef)}
+    reconciles = [ast.unparse(node) for node in ast.walk(engine.get("_suite_main", ast.Pass()))
+                  if isinstance(node, ast.Call)
+                  and ast.unparse(node.func) == "_execution_set_findings"]
+    if reconciles != ["_execution_set_findings(expected, _EXECUTED_SET, SHARD_LEFT)"]:
+        problems.append("engine reconciliation: {!r}".format(reconciles))
+    return problems
+
+
+def _shard_checks(base, runners=None):
+    """The config lanes' shard option (tools/selftest_git_fixture_env.py, SHARD), with no config
+    member run. roster/shard-argv-parse: _parse_shard and _config_argv over each end of each
+    bound just inside, at and just outside it, and the malformed spellings.
+    roster/shard-assignment-fixed: _shard_members deals fixed entries to fixed shards (N = 1 is
+    the whole roster; N past the roster leaves its last shards empty; an empty roster leaves
+    every shard empty). roster/shard-partition-fixtures: _shard_partition_problems finds no
+    problem for the empty roster, N larger than the roster and N = 1, and finds one for an
+    overlapping, a dropping and a foreign rule, so the checker discriminates.
+    roster/shard-partition-real: shards 1..N of each lane's real roster, N = 1 to 7 and
+    SHARD_MAX, partition it, and each lane roster is exactly the one the lane ran before the
+    option. roster/shard-lane-scope: _shard_select, _shard_leaves,
+    _shard_scope and _execution_set_findings over fixture rows, unsharded and sharded.
+    roster/shard-lane-main: _config_lane_main, over a recording stand-in for the engine main()
+    and a recording stand-in lane (no git, no config member), sets SHARD for a valid --shard K/N,
+    runs only the members of shard K of a fixture roster, forwards the execution report and the
+    lane, returns main()'s result, and selects the whole roster without --shard.
+    roster/shard-lane-wiring: each runner's source calls them as _shard_wiring_problems requires.
+    roster/shard-list-cli: each runner (runners, default _SHARD_RUNNERS), launched as a child,
+    lists through --list-shard exactly the in-process shards for N = 1 and 2, and refuses an
+    out-of-range --list-shard and --shard value with exit 2 and nothing on stdout; these
+    children read the registries and launch nothing (no git, no member), with TMPDIR inside the
+    suite's scratch, and a child that reaches its bound is cannot-evaluate. In process,
+    _list_shard returns 2, prints nothing on out and names the exception type on err when
+    building the roster raises an exception outside OSError and ValueError (KeyError)."""
+    import contextlib
+    import io
+    from unittest.mock import patch
+
+    this = _gfe
+    runners = _SHARD_RUNNERS if runners is None else runners
+    texts = ("1/1", "1/2", "2/2", "0/2", "3/2", "2/1", "1/0", "0/0", "63/64", "64/64", "1/64",
+             "1/65", "65/65", "100/100", "01/2", "1/02", "+1/2", "-1/2", " 1/2", "1/2 ", "1/2\n",
+             "1/2/3", "1", "", "1/", "/2", "a/b", "1.0/2", "١/٢", None)
+    argvs = ([], ["--execution-report", "/abs/report"], ["--shard", "2/3"],
+             ["--shard", "2/3", "--execution-report", "/abs/report"],
+             ["--execution-report", "/abs/report", "--shard", "2/3"], ["--list-shard", "7/7"],
+             ["--list-shard", "8/7"], ["--shard", "0/3"], ["--shard"], ["--list-shard"],
+             ["--shard", "1/2", "--shard", "2/2"],
+             ["--list-shard", "1/2", "--execution-report", "/abs/report"],
+             ["--shard", "1/2", "--list-shard", "1/2"], ["--execution-report", "relative"],
+             ["--unknown", "x"], ["--execution-report", "/abs/report", "--execution-report",
+                                  "/abs/other"])
+    check("roster/shard-argv-parse",
+          ([this._parse_shard(text) for text in texts], [this._config_argv(argv) for argv in argvs]),
+          ([(1, 1), (1, 2), (2, 2), None, None, None, None, None, (63, 64), (64, 64), (1, 64),
+            None, None, None, None, None, None, None, None, None, None, None, None, None, None,
+            None, None, None, None, None],
+           [(None, None, False), ("/abs/report", None, False), (None, (2, 3), False),
+            ("/abs/report", (2, 3), False), ("/abs/report", (2, 3), False), (None, (7, 7), True),
+            None, None, None, None, None, None, None, None, None, None]))
+
+    rows = tuple((name,) for name in ("a", "b", "c", "d", "e"))
+    a, b, c, d, e = rows
+    check("roster/shard-assignment-fixed",
+          [this._shard_members(rows, k, n) for k, n in (
+              (1, 1), (1, 2), (2, 2), (1, 3), (2, 3), (3, 3), (4, 7), (5, 7), (6, 7), (7, 7))]
+          + [this._shard_members((), k, 3) for k in (1, 2, 3)],
+          [rows, (a, c, e), (b, d), (a, d), (b, e), (c,), (d,), (e,), (), (), (), (), ()])
+
+    def overlap(roster, k, n):
+        return tuple(roster)
+
+    def drop(roster, k, n):
+        return tuple(roster[:-1]) if k == 1 else ()
+
+    def foreign(roster, k, n):
+        return tuple(roster) + (("z",),) if k == 1 else ()
+
+    check("roster/shard-partition-fixtures",
+          [this._shard_partition_problems(roster, n) for roster, n in (
+              ((), 1), ((), 3), (rows[:1], 1), (rows, 1), (rows, 2), (rows[:3], 5), (rows, 7),
+              (rows[:1], 64))]
+          + [this._shard_partition_problems(rows, n, rule) for rule, n in (
+              (overlap, 2), (drop, 1), (foreign, 1))],
+          [[], [], [], [], [], [], [], [],
+           ["in shards [1, 2]: ('a',)", "in shards [1, 2]: ('b',)", "in shards [1, 2]: ('c',)",
+            "in shards [1, 2]: ('d',)", "in shards [1, 2]: ('e',)"],
+           ["in no shard: ('e',)"], ["not in the roster: ('z',) (shards [1])"]])
+
+    try:
+        registered = _registered_selftests()
+        lanes = {lane: this._config_lane_roster(lane, registered) for lane, _, _ in runners}
+        real = [lanes["combined"] == registered, lanes["system"] == registered,
+                lanes["malformed"] == tuple(
+                    argv for argv in registered
+                    if _command_identity(argv) not in CONFIG_EXCLUSIONS["malformed"]),
+                len(lanes["malformed"]) + len(CONFIG_EXCLUSIONS["malformed"]) == len(registered)]
+        for lane, members in sorted(lanes.items()):
+            if not members:
+                real.append(lane + ": empty lane roster")
+            for n in (1, 2, 3, 4, 5, 6, 7, this.SHARD_MAX):
+                real.extend("{} {}: {}".format(lane, n, problem)
+                            for problem in this._shard_partition_problems(members, n))
+    except (OSError, ValueError) as exc:
+        lanes, real = {}, ["cannot build the roster: {}".format(exc)]
+    check("roster/shard-partition-real", real, [True, True, True, True])
+
+    sink = io.StringIO()
+    variants = (("tools/a.py", "--self-test"), ("tools/b.py",), ("tools/b.py", "--self-test"),
+                ("tools/c.py", "--self-test"))
+    scope = []
+    with patch.object(this, "SHARD", None), patch.object(this, "SHARD_RUN", {}), \
+            patch.object(this, "SHARD_LEFT", set()), contextlib.redirect_stdout(io.StringIO()):
+        scope.append(("unsharded", this._shard_select(variants) is variants,
+                      this._shard_leaves("tools/a.py", ("a/rc",)), this._shard_scope(variants),
+                      sorted(this.SHARD_LEFT)))
+    with patch.object(this, "SHARD", (2, 2)), patch.object(this, "SHARD_RUN", {}), \
+            patch.object(this, "SHARD_LEFT", set()), contextlib.redirect_stdout(io.StringIO()):
+        try:
+            this._shard_leaves("tools/a.py", ("a/rc",))
+            early = "no refusal"
+        except ValueError as exc:
+            early = str(exc)
+        scope.append(("sharded", early, this._shard_select(variants),
+                      this._shard_leaves("tools/a.py", ("a/rc", "a/hooks")),
+                      this._shard_leaves("tools/b.py", ("b/rc",)),
+                      this._shard_leaves("tools/absent.py", ("absent/rc",)),
+                      this._shard_scope(list(variants)), sorted(this.SHARD_LEFT)))
+    with patch.object(this, "SHARD", (3, 3)), patch.object(this, "SHARD_RUN", {}), \
+            patch.object(this, "SHARD_LEFT", set()), contextlib.redirect_stdout(io.StringIO()):
+        scope.append(("empty", this._shard_select(variants[:2], sink), sink.getvalue(),
+                      dict(this.SHARD_RUN)))
+    scope.append(("reconcile", [this._execution_set_findings(expected, executed, left)
+                                for expected, executed, left in (
+                                    ({"a", "b", "c"}, {"a", "b"}, set()),
+                                    ({"a", "b", "c"}, {"a", "b"}, {"c"}),
+                                    ({"a", "b"}, {"a", "b", "d"}, {"e"}),
+                                    ({"a", "b"}, {"a", "b"}, {"b"}))]))
+    check("roster/shard-lane-scope", scope, [
+        ("unsharded", True, False, variants, []),
+        ("sharded", "a sharded lane asked about a member before selecting its shard",
+         (variants[1], variants[3]), True, False, False, [variants[1], variants[3]],
+         ["a/hooks", "a/rc"]),
+        ("empty", None, "SELF-TEST HARNESS ERROR: shard 3/3 holds no member of the 2-member lane"
+                        " roster; nothing was run (cannot evaluate)\n", {}),
+        ("reconcile", [["execution-set/missing: c"], [],
+                       ["execution-set/extra: d", "execution-set/left-unexpected: e"],
+                       ["execution-set/left-and-run: b"]])])
+
+    # _config_lane_main itself, over a recording stand-in for the engine main() it hands off to
+    # and a recording stand-in lane, so no git, temp tree or config member is ever involved.
+    fixture = tuple(("tools/{}.py".format(name), "--self-test") for name in "abcde")
+    lane_main = []
+    for argv in (["--shard", "2/3", "--execution-report", "/abs/report"],
+                 ["--execution-report", "/abs/report", "--shard", "3/3"], [],
+                 ["--execution-report", "/abs/report"]):
+        calls, ran = [], []
+
+        def recording_lane(lane_base, ran=ran):
+            members = this._shard_select(this._config_lane_roster("combined", fixture))
+            ran.extend(members or ())
+            return None if members else 2
+
+        def stand_in_main(report_path, lanes, calls=calls):
+            calls.append((report_path, this.SHARD, lanes is recording_lane, lanes(base)))
+            return 7  # a distinctive result, so a hardcoded success cannot pass
+
+        with patch.object(this, "main", stand_in_main), patch.object(this, "SHARD", None), \
+                patch.object(this, "SHARD_RUN", {}), patch.object(this, "SHARD_LEFT", set()), \
+                contextlib.redirect_stdout(io.StringIO()):
+            lane_main.append((this._config_lane_main(argv, "combined", recording_lane), calls,
+                              ran))
+    check("roster/shard-lane-main", lane_main, [
+        (7, [("/abs/report", (2, 3), True, None)], [fixture[1], fixture[4]]),
+        (7, [("/abs/report", (3, 3), True, None)], [fixture[2]]),
+        (7, [(None, None, True, None)], list(fixture)),
+        (7, [("/abs/report", None, True, None)], list(fixture))])
+
+    try:
+        # Python sources parsed for ast, never runner or workflow text; read as bytes so no new
+        # text-read site joins check_ci_parity's reviewed read-API allowlist.
+        engine_source = Path(this.__file__).read_bytes().decode("utf-8")
+        wiring = {lane: _shard_wiring_problems(
+            lane, (ROOT / relative).read_bytes().decode("utf-8"), lane_name, engine_source)
+            for lane, relative, lane_name in runners}
+    except (OSError, SyntaxError, ValueError) as exc:
+        wiring = "cannot read the runners: {}".format(exc)
+    check("roster/shard-lane-wiring", wiring, {lane: [] for lane, _, _ in runners})
+
+    folder = base / "shard-cli"
+    folder.mkdir()
+    env = dict(os.environ, TMPDIR=str(folder))
+    cli, timeouts = [], []
+    for lane, relative, _ in runners:
+        launches = {}
+        for args in (("--list-shard", "1/1"), ("--list-shard", "1/2"), ("--list-shard", "2/2"),
+                     ("--list-shard", "0/2"), ("--shard", "3/2")):
+            rc, out, err = _run_bounded(
+                [sys.executable, "-I", "-B", str(ROOT / relative), *args], str(folder), env, 120,
+                "shard listing {} {}".format(relative, " ".join(args)), "CONTROL ")
+            if _is_timeout(rc):
+                timeouts.append(rc)
+            launches[args[1] if args[0] == "--list-shard" else "run " + args[1]] = (
+                rc, [line for line in out.split("\n") if line])
+        members = lanes.get(lane, ())
+        cli.append((lane, {key: value[0] for key, value in launches.items()},
+                    [launches[key][1] == [" ".join(argv) for argv in shard] for key, shard in (
+                        ("1/1", members), ("1/2", this._shard_members(members, 1, 2)),
+                        ("2/2", this._shard_members(members, 2, 2)))],
+                    bool(members), launches["0/2"][1], launches["run 3/2"][1]))
+    out, err = io.StringIO(), io.StringIO()
+
+    def roster_fault():
+        raise KeyError("injected roster fault")
+
+    with patch.object(this, "_registered_selftests", roster_fault):
+        cli.append(("roster-error", {"rc": this._list_shard("combined", (1, 2), out, err)},
+                    out.getvalue(), err.getvalue()))
+    want = [(lane, {"1/1": 0, "1/2": 0, "2/2": 0, "0/2": 2, "run 3/2": 2}, [True, True, True],
+             True, [], []) for lane, _, _ in runners] + [
+        ("roster-error", {"rc": 2}, "", "SELF-TEST HARNESS ERROR: cannot build the config roster:"
+                                        " KeyError: 'injected roster fault'\n")]
+    check("roster/shard-list-cli", cli, want,
+          tuple(timeouts) if timeouts and all(
+              got == expected or any(_is_timeout(value) for value in got[1].values())
+              for got, expected in zip(cli, want)) else None)
+    shutil.rmtree(folder, ignore_errors=True)
 
 
 def _system_pin_checks(base):
@@ -1607,8 +1918,10 @@ def _member_close_controls(fixture):
                 # raisegate, trygate, sendgate, scenariogate, bgate, outcomegate,
                 # outcomeonlygate, stallgate and pinned_version are examples of THE
                 # RESIDUAL (_allowlist_producers), which passes the value pin too, so an
-                # oracle or scenario change that starts catching one of them must update
-                # that text.
+                # oracle change that alters one of their recorded differences fails this
+                # pin and must update that text; a scenario change is not detected here
+                # (these probes only parse mutated sources) and needs THE RESIDUAL
+                # reassessed by hand.
                 ("producer-oracle", [["evidence"], ["evidence"], ["evidence"],
                                      ["lock_free", "unrecognized"],
                                      ["restored", "unrecognized"],
@@ -1952,6 +2265,8 @@ def _member_bound_checks(roster):
     coverage_suite = ("tools/check_selftest_execution.py", "--suite",
                       "child-status-coverage-selftest")
     release_cut = ("tools/check_release_cut.py", "--self-test", "--red-on-revert")
+    aiqt_hooks = ("tools/selftest_aiqt_hooks.py",)
+    adopt_apply = ("opf/tools/_opf_adopt_apply.py", "--self-test")
 
     figures, problems = _roster_figures(roster)
     print("CONFIG ROSTER FIGURES: {} members, {} in the malformed lane, {} outside the sizing"
@@ -2103,7 +2418,7 @@ def _member_bound_checks(roster):
     overrides = {record: 5100, opf_selftest: 3600, adopt_observe: 1800, release_delta: 1800,
                  opf_init: 1800, closure_a: 13500, closure_b: 10800, closure_c: 8100,
                  closure_d: 9900, closure_e: 9600, closure_f: 3600, coverage_suite: 5400,
-                 release_cut: 2700}
+                 release_cut: 2700, aiqt_hooks: 5700, adopt_apply: 3900}
     check("config/member-bound-table",
           (sorted(key for key in CONFIG_MEMBER_BOUNDS if key not in roster),
            {key: _config_member_bound(key) for key in CONFIG_MEMBER_BOUNDS},
@@ -2125,7 +2440,7 @@ def _member_bound_checks(roster):
     with patch.object(_gfe, "_run_bounded", recording):
         for member in (record, opf_selftest, adopt_observe, release_delta, opf_init, closure_a,
                        closure_b, closure_c, closure_d, closure_e, closure_f, coverage_suite,
-                       release_cut, ("opf/tools/opf.py",)):
+                       release_cut, aiqt_hooks, adopt_apply, ("opf/tools/opf.py",)):
             _run_config_member(member, {})
     check("config/member-bound-reaches-run", handed,
           [(" ".join(record), 5100), (" ".join(opf_selftest), 3600),
@@ -2133,7 +2448,8 @@ def _member_bound_checks(roster):
            (" ".join(opf_init), 1800), (" ".join(closure_a), 13500), (" ".join(closure_b), 10800),
            (" ".join(closure_c), 8100), (" ".join(closure_d), 9900), (" ".join(closure_e), 9600),
            (" ".join(closure_f), 3600), (" ".join(coverage_suite), 5400),
-           (" ".join(release_cut), 2700), ("opf/tools/opf.py", 1200)])
+           (" ".join(release_cut), 2700), (" ".join(aiqt_hooks), 5700),
+           (" ".join(adopt_apply), 3900), ("opf/tools/opf.py", 1200)])
 
 
 # The argv prefix of the closure gate's --ci-job members, and the closure module's names their
@@ -3278,6 +3594,7 @@ def _core_lanes(base):
         check(check_id, _archive_reads_use_caller_env(ROOT / member_rel), True)
 
     _roster_checks()
+    _shard_checks(base)
     _opf_lifecycle_graph_checks()
     _member_timeout_controls(base)
     _member_timeout_vectors(base)
