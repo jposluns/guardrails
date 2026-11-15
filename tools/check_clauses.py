@@ -231,7 +231,7 @@ LEGS (all run at the default step-1 invocation; none needs a manifest):
                         Renderer.__enter__ swaps into html._charref while it renders; copied here as
                         _RENDERER_CHARREF_RE) that html.unescape, which escape_html in
                         opf/tools/_vendor/marko/html_renderer.py runs on the text, changes, which the vendored
-                        renderer decodes when it sees the reference whole (not split by inline markup). That
+                        renderer decodes when it sees the reference whole in plain text (not split by inline markup, not inside a code span). That
                         pattern matches only a reference ending in ';': a decimal one of 1 to 7 digits such as
                         '&#32;' or '&#10;', a hexadecimal one of 1 to 6 digits such as '&#x20;', and a named
                         one of 1 to 32 characters (no space, tab, LF, form feed, '<', '&', '#' or ';' among
@@ -299,7 +299,7 @@ LEGS (all run at the default step-1 invocation; none needs a manifest):
                         fault.' or '+ 1 to the count.' is refused because CommonMark reads it as a blockquote
                         or a list item. A character reference ending in ';' inside a code span or after a
                         backslash (shown as typed, since the renderer decodes neither), a reference whose run
-                        to ';' is broken by emphasis, a code span or a backslash ('&reg*x*;', '&reg`x`;',
+                        to ';' is broken by emphasis, strikethrough, a code span or a backslash ('&reg*x*;', '&reg`x`;',
                         '&copy\\;'), which the renderer splits into pieces and decodes none of, so it shows the
                         reference as typed, a backslash at the line end of a paragraph's last line or after another backslash, and
                         a task marker with no text after it in its paragraph are refused, though the
@@ -1268,7 +1268,7 @@ def _is_table_delimiter_row(line):
 def _decoded_reference(line):
     """The first character reference in line that is a match of _RENDERER_CHARREF_RE (the renderer's own
     pattern, so only a reference ending in ';') that html.unescape changes, or None; the vendored renderer
-    decodes such a reference when it sees the reference whole (not split by inline markup). html.unescape on the match alone gives what the renderer's substitution gives,
+    decodes such a reference when it sees the reference whole in plain text (not split by inline markup, not inside a code span). html.unescape on the match alone gives what the renderer's substitution gives,
     since the standard pattern matches the same whole reference and both use the same replacement."""
     for match in _RENDERER_CHARREF_RE.finditer(line):
         if html.unescape(match.group()) != match.group():
@@ -1320,7 +1320,7 @@ def rule_units(source, where):
     frontmatter; a title with no blank line after it; a line _UNCLASSIFIABLE_LINE_RE matches or
     _is_table_delimiter_row accepts; a checked line holding '<!' or '<?' (_HIDDEN_INLINE_RE); a checked line that
     ends with a backslash (_HARD_BREAK_MARK, a hard line break to the vendored renderer); a checked line holding a
-    character reference the vendored renderer decodes when it sees it whole (_decoded_reference: a match of the
+    character reference the vendored renderer decodes when it sees it whole in plain text (_decoded_reference: a match of the
     renderer's own pattern,
     _RENDERER_CHARREF_RE, so one ending in ';', that html.unescape changes; a reference with no ';' such as
     'cut&copy' or '&#32Beta' is shown as typed and is not refused); a paragraph that
@@ -1370,7 +1370,7 @@ def rule_units(source, where):
                 raise GateError("{} line {}: the text-coverage splitter cannot classify {!r} (a character "
                                 "reference ending in ';', {!r}: a match of the renderer's own pattern that "
                                 "html.unescape changes, which the vendored renderer decodes when it sees the "
-                                "reference whole, not split by inline markup); cannot evaluate".format(where, number, line, _decoded_reference(line)))
+                                "reference whole in plain text, not split by inline markup or inside a code span); cannot evaluate".format(where, number, line, _decoded_reference(line)))
             first = para_start = False
         else:
             after_title, para_start = False, True
