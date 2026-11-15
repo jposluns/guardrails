@@ -48,10 +48,11 @@ pull request (CLAUDE.md, Gates and CI).
    closed (exit 2) when the `[plugin]` `version` in `.aiqt/core/hooks/manifest.toml` differs from `VERSION`,
    so the release cut also sets that value to the pack version and regenerates
    `plugin/aiqt-guardrails-hooks/.claude-plugin/plugin.json` with `python3 tools/gen_hooks.py`. The root
-   `VERSION` is the pack version only in this repository (the tree carrying `.aiqt/authoring.toml`); in an
-   adopter's tree, where `VERSION` is the adopter's own, both generators and `conformance.py` read the
-   installed pack version from `.aiqt/manifest.toml` `release-version` instead, and a tree with neither
-   cannot evaluate the rule (exit 2 for the skill and hooks plugin surfaces only). Only the latest skill version is served: exactly
+   `VERSION` is the pack version only in this repository (the tree carrying `.aiqt/authoring.toml`), so the
+   rule is a release-time rule of this repository and is enforced only here; in an adopter's tree, where
+   `VERSION` is the adopter's own, neither generator nor `conformance.py` re-checks it (a release ships only
+   after this check passed). A deleted `.aiqt/authoring.toml` that the git index still tracks is refused
+   (exit 2), not read as an adopter tree. Only the latest skill version is served: exactly
    one version-numbered zip sits under `site/downloads/`, and `gen_skill.py --check` reports a stale or
    missing one as latest-only drift. The concrete version-numbered
    filename `aiqt-skill-<skill version>.zip` is spelled as a literal in four places, kept consistent by a

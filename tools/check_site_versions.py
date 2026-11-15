@@ -374,6 +374,10 @@ def _self_test():
             if content is not None:
                 write(root / rel, content)
         for rel, content in files.items():  # any other fixture path (e.g. an opf/site page)
+            if content is None:
+                # An omitted path that is not declared: nothing to write. A case that omits a declared file
+                # then fails by its own assertion (and the declared-set pin below), never by a TypeError.
+                continue
             (root / rel).parent.mkdir(parents=True, exist_ok=True)
             write(root / rel, content)
         return root
@@ -435,6 +439,11 @@ def _self_test():
          b'[[release]]\nversion = "' + b"9" * 5000 + b'.0.0"\ntitle = "r"\n', {"i.html": "<p>ok</p>"}, 2),
     ]
     failures = []
+    # The declared public Markdown files are pinned literally, so narrowing the set is a deliberate edit of this
+    # suite too, and a dropped file is named here rather than only by the legs that plant it.
+    if PUBLIC_TEXT_FILES != ("README.md", "ROADMAP.md", "DISCLOSURE.md"):
+        failures.append("PUBLIC_TEXT_FILES must be ('README.md', 'ROADMAP.md', 'DISCLOSURE.md'), got {!r}".format(
+            PUBLIC_TEXT_FILES))
     for label, toml_bytes, pages, want in cases:
         with tempfile.TemporaryDirectory() as tmp:
             got, _ = run_quiet(build(tmp, toml_bytes, pages))

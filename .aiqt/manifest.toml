@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.0.5"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "27fd14dcd21784066dfed0f122d4b4cc9171d8c61f3e34d027d35e251cc12c97"
+tree-sha256 = "6f74b58de1194fa19973ad9d5f8fe9c4095b748f7317533b8bd3bc9b50a90741"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -148,7 +148,7 @@ sha256 = "7396859c9a2b6d18ecec0982f02f9b72a64a5a79ef6d4270df82eab956af0ec7"
 [[sources]]
 path = ".aiqt/core/renderers.toml"
 bytes = 3090
-sha256 = "b954c301980e548c265126d0d15972087109863181194cf4f9105c793e56d40e"
+sha256 = "46710ed71db18ae92a83ee6aec2b561145b01a4366f40919cb6a6115d0ee14e7"
 
 [[sources]]
 path = ".aiqt/core/rules/00-project-integrity.md"
@@ -2422,8 +2422,8 @@ sha256 = "4ae011d48bdbbdee67b70e595dee45c759e01fa286d52d23906a860b18458fe7"
 
 [[sources]]
 path = "RELEASING.md"
-bytes = 18936
-sha256 = "4727e6a49847485511192ceb3b43fe90f971fad3d1cd75d60b57953d80571d94"
+bytes = 19008
+sha256 = "3f15d329d8b74333aaa9f8b5967f84d2419bb3260756715de215fb5335c5e26b"
 
 [[sources]]
 path = "ROADMAP.md"
@@ -4417,8 +4417,8 @@ sha256 = "23e7cb6a038248d77cf7e44822f2880299f1e37524da52e345adf71beb1ee7bd"
 
 [[sources]]
 path = "tools/check_site_versions.py"
-bytes = 35884
-sha256 = "9c495fc34d09d9e631f118305c02a624b19a729735e3b0c92d99798f8489be6d"
+bytes = 36583
+sha256 = "83ddfc98cb88e6e717a13754e5d6ecd91182955df0e64965c83eda4649c29bf8"
 
 [[sources]]
 path = "tools/check_sitemap.py"
@@ -4467,8 +4467,8 @@ sha256 = "cc8c6901219efcf9d31f702be8ec4bc590806ac4521ca685aa492349785a20fd"
 
 [[sources]]
 path = "tools/conformance.py"
-bytes = 108244
-sha256 = "cf12f36b3d34438bd1e6d8328fada0d69f3e0be1da33731d40942880b92353b0"
+bytes = 109612
+sha256 = "486124f6ae202cc960d42abb3511f206a6630892ebbc0e6807ebbbf247b6268c"
 
 [[sources]]
 path = "tools/doctor.py"
@@ -4542,8 +4542,8 @@ sha256 = "5fe2069fa9978b5df1ae5cd65211c9d88d4c59f580dfeb4e3c876bbe2ebe1f29"
 
 [[sources]]
 path = "tools/gen_hooks.py"
-bytes = 288380
-sha256 = "e0ed4750ccf309b095a7edb8667b7de1ec985fe31b28a159880abd18b4519a3e"
+bytes = 287992
+sha256 = "46b0c0cf5be5244815c80404ae9fdab0f588412152c20eb4f5747402b971eba1"
 
 [[sources]]
 path = "tools/gen_manifest.py"
@@ -4592,8 +4592,8 @@ sha256 = "2f19dc1e1f6bac53f5afebb6b1857889467c249b29d566954a89e25687f884c3"
 
 [[sources]]
 path = "tools/gen_skill.py"
-bytes = 188288
-sha256 = "92e61b417ad2d0c6c0f8b3353c7cec0bd5c1130a74a2e98fe1a5a6221ba75a67"
+bytes = 189340
+sha256 = "e5ef0b312fbb1a21a316c7ec93e885ee84b50d75ec13c2f23c35ea5e4fddd1a7"
 
 [[sources]]
 path = "tools/gen_worker_pack.py"

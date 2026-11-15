@@ -39,9 +39,8 @@ Threat model: the generator defends against hostile STATIC tree state, anything 
 hostile commit can plant (a symlink at any component, a hard link, a FIFO or device, a wrong type, an orphan,
 an unknown entry), and fails closed on it: such an entry is refused or named, never read through, written
 through or deleted. That holds for every output and for every other input this generator reads: LICENSE,
-skill-source.md, the hooks manifest, the evidence page and the pack version source (read only for the
-skill/pack version alignment rule: the root VERSION in the authoring tree, the installed .aiqt/manifest.toml
-release-version in any other tree; see resolve_pack_version) are each read through the descriptor-anchored
+skill-source.md, the hooks manifest, the evidence page and the pack VERSION (read only for the skill/pack
+version alignment rule, and only in the authoring tree; see resolve_pack_version) are each read through the descriptor-anchored
 reader (O_NOFOLLOW on every component, O_NONBLOCK, fstat a regular file with exactly one link), so a hard link at a
 declared output or at one of those four inputs is refused, never read and accepted (so a hard-link-copied
 checkout, made with cp -al, is refused; an input's refusal says to break the link by copying the file and
@@ -81,6 +80,7 @@ import os
 import re
 import stat
 import struct
+import subprocess
 import tomllib
 import zipfile
 import zlib
@@ -127,9 +127,11 @@ ZIP_VERSIONED_PARTS = ("site", "downloads", "aiqt-skill-1.0.6.zip")  # the versi
 # Skill version policy: the skill is versioned on its own before the 1.1.1 pack release (skill 1.0.6 under
 # pack release 1.0.5). From the 1.1.1 pack release on, the skill version equals the pack version: build_outputs
 # refuses (exit 2) a skill meta version that differs from the pack version once it is at or above
-# PACK_ALIGN_FIRST_VERSION (pack_alignment_problem). The pack version is the root VERSION in the authoring
-# tree and the installed .aiqt/manifest.toml release-version anywhere else (resolve_pack_version). Below the
-# first version the two stay independent, so a tree at pack 1.0.5 with skill 1.0.6 still builds.
+# PACK_ALIGN_FIRST_VERSION (pack_alignment_problem). The rule is a release-time rule of the authoring
+# repository: it is enforced only in the authoring tree, where the root VERSION is the pack version
+# (resolve_pack_version); an adopter tree is not re-checked (a release ships only after the authoring check
+# passed). Below the first version the two stay independent, so a tree at pack 1.0.5 with skill 1.0.6 still
+# builds.
 SKILL_SRC_PARTS = (".aiqt", "core", "skill", "skill-source.md")
 # The pack version file (generated from changelog.toml by tools/gen_changelog.py), read for the alignment rule
 # in the authoring tree only (resolve_pack_version); its read is bounded like opf/VERSION's in
@@ -137,11 +139,6 @@ SKILL_SRC_PARTS = (".aiqt", "core", "skill", "skill-source.md")
 PACK_VERSION_PARTS = ("VERSION",)
 PACK_VERSION_REL = "/".join(PACK_VERSION_PARTS)
 PACK_VERSION_MAX_BYTES = 64
-# The installed pack manifest tools/gen_manifest.py writes; its release-version is the pack version in any tree
-# that is not the authoring tree (resolve_pack_version). Bounded well above the shipped manifest (~0.2 MB).
-INSTALLED_MANIFEST_PARTS = (".aiqt", "manifest.toml")
-INSTALLED_MANIFEST_REL = "/".join(INSTALLED_MANIFEST_PARTS)
-INSTALLED_MANIFEST_MAX_BYTES = 8_000_000
 # The most characters of a refused input's text an error message echoes.
 _ECHO_MAX_CHARS = 80
 # The first pack version from which a component version (the chat skill here, the hooks plugin in
@@ -178,40 +175,50 @@ def parse_pack_version(raw, where="VERSION"):
     return m.group(1)
 
 
-def parse_installed_release_version(raw, where=INSTALLED_MANIFEST_REL):
-    """The pack release version an installed pack manifest (tools/gen_manifest.py's .aiqt/manifest.toml) records
-    as release-version. Raises ValueError unless raw is UTF-8 TOML whose top level holds format-version, the
-    integer 1 (never the bool true), and release-version, a string that is exactly a bare MAJOR.MINOR.PATCH."""
+def authoring_marker_tracked(root, marker_rel):
+    """True when the git index of the repository holding root tracks root/marker_rel (`git ls-files -z
+    --cached -- marker_rel`, run in root), else False. This is the second sign of the authoring repository that
+    resolve_pack_version consults when the marker file itself is absent: the authoring repository tracks its
+    marker (tools/gen_manifest.py check_authoring_only refuses a tracked marker that is missing on disk), and no
+    release, pin or install carries it (.aiqt/core/ownership.toml excludes it by an exact literal), so an
+    adopter's index never tracks it. Only a positive answer counts: a root that is not in a git work tree, a
+    missing git binary, a nonzero exit or a timeout is False (an adopter tree need not be a git repository, and
+    the parent behaviour judged such a tree without git). The call is pinned like gen_manifest.git_tracked: the
+    GIT_* environment is scrubbed, core.fsmonitor=false (a repository-config fsmonitor hook is attacker-chosen
+    code), protocol.allow=never and GIT_NO_LAZY_FETCH=1; ls-files --cached runs no filter, hook or transport."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env["GIT_NO_LAZY_FETCH"] = "1"
     try:
-        data = tomllib.loads(raw)
-    except ValueError as exc:  # TOMLDecodeError and an oversized integer
-        raise ValueError("{} is not readable TOML ({}), so its release-version cannot be read; "
-                         "fail-closed".format(where, exc)) from exc
-    except (RecursionError, MemoryError) as exc:
-        raise ValueError("{} nests too deeply to parse ({}); fail-closed".format(where, exc)) from exc
-    fmt = data.get("format-version")
-    if type(fmt) is not int or fmt != 1:
-        raise ValueError("{} format-version {} is not the integer 1, so its release-version cannot be read; "
-                         "fail-closed".format(where, _echo(fmt)))
-    if "release-version" not in data:
-        raise ValueError("{} holds no release-version, so the installed pack version cannot be evaluated; "
-                         "fail-closed".format(where))
-    version = data["release-version"]
-    if _semver_tuple(version) is None:
-        raise ValueError("{} release-version {} is not a bare MAJOR.MINOR.PATCH string; fail-closed".format(
-            where, _echo(version)))
-    return version
+        proc = subprocess.run(["git", "-C", str(root), "-c", "core.fsmonitor=false", "-c", "protocol.allow=never",
+                               "ls-files", "-z", "--cached", "--", marker_rel],
+                              capture_output=True, timeout=60, env=env, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return proc.returncode == 0 and bool(proc.stdout.strip(b"\x00"))
 
 
 def resolve_pack_version(root, root_fd=None):
-    """(pack_version, source) for the tree at root: where this tree records the version of the pack installed
-    in it, for the component/pack alignment rule (pack_alignment_problem). The root VERSION is the pack version
-    only in the pack authoring repository, the tree that carries the authoring marker (gen_hooks.authoring_tree,
-    the marker gen_hooks and gensrc_guard already read): there VERSION is read and an absent VERSION cannot be
-    evaluated. In any other tree (an adopter's) the root VERSION is the adopter's own project version and is
-    never read; the installed pack records its version as release-version in .aiqt/manifest.toml (written by
-    tools/gen_manifest.py), and a tree with no readable release-version cannot be evaluated. Both files are read
-    through the descriptor-anchored reader (_read_output: no symlink, hard link or non-regular entry, bounded).
+    """(pack_version, source) for the tree at root when the component/pack alignment rule (pack_alignment_problem)
+    applies to it, else None. The rule is a release-time rule of the pack authoring repository: it applies only
+    in the tree that carries the authoring marker (gen_hooks.authoring_tree, the marker gen_hooks and
+    gensrc_guard already read), where the root VERSION is the pack version; there VERSION is read through the
+    descriptor-anchored reader (_read_output: no symlink, hard link or non-regular entry, bounded) and an absent
+    VERSION cannot be evaluated (exit 2). In any other tree (an adopter's) the rule is not re-checked, because a
+    release ships only after the authoring check passed: None, and the adopter's root VERSION (its own project
+    version) and its installed .aiqt/manifest.toml are never read for it, so an adopter tree is judged as before
+    the rule existed.
+
+    A missing marker must not silently turn the authoring repository into an adopter tree (deleting the marker
+    would switch the rule off). So when the marker file is absent, the second sign of the authoring repository is
+    consulted: its git index tracks the marker (authoring_marker_tracked). A tracked but absent marker is exit 2
+    (ValueError), naming the restore. Disclosed residual: the second sign needs the tree to be a git work tree
+    with a usable git; in an export of the authoring tree without its .git (an archive, a copy), or with the
+    marker deleted AND untracked in the same change (git rm, which tools/gen_manifest.py check_authoring_only
+    still refuses while .claude/settings.json is tracked, and which review sees), a missing marker reads as an
+    adopter tree and the rule is not applied. The root VERSION and the generators are no sign: VERSION and
+    tools/** are shipped pack content (.aiqt/core/ownership.toml classes them pack-immutable), so an adopter tree
+    carries them too.
+
     Raises ValueError (cannot evaluate, exit 2) or OSError (unreadable, exit 2); the caller fails closed on the
     pack surfaces it builds, never on anything else."""
     if root_fd is None:
@@ -222,22 +229,20 @@ def resolve_pack_version(root, root_fd=None):
             os.close(own_fd)
     # Lazy by design: gen_hooks imports this module at load, so the marker reader is imported at call time.
     import gen_hooks  # noqa: PLC0415
-    if gen_hooks.authoring_tree(root):
-        raw = _read_output(root_fd, root, root.joinpath(*PACK_VERSION_PARTS), False, single_link=True,
-                           is_input=True, max_bytes=PACK_VERSION_MAX_BYTES)
-        if raw is None:
-            raise ValueError("pack version alignment cannot be evaluated: the pack VERSION file is absent in the "
-                             "authoring tree (VERSION is a declared input of the rule; tools/gen_changelog.py "
-                             "generates it); fail-closed")
-        return parse_pack_version(raw), PACK_VERSION_REL
-    raw = _read_output(root_fd, root, root.joinpath(*INSTALLED_MANIFEST_PARTS), False, single_link=True,
-                       is_input=True, max_bytes=INSTALLED_MANIFEST_MAX_BYTES)
+    if not gen_hooks.authoring_tree(root):
+        if authoring_marker_tracked(root, gen_hooks.AUTHORING_MARKER_REL):
+            raise ValueError("pack version alignment cannot be evaluated: the authoring marker {0} is tracked in "
+                             "this tree's git index but absent on disk, so this is the authoring repository with "
+                             "its marker deleted, never an adopter tree; restore it (git checkout -- {0}) and "
+                             "rerun; fail-closed".format(gen_hooks.AUTHORING_MARKER_REL))
+        return None
+    raw = _read_output(root_fd, root, root.joinpath(*PACK_VERSION_PARTS), False, single_link=True,
+                       is_input=True, max_bytes=PACK_VERSION_MAX_BYTES)
     if raw is None:
-        raise ValueError("pack version alignment cannot be evaluated: this tree has no authoring marker ({}) and "
-                         "no installed pack manifest {} recording release-version (the root VERSION of a tree "
-                         "that is not the authoring repository is the project's own version and is never read); "
-                         "fail-closed".format(gen_hooks.AUTHORING_MARKER_REL, INSTALLED_MANIFEST_REL))
-    return parse_installed_release_version(raw), INSTALLED_MANIFEST_REL + " release-version"
+        raise ValueError("pack version alignment cannot be evaluated: the pack VERSION file is absent in the "
+                         "authoring tree (VERSION is a declared input of the rule; tools/gen_changelog.py "
+                         "generates it); fail-closed")
+    return parse_pack_version(raw), PACK_VERSION_REL
 
 
 def pack_alignment_problem(component, component_version, pack_version, first=None, source=PACK_VERSION_REL):
@@ -1083,13 +1088,13 @@ def build_outputs(root, root_fd=None):
             "ZIP_VERSIONED_PARTS and its GENSRC_OUTPUTS target when the skill version changes".format(
                 ZIP_VERSIONED_PARTS[-1], data["meta"]["version"], expected_basename))
     # Fail-closed skill/pack alignment (pack_alignment_problem): from pack PACK_ALIGN_FIRST_VERSION on, the
-    # skill meta version must equal the pack version resolve_pack_version finds: the root VERSION in the
-    # authoring tree, the installed .aiqt/manifest.toml release-version in any other tree (an adopter's root
-    # VERSION is never read). Either is read through the descriptor-anchored reader (a symlink, hard link, FIFO
-    # or other non-regular entry at it is refused, exit 2); a malformed or oversized one is exit 2; an absent
-    # one means the rule cannot be evaluated (exit 2).
-    pack_version, pack_source = resolve_pack_version(root, root_fd)
-    problem = pack_alignment_problem("skill", data["meta"]["version"], pack_version, source=pack_source)
+    # skill meta version must equal the root VERSION in the authoring tree (resolve_pack_version), read through
+    # the descriptor-anchored reader (a symlink, hard link, FIFO or other non-regular entry at it is refused,
+    # exit 2); a malformed or oversized one is exit 2; an absent one means the rule cannot be evaluated (exit
+    # 2), and so does a marker tracked in git but deleted. An adopter tree is not re-checked (None).
+    resolved = resolve_pack_version(root, root_fd)
+    problem = None if resolved is None else pack_alignment_problem(
+        "skill", data["meta"]["version"], resolved[0], source=resolved[1])
     if problem is not None:
         raise ValueError("{} in {} (meta version), with ZIP_VERSIONED_PARTS and the rest of RELEASING.md's "
                          "skill version bump checklist".format(problem, "/".join(SKILL_SRC_PARTS)))
@@ -1594,7 +1599,8 @@ def _write_fixture(root, skill_src_text):
     # carries the authoring marker, and the root VERSION is then the pack version source of the skill/pack
     # alignment rule (resolve_pack_version; an absent one is exit 2). VERSION sits below
     # PACK_ALIGN_FIRST_VERSION, where the skill stays independent (the state of main before the 1.1.1 cut).
-    # Legs that need another pack version overwrite it; the adopter legs remove the marker.
+    # Legs that need another pack version overwrite it; the adopter legs remove the marker (the rule is then
+    # not applied).
     (root / ".aiqt" / "authoring.toml").write_text(_AUTHORING_MARKER_TEXT, encoding="utf-8")
     (root / "VERSION").write_bytes(b"1.0.5\n")
     # build_outputs packs the pack-root LICENSE into the zip (fail-closed if absent); a well-formed
@@ -1922,102 +1928,117 @@ def self_test_main():
                     failures.append("pack_alignment_problem with no pack version raised for another reason: "
                                     "{}".format(exc))
 
-        # 7c. Where the pack version is read (resolve_pack_version). The legs above run in authoring trees (the
-        #     fixture carries the marker), where it is the root VERSION. Without the marker (an adopter's tree)
-        #     the root VERSION is the adopter's own and is never read: the installed .aiqt/manifest.toml
-        #     release-version is. An adopter VERSION that is another number, another format, CRLF, absent or a
-        #     dangling symlink, with the manifest at 1.0.5, builds clean in both modes (red if VERSION is read
-        #     there); a manifest at 1.1.1 under the shipped skill fails closed in both modes naming the manifest and
-        #     writing nothing, whatever the root VERSION says (red if the manifest is not read), while the equal
-        #     twin builds; and a tree with neither the marker nor a manifest cannot be evaluated (exit 2) though a
-        #     valid VERSION is there. In the authoring tree the manifest is never consulted.
-        def adopter_fixture(label, src, release="1.0.5"):
+        # 7c. Where the rule applies (resolve_pack_version). The legs above run in authoring trees (the fixture
+        #     carries the marker), where the root VERSION is the pack version. The rule is a release-time rule of
+        #     the authoring repository, so a tree WITHOUT the marker (an adopter's) is not re-checked and builds
+        #     as before the rule existed: with no installed .aiqt/manifest.toml, with one at 1.0.5 or at 1.1.1
+        #     (the shipped skill differing from it), or with an unparseable one, and whatever its own root VERSION
+        #     is (1.1.1 or 1.2.0, which the skill differs from, another format, CRLF, absent, a dangling symlink,
+        #     a directory), it generates and checks clean (red if the adopter's VERSION or manifest is read for
+        #     the rule). The authoring tree reads VERSION and never the manifest: VERSION 1.1.1 under a stale
+        #     manifest at 1.0.5 is refused.
+        def adopter_fixture(label, src, manifest=None):
             fx = pack_fixture("adopter-" + label, src)
             (fx / ".aiqt" / "authoring.toml").unlink()
-            fx.joinpath(*INSTALLED_MANIFEST_PARTS).write_text(_installed_manifest_text(release), encoding="utf-8")
+            if manifest is not None:
+                (fx / ".aiqt" / "manifest.toml").write_text(manifest, encoding="utf-8")
             return fx
 
-        for label, raw in (("other-number", b"2.3.0\n"), ("other-format", b"v2.3\n"), ("crlf", b"0.4.0\r\n"),
-                           ("absent", None), ("dangling-symlink", "link")):
-            fx = adopter_fixture("version-" + label, good_src)
+        for label, raw, manifest in (
+                ("no-manifest", b"1.0.5\n", None),
+                ("no-manifest-version-1.1.1", b"1.1.1\n", None),
+                ("manifest-1.0.5", b"1.0.5\n", _installed_manifest_text("1.0.5")),
+                ("manifest-1.1.1", b"0.4.0\n", _installed_manifest_text("1.1.1")),
+                ("manifest-unparseable", b"1.0.5\n", "format-version = [\n"),
+                ("version-1.2.0", b"1.2.0\n", _installed_manifest_text("1.0.5")),
+                ("version-other-format", b"v2.3\n", None),
+                ("version-crlf", b"0.4.0\r\n", None),
+                ("version-absent", None, None),
+                ("version-dangling-symlink", "link", None),
+                ("version-directory", "dir", None)):
+            fx = adopter_fixture(label, good_src, manifest)
             (fx / "VERSION").unlink()
             if raw == "link":
                 os.symlink(str(tmp / "no-such-VERSION"), str(fx / "VERSION"))
+            elif raw == "dir":
+                (fx / "VERSION").mkdir()
             elif raw is not None:
                 (fx / "VERSION").write_bytes(raw)
             for chk in (False, True):
                 code, out = capture(fx, chk)
                 if code != 0:
-                    failures.append("an adopter tree whose own VERSION is {} (installed manifest at 1.0.5) expected "
-                                    "exit 0 ({}), got {}\n{}".format(label, "--check" if chk else "generate", code,
-                                                                     out))
-        for root_version in (b"0.4.0\n", None):
-            tag = "none" if root_version is None else "0.4.0"
-            fx = adopter_fixture("differ-" + tag, good_src)
-            code, out = capture(fx, False)
-            if code != 0:
-                failures.append("the adopter alignment fixture expected a clean first generate at release 1.0.5, "
-                                "got {}\n{}".format(code, out))
+                    failures.append("an adopter tree ({}; skill {}) expected exit 0 ({}): the alignment rule is not "
+                                    "re-checked outside the authoring tree, got {}\n{}".format(
+                                        label, zip_versioned_version(), "--check" if chk else "generate", code, out))
+        if resolve_pack_version(tmp / "pack-align-adopter-no-manifest") is not None:
+            failures.append("resolve_pack_version must return None (rule not applied) in a tree without the "
+                            "authoring marker")
+        fx = pack_fixture("authoring-stale-manifest", good_src)
+        (fx / ".aiqt" / "manifest.toml").write_text(_installed_manifest_text("1.0.5"), encoding="utf-8")
+        (fx / "VERSION").write_bytes(b"1.1.1\n")
+        for chk in (True, False):
+            code, out = capture(fx, chk)
+            if code != 2 or "differs from the pack version '1.1.1' (VERSION)" not in out:
+                failures.append("an authoring tree at VERSION 1.1.1 with a stale installed manifest at 1.0.5 expected "
+                                "exit 2 reading VERSION ({}), got {}\n{}".format(
+                                    "--check" if chk else "generate", code, out))
+
+        # 7c2. A deleted marker never switches the authoring repository to adopter mode. The second sign is its git
+        #      index (authoring_marker_tracked): an authoring fixture generated clean at VERSION 1.0.5 is made a git
+        #      repository with the marker tracked, then the marker is deleted, VERSION moved to 1.1.1 and a stale
+        #      installed manifest at 1.0.5 left beside it (the review's MINOR A tree). Both modes are exit 2 naming
+        #      the tracked marker, writing nothing (red if the git index is not consulted: the tree then reads as an
+        #      adopter's and passes). The twin, the same tree whose git index never tracked the marker (an adopter's
+        #      repository), passes in both modes, and a directory that is not a git work tree reads as untracked.
+        git_bin = shutil.which("git")
+        if git_bin is None:
+            failures.append("NOT RUN: the deleted-marker legs (no git on PATH)")
+        else:
+            git_env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+
+            def git_fixture(label, track_marker):
+                fx = pack_fixture("git-" + label, good_src)
+                code, out = capture(fx, False)
+                if code != 0:
+                    failures.append("the {} git fixture expected a clean first generate at VERSION 1.0.5, got "
+                                    "{}\n{}".format(label, code, out))
+                tracked = [".aiqt/authoring.toml", "VERSION"] if track_marker else ["VERSION"]
+                for argv in (["init", "-q", str(fx)], ["-C", str(fx), "add", "--", *tracked]):
+                    proc = subprocess.run([git_bin, "-c", "init.defaultBranch=main", "-c", "core.fsmonitor=false",
+                                           *argv], capture_output=True, timeout=60, env=git_env, check=False)
+                    if proc.returncode != 0:
+                        failures.append("the {} git fixture: git {} failed ({}): {!r}".format(
+                            label, argv[0], proc.returncode, proc.stderr))
+                (fx / ".aiqt" / "authoring.toml").unlink()
+                (fx / ".aiqt" / "manifest.toml").write_text(_installed_manifest_text("1.0.5"), encoding="utf-8")
+                (fx / "VERSION").write_bytes(b"1.1.1\n")
+                return fx
+
+            fx = git_fixture("marker-tracked-deleted", True)
             before = {p: p.read_bytes() for p in sorted(fx.joinpath(*ZIP_PARTS[:-1]).rglob("*")) if p.is_file()}
-            fx.joinpath(*INSTALLED_MANIFEST_PARTS).write_text(_installed_manifest_text("1.1.1"), encoding="utf-8")
-            (fx / "VERSION").unlink()
-            if root_version is not None:
-                (fx / "VERSION").write_bytes(root_version)
             for chk in (True, False):
                 code, out = capture(fx, chk)
-                if (code != 2 or "differs from the pack version '1.1.1'" not in out
-                        or INSTALLED_MANIFEST_REL + " release-version" not in out):
-                    failures.append("an adopter skill {} under installed release 1.1.1 (root VERSION {}) expected "
-                                    "exit 2 naming the manifest ({}), got {}\n{}".format(
-                                        zip_versioned_version(), tag, "--check" if chk else "generate", code, out))
+                if (code != 2 or "tracked in this tree's git index but absent on disk" not in out
+                        or "git checkout -- .aiqt/authoring.toml" not in out):
+                    failures.append("an authoring repository whose tracked marker was deleted (VERSION 1.1.1, skill "
+                                    "{}, stale manifest at 1.0.5) expected exit 2 naming the tracked marker ({}), "
+                                    "got {}\n{}".format(zip_versioned_version(), "--check" if chk else "generate",
+                                                       code, out))
             after = {p: p.read_bytes() for p in sorted(fx.joinpath(*ZIP_PARTS[:-1]).rglob("*")) if p.is_file()}
             if after != before:
-                failures.append("a refused adopter skill/pack alignment must write nothing")
-        real_parts = ZIP_VERSIONED_PARTS
-        try:
-            globals()["ZIP_VERSIONED_PARTS"] = ("site", "downloads", versioned_zip_basename("1.1.1"))
-            fx = adopter_fixture("equal", _SKILL_SRC.replace("__ZIPVER__", "1.1.1"), release="1.1.1")
-            (fx / "VERSION").write_bytes(b"0.4.0\n")
+                failures.append("a run refused for a deleted tracked marker must write nothing")
+            fx = git_fixture("marker-never-tracked", False)
             for chk in (False, True):
                 code, out = capture(fx, chk)
                 if code != 0:
-                    failures.append("an adopter skill 1.1.1 under installed release 1.1.1 (own VERSION 0.4.0) "
-                                    "expected exit 0 ({}), got {}\n{}".format("--check" if chk else "generate",
-                                                                              code, out))
-        finally:
-            globals()["ZIP_VERSIONED_PARTS"] = real_parts
-        fx = adopter_fixture("no-manifest", good_src)
-        fx.joinpath(*INSTALLED_MANIFEST_PARTS).unlink()
-        for chk in (True, False):
-            code, out = capture(fx, chk)
-            if code != 2 or "cannot be evaluated" not in out or "never read" not in out:
-                failures.append("a tree with neither the authoring marker nor an installed manifest (a valid root "
-                                "VERSION present) expected exit 2, cannot evaluate ({}), got {}\n{}".format(
-                                    "--check" if chk else "generate", code, out))
-        for label, version, release, want in (("below", b"1.0.5\n", "1.1.1", 0), ("above", b"1.1.1\n", "1.0.5", 2)):
-            fx = pack_fixture("authoring-ignores-manifest-" + label, good_src)
-            fx.joinpath(*INSTALLED_MANIFEST_PARTS).write_text(_installed_manifest_text(release), encoding="utf-8")
-            (fx / "VERSION").write_bytes(version)
-            code, out = capture(fx, False)
-            if code != want or (want == 2 and "differs from the pack version '1.1.1' (VERSION)" not in out):
-                failures.append("an authoring tree at VERSION {} with an installed manifest at {} expected exit {} "
-                                "(VERSION, never the manifest, is read there), got {}\n{}".format(
-                                    version.decode("ascii").strip(), release, want, code, out))
-        for label, text, needle in (
-                ("no-release-version", "format-version = 1\n", "holds no release-version"),
-                ("bool-format", 'format-version = true\nrelease-version = "1.0.5"\n', "not the integer 1"),
-                ("prefixed", 'format-version = 1\nrelease-version = "v1.0.5"\n', "not a bare MAJOR.MINOR.PATCH"),
-                ("unparseable", "format-version = [\n", "not readable TOML")):
-            fx = adopter_fixture("bad-manifest-" + label, good_src)
-            fx.joinpath(*INSTALLED_MANIFEST_PARTS).write_text(text, encoding="utf-8")
-            code, out = capture(fx, True)
-            if code != 2 or needle not in out:
-                failures.append("an installed manifest that is {} expected exit 2 naming {!r}, got {}\n{}".format(
-                    label, needle, code, out))
-
-        # 7d. The pack version source is read bounded and echoed cut, and a non-regular one is refused as an input.
+                    failures.append("an adopter git repository that never tracked the marker (VERSION 1.1.1, skill "
+                                    "{}) expected exit 0 ({}), got {}\n{}".format(
+                                        zip_versioned_version(), "--check" if chk else "generate", code, out))
+            if authoring_marker_tracked(tmp / "pack-align-adopter-no-manifest", ".aiqt/authoring.toml"):
+                failures.append("authoring_marker_tracked must be False outside a git work tree")
+        # 7d. The pack VERSION is read bounded and echoed cut, and a non-regular one is refused as an input.
         #     An oversized VERSION (a megabyte) is exit 2 naming the bound in a short message (red if it is read
-        #     whole and echoed); a long malformed release-version is echoed cut; a FIFO, a dangling symlink or a
+        #     whole and echoed); _echo cuts a long value; a FIFO, a dangling symlink or a
         #     directory at VERSION is refused as an input, never told to git rm it (RELEASING.md), and a directory
         #     there is refused by the regular-file check with its descriptor closed (red if os.fdopen meets it
         #     first: "Is a directory" and a leaked descriptor).
@@ -2029,13 +2050,6 @@ def self_test_main():
                 failures.append("a 1 MB VERSION expected exit 2 naming the {}-byte bound in a short message ({}), "
                                 "got {} with {} characters of output".format(
                                     PACK_VERSION_MAX_BYTES, "--check" if chk else "generate", code, len(out)))
-        long_release = adopter_fixture("long-release", good_src)
-        long_release.joinpath(*INSTALLED_MANIFEST_PARTS).write_text(
-            'format-version = 1\nrelease-version = "{}"\n'.format("9" * 100_000), encoding="utf-8")
-        code, out = capture(long_release, True)
-        if code != 2 or "cut from" not in out or len(out) > 2000:
-            failures.append("a 100 000-character release-version expected exit 2 echoing it cut, got {} with {} "
-                            "characters of output".format(code, len(out)))
         if len(_echo("x" * 5000)) > _ECHO_MAX_CHARS + 40 or _echo("1.0.5\r\n") != repr("1.0.5\r\n"):
             failures.append("_echo must cut a long value and keep a short one whole")
 
@@ -2077,7 +2091,7 @@ def self_test_main():
                             "before, {} after)".format(probe_before, probe_after))
         # The pack version source changes no output byte, so no GENSRC_OUTPUTS entry declares it (gen_hooks too).
         for out_decl in GENSRC_OUTPUTS:
-            if {"VERSION", INSTALLED_MANIFEST_REL} & set(out_decl["sources"]):
+            if {"VERSION", ".aiqt/manifest.toml"} & set(out_decl["sources"]):
                 failures.append("GENSRC_OUTPUTS {}: the pack version source is a check input, not a content "
                                 "source; do not declare it".format(out_decl["target"]))
 
@@ -3035,11 +3049,11 @@ def self_test_main():
           "corpus-id, an invalid-UTF-8 target, and a version/zip-literal mismatch each fail closed (exit 2); "
           "from pack 1.1.1 on a skill version that differs from VERSION fails closed (exit 2, writing nothing) "
           "while the equal twin builds clean and a pack below 1.1.1 leaves the skill independent, and a "
-          "malformed, symlinked, hard-linked or absent VERSION fails closed (exit 2); the pack version is the "
-          "root VERSION only in the authoring tree: elsewhere the installed .aiqt/manifest.toml release-version "
-          "is read and the adopter's own VERSION never is (another number, format, CRLF, absent or dangling "
-          "passes; a manifest at 1.1.1 refuses the differing skill; neither marker nor manifest is exit 2, as "
-          "is a malformed manifest); an oversized VERSION is refused bounded and a long value echoed cut; a "
+          "malformed, symlinked, hard-linked or absent VERSION fails closed (exit 2); the rule applies only in "
+          "the authoring tree: an adopter tree is not re-checked (no manifest, a manifest at 1.0.5, 1.1.1 or "
+          "unparseable, and an own VERSION of 1.1.1, 1.2.0, another format, CRLF, absent, dangling or a "
+          "directory all pass), while an authoring repository whose git-tracked marker was deleted is exit 2, "
+          "and its never-tracked twin passes; an oversized VERSION is refused bounded and a long value echoed cut; a "
           "FIFO, dangling symlink or directory at VERSION is refused as an input (never git rm), with no "
           "descriptor leaked; "
           "a drifted SKILL.md is caught (exit 1); nothing is ever deleted: an orphan reserved entry and a "
