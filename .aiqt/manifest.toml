@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.0.5"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "5a0cbf905d425d765b6a2f93f97438e74119e77fd69a2184ea1b43b5918f079a"
+tree-sha256 = "1475ed5c69f185ffebf0d2c4099049a31609c4cfe25a9b5abc24cd23efd169a0"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -4172,8 +4172,8 @@ sha256 = "9387831df89640649d02a6382c5714bbcd2afc7079a5ccba60c8632d3f3349d2"
 
 [[sources]]
 path = "tools/check_child_status_coverage.py"
-bytes = 228720
-sha256 = "7c0abeb095d461887974795c93b4af86cb2ed75f4f2f996f457fc47993a7ce21"
+bytes = 228758
+sha256 = "8860a056e1a28a80df12b3c40d1ed2af397ef825754c66430bc9bac101798fa2"
 
 [[sources]]
 path = "tools/check_ci_parity.py"
@@ -4647,8 +4647,8 @@ sha256 = "4d5067573022ee9bb62a6eaf7a92e8ae0ba978de502407e199cb458dc90299f3"
 
 [[sources]]
 path = "tools/orch_doctor.py"
-bytes = 13954
-sha256 = "9f0847d34eefb8589a7b598960d5961d860b89267a6f000d223647f3afee9535"
+bytes = 16706
+sha256 = "54f1d78a0f4b8297a2074fe8e072c62c953434d3ca5c83a35132d0a62fe045e8"
 
 [[sources]]
 path = "tools/orch_preflight.py"
