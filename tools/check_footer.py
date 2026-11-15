@@ -130,9 +130,32 @@ class _Anchors(HTMLParser):
             self._nav_depth -= 1
 
 
+# The start tags that close an open <p> in the HTML parsing algorithm (WHATWG HTML 13.2.6.4.7, "in body"):
+# a <p> holds only phrasing content, so the parser ends the paragraph before any of these, and a link after
+# one of them is outside the About region even with no </p> written.
+P_CLOSING_START_TAGS = frozenset({
+    "address", "article", "aside", "blockquote", "center", "details", "dialog", "dir", "div", "dl",
+    "fieldset", "figcaption", "figure", "footer", "header", "hgroup", "main", "menu", "nav", "ol", "p",
+    "search", "section", "summary", "ul", "h1", "h2", "h3", "h4", "h5", "h6", "pre", "listing", "form", "li",
+    "dd", "dt", "plaintext", "table", "hr", "xmp",
+})
+# The end tags that close an open <p> by ending an element that contains it (the same algorithm: these end
+# tags generate implied end tags, which pop the paragraph). A <p> cannot hold any of these elements, since
+# their start tag would have closed it first, so one seen while the region is open ends an ancestor.
+P_CLOSING_END_TAGS = frozenset({
+    "address", "article", "aside", "blockquote", "center", "details", "dialog", "dir", "div", "dl",
+    "fieldset", "figcaption", "figure", "footer", "header", "hgroup", "main", "menu", "nav", "ol", "search",
+    "section", "summary", "ul", "h1", "h2", "h3", "h4", "h5", "h6", "pre", "listing", "form", "li", "dd",
+    "dt", "body", "html", "table", "tbody", "thead", "tfoot", "tr", "td", "th", "caption",
+})
+
+
 class _AboutAnchors(HTMLParser):
     """Collect the href of every <a> inside a <p class="about">, the landing page's "About this project"
-    line (template specification section 7.24). A <p> cannot nest, so the region closes at its </p>."""
+    line (template specification section 7.24). A <p> cannot nest and holds only phrasing content, so the
+    region closes at its </p>, at the start of any element that implicitly closes a paragraph
+    (P_CLOSING_START_TAGS, such as a nested <div>), and at the end tag of an element that contains it
+    (P_CLOSING_END_TAGS, such as the enclosing </div>). Phrasing end tags such as </span> leave it open."""
     def __init__(self):
         super().__init__(convert_charrefs=True)
         self.hrefs = []
@@ -142,11 +165,13 @@ class _AboutAnchors(HTMLParser):
         d = dict(attrs)
         if tag == "p":
             self._open = "about" in (d.get("class") or "").split()
+        elif tag in P_CLOSING_START_TAGS:
+            self._open = False
         elif tag == "a" and self._open and d.get("href") is not None:
             self.hrefs.append(d["href"].strip())
 
     def handle_endtag(self, tag):
-        if tag == "p":
+        if tag == "p" or tag in P_CLOSING_END_TAGS:
             self._open = False
 
 
@@ -801,6 +826,23 @@ def _self_test_cases():
         ("a live page named draft.html stays under the live rule",
          {"about.html": nav, "draft.html": "<nav></nav>"},
          ["draft.html: missing the /disclosure nav link"]),
+        # The About region ends where the HTML parser ends the paragraph: a nested block element closes it,
+        # and so does the end tag of the element around it, with no </p> written. Each red row counted the
+        # link on the parser that closed the region only at a <p> tag; each twin passes on both parsers.
+        ("draft landing with the About link after a nested block fails",
+         {"about.html": nav, "draft/index.html": draft_nav + '<p class="about"><a href="/draft/license/">Licence'
+          '</a><div><a href="/draft/disclosure/">Disclosure</a></div></p>'},
+         ["draft/index.html: missing the /draft/disclosure/ link in its About region"]),
+        ("draft landing with the About link before a nested block passes",
+         {"about.html": nav, "draft/index.html": draft_nav + '<p class="about"><a href="/draft/disclosure/">'
+          'Disclosure</a><div><a href="/draft/license/">Licence</a></div></p>'}, []),
+        ("draft landing with the About link after the enclosing end tag fails",
+         {"about.html": nav, "draft/index.html": draft_nav + '<div><p class="about"><a href="/draft/license/">'
+          'Licence</a></div><a href="/draft/disclosure/">Disclosure</a>'},
+         ["draft/index.html: missing the /draft/disclosure/ link in its About region"]),
+        ("draft landing with the About link after phrasing end tags passes",
+         {"about.html": nav, "draft/index.html": draft_nav + '<div><p class="about"><span>x</span><br/>'
+          '<a href="/draft/disclosure/">Disclosure</a></div>'}, []),
     ]
     # The real declaration is promoted, so the staged cases name the staged declaration explicitly and each
     # has a promoted counterpart (the promoted lists below) judged against the promoted one.
@@ -871,6 +913,13 @@ def _self_test_cases():
         ("promoted: a kept page named draft.html stays under the live rule", DISCLOSURE_HREF, "site",
          {"index.html": root_nav + root_about, "draft.html": "<nav></nav>"},
          ["draft.html: missing the /disclosure nav link"]),
+        ("promoted: landing with the About link after a nested block fails", DISCLOSURE_HREF, "site",
+         {"about.html": nav, "index.html": root_nav + '<p class="about"><a href="/x">x</a><div>'
+          '<a href="/disclosure/">Disclosure</a>'},
+         ["index.html: missing the /disclosure/ link in its About region"]),
+        ("promoted: landing with the About link before a nested block passes", DISCLOSURE_HREF, "site",
+         {"about.html": nav, "index.html": root_nav + '<p class="about"><a href="/disclosure/">Disclosure</a>'
+          '<div><a href="/x">x</a>'}, []),
         ("opfiles promoted: good kept pages and a good landing pass", "./disclosure", "opf/site",
          {"manifest.html": opf_nav, "index.html": opf_root_nav + root_about, "model/index.html": opf_root_nav},
          []),
