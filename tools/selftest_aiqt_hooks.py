@@ -4367,12 +4367,14 @@ def _test_trkasy_heredoc_consumer(failures, tmp):
 # rule in a scratch mutant, and every row DENIES in registry scope but ALLOWS with the rule reverted, so each
 # row is red precisely when its rule is gone. The reverts gate a condition with `False and` or widen a word
 # pattern, leaving the rest of the proof intact.
-_DS_TARGET_ANCHOR = (
-    '            if (not parts or ".." in parts or parts[0] in ("dev", "proc")\n'
-    '                    or parts[-1] in _ORCH_DATA_SHAPE_ALLOWED):')
-_DS_TARGET_REPL = (
-    '            if False and (not parts or ".." in parts or parts[0] in ("dev", "proc")\n'
-    '                    or parts[-1] in _ORCH_DATA_SHAPE_ALLOWED):')
+# The cat write target rule has three clauses, each with its own revert: the '..' clause, the absolute /dev
+# and /proc clause, and the allowlisted-last-component clause.
+_DS_DOTDOT_ANCHOR = '            if not parts or ".." in parts:\n'
+_DS_DOTDOT_REPL = '            if not parts:\n'
+_DS_DEVPROC_ANCHOR = '            if (target.startswith("/") and parts[0] in ("dev", "proc")\n'
+_DS_DEVPROC_REPL = '            if False and (target.startswith("/") and parts[0] in ("dev", "proc")\n'
+_DS_READER_ANCHOR = "            if parts[-1] in _ORCH_DATA_SHAPE_ALLOWED:\n"
+_DS_READER_REPL = "            if False and parts[-1] in _ORCH_DATA_SHAPE_ALLOWED:\n"
 _DS_PIPE_ANCHOR = 'if ch in "&|" and not command.startswith(ch * 2, i):'
 _DS_PIPE_REPL = 'if ch == "&" and not command.startswith(ch * 2, i):'
 _DS_EXTRA_ANCHOR = "extra_word = True"
@@ -4388,14 +4390,26 @@ _DS_REDIR_REPL = (
 _DS_WORD_ANCHOR = '_ORCH_DATA_SHAPE_WORD_RE = re.compile(r"[A-Za-z0-9_./+,:@%=-]+")'
 _DS_WORD_REPL = '_ORCH_DATA_SHAPE_WORD_RE = re.compile(r"[^\\s;&|<>]+")'
 _TRKASY_DATA_SHAPE_RULE_GROUPS = (
-    ("dstarget", _DS_TARGET_ANCHOR, _DS_TARGET_REPL, (
+    ("dsreadername", _DS_READER_ANCHOR, _DS_READER_REPL, (
         ("ds-target-wc", "cat > /abs/bin/wc <<'EOF'\n" + _HDC_APOS + "EOF\nwc /dev/null"),
         ("ds-target-ls", "cat > /abs/bin/ls <<'EOF'\n" + _HDC_APOS + "EOF\nls /abs"),
         ("ds-target-stat", "cat > /abs/bin/stat <<'EOF'\n" + _HDC_APOS + "EOF\nstat /abs"),
         ("ds-target-mkdir", "cat > /abs/bin/mkdir <<'EOF'\n" + _HDC_APOS + "EOF\nmkdir /abs/d"),
         ("ds-target-cat", "cat > /abs/bin/cat <<'EOF'\n" + _HDC_APOS + "EOF\ncat /abs/f"),
+    )),
+    ("dsdevproc", _DS_DEVPROC_ANCHOR, _DS_DEVPROC_REPL, (
         ("ds-target-dev", "cat > /dev/stdout <<'EOF'\n" + _HDC_APOS + "EOF"),
+        ("ds-target-dev-fd-1", "cat > /dev/fd/1 <<'EOF'\n" + _HDC_APOS + "EOF"),
+        ("ds-target-dev-stderr", "cat > /dev/stderr <<'EOF'\n" + _HDC_APOS + "EOF"),
+        ("ds-target-dev-tty", "cat > /dev/tty <<'EOF'\n" + _HDC_APOS + "EOF"),
+        ("ds-target-dev-shm-itself", "cat > /dev/shm <<'EOF'\n" + _HDC_APOS + "EOF"),
+        ("ds-target-dev-null-prefix", "cat > /dev/nullx <<'EOF'\n" + _HDC_APOS + "EOF"),
         ("ds-target-proc", "cat > /proc/self/fd/0 <<'EOF'\n" + _HDC_APOS + "EOF"),
+        ("ds-target-proc-fd-1", "cat > /proc/self/fd/1 <<'EOF'\n" + _HDC_APOS + "EOF"),
+    )),
+    ("dsdotdot", _DS_DOTDOT_ANCHOR, _DS_DOTDOT_REPL, (
+        ("ds-target-dotdot-dev", "cat > /abs/../dev/stdout <<'EOF'\n" + _HDC_APOS + "EOF"),
+        ("ds-target-dotdot-relative", "cat > ../x/stdout <<'EOF'\n" + _HDC_APOS + "EOF\nwc ../x/stdout"),
     )),
     ("dspipe", _DS_PIPE_ANCHOR, _DS_PIPE_REPL, (
         ("ds-pipe-cat", "cat <<'EOF' | wc -c\n" + _HDC_APOS + "EOF"),
@@ -4413,36 +4427,61 @@ _TRKASY_DATA_SHAPE_RULE_GROUPS = (
         ("ds-plain-word-backquote", "cat > /abs/f <<'EOF'\n" + _HDC_APOS + "EOF\ntest -n `bash /abs/f`"),
     )),
 )
+# The narrowing of the /dev and /proc clause, as (tag, anchor, replacement, rows): every row ALLOWS in registry
+# scope and DENIES with the clause put back to its wider form (any target whose first non-empty part is dev
+# or proc, absolute or relative, /dev/null and /dev/shm included), so each row is red if that wider rule
+# returns. Each is an ordinary message-body write whose bare '&' is text: a /dev/shm hand-back file alone or
+# then hashed, a write to /dev/null, and a relative project path under a directory named dev or proc.
+_DS_DEVPROC_WIDE_ANCHOR = (
+    '            if (target.startswith("/") and parts[0] in ("dev", "proc")\n'
+    '                    and parts != ["dev", "null"] and not (len(parts) > 2 and parts[:2] == ["dev", "shm"])):\n')
+_DS_DEVPROC_WIDE_REPL = '            if parts[0] in ("dev", "proc"):\n'
+_DS_AMP_BODY = "Tom & Jerry\n"
+_TRKASY_DATA_SHAPE_ALLOW_GROUPS = (
+    ("dsdevwide", _DS_DEVPROC_WIDE_ANCHOR, _DS_DEVPROC_WIDE_REPL, (
+        ("ds-allow-dev-shm-alone", "cat > /dev/shm/handoff.txt <<'EOF'\n" + _DS_AMP_BODY + "EOF"),
+        ("ds-allow-dev-shm-hashed", "cat > /dev/shm/handoff.txt <<'EOF'\n" + _DS_AMP_BODY
+         + "EOF\nsha256sum /dev/shm/handoff.txt"),
+        ("ds-allow-dev-null", "cat > /dev/null <<'EOF'\n" + _DS_AMP_BODY + "EOF"),
+        ("ds-allow-relative-dev-alone", "cat > dev/notes.md <<'EOF'\n" + _DS_AMP_BODY + "EOF"),
+        ("ds-allow-relative-dev-wc", "cat > dev/notes.md <<'EOF'\n" + _DS_AMP_BODY + "EOF\nwc dev/notes.md"),
+        ("ds-allow-relative-proc", "cat > proc/notes.md <<'EOF'\n" + _DS_AMP_BODY + "EOF\nls proc"),
+    )),
+)
 
 
 def _test_trkasy_data_shape_rules(failures, tmp):
     """Each data-shape proof rule has rows that DENY in registry scope and ALLOW when that one rule is reverted
     (_TRKASY_DATA_SHAPE_RULE_GROUPS, a scratch mutant per rule), so each row is red precisely when its rule is
-    gone: the cat write target restriction (an allowlisted last path component, or a /dev,/proc or '..'
-    target), the single-pipe rule, the no-extra-words-on-the-cat-line rule, the no-redirect-on-a-reader-segment
-    rule, and the plain-word rule (a substitution or quoted substitution in a reader's argument after a
-    write)."""
+    gone: each clause of the cat write target restriction on its own (a '..' component, an absolute /dev or
+    /proc target other than /dev/null or a path under /dev/shm/, an allowlisted last path component), the
+    single-pipe rule, the no-extra-words-on-the-cat-line rule, the no-redirect-on-a-reader-segment rule, and the
+    plain-word rule (a substitution or quoted substitution in a reader's argument after a write). The rows of
+    _TRKASY_DATA_SHAPE_ALLOW_GROUPS ALLOW in registry scope and DENY with the /dev and /proc clause widened
+    back to every dev or proc first part, so each is red if that wider rule returns."""
     root = tmp / "trkasy-data-shape-rules"
     (root / ".aiqt").mkdir(parents=True)
     (root / ".aiqt" / "orchestration.local.json").write_text(json.dumps({"version": 1}), encoding="utf-8")
     handler = aiqt_hooks.orch_truncation_guard
     seen = set()
-    for tag, anchor, replacement, rows in _TRKASY_DATA_SHAPE_RULE_GROUPS:
-        for label, command in rows:
-            if label in seen:
-                failures.append("(ds-labels) the rule rows repeat a label {!r}".format(label))
-            seen.add(label)
-            got = _decision(handler, command, cwd=str(root))
-            if got != "deny":
-                failures.append("({}) expected deny in registry scope; got {}".format(label, got))
-        decisions = _trkasy_heredoc_mutant_decisions(
-            failures, tmp, root, [command for _l, command in rows], anchor, replacement, tag)
-        if decisions is None:
-            continue
-        for (label, _command), got in zip(rows, decisions):
-            if got != "allow":
-                failures.append("({}-mutant) the row must allow with its rule reverted, so it pins the rule; "
-                                "got {}".format(label, got))
+    for groups, expected, reverted in ((_TRKASY_DATA_SHAPE_RULE_GROUPS, "deny", "allow"),
+                                       (_TRKASY_DATA_SHAPE_ALLOW_GROUPS, "allow", "deny")):
+        for tag, anchor, replacement, rows in groups:
+            for label, command in rows:
+                if label in seen:
+                    failures.append("(ds-labels) the rule rows repeat a label {!r}".format(label))
+                seen.add(label)
+                got = _decision(handler, command, cwd=str(root))
+                if got != expected:
+                    failures.append("({}) expected {} in registry scope; got {}".format(label, expected, got))
+            decisions = _trkasy_heredoc_mutant_decisions(
+                failures, tmp, root, [command for _l, command in rows], anchor, replacement, tag)
+            if decisions is None:
+                continue
+            for (label, _command), got in zip(rows, decisions):
+                if got != reverted:
+                    failures.append("({}-mutant) the row must {} with its rule reverted, so it pins the rule; "
+                                    "got {}".format(label, reverted, got))
 
 
 _WAIT_LOOP_DENY_COMMAND = "while true; do gh run view 1; sleep 30; done &"

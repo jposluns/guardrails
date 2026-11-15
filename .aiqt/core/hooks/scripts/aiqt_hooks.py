@@ -24416,8 +24416,10 @@ def _orch_heredoc_data_shape(command):
     an assignment, and the only separators are ';', '&&', '||' and newline, so none sits in a group, compound
     command, pipeline or substitution; the command holding each body is a plain cat (its only words `cat`, its
     only redirections '>'/'>>' to plain targets, writing to those files or, with none, to standard output),
-    and no write target's last path component is an allowlisted word (or `cat`) nor is the target under /dev
-    or /proc or reached through a '..', so a cat write cannot place a body where a later word runs it; and
+    and no write target is reached through a '..', is an ABSOLUTE path under /dev or /proc other than exactly
+    /dev/null or a path under /dev/shm/, or has a last path component that is an allowlisted word (or `cat`),
+    so a cat write cannot place a body where a later word runs it (a RELATIVE dev/ or proc/ target is an
+    ordinary project path); and
     every other simple command's first word is in _ORCH_DATA_SHAPE_ALLOWED, a short list of readers and the
     like that run or rename no file they name. A python3 -c or any interpreter, git, cp, mv, ln, eval, exec,
     source, a dot, read or printf -v fails the proof, as does any first word (echo and printf among them, and
@@ -24483,14 +24485,23 @@ def _orch_heredoc_data_shape(command):
             match = _ORCH_DATA_SHAPE_WORD_RE.match(command, i)
             if match is None:
                 return False
-            parts = [part for part in match.group().split("/") if part not in ("", ".")]
-            if (not parts or ".." in parts or parts[0] in ("dev", "proc")
-                    or parts[-1] in _ORCH_DATA_SHAPE_ALLOWED):
-                # A write target that could REPLACE a program the same command then runs is not a data
-                # shape: a last path component that is an allowlisted word (or cat) names the very program
-                # a reader segment resolves, and a target under /dev or /proc (or reached through a '..')
-                # can be the shell's own stream, not a file. Either lets a cat write place a body where a
-                # later word runs it, so the proof fails toward reading the bodies as commands.
+            target = match.group()
+            parts = [part for part in target.split("/") if part not in ("", ".")]
+            # A write target the proof cannot read as an ordinary file is not a data shape, and each case
+            # below fails the proof toward reading the bodies as commands. First, a target reached through a
+            # '..' can traverse to a place the plain word does not name (/abs/../dev/stdout).
+            if not parts or ".." in parts:
+                return False
+            # Second, an ABSOLUTE target under /dev or /proc can be the shell's own stream, not a file
+            # (/dev/stdout, /dev/stderr, /dev/fd/N, /dev/tty, any /proc path), except exactly /dev/null and a
+            # path under /dev/shm/, a regular tmpfs file. A RELATIVE dev/ or proc/ target is an ordinary
+            # project path here, read as any other relative file.
+            if (target.startswith("/") and parts[0] in ("dev", "proc")
+                    and parts != ["dev", "null"] and not (len(parts) > 2 and parts[:2] == ["dev", "shm"])):
+                return False
+            # Third, a last path component that is an allowlisted word (or cat) names the very program a
+            # reader segment resolves, so the write could REPLACE a program the same command then runs.
+            if parts[-1] in _ORCH_DATA_SHAPE_ALLOWED:
                 return False
             i = match.end()
             continue
@@ -24781,8 +24792,10 @@ def _orch_foreground_detach(command):
     in the manifest. A here-document body it reads on its own, in a command not proved a safe data-writing
     shape (_orch_heredoc_data_shape: `bash <<'EOF'` then `job &`, `cat <<'EOF' | bash`, `cat > s.sh <<'EOF'`
     then `bash s.sh`), is read as its consumer's commands, so the guard's lexer narrowing never lifts its
-    `&`; a written file run without the command naming it there keeps the earlier reading, a silent allow
-    disclosed in the manifest.
+    `&`. A cat write in a command the proof accepts whose file is run later without the command naming it
+    (a hook, a configuration a later program reads, or a later call, such as a body written into a shell
+    snapshot file a later shell sources) is read as data, a silent allow disclosed in the manifest's HONEST
+    RESIDUAL.
 
     OVER-REFUSAL RESIDUAL (disclosed): this scan reads a here-document body as data (its bare `&` alone, the
     body's quotes shifting nothing in the command) only when the WHOLE command is proved a safe data-writing
@@ -24790,8 +24803,9 @@ def _orch_foreground_detach(command):
     (_orch_heredoc_data_shape): every simple command outside the bodies made only of plain words (no quote,
     backslash, '$', backquote, parenthesis, brace, glob, pipe, bare '&' or redirection other than a cat
     write target), none an assignment, none in a group, compound command, pipeline or substitution; the
-    command holding each body a plain cat writing to plain targets (none whose last path component is an
-    allowlisted word or cat, and none under /dev or /proc or through a '..') or to standard output; and every
+    command holding each body a plain cat writing to plain targets (none reached through a '..', none an
+    ABSOLUTE path under /dev or /proc other than exactly /dev/null or a path under /dev/shm/, and none whose
+    last path component is an allowlisted word or cat) or to standard output; and every
     other simple command's first word in a short allowlist of readers that run or rename no file they name
     (cat, mkdir, the checksum tools, wc, ls, stat, cmp, diff, test, true, echo). Only in such a command does a
     quote, `&` or substitution in a body (`cat > f <<'EOF'` then `the user's file`, or a cat to standard
@@ -24800,12 +24814,17 @@ def _orch_foreground_detach(command):
     shell reading that text would for its bare `&`, apart from the command's quote state (_orch_foreground_scan,
     which does not model an unquoted delimiter's expansions or a nested here-document), so a body apostrophe no
     longer leaves the command's quote open; the detach then stands only where the command is not a data shape.
-    A body fed to a shell (bash, sh, dash, zsh, source /dev/stdin, a
-    cat piped onward), under a consumer the proof does not accept (a python3 -c or any interpreter, git,
-    echo or printf writing to a file, cp, mv, ln, eval, exec, source, a dot, read or printf -v), or written
-    to a file the same command then runs (bash FILE, sh FILE, source FILE, ./FILE, python3 FILE) is read as
-    those COMMANDS: a quote it leaves open denies beside an `&` or a runtime start form, as one in the
-    command's own text does, with or without an apostrophe elsewhere, and its bare `&` is never lifted. That
+    A body opened at the top level (not in the commit-message form below) fed to a shell (bash, sh, dash,
+    zsh, source /dev/stdin, a cat piped onward), under a consumer the proof does not accept (a python3 -c or
+    any interpreter, git, echo or printf writing to a file, cp, mv, ln, eval, exec, source, a dot, read or
+    printf -v), or written to a file the same command then runs (bash FILE, sh FILE, source FILE, ./FILE,
+    python3 FILE) is read as those COMMANDS: a quote it leaves open denies beside an `&` or a runtime start
+    form, as one in the command's own text does, with or without an apostrophe elsewhere, and its bare `&` is
+    never lifted. The commit-message form "$(cat <<'EOF' ... EOF)" is not read that way under any consumer:
+    under eval, sh -c or python3 -c its body `&` sits inside the double-quoted substitution, so the scan
+    reads no bare `&` and the command allows on the scan alone although the consumer runs the body and can
+    start a background job, a disclosed false allow (the manifest's KNOWN FALSE-ALLOW RESIDUAL (1) and (2)
+    and the nested shell string of its HONEST RESIDUAL). That
     over-refuses a body `&` under a consumer that does not run it (`git commit -F -`, the no-op `:`) and a
     written file a reader not on the allowlist names without running it. Every other body it reads as CODE at
     the outer quoting level: the commit-message form's in "$(cat <<'EOF' ... EOF)", one in a subshell or
