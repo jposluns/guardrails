@@ -222,9 +222,10 @@ LEGS (all run at the default step-1 invocation; none needs a manifest):
                         parser reads lines, cut at LF only (CommonMark reads a carriage return as a line
                         ending too); no other character ends a line there or in CommonMark, so a vertical
                         tab, U+0085, U+2028 and U+2029 stay inside their line; a checked line (the title is
-                        never checked) holding '<!' or '<?' anywhere (an inline HTML comment, processing
+                        never checked) holding '<!' or '<?' anywhere (possibly an inline HTML comment, processing
                         instruction, declaration or CDATA section, which the vendored renderer passes through
-                        as raw HTML that a browser does not show); a body with no frontmatter; a title
+                        as raw HTML that a browser does not show; it is not parsed, so it is refused even where
+                        it opens none); a body with no frontmatter; a title
                         heading with no blank line after it; a line the splitter cannot classify; a
                         paragraph that ends with an opener still open (an inch mark, a stray backtick); and
                         a unit with no letter (str.isalpha) or decimal digit (str.isdecimal), so an
@@ -234,8 +235,9 @@ LEGS (all run at the default step-1 invocation; none needs a manifest):
                         whitespace, read conservatively), so a wrapped line of prose that merely begins with
                         '#', '<' or a number is still prose. These, and only these, are refused; 'whitespace'
                         below is any character str.isspace admits, a no-break space and a vertical tab included.
-                        On ANY line: an ATX heading other than the title (one to six '#' then whitespace or
-                        the line end); a bullet item ('-', '*' or '+' then whitespace or the line end); an
+                        On ANY line: an ATX heading (one to six '#' then whitespace or the line end) other than the
+                        title and the one `## Detail` split line (see LAYER); a bullet item ('-', '*' or '+' then
+                        whitespace or the line end); an
                         ordered item numbered 1 (up to eight leading zeros, '1', then '.' or ')' and
                         whitespace or the line end), the only number that can interrupt a paragraph; a
                         blockquote ('>'); a line that opens with '|' (a table row, or a delimiter row with a
@@ -265,8 +267,12 @@ LEGS (all run at the default step-1 invocation; none needs a manifest):
                         vertical tab, and a setext underline with a trailing no-break space); a line whose
                         every '|'-separated cell begins with '-' or ':-', such as '--force is the flag.', is
                         refused wherever it stands, though only a header line holding a '|' with as many
-                        cells above it makes it a delimiter row; '<!' or '<?' inside a code span is refused,
-                        though a renderer shows it; as a paragraph's first line, '<b>bold</b>' and '<path> or
+                        cells above it makes it a delimiter row; '<!' or '<?' is refused wherever it stands on a
+                        checked line, since the check does not parse it, though a renderer shows it as text inside
+                        a code span ('`<!--`'), after a backslash ('\\<!--'), and anywhere but at a line's start
+                        where it opens no HTML comment, processing instruction, declaration or CDATA section
+                        ('Press <!> twice.', 'Type a <? b to start.', a '<!--' that no '-->' closes in its
+                        paragraph); as a paragraph's first line, '<b>bold</b>' and '<path> or
                         <ref>' are refused though they hold more than one tag, '[See the note]: it holds.' is
                         refused though no destination follows, and '[the note' is refused when its bracket
                         closes on a later line with no ':' after it; and a line such as '> 5 minutes is a
@@ -281,7 +287,12 @@ LEGS (all run at the default step-1 invocation; none needs a manifest):
                         which must then be covered or exempted. Inline raw HTML other than '<!' and '<?' (a
                         tag mid-line, such as a span with a hidden attribute, or a script or style element
                         opened mid-line) is read as text its unit holds; whether a renderer shows it is not
-                        judged.
+                        judged. Likewise a link destination, a link title and an image's alt text (in
+                        '[text](destination "title")' and '![alt](source)') are read as text their unit holds,
+                        though the vendored renderer emits them only as the href, title and alt attributes, not
+                        as page text, so they can hold unit text a reader does not see on the page (a title shows
+                        at most as a tooltip, and alt text only where the image does not load or through a screen
+                        reader).
 
 DEFERRED manifest-SOURCES leg (7.2 + round-10 R10-2 / gemini R9-4): the leg that cross-checks each row's
 source-digest against the manifest's SOURCES entry is OFF by default and reads no manifest. It runs only
@@ -1162,8 +1173,9 @@ _TITLE_RE = re.compile(r"# \S")  # the one heading a rule body opens with: its t
 # opf/tools/_vendor/marko/source.py rewrites CRLF, a bare CR and a form feed to LF, and the parser then cuts lines
 # at LF only, so no other character ends a line there; the LF-only splitter refuses each, wherever it stands
 _RENDERER_LINE_BREAKS = (("\r", "carriage return"), ("\f", "form feed"))
-# an inline HTML comment, processing instruction, declaration or CDATA section, which the vendored renderer
-# passes through as raw HTML that a browser does not show, so its text would sit in a unit unseen
+# possibly an inline HTML comment, processing instruction, declaration or CDATA section, which the vendored
+# renderer passes through as raw HTML that a browser does not show, so its text would sit in a unit unseen; it
+# is matched, not parsed, so it also refuses a '<!' or '<?' that opens none (disclosed under over-refusal)
 _HIDDEN_INLINE_RE = re.compile(r"<[!?]")
 # the vendored GFM table's row splitter and delimiter-cell test (TableRow in
 # opf/tools/_vendor/marko/ext/gfm/elements.py), for _is_table_delimiter_row
@@ -1285,9 +1297,11 @@ def rule_units(source, where):
                 raise GateError("{} line {}: the text-coverage splitter cannot classify {!r} (markup "
                                 "the sentence grammar does not model); cannot evaluate".format(where, number, line))
             elif _HIDDEN_INLINE_RE.search(line):
-                raise GateError("{} line {}: the text-coverage splitter cannot classify {!r} (an inline HTML "
-                                "comment, processing instruction or declaration, '<!' or '<?', whose text a "
-                                "renderer does not show); cannot evaluate".format(where, number, line))
+                raise GateError("{} line {}: the text-coverage splitter cannot classify {!r} (potential inline "
+                                "HTML: '<!' or '<?' may open an HTML comment, processing instruction, declaration "
+                                "or CDATA section, whose text a renderer does not show; the check does not parse "
+                                "it, so it is refused even when escaped or not HTML, such as inside a code span); "
+                                "cannot evaluate".format(where, number, line))
             first = para_start = False
         else:
             after_title, para_start = False, True
