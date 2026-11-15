@@ -7,8 +7,8 @@ one implementation does not predict a CI run on another, so this gate records, f
 reviewed inventory .aiqt/coreutils-tests.json and in every execution environment it declares, which file the
 run actually selects and what that file says it is:
 
-  check_coreutils_environment.py              probe and report; a recognised non-GNU program warns
-  check_coreutils_environment.py --ci         the same, but a recognised non-GNU program fails (exit 1)
+  check_coreutils_environment.py              probe and report; a program not identified as GNU warns
+  check_coreutils_environment.py --ci         the same, but a program not identified as GNU fails (exit 1)
   check_coreutils_environment.py --self-test  the fixture and mutant vectors (no real coreutils program run)
 
 A run is in CI mode with --ci or when the environment variable GITHUB_ACTIONS is exactly true (GitHub Actions
@@ -33,17 +33,21 @@ The first stdout line must be exactly '<program> (GNU <family>) <version>' or '<
 
 Outcomes, one per program and environment: OK (a recognised banner), MISSING (no executable of that name on
 that PATH, or PATH unset), PROBE_FAILED (the file could not be started, exited other than 0, or printed more
-than OUTPUT_LIMIT bytes), TIMEOUT, and UNRECOGNIZED (exit 0 but any other first line: another program's
-banner, another family, another implementation, an empty or malformed line). An UNRECOGNIZED program ran, so
-it is read as an unrecognised implementation, which is not GNU: like a recognised non-GNU program it warns
-locally and fails in CI mode. MISSING, PROBE_FAILED and TIMEOUT identify nothing and are cannot-evaluate.
+than OUTPUT_LIMIT bytes), TIMEOUT, NO_BANNER (exit 0 with no stdout at all, or a first line that is empty or
+holds only ASCII whitespace, whatever follows it), and UNRECOGNIZED (exit 0 and a non-empty first line that is
+not a recognised banner: another program's banner, another family, another implementation, a malformed line).
+An UNRECOGNIZED program ran and named something this gate does not recognise, so it is read as an unknown
+implementation: it is not identified as GNU, so it warns locally and fails in CI mode, as a recognised
+implementation other than GNU does, and the SCOPE line calls the implementation unknown. MISSING, PROBE_FAILED,
+TIMEOUT and NO_BANNER establish no implementation and are cannot-evaluate (exit 2) in local and in CI mode.
 
 Supported local hosts. The local runner passes this gate only where every inventoried program, on the runner's
-PATH and on each fixed PATH, starts, exits 0 on --version within PROBE_TIMEOUT and prints at most OUTPUT_LIMIT
-bytes. GNU coreutils and diffutils pass (PASS); uutils coreutils and any other implementation whose programs
-answer --version that way warn (WARNING). A host where any of them rejects --version with a nonzero exit, as
-the native cp of macOS and the BSDs does, is cannot-evaluate (exit 2), so the local runner does not support it
-unless GNU or uutils coreutils (and GNU diffutils) come first on each of those PATH values.
+PATH and on each fixed PATH, starts, exits 0 on --version within PROBE_TIMEOUT, prints at most OUTPUT_LIMIT
+bytes and prints a first line that is not empty or whitespace only. GNU coreutils and diffutils pass (PASS);
+uutils coreutils and any other implementation whose programs answer --version that way warn (WARNING). A host
+where any of them rejects --version with a nonzero exit, as the native cp of macOS and the BSDs does, or
+answers it with no first line, is cannot-evaluate (exit 2), so the local runner does not support it unless GNU
+or uutils coreutils (and GNU diffutils) come first on each of those PATH values.
 
 Each run prints one report: a header naming the probe and the mode, one block per environment with its PATH
 and one line per program (name, outcome, path, symlink target, implementation, version and, for a non-OK
@@ -57,13 +61,14 @@ full makes the run cannot-evaluate (exit 2), so a run that exits 0 has written i
 RESULT: PASS line carries that text.
 
 Exit convention (matches the repo's gates):
-  0  every program in every environment exited 0 within the bounds: all GNU (PASS), or, outside CI mode, at
-     least one program that is not GNU, recognised or UNRECOGNIZED (a WARNING line names each; the scope is
-     local, not CI-equivalent)
-  1  CI mode and at least one program is not GNU, recognised or UNRECOGNIZED
+  0  every program in every environment exited 0 within the bounds with a non-empty first line: all GNU (PASS),
+     or, outside CI mode, at least one program not identified as GNU, a recognised other implementation or an
+     UNRECOGNIZED unknown one (a WARNING line names each; the scope is local, not CI-equivalent)
+  1  CI mode and at least one program not identified as GNU, a recognised other implementation or an
+     UNRECOGNIZED unknown one
   2  cannot evaluate: the inventory is unreadable, not UTF-8 JSON, repeats a key or leaves its closed schema;
-     any program is MISSING, PROBE_FAILED or TIMEOUT in any environment; the arguments are not recognised;
-     the scope record was asked for and could not be written
+     any program is MISSING, PROBE_FAILED, TIMEOUT or NO_BANNER in any environment, in either mode; the
+     arguments are not recognised; the scope record was asked for and could not be written
 
 NOT CHECKED: a version banner is the program's own claim, not an authentication of the binary; matching
 implementations do not imply matching versions or matching behaviour; PATH changes, a file replaced after the
@@ -121,6 +126,7 @@ OK = "OK"
 MISSING = "MISSING"
 PROBE_FAILED = "PROBE_FAILED"
 TIMEOUT = "TIMEOUT"
+NO_BANNER = "NO_BANNER"
 UNRECOGNIZED = "UNRECOGNIZED"
 IMPLEMENTATIONS = ("GNU", "uutils")
 FAMILIES = ("coreutils", "diffutils")
@@ -139,6 +145,8 @@ BARE_RE = re.compile(r"[A-Za-z0-9_./+:@,=~-]+", re.ASCII)
 SCOPE_LABELS = {
     "match": "coreutils matches CI ({}) by implementation, not by version",
     "differs": "coreutils differs from CI ({}); see the per-program report",
+    "unknown": "coreutils implementation unknown for at least one program, so CI ({}) may differ; see the "
+               "per-program report",
     "incomplete": "coreutils identity incomplete; see the per-program report",
 }
 
@@ -325,6 +333,15 @@ def identify(environment, program, path_value, timeout, limit):
     if returncode != 0:
         return Row(environment, name, selected, target, "", "", PROBE_FAILED,
                    "{} {} exited {}".format(name, PROBE_ARGUMENT, returncode))
+    # No stdout, or a first line that is empty or ASCII whitespace only, names no implementation at all, so it
+    # establishes nothing and is cannot-evaluate in either mode, never an unknown implementation (which warns
+    # locally and fails only in CI mode).
+    if not output:
+        return Row(environment, name, selected, target, "", "", NO_BANNER,
+                   "{} {} exited 0 and printed nothing on stdout".format(name, PROBE_ARGUMENT))
+    if not output.split(b"\n", 1)[0].strip():
+        return Row(environment, name, selected, target, "", "", NO_BANNER,
+                   "{} {} exited 0 and its first line is empty or whitespace only".format(name, PROBE_ARGUMENT))
     parsed = parse_banner(name, family, output)
     if parsed is None:
         first = output.split(b"\n", 1)[0][:120].decode("ascii", "replace")
@@ -334,23 +351,28 @@ def identify(environment, program, path_value, timeout, limit):
 
 
 def verdict(rows, expected, ci):
-    """(exit code, verdict line, scope) for the rows. A program that ran and printed a banner this gate does not
-    recognise is an unrecognised implementation, not GNU, so it is read as a recognised non-GNU program is."""
+    """(exit code, verdict line, scope) for the rows. Every outcome but OK and UNRECOGNIZED (NO_BANNER among
+    them: no stdout, or an empty or whitespace-only first line) establishes no implementation, so it is
+    cannot-evaluate in either mode. A program that printed a non-empty first line this gate does not recognise
+    is an unknown implementation: it is not identified as the expected one, so, as a recognised other
+    implementation does, it warns locally and fails in CI mode, and the scope names it as unknown."""
     incomplete = [row for row in rows if row.outcome not in (OK, UNRECOGNIZED)]
     if incomplete:
-        return 2, "CANNOT EVALUATE: {} program(s) could not be probed to an exit 0 within the bounds: {}".format(
-            len(incomplete), ", ".join("{} in {} {}".format(row.name, row.environment, row.outcome)
-                                       for row in incomplete)), "incomplete"
+        return 2, ("CANNOT EVALUATE: {} program(s) established no implementation (each must exit 0 within the "
+                   "bounds with a non-empty first line): {}".format(
+                       len(incomplete), ", ".join("{} in {} {}".format(row.name, row.environment, row.outcome)
+                                                  for row in incomplete))), "incomplete"
     differs = [row for row in rows if row.outcome != OK or row.implementation != expected]
     named = ", ".join("{} in {} is {}".format(row.name, row.environment, "{} {}".format(
-        row.implementation, row.version) if row.outcome == OK else "an unrecognised implementation")
+        row.implementation, row.version) if row.outcome == OK else "an unknown implementation")
         for row in differs)
+    scope = "unknown" if any(row.outcome == UNRECOGNIZED for row in differs) else "differs"
     if differs and ci:
-        return 1, "FAIL: CI mode requires {} for every program, and {} differ: {}".format(
-            expected, len(differs), named), "differs"
+        return 1, ("FAIL: CI mode requires {} for every program, and {} program(s) are not identified as {}: "
+                   "{}".format(expected, len(differs), expected, named)), scope
     if differs:
-        return 0, ("WARNING: {} program(s) are not {}, the CI implementation, so this local run does "
-                   "not predict CI: {}".format(len(differs), expected, named)), "differs"
+        return 0, ("WARNING: {} program(s) are not identified as {}, the CI implementation, so this local run "
+                   "does not predict CI: {}".format(len(differs), expected, named)), scope
     return 0, "PASS: every program in every environment reports {}".format(expected), "match"
 
 
@@ -490,6 +512,26 @@ MUTANTS = (
      "    differs = [row for row in rows if row.outcome != OK or row.implementation != expected]\n",
      "    differs = [row for row in rows if row.outcome == OK and row.implementation != expected]\n",
      "malformed-output"),
+    ("unknown-scope",
+     "    scope = \"unknown\" if any(row.outcome == UNRECOGNIZED for row in differs) else \"differs\"\n",
+     "    scope = \"differs\"\n",
+     "malformed-output"),
+    ("empty-output-cannot-evaluate",
+     "NO_BANNER,\n                   \"{} {} exited 0 and printed nothing",
+     "UNRECOGNIZED,\n                   \"{} {} exited 0 and printed nothing",
+     "empty-output"),
+    ("empty-output-check",
+     "    if not output:\n",
+     "    if False:\n",
+     "empty-output"),
+    ("empty-first-line-cannot-evaluate",
+     "NO_BANNER,\n                   \"{} {} exited 0 and its first line",
+     "UNRECOGNIZED,\n                   \"{} {} exited 0 and its first line",
+     "empty-first-line"),
+    ("empty-first-line-check",
+     "    if not output.split(b\"\\n\", 1)[0].strip():\n",
+     "    if False:\n",
+     "empty-first-line"),
     ("start-failure-classified",
      "        return PROBE_FAILED, None, b\"\", \"it could not be started ({})\".format(type(exc).__name__)\n",
      "        return None, 0, b\"\", \"it could not be started ({})\".format(type(exc).__name__)\n",
@@ -602,6 +644,9 @@ def _fixtures(base):
         "slow": lambda name, family: sleeper + "printf '{} (GNU {}) 9.4\\n'\n".format(name, family),
         "malformed": lambda name, family: "printf 'hello from {}\\n'\n".format(name),
         "empty": lambda name, family: "",
+        "blank-first": lambda name, family: "printf '\\n{} (GNU {}) 9.4\\n'\n".format(name, family),
+        "space-first": lambda name, family: "printf ' \\t\\r\\n{} (GNU {}) 9.4\\n'\n".format(name, family),
+        "space-only": lambda name, family: "printf '  '\n",
         "other-name": lambda name, family: "printf 'mv (GNU {}) 9.4\\n'\n".format(family),
         "other-family": lambda name, family: "printf '{} (GNU diffutils) 3.10\\n'\n".format(name),
         "busybox": lambda name, family: "printf 'BusyBox v1.36.1 (2024-01-01) multi-call binary.\\n'\n",
@@ -634,6 +679,8 @@ def _fixtures(base):
     make("slow", "slow", ("cat",))
     make("malformed", "malformed", ("cp",))
     make("empty", "empty", ("cp",))
+    for key in ("blank-first", "space-first", "space-only"):
+        make(key, key, ("cp",))
     make("other-name", "other-name", ("cp",))
     make("other-family", "other-family", ("cp",))
     make("busybox", "busybox", ("cp",))
@@ -731,15 +778,40 @@ def _vectors(m, dirs, log):
     out["timeout"] = ((slow[0], rows_of(slow), elapsed < 2.5), (2, [("cat", "TIMEOUT", "", "")], True))
     flood = m.evaluate((CP,), (("runner", dirs["flood"]),), "GNU", False)
     out["oversized-output"] = ((flood[0], rows_of(flood)), (2, [("cp", "PROBE_FAILED", "", "")]))
-    # A program that ran and printed a banner the gate does not recognise warns locally and fails in CI mode.
+    # A program that ran and printed a non-empty first line the gate does not recognise is an unknown
+    # implementation: it warns locally and fails in CI mode, and no text calls it anything but unknown.
     bad = []
-    for key in ("malformed", "empty", "other-name", "other-family", "busybox"):
+    unknown = "cp in runner is an unknown implementation"
+    for key in ("malformed", "other-name", "other-family", "busybox"):
         result = m.evaluate((CP,), (("runner", dirs[key]),), "GNU", False)
         in_ci = m.evaluate((CP,), (("runner", dirs[key]),), "GNU", True)
-        bad.append((key, result[0], result[1][-1].split(":")[0], rows_of(result), in_ci[0],
-                    in_ci[1][-1].split(":")[0]))
-    out["malformed-output"] = (bad, [(key, 0, "WARNING", [("cp", "UNRECOGNIZED", "", "")], 1, "FAIL")
-                                     for key in ("malformed", "empty", "other-name", "other-family", "busybox")])
+        bad.append((key, result[0], result[3], result[1][-2], result[1][-1], rows_of(result), in_ci[0], in_ci[3],
+                    in_ci[1][-2], in_ci[1][-1]))
+    out["malformed-output"] = (bad, [
+        (key, 0, "unknown", "SCOPE: local scope; " + SCOPE_LABELS["unknown"].format("GNU"),
+         "WARNING: 1 program(s) are not identified as GNU, the CI implementation, so this local run does not "
+         "predict CI: " + unknown, [("cp", "UNRECOGNIZED", "", "")],
+         1, "unknown", "SCOPE: CI scope; " + SCOPE_LABELS["unknown"].format("GNU"),
+         "FAIL: CI mode requires GNU for every program, and 1 program(s) are not identified as GNU: " + unknown)
+        for key in ("malformed", "other-name", "other-family", "busybox")])
+    # A probe that exits 0 and prints nothing establishes no implementation: cannot-evaluate in both modes.
+    silent = [m.evaluate((CP,), (("runner", dirs["empty"]),), "GNU", in_ci) for in_ci in (False, True)]
+    out["empty-output"] = (
+        [(result[0], result[3], rows_of(result), result[2][0].reason, result[1][-1]) for result in silent],
+        [(2, "incomplete", [("cp", "NO_BANNER", "", "")], "cp --version exited 0 and printed nothing on stdout",
+          "CANNOT EVALUATE: 1 program(s) established no implementation (each must exit 0 within the bounds with "
+          "a non-empty first line): cp in runner NO_BANNER")] * 2)
+    # An empty or whitespace-only first line establishes nothing either, even when a GNU banner follows it on
+    # the next line (only the first line is read) and when the whitespace is all the output there is.
+    blank = []
+    for key in ("blank-first", "space-first", "space-only"):
+        for in_ci in (False, True):
+            result = m.evaluate((CP,), (("runner", dirs[key]),), "GNU", in_ci)
+            blank.append((key, in_ci, result[0], result[3], rows_of(result), result[2][0].reason))
+    out["empty-first-line"] = (blank, [
+        (key, in_ci, 2, "incomplete", [("cp", "NO_BANNER", "", "")],
+         "cp --version exited 0 and its first line is empty or whitespace only")
+        for key in ("blank-first", "space-first", "space-only") for in_ci in (False, True)])
     unstarted = m.evaluate((CP,), (("runner", dirs["noshebang"]),), "GNU", False)
     out["cannot-start"] = ((unstarted[0], rows_of(unstarted), unstarted[2][0].reason.split(" (")[0]),
                            (2, [("cp", "PROBE_FAILED", "", "")], "it could not be started"))

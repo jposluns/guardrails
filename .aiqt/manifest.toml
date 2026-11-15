@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.0.5"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "41eb39934d4fada6ba90a301b958a582ba66467e5b0c579a6f43f7715f0f8bce"
+tree-sha256 = "8636aae620ccdbcfb212b4ef937236e776e1286c552d2b4cad46dfa70ab318fc"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -72,8 +72,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 594980
-sha256 = "62617170128fbffcc7a19361ab962553d7b8815222c4e18aee6d054bf334a5a9"
+bytes = 595399
+sha256 = "bada7606b2abaab8105a8ff290c95dbd4e9707008e5cd2620cc48eb2f6f2ec48"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -4182,8 +4182,8 @@ sha256 = "e06cc6647c60c3eca96d5491c5e784bc9a4f47d91b72381a908ef4cd88ea86a5"
 
 [[sources]]
 path = "tools/check_coreutils_environment.py"
-bytes = 56980
-sha256 = "c597e63425785a69b9ae0e5caac1b3e21bfcfe99756aee4a8999b98c17e05683"
+bytes = 62144
+sha256 = "0208f21a17e957ebd8c0989e00a53b6393a00fc95f9348d17bc34da56ba987f8"
 
 [[sources]]
 path = "tools/check_crosswalk.py"
@@ -4667,8 +4667,8 @@ sha256 = "2b1d57119dd5e8849a0b28d9c58e35f2cfb900742b738b787e68b28650b39c22"
 
 [[sources]]
 path = "tools/run_all_checks.sh"
-bytes = 31448
-sha256 = "675f0a32cb2c8c7852facbbc608e45e62edfe3f9cc68d373426620b34a1f9556"
+bytes = 31607
+sha256 = "e750f784503233184773631151726a8354e8c569e60e56a9dc7c5e96baf17424"
 
 [[sources]]
 path = "tools/selftest_aiqt_corpus.py"

@@ -55,11 +55,12 @@ run_gate "child-status-coverage-selftest" python3 -I -B tools/check_selftest_exe
 run_gate "child-status-coverage" python3 -I -B tools/check_child_status_coverage.py
 # The coreutils implementation report, right after the child-status checks: it resolves every program in
 # .aiqt/coreutils-tests.json on this runner's PATH and on the removal oracle's fixed /usr/bin:/bin, each on its
-# own, and probes it. A missing, failed or timed-out probe exits 2 and fails the run, so a host whose
-# programs reject --version (the native cp of macOS and the BSDs) is not supported; an implementation other
-# than GNU (the CI one), recognised or not, prints a WARNING line and passes. The final RESULT: PASS line
-# carries the SCOPE text this gate printed in this run, read from the record it writes, so a local pass
-# names its coreutils scope instead of reading like a prediction of CI.
+# own, and probes it. A missing, failed or timed-out probe, or one that prints nothing or an empty or
+# whitespace-only first line, exits 2 and fails the run, so a host whose programs reject --version (the native
+# cp of macOS and the BSDs) is not supported; a program not identified as GNU (the CI one), a recognised other
+# implementation or an unknown one (a non-empty first line the gate does not recognise), prints a WARNING line
+# and passes. The final RESULT: PASS line carries the SCOPE text this gate printed in this run, read from the
+# record it writes, so a local pass names its coreutils scope instead of reading like a prediction of CI.
 run_gate "coreutils-environment-selftest" python3 -I -B tools/check_coreutils_environment.py --self-test
 run_gate "coreutils-environment" python3 -I -B tools/check_coreutils_environment.py
 run_gate "secrets"   python3 -I -B tools/check_secrets.py
