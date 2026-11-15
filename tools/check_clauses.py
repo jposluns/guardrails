@@ -1191,7 +1191,7 @@ _TITLE_RE = re.compile(r"# \S")  # the one heading a rule body opens with: its t
 _RENDERER_LINE_BREAKS = (("\r", "carriage return"), ("\f", "form feed"))
 # possibly an inline HTML comment, processing instruction, declaration or CDATA section, which the vendored
 # renderer passes through as raw HTML that a browser does not show, so its text would sit in a unit unseen; it
-# is matched, not parsed, so it also refuses a '<!' or '<?' that opens none (disclosed under over-refusal)
+# is matched, not parsed, so it also refuses a '<!' or '<?' that opens none (disclosed in the passage on why the class is wider than CommonMark)
 _HIDDEN_INLINE_RE = re.compile(r"<[!?]")
 # a backslash at a line's end, which the vendored inline parser (LineBreak in opf/tools/_vendor/marko/inline.py)
 # reads as a hard line break: it renders '<br />' between the line and the next, so a sentence end before it is
@@ -2199,7 +2199,8 @@ def self_test_main(_mkdtemp=None, _vectors=True):  # noqa: C901  a flat sequence
         except GateError as exc:
             failures.append("rule_units: {!r} inside a line was refused: {}".format(char, exc))
     # An inline HTML comment, processing instruction, declaration or CDATA section passes through as raw HTML a
-    # browser does not show, so '<!' or '<?' anywhere in a body line is refused, on a first or a wrapped line.
+    # browser does not show, and '<!' or '<?' is matched, not parsed, so it is refused anywhere in a body line,
+    # on a first or a wrapped line, even where it opens none (an unclosed '<!--', one inside a code span).
     for line in ("Alpha holds <!-- hidden words --> today.", "Alpha holds <!--", "Alpha holds <?php hidden ?> today.",
                  "Alpha holds <![CDATA[hidden]]> today.", "Alpha holds <!X hidden> today.", "Use `<!--` here."):
         for text in (line + "\n", "See the start of the PR\n" + line + "\nhidden words --> today.\n"):
