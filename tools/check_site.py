@@ -460,9 +460,12 @@ def card_findings(label, metas, site_root, hosts):
 NOT_FOUND_URL_ATTRS = {"href", "src", "srcset", "poster", "data", "action", "xlink:href"}
 # The (element, attribute) pairs the live 404 pages load a resource through: these must be root-absolute (a
 # fragment-only or query-only value resolves against the request URL, https:// names another host). The one
-# pair the live 404 pages write https:// on is a href, so no other pair accepts it.
+# pair the live 404 pages write https:// on is a href, so no other pair accepts it. A browser reads the scheme
+# case-insensitively (ASCII only), so https:// is accepted in any letter case (decision D15, 2026-11-15); the
+# generator writes it in lower case.
 NOT_FOUND_LOADING_PAIRS = frozenset((("link", "href"), ("script", "src")))
 NOT_FOUND_HTTPS_PAIRS = frozenset((("a", "href"),))
+_HTTPS_PREFIX = "https://"
 _HTML_SPACE = "\t\n\f\r "
 _RAW_TAG_RE = re.compile(r"<[A-Za-z]")
 # After a leading "/", a browser reads a backslash as a second slash and drops tabs and newlines, so any of
@@ -484,6 +487,14 @@ NOT_FOUND_ATTRIBUTES = frozenset((
     "target", "text-anchor", "type", "viewbox", "width", "x", "y",
 ))
 NOT_FOUND_META_ATTRIBUTES = frozenset(("charset", "content", "name"))
+# The values, exactly as written, a meta attribute other than content may carry on a live 404 page: an
+# allowed name with any other value (a referrer policy, another charset) is a finding. Taken from the live 404
+# pages before the template cutover (charset, and the viewport, description and robots names); content is
+# read by its name, so pinning the name fixes what content means (its url( check still applies).
+NOT_FOUND_META_VALUES = {
+    "charset": frozenset(("utf-8",)),
+    "name": frozenset(("description", "robots", "viewport")),
+}
 NOT_FOUND_ONCLICK = frozenset(("toggleNav()", "toggleTheme()"))
 NOT_FOUND_PRESENTATION = {
     "fill": frozenset(("var(--accent)", "var(--accent-2)")),
@@ -514,6 +525,16 @@ NOT_FOUND_DRAFT_ATTRIBUTES = frozenset((
 ))
 # "property" is the og:description meta the generator writes from each page's description.
 NOT_FOUND_DRAFT_META_ATTRIBUTES = frozenset(("charset", "content", "name", "property"))
+# The meta values the generated 404 pages write (site/404.html and opf/site/404.html): the charset, the
+# viewport and description names, and the link-preview card names and properties (_social_metas).
+NOT_FOUND_DRAFT_META_VALUES = {
+    "charset": frozenset(("utf-8",)),
+    "name": frozenset(("description", "twitter:card", "twitter:image", "viewport")),
+    "property": frozenset((
+        "og:description", "og:image", "og:image:alt", "og:image:height", "og:image:width", "og:site_name",
+        "og:title", "og:type", "og:url",
+    )),
+}
 NOT_FOUND_DRAFT_ONCLICK = frozenset()
 NOT_FOUND_DRAFT_PRESENTATION = {
     "fill": frozenset(("none",)),
@@ -618,10 +639,12 @@ def not_found_reference_ok(element, name, value):
     """Whether a URL value of attribute `name` on `element`, taken as written, is safe on a 404 page (served
     at any path): exactly one leading "/" followed by a safe character or nothing; also fragment-only or
     query-only unless the pair loads a resource (NOT_FOUND_LOADING_PAIRS); also https:// on a pair in
-    NOT_FOUND_HTTPS_PAIRS. Nothing is percent-decoded, so "%2F..." is not a slash."""
+    NOT_FOUND_HTTPS_PAIRS, its scheme in any ASCII letter case ("HTTPS://" too, as a browser reads it).
+    Nothing is percent-decoded, so "%2F..." is not a slash."""
     if (element, name) not in NOT_FOUND_LOADING_PAIRS and value.startswith(("#", "?")):
         return True
-    if (element, name) in NOT_FOUND_HTTPS_PAIRS and value.startswith("https://"):
+    scheme = value[:len(_HTTPS_PREFIX)]
+    if (element, name) in NOT_FOUND_HTTPS_PAIRS and scheme.isascii() and scheme.lower() == _HTTPS_PREFIX:
         return True
     return value.startswith("/") and value[1:2] not in _SECOND_SLASH
 
@@ -646,7 +669,7 @@ def not_found_reference_findings(label, text):
                         "host are refused").format(element, name)
             elif (element, name) in NOT_FOUND_HTTPS_PAIRS:
                 rule = ("{} on a 404 page must be root-absolute (one leading /), fragment-only, query-only or "
-                        "https://; a 404 page is served at any path").format(name)
+                        "https:// (scheme in any letter case); a 404 page is served at any path").format(name)
             else:
                 rule = ("{} on a 404 page must be root-absolute (one leading /), fragment-only or query-only (https:// "
                         "only on a href); a 404 page is served at any path").format(name)
@@ -665,7 +688,8 @@ def not_found_structure_findings(label, text, draft=False):
     """Findings for the raw markup `text` of a 404 page named `label` against the structural allowlist (the
     NOT_FOUND_DRAFT_* sets in place of the NOT_FOUND_* ones when `draft` is true, for a draft 404 page): an
     element or attribute name raw_tags finds that is not in NOT_FOUND_ELEMENTS or NOT_FOUND_ATTRIBUTES, a meta
-    attribute outside NOT_FOUND_META_ATTRIBUTES, an onclick or SVG presentation value the live 404 pages do
+    attribute outside NOT_FOUND_META_ATTRIBUTES, a meta attribute named in NOT_FOUND_META_VALUES whose value
+    as written (an empty value for a name written without "=") is not one listed there, an onclick or SVG presentation value the live 404 pages do
     not use, any value or script or style text that contains "url(" (any case, as written or with its
     character references decoded), a script without src whose body's sha256 is not pinned in
     NOT_FOUND_INLINE_SCRIPT_SHA256, a script with src whose body is not empty, and any script start tag at or
@@ -675,13 +699,14 @@ def not_found_structure_findings(label, text, draft=False):
     (it trusts the pinned script bodies), nor what the same-origin script, stylesheet or icon a root-absolute
     URL loads contains."""
     if draft:
-        kind, elements, attribute_names, meta_names = (
-            "draft", NOT_FOUND_DRAFT_ELEMENTS, NOT_FOUND_DRAFT_ATTRIBUTES, NOT_FOUND_DRAFT_META_ATTRIBUTES)
+        kind, elements, attribute_names, meta_names, meta_values = (
+            "draft", NOT_FOUND_DRAFT_ELEMENTS, NOT_FOUND_DRAFT_ATTRIBUTES, NOT_FOUND_DRAFT_META_ATTRIBUTES,
+            NOT_FOUND_DRAFT_META_VALUES)
         onclicks, presentation, inline_scripts = (
             NOT_FOUND_DRAFT_ONCLICK, NOT_FOUND_DRAFT_PRESENTATION, NOT_FOUND_DRAFT_INLINE_SCRIPT_SHA256)
     else:
-        kind, elements, attribute_names, meta_names = (
-            "live", NOT_FOUND_ELEMENTS, NOT_FOUND_ATTRIBUTES, NOT_FOUND_META_ATTRIBUTES)
+        kind, elements, attribute_names, meta_names, meta_values = (
+            "live", NOT_FOUND_ELEMENTS, NOT_FOUND_ATTRIBUTES, NOT_FOUND_META_ATTRIBUTES, NOT_FOUND_META_VALUES)
         onclicks, presentation, inline_scripts = (
             NOT_FOUND_ONCLICK, NOT_FOUND_PRESENTATION, NOT_FOUND_INLINE_SCRIPT_SHA256)
     out = []
@@ -702,6 +727,9 @@ def not_found_structure_findings(label, text, draft=False):
                 out.append("{}:{}: attribute {} on <meta> is not one the {} 404 pages use on meta".format(
                     label, attr_line, name, kind))
             value = "" if value is None else value
+            if element == "meta" and name in meta_values and value not in meta_values[name]:
+                out.append("{}:{}: {} value on <meta> is not one the {} 404 pages use -> {!r}".format(
+                    label, attr_line, name, kind, value))
             if _URL_FUNCTION in value.lower() or _URL_FUNCTION in unescape(value).lower():
                 out.append("{}:{}: {} value on a 404 page contains url(, which loads relative to the page "
                            "-> {!r}".format(label, attr_line, name, value))
@@ -1402,8 +1430,8 @@ def _touch_icon_self_test(quiet):
 
 def _not_found_links_self_test():
     """The 404-page reference allowlist: every URL-bearing attribute value on a page named 404.html, top-level
-    or nested, that is not root-absolute, fragment-only or query-only (https:// too on a href; root-absolute
-    only on script src and link href) is a finding even where it resolves from the page's own directory, and
+    or nested, that is not root-absolute, fragment-only or query-only (https:// too on a href, its scheme in
+    any letter case; root-absolute only on script src and link href) is a finding even where it resolves from the page's own directory, and
     the same relative links pass on any other page."""
     import contextlib
     import io
@@ -1415,12 +1443,24 @@ def _not_found_links_self_test():
             return _scan_root(base, "site"), out.getvalue()
 
     # The structural allowlist also reports the img, video, object, form, math and svg markup these reference
-    # cases use, so they count the reference findings, and a passing case allows only allowlist findings.
+    # cases use, so a failing case counts the reference findings, and a passing case names exactly the
+    # allowlist findings its markup draws: any other finding, or a named one that does not appear, fails it.
     def ref_findings(output):
         return [line for line in output.splitlines() if "on a 404 page must be root-absolute" in line]
 
-    def other_findings(output):
-        return [line for line in output.splitlines()[1:] if not line.endswith(" allowlist")]
+    def unexpected(output, allowed=()):
+        """The findings in a scan's output (each message without its "path:line: " prefix) that are not in
+        `allowed`, then each message in `allowed` that is not among them."""
+        found = [line.strip().split(": ", 1)[-1] for line in output.splitlines()[1:]]
+        return [m for m in found if m not in allowed] + [m for m in allowed if m not in found]
+
+    def passes(got, allowed=()):
+        return got[0] == (1 if allowed else 0) and not unexpected(got[1], allowed)
+
+    def live_allowlist(element, *attributes):
+        return (["element <{}> is not in the 404-page element allowlist".format(element)] +
+                ["attribute {} on <{}> is not in the 404-page attribute allowlist".format(a, element)
+                 for a in attributes])
 
     icon ='<link rel="apple-touch-icon" href="/t.png">'
     with tempfile.TemporaryDirectory() as d:
@@ -1470,8 +1510,11 @@ def _not_found_links_self_test():
         (root / "index.html").write_text('<!doctype html><title>t</title>' + icon +
                                          '<a class="logo" href="./"><img src="/l.png" alt=""></a>', encoding="utf-8")
         got = scan(base)
-        check("404-links/root-absolute-and-fragment-links-pass", got[0] in (0, 1) and not other_findings(got[1]),
-              got)
+        check("404-links/root-absolute-and-fragment-links-pass", passes(got, live_allowlist("img", "alt")), got)
+        # The passing-case rule itself: a finding the case does not name fails it, allowlist finding or not.
+        check("404-links/unexpected-allowlist-finding-fails-passing-case",
+              not passes(got) and not passes(got, live_allowlist("img"))
+              and not passes(got, live_allowlist("img", "alt") + live_allowlist("b")), got)
         (root / "404.html").unlink()
 
         (root / "sub" / "c.html").write_text(page(icon + '<link rel="stylesheet" href="s.css">',
@@ -1537,6 +1580,16 @@ def _not_found_links_self_test():
                  icon + '<link rel="preconnect" href="https://evil.example">', "", "href", "https://evil.example", 1),
                 ("404-links/https-img-src-fails", "404.html", icon, '<img src="https://example.test/i.png" alt="">',
                  "src", "https://example.test/i.png", 1),
+                # An upper-case https scheme is accepted on a href only (D15); any other scheme, in any case,
+                # and a scheme with one slash stay refused.
+                ("404-links/upper-case-https-script-src-fails", "404.html",
+                 icon + '<script src="HTTPS://evil.example/x.js"></script>', "", "src", "HTTPS://evil.example/x.js", 1),
+                ("404-links/upper-case-https-img-src-fails", "404.html", icon,
+                 '<img src="HTTPS://example.test/i.png" alt="">', "src", "HTTPS://example.test/i.png", 1),
+                ("404-links/upper-case-http-href-fails", "404.html", icon, '<a href="HTTP://aiqt.ai/b">B</a>',
+                 "href", "HTTP://aiqt.ai/b", 1),
+                ("404-links/upper-case-https-one-slash-href-fails", "404.html", icon,
+                 '<a href="HTTPS:/aiqt.ai/b">B</a>', "href", "HTTPS:/aiqt.ai/b", 1),
                 # A query-only or fragment-only load resolves against the request URL.
                 ("404-links/query-only-script-src-fails", "404.html", icon + '<script src="?x"></script>', "",
                  "src", "?x", 1),
@@ -1552,17 +1605,30 @@ def _not_found_links_self_test():
             check(name, got[0] == 1 and len(ref_findings(got[1])) == count
                   and "{} on a 404 page must be root-absolute".format(attr) in got[1]
                   and "-> {}\n".format(repr(value)) in got[1], got)
-        for name, body in (
-                ("404-links/query-only-passes", '<a href="?q=1">Q</a><form action="?q=1"></form>'),
-                ("404-links/fragment-only-passes", '<p id="top"></p><a href="#top">T</a>'
-                 '<svg><use href="#top"></use></svg>'),
-                ("404-links/root-absolute-passes", '<a href="/">H</a><img src="/i.png" srcset="/i.png 1x, /i.png 2x" '
-                 'alt=""><video poster="/i.png"></video><object data="/f.svg"></object><form action="/b"></form>'),
-                ("404-links/https-passes", '<a href="https://aiqt.ai/b">B</a><a href="https://example.test/b">E</a>')):
-            (root / "404.html").write_text(page(icon, body), encoding="utf-8")
+        for name, head, body, allowed in (
+                ("404-links/query-only-passes", icon, '<a href="?q=1">Q</a><form action="?q=1"></form>',
+                 live_allowlist("form", "action")),
+                ("404-links/fragment-only-passes", icon, '<p id="top"></p><a href="#top">T</a>'
+                 '<svg><use href="#top"></use></svg>', live_allowlist("use")),
+                ("404-links/root-absolute-passes", icon, '<a href="/">H</a><img src="/i.png" '
+                 'srcset="/i.png 1x, /i.png 2x" alt=""><video poster="/i.png"></video><object data="/f.svg"></object>'
+                 '<form action="/b"></form>',
+                 live_allowlist("img", "srcset", "alt") + live_allowlist("video", "poster")
+                 + live_allowlist("object", "data") + live_allowlist("form", "action")),
+                ("404-links/https-passes", icon, '<a href="https://aiqt.ai/b">B</a><a href="https://example.test/b">E</a>',
+                 ()),
+                # D15: the scheme of an https href in any letter case.
+                ("404-links/upper-case-https-href-passes", icon,
+                 '<a href="HTTPS://aiqt.ai/b">B</a><a href="Https://example.test/b">E</a>'
+                 '<a href="hTtPs://example.test/c">C</a>', ()),
+                # Every meta name and value the live 404 pages used.
+                ("404-structure/live-meta-values-pass",
+                 '<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">'
+                 '<meta name="description" content="D."><meta name="robots" content="noindex">' + icon, "", ())):
+            (root / "404.html").write_text(page(head, body), encoding="utf-8")
             got = scan(base)
             (root / "404.html").unlink()
-            check(name, got[0] in (0, 1) and not other_findings(got[1]), got)
+            check(name, passes(got, allowed), got)
 
         # A tab or newline after the leading "/" can make a protocol-relative //host URL.
         for name, value in (("404-links/tab-after-slash-fails", "/\taiqt.ai/b"),
@@ -1586,6 +1652,14 @@ def _not_found_links_self_test():
                  "attribute ping on <a> is not in the 404-page attribute allowlist"),
                 ("404-structure/meta-refresh-fails", page(icon + '<meta http-equiv="refresh" content="0;url=b">', ""),
                  "attribute http-equiv on <meta> is not one the live 404 pages use on meta"),
+                # An allowed meta attribute name with a value the live 404 pages do not use.
+                ("404-structure/meta-name-unpinned-value-fails",
+                 page(icon + '<meta name="referrer" content="unsafe-url">', ""),
+                 "name value on <meta> is not one the live 404 pages use -> 'referrer'"),
+                ("404-structure/meta-charset-unpinned-value-fails", page('<meta charset="utf-7">' + icon, ""),
+                 "charset value on <meta> is not one the live 404 pages use -> 'utf-7'"),
+                ("404-structure/meta-name-without-value-fails", page(icon + '<meta name content="x">', ""),
+                 "name value on <meta> is not one the live 404 pages use -> ''"),
                 ("404-structure/style-attribute-url-fails", page(icon, '<div style="background:url(i.png)"></div>'),
                  "style value on a 404 page contains url("),
                 ("404-structure/entity-escaped-url-fails", page(icon, '<div class="u&#114;l&#40;i.png)"></div>'),
@@ -1632,6 +1706,18 @@ def _not_found_links_self_test():
         got = not_found_structure_findings("404.html", '<script src="/j.js"> </script>')
         check("404-structure/script-with-src-and-space-body-fails",
               any("must have an empty body" in f for f in got), got)
+        # The draft meta values: a card property or name the generator does not write is refused, and every
+        # value it writes passes.
+        got = not_found_structure_findings("404.html", '<meta property="og:locale" content="en">', draft=True)
+        check("404-structure/draft-meta-property-unpinned-value-fails",
+              got == ["404.html:1: property value on <meta> is not one the draft 404 pages use -> 'og:locale'"], got)
+        got = not_found_structure_findings("404.html", '<meta name="referrer" content="unsafe-url">', draft=True)
+        check("404-structure/draft-meta-name-unpinned-value-fails",
+              got == ["404.html:1: name value on <meta> is not one the draft 404 pages use -> 'referrer'"], got)
+        written = "".join('<meta {}="{}" content="x">'.format(kind, value)
+                          for kind in ("name", "property") for value in sorted(NOT_FOUND_DRAFT_META_VALUES[kind]))
+        got = not_found_structure_findings("404.html", '<meta charset="utf-8">' + written, draft=True)
+        check("404-structure/draft-meta-values-pass", got == [], got)
 
         # A 404 page the parser rejects still gets both raw-markup rules (the parse failure is simulated: no
         # input tried makes this parser raise).

@@ -293,10 +293,23 @@ def _attr(value):
     return _html.escape(value, quote=True)
 
 
+_HTTPS = "https://"
+
+
+def _https(href):
+    """href with an https scheme written in any ASCII letter case ("HTTPS://", "Https://") rewritten as
+    "https://", so every page writes the scheme in lower case (decision D15, 2026-11-15); any other value is
+    returned unchanged."""
+    if isinstance(href, str) and href[:len(_HTTPS)].isascii() and href[:len(_HTTPS)].lower() == _HTTPS:
+        return _HTTPS + href[len(_HTTPS):]
+    return href
+
+
 def _external(href, label):
-    """A new-tab anchor: href is a raw URL, escaped here as an attribute value; label is markup."""
+    """A new-tab anchor: href is a raw URL, its https scheme written in lower case (_https) and escaped here
+    as an attribute value; label is markup."""
     return ('<a href="{}" target="_blank" rel="noopener noreferrer">{}<span class="vh"> (opens in a new tab)'
-            '</span></a>').format(_attr(href), label)
+            '</span></a>').format(_attr(_https(href)), label)
 
 
 def _brand(site):
@@ -440,7 +453,9 @@ def _internal_href(site, href, where):
 
 
 def _any_link(site, href, text, where):
-    """An anchor for an internal site-relative href, or a new-tab anchor for an https URL."""
+    """An anchor for an internal site-relative href, or a new-tab anchor for an https URL (its scheme in any
+    letter case, written in lower case)."""
+    href = _https(href)
     if isinstance(href, str) and href.startswith("https://"):
         return _external(href, text)
     return '<a href="{}">{}</a>'.format(_attr(_internal_href(site, href, where)), text)
@@ -721,7 +736,7 @@ def _c_control(site, doc, where):
         raise RefusedPage("{}: the document control strip belongs to aiqt.ai only".format(where))
     spec = _need(doc, where, ("component", "document", "source_text", "source_href"),
                  ("licence_text", "licence_href"))
-    source_href = _text(spec, where, "source_href")
+    source_href = _https(_text(spec, where, "source_href"))
     if not source_href.startswith("https://"):
         raise RefusedPage("{}: source_href must be an https URL".format(where))
     version, status = _version_and_status()
@@ -2249,6 +2264,25 @@ def _self_test():
     expect("refuse/http-external-href", "site-relative" in refused(
         "refuse/http-external-href", rendered,
         'component = "download"\nhref = "http://example.com/x"\nfilename = "x"\nsize = "s"\nhtml = "D"\n'))
+    # D15: an https scheme in any letter case is accepted and written in lower case; another scheme in upper
+    # case, a one-slash scheme and a non-ASCII lookalike stay refused.
+    for name, href in (("links/upper-case-https-download-lowercased", "HTTPS://example.com/x.zip"),
+                       ("links/mixed-case-https-download-lowercased", "hTtPs://example.com/x.zip")):
+        cased = rendered('component = "download"\nlabel = "The skill"\nhref = "{}"\n'
+                         'filename = "x.zip"\nsize = "zip, version 1"\nhtml = "D"\n'.format(href))
+        expect(name, cased == download, cased)
+    for name, href in (("refuse/upper-case-http-external-href", "HTTP://example.com/x"),
+                       ("refuse/upper-case-https-one-slash-href", "HTTPS:/example.com/x"),
+                       ("refuse/non-ascii-https-lookalike-href", "HTTP\\u017f://example.com/x")):
+        expect(name, "site-relative" in refused(
+            name, rendered,
+            'component = "download"\nhref = "{}"\nfilename = "x"\nsize = "s"\nhtml = "D"\n'.format(href)))
+    expect("links/upper-case-https-external-lowercased",
+           _external("HTTPS://example.com/X", "L").startswith('<a href="https://example.com/X" '),
+           _external("HTTPS://example.com/X", "L"))
+    expect("links/lower-case-https-external-unchanged",
+           _external("https://example.com/X", "L").startswith('<a href="https://example.com/X" '),
+           _external("https://example.com/X", "L"))
     expect("refuse/bad-code-variant", "variant" in refused(
         "refuse/bad-code-variant", rendered, 'component = "code"\nid = "x"\ntext = "t"\nvariant = "inline"\n'))
     expect("refuse/bad-id", "not a valid id" in refused(
@@ -2445,6 +2479,15 @@ def _self_test():
     expect("refuse/control-off-aiqt", "aiqt.ai only" in refused(
         "refuse/control-off-aiqt", _c_control, opf,
         {"component": "control", "document": "d", "source_text": "s", "source_href": "https://example.com/"},
+        "fixture.body[1]"))
+    upper_control = _c_control(site, {"component": "control", "document": "d", "source_text": "s",
+                                      "source_href": "HTTPS://example.com/"}, "fixture.body[1]")
+    expect("links/upper-case-https-control-source-lowercased",
+           '<a href="https://example.com/" target="_blank"' in upper_control and "HTTPS:" not in upper_control,
+           upper_control)
+    expect("refuse/upper-case-http-control-source", "https URL" in refused(
+        "refuse/upper-case-http-control-source", _c_control, site,
+        {"component": "control", "document": "d", "source_text": "s", "source_href": "HTTP://example.com/"},
         "fixture.body[1]"))
 
     # The 3 section 7.18 and 7.13 components added for opfiles.ai, each pinned exactly.
