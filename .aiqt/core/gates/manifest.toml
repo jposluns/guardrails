@@ -323,7 +323,7 @@ rules = []
 platform = "ci"
 default = "block"
 class = "c"
-residue = "It checks that internal document links in Markdown files resolve to a real target. It covers a recognizable SUBSET: its matcher recognizes inline-style links [text](target) only, so a broken reference-style link [text][ref] is not resolved (class c, partial). Its linkage to a single corpus rule is arguable, so none is claimed here."
+residue = "It checks that internal document links in Markdown files resolve to a real target, and that an own-site link (an http or https URL on a host the project's sites are served at, in an inline Markdown link or as an href in a declared generated-Markdown source such as roadmap.toml, where a root-relative path is joined to the source's site_base as its generator renders it) names a page of the site tree that host serves (aiqt.ai, or the AIQT_SITE_HOST host, and its www. serve site/; opfiles.ai and www.opfiles.ai serve opf/site/): a file at the path, at path plus .html or at path/index.html, or a rule in that tree's _redirects. A tree absent from the checkout is not checked, the fragment and query are not checked, and a temporary allowlist of named pending-decision links is honoured only for each entry's exact URL and printed on every run. It covers a recognizable SUBSET: its matcher recognizes inline-style links [text](target) only, so a broken reference-style link [text][ref], an autolink or a bare URL is not resolved, and only the declared generated-Markdown sources are read (class c, partial). Its linkage to a single corpus rule is arguable, so none is claimed here."
 
 [[gate]]
 id = "site"
