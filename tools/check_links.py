@@ -12,8 +12,21 @@ The Markdown forms read, line by line as CommonMark and GitHub Flavored Markdown
   and every reference-style image that uses it (an undefined reference renders as text, not a link);
 - an autolink <scheme:...>;
 - a bare URL, read as GitHub's extended autolink reads it: http://, https:// or www. at the start of a
-  line or after whitespace, *, _, ~ or (, running to whitespace or <, less trailing ?!.,:*_~, an
-  unbalanced trailing ) and a trailing entity reference (a www. URL renders as http://).
+  line or after whitespace, *, _, ~, ( or |, running to whitespace, < or |, less trailing ?!.,:*_~, an
+  unbalanced trailing ) and a trailing entity reference (a www. URL renders as http://); a bare URL in
+  an inline link's text or inside a raw HTML tag is not a link and is not read, and a | ends it even
+  outside a table, where GitHub would keep it;
+- raw HTML: the href of an a element and the src of an img element, in a start tag that CommonMark's
+  open-tag grammar reads as raw HTML, written on one line (the first of two attributes with one name
+  counts, as the HTML parser keeps it); only an own-site URL there is checked, since a root-relative
+  href in a page source such as docs/*.md names a site path, not a repository file. Other elements and
+  attributes (srcset, source, link, area and the rest) are not read.
+
+Entity and numeric character references (&#115;, &#x73;, &amp;) are decoded before a URL is classified:
+in an inline destination, a reference definition and an autolink, as cmark (which GitHub renders with)
+decodes them, with the semicolon required and a backslash-escaped & left literal; in an HTML attribute
+value, as the HTML parser decodes them. They are not decoded in a bare URL; whether GitHub decodes one
+there before autolinking is not verified.
 
 Code spans and fenced code blocks are read like any other text, so an own-site URL written in code is
 checked too. A link whose text or destination spans two lines is not read.
@@ -21,7 +34,8 @@ checked too. A link whose text or destination spans two lines is not read.
 Two kinds of target are checked:
 
 1. A relative destination of an inline link, inline image or reference definition resolves against the
-   file's directory and must exist.
+   file's directory (a root-relative one, starting with "/", against the repository root, as GitHub
+   renders it) and must exist inside the repository; a path holding NUL names no file.
 2. An own-site link: an absolute http or https URL, in any form above, on a host this project's sites
    are served at, or an href in a generated-Markdown source (GENERATED_MD_SOURCES), joined exactly as
    that source's generator renders it into the Markdown. tools/gen_roadmap.py renders every
@@ -34,32 +48,40 @@ Two kinds of target are checked:
    fragment, or a source shaped other than its generator reads, is malformed: exit 2. An href key
    elsewhere in a source is not rendered and is not read. The host picks the site tree that serves it
    (SITE_ROOTS, the same host model as tools/check_site.py: aiqt.ai and www.aiqt.ai, or the
-   AIQT_SITE_HOST host and its www., serve site/; opfiles.ai and www.opfiles.ai serve opf/site/), and
-   the URL path must name a page of that tree: a regular file inside it at the path as written, at
-   path + ".html", or at path/index.html ("/" is index.html), or else the first rule in that tree's
+   AIQT_SITE_HOST host and its www., serve site/; opfiles.ai and www.opfiles.ai serve opf/site/; a host
+   written with its trailing root-label dot, such as aiqt.ai., is the same host), and the URL path must
+   name a page of that tree: a regular file inside it at the path as written, at path + ".html", or at
+   path/index.html ("/" is index.html), never a host configuration file at the tree's top
+   (HOST_CONFIG_FILES: _headers and _redirects), or else the first rule in that tree's
    _redirects whose source matches the path (exactly, through a trailing * splat or through a /:name
    placeholder), when that rule counts. A rule counts only when its status is a redirect (301, 302,
    303, 307 or 308; a rule with no status is a 302) or a 200 rewrite, and its destination itself
    resolves: a destination path or own-site URL resolves by these same rules (a chain that returns to
    a path it has visited, or runs past MAX_REDIRECT_HOPS, loops and does not count); an external
-   destination counts for a redirect (whether it is live is out of scope) and never for a 200 rewrite
-   (the host serves no rewrite to another origin). Splats and placeholders: a rule whose source holds
+   destination counts for a redirect (whether it is live is out of scope), and a 200 rewrite counts only
+   to a /path on the same site, never to an absolute URL, own-site or not (whether Cloudflare Pages
+   proxies an absolute URL to its own origin is not verified; this is the stricter reading). Splats and
+   placeholders: a rule whose source holds
    a * splat or a :name placeholder counts only when its destination carries every value it captures
    (:splat for the *, :name for each placeholder), and the destination is then resolved with those
    values substituted for the link being checked; a rule that sends every match to one fixed
    destination, such as /* /index.html 200, is a catch-all that serves something for any path and
    proves no page, so it never counts and a link it matches fails. A _redirects line that is not
-   "source destination [status]" with a numeric status is malformed: exit 2. A tree absent from the
-   checkout is not checked (an adopter vendoring this gate has no site/). The fragment and query are
-   not checked; tools/check_site.py validates anchors inside the HTML.
+   "source destination [status]" with a numeric status is malformed, and so is a _redirects that is a
+   symbolic link (dangling or not) or not a regular file: exit 2. A tree absent from the checkout is not
+   checked (an adopter vendoring this gate has no site/); a tree path that is present but is not a
+   directory is exit 2. The fragment and query are not checked; tools/check_site.py validates anchors
+   inside the HTML.
 
 Other external URLs, mailto and tel links, and pure anchors are out of scope: this gate answers "does the
-target exist in this checkout", not "is the URL live". An autolink or bare URL is checked only when it is
-own-site.
+target exist in this checkout", not "is the URL live". An autolink, bare URL or raw HTML link is checked
+only when it is own-site.
 
 PENDING_DECISION_ALLOWLIST names own-site links knowingly broken while a maintainer decides their fate.
-Each entry is temporary, honoured only for its exact resolved URL, and printed on every run; an entry
-whose target page now exists is itself a finding, so it is removed in the change that decides the link.
+Each entry is temporary, honoured only for its exact resolved URL (in any scanned file, not only the one
+that motivated it), and printed on every run as temporary; an entry whose target page now exists is itself
+a finding, so it is removed in the change that decides the link. An entry that no scanned link uses is not
+flagged, and an entry carries no owner or expiry.
 
   check_links.py              scan the repository (exit 0 clean, 1 findings, 2 cannot evaluate)
   check_links.py --self-test  run every rule above over synthetic fixture trees
@@ -78,6 +100,8 @@ if tuple(sys.version_info[:2]) < (3, 14):
         pass
     os._exit(2)
 
+import html
+import html.entities
 import os
 import re
 import tomllib
@@ -96,9 +120,23 @@ _ESCAPABLE = frozenset("!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~")
 _AUTOLINK = re.compile(r"<([A-Za-z][A-Za-z0-9+.\-]{1,31}:[^\x00-\x20<>]*)>")
 # GitHub extended autolink: http://, https:// or www., then a domain with at least one period, then any
 # run of characters other than whitespace and <; it starts a line or follows whitespace, *, _, ~ or (.
-_BARE_URL = re.compile(r"(?<![^\s*_~(])((?:https?://|www\.)[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)+[^\s<]*)",
+# A | is accepted before it and ends it too, so a URL that fills a table cell with no space is read as the
+# cell holds it (outside a table, a | in a URL ends the URL here, though GitHub would keep it).
+_BARE_URL = re.compile(r"(?<![^\s*_~(|])((?:https?://|www\.)[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)+[^\s<|]*)",
                        re.IGNORECASE)
 _TRAILING_ENTITY = re.compile(r"&[A-Za-z0-9]+;$")
+# CommonMark entity and numeric character references: &name; for an HTML5 entity name, &#digits; with 1 to
+# 7 digits, &#xhex; with 1 to 6 hex digits; the semicolon is required.
+_CHAR_REF = re.compile(r"&(?:#([0-9]{1,7})|#[xX]([0-9A-Fa-f]{1,6})|([A-Za-z][A-Za-z0-9]{0,31}));")
+# CommonMark raw HTML open tag of an a or img element, read with CommonMark's open-tag grammar (attribute
+# name, optional value unquoted, '...' or "..."), on one line.
+_HTML_ATTR_ONE = re.compile(
+    r"([A-Za-z_:][A-Za-z0-9_.:-]*)(?:[ \t]*=[ \t]*([^\x00-\x20\"'=<>`]+|'[^']*'|\"[^\"]*\"))?")
+_HTML_TAG = re.compile(
+    r"<(a|img)((?:[ \t]+[A-Za-z_:][A-Za-z0-9_.:-]*(?:[ \t]*=[ \t]*(?:[^\x00-\x20\"'=<>`]+|'[^']*'|\"[^\"]*\"))?)*)"
+    r"[ \t]*/?>", re.IGNORECASE)
+# An HTML character reference in an attribute value, as the HTML parser reads it (semicolon optional).
+_HTML_REF = re.compile(r"&(#[xX][0-9A-Fa-f]+;?|#[0-9]+;?|[A-Za-z][A-Za-z0-9]*;?)")
 # CommonMark link reference definition: up to three spaces, [label], a colon, then the destination.
 _DEFINITION = re.compile(r"^ {0,3}\[((?:[^\[\]\\]|\\.){1,999})\]:(.*)$")
 
@@ -118,6 +156,9 @@ REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
 REWRITE_STATUS = 200
 DEFAULT_STATUS = 302
 MAX_REDIRECT_HOPS = 16
+# Files at a site tree's top that configure the host and are not served as pages (Cloudflare Pages reads
+# them; that it does not serve them is assumed here, which is the stricter reading).
+HOST_CONFIG_FILES = frozenset({"_headers", "_redirects"})
 
 # Own-site links knowingly broken pending a maintainer decision. TEMPORARY: each entry is keyed by the
 # exact resolved URL (another spelling, host, scheme, case, trailing slash or fragment is not covered) and
@@ -141,11 +182,68 @@ class ScanError(Exception):
 # ---------------------------------------------------------------------------------------------------
 # Markdown reading
 
+def _char_ref_at(text, i):
+    """(decoded text, end index) when a CommonMark entity or numeric character reference starts at
+    text[i], else None. A numeric reference to 0, a surrogate or a code point past U+10FFFF is U+FFFD."""
+    match = _CHAR_REF.match(text, i)
+    if match is None:
+        return None
+    decimal, hexadecimal, name = match.groups()
+    if name is not None:
+        value = html.entities.html5.get(name + ";")
+        return None if value is None else (value, match.end())
+    code = int(decimal) if decimal is not None else int(hexadecimal, 16)
+    if code == 0 or code > 0x10FFFF or 0xD800 <= code <= 0xDFFF:
+        return "�", match.end()
+    return chr(code), match.end()
+
+
+def decode_char_refs(text):
+    """text with every CommonMark entity and numeric character reference decoded (no backslash escapes)."""
+    out = []
+    i = 0
+    while i < len(text):
+        ref = _char_ref_at(text, i) if text[i] == "&" else None
+        if ref is None:
+            out.append(text[i])
+            i += 1
+        else:
+            out.append(ref[0])
+            i = ref[1]
+    return "".join(out)
+
+
+def _html_ref(match):
+    """One HTML character reference in an attribute value, decoded as the HTML parser decodes it: the
+    longest entity name wins, and a name without ';' followed by '=' or an ASCII letter or digit stays
+    literal (the attribute-value rule)."""
+    ref = match.group(1)
+    if ref.startswith("#"):
+        return html.unescape(match.group(0))
+    for x in range(len(ref), 1, -1):
+        name = ref[:x]
+        if name in html.entities.html5:
+            following = ref[x:x + 1] or match.string[match.end():match.end() + 1]
+            if not name.endswith(";") and (following == "=" or (following.isascii() and following.isalnum())):
+                return match.group(0)
+            return html.entities.html5[name] + ref[x:]
+    return match.group(0)
+
+
+def _html_attr_value(raw):
+    """An HTML attribute value with its quotes removed, character references decoded and the ASCII
+    whitespace the URL parser strips removed from both ends."""
+    if raw[:1] in ("\"", "'"):
+        raw = raw[1:-1]
+    return _HTML_REF.sub(_html_ref, raw).strip(" \t\n\r\f")
+
+
 def _parse_destination(text, i):
     """The CommonMark link destination starting at text[i] as (destination, end index), or None.
 
     <...>: no line ending and no unescaped < or >. Otherwise: a nonempty run with no ASCII space or
-    control character, in which unescaped parentheses must balance. Backslash escapes are removed."""
+    control character, in which unescaped parentheses must balance. Backslash escapes are removed and
+    entity and numeric character references are decoded (a decoded character is never structural)."""
     n = len(text)
     out = []
     if i < n and text[i] == "<":
@@ -155,6 +253,11 @@ def _parse_destination(text, i):
             if ch == "\\" and j + 1 < n and text[j + 1] in _ESCAPABLE:
                 out.append(text[j + 1])
                 j += 2
+                continue
+            ref = _char_ref_at(text, j) if ch == "&" else None
+            if ref is not None:
+                out.append(ref[0])
+                j = ref[1]
                 continue
             if ch == ">":
                 return "".join(out), j + 1
@@ -170,6 +273,11 @@ def _parse_destination(text, i):
         if ch == "\\" and j + 1 < n and text[j + 1] in _ESCAPABLE:
             out.append(text[j + 1])
             j += 2
+            continue
+        ref = _char_ref_at(text, j) if ch == "&" else None
+        if ref is not None:
+            out.append(ref[0])
+            j = ref[1]
             continue
         if ord(ch) <= 0x20 or ord(ch) == 0x7F:
             break
@@ -271,8 +379,11 @@ def _gfm_trim(url):
 
 def line_targets(line):
     """Every (kind, target) one Markdown line links to, in reading order. kind is "inline" (an inline
-    link or image destination), "autolink" or "bare"."""
-    targets, masked = [], []
+    link or image destination), "autolink", "bare" or "html" (an a element's href or an img element's
+    src in raw HTML). Character references are decoded in an inline destination and an autolink (as
+    cmark, which GitHub renders with, decodes them) and in an HTML attribute value; a bare URL inside an
+    inline link's text is not a link and is not read."""
+    targets, masked, link_text = [], [], []
     n = len(line)
     i = 0
     while i < n:
@@ -293,18 +404,28 @@ def line_targets(line):
                     if dest:
                         targets.append((i, "inline", dest))
                     masked.append((close + 1, end))
+                    link_text.append((i + 1, close))
             i += 1
             continue
         if ch == "<":
             match = _AUTOLINK.match(line, i)
             if match:
-                targets.append((i, "autolink", match.group(1)))
+                targets.append((i, "autolink", decode_char_refs(match.group(1))))
                 masked.append((i, match.end()))
                 i = match.end()
                 continue
         i += 1
+    for match in _HTML_TAG.finditer(line):
+        link_text.append((match.start(), match.end()))  # a URL inside the tag is no bare URL
+        wanted = "href" if match.group(1).lower() == "a" else "src"
+        for attr in _HTML_ATTR_ONE.finditer(match.group(2)):
+            if attr.group(1).lower() == wanted:
+                # the HTML parser keeps the first of two attributes with one name
+                if attr.group(2) is not None:
+                    targets.append((match.start(), "html", _html_attr_value(attr.group(2))))
+                break
     for match in _BARE_URL.finditer(line):
-        if any(start <= match.start() < end for start, end in masked):
+        if any(start <= match.start() < end for start, end in masked + link_text):
             continue
         url = _gfm_trim(match.group(1))
         if url.lower().startswith("www."):
@@ -342,12 +463,15 @@ def definition_at(lines, index):
 # Site trees and _redirects
 
 def own_site_target(url, site_roots):
-    """(tree, path) when url is an http or https URL on an own-site host, else None."""
+    """(tree, path) when url is an http or https URL on an own-site host, else None. A host written with
+    the trailing root-label dot (aiqt.ai.) names the same host."""
     try:
         parts = urlsplit(url)
         host = (parts.hostname or "").lower()
     except ValueError:
         return None
+    if host.endswith("."):
+        host = host[:-1]
     if parts.scheme.lower() not in ("http", "https"):
         return None
     tree = site_roots.get(host)
@@ -378,7 +502,7 @@ def load_redirect_rules(tree_dir):
     """Every rule in tree_dir/_redirects as (line, source, destination, status, pattern, names), in file
     order (none when the file is absent). A line that is not 'source destination [status]' is malformed."""
     path = tree_dir / "_redirects"
-    if not path.exists():
+    if not path.exists() and not path.is_symlink():
         return []
     if path.is_symlink() or not path.is_file():
         raise ScanError("{} is not a regular file".format(path))
@@ -404,7 +528,11 @@ def load_redirect_rules(tree_dir):
 
 
 def file_present(tree_dir, path):
-    """True when tree_dir holds a regular file for path: as written, path + .html or path/index.html."""
+    """True when tree_dir holds a regular file for path: as written, path + .html or path/index.html. A
+    host configuration file at the tree's top (HOST_CONFIG_FILES) is not a page, and a path holding a
+    NUL names no file."""
+    if "\x00" in path:
+        return False
     rel = path.lstrip("/")
     if rel == "" or rel.endswith("/"):
         candidates = [tree_dir / rel / "index.html"]
@@ -413,6 +541,8 @@ def file_present(tree_dir, path):
     base = tree_dir.resolve()
     for candidate in candidates:
         resolved = candidate.resolve()
+        if resolved.parent == base and resolved.name in HOST_CONFIG_FILES:
+            continue
         if resolved.is_relative_to(base) and resolved.is_file():
             return True
     return False
@@ -430,7 +560,12 @@ class Sites:
         """(tree_dir, rules), or None when the tree is absent from the checkout."""
         if tree not in self.trees:
             tree_dir = self.root / tree
-            self.trees[tree] = (tree_dir, load_redirect_rules(tree_dir)) if tree_dir.is_dir() else None
+            if tree_dir.is_dir():
+                self.trees[tree] = (tree_dir, load_redirect_rules(tree_dir))
+            elif tree_dir.exists() or tree_dir.is_symlink():
+                raise ScanError("{} is present but is not a directory".format(tree_dir))
+            else:
+                self.trees[tree] = None
         return self.trees[tree]
 
     def missing(self, tree, path, visited=()):
@@ -460,9 +595,12 @@ class Sites:
                 return "{} has a destination that is not a URL".format(rule)
             if parts.scheme or parts.netloc:
                 own = own_site_target(target, self.site_roots)
-                if own is None:
-                    if status == REWRITE_STATUS:
+                if status == REWRITE_STATUS:
+                    if own is None:
                         return "{} rewrites to another origin, which is not served".format(rule)
+                    return ("{} rewrites to an absolute URL; a 200 rewrite counts only to a /path on the same "
+                            "site".format(rule))
+                if own is None:
                     return None
                 next_hop = own
             elif target.startswith("/"):
@@ -567,6 +705,7 @@ def scan(root, site_roots=None, sources=None, allowlist=None):
     allowlist = PENDING_DECISION_ALLOWLIST if allowlist is None else allowlist
     findings, notes = [], []
     sites = Sites(root, site_roots)
+    root_dir = root.resolve()
 
     def check_own_site(where, shown, url):
         target = own_site_target(url, site_roots)
@@ -577,7 +716,8 @@ def scan(root, site_roots=None, sources=None, allowlist=None):
         if why is None:
             return True
         if url in allowlist:
-            notes.append("{}: allowlisted pending decision ({}) -> {}".format(where, allowlist[url], shown))
+            notes.append("{}: temporarily allowlisted pending decision ({}) -> {}".format(
+                where, allowlist[url], shown))
             return True
         findings.append("{}: broken own-site link -> {} (no page for {} under {}/: {})".format(
             where, shown, path, tree, why))
@@ -586,13 +726,19 @@ def scan(root, site_roots=None, sources=None, allowlist=None):
     def check_target(where, path, kind, target):
         if check_own_site(where, target, target):
             return
-        if kind in ("autolink", "bare") or target.startswith(NOT_RELATIVE):
+        if kind in ("autolink", "bare", "html") or target.startswith(NOT_RELATIVE):
             return
         clean = unquote(target.split("#", 1)[0])
         if not clean:
             return
-        resolved = (path.parent / clean).resolve()
-        if not resolved.exists():
+        if "\x00" in clean:
+            findings.append(f"{where}: broken link -> {target} (a path holding NUL names no file)")
+            return
+        # a root-relative destination resolves against the repository root, as GitHub renders it, never
+        # against the filesystem root; a target outside the repository is not in this checkout
+        base = root_dir if clean.startswith("/") else path.parent
+        resolved = (base / clean.lstrip("/")).resolve()
+        if not resolved.is_relative_to(root_dir) or not resolved.exists():
             findings.append(f"{where}: broken link -> {target}")
 
     for path in sorted(walk_files(root, SKIP_DIRS, suffixes={".md"})):
@@ -683,6 +829,11 @@ _ROADMAP = '[[stage]]\nlinks = [{{ text = "x", href = "{}" }}]\n'
 SELF_TEST_VECTORS = (
     ("relative/present-passes", {"README.md": "[a](docs/a.md)\n", "docs/a.md": "x\n"}, 0, ()),
     ("relative/missing-fails", {"README.md": "[a](docs/none.md)\n"}, 1, ("broken link -> docs/none.md",)),
+    ("relative/root-relative-in-repo-passes", {"README.md": "x\n", "docs/x.md": "[a](/README.md) [b](/docs/x.md)\n"},
+     0, ()),
+    ("relative/root-relative-or-outside-repo-fails", {"docs/x.md": "[a](/etc) [b](/usr)\n[c](" + "../" * 40
+     + "etc)\n"}, 1, ("docs/x.md:1: broken link -> /etc\n", "docs/x.md:1: broken link -> /usr\n",
+                      "docs/x.md:2: broken link -> ../../", "FAIL: 3 broken link(s)")),
     ("own-site/missing-page-fails", {**_SITE, "README.md": "[t](https://aiqt.ai/missing)\n"}, 1,
      ("README.md:1: broken own-site link -> https://aiqt.ai/missing", "no page for /missing under site/",
       "FAIL: 1 broken link(s)")),
@@ -690,7 +841,20 @@ SELF_TEST_VECTORS = (
      ("broken own-site link -> https://www.aiqt.ai/missing",)),
     ("own-site/present-page-passes", {**_SITE, "site/present.html": "p", "README.md":
      "[a](https://aiqt.ai/present) [b](https://aiqt.ai/present.html) [c](https://aiqt.ai/) "
-     "[d](https://aiqt.ai/present#frag)\n"}, 0, ()),
+     "[d](https://aiqt.ai/present#frag) [e](https://aiqt.ai./present)\n"}, 0, ()),
+    ("own-site/trailing-dot-host-missing-fails", {**_SITE, "README.md": "[a](https://aiqt.ai./nope)\n"}, 1,
+     ("broken own-site link -> https://aiqt.ai./nope (no page for /nope under site/",)),
+    ("own-site/nul-path-fails", {**_SITE, "site/_redirects": "/r /%00 301\n", "README.md":
+     "[a](https://aiqt.ai/%00) [b](docs/x%00.md) [c](https://aiqt.ai/r)\n"}, 1,
+     ("broken own-site link -> https://aiqt.ai/%00 (", "broken link -> docs/x%00.md (a path holding NUL",
+      "leads to /%00, which is missing", "FAIL: 3 broken link(s)")),
+    ("own-site/host-config-file-not-a-page-fails", {**_SITE, "site/_headers": "/*\n  X: y\n",
+     "site/_redirects": "# none\n", "README.md": "[a](https://aiqt.ai/_headers) [b](https://aiqt.ai/_redirects)\n"},
+     1, ("no page for /_headers under site/", "no page for /_redirects under site/")),
+    ("own-site/nested-underscore-file-passes", {**_SITE, "site/sub/_headers": "h", "site/_headers": "h",
+     "README.md": "[a](https://aiqt.ai/sub/_headers)\n"}, 0, ()),
+    ("tree/site-not-a-directory-cannot-evaluate", {"site": "not a tree", "README.md": "[a](https://aiqt.ai/x)\n"},
+     2, ("is present but is not a directory", "fail-closed")),
     ("own-site/directory-index-passes", {**_SITE, "site/dir/index.html": "d", "README.md":
      "[a](https://aiqt.ai/dir/) [b](https://aiqt.ai/dir)\n"}, 0, ()),
     ("own-site/directory-without-index-fails", {**_SITE, "site/bare/other.html": "o", "README.md":
@@ -718,10 +882,17 @@ SELF_TEST_VECTORS = (
     ("redirects/counting-rules-pass", {**_SITE, "site/present.html": "p", "site/news/x/y.html": "n",
      "site/people/7.html": "p", "site/_redirects": "# comment\n/old /index.html 301\n"
      "/blog/* /news/:splat 301\n/u/:id /people/:id 308\n/r /present 200\n/two /old 302\n"
-     "/ext https://example.com/x 301\n/plain /present\n/frag /present#a 303\n", "README.md":
-     "[a](https://aiqt.ai/old) [b](https://aiqt.ai/blog/x/y) [c](https://aiqt.ai/u/7) "
+     "/ext https://example.com/x 301\n/plain /present\n/frag /present#a 303\n/abs https://aiqt.ai/present 301\n",
+     "README.md": "[a](https://aiqt.ai/old) [b](https://aiqt.ai/blog/x/y) [c](https://aiqt.ai/u/7) "
      "[d](https://aiqt.ai/r) [e](https://aiqt.ai/two) [f](https://aiqt.ai/ext) [g](https://aiqt.ai/plain) "
-     "[h](https://aiqt.ai/frag)\n"}, 0, ()),
+     "[h](https://aiqt.ai/frag) [i](https://aiqt.ai/abs)\n"}, 0, ()),
+    ("redirects/rewrite-to-absolute-own-site-fails", {**_SITE, "opf/site/model.html": "m", "site/_redirects":
+     "/m https://opfiles.ai/model 200\n/n https://aiqt.ai/index.html 200\n", "README.md":
+     "[a](https://aiqt.ai/m) [b](https://aiqt.ai/n)\n"}, 1,
+     ("(/m https://opfiles.ai/model 200) rewrites to an absolute URL",
+      "(/n https://aiqt.ai/index.html 200) rewrites to an absolute URL", "FAIL: 2 broken link(s)")),
+    ("redirects/dangling-symlink-cannot-evaluate", {**_SITE, "site/_redirects": ("symlink", "nowhere"),
+     "README.md": "[a](https://aiqt.ai/)\n"}, 2, ("_redirects is not a regular file", "fail-closed")),
     ("redirects/rule-not-a-prefix-fails", {**_SITE, "site/_redirects": "/old /index.html 301\n",
      "README.md": "[a](https://aiqt.ai/older)\n"}, 1, ("no page for /older under site/",)),
     ("redirects/non-redirect-status-fails", {**_SITE, "site/_redirects": "/gone /index.html 404\n",
@@ -744,7 +915,45 @@ SELF_TEST_VECTORS = (
     ("forms/present-pass", {**_SITE, "site/present.html": "p", "docs/i.png": "i", "README.md":
      "<https://aiqt.ai/present> [r][ref] ![i][img] [s] ![j](docs/i.png) [![k](docs/i.png)](https://aiqt.ai/)\n"
      "See https://aiqt.ai/present. (also www.aiqt.ai/present), https://opfiles.ai/x is absent here.\n"
+     "| a |https://aiqt.ai/present|\n"
      "\n[ref]: https://aiqt.ai/present \"Title\"\n[img]: <docs/i.png>\n[s]:\n  https://aiqt.ai/present\n"},
+     0, ()),
+    ("forms/table-cell-bare-url-missing-fails", {**_SITE, "README.md": "| a |https://aiqt.ai/nope|\n"}, 1,
+     ("README.md:1: broken own-site link -> https://aiqt.ai/nope (", "FAIL: 1 broken link(s)")),
+    ("forms/url-in-link-text-passes", {**_SITE, "site/present.html": "p", "README.md":
+     "[see https://aiqt.ai/present](https://aiqt.ai/present) [www.aiqt.ai/x](https://aiqt.ai/present)\n"},
+     0, ()),
+    ("forms/url-in-link-text-destination-missing-fails", {**_SITE, "site/present.html": "p", "README.md":
+     "[see https://aiqt.ai/present](https://aiqt.ai/nope)\n"}, 1,
+     ("README.md:1: broken own-site link -> https://aiqt.ai/nope (", "FAIL: 1 broken link(s)")),
+    # (5) entity and numeric character references are decoded in a destination, an autolink and a
+    # reference definition before the URL is classified, as cmark decodes them.
+    ("charref/decoded-present-passes", {**_SITE, "site/present.html": "p", "site/a&b.html": "a",
+     "docs/a.md": "x", "README.md": "[a](https://aiqt.ai/pre&#115;ent) [b](<https://aiqt.ai/pre&#x73;ent>) "
+     "<https://aiqt.ai/pre&#115;ent> [c](https://aiqt.ai/a&amp;b) [d](docs/a&#46;md) [r]\n"
+     "\n[r]: https://aiqt&#x2E;ai/pre&#115;ent\n"}, 0, ()),
+    ("charref/encoded-host-missing-fails", {**_SITE, "README.md": "[a](https://aiqt&#46;ai/missing) "
+     "<https://aiqt&period;ai/gone> [r]\n\n[r]: https://www&#46;aiqt.ai/def\n"}, 1,
+     ("README.md:1: broken own-site link -> https://aiqt.ai/missing (",
+      "README.md:1: broken own-site link -> https://aiqt.ai/gone (",
+      "README.md:3: broken own-site link -> https://www.aiqt.ai/def (", "FAIL: 3 broken link(s)")),
+    ("charref/escaped-or-unterminated-not-decoded-fails", {**_SITE, "site/present.html": "p", "README.md":
+     "[a](https://aiqt.ai/pre\\&#115;ent) [b](https://aiqt.ai/pre&#115ent) [c](https://aiqt.ai/pre&nosuch;)\n"},
+     1, ("-> https://aiqt.ai/pre&#115;ent (no page for /pre& under", "-> https://aiqt.ai/pre&#115ent (",
+         "-> https://aiqt.ai/pre&nosuch; (", "FAIL: 3 broken link(s)")),
+    # (6) an a element's href and an img element's src in raw HTML are read; only an own-site URL is checked.
+    ("html/missing-fails", {**_SITE, "opf/site/index.html": "i", "README.md":
+     "<a href=\"https://aiqt.ai/nope\">x</a> <img alt='i' src='https://aiqt.ai/nope.png'>\n"
+     "<A CLASS=x HREF=https://opfiles.ai/gone>y</A> <a href=\"https://aiqt&#46;ai/enc\">z</a>\n"}, 1,
+     ("README.md:1: broken own-site link -> https://aiqt.ai/nope (",
+      "README.md:1: broken own-site link -> https://aiqt.ai/nope.png (",
+      "README.md:2: broken own-site link -> https://opfiles.ai/gone (",
+      "README.md:2: broken own-site link -> https://aiqt.ai/enc (", "FAIL: 4 broken link(s)")),
+    ("html/present-passes", {**_SITE, "site/present.html": "p", "site/i.png": "i", "site/a&b.html": "a",
+     "README.md": "<a class=\"btn\" href=\"https://aiqt.ai/present\">p</a> <img alt=\"i\" src=\"https://aiqt.ai/i.png\" />"
+     " <a href=\"/install\">site path</a> <a href=\"https://example.com/x\">e</a>\n"
+     "<a title=\"t\" href=\" https://aiqt.ai/pre&#115;ent \" href=\"https://aiqt.ai/nope\">first wins</a>"
+     " <a href='https://aiqt.ai/a&amp;b'>amp</a> <abbr title=\"https://aiqt.ai/nope\">not a or img</abbr>\n"},
      0, ()),
     ("forms/autolink-missing-fails", {**_SITE, "README.md": "<https://aiqt.ai/nope>\n"}, 1,
      ("README.md:1: broken own-site link -> https://aiqt.ai/nope (", "FAIL: 1 broken link(s)")),
@@ -781,8 +990,8 @@ SELF_TEST_VECTORS = (
     ("source/malformed-cannot-evaluate", {**_SITE, "roadmap.toml": "title = \n"}, 2, ()),
     ("allowlist/exact-url-honoured", {**_SITE, "README.md": "[t](https://aiqt.ai/teams)\n", "roadmap.toml":
      '[[stage]]\nlinks = [{ text = "t", href = "/teams" }]\n'}, 0,
-     ("allowlisted pending decision (roadmap-teams-link) -> https://aiqt.ai/teams",
-      "roadmap.toml:2: allowlisted pending decision (roadmap-teams-link) -> /teams")),
+     ("temporarily allowlisted pending decision (roadmap-teams-link) -> https://aiqt.ai/teams",
+      "roadmap.toml:2: temporarily allowlisted pending decision (roadmap-teams-link) -> /teams")),
     ("allowlist/trailing-slash-not-honoured", {**_SITE, "README.md": "[t](https://aiqt.ai/teams/)\n"}, 1,
      ("broken own-site link -> https://aiqt.ai/teams/",)),
     ("allowlist/other-host-not-honoured", {**_SITE, "README.md": "[t](https://www.aiqt.ai/teams)\n"}, 1,
@@ -815,7 +1024,11 @@ def self_test(script=None):
             shutil.copyfile(walk, root / "tools" / "_walk.py")
             for rel, content in files.items():
                 (root / rel).parent.mkdir(parents=True, exist_ok=True)
-                (root / rel).write_text(content, encoding="utf-8")
+                if isinstance(content, tuple):
+                    # ("symlink", target): a symbolic link to target, which need not exist
+                    (root / rel).symlink_to(content[1])
+                else:
+                    (root / rel).write_text(content, encoding="utf-8")
             proc = subprocess.run([sys.executable, "-I", "-B", str(root / "tools" / "check_links.py")],
                                   cwd=root, env=env, capture_output=True, text=True, timeout=120)
             out = proc.stdout + proc.stderr
