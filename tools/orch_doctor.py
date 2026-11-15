@@ -3,6 +3,12 @@
 contract, and the state directory; and re-run the resume audit to clear (or re-arm) the barrier.
   orch_doctor.py                 validate everything; exit 0 clean, 1 findings, 2 no registry
   orch_doctor.py --resume-audit  re-run the resume probes; a clean run clears the barrier
+  orch_doctor.py --hook-coverage FILE [FILE ...] [--require ID ...]
+                                 read-only: which manifest controls the named Claude Code settings or
+                                 plugin hooks.json files register; exit 0 every required control covered,
+                                 1 findings (missing, matcher differs, disableAllHooks), 2 cannot evaluate.
+                                 With no --require, every enforce-stage PreToolUse control whose default is
+                                 block is required. It never reads the registry or the state directory.
   An interpreter older than Python 3.14 that can start this file is refused at exit 2 before anything
   runs. One that cannot start it fails with Python's own error first, and that exit is Python's: 1 for a
   compile failure, which reads as findings, or 2 for an interpreter predating -I when run with it.
@@ -21,7 +27,9 @@ if tuple(sys.version_info[:2]) < (3, 14):
         pass
     os._exit(2)
 
+import json
 import os
+import stat
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -46,7 +54,130 @@ def _guard_scope_lines(root):
     return aiqt_hooks._orch_guard_scope_report(root)
 
 
+# --hook-coverage: a read-only report of which manifest controls the files an operator names register. Claude
+# Code decides which settings files a session loads (and whether a plugin is enabled); this mode never sees
+# that, so every run prints HOOK_COVERAGE_HONESTY, whatever its exit.
+HOOK_COVERAGE_HONESTY = ("coverage of the named files only; which files the session loads is decided by "
+                         "Claude Code, which this check does not observe")
+HOOK_COVERAGE_MAX_BYTES = 16 * 1024 * 1024
+
+
+class _CoverageError(Exception):
+    """A --hook-coverage input that cannot be evaluated (exit 2)."""
+
+
+def _hook_coverage_read(path):
+    """The parsed JSON object in the file at path. Raises _CoverageError unless it is a regular file of at most
+    HOOK_COVERAGE_MAX_BYTES holding UTF-8 JSON whose top level is an object. The open is non-blocking, so a
+    FIFO with no writer is refused as not a regular file instead of hanging the check; nothing is written."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0))
+    except OSError as exc:
+        raise _CoverageError("{}: cannot be read ({})".format(path, exc))
+    try:
+        with os.fdopen(fd, "rb") as handle:
+            if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+                raise _CoverageError("{}: not a regular file".format(path))
+            raw = handle.read(HOOK_COVERAGE_MAX_BYTES + 1)
+    except OSError as exc:
+        raise _CoverageError("{}: cannot be read ({})".format(path, exc))
+    if len(raw) > HOOK_COVERAGE_MAX_BYTES:
+        raise _CoverageError("{}: larger than {} bytes".format(path, HOOK_COVERAGE_MAX_BYTES))
+    try:
+        obj = json.loads(raw.decode("utf-8"))
+    except (ValueError, RecursionError) as exc:  # UnicodeDecodeError and JSONDecodeError are ValueErrors
+        raise _CoverageError("{}: not UTF-8 JSON ({})".format(path, exc))
+    if not isinstance(obj, dict):
+        raise _CoverageError("{}: the top level is not a JSON object".format(path))
+    return obj
+
+
+def _matcher_text(matcher):
+    return "(no matcher)" if matcher is None else matcher
+
+
+def _hook_coverage_run(argv):
+    files, required = [], []
+    i = 0
+    while i < len(argv):
+        arg = argv[i]
+        if arg == "--require":
+            if i + 1 >= len(argv):
+                raise _CoverageError("--require needs a control id")
+            if argv[i + 1] not in required:
+                required.append(argv[i + 1])
+            i += 1
+        elif arg.startswith("-") and arg != "--hook-coverage":
+            raise _CoverageError("unknown argument {!r} in --hook-coverage mode".format(arg))
+        elif arg != "--hook-coverage":
+            files.append(arg)
+        i += 1
+    if not files:
+        raise _CoverageError("no settings or hooks.json file named")
+    try:
+        import gen_hooks
+        _plugin, hooks = gen_hooks.load_manifest(repo_root() / ".aiqt" / "core" / "hooks" / "manifest.toml")
+    except (ImportError, ValueError, OSError) as exc:
+        raise _CoverageError("cannot load the hooks manifest: {}".format(exc))
+    objs = [(name, _hook_coverage_read(name)) for name in files]
+    ids = required or gen_hooks.default_required_ids(hooks)
+    if not ids:
+        raise _CoverageError("no control is required: the manifest has no enforce-stage PreToolUse block control")
+    regs = []
+    for name, obj in objs:
+        regs.extend(gen_hooks.registered_handlers(obj, name))
+    try:
+        results = gen_hooks.hook_coverage(hooks, regs, ids)
+    except ValueError as exc:
+        raise _CoverageError(str(exc))
+    known = {hook["id"]: hook for hook in hooks}
+    findings = 0
+    for event, matcher, handler, source in regs:
+        print("registered in named files: {} {} -> {} ({})".format(event, _matcher_text(matcher), handler, source))
+    for name, obj in objs:
+        # Fail closed: any value other than false is read as switching every hook off.
+        if "disableAllHooks" in obj and obj["disableAllHooks"] is not False:
+            findings += 1
+            print("DISABLED: {} sets disableAllHooks to {}; no hook runs while it is in effect, so no "
+                  "registration counts".format(name, json.dumps(obj["disableAllHooks"])))
+    for hid, status, detail in results:
+        hook = known[hid]
+        want = "{} {} -> {}".format(hook["event"], _matcher_text(hook.get("matcher")), hook["handler"])
+        if status == "covered":
+            print("covered: {} ({})".format(hid, want))
+        elif status == "matcher-differs":
+            findings += 1
+            print("MATCHER DIFFERS: {}: {} is registered for {} only under {}; the manifest declares {}; "
+                  "coverage UNPROVEN".format(hid, hook["handler"], hook["event"],
+                                             ", ".join(_matcher_text(m) for m in detail),
+                                             _matcher_text(hook.get("matcher"))))
+        else:
+            findings += 1
+            print("MISSING: {}: no registration of {} in the named files".format(hid, want))
+    if findings:
+        print("HOOK COVERAGE: {} finding(s) over {} required control(s)".format(findings, len(ids)))
+        return 1
+    print("HOOK COVERAGE: all {} required control(s) are registered in the named files".format(len(ids)))
+    return 0
+
+
+def hook_coverage_main(argv):
+    """The --hook-coverage mode: exit 0 when every required control is covered, 1 on any finding, 2 when it
+    cannot evaluate (no file named, a file that cannot be read, is not JSON or is not an object, an unknown
+    --require id, a manifest load error). Read-only: it writes no barrier and creates no directory."""
+    try:
+        code = _hook_coverage_run(argv)
+    except _CoverageError as exc:
+        print("HOOK COVERAGE: cannot evaluate: {}".format(exc))
+        code = 2
+    print(HOOK_COVERAGE_HONESTY)
+    return code
+
+
 def main():
+    if "--hook-coverage" in sys.argv[1:]:
+        # Before anything else: this mode never reads the registry or touches the state directory.
+        return hook_coverage_main(sys.argv[1:])
     root = str(repo_root())
     status, reg = aiqt_hooks._orch_registry(root)
     guard_lines, guard_denies = _guard_scope_lines(root)

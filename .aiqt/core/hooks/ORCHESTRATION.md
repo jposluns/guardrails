@@ -1675,6 +1675,41 @@ Limits:
   `aiqt` symlink reads as malformed marker state (fail closed), never as absence, and only the
   directory's entries are opened without following links.
 
+## Hook coverage at launch and resume
+
+No hook can report that the hooks themselves are not loaded: a session that did not load the
+`orch-resume-audit` SessionStart hook never runs it, so its silence looks like a clean audit. The pack
+therefore ships a read-only check that an orchestrator runs before it starts a session:
+
+    python3 -I tools/orch_doctor.py --hook-coverage FILE [FILE ...] [--require ID ...]
+
+Each `FILE` is a Claude Code settings file or a plugin `hooks.json`. The check lists every dispatcher
+registration it finds in them and judges each required control. A control is covered only by a
+registration with the control's event, its handler and the identical matcher string from
+`.aiqt/core/hooks/manifest.toml`. A registration under another matcher is reported as a differing
+matcher with coverage UNPROVEN, because the check does not try to prove that one regular expression
+covers another. With no `--require`, every enforce-stage PreToolUse control whose default is `block` is
+required. A named file that sets `disableAllHooks` to any value other than `false` is a finding. Only the
+two launcher shapes `tools/gen_hooks.py` renders count (a handler run through another script never does).
+The exit is 0 when every required control is covered, 1 on any finding, and 2 when the check cannot
+evaluate: no file named, a file that cannot be read, is not JSON or is not a JSON object, an unknown
+`--require` id, or a manifest that cannot be loaded. The check writes nothing: it reads neither the
+registry nor the state directory and never touches `resume-barrier.json`. Every run prints this line:
+
+    coverage of the named files only; which files the session loads is decided by Claude Code, which this check does not observe
+
+The launcher contract, which each orchestrator implements in its own launch and resume procedures:
+
+- Run the check with exactly the files the session will load: the launch directory's settings files, any
+  file passed with `--settings`, and the plugin `hooks.json` where the plugin is enabled.
+- Do not start the session on a non-zero exit.
+- Run the check again at resume, before acting on the resume audit's result.
+
+The pack cannot observe what Claude Code actually loads: settings precedence, managed policy and plugin
+enablement are decided by the platform. A clean exit therefore means only that the named files register
+the required controls. Even a loaded control acts only where its own scope finds a registry (see The
+registry above).
+
 ## Platforms without hooks
 
 The decision algorithm binds as an operating procedure: before any stop, idle wake, or drained

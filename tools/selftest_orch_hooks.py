@@ -12337,6 +12337,175 @@ def _gitalias_oracle_cases(tmp):
     shutil.rmtree(str(root), ignore_errors=True)
 
 
+# The honesty line tools/orch_doctor.py --hook-coverage prints on every run, spelled out here (never read from
+# the doctor) so a reworded line fails the hook-coverage checks.
+_HOOK_COVERAGE_HONESTY = ("coverage of the named files only; which files the session loads is decided by "
+                          "Claude Code, which this check does not observe")
+# This repository's .claude/settings.json as of SEED-SESSION-HOOK-COVERAGE, pinned as text: the launch-directory
+# shape that registers gensrc_guard and nothing else (no orch_ask_guard).
+_HOOK_COVERAGE_GRC_SETTINGS = {"hooks": {"PreToolUse": [{"matcher": "Write|Edit|MultiEdit|Bash", "hooks": [
+    {"type": "command",
+     "command": "python3 -I \"$CLAUDE_PROJECT_DIR\"/plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py "
+                "gensrc_guard",
+     "timeout": 10}]}]}}
+
+
+def _hook_coverage_cases(tmp):
+    """tools/orch_doctor.py --hook-coverage (SEED-SESSION-HOOK-COVERAGE T4 to T9, the disableAllHooks finding,
+    and a passing twin beside each failing row), run in process with the doctor's repo_root patched to fixture
+    roots that carry a copy of this repository's hooks manifest and dispatcher (load_manifest reads the
+    dispatcher beside the manifest). Every row also requires the exact honesty line, and every exit-2 row the
+    cannot-evaluate line, so a doctor that ignores the mode (its default run exits 2 with no registry) is red."""
+    import contextlib
+    import importlib
+    import io
+    doc = importlib.import_module("orch_doctor")
+    base = tmp / "hook-coverage"
+    files = base / "files"
+    files.mkdir(parents=True)
+
+    def _with_manifest(root):
+        dest = root / ".aiqt" / "core" / "hooks"
+        (dest / "scripts").mkdir(parents=True, exist_ok=True)
+        src = repo_root() / ".aiqt" / "core" / "hooks"
+        shutil.copyfile(str(src / "manifest.toml"), str(dest / "manifest.toml"))
+        shutil.copyfile(str(src / "scripts" / "aiqt_hooks.py"), str(dest / "scripts" / "aiqt_hooks.py"))
+        return root
+    plain_root = _with_manifest(base / "root")
+
+    def _write(name, obj):
+        path = files / name
+        path.write_text(obj if isinstance(obj, str) else json.dumps(obj, indent=2), encoding="utf-8")
+        return str(path)
+
+    def _run(root, *args):
+        saved_root, saved_argv = doc.repo_root, sys.argv
+        doc.repo_root = lambda: Path(root)
+        sys.argv = ["orch_doctor.py"] + [str(a) for a in args]
+        out = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(out):
+                code = doc.main()
+        finally:
+            doc.repo_root, sys.argv = saved_root, saved_argv
+        text = out.getvalue()
+        return code, text, _HOOK_COVERAGE_HONESTY + "\n" in text
+
+    def _cannot(root, *args):
+        code, text, honest = _run(root, *args)
+        return code, honest, "HOOK COVERAGE: cannot evaluate:" in text, "HOOK COVERAGE: all" in text
+
+    settings = _write("settings.json", _HOOK_COVERAGE_GRC_SETTINGS)
+    plugin = str(repo_root() / "plugin" / "aiqt-guardrails-hooks" / "hooks" / "hooks.json")
+    ask_cmd = ("python3 -I \"$CLAUDE_PROJECT_DIR\"/plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py "
+               "orch_ask_guard")
+
+    def _with_ask(matcher):
+        obj = json.loads(json.dumps(_HOOK_COVERAGE_GRC_SETTINGS))
+        obj["hooks"]["PreToolUse"].append(
+            {"matcher": matcher, "hooks": [{"type": "command", "command": ask_cmd, "timeout": 10}]})
+        return obj
+
+    # T4: the grc shape (only gensrc_guard registered) with --require orch-ask-unattended exits 1 naming it.
+    code, text, honest = _run(plain_root, "--hook-coverage", settings, "--require", "orch-ask-unattended")
+    check("hook-coverage/grc-shape-missing-ask-exits-1",
+          (code, honest, "MISSING: orch-ask-unattended:" in text, "covered:" in text), (1, True, True, False))
+    # T5: the same group with matcher AskUser.* exits 1 with UNPROVEN; its twin with the manifest's exact
+    # matcher exits 0.
+    code, text, honest = _run(plain_root, "--hook-coverage", _write("ask-regex.json", _with_ask("AskUser.*")),
+                              "--require", "orch-ask-unattended")
+    check("hook-coverage/ask-matcher-differs-unproven-exits-1",
+          (code, honest, "MATCHER DIFFERS: orch-ask-unattended:" in text, "UNPROVEN" in text),
+          (1, True, True, True))
+    code, text, honest = _run(plain_root, "--hook-coverage", _write("ask-exact.json", _with_ask("AskUserQuestion")),
+                              "--require", "orch-ask-unattended")
+    check("hook-coverage/ask-exact-matcher-exits-0",
+          (code, honest, "covered: orch-ask-unattended (PreToolUse AskUserQuestion -> orch_ask_guard)" in text),
+          (0, True, True))
+    # T6: the settings file plus the plugin hooks.json together exit 0, for the named id and for the default
+    # required set (every enforce-stage PreToolUse block control); each registration found is listed.
+    code, text, honest = _run(plain_root, "--hook-coverage", settings, plugin, "--require", "orch-ask-unattended")
+    check("hook-coverage/settings-plus-plugin-exits-0",
+          (code, honest, "registered in named files: PreToolUse Write|Edit|MultiEdit|Bash -> gensrc_guard ({})"
+           .format(settings) in text,
+           "registered in named files: PreToolUse AskUserQuestion -> orch_ask_guard ({})".format(plugin) in text),
+          (0, True, True, True))
+    code, text, honest = _run(plain_root, "--hook-coverage", settings, plugin)
+    check("hook-coverage/settings-plus-plugin-default-set-exits-0",
+          (code, honest, "MISSING" in text, "covered: orch-ask-unattended (" in text,
+           "covered: orch-resume-barrier (" in text, "covered: inline-errexit (" in text),
+          (0, True, False, True, False, False))
+    # T7: {"hooks": {}} exits 1 (the default set, every control missing).
+    code, text, honest = _run(plain_root, "--hook-coverage", _write("empty-hooks.json", {"hooks": {}}))
+    check("hook-coverage/empty-hooks-exits-1",
+          (code, honest, "MISSING: orch-ask-unattended:" in text, "registered in named files:" in text),
+          (1, True, True, False))
+    # The disableAllHooks finding (D2): any value other than false in a named file is a finding (exit 1) even
+    # with every control covered; false is not.
+    for cid, label, value, want in (
+            ("hook-coverage/disable-all-hooks-true", "true", True, (1, True, True)),
+            ("hook-coverage/disable-all-hooks-string", "string", "yes", (1, True, True)),
+            ("hook-coverage/disable-all-hooks-false", "false", False, (0, True, False))):
+        obj = json.loads(json.dumps(_HOOK_COVERAGE_GRC_SETTINGS))
+        obj["disableAllHooks"] = value
+        code, text, honest = _run(plain_root, "--hook-coverage", _write("disable-{}.json".format(label), obj),
+                                  plugin)
+        check(cid, (code, honest, "DISABLED: " in text), want)
+    # T8: no file, a file that is not JSON, one that cannot be read (absent, a directory, a FIFO with no
+    # writer), a top level that is not an object, and an unknown --require id each exit 2 and never pass.
+    fifo = files / "fifo.json"
+    os.mkfifo(str(fifo))
+    for cid, args in (
+            ("hook-coverage/cannot-evaluate-no-file-exits-2", ()),
+            ("hook-coverage/cannot-evaluate-require-only-exits-2", ("--require", "orch-ask-unattended")),
+            ("hook-coverage/cannot-evaluate-not-json-exits-2", (_write("not-json.json", "{not json"),)),
+            ("hook-coverage/cannot-evaluate-absent-file-exits-2", (str(files / "absent.json"),)),
+            ("hook-coverage/cannot-evaluate-directory-exits-2", (str(files),)),
+            ("hook-coverage/cannot-evaluate-fifo-exits-2", (str(fifo),)),
+            ("hook-coverage/cannot-evaluate-not-object-exits-2", (_write("array.json", [{"hooks": {}}]),)),
+            ("hook-coverage/cannot-evaluate-unknown-require-exits-2",
+             (settings, plugin, "--require", "no-such-control")),
+            ("hook-coverage/cannot-evaluate-dangling-require-exits-2", (settings, "--require"))):
+        check(cid, _cannot(plain_root, "--hook-coverage", *args), (2, True, True, False))
+    # A manifest that cannot be loaded exits 2 too (a root with no hooks manifest).
+    (base / "no-manifest").mkdir()
+    check("hook-coverage/cannot-evaluate-manifest-exits-2",
+          _cannot(base / "no-manifest", "--hook-coverage", settings, plugin), (2, True, True, False))
+
+    # T9: read-only. Against a root carrying a registry, a state directory and a resume barrier, the mode leaves
+    # every byte of the state directory unchanged; against one whose state directory is absent, it stays absent
+    # (the default doctor run creates it).
+    def _snapshot(path):
+        if not os.path.lexists(str(path)):
+            return None
+        rows = []
+        for dirpath, dirnames, filenames in os.walk(str(path)):
+            dirnames.sort()
+            for name in sorted(filenames):
+                full = Path(dirpath) / name
+                rows.append((str(full.relative_to(path)), full.read_bytes()))
+        return rows
+    fx = Fixture(base, "state-present")
+    _with_manifest(fx.root)
+    sd = Path(aiqt_hooks._orch_state_dir_for_root(str(fx.root)))
+    sd.mkdir(parents=True, exist_ok=True)
+    (sd / "resume-barrier.json").write_bytes(
+        b'{"active": true, "findings": ["fixture"], "ts": "2026-01-01T00:00:00+00:00", "warned": false}')
+    before = _snapshot(sd)
+    code, text, honest = _run(fx.root, "--hook-coverage", settings, plugin)
+    check("hook-coverage/state-and-barrier-byte-identical",
+          (code, honest, "DOCTOR" in text, _snapshot(sd) == before,
+           [row[0] for row in before or []]), (0, True, False, True, ["resume-barrier.json"]))
+    fx2 = Fixture(base, "state-absent")
+    _with_manifest(fx2.root)
+    sd2 = Path(aiqt_hooks._orch_state_dir_for_root(str(fx2.root)))
+    absent_before = not os.path.lexists(str(sd2))
+    code, text, honest = _run(fx2.root, "--hook-coverage", settings, plugin)
+    check("hook-coverage/absent-state-dir-not-created",
+          (code, honest, absent_before, os.path.lexists(str(sd2))), (0, True, True, False))
+    shutil.rmtree(str(base), ignore_errors=True)
+
+
 # The child of the record-surface checks that can block or exhaust memory where the read is unbounded or
 # waits for a FIFO writer: it loads the hook script from the file in argv[1] (importlib, so a mutated copy
 # can be loaded in its place), reads the registry JSON in argv[2] and either runs the resume probes over
@@ -19461,6 +19630,7 @@ def _main_isolated(report_path=None):
         _rdp_cases(tmp)
         _rwh_cases(tmp)
         _gitalias_oracle_cases(tmp)
+        _hook_coverage_cases(tmp)
     finally:
         aiqt_hooks._orch_dirfd_has_registry = saved_probe
         shutil.rmtree(tmp, ignore_errors=True)

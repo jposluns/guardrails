@@ -1892,6 +1892,28 @@ expected-check-ids = [
   # fail-open (no-fail-open), and missing or malformed fixture evidence fails the test (fixture-hermetic).
   "gitalias-oracle/no-fail-open",
   "gitalias-oracle/fixture-hermetic",
+  # ---------- tools/orch_doctor.py --hook-coverage (read-only coverage of the named files) ----------
+  "hook-coverage/grc-shape-missing-ask-exits-1",
+  "hook-coverage/ask-matcher-differs-unproven-exits-1",
+  "hook-coverage/ask-exact-matcher-exits-0",
+  "hook-coverage/settings-plus-plugin-exits-0",
+  "hook-coverage/settings-plus-plugin-default-set-exits-0",
+  "hook-coverage/empty-hooks-exits-1",
+  "hook-coverage/disable-all-hooks-true",
+  "hook-coverage/disable-all-hooks-string",
+  "hook-coverage/disable-all-hooks-false",
+  "hook-coverage/cannot-evaluate-no-file-exits-2",
+  "hook-coverage/cannot-evaluate-require-only-exits-2",
+  "hook-coverage/cannot-evaluate-not-json-exits-2",
+  "hook-coverage/cannot-evaluate-absent-file-exits-2",
+  "hook-coverage/cannot-evaluate-directory-exits-2",
+  "hook-coverage/cannot-evaluate-fifo-exits-2",
+  "hook-coverage/cannot-evaluate-not-object-exits-2",
+  "hook-coverage/cannot-evaluate-unknown-require-exits-2",
+  "hook-coverage/cannot-evaluate-dangling-require-exits-2",
+  "hook-coverage/cannot-evaluate-manifest-exits-2",
+  "hook-coverage/state-and-barrier-byte-identical",
+  "hook-coverage/absent-state-dir-not-created",
   # ---------- the self-test entry point hands the caller's environment back ----------
   "harness/entry-restores-caller-env",
 ]

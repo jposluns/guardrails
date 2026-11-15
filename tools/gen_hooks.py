@@ -553,6 +553,96 @@ def render_project_settings(hooks, ids=PROJECT_HOOK_IDS):
     return json.dumps({"hooks": events}, indent=2) + "\n"
 
 
+# Hook coverage (read-only, tools/orch_doctor.py --hook-coverage): which manifest controls a parsed Claude Code
+# settings object or plugin hooks.json object registers. The two launcher shapes the renderers above emit are
+# the only ones recognized: the plugin form (command "python3", args ["-I", <path ending
+# /hooks/scripts/aiqt_hooks.py>, <handler>]) and the settings form (the whole shell string `python3 -I <path
+# ending /aiqt_hooks.py, any part of it double-quoted> <handler>`). Any other entry is ignored, so it can never
+# count as coverage. These functions say what the parsed files register, never what a session loaded.
+_COVERAGE_PLUGIN_SCRIPT_TAIL = "/hooks/scripts/" + SCRIPT_NAME
+_COVERAGE_SETTINGS_RE = re.compile(r'python3 -I ((?:"[^"\n]*"|[^\s"])+) ([a-z][a-z0-9_]*)', re.ASCII)
+
+
+def _coverage_handler(launcher):
+    """The handler a launcher entry runs through the dispatcher, or None when the entry is not one of the two
+    recognized shapes (see registered_handlers)."""
+    if not isinstance(launcher, dict) or launcher.get("type") != "command":
+        return None
+    command = launcher.get("command")
+    if not isinstance(command, str):
+        return None
+    if "args" in launcher:
+        args = launcher["args"]
+        if (command == "python3" and isinstance(args, list) and len(args) == 3
+                and all(isinstance(a, str) for a in args) and args[0] == "-I"
+                and args[1].endswith(_COVERAGE_PLUGIN_SCRIPT_TAIL) and HANDLER_RE.match(args[2])):
+            return args[2]
+        return None
+    match = _COVERAGE_SETTINGS_RE.fullmatch(command)
+    if match is None or not match.group(1).replace('"', "").endswith("/" + SCRIPT_NAME):
+        return None
+    return match.group(2)
+
+
+def registered_handlers(obj, source):
+    """The dispatcher registrations in one parsed settings or plugin hooks.json object, as a list of (event,
+    matcher, handler, source) tuples in file order: for each hooks.<Event>[] group and each launcher in its
+    hooks[] list that _coverage_handler recognizes. matcher is the group's matcher string, or None where the
+    group has no matcher key; a group whose matcher is not a string is ignored. Anything malformed is skipped,
+    never raised, so the result is only ever an under-count of what the object registers."""
+    regs = []
+    events = obj.get("hooks") if isinstance(obj, dict) else None
+    if not isinstance(events, dict):
+        return regs
+    for event, groups in events.items():
+        if not isinstance(groups, list):
+            continue
+        for group in groups:
+            if not isinstance(group, dict) or not isinstance(group.get("hooks"), list):
+                continue
+            matcher = group.get("matcher")
+            if matcher is not None and not isinstance(matcher, str):
+                continue
+            for launcher in group["hooks"]:
+                handler = _coverage_handler(launcher)
+                if handler is not None:
+                    regs.append((event, matcher, handler, source))
+    return regs
+
+
+def default_required_ids(hooks):
+    """The controls hook coverage requires when none is named: every enforce-stage PreToolUse control whose
+    default is "block" (the render_hooks_json onFailure test), in manifest order."""
+    return [hook["id"] for hook in hooks
+            if hook["event"] == "PreToolUse" and hook["default"] == "block"
+            and hook.get("stage", "enforce") == "enforce"]
+
+
+def hook_coverage(hooks, regs, required_ids):
+    """Judge each id in required_ids against registrations from registered_handlers. A control is covered only
+    by a registration with its event, its handler and an IDENTICAL matcher string (None for a non-tool event);
+    no attempt is made to prove one regex covers another. Returns a list of (id, status, detail) in
+    required_ids order, status one of "covered", "missing" or "matcher-differs" (the same event and handler
+    registered only under other matchers, listed in detail; coverage UNPROVEN). Raises ValueError when an id
+    names no manifest control, fail closed like render_project_settings."""
+    known = {hook["id"]: hook for hook in hooks}
+    unknown = [hid for hid in required_ids if hid not in known]
+    if unknown:
+        raise ValueError("hook coverage: required id(s) not in the manifest: {}".format(", ".join(unknown)))
+    results = []
+    for hid in required_ids:
+        hook = known[hid]
+        want = hook.get("matcher")
+        same = [reg for reg in regs if reg[0] == hook["event"] and reg[2] == hook["handler"]]
+        if any(reg[1] == want for reg in same):
+            results.append((hid, "covered", None))
+        elif same:
+            results.append((hid, "matcher-differs", sorted({reg[1] for reg in same}, key=repr)))
+        else:
+            results.append((hid, "missing", None))
+    return results
+
+
 def authoring_tree(root):
     """True when root is the pack authoring repository: AUTHORING_MARKER_REL is a regular file of at most
     AUTHORING_MARKER_MAX_BYTES holding exactly AUTHORING_MARKER (format-version the integer 1, never the bool
@@ -856,6 +946,11 @@ def main():
 #      refused just below it and generate just above it, so the rule cannot narrow to the onFailure
 #      predicate or to the first hook; with the switch false or absent the below, at and above values
 #      still generate and render the default timeout.
+#  36. hook coverage: the project settings render and the plugin hooks.json render (synthetic and this
+#      repository's manifest, switch off and on) each round-trip through registered_handlers and cover their
+#      controls; a handler under a script that is not aiqt_hooks.py, or a settings string that is not the
+#      anchored isolated launcher, never counts while each twin under aiqt_hooks.py does; another matcher
+#      reads matcher-differs; an unknown required id raises ValueError.
 # Every vector that removes the entries its own faults caused (cases 20b, 21b, 27 and 28)
 # does so by PROVENANCE, never by message text: each named entry from the staged cleanup,
 # the removal and absence helpers and the launch diagnostic carries its stage and the
@@ -3990,6 +4085,86 @@ def self_test_main(_nested=False):
                  ("[[hook]] selftest-second", "timeout 9 ", "minimum authored timeout is 11")),
                 ("second-above", "second", 11, 0, ())):
             fit_case(label, switch_on, timeout, want, needles=needles, shape=shape)
+
+        # 36. hook coverage, the parser tools/orch_doctor.py --hook-coverage reads through (T1 to T3 of
+        #     SEED-SESSION-HOOK-COVERAGE).
+        cov_tree = tmp / "hook-coverage"
+        _build_project_tree(cov_tree)
+        _cov_plugin, cov_hooks = load_manifest(cov_tree / ".aiqt" / "core" / "hooks" / "manifest.toml")
+        # T1: the project settings render round-trips through registered_handlers and covers its control (the
+        # synthetic matcher "Edit|Bash" differs from the real one, so a parser that hard-codes it fails), and a
+        # control the file does not register reads missing (the passing twin of "covered").
+        regs = registered_handlers(json.loads(render_project_settings(cov_hooks, ("gensrc-edit-guard",))),
+                                   "settings.json")
+        if regs != [("PreToolUse", "Edit|Bash", "gensrc_guard", "settings.json")]:
+            failures.append("hook coverage T1: the project settings render must parse to exactly one "
+                            "registration, got {!r}".format(regs))
+        got = hook_coverage(cov_hooks, regs, ["gensrc-edit-guard", "selftest-control"])
+        if got != [("gensrc-edit-guard", "covered", None), ("selftest-control", "missing", None)]:
+            failures.append("hook coverage T1: expected gensrc-edit-guard covered and selftest-control missing, "
+                            "got {!r}".format(got))
+        # T2: the plugin hooks.json render covers every manifest id, for the synthetic manifest and for this
+        # repository's own (which carries matcherless events), with the render switch off and on.
+        try:
+            _real_plugin, real_hooks = load_manifest(repo_root() / ".aiqt" / "core" / "hooks" / "manifest.toml")
+        except (ValueError, OSError) as exc:
+            failures.append("hook coverage T2: cannot load this repository's manifest: {}".format(exc))
+            real_hooks = []
+        for label, cov_set in (("synthetic", cov_hooks), ("repository", real_hooks)):
+            if not cov_set:
+                continue
+            ids = [hook["id"] for hook in cov_set]
+            for switch in (False, True):
+                regs = registered_handlers(json.loads(render_hooks_json(cov_set, switch)), "hooks.json")
+                got = hook_coverage(cov_set, regs, ids)
+                if len(regs) != len(ids) or [row[1] for row in got] != ["covered"] * len(ids):
+                    failures.append("hook coverage T2 ({}, on-failure-render {}): every manifest id must be "
+                                    "covered by the hooks.json render, got {!r} from {!r}"
+                                    .format(label, switch, got, regs))
+        # T3: a handler registered under a script that is not aiqt_hooks.py never counts, in either shape, nor a
+        # settings string that is not the anchored isolated launcher; each passing twin under aiqt_hooks.py does,
+        # and the same registration under another matcher reads matcher-differs, never covered.
+
+        def _cov_settings(command, matcher="Edit|Bash"):
+            return {"hooks": {"PreToolUse": [{"matcher": matcher, "hooks": [
+                {"type": "command", "command": command, "timeout": 10}]}]}}
+
+        def _cov_plugin_obj(script):
+            return {"hooks": {"PreToolUse": [{"matcher": "Edit|Bash", "hooks": [
+                {"type": "command", "command": "python3", "args": ["-I", script, "gensrc_guard"],
+                 "timeout": 10}]}]}}
+        for label, obj, want in (
+                ("settings other script", _cov_settings(
+                    'python3 -I "$CLAUDE_PROJECT_DIR"/plugin/x/hooks/scripts/other_hooks.py gensrc_guard'), "missing"),
+                ("settings suffix lookalike", _cov_settings("python3 -I /x/not_aiqt_hooks.py gensrc_guard"),
+                 "missing"),
+                ("settings script as a directory", _cov_settings(
+                    "python3 -I /x/aiqt_hooks.py/evil.py gensrc_guard"), "missing"),
+                ("settings not isolated", _cov_settings("python3 /x/aiqt_hooks.py gensrc_guard"), "missing"),
+                ("settings trailing command", _cov_settings("python3 -I /x/aiqt_hooks.py gensrc_guard; true"),
+                 "missing"),
+                ("plugin other script", _cov_plugin_obj("${CLAUDE_PLUGIN_ROOT}/hooks/scripts/other_hooks.py"),
+                 "missing"),
+                ("plugin suffix lookalike", _cov_plugin_obj("${CLAUDE_PLUGIN_ROOT}/hooks/scripts/not_aiqt_hooks.py"),
+                 "missing"),
+                ("twin settings quoted path", _cov_settings('python3 -I "/opt/a b/aiqt_hooks.py" gensrc_guard'),
+                 "covered"),
+                ("twin settings plain path", _cov_settings("python3 -I /opt/x/aiqt_hooks.py gensrc_guard"),
+                 "covered"),
+                ("twin plugin", _cov_plugin_obj(SCRIPT_PLUGIN_PATH), "covered"),
+                ("twin matcher differs", _cov_settings("python3 -I /opt/x/aiqt_hooks.py gensrc_guard", "Edit"),
+                 "matcher-differs")):
+            got = hook_coverage(cov_hooks, registered_handlers(obj, label), ["gensrc-edit-guard"])
+            if [row[1] for row in got] != [want]:
+                failures.append("hook coverage T3 ({}): expected {}, got {!r}".format(label, want, got))
+        try:
+            hook_coverage(cov_hooks, [], ["no-such-control"])
+            failures.append("hook coverage: an unknown required id must raise ValueError (fail closed)")
+        except ValueError:
+            pass
+        if real_hooks and "orch-ask-unattended" not in default_required_ids(real_hooks):
+            failures.append("hook coverage: the default required set must hold orch-ask-unattended, got {!r}"
+                            .format(default_required_ids(real_hooks)))
     finally:
         try:
             _rmtree_verified(tmp, "suite temp cleanup")
@@ -4122,7 +4297,10 @@ def self_test_main(_nested=False):
           "below the dispatcher's budget plus its own margin is refused naming the hook and the "
           "minimum (just below, at and just above the boundary, on a PreToolUse and a Stop hook and "
           "under a moved margin), a warn hook, a bake-stage hook and a second hook each refused at 9 "
-          "and generating at 11, while with it off or absent 9, 10 and 11 still render the default"
+          "and generating at 11, while with it off or absent 9, 10 and 11 still render the default; "
+          "the hook-coverage parser reads both renders back as covering their controls (every manifest id "
+          "for hooks.json), never counts a handler under another script or an unanchored settings string, "
+          "reads another matcher as matcher-differs, and refuses an unknown required id"
           + note)
     return 0
 
