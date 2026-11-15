@@ -228,9 +228,13 @@ import statement in the same scope included, can then load from the mutated path
 by the dotted name of the enclosing def, async def or class, not by the true Python scope: a
 lambda or comprehension shares the name of the function, class or module around it, and two
 scopes with one dotted name, such as a function defined twice, one name in both branches of an
-if, or a class and a function of one name, are paired, which errs toward reporting; an insert
-in one function and the importer in a function of another name, and a mutation whose importer
-is in a nested function, are not paired); a plain
+if, or a class and a function of one name, are paired, which errs toward reporting; a mutation
+and an importer whose enclosing dotted names differ are not paired: an insert in one function
+and the importer in a function of another name, a mutation whose importer is in a nested
+function, a mutation in a nested function whose importer is in the function around it, a
+module-level mutation whose importer is inside a top-level def, a class-body mutation whose
+importer is in a method of that class, and a mutation inside a def whose importer is at module
+level); a plain
 import statement after a sys.path insert or append in the same scope (not counted because it
 matches about 160 live scopes, most of them a tool importing its own directory, so counting
 it would over-fire); a literal module name for a file the code itself writes under a name the
@@ -2832,6 +2836,25 @@ POSITIVE_VECTORS = (
     # mutation as the direct spelling does.
     ("import importlib, sys\ndef load(td):\n    sys.path.insert(0, str(td))\n"
      "    return getattr(importlib, 'import_module')('json')\n", ("code-syspath",)),
+    # Pairing is by the dotted name of the enclosing def, async def or class, so a lambda or
+    # comprehension shares the name around it (a function, a class body or the module)...
+    ("import importlib, sys\ndef load(td):\n    sys.path.insert(0, str(td))\n"
+     "    return lambda: importlib.import_module('json')\n", ("code-syspath",)),
+    ("import importlib, sys\nsys.path.insert(0, str(td))\n"
+     "load = lambda: importlib.import_module('json')\n", ("code-syspath",)),
+    ("import importlib, sys\ndef load(td, names):\n    sys.path.insert(0, str(td))\n"
+     "    return [importlib.import_module('json') for n in names]\n", ("code-syspath",)),
+    ("import importlib, sys\nclass C:\n    sys.path.insert(0, str(td))\n"
+     "    mods = [importlib.import_module('json') for n in names]\n", ("code-syspath",)),
+    # ...and two scopes with one dotted name pair: a function defined twice, one name in both
+    # branches of an if, and a class and a function of one name.
+    ("import importlib, sys\ndef load(td):\n    sys.path.insert(0, str(td))\n"
+     "def load():\n    return importlib.import_module('json')\n", ("code-syspath",)),
+    ("import importlib, sys\nif fast:\n    def load(td):\n        sys.path.insert(0, str(td))\n"
+     "else:\n    def load():\n        return importlib.import_module('json')\n",
+     ("code-syspath",)),
+    ("import importlib, sys\nclass load:\n    sys.path.insert(0, str(td))\n"
+     "def load():\n    return importlib.import_module('json')\n", ("code-syspath",)),
     ("from logging.handlers import pickle\npickle.loads(data)\n", ("chain", "dsz-ref")),
     ("from pickle import *\nloads(b'')\n", ("star-import",)),
     ("import subprocess\nm = subprocess\nm.run(cmd, shell=True)\n", ("module-escape",)),
@@ -3202,6 +3225,21 @@ NEGATIVE_VECTORS = (
     "def load():\n    return importlib.import_module('json')\n",
     "import importlib, sys\ndef f():\n    sys.path.insert(0, '/usr/share/stubs')\n"
     "    return importlib.import_module('json')\n",
+    # A mutation and an importer whose enclosing dotted names differ are not paired (the
+    # residuals name each): the importer in a nested function, the mutation in a nested
+    # function, a module-level mutation with the importer in a top-level def, a class-body
+    # mutation with the importer in a method, and a mutation in a def with the importer at
+    # module level.
+    "import importlib, sys\ndef load(td):\n    sys.path.insert(0, str(td))\n"
+    "    def inner():\n        return importlib.import_module('json')\n    return inner\n",
+    "import importlib, sys\ndef load(td):\n    def add():\n        sys.path.insert(0, str(td))\n"
+    "    add()\n    return importlib.import_module('json')\n",
+    "import importlib, sys\nsys.path.insert(0, str(td))\n"
+    "def load():\n    return importlib.import_module('json')\n",
+    "import importlib, sys\nclass C:\n    sys.path.insert(0, str(td))\n"
+    "    def load(self):\n        return importlib.import_module('json')\n",
+    "import importlib, sys\ndef add(td):\n    sys.path.insert(0, str(td))\n"
+    "importlib.import_module('json')\n",
 )
 
 
