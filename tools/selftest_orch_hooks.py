@@ -14695,15 +14695,19 @@ def _main_isolated(report_path=None):
         # The guard reads a foreground detach through the shared lexer beside the raw scan
         # (_orch_foreground_detach_lexed). (1) A command proved a safe data-writing shape
         # (_orch_heredoc_data_shape: nothing but plain cat writes, or cat to standard output, and allowlist
-        # readers) reads each body as data up to its delimiter line, so a quoted body's `&` reads as no detach
-        # and, on the registry path these rows run, the lexer's narrowing is never reached: the cat-write and
-        # cat-to-standard-output rows allow on the scan alone. (2) The commit-message form's `&` lies inside
-        # the scan's double-quote state (the double-quoted "$(...)" that holds the body), so the scan reads no
-        # detach whether or not it skips bodies, and the row allows. (3) But a command that is NOT a data
-        # shape because it holds a quote or a `#` comment outside the bodies (echo 'a & b', echo "a & b", a
-        # trailing comment) reads each here-document body as its consumer's COMMANDS, so a body apostrophe
-        # leaves the scan unbalanced and the command denies: the three quote-shift rows now OVER-REFUSE these
-        # safe commands (bash runs no background job), the accepted, disclosed side of the narrow proof.
+        # readers) reads each body as data, so a body's bare `&` detaches nothing. Where the cat WRITES the
+        # body to a file (the cat-write rows), the raw scan returns None and the row allows on the scan alone;
+        # where the cat writes to standard OUTPUT (the cat-to-standard-output rows), the scan (which lists no
+        # amps on the detach-kind path) still returns detach for the body `&`, so the row allows only through
+        # the lexer lift, which places that `&` in the quoted here-document body. (2) The commit-message
+        # template keeps the `&` as plain text in the double-quoted "$(cat <<'EOF' ... EOF)", so the scan reads
+        # no detach and it allows on the scan alone; the commit form whose body carries its own double quotes
+        # (fg-commit-heredoc-quoted-amp) leaves the scan reading a detach, lifted the same way. (3) But a
+        # command that is NOT a data shape because it holds a quote or a `#` comment outside the bodies
+        # (echo 'a & b', echo "a & b", a trailing comment) reads each here-document body as its consumer's
+        # COMMANDS, so a body apostrophe leaves the scan unbalanced and the command denies: the three
+        # quote-shift rows now OVER-REFUSE these safe commands (bash runs no background job), the accepted,
+        # disclosed side of the narrow proof.
         check("trunc/fg-quoted-heredoc-amp-allows",
               [_verdict(bg("cat <<'EOF'\nFix A & B\nEOF", rib=False)),
                _verdict(bg('cat <<"EOF"\nFix A & B\nEOF', rib=False))], ["allow", "allow"])

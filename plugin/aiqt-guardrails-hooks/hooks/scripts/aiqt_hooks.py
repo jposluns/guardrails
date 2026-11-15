@@ -24094,7 +24094,9 @@ def _orch_foreground_scan(command, bash_word_starts, amps=None, skip_bodies=True
     read; but bash never reads a quote, comment or operator in a body as part of the command, quoted
     delimiter or not, so a body opened at the top level with nothing open, under a delimiter this pass
     parses and ended at its exact delimiter line, is read ON ITS OWN (_orch_heredoc_body_spans): a pass
-    over the body text alone (body set) reads its `&`, `#` and quotes as a shell reading that text would,
+    over the body text alone (body set) reads its `&`, `#` and quotes as a shell reading that text would for
+    its bare `&` (it does NOT model an unquoted delimiter's expansions and backslash removal, nor a
+    here-document nested inside the body, so a detach reached only through those stays a disclosed miss),
     and the command's pass resumes past the delimiter line in the state the line before the body left, so
     a body quote no longer opens or closes the command's quote state. That body pass returns "unbalanced"
     for an uncertain `#`, and for a quote still open at the body's end where the body text that quote hides
@@ -24122,11 +24124,6 @@ def _orch_foreground_scan(command, bash_word_starts, amps=None, skip_bodies=True
     dq_prev = "word"  # the comment rule's class of the previous character inside those substitutions
     dq_single = False  # inside a single-quoted span within such a substitution
     heredocs = []  # the here-documents opened on the current line, each a _orch_heredoc_spec or None
-    # Beside heredocs, each one's `<<` index and the start of the simple command holding it (seg_start, the
-    # index just past the last unquoted `;`, `|`, `&` or newline before it), which name its consumer.
-    heredoc_ats = []
-    seg_start = 0
-    read_bodies = []  # the (start, stop) of each body read on its own so far
     # Set once a here-document body is read as code: a line in it may be a nested shell's input or data
     # bash ends elsewhere, so no later here-document is skipped.
     code_body = False
@@ -24208,14 +24205,13 @@ def _orch_foreground_scan(command, bash_word_starts, amps=None, skip_bodies=True
             # nothing. In any other command (a write followed by '. ./s.sh' or 'bash s.sh', or preceded by
             # 'hash -p /usr/bin/bash cat', included) a body can be a shell's input, so its '&' is still read.
             specs, heredocs = heredocs, []
-            ats, heredoc_ats = heredoc_ats, []
             literal = (data_command and not nest and not code_body
                        and all(spec and spec[1] for spec in specs))
             end, closed = (_orch_heredoc_bodies_end(command, i + 1, n, [(spec[0], spec[2]) for spec in specs])
                            if literal else (i, False))
             if closed:
                 prev_dup, prev, after_dollar = False, "break", False
-                i = seg_start = end
+                i = end
                 continue
             # Any other body opened at the top level with nothing open, under a delimiter this pass parses,
             # is read on its own (_orch_heredoc_body_spans), its '&' read as a shell reading the body would:
@@ -24225,7 +24221,7 @@ def _orch_foreground_scan(command, bash_word_starts, amps=None, skip_bodies=True
             spans, end = ((None, i) if literal or nest or code_body or not all(specs)
                           else _orch_heredoc_body_spans(command, i + 1, n, specs))
             if spans is not None:
-                for (start, stop), (op_at, seg) in zip(spans, ats):
+                for start, stop in spans:
                     # Unless the WHOLE command is a safe data-writing shape (_orch_heredoc_data_shape, proved
                     # once as data_shape), every body is read as its consumer's COMMANDS: a quote it leaves
                     # open is the "unbalanced" a quote left open in the command's own text gives, and a bare
@@ -24242,16 +24238,13 @@ def _orch_foreground_scan(command, bash_word_starts, amps=None, skip_bodies=True
                         return "unbalanced" if body_open else "detach"
                     if found:
                         amps.extend(start + at for at in found)
-                    read_bodies.append((start, stop))
                 prev_dup, prev, after_dollar = False, "break", False
-                i = seg_start = end
+                i = end
                 continue
             code_body = True
         if ch.isspace():
             prev_dup, after_dollar = False, False
             prev = "break" if ch in _ORCH_BASH_WORD_BREAKS or not bash_word_starts else "word"
-            if ch == "\n":
-                seg_start = i + 1
             i += 1
             continue
         if ch == "\\":
@@ -24272,7 +24265,7 @@ def _orch_foreground_scan(command, bash_word_starts, amps=None, skip_bodies=True
             nxt = command[i + 1] if i + 1 < n else ""
             if nxt == "&":  # `&&` logical AND: not a detach
                 prev_dup = False
-                i = seg_start = i + 2
+                i += 2
                 continue
             if nxt == ">":  # `&>` / `&>>` redirect: not a detach
                 prev_dup = False
@@ -24287,14 +24280,13 @@ def _orch_foreground_scan(command, bash_word_starts, amps=None, skip_bodies=True
                 # left a quote open that a shell reading that body with later text can pair (body_open).
                 return "unbalanced" if body_open else "detach"
             amps.append(i)
-            i = seg_start = i + 1
+            i += 1
             continue
         if (skip_bodies and ch == "<" and command.startswith("<<", i) and not command.startswith("<<<", i)
                 and not (prev_dup and command[i - 1] == "<")):
             # A here-document operator (not a here-string, nor the second '<' of one already read). One
             # opened inside a grouping or with something open on the stack records None, never skipped.
             heredocs.append(_orch_heredoc_spec(command, i) if i < grouped and not nest else None)
-            heredoc_ats.append((i, seg_start))
         _nest_track(nest, ch, after_dollar)
         if ch in "()":
             prev = "paren"
@@ -24305,8 +24297,6 @@ def _orch_foreground_scan(command, bash_word_starts, amps=None, skip_bodies=True
         prev_dup = ch in (">", "<", "|")
         after_dollar = ch == "$"
         i += 1
-        if ch in ";|":
-            seg_start = i
     # A scan that ended still inside an unbalanced quote could not prove a later `&` was quoted; it fails
     # toward the DENY (with its own reason) rather than silently allowing a possibly-real detach. A body
     # read on its own (body) hides no text of the command after it, which the caller reads past the
@@ -24425,13 +24415,16 @@ def _orch_heredoc_data_shape(command):
     backquote, parenthesis, brace, glob, pipe, bare '&' or redirection other than a cat write target), none is
     an assignment, and the only separators are ';', '&&', '||' and newline, so none sits in a group, compound
     command, pipeline or substitution; the command holding each body is a plain cat (its only words `cat`, its
-    only redirections '>'/'>>' to plain targets, writing to those files or, with none, to standard output);
-    and every other simple command's first word is in _ORCH_DATA_SHAPE_ALLOWED, a short list of readers and
-    the like that run or rename no file they name. A cat, python3 -c or any interpreter, git, echo or printf
-    writing to a file, cp, mv, ln, eval, exec, source, a dot, read or printf -v fails the proof, so its body
-    is read as commands. The work is linear in the command length within two cost ceilings, each failing
-    toward commands: a command longer than _ORCH_DATA_SHAPE_TEXT_LIMIT characters, or holding more than
-    _ORCH_DATA_BODY_LIMIT here-documents."""
+    only redirections '>'/'>>' to plain targets, writing to those files or, with none, to standard output),
+    and no write target's last path component is an allowlisted word (or `cat`) nor is the target under /dev
+    or /proc or reached through a '..', so a cat write cannot place a body where a later word runs it; and
+    every other simple command's first word is in _ORCH_DATA_SHAPE_ALLOWED, a short list of readers and the
+    like that run or rename no file they name. A python3 -c or any interpreter, git, cp, mv, ln, eval, exec,
+    source, a dot, read or printf -v fails the proof, as does any first word (echo and printf among them, and
+    cat with a file redirect but no here-document body: `cat a > b`) that redirects to a file without holding
+    a body, so such a command's body is read as commands. The work is linear in the command length within two
+    cost ceilings, each failing toward commands: a command longer than _ORCH_DATA_SHAPE_TEXT_LIMIT characters,
+    or holding more than _ORCH_DATA_BODY_LIMIT here-documents."""
     n = len(command)
     if n > _ORCH_DATA_SHAPE_TEXT_LIMIT:
         return False
@@ -24489,6 +24482,15 @@ def _orch_heredoc_data_shape(command):
                 i += 1
             match = _ORCH_DATA_SHAPE_WORD_RE.match(command, i)
             if match is None:
+                return False
+            parts = [part for part in match.group().split("/") if part not in ("", ".")]
+            if (not parts or ".." in parts or parts[0] in ("dev", "proc")
+                    or parts[-1] in _ORCH_DATA_SHAPE_ALLOWED):
+                # A write target that could REPLACE a program the same command then runs is not a data
+                # shape: a last path component that is an allowlisted word (or cat) names the very program
+                # a reader segment resolves, and a target under /dev or /proc (or reached through a '..')
+                # can be the shell's own stream, not a file. Either lets a cat write place a body where a
+                # later word runs it, so the proof fails toward reading the bodies as commands.
                 return False
             i = match.end()
             continue
@@ -24782,20 +24784,23 @@ def _orch_foreground_detach(command):
     `&`; a written file run without the command naming it there keeps the earlier reading, a silent allow
     disclosed in the manifest.
 
-    OVER-REFUSAL RESIDUAL (disclosed): this scan skips a here-document body as data only when the WHOLE
-    command is proved a safe data-writing shape, by ONE positive proof over the outer text
+    OVER-REFUSAL RESIDUAL (disclosed): this scan reads a here-document body as data (its bare `&` alone, the
+    body's quotes shifting nothing in the command) only when the WHOLE command is proved a safe data-writing
+    shape, by ONE positive proof over the outer text
     (_orch_heredoc_data_shape): every simple command outside the bodies made only of plain words (no quote,
     backslash, '$', backquote, parenthesis, brace, glob, pipe, bare '&' or redirection other than a cat
     write target), none an assignment, none in a group, compound command, pipeline or substitution; the
-    command holding each body a plain cat writing to plain targets or to standard output; and every other
-    simple command's first word in a short allowlist of readers that run or rename no file they name (mkdir,
-    the checksum tools, wc, ls, stat, cmp, diff, test, true, echo). Only in such a command does a quote, `&`
-    or substitution in a body (`cat > f <<'EOF'` then `the user's file`) read as no detach. In every other
-    command a body can be a shell's input, so its bare `&` is read: a body opened at the top level with
-    nothing open, under a delimiter the scan parses and ended at its delimiter line, it reads ON ITS OWN, as
-    a shell reading that text would, apart from the command's quote state (_orch_foreground_scan), so a body
-    apostrophe (`cat <<'EOF'` to standard output then `it's`, or the same under an unquoted delimiter) no
-    longer leaves the command's quote open. A body fed to a shell (bash, sh, dash, zsh, source /dev/stdin, a
+    command holding each body a plain cat writing to plain targets (none whose last path component is an
+    allowlisted word or cat, and none under /dev or /proc or through a '..') or to standard output; and every
+    other simple command's first word in a short allowlist of readers that run or rename no file they name
+    (cat, mkdir, the checksum tools, wc, ls, stat, cmp, diff, test, true, echo). Only in such a command does a
+    quote, `&` or substitution in a body (`cat > f <<'EOF'` then `the user's file`, or a cat to standard
+    output alone, itself a data shape) read as no detach. Every command reads a body opened at the top level
+    with nothing open, under a delimiter the scan parses and ended at its delimiter line, ON ITS OWN, as a
+    shell reading that text would for its bare `&`, apart from the command's quote state (_orch_foreground_scan,
+    which does not model an unquoted delimiter's expansions or a nested here-document), so a body apostrophe no
+    longer leaves the command's quote open; the detach then stands only where the command is not a data shape.
+    A body fed to a shell (bash, sh, dash, zsh, source /dev/stdin, a
     cat piped onward), under a consumer the proof does not accept (a python3 -c or any interpreter, git,
     echo or printf writing to a file, cp, mv, ln, eval, exec, source, a dot, read or printf -v), or written
     to a file the same command then runs (bash FILE, sh FILE, source FILE, ./FILE, python3 FILE) is read as
@@ -26509,8 +26514,10 @@ def orch_truncation_guard(data):
                 "one opened after a '(' or backquote, an unquoted delimiter's holding a command "
                 "substitution, so quote the delimiter (<<'EOF') where the body needs no expansion, or one "
                 "whose quote stays open over an '&') or an ANSI-C $'...' "
-                "quote; a here-document body fed to a shell or to a consumer this guard does not accept as a "
-                "plain cat write, or written to a file the same command then runs, is read as commands, so a "
+                "quote; a here-document body in any command this guard does not prove a safe data-writing shape "
+                "(one fed to a shell, held by a consumer other than a plain cat write to a plain file or to "
+                "standard output, written to a file the same command then runs, or beside any other command "
+                "such as a cd) is read as commands, so a "
                 "quote it leaves open counts as one. Balance the quoting, put a blank before such a '#' outside "
                 "any grouping or substitution, or write the text with cat in a call of its own and run any "
                 "other command in a separate call.",

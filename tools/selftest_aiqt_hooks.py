@@ -4056,19 +4056,29 @@ _TAB = "\t"
 _TRKASY_HEREDOC_BODY_ROWS = (
     # A DATA body's quote never leaves the command's quote open: a plain cat write (or cat to standard output)
     # followed only by a reader of the data-writing allowlist (sha256sum, ls and the like) still allows, its
-    # delimiter form and apostrophe notwithstanding. A command holding anything else (the adopter's python3,
-    # a source, a coproc) is not a data shape, so its body is read as commands (_orch_heredoc_data_shape).
+    # delimiter form and apostrophe notwithstanding. Each delimiter-form row's body also holds a start form
+    # (coproc) beside its apostrophe or quote, so reading that body as code (the body-spans-off mutant) denies
+    # it: the row's base decision is deny, and it pins the body-on-its-own reading. A command holding anything
+    # else (the adopter's python3, a source, a coproc outside a data shape) is not a data shape, so its body
+    # is read as commands (_orch_heredoc_data_shape).
     ("hdb-adopter-exact", _TRKASY_HEREDOC_ADOPTER, "deny", "deny"),
     ("hdb-unquoted-apostrophe-source", "cat > /tmp/k.txt <<EOF\na'b\nsource\nEOF", "allow", "deny"),
-    ("hdb-single-quoted-delim", "cat > /abs/f <<'EOF'\nit's\nEOF\nsha256sum /abs/g", "allow", "allow"),
-    ("hdb-double-quoted-delim", "cat > /abs/f <<\"EOF\"\nit's\nEOF\nsha256sum /abs/g", "allow", "allow"),
-    ("hdb-backslash-delim", "cat > /abs/f <<\\EOF\nit's\nEOF\nsha256sum /abs/g", "allow", "allow"),
-    ("hdb-dash-tabs-unquoted", "cat <<-EOF\n" + _TAB + "it's\n" + _TAB + "EOF\nsha256sum /abs/f", "allow", "allow"),
-    ("hdb-dash-tabs-quoted", "cat <<-'EOF'\n" + _TAB + "it's\n" + _TAB + "EOF\nsha256sum /abs/f", "allow", "allow"),
-    ("hdb-two-on-one-line", "cat <<A <<'B'\nit's\nA\nsay \"hi\nB\nsha256sum /abs/f", "allow", "allow"),
-    ("hdb-double-quote-body", "cat <<EOF\nsay \"hi\nEOF\nsha256sum /abs/f", "allow", "allow"),
-    ("hdb-plain-brace-body", "cat <<EOF\nit's ${HOME}\nEOF\nsha256sum /abs/f", "allow", "allow"),
-    ("hdb-escaped-substitutions", "cat <<EOF\nit's \\$(date) \\`date\\`\nEOF\nsha256sum /abs/f", "allow", "allow"),
+    ("hdb-single-quoted-delim", "cat > /abs/f <<'EOF'\ncoproc sleep 5\necho it's\nEOF\nsha256sum /abs/g",
+     "allow", "deny"),
+    ("hdb-double-quoted-delim", "cat > /abs/f <<\"EOF\"\ncoproc sleep 5\necho it's\nEOF\nsha256sum /abs/g",
+     "allow", "deny"),
+    ("hdb-backslash-delim", "cat > /abs/f <<\\EOF\ncoproc sleep 5\necho it's\nEOF\nsha256sum /abs/g",
+     "allow", "deny"),
+    ("hdb-dash-tabs-unquoted", "cat <<-EOF\n" + _TAB + "coproc sleep 5\n" + _TAB + "echo it's\n" + _TAB
+     + "EOF\nsha256sum /abs/f", "allow", "deny"),
+    ("hdb-dash-tabs-quoted", "cat <<-'EOF'\n" + _TAB + "coproc sleep 5\n" + _TAB + "echo it's\n" + _TAB
+     + "EOF\nsha256sum /abs/f", "allow", "deny"),
+    ("hdb-two-on-one-line",
+     "cat <<A <<'B'\nit's\ncoproc sleep 5\nA\nsay \"hi\ncoproc sleep 5\nB\nsha256sum /abs/f", "allow", "deny"),
+    ("hdb-double-quote-body", "cat <<EOF\nsay \"hi\ncoproc sleep 5\nEOF\nsha256sum /abs/f", "allow", "deny"),
+    ("hdb-plain-brace-body", "cat <<EOF\nit's ${HOME}\ncoproc sleep 5\nEOF\nsha256sum /abs/f", "allow", "deny"),
+    ("hdb-escaped-substitutions", "cat <<EOF\nit's \\$(date) \\`date\\`\ncoproc sleep 5\nEOF\nsha256sum /abs/f",
+     "allow", "deny"),
     ("hdb-and-list-after-body", "cat > /abs/f <<'EOF'\nit's\nEOF\nls /abs && sha256sum /abs/f", "allow", "allow"),
     # The quote a body left open hid a real bare '&' after the delimiter line (QUOTE SHIFT): now read.
     ("hdb-amp-between-bodies", "cat <<A\nit's\nA\nsleep 5 & cat <<B\nx'\nB", "deny", "allow"),
@@ -4278,8 +4288,11 @@ _TRKASY_HEREDOC_CONSUMER_ROWS = tuple(
         # The cost ceilings, each end just inside, at and just outside (_orch_heredoc_data_shape fails toward
         # commands): a command holding more than 64 here-documents is not proved a data shape, and neither is
         # one longer than 65536 characters (here, a plain cat write with an '&' body padded to that length).
-        + tuple(("hdc-body-limit-{}".format(count), "cat <<'E'\nx\nE\n" * count + "cat <<'E'\n" + _HDC_AMP + "E",
-                 expected) for count, expected in ((63, "allow"), (64, "deny"), (65, "deny")))
+        # The body-limit label is the TOTAL number of here-documents in the command (the last one carries the
+        # '&' body), so 64 is the limit itself (allow), 63 just inside it and 65 just outside it (deny).
+        + tuple(("hdc-body-limit-{}".format(total),
+                 "cat <<'E'\nx\nE\n" * (total - 1) + "cat <<'E'\n" + _HDC_AMP + "E", expected)
+                for total, expected in ((63, "allow"), (64, "allow"), (65, "deny")))
         + tuple(("hdc-run-text-limit-{}".format(size),
                  "cat > /abs/s <<'E'\n" + _HDC_AMP + "E\nsha256sum /" + "a" * (size - 42), expected)
                 for size, expected in ((65535, "allow"), (65536, "allow"), (65537, "deny")))
@@ -4348,6 +4361,88 @@ def _test_trkasy_heredoc_consumer(failures, tmp):
         if got != before:
             failures.append("({}-mutant) the row must give its earlier decision {} with every consumer read as "
                             "data, so it pins the consumer reading; got {}".format(label, before, got))
+
+
+# Each data-shape proof rule, as (tag, anchor, replacement, rows): the anchor/replacement revert exactly that
+# rule in a scratch mutant, and every row DENIES in registry scope but ALLOWS with the rule reverted, so each
+# row is red precisely when its rule is gone. The reverts gate a condition with `False and` or widen a word
+# pattern, leaving the rest of the proof intact.
+_DS_TARGET_ANCHOR = (
+    '            if (not parts or ".." in parts or parts[0] in ("dev", "proc")\n'
+    '                    or parts[-1] in _ORCH_DATA_SHAPE_ALLOWED):')
+_DS_TARGET_REPL = (
+    '            if False and (not parts or ".." in parts or parts[0] in ("dev", "proc")\n'
+    '                    or parts[-1] in _ORCH_DATA_SHAPE_ALLOWED):')
+_DS_PIPE_ANCHOR = 'if ch in "&|" and not command.startswith(ch * 2, i):'
+_DS_PIPE_REPL = 'if ch == "&" and not command.startswith(ch * 2, i):'
+_DS_EXTRA_ANCHOR = "extra_word = True"
+_DS_EXTRA_REPL = "extra_word = False"
+_DS_REDIR_ANCHOR = (
+    "        if has_redirect:\n"
+    "            return False\n"
+    "        return first_word in _ORCH_DATA_SHAPE_ALLOWED")
+_DS_REDIR_REPL = (
+    "        if False and has_redirect:\n"
+    "            return False\n"
+    "        return first_word in _ORCH_DATA_SHAPE_ALLOWED")
+_DS_WORD_ANCHOR = '_ORCH_DATA_SHAPE_WORD_RE = re.compile(r"[A-Za-z0-9_./+,:@%=-]+")'
+_DS_WORD_REPL = '_ORCH_DATA_SHAPE_WORD_RE = re.compile(r"[^\\s;&|<>]+")'
+_TRKASY_DATA_SHAPE_RULE_GROUPS = (
+    ("dstarget", _DS_TARGET_ANCHOR, _DS_TARGET_REPL, (
+        ("ds-target-wc", "cat > /abs/bin/wc <<'EOF'\n" + _HDC_APOS + "EOF\nwc /dev/null"),
+        ("ds-target-ls", "cat > /abs/bin/ls <<'EOF'\n" + _HDC_APOS + "EOF\nls /abs"),
+        ("ds-target-stat", "cat > /abs/bin/stat <<'EOF'\n" + _HDC_APOS + "EOF\nstat /abs"),
+        ("ds-target-mkdir", "cat > /abs/bin/mkdir <<'EOF'\n" + _HDC_APOS + "EOF\nmkdir /abs/d"),
+        ("ds-target-cat", "cat > /abs/bin/cat <<'EOF'\n" + _HDC_APOS + "EOF\ncat /abs/f"),
+        ("ds-target-dev", "cat > /dev/stdout <<'EOF'\n" + _HDC_APOS + "EOF"),
+        ("ds-target-proc", "cat > /proc/self/fd/0 <<'EOF'\n" + _HDC_APOS + "EOF"),
+    )),
+    ("dspipe", _DS_PIPE_ANCHOR, _DS_PIPE_REPL, (
+        ("ds-pipe-cat", "cat <<'EOF' | wc -c\n" + _HDC_APOS + "EOF"),
+        ("ds-pipe-after-write", "cat > /abs/f <<'EOF'\n" + _HDC_APOS + "EOF\nwc /abs/f | wc -l"),
+    )),
+    ("dsextra", _DS_EXTRA_ANCHOR, _DS_EXTRA_REPL, (
+        ("ds-extra-word", "cat x > /abs/f <<'EOF'\n" + _HDC_APOS + "EOF"),
+    )),
+    ("dsredir", _DS_REDIR_ANCHOR, _DS_REDIR_REPL, (
+        ("ds-reader-redirect", "cat > /abs/f <<'EOF'\n" + _HDC_APOS + "EOF\nwc /abs/f > /abs/c.txt"),
+    )),
+    ("dsword", _DS_WORD_ANCHOR, _DS_WORD_REPL, (
+        ("ds-plain-word-subst", "cat > /abs/f <<'EOF'\n" + _HDC_APOS + "EOF\necho $(bash /abs/f)"),
+        ("ds-plain-word-quoted-subst", "cat > /abs/f <<'EOF'\n" + _HDC_APOS + "EOF\nls \"$(bash /abs/f)\""),
+        ("ds-plain-word-backquote", "cat > /abs/f <<'EOF'\n" + _HDC_APOS + "EOF\ntest -n `bash /abs/f`"),
+    )),
+)
+
+
+def _test_trkasy_data_shape_rules(failures, tmp):
+    """Each data-shape proof rule has rows that DENY in registry scope and ALLOW when that one rule is reverted
+    (_TRKASY_DATA_SHAPE_RULE_GROUPS, a scratch mutant per rule), so each row is red precisely when its rule is
+    gone: the cat write target restriction (an allowlisted last path component, or a /dev,/proc or '..'
+    target), the single-pipe rule, the no-extra-words-on-the-cat-line rule, the no-redirect-on-a-reader-segment
+    rule, and the plain-word rule (a substitution or quoted substitution in a reader's argument after a
+    write)."""
+    root = tmp / "trkasy-data-shape-rules"
+    (root / ".aiqt").mkdir(parents=True)
+    (root / ".aiqt" / "orchestration.local.json").write_text(json.dumps({"version": 1}), encoding="utf-8")
+    handler = aiqt_hooks.orch_truncation_guard
+    seen = set()
+    for tag, anchor, replacement, rows in _TRKASY_DATA_SHAPE_RULE_GROUPS:
+        for label, command in rows:
+            if label in seen:
+                failures.append("(ds-labels) the rule rows repeat a label {!r}".format(label))
+            seen.add(label)
+            got = _decision(handler, command, cwd=str(root))
+            if got != "deny":
+                failures.append("({}) expected deny in registry scope; got {}".format(label, got))
+        decisions = _trkasy_heredoc_mutant_decisions(
+            failures, tmp, root, [command for _l, command in rows], anchor, replacement, tag)
+        if decisions is None:
+            continue
+        for (label, _command), got in zip(rows, decisions):
+            if got != "allow":
+                failures.append("({}-mutant) the row must allow with its rule reverted, so it pins the rule; "
+                                "got {}".format(label, got))
 
 
 _WAIT_LOOP_DENY_COMMAND = "while true; do gh run view 1; sleep 30; done &"
@@ -30905,6 +31000,7 @@ def _main_isolated(monitor):
         _test_trkasy_no_amp(failures, tmp)
         _test_trkasy_heredoc_body_data(failures, tmp)
         _test_trkasy_heredoc_consumer(failures, tmp)
+        _test_trkasy_data_shape_rules(failures, tmp)
         _test_wait_loop_deny_text(failures, tmp)
         _test_note_literal_sites(failures, tmp)
         _test_stop_dispatch_note_sites(failures, tmp)
