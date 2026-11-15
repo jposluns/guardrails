@@ -586,6 +586,31 @@ def _self_test():
     findings, errors = _scan_case(mutate=_link_beside_parent)
     check("pass/symlink-beside-parent", findings == [] and errors == [], (findings, errors))
 
+    # A parent folder that is a regular file is a finding, not cannot-evaluate: red if the parent check
+    # refuses only a link (the root's lstat then fails with ENOTDIR, an error).
+    def _file_parent(tmp):
+        os.rename(tmp / parent_rel, tmp / "elsewhere-parent")
+        (tmp / parent_rel).write_bytes(b"not a folder\n")
+
+    findings, errors = _scan_case(mutate=_file_parent)
+    check("refuse/nondir-parent", errors == [] and findings == [
+        "{}: parent folder {} is a symbolic link or not a directory".format(FIXTURE_ROOT, parent_rel)],
+          (findings, errors))
+
+    # The top-level folder (site) as a link to a real folder holding the exact copy: red if the parent check
+    # starts below the top level.
+    top_rel = FIXTURE_ROOT.split("/", 1)[0]
+
+    def _link_top(tmp):
+        real = tmp / "elsewhere-top"
+        os.rename(tmp / top_rel, real)
+        os.symlink(real, tmp / top_rel)
+
+    findings, errors = _scan_case(mutate=_link_top)
+    check("refuse/symlink-top-folder", errors == [] and findings == [
+        "{}: parent folder {} is a symbolic link or not a directory".format(FIXTURE_ROOT, top_rel)],
+          (findings, errors))
+
     def _fifo(tmp):
         os.mkfifo(tmp / FIXTURE_ROOT / "pipe")
 
@@ -904,7 +929,8 @@ def _self_test():
         return 1
     print("SELF-TEST PASS: check_baseline_pin {} checks (the exact fixture passes; a differing file, a "
           "missing file, a stray file, a symbolic link at a file, a directory, the root or a parent folder of "
-          "the root, a FIFO and a missing root each fail, and a link beside a parent folder passes; a missing, unreadable, non-UTF-8, non-TOML or misshapen pin and an "
+          "the root (the top-level folder included), a parent folder that is a regular file, a FIFO and a "
+          "missing root each fail, and a link beside a parent folder passes; a missing, unreadable, non-UTF-8, non-TOML or misshapen pin and an "
           "unreadable copied file are cannot-evaluate; the pin size bound holds one byte under, at and "
           "over; 2 registered pairs pass together, a second copy's defect is reported against its own root "
           "and pin, and a pin naming another root or a registry repeating a pin or a root is "

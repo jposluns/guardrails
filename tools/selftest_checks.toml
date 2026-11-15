@@ -5102,6 +5102,8 @@ expected-check-ids = [
   "refuse/symlink-root",
   "refuse/symlink-parent",
   "pass/symlink-beside-parent",
+  "refuse/nondir-parent",
+  "refuse/symlink-top-folder",
   "refuse/fifo-not-regular",
   "refuse/root-missing",
   "refuse/pin-missing-cannot-evaluate",
