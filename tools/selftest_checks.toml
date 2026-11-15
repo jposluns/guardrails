@@ -5208,6 +5208,57 @@ expected-check-ids = [
 ]
 
 [[suite]]
+# The branch fold helper (tools/fold_onto_base.py): vectors H1 to H16 and Q10 in temporary
+# repositories, then each listed mutant run against its own vector in a private sink.
+id = "fold-onto-base-selftest"
+runner = "tools/fold_onto_base.py"
+expected-check-ids = [
+  "fold/h1-valid-fold",
+  "fold/h1-recovery-ref-create-only",
+  "fold/h2-protected-moved-parent-is-base",
+  "fold/h14-fold-passes-branch-root",
+  "fold/h14-tip-fold-is-reverts",
+  "fold/h3-expect-base-older-refused",
+  "fold/h3-expect-base-abbreviated-usage",
+  "fold/h3-expect-base-equal-folds",
+  "fold/h4-dirty-worktree-refused",
+  "fold/h4-staged-unrelated-refused",
+  "fold/h4-tree-from-commit-not-index",
+  "fold/h5-criss-cross-refused",
+  "fold/h6-shallow-cannot-evaluate",
+  "fold/h7-branch-moved-swap-lost",
+  "fold/h8-on-main-refused",
+  "fold/h8-on-master-refused",
+  "fold/h8-protected-is-branch-refused",
+  "fold/h9-detached-refused",
+  "fold/h10-merge-in-range-refused",
+  "fold/h11-rebase-merge-refused",
+  "fold/h11-rebase-apply-refused",
+  "fold/h11-merge-head-refused",
+  "fold/h11-cherry-pick-refused",
+  "fold/h11-revert-refused",
+  "fold/h11-bisect-refused",
+  "fold/h11-sequencer-refused",
+  "fold/h12-nothing-to-fold-refused",
+  "fold/h13-awkward-paths-tree-kept",
+  "fold/h15-hooks-allow-command",
+  "fold/h16-ambient-git-env-scrubbed",
+  "fold/q10-failed-signature-refused",
+  "cli/usage-and-unresolvable-exit-2",
+  "cli/closed-git-subcommands",
+  "mutant/parent-is-protected-tip",
+  "mutant/tree-from-index",
+  "mutant/swap-without-old-value",
+  "mutant/first-of-several-bases",
+  "mutant/expect-base-ignored",
+  "mutant/no-recovery-ref",
+  "mutant/merges-allowed",
+  "mutant/dirty-allowed",
+  "mutant/ambient-git-env-kept",
+  "mutant/signing-config-ignored",
+]
+
+[[suite]]
 id = "record-readers-selftest"
 runner = "tools/check_record_readers.py"
 expected-check-ids = [

@@ -963,6 +963,10 @@ jobs:
             python3 -I -B tools/check_branch_root.py --protected "origin/${GITHUB_REF_NAME}" --max-lag 200
           fi
 
+      - name: Fold onto base self-test (execution-reconciled)
+        shell: bash
+        run: python3 -I -B tools/check_selftest_execution.py --suite fold-onto-base-selftest
+
       - name: Release delta self-test
         shell: bash
         run: python3 -I -B tools/check_release_delta.py --self-test

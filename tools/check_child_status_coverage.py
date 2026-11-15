@@ -490,6 +490,7 @@ DIRECT_LAUNCH_RESIDUAL = (
     "tools/ci_site_scope.py",
     "tools/conformance.py",
     "tools/doctor.py",
+    "tools/fold_onto_base.py",
     "tools/gen_adapters.py",
     "tools/gen_agents.py",
     "tools/gen_claude.py",
