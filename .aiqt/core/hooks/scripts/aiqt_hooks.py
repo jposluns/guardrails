@@ -10574,7 +10574,7 @@ _RECOVERY_SIZE_CAP = 100 * 1024 * 1024  # 100 MiB
 _RECOVERY_LEDGER_PARTS = ("aiqt-guardrails", "recovery.jsonl")
 
 
-def _recovery_git(repo, args, env_extra=None, timeout=10):
+def _recovery_git(repo, args, env_extra=None, timeout=10, text=True):
     """Run a git subcommand against repo and return the CompletedProcess. INERT TO WORKING STATE: across all
     of its git calls it never touches the real index (a snapshot call uses a TEMP GIT_INDEX_FILE via
     env_extra), the worktree, HEAD, or a branch, and in a NORMAL repo writes only objects and one private ref
@@ -10592,12 +10592,14 @@ def _recovery_git(repo, args, env_extra=None, timeout=10):
     PATH-based git resolution, and partial-clone object availability, all read by git by design and none
     neutralized here.
     Raises subprocess.SubprocessError / OSError on a spawn or timeout failure, which the caller treats as a
-    snapshot failure. offline, bounded by `timeout`."""
+    snapshot failure. offline, bounded by `timeout`. text=False returns the output as bytes (the Stop
+    family's root read, _orch_stop_root, decodes the toplevel itself); every other caller keeps the
+    text-mode default."""
     cmd = ["git", "-C", repo] + list(args)
     env = _isolate_git_env(dict(os.environ))  # real-state calls must see the REAL repo, not an ambient decoy
     if env_extra:
         env.update(env_extra)  # a snapshot call sets its own GIT_INDEX_FILE here, applied AFTER the scrub
-    return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, env=env)
+    return subprocess.run(cmd, capture_output=True, text=text, timeout=timeout, env=env)
 
 
 def _recovery_toplevel(repo):
@@ -21782,6 +21784,53 @@ def _orch_root(data):
     return _recovery_toplevel(cwd)
 
 
+def _orch_stop_root(data):
+    """The Stop family's repo root: (root, undecodable). The same scrubbed `git rev-parse
+    --show-toplevel` as _orch_root, read as BYTES, so a toplevel path that is not decodable text is
+    never read as out of scope. _recovery_toplevel (and so _orch_root and the snapshot caller) answers
+    None there, since its text-mode decode raises, and the Stop family would then ALLOW a stop in an
+    orchestrated tree. Here the toplevel is decoded the way the os module decodes a path
+    (os.fsdecode), so the registry, the lease and the state directory under it are still reached;
+    undecodable is True when those bytes are not strict text in the filesystem encoding, and the
+    caller then HOLDS (cannot-evaluate). (None, False) for a missing or non-string cwd, a git failure,
+    a non-zero exit or an empty or relative answer, exactly where _orch_root answers None; (None, True)
+    when the undecodable bytes cannot be decoded as a path at all (no POSIX platform: os.fsdecode
+    escapes every byte there)."""
+    cwd = data.get("cwd")
+    if not isinstance(cwd, str) or not cwd:
+        return (None, False)
+    try:
+        result = _recovery_git(cwd, ["rev-parse", "--show-toplevel"], timeout=5, text=False)
+    except (subprocess.SubprocessError, OSError, ValueError):
+        return (None, False)
+    raw = result.stdout
+    if result.returncode != 0 or not isinstance(raw, bytes):
+        return (None, False)
+    # strip git's ONE output terminator only, as _recovery_toplevel does
+    raw = raw[:-1] if raw.endswith(b"\n") else raw
+    if not raw:
+        return (None, False)
+    try:
+        raw.decode(sys.getfilesystemencoding(), "strict")
+        undecodable = False
+    except (UnicodeDecodeError, LookupError):
+        undecodable = True
+    try:
+        top = os.fsdecode(raw)
+    except (UnicodeDecodeError, ValueError):
+        return (None, True)
+    if not os.path.isabs(top):
+        return (None, False)
+    return (top, undecodable)
+
+
+# The cannot-evaluate entry a Stop-family decision carries when the repository toplevel is not
+# decodable text (_orch_stop_root): the stop HOLDS below the loop bound, never a silent out-of-scope allow.
+_ORCH_TOPLEVEL_UNDECODABLE_DETAIL = ("the repository top-level path is not decodable text, so this "
+                                     "guard cannot vouch for the paths and records it reads under it; "
+                                     "rename the repository directory to a UTF-8 name")
+
+
 # Orchestration-scope discovery: the truncation guard decides scope by the UNION of two legs.
 # Leg one walks the session cwd's PHYSICAL ancestor chain directly with no-follow, descriptor-anchored
 # lookups and needs no git at all, so a git discovery failure alone (no git binary on PATH, a
@@ -22705,6 +22754,11 @@ def _orch_scope_live(reg, root, session_id=None):
                 if lease.get("holder_is_session_id"):
                     return False  # holder mode: an unreadable lease -> caller cannot be confirmed holder
                 # otherwise an absent/unreadable lease is not live; fall through to the mode check
+            except ValueError:
+                # a declared lease path holding a NUL character is an unreadable lease (read the way
+                # _orch_record_surface_read reads it), never an exception out of the Stop handler
+                if lease.get("holder_is_session_id"):
+                    return False
     if _orch_mode(reg, root) is not None:
         return True  # a live mode record is an independent scope source; it outranks a lease 'cannot'
     return "cannot" if cannot else False
@@ -22725,6 +22779,8 @@ def _orch_escape_stat(path):
                      | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0))
     except OSError:
         return None
+    except ValueError:
+        return None  # a path holding a NUL character: unopenable, never an exception out of the guard
     try:
         return os.fstat(fd)
     finally:
@@ -22773,6 +22829,8 @@ def _orch_escape_active(reg, root):
                 return (False, "escape sentinel has a symlinked path component (rejected)")
         except OSError:
             return (False, None)  # a missing intermediate directory is simply no sentinel
+        except ValueError:
+            return (False, None)  # a component holding a NUL character names no sentinel
     # a symlink AT the final name is a spoof: classify via lstat so it surfaces a detail (the seam's
     # O_NOFOLLOW open would otherwise report it only as an unopenable None)
     try:
@@ -22780,6 +22838,8 @@ def _orch_escape_active(reg, root):
             return (False, "escape sentinel is a symlink (not followed; ignored)")
     except OSError:
         pass  # absent on disk here: the seam is authoritative (and may be injected under test)
+    except ValueError:
+        pass  # a name holding a NUL character: the seam reads it as unopenable (None)
     st = _orch_escape_stat(norm)
     if st is None:
         return (False, None)
@@ -23625,10 +23685,19 @@ def _orch_record_forced_exit(root, event_name, ctx, reason):
 def _orch_stop_family(data, event_name, kind):
     """The shared Stop/TeammateIdle binding: scope, decide, map the verdict to the event's block
     mechanism (exit 2, doc-confirmed for both events 2026-08-29). Fail-OPEN on its own I/O errors;
-    a cannot-evaluate DENIES (FIX 1)."""
-    root = _orch_root(data)
+    a cannot-evaluate DENIES (FIX 1). The root is read by _orch_stop_root, so a toplevel path that is
+    not decodable text is a cannot-evaluate HOLD in an orchestrated tree, never an out-of-scope allow."""
+    root, undecodable = _orch_stop_root(data)
     if root is None:
-        return _allow()
+        if not undecodable:
+            return _allow()
+        # an undecodable toplevel with no usable path at all: no counter can be read, so the
+        # stop-hook loop signal is the bound
+        reason = "{} (cannot-evaluate)".format(_ORCH_TOPLEVEL_UNDECODABLE_DETAIL)
+        if data.get("stop_hook_active") is True:
+            return _stop_warn("AIQT guardrail ({}): loop signal set; yielding with a finding: {}"
+                              .format(event_name, reason))
+        return (2, None, reason)
     status, reg = _orch_registry(root)
     if status == "absent":
         return _allow()
@@ -23647,6 +23716,11 @@ def _orch_stop_family(data, event_name, kind):
         # loop bound and the operator escape still release), never a silent guards-off _allow().
         ctx["cannot_evaluate"] = list(ctx.get("cannot_evaluate", [])) + [
             ("lease:max_age_hours", "cannot-evaluate", _ORCH_SCOPE_CANNOT_DETAIL)]
+    if undecodable:
+        # an undecodable repository toplevel: routed into the same cannot-evaluate deny path (the loop
+        # bound and the operator escape still release), never the out-of-scope allow a None root reads as
+        ctx["cannot_evaluate"] = list(ctx.get("cannot_evaluate", [])) + [
+            ("repo:toplevel", "cannot-evaluate", _ORCH_TOPLEVEL_UNDECODABLE_DETAIL)]
     spoof_warn = (_orch_record_escape_spoof(root, ctx["escape_spoof"])
                   if ctx.get("escape_spoof") else "")
     verdict, reason, disposition = decide_yield(ctx)
@@ -32968,6 +33042,9 @@ def _orch_chained_rows(path, prefix):
         return (None, "unreadable ({})".format(exc))
     except UnicodeDecodeError as exc:
         return (None, "not UTF-8 text ({})".format(exc))
+    except ValueError as exc:
+        # a declared path holding a NUL character (read as _orch_record_surface_read reads it)
+        return (None, "unreadable ({})".format(exc))
     sha = __import__("hashlib").sha256
     rows, prev = [], None
     for n, line in enumerate(lines, 1):
@@ -33017,6 +33094,9 @@ def _orch_register_authority(root, path):
         return ("hold", "register unreadable ({})".format(exc), None)
     except UnicodeDecodeError as exc:
         return ("hold", "register is not UTF-8 text ({})".format(exc), None)
+    except ValueError as exc:
+        # a declared path holding a NUL character (read as _orch_record_surface_read reads it)
+        return ("hold", "register unreadable ({})".format(exc), None)
     env = _isolate_git_env(dict(os.environ))
     rel = None
     try:
@@ -33038,11 +33118,19 @@ def _orch_register_authority(root, path):
                     "{})".format(probe.returncode), None)
         if probe.returncode == 0:
             try:
+                # read as bytes and decoded below as strict UTF-8, never by the locale, exactly as
+                # the git show read is
                 base = subprocess.run(["git", "-C", root, "merge-base", "HEAD", "origin/HEAD"],
-                                      capture_output=True, text=True, timeout=10, env=env)
-                if base.returncode != 0 or not base.stdout.strip():
+                                      capture_output=True, timeout=10, env=env)
+                if base.returncode != 0:
                     return ("hold", "no computable merge-base with origin/HEAD", None)
-                ref = base.stdout.strip()
+                try:
+                    ref = base.stdout.decode("utf-8").strip()
+                except UnicodeDecodeError as exc:
+                    return ("hold", "the merge-base with origin/HEAD is not UTF-8 text "
+                            "({})".format(exc), None)
+                if not ref:
+                    return ("hold", "no computable merge-base with origin/HEAD", None)
                 old = subprocess.run(["git", "-C", root, "show", "{}:{}".format(ref, rel)],
                                      capture_output=True, timeout=10, env=env)
             except (OSError, subprocess.SubprocessError) as exc:
@@ -33071,6 +33159,9 @@ def _orch_register_authority(root, path):
     except OSError as exc:
         if exc.errno == errno.ELOOP:
             return ("hold", "the register anchor is a symlink, which is never followed", None)
+        return ("hold", "declared register has no readable anchor authority", None)
+    except ValueError:
+        # an anchor path holding a NUL character: unreadable, never an exception out of the reader
         return ("hold", "declared register has no readable anchor authority", None)
     try:
         if not stat.S_ISREG(os.fstat(fd).st_mode):
@@ -33126,8 +33217,11 @@ def _orch_pointer_resolves(root, sd, pointer):
     if os.path.isabs(pointer):
         return False
     for base in (root, sd):
-        rb = os.path.realpath(base)
-        cand = os.path.realpath(os.path.join(base, pointer))
+        try:
+            rb = os.path.realpath(base)
+            cand = os.path.realpath(os.path.join(base, pointer))
+        except ValueError:
+            continue  # a pointer or base holding a NUL character resolves to nothing real here
         if (cand == rb or cand.startswith(rb.rstrip(os.sep) + os.sep)) and os.path.exists(cand):
             return True
     return False

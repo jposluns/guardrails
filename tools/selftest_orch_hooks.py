@@ -12799,6 +12799,223 @@ def _named_text_cases(hooks):
     return table
 
 
+def _stop_unreadable_input_cases(tmp):
+    """The Stop path fails closed on input it cannot read (fix round 1 of the fail-closed hooks PR).
+    Each reader below once raised out of the Stop handler, or answered out of scope, on input it could
+    not read; a raise there is a handler crash, which the Stop dispatcher turns into a warning and an
+    allowed stop. _try returns a raised exception as a named result, so a reader that raises is a red
+    check, never a crashed suite."""
+    import builtins
+    import codecs
+    import io
+    import locale
+
+    def _try(fn):
+        try:
+            return fn()
+        except Exception as exc:
+            return ("raised", type(exc).__name__)
+
+    rd_hooks = os.path.dirname(os.path.abspath(aiqt_hooks.__file__))
+    rd_home = tmp / "rd-home"
+    rd_home.mkdir()
+
+    # F1: a repository whose top-level path is not decodable text (a directory name ending in byte
+    # 0xff). The snapshot caller still reads that toplevel as unresolved (None); the Stop family must
+    # not read it as out of scope: in an orchestrated tree it HOLDS (cannot-evaluate) and the loop
+    # bound still releases, while a tree with no registry stays out of scope.
+    bad_name = os.fsdecode(b"rd-toplevel-\xff")
+    ft = Fixture(tmp, bad_name)
+    ft.set_items([])
+    ft.set_turn_state({})
+    check("recovery/undecodable-toplevel-snapshot-unresolved",
+          _try(lambda: aiqt_hooks._recovery_toplevel(str(ft.root))), None)
+    ft_got = _try(lambda: aiqt_hooks.orch_stop_guard(ft.payload("Stop")))
+    check("stop/undecodable-toplevel-holds",
+          (_verdict(ft_got), "repo:toplevel" in str(ft_got[2]))
+          if ft_got and ft_got[0] != "raised" else ft_got, ("block2", True))
+    ft.set_turn_state({})
+    ft_idle = _try(lambda: _verdict(aiqt_hooks.orch_teammate_idle(ft.payload("TeammateIdle"))))
+    check("stop/undecodable-toplevel-idle-holds", ft_idle, "block2")
+    ft.set_turn_state({"stop_denials": 2})
+    check("stop/undecodable-toplevel-loop-bound-releases",
+          _try(lambda: _verdict(aiqt_hooks.orch_stop_guard(ft.payload("Stop")))), "warn")
+    ft.set_turn_state({})
+    rd_ctl = subprocess.run(
+        [sys.executable, "-I", "-B", "-c", _CEILED_DISPATCH_CHILD, rd_hooks,
+         json.dumps(sorted(_registry_ceiling(ft.root, None).above)), "orch_stop_guard"],
+        input=json.dumps(ft.payload("Stop")), capture_output=True, text=True,
+        timeout=120, env=_controlled_child_env(rd_home))
+    check("stop/undecodable-toplevel-dispatcher-denies-stop",
+          (rd_ctl.returncode, rd_ctl.stdout.strip()), (2, ""))
+    # CONTROLS: a valid multibyte UTF-8 toplevel with the same empty backlog allows, so the hold
+    # above comes from the undecodable bytes, not from non-ASCII text; an undecodable toplevel that
+    # carries no registry stays out of scope.
+    fu = Fixture(tmp, "rd-toplevel-café-€")
+    fu.set_items([])
+    fu.set_turn_state({})
+    check("stop/undecodable-toplevel-control-multibyte-allows",
+          _try(lambda: _verdict(aiqt_hooks.orch_stop_guard(fu.payload("Stop")))), "allow")
+    bare_bad = tmp / os.fsdecode(b"rd-bare-\xff")
+    bare_bad.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "main", str(bare_bad)],
+                   check=True, capture_output=True, timeout=30)
+    check("stop/undecodable-toplevel-control-no-registry-allows",
+          _try(lambda: _verdict(aiqt_hooks.orch_stop_guard(
+              {"hook_event_name": "Stop", "cwd": str(bare_bad), "session_id": "s1"}))), "allow")
+
+    # F2: a registry-declared path holding a NUL character is unreadable to every Stop-path reader
+    # (ValueError, as _orch_record_surface_read already reads it), never an exception out of it.
+    fn = Fixture(tmp, "rd-nul")
+    fn_regp = fn.root / ".aiqt" / "orchestration.local.json"
+    fn_reg = json.loads(fn_regp.read_text(encoding="utf-8"))
+
+    def fn_write(**changes):
+        reg = dict(fn_reg)
+        reg.update(changes)
+        fn_regp.write_text(json.dumps(reg), encoding="utf-8")
+        return reg
+
+    # (c) the lease path: unreadable, so the lease is not live, exactly as an unreadable lease
+    # (EACCES) already reads; a CONTROL lease at a readable path is live
+    lease_nul = fn_write(lease={"path": "lea\u0000se", "max_age_hours": 24})
+    check("stop/nul-lease-path-reads-not-live",
+          _try(lambda: aiqt_hooks._orch_scope_live(lease_nul, str(fn.root), "s1")), False)
+    lease_ok = fn_write(lease={"path": str(fn.lease), "max_age_hours": 24})
+    check("stop/nul-lease-path-control-live",
+          _try(lambda: aiqt_hooks._orch_scope_live(lease_ok, str(fn.root), "s1")), True)
+    # (d) the escape sentinel path, at the final name and at an intermediate component: the escape
+    # is simply not active, so an actionable item still DENIES the stop
+    fn.set_items([item("A-1")])
+    fn_write(escape={"path": "esc\u0000ape"})
+    fn.set_turn_state({})
+    check("stop/nul-escape-final-name-holds",
+          _try(lambda: _verdict(aiqt_hooks.orch_stop_guard(fn.payload("Stop")))), "block2")
+    fn_write(escape={"path": "d\u0000ir/escape"})
+    fn.set_turn_state({})
+    check("stop/nul-escape-dir-component-holds",
+          _try(lambda: _verdict(aiqt_hooks.orch_stop_guard(fn.payload("Stop")))), "block2")
+    check("stop/nul-escape-stat-unreadable",
+          _try(lambda: aiqt_hooks._orch_escape_stat(str(fn.root / "esc\u0000ape"))), None)
+    fn_write()
+    fn.set_turn_state({})
+    check("stop/nul-escape-control-actionable-denies",
+          _try(lambda: _verdict(aiqt_hooks.orch_stop_guard(fn.payload("Stop")))), "block2")
+    # (e) the two register readers and the register anchor: unreadable, a cannot-evaluate HOLD
+    nul_reg = str(fn.root / "regi\u0000ster.jsonl")
+    nul_rows = _try(lambda: aiqt_hooks._orch_chained_rows(nul_reg, "AT-"))
+    check("attest/nul-path-chain-reader-cannot-evaluate",
+          (nul_rows[0], str(nul_rows[1]).startswith("unreadable")), (None, True))
+    nul_auth = _try(lambda: aiqt_hooks._orch_register_authority(str(fn.root), nul_reg))
+    check("attest/nul-path-authority-holds",
+          (nul_auth[0], "unreadable" in str(nul_auth[1])), ("hold", True))
+    # the anchor open is reached only past a register read that succeeded, so a seam stands in for
+    # that read (a module-level open shadowing the builtin, for the NUL path alone)
+    def _seam_open(path, *args, **kwargs):
+        if isinstance(path, str) and "\x00" in path:
+            return io.StringIO("")
+        return builtins.open(path, *args, **kwargs)
+
+    aiqt_hooks.open = _seam_open
+    try:
+        nul_anchor = _try(lambda: aiqt_hooks._orch_register_authority(str(fn.root), nul_reg))
+    finally:
+        del aiqt_hooks.open
+    check("attest/nul-path-anchor-holds",
+          (nul_anchor[0], "anchor" in str(nul_anchor[1])), ("hold", True))
+    # (f) a register row's pointer: unresolved (False), never a raise; a CONTROL pointer resolves
+    fn_sd = str(fn.state)
+    check("attest/nul-pointer-unresolved",
+          _try(lambda: aiqt_hooks._orch_pointer_resolves(str(fn.root), fn_sd, "seed\u0000.txt")), False)
+    check("attest/nul-pointer-control-resolves",
+          _try(lambda: aiqt_hooks._orch_pointer_resolves(str(fn.root), fn_sd, "seed.txt")), True)
+
+    # F3: the merge-base call in _orch_register_authority is read as bytes and decoded as strict
+    # UTF-8, holding on failure. A git wrapper first on PATH answers merge-base with a non-UTF-8
+    # byte and passes every other call to the real git.
+    mb_repo = tmp / "rd-merge-base"
+    mb_repo.mkdir()
+
+    def mb_git(*args):
+        subprocess.run(["git", "-C", str(mb_repo), "-c", "user.name=T",
+                        "-c", "user.email=t@example.invalid", "-c", "commit.gpgsign=false"]
+                       + list(args), check=True, capture_output=True, timeout=30)
+
+    mb_git("init", "-q", "-b", "main")
+    mb_reg = mb_repo / "attestations.jsonl"
+    mb_reg.write_text(json.dumps({"seq": 1, "id": "AT-1", "prev": "0" * 64}) + "\n", encoding="utf-8")
+    mb_git("add", "attestations.jsonl")
+    mb_git("commit", "-q", "-m", "register")
+    mb_git("update-ref", "refs/remotes/origin/HEAD", "HEAD")
+    check("attest/merge-base-control-tracked-ok",
+          _try(lambda: aiqt_hooks._orch_register_authority(str(mb_repo), str(mb_reg)))[0], "ok")
+    real_git = shutil.which("git")
+    mb_bin = tmp / "rd-merge-base-bin"
+    mb_bin.mkdir()
+    (mb_bin / "git").write_text(
+        "#!{} -I\n"
+        "import os, sys\n"
+        "if 'merge-base' in sys.argv[1:]:\n"
+        "    sys.stdout.buffer.write(b'\\xff\\n')\n"
+        "    sys.stdout.buffer.flush()\n"
+        "    sys.exit(0)\n"
+        "os.execv({!r}, [{!r}] + sys.argv[1:])\n".format(sys.executable, real_git, real_git),
+        encoding="utf-8")
+    os.chmod(str(mb_bin / "git"), 0o755)
+    saved_path = os.environ.get("PATH", "")
+    os.environ["PATH"] = str(mb_bin) + os.pathsep + saved_path
+    try:
+        mb_auth = _try(lambda: aiqt_hooks._orch_register_authority(str(mb_repo), str(mb_reg)))
+    finally:
+        os.environ["PATH"] = saved_path
+    check("attest/nonutf8-merge-base-ref-holds",
+          (mb_auth[0], "merge-base" in str(mb_auth[1])), ("hold", True))
+
+    # F4: _orch_enumerate decodes the enumerator's answer as strict UTF-8 under every locale: a valid
+    # multibyte UTF-8 title, read under the C locale in-process (this process's text default is
+    # then not UTF-8; the dispatcher child environment is unchanged), still enumerates and the
+    # proposed-only backlog allows. Without the explicit encoding the locale default would refuse
+    # the bytes and the stop would deny on an enumerator error.
+    fe = Fixture(tmp, "rd-enum-c-locale")
+    fe_stub = fe.root / "enum-bytes-stub.py"
+    fe_stub.write_text("import sys\nsys.stdout.buffer.write(open(sys.argv[1], 'rb').read())\n",
+                       encoding="utf-8")
+    fe.set_items([])
+    fe.enum_payload.write_text(json.dumps(
+        {"version": 1, "generated_at_utc": now_iso(0),
+         "source": {"locator": "fixture", "revision": "r1", "observed_at_utc": now_iso(0)},
+         "items": [item("P-1", state="proposed", title="café € \U0001f600")]},
+        ensure_ascii=False), encoding="utf-8")
+    fe_regp = fe.root / ".aiqt" / "orchestration.local.json"
+    fe_reg = json.loads(fe_regp.read_text(encoding="utf-8"))
+    fe_reg["enumerator"] = {"argv": [sys.executable, "-I", "-B", str(fe_stub), str(fe.enum_payload)],
+                            "timeout": 30}
+    fe_regp.write_text(json.dumps(fe_reg), encoding="utf-8")
+    fe.set_turn_state({})
+    check("stop/enum-utf8-title-control-allows",
+          _try(lambda: _verdict(aiqt_hooks.orch_stop_guard(fe.payload("Stop")))), "allow")
+    getenc = getattr(locale, "getencoding", None) or (lambda: locale.getpreferredencoding(False))
+    saved_te = getattr(subprocess, "_text_encoding", None)
+    saved_loc = locale.setlocale(locale.LC_CTYPE)
+    fe.set_turn_state({})
+    try:
+        locale.setlocale(locale.LC_CTYPE, "C")
+        if saved_te is not None:
+            # subprocess's own text default under that locale with UTF-8 mode off, whatever mode
+            # this interpreter runs in
+            subprocess._text_encoding = getenc
+            default_enc = subprocess._text_encoding()
+        else:
+            default_enc = "utf-8" if sys.flags.utf8_mode else getenc()
+        fe_got = _try(lambda: _verdict(aiqt_hooks.orch_stop_guard(fe.payload("Stop"))))
+    finally:
+        if saved_te is not None:
+            subprocess._text_encoding = saved_te
+        locale.setlocale(locale.LC_CTYPE, saved_loc)
+    check("stop/enum-utf8-title-c-locale-allows",
+          (codecs.lookup(default_enc).name != "utf-8", fe_got), (True, "allow"))
+
+
 def main(report_path=None):
     if report_path is not None:
         # The execution report is finalized at interpreter exit, after this run's cleanup
@@ -12832,6 +13049,7 @@ def _main_isolated(report_path=None):
     try:
         aiqt_hooks._orch_dirfd_has_registry = _registry_ceiling(tmp, saved_probe)
         _record_surface_cases(tmp)
+        _stop_unreadable_input_cases(tmp)
         # ---------- component 1: the stop guard ----------
         f = Fixture(tmp, "stop")
         stop = lambda: aiqt_hooks.orch_stop_guard(f.payload("Stop"))
