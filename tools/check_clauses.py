@@ -226,11 +226,12 @@ LEGS (all run at the default step-1 invocation; none needs a manifest):
                         instruction, declaration or CDATA section, which the vendored renderer passes through
                         as raw HTML that a browser does not show; it is not parsed, so it is refused even where
                         it opens none); a checked line holding, anywhere, a
-                        character reference the vendored renderer decodes: a match of the renderer's own
+                        character reference: a match of the renderer's own
                         pattern (Renderer._charref in opf/tools/_vendor/marko/renderer.py, which
                         Renderer.__enter__ swaps into html._charref while it renders; copied here as
                         _RENDERER_CHARREF_RE) that html.unescape, which escape_html in
-                        opf/tools/_vendor/marko/html_renderer.py runs on the text, turns into other text. That
+                        opf/tools/_vendor/marko/html_renderer.py runs on the text, changes, which the vendored
+                        renderer decodes when it sees the reference whole (not split by inline markup). That
                         pattern matches only a reference ending in ';': a decimal one of 1 to 7 digits such as
                         '&#32;' or '&#10;', a hexadecimal one of 1 to 6 digits such as '&#x20;', and a named
                         one of 1 to 32 characters (no space, tab, LF, form feed, '<', '&', '#' or ';' among
@@ -297,8 +298,10 @@ LEGS (all run at the default step-1 invocation; none needs a manifest):
                         closes on a later line with no ':' after it; and a line such as '> 5 minutes is a
                         fault.' or '+ 1 to the count.' is refused because CommonMark reads it as a blockquote
                         or a list item. A character reference ending in ';' inside a code span or after a
-                        backslash (shown as typed, since the renderer decodes neither), a
-                        backslash at the line end of a paragraph's last line or after another backslash, and
+                        backslash (shown as typed, since the renderer decodes neither), a reference whose run
+                        to ';' is broken by emphasis, a code span or a backslash ('&reg*x*;', '&reg`x`;',
+                        '&copy\\;'), which the renderer splits into pieces and decodes none of, so it shows the
+                        reference as typed, a backslash at the line end of a paragraph's last line or after another backslash, and
                         a task marker with no text after it in its paragraph are refused, though the
                         renderer shows each as text.
                         RESIDUAL, disclosed: coverage is positional, not semantic. A unit counts as covered
@@ -1263,9 +1266,9 @@ def _is_table_delimiter_row(line):
 
 
 def _decoded_reference(line):
-    """The first character reference in line that the vendored renderer decodes to other text, or None: a
-    match of _RENDERER_CHARREF_RE (the renderer's own pattern, so only a reference ending in ';') that
-    html.unescape changes. html.unescape on the match alone gives what the renderer's substitution gives,
+    """The first character reference in line that is a match of _RENDERER_CHARREF_RE (the renderer's own
+    pattern, so only a reference ending in ';') that html.unescape changes, or None; the vendored renderer
+    decodes such a reference when it sees the reference whole (not split by inline markup). html.unescape on the match alone gives what the renderer's substitution gives,
     since the standard pattern matches the same whole reference and both use the same replacement."""
     for match in _RENDERER_CHARREF_RE.finditer(line):
         if html.unescape(match.group()) != match.group():
@@ -1317,7 +1320,8 @@ def rule_units(source, where):
     frontmatter; a title with no blank line after it; a line _UNCLASSIFIABLE_LINE_RE matches or
     _is_table_delimiter_row accepts; a checked line holding '<!' or '<?' (_HIDDEN_INLINE_RE); a checked line that
     ends with a backslash (_HARD_BREAK_MARK, a hard line break to the vendored renderer); a checked line holding a
-    character reference the vendored renderer decodes (_decoded_reference: a match of the renderer's own pattern,
+    character reference the vendored renderer decodes when it sees it whole (_decoded_reference: a match of the
+    renderer's own pattern,
     _RENDERER_CHARREF_RE, so one ending in ';', that html.unescape changes; a reference with no ';' such as
     'cut&copy' or '&#32Beta' is shown as typed and is not refused); a paragraph that
     ends with an opener still open; and a unit with no letter or digit (_has_letter_or_digit). A line
@@ -1364,8 +1368,9 @@ def rule_units(source, where):
                                 "evaluate".format(where, number, line))
             elif _decoded_reference(line) is not None:
                 raise GateError("{} line {}: the text-coverage splitter cannot classify {!r} (a character "
-                                "reference ending in ';', {!r}, which the vendored renderer decodes to other "
-                                "text); cannot evaluate".format(where, number, line, _decoded_reference(line)))
+                                "reference ending in ';', {!r}: a match of the renderer's own pattern that "
+                                "html.unescape changes, which the vendored renderer decodes when it sees the "
+                                "reference whole, not split by inline markup); cannot evaluate".format(where, number, line, _decoded_reference(line)))
             first = para_start = False
         else:
             after_title, para_start = False, True
@@ -2002,6 +2007,34 @@ def _not_run_vector(failures):
                         "never a PASS (PARTIAL) exit 0 (got exit {})".format(want, rc))
 
 
+def _charref_copy_failures(vendored, source=None):
+    """Failure lines (none when they agree) comparing _RENDERER_CHARREF_RE with the re.compile argument of
+    Renderer._charref in the vendored renderer at vendored, read with ast; source, when given, stands in for
+    that file's text (a self-test mutant). An argument ast.literal_eval cannot read (ValueError) is recorded
+    as a failure line, never raised."""
+    import ast
+    charref = None
+    try:
+        tree = ast.parse(vendored.read_text(encoding="utf-8") if source is None else source, str(vendored))
+    except (OSError, UnicodeDecodeError, SyntaxError) as exc:
+        return ["_RENDERER_CHARREF_RE: cannot read the vendored renderer {} ({})".format(vendored, exc)]
+    for node in tree.body:
+        if isinstance(node, ast.ClassDef) and node.name == "Renderer":
+            for item in node.body:
+                if (isinstance(item, ast.Assign) and [getattr(t, "id", None) for t in item.targets] == ["_charref"]
+                        and isinstance(item.value, ast.Call) and len(item.value.args) == 1
+                        and not item.value.keywords and ast.unparse(item.value.func) == "re.compile"):
+                    try:
+                        charref = ast.literal_eval(item.value.args[0])
+                    except ValueError as exc:
+                        return ["_RENDERER_CHARREF_RE: the re.compile argument of Renderer._charref in {} is not a "
+                                "literal ast.literal_eval reads ({})".format(vendored, exc)]
+    if charref != _RENDERER_CHARREF_RE.pattern:
+        return ["_RENDERER_CHARREF_RE {!r} is not Renderer._charref in {} ({!r})".format(
+            _RENDERER_CHARREF_RE.pattern, vendored, charref)]
+    return []
+
+
 def self_test_main(_mkdtemp=None, _vectors=True):  # noqa: C901  a flat sequence of fixture cases
     failures = []
 
@@ -2241,7 +2274,8 @@ def self_test_main(_mkdtemp=None, _vectors=True):  # noqa: C901  a flat sequence
                 if "does not show" not in str(exc):
                     failures.append("rule_units: {!r} was refused for another reason: {}".format(text, exc))
     # A backslash at a line's end is a hard line break to the vendored renderer ('<br />'), and a character reference
-    # ending in ';' is decoded by it (a numeric one to whitespace or a line ending, a named one to its character,
+    # ending in ';' is decoded by it (a numeric one to its character: whitespace, a line ending or another character,
+    # such as '&#507;'; a named one to its character,
     # '&region=eu;' by its prefix '&reg'), but the boundary grammar reads neither: '&#32;' or a hard break after a
     # sentence end joins two rendered sentences into one unit, and the ';' of '&amp; ' reads as a clause separator.
     # Each is refused on a first or a wrapped line.
@@ -2282,25 +2316,28 @@ def self_test_main(_mkdtemp=None, _vectors=True):  # noqa: C901  a flat sequence
                 failures.append("rule_units: {!r} expected units {!r}, got {!r}".format(text, want, got))
         except GateError as exc:
             failures.append("rule_units: {!r} was refused: {}".format(text, exc))
+    # Over-refusal, disclosed in the help text: a reference whose run to ';' is broken by emphasis is split by the
+    # renderer into pieces it decodes none of ('&amp;reg<em>x</em>;'), but the gate reads the raw line and
+    # refuses it. This vector holds that refusal, so the disclosure stays true.
+    text = "Use &reg*x*; here.\n"
+    try:
+        rule_units(head + text, "probe")
+        failures.append("rule_units: the disclosed over-refusal of {!r} no longer holds (update the disclosure)"
+                        .format(text))
+    except GateError as exc:
+        if "character reference" not in str(exc) or "cannot classify" not in str(exc):
+            failures.append("rule_units: {!r} was refused for another reason: {}".format(text, exc))
     # _RENDERER_CHARREF_RE is a copy of the vendored renderer's Renderer._charref: this file never imports the
     # vendored module, so its source is read with ast and the re.compile argument of that class attribute compared.
-    import ast
-    vendored, charref = Path(__file__).resolve().parent.parent.joinpath(*_RENDERER_SOURCE_REL), None
-    try:
-        tree = ast.parse(vendored.read_text(encoding="utf-8"), str(vendored))
-    except (OSError, UnicodeDecodeError, SyntaxError) as exc:
-        failures.append("_RENDERER_CHARREF_RE: cannot read the vendored renderer {} ({})".format(vendored, exc))
-        tree = None
-    for node in (tree.body if tree is not None else ()):
-        if isinstance(node, ast.ClassDef) and node.name == "Renderer":
-            for item in node.body:
-                if (isinstance(item, ast.Assign) and [getattr(t, "id", None) for t in item.targets] == ["_charref"]
-                        and isinstance(item.value, ast.Call) and len(item.value.args) == 1
-                        and not item.value.keywords and ast.unparse(item.value.func) == "re.compile"):
-                    charref = ast.literal_eval(item.value.args[0])
-    if tree is not None and charref != _RENDERER_CHARREF_RE.pattern:
-        failures.append("_RENDERER_CHARREF_RE {!r} is not Renderer._charref in {} ({!r})".format(
-            _RENDERER_CHARREF_RE.pattern, vendored, charref))
+    vendored = Path(__file__).resolve().parent.parent.joinpath(*_RENDERER_SOURCE_REL)
+    failures += _charref_copy_failures(vendored)
+    # A mutant whose re.compile argument is a name, not a literal, makes ast.literal_eval raise ValueError; the
+    # comparison records one clean failure line for it, never an escaping traceback.
+    mutant = _charref_copy_failures(vendored, "import re\n_PAT = '&x;'\n\n\nclass Renderer:\n"
+                                              "    _charref = re.compile(_PAT)\n")
+    if len(mutant) != 1 or "is not a literal" not in mutant[0]:
+        failures.append("_RENDERER_CHARREF_RE: a Renderer._charref whose pattern is a name must record one clean "
+                        "failure line, got {!r}".format(mutant))
     if _RENDERER_CHARREF_RE.flags != re.compile("").flags:
         failures.append("_RENDERER_CHARREF_RE carries flags the vendored Renderer._charref does not")
     # The delimiter-row test is the vendored GFM table's own: every '|'-separated cell begins with '-' or ':-'.
@@ -3766,7 +3803,7 @@ def self_test_main(_mkdtemp=None, _vectors=True):  # noqa: C901  a flat sequence
           "the classifier itself refuses; and the round-5 reproductions hold: a backslash at a line end (a hard "
           "line break to the vendored renderer) and a character reference ending in ';' that it decodes "
           "('&#32;', '&#10;', '&nbsp;', '&amp;', '&copy;', '&region=eu;', '&#507;') are a cannot-evaluate on a "
-          "first or a wrapped line, even exempted, while plain whitespace, a mid-line backslash, an '&' that "
+          "first or a wrapped line, '&#32;' and '&amp;' also when exempted, while plain whitespace, a mid-line backslash, an '&' that "
           "opens no reference and a reference with no ';', which the renderer shows as typed ('&#32Beta', "
           "'cut&copy', '&region=eu', 'PR&#507'), stay prose, and the copied renderer pattern equals the vendored "
           "Renderer._charref read with ast; and a GFM task marker "
