@@ -43,7 +43,8 @@ an allowlisted page that is missing, or that starts carrying the link, is allowl
   check_footer.py             scan every .html page under site/ and opf/site/
   check_footer.py --self-test  assert the present/missing/drift and fail-closed paths each resolve
 
-Exit 0 clean, 1 on any coverage finding, 2 on a missing/unreadable/empty required input (fail-closed).
+Exit 0 clean, 1 on any coverage finding, 2 on a missing/unreadable/empty required input (fail-closed) and on
+any other argument list (an unrecognized argument runs neither the scan nor the self-test).
 """
 import sys
 
@@ -1142,6 +1143,9 @@ def _self_test_cases():
     # The background fault channels of code loaded in process (atexit, worker thread, destructor), each
     # driven through the real _fail_closed_main entry in a child.
     failures.extend(_fault_channel_vectors())
+    # main()'s strict argument parsing: an unrecognized argument exits 2 and runs neither the scan nor this
+    # self-test, and so does any --execution-report form.
+    failures.extend(_main_argv_failures())
     if failures:
         print("FAIL: check_footer self-test")
         for f in failures:
@@ -1150,16 +1154,74 @@ def _self_test_cases():
     print("PASS: check_footer self-test ({} check_pages cases + {} draft-rule cases + {} opfiles draft-rule "
           "cases + {} promoted draft-rule cases + {} staged and promoted template cases + run() exit-code legs + "
           "7 declaration cases + {} #378 close-vector runs + "
-          "{} close-vector guard cases)".format(
+          "{} close-vector guard cases + {} argument cases)".format(
               len(cases), len(site_cases), len(opf_cases), len(promoted_cases), len(state_cases), close_runs,
-              guard_cases))
+              guard_cases, len(_ARGV_CASES)))
     return 0
 
 
+def _parse_argv(argv):
+    """argv for an accepted argument list, [] or ["--self-test"]; None for any other list. This gate is not a
+    registered execution suite (tools/selftest_checks.toml), so no --execution-report form is accepted: a
+    relative or absolute report path is refused like any other unrecognized argument, never armed."""
+    if argv not in ([], ["--self-test"]):
+        return None
+    return argv
+
+
 def main():
-    if "--self-test" in sys.argv[1:]:
+    argv = _parse_argv(sys.argv[1:])
+    if argv is None:
+        print("error: unrecognized arguments {!r}; fail closed".format(sys.argv[1:]), file=sys.stderr)
+        return 2
+    if argv == ["--self-test"]:
         return _self_test()
     return run(Path(__file__).resolve().parents[1])
+
+
+# main()'s argument handling: (argv, the call main() must make or 2 for a refusal). The refused rows run the
+# scan or the self-test on the parse before this one (`"--self-test" in sys.argv[1:]`), so each is red there.
+_ARGV_CASES = (
+    ("no-argument-runs-scan", [], "scan"),
+    ("self-test-runs-self-test", ["--self-test"], "self-test"),
+    ("unknown-argument-exits-2", ["--bogus"], 2),
+    ("self-test-with-unknown-argument-exits-2", ["--self-test", "--bogus"], 2),
+    ("unknown-before-self-test-exits-2", ["--bogus", "--self-test"], 2),
+    ("repeated-self-test-exits-2", ["--self-test", "--self-test"], 2),
+    ("relative-report-path-exits-2", ["--execution-report", "relative/report"], 2),
+    ("self-test-relative-report-path-exits-2", ["--self-test", "--execution-report", "relative/report"], 2),
+    ("self-test-absolute-report-path-exits-2", ["--self-test", "--execution-report", "/abs/report"], 2),
+)
+
+
+def _main_argv_failures():
+    """One failure string per _ARGV_CASES row main() gets wrong, run with sys.argv set to the row and with
+    _self_test and run replaced by recorders, so no row starts this self-test again or scans the tree."""
+    import contextlib
+    import io
+    g = globals()
+    saved = {name: g[name] for name in ("_self_test", "run")}
+    saved_argv = sys.argv
+    failures = []
+    for label, argv, want in _ARGV_CASES:
+        calls = []
+        g["_self_test"] = lambda: calls.append("self-test") or "self-test"
+        g["run"] = lambda root: calls.append("scan") or "scan"
+        sys.argv = [saved_argv[0]] + list(argv)
+        err = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+                got = main()
+        except Exception as exc:  # a crash is a failure of this row, recorded rather than raised
+            got = "{}: {}".format(type(exc).__name__, exc)
+        finally:
+            sys.argv = saved_argv
+            g.update(saved)
+        refused_ok = want != 2 or (calls == [] and "unrecognized arguments" in err.getvalue())
+        if got != want or len(calls) > 1 or not refused_ok:
+            failures.append("argv/{}: {!r} expected {!r}, got {!r} (calls {!r})".format(
+                label, argv, want, got, calls))
+    return failures
 
 
 

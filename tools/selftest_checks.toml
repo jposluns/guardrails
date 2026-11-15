@@ -5826,6 +5826,16 @@ expected-check-ids = [
   "declaration/full-entry-list-target-scan-exits-2",
   "declaration/full-entry-int-target-refused",
   "declaration/full-entry-int-target-scan-exits-2",
+  "argv/no-argument-runs-scan",
+  "argv/self-test-runs-self-test",
+  "argv/absolute-report-path-arms-self-test",
+  "argv/bare-absolute-report-path-arms-self-test",
+  "argv/unknown-argument-exits-2",
+  "argv/self-test-with-unknown-argument-exits-2",
+  "argv/unknown-before-self-test-exits-2",
+  "argv/relative-report-path-exits-2",
+  "argv/self-test-relative-report-path-exits-2",
+  "argv/report-path-not-trailing-exits-2",
 ]
 
 [[suite]]
