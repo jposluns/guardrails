@@ -21,9 +21,27 @@ module-level name it reads; tools/gen_char_policy.py writes it byte for byte int
 --default-parity checks that, for this repository's CI only. This Python file is in no scope entry, so it may
 name the characters in its own source without flagging itself; it writes them only as escapes.
 
-  check_no_dashes.py                   scan the repository under its policy
-  check_no_dashes.py --self-test       fixture trees for the scan and the policy validator
-  check_no_dashes.py --default-parity  this repository only: DEFAULT_POLICY equals .aiqt/char-policy.json
+  check_no_dashes.py                     scan the repository under its policy
+  check_no_dashes.py --self-test         fixture trees for the scan and the policy validator
+  check_no_dashes.py --default-parity    this repository only: DEFAULT_POLICY equals .aiqt/char-policy.json
+  check_no_dashes.py --staged-scan ROOT  the staged changes of the git working tree whose top level is ROOT
+
+--staged-scan is the mode a commit-time runner calls. It reads the policy from the index (stage 0 of
+.aiqt/char-policy.json; absent there, DEFAULT_POLICY), lists the staged changes against HEAD (against the empty
+tree on an unborn branch) with renames detected, and reads the staged blob of each added, modified, type-changed
+or renamed regular file whose new path the policy scopes (scoped_rel, the same matcher as the preview hook's
+_in_scope, which agrees with scope_paths). It counts every occurrence of each policy character, per path and
+per character and never netted across either, and reports only what a staged blob adds over its HEAD version
+(for a rename, the old path's blob; for a new file or one that was not a regular file, nothing). A staged
+deletion is never scanned; a staged symbolic link or submodule in scope is named on a NOTE line and not
+scanned. Every git call is bound to ROOT (git -C ROOT, confirmed to be the working tree's top level) and runs
+with every ambient GIT_-prefixed variable dropped, as tools/check_portability.py runs its own git reads, so a
+GIT_DIR, GIT_WORK_TREE, GIT_INDEX_FILE or GIT_CONFIG_* in the caller's environment cannot redirect it. Two
+consequences are disclosed: under git commit -a or git commit PATH, whose pre-commit hook reads a temporary
+index named only by GIT_INDEX_FILE, this mode reads the repository's own index instead; and the git binary is
+resolved through PATH. Exit: 0 nothing added; 1 something added; 2 cannot evaluate (ROOT not the top level of
+a git working tree, a git call that fails, an unmerged entry, an index policy that is malformed or not a
+regular file, a scoped staged blob or its HEAD version that is not valid UTF-8, each named on stderr).
 
 Exit: 0 clean; 1 a finding; 2 cannot evaluate (an unreadable tree, a scoped tree that is there but is not a
 directory or a symlink to a directory inside the repository, a scoped file that is not valid UTF-8, a malformed
@@ -52,7 +70,8 @@ if tuple(sys.version_info[:2]) < (3, 14):
 
 import os
 import stat
-from pathlib import Path
+import subprocess
+from pathlib import Path, PurePosixPath
 
 # The standard library's json, imported before this folder goes on sys.path below, so the copied region's own
 # `import json` finds it in sys.modules and a json.py in this folder cannot replace it (self-test G15). That holds
@@ -377,6 +396,416 @@ def default_parity(root):
     return 0
 
 
+# --staged-scan (see the module docstring). Every name below is outside the copied region and binds no name the
+# region binds or reads.
+STAGED_GIT_TIMEOUT = 120  # seconds, per git call
+_STAGED_REGULAR_MODES = ("100644", "100755")
+
+
+class StagedScanError(RuntimeError):
+    """The staged changes cannot be read (cannot evaluate, exit 2)."""
+
+
+def scoped_rel(parts, policy):
+    """True when the repo-relative path, given as the list of its components, is one scope_paths would list
+    for policy if it were present: a file entry naming exactly that path, or a path below a tree entry whose
+    components below the tree hold no skip name and whose last component has a listed suffix. The same matcher
+    as the preview hook's _in_scope."""
+    for entry in policy["scope"]:
+        if "file" in entry:
+            if parts == entry["file"].split("/"):
+                return True
+            continue
+        tree = [] if entry["tree"] == "." else entry["tree"].split("/")
+        if len(parts) <= len(tree) or parts[:len(tree)] != tree:
+            continue
+        skip = entry.get("skip", ())
+        if any(part in skip for part in parts[len(tree):]):
+            continue
+        if PurePosixPath(parts[-1]).suffix in entry["suffixes"]:
+            return True
+    return False
+
+
+def _staged_shown(rel):
+    """rel for one output line: each control character (C0, DEL, C1) and each lone surrogate (a path byte that
+    is not UTF-8) written as U+XXXX, so no path can break the line format or the output encoding."""
+    return "".join(f"U+{ord(ch):04X}" if ord(ch) < 32 or 127 <= ord(ch) <= 159 or 0xD800 <= ord(ch) <= 0xDFFF
+                   else ch for ch in rel)
+
+
+def _staged_git(root, *args, stdin=b""):
+    """Run git bound to root (git -C root) with every ambient GIT_-prefixed variable dropped, the posture
+    tools/check_portability.py takes for its own git reads, so GIT_DIR, GIT_WORK_TREE, GIT_INDEX_FILE or a
+    GIT_CONFIG_* variable cannot point the read at another repository, index or configuration. The three
+    `-c` pairs in option position switch off automatic gc and maintenance (tools/_git_fixture_env.py
+    _NO_AUTO_MAINTENANCE), so no git call here can leave a detached repack behind. Returns the completed process
+    (bytes); raises StagedScanError when git cannot be launched or does not finish."""
+    env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    try:
+        return subprocess.run(["git", "-C", str(root), "-c", "gc.auto=0", "-c", "gc.autoDetach=false",
+                               "-c", "maintenance.auto=false", *args], input=stdin, capture_output=True, env=env,
+                              timeout=STAGED_GIT_TIMEOUT)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise StagedScanError(f"git {args[0]} could not run ({exc})") from None
+
+
+def _staged_git_ok(root, *args, stdin=b""):
+    """_staged_git's stdout; StagedScanError, with git's own message, on a non-zero exit."""
+    done = _staged_git(root, *args, stdin=stdin)
+    if done.returncode != 0:
+        detail = done.stderr.decode("utf-8", "replace").strip()[:300]
+        raise StagedScanError(f"git {args[0]} exited {done.returncode} ({_staged_shown(detail)})")
+    return done.stdout
+
+
+def _staged_root(root):
+    """Raise StagedScanError unless root is the top level of a git working tree."""
+    top = _staged_git_ok(root, "rev-parse", "--show-toplevel").decode("utf-8", "surrogateescape").rstrip("\n")
+    try:
+        same = top != "" and os.path.samefile(top, root)
+    except OSError as exc:
+        raise StagedScanError(f"cannot compare {root} with the working tree's top level ({exc})") from None
+    if not same:
+        raise StagedScanError(f"{root} is not the top level of a git working tree (git names "
+                              f"{_staged_shown(top)!r})")
+
+
+def _staged_base(root):
+    """The tree the staged changes are compared with: HEAD's, or the empty tree on an unborn branch (HEAD names
+    a branch that does not exist yet), hashed without writing it. Any other failure is StagedScanError."""
+    head = _staged_git(root, "rev-parse", "--verify", "--quiet", "HEAD^{tree}")
+    if head.returncode == 0:
+        return head.stdout.decode("ascii", "replace").strip()
+    ref = _staged_git(root, "symbolic-ref", "--quiet", "HEAD")
+    name = ref.stdout.decode("utf-8", "surrogateescape").strip()
+    if ref.returncode != 0 or not name:
+        raise StagedScanError("HEAD does not resolve to a tree and does not name a branch")
+    listed = _staged_git_ok(root, "for-each-ref", "--format=%(refname)", name)
+    if name in listed.decode("utf-8", "surrogateescape").splitlines():
+        raise StagedScanError(f"HEAD names {_staged_shown(name)}, which exists but does not resolve to a tree")
+    return _staged_git_ok(root, "hash-object", "-t", "tree", "--stdin").decode("ascii", "replace").strip()
+
+
+def _staged_blobs(root, oids):
+    """{object id: bytes} for each blob in oids, read by id through one git cat-file --batch; StagedScanError
+    when one is missing, is not a blob, or the output is malformed."""
+    unique = sorted(set(oids))
+    if not unique:
+        return {}
+    out = _staged_git_ok(root, "cat-file", "--batch", stdin="".join(oid + "\n" for oid in unique).encode("ascii"))
+    blobs, pos = {}, 0
+    for oid in unique:
+        end = out.find(b"\n", pos)
+        header = out[pos:end].decode("ascii", "replace").split(" ") if end >= 0 else []
+        if len(header) != 3 or header[0] != oid or header[1] != "blob" or not header[2].isdigit():
+            raise StagedScanError(f"object {oid} is not a readable blob ({' '.join(header)[:120]!r})")
+        start = end + 1
+        size = int(header[2])
+        if out[start + size:start + size + 1] != b"\n":
+            raise StagedScanError(f"git cat-file output for {oid} is truncated")
+        blobs[oid] = out[start:start + size]
+        pos = start + size + 1
+    if pos != len(out):
+        raise StagedScanError("git cat-file printed more than the objects asked for")
+    return blobs
+
+
+def _staged_policy(root):
+    """The policy in the index: stage 0 of POLICY_PATH parsed and validated, or DEFAULT_POLICY when the index
+    does not hold it. PolicyError when it is not a regular file or is malformed; StagedScanError when it is
+    unmerged or cannot be read."""
+    listed = _staged_git_ok(root, "ls-files", "--stage", "-z", "--", ":(literal)" + POLICY_PATH)
+    entries = []
+    for record in listed.split(b"\0"):
+        if not record:
+            continue
+        meta, _tab, path = record.partition(b"\t")
+        fields = meta.decode("ascii", "replace").split(" ")
+        if len(fields) != 3:
+            raise StagedScanError(f"unexpected git ls-files output {record[:120]!r}")
+        entries.append((fields, path.decode("utf-8", "surrogateescape")))
+    if not entries:
+        return DEFAULT_POLICY
+    if any(path != POLICY_PATH for _fields, path in entries):
+        raise PolicyError("the policy file in the index is not a regular file (a directory)")
+    if len(entries) != 1 or entries[0][0][2] != "0":
+        raise StagedScanError(f"{POLICY_PATH} is unmerged in the index")
+    mode, oid, _stage = entries[0][0]
+    if mode not in _STAGED_REGULAR_MODES:
+        raise PolicyError("the policy file in the index is not a regular file (a symbolic link or another kind)")
+    return parse_policy(_staged_blobs(root, [oid])[oid])
+
+
+def _staged_changes(root, base):
+    """The staged changes against base, in git's order, as (status letter, old mode, new mode, old object id,
+    new object id, new path); a rename's old blob is its baseline. StagedScanError on an unmerged entry or
+    output this parser does not know."""
+    raw = _staged_git_ok(root, "diff-index", "--cached", "--raw", "-z", "-M", "--no-abbrev", base, "--")
+    fields = raw.split(b"\0")
+    if fields and fields[-1] == b"":
+        fields.pop()
+    changes, index = [], 0
+    while index < len(fields):
+        head = fields[index]
+        meta = head[1:].decode("ascii", "replace").split(" ") if head.startswith(b":") else []
+        if len(meta) != 5 or meta[4][:1] not in ("A", "C", "D", "M", "R", "T", "U"):
+            raise StagedScanError(f"unexpected git diff-index output {head[:120]!r}")
+        old_mode, new_mode, old_oid, new_oid, status = meta
+        width = 2 if status[0] in ("R", "C") else 1
+        if index + 1 + width > len(fields):
+            raise StagedScanError("git diff-index output is truncated")
+        path = fields[index + width].decode("utf-8", "surrogateescape")
+        index += 1 + width
+        if status[0] == "U":
+            raise StagedScanError(f"{_staged_shown(path)} is unmerged in the index")
+        changes.append((status[0], old_mode, new_mode, old_oid, new_oid, path))
+    return changes
+
+
+def staged_scan(root):
+    """Scan the staged changes of the git working tree whose top level is root (see the module docstring);
+    print the result and return the exit status."""
+    root = Path(root)
+    try:
+        _staged_root(root)
+        policy = _staged_policy(root)
+    except PolicyError as exc:
+        print(f"error: the character policy {POLICY_PATH} in the index cannot be used ({exc}); fail-closed",
+              file=sys.stderr)
+        return 2
+    except StagedScanError as exc:
+        print(f"error: cannot read the staged changes ({exc}); fail-closed", file=sys.stderr)
+        return 2
+    chars = list(policy["chars"].items())
+    try:
+        scoped, notes = [], []
+        for status, old_mode, new_mode, old_oid, new_oid, path in _staged_changes(root, _staged_base(root)):
+            if status == "D" or not scoped_rel(path.split("/"), policy):
+                continue
+            if new_mode not in _STAGED_REGULAR_MODES:
+                notes.append(path)
+                continue
+            scoped.append((path, new_oid, old_oid if status != "A" and old_mode in _STAGED_REGULAR_MODES else None))
+        blobs = _staged_blobs(root, [oid for _path, new_oid, old_oid in scoped for oid in (new_oid, old_oid)
+                                     if oid is not None])
+    except StagedScanError as exc:
+        print(f"error: cannot read the staged changes ({exc}); fail-closed", file=sys.stderr)
+        return 2
+    findings, undecodable, total = [], [], 0
+    for path, new_oid, old_oid in scoped:
+        try:
+            new = blobs[new_oid].decode("utf-8")
+        except UnicodeDecodeError:
+            undecodable.append(f"{_staged_shown(path)} is not valid UTF-8 in the index")
+            continue
+        try:
+            old = "" if old_oid is None else blobs[old_oid].decode("utf-8")
+        except UnicodeDecodeError:
+            undecodable.append(f"{_staged_shown(path)} is not valid UTF-8 in HEAD (its baseline)")
+            continue
+        for char, name in chars:
+            added = new.count(char) - old.count(char)
+            if added > 0:
+                total += added
+                findings.append(f"{_staged_shown(path)}: {name} x{added} added (HEAD {old.count(char)}, "
+                                f"staged {new.count(char)})")
+    for path in notes:
+        print(f"NOTE: {_staged_shown(path)} is staged as a symbolic link or a submodule, not a regular file; "
+              "not scanned")
+    if findings:
+        print(f'FAIL: {total} character(s) forbidden by the "{policy["id"]}" character policy added by the staged '
+              "changes")
+        for finding in findings:
+            print(f"  {finding}")
+    for problem in undecodable:
+        print(f"error: {problem}, so it cannot be scanned (cannot evaluate); fail-closed", file=sys.stderr)
+    if undecodable:
+        return 2
+    if findings:
+        return 1
+    names = " or ".join(name for _, name in chars)
+    print(f'PASS: the staged changes add no {names} to the files the "{policy["id"]}" character policy scopes')
+    return 0
+
+
+def _staged_vectors(failures, expect, tree, policy, scratch):
+    """The --staged-scan self-test vectors (G19 to G32), each on throwaway git repositories. The whole block runs
+    inside _git_fixture_env.fixture_git_lifecycle, so neither the fixture git calls nor the scan under test can
+    read or change the caller's repository, index or git configuration, and the caller's environment is put
+    back afterwards. Each vector that fails without the staged scan (or without the one behaviour it names) is
+    paired with a twin that passes either way, so the pair proves the difference."""
+    from _git_fixture_env import fixture_git_lifecycle, git_fixture_env
+
+    em, en, quote = "—", "–", "“"
+    identity = {"GIT_AUTHOR_NAME": "fixture", "GIT_AUTHOR_EMAIL": "fixture@example.invalid",
+                "GIT_COMMITTER_NAME": "fixture", "GIT_COMMITTER_EMAIL": "fixture@example.invalid"}
+
+    def git(root, *args, stdin=b""):
+        done = subprocess.run(["git", "-C", root, *args], input=stdin, capture_output=True,
+                              env=git_fixture_env(**identity), timeout=120)
+        if done.returncode != 0:
+            raise RuntimeError(f"fixture git {args[0]} exited {done.returncode}: {done.stderr[:200]!r}")
+        return done.stdout
+
+    def write(root, rel, data):
+        path = os.path.join(root, *rel.split("/"))
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "wb") as handle:
+            handle.write(data.encode("utf-8") if isinstance(data, str) else data)
+
+    def repo(head=None, staged=None, work=None):
+        """A repository whose HEAD commit holds head (no commit at all when head is None), whose index then
+        takes staged (a None value stages a deletion), and whose working tree then takes work, unstaged."""
+        root = tree({})
+        git(root, "init", "-q")
+        if head is not None:
+            for rel, data in head.items():
+                write(root, rel, data)
+            git(root, "add", "-A")
+            git(root, "commit", "-q", "--allow-empty", "-m", "base")
+        for rel, data in (staged or {}).items():
+            if data is None:
+                git(root, "rm", "-q", "--", rel)
+            else:
+                write(root, rel, data)
+                git(root, "add", "--", rel)
+        for rel, data in (work or {}).items():
+            if data is None:
+                os.remove(os.path.join(root, *rel.split("/")))
+            else:
+                write(root, rel, data)
+        return root
+
+    def staged(label, root, want, needle=None):
+        expect(label, root, want, needle, check=staged_scan)
+
+    pass_line = 'PASS: the staged changes add no en dash or em dash to the files the "no-dashes" character policy'
+    filler = "".join(f"line {number} of a file long enough for rename detection\n" for number in range(30))
+    with fixture_git_lifecycle():
+        try:
+            # G19 (T1) the index, not the working tree: a dash staged but taken out of the working tree is a
+            # finding; a dash in the working tree only is not.
+            staged("G19A dash staged, working tree clean", repo({"d/a.md": "x\n"}, {"d/a.md": f"x{em}\n"},
+                                                                {"d/a.md": "x\n"}), 1, "d/a.md: em dash x1 added")
+            staged("G19B dash in the working tree only", repo({"d/a.md": "x\n"}, work={"d/a.md": f"x{em}\n"}),
+                   0, pass_line)
+            # G20 (T3) the HEAD baseline, counted per occurrence: an edit beside an existing dash adds nothing;
+            # a second dash on the same line adds one.
+            staged("G20A edit beside a dash already in HEAD", repo({"d/a.md": f"a{em}b\n"},
+                                                                   {"d/a.md": f"a{em}b\nmore\n"}), 0, pass_line)
+            staged("G20B second dash on the same line", repo({"d/a.md": f"a{em}b\n"}, {"d/a.md": f"a{em}b{em}c\n"}),
+                   1, "d/a.md: em dash x1 added (HEAD 1, staged 2)")
+            # G21 (T4) per path and per character, never netted: a dash moved to another file, and an en dash
+            # replaced by an em dash, are findings; a dash moved within its own file is not.
+            staged("G21A dash moved to another file", repo({"d/a.md": f"{em}\n", "d/b.md": "x\n"},
+                                                           {"d/a.md": "x\n", "d/b.md": f"{em}\n"}), 1,
+                   "d/b.md: em dash x1 added (HEAD 0, staged 1)")
+            staged("G21B en dash replaced by an em dash", repo({"d/a.md": f"{en}\n"}, {"d/a.md": f"{em}\n"}), 1,
+                   "d/a.md: em dash x1 added")
+            staged("G21C dash moved within its file", repo({"d/a.md": f"{em} x\n"}, {"d/a.md": f"x {em}\n"}), 0,
+                   pass_line)
+            # G22 (T5) a rename is compared with its old blob: a plain git mv adds nothing; a rename that adds a
+            # dash adds one.
+            moved = repo({"d/a.md": filler + f"{em}{em}\n"})
+            git(moved, "mv", "d/a.md", "d/b.md")
+            staged("G22A git mv of a file holding dashes", moved, 0, pass_line)
+            moved = repo({"d/a.md": filler + f"{em}{em}\n"})
+            git(moved, "mv", "d/a.md", "d/b.md")
+            write(moved, "d/b.md", filler + f"{em}{em}{em}\n")
+            git(moved, "add", "--", "d/b.md")
+            staged("G22B rename that adds a dash", moved, 1, "d/b.md: em dash x1 added (HEAD 2, staged 3)")
+            # G23 (T6) an unborn branch is compared with the empty tree.
+            staged("G23A unborn branch, staged dash", repo(None, {"d/a.md": f"{em}\n"}), 1,
+                   "d/a.md: em dash x1 added")
+            staged("G23B unborn branch, clean", repo(None, {"d/a.md": "x\n"}), 0, pass_line)
+            # G24 (T7) a staged deletion is never scanned.
+            staged("G24A staged deletion of a file holding a dash", repo({"d/a.md": f"{em}\n"}, {"d/a.md": None}),
+                   0, pass_line)
+            # The added file shares no text with the deleted one, so git does not pair them as a rename.
+            staged("G24B deletion beside an added dash", repo({"d/a.md": filler + f"{em}\n"},
+                                                              {"d/a.md": None, "d/c.md": f"new {em}\n"}), 1,
+                   "d/c.md: em dash x1 added")
+            # G25 (T11) scope: a dash in an out-of-scope file is not a finding under the default policy.
+            staged("G25A dash in out-of-scope tools/x.py", repo({"README.md": "x\n"}, {"tools/x.py": f"{em}\n"}),
+                   0, pass_line)
+            staged("G25B dash in in-scope plugin/x.py", repo({"README.md": "x\n"}, {"plugin/x.py": f"{em}\n"}), 1,
+                   "plugin/x.py: em dash x1 added")
+            # G26 (T9) the policy comes from the index: an untracked working-tree policy adding a quotation mark
+            # is not used; a committed one is used even when the working-tree file is gone.
+            quote_policy = json.dumps(policy()) + "\n"
+            staged("G26A working-tree policy only", repo({"d/a.md": "x\n"}, {"d/a.md": f"{quote}\n"},
+                                                         {".aiqt/char-policy.json": quote_policy}), 0)
+            staged("G26B index policy, working-tree file removed",
+                   repo({"d/a.md": "x\n", ".aiqt/char-policy.json": quote_policy}, {"d/a.md": f"{quote}\n"},
+                        {".aiqt/char-policy.json": None}), 1, "d/a.md: left double quotation mark x1 added")
+            # G27 fail-closed: a scoped staged blob that is not UTF-8, an unmerged entry, a root that is not the
+            # top level, a directory outside any repository and a malformed index policy are each exit 2.
+            staged("G27A staged blob not UTF-8", repo({"d/a.md": "x\n"}, {"d/a.md": b"x\xff\n"}), 2,
+                   "d/a.md is not valid UTF-8 in the index")
+            staged("G27B the same text as UTF-8", repo({"d/a.md": "x\n"}, {"d/a.md": b"xy\n"}), 0, pass_line)
+            conflicted = repo({"README.md": "x\n"})
+            blob = git(conflicted, "hash-object", "-w", "--stdin", stdin=b"x\n").decode("ascii").strip()
+            git(conflicted, "update-index", "--index-info",
+                stdin="".join(f"100644 {blob} {stage}\td/a.md\n" for stage in (1, 2, 3)).encode("ascii"))
+            staged("G27C unmerged entry", conflicted, 2, "d/a.md is unmerged in the index")
+            nested = repo({"d/a.md": "x\n"}, {"d/a.md": f"{em}\n"})
+            staged("G27D root is a subdirectory", os.path.join(nested, "d"), 2, "is not the top level")
+            staged("G27E root in no repository", tree({"d/a.md": f"{em}\n"}), 2, "cannot read the staged changes")
+            staged("G27F malformed index policy", repo({"d/a.md": "x\n", ".aiqt/char-policy.json": "{\n"}), 2,
+                   "in the index cannot be used")
+            # G28 every git call drops the ambient GIT_ variables: with GIT_DIR, GIT_WORK_TREE and GIT_INDEX_FILE
+            # naming a repository whose index holds a dash, the clean repository still scans clean; the dirty
+            # one, scanned itself with no such variable, is the twin.
+            dirty = repo({"d/a.md": "x\n"}, {"d/a.md": f"{em}\n"})
+            clean = repo({"d/a.md": "x\n"})
+            redirect = {"GIT_DIR": os.path.join(dirty, ".git"), "GIT_WORK_TREE": dirty,
+                        "GIT_INDEX_FILE": os.path.join(dirty, ".git", "index")}
+            os.environ.update(redirect)
+            try:
+                staged("G28A ambient GIT_DIR, GIT_WORK_TREE and GIT_INDEX_FILE name another repository", clean, 0,
+                       pass_line)
+            finally:
+                for key in redirect:
+                    os.environ.pop(key, None)
+            staged("G28B that other repository scanned itself", dirty, 1, "d/a.md: em dash x1 added")
+            # G29 (T8) paths with a space, a leading dash and a newline are read whole (git -z) and shown on one
+            # line each, the newline as U+000A.
+            odd = ("d/a b.md", "d/-x.md", "d/new\nline.md")
+            staged("G29A odd paths holding a dash", repo({"README.md": "x\n"}, {rel: f"{em}\n" for rel in odd}), 1,
+                   "d/newU+000Aline.md: em dash x1 added")
+            for rel in ("d/a b.md", "d/-x.md"):
+                staged(f"G29A {rel!r} named", repo({"README.md": "x\n"}, {rel: f"{em}\n"}), 1,
+                       f"{rel}: em dash x1 added")
+            staged("G29B the same paths clean", repo({"README.md": "x\n"}, {rel: "x\n" for rel in odd}), 0,
+                   pass_line)
+            # G30 (T13) every occurrence counts: two dashes on one line of a new file are two.
+            staged("G30A two dashes on one line", repo({"README.md": "x\n"}, {"d/a.md": f"a{em}b{em}c\n"}), 1,
+                   "d/a.md: em dash x2 added (HEAD 0, staged 2)")
+            staged("G30B one dash", repo({"README.md": "x\n"}, {"d/a.md": f"a{em}b\n"}), 1,
+                   "d/a.md: em dash x1 added (HEAD 0, staged 1)")
+            # G31 the command line reaches the staged scan: --staged-scan ROOT exits 1 on a staged dash and 0 on a
+            # clean index, run as CI runs the gate (python3 -I -B).
+            for label, root, want in (("G31A command line, staged dash", dirty, 1),
+                                      ("G31B command line, clean", clean, 0)):
+                done = subprocess.run([sys.executable, "-I", "-B", os.path.abspath(__file__), "--staged-scan", root],
+                                      capture_output=True, text=True, timeout=120)
+                if done.returncode != want:
+                    failures.append(f"{label}: want exit {want}, got {done.returncode}: "
+                                    f"{(done.stdout + done.stderr).strip()[:200]!r}")
+            # G32 a staged symbolic link in scope is named and not scanned, though its target text holds a dash;
+            # a regular file of the same name holding a dash is the twin.
+            linked = repo({"README.md": "x\n"})
+            os.makedirs(os.path.join(linked, "d"))
+            os.symlink(f"x{em}.txt", os.path.join(linked, "d", "l.md"))
+            git(linked, "add", "--", "d/l.md")
+            staged("G32A staged symbolic link", linked, 0, "NOTE: d/l.md is staged as a symbolic link")
+            staged("G32B regular file of that name", repo({"README.md": "x\n"}, {"d/l.md": f"x{em}.txt"}), 1,
+                   "d/l.md: em dash x1 added")
+        except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+            failures.append(f"G19 to G32 staged-scan fixtures could not be built ({exc})")
+
+
 def _self_test():
     """Fixture trees for each scan and validation clause; each pair differs in one feature."""
     import io
@@ -631,8 +1060,10 @@ def _self_test():
             finally:
                 os.chmod(os.path.join(hidden, "d"), 0o700)
         # G13 arguments: an unknown argument is exit 2 with the usage line, never a scan.
+        # T13: --staged-scan takes exactly one ROOT; none, or a second argument, is the same usage error.
         for argv in (["check_no_dashes.py", "--bogus"], ["check_no_dashes.py", "--self-test", "x"],
-                     ["check_no_dashes.py", "--default-parity", "x"]):
+                     ["check_no_dashes.py", "--default-parity", "x"], ["check_no_dashes.py", "--staged-scan"],
+                     ["check_no_dashes.py", "--staged-scan", scratch, "x"]):
             out, err = io.StringIO(), io.StringIO()
             with redirect_stdout(out), redirect_stderr(err):
                 rc = main(argv)
@@ -688,6 +1119,36 @@ def _self_test():
                 chars={em: "em dash"}, scope=[{"tree": "t", "suffixes": [".md"]}]))
             os.symlink(target, os.path.join(linked, "t"))
             expect(f"G17 tree entry that is a symlink {shape}", linked, want, needle)
+        # G18 (plan T12) scoped_rel, the staged scan's matcher, lists exactly what scope_paths lists, on a tree
+        # with tree and file entries, skip lists naming a directory and a file, a nested tree, overlapping
+        # entries, a dot file named like a suffix and a double suffix. G18B pins named paths each way.
+        matcher_policy = policy(chars={em: "em dash"}, scope=[
+            {"tree": ".", "suffixes": [".md", ".mdc"], "skip": ["node_modules", "skip.md"]},
+            {"tree": "plugin", "suffixes": [".py"]}, {"tree": "t/u", "suffixes": [".py"], "skip": ["__pycache__"]},
+            {"tree": "t", "suffixes": [".md"]}, {"file": "NOTICE"}, {"file": "d/c.txt"}])
+        matcher_files = ["a.md", "b.mdc", "c.txt", ".md", "x.md.txt", "skip.md", "d/skip.md", "d/c.txt",
+                         "node_modules/n.md", "d/node_modules/n.md", "plugin/p.py", "plugin/p.txt", "plugin/q/r.py",
+                         "t/u/v.py", "t/u/__pycache__/w.py", "t/u/x.md", "t/v.py", "NOTICE", "e/NOTICE"]
+        matcher_root = tree({rel: "x\n" for rel in matcher_files})
+        walked = {path.relative_to(matcher_root).as_posix() for path in scope_paths(matcher_root, matcher_policy)}
+        matched = {rel for rel in matcher_files if scoped_rel(rel.split("/"), matcher_policy)}
+        if walked != matched or not walked or walked == set(matcher_files):
+            failures.append(f"G18A scoped_rel lists {sorted(matched)}, scope_paths lists {sorted(walked)}")
+        default_root = tree({rel: "x\n" for rel in (
+            "a.md", "node_modules/a.md", "x/__pycache__/a.md", ".aiqt/standards/a.toml", ".aiqt/a.toml",
+            "plugin/a.py", "plugin/node_modules/a.py", "tools/a.py", ".aiqt/core/hooks/a.json", "NOTICE",
+            ".aiqt/attribution.toml", "docs/NOTICE")})
+        default_files = [path.relative_to(default_root).as_posix() for path in walk_files(default_root)]
+        walked = {path.relative_to(default_root).as_posix() for path in scope_paths(default_root, DEFAULT_POLICY)}
+        matched = {rel for rel in default_files if scoped_rel(rel.split("/"), DEFAULT_POLICY)}
+        if walked != matched or not walked:
+            failures.append(f"G18A default policy: scoped_rel {sorted(matched)}, scope_paths {sorted(walked)}")
+        for rel, want in (("t/u", False), ("t/u/v.py", True), ("d/node_modules/n.md", False), ("d/c.txt", True),
+                          ("c.txt", False), (".md", False), ("e/NOTICE", False), ("NOTICE", True),
+                          ("t/u/x.md", True)):
+            if scoped_rel(rel.split("/"), matcher_policy) is not want:
+                failures.append(f"G18B scoped_rel({rel!r}) is not {want}")
+        _staged_vectors(failures, expect, tree, policy, scratch)
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
     for failure in failures:
@@ -704,8 +1165,10 @@ def main(argv):
         return _self_test()
     if argv[1:] == ["--default-parity"]:
         return default_parity(Path(__file__).resolve().parents[1])
+    if len(argv) == 3 and argv[1] == "--staged-scan":
+        return staged_scan(argv[2])
     if argv[1:]:
-        print("usage: check_no_dashes.py [--self-test | --default-parity]", file=sys.stderr)
+        print("usage: check_no_dashes.py [--self-test | --default-parity | --staged-scan ROOT]", file=sys.stderr)
         return 2
     return run(Path(__file__).resolve().parents[1])
 
