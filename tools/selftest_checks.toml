@@ -2827,6 +2827,7 @@ expected-check-ids = [
   "source/unknown-key-cannot-evaluate",
   "source/bool-format-version-cannot-evaluate",
   "source/malformed-floor-cannot-evaluate",
+  "source/floor-component-digit-bound",
   "source/non-bool-switch-cannot-evaluate",
   "source/escaping-surface-cannot-evaluate",
   "source/hidden-dir-surface-passes",
