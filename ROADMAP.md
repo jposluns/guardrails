@@ -12,4 +12,4 @@ Version 1.2.0, in development, installs the same governance core into a project.
 
 ## Ideas we are considering: Teams and Enterprise
 
-A web console would show governance activity across projects without requiring a terminal. Enterprise management would cover what an organization needs beyond an individual: central policy, shared configuration, and reporting across teams. No dates and no commitments. [Read about Teams & Enterprise.](https://aiqt.ai/teams)
+A web console would show governance activity across projects without requiring a terminal. Enterprise management would cover what an organization needs beyond an individual: central policy, shared configuration, and reporting across teams. No dates and no commitments.

@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.0.5"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "508bf2221d0818d51a175a24688632d72b541f7885772ee94ac419e0d11586a9"
+tree-sha256 = "3bdfb072d29e74152701ed76790e0bca8b3b434e57383eed9c9fa28b2773b412"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -122,8 +122,8 @@ sha256 = "f1625261cc219e8a08ac893874d74d2f1e435683d9e552d877fefcdde6880f9d"
 
 [[sources]]
 path = ".aiqt/core/ownership.toml"
-bytes = 27038
-sha256 = "40a6b793803406e3c0baad2634463e5793119af9dc60a7728b9f738887f76f66"
+bytes = 27107
+sha256 = "cdd82b74c89d45766903dc6937ec4f64bba3f17350cfcb640ae5ee205263e241"
 
 [[sources]]
 path = ".aiqt/core/profiles/worker-pack.md"
@@ -837,8 +837,8 @@ sha256 = "0bef727083ae24ef1aea29a2e2b1a3593deaaf0238ec5785e01112f50112e104"
 
 [[sources]]
 path = ".aiqt/gensrc.json"
-bytes = 14513
-sha256 = "308f9285337e54eb891ce82f77e373d6430a1891965cf2db7cc6ed7ce72bb827"
+bytes = 14736
+sha256 = "7bfce120ab6325f2c44a674f5a3fd69b92455e782c01e871727112a78fcd4041"
 
 [[sources]]
 path = ".aiqt/record-sections.toml.example"
@@ -2307,8 +2307,8 @@ sha256 = "9e0e365fb1e2813246c724267ec062310de3be1c5ca4ad9cba37fa0ce5691af4"
 
 [[sources]]
 path = ".gitattributes"
-bytes = 53975
-sha256 = "2d16ca810fc72d77ef3c01857296f8a9382e9d5e50f064b000ad55f3af6f988a"
+bytes = 54041
+sha256 = "e62929da82ecf461cece6435ab11256f2b8030ec923ffd754df57d3acf38aab3"
 
 [[sources]]
 path = ".github/copilot-instructions.md"
@@ -2427,8 +2427,8 @@ sha256 = "919da84c70d891eaf8d58a6f16edded70042eb6f30b98cf6ec480a198a6f4be8"
 
 [[sources]]
 path = "ROADMAP.md"
-bytes = 1488
-sha256 = "4584fb10d4ffd6683c01abdd1d733b4c2ba212b45a38778c88713ff4ed133c0f"
+bytes = 1432
+sha256 = "d0385d5e2ebb0b2a0fb1a5dedf25214d653a5c863d14c9cfce976e646a24c25f"
 
 [[sources]]
 path = "SCOPE.md"
@@ -3532,8 +3532,8 @@ sha256 = "c03c88544f5b1675467e422c7ac201e81d04367a85f72f5d50075dff75c170f7"
 
 [[sources]]
 path = "roadmap.toml"
-bytes = 1744
-sha256 = "8b9b3213979a7f29ef2a788149fb92caaff18013a1766efc71496b1a2c41358d"
+bytes = 1673
+sha256 = "837dc139117ca9ab630e8fe78702e0e4163a0357396d76371bc7fe058912c81e"
 
 [[sources]]
 path = "site/.well-known/security.txt"
@@ -3684,6 +3684,11 @@ sha256 = "2d42d232d872eda17463889371672aeed1f1a92dcd155ff4c51b1716989b5ffe"
 path = "site/draft-src/standard.toml"
 bytes = 12645
 sha256 = "d08ba7eec579f657aad35de096f3d4129206754cc0e5c3a8a2a65179e8bb4a95"
+
+[[sources]]
+path = "site/draft-src/teams.toml"
+bytes = 9554
+sha256 = "c1e697ba783bc337999721fc0f5b8f9099dfdb1faa78a115eabe1bdb9c9f45ae"
 
 [[sources]]
 path = "site/draft/assets/baseline/LICENSE"
@@ -4044,6 +4049,11 @@ sha256 = "d98a56242929d003336dbc1b5065f90af431163e555649358e325af7ad5d522f"
 path = "site/styles.css"
 bytes = 39818
 sha256 = "3a7c8983ab9fca0e04dc69f88afef82b0ff9e533dc150c86f250aae2c3a4d3d3"
+
+[[sources]]
+path = "site/teams.html"
+bytes = 14872
+sha256 = "ff0eaff658871a17257804ae45f005dad7da15bdd10c2a673b752f1987e3a7bb"
 
 [[sources]]
 path = "site/tech-details.html"
@@ -4517,8 +4527,8 @@ sha256 = "e732c5633f7a18889d9f71af931cd2eb0131c2b51e53e81087316d976923752c"
 
 [[sources]]
 path = "tools/gen_draft_site.py"
-bytes = 199726
-sha256 = "d8985399f6794e45273460465ea820c19c7ee207634d534ff6a3de79f41c125f"
+bytes = 199905
+sha256 = "b95d0fc19297a4ad17f9bbf9851c6ba99e359212ad29a63e64171ba1158cfe58"
 
 [[sources]]
 path = "tools/gen_enforceability.py"

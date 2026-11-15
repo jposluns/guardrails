@@ -23,4 +23,3 @@ pill_class = "idea"
 pill_label = "Ideas we are considering"
 heading = "Teams and Enterprise"
 body = "A web console would show governance activity across projects without requiring a terminal. Enterprise management would cover what an organization needs beyond an individual: central policy, shared configuration, and reporting across teams. No dates and no commitments."
-links = [{ text = "Read about Teams & Enterprise.", href = "/teams" }]
