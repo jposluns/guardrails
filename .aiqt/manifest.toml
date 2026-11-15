@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.0.5"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "6bfbb63edcc7352907904899c95849a243e9e63f3ee43f3d556af7ff01fcb085"
+tree-sha256 = "f3cfac852dbdf6a3a25a9334f77b2b7ea614b247d28d36e94b1f9b78fb4c1bbd"
 
 [[sources]]
 path = ".aiqt/LICENSE"
@@ -847,8 +847,8 @@ sha256 = "0bef727083ae24ef1aea29a2e2b1a3593deaaf0238ec5785e01112f50112e104"
 
 [[sources]]
 path = ".aiqt/gensrc.json"
-bytes = 15436
-sha256 = "02ec3378819b80b01d28f53e98389ec6c742586f3c7af42e2b34ce6453d98b43"
+bytes = 15548
+sha256 = "e8f9d0ec4b51cd9507cf51bb58db6538e37283d04d1c204a0ff23ac41e1e1a52"
 
 [[sources]]
 path = ".aiqt/record-sections.toml.example"
@@ -4357,8 +4357,8 @@ sha256 = "3aba6654e5757854a967398ac9e512d9b614b6b6c2012fba0d76eae55685ebff"
 
 [[sources]]
 path = "tools/check_portability.py"
-bytes = 203950
-sha256 = "5c13689b931667d9ac7b7b485b05ad2e4f1c0f0f8bacec1fd63f06a309facfea"
+bytes = 210299
+sha256 = "19f67b226034b74ec9c7e5499c2f02f8e96b3ed53c29bbec5b0ab3e7ef832c4f"
 
 [[sources]]
 path = "tools/check_python_floor.py"
@@ -4567,13 +4567,13 @@ sha256 = "9c236464c51d0644d75a2f1ea27ef4614f9b4394453923213b89987876aae4ba"
 
 [[sources]]
 path = "tools/gen_gensrc.py"
-bytes = 70699
-sha256 = "5fe2069fa9978b5df1ae5cd65211c9d88d4c59f580dfeb4e3c876bbe2ebe1f29"
+bytes = 79973
+sha256 = "7066bed06b82860a51842fc6f1db1b6ced3ffbf1776502f14b461c910ad49adc"
 
 [[sources]]
 path = "tools/gen_hooks.py"
-bytes = 275396
-sha256 = "cbb4e9f001879c4cbda59963f517983875bccf974255a7612973b392762f5250"
+bytes = 277558
+sha256 = "2ad58cabe04127a50153677a87417640e9f9e1e59c6305b2b0ef8440218cf743"
 
 [[sources]]
 path = "tools/gen_manifest.py"

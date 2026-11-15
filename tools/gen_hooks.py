@@ -139,6 +139,18 @@ AUTHORING_ONLY_REL = (AUTHORING_MARKER_REL, PROJECT_SETTINGS_REL)
 # regular file (a symlink is not followed) fails closed (exit 2).
 LICENCE_FILES = ("LICENSE", "NOTICE")
 LICENCE_HOMES = (PLUGIN_ROOT_REL, ".aiqt")
+# The authoring-SCOPED roster: SHIPPED paths this tool generates and drift-checks ONLY in the authoring tree, the
+# licence copies above (every LICENCE_HOMES x LICENCE_FILES path; self-test case 36 pins the equality). Unlike
+# AUTHORING_ONLY_REL these ship: they keep their release class, because gen_manifest.check_authoring_only (the
+# never-ship check) reads AUTHORING_ONLY_REL alone, so they are never on that roster. gen_gensrc reads this
+# roster statically (read_authoring_roster with SCOPED_ROSTER_NAME) and scopes their registry entries
+# "authoring", so gensrc_guard honours them only where the authoring marker is exact, matching run(), which
+# never touches them in an adopter tree. gen_manifest.cross_check_exclusions sees that scope too (through
+# gen_gensrc.collect_entries), so it no longer refuses an EXACT [[exclusion]] literal for one of them as
+# swallowing a gensrc target. The same binding rules as AUTHORING_ONLY_REL apply: a tuple of str literals bound
+# once by one plain top-level assignment.
+AUTHORING_SCOPED_REL = (".aiqt/LICENSE", ".aiqt/NOTICE", "plugin/aiqt-guardrails-hooks/LICENSE",
+                        "plugin/aiqt-guardrails-hooks/NOTICE")
 
 # The event whitelist, in the fixed render order (doc-confirmed event names, 2026-08-17; SessionStart
 # and TeammateIdle re-confirmed against the hooks reference 2026-08-29). PostToolUseFailure, the tool
@@ -4076,6 +4088,17 @@ def self_test_main(_nested=False):
         #     dropped home or a renamed file fails here.
         copy_rels = ("plugin/aiqt-guardrails-hooks/LICENSE", "plugin/aiqt-guardrails-hooks/NOTICE",
                      ".aiqt/LICENSE", ".aiqt/NOTICE")
+        # The authoring-scoped roster (gen_gensrc scopes these registry entries "authoring") names exactly the
+        # copies run() generates only in the authoring tree, each a declared GENSRC_OUTPUTS file, and none is on
+        # the never-ship AUTHORING_ONLY_REL roster (the copies ship).
+        declared_files = {d["target"] for d in GENSRC_OUTPUTS if d["kind"] == "file"}
+        if (sorted(AUTHORING_SCOPED_REL) != sorted(copy_rels)
+                or sorted(AUTHORING_SCOPED_REL) != sorted("{}/{}".format(home, name) for home in LICENCE_HOMES
+                                                          for name in LICENCE_FILES)
+                or not set(AUTHORING_SCOPED_REL) <= declared_files
+                or set(AUTHORING_SCOPED_REL) & set(AUTHORING_ONLY_REL)):
+            failures.append("licence copies: AUTHORING_SCOPED_REL must name exactly the four declared copies, "
+                            "off AUTHORING_ONLY_REL, got {!r}".format(AUTHORING_SCOPED_REL))
         lic = tmp / "licence-copies"
         lic.mkdir()
         _build_project_tree(lic)

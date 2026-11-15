@@ -3,6 +3,7 @@
     {
       "kind": "file",
       "regenerate": "python3 tools/gen_hooks.py",
+      "scope": "authoring",
       "sources": [
         "LICENSE"
       ],
@@ -11,6 +12,7 @@
     {
       "kind": "file",
       "regenerate": "python3 tools/gen_hooks.py",
+      "scope": "authoring",
       "sources": [
         "NOTICE"
       ],
@@ -386,6 +388,7 @@
     {
       "kind": "file",
       "regenerate": "python3 tools/gen_hooks.py",
+      "scope": "authoring",
       "sources": [
         "LICENSE"
       ],
@@ -394,6 +397,7 @@
     {
       "kind": "file",
       "regenerate": "python3 tools/gen_hooks.py",
+      "scope": "authoring",
       "sources": [
         "NOTICE"
       ],

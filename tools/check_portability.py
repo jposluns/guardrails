@@ -91,6 +91,7 @@ if tuple(sys.version_info[:2]) < (3, 14):
 import json
 import os
 import re
+import stat
 import subprocess
 import tempfile
 from pathlib import Path
@@ -280,23 +281,43 @@ TEXT_PATHS = frozenset(("opf/enforcement/precommit/pre-commit",
 # so the plugin's copy carries the operator NAME by design. The copy is exempt from the C1 operator NAME and EMAIL
 # match ONLY while its bytes equal the repository-root source named here (the file tools/gen_hooks.py copies byte
 # for byte); a copy that differs in any byte is scanned whole like any other file, and an unreadable copy or
-# source fails closed (exit 2). The personal-handle C1 match, C2 and C5 still apply to the copy.
+# source fails closed (exit 2). Neither file is read through a symlink: a root NOTICE (or a copy) that is a
+# symlink or any other non-regular file fails closed (exit 2), so a root NOTICE linked to the copy can never
+# make the copy match itself. The personal-handle C1 match, C2 and C5 still apply to the copy.
 NOTICE_COPIES = {"plugin/aiqt-guardrails-hooks/NOTICE": "NOTICE"}
+
+
+def _read_regular_nofollow(path, opener):
+    """The bytes of the regular file at path, never read through a symlink. With the builtin opener the final
+    component is lstat'd and must be a regular file, then opened with O_NOFOLLOW (where the platform has it)
+    and fstat'd again, so a symlink or other non-regular file raises OSError. An injected opener (the
+    self-test seam for unreadable files) is called as given."""
+    if opener is not open:
+        with opener(path, "rb") as handle:
+            return handle.read()
+    if not stat.S_ISREG(os.lstat(path).st_mode):
+        raise OSError("{} is a symlink or other non-regular file; it is not followed".format(path))
+    flags = (os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+             | getattr(os, "O_BINARY", 0))
+    with os.fdopen(os.open(path, flags), "rb") as handle:
+        if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+            raise OSError("{} is not a regular file; it is not followed".format(path))
+        return handle.read()
 
 
 def notice_copy_matches(root, rel, opener=open):
     """True when rel is a NOTICE_COPIES member whose bytes equal its repository-root source; False for any
-    other rel or a copy that differs. Raises GateError (exit 2) when either file cannot be read."""
+    other rel or a copy that differs. Raises GateError (exit 2) when either file cannot be read, or is a
+    symlink or other non-regular file (_read_regular_nofollow never follows a link)."""
     source_rel = NOTICE_COPIES.get(rel)
     if source_rel is None:
         return False
     try:
-        with opener(root / rel, "rb") as handle:
-            copy = handle.read()
-        with opener(root / source_rel, "rb") as handle:
-            source = handle.read()
+        copy = _read_regular_nofollow(root / rel, opener)
+        source = _read_regular_nofollow(root / source_rel, opener)
     except OSError as exc:
-        raise GateError("cannot read the NOTICE copy {} or its source {} ({})".format(rel, source_rel, exc))
+        raise GateError("cannot read the NOTICE copy {} or its source {} as a regular file without following "
+                        "a symlink ({})".format(rel, source_rel, exc))
     return copy == source
 
 
@@ -3081,6 +3102,14 @@ def _self_test_main_isolated(_vectors=True, _mkdtemp=None, _symlink=None, _which
     if notice_copy_matches(iw_root, notice_rel,
                            _notice_opener({notice_rel: notice_bytes + b"x", "NOTICE": notice_bytes})):
         failures.append("NOTICE copy: a copy differing by one byte must not match")
+    # Line endings are bytes: a CRLF copy of an LF source, and an LF copy of a CRLF source, never match (a
+    # comparison that normalizes line ends would pass both).
+    notice_crlf = notice_bytes.replace(b"\n", b"\r\n")
+    for copy_bytes, source_bytes, label in ((notice_crlf, notice_bytes, "a CRLF copy of an LF source"),
+                                            (notice_bytes, notice_crlf, "an LF copy of a CRLF source")):
+        if notice_copy_matches(iw_root, notice_rel,
+                               _notice_opener({notice_rel: copy_bytes, "NOTICE": source_bytes})):
+            failures.append("NOTICE copy: {} must not match (line endings are bytes)".format(label))
     if notice_copy_matches(iw_root, ".claude/rules/NOTICE",
                            _notice_opener({".claude/rules/NOTICE": notice_bytes, "NOTICE": notice_bytes})):
         failures.append("NOTICE copy: a path off NOTICE_COPIES must never be exempt")
@@ -3341,6 +3370,64 @@ def _self_test_main_isolated(_vectors=True, _mkdtemp=None, _symlink=None, _which
                 "#!/bin/sh\n# see the session-handoff first\nexit 0\n", encoding="utf-8")
             if _run_quiet(sroot, entries) != 1:
                 failures.append("e2e: an operational term in the pre-commit hook expected exit 1")
+
+            # (d4) the plugin's LICENSE and NOTICE copies (TEXT_PATHS) are scanned as text: a clean LICENSE copy
+            # and a NOTICE copy byte-identical to the root NOTICE pass (off TEXT_PATHS each is a C3 file-class
+            # finding), and an operational term in the LICENSE copy fails, so the allowance is a text scan.
+            plugin_licence = "plugin/aiqt-guardrails-hooks/LICENSE"
+            plugin_notice = "plugin/aiqt-guardrails-hooks/NOTICE"
+            e2e_notice = "Self-test NOTICE\n\nauthored and maintained by {}.\n".format(e2e_name).encode("utf-8")
+
+            def _licence_surface(tag, licence_text, notice_copy_bytes):
+                lroot, lentries = _fresh(tag)
+                (lroot / plugin_licence).write_text(licence_text, encoding="utf-8")
+                (lroot / plugin_notice).write_bytes(notice_copy_bytes)
+                (lroot / "NOTICE").write_bytes(e2e_notice)
+                lentries.extend(((0o100644, plugin_licence), (0o100644, plugin_notice)))
+                return lroot, lentries
+
+            sroot, entries = _licence_surface("licence-copies-clean", "Licence text\n", e2e_notice)
+            if _run_quiet(sroot, entries) != 0:
+                failures.append("e2e: a clean plugin LICENSE copy and a NOTICE copy identical to the root NOTICE "
+                                "expected exit 0 (are both on TEXT_PATHS?)")
+            sroot, entries = _licence_surface("licence-copy-term", "see the session-handoff first\n", e2e_notice)
+            if _run_quiet(sroot, entries) != 1:
+                failures.append("e2e: an operational term in the plugin LICENSE copy expected exit 1")
+
+            # (d5) the byte-identity condition AT THE scan_file CALL SITE: a NOTICE copy with one line changed or
+            # one line added differs from the root NOTICE, so scan_file scans it whole and the operator identity
+            # in it is a C1 finding (run exit 1); the identical copy is the passing twin (no finding, exit 0).
+            # Each goes through scan_file and run, never notice_copy_matches alone, so a call site that exempts
+            # every NOTICE_COPIES member whatever its bytes is caught.
+            e2e_forms = identity_deny_forms(e2e_name, e2e_email)
+            e2e_maxn = max(len(_tokens(e2e_name)), len(_tokens(e2e_email)))
+            e2e_contact = "contact {}".format(e2e_email).encode("utf-8")
+            for tag, copy_bytes, differs in (
+                    ("notice-copy-identical", e2e_notice, False),
+                    ("notice-copy-changed-line", e2e_notice.replace(b"Self-test NOTICE", e2e_contact), True),
+                    ("notice-copy-added-line", e2e_notice + e2e_contact + b"\n", True)):
+                sroot, entries = _licence_surface(tag, "Licence text\n", copy_bytes)
+                found = scan_file(sroot, sroot / plugin_notice, e2e_forms, e2e_maxn, term_grams, maxn)
+                if any("portability C1" in f for f in found) != differs:
+                    failures.append("e2e: scan_file on the {} NOTICE copy expected {}, got {!r}".format(
+                        tag, "a C1 finding" if differs else "no finding", found))
+                if _run_quiet(sroot, entries) != (1 if differs else 0):
+                    failures.append("e2e: the {} NOTICE copy expected exit {}".format(tag, 1 if differs else 0))
+
+            # (d6) a root NOTICE that is a symlink is never followed: linked to the plugin copy (which then
+            # "matches" itself even with the operator email added), it fails closed (exit 2). The regular root
+            # NOTICE in (d4) and (d5) is the passing twin.
+            sroot, entries = _licence_surface("notice-root-symlink", "Licence text\n",
+                                              e2e_notice + e2e_contact + b"\n")
+            (sroot / "NOTICE").unlink()
+            try:
+                _symlink_fn(sroot / plugin_notice, sroot / "NOTICE")
+            except OSError as exc:
+                _not_run(failures, "the symlinked root NOTICE case", "no symlink support ({})".format(exc))
+            else:
+                if _run_quiet(sroot, entries) != 2:
+                    failures.append("e2e: a root NOTICE that is a symlink to the copy expected exit 2 (never "
+                                    "followed)")
 
             # (e) a pathname operational term fails on the NAME alone, with clean bytes.
             sroot, entries = _fresh("pathname-term")
