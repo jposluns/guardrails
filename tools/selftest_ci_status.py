@@ -193,6 +193,33 @@ if tree_served is not None:
     else:
         print(json.dumps(entry["body"]))
     sys.exit(0)
+# A --main-health case serves "main" instead: a list of reads of the unfiltered listing, each a list of
+# pages served one per request ({"body": JSON} or {"raw": text} or {"error": diagnostic}; an absent page
+# is Not Found). Each read of page 1 starts the next read (the last one repeats); its position is counted
+# from the argv log, which already holds this read.
+with open(os.environ["MOCK_GH_RESPONSE"], "r", encoding="utf-8") as handle:
+    main_served = json.load(handle).get("main")
+if main_served is not None:
+    main_prefix = "repos/" + os.environ["MOCK_GH_REPO"] + "/actions/runs?per_page=100&page="
+    number = endpoint[len(main_prefix):] if endpoint.startswith(main_prefix) else ""
+    if not number.isdigit() or "--paginate" in args or "--slurp" in args:
+        print("gh fixture: a main-health read must be one unfiltered runs page", file=sys.stderr)
+        sys.exit(1)
+    with open(os.environ["MOCK_GH_ARGV_LOG"], "r", encoding="utf-8") as handle:
+        started = sum(1 for line in handle if json.loads(line) == ["api", main_prefix + "1"])
+    pages = main_served[min(max(started, 1) - 1, len(main_served) - 1)]
+    entry = pages[int(number) - 1] if 1 <= int(number) <= len(pages) else None
+    if entry is None:
+        print("gh: Not Found (HTTP 404)", file=sys.stderr)
+        sys.exit(1)
+    if "error" in entry:
+        print(entry["error"], file=sys.stderr)
+        sys.exit(1)
+    if "raw" in entry:
+        sys.stdout.write(entry["raw"])
+    else:
+        print(json.dumps(entry["body"]))
+    sys.exit(0)
 # A --pr case also serves "local": "pulls" (the replies to each read of pulls/NUMBER, in order, the last
 # repeating; the --wait probe's reads of that number take the same sequence), "statuses" and "status"
 # (the replies to each read of commits/SHA/statuses and commits/SHA/status with per_page=100 and
@@ -796,14 +823,15 @@ class Fixture:
 
     def invoke(self, polls, wait=False, timeout="900", clock=NOW, override=FIXTURE_REPO,
                served=FIXTURE_REPO, git_remote=None, extra_args=(), probes=None, tree=None,
-               rev="HEAD", local=None, creator=None):
+               rev="HEAD", local=None, creator=None, main=None):
         # override is CI_STATUS_REPO (None leaves it unset); served is the only repository gh answers for;
         # git_remote, when given, is the (stdout, exit status) the fixture git gives for the origin's URLs.
         # probes are the pull-request probe's reads (see FAKE_GH); by default every read finds one open
         # pull request at this head into main that GitHub reports MERGEABLE. tree, when given, is what gh
         # serves a --match-tree read instead (see FAKE_GH); rev=None passes no positional rev. local, when
         # given, is what gh serves the --pr reads (see FAKE_GH); creator, when given, is the value of
-        # CI_STATUS_STATUS_CREATOR (None leaves it unset).
+        # CI_STATUS_STATUS_CREATOR (None leaves it unset). main, when given, is what gh serves a
+        # --main-health read (see FAKE_GH).
         if probes is None:
             probes = [probe_read(pull(1, self.head_sha))]
         response = {"polls": polls, "probes": probes}
@@ -811,6 +839,8 @@ class Fixture:
             response["tree"] = tree
         if local is not None:
             response["local"] = local
+        if main is not None:
+            response["main"] = main
         self.response.write_text(json.dumps(response), encoding="utf-8")
         self.counter.write_text("0\n", encoding="utf-8")
         self.probe_counter.write_text("0\n", encoding="utf-8")
@@ -3438,6 +3468,8 @@ def _run_checks():
         option_cases.append((rc, fixture.gh_argv))
         check("ci/local-status-option-refusals", option_cases, [(2, [])] * 7)
 
+        _main_health_checks(fixture)
+
     # Round 7: main() must print every collected failure and map the exit code by the module docstring's
     # rule on every path. Each case runs a nested main() on seeded state and restores the real state.
     # Round 8: an exception or a stream that raises while being reported (SystemExit included) is
@@ -3449,6 +3481,205 @@ def _run_checks():
     # case that fails without it; a PASS write cut off mid-line is followed by the void line on a line of
     # its own, read line by line.
     _finalise_check(*_finalisation_cases())
+
+
+def main_run(run_id, status, conclusion, sha, event="push", branch="main", path=QUALITY_PATH):
+    # A run as the unfiltered listing serves it to --main-health: a workflow_run() named Quality, with
+    # the head_branch that read filters on (branch=None omits it; event=None omits the event).
+    run = workflow_run(run_id, status, conclusion, "Quality", sha, event=event, path=path)
+    if branch is not None:
+        run["head_branch"] = branch
+    return run
+
+
+def main_listing(*pages):
+    # One --main-health read of the unfiltered listing (see FAKE_GH): each argument is one page's runs.
+    total = sum(len(runs) for runs in pages)
+    return [{"body": page(list(runs), total)} for runs in pages]
+
+
+def _main_health_checks(fixture):
+    # THE MAIN HEALTH (--main-health [--merge-commit SHA]). Every case reads only pages of the unfiltered
+    # listing (calls stays 0: the head_sha query is never made) and resolves no rev (no COMMIT line). Each
+    # check holds the case it names and a passing twin that differs from it in the deciding run alone.
+    health = ("--main-health",)
+    old_sha, new_sha, merge_sha = "a" * 40, "b" * 40, "c" * 40
+    green_line = "RESULT: main is green: the newest completed push run "
+    red_line = "RESULT: MAIN IS RED: the newest completed push run "
+    cannot = "ERROR: cannot evaluate the health of main in {}: ".format(FIXTURE_REPO)
+    none_completed = (cannot + "no completed push run of the workflow file " + QUALITY_PATH
+                      + " on main is listed")
+    advisory_note = ("NOTE: advisory run(s) (a schedule or workflow_dispatch event) of " + QUALITY_PATH
+                     + " on main are neither health evidence nor a red signal")
+    pending_note = "NOTE: newer push run(s) of " + QUALITY_PATH + " on main are not completed"
+    page_prefix = "repos/{}/actions/runs?per_page=100&page=".format(FIXTURE_REPO)
+
+    def outcome(listing, named=None):
+        # (exit, head_sha queries, COMMIT line, green line, red line, none-completed line, the deciding
+        # run named, every gh call one listing page)
+        rc, output, calls = fixture.invoke([], rev=None, extra_args=health, main=[listing])
+        return (rc, calls, "COMMIT:" in output, green_line in output, red_line in output,
+                none_completed in output,
+                named is not None and "push run {} of the workflow file".format(named) in output,
+                bool(fixture.gh_argv) and all(argv[:1] == ["api"] and len(argv) == 2
+                                              and argv[1].startswith(page_prefix)
+                                              for argv in fixture.gh_argv))
+
+    green = (0, 0, False, True, False, False, True, True)
+    red = (1, 0, False, False, True, False, True, True)
+    undecided = (2, 0, False, False, False, True, False, True)
+    new_green = main_run(601, "completed", "success", new_sha)
+    new_red = main_run(602, "completed", "failure", new_sha)
+    old_green = main_run(603, "completed", "success", old_sha)
+    old_red = main_run(604, "completed", "failure", old_sha)
+    running = main_run(605, "in_progress", None, new_sha)
+    other_file_red = main_run(606, "completed", "failure", new_sha, path=".github/workflows/unrelated.yml")
+    pull_red = main_run(607, "completed", "failure", new_sha, event="pull_request", branch="merge-train-1")
+    dev_red = main_run(608, "completed", "failure", new_sha, branch="dev")
+
+    # Success: the newest completed main push run concluded success (exit 0, naming it), also beside an
+    # older red one and beside red runs that are not main push runs (another workflow file, a
+    # pull_request run, a push to another branch). Twin: the red case below.
+    check("ci/main-health-success-green",
+          [outcome(main_listing([new_green]), 601), outcome(main_listing([new_green, old_red]), 601),
+           outcome(main_listing([other_file_red, pull_red, dev_red, new_green]), 601)],
+          [green] * 3)
+
+    # Red: the newest completed main push run concluded failure or cancelled (exit 1, naming it), an older
+    # success beside it rescuing nothing. Twin: the same listing with the newest run green (exit 0).
+    new_cancelled = main_run(609, "completed", "cancelled", new_sha)
+    check("ci/main-health-red-exit1",
+          [outcome(main_listing([new_red, old_green]), 602),
+           outcome(main_listing([new_cancelled, old_green]), 609),
+           outcome(main_listing([new_green, old_red]), 601)],
+          [red, red, green])
+
+    # In progress: a newer main push run still running neither decides nor masks the older completed one,
+    # which is named: red stays red (exit 1), and a running run alone cannot evaluate (exit 2). Twin: the
+    # older completed run green (exit 0). Each names the running run on its NOTE line.
+    in_progress = []
+    for listing, named in ((main_listing([running, old_red]), 604),
+                           (main_listing([running]), None),
+                           (main_listing([running, old_green]), 603)):
+        rc, output, calls = fixture.invoke([], rev=None, extra_args=health, main=[listing])
+        in_progress.append((rc, calls, pending_note in output, "run 605 on {}: in_progress".format(new_sha)
+                            in output, red_line in output, green_line in output,
+                            none_completed in output,
+                            named is not None and "push run {} of".format(named) in output))
+    check("ci/main-health-in-progress-not-deciding", in_progress,
+          [(1, 0, True, True, True, False, False, True),
+           (2, 0, True, True, False, False, True, False),
+           (0, 0, True, True, False, True, False, True)])
+
+    # Missing: no completed main push run in the window cannot evaluate (exit 2): an empty listing, only
+    # runs that are not main push runs, and five full pages without one (page 6, which holds a green one,
+    # is never read). Twins: the green run on page 5, the last page read, and alone (exit 0).
+    filler = [main_run(20000 + index, "completed", "success", old_sha,
+                       path=".github/workflows/unrelated.yml") for index in range(500)]
+    beyond = main_listing(*[filler[start:start + 100] for start in range(0, 500, 100)], [new_green])
+    on_last = main_listing(*[filler[start:start + 100] for start in range(0, 400, 100)],
+                           filler[400:499] + [new_green])
+    missing = [outcome(main_listing([])), outcome(main_listing([other_file_red, pull_red, dev_red])),
+               outcome(beyond) + (fixture.gh_reads("actions/runs?per_page=100&page=6"),
+                                  len(fixture.gh_argv)),
+               outcome(on_last, 601) + (fixture.gh_reads("actions/runs?per_page=100&page=6"),
+                                        len(fixture.gh_argv)),
+               outcome(main_listing([new_green]), 601)]
+    check("ci/main-health-missing-exit2", missing,
+          [undecided, undecided, undecided + (0, 5), green + (0, 5), green])
+
+    # Malformed: a response that is not JSON, a page whose total_count is not a number, a run of the
+    # required file with no event or an empty head_branch, any run with no path, a malformed page 2
+    # behind a green page 1 (the whole window is read first), and a failed read each cannot evaluate
+    # (exit 2) at once, never a verdict. Twin: the well-formed listing (exit 0).
+    no_event = main_run(610, "completed", "success", new_sha, event=None)
+    no_path = main_run(611, "completed", "success", new_sha, path=None)
+    full_first = filler[:99] + [new_green]
+    malformed = []
+    for listing in ([{"raw": "not json"}],
+                    [{"body": {"total_count": "1", "workflow_runs": [new_green]}}],
+                    main_listing([no_event]),
+                    main_listing([main_run(612, "completed", "success", new_sha, branch="")]),
+                    main_listing([new_green, no_path]),
+                    main_listing(full_first, [no_path]),
+                    [{"error": "gh: HTTP 502"}],
+                    main_listing([new_green])):
+        rc, output, calls = fixture.invoke([], rev=None, extra_args=health, main=[listing])
+        malformed.append((rc, calls, cannot in output, green_line in output))
+    check("ci/main-health-malformed-exit2", malformed,
+          [(2, 0, True, False)] * 7 + [(0, 0, False, True)])
+
+    # Advisory only: THE ADVISORY RUNS apply as in every mode. A scheduled or manual run of quality.yml on
+    # main is named on a NOTE line and never decides, so one alone, even a success, cannot evaluate
+    # (exit 2); a failed one is no red signal and a successful one no health evidence. Twins: a failed
+    # advisory run newer than a green push run (exit 0), and a green one newer than a red push run (exit 1).
+    advisory = []
+    for event in ("schedule", "workflow_dispatch"):
+        advisory_green = main_run(613, "completed", "success", new_sha, event=event)
+        advisory_red = main_run(614, "completed", "failure", new_sha, event=event)
+        for listing, named in ((main_listing([advisory_green]), None),
+                               (main_listing([advisory_red, old_green]), 603),
+                               (main_listing([advisory_green, old_red]), 604)):
+            rc, output, calls = fixture.invoke([], rev=None, extra_args=health, main=[listing])
+            advisory.append((rc, calls, advisory_note in output, none_completed in output,
+                             named is not None and "push run {} of".format(named) in output))
+    check("ci/main-health-advisory-only-exit2", advisory,
+          [(2, 0, True, True, False), (0, 0, True, False, True), (1, 0, True, False, True)] * 2)
+
+    # Post-merge wait (--merge-commit SHA): bound to that commit's main push runs, re-read every 15
+    # seconds until CI_STATUS_TIMEOUT. Not listed, then running, then green: exit 0 after two sleeps.
+    # Running, then red: exit 1 at once, loudly. Running at the deadline, or still not listed: exit 2
+    # naming the timeout. A red run of another commit never decides, and an advisory failure on the merge
+    # commit is no red signal.
+    merge_running = main_run(621, "in_progress", None, merge_sha)
+    merge_green = main_run(621, "completed", "success", merge_sha)
+    merge_red = main_run(621, "completed", "failure", merge_sha)
+    merge_advisory_red = main_run(622, "completed", "failure", merge_sha, event="workflow_dispatch")
+    waited = []
+    for reads, timeout in (([main_listing([old_green]), main_listing([merge_running, old_green]),
+                             main_listing([merge_green, old_green])], "900"),
+                           ([main_listing([merge_running]), main_listing([merge_red])], "900"),
+                           ([main_listing([merge_running])], "30"),
+                           ([main_listing([old_green])], "15"),
+                           ([main_listing([merge_green, old_red])], "900"),
+                           ([main_listing([merge_advisory_red, merge_green])], "900")):
+        rc, output, calls = fixture.invoke([], rev=None, extra_args=health + ("--merge-commit", merge_sha),
+                                           main=reads, timeout=timeout)
+        waited.append((rc, calls, fixture.sleeps, "COMMIT:" in output,
+                       "RESULT: main is green at merge commit {}: push run(s) 621 ".format(merge_sha)
+                       in output,
+                       "RESULT: MAIN IS RED: the push run(s) of the workflow file {} on main for merge "
+                       "commit {}".format(QUALITY_PATH, merge_sha) in output and "run 621: failure" in output,
+                       "ERROR: cannot evaluate the health of main at merge commit {} in {}: TIMEOUT "
+                       "after".format(merge_sha, FIXTURE_REPO) in output))
+    check("ci/main-health-merge-commit-wait", waited,
+          [(0, 0, [15, 15], False, True, False, False), (1, 0, [15], False, False, True, False),
+           (2, 0, [15, 15], False, False, False, True), (2, 0, [15], False, False, False, True),
+           (0, 0, [], False, True, False, False), (0, 0, [], False, True, False, False)])
+
+    # The mode's options are validated before any git or API read: a positional rev, --wait,
+    # --match-tree, --require-base and --pr with --require-status are refused with --main-health, so is a
+    # repeated --main-health; --merge-commit is refused without --main-health, with a short, upper-case or
+    # missing id, and when repeated.
+    separate = "--main-health is a separate read of main"
+    refusals = []
+    for rev, extra, needle in (
+            ("HEAD", health, separate),
+            (None, health + ("--wait",), separate),
+            (None, health + ("--match-tree",), separate),
+            (None, health + ("--require-base", "main"), separate),
+            (None, health + ("--pr", "7", "--require-status", STATUS_CONTEXT), separate),
+            (None, health + health, "--main-health is given more than once"),
+            (None, ("--merge-commit", merge_sha), "--merge-commit is accepted only with --main-health"),
+            (None, health + ("--merge-commit", merge_sha[:7]), "--merge-commit needs the full id"),
+            (None, health + ("--merge-commit", "C" * 40), "--merge-commit needs the full id"),
+            (None, health + ("--merge-commit",), "--merge-commit needs a merge commit id and none"),
+            (None, health + ("--merge-commit", merge_sha, "--merge-commit", merge_sha),
+             "--merge-commit is given more than once")):
+        rc, output, _calls = fixture.invoke([], rev=rev, extra_args=extra,
+                                            main=[main_listing([new_green])])
+        refusals.append((rc, fixture.gh_argv == [], fixture.git_argv == [], needle in output))
+    check("ci/main-health-option-refusals", refusals, [(2, True, True, True)] * 11)
 
 
 def _finalise_check(got, want):
