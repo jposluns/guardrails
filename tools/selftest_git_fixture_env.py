@@ -2681,7 +2681,11 @@ _GROUP_MEMBER_FIXTURE = "\n".join((
 # the scenario itself, deliberate (_DELIBERATE_EMPTY_SEND), so nothing stands down in a
 # healthy run and a producer tied to those facts on code this run executes, not also
 # dependent on any other state that differs from a slow "failed" run, mismatches
-# definitely (what it does not reach is THE RESIDUAL stated in _allowlist_producers);
+# definitely (THE RESIDUAL, stated in _allowlist_producers, is not what this run misses
+# but what neither net catches: a producer that leaves every compared field at its want
+# in every scenario run within its bounds, this one included, and that the producer-map
+# oracle neither refuses ("unrecognized") nor sees through a change to a pinned
+# signature);
 # only a positive control slower than its 60 s bound is recorded (as the reached bound
 # "positive control a observed") and stands the run down, cannot-evaluate, never definite. Every
 # wait the child makes is bounded, and an expiry is recorded under one of two keys by WHO sets
@@ -4022,8 +4026,11 @@ def _allowlist_producers(source=None):
     "failed-refused" took to release its lock holders, a length no scenario arranges and a
     slow positive control, which leaves stalls empty, does not produce); round 25's
     pinned_version, above. The nine residual probes are recorded in "producer-oracle" at
-    their empty diff, so an oracle or scenario change that starts catching one fails that
-    pin and must update this text. Only a run in which the residual producer's condition
+    their empty diff, so an oracle change that alters a pinned producer difference (one of
+    these nine leaving its empty diff included) fails that pin and must update this text; a
+    scenario change is not detected by these static probes (each only parses a mutated
+    child source, none runs a scenario), so it needs the runtime residual, THE RESIDUAL
+    above, reassessed by hand. Only a run in which the residual producer's condition
     holds where the producer runs can catch it (a slow positive control is one such run,
     for a condition it alters: a "failed" run whose member-a positive control reaches its
     60 s bound can leave the field wrong beside the recorded timeout and, the allowlist
@@ -4311,8 +4318,12 @@ def _slow_control_record(source=None):
     reads as a missing report, not a timeout; and any change to how the report is written
     (a rebinding or replacement of print, sys.stdout or json.dumps). THE NOT READ CLASS,
     exact by construction: this reader does not read ANY edit, by any route, that changes
-    what the pinned try or the gate evaluates, or whether the record reaches the printed
-    report, without a change it parses as a fact that does not hold (it then still gives
+    what the pinned try or the gate evaluates, or whether the record reaches the extras the
+    parent decodes (_member_close_controls in tools/selftest_git_fixture_env_core.py takes
+    the text after the LAST "PROBE-REPORT " in the child's stdout, the whole stdout when it
+    has none, up to the next newline, and json.loads it as the five fields outcome,
+    registered, states, timely and extra; a decode or unpack failure is "no report"),
+    without a change it parses as a fact that does not hold (it then still gives
     []); every route named above is an EXAMPLE of that class, not its bound. The probes
     exceptbind and ctxclass (the rebinding route), wildcard and mainattr (the wildcard and
     own-globals routes), exitafter, clsname (the attribute-store route) and funcglobals
