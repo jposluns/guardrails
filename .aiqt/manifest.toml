@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.0.5"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "60a8aedd23bb068f47af373c2dcd003b06062d347ef84c4a6369ece6fd4f43b6"
+tree-sha256 = "b86cf7bd3d6bb1a0f4d4462498dd47f4ef71036c1f729284eff040fc1519acc1"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -4472,8 +4472,8 @@ sha256 = "1e9bd4c85c3e549d35a8d43cbe5e3449f17cc7c8c4e396bd5d31fc914dd891a0"
 
 [[sources]]
 path = "tools/ci_site_scope.py"
-bytes = 63223
-sha256 = "fac863e3c1297b45b6b90cfebc633069ab0d76876e9a5e2bc8284e0e5160e801"
+bytes = 64393
+sha256 = "2f6a108b9af3269472015653b726e885b6c009b22bfd94cc9f27da15d186057e"
 
 [[sources]]
 path = "tools/conformance.py"
