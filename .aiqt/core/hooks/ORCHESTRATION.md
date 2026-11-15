@@ -1681,7 +1681,11 @@ No hook can report that the hooks themselves are not loaded: a session that did 
 `orch-resume-audit` SessionStart hook never runs it, so its silence looks like a clean audit. The pack
 therefore ships a read-only check that an orchestrator runs before it starts a session:
 
-    python3 -I tools/orch_doctor.py --hook-coverage FILE [FILE ...] [--require ID ...]
+    python3 -I tools/orch_doctor.py --hook-coverage FILE [FILE ...] [--require ID]...
+
+Each `--require` names exactly one control id; repeat the flag to require several (for example
+`--require orch-ask-unattended --require gensrc-edit-guard`). A second word after one `--require` is read
+as a `FILE`.
 
 Each `FILE` is a Claude Code settings file or a plugin `hooks.json`. The check lists every dispatcher
 registration it finds in them and judges each required control. A control is covered only by a
@@ -1690,13 +1694,27 @@ registration with the control's event, its handler and the identical matcher str
 matcher with coverage UNPROVEN, because the check does not try to prove that one regular expression
 covers another. With no `--require`, every enforce-stage PreToolUse control whose default is `block` is
 required. A named file that sets `disableAllHooks` to any value other than `false` is a finding. Only the
-two launcher shapes `tools/gen_hooks.py` renders count (a handler run through another script never does).
-The exit is 0 when every required control is covered, 1 on any finding, and 2 when the check cannot
-evaluate: no file named, a file that cannot be read, is not JSON or is not a JSON object, an unknown
-`--require` id, or a manifest that cannot be loaded. The check writes nothing: it reads neither the
-registry nor the state directory and never touches `resume-barrier.json`. Every run prints this line:
+two launcher shapes `tools/gen_hooks.py` renders count. In a settings file the command must be exactly
+`python3 -I`, one path ending `/aiqt_hooks.py` and one handler word, separated by single spaces, with no
+other shell text: the path may join unquoted runs of letters, digits and `_ . / + -` with double-quoted
+runs whose only expansion is `$NAME` or `${NAME}` (the rendered `"$CLAUDE_PROJECT_DIR"/...` form), and any
+other shell character (a list operator, comment, pipe, redirection, substitution, glob, unquoted variable
+or single quote, or another expansion inside the quotes) makes the entry unrecognized, so it never counts.
+In either shape a path that begins with `-` (an option to `python3`) never counts.
 
-    coverage of the named files only; which files the session loads is decided by Claude Code, which this check does not observe
+The script's identity is not checked. A registration counts on the script's file name alone: any path
+ending `/aiqt_hooks.py` in a settings file, or `/hooks/scripts/aiqt_hooks.py` in a plugin `hooks.json`,
+is accepted, wherever it points. The check does not resolve the path (it cannot see the values of
+`$CLAUDE_PROJECT_DIR` or `${CLAUDE_PLUGIN_ROOT}` in the session) and does not compare the file with the
+pack's dispatcher, so a file of that name elsewhere, or one whose content differs, reads as covered.
+
+The exit is 0 when every required control is covered, 1 on any finding, and 2 when the check cannot
+evaluate: no file named, a file that cannot be read, is not strict JSON (`NaN`, `Infinity` and
+`-Infinity` are refused) or is not a JSON object, an unknown `--require` id, or a manifest that cannot be
+loaded. The check writes nothing: it reads neither the registry nor the state directory and never touches
+`resume-barrier.json`. Every run prints this line:
+
+    coverage of the named files only; which files the session loads is decided by Claude Code, which this check does not observe; only the script's file name is checked (any path ending /aiqt_hooks.py counts), not that it is the pack's dispatcher
 
 The launcher contract, which each orchestrator implements in its own launch and resume procedures:
 
@@ -1707,7 +1725,7 @@ The launcher contract, which each orchestrator implements in its own launch and 
 
 The pack cannot observe what Claude Code actually loads: settings precedence, managed policy and plugin
 enablement are decided by the platform. A clean exit therefore means only that the named files register
-the required controls. Even a loaded control acts only where its own scope finds a registry (see The
+the required controls through a script of the dispatcher's name. Even a loaded control acts only where its own scope finds a registry (see The
 registry above).
 
 ## Platforms without hooks

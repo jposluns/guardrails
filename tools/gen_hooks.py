@@ -557,10 +557,22 @@ def render_project_settings(hooks, ids=PROJECT_HOOK_IDS):
 # settings object or plugin hooks.json object registers. The two launcher shapes the renderers above emit are
 # the only ones recognized: the plugin form (command "python3", args ["-I", <path ending
 # /hooks/scripts/aiqt_hooks.py>, <handler>]) and the settings form (the whole shell string `python3 -I <path
-# ending /aiqt_hooks.py, any part of it double-quoted> <handler>`). Any other entry is ignored, so it can never
-# count as coverage. These functions say what the parsed files register, never what a session loaded.
+# ending /aiqt_hooks.py> <handler>`, single spaces, and no other shell text). In the settings form the path is
+# one shell word built only from unquoted runs of path characters (letters, digits and _ . / + -) and
+# double-quoted runs whose only expansion is a plain variable reference ($NAME or ${NAME}); any other character
+# outside quotes (; | & # ( ) < > ` $ * ? [ ] ~ ' \ or whitespace) and, inside quotes, a backtick, a backslash,
+# a control character or any other $ form ($( ), $1, ${NAME:-...}) makes the entry unrecognized, so a string
+# that could run anything but the dispatcher never counts. In either form a path that begins with "-" (which
+# python3 would read as an option, such as -c) is unrecognized. Any other entry is ignored, so it can never
+# count as coverage. Only the script's FILE NAME is checked: any path ending /aiqt_hooks.py (or
+# /hooks/scripts/aiqt_hooks.py in the plugin form) counts, and which file that path names when the session
+# runs (the pack's dispatcher or another file of that name) is not checked. These functions say what the
+# parsed files register, never what a session loaded.
 _COVERAGE_PLUGIN_SCRIPT_TAIL = "/hooks/scripts/" + SCRIPT_NAME
-_COVERAGE_SETTINGS_RE = re.compile(r'python3 -I ((?:"[^"\n]*"|[^\s"])+) ([a-z][a-z0-9_]*)', re.ASCII)
+_COVERAGE_HANDLER_RE = re.compile(r"[a-z][a-z0-9_]*", re.ASCII)
+_COVERAGE_SETTINGS_RE = re.compile(
+    r'python3 -I ((?:[A-Za-z0-9_./+-]+|"(?:[^"$`\\\x00-\x1f\x7f]|\$[A-Za-z_][A-Za-z0-9_]*'
+    r'|\$\{[A-Za-z_][A-Za-z0-9_]*\})*")+) ([a-z][a-z0-9_]*)', re.ASCII)
 
 
 def _coverage_handler(launcher):
@@ -575,11 +587,15 @@ def _coverage_handler(launcher):
         args = launcher["args"]
         if (command == "python3" and isinstance(args, list) and len(args) == 3
                 and all(isinstance(a, str) for a in args) and args[0] == "-I"
-                and args[1].endswith(_COVERAGE_PLUGIN_SCRIPT_TAIL) and HANDLER_RE.match(args[2])):
+                and args[1].endswith(_COVERAGE_PLUGIN_SCRIPT_TAIL) and not args[1].startswith("-")
+                and _COVERAGE_HANDLER_RE.fullmatch(args[2])):
             return args[2]
         return None
     match = _COVERAGE_SETTINGS_RE.fullmatch(command)
-    if match is None or not match.group(1).replace('"', "").endswith("/" + SCRIPT_NAME):
+    if match is None:
+        return None
+    path = match.group(1).replace('"', "")
+    if path.startswith("-") or not path.endswith("/" + SCRIPT_NAME):
         return None
     return match.group(2)
 
@@ -948,9 +964,12 @@ def main():
 #      still generate and render the default timeout.
 #  36. hook coverage: the project settings render and the plugin hooks.json render (synthetic and this
 #      repository's manifest, switch off and on) each round-trip through registered_handlers and cover their
-#      controls; a handler under a script that is not aiqt_hooks.py, or a settings string that is not the
-#      anchored isolated launcher, never counts while each twin under aiqt_hooks.py does; another matcher
-#      reads matcher-differs; an unknown required id raises ValueError.
+#      controls; a handler under a script that is not aiqt_hooks.py, a settings string that is not the
+#      anchored isolated launcher, one carrying any other shell text (a list operator, comment, pipe,
+#      redirection, substitution, glob, unquoted variable or single quotes, or a quoted expansion other than
+#      $NAME or ${NAME}), and an option-shaped path in either shape never count while each twin under
+#      aiqt_hooks.py (the rendered "$CLAUDE_PROJECT_DIR" path and a ${NAME} path among them) does; another
+#      matcher reads matcher-differs; an unknown required id raises ValueError.
 # Every vector that removes the entries its own faults caused (cases 20b, 21b, 27 and 28)
 # does so by PROVENANCE, never by message text: each named entry from the staged cleanup,
 # the removal and absence helpers and the launch diagnostic carries its stage and the
@@ -4129,9 +4148,9 @@ def self_test_main(_nested=False):
             return {"hooks": {"PreToolUse": [{"matcher": matcher, "hooks": [
                 {"type": "command", "command": command, "timeout": 10}]}]}}
 
-        def _cov_plugin_obj(script):
+        def _cov_plugin_obj(script, handler="gensrc_guard"):
             return {"hooks": {"PreToolUse": [{"matcher": "Edit|Bash", "hooks": [
-                {"type": "command", "command": "python3", "args": ["-I", script, "gensrc_guard"],
+                {"type": "command", "command": "python3", "args": ["-I", script, handler],
                  "timeout": 10}]}]}}
         for label, obj, want in (
                 ("settings other script", _cov_settings(
@@ -4147,6 +4166,46 @@ def self_test_main(_nested=False):
                  "missing"),
                 ("plugin suffix lookalike", _cov_plugin_obj("${CLAUDE_PLUGIN_ROOT}/hooks/scripts/not_aiqt_hooks.py"),
                  "missing"),
+                # Shell text around or inside the path: each runs something other than the dispatcher (or
+                # nothing) yet ends /aiqt_hooks.py, so none may count (QA F1); an option-shaped path likewise.
+                ("settings semicolon comment", _cov_settings("python3 -I /dev/null;#/aiqt_hooks.py gensrc_guard"),
+                 "missing"),
+                ("settings or-list", _cov_settings("python3 -I /dev/null||/aiqt_hooks.py gensrc_guard"), "missing"),
+                ("settings and-list exit", _cov_settings(
+                    "python3 -I /dev/null&&exit&&/aiqt_hooks.py gensrc_guard"), "missing"),
+                ("settings background", _cov_settings("python3 -I /dev/null&/aiqt_hooks.py gensrc_guard"), "missing"),
+                ("settings pipe", _cov_settings("python3 -I /dev/null|/aiqt_hooks.py gensrc_guard"), "missing"),
+                ("settings redirect", _cov_settings("python3 -I /dev/null>/aiqt_hooks.py gensrc_guard"), "missing"),
+                ("settings subshell", _cov_settings("python3 -I (true)/aiqt_hooks.py gensrc_guard"), "missing"),
+                ("settings backtick unquoted", _cov_settings("python3 -I `true`/aiqt_hooks.py gensrc_guard"),
+                 "missing"),
+                ("settings unquoted variable", _cov_settings("python3 -I $HOME/aiqt_hooks.py gensrc_guard"),
+                 "missing"),
+                ("settings glob", _cov_settings("python3 -I /x/*/aiqt_hooks.py gensrc_guard"), "missing"),
+                ("settings single quotes", _cov_settings("python3 -I '/x'/aiqt_hooks.py gensrc_guard"), "missing"),
+                ("settings quoted command substitution", _cov_settings(
+                    'python3 -I "$(true)"/aiqt_hooks.py gensrc_guard'), "missing"),
+                ("settings quoted backtick", _cov_settings('python3 -I "`true`"/aiqt_hooks.py gensrc_guard'),
+                 "missing"),
+                ("settings quoted default expansion", _cov_settings(
+                    'python3 -I "${X:-$(true)}"/aiqt_hooks.py gensrc_guard'), "missing"),
+                ("settings quoted backslash", _cov_settings('python3 -I "\\$X"/aiqt_hooks.py gensrc_guard'),
+                 "missing"),
+                ("settings quoted newline", _cov_settings('python3 -I "/x\n"/aiqt_hooks.py gensrc_guard'),
+                 "missing"),
+                ("settings option-shaped path", _cov_settings(
+                    'python3 -I "-cimport os; os._exit(0) #/aiqt_hooks.py" gensrc_guard'), "missing"),
+                ("settings two spaces", _cov_settings("python3 -I /x/aiqt_hooks.py  gensrc_guard"), "missing"),
+                ("settings trailing newline", _cov_settings("python3 -I /x/aiqt_hooks.py gensrc_guard\n"), "missing"),
+                ("plugin option-shaped path", _cov_plugin_obj("-cimport os; os._exit(0) #/hooks/scripts/aiqt_hooks.py"),
+                 "missing"),
+                # The handler argument is the whole word: one with a trailing newline names no handler (a "$"
+                # anchor would accept it).
+                ("plugin handler trailing newline", _cov_plugin_obj(SCRIPT_PLUGIN_PATH, "gensrc_guard\n"), "missing"),
+                ("twin settings rendered path", _cov_settings(
+                    "python3 -I {} gensrc_guard".format(PROJECT_SCRIPT_PATH)), "covered"),
+                ("twin settings braced variable", _cov_settings(
+                    'python3 -I "${CLAUDE_PROJECT_DIR}"/plugin/x/hooks/scripts/aiqt_hooks.py gensrc_guard'), "covered"),
                 ("twin settings quoted path", _cov_settings('python3 -I "/opt/a b/aiqt_hooks.py" gensrc_guard'),
                  "covered"),
                 ("twin settings plain path", _cov_settings("python3 -I /opt/x/aiqt_hooks.py gensrc_guard"),
@@ -4299,7 +4358,8 @@ def self_test_main(_nested=False):
           "under a moved margin), a warn hook, a bake-stage hook and a second hook each refused at 9 "
           "and generating at 11, while with it off or absent 9, 10 and 11 still render the default; "
           "the hook-coverage parser reads both renders back as covering their controls (every manifest id "
-          "for hooks.json), never counts a handler under another script or an unanchored settings string, "
+          "for hooks.json), never counts a handler under another script, an unanchored settings string, a "
+          "settings string carrying other shell text or an option-shaped path, "
           "reads another matcher as matcher-differs, and refuses an unknown required id"
           + note)
     return 0

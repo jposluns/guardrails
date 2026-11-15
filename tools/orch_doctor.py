@@ -3,12 +3,14 @@
 contract, and the state directory; and re-run the resume audit to clear (or re-arm) the barrier.
   orch_doctor.py                 validate everything; exit 0 clean, 1 findings, 2 no registry
   orch_doctor.py --resume-audit  re-run the resume probes; a clean run clears the barrier
-  orch_doctor.py --hook-coverage FILE [FILE ...] [--require ID ...]
+  orch_doctor.py --hook-coverage FILE [FILE ...] [--require ID]...
                                  read-only: which manifest controls the named Claude Code settings or
                                  plugin hooks.json files register; exit 0 every required control covered,
                                  1 findings (missing, matcher differs, disableAllHooks), 2 cannot evaluate.
                                  With no --require, every enforce-stage PreToolUse control whose default is
-                                 block is required. It never reads the registry or the state directory.
+                                 block is required. Each --require names one id; repeat it for more. It
+                                 never reads the registry or the state directory. Only the script's file
+                                 name is checked, not that it is the pack's dispatcher.
   An interpreter older than Python 3.14 that can start this file is refused at exit 2 before anything
   runs. One that cannot start it fails with Python's own error first, and that exit is Python's: 1 for a
   compile failure, which reads as findings, or 2 for an interpreter predating -I when run with it.
@@ -58,7 +60,8 @@ def _guard_scope_lines(root):
 # Code decides which settings files a session loads (and whether a plugin is enabled); this mode never sees
 # that, so every run prints HOOK_COVERAGE_HONESTY, whatever its exit.
 HOOK_COVERAGE_HONESTY = ("coverage of the named files only; which files the session loads is decided by "
-                         "Claude Code, which this check does not observe")
+                         "Claude Code, which this check does not observe; only the script's file name is "
+                         "checked (any path ending /aiqt_hooks.py counts), not that it is the pack's dispatcher")
 HOOK_COVERAGE_MAX_BYTES = 16 * 1024 * 1024
 
 
@@ -66,9 +69,16 @@ class _CoverageError(Exception):
     """A --hook-coverage input that cannot be evaluated (exit 2)."""
 
 
+def _hook_coverage_no_constant(name):
+    """json.loads parse_constant hook: Python's json accepts NaN, Infinity and -Infinity, which RFC 8259 JSON
+    does not, so a file holding one is refused (cannot evaluate) rather than judged."""
+    raise ValueError("non-JSON constant {}".format(name))
+
+
 def _hook_coverage_read(path):
     """The parsed JSON object in the file at path. Raises _CoverageError unless it is a regular file of at most
-    HOOK_COVERAGE_MAX_BYTES holding UTF-8 JSON whose top level is an object. The open is non-blocking, so a
+    HOOK_COVERAGE_MAX_BYTES holding strict UTF-8 JSON (no NaN, Infinity or -Infinity) whose top level is an
+    object. The open is non-blocking, so a
     FIFO with no writer is refused as not a regular file instead of hanging the check; nothing is written."""
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0))
@@ -84,7 +94,7 @@ def _hook_coverage_read(path):
     if len(raw) > HOOK_COVERAGE_MAX_BYTES:
         raise _CoverageError("{}: larger than {} bytes".format(path, HOOK_COVERAGE_MAX_BYTES))
     try:
-        obj = json.loads(raw.decode("utf-8"))
+        obj = json.loads(raw.decode("utf-8"), parse_constant=_hook_coverage_no_constant)
     except (ValueError, RecursionError) as exc:  # UnicodeDecodeError and JSONDecodeError are ValueErrors
         raise _CoverageError("{}: not UTF-8 JSON ({})".format(path, exc))
     if not isinstance(obj, dict):
@@ -163,7 +173,8 @@ def _hook_coverage_run(argv):
 
 def hook_coverage_main(argv):
     """The --hook-coverage mode: exit 0 when every required control is covered, 1 on any finding, 2 when it
-    cannot evaluate (no file named, a file that cannot be read, is not JSON or is not an object, an unknown
+    cannot evaluate (no file named, a file that cannot be read, is not strict JSON (NaN, Infinity and
+    -Infinity included) or is not an object, an unknown
     --require id, a manifest load error). Read-only: it writes no barrier and creates no directory."""
     try:
         code = _hook_coverage_run(argv)

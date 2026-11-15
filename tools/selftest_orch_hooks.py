@@ -12340,7 +12340,8 @@ def _gitalias_oracle_cases(tmp):
 # The honesty line tools/orch_doctor.py --hook-coverage prints on every run, spelled out here (never read from
 # the doctor) so a reworded line fails the hook-coverage checks.
 _HOOK_COVERAGE_HONESTY = ("coverage of the named files only; which files the session loads is decided by "
-                          "Claude Code, which this check does not observe")
+                          "Claude Code, which this check does not observe; only the script's file name is "
+                          "checked (any path ending /aiqt_hooks.py counts), not that it is the pack's dispatcher")
 # This repository's .claude/settings.json as of SEED-SESSION-HOOK-COVERAGE, pinned as text: the launch-directory
 # shape that registers gensrc_guard and nothing else (no orch_ask_guard).
 _HOOK_COVERAGE_GRC_SETTINGS = {"hooks": {"PreToolUse": [{"matcher": "Write|Edit|MultiEdit|Bash", "hooks": [
@@ -12471,6 +12472,75 @@ def _hook_coverage_cases(tmp):
     (base / "no-manifest").mkdir()
     check("hook-coverage/cannot-evaluate-manifest-exits-2",
           _cannot(base / "no-manifest", "--hook-coverage", settings, plugin), (2, True, True, False))
+
+    def _with_ask_command(command):
+        obj = json.loads(json.dumps(_HOOK_COVERAGE_GRC_SETTINGS))
+        obj["hooks"]["PreToolUse"].append(
+            {"matcher": "AskUserQuestion", "hooks": [{"type": "command", "command": command, "timeout": 10}]})
+        return obj
+
+    # A settings command with shell text around the path runs something other than the dispatcher (or
+    # nothing), so it is never coverage, however it ends: each reads MISSING and exits 1 (QA F1). The passing
+    # twin is ask-exact-matcher-exits-0 (the rendered command under the same matcher).
+    metachar = []
+    for label, command in (
+            ("semicolon", "python3 -I /dev/null;#/aiqt_hooks.py orch_ask_guard"),
+            ("or-list", "python3 -I /dev/null||/aiqt_hooks.py orch_ask_guard"),
+            ("and-list", "python3 -I /dev/null&&exit&&/aiqt_hooks.py orch_ask_guard"),
+            ("background", "python3 -I /dev/null&/aiqt_hooks.py orch_ask_guard"),
+            ("quoted-substitution", 'python3 -I "$(true)"/aiqt_hooks.py orch_ask_guard'),
+            ("option-path", 'python3 -I "-cimport os; os._exit(0) #/aiqt_hooks.py" orch_ask_guard')):
+        code, text, honest = _run(plain_root, "--hook-coverage",
+                                  _write("metachar-{}.json".format(label), _with_ask_command(command)),
+                                  "--require", "orch-ask-unattended")
+        metachar.append((label, code, honest, "MISSING: orch-ask-unattended:" in text,
+                         "covered: orch-ask-unattended" in text))
+    check("hook-coverage/settings-shell-text-not-covered-exits-1", metachar,
+          [(label, 1, True, True, False) for label in ("semicolon", "or-list", "and-list", "background",
+                                                        "quoted-substitution", "option-path")])
+    # Python-only JSON constants (QA F2): NaN, Infinity and -Infinity are not JSON (RFC 8259), so an otherwise
+    # covering file holding one cannot be evaluated (exit 2), never covered; the twin with a finite number
+    # exits 0.
+    for cid, constant in (("hook-coverage/cannot-evaluate-nan-exits-2", "NaN"),
+                          ("hook-coverage/cannot-evaluate-infinity-exits-2", "Infinity"),
+                          ("hook-coverage/cannot-evaluate-negative-infinity-exits-2", "-Infinity")):
+        text = json.dumps(_with_ask("AskUserQuestion"), indent=2)
+        text = text[:-1].rstrip() + ',\n  "x": ' + constant + "\n}"
+        check(cid, _cannot(plain_root, "--hook-coverage",
+                           _write("constant-{}.json".format(constant), text), "--require", "orch-ask-unattended"),
+              (2, True, True, False))
+    finite = json.dumps(_with_ask("AskUserQuestion"), indent=2)
+    finite = finite[:-1].rstrip() + ',\n  "x": 1.5\n}'
+    code, text, honest = _run(plain_root, "--hook-coverage", _write("constant-finite.json", finite),
+                              "--require", "orch-ask-unattended")
+    check("hook-coverage/finite-number-twin-exits-0",
+          (code, honest, "covered: orch-ask-unattended (" in text), (0, True, True))
+    # Script identity is not checked (QA F3, disclosed rather than enforced): a registration through a file
+    # of the dispatcher's name outside the pack still reads covered, and both the honesty line every run
+    # prints and ORCHESTRATION.md say so.
+    orch_doc = (repo_root() / ".aiqt" / "core" / "hooks" / "ORCHESTRATION.md").read_text(encoding="utf-8")
+    code, text, honest = _run(plain_root, "--hook-coverage", _write("elsewhere.json", _with_ask_command(
+        "python3 -I /elsewhere/not-the-pack/aiqt_hooks.py orch_ask_guard")), "--require", "orch-ask-unattended")
+    check("hook-coverage/script-identity-unchecked-disclosed",
+          (code, honest, "covered: orch-ask-unattended (" in text,
+           "\n    " + _HOOK_COVERAGE_HONESTY + "\n" in orch_doc, "The script's identity is not checked." in orch_doc),
+          (0, True, True, True, True))
+    # The documented --require form and the parser agree (Codex review): each --require takes one id and is
+    # repeated for more, as ORCHESTRATION.md and the doctor's usage both write it; the repeated form covers
+    # both ids. Its twin: a second word after one --require is a FILE, so that form cannot evaluate.
+    usage = "--hook-coverage FILE [FILE ...] [--require ID]..."
+    code, text, honest = _run(plain_root, "--hook-coverage", settings, plugin,
+                              "--require", "orch-ask-unattended", "--require", "gensrc-edit-guard")
+    check("hook-coverage/documented-require-form-matches-parser",
+          (usage in orch_doc, "[--require ID ...]" in orch_doc, usage in (doc.__doc__ or ""),
+           "[--require ID ...]" in (doc.__doc__ or ""), code, honest, "covered: orch-ask-unattended (" in text,
+           "covered: gensrc-edit-guard (" in text),
+          (True, False, True, False, 0, True, True, True))
+    code, text, honest = _run(plain_root, "--hook-coverage", settings, plugin,
+                              "--require", "orch-ask-unattended", "gensrc-edit-guard")
+    check("hook-coverage/require-second-word-is-a-file-exits-2",
+          (code, honest, "HOOK COVERAGE: cannot evaluate: gensrc-edit-guard: cannot be read" in text),
+          (2, True, True))
 
     # T9: read-only. Against a root carrying a registry, a state directory and a resume barrier, the mode leaves
     # every byte of the state directory unchanged; against one whose state directory is absent, it stays absent
