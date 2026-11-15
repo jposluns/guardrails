@@ -4994,10 +4994,31 @@ def _run_runner_copy(text, stubs, fail_command="", gitleaks_rc=0):
     return proc.returncode, proc.stdout.splitlines(), calls
 
 
+# The dirname stand-in for dirname_guard_problems and cdpath_problems. It records
+# each call as one line, "dirname" and its arguments, in the log its test names
+# inside that test's own temporary directory, before it answers; a call it cannot
+# record exits 2. Each test reads the log back through _dirname_calls_differ.
 _STUB_DIRNAME = """#!/bin/sh
+printf '%s\\n' "dirname $*" >> "$stub_dirname_log" || exit 2
 printf '%s' "$stub_dirname_out"
 exit "$stub_dirname_rc"
 """
+
+
+def _dirname_calls_differ(log, expected):
+    """True when the dirname stand-in's log is not exactly one record per
+    expected call (a tuple of arguments), in order: each record is "dirname",
+    the arguments joined by spaces and a newline. The log is compared as raw
+    bytes, so a missing, extra, reordered, truncated or malformed record (a
+    carriage return included) differs. With no expected call the log must be
+    absent: the stand-in creates it on its first call and nothing else writes
+    it, so a log that is present, even empty, differs."""
+    if _path_absent(log):
+        return bool(expected)
+    if not expected:
+        return True
+    want = "".join("dirname {}\n".format(" ".join(call)) for call in expected)
+    return log.read_bytes() != want.encode("utf-8")
 
 
 def _path_absent(path):
@@ -5014,11 +5035,14 @@ def _path_absent(path):
 
 def _dirname_guard_outcome(text, relative, scenario):
     """Run a runner text from relative in a scratch tree under one dirname
-    scenario; return (rc, no gate launched).
+    scenario; return (rc, no gate launched, dirname calls differ).
 
     Scenarios: "missing" (no dirname on PATH), "failed" (prints . and exits 7),
     "empty" (prints nothing and exits 0) and "control" (prints the runner's true
     directory). Every stub is written before the one launch, from this thread.
+    The dirname stand-in's log must hold exactly the binding's one call,
+    dirname -- "$0" with $0 the runner path bash was given, or be absent under
+    "missing", where no stand-in is on PATH.
     """
     import os
     import shutil
@@ -5047,15 +5071,19 @@ def _dirname_guard_outcome(text, relative, scenario):
             stub.chmod(0o500)
             path.insert(0, str(dirname_dir))
         log = root / "calls.log"
+        dirname_log = root / "dirname.log"
         env = dict(PATH=os.pathsep.join(path), BASH_ENV=str(functions),
                    HOME=tmp, LC_ALL="C", stub_log=str(log),
                    stub_fail_command="", stub_gitleaks_rc="0",
-                   stub_dirname_out=out, stub_dirname_rc=rc)
+                   stub_dirname_out=out, stub_dirname_rc=rc,
+                   stub_dirname_log=str(dirname_log))
         proc = subprocess.run(
             [bash, "--noprofile", "--norc", str(runner)],
             cwd=str(caller), env=env, stdin=subprocess.DEVNULL,
             capture_output=True, timeout=600)
-        return proc.returncode, _path_absent(log)
+        expected = [] if scenario == "missing" else [("--", str(runner))]
+        return (proc.returncode, _path_absent(log),
+                _dirname_calls_differ(dirname_log, expected))
 
 
 def _passing_status(text):
@@ -5102,16 +5130,19 @@ def dirname_guard_problems(text, relative):
     passing run gives (_passing_status) is not 0, each faulty dirname must
     exit 2 with no gate launched, and the control must launch gates and exit
     with that status. Every stub gate passes, so a control that launched
-    gates and then failed is not a pass."""
+    gates and then failed is not a pass. "<scenario> calls" when the dirname
+    stand-in's log is not exactly the calls that scenario expects."""
     passing = _passing_status(text)
     problems = ["pass-status"] if _passing_status_wrong(passing) else []
     for scenario in ("missing", "failed", "empty", "control"):
-        rc, absent = _dirname_guard_outcome(text, relative, scenario)
+        rc, absent, calls_differ = _dirname_guard_outcome(text, relative, scenario)
         if scenario == "control":
             if absent or _status_differs(rc, passing):
                 problems.append(scenario)
         elif (rc, absent) != (2, True):
             problems.append(scenario)
+        if calls_differ:
+            problems.append(scenario + " calls")
     return problems
 
 
@@ -5127,10 +5158,12 @@ _STUB_PYTHON3_PWD_FUNCTION = """python3() {
 def _cdpath_outcome(text, relative):
     """Run a runner text by its RELATIVE path from its scratch tree's root
     under a CDPATH naming a decoy tree that holds the same relative directory;
-    return (rc, tree, decoy, logged gate lines).
+    return (rc, tree, decoy, logged gate lines, dirname calls differ).
 
     dirname prints the relative directory, as the real one does for a relative
-    $0. Every stub is written before the one launch, from this thread.
+    $0. Every stub is written before the one launch, from this thread. The
+    dirname stand-in's log must hold exactly the binding's one call,
+    dirname -- "$0" with $0 the relative path bash was given.
     """
     import os
     import shutil
@@ -5158,18 +5191,21 @@ def _cdpath_outcome(text, relative):
         stub.write_text(_STUB_DIRNAME, encoding="utf-8")
         stub.chmod(0o500)
         log = root / "calls.log"
+        dirname_log = root / "dirname.log"
         env = dict(PATH=os.pathsep.join([str(dirname_dir), str(bin_dir)]),
                    BASH_ENV=str(functions), HOME=tmp, LC_ALL="C",
                    CDPATH=str(decoy), stub_log=str(log),
                    stub_fail_command="", stub_gitleaks_rc="0",
-                   stub_dirname_out=str(Path(relative).parent), stub_dirname_rc="0")
+                   stub_dirname_out=str(Path(relative).parent), stub_dirname_rc="0",
+                   stub_dirname_log=str(dirname_log))
         proc = subprocess.run(
             [bash, "--noprofile", "--norc", relative],
             cwd=str(tree), env=env, stdin=subprocess.DEVNULL,
             capture_output=True, timeout=600)
         calls = ([] if _path_absent(log)
                  else log.read_text(encoding="utf-8").splitlines())
-        return proc.returncode, str(tree), str(decoy), calls
+        calls_differ = _dirname_calls_differ(dirname_log, [("--", relative)])
+        return proc.returncode, str(tree), str(decoy), calls, calls_differ
 
 
 def cdpath_problems(text, relative):
@@ -5179,9 +5215,10 @@ def cdpath_problems(text, relative):
     line names the decoy (a moved root, or a printed CDPATH match in a
     captured directory), and "exit" when the run does not exit with that
     status: every stub gate passes, so a run that logged a true-tree gate
-    line and then failed is not a pass."""
+    line and then failed is not a pass. "dirname-calls" when the dirname
+    stand-in's log is not exactly the binding's one call."""
     passing = _passing_status(text)
-    rc, tree, decoy, calls = _cdpath_outcome(text, relative)
+    rc, tree, decoy, calls, dirname_calls_differ = _cdpath_outcome(text, relative)
     problems = ["pass-status"] if _passing_status_wrong(passing) else []
     if not any(call.startswith(tree + " python3 ") for call in calls):
         problems.append("no-gate")
@@ -5189,6 +5226,8 @@ def cdpath_problems(text, relative):
         problems.append("moved")
     if _status_differs(rc, passing):
         problems.append("exit")
+    if dirname_calls_differ:
+        problems.append("dirname-calls")
     return problems
 
 
@@ -9922,6 +9961,8 @@ def self_test():
     # that requirement (_passing_status_wrong) out of the real helper, which
     # passes it. The pass echo indented, or with a trailing comment, is a form
     # the grammar accepts, so each runner must be found passing (status 0).
+    # Every run also reads back the dirname stand-in's call log, which must
+    # hold exactly the binding's one call (absent when dirname is missing).
     def gate_then_fail(text):
         first_gate = re.search(r"^run_gate .*\n", text, re.M)
         if first_gate is None:
@@ -10031,7 +10072,9 @@ def self_test():
     # exit status did, which passes it. The pass-then-fail runner of vector 44
     # is held red only by the requirement that a passing run gives 0; its flip
     # patches that requirement (_passing_status_wrong) out of the real helper.
-    # The indented and commented pass echoes of vector 44 each pass.
+    # The indented and commented pass echoes of vector 44 each pass. Every
+    # run also reads back the dirname stand-in's call log, which must hold
+    # exactly the binding's one call.
     count += 8
     for relative, binding in (("tools/run_all_checks.sh", LOCAL_BINDING_LINES),
                               (STANDALONE_SOURCE, STANDALONE_BINDING_LINES)):
