@@ -26,8 +26,10 @@ name the characters in its own source without flagging itself; it writes them on
   check_no_dashes.py --default-parity  this repository only: DEFAULT_POLICY equals .aiqt/char-policy.json
 
 Exit: 0 clean; 1 a finding; 2 cannot evaluate (an unreadable tree, a scoped tree that is there but is not a
-directory or a symlink to a directory inside the repository, a malformed policy, a bad argument). A file
-that is not valid UTF-8 is reported as SKIP and not scanned. --default-parity exits 0 when the two are equal,
+directory or a symlink to a directory inside the repository, a scoped file that is not valid UTF-8, a malformed
+policy, a bad argument). Each scoped file that is not valid UTF-8 is named on stderr and the run exits 2, never 0
+and never 1, even when another file holds a finding (the findings are still printed). --default-parity exits 0
+when the two are equal,
 and also, saying SKIP, when the file is absent; 1 when they differ; 2 when the file cannot be used. An adopter's
 own policy differs from this repository's by design, so only this repository's check roster runs that mode;
 the self-test never reads the repository's policy file.
@@ -319,13 +321,13 @@ def run(root):
         print(f"error: the character policy {POLICY_PATH} cannot be used ({exc}); fail-closed", file=sys.stderr)
         return 2
     chars = list(policy["chars"].items())
-    findings = []
+    findings, undecodable = [], []
     try:
         for path in scope_paths(root, policy):
             try:
                 lines = path.read_text(encoding="utf-8").splitlines()
             except UnicodeDecodeError:
-                print(f"SKIP (not utf-8): {path.relative_to(root)}")
+                undecodable.append(path.relative_to(root))
                 continue
             for number, line in enumerate(lines, 1):
                 for char, name in chars:
@@ -339,6 +341,14 @@ def run(root):
         print(f'FAIL: {len(findings)} character(s) forbidden by the "{policy["id"]}" character policy found')
         for finding in findings:
             print(f"  {finding}")
+    # A scoped file that is not valid UTF-8 cannot be scanned, so the run cannot vouch for it: exit 2, which
+    # wins over the findings above (exit 1), never a skip and a pass.
+    for rel in undecodable:
+        print(f"error: {rel} is not valid UTF-8, so it cannot be scanned (cannot evaluate); fail-closed",
+              file=sys.stderr)
+    if undecodable:
+        return 2
+    if findings:
         return 1
     names = " or ".join(name for _, name in chars)
     print(f'PASS: no {names} in the files the "{policy["id"]}" character policy scopes')
@@ -545,9 +555,38 @@ def _self_test():
         expect("G7 valid file is used", tree({"d/a.md": quote}, policy()), 1)
         expect("G7 valid file with advice and skip", tree({"d/a.md": quote}, policy(
             advice="spell it out", scope=[{"tree": ".", "suffixes": [".md"], "skip": ["x"]}])), 1)
-        # G8 encoding: a file that is not UTF-8 is reported and skipped.
+        # G8 encoding: a scoped file that is not UTF-8 cannot be scanned, so it is named and the run exits 2,
+        # never skipped with exit 0; that exit 2 wins over a finding in another file (exit 1), whose line is still
+        # printed. A file outside the scope is never read, so its bytes do not matter.
+        not_utf8 = "error: d/a.md is not valid UTF-8"
         expect("G8A UTF-8", tree({"d/a.md": em.encode("utf-8")}), 1)
-        expect("G8B not UTF-8", tree({"d/a.md": em.encode("utf-8") + b"\xff"}), 0, "SKIP (not utf-8): d/a.md")
+        g8b = tree({"d/a.md": em.encode("utf-8") + b"\xff"})
+        expect("G8B not UTF-8", g8b, 2, not_utf8)
+        expect("G8C not UTF-8 beside a finding", tree({"d/a.md": b"\xff", "d/b.md": em}), 2, not_utf8)
+        expect("G8C finding still printed", tree({"d/a.md": b"\xff", "d/b.md": em}), 2, "d/b.md:1:1: em dash")
+        expect("G8D not UTF-8 out of scope", tree({"d/a.txt": b"\xff", "d/b.md": "x\n"}), 0)
+        # G8R revert: a copy of this gate whose undecodable branch is put back to the old skip (print SKIP and
+        # continue) passes G8B's tree with exit 0, so G8B tells the fail-closed branch from the skip. The edit
+        # must match exactly once; the needle spans a line break, so the string literals below never match it.
+        revert_from = "except UnicodeDecodeError:\n" + " " * 16 + "undecodable" + ".append(path.relative_to(root))\n"
+        revert_to = ("except UnicodeDecodeError:\n" + " " * 16
+                     + 'print(f"SKIP (not utf-8): {path.relative_to(root)}")\n')
+        reverted = os.path.join(g8b, "tools")
+        os.makedirs(reverted)
+        here = Path(__file__).resolve().parent
+        source = (here / "check_no_dashes.py").read_text(encoding="utf-8")
+        if source.count(revert_from) != 1:
+            failures.append(f"G8R revert: the fail-closed branch occurs {source.count(revert_from)} times, not once")
+        else:
+            with open(os.path.join(reverted, "check_no_dashes.py"), "w", encoding="utf-8") as handle:
+                handle.write(source.replace(revert_from, revert_to))
+            for name in ("_walk.py", "_standards.py"):
+                shutil.copyfile(here / name, os.path.join(reverted, name))
+            done = subprocess.run([sys.executable, "-I", "-B", os.path.join(reverted, "check_no_dashes.py")],
+                                  capture_output=True, text=True, timeout=120)
+            if done.returncode != 0 or "SKIP (not utf-8): d/a.md" not in done.stdout:
+                failures.append(f"G8R revert: want exit 0 and the old SKIP line from the reverted copy, got "
+                                f"{done.returncode}: {(done.stdout + done.stderr).strip()[:200]!r}")
         # G9 order and duplicates: overlapping entries report a file once, in its first entry's place.
         overlap = policy(scope=[{"tree": "b", "suffixes": [".md"]}, {"tree": ".", "suffixes": [".md"]}])
         rc, out, _ = scan(tree({"a.md": quote, "b/c.md": quote}, overlap))
