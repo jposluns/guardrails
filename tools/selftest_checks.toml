@@ -2060,6 +2060,15 @@ expected-check-ids = [
   "ci/main-health-advisory-only-exit2",
   "ci/main-health-merge-commit-wait",
   "ci/main-health-option-refusals",
+  "ci/main-health-merge-commit-late-read-refused",
+  "ci/main-health-merge-commit-sleep-bounded",
+  "ci/main-health-merge-commit-read-bounded",
+  "ci/main-health-merge-commit-waits-for-every-run",
+  "ci/main-health-null-fields-exit2",
+  "ci/main-health-count-reconciled",
+  "ci/main-health-push-event-only",
+  "ci/main-health-malformed-record-not-skipped",
+  "ci/main-health-no-rev-resolution",
   "ci/finalise-harness-error-keeps-failures",
 ]
 [[suite]]

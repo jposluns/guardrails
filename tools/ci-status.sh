@@ -546,12 +546,26 @@ DEADLINE=$(( NOW + ${CI_STATUS_TIMEOUT:-900} ))
 # neither passes nor blocks: it does not mask a red deciding run, and it does not erase a green one.
 # Post-merge (--main-health --merge-commit SHA): the main push runs whose head_sha is exactly SHA decide,
 # re-read every MAIN_HEALTH_POLL_SECONDS until CI_STATUS_TIMEOUT (default 900 seconds) has passed since
-# the script started. Any of them completed with a conclusion other than success: exit 1 at once, on a
-# line starting "RESULT: MAIN IS RED"; none still running and at least one completed success: exit 0;
-# none listed yet or one still running at the deadline: exit 2 (cannot evaluate, naming the timeout).
+# the script started (DEADLINE). Any of them completed with a conclusion other than success: exit 1 at
+# once, on a line starting "RESULT: MAIN IS RED"; none still running and at least one completed success:
+# exit 0; none listed yet or one still running at the deadline: exit 2 (cannot evaluate, naming the
+# timeout). THE DEADLINE BINDS EVERY STEP: it is checked before each read and after each read, before any
+# result of that read is accepted, so a read that ends at or after it is exit 2 whatever it shows (a red
+# one included: the RESULT line is never printed from a late read); each sleep is cut to the seconds
+# left; and each page read runs under timeout(1) with the seconds left, so a read still running at the
+# deadline is stopped and is exit 2 naming the timeout. The one-shot form keeps no deadline: its reads
+# are not bounded by time (as the reads of every other mode, --wait included, are not).
+# AVAILABILITY COST (disclosed): the post-merge form needs timeout(1) on PATH (GNU coreutils); without
+# it every page read fails and the wait exits 2. Time is whole seconds of date +%s, so the bound holds to
+# within a second, plus the time jq takes on a page already read.
 # Exit 2 also, in both forms and at once (no re-read, also under --merge-commit): a failed read, a
 # response jq cannot parse, a malformed page, or a malformed record anywhere on a page read (id, head_sha,
-# path, status, conclusion; and for a run of the required file also its event and head_branch).
+# path, status, conclusion; for a run of the required file also its event and head_branch; and for a push
+# run of the required file a head_branch that is not a string, or, on main, a status that is not one:
+# whether such a run is main's, or completed, cannot be evaluated, so it is refused, never skipped), and a
+# page whose total_count is below the runs listed through it, or, on a short page (the listing's end),
+# differs from them (100 for each earlier page, all full, plus this page's), since a short or truncated
+# page is then not the end of the listing.
 # WINDOW (disclosed, stated on every result line): the listing is read to its end or to
 # MAIN_HEALTH_MAX_PAGES pages (500 runs), each in full; a run past the bound is not seen, so a busy
 # repository whose newest main push run lies beyond 500 runs cannot evaluate (exit 2). Up to 5 requests per
@@ -561,7 +575,10 @@ DEADLINE=$(( NOW + ${CI_STATUS_TIMEOUT:-900} ))
 # the commit it names. Whether a pull request is the fix for a red main is the caller's judgment, not this
 # read's: exit 1 is the refusal, and an exception for the fixing pull request is taken outside this
 # script. The listing shows each run's latest attempt only. A run that a page shift between page reads
-# skips is not seen (see BOUNDED SCAN; this read merges no repeat and reconciles no count).
+# skips is not seen (see BOUNDED SCAN; this read merges no repeat, and reconciles the count only against
+# total_count as above: a run created at the head between page reads repeats a row and raises the count
+# alike, so it still reconciles; a run deleted between page reads lowers the count, which is exit 2 when
+# that leaves it below the runs listed, and on a short last page always).
 MAIN_HEALTH_BRANCH="main"
 MAIN_HEALTH_MAX_PAGES=5
 MAIN_HEALTH_POLL_SECONDS=15
@@ -592,13 +609,23 @@ def malformed_run:
   or nullable_token(.conclusion)
   or ((.path == $require_workflow)
       and (((.event | type) != "string") or ((.event | length) == 0)
-           or nullable_token(.head_branch)));
+           or nullable_token(.head_branch)))
+  or ((.path == $require_workflow) and (.event == "push")
+      and (((.head_branch | type) != "string")
+           or ((.head_branch == $branch) and ((.status | type) != "string"))));
 def advisory_run:
   (.event == "schedule") or (.event == "workflow_dispatch");
+def rows_through_page:
+  100 * ($page_no - 1) + (.workflow_runs | length);
 if (length != 1) or (.[0] | malformed_page) then
   error("malformed workflow-runs response")
 elif any(.[0].workflow_runs[]; malformed_run) then
   error("malformed workflow run record")
+elif (.[0].total_count < (.[0] | rows_through_page))
+  or (((.[0].workflow_runs | length) < 100) and (.[0].total_count != (.[0] | rows_through_page))) then
+  error("incomplete workflow-runs listing: total_count " + (.[0].total_count | tostring)
+        + " does not match the " + (.[0] | rows_through_page | tostring)
+        + " runs listed through page " + ($page_no | tostring))
 else
   .[0]
   | (if (.workflow_runs | length) < 100 then "stop" else "more" end),
@@ -610,9 +637,10 @@ else
      | @tsv)
 end'
 
+# $1 is the number of the page read.
 main_jq() {
   jq -s -r --arg require_workflow "$REQUIRE_WORKFLOW" --arg branch "$MAIN_HEALTH_BRANCH" \
-    "$CI_STATUS_MAIN_JQ"
+    --argjson page_no "$1" "$CI_STATUS_MAIN_JQ"
 }
 
 main_health_error() {
@@ -621,10 +649,30 @@ main_health_error() {
   exit 2
 }
 
+# Prints the whole seconds left before DEADLINE, read from the clock every deadline check reads; 0 once
+# it has passed, and 0 when the clock cannot be read (so a bounded read refuses rather than runs unbounded).
+main_health_remaining() {
+  local now
+  now="$(date +%s)"
+  if ! [[ "$now" =~ ^[0123456789]+$ ]] || [ "$now" -ge "$DEADLINE" ]; then
+    echo 0
+    return 0
+  fi
+  echo "$((DEADLINE - now))"
+}
+
+# The post-merge wait's deadline outcome ($1 says what was last read, or why nothing was): exit 2.
+main_health_timeout() {
+  echo "ERROR: cannot evaluate the health of ${MAIN_HEALTH_BRANCH} at merge commit ${MERGE_COMMIT} in ${REPO}: TIMEOUT after ${CI_STATUS_TIMEOUT:-900}s; $1."
+  exit 2
+}
+
 # One read of the window: fills the MH_ arrays (one entry per row, in listing order) and MH_WINDOW, or
-# exits 2 through main_health_error.
+# exits 2 through main_health_error. With $1 "bounded" (the post-merge wait) each page read is run under
+# timeout(1) with the seconds left before DEADLINE, and a page that cannot be read before it, or whose
+# read is still running at it, ends the wait through main_health_timeout.
 main_health_read() {
-  local raw step row page_no=1 kind run_id head_sha status concl event
+  local raw step row page_no=1 kind run_id head_sha status concl event left read_rc
   local -a rows=()
   MH_KINDS=()
   MH_IDS=()
@@ -633,9 +681,23 @@ main_health_read() {
   MH_CONCLS=()
   MH_EVENTS=()
   while :; do
-    raw="$(gh api "repos/$REPO/actions/runs?per_page=100&page=$page_no" 2>&1)" ||
+    if [ "${1:-}" = "bounded" ]; then
+      left="$(main_health_remaining)"
+      if [ "$left" -le 0 ]; then
+        main_health_timeout "the deadline passed before page ${page_no} of the workflow-runs listing was read (window: page ${page_no} of at most ${MAIN_HEALTH_MAX_PAGES} unread)"
+      fi
+      raw="$(timeout "$left" gh api "repos/$REPO/actions/runs?per_page=100&page=$page_no" 2>&1)"
+      read_rc=$?
+      if [ "$read_rc" -eq 124 ]; then
+        main_health_timeout "the read of page ${page_no} of the workflow-runs listing did not finish within the ${left}s left before the deadline, and was stopped (window: page ${page_no} of at most ${MAIN_HEALTH_MAX_PAGES} unread)"
+      fi
+    else
+      raw="$(gh api "repos/$REPO/actions/runs?per_page=100&page=$page_no" 2>&1)"
+      read_rc=$?
+    fi
+    [ "$read_rc" -eq 0 ] ||
       main_health_error "the workflow-runs listing (page ${page_no}) could not be read" "$raw"
-    step="$(printf '%s\n' "$raw" | main_jq 2>&1)" ||
+    step="$(printf '%s\n' "$raw" | main_jq "$page_no" 2>&1)" ||
       main_health_error "the workflow-runs listing (page ${page_no}) was refused" "$step"
     mapfile -t rows <<<"$step"
     for row in "${rows[@]:1}"; do
@@ -718,15 +780,20 @@ main_health_once() {
   exit 1
 }
 
-# Every outcome of --main-health --merge-commit SHA exits here.
+# Every outcome of --main-health --merge-commit SHA exits here. The deadline is checked before every
+# read, after every read and before any result of it is accepted, and every sleep is cut to the time
+# left, so no read starts, no result is accepted and no sleep runs at or past DEADLINE.
 main_health_wait() {
-  local i row summary
+  local i row summary="no read of the workflow-runs listing finished before the deadline (window: none read)" nap
   local -a failed=() pending=() passed=()
   while :; do
+    if [ "$(main_health_remaining)" -le 0 ]; then
+      main_health_timeout "$summary"
+    fi
     failed=()
     pending=()
     passed=()
-    main_health_read
+    main_health_read bounded
     main_health_advisory_note "$MERGE_COMMIT"
     for ((i = 0; i < ${#MH_IDS[@]}; i++)); do
       [ "${MH_KINDS[i]}" = "push" ] && [ "${MH_SHAS[i]}" = "$MERGE_COMMIT" ] || continue
@@ -739,6 +806,28 @@ main_health_wait() {
       fi
     done
     if [ "${#failed[@]}" -ne 0 ]; then
+      summary="push run(s) that did not conclude success:"
+      for row in "${failed[@]}"; do
+        summary+=" ${row};"
+      done
+      summary="${summary%;}"
+    elif [ "${#pending[@]}" -ne 0 ]; then
+      summary="push run(s) not completed:"
+      for row in "${pending[@]}"; do
+        summary+=" ${row};"
+      done
+      summary="${summary%;}"
+    elif [ "${#passed[@]}" -ne 0 ]; then
+      summary="push run(s) $(IFS=,; printf '%s' "${passed[*]}") concluded success"
+    else
+      summary="no push run of the workflow file ${REQUIRE_WORKFLOW} on ${MAIN_HEALTH_BRANCH} is listed for it yet"
+    fi
+    summary+=" (window: ${MH_WINDOW})"
+    # A read that ended at or after the deadline is not accepted, whatever it shows.
+    if [ "$(main_health_remaining)" -le 0 ]; then
+      main_health_timeout "the last read ended at or after the deadline, so it is not accepted: ${summary}"
+    fi
+    if [ "${#failed[@]}" -ne 0 ]; then
       echo "RESULT: MAIN IS RED: the push run(s) of the workflow file ${REQUIRE_WORKFLOW} on ${MAIN_HEALTH_BRANCH} for merge commit ${MERGE_COMMIT} did not conclude success; fix ${MAIN_HEALTH_BRANCH} first, and merge nothing else onto it (window: ${MH_WINDOW}):"
       for row in "${failed[@]}"; do
         printf '  %s\n' "$row"
@@ -749,21 +838,13 @@ main_health_wait() {
       echo "RESULT: ${MAIN_HEALTH_BRANCH} is green at merge commit ${MERGE_COMMIT}: push run(s) $(IFS=,; printf '%s' "${passed[*]}") of the workflow file ${REQUIRE_WORKFLOW} concluded success (window: ${MH_WINDOW})."
       exit 0
     fi
-    if [ "${#pending[@]}" -ne 0 ]; then
-      summary="push run(s) not completed:"
-      for row in "${pending[@]}"; do
-        summary+=" ${row};"
-      done
-      summary="${summary%;}"
-    else
-      summary="no push run of the workflow file ${REQUIRE_WORKFLOW} on ${MAIN_HEALTH_BRANCH} is listed for it yet"
-    fi
-    if [ "$(date +%s)" -ge "$DEADLINE" ]; then
-      echo "ERROR: cannot evaluate the health of ${MAIN_HEALTH_BRANCH} at merge commit ${MERGE_COMMIT} in ${REPO}: TIMEOUT after ${CI_STATUS_TIMEOUT:-900}s; ${summary} (window: ${MH_WINDOW})."
-      exit 2
-    fi
     echo "NOTE: merge commit ${MERGE_COMMIT}: ${summary}; waiting."
-    sleep "$MAIN_HEALTH_POLL_SECONDS"
+    # Never past the deadline: the sleep is cut to the seconds left (at least 1 here, as checked above).
+    nap="$(main_health_remaining)"
+    [ "$nap" -gt "$MAIN_HEALTH_POLL_SECONDS" ] && nap="$MAIN_HEALTH_POLL_SECONDS"
+    if [ "$nap" -gt 0 ]; then
+      sleep "$nap"
+    fi
   done
 }
 

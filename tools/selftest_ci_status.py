@@ -196,7 +196,9 @@ if tree_served is not None:
 # A --main-health case serves "main" instead: a list of reads of the unfiltered listing, each a list of
 # pages served one per request ({"body": JSON} or {"raw": text} or {"error": diagnostic}; an absent page
 # is Not Found). Each read of page 1 starts the next read (the last one repeats); its position is counted
-# from the argv log, which already holds this read.
+# from the argv log, which already holds this read. A page entry may add "advance" (seconds the fixture
+# clock moves on before the page is served: a read that takes that long) and "hang" (real seconds the
+# fixture sleeps before serving: a read that stalls).
 with open(os.environ["MOCK_GH_RESPONSE"], "r", encoding="utf-8") as handle:
     main_served = json.load(handle).get("main")
 if main_served is not None:
@@ -212,6 +214,14 @@ if main_served is not None:
     if entry is None:
         print("gh: Not Found (HTTP 404)", file=sys.stderr)
         sys.exit(1)
+    if "advance" in entry:
+        with open(os.environ["MOCK_CLOCK"], "r", encoding="utf-8") as handle:
+            now = int(handle.read().strip())
+        with open(os.environ["MOCK_CLOCK"], "w", encoding="utf-8") as handle:
+            handle.write(str(now + entry["advance"]) + "\n")
+    if "hang" in entry:
+        import time
+        time.sleep(entry["hang"])
     if "error" in entry:
         print(entry["error"], file=sys.stderr)
         sys.exit(1)
@@ -3680,6 +3690,137 @@ def _main_health_checks(fixture):
                                             main=[main_listing([new_green])])
         refusals.append((rc, fixture.gh_argv == [], fixture.git_argv == [], needle in output))
     check("ci/main-health-option-refusals", refusals, [(2, True, True, True)] * 11)
+
+    green_at_merge = "RESULT: main is green at merge commit {}: push run(s) ".format(merge_sha)
+    red_at_merge = ("RESULT: MAIN IS RED: the push run(s) of the workflow file {} on main for merge commit "
+                    "{}".format(QUALITY_PATH, merge_sha))
+    timed_out = "ERROR: cannot evaluate the health of main at merge commit {} in {}: TIMEOUT after".format(
+        merge_sha, FIXTURE_REPO)
+
+    def merge_wait(reads, timeout):
+        # (exit, green line, red line, timeout line, sleeps) of one post-merge wait.
+        rc, output, _calls = fixture.invoke([], rev=None, extra_args=health + ("--merge-commit", merge_sha),
+                                            main=reads, timeout=timeout)
+        return (rc, green_at_merge in output, red_at_merge in output, timed_out in output, fixture.sleeps)
+
+    def slow(listing, seconds, key="advance"):
+        # The same read, each page taking that long on the fixture clock ("advance") or stalling for
+        # that many real seconds ("hang").
+        return [dict(entry, **{key: seconds}) for entry in listing]
+
+    # The deadline is checked before a read's result is accepted: a read that ends at or after it is exit
+    # 2 naming the timeout, whether it shows the merge commit green or red, and the RESULT line is never
+    # printed from it. Twins: the same reads ending before the deadline pass (exit 0) or are red (exit 1).
+    check("ci/main-health-merge-commit-late-read-refused",
+          [merge_wait([slow(main_listing([merge_green]), 1000)], "900"),
+           merge_wait([slow(main_listing([merge_red]), 900)], "900"),
+           merge_wait([slow(main_listing([merge_green]), 100)], "900"),
+           merge_wait([slow(main_listing([merge_red]), 899)], "900")],
+          [(2, False, False, True, []), (2, False, False, True, []),
+           (0, True, False, False, []), (1, False, True, False, [])])
+
+    # No sleep runs past the deadline: each is cut to the seconds left, and a deadline reached while
+    # sleeping ends the wait (exit 2) without another read, so a run that turns green after it is not
+    # accepted. Twins: with time left the same reads pass after one full 15-second sleep.
+    check("ci/main-health-merge-commit-sleep-bounded",
+          [merge_wait([main_listing([merge_running]), main_listing([merge_green])], "1"),
+           merge_wait([main_listing([merge_running])] * 2 + [main_listing([merge_green])], "20"),
+           merge_wait([main_listing([merge_running]), main_listing([merge_green])], "900"),
+           merge_wait([main_listing([merge_running])] * 2 + [main_listing([merge_green])], "31")],
+          [(2, False, False, True, [1]), (2, False, False, True, [15, 5]),
+           (0, True, False, False, [15]), (0, True, False, False, [15, 15])])
+
+    # Each page read is bounded by the seconds left: a read that stalls past the deadline is stopped, and
+    # the wait exits 2 naming the timeout, well before the stalled read would have answered (green).
+    # Twin: a read that answers within the time left passes.
+    bounded = []
+    for reads, timeout in (([slow(main_listing([merge_green]), 20, "hang")], "2"),
+                           ([slow(main_listing([merge_green]), 1, "hang")], "900")):
+        started = time.monotonic()
+        result = merge_wait(reads, timeout)
+        bounded.append(result + (time.monotonic() - started < 15,))
+    check("ci/main-health-merge-commit-read-bounded", bounded,
+          [(2, False, False, True, [], True), (0, True, False, False, [], True)])
+
+    # Every push run of the merge commit must be completed before a pass: one still running beside a
+    # green one keeps the wait going to the deadline (exit 2). Twin: both green (exit 0).
+    other_running = main_run(623, "in_progress", None, merge_sha)
+    other_green = main_run(623, "completed", "success", merge_sha)
+    check("ci/main-health-merge-commit-waits-for-every-run",
+          [merge_wait([main_listing([other_running, merge_green])], "30"),
+           merge_wait([main_listing([other_green, merge_green])], "30")],
+          [(2, False, False, True, [15, 15]), (0, True, False, False, [])])
+
+    def refused_record(listing):
+        # (exit, malformed-record line, green line, red line) of a one-shot read.
+        rc, output, _calls = fixture.invoke([], rev=None, extra_args=health, main=[listing])
+        return (rc, "malformed workflow run record" in output, green_line in output, red_line in output)
+
+    # A push run of the required file whose head_branch is null, or one on main whose status is null, is
+    # a malformed record (exit 2), never skipped so that an older green run decides. Twins: the same runs
+    # with those fields set (exit 1, red), and a null head_branch on a pull_request run, which is no main
+    # push run and stays passed over (exit 0).
+    null_status = main_run(631, "completed", "failure", new_sha)
+    null_status["status"] = None
+    null_branch = main_run(632, "completed", "failure", new_sha, branch=None)
+    null_branch["head_branch"] = None
+    pull_null_branch = main_run(633, "completed", "failure", new_sha, event="pull_request", branch=None)
+    pull_null_branch["head_branch"] = None
+    check("ci/main-health-null-fields-exit2",
+          [refused_record(main_listing([null_status, old_green])),
+           refused_record(main_listing([null_branch, old_green])),
+           refused_record(main_listing([main_run(631, "completed", "failure", new_sha), old_green])),
+           refused_record(main_listing([main_run(632, "completed", "failure", new_sha), old_green])),
+           refused_record(main_listing([pull_null_branch, old_green]))],
+          [(2, True, False, False), (2, True, False, False), (1, False, False, True),
+           (1, False, False, True), (0, False, True, False)])
+
+    def counted(listing):
+        # (exit, incomplete-listing line, green line) of a one-shot read.
+        rc, output, _calls = fixture.invoke([], rev=None, extra_args=health, main=[listing])
+        return (rc, "incomplete workflow-runs listing" in output, green_line in output)
+
+    # A short page is the listing's end only when total_count equals the runs listed through it, and no
+    # page may list more runs than total_count: a truncated page (total_count 500 beside one run) and an
+    # overrun (two runs, total_count 1) are exit 2. Twins: a consistent page, and a page shift (a run
+    # created between the two page reads repeats the last row and raises total_count by one) reconcile.
+    shifted_first = filler[:99] + [new_green]
+    check("ci/main-health-count-reconciled",
+          [counted([{"body": page([new_green], 500)}]),
+           counted([{"body": page([new_green, old_red], 1)}]),
+           counted([{"body": page([new_green], 1)}]),
+           counted([{"body": page(shifted_first, 150)},
+                    {"body": page([new_green] + filler[100:150], 151)}])],
+          [(2, True, False), (2, True, False), (0, False, True), (0, False, True)])
+
+    # Only push runs decide: a green pull_request run whose head_branch is main (a fork's main) does not
+    # rescue an older red push run (exit 1, naming it). Twin: the same run as a push run (exit 0).
+    fork_green = main_run(641, "completed", "success", new_sha, event="pull_request")
+    check("ci/main-health-push-event-only",
+          [outcome(main_listing([fork_green, old_red]), 604),
+           outcome(main_listing([main_run(641, "completed", "success", new_sha), old_red]), 641)],
+          [red, green])
+
+    # A run of the required file with no event, or with an empty head_branch, is refused as malformed
+    # (exit 2) even beside an older green push run, never skipped. Twin: the same run well formed (exit 1).
+    check("ci/main-health-malformed-record-not-skipped",
+          [refused_record(main_listing([main_run(651, "completed", "failure", new_sha, event=None),
+                                        old_green])),
+           refused_record(main_listing([main_run(652, "completed", "failure", new_sha, branch=""),
+                                        old_green])),
+           refused_record(main_listing([main_run(651, "completed", "failure", new_sha), old_green]))],
+          [(2, True, False, False), (2, True, False, False), (1, False, False, True)])
+
+    # --main-health resolves no rev and reads no committer date: its only git call is the origin read.
+    # Twin: a plain read of HEAD resolves the rev first.
+    fixture.invoke([], rev=None, extra_args=health, main=[main_listing([old_green])])
+    health_git = fixture.git_argv
+    fixture.invoke([[page([])]])
+    plain_git = fixture.git_argv
+    check("ci/main-health-no-rev-resolution",
+          [health_git == [["remote", "get-url", "--all", "origin"]],
+           any(argv[:1] == ["rev-parse"] for argv in plain_git)],
+          [True, True])
 
 
 def _finalise_check(got, want):
