@@ -94,21 +94,31 @@ line; and archive contents are not unpacked.
 
 SWEPT-PATH ZERO-TOLERANCE LAYER (scan_swept_labels). A tracked file under a SWEPT_PREFIXES prefix (an
 area already swept clean of review-round labels) tolerates NO match of the SWEPT_LABELS rows: a
-reviewer family next to a grade or one-letter grade id, a QA round number with a family after it, a
-bare QA round number (with or without the round word), a family next to a round number, a family next
-to a mutation, mutant or flip word, a bare round number, a model identifier (a family or vendor prefix,
-a hyphen and a version digit) and a family used as an attribution (before a colon, a slash or a
-possessive), each case-insensitive. Each line is also read joined to the next one (the break, the next
-line's indentation and comment or quote leader collapsed to one space), so a label wrapped across a
-line break is a hit on the line where it starts. A hit is a finding (exit 1), never a ratcheted count,
-there is no baseline, no allowlist and no line marker, and the rows are deliberately wider than the
-four ratchet shapes (so prose such as a product name next to a version digit stays legal only OUTSIDE
-a swept path). Unswept areas are untouched by this layer and stay under the ratchet above. This layer
+reviewer family next to an upper-case grade word or one-letter grade id, a QA round number with a
+family after it, a bare QA round number (with or without the round word) that is not a path or
+pattern segment, a family next to a round number, a family next to a mutation, mutant or flip word,
+a bare round number that is not a loop count (right after "retry", or followed by "of"), a model
+identifier (a family or vendor prefix, a hyphen and a version digit) that does not open a quoted
+string, a family used as an attribution (before a colon or a slash, or a possessive followed within
+one word by review vocabulary), a review finding or item (numbered or not, "peer" or not) followed by
+a parenthesised upper-case grade or a false-deny-style verdict, and a review-round-derived test_r
+test name; the family and the review words match in any case, the grade words in upper case only.
+The narrowing keeps ordinary prose and command data legal under a swept path: a family's reasoning
+effort written in lower case, a family's possessive before an ordinary noun, a loop count, a quoted
+model setting and a process-search pattern token are not hits. Each line is also read joined to the
+next one (the break, the next line's indentation and comment or quote leader collapsed to one space),
+so a label wrapped across a line break is a hit on the line where it starts. A hit is a finding (exit
+1), never a ratcheted count, there is no baseline, no allowlist and no line marker, and the rows are
+deliberately wider than the four ratchet shapes (so prose such as a product name next to a version
+digit stays legal only OUTSIDE a swept path). Unswept areas are untouched by this layer and stay under the ratchet above. This layer
 runs beside the preview-only _PREVIEW_LABELS patterns of scan_scope, which keep their internal-allow
-line exemption; a swept-path hit has none. DISCLOSED LIMITS: a label written outside these shapes (a
-family name alone, a bare grade word, a label split across more than one line break, inside a word or
-with other punctuation at the break, or encoded) is not matched, and SWEPT_PREFIXES is hand-grown, so
-an area is covered only once a sweep adds it.
+line exemption; a swept-path hit has none, so a test_r name on an internal-allow line is still a
+finding here. DISCLOSED LIMITS: a label written outside these shapes (a family name alone, a bare
+grade word, a grade word in lower case after a family name, a family possessive before a word that
+is not review vocabulary, a round number after "retry" or before "of", a model identifier opening a
+quoted string, a QA round number written as a path or pattern segment, a label split across more
+than one line break, inside a word or with other punctuation at the break, or encoded) is not
+matched, and SWEPT_PREFIXES is hand-grown, so an area is covered only once a sweep adds it.
 
 DISCLOSED SCOPE LIMITS. SCOPE_RELPATHS is a HAND-MAINTAINED allowlist with no drift-guard: a new QA-suite
 surface must be ADDED HERE BY HAND to be covered, and a surface not yet listed is out of this gate's reach
@@ -173,7 +183,7 @@ test name. No other scoped surface, and neither the tracked-file rule nor the tr
 these patterns. Other provenance prose in a preview file (a round number with no reviewer family name after
 it, a family name before a grade word, a model identifier) is outside this rule, which honours the
 internal-allow line exemption; the swept-path zero-tolerance layer above reads the same files with wider
-rows and no exemption, so such prose under .preview/ is a finding there.
+rows (a test_r name among them) and no exemption, so such prose under .preview/ is a finding there.
 
 Exit 0 clean, 1 on any finding or a malformed hashes file, 2 on a read error or a tracked file the role
 rule cannot evaluate (fail-closed). `--self-test` proves the gate FAILS on a seeded internal name (a
@@ -444,17 +454,26 @@ TRACKER_BASELINE_RELPATH = ".aiqt/tracker-label-baseline.toml"
 # label shape sits in this source (the shipped tracker-label layer scans this file too).
 SWEPT_PREFIXES = (".preview/",)
 _SWEPT_FAM = r"(?:codex|claude|gemini|fable)"
-_SWEPT_GRADE = r"(?:BLOCKER|CRITICAL|MAJOR|MEDIUM|MED|MINOR|HIGH|LOW|NIT|[A-Za-z][0-9]+)"
+_SWEPT_FAM_ANY_CASE = r"(?i:" + _SWEPT_FAM[3:]
+# The grade words are matched in UPPER CASE only (a lower-case "high" or "low" after a family name is
+# ordinary prose, such as a reasoning-effort setting); a one-letter grade id is an upper-case letter
+# other than V (a version) and digits ("M3").
+_SWEPT_GRADE = r"(?:BLOCKER|BLOCKING|CRITICAL|MAJOR|MEDIUM|MED|MINOR|HIGH|LOW|NIT|[A-UW-Z][0-9]+)"
 _SWEPT_ROUND = r"rou" + r"nds?"
+# The review vocabulary an attributing possessive must reach within one word ("<family>'s exact repro").
+_SWEPT_REVIEW_NOUN = (r"(?:find" + r"ings?|reviews?|repros?|reproductions?|verdicts?|mutants?|mutations?"
+                      r"|objections?|catch(?:es)?|notes?|points?|flags?|reports?)")
 SWEPT_LABELS = (
-    # a reviewer family directly before a grade word or a one-letter grade id ("M3")
-    (re.compile(r"\b" + _SWEPT_FAM + r"[ -]?" + _SWEPT_GRADE + r"(?![\w-])", re.IGNORECASE),
+    # a reviewer family (any case) directly before an upper-case grade word or a one-letter grade id
+    (re.compile(r"\b" + _SWEPT_FAM_ANY_CASE + r"[ -]?" + _SWEPT_GRADE + r"(?![\w-])"),
      "a reviewer family before a grade"),
     # a QA round number with a reviewer family after it
     (re.compile(r"\bQA[ -]?[0-9]+\W{0,3}" + _SWEPT_FAM + r"\b", re.IGNORECASE),
      "a QA round with a reviewer family after it"),
-    # a bare QA round number, with or without the round word between
-    (re.compile(r"\bQA(?:[ -]?" + _SWEPT_ROUND + r")?[ -]?[0-9]+\b", re.IGNORECASE),
+    # a bare QA round number, with or without the round word between; a token that is a path or
+    # pattern segment (a slash, dot or hyphen and then a word character on either side, or a slash
+    # after it, as in a process-search pattern "qa2451/") is command data, not a label
+    (re.compile(r"(?<![\w/.-])QA(?:[ -]?" + _SWEPT_ROUND + r")?[ -]?[0-9]+\b(?!/|[.-]\w)", re.IGNORECASE),
      "a bare QA round number"),
     # a reviewer family directly before a round number
     (re.compile(r"\b" + _SWEPT_FAM + r"\W{0,3}(?:QA[ -])?" + _SWEPT_ROUND + r"[ -]?[0-9]",
@@ -463,21 +482,33 @@ SWEPT_LABELS = (
     # a reviewer family next to a mutation, mutant or flip word
     (re.compile(r"\b" + _SWEPT_FAM + r"[ -]?(?:mutation|mutant|flip)s?\b", re.IGNORECASE),
      "a reviewer family before a mutation word"),
-    # a bare round number ("n" after the round word with one space or hyphen)
-    (re.compile(r"\b" + _SWEPT_ROUND + r"[ -][0-9]+\b", re.IGNORECASE),
+    # a bare round number ("n" after the round word with one space or hyphen), except a loop count:
+    # one right after "retry" or one followed by "of" (a retry count, or a count "of the loop")
+    (re.compile(r"(?<!retry )(?<!retry-)\b" + _SWEPT_ROUND + r"[ -][0-9]+\b(?!\s+of\b)", re.IGNORECASE),
      "a bare review-round number"),
     # a model identifier: a family or vendor model prefix, a hyphen, an optional tier word and a
-    # version digit (a dotted path segment such as a settings directory is not one)
-    (re.compile(r"(?<![\w.])(?:" + _SWEPT_FAM[3:-1] + r"|g" + r"pt)-(?:[a-z]+-)?[0-9]",
+    # version digit (a dotted path segment such as a settings directory is not one, and nor is one
+    # that opens a quoted string, which is configuration data such as a model setting)
+    (re.compile(r"(?<![\w.'\"])(?:" + _SWEPT_FAM[3:-1] + r"|g" + r"pt)-(?:[a-z]+-)?[0-9]",
                 re.IGNORECASE),
      "a model identifier"),
-    # a reviewer family used as an attribution: directly before a colon, a slash or a possessive
-    (re.compile(r"(?<![\w.$])" + _SWEPT_FAM + r"(?::|/|'s\b)", re.IGNORECASE),
+    # a reviewer family used as an attribution: directly before a colon or a slash, or a possessive
+    # followed (at most one word later) by review vocabulary ("Claude's context window" is not one)
+    (re.compile(r"(?<![\w.$])" + _SWEPT_FAM + r"(?::|/|'s\s+(?:\w+\s+)?" + _SWEPT_REVIEW_NOUN + r"\b)",
+                re.IGNORECASE),
      "a reviewer family used as an attribution"),
+    # a numbered or unnumbered review finding or item followed by a parenthesised upper-case grade or
+    # a verdict ("finding 3 (MED)", "item 1 (BLOCKING)", "peer finding (HIGH)", "item 3 (false deny)")
+    (re.compile(r"(?i:\b(?:peer[ -])?(?:find" + r"ing|item)s?)(?:[ -]?[0-9]+[a-z]?)?\s*\(\s*(?:"
+                + _SWEPT_GRADE + r"(?![\w-])|(?i:false[ -](?:deny|allow|positive|negative|block)\b))"),
+     "a review finding or item with a grade"),
+    # a review-round-derived test name, here with no internal-allow exemption
+    (re.compile(r"\btest_r" + r"[0-9]+[a-z]?_"), "a review-round test name"),
 )
 # The per-row keys of _swept_hits, positionally parallel to SWEPT_LABELS.
 SWEPT_ROW_KEYS = ("family-grade", "qa-then-family", "bare-qa-round", "family-round",
-                  "family-mutation", "bare-round", "model-id", "family-attribution")
+                  "family-mutation", "bare-round", "model-id", "family-attribution",
+                  "review-item-grade", "review-test-name")
 # A label wrapped onto the next line is still a label: each line is also read joined to the next
 # one, with the line break, the next line's indentation and comment or quote leader and this line's
 # closing quote collapsed to one space, and a match that starts on this line and ends on the next is
@@ -2715,7 +2746,12 @@ def _self_test(caller_env=None):
                 (3, "swept/row-family-round", "codex rou" + "nd 3"),
                 (4, "swept/row-family-mutation", "codex" + " mutant 1"),
                 (5, "swept/row-bare-round", "Rou" + "nd 31"),
-                (5, "swept/row-bare-round-hyphen", "rou" + "nd-7")):
+                (5, "swept/row-bare-round-hyphen", "rou" + "nd-7"),
+                (8, "swept/row-review-finding-grade", "fin" + "ding 3 (MED)"),
+                (8, "swept/row-review-item-blocking", "it" + "em 1 (BLOCK" + "ING): x"),
+                (8, "swept/row-review-peer-finding", "peer fin" + "ding (HI" + "GH): x"),
+                (8, "swept/row-review-item-verdict", "it" + "em 3 (false" + " deny): x"),
+                (9, "swept/row-review-test-name", "def test" + "_r13_case(self):  # internal" + "-allow")):
             key = SWEPT_ROW_KEYS[row]
             intact = _swept_hits("a {} b\n".format(vector))[key]
             dropped = _swept_hits("a {} b\n".format(vector), swept_without(row))[key]
@@ -2728,7 +2764,7 @@ def _self_test(caller_env=None):
                 (6, "swept/row-model-id-vendor", "g" + "pt-6-astra"),
                 (7, "swept/row-family-colon", "(gem" + "ini: a missing"),
                 (7, "swept/row-family-slash", "claude" + "/an earlier review"),
-                (7, "swept/row-family-possessive", "codex" + "'s exact")):
+                (7, "swept/row-family-possessive", "codex" + "'s exact repro")):
             key = SWEPT_ROW_KEYS[row]
             intact = _swept_hits("a {} b\n".format(vector))[key]
             dropped_hits = _swept_hits("a {} b\n".format(vector), swept_without(row))
@@ -2758,6 +2794,29 @@ def _self_test(caller_env=None):
         swept_flagged = [v for v in swept_clean
                         if any(_swept_hits("a {} b\n".format(v))[key] for key in SWEPT_ROW_KEYS)]
         check("swept/clean-controls-unflagged", not swept_flagged, swept_flagged)
+        # The narrowed rows: ordinary prose and command data that the wider rows used to flag stay
+        # unflagged by EVERY row (a lower-case effort word after a family, a family possessive before
+        # an ordinary noun, a loop count, a quoted model setting, a process-search pattern token, and
+        # the finding, item and test-name twins of the two newest rows), while each twin written as a
+        # label is still caught by its own row. Assembled at run time from split pieces.
+        fam_c, fam_x, rnd_w = "Cla" + "ude", "co" + "dex", "rou" + "nd"
+        swept_narrow = (
+            ("family-attribution", fam_c + "'s context window holds the payload",
+             fam_c + "'s review asked for this guard"),
+            ("family-grade", "run " + fam_x + " high effort on it", fam_x + " HI" + "GH: a missing guard"),
+            ("bare-round", "a retry " + rnd_w + " 3 of the loop", rnd_w.capitalize() + " 3: a missing guard"),
+            ("bare-round", "the " + rnd_w + " 4 of 9 polls", "fixed in " + rnd_w + " 4"),
+            ("model-id", "MODEL = '" + fam_c.lower() + "-opus-5-5'", "reported by " + fam_c.lower() + "-opus-5-5"),
+            ("bare-qa-round", "pgrep -f q" + "a2451/ | tr -d '0-9' | xargs -r kill",
+             "q" + "a2451 asked for this guard"),
+            ("review-item-grade", "each it" + "em (high or low) is checked", "it" + "em 1 (BLOCK" + "ING): x"),
+            ("review-item-grade", "a fin" + "ding (see below) is printed", "fin" + "ding 1 (HI" + "GH): x"),
+            ("review-test-name", "def test" + "_rerun_7_times(self):", "def test" + "_r7_rerun(self):"))
+        narrow_flagged = [c for _k, c, _t in swept_narrow
+                          if any(_swept_hits("a {} b\n".format(c))[key] for key in SWEPT_ROW_KEYS)]
+        check("swept/narrowed-controls-unflagged", not narrow_flagged, narrow_flagged)
+        twin_missed = [t for k, _c, t in swept_narrow if not _swept_hits("a {} b\n".format(t))[k]]
+        check("swept/narrowed-twins-flagged", not twin_missed, twin_missed)
         swlab = Path(tempfile.mkdtemp(prefix="aiqt-internal-names-swept-"))
         try:
             (swlab / ".preview").mkdir()
@@ -2773,6 +2832,58 @@ def _self_test(caller_env=None):
                   (inside, clean_run))
         finally:
             shutil.rmtree(swlab, ignore_errors=True)
+        # The same controls and twins through the REAL gate entry point (run_gate, in process) on a
+        # fixture git repository whose one tracked file is .preview/hook.py, so the swept layer, the
+        # scoped preview patterns and every other layer read it as they read a real preview hook: each
+        # control line exits 0 and each twin exits 1 with a swept-path finding on line 1. The test-name
+        # pair carries the internal-allow marker on both lines, so the twin is caught by the swept row
+        # alone (the scoped preview pattern honours that marker).
+        swwired = Path(tempfile.mkdtemp(prefix="aiqt-internal-names-swept-wired-"))
+        try:
+            (swwired / ".aiqt").mkdir()
+            (swwired / ".aiqt" / "manifest.toml").write_text("format-version = 1\nsources = []\n",
+                                                             encoding="utf-8")
+            (swwired / ".preview").mkdir()
+            hook = swwired / ".preview" / "hook.py"
+            hook.write_text("# a plain hook\n", encoding="utf-8")
+            swenv = _git_fixture_env.git_fixture_env()
+            sw_init = subprocess.run(["git", "-C", str(swwired), "init", "-q"], capture_output=True,
+                                     text=True, env=swenv, timeout=60)
+            sw_add = subprocess.run(["git", "-C", str(swwired), "add", "--", ".preview/hook.py"],
+                                    capture_output=True, text=True, env=swenv, timeout=60)
+            sw_built = sw_init.returncode == 0 and sw_add.returncode == 0
+            marker = "  # internal" + "-allow"
+
+            def swept_gate(at):
+                sw_out, sw_err = io.StringIO(), io.StringIO()
+                with contextlib.redirect_stdout(sw_out), contextlib.redirect_stderr(sw_err):
+                    sw_rc = run_gate(at)
+                return sw_rc, sw_out.getvalue() + sw_err.getvalue()
+
+            for control_id, twin_id, control, twin in (
+                    ("swept/wired-control-context-window-passes", "swept/wired-twin-context-window-flagged",
+                     "# " + swept_narrow[0][1], "# " + swept_narrow[0][2]),
+                    ("swept/wired-control-effort-passes", "swept/wired-twin-effort-flagged",
+                     "# " + swept_narrow[1][1], "# " + swept_narrow[1][2]),
+                    ("swept/wired-control-loop-count-passes", "swept/wired-twin-loop-count-flagged",
+                     "# " + swept_narrow[2][1], "# " + swept_narrow[2][2]),
+                    ("swept/wired-control-model-setting-passes", "swept/wired-twin-model-setting-flagged",
+                     swept_narrow[4][1], "# " + swept_narrow[4][2]),
+                    ("swept/wired-control-process-search-passes", "swept/wired-twin-process-search-flagged",
+                     'CMD = "' + swept_narrow[5][1] + '"', "# " + swept_narrow[5][2]),
+                    ("swept/wired-control-review-item-passes", "swept/wired-twin-review-item-flagged",
+                     "# " + swept_narrow[6][1], "# " + swept_narrow[6][2]),
+                    ("swept/wired-control-test-name-passes", "swept/wired-twin-test-name-flagged",
+                     "    " + swept_narrow[8][1] + marker, "    " + swept_narrow[8][2] + marker)):
+                hook.write_text(control + "\n", encoding="utf-8")
+                rc_c, out_c = swept_gate(swwired)
+                check(control_id, sw_built and rc_c == 0, (control, rc_c, out_c))
+                hook.write_text(twin + "\n", encoding="utf-8")
+                rc_t, out_t = swept_gate(swwired)
+                check(twin_id, sw_built and rc_t == 1 and ".preview/hook.py:1: " in out_t
+                      and "(zero tolerance under a swept path)" in out_t, (twin, rc_t, out_t))
+        finally:
+            shutil.rmtree(swwired, ignore_errors=True)
 
         # 28. DISCRIMINATING (path-only allowlists, scope membership, no line marker, and the closed
         #     baseline schema), in process over a fixture root; the tracked argument stands in for the
@@ -3692,7 +3803,12 @@ def _self_test(caller_env=None):
           "or attribution vector is flagged by no row once its own row is disabled, a label wrapped "
           "across one line break in a comment, a docstring and adjacent string literals is caught (and "
           "missed with the joined read disabled) while a one-line label counts once on its own line, "
-          "the clean controls stay unflagged and only files under a swept prefix are read; and the PNG "
+          "the clean controls stay unflagged and only files under a swept prefix are read, a review "
+          "finding or item with a grade and a review-round test name on an internal-allow line are "
+          "caught, and ordinary prose and command data the narrowed rows leave alone (a lower-case "
+          "effort word, a possessive before an ordinary noun, a loop count, a quoted model setting, a "
+          "process-search pattern token) pass the real gate in a tracked preview file while each "
+          "label-shaped twin fails it; and the PNG "
           "rule passes a clean minimal tracked .png, refuses (exit 2) a bad signature, "
           "a bad CRC, a truncated chunk, a missing IEND, bytes after IEND, IHDR out of place or of the wrong "
           "length, IEND carrying data, a chunk type that is not four letters, a tEXt with no NUL "

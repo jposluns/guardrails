@@ -1394,7 +1394,7 @@ def _self_test():
     false_deny_witnesses = [
         "while pgrep -c -f qa-selfmatch472/; do printf '-v' PATH /nonexistent; done",
         "for p in $(pgrep -f qa-x/); do printf '-v' p not_a_pid; kill \"$p\"; done",
-        "for UID in $(pgrep -f tk472readonly/); do kill \"$UID\"; done",
+        "for UID in $(pgrep -f qa472readonly/); do kill \"$UID\"; done",
         "printf '-v' PATH x; pkill -f qa-x/", "while pgrep -f qa-x/; do printf '-v' PATH x; done",
         "for p in $(pgrep -f qa-x/); do printf '-v' p x; kill $p; done",
         "printf '%999999999d' 1; pkill -f qa-x/", "printf x; pkill -f qa-x/",
@@ -1411,16 +1411,16 @@ def _self_test():
         "PATH", "HOME", "SHELLOPTS", "BASHOPTS", "BASHPID", "BASH_pid", "MYPID", "_")]
     # The counterexamples: each must not be denied; each gets a note.
     counter_vectors = [
-        "pkill -f 'tk2451newline\nend'",
-        "until pgrep -f tk2451until/ >/dev/null; do sleep 1; done",
-        "while ! pgrep -f tk2451while/ >/dev/null; do sleep 1; done",
+        "pkill -f 'qa2451newline\nend'",
+        "until pgrep -f qa2451until/ >/dev/null; do sleep 1; done",
+        "while ! pgrep -f qa2451while/ >/dev/null; do sleep 1; done",
         "while pgrep -f x/; do sleep 1; break; done",
-        "ps -p 1 -o pid,args | grep tk2451/ | awk '{print $1}' | xargs -r kill",
-        "pgrep -f tk2451/ | tr -d '0-9' | xargs -r kill",
+        "ps -p 1 -o pid,args | grep qa2451/ | awk '{print $1}' | xargs -r kill",
+        "pgrep -f qa2451/ | tr -d '0-9' | xargs -r kill",
         "pgrep -f x/ | awk '{print $2}' | xargs kill",
         'for p in $(pgrep -f x/); do kill "$recorded_pid"; break; done',
-        "exec pkill -f tk2451exec/",
-        "pkill -x -f 'tk2451/\\|.*'",
+        "exec pkill -f qa2451exec/",
+        "pkill -x -f 'qa2451/\\|.*'",
         "pkill -f 'w[t]-x/'",
         "pkill -f 'qq7\\.dot'",
     ]

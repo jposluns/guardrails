@@ -4397,7 +4397,7 @@ def _self_test():
             # per GFM example 202, a pipe-free body row continues the table (one cell, column 0)
             body = "| Item | Due |\n|---|---|\nTBD\nrelease | %s\n"
             self.assertEqual(self.tw(*(body % "2099-01-01T00:00Z").splitlines()), [])
-            fp = os.path.join(self.tmp, "r11.md")
+            fp = os.path.join(self.tmp, "table.md")
             os.environ["AIQT_STORE_ROOT"] = self.tmp  # the Edit must reach a store path to count
             with open(fp, "w") as f:
                 f.write(body % "2026-09-01T00:00Z")
@@ -4438,7 +4438,7 @@ def _self_test():
             # a fabricated future heartbeat was allowed through Write, Edit, and MultiEdit
             fut = "2099-01-01T00:00Z"
             body = "| Due | Item |\n| --- | --- |\n| 2099-02-01T09:00Z | release |\nLast-heartbeat: %s\n"
-            fp = os.path.join(self.tmp, "r12.md")
+            fp = os.path.join(self.tmp, "due.md")
             os.environ["AIQT_STORE_ROOT"] = self.tmp
             self.assertEqual(self.ev("Write", file_path=fp, content=body % fut), [fut])
             with open(fp, "w") as f:
@@ -4527,7 +4527,7 @@ def _self_test():
                 os.environ.update(old_env)
 
         def test_write_word_only_in_command_position(self):
-            # item 3 (false deny): every argument's basename was compared against WRITE_COMMANDS
+            # an earlier false deny: every argument's basename was compared against WRITE_COMMANDS
             store = f"{PROJ}/private/state.md"
             reads = (f"rg -e tee -e '2099-01-01T00:00Z' {store}", f"grep -n -e cp -e mv 2099-01-01T00:00Z {store}",
                      f"rg 'dd|truncate' {store} | grep 2099-01-01T00:00Z", f"echo install 2099-01-01T00:00Z; cat {store}",
@@ -4562,7 +4562,7 @@ def _self_test():
                 self.assertTrue(self.ev("Bash", command=cmd.replace("S", store)), cmd)
 
         def test_quoted_text_in_store_write_exempt(self):
-            # item 4 (false deny): a blockquote, inline code span, or fenced block holding a future literal
+            # an earlier false deny: a blockquote, inline code span, or fenced block holding a future literal
             fut = "2099-01-01T00:00Z"
             for content in (f"> quoted: {fut}\n", f"  > nested > {fut}\n", f"example `{fut}` shape\n",
                             f"example ``a ` {fut}`` shape\n", f"```\nhb: {fut}\n```\n", f"~~~~\n{fut}\n~~~~~\n",
@@ -4606,7 +4606,7 @@ def _self_test():
                                  (globals()[name].pattern, globals()[name].flags), name)
 
         # -- input redirections, find -exec, in-place position, conditional comparisons --
-        def r14(self, cmds, want):
+        def writes(self, cmds, want):
             store = f"{PROJ}/private/state.md"
             for cmd in cmds:
                 cmd = cmd.replace("S", store).replace("F", "2099-01-01T00:00Z")
@@ -4615,31 +4615,31 @@ def _self_test():
 
         def test_leading_input_redirection_keeps_command_position(self):
             # a regression once read a leading input redirection's operand as the command word
-            self.r14(("<<<'Last-heartbeat: F' tee S", "< /dev/shm/in tee S F", "0</dev/shm/in tee S F",
+            self.writes(("<<<'Last-heartbeat: F' tee S", "< /dev/shm/in tee S F", "0</dev/shm/in tee S F",
                       "<&0 tee S F", "<<-E tee S\nF\nE", "sudo < /dev/shm/in tee S F", "echo F <> S",
                       "x=$(<<<F tee S)", "cat < /dev/shm/in | tee -a S F"), True)
-            self.r14(("cat < S F", "rg x < S F", "while read l; do echo; done < <(rg x S) F",
+            self.writes(("cat < S F", "rg x < S F", "while read l; do echo; done < <(rg x S) F",
                       "diff <(sort S) /dev/shm/b F", "rg -c x <<< F S"), False)
 
         def test_exec_only_under_find(self):
             # an earlier false deny: any -exec word re-entered command position, even outside find
-            self.r14(("printf '%s\\n' '-exec' tee F S", "echo -ok cp F S", "rg -e -execdir -e mv F S",
+            self.writes(("printf '%s\\n' '-exec' tee F S", "echo -ok cp F S", "rg -e -execdir -e mv F S",
                       "find . -exec rg x {} + -name tee F S", "find . -exec rg x {} \\; -name cp F S"), False)
-            self.r14(("find . -name x -exec tee S \\; F", "sudo find . -okdir cp x S \\; F",
+            self.writes(("find . -name x -exec tee S \\; F", "sudo find . -okdir cp x S \\; F",
                       "find . -exec rg x {} + -exec tee S \\; F", "find . -execdir sed -i s/a/b/ S + F"), True)
 
         def test_inplace_only_in_command_position(self):
             # an earlier false deny: sed or perl as a mere argument (a search pattern) armed in-place detection
-            self.r14(("rg -e sed -i -e F S", "grep -e perl -i F S", "echo sed -i F; cat S"), False)
-            self.r14(("sed -i s/a/b/ S F", "echo F | sudo sed -i 's/a/b/' S", "perl -pi -e 1 S F",
+            self.writes(("rg -e sed -i -e F S", "grep -e perl -i F S", "echo sed -i F; cat S"), False)
+            self.writes(("sed -i s/a/b/ S F", "echo F | sudo sed -i 's/a/b/' S", "perl -pi -e 1 S F",
                       "ls S | xargs sed -i s/a/F/", "LC_ALL=C sed --in-place s/a/b/ S F"), True)
 
         def test_conditional_comparison_is_not_redirection(self):
             # inside [[ ]], `>` and `<` compare strings (reading them as redirections was a false deny)
-            self.r14(("stamp=$(cat S); [[ \"$stamp\" > 'F' ]]", "stamp=$(cat S); [[ \"$stamp\" < 'F' ]]",
+            self.writes(("stamp=$(cat S); [[ \"$stamp\" > 'F' ]]", "stamp=$(cat S); [[ \"$stamp\" < 'F' ]]",
                       "if [[ $(cat S) > F ]]; then echo late; fi", "[[ a > b && ( c < F ) ]] && cat S"), False)
             # [ ] and test are commands: an unquoted `>` there IS an output redirection (real bash creates b)
-            self.r14(("[ \"$(cat F)\" > S ]", "test x > S F", "[[ a < b ]] && echo F > S",
+            self.writes(("[ \"$(cat F)\" > S ]", "test x > S F", "[[ a < b ]] && echo F > S",
                       "[[ $(tee S <<< F) > a ]]", "[[ a > b ]]; echo F >> S", "echo '[[' > S F",
                       "[[ a > b F S"), True)
 
@@ -4675,7 +4675,7 @@ def _self_test():
         def test_function_body_is_command_position(self):
             # a regression once let `function NAME {` consume command position, so an in-place
             # write in the body was missed; detected whether or not the function is called (conservative)
-            self.r14(("function update_state { sed -i 's/OLD/F/' S; }; update_state",
+            self.writes(("function update_state { sed -i 's/OLD/F/' S; }; update_state",
                       "function update_state { perl -pi -e 's/OLD/F/' S; }; update_state",
                       "function update_state { sed -i 's/OLD/F/' S; }", "function u\n{ tee S <<< F; }",
                       "function u () { sed -i s/a/F/ S; }", "function u() ( perl -pi -e 1 S F )",
@@ -4684,20 +4684,20 @@ def _self_test():
                       "x=$(function u { tee S <<< F; }; u)", "if true; then function u { cp F S; }; fi"),
                      True)
             # the header words are never command words, and a conditional in a body still compares
-            self.r14(("rg function S -e F", "function tee { rg x S F; }", "function u { [[ $(cat S) > F ]]; }",
+            self.writes(("rg function S -e F", "function tee { rg x S F; }", "function u { [[ $(cat S) > F ]]; }",
                       "u() { [[ $(cat S) < F ]] && echo late; }", "echo function sed -i F S"), False)
 
         def test_time_and_negation_keep_conditional(self):
             # an earlier false deny: command position was lost at `time`, so `[[` was not a conditional and its
             # `>` read as a redirection
-            self.r14(("if time [[ $(cat S) > F ]]; then echo corrupt; fi", "time [[ $(cat S) > F ]]",
+            self.writes(("if time [[ $(cat S) > F ]]; then echo corrupt; fi", "time [[ $(cat S) > F ]]",
                       "time -p [[ $(cat S) > F ]] && echo corrupt", "time -- [[ $(cat S) > F ]]",
                       "time -p -- [[ $(cat S) > F ]]", "! [[ $(cat S) > F ]] && echo ok",
                       "if ! time [[ $(cat S) > F ]]; then echo corrupt; fi", "time ! [[ $(cat S) > F ]]",
                       "x=$(time [[ $(cat S) > F ]] && echo late)"), False)
             # bash runs a command after `time -p -p`, `time -x`, or `time -- -p`: there `>` IS a redirection;
             # and a write after time or ! is still a write
-            self.r14(("time -p -p [[ a > S F", "time -x [[ a > S F", "time -- -p [[ a > S F",
+            self.writes(("time -p -p [[ a > S F", "time -x [[ a > S F", "time -- -p [[ a > S F",
                       "time echo F > S", "time -p tee S <<< F", "! tee S <<< F", "time ! sed -i s/a/F/ S"), True)
 
         def test_real_bash_reserved_word_and_function_semantics(self):
@@ -4717,7 +4717,7 @@ def _self_test():
         # -- arithmetic commands and expansions --
         def test_arithmetic_is_not_redirection(self):
             # an earlier version caused a false deny: `>` inside `(( ... ))` and `$(( ... ))` read as a redirection
-            self.r14(("count=$(grep -Fc 'F' S)\nif (( count > 0 )); then printf '%s\\n' \"$count\"; fi",
+            self.writes(("count=$(grep -Fc 'F' S)\nif (( count > 0 )); then printf '%s\\n' \"$count\"; fi",
                       "count=$(grep -Fc 'F' S)\nprintf '%s\\n' \"$(( count > 0 ))\"",
                       "rg -c F S; (( x = 1 << 2 ))", "rg -c F S; echo $(( a >> 1 ))", "rg F S; (( a > b ))",
                       "rg F S; echo $(( (a) > (b) ))", "rg F S; for ((i = 0; i < 2; i++)); do (( i > 0 )); done",
@@ -4728,7 +4728,7 @@ def _self_test():
                      False)
             # a write inside a substitution nested in arithmetic, a real redirect after `))`, a `((` not in
             # command position, and the unemulated `((` fallback all still count as writes
-            self.r14(("(( $(echo F > S; echo 1) > 0 ))", "echo $(( `tee S <<< F` + 1 ))",
+            self.writes(("(( $(echo F > S; echo 1) > 0 ))", "echo $(( `tee S <<< F` + 1 ))",
                       "x=$(( $(sed -i s/a/F/ S) + 1 ))", "echo F | (( 1 > 0 )) > S", "echo $(( 1 )) > S F",
                       "for ((i = 0; i < 1; i++)); do :; done > S F", "if echo F | (( 1 > 0 )) > S; then :; fi",
                       "echo ((x > S)) F", "rg for ((x > S)) F", "((echo F) > S)", "x=$((cat S) > S) F",
@@ -4752,7 +4752,7 @@ def _self_test():
             # a regression once missed writes: after a `for ((...))` header the body
             # lost command position, so `do tee` and `do sed -i` were missed; bash takes `do` with or without a
             # `;` or newline before it, and `{` in place of `do`
-            self.r14(("for ((i=0;i<1;i++)) do tee S <<< 'Last-heartbeat: F'; done",
+            self.writes(("for ((i=0;i<1;i++)) do tee S <<< 'Last-heartbeat: F'; done",
                       "for ((i=0;i<1;i++)); do tee S <<< 'Last-heartbeat: F'; done",
                       "for ((i=0;i<1;i++))\ndo tee S <<< 'Last-heartbeat: F'; done",
                       "for ((i=0;i<1;i++))do tee S <<< F; done", "for ((i=0;i<1;i++)) ;do tee S <<< F; done",
@@ -4762,7 +4762,7 @@ def _self_test():
                       "for ((i=0;i<1;i++)) { tee S <<< F; }", "for (( ; ; )) do cp /dev/shm/x S; break; done F",
                       "x=$(for ((i=0;i<1;i++)) do tee S <<< F; done)",
                       "for ((i=0;i<1;i++)) do for ((j=0;j<1;j++)) do tee S <<< F; done; done"), True)
-            self.r14(("for ((i=0;i<1;i++)) do rg -c F S; done", "for ((i=0;i<1;i++)) do echo tee S F; done",
+            self.writes(("for ((i=0;i<1;i++)) do rg -c F S; done", "for ((i=0;i<1;i++)) do echo tee S F; done",
                       "for ((i=0;i<1;i++)) { rg F S; }", "rg F S; for ((i=0;i<2;i++)) do (( i > 0 )); done"),
                      False)
             # the tokenizer emits a separator after the closed header, so the stream sees `do` in command position
@@ -4772,7 +4772,7 @@ def _self_test():
         def test_keyword_touching_arith_is_arithmetic(self):
             # an earlier version caused a false deny: the reserved word before `((` was not flushed at the `(`
             # metacharacter, so `if((` read as a subshell and its `>` as a redirection
-            self.r14(("count=$(grep -Fc 'F' S); if(( count > 0 )); then echo found; fi",
+            self.writes(("count=$(grep -Fc 'F' S); if(( count > 0 )); then echo found; fi",
                       "count=$(grep -Fc 'F' S); while(( count > 5 )); do break; done",
                       "count=$(grep -Fc 'F' S); until(( count > -1 )); do break; done",
                       "if false; then :; elif(( $(rg -c F S) > 0 )); then echo found; fi",
@@ -4780,7 +4780,7 @@ def _self_test():
                       "rg F S; for((i=0;i<2;i++)); do (( i > 0 )); done", "x=$(if(( 2 > 1 )); then rg F S; fi)"),
                      False)
             # a non-keyword word touching `((` is still no arithmetic, and a write after `if((` still counts
-            self.r14(("if(( 1 > 0 )); then tee S <<< F; fi", "echo((x > S)) F", "rg((x > S)) F",
+            self.writes(("if(( 1 > 0 )); then tee S <<< F; fi", "echo((x > S)) F", "rg((x > S)) F",
                       "while(( 1 > 0 )); do sed -i s/a/F/ S; break; done"), True)
 
         def test_real_bash_arith_header_and_keyword_syntax(self):
@@ -4803,11 +4803,11 @@ def _self_test():
             # an earlier version caused a false deny: after `function NAME` with no `()` the body word lost command
             # position, so `function NAME (( ... ))` read its `>` as a redirection; a sibling of the same class
             # (a MISS) hid a write in a `function NAME while|until|if` body
-            self.r14(("count=$(grep -c 'F' S); function has_matches (( count > 0 ))", "function g [[ 1 < 2 ]]",
+            self.writes(("count=$(grep -c 'F' S); function has_matches (( count > 0 ))", "function g [[ 1 < 2 ]]",
                       "function g [[ $(rg -c F S) > 0 ]]", "count=$(rg -c F S); function h (( count > 0 )); h",
                       "function h (( $(rg -c F S) >> 1 ))", "function w while rg -q F S; do break; done",
                       "function tee { rg x S F; }", "function u { [[ $(cat S) > F ]]; }"), False)
-            self.r14(("function f { tee S <<< 'F'; }", "function f (( $(tee S <<< F) ))",
+            self.writes(("function f { tee S <<< 'F'; }", "function f (( $(tee S <<< F) ))",
                       "function f (( `tee S <<< F` ))", "function f [[ $(tee S <<< F) ]]",
                       "function f (( 1 > 0 )) > S; echo F", "function f (( 1 > 0 )) >> S F",
                       "function f [[ 1 < 2 ]] > S F", "function f ( tee S <<< F )",
@@ -4842,7 +4842,7 @@ def _self_test():
             # a regression once missed writes: only a `for ((...))` header restored command position
             # at its closing `))`, so a `while`, `until`, or `if` condition that is a plain `((...))` or a
             # `[[ ... ]]`, followed by `do` or `then` with no `;`, hid the body's write
-            self.r14(("until ((a>b)) do tee S <<< 'Last-heartbeat: F'; break; done",
+            self.writes(("until ((a>b)) do tee S <<< 'Last-heartbeat: F'; break; done",
                       "while !((a>0)) do tee S <<< F; break; done", "until ((a>b)) do sed -i s/x/F/ S; done",
                       "if (( 1 > 0 )) then tee S <<< F; fi", "while [[ 1 > 0 ]] do tee S <<< F; break; done",
                       "if [[ 1 > 0 ]] then tee S <<< F; fi", "until [[ a > b ]] do sed -i s/x/F/ S; done",
@@ -4851,7 +4851,7 @@ def _self_test():
                       "if echo F | (( 1 )) > S; then :; fi"), True)
             # pure arithmetic and conditional reads in the same no-separator form stay reads, and a `$((` expansion
             # does not restore command position (its value is a word of the enclosing command)
-            self.r14(("until ((a>b)) do rg F S; break; done", "if (( 1 > 0 )) then rg -c F S; fi",
+            self.writes(("until ((a>b)) do rg F S; break; done", "if (( 1 > 0 )) then rg -c F S; fi",
                       "while [[ 1 > 0 ]] do rg F S; break; done", "if [[ $(cat S) > F ]] then echo later; fi",
                       "while !((a>0)) do echo tee S F; break; done", "if (( $(rg -c F S) > 0 )) then echo y; fi",
                       "(( x )) && rg F S", "[[ x ]] && rg F S", "echo $(( 1 > 0 )) tee F S", "rg $((1)) tee F S",
@@ -4865,14 +4865,14 @@ def _self_test():
         def test_conditional_operand_text_is_not_a_separator(self):
             # an earlier version caused a false deny: inside [[ ... ]] a regex operand's `(`, `)`, and
             # `|` were separators, so `cp` in `=~ operation=(cp|mv)` read as a command word
-            self.r14(("record=$(grep -c 'F' S)\n[[ \"$record\" =~ operation=(cp|mv) ]]",
+            self.writes(("record=$(grep -c 'F' S)\n[[ \"$record\" =~ operation=(cp|mv) ]]",
                       "record=$(grep -c 'F' S); function check [[ \"$record\" =~ operation=(cp|mv) ]]",
                       "record=$(grep -c 'F' S); function check [[ $record =~ (tee|dd) ]]; check",
                       "rg F S; [[ a && (b || c) ]]", "rg F S; [[ x =~ ^(tee|dd)$ ]] && echo y",
                       "rg F S; [[ ( a > b ) || (cp) ]]", "if [[ $(rg -c F S) =~ (sed|tee) ]] then echo y; fi"), False)
             # a substitution inside the conditional is still its own scanned stream, and a redirection after `]]`
             # still counts; a `>(...)` process substitution is now scanned too (its `>` inside [[ was once dropped)
-            self.r14(("[[ x =~ ($(tee S <<< F)|y) ]]", "[[ x =~ (`tee S <<< F`|y) ]]",
+            self.writes(("[[ x =~ ($(tee S <<< F)|y) ]]", "[[ x =~ (`tee S <<< F`|y) ]]",
                       "function check [[ x =~ ($(tee S <<< F)) ]]", "[[ -n <(tee S <<< F) ]]",
                       "[[ -e >(cat > S <<< F) ]]", "[[ x =~ (cp|mv) ]] > S F",
                       "[[ x =~ (cp|mv) ]] && cp F S"), True)
@@ -4898,24 +4898,24 @@ def _self_test():
             # an earlier version caused a false deny: inside [[ ... ]] the `#` of a regex
             # operand such as `(#|$)` started a comment that swallowed the closing `]]`, so the command read as
             # an unterminated conditional (a write); a newline inside the conditional is no separator either
-            self.r14(("record=$(grep 'F' S)\n[[ \"$record\" =~ ^[[:space:]]*(#|$) ]]",
+            self.writes(("record=$(grep 'F' S)\n[[ \"$record\" =~ ^[[:space:]]*(#|$) ]]",
                       "record=$(grep 'F' S); [[ \"$record\" =~ ^[[:space:]]*(#|$) ]] && echo skip",
                       "record=$(grep 'F' S); [[ $record =~ ^# ]] && echo comment", "rg F S; [[ x =~ a#b ]] || echo no",
                       "record=$(grep 'F' S); if [[ $record =~ (#|;) ]] then echo y; fi",
                       "rg F S; [[ a &&\n tee ]] && echo ok", "rg F S; if [[ a ||\n cp ]]; then echo y; fi"), False)
-            self.r14(("[[ x =~ (#|$) ]] && tee S <<< F", "[[ x =~ a#b ]]\ntee S <<< F", "[[ x =~ ^# ]] > S F",
+            self.writes(("[[ x =~ (#|$) ]] && tee S <<< F", "[[ x =~ a#b ]]\ntee S <<< F", "[[ x =~ ^# ]] > S F",
                       "[[ x =~ (#|$($(tee S <<< F))) ]]"), True)
 
         def test_conditional_closes_only_at_a_closing_word(self):
             # an earlier version missed a write: a `]]` glued to a regex word's `)` closed the conditional, so the
             # real closing `]]` read as a command word and the `then` body after it lost command position
-            self.r14(("if [[ 'x]]' =~ (x)]] ]] then tee S <<< 'Last-heartbeat: F'; fi",
+            self.writes(("if [[ 'x]]' =~ (x)]] ]] then tee S <<< 'Last-heartbeat: F'; fi",
                       "if [[ 'x]]' =~ (x)]] ]]\nthen tee S <<< 'Last-heartbeat: F'; fi",
                       "[[ x == x]] ]] && tee S <<< F", "[[ a ]]>S F", "while [[ a =~ (b)]] ]] do tee S <<< F; done",
                       "[[ ( a )]] && tee S <<< F"), True)
             # a regex word glued to `]]` before the real `]]` is no false deny (but a grouping `)` glued to
             # `]]` with no later close leaves the command unparseable; see test_conditional_open_at_frame_end_is_unparseable)
-            self.r14(("rg F S; [[ x =~ (a)]] ]] && echo ok",
+            self.writes(("rg F S; [[ x =~ (a)]] ]] && echo ok",
                       "rg F S; ( [[ x ]])", "if [[ $(rg -c F S) =~ (x)]] ]] then echo y; fi"), False)
             self.assertEqual(_shell_tokens("[[ a =~ (#|x)]] ]] && tee y")[-1],
                              [("w", "[["), ("w", "a"), ("w", "=~"), ("w", "#x]]"), ("w", "]]"), ("s",), ("s",),
@@ -4943,10 +4943,10 @@ def _self_test():
             # a regression once caused a false deny: in a compact `[[(`, flushing `[[` opened the
             # conditional only after its branch was passed, so the `(` became a separator (and, in a substitution,
             # a depth change that left the substitution unterminated)
-            self.r14(("result=$( [[(-f S) ]] && grep -c 'F' S )", "result=$( [[(-f S) ]] &&\n grep -c 'F' S )",
+            self.writes(("result=$( [[(-f S) ]] && grep -c 'F' S )", "result=$( [[(-f S) ]] &&\n grep -c 'F' S )",
                       "record=$(grep 'F' S); [[(tee == \"$record\") ]] && echo same",
                       "rg F S; [[((-n x)) ]] && echo ok", "rg F S; [[<(rg F S) ]] || echo no"), False)
-            self.r14(("[[(-f S) ]] && tee S <<< F", "[[(x) ]]>S F", "x=$( [[(-n y) ]] && tee S <<< F )"), True)
+            self.writes(("[[(-f S) ]] && tee S <<< F", "[[(x) ]]>S F", "x=$( [[(-n y) ]] && tee S <<< F )"), True)
             self.assertEqual(_shell_tokens("[[(tee == x) ]] && y")[-1],
                              [("w", "[["), ("w", "tee"), ("w", "=="), ("w", "x"), ("w", "]]"), ("s",), ("s",),
                               ("s",), ("w", "y")])
@@ -4955,11 +4955,11 @@ def _self_test():
             # a removed alternate reading once caused a false deny: it closed at the regex word `(x)]]`
             # and invented a redirection out of the string comparison `>` after it; with the single rule a `]]`
             # glued to preceding text never closes while a word-initial `]]` follows
-            self.r14(("record=$(grep 'F' S)\n[[ \"$record\" =~ (x)]] || \"$record\" > 'F' ]]",
+            self.writes(("record=$(grep 'F' S)\n[[ \"$record\" =~ (x)]] || \"$record\" > 'F' ]]",
                       "record=$(grep 'F' S); [[ \"$record\" =~ (x)]] || \"$record\" > 'F' ]] && echo ok"), False)
             # the earlier glued-close miss stays caught, and a lone glued close (now unparseable) still
             # denies a write after it
-            self.r14(("if [[ 'x]]' =~ (x)]] ]] then tee S <<< 'Last-heartbeat: F'; fi",
+            self.writes(("if [[ 'x]]' =~ (x)]] ]] then tee S <<< 'Last-heartbeat: F'; fi",
                       "[[ ( -n x )]] && tee S <<< F", "[[ ( a )]] && [[ ( b )]] && tee S <<< F"), True)
             # a strict parse is kept as is
             self.assertEqual(_shell_tokens("[[ x =~ (a)]] ]] && y")[-1],
@@ -4990,7 +4990,7 @@ def _self_test():
             # a regression once missed a write: a backtick frame closed while its conditional was
             # open, so the earlier fallback never ran and the write read as conditional operand text; the
             # fallback is removed, and a conditional open when its frame ends makes the command unparseable
-            self.r14(("result=`[[ ( -n x )]] && tee S <<< 'Last-heartbeat: F'`",
+            self.writes(("result=`[[ ( -n x )]] && tee S <<< 'Last-heartbeat: F'`",
                       "result=`[[ ( -n x )]]` && tee S <<< F", "x=$( [[ ( -n y )]] && tee S <<< F )",
                       "r=`[[` && tee S <<< F"), True)
             for c in ("r=`[[ ( -n x )]] && echo ok`", "r=`[[`", "r=$( [[ a )", "[[ ( -n x )]] && echo ok",
@@ -5003,7 +5003,7 @@ def _self_test():
             # the first conditional's glued `)]]` unclosed, so the command is unparseable and denies only
             # because it names a store and holds a future literal (the disclosed exotic false deny); the same
             # holds for the former glued-close allows, pinned here so a future fix flips them deliberately
-            self.r14(("record=$(grep 'F' S)\n[[ ( -n x )]] # it's fine\n[[ \"$record\" =~ (x)]] || \"$record\" > 'F' ]]",
+            self.writes(("record=$(grep 'F' S)\n[[ ( -n x )]] # it's fine\n[[ \"$record\" =~ (x)]] || \"$record\" > 'F' ]]",
                       "rg F S; [[ ( -n x )]] && echo ok", "rg F S; [[ x =~ (a)]] && echo ok",
                       "rg F S; [[ ( a )]] # it's fine"), True)
             # with no store path and no future literal an unparseable command has nothing to deny: allowed
@@ -5045,14 +5045,14 @@ def _self_test():
             # a regression once caused a false deny: a word-initial `]]` glued to the closing
             # backtick of the backtick frame being scanned was not a close, so the conditional was still open at
             # the frame end and a read was unparseable; that backtick now closes it, as `)` does for `$(...)`
-            self.r14(("record=`grep 'F' S && [[ -s S ]]`", "record=`grep 'F' S && [[ -s S ]] `",
+            self.writes(("record=`grep 'F' S && [[ -s S ]]`", "record=`grep 'F' S && [[ -s S ]] `",
                       "record=`grep 'F' S && [[ -s S ]]\t`", "record=`grep 'F' S && [[ -s S ]]\n`",
                       "record=$(grep 'F' S && [[ -s S ]])", "record=$(grep 'F' S && [[ -s S ]] )",
                       "x=$(echo `rg F S && [[ -s S ]]`)", "r=`[[ -s S ]]`; rg F S"), False)
             self.assertEqual(_shell_tokens("r=`g && [[ -s x ]]`")[0],
                              [("w", "g"), ("s",), ("s",), ("w", "[["), ("w", "-s"), ("w", "x"), ("w", "]]"), ("s",)])
             # the glued-grouping backtick write still denies, and a write after the close is caught
-            self.r14(("result=`[[ ( -n x )]] && tee S <<< 'Last-heartbeat: F'`",
+            self.writes(("result=`[[ ( -n x )]] && tee S <<< 'Last-heartbeat: F'`",
                       "result=`[[ -n x ]]` && tee S <<< F", "result=`[[ -n x ]] && tee S <<< F`"), True)
             # genuinely unclosed conditionals stay unparseable: a glued close, a `]]` glued to a following word,
             # a top-level `]]` before an OPENING backtick (not a frame end), and a backtick that closes a
@@ -5079,7 +5079,7 @@ def _self_test():
 
         # -- writes bound to store targets; unreadable targets --
         def test_write_bound_to_store_target(self):
-            # item 3: a write-indicator word, a store path, and a future literal merely co-occurring denied
+            # earlier, a write-indicator word, a store path, and a future literal merely co-occurring denied
             # read-only searches and writes elsewhere; a Bash command is denied only when a write TARGETS the store
             S, F = f"{PROJ}/private/state.md", "2099-01-01T00:00Z"
             allowed = (f"rg {F} {S} > /dev/shm/hits.txt", f"rg {F} {S} | tee /dev/shm/hits.txt",
@@ -5105,7 +5105,7 @@ def _self_test():
             self.assertEqual(_write_targets("tee", ["-a", "--", "-x", "f"]), ["-x", "f"])
 
         def test_unreadable_target_fails_open(self):
-            # item 4: an unreadable target made the Edit path deny a literal the file already held; it fails OPEN
+            # earlier, an unreadable target made the Edit path deny a literal the file already held; it fails OPEN
             # now, except that a future literal the new content itself introduces still counts
             F = "2099-01-01T00:00Z"
             fp = self.store_file(f"Last-heartbeat: {F}\nStatus: ok\n")
@@ -5840,7 +5840,7 @@ def _self_test():
                                   stdin=subprocess.DEVNULL, env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"),
                                                                  "HOME": self.tmp, "LC_ALL": "C"})
 
-        def r31_store(self):
+        def fixture_store(self):
             store = os.path.join(self.tmp, "store")
             os.makedirs(store, exist_ok=True)
             with open(os.path.join(store, "state.md"), "w") as f:
@@ -5888,7 +5888,7 @@ def _self_test():
         def test_relative_targets_resolve_against_cwd_and_cd(self):
             # a relative Bash destination once bypassed store detection: `printf ... > store/state.md`
             # with the cwd holding store/, and `cd <store> && printf ... > state.md`, wrote the future heartbeat
-            store = self.r31_store()
+            store = self.fixture_store()
             F = "2099-01-01T00:00Z"
             denied = ((self.tmp, f"printf '%s\\n' 'heartbeat: {F}' > store/state.md"),
                       (self.tmp, f"cd {store} && printf '%s\\n' 'heartbeat: {F}' > state.md"),
@@ -5904,7 +5904,7 @@ def _self_test():
                       (self.tmp, f"cd {self.tmp}/nowhere; echo 'heartbeat: {F}' >> state.md # {store}"))
             for cwd, cmd in denied:
                 self.assertEqual(self.ev("Bash", cwd=cwd, command=cmd), [F], (cwd, cmd))
-            allowed = ((self.tmp, f"cd /dev/shm && echo 'heartbeat: {F}' > r31-not-a-store"),
+            allowed = ((self.tmp, f"cd /dev/shm && echo 'heartbeat: {F}' > not-a-store"),
                        (store, f"cd {self.tmp} && echo 'heartbeat: {F}' >> state.md"),
                        (self.tmp, f"echo 'heartbeat: {F}' >> storex/state.md"),
                        (self.tmp, f"echo 'heartbeat: {F}' >> state.md"),
@@ -5932,7 +5932,7 @@ def _self_test():
         def test_literal_shell_c_strings_are_inspected(self):
             # `bash -c "printf ... > <store file>"` was once allowed although real bash wrote the
             # future heartbeat; a statically known -c string is now analysed recursively with the same cwd
-            store = self.r31_store()
+            store = self.fixture_store()
             S, F = os.path.join(store, "state.md"), "2099-01-01T00:00Z"
             denied = (f"bash -c \"printf '%s\\n' 'heartbeat: {F}' > {S}\"", f"sh -c 'echo heartbeat: {F} >> {S}'",
                       f"dash -c 'echo heartbeat: {F} >> {S}'", f"zsh -c 'echo heartbeat: {F} >> {S}'",
@@ -5968,7 +5968,7 @@ def _self_test():
             # an unrelated literal once tainted every store write in the command: a search for the
             # literal, then an audit append, and a literal only in a comment, were denied although bash appended
             # only `checked`; a literal now counts only as DATA of a store write
-            store = self.r31_store()
+            store = self.fixture_store()
             S, F = os.path.join(store, "state.md"), "2099-01-01T00:00Z"
             allowed = (f"grep -F '{F}' {S}; echo checked >> {S}", f"echo checked >> {S} # {F}",
                        f"rg -c '{F}' {S} | wc -l; date -u >> {S}",
@@ -6012,7 +6012,7 @@ def _self_test():
             # written, and the docstring says so
             S, F = f"{PROJ}/private/state.md", "2099-01-01T00:00Z"
             for cmd in (f"if false; then printf '%s\\n' 'heartbeat: {F}' > {S}; fi",
-                        f"[ -e /dev/shm/r31-missing-sentinel ] && echo 'heartbeat: {F}' >> {S}"):
+                        f"[ -e /dev/shm/missing-sentinel ] && echo 'heartbeat: {F}' >> {S}"):
                 self.assertEqual(self.ev("Bash", command=cmd), [F], cmd)
             doc = " ".join(__doc__.split())
             self.assertIn("BY DESIGN (not modeled): a write in a branch that never runs is judged as written", doc)
@@ -6021,7 +6021,7 @@ def _self_test():
             # an earlier version modeled only perl's --help and --version as exiting, so `cp --version src
             # <store file>` was denied although cp exits at once; GNU cp, mv, sed, and ed and uutils install, tee,
             # and truncate exit on either wherever it stands before `--` (they permute)
-            store = self.r31_store()
+            store = self.fixture_store()
             S, F = os.path.join(store, "state.md"), "2099-01-01T00:00Z"
             allowed = (f"cp --version src {S} <<< {F}", f"cp src {S} --help <<< {F}", f"mv --help src {S} <<< {F}",
                        f"mv src {S} --vers <<< {F}", f"install --version src {S} <<< {F}",
@@ -6070,10 +6070,10 @@ def _self_test():
             # a substitution in an unquoted body still counts
             S, F = f"{PROJ}/private/state.md", "2099-01-01T00:00Z"
             for delim in ("E", "'E'"):
-                self.assertEqual(self.ev("Bash", command=f"cat <<{delim} > /dev/shm/r31x\nhb > {S} {F} $(date -u)\nE"),
+                self.assertEqual(self.ev("Bash", command=f"cat <<{delim} > /dev/shm/body\nhb > {S} {F} $(date -u)\nE"),
                                  [], delim)
-            self.assertEqual(self.ev("Bash", command=f"cat <<E > /dev/shm/r31x\n$(echo hb {F} >> {S})\nE"), [F])
-            self.assertEqual(self.ev("Bash", command=f"cat <<'E' > /dev/shm/r31x\n$(echo hb {F} >> {S})\nE"), [])
+            self.assertEqual(self.ev("Bash", command=f"cat <<E > /dev/shm/body\n$(echo hb {F} >> {S})\nE"), [F])
+            self.assertEqual(self.ev("Bash", command=f"cat <<'E' > /dev/shm/body\n$(echo hb {F} >> {S})\nE"), [])
             for c in ("a;b|c&&d||e > f >> g < h 2>&1 &", "x=1 y=2 cmd -o --long=v 'q' \"d\" $v `b`",
                       "if a; then b; fi; for i in 1; do :; done; [[ a > b ]] && (( c > d ))"):
                 self.assertEqual(_shell_tokens(c), _tokenize(c).streams)
@@ -6093,7 +6093,7 @@ def _self_test():
                 self.assertNotIn(s, doc)
 
         # -- directory budget and subshell scope, shell -c output and staging, search patterns, timing guards --
-        def r32_check_bash(self, cases, store, cwd=None):
+        def check_bash_cases(self, cases, store, cwd=None):
             """Real bash agrees with each (command, wants-denied) case: it writes F into the store exactly when the
             hook denies."""
             if not shutil.which("bash"):
@@ -6113,7 +6113,7 @@ def _self_test():
             # directory-set expansion, path resolution, and set union were once not charged to the
             # work budget, so 64 KiB of `(cd <dir>);` over 400 directories took about 200 ms in-process. They are
             # now charged BEFORE they are done, and a set above MAX_CWDS spends the budget (fail open)
-            store = self.r31_store()
+            store = self.fixture_store()
             F = "2099-01-01T00:00Z"
             cap, cost = globals().get("MAX_CWDS", 32), globals().get("CWD_COST", 6)  # an older build defines neither
             dirs = []
@@ -6161,7 +6161,7 @@ def _self_test():
             # a regression once let a subshell's cd leak into the parent, so
             # `(cd <store> && ls >/dev/null); printf ... > state.md` was denied although bash wrote only the cwd's
             # state.md; `( ... )` now scopes the directory set, and `{ ... }` does not, as in bash
-            store = self.r31_store()
+            store = self.fixture_store()
             F = "2099-01-01T00:00Z"
             w = f"printf '%s\\n' 'heartbeat: {F}' > state.md"
             allowed = (f"(cd {store} && ls >/dev/null); {w}", f"(cd {store}) && {w}", f"( (cd {store}); ls ); {w}",
@@ -6172,12 +6172,12 @@ def _self_test():
                 self.assertEqual(self.ev("Bash", cwd=self.tmp, command=cmd), [], cmd)
             for cmd in denied:
                 self.assertEqual(self.ev("Bash", cwd=self.tmp, command=cmd), [F], cmd)
-            self.r32_check_bash([(c, False) for c in allowed] + [(c, True) for c in denied], store)
+            self.check_bash_cases([(c, False) for c in allowed] + [(c, True) for c in denied], store)
 
         def test_shell_c_output_reaching_the_store_counts(self):
             # a literal shell -c string whose OUTPUT is redirected or piped into a store target was once
             # allowed (a missed write); a literal in the string is now also data of the wrapper, as for echo
-            store = self.r31_store()
+            store = self.fixture_store()
             S, F = os.path.join(store, "state.md"), "2099-01-01T00:00Z"
             denied = (f"bash -c 'echo heartbeat: {F}' >> {S}", f"sh -c 'echo heartbeat: {F}' | tee {S}",
                       f"bash -c \"printf 'hb {F}\\n'\" > {S}", f"bash -c 'echo hb {F}' | cat >> {S}",
@@ -6190,13 +6190,13 @@ def _self_test():
                 self.assertEqual(self.ev("Bash", cwd=self.tmp, command=cmd), [F], cmd)
             for cmd in allowed:
                 self.assertEqual(self.ev("Bash", cwd=self.tmp, command=cmd), [], cmd)
-            self.r32_check_bash([(c, True) for c in denied] + [(c, False) for c in allowed], store)
+            self.check_bash_cases([(c, True) for c in denied] + [(c, False) for c in allowed], store)
 
         def test_staging_through_shell_c(self):
             # a file staged by the outer command and copied by a literal shell -c string
             # (`printf ... > stage; bash -c 'cp stage <store file>'`) was once allowed; the string's store write now
             # exposes the words it names, and its own writes, to the enclosing staging walk
-            store = self.r31_store()
+            store = self.fixture_store()
             S, F = os.path.join(store, "state.md"), "2099-01-01T00:00Z"
             denied = (f"printf '%s\\n' 'heartbeat: {F}' > stage; bash -c 'cp stage {S}'",
                       f"echo 'hb {F}' > stage; sh -c 'cat stage >> {S}'",
@@ -6208,14 +6208,14 @@ def _self_test():
                 self.assertEqual(self.ev("Bash", cwd=self.tmp, command=cmd), [F], cmd)
             for cmd in allowed:
                 self.assertEqual(self.ev("Bash", cwd=self.tmp, command=cmd), [], cmd)
-            self.r32_check_bash([(c, True) for c in denied] + [(c, False) for c in allowed], store)
+            self.check_bash_cases([(c, True) for c in denied] + [(c, False) for c in allowed], store)
 
         def test_matching_search_pattern_counts(self):
             # an earlier version exempted every grep/rg pattern in a search-only substitution, "a search
             # prints file text or a count, never its pattern", but a MATCHING search prints file text holding its
             # pattern (with -o, exactly it); only a pipeline ending in wc or a counting/quiet/file-list search is
             # exempt now
-            store = self.r31_store()
+            store = self.fixture_store()
             S, F = os.path.join(store, "state.md"), "2099-01-01T00:00Z"
             hits = os.path.join(self.tmp, "hits.log")
             with open(hits, "w") as f:
@@ -6235,7 +6235,7 @@ def _self_test():
             self.assertEqual(self.ev("Bash", cwd=self.tmp, command=allowed[5]), [F])
             if not shutil.which("rg"):
                 denied, allowed = denied[:2] + denied[3:], allowed[:3] + allowed[4:]
-            self.r32_check_bash([(c, True) for c in denied] + [(c, False) for c in allowed], store)
+            self.check_bash_cases([(c, True) for c in denied] + [(c, False) for c in allowed], store)
             doc = " ".join(__doc__.split())
             self.assertIn("A MATCHING search that prints lines prints file text holding its pattern", doc)
             self.assertNotIn("a search prints file text or a count, never its pattern", doc)
@@ -6328,7 +6328,7 @@ def _self_test():
             # text, work of wrappers x pipeline length the budget never saw: 64 KiB of 450 piped `sh -c`
             # wrappers and 1,050 `:` took about 107 ms in-process (14.5 ms before that regression) with 1,794
             # budget steps left. Each pipeline's aggregates are now computed once, charged before the pass
-            store = self.r31_store()
+            store = self.fixture_store()
             F = "2099-01-01T00:00Z"
             tail = f"; echo checked > {store}/state.md"
 

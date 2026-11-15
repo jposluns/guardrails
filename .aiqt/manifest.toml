@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.0.5"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "0e06091007b0207044dc602f0775bbf10995c2b1b6185866f5cf5fb8bc86cf9e"
+tree-sha256 = "51526bb95b809a1085540efca4ae78d8f6ea9e52f8fc51b36f6c950a3e7dde7e"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -2318,12 +2318,12 @@ sha256 = "f77b74f20752686a7ad2935f27787232b35ad872210c6ef9e6c1226eee73b9fc"
 [[sources]]
 path = ".preview/README.md"
 bytes = 72555
-sha256 = "0264dd551b69cb55215ac89148932266fe31ccccb9ec006e794c750a30a98105"
+sha256 = "83904b3cb710d1e61d64817a8ff01472300a437e6da062e6eee74e0718cb78e6"
 
 [[sources]]
 path = ".preview/SHA256SUMS"
 bytes = 984
-sha256 = "3281a3b4f5528e72387ba1caefd539f41f8f6abe8ed62e09f4fea045da6579bc"
+sha256 = "6c9c1916ed2d09658410df68b3b96f52e794d3e86c9beeca34258be26f1410dd"
 
 [[sources]]
 path = ".preview/char-policy-write.py"
@@ -2342,13 +2342,13 @@ sha256 = "5f8ffc633993ebb9b84b1c858b5d03fa94511c30cc1624f6c2813a0e3268a9fb"
 
 [[sources]]
 path = ".preview/future-stamp-write.py"
-bytes = 424193
-sha256 = "6d9a655c14307388d1137bfeae980ce8b51d857b6c435d8829222665ffbe2c8c"
+bytes = 424358
+sha256 = "be125990e7ba4505821be61d832bcac9e7280cca82488f1690c99cce6bda576d"
 
 [[sources]]
 path = ".preview/pattern-self-match.py"
 bytes = 188744
-sha256 = "880cbd11151b03bee99f7f431ab5d30f268138cbe02d9738ea443a2a65dc7504"
+sha256 = "84bcb120cc1d30df845e4c2f77d7033a1bb9af473b9a0ffd336a622ae67fe6cd"
 
 [[sources]]
 path = ".preview/record-remove-check.py"
@@ -2362,8 +2362,8 @@ sha256 = "319f4de2aff71cca9d1cf33ae990c264982141ca38ec44e939780a0961996f66"
 
 [[sources]]
 path = ".preview/stamp-truth-stop.py"
-bytes = 530148
-sha256 = "831836512ecd0e464336c7b664014143a7687b0978a14c25244c39d7dd42e188"
+bytes = 529801
+sha256 = "fcfdab3d99fe6e0868f27d10fad7fa691c5a5f58ad1f2242e8721e1df4f5312b"
 
 [[sources]]
 path = ".preview/unbounded-wait.py"
@@ -4247,8 +4247,8 @@ sha256 = "57fe0345d8e1959e9ff8a5f22ae5271577d3485ffd8a116e68d3f2e14c2de010"
 
 [[sources]]
 path = "tools/check_internal_names.py"
-bytes = 262483
-sha256 = "dc91ff3182a7c8f37198729f465ffb2c9ab456b254e4582c35cd370bbd498e7d"
+bytes = 272217
+sha256 = "a6a9b9965090b928f8e41c7ffaae04ff814ebb6c1dc472916c3e8a665cc19e5c"
 
 [[sources]]
 path = "tools/check_leaks.py"
@@ -4687,8 +4687,8 @@ sha256 = "85af66ecb238a3221b6e0b5834dbbc891a37487b1fa6a8d113e8ee6ce0f23a0d"
 
 [[sources]]
 path = "tools/selftest_checks.toml"
-bytes = 242464
-sha256 = "263a6c3edcbf28fceb1c4ce0f740a9e76e81ca470a63b2ee0237c25a0e83e86a"
+bytes = 243313
+sha256 = "f257aaff50633eaa3e550e014192c1e6f152049058987e07ff34598e9bcd1e25"
 
 [[sources]]
 path = "tools/selftest_ci_status.py"
