@@ -41,7 +41,7 @@ heading = "Sign-off backed by evidence you can check"
 
 [[body]]
 component = "prose"
-html = '''<p>The standard asks the assistant to trace claims to sources, say what a guardrail caught, and log overrides. With the 1.0.6 chat Skill, that record lives in the conversation itself: the stated sources, the named catches, and the logged overrides you can scroll back to. Repository-level records are part of the 1.2.0 design, in development. Reporting across a team is planned, as <a href="#planned">performance metrics</a>.</p>'''
+html = '''<p>The standard asks the assistant to trace claims to sources, say what a guardrail caught, and log overrides. With the chat Skill (1.0.6, in the AIQT 1.0.5 release), that record lives in the conversation itself: the stated sources, the named catches, and the logged overrides you can scroll back to. Repository-level records are part of the 1.2.0 design, in development. Reporting across a team is planned, as <a href="#planned">performance metrics</a>.</p>'''
 
 [[body]]
 component = "subhead"
@@ -89,7 +89,7 @@ html = '''<p>Today's team path is a human-led pilot: a small group, the assistan
 component = "steps"
 items = [
   '''<b>Choose a small group</b> and the assistants they already use (Claude, ChatGPT, or Copilot).''',
-  '''<b>Each person installs AIQT 1.0.5</b> and confirms that it is on.''',
+  '''<b>Each person installs the AIQT chat Skill</b> (1.0.6, in the AIQT 1.0.5 release) and confirms that it is on.''',
   '''<b>Run two or three weeks of normal work</b>, noting a few observations: unsupported factual claims, completion claims without a check, missed requirements, clarification questions asked, overrides, rework, and reviewer confidence.''',
   '''<b>Compare</b> against the period before, on the same observations.''',
   '''<b>Decide</b>: keep it, extend it, or remove it.''',
