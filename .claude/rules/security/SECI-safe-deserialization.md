@@ -10,7 +10,7 @@ map-owasp-web-broad: [A08]
 map-owasp-asi-broad: [ASI05]
 map-owasp-cheatsheet-tight: [deserialization]
 map-csa-ccm-broad: [AIS-04]
-map-csa-aicm-broad: [AIS-09, MDS-02, MDS-13]
+map-csa-aicm-broad: [AIS-09, MDS-13]
 ---
 
 # Deserialize untrusted data only as data

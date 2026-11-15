@@ -18,7 +18,7 @@ map-owasp-asi-tight: [ASI08]
 map-owasp-api-tight: [API4]
 map-owasp-cheatsheet-broad: [denial-of-service]
 map-csa-ccm-broad: [I&S-02]
-map-csa-aicm-broad: [AIS-13, MDS-11]
+map-csa-aicm-broad: [MDS-11]
 ---
 
 # Bounded consumption and safe failure

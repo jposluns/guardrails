@@ -87,7 +87,7 @@ RECORDED_REL = "tools/sized-instructions-source.sha256"       # the blessed sour
 # non-numeric 4th segment (1.2.3.foo), a prerelease or build suffix (1.2.3-alpha, 1.2.3+build), and a
 # trailing alphanumeric (1.2.3rc1). A malformed version matches nothing here and is caught as a fail-closed
 # finding by the VERSION_LINE_RE sweep below, never a silent pass.
-VERSION_RE = re.compile(r"^Version[ \t]+(\d+\.\d+\.\d+)(?=[ \t]|\r?$|\.(?:[ \t]|\r?$))", re.M)
+VERSION_RE = re.compile(r"^Version[ \t]+(\d+\.\d+\.\d+)(?=[ \t]|\r?$|\.(?:[ \t]|\r?$))", re.M | re.ASCII)
 # Any line that opens a version declaration ("Version" then horizontal whitespace). Every such line MUST
 # parse cleanly through VERSION_RE; one that does not is a malformed declaration (e.g. a "Version 1.2.3.4"
 # line sitting beside a valid "Version 1.0.3." line), which VERSION_RE alone would silently skip while the

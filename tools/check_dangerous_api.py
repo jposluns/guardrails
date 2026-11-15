@@ -7,7 +7,8 @@ Exit: 0 clean within scope; 1 finding; 2 cannot-evaluate.
 
 Rule text: "parsing cannot become execution" (secdsz), "certificate and hostname validation
 stay on" (seccry), and the operating-system command and code injection classes prevented by
-construction (secinp). Each is covered in PART only; the residuals below name what is not. The
+construction and identifier validators that admit only ASCII digits (secinp). Each is covered
+in PART only; the residuals below name what is not. The
 scan parses every *.py file under SCAN_ROOTS and every plugin/*/hooks/scripts tree with ast,
 never importing or running the file, and reports:
 
@@ -58,9 +59,84 @@ never importing or running the file, and reports:
                spread hides; and any of these referenced without a call (an alias);
   code         any reference to eval or exec (builtins included),
                types.FunctionType, and the runpy, timeit, cProfile, profile, pdb and code
-               runners, and any call of, or reference to, a method named exec_module or
+               runners, any call of, or reference to, a method named exec_module or
                load_module (an importlib loader running a module's code, whatever object it is
-               called on).
+               called on), a call of importlib.import_module, importlib.__import__ or the
+               builtin __import__ whose module is anything but a literal name of a
+               standard-library module (by its top-level name) or of a module file the scanned
+               tree holds (by its stem): importing a freshly written source file runs that
+               file's code, so a computed name, a name a * spread hides, an absent name and a
+               literal the scan cannot place are each counted (fail closed), while a literal
+               import of a repository or standard-library module is not, and an importer
+               reached through a literal getattr in the call position (getattr(importlib,
+               "import_module")(n), getattr(builtins, "__import__")(n)) is judged as the
+               direct spelling is; a __import__ spelling (the builtin, builtins.__import__ or
+               importlib.__import__) whose fromlist is given and is not a literal list or
+               tuple display of string constants, whose level is given and is not the literal
+               int 0, or whose fromlist or level a * or an unreadable ** spread may hide (a
+               fromlist can import a submodule, and a level other than 0 a relative module,
+               that the literal name does not place); every call of pkgutil.resolve_name,
+               pydoc.locate or importlib.reload, whatever the argument (pkgutil.resolve_name
+               imports the module a dotted or colon-separated name names, pydoc.locate the
+               module a dotted name names, and importlib.reload runs a module's code again);
+               and a sys.path.insert
+               or sys.path.append whose path is not a string literal, in a scope that also
+               calls one of those importers (it can make a directory the same code wrote
+               importable there, or shadow a known module name);
+  regex        a str regular expression whose pattern holds \\d or \\w read as Unicode (without
+               re.ASCII they match every Unicode digit and word character, so an id validator
+               admits Arabic-Indic or fullwidth digits) and is anchored (starts with ^ or \\A and
+               ends with $, \\Z or \\z, after the leading inline flag groups and comment groups
+               (?#...), in any order and, when verbose, past whitespace and # comments between
+               them, with any comment group skipped, inside any group that holds the whole pattern
+               ((...), (?:...), (?P<name>...), an atomic (?>...) or a scoped flag group such as
+               (?i:...)), inside such a group that opens or closes the pattern ((^\\d+)$) where
+               neither holds an alternation of its own (a group that opens it is entered even when
+               a quantifier follows it, so (^\\d+)*$ reads as anchored, which errs toward
+               reporting), and, when verbose, past whitespace and # comments outside a character
+               class) or is matched from its start (re.match, re.fullmatch, or the match or
+               fullmatch method of a compiled pattern) or starts with ^ or \\A and is searched
+               (re.search, or the search method of a compiled pattern). A \\d or \\w is read as
+               ASCII, as Python reads it, under re.ASCII or re.A in the flags (a | of flags, or a
+               name every binding of which is one), a leading inline (?a), or a scoped (?a:...)
+               group around it, unless a scoped (?u:...) group nearer it reads it as Unicode again.
+               Under MULTILINE (re.M or re.MULTILINE in the flags, read as re.ASCII is, an inline
+               (?m), or a scoped (?m:...) group around it, unless a scoped (?-m:...) turns it off)
+               ^ and $ match at every line, so they anchor nothing: a pattern anchored at both ends
+               only once they are read as anchors is a line scan, not a whole-input validator, and
+               is judged at each use as an unanchored one is (not reported with search, findall,
+               finditer, sub, subn or split; reported when matched from its start), and a compiled
+               one is reported where it is compiled unless every use of it in its own file scans
+               lines: a search, findall, finditer, sub, subn or split method of it (called or
+               referenced), or its .pattern given (alone, or in a + or conditional expression) as
+               the resolved pattern of an re function, where that text is judged. A store of it to
+               a name or attribute (a walrus included) is followed to every read the scan resolves
+               to it, to every attribute read named like it (self.P, cls.P or Lines.P for a class
+               attribute P), and to every name read that may hold the stored value (p = self.P,
+               then p.fullmatch); a getattr in its file with a name it is stored to, with a name
+               that is not a literal, or read other than as the function a call calls (g =
+               getattr, getattr.__call__, functools.partial(getattr, x), a conditional expression
+               of it), one called with the literal name "getattr" (getattr(builtins, "getattr")
+               returns getattr itself), and any other use (match or fullmatch, an argument, a
+               return, a container, any other attribute) report it there. \\A, \\Z and \\z anchor
+               the whole input under MULTILINE too.
+               A compiled pattern is an re.compile call, the value of a walrus, either branch of a
+               conditional expression, any operand of a boolean expression (cache or
+               re.compile(...)), or a name every binding of which is one of these or a copy of
+               another such name; its method is judged where it is called, where it is referenced
+               uncalled (a bound method held for later, alone or in functools.partial), and as
+               re.Pattern.match, fullmatch or search (typing.Pattern is the same class) given the
+               pattern as its first argument. An anchored pattern is reported where it is compiled
+               or called, whatever function uses it (findall, finditer, sub, subn and split
+               included: anchored at both ends, it matches the whole input or nothing); an
+               unanchored compiled one, at each use.
+               Patterns resolve as literals do: a string literal, a + of resolved parts, a
+               conditional expression whose branches both resolve, a name every binding of which,
+               in every scope Python may read it from, is an assignment of one, or the .pattern of
+               a compiled pattern, which is the text of every re.compile it may be without that
+               compile's flags (re.fullmatch(LINE.pattern, text) is judged without LINE's re.M).
+               Patterns not anchored at their start used with search, and patterns not anchored at
+               both ends used with findall, finditer, sub, subn or split, are out of scope.
 
 A method judged by its name alone (starttls, stls, subprocess_shell, exec_module, load_module)
 is called as x.name(...) or getattr(x, "name")(...) with a literal name; x.name or that getattr
@@ -70,7 +146,11 @@ Names resolve PER SCOPE as Python binds them: a binding in a function is local t
 declared global or nonlocal), a nested function sees its enclosing functions but not a class
 body, and a module, class or comprehension scope that binds a name may still see the outer
 binding, so every binding it could have is a candidate and the reference is a finding if any
-candidate is a sink. An unbound name falls back to the builtin of that name, where one exists.
+candidate is a sink. An unbound name falls back to the builtin of that name, where one exists,
+and a __builtins__ that may be unbound here to the builtins module (__builtins__.getattr is
+builtins.getattr), so a module-level, class-body or global-declared binding named __builtins__
+is still read as the builtins module (a conservative false report); only a function-local
+binding of it is not.
 A sink module reached as an attribute of another module names that module (shutil.os.system
 is os.system, and from logging.handlers import pickle binds pickle), except an attribute named
 like the module that holds it (timeit.timeit is a function). getattr(x, "name") is read as
@@ -119,14 +199,15 @@ included; only the vendored opf/tools/_vendor tree is excluded.
 
 Out of scope: this lint guards against ACCIDENTAL use of a dangerous API in the repository's
 own code written the ordinary way, so code deliberately built to hide a sink is not claimed:
-a string-assembled or string-literal module name (importlib or __import__ with a computed
-name, sys.modules[...]; a literal import of a sink module is a finding, but the module it
-returns is not followed), getattr with a computed name or a sink module followed by an
+a string-assembled or string-literal module name is not followed to a SINK (sys.modules[...];
+a literal import of a sink module is a finding, and a computed or unknown module name is a
+code site of its own as above, but the module an importer returns is never followed to the
+sinks it holds), getattr with a computed name or a sink module followed by an
 adjacent string literal (f(os, "x") and (pickle, "x")[0] read the module as an attribute base,
 not an escape, and getattr(shutil, "os") is not read as the os module), __builtins__ aliasing
-(m = __builtins__, __builtins__.exec, __builtins__[...]), a rewritten module attribute
-(ssl.PROTOCOL_TLS_CLIENT = 2 still proves the protocol) and dunder access (__getattribute__,
-__setattr__, object.__setattr__, __dict__).
+(m = __builtins__, __builtins__[...]; __builtins__.exec is builtins.exec), a rewritten module
+attribute (ssl.PROTOCOL_TLS_CLIENT = 2 still proves the protocol) and dunder access
+(__getattribute__, __setattr__, object.__setattr__, __dict__).
 
 Residuals (not seen): dynamic dispatch (getattr with a non-literal name on an object that is
 not a sink module, setattr with a non-literal name, globals() or vars() lookups); a numpy.load
@@ -135,7 +216,43 @@ not an import binding (a parameter, self, a call result or a subscript, so self.
 sys.modules["os"].system are not resolved), and a sink module re-exported under a name other
 than its own (a module that binds pickle as _p, reached as mod._p.loads); a sink function (not
 module) obtained from such an object or from a call; a method run on a profiler, debugger or
-trace object (cProfile.Profile().run, bdb.Bdb.run); a shell launched through an argv list
+trace object (cProfile.Profile().run, bdb.Bdb.run); for the import check: an importer held
+uncalled or reached through an object the scan cannot name (r = importlib.import_module, a
+sys.modules read), sys.path made importable from other than by an insert or append call
+resolved from an import binding (extend, sys.path += [...], a slice or whole-list assignment,
+a copy such as p = sys.path then p.insert, site.addsitedir, sys.meta_path or sys.path_hooks,
+the PYTHONPATH environment), a
+sys.path.insert or append whose path is a string literal, and one in a scope with no importer
+call (the mutation runs nothing by itself, though any import evaluated after it, a plain
+import statement in the same scope included, can then load from the mutated path; pairing is
+by the dotted name of the enclosing def, async def or class, not by the true Python scope: a
+lambda or comprehension shares the name of the function, class or module around it, and two
+scopes with one dotted name, such as a function defined twice, one name in both branches of an
+if, or a class and a function of one name, are paired, which errs toward reporting; a mutation
+and an importer whose enclosing dotted names differ are not paired: an insert in one function
+and the importer in a function of another name, a mutation whose importer is in a nested
+function, a mutation in a nested function whose importer is in the function around it, a
+module-level mutation whose importer is inside a top-level def, a class-body mutation whose
+importer is in a method of that class, and a mutation inside a def whose importer is at module
+level); a plain
+import statement after a sys.path insert or append in the same scope (not counted because it
+matches about 160 live scopes, most of them a tool importing its own directory, so counting
+it would over-fire); a literal module name for a file the code itself writes under a name the
+tree or the standard library already holds (the literal is read as known), a dotted name
+whose first part is a standard-library name included; importlib.util.find_spec of a dotted
+name (it imports the parent packages of that name); any API other than the importers named
+above (importlib.import_module, the __import__ spellings, pkgutil.resolve_name, pydoc.locate
+and importlib.reload) that imports a module by name or from a path is not counted either
+(among those reviewed: pkgutil.walk_packages, pkgutil.get_data, importlib.resources.files, a
+string target of mock.patch, and unittest's TestLoader loadTestsFromName and discover); an
+importer reached
+through an alias of getattr (g = getattr, then g(importlib, "import_module")(n)) is not
+followed, since only a getattr called directly in the call position is; while a
+repository module is known only by the stem of a scanned *.py file, so a literal dotted
+package name from the repository, or a repository module outside the scanned roots, is
+counted (fail closed, a conservative false report), and so is a __import__ whose fromlist is
+the literal None (fromlist=None or a fourth positional None, which imports no submodule); a
+shell launched through an argv list
 naming a shell (["sh", "-c", text]) or a Python interpreter given code (sys.executable with -c
 or -m), an executable= override, or os.exec*, os.spawn* or pty.spawn of a shell; a verify,
 verify_ssl, ssl, check_hostname, server_hostname, verify_mode, cert_reqs or allow_pickle value
@@ -156,7 +273,43 @@ literalness is judged, not data flow, so a literal command or a non-false verify
 attacker-shaped; and code outside the scanned roots (the vendored opf/tools/_vendor tree,
 .github, .preview, site, and Python embedded in a non-.py file). The class and comprehension
 scopes only widen the candidate set (they fall through to the outer scope), so their own
-bindings never hide a sink.
+bindings never hide a sink. For regex: a pattern the scan cannot resolve (a parameter, an
+import, a call, an f-string, % or format, a name or .pattern read again while it is being
+resolved, or more than 64 candidate texts) is not judged, and so is a pattern held in data (the
+standards manifests' id-patterns, which tools/_standards.py compiles with re.ASCII by hand, are
+the one data-built family fixed; any other is not seen); a .pattern is read only through the
+re.compile calls its receiver may be (a binding of that name to any other value adds no text);
+an unanchored compiled pattern reached through an attribute (self.PAT.match, mod.PAT.fullmatch;
+an anchored one, or a line scan with such a use in its own file, is reported where it is
+compiled), an import, a parameter, a call or a container, or a pattern passed to a non-re
+matcher; an re function itself held for later (f = re.fullmatch, functools.partial(re.fullmatch,
+pattern), re.Pattern.fullmatch or typing.Pattern.fullmatch referenced uncalled) and a method
+named through getattr but not called (getattr(PAT, "fullmatch")); flags held in anything but a
+| of flags or a name bound only to one are read as neither ASCII nor MULTILINE; \\d and \\w
+detectors with no start anchor used with search, and any not anchored at both ends used with
+findall, finditer, sub, subn or split; a line scan (anchored only by ^ or $ under MULTILINE)
+used only to scan lines, so a line validator that admits non-ASCII digits in each line is not
+seen, and a line scan matched from its start only in another module (mod.LINE.fullmatch) or
+only through a read that is not a name, an attribute or a getattr (vars(self)["P"],
+operator.attrgetter("P"), self.__getattribute__("P"), inspect.getattr_static(self, "P")); a
+getattr reached through a subscript (builtins.__dict__['getattr'],
+sys.modules['builtins'].getattr) or other deliberate indirection to the builtins module is not
+followed: the lint guards ordinary code, not code written to evade it; a comprehension's own
+target named like a name a line scan is stored to is read through the outer binding of that
+name, so its use is followed (a false report), and a module-level function named getattr is
+read as the builtin (a conservative false report), as is a module-level import, assignment,
+loop, except or with target, class-body binding, comprehension target or annotation named
+getattr; a module-level, class-body or global-declared binding named __builtins__ (an
+assignment, or an import as __builtins__) is read as the builtins module (a conservative false
+report); a lookaround, conditional or backreference group at either end is not entered
+(^\\d+(?=$) is not read as anchored), nor is a group that closes the pattern with a quantifier
+after it (^(\\d+$)? is not read as anchored); a top-level alternation is read by its
+first and last tokens only, and neither it nor a group holding its own alternation is entered
+at an end (^a|b$ reads as anchored; (^a)|b$, ^a(?:b|$) and a|^\\d+$ do not); \\D, \\W, \\s, \\S
+and \\b, which change meaning with re.ASCII too, are not judged, so the \\b detector false
+negatives in tools/check_secrets.py and tools/check_leaks.py are not addressed here (a site
+given re.ASCII for its \\d or \\w also narrows its \\s, which then misses U+001C to U+001F); and
+the regex module and bytes patterns (where \\d and \\w are ASCII already).
 """
 import sys
 
@@ -177,6 +330,7 @@ import ast
 import builtins
 import io
 import os
+import re
 import shutil
 import stat
 import tempfile
@@ -193,6 +347,7 @@ KIND_RULES = {
     "tls": ("seccry",),
     "shell": ("secinp",),
     "code": ("secinp",),
+    "regex": ("secinp",),
 }
 
 _PICKLE_MODULES = ("pickle", "_pickle", "cPickle", "dill", "cloudpickle")
@@ -257,6 +412,29 @@ LOADER_METHODS = frozenset({"exec_module", "load_module"})
 METHOD_SINKS = {"starttls": ("tls", "tls-context"), "stls": ("tls", "tls-context"),
                 "subprocess_shell": ("shell", "shell-always"),
                 "exec_module": ("code", "code-loader"), "load_module": ("code", "code-loader")}
+# The re functions that take a str pattern first, with the positional index of their flags.
+# Without re.ASCII, \d and \w in a str pattern match every Unicode digit and word character, so
+# a validator that matches a whole identifier admits Arabic-Indic or fullwidth digits.
+REGEX_FUNCS = {"re.compile": 1, "re.match": 2, "re.fullmatch": 2, "re.search": 2,
+               "re.findall": 2, "re.finditer": 2, "re.sub": 4, "re.subn": 4, "re.split": 3}
+# The functions that match from the start of the text, and the methods of a compiled pattern
+# judged at their use (match and fullmatch match from the start; search, of a pattern anchored
+# at its start, does too).
+REGEX_WHOLE = frozenset({"re.match", "re.fullmatch"})
+REGEX_METHODS = frozenset({"match", "fullmatch", "search"})
+# The methods of a compiled pattern that scan the text for it (each line, under MULTILINE), so a
+# line scan used only through them is used as one.
+REGEX_LINE_METHODS = frozenset({"search", "findall", "finditer", "sub", "subn", "split"})
+REGEX_ASCII = frozenset({"re.ASCII", "re.A", "re.RegexFlag.ASCII", "re.RegexFlag.A"})
+REGEX_VERBOSE = frozenset({"re.VERBOSE", "re.X", "re.RegexFlag.VERBOSE", "re.RegexFlag.X"})
+REGEX_MULTILINE = frozenset({"re.MULTILINE", "re.M", "re.RegexFlag.MULTILINE", "re.RegexFlag.M"})
+# The class whose match, fullmatch and search take the compiled pattern as their first argument
+# (typing.Pattern is the same class).
+REGEX_PATTERN_CLASSES = frozenset({"re.Pattern", "typing.Pattern"})
+# Bounds on resolving a pattern: name hops, and the texts a pattern may hold (each binding of
+# each name it is built from is one candidate); past either, the pattern is unresolved.
+_REGEX_DEPTH = 32
+_REGEX_TEXTS = 64
 # The callables whose call site is judged (shell switch, command, Loader, protocol): any other
 # reference to them is an alias the call-site check cannot follow, so it is a finding.
 CALL_JUDGED = (YAML_LOAD | SUBPROCESS_FUNCS | ALWAYS_SHELL | {SSL_CONTEXT, SMTP_HANDLER}
@@ -290,26 +468,57 @@ STAR_MODULES = _sink_modules(SINK_INVENTORY)
 # An unbound name falls back to the builtin of that name only where one exists (any other
 # unbound name is a NameError when run, so it names nothing).
 BUILTIN_NAMES = frozenset(builtins.__dict__)
+# A __builtins__ that may be unbound (any binding but a function-local one leaves it so) falls
+# back to the builtins module (what it is in __main__), so __builtins__.getattr is
+# builtins.getattr.
+_BUILTINS_MODULE = {"__builtins__": "builtins"}
 _GETATTR = frozenset({"getattr", "builtins.getattr"})
+# A getattr called with one of these literal names returns getattr itself (getattr(builtins,
+# "getattr")), so it is held like g = getattr and may be given any name.
+_GETATTR_NAMES = frozenset({"getattr"})
 _HASATTR = frozenset({"hasattr", "builtins.hasattr"})
 _DELATTR = frozenset({"delattr", "builtins.delattr"})
 _SETATTR = frozenset({"setattr", "builtins.setattr"})
 # A mock patch of one literal attribute names that attribute (patch.object(os, "kill") is os.kill)
 # and leaves the module itself in place, so its target is an attribute base like getattr's.
 _PATCH_OBJECT = frozenset({"unittest.mock.patch.object", "mock.patch.object"})
-_IMPORTERS = frozenset({"importlib.import_module", "__import__", "builtins.__import__"})
+# The __import__ spellings, whose fromlist and level (a submodule or relative import the
+# literal name does not place) are judged besides the name; import_module takes neither.
+_IMPORT_DUNDERS = frozenset({"importlib.__import__", "__import__", "builtins.__import__"})
+_IMPORTERS = _IMPORT_DUNDERS | frozenset({"importlib.import_module"})
+# Importers judged by the call alone: pkgutil.resolve_name imports the module a dotted or
+# colon-separated name names, pydoc.locate the module a dotted name names, and importlib.reload
+# runs a module's code again, so every call of any of them is a code site (fail closed,
+# whatever the argument).
+_REIMPORTERS = frozenset({"pkgutil.resolve_name", "pydoc.locate", "importlib.reload"})
+# Every importer whose call makes its scope one a non-literal sys.path mutation pairs with:
+# a resolve_name, locate or reload call after the mutation imports from (or reloads over) the
+# mutated path just as import_module or __import__ does.
+_SCOPE_IMPORTERS = _IMPORTERS | _REIMPORTERS
+# The sys.path mutators that can make a directory the code wrote importable (or shadow a
+# known module name), with the positional index of the path each takes.
+_SYS_PATH_MUTATORS = {"sys.path.insert": 1, "sys.path.append": 0}
+# The module names an importer call may name without being a code site: the standard library
+# (judged by the top-level name, so a stdlib submodule passes too); the scanned tree's own
+# module files are the other known set, built per tree in scan_tree.
+_STDLIB_MODULES = frozenset(sys.stdlib_module_names)
 
 # Every detector the scan runs; the self-test disables each in turn to prove its vectors
 # depend on it. "alias" is import-alias resolution, "scope" its per-scope binding (off, it
 # falls back to one file-global, last-wins map) and "chain" the reading of a sink module
-# reached as an attribute of another module (shutil.os.system is os.system); the rest are
-# the sink checks and the fail-closed and allowlist legs of the tree scan.
+# reached as an attribute of another module (shutil.os.system is os.system); "regex-lines" is
+# the report, where it is compiled, of a MULTILINE line scan used other than as one,
+# "regex-stores" the following of a line scan stored to a name to every read of that name (and
+# the reading of a getattr as a use it cannot follow), and "regex-pattern" the reading of a
+# compiled pattern's .pattern as its text; the rest are the sink checks and the fail-closed and
+# allowlist legs of the tree scan.
 CHECKS = ("alias", "scope", "chain", "star-import", "module-escape", "dsz-ref", "dsz-yaml",
           "dsz-numpy", "tls-verify", "tls-ref", "tls-hostname", "tls-verify-mode", "tls-context",
-          "shell-subprocess", "shell-always", "code-ref", "code-loader",
-          "fail-encoding", "fail-read", "fail-parse", "fail-nonregular", "fail-symlink",
-          "fail-walk", "fail-root", "allowlist-stale", "allowlist-shape", "site-column",
-          "site-end")
+          "shell-subprocess", "shell-always", "code-ref", "code-loader", "code-import",
+          "code-syspath", "regex-ascii",
+          "regex-lines", "regex-stores", "regex-pattern", "fail-encoding", "fail-read",
+          "fail-parse", "fail-nonregular", "fail-symlink", "fail-walk", "fail-root",
+          "allowlist-stale", "allowlist-shape", "site-column", "site-end")
 
 # The reviewed allowlist: (path, enclosing qualname, kind, exact count, reason). Every entry
 # names a current legitimate site and why it is safe; a count that no longer matches the
@@ -319,13 +528,48 @@ _MUTANT = ("self-test mutant: compiles this repository's own source text with on
 _SAVED = ("self-test stub: keeps the real subprocess.run or Popen to delegate to or restore after"
           " patching; the wrapper forwards its caller's own arguments, and no call in this file"
           " turns shell on")
+_WORD = ("Unicode on purpose: \\w here is a word-character test over prose or command text, where a"
+         " letter of any script is part of the word; the pattern holds no \\d")
+_AI_WORD = (_WORD + " (_WORD_CHAR_RE tests the character before a value as AI_IDENTITY_RE's own"
+            " Unicode \\b does, so the bounded scan finds what the plain scan finds)")
+_GIT_WORD = (_WORD + " (_GIT_WORD_RE reads git as a word with the same Unicode \\w test as its"
+             " search twin _CMTIDN_GIT_WORD_RE; a letter of any script beside it makes another word)")
+_LIST_DIGIT = ("Unicode on purpose: the list-marker \\d is read as a renderer that takes a non-ASCII"
+               " digit for a list number reads it, and the wider read is the fail-closed side")
 ALLOWLIST = (
+    ("tools/_entry_restore_selftest.py", "_import_tool", "code", 2,
+     "self-test import harness: appends the given tool file's own directory to the module path"
+     " and imports it by its validated NAME.py stem (an identifier, not a keyword, not already"
+     " loaded); its callers pass a repository tool's own file or a synthetic tool a self-test"
+     " writes from its own fixed literal source into its own fixture directory (the tools"
+     " tools/selftest_git_fixture_env_core.py writes), so no outside data names or supplies"
+     " the module; the module-path comparison after the import detects a shadowing module only"
+     " after the loaded module's code has run"),
+    ("opf/tools/_opf_emit.py", "_fixture_preload", "code", 1,
+     "fixture preload: imports each name of the fixed literal _FIXTURE_GUARDIAN_MODULES tuple"
+     " of standard-library modules before any fork, so every guardian-side import is a"
+     " lock-free sys.modules hit; the loop variable is what the scan cannot see; no external"
+     " input"),
+    ("opf/tools/opf.py", "_verb_status_self_test.imports_helper", "code", 1,
+     "self-test probe: imports one fixed literal module name that exists nowhere on purpose,"
+     " so the probe proves the dispatch import gate fails with ModuleNotFoundError before"
+     " anything runs; no external input"),
     ("tools/check_footer.py", "_close_vectors", "code", 1,
-     _MUTANT + " (the _read_regular_page close revert)"),
+     _MUTANT + " (the _read_regular_page close revert, loaded by exec_module from a scratch file)"),
     ("tools/check_release_cut.py", "_close_vectors", "code", 1,
      _MUTANT + " (the working_blob close revert)"),
     ("tools/check_release_cut.py", "_self_test_isolated", "code", 1,
      _MUTANT + " (each _CLOSE_SWEEP_REVERTS sweep revert, matched exactly once)"),
+    ("tools/check_release_cut.py", "_census_construction_interrupt_row", "shell", 1, _SAVED),
+    ("tools/check_release_cut.py", "_census_sigchld_ignored_row", "shell", 1, _SAVED),
+    ("tools/check_release_cut.py", "_census_kernel_sigchld_row", "shell", 1, _SAVED),
+    ("tools/check_release_cut.py", "_census_reaped_exit_row", "shell", 1, _SAVED),
+    ("tools/check_release_cut.py", "_census_drain_reaped_row", "shell", 1, _SAVED),
+    ("tools/check_release_cut.py", "_census_paused_run", "shell", 1, _SAVED),
+    ("tools/check_release_cut.py", "_census_run_flipped", "code", 1,
+     _MUTANT + " (each census drain revert, loaded by exec_module from a scratch file)"),
+    ("tools/check_release_cut.py", "_census_table_flipped", "code", 1,
+     _MUTANT + " (each census budget cross-check revert, loaded by exec_module from a scratch file)"),
     ("tools/pin.py", "_recover_close_vectors", "code", 1,
      _MUTANT + " (the recover close reverts)"),
     ("tools/selftest_git_fixture_env_core.py", "_system_pin_checks", "code", 1,
@@ -458,15 +702,39 @@ ALLOWLIST = (
     ("tools/check_rule_placement.py", "_load_placement_mutant", "code", 1,
      "self-test mutant: exec_module of a scratch copy of this gate's own source (read from __file__)"
      " with one reviewed literal substitution (the listing identity check dropped); no external input"),
+    ("tools/gen_rules.py", "_load_reverted", "code", 1,
+     "self-test mutant: exec_module of a scratch copy of this generator's own source (read from __file__)"
+     " with the reviewed literal substitutions of its fixed revert table (one rule-source guard put back);"
+     " no external input"),
+    ("tools/check_clauses.py", "_load_reverted", "code", 1,
+     "self-test mutant: exec_module of a scratch copy of this gate's own source (read from __file__)"
+     " with one reviewed literal substitution from its fixed layer revert table; no external input"),
+    ("tools/check_clauses.py", "self_test_main", "code", 1,
+     "self-test mutant: exec_module of a scratch copy of the repository's own gen_rules.py with the"
+     " reviewed literal substitutions of the fixed shared-reader revert table; no external input"),
+    ("tools/check_release_delta.py", "_self_test_main_isolated", "code", 2,
+     "self-test mutant: exec_module of a scratch copy of this gate's own source and of the repository's"
+     " own _release_schema.py, each with one reviewed literal substitution (the clause layer comparison"
+     " or the clause layer value check dropped); no external input"),
     ("tools/check_python_floor.py", "_rule_reverts", "code", 1,
      "self-test mutant: exec_module of a copy of this gate's own source with one rule removed"
      " from RULES; no external input"),
+    ("tools/check_python_launcher_isolation.py", "_load_mutant", "code", 1,
+     "self-test mutant: exec_module of a scratch copy of this gate's own source (read from __file__)"
+     " with one reviewed whole-line substitution from its fixed LAUNCHER_MUTANTS table, or the"
+     " unmutated copy as the control, written under the self-test's temporary directory; no"
+     " external input"),
     ("tools/check_python_host_pin.py", "_copy", "code", 1,
      "self-test mutant loader: exec_module of a copy, written under the self-test's temporary"
      " directory, of this gate's own source (read from __file__) with reviewed literal"
      " substitutions, or of the repository's own tools/check_python_floor.py; no external input"),
     ("tools/gen_crosswalk.py", "_fdopen_vectors.flipped", "code", 1,
      _MUTANT + " (each fdopen close revert, loaded by exec_module from a scratch file)"),
+    ("tools/selftest_aiqt_hooks.py", "_ie_mutant_handlers", "code", 1,
+     "self-test mutant loader: exec_module of a copy, written under the self-test's temporary"
+     " directory, of the repository's own hook source (read from aiqt_hooks.__file__) with the"
+     " reviewed literal substitutions of one _IE_MUTANTS entry, each anchor matched exactly once;"
+     " no external input"),
     ("tools/_close_selftest.py", "_StCloseFault.__init__", "shell", 1,
      "self-test fault injector: wraps the os functions named in its own fixed _ST_WATCHED"
      " tuple (descriptor stat and seek calls) to count closes; never runs a shell"),
@@ -524,6 +792,20 @@ ALLOWLIST = (
     ("tools/check_ci_parity.py", "self_test", "shell", 1, _SAVED),
     ("tools/check_gensrc_failclose.py", "_self_test_main_isolated._check_no_maintenance", "shell", 1,
      _SAVED + " (the no-maintenance vector's recorder of the template git argv lists)"),
+    ("tools/check_gensrc_failclose.py", "_self_test_main_isolated._evaluate_launch_failure", "shell", 1,
+     _SAVED + " (the gc launch-failure vector's double, raising for the gc launch, delegating the rest)"),
+    ("tools/check_gensrc_failclose.py", "_self_test_main_isolated._evaluate_interrupt", "shell", 1,
+     _SAVED + " (the real Popen subclassed by the gc interrupt vector's double, whose wait raises"
+     " KeyboardInterrupt once)"),
+    ("tools/check_gensrc_failclose.py", "_self_test_main_isolated._evaluate_gone_bound.evaluate", "shell",
+     1, _SAVED + " (the real Popen subclassed by the gc group-exit bound vector's double, whose wait"
+     " raises KeyboardInterrupt once on its interrupt leg)"),
+    ("tools/check_gensrc_failclose.py", "_self_test_main_isolated._evaluate_unreapable", "shell", 1,
+     _SAVED + " (the real Popen subclassed by the gc unreapable-leader vector's double, whose bounded"
+     " reaps time out without reaping and whose unbounded reap is refused)"),
+    ("tools/check_gensrc_failclose.py", "_self_test_main_isolated._evaluate_second_interrupt", "shell", 1,
+     _SAVED + " (the real Popen subclassed by the gc second-interrupt vector's double, whose wait raises"
+     " the original KeyboardInterrupt once)"),
     ("tools/check_release_build.py", "_self_test_main_isolated", "shell", 1, _SAVED),
     ("tools/check_release_delta.py", "_self_test_main_isolated", "shell", 1, _SAVED),
     ("tools/check_mistakes_register.py", "self_test", "shell", 2,
@@ -562,6 +844,10 @@ ALLOWLIST = (
     ("tools/_selftest_exit_report.py", "_bootstrap_main", "code", 1,
      "execution-report bootstrap: runs the runner script named in its own argv as __main__ under its"
      " audit hook, the same trust as running that script directly with python3; no other input"),
+    ("opf/tools/_selftest_exit_report.py", "_bootstrap_main", "code", 1,
+     "the OPF-local copy of the execution-report bootstrap: runs the runner script named in its own"
+     " argv as __main__ under its audit hook, the same trust as running that script directly with"
+     " python3; no other input"),
     ("tools/check_opf_enforce_platforms.py", "load_hook", "code", 1,
      "check harness: loads the repository's own Claude Code deny hook as a private module, never"
      " entered in sys.modules and its main() never called, the equivalent of an import; no external"
@@ -583,6 +869,12 @@ ALLOWLIST = (
      _MUTANT + " (each route mutant, written to the self-test's temporary directory first)"),
     ("opf/tools/check_opf_init.py", "_suite_isolated.load_plain", "code", 1,
      _MUTANT + " (each boot mutant, written to the self-test's temporary directory first)"),
+    ("tools/check_opf_declaration.py", "_mutant", "code", 1,
+     _MUTANT + " (each opf/tools/_opf_declaration.py revert, written to the self-test's temporary directory"
+     " first)"),
+    ("tools/check_opf_declaration.py", "_copy_mutant", "code", 1,
+     _MUTANT + " (each revert of opf/tools/opf.py or of this gate's own source, written to the self-test's"
+     " temporary directory first)"),
     ("tools/_load_bound.py", "_acquiring_popen", "shell", 1,
      "ownership spawn: subclasses the current subprocess.Popen so run() holds the handle before the"
      " fork; the subclass forwards run()'s own argv list and keywords, and no call in this file"
@@ -591,7 +883,7 @@ ALLOWLIST = (
      "pid capture: types.FunctionType rebuilds the standard library's own Popen._execute_child code"
      " object with its globals copied and only _fork_exec wrapped to record the pid; no external"
      " code"),
-    ("tools/_load_bound.py", "vector_failures", "shell", 14,
+    ("tools/_load_bound.py", "vector_failures", "shell", 15,
      _SAVED + " (the real Popen each vector's fault or recording double subclasses, set back in a"
      " finally; the fork-window vector also reads its _execute_child through that saved class)"),
     ("tools/_load_bound.py", "vector_failures.bounded", "shell", 1,
@@ -600,6 +892,81 @@ ALLOWLIST = (
      _SAVED + " (the real Popen the mid-read fault double subclasses, restored in a finally)"),
     ("tools/_load_bound.py", "vector_failures.drained_stop", "shell", 1,
      _SAVED + " (the real Popen the recording double subclasses, restored in a finally)"),
+    ("tools/check_brief_capability.py", "noun_ranges", "regex", 3,
+     _WORD + " (NOUN_WORD continues a noun through letters of any script, so a list tail is"
+     " judged on the whole word)"),
+    ("tools/check_brief_capability.py", "rule_r1", "regex", 1,
+     _WORD + " (a word character after the verb, or after a dot or slash, keeps it one word or a"
+     " dotted name rather than an imperative)"),
+    ("tools/check_brief_capability.py", "rule_s1", "regex", 2,
+     "Unicode on purpose: rule_s1 decides whether a fence is executable, and an executable fence"
+     " is a finding, so the wider read is the fail-closed side: RUN_PROMPT_RE reads an In [n]:"
+     " prompt numbered in any script's digits, and SHELL_FIRST_LINE_RE reads an assignment name"
+     " or directory segment continued in any script, and a python3.N version in any script's"
+     " digits, as a shell line"),
+    ("tools/check_brief_capability.py", "option_commands", "regex", 1,
+     _WORD + " (GIT_SUBCOMMAND_RE ends a git subcommand only where no letter of any script"
+     " continues it, and PYTHON_TARGET_RE reads a .py path whose segments may be named in any"
+     " script)"),
+    ("tools/check_brief_capability.py", "git_write_commands", "regex", 1,
+     _WORD + " (GIT_WRITE_SUBCOMMAND_RE ends commit or push only where no letter of any script"
+     " continues it, as GIT_SUBCOMMAND_RE ends a git subcommand)"),
+    ("tools/check_brief_capability.py", "sentence_asks", "regex", 1,
+     _WORD + " (a letter after test or fix continues that word)"),
+    ("tools/check_brief_capability.py", "unplaced", "regex", 1,
+     _WORD + " (a ~user or $NAME lead of any script is still read as an unplaced path)"),
+    ("tools/check_brief_capability.py", "near_pin", "regex", 1,
+     _WORD + " (a letter glued to the hex run means it is not a pin)"),
+    ("tools/check_brief_capability.py", "PreflightText.__init__", "regex", 1,
+     _WORD + " (a letter glued to the hex run means it is not a pin)"),
+    ("tools/check_brief_capability.py", "PreflightText._declare", "regex", 1,
+     _WORD + " (an absolute path's segments may be named in any script)"),
+    ("tools/check_brief_capability.py", "_declaration_rest", "regex", 1,
+     _WORD + " (a letter after workdir or directory continues that word)"),
+    ("tools/check_cited_standards.py", "parse_designator", "regex", 1,
+     "Unicode on purpose: parse_designator reads one token with the same _PATTERN designators()"
+     " scans prose with, so a token is read as a finding prints it; the pattern's \\d groups"
+     " match any script's digits and _num reads them with int(), so a designator written in"
+     " Arabic-Indic or fullwidth digits names the same identity as its ASCII spelling, and its"
+     " letter tests ([^\\W_] and [^\\W\\d_]; the pattern holds no \\w) are Unicode through \\W,"
+     " so a letter of any script glued to a designator makes it a token"),
+    ("tools/check_clauses.py", "rule_units", "regex", 1,
+     "Unicode on purpose: _UNCLASSIFIABLE_FIRST_LINE_RE refuses a paragraph whose first line opens"
+     " with a list marker numbered in any script's digits, which a renderer may read as a list; its"
+     " self-test pins the Arabic-Indic and Devanagari forms"),
+    ("tools/check_instruction_budget.py", "comment_spans", "regex", 1,
+     _LIST_DIGIT + " (UNPLACED_RE: a line under such a marker stops the comment scan, so more"
+     " comments are counted)"),
+    ("tools/check_overclaim.py", "<module>", "regex", 1,
+     _WORD + " (NEG_AUX_TAIL reads the words between a negator and the guarantee it denies; a"
+     " no-break space separates them and an accented adjective such as naive or cafe-grade is"
+     " one word, so re.ASCII there flagged honest denials)"),
+    ("tools/check_python_launcher_isolation.py", "<module>", "regex", 1,
+     "Unicode on purpose: PY_WORD_RE decides whether a token is a python launcher, and for a"
+     " launch detector the wider match is the safe side: python3. followed by non-ASCII digits"
+     " is judged as a launcher, never left out of scope"),
+    ("tools/check_reference_facts.py", "_refuse_unbounded", "regex", 1,
+     _LIST_DIGIT + " (LIST_HTML: a list item opening with '<' under such a marker is refused)"),
+    ("tools/check_reference_facts.py", "_require_section_grammar", "regex", 4,
+     _LIST_DIGIT + " (FLAT_LIST_ITEM and LIST_MARKER_LEAD: such a marker is read as a list item, so"
+     " a nested marker or an opening '<' after it is refused rather than read as paragraph text)"),
+    ("tools/check_verifier_delivery.py", "_marker_scan", "regex", 1,
+     "Unicode on purpose: MARKER_RE detects disguised answer markers, and a marker written with"
+     " non-ASCII digits is one of the forms it must find and refuse"),
+    ("opf/tools/check_opf_homes.py", "_heading_bounds", "regex", 1,
+     "Unicode on purpose: _OTHER_DIGIT_MARK finds a list marker numbered with a non-ASCII digit,"
+     " which CommonMark reads as text but a renderer reading \\d as a digit opens as a list"),
+    ("opf/tools/_opf_absorb.py", "_md_minimal_escape", "regex", 1,
+     "Unicode on purpose: the escape is reached under c.isdigit(), which is true for any script's"
+     " digits, and escaping a digit-led marker in any script is the safe direction (a renderer"
+     " that reads a non-ASCII digit as a list number sees escaped text; CommonMark renders the"
+     " backslash away)"),
+    (".aiqt/core/hooks/scripts/aiqt_hooks.py", "_ai_value_match", "regex", 1, _AI_WORD),
+    (".aiqt/core/hooks/scripts/aiqt_hooks.py", "_GitWordChain.unread", "regex", 1, _GIT_WORD),
+    ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py", "_ai_value_match", "regex", 1,
+     _AI_WORD + " (the generated plugin copy)"),
+    ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py", "_GitWordChain.unread", "regex",
+     1, _GIT_WORD + " (the generated plugin copy)"),
 )
 
 
@@ -617,6 +984,24 @@ def _literal_command(node):
     if isinstance(node, (ast.List, ast.Tuple)):
         return all(_is_str(e) for e in node.elts)
     return False
+
+
+def _import_arguments_unplaced(call, pairs):
+    """Whether a __import__ call's later arguments make the import one the literal name does not
+    place: a fromlist that is given and is not a literal list or tuple display of string
+    constants, a level that is given and is not the literal int 0 (a bool or float is not), or
+    a * or an unreadable ** spread that may hide either."""
+    fromlist = _first(_kw(pairs, "fromlist", True), _positional(call, 3))
+    if fromlist is not None and not (isinstance(fromlist, (ast.List, ast.Tuple)) and all(
+            isinstance(elt, ast.Constant) and isinstance(elt.value, str)
+            for elt in fromlist.elts)):
+        return True
+    level = _first(_kw(pairs, "level", True), _positional(call, 4))
+    if level is not None and not (isinstance(level, ast.Constant)
+                                  and type(level.value) is int and level.value == 0):
+        return True
+    return (any(isinstance(arg, ast.Starred) for arg in call.args)
+            or any(key is None for key, _value in pairs))
 
 
 def _is_true(node):
@@ -893,11 +1278,218 @@ def _first(*nodes):
     return None
 
 
+# A group read before the pattern's body: an inline flag group, or a comment group, which re skips
+# (it ends at the first ) no backslash escapes), so flag groups after it still lead the pattern.
+_LEADING_GROUP = re.compile(r"\(\?(?:([aiLmsux]+)|#(?:\\.|[^\\)])*)\)", re.ASCII | re.DOTALL)
+# The scoped flags that set ASCII for a group's body, and those that clear it: \d and \w inside
+# (?u:...) match every Unicode digit and word character, even within (?a:...) or under re.ASCII.
+_SCOPE_ASCII = frozenset("a")
+_SCOPE_UNICODE = frozenset("u")
+# The group openers the shape reader enters, each kept as one token after its (: a scoped flag
+# group ((?:...) is one with no flags), an atomic group and a named group.
+_GROUP_OPEN = re.compile(r"\?(?:[aiLmsux]*(?:-[imsx]*)?:|>|P<[^>]*>)", re.ASCII)
+# The anchors at the start and end of the whole input (\z is \Z's spelling since Python 3.14).
+# Under MULTILINE, ^ and $ match at every line, so they are kept as the tokens m^ and m$ and
+# anchor nothing; \A, \Z and \z are never changed by it.
+_REGEX_STARTS = ("^", "\\A")
+_REGEX_ENDS = ("$", "\\Z", "\\z")
+
+
+# The whitespace a verbose pattern skips outside a character class (re reads only these).
+_VERBOSE_SPACE = frozenset(" \t\n\r\v\f")
+
+
+def _group_end(tokens):
+    """The index of the token that closes the group tokens[0] opens, or None."""
+    depth = 0
+    for index, token in enumerate(tokens):
+        depth += (token == "(") - (token == ")")
+        if depth == 0:
+            return index
+    return None
+
+
+def _group_start(tokens, end):
+    """The index of the token that opens the group tokens[end] closes, or None."""
+    depth = 0
+    for index in range(end, -1, -1):
+        depth += (tokens[index] == ")") - (tokens[index] == "(")
+        if depth == 0:
+            return index
+    return None
+
+
+def _alternation(tokens):
+    """Whether tokens hold a | outside every group they open."""
+    depth = 0
+    for token in tokens:
+        depth += (token == "(") - (token == ")")
+        if depth == 0 and token == "|":
+            return True
+    return False
+
+
+def _opening(tokens, index):
+    """The number of tokens that open the group at tokens[index] when the shape reader enters
+    it (1 for (...), 2 for a scoped flag, atomic or named group), or 0 for any other group (a
+    lookaround, a conditional, a backreference) and for a token that opens no group."""
+    if index is None or tokens[index] != "(" or index + 1 >= len(tokens):
+        return 0
+    if tokens[index + 1][:1] != "?":
+        return 1
+    return 2 if len(tokens[index + 1]) > 1 else 0
+
+
+def _regex_shape(text, verbose, multiline=False, ascii_flag=False):
+    """(classes, anchored, start, lines) of a str pattern: whether it holds \\d or \\w read as
+    Unicode (a backslash escaped by another is a literal backslash, so \\\\d is not one; one under
+    ASCII, from the flag, a leading inline a or a scoped a group around it, is not counted unless
+    a scoped u group nearer it reads it as Unicode again), whether it starts with ^ or \\A and
+    ends with $, \\Z or \\z, whether it starts with ^ or \\A at all, and whether it is a line
+    scan (anchored at both ends only once a ^ or $ under MULTILINE is read as an anchor). The ends
+    are read once the leading inline flag groups and comment groups (?#...), in any order and,
+    when verbose, past whitespace and # comments between them, are passed, a comment group
+    skipped wherever it is, verbose (the flag, an inline x, or a scoped x group around it)
+    skipping whitespace and a # comment to the end of its line outside a character class; inside
+    any group that holds the whole pattern ((...), (?:...), (?P<name>...), an atomic (?>...) or a
+    scoped flag group such as (?i:...)), whose anchors anchor the whole match; and inside such a
+    group that opens or closes the pattern ((^\\d+)$) where neither the pattern nor the group
+    holds an alternation of its own (a group that opens it is entered even when a quantifier
+    follows it, so (^\\d+)*$ reads as anchored). A ^ or $ under MULTILINE (the flag, an inline m,
+    or a scoped m group around it, unless a scoped -m turns it off) anchors nothing."""
+    pos, flags = 0, ""
+    while True:
+        spaced = verbose or "x" in flags
+        if spaced and text[pos:pos + 1] in _VERBOSE_SPACE:
+            pos += 1
+        elif spaced and text.startswith("#", pos):
+            end = text.find("\n", pos)
+            pos = len(text) if end == -1 else end
+        elif (m := _LEADING_GROUP.match(text, pos)):
+            flags += m.group(1) or ""
+            pos = m.end()
+        else:
+            break
+    verbose = verbose or "x" in flags
+    multiline = multiline or "m" in flags
+    ascii_flag = ascii_flag or "a" in flags
+    tokens, classes, modes = [], False, []
+    while pos < len(text):
+        char = text[pos]
+        if char == "\\":
+            classes = classes or (not ascii_flag and text[pos:pos + 2] in ("\\d", "\\w"))
+            tokens.append(text[pos:pos + 2])
+            pos += 2
+        elif verbose and char in _VERBOSE_SPACE:
+            pos += 1
+        elif verbose and char == "#":
+            end = text.find("\n", pos)
+            pos = len(text) if end == -1 else end
+        elif char == "[":
+            # A character class is one token; a ] first in it (after any ^) is a literal.
+            end = pos + 1 + (text[pos + 1:pos + 2] == "^")
+            end += text[end:end + 1] == "]"
+            while end < len(text) and text[end] != "]":
+                classes = classes or (not ascii_flag and text[end:end + 2] in ("\\d", "\\w"))
+                end += 2 if text[end] == "\\" else 1
+            tokens.append(text[pos:end + 1])
+            pos = end + 1
+        elif text.startswith("(?#", pos):
+            # A comment group ends at the first ) that no backslash escapes, as re reads it.
+            end = pos + 3
+            while end < len(text) and text[end] != ")":
+                end += 2 if text[end] == "\\" else 1
+            pos = end + 1
+        elif char == "(":
+            # A group keeps the verbose, MULTILINE and ASCII state around it; a scoped flag group
+            # sets or clears them for its own body.
+            modes.append((verbose, multiline, ascii_flag))
+            tokens.append(char)
+            pos += 1
+            if (m := _GROUP_OPEN.match(text, pos)):
+                tokens.append(m.group())
+                on, _, off = m.group()[1:-1].partition("-") if m.group().endswith(":") \
+                    else ("", "", "")
+                verbose = (verbose or "x" in on) and "x" not in off
+                multiline = (multiline or "m" in on) and "m" not in off
+                ascii_flag = (ascii_flag or bool(_SCOPE_ASCII & set(on))) \
+                    and not _SCOPE_UNICODE & set(on)
+                pos = m.end()
+        elif char == ")":
+            if modes:
+                verbose, multiline, ascii_flag = modes.pop()
+            tokens.append(char)
+            pos += 1
+        else:
+            tokens.append("m" + char if multiline and char in "^$" else char)
+            pos += 1
+    while len(tokens) > 2 and _opening(tokens, 0) and _group_end(tokens) == len(tokens) - 1:
+        tokens = tokens[_opening(tokens, 0):-1]
+    # A group that opens or closes the pattern is entered for its anchor only where neither the
+    # pattern nor the group holds an alternation, whose other branch may not be anchored.
+    first, last = 0, len(tokens) - 1
+    while not _alternation(tokens) and first < last and (head := _opening(tokens, first)):
+        close = _group_end(tokens[first:])
+        if close is None or _alternation(tokens[first + head:first + close]):
+            break
+        first += head
+    while not _alternation(tokens) and last > first and tokens[last] == ")":
+        opener = _group_start(tokens, last)
+        head = _opening(tokens, opener)
+        if not head or _alternation(tokens[opener + head:last]):
+            break
+        last -= 1
+    start = first <= last and tokens[first] in _REGEX_STARTS
+    anchored = start and last > first and tokens[last] in _REGEX_ENDS
+    lines = not anchored and last > first and tokens[first] in _REGEX_STARTS + ("m^",) \
+        and tokens[last] in _REGEX_ENDS + ("m$",)
+    return classes, anchored, start, lines
+
+
+_SCOPE_NODES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef, ast.ListComp,
+                ast.SetComp, ast.GeneratorExp, ast.DictComp)
+
+
+def _reads(tree, binder):
+    """Every name read in tree and every attribute read (by attribute name), each with the scope
+    that evaluates it as the scanner walks scopes, and the parent of every node."""
+    names, attrs, parents = [], {}, {}
+    stack = [(tree, binder.module)]
+    while stack:
+        node, scope = stack.pop()
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
+            names.append((node, scope))
+        elif isinstance(node, ast.Attribute) and isinstance(node.ctx, ast.Load):
+            attrs.setdefault(node.attr, []).append((node, scope))
+        if isinstance(node, _SCOPE_NODES):
+            _kind, outer, inner = _scope_parts(node)
+            inside = binder.scope_of[id(node)]
+            children = [(child, scope) for child in outer] + [(child, inside) for child in inner]
+        else:
+            children = [(child, scope) for child in ast.iter_child_nodes(node)]
+        for child, child_scope in children:
+            parents[id(child)] = node
+            stack.append((child, child_scope))
+    return names, attrs, parents
+
+
 class _Scanner(ast.NodeVisitor):
-    def __init__(self, disabled, binder, flat):
+    def __init__(self, disabled, binder, flat, tree=None, modules=None):
         self.disabled = frozenset(disabled)
         self.binder = binder
         self.flat = flat
+        self.tree = tree
+        # The scanned tree's own module names (file stems), or None outside a tree scan, where
+        # only the standard library is known (fail closed).
+        self.modules = modules
+        # The non-literal sys.path mutations seen, with their enclosing scope, and every scope
+        # that calls an importer: paired after the walk, since either may come first.
+        self.syspath_pending = []
+        self.importer_scopes = set()
+        # The uses of every compiled pattern, built once per file when a line scan is first
+        # judged, and whether each line scan judged so far is used only as one.
+        self.uses = None
+        self.line_scans = {}
         self.scope = binder.module
         self.qual = []
         self.findings = []
@@ -909,8 +1501,9 @@ class _Scanner(ast.NodeVisitor):
     def on(self, check):
         return check not in self.disabled
 
-    def add(self, node, kind, check, detail):
-        qual = ".".join(self.qual) if self.qual else "<module>"
+    def add(self, node, kind, check, detail, qual=None):
+        if qual is None:
+            qual = ".".join(self.qual) if self.qual else "<module>"
         # The column keeps two sites on one line apart, and the end position two chained calls
         # that start at one place (x.f(a).f(b)), so each call site counts once.
         column = getattr(node, "col_offset", 0) if self.on("site-column") else 0
@@ -938,6 +1531,8 @@ class _Scanner(ast.NodeVisitor):
             scope = scope.parent
         if fallback and name in BUILTIN_NAMES:
             out.add(name)
+        elif fallback and name in _BUILTINS_MODULE:
+            out.add(_BUILTINS_MODULE[name])
         return out
 
     def resolve(self, node):
@@ -978,17 +1573,282 @@ class _Scanner(ast.NodeVisitor):
             return self._safe_constructor(node)
         if not isinstance(node, ast.Name):
             return False
-        start = scope = self.binder.module if node.id in self.scope.globals else self.scope
-        sources = []
-        while scope is not None:
-            if (scope.kind != "class" or scope is start) and node.id in scope.bindings:
-                sources += scope.values.get(node.id, [])
-                if scope.kind == "function":
-                    break
-            scope = scope.parent
+        sources = self._sources(node.id)
         return bool(sources) and all(
             source is not None and self._judged_in(source[1], self._safe_constructor, source[0])
             for source in sources)
+
+    def _sources(self, name):
+        """The source of every binding the bare name may hold here, in every scope Python may
+        read it from (as candidates walks them): (value, evaluating scope), or None for a
+        binding the binder cannot read."""
+        start = scope = self.binder.module if name in self.scope.globals else self.scope
+        sources = []
+        while scope is not None:
+            if (scope.kind != "class" or scope is start) and name in scope.bindings:
+                sources += scope.values.get(name, [])
+                if scope.kind == "function":
+                    break
+            scope = scope.parent
+        return sources
+
+    def _regex_texts(self, node, seen=frozenset()):
+        """Every text a pattern may hold, resolved as literals are: a string literal, a + of
+        resolved parts, a conditional expression whose branches both resolve, a name every
+        binding of which, in every scope Python may read it from, is an assignment of one (each
+        judged where it is evaluated), or the .pattern of a compiled pattern (as _compiled reads
+        it), which is the text of every re.compile it may be, without that compile's flags. None
+        when any part is unresolved (a parameter, an import, a call, an f-string, a name or
+        .pattern read again while it is being resolved), so the pattern is not judged. A bytes
+        pattern yields no text: there \\d and \\w match ASCII only."""
+        if isinstance(node, ast.Attribute) and node.attr == "pattern" and self.on("regex-pattern"):
+            key = ("pattern", id(node))
+            compiled = [] if key in seen or len(seen) >= _REGEX_DEPTH \
+                else self._compiled(node.value)
+            out = set()
+            for call, scope in compiled:
+                texts = self._judged_in(scope, lambda c: self._call_texts(c, seen | {key}), call)
+                if texts is None:
+                    return None
+                out |= texts
+            return out if compiled and len(out) <= _REGEX_TEXTS else None
+        if isinstance(node, ast.Constant):
+            if isinstance(node.value, bytes):
+                return set()
+            return {node.value} if isinstance(node.value, str) else None
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+            left = self._regex_texts(node.left, seen)
+            right = None if left is None else self._regex_texts(node.right, seen)
+            if right is None or len(left) * len(right) > _REGEX_TEXTS:
+                return None
+            return {a + b for a in left for b in right}
+        if isinstance(node, ast.IfExp):
+            body = self._regex_texts(node.body, seen)
+            orelse = None if body is None else self._regex_texts(node.orelse, seen)
+            if orelse is None or len(body | orelse) > _REGEX_TEXTS:
+                return None
+            return body | orelse
+        if not isinstance(node, ast.Name) or len(seen) >= _REGEX_DEPTH:
+            return None
+        key = (id(self.scope), node.id)
+        sources = self._sources(node.id)
+        if key in seen or not sources or None in sources:
+            return None
+        out = set()
+        for value, scope in sources:
+            texts = self._judged_in(scope, lambda v: self._regex_texts(v, seen | {key}), value)
+            if texts is None:
+                return None
+            out |= texts
+        return out if len(out) <= _REGEX_TEXTS else None
+
+    def _regex_flag(self, node, allowed, seen=frozenset()):
+        """True when the flags argument proves a flag in allowed: the flag itself, a | with it
+        on either side, or a name every binding of which proves it."""
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.BitOr):
+            return self._regex_flag(node.left, allowed, seen) \
+                or self._regex_flag(node.right, allowed, seen)
+        if node is None:
+            return False
+        if self.proves(node, allowed):
+            return True
+        if not isinstance(node, ast.Name) or len(seen) >= _REGEX_DEPTH:
+            return False
+        key = (id(self.scope), node.id)
+        sources = self._sources(node.id)
+        return key not in seen and bool(sources) and all(
+            source is not None and self._judged_in(
+                source[1], lambda v: self._regex_flag(v, allowed, seen | {key}), source[0])
+            for source in sources)
+
+    def _call_texts(self, call, seen=frozenset()):
+        """The texts of the pattern an re call is given (first, or as pattern=), or None."""
+        pairs = _effective_keywords(call, self.candidates("dict") == {"dict"})
+        pattern = _first(_positional(call, 0), _kw(pairs, "pattern"))
+        return None if pattern is None else self._regex_texts(pattern, seen)
+
+    def _regex_finding(self, call, func, whole, search=False, lines=False):
+        """The detail of an re call (func its dotted name) whose resolved str pattern holds \\d
+        or \\w read as Unicode (neither re.ASCII nor re.A in its flags, nor an inline (?a) or a
+        scoped (?a:...) around it, unless a scoped (?u:...) nearer it) and is anchored, or is
+        matched from its start (whole), or is searched (search) and starts with ^ or \\A, or is a
+        line scan (lines, its use judged by the caller); None otherwise, or when the pattern is
+        unresolved."""
+        texts = self._call_texts(call)
+        if not texts:
+            return None
+        pairs = _effective_keywords(call, self.candidates("dict") == {"dict"})
+        flags = _first(_positional(call, REGEX_FUNCS[func]), _kw(pairs, "flags"))
+        ascii_flag = self._regex_flag(flags, REGEX_ASCII)
+        verbose = self._regex_flag(flags, REGEX_VERBOSE)
+        multiline = self._regex_flag(flags, REGEX_MULTILINE)
+        for text in sorted(texts):
+            classes, anchored, start, line = _regex_shape(text, verbose, multiline, ascii_flag)
+            if classes and (anchored or whole or (search and start) or (lines and line)):
+                how = "anchored" if anchored else "matched whole" if whole else \
+                    "anchored at its start and searched" if search and start else \
+                    "anchored only at each line (MULTILINE) and used other than as a line scan"
+                return ("a pattern with \\d or \\w read as Unicode " + how
+                        + " (it admits non-ASCII digits and word characters)")
+        return None
+
+    def _compile_finding(self, call):
+        """The detail of an re.compile reported where it is compiled: one anchored, or a line
+        scan (anchored only by a ^ or $ under MULTILINE) not every use of which scans lines (see
+        _line_uses). None when it is judged at each use instead."""
+        detail = self._regex_finding(call, "re.compile", False)
+        if detail is None and self.on("regex-lines"):
+            lines = self._regex_finding(call, "re.compile", False, lines=True)
+            if lines is not None and not self._line_uses(call):
+                return lines
+        return detail
+
+    def _pattern_uses(self):
+        """(the name reads the scan resolves to each re.compile, by the call's id, each with its
+        scope; every attribute read, by attribute name, each with its scope; every node's parent;
+        the name reads that may hold each assigned value, by the value's id, each with its scope;
+        the attribute names getattr is called with, None for a name that is not a literal or for
+        a getattr read other than as the function a call calls), built once per file."""
+        if self.uses is None:
+            names, attrs, parents = _reads(self.tree, self.binder)
+            by_call, by_value, getattrs = {}, {}, set()
+            for read, scope in names:
+                for call, _scope in self._judged_in(scope, self._compiled, read):
+                    by_call.setdefault(id(call), []).append((read, scope))
+                for source in self._judged_in(scope, lambda r: self._sources(r.id), read):
+                    if source is not None:
+                        by_value.setdefault(id(source[0]), []).append((read, scope))
+            for read, scope in names + attrs.get("getattr", []):
+                if not self._judged_in(scope, self.resolve, read) & _GETATTR:
+                    continue
+                call = parents.get(id(read))
+                if isinstance(call, ast.Call) and call.func is read:
+                    attr = _positional(call, 1)
+                    name = attr.value if isinstance(attr, ast.Constant) \
+                        and isinstance(attr.value, str) else None
+                    # getattr(builtins, "getattr") returns getattr itself, held like g = getattr.
+                    getattrs.add(None if name in _GETATTR_NAMES else name)
+                else:
+                    # Held, passed or wrapped before it is called (g = getattr, getattr.__call__,
+                    # functools.partial(getattr, x)), it may be given any name.
+                    getattrs.add(None)
+            self.uses = by_call, attrs, parents, by_value, getattrs
+        return self.uses
+
+    def _line_uses(self, call):
+        """Whether every use of a compiled line scan scans lines (see _line_use): the re.compile
+        call itself, every name read the scan resolves to it (a copy included), every attribute
+        read anywhere in this file named like a name or attribute it is stored to (self.P, cls.P
+        or Lines.P for a class attribute P), and every name read that may hold a value stored to
+        a name (p = self.P, Q = Lines.P, or a walrus of either). A getattr anywhere in this file
+        with a name it is stored to, with a name that is not a literal, or read other than as the
+        function a call calls (held, passed or wrapped before it is called), is a use that is not
+        followed, so it is not a line scan. A use in another module is not seen."""
+        if id(call) not in self.line_scans:
+            by_call, attrs, _parents, by_value, getattrs = self._pattern_uses()
+            pending, stored, lines = [(call, self.scope)] + by_call.get(id(call), []), set(), True
+            followed = set()
+            while lines and pending:
+                use, scope = pending.pop()
+                lines, names, values = self._judged_in(scope, self._line_use, use)
+                for name in sorted(names - stored):
+                    stored.add(name)
+                    pending += attrs.get(name, [])
+                    if self.on("regex-stores") and getattrs & {name, None}:
+                        lines = False
+                for value in values:
+                    if self.on("regex-stores") and id(value) not in followed:
+                        followed.add(id(value))
+                        pending += by_value.get(id(value), [])
+            self.line_scans[id(call)] = lines
+        return self.line_scans[id(call)]
+
+    def _line_use(self, use):
+        """(whether one use of a compiled line scan scans lines, the names and attributes it is
+        stored to, the values stored to names). Read through a walrus or a conditional or boolean
+        expression, it scans lines when it calls or references a REGEX_LINE_METHODS method, or
+        when its .pattern is given as an re function's pattern (alone, or in a + or conditional
+        expression) that resolves, so that text is judged there; a store to names or attributes,
+        a walrus included, is followed (_line_uses). Any other use (match or fullmatch, an
+        argument, a return, a container, any other attribute) is not a line scan."""
+        parents = self._pattern_uses()[2]
+        node, parent = use, parents.get(id(use))
+        names, values = set(), []
+        while isinstance(parent, (ast.IfExp, ast.BoolOp, ast.NamedExpr)) \
+                and node is not getattr(parent, "test", None):
+            if isinstance(parent, ast.NamedExpr) and self.on("regex-stores"):
+                names.add(parent.target.id)
+                values.append(node)
+            node, parent = parent, parents.get(id(parent))
+        if isinstance(parent, ast.Attribute) and parent.value is node:
+            if parent.attr == "pattern":
+                return self._pattern_argument(parent), names, values
+            return parent.attr in REGEX_LINE_METHODS, names, values
+        targets = parent.targets if isinstance(parent, ast.Assign) else \
+            [parent.target] if isinstance(parent, ast.AnnAssign) else []
+        if targets and parent.value is node \
+                and all(isinstance(target, (ast.Name, ast.Attribute)) for target in targets):
+            return True, names | {target.id if isinstance(target, ast.Name) else target.attr
+                                  for target in targets}, values + [node]
+        return False, names, values
+
+    def _pattern_argument(self, node):
+        """Whether a .pattern read is, alone or in a + or conditional expression, the resolved
+        pattern an re function is given (where its text is judged)."""
+        parents = self._pattern_uses()[2]
+        parent = parents.get(id(node))
+        while (isinstance(parent, ast.BinOp) and isinstance(parent.op, ast.Add)) \
+                or (isinstance(parent, ast.IfExp) and node is not parent.test):
+            node, parent = parent, parents.get(id(parent))
+        if isinstance(parent, ast.keyword):
+            # pattern= is the call's keyword, one node above it.
+            parent = parents.get(id(parent))
+        if not isinstance(parent, ast.Call) or not self.resolve(parent.func) & set(REGEX_FUNCS):
+            return False
+        pairs = _effective_keywords(parent, self.candidates("dict") == {"dict"})
+        return node is _first(_positional(parent, 0), _kw(pairs, "pattern")) \
+            and self._regex_texts(node) is not None
+
+    def _compiled(self, receiver, seen=frozenset()):
+        """Every re.compile call the receiver of a match, fullmatch or search may be, each with
+        the scope that evaluates it: the call itself, the value of a walrus, both branches of a
+        conditional expression, every operand of a boolean expression (cache or re.compile(...)),
+        or what a name may hold (an assignment of any of these, a copy of another name
+        included)."""
+        if isinstance(receiver, ast.NamedExpr):
+            return self._compiled(receiver.value, seen)
+        if isinstance(receiver, ast.IfExp):
+            return self._compiled(receiver.body, seen) + self._compiled(receiver.orelse, seen)
+        if isinstance(receiver, ast.BoolOp):
+            return [found for value in receiver.values for found in self._compiled(value, seen)]
+        if isinstance(receiver, ast.Call):
+            return [(receiver, self.scope)] if "re.compile" in self.resolve(receiver.func) else []
+        if not isinstance(receiver, ast.Name) or len(seen) >= _REGEX_DEPTH:
+            return []
+        key = (id(self.scope), receiver.id)
+        if key in seen:
+            return []
+        out = []
+        for source in self._sources(receiver.id):
+            if source is not None:
+                out += self._judged_in(source[1], lambda v: self._compiled(v, seen | {key}),
+                                       source[0])
+        return out
+
+    def _regex_method(self, node, method, receiver):
+        """A match, fullmatch or search of a compiled pattern, called or referenced (a bound
+        method held for later is matched as it would be called): one reported where it is
+        compiled (anchored, or a line scan used other than as one) is not reported again at each
+        use."""
+        search = method == "search"
+        for compiled, scope in self._compiled(receiver):
+            if self._judged_in(scope, self._compile_finding, compiled) is None:
+                detail = self._judged_in(
+                    scope, lambda c: self._regex_finding(c, "re.compile", not search, search),
+                    compiled)
+                if detail is not None:
+                    self.add(node, "regex", "regex-ascii", "." + method + " of " + detail)
+                    break
 
     def _judged_in(self, scope, judge, node):
         saved, self.scope = self.scope, scope
@@ -1094,6 +1954,13 @@ class _Scanner(ast.NodeVisitor):
         self.called.add(id(node.func))
         pairs = _effective_keywords(node, self.candidates("dict") == {"dict"})
         names = self.resolve(node.func)
+        if isinstance(node.func, ast.Call):
+            # An importer reached through a literal getattr in the call position, such as
+            # getattr(importlib, "import_module")(n), is judged as the direct spelling is.
+            method, receiver = self._method(node.func)
+            if method is not None:
+                names |= {base + "." + method for base in self.resolve(receiver)} \
+                    & (_IMPORTERS | _REIMPORTERS)
         # A store, delete, patch or test of a literal attribute reads no sink (judged below).
         if not names & (_SETATTR | _DELATTR | _PATCH_OBJECT | _HASATTR):
             self._pairs(node.args)
@@ -1117,10 +1984,20 @@ class _Scanner(ast.NodeVisitor):
             if command is None or not _literal_command(command):
                 self.add(node, "shell", "shell-always",
                          "subprocess_shell over a non-literal command")
+        if method in REGEX_METHODS and self.on("regex-ascii"):
+            # re.Pattern.fullmatch(pattern, text) takes the compiled pattern as its first argument.
+            if self.resolve(receiver) & REGEX_PATTERN_CLASSES:
+                receiver = _positional(node, 0)
+            self._regex_method(node, method, receiver)
         self._judge_keywords(node, pairs)
         self.generic_visit(node)
 
     def _judge_call(self, node, name, pairs):
+        if name in REGEX_FUNCS and self.on("regex-ascii"):
+            detail = self._compile_finding(node) if name == "re.compile" else \
+                self._regex_finding(node, name, name in REGEX_WHOLE, name == "re.search")
+            if detail is not None:
+                self.add(node, "regex", "regex-ascii", name + " of " + detail)
         if name in YAML_LOAD and self.on("dsz-yaml"):
             loader = _first(_kw(pairs, "Loader"), _positional(node, 1))
             if not self.proves(loader, YAML_SAFE_LOADERS):
@@ -1184,12 +2061,57 @@ class _Scanner(ast.NodeVisitor):
                 self.based.add(id(target))
                 if name in _SETATTR:
                     self._check_store(attr.value, _positional(node, 2), node, True)
-        if name in _IMPORTERS and self.on("module-escape"):
+        if name in _SCOPE_IMPORTERS:
+            self.importer_scopes.add(".".join(self.qual) if self.qual else "<module>")
+        if name in _IMPORTERS:
             target = _first(_positional(node, 0), _kw(pairs, "name"))
-            if isinstance(target, ast.Constant) and isinstance(target.value, str) \
+            if self.on("module-escape") and isinstance(target, ast.Constant) \
+                    and isinstance(target.value, str) \
                     and target.value.split(".")[0] in STAR_MODULES:
                 self.add(node, STAR_MODULES[target.value.split(".")[0]], "module-escape",
                          "dynamic import of sink module " + target.value)
+            if self.on("code-import") and not self._known_module(target):
+                self.add(node, "code", "code-import",
+                         name + " of a module that is not a literal standard-library or"
+                         " repository module name (importing a written file runs its code)")
+            elif name in _IMPORT_DUNDERS and self.on("code-import") \
+                    and _import_arguments_unplaced(node, pairs):
+                self.add(node, "code", "code-import",
+                         name + " with a fromlist that is not a literal list or tuple of string"
+                         " constants, a level other than the literal 0, or a spread that may"
+                         " hide either (a submodule or relative import the literal name does"
+                         " not place)")
+        if name in _REIMPORTERS and self.on("code-import"):
+            self.add(node, "code", "code-import",
+                     name + (" runs a module's code again" if name == "importlib.reload"
+                             else " imports the module its dotted name names")
+                     + ", so every call is counted")
+        if name in _SYS_PATH_MUTATORS and self.on("code-syspath"):
+            path = _positional(node, _SYS_PATH_MUTATORS[name])
+            if not (isinstance(path, ast.Constant) and isinstance(path.value, str)):
+                self.syspath_pending.append(
+                    (node, ".".join(self.qual) if self.qual else "<module>", name))
+
+    def _known_module(self, node):
+        """True only for a literal module name the scan can place: a standard-library module
+        (by its top-level name) or a module file the scanned tree holds (by stem; outside a
+        tree scan no repository module is known). Anything else, a computed name, a name a
+        spread hides and an absent name included, is unknown, so it is counted (fail closed)."""
+        if not (isinstance(node, ast.Constant) and isinstance(node.value, str)):
+            return False
+        if node.value.split(".")[0] in _STDLIB_MODULES:
+            return True
+        return self.modules is not None and "." not in node.value and node.value in self.modules
+
+    def finish(self):
+        """Emit the deferred sys.path findings: a non-literal insert or append is a code site
+        only in a scope that also calls an importer (there the mutated path can be imported
+        from), and either may come first, so the pairing runs after the walk."""
+        for node, qual, name in self.syspath_pending:
+            if qual in self.importer_scopes:
+                self.add(node, "code", "code-syspath",
+                         name + " of a non-literal path in a scope that also imports by name"
+                         " (a written directory becomes importable)", qual=qual)
 
     def _judge_keywords(self, node, pairs):
         if self.on("tls-verify"):
@@ -1276,6 +2198,8 @@ class _Scanner(ast.NodeVisitor):
             self._escape(node, names)
             if id(node) not in self.called:
                 self._method_alias(node, node.attr)
+                if node.attr in REGEX_METHODS and self.on("regex-ascii"):
+                    self._regex_method(node, node.attr, node.value)
         self._store(node, node.attr, True)
         self.generic_visit(node)
 
@@ -1347,14 +2271,16 @@ def _flat_aliases(tree):
     return aliases
 
 
-def scan_source(source, filename="<source>", disabled=()):
+def scan_source(source, filename="<source>", disabled=(), modules=None):
     """Return the sorted findings for one source text (str, or bytes parsed as Python decodes
-    them); SyntaxError, ValueError and RecursionError propagate."""
+    them); SyntaxError, ValueError and RecursionError propagate. modules is the scanned tree's
+    own module-name set, or None where only the standard library is known."""
     tree = ast.parse(source, filename=filename)
     binder = _Binder()
     binder.visit(tree)
-    scanner = _Scanner(disabled, binder, _flat_aliases(tree))
+    scanner = _Scanner(disabled, binder, _flat_aliases(tree), tree, modules)
     scanner.visit(tree)
+    scanner.finish()
     return sorted(set(scanner.findings))
 
 
@@ -1469,6 +2395,9 @@ def scan_tree(root, allowlist=ALLOWLIST, disabled=()):
         paths = _python_files(root, disabled)
     except OSError as exc:
         raise CannotEvaluate("cannot walk the scan roots: " + str(exc))
+    # The tree's own module names: a literal import of one is the ordinary way to reach the
+    # repository's code, so it is not a code site (an unknown literal still is).
+    modules = frozenset(path.stem for path in paths)
     for path in paths:
         rel = path.relative_to(root).as_posix()
         try:
@@ -1486,7 +2415,7 @@ def scan_tree(root, allowlist=ALLOWLIST, disabled=()):
                 continue
             raise CannotEvaluate("cannot read " + rel + ": " + str(exc))
         try:
-            found = scan_source(source, rel, disabled)
+            found = scan_source(source, rel, disabled, modules)
         except (SyntaxError, ValueError, RecursionError) as exc:
             if "fail-parse" in disabled:
                 continue
@@ -1523,7 +2452,8 @@ def run(root):
             print("VIOLATION: dangerous-api: " + line, file=sys.stderr)
         return 1
     print("PASS: dangerous-api: no unreviewed deserialization, TLS-verification, shell or"
-          " code-execution sink in the scanned roots; see residuals.")
+          " code-execution sink or Unicode-matching regex validator in the scanned roots; see"
+          " residuals.")
     return 0
 
 
@@ -1543,6 +2473,61 @@ def main(argv=None):
     root = args.root if args.root is not None else Path(__file__).resolve().parent.parent
     return run(root)
 
+
+# The vectors anchored only by \z: the self-test also reads them with \z dropped from the end
+# anchors, where each must pass, so the \z reading is what flags them.
+_REGEX_END_Z = (
+    "import re\nre.compile(r'\\A\\w+\\z')\n",
+    "import re\nclass Ids:\n    P = re.compile(r'^\\d+\\z')\n    def ok(self, text):\n"
+    "        return self.P.fullmatch(text)\n",
+)
+# The vectors whose leading flag group follows a comment group, in any interleaving (verbose
+# whitespace between them included): the self-test also reads them with only flag groups read
+# as leading, where each validator must pass and each ASCII one must be flagged.
+_REGEX_LEADING_COMMENT = (
+    "import re\nre.compile(r'(?#c)(?i)^\\d+$')\n",
+    "import re\nre.compile(r'(?#c)(?x) ^ \\d+ $')\n",
+    "import re\nre.compile(r'(?i)(?#c)(?#d)(?s)^\\w+$')\n",
+    "import re\nre.compile(r'(?x) (?#c) (?i) ^ \\d+ $')\n",
+)
+_REGEX_LEADING_ASCII = (
+    "import re\nok = re.fullmatch(r'(?#c)(?a)\\d+', text)\n",
+    "import re\nok = re.fullmatch(r'(?i)(?#c)(?a)^\\d+$', text)\n",
+    "import re\nok = re.fullmatch(r'(?x)(?#c) (?a)\\d+', text)\n",
+)
+# The vectors a scoped (?u:...) group reads as Unicode inside an ASCII scope: the self-test also
+# reads them with u not clearing ASCII, where each must pass.
+_REGEX_SCOPE_U = (
+    "import re\nre.compile(r'(?a:^(?u:\\d+)$)')\n",
+    "import re\nre.compile(r'(?a)^(?u:\\d+)$')\n",
+    "import re\nre.compile(r'^(?u:\\d+)$', re.A)\n",
+)
+# The vectors whose getattr is held only as one called with the name "getattr", and those that
+# reach getattr or exec only through __builtins__: the self-test also reads each with that
+# reading removed, where each must pass.
+_GETATTR_BY_NAME = tuple(
+    "import builtins, re\nclass Ids:\n    def __init__(self):\n"
+    "        self.P = re.compile(r'^\\d+$', re.M)\n    def ok(self, t, c):\n"
+    + local + "        return " + read + ".fullmatch(t)\n"
+    for local, read in (("        g = getattr(builtins, 'getattr')\n", "g(self, 'P')"),
+                        ("", "getattr(c, 'getattr')(self, 'P')")))
+_BUILTINS_DUNDER = (
+    "import re\nclass Ids:\n    def __init__(self):\n"
+    "        self.P = re.compile(r'^\\d+$', re.M)\n    def ok(self, t):\n"
+    "        g = __builtins__.getattr\n        return g(self, 'P').fullmatch(t)\n",
+    "__builtins__.exec(text)\n",
+)
+# The vectors that bind __builtins__ where it may still be unbound (module-level assignment,
+# import as __builtins__, class body, global declaration): each is still read as the builtins
+# module, a conservative false report, and passes with that reading removed. A function-local
+# binding is not read so (a negative below).
+_BUILTINS_BOUND = (
+    "__builtins__ = Shim()\n__builtins__.exec(text)\n",
+    "import shim as __builtins__\n__builtins__.exec(text)\n",
+    "class C:\n    __builtins__ = Shim()\n    run = __builtins__.exec\n",
+    "def f(text):\n    global __builtins__\n    __builtins__ = Shim()\n"
+    "    __builtins__.exec(text)\n",
+)
 
 # Positive vectors: (source, checks). Each must yield a finding with all checks on, and NO
 # finding with any one of its checks disabled, so every vector fails without its check. That
@@ -1783,6 +2768,7 @@ POSITIVE_VECTORS = (
     ("def f(text):\n    exec(text)\n", ("code-ref",)),
     ("run = exec\n", ("code-ref",)),
     ("import builtins as b\nb.exec(text)\n", ("alias", "code-ref")),
+    (_BUILTINS_DUNDER[1], ("alias", "code-ref")),
     ("import types\ntypes.FunctionType(compile(text, 'x', 'exec'), {})()\n", ("code-ref",)),
     ("import pydoc\npydoc.builtins.exec(text)\n", ("chain", "code-ref")),
     ("spec.loader.exec_module(module)\n", ("code-loader",)),
@@ -1790,6 +2776,85 @@ POSITIVE_VECTORS = (
     ("run = spec.loader.exec_module\n", ("code-loader",)),
     ("run = loader.load_module\n", ("code-loader",)),
     ("getattr(spec.loader, 'exec_module')(module)\n", ("code-loader",)),
+    # A dynamic import of a module the scan cannot place: a computed name (the written-then-
+    # imported probe), each importer spelling, a keyword name, a spread-hidden name, and a
+    # literal that is neither a standard-library nor a repository module.
+    ("import importlib, pathlib\ndef probe(td, name, body):\n"
+     "    pathlib.Path(td, name + '.py').write_text(body)\n"
+     "    return importlib.import_module(name)\n", ("code-import",)),
+    ("def load(name):\n    return __import__(name)\n", ("code-import",)),
+    ("import builtins\nbuiltins.__import__(name)\n", ("code-import",)),
+    ("import importlib\nimportlib.__import__(name)\n", ("code-import",)),
+    ("from importlib import import_module\nimport_module(name)\n", ("alias", "code-import")),
+    ("import importlib\nimportlib.import_module(name=chosen)\n", ("code-import",)),
+    ("import importlib\nimportlib.import_module(*names)\n", ("code-import",)),
+    ("import importlib\nimportlib.import_module('no_such_module_here')\n", ("code-import",)),
+    # An importer reached through a literal getattr in the call position is judged as the
+    # direct spelling is: a computed name is counted, and a sink-module name escapes.
+    ("import importlib\ngetattr(importlib, 'import_module')(name)\n", ("code-import",)),
+    ("import builtins\ngetattr(builtins, '__import__')(name)\n", ("code-import",)),
+    ("import importlib\ngetattr(importlib, 'import_module')('pickle')\n", ("module-escape",)),
+    # A __import__ whose later arguments the literal name does not place: a fromlist that is
+    # not a literal list or tuple of string constants (keyword or fourth positional), a level
+    # other than the literal int 0 (a bool is not that int), and a spread that may hide either.
+    ("__import__('json', fromlist=[name])\n", ("code-import",)),
+    ("__import__('json', None, None, modules)\n", ("code-import",)),
+    ("__import__('json', level=1)\n", ("code-import",)),
+    ("__import__('json', level=False)\n", ("code-import",)),
+    ("__import__('json', *rest)\n", ("code-import",)),
+    ("__import__('json', **options)\n", ("code-import",)),
+    ("import importlib\nimportlib.__import__('json', fromlist=[name])\n", ("code-import",)),
+    # Every pkgutil.resolve_name, pydoc.locate and importlib.reload call is counted, whatever
+    # the argument.
+    ("import pkgutil\npkgutil.resolve_name(spec)\n", ("code-import",)),
+    ("import pkgutil\npkgutil.resolve_name('a.b:c')\n", ("code-import",)),
+    ("import pydoc\npydoc.locate(spec)\n", ("code-import",)),
+    ("import pydoc\npydoc.locate('json')\n", ("code-import",)),
+    ("import importlib\nimportlib.reload(mod)\n", ("code-import",)),
+    ("import importlib\ngetattr(importlib, 'reload')(mod)\n", ("code-import",)),
+    # The non-direct pydoc.locate spellings are counted as the direct one is.
+    ("from pydoc import locate\nlocate(spec)\n", ("alias", "code-import")),
+    ("from pydoc import locate as L\nL(spec)\n", ("alias", "code-import")),
+    ("import pydoc as p\np.locate(spec)\n", ("alias", "code-import")),
+    ("import pydoc\ngetattr(pydoc, 'locate')(spec)\n", ("code-import",)),
+    # A non-literal sys.path mutation in a scope that also imports by name (the import itself
+    # is a literal standard-library module, so only the mutation is the site), in either order.
+    ("import importlib, sys\ndef load(td):\n    sys.path.insert(0, str(td))\n"
+     "    return importlib.import_module('json')\n", ("code-syspath",)),
+    ("import importlib, sys\ndef load(td):\n    sys.path.append(str(td))\n"
+     "    return importlib.import_module('json')\n", ("code-syspath",)),
+    ("import importlib, sys\ndef load(td):\n    m = importlib.import_module('json')\n"
+     "    sys.path.insert(0, str(td))\n    return m\n", ("code-syspath",)),
+    ("import sys\nfrom importlib import import_module\ndef load(td):\n"
+     "    sys.path.insert(0, td)\n    return import_module('json')\n",
+     ("alias", "code-syspath")),
+    ("import importlib, sys\nsys.path.insert(0, str(td))\nimportlib.import_module('json')\n",
+     ("code-syspath",)),
+    ("import importlib, sys\ndef load(td):\n    sys.path.insert(0, *rest)\n"
+     "    return importlib.import_module('json')\n", ("code-syspath",)),
+    # An importer reached through a literal getattr in the call position pairs with the
+    # mutation as the direct spelling does.
+    ("import importlib, sys\ndef load(td):\n    sys.path.insert(0, str(td))\n"
+     "    return getattr(importlib, 'import_module')('json')\n", ("code-syspath",)),
+    # Pairing is by the dotted name of the enclosing def, async def or class, so a lambda or
+    # comprehension shares the name around it (a function, a class body or the module)...
+    ("import importlib, sys\ndef load(td):\n    sys.path.insert(0, str(td))\n"
+     "    return lambda: importlib.import_module('json')\n", ("code-syspath",)),
+    ("import importlib, sys\nsys.path.insert(0, str(td))\n"
+     "load = lambda: importlib.import_module('json')\n", ("code-syspath",)),
+    ("import importlib, sys\ndef load(td, names):\n    sys.path.insert(0, str(td))\n"
+     "    return [importlib.import_module('json') for n in names]\n", ("code-syspath",)),
+    ("import importlib, sys\nclass C:\n    sys.path.insert(0, str(td))\n"
+     "    mods = [importlib.import_module('json') for n in names]\n", ("code-syspath",)),
+    # ...and two scopes with one dotted name pair: a function defined twice, one name in both
+    # branches of an if, and a class and a function of one name.
+    ("import importlib, sys\ndef load(td):\n    sys.path.insert(0, str(td))\n"
+     "def load():\n    return importlib.import_module('json')\n", ("code-syspath",)),
+    ("import importlib, sys\nif fast:\n    def load(td):\n        sys.path.insert(0, str(td))\n"
+     "else:\n    def load():\n        return importlib.import_module('json')\n",
+     ("code-syspath",)),
+    ("import importlib, sys\nclass load:\n    sys.path.insert(0, str(td))\n"
+     "def load():\n    return importlib.import_module('json')\n", ("code-syspath",)),
     ("from logging.handlers import pickle\npickle.loads(data)\n", ("chain", "dsz-ref")),
     ("from pickle import *\nloads(b'')\n", ("star-import",)),
     ("import subprocess\nm = subprocess\nm.run(cmd, shell=True)\n", ("module-escape",)),
@@ -1834,6 +2899,163 @@ POSITIVE_VECTORS = (
     ("def outer():\n    def mid():\n        def inner():\n            nonlocal p\n"
      "            import pickle as p\n        inner()\n    p = None\n    mid()\n"
      "    return p.loads(x)\n", ("alias", "dsz-ref")),
+    # A str pattern with \d or \w, anchored or matched from its start, without ASCII.
+    ("import re\nCODE_RE = re.compile(r'^CWE-\\d+$')\n", ("regex-ascii",)),
+    ("import re\nok = re.search(r'\\A\\w+\\Z', text)\n", ("regex-ascii",)),
+    ("import re\nok = re.fullmatch(r'-?\\d+', text)\n", ("regex-ascii",)),
+    ("import re\nok = re.match(pattern=r'\\d+-', string=name)\n", ("regex-ascii",)),
+    ("import re\nPAT = re.compile(r'\\d+\\.\\d+')\ndef f(text):\n    return PAT.fullmatch(text)\n",
+     ("regex-ascii",)),
+    ("import re\nok = re.compile(r'[0-9]+|\\w+').match(text)\n", ("regex-ascii",)),
+    ("import re\nre.compile(r'^\\d+$', re.I | re.S)\n", ("regex-ascii",)),
+    ("import re\nre.compile(r'(?i)^\\d+$')\n", ("regex-ascii",)),
+    ("import re\nDIGITS = r'\\d+'\nre.compile('^' + DIGITS + '$')\n", ("regex-ascii",)),
+    ("import re\nre.compile(r'''\n    ^ \\d+ $\n''', re.X)\n", ("regex-ascii",)),
+    ("from re import compile as c\nc(r'^\\d+$')\n", ("alias", "regex-ascii")),
+    # A verbose pattern whose anchored line ends in a comment, by the flag or an inline (?x).
+    ("import re\nre.compile(r'''\n    ^ \\d+ $  # digits only\n''', re.X)\n", ("regex-ascii",)),
+    ("import re\nre.compile(r'(?x) ^ \\w+ $  # a word')\n", ("regex-ascii",)),
+    # Anchors inside a group that holds the whole pattern, used with search.
+    ("import re\nok = re.search(r'(^\\d+$)', text)\n", ("regex-ascii",)),
+    ("import re\nok = re.search(r'(?:^\\d+$)', text)\n", ("regex-ascii",)),
+    ("import re\nok = re.search(r'(?P<n>\\A\\w+\\Z)', text)\n", ("regex-ascii",)),
+    # \z ends the whole input as \Z does; a class attribute anchored by it is reported where it
+    # is compiled, so its use through self is covered there.
+    (_REGEX_END_Z[0], ("regex-ascii",)),
+    (_REGEX_END_Z[1], ("regex-ascii",)),
+    # A scoped flag group (verbose included) or an atomic group that holds the whole pattern, a
+    # comment group before it, and a group that holds only the start.
+    ("import re\nre.compile(r'(?i:^\\d+$)')\n", ("regex-ascii",)),
+    ("import re\nre.compile(r'(?x: ^ \\w+ $ )')\n", ("regex-ascii",)),
+    ("import re\nre.compile(r'(?>^\\d+$)')\n", ("regex-ascii",)),
+    ("import re\nre.compile(r'(?#id)^\\d+$')\n", ("regex-ascii",)),
+    ("import re\nre.compile(r'(^\\d+)$')\n", ("regex-ascii",)),
+    ("import re\nre.compile(r'^(?:\\d+$)')\n", ("regex-ascii",)),
+    # MULTILINE leaves \A a whole-input anchor, a scoped -m turns it off, and a pattern matched
+    # from its start is still matched whole, called or compiled.
+    ("import re\nok = re.search(r'\\A\\d+', text, re.M)\n", ("regex-ascii",)),
+    ("import re\nre.compile(r'(?-m:^\\d+$)', re.M)\n", ("regex-ascii",)),
+    ("import re\nok = re.fullmatch(r'^\\d+$', text, re.M)\n", ("regex-ascii",)),
+    ("import re\nLINES = re.compile(r'^\\w+$', re.M)\nok = LINES.fullmatch(text)\n",
+     ("regex-ascii",)),
+    # A compiled pattern's .pattern is its text without its flags, judged where it is read (alone
+    # or in a +). A line scan's, matched whole or recompiled without MULTILINE, is anchored there
+    # (unread, that use is not followed, so the line scan is reported where it is compiled).
+    ("import re\nPAT = re.compile(r'\\d+')\nok = re.fullmatch(PAT.pattern, text)\n",
+     ("regex-ascii", "regex-pattern")),
+    ("import re\nPAT = re.compile(r'\\w+', re.M)\nok = re.compile('^' + PAT.pattern + '$')\n",
+     ("regex-ascii", "regex-pattern")),
+    ("import re\nLINE = re.compile(r'^\\d+$', re.M)\nok = re.fullmatch(LINE.pattern, text)\n",
+     ("regex-ascii",)),
+    ("import re\nLINE = re.compile(r'^\\d+$', re.M)\nok = re.compile(LINE.pattern).search(text)\n",
+     ("regex-ascii",)),
+    # A line scan is reported where it is compiled when a use is matched from its start through
+    # an attribute (a class attribute, or one stored through self), or is any use the scan does
+    # not follow (passed on, or its .pattern held other than as an re function's pattern).
+    ("import re\nclass Ids:\n    P = re.compile(r'^\\d+$', re.M)\n    def ok(self, t):\n"
+     "        return self.P.fullmatch(t)\n", ("regex-ascii", "regex-lines")),
+    ("import re\nclass Ids:\n    def __init__(self):\n"
+     "        self.P = re.compile(r'^\\w+$', re.M)\n    def ok(self, t):\n"
+     "        return self.P.match(t)\n", ("regex-ascii", "regex-lines")),
+    ("import re\nLINE = re.compile(r'^\\d+$', re.M)\ncheck(LINE, text)\n",
+     ("regex-ascii", "regex-lines")),
+    ("import re\nLINE = re.compile(r'^\\d+$', re.M)\nTEXT = LINE.pattern\n",
+     ("regex-ascii", "regex-lines")),
+    # Stored to a name from an attribute (or a walrus of one), a line scan is followed to every
+    # read of that name, so one matched from its start there is reported where it is compiled;
+    # so is one an attribute holds that any getattr may read.
+    ("import re\nclass Ids:\n    def __init__(self):\n"
+     "        self.P = re.compile(r'^\\d+$', re.M)\n    def ok(self, t):\n"
+     "        p = self.P\n        return p.fullmatch(t)\n",
+     ("regex-ascii", "regex-lines", "regex-stores")),
+    ("import re\nclass C:\n    P = re.compile(r'^\\d+$', re.M)\nQ = C.P\nQ.fullmatch(text)\n",
+     ("regex-ascii", "regex-lines", "regex-stores")),
+    ("import re\nclass C:\n    P = re.compile(r'^\\w+$', re.M)\nQ = C.P\nQ.match(text)\n",
+     ("regex-ascii", "regex-lines", "regex-stores")),
+    ("import re\nclass Ids:\n    def __init__(self):\n"
+     "        self.P = re.compile(r'^\\d+$', re.M)\n        self.Q = self.P\n"
+     "    def ok(self, t):\n        q = self.Q\n        return q.fullmatch(t)\n",
+     ("regex-ascii", "regex-lines", "regex-stores")),
+    ("import re\nclass Ids:\n    def __init__(self):\n"
+     "        self.P = re.compile(r'^\\d+$', re.M)\n    def ok(self, t):\n"
+     "        return getattr(self, 'P').fullmatch(t)\n",
+     ("regex-ascii", "regex-lines", "regex-stores")),
+    # A getattr held, passed or wrapped before it is called may be given any name.
+    *(("import functools, re\n" + held + "class Ids:\n    def __init__(self):\n"
+       "        self.P = re.compile(r'^\\d+$', re.M)\n    def ok(self, t, c):\n"
+       + local + "        return " + read + ".fullmatch(t)\n",
+       ("regex-ascii", "regex-lines", "regex-stores"))
+      for held, local, read in (
+          ("", "        g = getattr\n", "g(self, 'P')"), ("g = getattr\n", "", "g(self, 'P')"),
+          ("", "", "getattr.__call__(self, 'P')"),
+          ("", "", "functools.partial(getattr, self)('P')"),
+          ("", "", "(getattr if c else hasattr)(self, 'P')"))),
+    # So is one called with the name "getattr", or reached through __builtins__.
+    *((source, ("regex-ascii", "regex-lines", "regex-stores"))
+      for source in _GETATTR_BY_NAME + _BUILTINS_DUNDER[:1]),
+    ("import re\nclass Ids:\n    def __init__(self):\n"
+     "        self.P = re.compile(r'^\\d+$', re.M)\n    def ok(self, t):\n"
+     "        (p := self.P).finditer(t)\n        return p.fullmatch(t)\n",
+     ("regex-ascii", "regex-lines", "regex-stores")),
+    # A comment group before the leading flag groups, and a scoped (?u:...) inside an ASCII scope.
+    *((source, ("regex-ascii",)) for source in _REGEX_LEADING_COMMENT + _REGEX_SCOPE_U),
+    # Anchored at both ends, a pattern used with findall matches the whole input or nothing.
+    ("import re\nok = re.findall(r'^\\d+$', text)\n", ("regex-ascii",)),
+    # A start-only anchor with search, called or on a compiled pattern.
+    ("import re\nok = re.search(r'^\\d+', text)\n", ("regex-ascii",)),
+    ("import re\nPAT = re.compile(r'\\A\\w+')\ndef f(text):\n    return PAT.search(text)\n",
+     ("regex-ascii",)),
+    # A compiled pattern copied to another name, and a walrus receiver.
+    ("import re\nPAT = re.compile(r'\\d+')\nCOPY = PAT\nCOPY.fullmatch(text)\n", ("regex-ascii",)),
+    ("import re\nok = (p := re.compile(r'\\d+')).fullmatch(text)\n", ("regex-ascii",)),
+    # A compiled pattern bound through a boolean expression.
+    ("import re\nPAT = cache or re.compile(r'\\d+')\nok = PAT.fullmatch(text)\n",
+     ("regex-ascii",)),
+    # A bound method held for later, alone or under functools.partial.
+    ("import re\nm = re.compile(r'\\d+').fullmatch\nok = m(text)\n", ("regex-ascii",)),
+    ("import functools, re\nPAT = re.compile(r'\\w+')\ncheck = functools.partial(PAT.match)\n",
+     ("regex-ascii",)),
+    # The compiled pattern given to re.Pattern's method (or typing.Pattern's) as its first
+    # argument.
+    ("import re\nPAT = re.compile(r'\\d+')\nok = re.Pattern.fullmatch(PAT, text)\n",
+     ("regex-ascii",)),
+    ("import re, typing\nPAT = re.compile(r'\\d+')\nok = typing.Pattern.fullmatch(PAT, text)\n",
+     ("regex-ascii",)),
+    # A pattern, or a compiled receiver, chosen by a conditional expression.
+    ("import re\nok = re.fullmatch(r'[0-9]+' if strict else r'\\d+', text)\n", ("regex-ascii",)),
+    ("import re\nA = re.compile(r'[0-9]+')\nB = re.compile(r'\\w+')\n"
+     "ok = (A if strict else B).match(text)\n", ("regex-ascii",)),
+)
+
+# The literal standard-library imports the import check leaves alone; the self-test also reads
+# them with the stdlib roster emptied, where each must be counted (the fail-closed side).
+_IMPORT_STDLIB = (
+    "import importlib\nimportlib.import_module('json')\n"
+    "importlib.import_module('xml.etree.ElementTree')\n",
+    "__import__('hashlib')\n",
+)
+# A literal import of a module file the tree holds is not a code site; the same literal with
+# no such file is (the flip), and is admitted by an allowlist entry like any other site.
+_IMPORT_REPO = b"import importlib\nimportlib.import_module('helper')\n"
+
+# A non-literal sys.path mutation beside each importer judged by its call alone: the scope of
+# a pkgutil.resolve_name, pydoc.locate or importlib.reload call pairs with the mutation as an
+# import_module or __import__ scope does. The self-test also reads these with the reimporters
+# dropped from the scope registration (only that registration removed, each call still
+# counted), where none may report code-syspath.
+_SYSPATH_REIMPORTERS = (
+    "import pkgutil, sys\ndef load(td):\n    sys.path.insert(0, str(td))\n"
+    "    return pkgutil.resolve_name('a.b:c')\n",
+    "import pkgutil, sys\ndef load(td):\n    sys.path.append(str(td))\n"
+    "    return pkgutil.resolve_name('a.b:c')\n",
+    "import pydoc, sys\ndef load(td):\n    sys.path.insert(0, str(td))\n"
+    "    return pydoc.locate('json')\n",
+    "import pydoc, sys\ndef load(td):\n    sys.path.append(str(td))\n"
+    "    return pydoc.locate('json')\n",
+    "import importlib, sys\ndef load(td, mod):\n    sys.path.insert(0, str(td))\n"
+    "    return importlib.reload(mod)\n",
+    "import importlib, sys\ndef load(td, mod):\n    sys.path.append(str(td))\n"
+    "    return importlib.reload(mod)\n",
 )
 
 # Negative vectors: the safe spellings each check must leave alone.
@@ -1848,6 +3070,9 @@ NEGATIVE_VECTORS = (
     "subprocess.run(cmd, **{'shell': False})\nsubprocess.run(cmd, **dict(shell=False))\n",
     "import os\nos.system('true')\n",
     "import os, subprocess\nflag = getattr(os, 'O_NOFOLLOW', 0)\nok = hasattr(subprocess, 'run')\n",
+    "import importlib\ngetattr(importlib, 'import_module')('json')\n",
+    "__import__('json', fromlist=['loads'], level=0)\n__import__('json', None, None, ())\n"
+    "__import__('json', None, None, ('a', 'b'), 0)\n",
     "import requests\nrequests.get(url, verify=True)\nrequests.get(url, verify='/ca.pem')\n"
     "requests.get(url, **{'verify': True})\nsession.verify = '/ca.pem'\n",
     "import ssl\nctx.check_hostname = True\nctx.verify_mode = ssl.CERT_REQUIRED\n"
@@ -1864,6 +3089,8 @@ NEGATIVE_VECTORS = (
     "with patch.object(subprocess, 'run', fake):\n    pass\nsetattr(os, 'stat', fake)\n"
     "ok = hasattr(os, name)\ndef f():\n    code = make()\n    alias = code\n",
     "import pickle\ndef f():\n    pickle = Codec()\n    return pickle.loads(x)\n",
+    # A function-local binding of __builtins__ is not the builtins module.
+    "def f(text):\n    __builtins__ = Shim()\n    __builtins__.exec(text)\n",
     # A class body's binding is not visible inside its methods.
     "class C:\n    from pickle import loads\n    def f(self):\n        return loads(x)\n",
     # An unbound name that is not a builtin names nothing, so no chain is read through it.
@@ -1916,6 +3143,103 @@ NEGATIVE_VECTORS = (
     "import logging.handlers\nlogging.handlers.SMTPHandler(host, a, b, s)\n"
     "logging.handlers.SMTPHandler(host, a, b, s, creds, None)\n"
     "logging.handlers.SMTPHandler(host, a, b, s, secure=None)\n",
+    # The same validators with re.ASCII (or re.A, or a flag name bound only to it), an inline
+    # (?a) or [0-9]; unanchored detectors over search, findall, sub and split; a bytes pattern; an
+    # escaped backslash before d; and a pattern the scan cannot resolve.
+    "import re\nre.compile(r'^CWE-\\d+$', re.ASCII)\nre.compile(r'^\\d+$', re.M | re.A)\n"
+    "re.fullmatch(r'-?\\d+', text, flags=re.ASCII)\nFLAGS = re.ASCII\nre.compile(r'^\\w+$', FLAGS)\n"
+    "re.compile(r'(?a)^\\d+$')\nre.compile(r'(?ai)^\\w+$')\nre.compile(r'^CWE-[0-9]+$')\n"
+    "PAT = re.compile(r'\\d+', re.ASCII)\nPAT.fullmatch(text)\n",
+    "import re\nre.search(r'\\w+', text)\nre.findall(r'\\d+', text)\nre.sub(r'\\w', '', text)\n"
+    "re.split(r'\\d+', text)\nWORDS = re.compile(r'\\b\\w+\\b')\nWORDS.search(text)\n",
+    "import re\nre.fullmatch(rb'\\d+', data)\nre.compile(r'^\\\\d$')\nre.match(r'^[a-z]+$', text)\n"
+    "def f(pattern, text):\n    return re.fullmatch(pattern, text)\n"
+    "re.fullmatch(f'{prefix}\\\\d+', text)\n",
+    # The widened forms in their clean spellings: a verbose comment with re.A, a # that is a
+    # literal outside verbose or inside a class, a search anchored only at its end or not at all,
+    # a start anchor under findall or sub, a group that is a lookahead or does not hold the whole
+    # pattern, and copies, walruses, bound methods and conditionals of ASCII or unanchored
+    # patterns.
+    "import re\nre.compile(r'''\n    ^ \\d+ $  # digits\n''', re.X | re.A)\n"
+    "re.compile(r'^\\d+$ # not a comment')\nre.compile(r'(?x) ^ [#] \\d+')\n"
+    "re.search(r'\\d+$', text)\nre.search(r'\\w+', text)\nre.search(r'^[0-9]+', text)\n"
+    "re.findall(r'^\\d+', text)\nre.sub(r'^\\w+', '', text)\nre.search(r'(?=^\\d+$)x', text)\n"
+    "re.search(r'(^\\d+)|x$', text)\n",
+    "import functools, re\nPAT = re.compile(r'^\\d+', re.ASCII)\nCOPY = PAT\nCOPY.search(text)\n"
+    "(p := re.compile(r'\\d+', re.A)).fullmatch(text)\nm = re.compile(r'\\d+').search\n"
+    "re.Pattern.search(re.compile(r'\\w+'), text)\nfunctools.partial(re.compile(r'\\d+').findall)\n"
+    "re.fullmatch(r'[0-9]+' if strict else r'[a-z]+', text)\n"
+    "(re.compile(r'\\d+') if strict else re.compile(r'\\w+')).search(text)\n",
+    # Under MULTILINE (re.M, re.MULTILINE, an inline (?m), a scoped (?m:...), or a flags
+    # expression or name holding it) a pattern anchored only by ^ and $ is a line scan: with
+    # search, finditer, findall and sub, called or compiled.
+    "import re\nre.search(r'^\\d+', text, re.M)\nre.search(r'^\\d+$', text, re.M)\n"
+    "re.finditer(r'^\\d+$', text, re.M)\nre.findall(r'^\\w+$', text, re.MULTILINE)\n"
+    "re.sub(r'^\\d+$', '', text, 0, re.I | re.M)\nre.sub(r'(?m)^\\d+$', '', text)\n"
+    "re.search(r'(?m:^\\w+$)', text)\nFLAGS = re.M | re.I\nre.findall(r'^\\d+$', text, FLAGS)\n"
+    "LINES = re.compile(r'^\\d+$', re.M)\nLINES.search(text)\nLINES.finditer(text)\n",
+    # A scoped (?a:...) group that holds the whole pattern is ASCII, and the clean spellings of a
+    # boolean-expression receiver, a typing.Pattern call, a lookahead at the end, and a group at
+    # an end that holds its own alternation.
+    "import re, typing\nre.compile(r'(?a:^\\d+$)')\nre.compile(r'(?>^\\d+\\z)', re.A)\n"
+    "PAT = cache or re.compile(r'\\d+', re.A)\nPAT.fullmatch(text)\n"
+    "typing.Pattern.search(re.compile(r'\\w+'), text)\nre.compile(r'^\\d+(?=$)')\n"
+    "re.compile(r'^\\d+(?:[ \\t]|$)')\n",
+    # A line scan used only as one, called or compiled: finditer, findall, sub, a search anchored
+    # at its start, verbose with MULTILINE, split, an inline (?m) with subn, a flags name with
+    # findall, a compiled sub, finditer through a class attribute or a copy, its .pattern given
+    # to a line scan with MULTILINE (positionally or as pattern=), and an attribute stored to a
+    # name every read of which scans lines.
+    "import re\nre.finditer(r'^\\d+$', text, re.M)\nre.findall(r'^\\d+$', text, re.M)\n"
+    "re.sub(r'^\\d+$', '', text, flags=re.M)\nre.search(r'^\\d+', text, re.M)\n"
+    "re.findall(r'''^ \\d+ $  # one line''', text, re.X | re.M)\n"
+    "re.split(r'^\\d+$', text, flags=re.M)\nre.subn(r'(?m)^\\d+$', '', text)\n"
+    "FLAGS = re.M\nre.findall(r'^\\d+$', text, FLAGS)\n"
+    "LINE = re.compile(r'^\\d+$', re.M)\nLINE.finditer(text)\nLINE.findall(text)\n"
+    "LINE.sub('', text)\nLINE.subn('', text)\nLINE.split(text)\nLINE.search(text)\n"
+    "re.findall(LINE.pattern, text, re.M)\nre.sub(pattern=LINE.pattern, repl='', string=text,"
+    " flags=re.M)\nCOPY = LINE\nCOPY.finditer(text)\n"
+    "START = re.compile(r'^\\d+', re.M)\nSTART.search(text)\n"
+    "class Lines:\n    P = re.compile(r'^\\w+$', re.M)\n    def scan(self, t):\n"
+    "        return self.P.finditer(t)\n"
+    "class Ids:\n    def __init__(self):\n        self.P = re.compile(r'^\\d+$', re.M)\n"
+    "    def scan(self, t):\n        p = self.P\n        return p.finditer(t)\n"
+    "QUOTE = Lines.P\nQUOTE.findall(text)\nQUOTE.sub('', text)\n",
+    # A stored line scan used only as one beside a hasattr held, passed or wrapped (only a read
+    # of getattr may hand the scan on).
+    "import functools, re\nh = hasattr\nclass Ids:\n    def __init__(self):\n"
+    "        self.P = re.compile(r'^\\d+$', re.M)\n    def scan(self, t, c):\n"
+    "        g = hasattr\n        ok = g(self, 'P') and h(self, 'P')\n"
+    "        ok = ok and hasattr.__call__(self, 'P') and functools.partial(hasattr, self)('P')\n"
+    "        ok = ok and (hasattr if c else callable)(t)\n"
+    "        return ok and self.P.finditer(t)\n",
+    # ASCII after comment groups among the leading flag groups, and in a scoped (?a:...) group
+    # that holds only part of the pattern, (?u:...) closed before the \d.
+    *_REGEX_LEADING_ASCII,
+    "import re\nre.compile(r'^(?a:\\d+)$')\nre.compile(r'(?a:^(?u:[a-z]+)\\d+$)')\n",
+    # Literal standard-library imports, a sys.path mutation with no importer call in its
+    # scope (or in another function's), and a literal-path insert beside a stdlib import.
+    *_IMPORT_STDLIB,
+    "import sys\nsys.path.insert(0, str(root))\nsys.path.append(found)\n",
+    "import importlib, sys\ndef add(p):\n    sys.path.insert(0, p)\n"
+    "def load():\n    return importlib.import_module('json')\n",
+    "import importlib, sys\ndef f():\n    sys.path.insert(0, '/usr/share/stubs')\n"
+    "    return importlib.import_module('json')\n",
+    # A mutation and an importer whose enclosing dotted names differ are not paired (the
+    # residuals name each): the importer in a nested function, the mutation in a nested
+    # function, a module-level mutation with the importer in a top-level def, a class-body
+    # mutation with the importer in a method, and a mutation in a def with the importer at
+    # module level.
+    "import importlib, sys\ndef load(td):\n    sys.path.insert(0, str(td))\n"
+    "    def inner():\n        return importlib.import_module('json')\n    return inner\n",
+    "import importlib, sys\ndef load(td):\n    def add():\n        sys.path.insert(0, str(td))\n"
+    "    add()\n    return importlib.import_module('json')\n",
+    "import importlib, sys\nsys.path.insert(0, str(td))\n"
+    "def load():\n    return importlib.import_module('json')\n",
+    "import importlib, sys\nclass C:\n    sys.path.insert(0, str(td))\n"
+    "    def load(self):\n        return importlib.import_module('json')\n",
+    "import importlib, sys\ndef add(td):\n    sys.path.insert(0, str(td))\n"
+    "importlib.import_module('json')\n",
 )
 
 
@@ -2120,7 +3444,7 @@ def _parse_raises(exc_type):
         module = sys.modules[__name__]
         real = module.scan_source
 
-        def refuse(source, filename="<source>", disabled=()):
+        def refuse(source, filename="<source>", disabled=(), modules=None):
             raise exc_type("parser refused " + filename)
         module.scan_source = refuse
 
@@ -2156,6 +3480,9 @@ CE = "cannot-evaluate"
 _TWO_ON_ONE_LINE = (b"def f(spec, a, b):\n"
                     b"    spec.loader.exec_module(a); spec.loader.exec_module(b)\n")
 _TWO_CHAINED = b"def f(x, a, b):\n    x.exec_module(a).exec_module(b)\n"
+_REGEX_SITE = b"import re\ndef f(text):\n    return re.fullmatch(r'\\d+', text)\n"
+_REGEX_FIXED = b"import re\ndef f(text):\n    return re.fullmatch(r'\\d+', text, re.ASCII)\n"
+_REGEX_ENTRY = ("tools/a.py", "f", "regex", 1, _REASON)
 # Tree vectors: (name, files, allowlist, setup, expected, check, outcome without the check).
 TREE_VECTORS = (
     # Parses, but nests deeper than the visitor can recurse: RecursionError is cannot-evaluate.
@@ -2219,6 +3546,24 @@ TREE_VECTORS = (
      "allowlist-shape", 0),
     ("allowlist not a tuple", {"tools/a.py": _SITE}, [_ENTRY], None, CE,
      "allowlist-shape", 0),
+    # A reviewed Unicode validator is admitted; without the check its entry no longer matches.
+    ("allowlisted regex site", {"tools/a.py": _REGEX_SITE}, (_REGEX_ENTRY,), None, 0,
+     "regex-ascii", 1),
+    ("regex allowlist count drift", {"tools/a.py": _REGEX_SITE},
+     (_REGEX_ENTRY[:3] + (2, _REASON),), None, 2, "allowlist-stale", 0),
+    # A site fixed with re.ASCII leaves its entry stale, which is itself a finding.
+    ("regex allowlist entry stale after a fix", {"tools/a.py": _REGEX_FIXED}, (_REGEX_ENTRY,),
+     None, 1, "allowlist-stale", 0),
+    # A literal import of a module no file in the tree supplies is counted (fail closed).
+    ("unknown literal module import", {"tools/a.py": _IMPORT_REPO}, (), None, 1,
+     "code-import", 0),
+    # A written-then-imported probe in a tree: the temporary-directory insert and the computed
+    # import are two code sites in one function, so a one-site allowance reports all three lines.
+    ("written module import probe",
+     {"tools/a.py": b"import importlib, sys\ndef probe(td, name):\n"
+                    b"    sys.path.insert(0, str(td))\n"
+                    b"    return importlib.import_module(name)\n"},
+     (("tools/a.py", "probe", "code", 1, _REASON),), None, 3, "code-syspath", 0),
 )
 
 
@@ -2257,6 +3602,90 @@ def self_test():
         failures.append("tree: the vendored tree is not excluded")
     if _tree_outcome({"tools/a.py": _SITE}) != 1:
         failures.append("tree: an unreviewed site passes")
+    # A literal import of a module file the tree holds is the ordinary way to reach the
+    # repository's code; the same literal with no such file is counted (the flip above in
+    # TREE_VECTORS proves the check carries it).
+    if _tree_outcome({"tools/helper.py": b"x = 1\n", "tools/a.py": _IMPORT_REPO}) != 0:
+        failures.append("tree: a literal import of a repository module is counted")
+    if _tree_outcome({"tools/a.py": _IMPORT_REPO}) != 1:
+        failures.append("tree: a literal import with no such module file is not counted")
+    # The stdlib reading flipped: with the roster emptied, each literal stdlib import counts.
+    global _STDLIB_MODULES
+    stdlib, _STDLIB_MODULES = _STDLIB_MODULES, frozenset()
+    try:
+        for source in _IMPORT_STDLIB:
+            if not any(item[4] == "code-import" for item in scan_source(source)):
+                failures.append("not counted with the stdlib roster emptied: " + repr(source))
+    finally:
+        _STDLIB_MODULES = stdlib
+    # A non-literal sys.path mutation pairs with a reimporter call as it does with a direct
+    # importer; with the reimporters dropped from the scope registration (only the
+    # registration removed, each call still counted), no vector reports code-syspath.
+    for source in _SYSPATH_REIMPORTERS:
+        if not any(item[4] == "code-syspath" for item in scan_source(source)):
+            failures.append("sys.path mutation beside a reimporter not counted: " + repr(source))
+    global _SCOPE_IMPORTERS
+    scope_importers, _SCOPE_IMPORTERS = _SCOPE_IMPORTERS, _IMPORTERS
+    try:
+        for source in _SYSPATH_REIMPORTERS:
+            if any(item[4] == "code-syspath" for item in scan_source(source)):
+                failures.append("code-syspath with the reimporters not registering their scope: "
+                                + repr(source))
+    finally:
+        _SCOPE_IMPORTERS = scope_importers
+    # \z is read as an end anchor: with it dropped from the end anchors, its vectors pass.
+    global _REGEX_ENDS
+    ends, _REGEX_ENDS = _REGEX_ENDS, tuple(end for end in _REGEX_ENDS if end != "\\z")
+    try:
+        for source in _REGEX_END_Z:
+            if scan_source(source):
+                failures.append("flagged without \\z as an end anchor: " + repr(source))
+    finally:
+        _REGEX_ENDS = ends
+    # A comment group is passed among the leading flag groups: with only flag groups read as
+    # leading, its validators pass and its ASCII spellings are flagged.
+    global _LEADING_GROUP
+    leading, _LEADING_GROUP = _LEADING_GROUP, re.compile(r"\(\?([aiLmsux]+)\)", re.ASCII)
+    try:
+        for source in _REGEX_LEADING_COMMENT:
+            if scan_source(source):
+                failures.append("flagged with only flag groups read as leading: " + repr(source))
+        for source in _REGEX_LEADING_ASCII:
+            if not scan_source(source):
+                failures.append("passes with only flag groups read as leading: " + repr(source))
+    finally:
+        _LEADING_GROUP = leading
+    # A scoped u clears ASCII for its body: with it not clearing ASCII, its vectors pass.
+    global _SCOPE_UNICODE
+    unicode, _SCOPE_UNICODE = _SCOPE_UNICODE, frozenset()
+    try:
+        for source in _REGEX_SCOPE_U:
+            if scan_source(source):
+                failures.append("flagged with a scoped u not clearing ASCII: " + repr(source))
+    finally:
+        _SCOPE_UNICODE = unicode
+    # getattr called with the name "getattr" is held, and a __builtins__ that may be unbound is
+    # the builtins module: with either reading removed, its vectors pass.
+    global _GETATTR_NAMES, _BUILTINS_MODULE
+    names, _GETATTR_NAMES = _GETATTR_NAMES, frozenset()
+    try:
+        for source in _GETATTR_BY_NAME:
+            if scan_source(source):
+                failures.append("flagged with getattr(x, \"getattr\") not held: " + repr(source))
+    finally:
+        _GETATTR_NAMES = names
+    # A module-level, class-body or global-declared __builtins__ is still the builtins module.
+    for source in _BUILTINS_BOUND:
+        if not any(item[4] == "code-ref" for item in scan_source(source)):
+            failures.append("bound __builtins__ not read as the builtins module: " + repr(source))
+    dunder, _BUILTINS_MODULE = _BUILTINS_MODULE, {}
+    try:
+        for source in _BUILTINS_DUNDER + _BUILTINS_BOUND:
+            if scan_source(source):
+                failures.append("flagged with __builtins__ not the builtins module: "
+                                + repr(source))
+    finally:
+        _BUILTINS_MODULE = dunder
     drift = _roster_drift()
     if drift:
         failures.append("sink sets differ from the pinned roster: " + ", ".join(drift))
@@ -2272,8 +3701,19 @@ def self_test():
         return 1
     print("SELF-TEST PASS: dangerous-api: {} positive vectors and {} generated sink-set vectors"
           " (each fails without its check), {} negatives, {} fail-closed and allowlist tree"
-          " vectors (each changes outcome without its check), 4 admission vectors.".format(
-              len(POSITIVE_VECTORS), len(generated), len(NEGATIVE_VECTORS), len(TREE_VECTORS)))
+          " vectors (each changes outcome without its check), 4 admission vectors, {} literal-"
+          "import vectors (the repository module file and the emptied stdlib roster flip"
+          " them), {} reimporter sys.path vectors (each loses its code-syspath with the"
+          " reimporters dropped from the scope registration), {} \\z vectors"
+          " that pass without \\z as an end anchor, {} leading comment-group vectors that flip"
+          " with only flag groups read as leading, {} scoped u vectors that pass with u not"
+          " clearing ASCII, {} getattr(x, \"getattr\") and {} __builtins__ vectors that pass"
+          " without that reading.".format(
+              len(POSITIVE_VECTORS), len(generated), len(NEGATIVE_VECTORS), len(TREE_VECTORS),
+              2 + len(_IMPORT_STDLIB), len(_SYSPATH_REIMPORTERS),
+              len(_REGEX_END_Z), len(_REGEX_LEADING_COMMENT) + len(_REGEX_LEADING_ASCII),
+              len(_REGEX_SCOPE_U), len(_GETATTR_BY_NAME),
+              len(_BUILTINS_DUNDER) + len(_BUILTINS_BOUND)))
     return 0
 
 

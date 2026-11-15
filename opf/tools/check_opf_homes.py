@@ -50,17 +50,17 @@ base defines one implementation model (spec 16.1), so restoring one of its sente
 under the default entry; the rest of 9.1, and additions to it, stay unprotected. Appendix E stays
 untiled, and its sentences that state what section 16.1 makes of its probes are pinned sentence
 by sentence (_PINNED), so deleting or rewording a pinned sentence there turns the gate red; the
-rest of Appendix E, and additions to it, stay unprotected here. The quickstart's, the opfiles.ai
-disclosure page's, the adopt page's, the adoption guide's, the record-indexes page's and the
-core-files page's changed
-sentences are pinned the same way over tag-stripped text (_SURFACE), outside the keyword lint,
-and the self-test pins the registry's shape, so dropping a _SURFACE entry turns the self-test
-red; each sentence of the disclosure page's retired fresh-only item, the quickstart's retired
-conformance-class sentence, the record-indexes page's deleted importer-only legacy_fragment
-rows and counts, those three files' wording of the removed section 9.2 remedy adoption, and the
-disclosure and record-indexes pages' description of a store upgrade the reference tooling no longer
-defines, is searched over its whole file's normalized text and is red wherever it lands
-(_SURFACE_RETIRED). The rest of those files, and additions to them, stay unprotected,
+rest of Appendix E, and additions to it, stay unprotected here. The quickstart's, the adoption
+guide's (opf/site/adopt.md) and the generated opfiles.ai disclosure, adopt and core-files pages'
+(opf/site/<page>/index.html) changed sentences, the record indexes' sentences held on the
+core-files page that carries them, are pinned the same way over tag-stripped text (_SURFACE),
+outside the keyword lint, and the self-test pins the registry's shape, so dropping a _SURFACE
+entry turns the self-test red; each sentence of the disclosure page's retired fresh-only item, the
+quickstart's retired conformance-class sentence, the record indexes' deleted importer-only
+legacy_fragment rows and counts, those three files' wording of the removed section 9.2 remedy
+adoption, and the disclosure page's and the record indexes' description of a store upgrade the
+reference tooling no longer defines, is searched over its whole file's normalized text and is red
+wherever it lands (_SURFACE_RETIRED). The rest of those files, and additions to them, stay unprotected,
 and beyond those registered retired sentences no retired-text check reads them, so any other
 deleted sentence restored there stays green.
 
@@ -268,11 +268,13 @@ import _opf_store as store  # noqa: E402
 
 SPEC = Path(__file__).resolve().parents[1] / "spec" / "OPF-SPEC.md"
 QUICKSTART = SPEC.parent / "OPF-QUICKSTART.md"
-DISCLOSURE = SPEC.parents[1] / "site" / "disclosure.html"
-ADOPT_PAGE = SPEC.parents[1] / "site" / "adopt.html"
+# The opfiles.ai pages are generated (tools/gen_draft_site.py, from opf/site/draft-src/), each an
+# index.html under its page directory. The core-files page also carries the record indexes that the
+# retired record-indexes page described, so that page's pins and retired sentences are held there.
+DISCLOSURE = SPEC.parents[1] / "site" / "disclosure" / "index.html"
+ADOPT_PAGE = SPEC.parents[1] / "site" / "adopt" / "index.html"
 ADOPT_GUIDE = SPEC.parents[1] / "site" / "adopt.md"
-RECORD_INDEXES = SPEC.parents[1] / "site" / "record-indexes.html"
-CORE_FILES = SPEC.parents[1] / "site" / "core-files.html"
+CORE_FILES = SPEC.parents[1] / "site" / "core-files" / "index.html"
 
 
 class _Descriptive(str):
@@ -310,7 +312,9 @@ _CONTRACT = {
         _D('# OPFiles: the operational-files standard Formal name: AIQT Development Operational Standard.'),
         _D('Public brand: OPFiles (opfiles.ai).'),
         _D('Base discovery token: opf.'),
-        _D('Status: draft (specification only; schemas and the reference tooling, the scaffolder opf init, the adopter opf adopt, the post-adoption importer opf import, the validator opf doctor, the renderer opf render, the relocator opf migrate, the synchronizer opf sync, the schema-upgrader opf upgrade, the absorber opf absorb, and the record author opf record, ship in later releases).'),
+        _D('Status: this specification is a draft.'),
+        _D("The reference tooling's status in this build is the generated status note that follows, also published in opf/README.md, on opfiles.ai, and in opf/site/llms.txt (generated from VERB_STATUS in opf/tools/opf.py):"),
+        _D('Reference CLI status. Available: init, render, doctor, absorb. Partial: record (create, transition, done-with-receipt, and worklog-append; receipt-repair exits 2), adopt (plan, approve, reconcile, and status; apply and complete exit 2). In progress: upgrade, import, migrate, sync; each exits 2 in this build.'),
         _D('Date: 2026-10-24 (UTC).'),
         _D('OPFiles is a neutral, self-contained operational-files standard published under the Apache License 2.0 (except vendored third-party material, which remains under its own terms).'),
         _D('AIQT and AIQT Guardrails are trademarks (registration pending); AIQT is a brand, not a legal entity, and the standard is authored and maintained by its lead maintainer.'),
@@ -622,6 +626,10 @@ _CONTRACT = {
         _D('| | block | active > released or expired | Scopes an enumerated list of record IDs.'),
         'A block created by an assistant or automation actor is active/proposed and is a proposal, not a grant: it MUST NOT count toward blocked-ness or justify a stop until a maintainer ratifies it.',
         '| | handoff | current > superseded | Posting a new handoff MUST supersede the previous in the same act; at most one current handoff MAY exist among clean records authored by non-importer actors (section 8.6).',
+        _D('The previous handoff is the one clean current handoff authored by a non-importer actor; a first handoff, posted while none stands, supersedes nothing.'),
+        _D("The superseded handoff lands the status the posting actor's transition takes (section 8.4): unqualified superseded for a maintainer, superseded/proposed for an assistant or automation."),
+        _D("An importer-authored current handoff is history: it neither blocks a posting nor is superseded by the posting's own supersession."),
+        'A handoff MUST NOT return to current while another such current handoff stands (section 8.8).',
         _D('| | reference | recorded | Immutable captured reference.'),
         '| | contribution | proposed > sent > acknowledged or superseded; proposed > withdrawn | Records what this project proposes or sends to a peer, with a delivery bundle {channel, ref, sent_at, receipt_ref?, receipted_at?}: channel/ref/sent_at MUST be present once sent, sent_at MUST NOT be present before, and the receipt fields MAY appear only at acknowledged.',
         _D('sent is gated (an assistant lands sent/proposed; a maintainer, or a valid standing authorization for the recipient, lands the bare grant).'),
@@ -667,13 +675,17 @@ _CONTRACT = {
     ),
     "8.8": (
         _D("opf record is the reference tooling's record-authoring verb."),
-        _D('It writes the record and worklog shapes this specification defines, and it adds one optional envelope key of its own: proposed_from (section 8.3), which appears only on /proposed records written by opf record transition.'),
+        _D("It writes the record and worklog shapes this specification defines, and it adds one optional envelope key of its own: proposed_from (section 8.3), which appears only on /proposed records written by opf record transition or by a handoff create's supersession (section 8.5)."),
         _D('Its clean-series subcommands use the strict record model; the import write mode uses the separate imported model.'),
         'Import is not a flag that relaxes create, and the clean-series subcommands MUST refuse actor.kind = "importer": an importer authors only through import.',
         'The clean-series subcommands MUST also refuse an importer-authored record as their operand: acting on imported history is a new clean record linking back (section 8.6).',
         _D("Its subcommands: - create: one new record of an enabled baseline type, in the type's initial state."),
         _D('An assistant or automation author entering a gated initial state lands /proposed; a created-terminal factual or ACT type (reference, autonomous_decision, maintainer_decision) carries no qualifier (section 8.4).'),
         _D('done receipts and worklog entries are not created this way.'),
+        _D("A handoff create lands unqualified current whatever the actor and supersedes the previous handoff (section 8.5) in the same act: the one current handoff authored by a non-importer actor in the active index moves to unqualified superseded when the actor is a maintainer, or to superseded/proposed with proposed_from set to current when the actor is an assistant or automation, and its updated_at takes the operation's clock value; the new record appends one supersedes link to it after its requested links; and the worklog entry adds a supersedes: <ID> line to its detail and a relates link to the superseded record."),
+        _D('With no such handoff standing, a store holding only superseded handoffs included, the create supersedes nothing and writes no supersedes link.'),
+        _D("An importer-authored current handoff is outside this selection (section 8.6): it neither blocks the posting nor is superseded by the posting's own supersession, and its record is left unchanged."),
+        "Before anything is written, a handoff create MUST refuse a requested supersedes link that names the handoff it supersedes, more than one such current handoff, such a current handoff found in the archive (section 12), an archive input that the doctor's archive walk finds defective, and a previous handoff that is not schema-valid or whose updated_at is not earlier than the operation's clock value.",
         _D("- transition: a status change checked against the type's grammar (section 8.5)."),
         "An assistant or automation author landing a terminal or gated state takes /proposed, and the verb MUST record the state the record held at that moment in the record's own proposed_from field (section 8.3) in the same act; only a maintainer ratifies, or rejects with a recorded reason back to the recorded pre-proposal state (section 8.4).",
         'A rejection MUST restore exactly the recorded proposed_from state, and leaving the /proposed status, by rejection or ratification, MUST remove the field.',
@@ -698,6 +710,8 @@ _CONTRACT = {
         _D("transition does not read a standing authorization (section 8.4): an assistant or automation send lands sent/proposed even where the authorization would permit a bare sent, for a maintainer to ratify."),
         "A recipient receipt reference MAY be given only on sent > acknowledged, landing bare or /proposed: transition then adds receipt_ref and receipted_at, the operation's clock value, to delivery, and MUST refuse the value on every other transition.",
         'A rejection of acknowledged/proposed back to sent MUST remove those two keys.',
+        'A transition that lands a handoff at current, the maintainer rejection of superseded/proposed, MUST refuse with nothing written while another current handoff authored by a non-importer actor stands in the active index or the archive, since a rejection restores only the one named record; the maintainer MAY instead ratify the proposal to superseded.',
+        _D('An importer-authored current handoff does not block that rejection (section 8.6).'),
         'A backlog item MUST reach unqualified done only through done-with-receipt.',
         _D('- done-with-receipt: maintainer-only.'),
         _D('It moves a backlog item to unqualified done, from active or by ratifying done/proposed, and in the same act creates its one-to-one done receipt linked receipt_of (section 8.5).'),
@@ -729,6 +743,7 @@ _CONTRACT = {
         _D('3. Claim each new ID as one atomic act (section 8.2): the claim is an irrevocable reservation in the journal home, made before the reversible publication (section 4.2).'),
         _D("4. Postcondition: the model diff of every rewritten file equals exactly the operation's allowed delta (the new rows appended, the counters advanced by exactly the claim, and for a transition one status and updated_at change plus the proposed_from write or removal and, for a pending_decision, the resolution bundle write or removal and the supersedes link append), value for value and type for type (a boolean or float is never equal to an integer), before anything is written."),
         'The expected delta MUST be derived from the request, the prior bytes of each rewritten file, the claimed IDs, the clock value, and the schema rules, never from the planned rows themselves.',
+        _D("For a handoff create that supersedes (section 8.5), the allowed delta also holds the superseded handoff's status and updated_at change and, for an assistant or automation post, its proposed_from write; it holds no change to any other existing record."),
         '5. The in-repo store contract (section 5.7): the planned destinations MUST be clean, including ignored files, and the single-writer lease MUST be held across publication, render, and the final doctor.',
         '6. Every rewritten file MUST be published in one crash-durable journaled transaction, so an interruption leaves the store exactly at its prestate or exactly at its poststate once reconciled.',
         _D('That journal is .working/journals/record/journal.'),
@@ -867,7 +882,7 @@ _CONTRACT = {
         'A manifest declaring a spec_version of 2.0.0 or above whose [opf].homes is missing or not the integer 2 is refused as a store (section 9.2), never foreign content: investigation over it MUST fail closed and MUST NOT read that refusal as authorizing any adoption (sections 4.5 and 8.2).',
         'A manifest refused only at the section 9.2 version ceiling marks a store at a later version, never foreign content: investigation over it MUST fail closed, naming the tooling-upgrade remedy, and MUST NOT read that refusal as authorizing any adoption (sections 4.5 and 8.2).',
         'Exactly one adopter approval MUST follow each concrete plan.',
-        "The opf.adoption.plan/v2 plan MUST bind: - product and store identities and the observed revision; - every source path, byte digest, disposition and preservation destination; - exact creations, replacements, removals and consumer repointings; - tool release identity, including manifest_sha256 checked against an independent anchor; - the version and digest of the prompt pack; - enforcement-pack contents per platform and each platform's disclosed residual coverage; - the completion-check roster and the rule that retirement requires green checks and matching bytes; - the missingness and unparsed-content policy, the skip policy under which a migrate-disposed source may be recorded as skipped, and the migrate-disposed sources import may touch.",
+        "The opf.adoption.plan/v2 plan MUST bind: - product and store identities and the observed revision; - every source path, byte digest, disposition and preservation destination; - exact creations, replacements, removals and consumer repointings; - tool release identity, including manifest_sha256 and the named anchor it was checked against (a copy of that digest published apart from the release artefact), the two digests agreeing; - the version and digest of the prompt pack; - enforcement-pack contents per platform and each platform's disclosed residual coverage; - the completion-check roster and the rule that retirement requires green checks and matching bytes; - the missingness and unparsed-content policy, the skip policy under which a migrate-disposed source may be recorded as skipped, and the migrate-disposed sources import may touch.",
         'The attributed approval MUST bind plan_digest and inventory_digest, hence that whole plan.',
         'A per-fragment acceptance or later adopter checkpoint MUST NOT occur within the approved plan.',
         'Any bound-item drift MUST refuse into a fresh plan with its own single approval; a changed old file MUST NOT be retired.',
@@ -1427,8 +1442,8 @@ _TOOLING_ONLY_RESERVATIONS = ("imports",)
 # Plain-language surfaces restating the base 2.0.0 contract: sentence pins over tag-stripped,
 # whitespace-normalized text, so deleting or rewording a pinned sentence turns the gate red.
 # They are not specification sentences, so the section 2 keyword lint does not read them. The
-# quickstart, the disclosure page, the adopt page, the adoption guide, the record-indexes page
-# and the core-files page state the one implementation model, the 2.0.0 file baseline, the
+# quickstart, the disclosure page, the adopt page, the adoption guide and the core-files page
+# (with the record indexes it carries) state the one implementation model, the 2.0.0 file baseline, the
 # reference tooling's grading of a 2.0.0 manifest with homes = 2, that it defines no store
 # upgrade, what its scaffold still writes, and where its 1.2.0 behaviour diverges from the
 # specification. The self-test pins
@@ -1436,7 +1451,7 @@ _TOOLING_ONLY_RESERVATIONS = ("imports",)
 _SURFACE = {
     QUICKSTART: (
         'Date: 2026-10-24 (UTC).',
-        'Create .working/toml/ by hand with manifest.toml declaring standard = "opf", spec_version = "2.0.0" and homes = 2 in its [opf] table, plus counters.toml (with the imported counter row of each enabled type beside its clean row), version.toml, worklog.toml, the eleven baseline .index.toml files (worklog is the exempt ledger listed above, not an index), the eleven .imported.index.toml leaves, and worklog.imported.toml, all empty to start; specification sections 4, 8 and 9 give the full file baseline.',
+        'Create .working/toml/ by hand with manifest.toml declaring standard = "opf", spec_version = "2.0.0" and homes = 2 in its [opf] table, plus counters.toml (with the imported counter row of each enabled type beside its clean row), version.toml, worklog.toml, the eleven baseline .index.toml files (worklog is the exempt ledger listed above, not an index), the eleven .imported.index.toml leaves, and worklog.imported.toml, and create the root CHANGELOG.md (a required public deliverable, specification section 5.8), each holding exactly the starting contents under "Hand-start file contents" below, never a zero-byte file; specification sections 4, 8 and 9 give the full file baseline.',
         "The reference tooling's opf init does not scaffold this store yet: its scaffold still writes a 1.2.0 store, a format the specification's validation refuses (specification section 9.2).",
         'The specification defines one implementation model, with no conformance classes (OPF-SPEC section 16.1).',
         'Base 2.0.0, with homes = 2, is the only base version the specification defines, and the reference tooling does not yet implement it.',
@@ -1460,7 +1475,7 @@ _SURFACE = {
         "The reference tooling's opf init does not scaffold this store yet: its scaffold still writes a 1.2.0 store, a format the standard's validation refuses (specification section 9.2).",
         'It declares standard = "opf" (the exact discovery token) in its [opf] table, along with the base spec_version you conform to ("2.0.0"), the homes generation homes = 2, the storage layout, the enforcement posture, and import_status.',
         'It holds the clean row and the imported counter row (the quoted key "imported:&lt;NS&gt;", at zero to start) of every enabled type.',
-        'The imported leaves: one &lt;type&gt;.imported.index.toml beside each of those eleven indexes, plus worklog.imported.toml for the worklog, each empty to start. The standard requires them in every store (OPF-SPEC.md sections 4.2 and 8.2).',
+        'The imported leaves: one &lt;type&gt;.imported.index.toml beside each of those eleven indexes, plus worklog.imported.toml for the worklog, each starting with no records in the same canonical form, never as a zero-byte file. The standard requires them in every store (OPF-SPEC.md sections 4.2 and 8.2).',
         'The reference tooling does not yet implement spec 2.0.0, the only base version the standard defines; it validates spec 1.2.0 stores, as described above.',
         'Its opf doctor grades a manifest declaring spec_version = "2.0.0" with homes = 2 under its 1.2.0 rules, so its VALID verdict on such a store says nothing about conformance to the standard; opf upgrade and opf record refuse such a store.',
         'spec_version = "2.0.0" # the base spec version this store conforms to homes = 2 # the homes generation; required, and 2 is the only value',
@@ -1469,13 +1484,14 @@ _SURFACE = {
     ),
     ADOPT_GUIDE: (
         "The reference tooling's opf init does not scaffold a 2.0.0 store yet: its scaffold still writes a 1.2.0 store, a format the standard's validation refuses (specification section 9.2).",
-        'Create the machine store at .working/toml/: manifest.toml (the control document: an [opf] table declaring standard = "opf", the base spec_version ("2.0.0"), the homes generation homes = 2, the storage layout, the enforcement posture, and import_status, plus a [types.] registration for every enabled type, the declared [views], and the other tables the standard defines; see section 9 of OPF-SPEC.md, linked from /standard), counters.toml (the per-namespace ID high-water marks), version.toml (the version and release ledger, numbers, dates, spans, and digests, never release prose), worklog.toml (the durable operational record: one entry per change, correctable before its span is released, frozen afterward, never deleted), and the eleven baseline typed indexes as .index.toml, empty to start, plus the imported leaves the standard requires in every store: one .imported.index.toml beside each of those indexes and worklog.imported.toml for the worklog, each empty to start, with the imported counter row of each enabled type (the quoted key "imported:", at zero) beside its clean row in counters.toml (OPF-SPEC.md sections 4.2 and 8.2).',
+        'Create the machine store at .working/toml/: manifest.toml (the control document: an [opf] table declaring standard = "opf", the base spec_version ("2.0.0"), the homes generation homes = 2, the storage layout, the enforcement posture, and import_status, plus a [types.] registration for every enabled type, the declared [views], and the other tables the standard defines; see section 9 of OPF-SPEC.md, linked from /standard), counters.toml (the per-namespace ID high-water marks), version.toml (the version and release ledger, numbers, dates, spans, and digests, never release prose), worklog.toml (the durable operational record: one entry per change, correctable before its span is released, frozen afterward, never deleted), and the eleven baseline typed indexes as .index.toml, each starting with no records in the canonical form the reference tooling writes, never as a zero-byte file, plus the imported leaves the standard requires in every store: one .imported.index.toml beside each of those indexes and worklog.imported.toml for the worklog, each starting the same way, with the imported counter row of each enabled type (the quoted key "imported:", at zero) beside its clean row in counters.toml (OPF-SPEC.md sections 4.2 and 8.2).',
         'It does not yet implement spec 2.0.0, the only base version the standard defines.',
         'Its opf doctor grades a manifest declaring spec_version = "2.0.0" with homes = 2 under its 1.2.0 rules, so its VALID verdict on such a store says nothing about conformance to the standard; opf upgrade and opf record refuse such a store.',
         "Ordinary import is retired and refuses with exit 2, and nothing in the reference CLI creates legacy_fragment records; the type remains only for stores that already hold such records from the reference CLI's retired import path.",
         'The reference tooling defines no store upgrade: opf upgrade refuses every invocation with exit 2, reading and writing nothing.',
     ),
-    RECORD_INDEXES: (
+    CORE_FILES: (
+        # The record indexes (the retired record-indexes page's pins).
         "Created by opf init (empty index), by the ratified-done transition, and, as migrated history with provenance, by import (the reference CLI's retired importer, or post-adoption import, which the reference CLI does not implement yet); never updated, since records are immutable, though rotation relocates aged receipts to the archive; read by opf render (DONE.md and the mirror) and validated by opf doctor (schema, uniqueness, the one-to-one receipt link).",
         'Reserved namespace No module toggle: the standard reserves LF unassigned, with no record type on it (spec section 8.1). The reference tooling still recognizes legacy_fragment (LF, quarantined &#8594; resolved | ignored) in stores that hold such records from its retired import path; nothing in the reference CLI creates it now.',
         '(none) LF reserved unassigned; the reference tooling still recognizes legacy_fragment (quarantined &#8594; resolved | ignored) in stores holding such records from its retired import path',
@@ -1483,8 +1499,7 @@ _SURFACE = {
         "Under the reference tooling's retired import contract, everything an import could not confidently map became quarantined fragment data with source path, digest, span, and run ID, so nothing was dropped.",
         'Ordinary import is now retired and refuses with exit 2, nothing in the reference CLI creates legacy_fragment records, and the standard directs new imports to the imported series with verbatim unparsed text instead (spec section 8.1); the type remains in the tooling for existing stores and evidence.',
         "A new store's counters file has no LF namespace; a store scaffolded by earlier reference tooling may carry LF (at zero, or higher if it imported records), and doctor and re-adoption accept it. That acceptance is the reference tooling's 1.2.0 behaviour and diverges from the standard, whose section 9.2 validation refuses a 1.2.0 manifest as a store.",
-    ),
-    CORE_FILES: (
+        # The control files.
         'The base [opf] table carries the exact discovery token standard = "opf", the spec version the store conforms to, and the homes generation. The base of a spec 2.0.0 store:',
         'standard = "opf" spec_version = "2.0.0" homes = 2 layout = "inline"',
         'The reference tooling does not yet implement spec 2.0.0: its scaffold still writes spec_version = "1.2.0" with no homes key.',
@@ -1493,12 +1508,13 @@ _SURFACE = {
 }
 # Retired surface wording: the disclosure page's fresh-only item, the quickstart's
 # conformance-class sentence, retired with the implementation classes (spec 16.1), the
-# record-indexes page's deleted importer-only legacy_fragment rows and counts, retired with the reserved
+# record indexes' deleted importer-only legacy_fragment rows and counts, retired with the reserved
 # unassigned LF namespace (spec 8.1), and the quickstart's, the disclosure page's and the
-# record-indexes page's wording of the removed section 9.2 remedy adoption, retired with it (spec
-# 9.2 defines no path for a manifest below 2.0.0), and the disclosure and record-indexes pages'
-# description of a store upgrade the reference tooling no longer defines. Each sentence present in
-# its file's normalized text is a finding.
+# record indexes' wording of the removed section 9.2 remedy adoption, retired with it (spec
+# 9.2 defines no path for a manifest below 2.0.0), and the disclosure page's and the record indexes'
+# description of a store upgrade the reference tooling no longer defines. The record indexes'
+# sentences are held on the core-files page, which carries the record indexes now. Each sentence
+# present in its file's normalized text is a finding.
 _SURFACE_RETIRED = {
     QUICKSTART: (
         'An implementation declares a conformance class: an upgrade-capable one carries older stores forward',
@@ -1517,7 +1533,7 @@ _SURFACE_RETIRED = {
         "An older store has no upgrade into 2.0.0; its remedy is a fresh 2.0.0 store whose adoption takes the old store's files as foreign content.",
         'If an upgrade from 1.0.0 or 1.1.0 passes preflight, it applies the schema delta before failing at render, leaving the changes in place for recovery.',
     ),
-    RECORD_INDEXES: (
+    CORE_FILES: (
         'Importer-only (no module toggle)',
         'legacy_fragment LF quarantined &#8594; resolved | ignored',
         '+ 1 importer-only',
@@ -1526,6 +1542,11 @@ _SURFACE_RETIRED = {
         'If an upgrade from 1.0.0 or 1.1.0 passes preflight, it applies the schema delta before failing at render, leaving the changes in place for recovery.',
     ),
 }
+
+
+def _surface_name(path):
+    # A generated page is an index.html under its page directory, so it is named by that directory.
+    return "/".join(path.parts[-2:]) if path.name == "index.html" else path.name
 
 
 def _surface_text(text):
@@ -1539,10 +1560,10 @@ def surface_findings(texts=None):
         body = _surface_text(texts[path])
         for fragment in fragments:
             if fragment not in body:
-                findings.append("surface {} missing contract: {}".format(path.name, fragment))
+                findings.append("surface {} missing contract: {}".format(_surface_name(path), fragment))
         for fragment in _SURFACE_RETIRED.get(path, ()):
             if fragment in body:
-                findings.append("surface {} restores retired text: {}".format(path.name, fragment))
+                findings.append("surface {} restores retired text: {}".format(_surface_name(path), fragment))
     return findings
 
 
@@ -5558,26 +5579,33 @@ def _self_test_vectors():
         for fragment in fragments:
             mutated = dict(surfaces)
             mutated[path] = normalized.replace(fragment, "", 1)
-            finding = "surface {} missing contract: {}".format(path.name, fragment)
-            check("surface-pin-flip-" + path.name + "-" + fragment,
+            finding = "surface {} missing contract: {}".format(_surface_name(path), fragment)
+            check("surface-pin-flip-" + _surface_name(path) + "-" + fragment,
                   lambda f=finding, m=mutated, frag=fragment, nb=normalized:
                   nb.count(frag) == 1 and f in surface_findings(m))
     # Emptying or narrowing the surface registry would retire its pins silently: its shape is
     # pinned, so dropping a file or any of its pins turns the self-test red.
     check("surface-registry", lambda: tuple(_SURFACE) == (
-        QUICKSTART, DISCLOSURE, ADOPT_PAGE, ADOPT_GUIDE, RECORD_INDEXES, CORE_FILES) and
-          tuple(map(len, _SURFACE.values())) == (10, 7, 10, 6, 7, 4))
+        QUICKSTART, DISCLOSURE, ADOPT_PAGE, ADOPT_GUIDE, CORE_FILES) and
+          tuple(map(len, _SURFACE.values())) == (10, 7, 10, 6, 11))
+    # Each generated page is registered at its root path, an index.html under its page directory,
+    # named by that directory, so the findings tell the pages apart.
+    check("surface-page-paths", lambda: all(
+        path.name == "index.html" and path.parent.parent == SPEC.parents[1] / "site"
+        and _surface_name(path) == path.parent.name + "/index.html"
+        for path in (DISCLOSURE, ADOPT_PAGE, CORE_FILES)))
     # Each retired surface sentence is absent from its live file, and planting it back turns the
     # gate red with its own finding.
-    check("surface-retired-registry", lambda: tuple(map(len, _SURFACE_RETIRED.values())) == (3, 10, 6) and
+    check("surface-retired-registry", lambda: tuple(_SURFACE_RETIRED) == (QUICKSTART, DISCLOSURE, CORE_FILES) and
+          tuple(map(len, _SURFACE_RETIRED.values())) == (3, 10, 6) and
           set(_SURFACE_RETIRED) <= set(_SURFACE))
     for path, fragments in _SURFACE_RETIRED.items():
         normalized = _surface_text(surfaces[path])
         for fragment in fragments:
             mutated = dict(surfaces)
             mutated[path] = normalized + " " + fragment
-            finding = "surface {} restores retired text: {}".format(path.name, fragment)
-            check("surface-retired-flip-" + path.name + "-" + fragment,
+            finding = "surface {} restores retired text: {}".format(_surface_name(path), fragment)
+            check("surface-retired-flip-" + _surface_name(path) + "-" + fragment,
                   lambda f=finding, m=mutated, frag=fragment, nb=normalized:
                   frag not in nb and f in surface_findings(m))
     # Delete the wrapped sentence in place: normalization must not hide a lost requirement.

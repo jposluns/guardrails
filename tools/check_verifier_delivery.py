@@ -142,7 +142,35 @@ Rules:
      (a run of letters or digits) outside its "QN." marker and the file names it holds, where its words
      are not exactly the words of its question (a restated question). So "Q1. ", "Q1. README.md", the
      question copied back and "Q2. Confirmed." under a quote question are not answered, and findings
-     text never answers the last question. One UNVERIFIABLE answer among answered ones is legitimate.
+     text never answers the last question. One UNVERIFIABLE answer among answered ones is legitimate,
+     except over a declared input: under the clean verdict (VERDICT: NO BLOCKERS), an UNVERIFIABLE answer
+     whose text (its "QN." line and body, outside fenced blocks and blockquotes) names a path the brief
+     declares on an INPUT line, makes the delivery NO_VOTE (exit 1, the reason naming the
+     answer, the path and its brief line): a clean verdict over a required input the verifier did not read
+     counts as not-passed. An answer NAMES a declared input when it holds the path as a substring (a
+     prefix match: a longer path the declared one starts, /abs/in.md of /abs/in.md.bak or a file under a
+     declared directory, still names it; a declared directory written with a trailing slash is also
+     matched by its spelling without one, as its own token), or when it holds an ancestor directory of
+     the path as its own token (not extended by a path character into a sibling, and not glued to another
+     word; an ancestor written with a trailing slash, bare, in backticks or followed by punctuation,
+     still names it, since the slash extends it into no sibling): a verifier
+     that could not read the parent did not read the input. A declared INPUT: / has no ancestor and, as a
+     one-character substring, is named by any answer text holding a slash. The brief is the --brief file
+     already read for its pin and questions. INPUT declarations are read by the SAME parser as the brief
+     lint's P6 (tools/_input_declarations.py), which reads the brief as the CommonMark document the
+     vendored parser builds (opf/tools/_vendor/marko, pinned 2.2.4): a declaration is a top-level or
+     list-item paragraph line whose rendered, folded text begins with INPUT: and one path (one word, one
+     code span, or one double-quoted span), so **INPUT:**, __INPUT:__, an escaped or character-referenced
+     colon and a confusable-spelt label all declare as a reader shows them; code (a fenced or indented
+     block, a code span) declares nothing and is never a look-alike; and a brief holding a line separator
+     other than LF anywhere, a format character outside code, a malformed declaration or a look-alike
+     label (a rendered paragraph line, heading or table cell opening with the token INPUT or INPUTS and a
+     colon in any case, or a table cell that is exactly INPUT or INPUTS) is
+     CANNOT_EVALUATE, exactly what the brief lint refuses before a brief is sent, so the two readings
+     cannot disagree, and a text the vendored parser cannot read, or one over the shared reading's own
+     bounds (its text ceiling, its whitespace-run and nesting prescans, and its parse deadline, held by
+     killing the parse child's process group), is CANNOT_EVALUATE, never read another way. The path is compared as text and never opened. A BLOCKERS FOUND or any other verdict
+     is unchanged, and an UNVERIFIABLE answer that names no declared input is legitimate as above.
      Coverage n/m is reported: n answered answers, m the brief's numbered questions.
   C2 verbatim. Every fenced code block, every blockquote run and every inline double-quoted span must
      appear byte for byte (UTF-8) as a contiguous span of one file of the pinned tree (a tree file stored
@@ -295,7 +323,26 @@ whole-line reading refuses a backslash-escaped reference that reads as a marker 
 over-refusal this grammar accepts; the escape-aware reading is kept beside the whole-line
 reading as a further refusal branch, a stated union, never a replacement);
 the UNVERIFIABLE and quote-question tests are word tests, so a stray
-mention moves an answer toward NO_VOTE, never toward a pass. Object reads: commit and tree objects are
+mention moves an answer toward NO_VOTE, never toward a pass. The declared-input reading of C1 matches a
+declared path as a substring of the UNVERIFIABLE answer's text, or an ancestor directory of it as a token:
+an answer that names the input another way
+(a relative path, its basename, another spelling, a link to it) passes as before; a declared path that
+starts another named path (/a/in.md of /a/in.md.bak, a directory of a file under it) reads as named, toward
+NO_VOTE, and so does an ancestor named with only a sentence stop or an extension dot after it (/a/b.txt
+beside the ancestor /a/b), an accepted over-withholding, while an ancestor extended by a path character
+other than a closing slash (/a/b2, /a/b/other.md) is a sibling and does not name it (an ancestor written
+/a/b/ with nothing path-like after the slash names it, and a declared directory written with a trailing
+slash is also matched by its spelling without one); INPUT lines are read by the brief lint's own
+parser (tools/_input_declarations.py) over the parsed CommonMark document, so a brief the lint would
+refuse (a non-LF line separator, a format
+character outside code, a malformed declaration, a look-alike label, a text the vendored parser cannot
+read) is CANNOT_EVALUATE here rather
+than read another way, code declares nothing and is not checked, and the two tools cannot
+disagree on what a brief declares; a verifier that skips a declared input without answering UNVERIFIABLE
+for it is not
+caught (that needs a per-input acknowledgement in the delivery format); and an UNVERIFIABLE answer naming
+an absolute path outside the repository that its question does not name already fails on that absent file
+reference (C2), and FAIL wins over NO_VOTE. Object reads: commit and tree objects are
 not re-hashed (only blobs are), so a rewritten loose tree or commit object could list other existing
 blob ids; a shallow file cuts only parent lists, which no read here uses. git is resolved through PATH,
 a trusted-toolchain concern; a repository in SHA-256 object format never resolves a 40-hex pin and so
@@ -303,7 +350,10 @@ cannot be evaluated.
 
 SELF-TEST COVERAGE. Each rule has a fixture that changes result when the rule is removed; a flip/ check
 patches a rule out in the suite and shows its fixture's result change for C1 (no answered item, answer
-content, a quote question needs a quote, findings evidence is no answer), C2 (verbatim, inline, fenced,
+content, a quote question needs a quote, findings evidence is no answer, a clean verdict over an
+UNVERIFIABLE answer that names a declared input or its parent directory, and the shared declaration
+parser seam, whose removal reads a look-alike label past as the legacy per-tool reading did), C2
+(verbatim, inline, fenced,
 list-item fences, blockquotes, the answer's names, absent references in an answer and in a question,
 the findings section and its names, quoted text naming nothing, bare-name binding, absolute repository
 paths, excerpts, indentation, examples and their closing ")", the example openers, CRLF tree files),
@@ -381,6 +431,7 @@ import html.entities
 import json
 import os
 import re
+import shutil
 import signal
 import stat
 import subprocess
@@ -389,6 +440,14 @@ import time
 import unicodedata
 import zlib
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _input_declarations  # noqa: E402
+
+# the ONE reading of the brief's INPUT declarations, shared with check_brief_capability's P6 so the two
+# cannot disagree; bound here so the self-test can patch each seam out
+_brief_forbidden = _input_declarations.forbidden
+_read_declared = _input_declarations.read
 
 TIMEOUT = 120
 MAX_INPUT_BYTES = 16 * 1024 * 1024
@@ -402,6 +461,15 @@ HARNESS_FIRST_RE = re.compile(r"WORKER_STATUS: [A-Z][A-Z_]*+ \(account=[^\s,()]+
                               r"model=[^\s,()]++, effort=[^\s,()]++\)")
 HARNESS_LAST_LINE = "WORKER_STATUS: COMPLETE"
 CLEAN_VERDICT = "NO BLOCKERS"
+# C1: the brief's INPUT declarations are read by the shared parser (tools/_input_declarations.py, bound
+# above as _read_declared), the same reading the brief lint's P6 takes (_declared_inputs). For the
+# ancestor-directory reading (_names_input): a character of INPUT_NAME_CONTINUES after an ancestor's
+# occurrence extends it into a deeper or longer path (a sibling), so that occurrence does not name the
+# directory itself, EXCEPT a closing slash followed by no further INPUT_NAME_CONTINUES character (the
+# trailing-slash spelling of the directory itself, bare, in backticks or before punctuation), and a
+# character of INPUT_NAME_GLUED before it glues it to another word
+INPUT_NAME_CONTINUES = frozenset("/_-abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")
+INPUT_NAME_GLUED = frozenset("._~-abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")
 ANSWER_HEAD_RE = re.compile(r"Q([0-9]+)\.(?=[ \t]|$)")
 # U+2800 BRAILLE PATTERN BLANK is no space and no format character, yet renders as a blank glyph.
 MARKER_DECORATION = " \t*_#>+-\\\u2800"
@@ -425,7 +493,7 @@ DEFAULT_IGNORABLE_SHA256 = "d1d78a34fea3a0f9cc46bbab9acf2686a8493e4cadf7c1f412a8
 DEFAULT_IGNORABLE = frozenset(point for low, high in DEFAULT_IGNORABLE_RANGES for point in range(low, high + 1))
 FINDINGS_HEADING = "## Findings"
 COMPLETE_LINE = "QA-COMPLETE"
-QUESTION_RE = re.compile(r"(#{1,6}[ \t]+)?(?:\*\*)?(?:Q|Item[ \t]+|Question[ \t]+)?(\d{1,3})[.):](?:\*\*)?(?=[ \t]|$)",
+QUESTION_RE = re.compile(r"(#{1,6}[ \t]+)?(?:\*\*)?(?:Q|Item[ \t]+|Question[ \t]+)?([0-9]{1,3})[.):](?:\*\*)?(?=[ \t]|$)",
                          re.I)
 QUESTIONS_MARKER_RE = re.compile(r"QUESTIONS:?", re.I)
 QUOTE_WORD_RE = re.compile(r"\bquot(?:e|es|ed|ing)\b", re.I)
@@ -2020,6 +2088,85 @@ def _rule_all_unverifiable(verdict, answered, total):
     return None
 
 
+def _declared_inputs(text):
+    """(brief line, path) for the first declaration of each input the brief declares on an INPUT line,
+    read by the SAME parser as the brief lint's P6 (tools/_input_declarations.py) over the parsed
+    CommonMark document: a top-level or list-item paragraph line whose rendered, folded text begins with
+    INPUT: declares one path; code declares nothing and is not checked; and the brief is CANNOT_EVALUATE
+    when it holds a line separator other than LF anywhere, a format character outside code, a malformed
+    declaration, a look-alike label, or a text the vendored parser cannot read (the brief lint refuses
+    such a brief before it is sent, so a delivery over one proves nothing). The path is text, never
+    opened."""
+    try:
+        found = _brief_forbidden(text)
+        if found is not None:
+            raise CannotEvaluate("brief line {}: {}".format(*found))
+        inputs, bad = _read_declared(text)
+    except _input_declarations.DeclarationError as exc:
+        raise CannotEvaluate("brief: {}".format(exc))
+    if bad:
+        raise CannotEvaluate("brief line {}: {}".format(*bad[0]))
+    declared, seen = [], set()
+    for number, path in inputs:
+        if path not in seen:
+            seen.add(path)
+            declared.append((number, path))
+    return declared
+
+
+def _names_input(text, path):
+    """Whether an answer's text names the declared input `path`: the path as a plain substring (so a
+    longer path the declared one starts, /abs/in.md of /abs/in.md.bak, still names it), or an ANCESTOR
+    directory of it (each prefix cut at a /; the root alone excluded; for a declared directory written
+    with a trailing slash, its own spelling without that slash included) as its own token: an occurrence
+    extended by a character of INPUT_NAME_CONTINUES is a deeper or longer path (a sibling, not the
+    directory), EXCEPT a closing slash that no further INPUT_NAME_CONTINUES character follows, which is
+    the directory's own trailing-slash spelling (bare at the text's end, in backticks, or before
+    punctuation or a space) and still names it; one glued after a character of INPUT_NAME_GLUED is part
+    of another word; a sentence stop directly after an ancestor still counts, so a sibling FILE whose
+    name adds only an extension (/abs/b.txt beside the ancestor /abs/b) is read as naming it, an accepted
+    over-withholding."""
+    if path in text:
+        return True
+    parts = path.rstrip("/").split("/")
+    top = len(parts) + 1 if path.endswith("/") and len(parts) > 2 else len(parts)
+    for depth in range(2, top):
+        ancestor = "/".join(parts[:depth])
+        start = text.find(ancestor)
+        while start >= 0:
+            end = start + len(ancestor)
+            glued = start > 0 and text[start - 1] in INPUT_NAME_GLUED
+            extended = end < len(text) and text[end] in INPUT_NAME_CONTINUES and not (
+                text[end] == "/" and (end + 1 == len(text) or text[end + 1] not in INPUT_NAME_CONTINUES))
+            if not glued and not extended:
+                return True
+            start = text.find(ancestor, start + 1)
+    return False
+
+
+def _rule_unread_input(verdict, answers, inputs):
+    """C1: the clean verdict with an UNVERIFIABLE answer whose text (its QN. line and body) names a declared input
+    path (_declared_inputs) is no vote: a clean verdict over a required input the verifier did not
+    read counts as not-passed. An answer names an input when it holds the path as a substring, or an ancestor
+    directory of it as its own token (_names_input): a verifier that could not read the parent did not read the
+    input. Any other verdict, and an UNVERIFIABLE answer naming no declared input, is as
+    before."""
+    if verdict != CLEAN_VERDICT or not inputs:
+        return None
+    unread = []
+    for item in answers:
+        if item["unverifiable"]:
+            text = "\n".join([item["heading"]] + item["body"])
+            unread.extend("Q{} names {} (brief line {})".format(item["item"], path, line)
+                          for line, path in inputs if _names_input(text, path))
+    if not unread:
+        return None
+    return ("verdict {!r} with an UNVERIFIABLE answer over an input the brief declares ({}): a clean verdict over a "
+            "required input the verifier did not read counts as not-passed".format(
+                verdict, "; ".join(unread[:MAX_LISTED]) + (" and {} more".format(len(unread) - MAX_LISTED)
+                                                         if len(unread) > MAX_LISTED else "")))
+
+
 # ---------------------------------------------------------------------------------------------------
 # Evaluation
 # ---------------------------------------------------------------------------------------------------
@@ -2036,6 +2183,7 @@ def evaluate(brief_path, delivery_path, repo):
         report["pin"] = pin
         body = _delivery_body(delivery, pin)
         questions = _parse_questions(_lines(brief))
+        inputs = _declared_inputs(brief)
         if not questions:
             raise CannotEvaluate("the brief numbers no question; the closed delivery shape answers a numbered "
                                  "question list")
@@ -2080,7 +2228,8 @@ def evaluate(brief_path, delivery_path, repo):
     total = len(questions)
     answered = sum(1 for item in items if item["state"] == "answered")
     report["coverage"] = {"answered": answered, "total": total, "text": "{}/{}".format(answered, total)}
-    no_vote = [reason for reason in (_rule_all_unverifiable(report["delivery_verdict"], answered, total),) if reason]
+    no_vote = [reason for reason in (_rule_all_unverifiable(report["delivery_verdict"], answered, total),
+                                     _rule_unread_input(report["delivery_verdict"], items, inputs)) if reason]
     if failures:
         report["verdict"] = "FAIL"
         report["reasons"] = failures + no_vote
@@ -2151,6 +2300,10 @@ BRIEF_QUOTE_TWO = ("Synthetic review brief.\nBRIEF-PIN: {pin}\n\n"
 BRIEF_ABSENT_ASKED = "Synthetic review brief.\nBRIEF-PIN: {pin}\n\n1. Does docs/retired/alpha.md still exist?\n"
 BRIEF_VERSION = "Synthetic review brief.\nBRIEF-PIN: {pin}\n\n1. Quote the VERSION line as written.\n"
 BRIEF_BARE_ABSENT = "Synthetic review brief.\nBRIEF-PIN: {pin}\n\n1. Quote the first rule from alpha_old.md.\n"
+# question 3 names an input outside the repository, so an answer naming it is no absent reference of its own
+BRIEF_INPUT = BRIEF_MIXED.replace("3. Quote the sentence in docs/gamma.md.", "3. Quote the sentence in /abs/in.md.")
+BRIEF_INPUT_DECLARED = BRIEF_INPUT.replace("BRIEF-PIN: {pin}\n", "BRIEF-PIN: {pin}\nINPUT: /abs/in.md\n")
+A3_UNREAD = "Q3. UNVERIFIABLE: cannot read /abs/in.md."
 A1 = 'Q1. docs/alpha.md reads "The first rule is plain."'
 A2 = "Q2. src/beta.py:\n```python\n    if ready:\n        return 1\n```"
 A3 = 'Q3. docs/gamma.md says "Only gamma carries this exact sentence."'
@@ -2184,6 +2337,30 @@ def _mixed(pin, replace=None, **options):
     answers = {1: A1, 2: A2, 3: A3, 4: A4}
     answers.update(replace or {})
     return _delivery(pin, *(answers[number] for number in sorted(answers)), **options)
+
+
+def _fixture_root(make=tempfile.mkdtemp):
+    """The self-test's fixture directory, drawn through `make` (tempfile.mkdtemp) by
+    _input_declarations.verbatim_tempdir: a fixture brief names a path under it on an INPUT line, so it
+    must render exactly as written; a root or draw the reading would render differently is CannotEvaluate.
+    self_test draws the directory here through _marked_first_draw, and a check reads FIXTURE_DRAWS."""
+    return Path(_input_declarations.verbatim_tempdir("verifier-delivery-selftest-", CannotEvaluate, make=make))
+
+
+# (prefix, directory) for every draw _marked_first_draw made, in order
+FIXTURE_DRAWS = []
+
+
+def _marked_first_draw(prefix):
+    """tempfile.mkdtemp, its first draw always a name holding marks (as a real draw can), so the
+    c1/declared-input-fixture-verbatim check sees every draw self_test made, and a self_test that draws
+    its fixture directory with plain mkdtemp fails that check on every run, not only on an unlucky draw."""
+    if FIXTURE_DRAWS:
+        directory = tempfile.mkdtemp(prefix=prefix)
+    else:
+        directory = tempfile.mkdtemp(prefix=prefix + "_", suffix="_")
+    FIXTURE_DRAWS.append((prefix, directory))
+    return directory
 
 
 class _Fixture:
@@ -2269,6 +2446,180 @@ def _self_test_cases(fx):
           "PASS")
     one = fx.run(_mixed(sha, {3: _unverifiable(3)}, lead=HARNESS_LEAD))
     check("c1/one-unverifiable-passes", (verdict(one), one["coverage"]["text"]), ("PASS", "3/4"))
+    # a clean verdict whose UNVERIFIABLE answer names an input the brief declares is no vote
+    unread = _mixed(sha, {3: A3_UNREAD})
+    report = fx.run(unread, BRIEF_INPUT_DECLARED)
+    check("c1/unverifiable-declared-input-no-vote",
+          (verdict(report), report["coverage"]["text"], "/abs/in.md (brief line 3)" in " ".join(report["reasons"])),
+          ("NO_VOTE", "3/4", True))
+    check("flip/c1-declared-input",
+          verdict(_patched("_rule_unread_input", lambda *a: None, lambda: fx.run(unread, BRIEF_INPUT_DECLARED))),
+          "PASS")
+    report = fx.run(unread, BRIEF_INPUT)
+    check("c1/unverifiable-no-declared-input-passes", (verdict(report), report["coverage"]["text"]), ("PASS", "3/4"))
+    check("c1/unverifiable-undeclared-path-passes", verdict(fx.run(
+        _mixed(sha, {3: A3_UNREAD.replace("in.md", "other.md")}),
+        BRIEF_INPUT_DECLARED.replace("3. Quote the sentence in /abs/in.md.", "3. Quote the sentence in /abs/other.md."))),
+        "PASS")
+    report = fx.run(_mixed(sha, {3: A3_UNREAD}, verdict="VERDICT: BLOCKERS FOUND"), BRIEF_INPUT_DECLARED)
+    check("c1/unverifiable-declared-input-blockers-unchanged", (verdict(report), report["delivery_verdict"]),
+          ("PASS", "BLOCKERS FOUND"))
+    in_repo = "{}/docs/gamma.md".format(fx.repo)
+    spaced = "/abs/dir with space/inputs"
+    check("c1/declared-input-forms-no-vote", [verdict(fx.run(delivery, brief)) for delivery, brief in (
+        (unread, BRIEF_INPUT.replace("BRIEF-PIN: {pin}\n", "BRIEF-PIN: {pin}\n**INPUT:** /abs/in.md\n")),
+        (unread, BRIEF_INPUT.replace("BRIEF-PIN: {pin}\n", "BRIEF-PIN: {pin}\n**INPUT**: /abs/in.md\n")),
+        (unread, BRIEF_INPUT.replace("BRIEF-PIN: {pin}\n", "BRIEF-PIN: {pin}\n- INPUT: /abs/in.md\n")),
+        (_mixed(sha, {3: "Q3. UNVERIFIABLE: cannot read " + in_repo}),
+         BRIEF_MIXED.replace("BRIEF-PIN: {pin}\n", "BRIEF-PIN: {pin}\nINPUT: " + in_repo + "\n")),
+        (_mixed(sha, {3: "Q3. UNVERIFIABLE: " + spaced + " could not be listed."}),
+         BRIEF_MIXED.replace("BRIEF-PIN: {pin}\n", "BRIEF-PIN: {pin}\nINPUT: \"" + spaced + "\"\n")))],
+          ["NO_VOTE"] * 5)
+    # the fixture path the INPUT line above names renders verbatim: a mkdtemp draw the reading renders as
+    # emphasis names a path without the marks; self_test drew the fixture directory through
+    # _marked_first_draw, its marked draws were removed and drawn again, and the path reads back as written
+    marked = fx.base / "draw-_k9b51z_"
+    check("c1/declared-input-fixture-verbatim", (
+        _input_declarations.read("INPUT: {}/docs/gamma.md\n".format(marked)) == (
+            [(1, "{}/docs/gamma.md".format(marked))], []),
+        len(FIXTURE_DRAWS) > 1, set(prefix for prefix, _ in FIXTURE_DRAWS),
+        [os.path.lexists(directory) for _, directory in FIXTURE_DRAWS[:-1]] == [False] * (len(FIXTURE_DRAWS) - 1),
+        Path(FIXTURE_DRAWS[-1][1]) == fx.base if FIXTURE_DRAWS else None,
+        _input_declarations.read("INPUT: " + in_repo + "\n")),
+        (False, True, {"verifier-delivery-selftest-"}, True, True, ([(1, in_repo)], [])))
+    # what a reader shows as INPUT: declares, exactly as the brief lint's P6 reads it: underscore and
+    # asterisk emphasis, a numbered list item, an escaped or character-referenced colon, a fullwidth or
+    # confusable-spelt label, a combining character the fold removes, strikethrough, a code-span path,
+    # and a declaration after a list item's fence or an indented code block (which hide nothing)
+    check("c1/markdown-declared-forms-no-vote", [verdict(fx.run(unread, BRIEF_INPUT.replace(
+        "BRIEF-PIN: {pin}\n", "BRIEF-PIN: {pin}\n" + line + "\n"))) for line in (
+        "__INPUT:__ /abs/in.md", "_INPUT:_ /abs/in.md", "*INPUT:* /abs/in.md", "+ INPUT: /abs/in.md",
+        "INPUT\\: /abs/in.md", "INPUT&#58; /abs/in.md", "INPUT： /abs/in.md",
+        "ＩＮＰＵＴ: /abs/in.md", "ІNPUT: /abs/in.md",
+        "I" + chr(0x034F) + "NPUT: /abs/in.md", "INPUT" + chr(0xFE0F) + ": /abs/in.md",
+        "~~INPUT:~~ /abs/in.md",
+        "INPUT: `/abs/in.md`")],
+        ["NO_VOTE"] * 13)
+    # ASCII-only rendered labels: a character reference or intraword emphasis spells INPUT: with no
+    # literal "nput" substring in the line and no non-ASCII character anywhere, read from the parsed
+    # document exactly as the brief lint's P6 reads them
+    check("c1/ascii-rendered-forms-no-vote", [verdict(fx.run(unread, BRIEF_INPUT.replace(
+        "BRIEF-PIN: {pin}\n", "BRIEF-PIN: {pin}\n" + line + "\n"))) for line in (
+        "I&#78;PUT: /abs/in.md", "IN**PUT**: /abs/in.md", "IN*PUT*: /abs/in.md")],
+        ["NO_VOTE"] * 3)
+    # a declaration after a list item's fence or after an indented code block is read (the parsed
+    # document hides nothing there); asserted on the declaration reading itself, since this suite's
+    # question parser separately refuses such a brief's fence shape
+    check("c1/markdown-fence-briefs-declare", [_declared_inputs(BRIEF_INPUT.replace(
+        "BRIEF-PIN: {pin}\n", "BRIEF-PIN: {pin}\n" + line + "\n").format(pin=sha)) for line in (
+        "- ```text\n  example\n  ```\n\nINPUT: /abs/in.md",
+        "\n    ```\n\nINPUT: /abs/in.md")],
+        [[(7, "/abs/in.md")], [(6, "/abs/in.md")]])
+    # code declares nothing (the same parser as the brief lint's P6 reads): a fenced INPUT line, an
+    # indented code block's inputs: key, a tab-indented INPUT line and the label in a code span, so the
+    # clean verdict stands over an UNVERIFIABLE answer naming the path
+    check("c1/fenced-input-declares-nothing", [verdict(fx.run(unread, brief)) for brief in (
+        BRIEF_INPUT.replace("BRIEF-PIN: {pin}\n", "BRIEF-PIN: {pin}\n```\nINPUT: /abs/in.md\n```\n"),
+        BRIEF_INPUT.replace("BRIEF-PIN: {pin}\n", "BRIEF-PIN: {pin}\n\n    inputs:\n      target: x\n"),
+        BRIEF_INPUT.replace("BRIEF-PIN: {pin}\n", "BRIEF-PIN: {pin}\n\n\tINPUT: /abs/in.md\n"),
+        BRIEF_INPUT.replace("BRIEF-PIN: {pin}\n", "BRIEF-PIN: {pin}\n`INPUT: /abs/in.md`\n"))],
+        ["PASS"] * 4)
+    # ordinary prose and tables that only mention the word input pass: the look-alike scan is anchored at
+    # the rendered start of a paragraph line, heading or table cell
+    check("c1/prose-input-mention-passes", [verdict(fx.run(unread, brief)) for brief in (
+        BRIEF_INPUT.replace("BRIEF-PIN: {pin}\n", "BRIEF-PIN: {pin}\nThe tool's input: a TOML file.\n"),
+        BRIEF_INPUT.replace("BRIEF-PIN: {pin}\n", "BRIEF-PIN: {pin}\n`cat input | wc -l`\n"),
+        BRIEF_INPUT.replace("BRIEF-PIN: {pin}\n", "BRIEF-PIN: {pin}\nStep 1 - INPUT: /abs/in.md\n"),
+        BRIEF_INPUT.replace("BRIEF-PIN: {pin}\n", "BRIEF-PIN: {pin}\n| INPUT | /abs/in.md |\n"),
+        BRIEF_INPUT.replace("BRIEF-PIN: {pin}\n",
+                            "BRIEF-PIN: {pin}\n\n| Input | Expected |\n|---|---|\n| a | b |\n"))],
+        ["PASS"] * 5)
+    # a brief the lint would refuse is CANNOT_EVALUATE here, never read another way
+    check("c1/brief-separator-cannot-evaluate", [verdict(fx.run(unread, brief)) for brief in (
+        BRIEF_INPUT_DECLARED.replace("INPUT: /abs/in.md\n", "INPUT: /abs/in.md\r\n"),
+        BRIEF_INPUT_DECLARED.replace("INPUT: /abs/in.md\n", "x" + chr(0x2028) + "y\n"),
+        BRIEF_INPUT_DECLARED.replace("INPUT: /abs/in.md\n", "x" + chr(0x0085) + "y\n"),
+        BRIEF_INPUT_DECLARED.replace("INPUT: /abs/in.md\n", "x" + chr(0x0C) + "y\n"))],
+        ["CANNOT_EVALUATE"] * 4)
+    check("c1/brief-format-cannot-evaluate", verdict(fx.run(
+        unread, BRIEF_INPUT_DECLARED.replace("INPUT: /abs/in.md", "INPUT: /abs/i" + chr(0x200B) + "n.md"))),
+        "CANNOT_EVALUATE")
+    check("c1/malformed-declaration-cannot-evaluate", [verdict(fx.run(unread, brief)) for brief in (
+        BRIEF_INPUT_DECLARED.replace("INPUT: /abs/in.md", "Input: /abs/in.md"),
+        BRIEF_INPUT_DECLARED.replace("INPUT: /abs/in.md", chr(0x2013) + " INPUT: /abs/in.md"),
+        BRIEF_INPUT_DECLARED.replace("INPUT: /abs/in.md", chr(0x2014) + " INPUT: /abs/in.md"),
+        BRIEF_INPUT_DECLARED.replace("INPUT: /abs/in.md", "- [ ] INPUT: /abs/in.md"),
+        BRIEF_INPUT_DECLARED.replace("INPUT: /abs/in.md", "> INPUT: /abs/in.md"),
+        BRIEF_INPUT_DECLARED.replace("INPUT: /abs/in.md\n", "INPUT: /abs/in.md\n\n## Inputs:\n"),
+        BRIEF_INPUT_DECLARED.replace("INPUT: /abs/in.md\n",
+                                     "INPUT: /abs/in.md\n\n| INPUT | x |\n|---|---|\n| a | b |\n"),
+        BRIEF_INPUT_DECLARED.replace("INPUT: /abs/in.md", "INPUT: <scratch>/in.md"),
+        BRIEF_INPUT_DECLARED.replace("INPUT: /abs/in.md", "INPUT: relative/in.md"),
+        BRIEF_INPUT_DECLARED.replace("INPUT: /abs/in.md", "Inp&#117;t: /abs/in.md"))],
+        ["CANNOT_EVALUATE"] * 10)
+    # the shared reading's own bounds refuse a brief up front, whatever else it holds: a marker run that
+    # nests past the nesting ceiling, with a no-break space after a quote marker read as the one
+    # whitespace column the parser's own quote prefix consumes there (never the end of the lead), and a
+    # run past the whitespace-run ceiling of any character the parser reads as whitespace (a vertical
+    # tab and a no-break space here, not only a space)
+    check("c1/brief-bounds-cannot-evaluate", [verdict(fx.run(unread, brief)) for brief in (
+        BRIEF_INPUT_DECLARED.replace("INPUT: /abs/in.md", "1) " * 150 + "x"),
+        BRIEF_INPUT_DECLARED.replace("INPUT: /abs/in.md", ">\xa0" * 30 + "x"),
+        BRIEF_INPUT_DECLARED.replace("INPUT: /abs/in.md", "- " * 5 + ">\xa0" * 25 + "x"),
+        BRIEF_INPUT_DECLARED.replace("INPUT: /abs/in.md", "a" + " " * 2001 + "b"),
+        BRIEF_INPUT_DECLARED.replace("INPUT: /abs/in.md", "a" + "\x0b" * 2001 + "b"),
+        BRIEF_INPUT_DECLARED.replace("INPUT: /abs/in.md", "a" + "\xa0" * 2001 + "b"))],
+        ["CANNOT_EVALUATE"] * 6)
+    # inside the bounds the brief evaluates, and a block is read as it reads alone: the same deep fenced
+    # example after an unrelated five-deep list and a heading evaluates like the fenced example by itself
+    deep_example = ("```yaml\n"
+                    + "".join("        " * level + "- k%d:\n" % level for level in range(18)) + "```\n")
+    check("c1/brief-bounds-block-local", [verdict(fx.run(unread, brief)) for brief in (
+        BRIEF_INPUT_DECLARED.replace("BRIEF-PIN: {pin}\n", "BRIEF-PIN: {pin}\n\n" + deep_example),
+        BRIEF_INPUT_DECLARED.replace(
+            "BRIEF-PIN: {pin}\n",
+            "BRIEF-PIN: {pin}\n\n" + "".join("  " * level + "- a\n" for level in range(5))
+            + "\n# Notes\n\n" + deep_example))],
+        ["NO_VOTE"] * 2)
+    # the declarations come from the shared parser seam: with it patched to declare nothing, the en-dash
+    # look-alike is read past (the legacy per-tool reading) and the clean verdict stands
+    endash = BRIEF_INPUT_DECLARED.replace("INPUT: /abs/in.md", chr(0x2013) + " INPUT: /abs/in.md")
+    check("flip/c1-shared-parser",
+          verdict(_patched("_read_declared", lambda text: ([], []), lambda: fx.run(unread, endash))), "PASS")
+    # an UNVERIFIABLE answer naming the PARENT DIRECTORY of a declared input withholds the vote too (a
+    # sentence stop after the ancestor included); a sibling path or a longer non-ancestor word does not
+    parent = _mixed(sha, {3: "Q3. UNVERIFIABLE: cannot list /abs."})
+    report = fx.run(parent, BRIEF_INPUT_DECLARED)
+    check("c1/parent-directory-no-vote",
+          (verdict(report), "/abs/in.md (brief line 3)" in " ".join(report["reasons"])), ("NO_VOTE", True))
+    check("flip/c1-parent-directory", verdict(_patched(
+        "_names_input", lambda text, path: path in text, lambda: fx.run(parent, BRIEF_INPUT_DECLARED))), "PASS")
+    # the ancestor's trailing-slash spelling names it: bare at the end, before punctuation or a space,
+    # and in backticks; a character after the slash extends it into a sibling again (the boundary runs
+    # just inside, exactly at, and just outside the closing slash)
+    check("c1/parent-trailing-slash-no-vote", [verdict(fx.run(_mixed(sha, {3: answer}), BRIEF_INPUT_DECLARED))
+          for answer in ("Q3. UNVERIFIABLE: cannot list /abs/",
+                         "Q3. UNVERIFIABLE: cannot list /abs/ (permission denied).",
+                         "Q3. UNVERIFIABLE: cannot list `/abs/`.")], ["NO_VOTE"] * 3)
+    check("c1/sibling-path-vote-stands", [verdict(fx.run(_mixed(sha, {3: answer}), BRIEF_INPUT_DECLARED))
+          for answer in ("Q3. UNVERIFIABLE: /abs/other could not be read.",
+                         "Q3. UNVERIFIABLE: /ab could not be listed.",
+                         "Q3. UNVERIFIABLE: /absolute could not be listed.")], ["PASS"] * 3)
+    # a declared directory with a trailing slash is matched by its spelling without one, as its own
+    # token; a name that extends it is still a sibling
+    slash_brief = BRIEF_MIXED.replace(
+        "3. Quote the sentence in docs/gamma.md.", "3. Quote the sentence in /abs/dir/in.md.").replace(
+        "BRIEF-PIN: {pin}\n", "BRIEF-PIN: {pin}\nINPUT: /abs/dir/\n")
+    check("c1/declared-directory-slash-spelling", [verdict(fx.run(_mixed(sha, {3: answer}), slash_brief))
+          for answer in ("Q3. UNVERIFIABLE: cannot read /abs/dir.",
+                         "Q3. UNVERIFIABLE: cannot read /abs/dir",
+                         "Q3. UNVERIFIABLE: cannot read /abs/dirx.")],
+          ["NO_VOTE", "NO_VOTE", "PASS"])
+    # an answer naming an absolute path its question does not name already fails on that absent reference
+    report = fx.run(unread, BRIEF_MIXED.replace("BRIEF-PIN: {pin}\n", "BRIEF-PIN: {pin}\nINPUT: /abs/in.md\n"))
+    check("c1/declared-input-absent-reference-fail-wins",
+          (verdict(report), any("absent from the pinned tree" in reason for reason in report["reasons"]),
+           any("input the brief declares" in reason for reason in report["reasons"])), ("FAIL", True, True))
     no_quotes = _delivery(sha, *("Q{}. Confirmed after reading the file.".format(n) for n in range(1, 5)))
     report = fx.run(no_quotes, BRIEF_QUOTE_ONLY)
     check("c1/quote-only-without-quotes-no-vote", (verdict(report), report["coverage"]["text"]), ("NO_VOTE", "0/4"))
@@ -3561,8 +3912,12 @@ def self_test(report_path=None):
         _selftest_exit_report.arm(report_path, SUITE_ID, EXECUTED)
     from _git_fixture_env import fixture_git_lifecycle
     try:
-        with fixture_git_lifecycle(), tempfile.TemporaryDirectory(prefix="verifier-delivery-selftest-") as raw:
-            _self_test_cases(_Fixture(Path(raw)))
+        with fixture_git_lifecycle():
+            base = _fixture_root(make=_marked_first_draw)
+            try:
+                _self_test_cases(_Fixture(base))
+            finally:
+                shutil.rmtree(base)
     except (CannotEvaluate, OSError, RuntimeError, subprocess.SubprocessError) as exc:
         print("SELF-TEST HARNESS ERROR: {}".format(exc), file=sys.stderr)
         return 2

@@ -1,0 +1,130 @@
+# The opfiles.ai draft disclosure page (template specification section 7.20): each entry is a claim, its
+# limitation and its evidence, written from the OPFiles sources (opf/site/disclosure.html, the opf CLI's
+# adopt dispatcher and the release manifest declaration in disclosure.toml).
+path = "disclosure/index.html"
+title = "Disclosure"
+kind = "document"
+label = "Disclosure"
+heading = "Disclosure"
+meta = "This page sets out what OPFiles claims, the limit of each claim, and the evidence for both."
+
+[[body]]
+component = "entry"
+lbl = "Entry 1"
+id = "d-1"
+heading = "Draft status"
+rail = "Draft status"
+claim = '''The reference tooling lands verb by verb. A conformance claim names its scope and which profiles were evaluated.'''
+limitation = '''Until the validation tooling covers a given claim, conformance to that claim is self-asserted, and any report says so. An unqualified "conformant" claim is never emitted, by tooling or by prose.'''
+evidence = '''<a href="https://github.com/jposluns/guardrails/blob/main/opf/spec/OPF-SPEC.md" target="_blank" rel="noopener noreferrer">The specification<span class="vh"> (opens in a new tab)</span></a> <a href="$BASE/standard/">The standard</a>'''
+
+[[body]]
+component = "entry"
+lbl = "Entry 2"
+id = "d-2"
+heading = "Implementations"
+rail = "Implementations"
+claim = '''Implementations (specification section 16.1): the specification defines one implementation model, with no conformance classes, and base 2.0.0, with homes = 2, is the only base version it defines.'''
+limitation = '''The reference tooling does not yet implement base 2.0.0: it still initializes and validates stores at base 1.2.0, and it makes no claim of conformance to the specification. The reference tooling's opf doctor grades a manifest declaring <code>spec_version = "2.0.0"</code> with <code>homes = 2</code> under its 1.2.0 rules, so its VALID verdict on such a store says nothing about conformance to the specification; opf upgrade and opf record refuse such a store. The reference tooling defines no store upgrade: opf upgrade refuses every invocation with exit 2, reading and writing nothing.'''
+evidence = '''<a href="$BASE/core-files/#manifest">The store manifest</a>'''
+
+[[body]]
+component = "entry"
+lbl = "Entry 3"
+id = "d-3"
+heading = "Changelog and worklog checks"
+rail = "Changelog and worklog checks"
+claim = '''Changelog freeze compares a published entry's LF-normalized UTF-8 digest with its recorded digest. Range coverage checks that changelog entries tile every released version with no gap or overlap.'''
+limitation = '''Line-ending-only changes do not alter the freeze digest. The freeze check does not judge whether the prose is accurate or complete, and range coverage does not judge the quality of what the entries say. The unreleased worklog tail is reviewed, not machine-frozen: before a release cut, entries are correctable in place. Review and version-control history, not a digest, control the unreleased tail.'''
+evidence = '''<a href="$BASE/core-files/#worklog">The worklog</a> <a href="$BASE/core-files/#version">The version ledger</a>'''
+
+[[body]]
+component = "entry"
+lbl = "Entry 4"
+id = "d-4"
+heading = "Store resolution"
+rail = "Store resolution"
+claim = '''Store resolution confirms that 1 declared store resolves. The tracked-store check confirms that the store is a tracked git repository whose pointer, recorded sync target, and actual remote agree.'''
+limitation = '''Resolution cannot detect a second, unnamed store a project might also keep. The tracked-store check does not verify that the repository is backed up, accessible, or hosted anywhere in particular.'''
+evidence = '''<a href="$BASE/core-files/#pointer">The store pointer</a>'''
+
+[[body]]
+component = "entry"
+lbl = "Entry 5"
+id = "d-5"
+heading = "The single-writer lease"
+rail = "The single-writer lease"
+claim = '''The standard's cross-system contract requires a divergence check to detect a collision between 2 systems afterward.'''
+limitation = '''The lease has a propagation window: a second system may begin before observing the held lease. The divergence check and the lease are specified controls, not complete CLI coverage, and opf sync exits 2 in this build. The operation lock that opf init takes excludes other OPF runs on the same store only. It does not exclude runs on another store in the same repository or writers on another system.'''
+evidence = '''<a href="$BASE/core-files/#lease">The single-writer lease</a>'''
+
+[[body]]
+component = "entry"
+lbl = "Entry 6"
+id = "d-6"
+heading = "Doctor and the renderer"
+rail = "Doctor and the renderer"
+claim = '''opf doctor runs the integrity checks as 1 command you can configure as a required CI step.'''
+limitation = '''Doctor reports per-record view drift and the content schemas of module-tier and importer records as cannot-evaluate. The reference renderer does not render or drift-check per-record views. For a store with module-tier or importer records, or a per-record store that declares views, doctor's overall verdict is cannot-evaluate (exit 2). Doctor does not check behind, ahead, or divergence against a sync target.'''
+evidence = '''<a href="$BASE/adopt/">The 10 command verbs</a>'''
+
+[[body]]
+component = "entry"
+lbl = "Entry 7"
+id = "d-7"
+heading = "Adoption and the prompt pack"
+rail = "Adoption and the prompt pack"
+claim = '''The reference CLI runs adoption investigation; opf adopt plan, approve, reconcile and status run, and plan, approve and status write nothing.'''
+limitation = '''apply refuses every plan in this build and complete refuses every invocation, each with exit 2, so no receipt, completion check or retirement is recorded. Ordinary import is retired and refuses with exit 2, and nothing in the reference CLI creates legacy_fragment records; the type remains only for stores that already hold such records from the reference CLI's retired import path. The prompt pack's procedures are instructions an assistant is asked to follow; they do not control what the assistant does. The interim clean-start route initializes a store with <code>opf init</code>; it is not an adoption, and a later <code>opf adopt</code> run reads that store as re-adoption. That reading is the reference tooling's 1.2.0 behaviour and diverges from the specification, whose section 9.2 validation refusals refuse a 1.2.0 manifest as a store.'''
+evidence = '''<a href="$BASE/adopt/">Adopt</a> <a href="https://github.com/jposluns/guardrails/blob/main/opf/spec/OPF-QUICKSTART.md" target="_blank" rel="noopener noreferrer">The quickstart<span class="vh"> (opens in a new tab)</span></a>'''
+
+[[body]]
+component = "entry"
+lbl = "Entry 8"
+id = "d-8"
+heading = "What the release is made of"
+rail = "What the release is made of"
+claim = '''The AIQT Guardrails 1.0.5 release manifest ships OPFiles code: the Python and shell tooling under opf/tools/; the opf enforcement hooks (the pre-commit hook and the Claude Code deny hook), the pre-commit installer, and the CI template and script under opf/enforcement/; and the HTML pages (inline scripts included) and JavaScript under opf/site/.'''
+limitation = '''On your machine none of it runs on its own: each piece runs only when you run a tool or check, install an enforcement hook, or open the site in a browser.'''
+evidence = '''<a href="https://github.com/jposluns/guardrails" target="_blank" rel="noopener noreferrer">The repository<span class="vh"> (opens in a new tab)</span></a>'''
+
+[[body]]
+component = "entry"
+lbl = "Entry 9"
+id = "d-9"
+heading = "Network reach"
+rail = "Network reach"
+claim = '''A host provider's conveniences call the external API of the host the target names; the egress bound is that named host and nothing else.'''
+limitation = '''The standard cannot vouch for the host's own behaviour beyond that bound. Public deliverables reach the product repository under that repository's own review flow, which the standard requires to exist but does not gate.'''
+evidence = '''<a href="https://github.com/jposluns/guardrails/blob/main/opf/spec/OPF-SPEC.md" target="_blank" rel="noopener noreferrer">The specification<span class="vh"> (opens in a new tab)</span></a>'''
+
+[[body]]
+component = "entry"
+lbl = "Entry 10"
+id = "d-10"
+heading = "The discovery token"
+rail = "The discovery token"
+claim = '''A store declares itself with the exact discovery token <code>standard = "opf"</code> in its <code>[opf]</code> table.'''
+limitation = '''A rename would be a store-breaking change the specification gives no path: every base-schema version bump stays additive and keeps the exact token, so no bump the specification permits renames it (specification sections 4.5 and 9.2).'''
+evidence = '''<a href="$BASE/core-files/#manifest">The store manifest</a>'''
+
+[[body]]
+component = "label"
+text = "Your browser"
+
+[[body]]
+component = "prose"
+html = '''<p>If you use the light and dark switch, your choice is kept in your browser's local storage under the name scheme, so the site opens in that scheme next time. It is not sent to this site, and the site itself stores nothing until you press the switch. Cloudflare, which serves this site, adds an analytics script to its pages; it comes from Cloudflare, not from this site. On 4 November 2026 it stored nothing in the browser.</p>'''
+
+[[body]]
+component = "label"
+text = "Security"
+
+[[body]]
+component = "prose"
+html = '''<p>To report a security vulnerability, see <a href="https://posluns.ca/security/" target="_blank" rel="noopener noreferrer">the vulnerability disclosure policy<span class="vh"> (opens in a new tab)</span></a>. For what reaches Cloudflare and the owner when you visit this site, see <a href="https://posluns.ca/privacy/" target="_blank" rel="noopener noreferrer">the privacy policy<span class="vh"> (opens in a new tab)</span></a>.</p>'''
+
+[[body]]
+component = "next"
+text = "Home"
+href = ""

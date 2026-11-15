@@ -65,7 +65,7 @@ sidebar-active = "evidence"
     <p class="eyebrow">Documented cases</p>
     <h2>Real calls from the GRC Library</h2>
     <p class="lead">AIQT was built and tested on the GRC Library first. The
-      <a href="/examples">examples</a> narrate several real calls; each links here to its source
+      <a href="/standard/#st-3">examples on the standard page</a> narrate several real calls; each links here to its source
       record when that record is public.</p>
     <ul class="clean">
       <li>A fixed retention baseline attributed to sources that prescribe no fixed interval, caught and corrected. <span class="evidence-label">Source record link: pending</span></li>
@@ -82,7 +82,6 @@ sidebar-active = "evidence"
     <p class="lead">Every substantive change to AIQT is recorded; the public change log is a
       curated release-level view. <a href="https://github.com/jposluns/guardrails/blob/main/CHANGELOG.md" target="_blank" rel="noopener noreferrer">The public change log</a></p>
     <div class="cta" style="justify-content:flex-start; margin-top:1.2rem">
-      <a class="btn primary" href="/about">Who is behind AIQT</a>
       <a class="btn ghost" href="https://github.com/jposluns/guardrails" target="_blank" rel="noopener noreferrer">View the source on GitHub</a>
     </div>
   </div>

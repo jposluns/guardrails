@@ -3,13 +3,24 @@
 
 The protected ref is supplied explicitly or derived from origin/HEAD. The candidate revision is
 supplied explicitly or defaults to HEAD. A merge-base exit status of 0 means rooted, 1 means
-ORPHANED, and every other status is cannot-evaluate. First-parent lag is always reported and becomes
-a blocking STALE verdict only when --max-lag is configured.
+ORPHANED, and every other status is cannot-evaluate. A rooted candidate that restores, at a path it
+changes from any merge base, the exact blob a first-parent commit of the protected line replaced
+within the REVERT_WINDOW commits ending at that merge base (following the line's exact renames
+within that window to the newest name; or, at a path it adds, the exact nonempty blob such a commit
+replaced at a path it removes, other than that path's merge-base blob, so a rename that puts old
+content back is caught) is REVERTS, unless
+merging it into the
+protected tip (git merge-tree --write-tree) leaves that path, and every path the protected line renamed
+it to, as the tip has it without a conflict (a mode-only difference counts only where it restores the
+replaced image), or the "Reverts: <full sha>" trailers of the commits in base..head together name
+every such commit.
+First-parent lag is always reported
+and becomes a blocking STALE verdict only when --max-lag is configured.
 
   check_branch_root.py [--root DIR] [--protected REF] [--head REV] [--max-lag N]
   check_branch_root.py --self-test
 
-Exit: 0 rooted (and fresh when configured); 1 ORPHANED or STALE; 2 usage/cannot-evaluate.
+Exit: 0 rooted (and fresh when configured); 1 ORPHANED, REVERTS or STALE; 2 usage/cannot-evaluate.
 Stdlib only; offline against the local object database.
 """
 import sys
@@ -39,11 +50,33 @@ from pathlib import Path
 # Liftable and stdlib-only: the default root is resolved from the working directory via git
 # rev-parse (_repo_root), with no dependency on any repository-local helper module.
 TIMEOUT = 30
+# The revert check looks back this many first-parent commits, the merge base included. It matches the
+# --max-lag 200 the CI legs pin, so a branch the staleness layer admits has its whole lag in view.
+REVERT_WINDOW = 200
 Result = namedtuple(
     "Result",
     ("code", "verdict", "protected_ref", "protected_sha", "head_ref", "head_sha",
-     "bases", "lag", "max_lag", "detail"),
+     "bases", "lag", "max_lag", "detail", "findings", "conflicts"),
+    defaults=((), ()),
 )
+# The window walk. --diff-merges=first-parent is named even though a current git (2.53 checked) implies
+# it from --first-parent, so a git that does not still diffs a merge on the protected line against its
+# first parent instead of printing no raw diff for it.
+_WINDOW_LOG_ARGS = ("log", "--first-parent", "--diff-merges=first-parent", "--raw", "--no-renames",
+                    "--no-abbrev", "--no-color", "--no-show-signature", "--format=%H")
+# The same walk with exact renames only. -M100% pairs a removed and an added path by blob id, which git does
+# before and without its rename limit, so no similarity guess carries one file's history to another.
+_WINDOW_RENAME_ARGS = ("log", "--first-parent", "--diff-merges=first-parent", "--raw", "-M100%",
+                       "--no-abbrev", "--no-color", "--no-show-signature", "--format=%H")
+# The empty blob in each object format. An empty file equals an old empty pre-image of another path by
+# coincidence, so _moved never pairs it.
+_EMPTY_BLOBS = frozenset(("e69de29bb2d1d6434b8b29ae775ad8c2e48c5391",
+                          "473a0f4c3be8a93681a267e3b1e9a7dcda1185436fe141f7749120a303721813"))
+# The merge's rename settings, pinned so global or repository config cannot change the merge result.
+# File renames stay on, as in git's default merge, and are followed (_renamed). Directory renames are off,
+# so a path the head adds stays where the head put it and is judged there, rather than moving silently
+# into a directory the protected line renamed.
+_MERGE_CONFIG = ("-c", "merge.renames=true", "-c", "merge.directoryRenames=false")
 
 
 class CannotEvaluate(RuntimeError):
@@ -68,13 +101,13 @@ def _git_env():
     return env
 
 
-def _git(root, *args, input_text=None):
+def _git(root, *args, input_text=None, binary=False):
     try:
         return subprocess.run(
             ["git", "-C", str(root), *args],
             input=input_text,
             capture_output=True,
-            text=True,
+            text=not binary,
             timeout=TIMEOUT,
             env=_git_env(),
         )
@@ -160,11 +193,292 @@ def _is_shallow(root):
     return value == "true"
 
 
-def evaluate(root, protected=None, head=None, max_lag=None):
+def _object_id(token):
+    """True for a full lowercase hex object id (SHA-1 or SHA-256), checked on the raw bytes so a
+    non-ASCII byte is refused here rather than raising on decode."""
+    return len(token) in (40, 64) and all(char in b"0123456789abcdef" for char in token)
+
+
+def _image(mode, oid, command):
+    """One side of a raw record: None where the path is absent, else the (mode, oid) pair. A mode that is
+    not six octal digits or an oid that is not a full hex id is a malformed record (cannot-evaluate)."""
+    if len(mode) != 6 or not all(char in b"01234567" for char in mode) or not _object_id(oid):
+        raise CannotEvaluate("git {} printed a malformed raw record".format(command))
+    return None if mode == b"000000" else (mode.decode("ascii"), oid.decode("ascii"))
+
+
+def _blob(image):
+    """The blob id an image holds, or None where the path is absent. A revert is judged on this alone,
+    so a mode change cannot hide a restored pre-image."""
+    return None if image is None else image[1]
+
+
+def _raw_records(root, *args, commits=None):
+    """Run a git raw-diff command with -z and return its (commit, path, pre, post) records. Paths stay
+    bytes, so a space, newline or non-UTF-8 byte in a name is compared exactly. An image is a
+    (mode, oid) pair, or None where the path is absent on that side. commit is the preceding %H line
+    for log output and None for diff-tree. When commits is a list, every %H line is appended to it,
+    including those of commits that changed nothing."""
+    probe = _git(root, args[0], "-z", *args[1:], binary=True)
+    if probe.returncode != 0:
+        raise CannotEvaluate("git {} failed ({})".format(
+            args[0], probe.stderr.decode("utf-8", "replace").strip() or "no diagnostic"))
+    records = []
+    commit = None
+    tokens = iter(probe.stdout.split(b"\0"))
+    for token in tokens:
+        header = token.lstrip(b"\n")
+        if not header:
+            continue
+        if header.startswith(b":"):
+            fields = header[1:].split(b" ")
+            path = next(tokens, None)
+            if len(fields) == 5 and fields[4][:1] in (b"R", b"C"):
+                # Only a -M call prints a rename or copy: its path is the (source, destination) pair.
+                target = next(tokens, None)
+                path = (path, target) if path and target else None
+            if len(fields) != 5 or not path:
+                raise CannotEvaluate("git {} printed a malformed raw record".format(args[0]))
+            records.append((commit, path, _image(fields[0], fields[2], args[0]),
+                            _image(fields[1], fields[3], args[0])))
+        elif _object_id(header):
+            commit = header.decode("ascii")
+            if commits is not None:
+                commits.append(commit)
+        else:
+            raise CannotEvaluate("git {} printed an unrecognized line".format(args[0]))
+    return records
+
+
+def _window_listed(commits, base):
+    """A correct git lists the window newest first starting at base itself, so an empty listing, or one
+    that does not start at base, cannot be judged."""
+    if not commits or commits[0] != base:
+        raise CannotEvaluate("git log listed {} for the revert window below {}, not that base first"
+                             .format("no commit" if not commits else commits[0], base))
+
+
+def _window_touches(root, base, window):
+    """(commit, path, pre, post) for every path each of the window first-parent commits ending at base
+    changed against its first parent, newest first. A shallow repository is judged only when the parent
+    of the oldest window commit is present: a shallow boundary commit diffs as if it added every file.
+    A listing without base as its first commit is cannot-evaluate."""
+    if _is_shallow(root):
+        commits = _git(root, "rev-list", "--count", "--first-parent", "-n", str(window + 1), base)
+        if commits.returncode != 0 or not commits.stdout.strip().isdigit():
+            raise CannotEvaluate("cannot count the revert window in a shallow repository")
+        if int(commits.stdout.strip()) <= window:
+            raise CannotEvaluate(
+                "the repository is shallow and its history ends inside the {}-commit revert window "
+                "below {}; run `git fetch --unshallow` and retry".format(window, base))
+    commits = []
+    records = _raw_records(root, *_WINDOW_LOG_ARGS, "-n", str(window), base, "--", commits=commits)
+    _window_listed(commits, base)
+    return records
+
+
+def _reverts_named(root, base, head_sha):
+    """The values of every Reverts trailer on the commits in base..head."""
+    probe = _git(root, "log", "--no-show-signature", "--no-color",
+                 "--format=%(trailers:key=Reverts,valueonly,unfold)", "-z",
+                 "{}..{}".format(base, head_sha), "--")
+    if probe.returncode != 0:
+        raise CannotEvaluate("cannot read Reverts trailers in {}..{} ({})".format(
+            base, head_sha, probe.stderr.strip() or "git log failed"))
+    return {value.strip() for value in probe.stdout.replace("\0", "\n").splitlines() if value.strip()}
+
+
+def _allowed(undone, named):
+    """A deliberate restoration passes only when a trailer names each undone commit by its full id."""
+    return all(commit in named for commit in undone)
+
+
+def _matched(touches, image):
+    """(undone, restored) where image's blob equals the pre-image blob of one of touches, the window's
+    (commit, pre) records on one path, newest first; else None. undone runs from the newest record back to
+    the match. Where the newest blob match differs from image in mode only, the walk goes on to an older
+    pre-image equal to the whole image, so a mode the line changed before a content round trip is found."""
+    undone, matched = [], None
+    for commit, pre in touches:
+        undone.append(commit)
+        if _blob(pre) != _blob(image):
+            continue
+        if matched is None or pre == image:
+            matched = (len(undone), pre)
+        if pre == image:
+            break
+    return None if matched is None else (tuple(undone[:matched[0]]), (matched[1],))
+
+
+def _moved(records, touches):
+    """(destination, source) for each path the head adds whose blob equals a window pre-image blob of a
+    path the head removes, other than the blob that source had at the base and other than the empty
+    blob: the head moved the source and put back content the line replaced there. Pairs are made on
+    exact blobs, not by git's rename detection, so no rename limit or similarity threshold applies. A
+    path the head changes in place is neither a source nor a destination: a new file beside an edited
+    one often holds the edited file's old content for a legitimate reason (a licence header, a version
+    string, a generated file), and exact blobs cannot tell that from a move."""
+    removed = {path: pre for _c, path, pre, post in records if post is None and path in touches}
+    sources = {}
+    for source, pre in removed.items():
+        for _commit, old in touches[source]:
+            if old is not None and _blob(old) != _blob(pre) and _blob(old) not in _EMPTY_BLOBS:
+                sources.setdefault(_blob(old), set()).add(source)
+    return sorted((path, source) for _c, path, pre, post in records if pre is None and post is not None
+                  for source in sources.get(_blob(post), ()))
+
+
+def _window_renames(root, base, window):
+    """{commit: [(source, destination)]}: the exact renames each of the window first-parent commits
+    ending at base made against its first parent. A listing without base as its first commit is
+    cannot-evaluate, as for _window_touches, so a git that prints nothing cannot drop the renames."""
+    renames, commits = {}, []
+    records = _raw_records(root, *_WINDOW_RENAME_ARGS, "-n", str(window), base, "--", commits=commits)
+    _window_listed(commits, base)
+    for commit, pair, _pre, _post in records:
+        if isinstance(pair, tuple):
+            renames.setdefault(commit, []).append(pair)
+    return renames
+
+
+def _followed(follow, pairs):
+    """follow, {old name: {newest name}}, with the exact renames pairs of one window commit applied, the
+    walk going newest first. A source maps to the name its destination reached, not to the destination
+    as well, so a name the content only passed through, or left again, gains no older history."""
+    return {**follow, **{source: follow.get(destination, {destination}) for source, destination in pairs}}
+
+
+def _revert_findings(root, base, head_sha, window):
+    """(path, undone, restored) for each path the head changes from base whose head blob equals the
+    pre-image blob of a commit in the window (file modes are not compared, but see _matched); undone lists
+    the window commits on that path from base back to that commit, newest first, and restored holds that
+    pre-image. A deletion matches an add (an absent pre-image). Where a window commit renamed a path
+    exactly, the commits older than it on the old name count on the newest name that content reached
+    too, so a restore at a path the line renamed is found, while a name the content passed through or
+    left is credited with none of it. A path the head adds is also judged against the window of each
+    path the head removes that _moved pairs it with, and is reported under its own name. A path is
+    dropped when the Reverts trailers of the commits in base..head together name every commit it
+    undoes."""
+    records = _raw_records(
+        root, "diff-tree", "-r", "--raw", "--no-renames", "--no-abbrev", base, head_sha, "--")
+    changed = {path: post for _c, path, _pre, post in records}
+    if not changed:
+        return []
+    renames = _window_renames(root, base, window)
+    touches, follow, current = {}, {}, None
+    for commit, path, pre, _post in _window_touches(root, base, window):
+        if commit != current:
+            follow = _followed(follow, renames.get(current, ()))
+            current = commit
+        for name in sorted({path} | follow.get(path, set())):
+            if name in changed:
+                touches.setdefault(name, []).append((commit, pre))
+    findings = []
+    for path, source in [(path, path) for path in sorted(touches)] + _moved(records, touches):
+        found = _matched(touches[source], changed[path])
+        if found is not None:
+            findings.append((path,) + found)
+    if findings:
+        named = _reverts_named(root, base, head_sha)
+        findings = [finding for finding in findings if not _allowed(finding[1], named)]
+    return findings
+
+
+def _union_findings(root, bases, _protected_sha, head_sha, window):
+    """The revert findings judged from every merge base, one per path, and the bases that produced any.
+    A revert can be visible from one base only, so no single base stands in for the others. A path found
+    from several bases is reported and counted once, with the undone commits and restored pre-images
+    of each base in the order found."""
+    undone_at, restored_at, anchors = {}, {}, []
+    for base in bases:
+        found = _revert_findings(root, base, head_sha, window)
+        if found:
+            anchors.append(base)
+        for path, undone, restored in found:
+            merged = undone_at.setdefault(path, [])
+            for commit in undone:
+                if commit not in merged:
+                    merged.append(commit)
+            images = restored_at.setdefault(path, [])
+            images.extend(image for image in restored if image not in images)
+    return sorted((path, tuple(undone), tuple(restored_at[path]))
+                  for path, undone in undone_at.items()), anchors
+
+
+def _merge_result(root, protected_sha, head_sha):
+    """(tree, conflicted): the tree git merge-tree --write-tree writes for merging the head into the
+    protected tip, and the paths that merge reports conflicting. Status 0 is a clean merge and 1 a
+    conflicted one. Any other status, output that is not a tree id followed by NUL-terminated nonempty
+    paths, a clean merge that lists a path, or a conflicted one that lists none is cannot-evaluate."""
+    probe = _git(root, *_MERGE_CONFIG, "merge-tree", "--write-tree", "-z", "--name-only", "--no-messages",
+                 protected_sha, head_sha, binary=True)
+    if probe.returncode not in (0, 1):
+        raise CannotEvaluate("git merge-tree returned unexpected status {} ({})".format(
+            probe.returncode, probe.stderr.decode("utf-8", "replace").strip() or "no diagnostic"))
+    tokens = probe.stdout.split(b"\0")
+    tree, paths = tokens[0], tokens[1:-1]
+    if (len(tokens) < 2 or tokens[-1] or not _object_id(tree) or not all(paths)
+            or bool(paths) != (probe.returncode == 1)):
+        raise CannotEvaluate("git merge-tree printed output that does not parse (status {})".format(
+            probe.returncode))
+    return tree.decode("ascii"), frozenset(paths)
+
+
+def _renamed(root, bases, protected_sha):
+    """{path: destinations}: the renames git's rename detection (-M, no rename limit) pairs from each merge
+    base to the protected tip. The merge carries a head change at a renamed path to its destination, so
+    a finding is judged there as well."""
+    moves = {}
+    for base in bases:
+        for _c, pair, _pre, _post in _raw_records(
+                root, "diff-tree", "-r", "--raw", "-M", "-l0", "--no-abbrev", base, protected_sha, "--"):
+            if isinstance(pair, tuple):
+                moves.setdefault(pair[0], set()).add(pair[1])
+    return moves
+
+
+def _undoes(tip, merged, restored):
+    """True where the merge result's image of a path changes the tip's: its blob differs, or only its mode
+    does and the merged image is a restored pre-image, so putting back a mode the line changed stands
+    while a mode change the line never made does not."""
+    return _blob(merged) != _blob(tip) or (merged != tip and merged in restored)
+
+
+def _settled(root, bases, protected_sha, head_sha, findings):
+    """Judge the findings by the merge of the head into the protected tip. A finding stands where that
+    merge conflicts or _undoes the tip's image at the path or at a path the protected line renamed it
+    to; elsewhere merging the head leaves the path's content as the protected line has it, so it undoes
+    nothing there (a stale branch carrying a revert the line already made, a path changed from one merge
+    base only by what the head picked up through another, a mode change the line never made). Returns
+    the findings that stand, as (path, undone), and the paths among them where the merge conflicts."""
+    if not findings:
+        return [], ()
+    tree, conflicted = _merge_result(root, protected_sha, head_sha)
+    images = {path: (pre, post) for _c, path, pre, post in _raw_records(
+        root, "diff-tree", "-r", "--raw", "--no-renames", "--no-abbrev", protected_sha, tree, "--")}
+    moves = None
+    kept = []
+    for path, undone, restored in findings:
+        spots = [path]
+        if path not in conflicted and not (path in images and _undoes(*images[path], restored)):
+            if moves is None:
+                moves = _renamed(root, bases, protected_sha)
+            spots = sorted(moves.get(path, ()))
+        if any(spot in conflicted or (spot in images and _undoes(*images[spot], restored))
+               for spot in spots):
+            kept.append((path, undone))
+    return kept, tuple(path for path, _undone in kept if path in conflicted)
+
+
+def evaluate(root, protected=None, head=None, max_lag=None, revert_window=None):
     # A malformed threshold is a cannot-evaluate (exit 2), never a silently-disabled or inverted guard
     # (guard-input-soundness / D11): a negative or non-integer --max-lag would make every lag "exceed" it.
     if max_lag is not None and (isinstance(max_lag, bool) or not isinstance(max_lag, int) or max_lag < 0):
         raise CannotEvaluate("--max-lag must be a non-negative integer, got {!r}".format(max_lag))
+    if revert_window is None:
+        revert_window = REVERT_WINDOW
+    if isinstance(revert_window, bool) or not isinstance(revert_window, int) or revert_window < 1:
+        raise CannotEvaluate("the revert window must be a positive integer, got {!r}".format(revert_window))
     root = _repo_root(root)
     protected_ref = protected if protected is not None else "origin/HEAD"
     head_ref = head if head is not None else "HEAD"
@@ -196,7 +510,17 @@ def evaluate(root, protected=None, head=None, max_lag=None):
     if not bases:
         raise CannotEvaluate("git merge-base exited 0 but returned no merge base")
 
+    # The reported lag is the least across bases; the revert check is judged from every base.
     lag = min(_count_lag(root, base, protected_sha) for base in bases)
+    findings, anchors = _union_findings(root, bases, protected_sha, head_sha, revert_window)
+    findings, conflicts = _settled(root, bases, protected_sha, head_sha, findings)
+    if findings:
+        return Result(
+            1, "REVERTS", protected_ref, protected_sha, head_ref, head_sha,
+            bases, lag, max_lag, "restores content the protected line replaced by merge base(s) {}".format(
+                ", ".join(anchors)),
+            tuple(findings), tuple(conflicts),
+        )
     if max_lag is not None and lag > max_lag:
         return Result(
             1, "STALE", protected_ref, protected_sha, head_ref, head_sha,
@@ -232,6 +556,24 @@ def _print_result(result):
         if result.max_lag is None
         else "configured maximum {}".format(result.max_lag)
     )
+    if result.verdict == "REVERTS":
+        lines = ["  {!r} undoes {}{}".format(
+            path.decode("utf-8", "surrogateescape"), ", ".join(undone),
+            " (merging it into {} conflicts at this path)".format(result.protected_ref)
+            if path in result.conflicts else "")
+            for path, undone in result.findings]
+        print(
+            "VIOLATION: branch-root: {} {}: at {} path(s) it holds the exact content that a first-parent "
+            "commit of {} within the {} commits ending at that base replaced, and merging it into the "
+            "protected tip changes that path (or a path the protected line renamed it to) away from the "
+            "tip's content or conflicts there, so it "
+            "reverts that change:\n{}\nRebuild the branch from its own changes on top of the merge base, or, when "
+            "the restoration is deliberate, add a trailer `Reverts: <full sha>` naming each listed commit "
+            "to a commit in <merge base>..<head>. This gate never rewrites a branch itself.".format(
+                result.head_sha, result.detail, len(result.findings), result.protected_ref,
+                REVERT_WINDOW, "\n".join(lines))
+        )
+        return
     if result.verdict == "STALE":
         print(
             "VIOLATION: branch-root: {} is rooted at merge base(s) {}, but its nearest "
@@ -248,9 +590,10 @@ def _print_result(result):
     )
 
 
-def run(root, protected=None, head=None, max_lag=None):
+def run(root, protected=None, head=None, max_lag=None, revert_window=None):
     try:
-        result = evaluate(root, protected=protected, head=head, max_lag=max_lag)
+        result = evaluate(root, protected=protected, head=head, max_lag=max_lag,
+                          revert_window=revert_window)
     except CannotEvaluate as exc:
         print("ERROR: branch-root cannot evaluate: {}".format(exc), file=sys.stderr)
         return 2
@@ -258,7 +601,7 @@ def run(root, protected=None, head=None, max_lag=None):
     return result.code
 
 
-def _fixture_git(root, *args, identity=False, input_text=None):
+def _fixture_git(root, *args, identity=False, input_text=None, input_bytes=None):
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     from _git_fixture_env import git_fixture_env
     env = git_fixture_env(GIT_NO_LAZY_FETCH="1", GIT_TERMINAL_PROMPT="0",
@@ -271,6 +614,10 @@ def _fixture_git(root, *args, identity=False, input_text=None):
             "-c", "commit.gpgsign=false",
         ]
     cmd += list(args)
+    if input_bytes is not None:
+        return subprocess.run(
+            cmd, input=input_bytes, capture_output=True, check=True, timeout=TIMEOUT, env=env,
+        ).stdout.decode("ascii").strip()
     return subprocess.run(
         cmd,
         input=input_text,
@@ -305,6 +652,663 @@ def _commit_tree(root, tree, parents, message):
     for parent in parents:
         args += ["-p", parent]
     return _fixture_git(root, *args, identity=True, input_text=message + "\n")
+
+
+def _plumb_tree(root, files, modes):
+    """The tree of {path bytes: content bytes}, a path with a slash going into a subtree."""
+    subtrees = {}
+    entries = []
+    for path, data in files.items():
+        directory, slash, rest = path.partition(b"/")
+        if slash:
+            subtrees.setdefault(directory, {})[rest] = data
+            continue
+        entries.append(modes.get(path, b"100644") + b" blob "
+                       + _fixture_git(root, "hash-object", "-w", "--stdin", input_bytes=data).encode()
+                       + b"\t" + path + b"\0")
+    for directory, contents in subtrees.items():
+        inner = {path[len(directory) + 1:]: mode for path, mode in modes.items()
+                 if path.startswith(directory + b"/")}
+        entries.append(b"040000 tree " + _plumb_tree(root, contents, inner).encode()
+                       + b"\t" + directory + b"\0")
+    return _fixture_git(root, "mktree", "-z", input_bytes=b"".join(entries))
+
+
+def _plumb_commit(root, files, parents, message, modes=None):
+    """Write a tree of {path bytes: content bytes} with hash-object and mktree, then commit it, so a
+    fixture path may carry a space, a newline or a non-UTF-8 byte whatever the filesystem allows. A
+    slash in a path makes a subtree. modes maps a path to a file mode other than 100644."""
+    tree = _plumb_tree(root, files, modes or {})
+    return _commit_tree(root, tree, parents, message)
+
+
+def _revert_vectors(temp, failures, case):
+    """R1-R30: the revert check. One repository holds every history; each case names its own refs."""
+    def ref(name, sha):
+        _fixture_git(repo, "update-ref", "refs/heads/" + name, sha)
+        return "refs/heads/" + name
+
+    def found(label, protected, head, want, revert_window=None):
+        try:
+            got = evaluate(repo, protected, head, revert_window=revert_window)
+        except CannotEvaluate as exc:
+            failures.append("{}: expected finding paths {!r}, got cannot-evaluate ({})".format(
+                label, sorted(want), exc))
+            return None
+        paths = {path for path, _undone in got.findings}
+        if paths != want:
+            failures.append("{}: expected finding paths {!r}, got {!r} ({})".format(
+                label, sorted(want), sorted(paths), got.verdict))
+        return got
+
+    repo = temp / "r-revert"
+    repo.mkdir()
+    _fixture_git(repo, "init", "-q", "-b", "protected")
+    old = {b"seed.txt": b"seed\n", b"c.txt": b"c1\n"}
+    base = _plumb_commit(repo, old, (), "seed")
+    c1 = _plumb_commit(repo, {**old, b"b.txt": b"b\n"}, (base,), "main adds b")
+    main_files = {**old, b"b.txt": b"b\n", b"c.txt": b"c2\n"}
+    c2 = _plumb_commit(repo, main_files, (c1,), "main changes c")
+    feature = {**old, b"f.txt": b"feature\n"}
+    branch = _plumb_commit(repo, feature, (base,), "feature")
+    main = ref("main-r", c2)
+
+    # R1: the incident fold: the branch's tree committed on the newer protected tip. Merge base is the
+    # tip, lag 0, so ancestry alone passes; the check names exactly the add and the change it reverts.
+    fold = _plumb_commit(repo, feature, (c2,), "folded")
+    case("R1 incident fold", 1, repo, main, ref("r1", fold))
+    r1 = found("R1 incident fold", main, "refs/heads/r1", {b"b.txt", b"c.txt"})
+    if r1 is not None and dict(r1.findings) != {b"b.txt": (c1,), b"c.txt": (c2,)}:
+        failures.append("R1 incident fold: expected b.txt undoing {} and c.txt undoing {}, got {!r}"
+                        .format(c1, c2, r1.findings))
+    # R2: the same tree folded onto the pinned merge base.
+    case("R2 pinned fold", 0, repo, main, ref("r2", _plumb_commit(repo, feature, (base,), "pinned")))
+    # R3: a stale but correct branch that was never rebased.
+    r3 = _plumb_commit(repo, {**feature, b"g.txt": b"g\n"}, (branch,), "feature two")
+    case("R3 stale unrebased", 0, repo, main, ref("r3", r3))
+
+    # R4: the same shape made through porcelain: check out the branch, mixed-reset onto the tip, add -A.
+    _fixture_git(repo, "switch", "-q", "-c", "r4", branch)
+    _fixture_git(repo, "reset", "-q", "--mixed", c2)
+    _fixture_git(repo, "add", "-A")
+    _fixture_git(repo, "commit", "-q", "-m", "reset fold", identity=True)
+    if _fixture_git(repo, "rev-parse", "r4^{tree}") != _fixture_git(repo, "rev-parse", fold + "^{tree}"):
+        failures.append("R4 reset fold: the porcelain fold did not reproduce the R1 tree")
+    case("R4 reset fold", 1, repo, main, "refs/heads/r4")
+    _fixture_git(repo, "switch", "-q", "--detach", base)
+
+    # R5: the protected line advances again after the fold: it drops b.txt, changes c.txt once more and
+    # adds n.txt. Anchored on the merge base c.txt is still found; b.txt is not, because the protected
+    # tip dropped it too, so merging the fold leaves it as the tip has it. c.txt conflicts in that merge,
+    # and the report says so.
+    drop = _plumb_commit(repo, {**old, b"c.txt": b"c2\n"}, (c2,), "main drops b")
+    again = _plumb_commit(repo, {**old, b"c.txt": b"c3\n"}, (drop,), "main changes c again")
+    later = _plumb_commit(repo, {**old, b"c.txt": b"c3\n", b"n.txt": b"n\n"}, (again,), "main adds n")
+    advanced = ref("protected", later)
+    case("R5 main advanced", 1, repo, advanced, "refs/heads/r1")
+    r5 = found("R5 main advanced", advanced, "refs/heads/r1", {b"c.txt"})
+    if r5 is not None and r5.conflicts != (b"c.txt",):
+        failures.append("R5 main advanced: expected c.txt named as conflicting, got {!r}".format(
+            r5.conflicts))
+    # R6: the branch rebased onto the tip.
+    case("R6 rebased", 0, repo, main, ref("r6", _plumb_commit(
+        repo, {**main_files, b"f.txt": b"feature\n"}, (c2,), "rebased")))
+
+    # R7: a revert inside a file the branch also edits is not detected: the head's blob is new. This
+    # pins the disclosed residual, so a change that starts catching it updates the residue too.
+    shared = _plumb_commit(repo, {**old, b"s.txt": b"s1\nshared\n"}, (base,), "main adds s")
+    shared2 = _plumb_commit(repo, {**old, b"s.txt": b"s2\nshared\n"}, (shared,), "main edits s")
+    case("R7 shared-file residual", 0, repo, ref("r7-main", shared2), ref("r7", _plumb_commit(
+        repo, {**old, b"s.txt": b"s1\nbranch\n"}, (shared2,), "fold over a shared edit")))
+
+    # R8: a deliberate delete of a file the protected line added is a finding, and passes only with a
+    # Reverts trailer naming the adding commit by its full id.
+    dropped = {**old, b"c.txt": b"c2\n"}
+    case("R8 deliberate delete", 1, repo, main, ref("r8", _plumb_commit(repo, dropped, (c2,), "drop b")))
+    case("R8 deliberate delete with trailer", 0, repo, main, ref("r8t", _plumb_commit(
+        repo, dropped, (c2,), "drop b\n\nReverts: {}".format(c1))))
+    # R9: a trailer naming another commit, or the right commit abbreviated, allows nothing.
+    case("R9 trailer names the wrong commit", 1, repo, main, ref("r9", _plumb_commit(
+        repo, dropped, (c2,), "drop b\n\nReverts: {}".format(c2))))
+    case("R9 abbreviated trailer", 1, repo, main, ref("r9a", _plumb_commit(
+        repo, dropped, (c2,), "drop b\n\nReverts: {}".format(c1[:12]))))
+
+    # R10: window boundary. w.txt changes, then three empty commits, so the change is the fourth commit
+    # ending at the base: inside a window of 5, exactly at a window of 4, outside a window of 3.
+    w0 = _plumb_commit(repo, {b"w.txt": b"w1\n"}, (), "w root")
+    tip = _plumb_commit(repo, {b"w.txt": b"w2\n"}, (w0,), "w change")
+    for i in range(3):
+        tip = _plumb_commit(repo, {b"w.txt": b"w2\n"}, (tip,), "w filler {}".format(i))
+    w_main = ref("r10-main", tip)
+    w_head = ref("r10", _plumb_commit(repo, {b"w.txt": b"w1\n"}, (tip,), "w revert"))
+    for label, window, want in (("inside", 5, {b"w.txt"}), ("at", 4, {b"w.txt"}), ("outside", 3, set())):
+        found("R10 window {} K={}".format(label, window), w_main, w_head, want, window)
+    # The window ends at the merge base, not at the protected tip: two more protected commits put the
+    # change sixth from the tip, yet it is still fourth from the base, so a window of 4 still finds it.
+    w_later = tip
+    for i in range(2):
+        w_later = _plumb_commit(repo, {b"w.txt": b"w2\n"}, (w_later,), "w later {}".format(i))
+    found("R10 window anchored at the base K=4", ref("r10-later", w_later), w_head, {b"w.txt"}, 4)
+    if REVERT_WINDOW != 200:
+        failures.append("R10 window: REVERT_WINDOW must stay 200 to match the pinned --max-lag 200")
+
+    # R11: paths with a space, a newline and a non-UTF-8 byte are compared as exact bytes.
+    odd = {b"with space.txt": b"1\n", b"new\nline.txt": b"2\n", b"bad-\xff-byte.txt": b"3\n"}
+    q0 = _plumb_commit(repo, {b"q.txt": b"q\n"}, (), "q root")
+    q1 = _plumb_commit(repo, {b"q.txt": b"q\n", **odd}, (q0,), "main adds odd names")
+    q_head = ref("r11", _plumb_commit(repo, {b"q.txt": b"q\n"}, (q1,), "drops odd names"))
+    found("R11 odd path bytes", ref("r11-main", q1), q_head, set(odd))
+
+    # R13: a merge on the protected line's first-parent chain is diffed against its first parent.
+    t0 = _plumb_commit(repo, {b"a.txt": b"a1\n", b"m.txt": b"m1\n"}, (), "t root")
+    side = _plumb_commit(repo, {b"a.txt": b"a1\n", b"m.txt": b"m2\n"}, (t0,), "side changes m")
+    t1 = _plumb_commit(repo, {b"a.txt": b"a2\n", b"m.txt": b"m1\n"}, (t0,), "main changes a")
+    merged = _plumb_commit(repo, {b"a.txt": b"a2\n", b"m.txt": b"m2\n"}, (t1, side), "merge side")
+    found("R13 first-parent merge", ref("r13-main", merged), ref("r13", _plumb_commit(
+        repo, {b"a.txt": b"a2\n", b"m.txt": b"m1\n"}, (merged,), "reverts the merge's m")), {b"m.txt"})
+    if "--diff-merges=first-parent" not in _WINDOW_LOG_ARGS:
+        failures.append("R13 pin: the window walk must name --diff-merges=first-parent")
+
+    # R14: the push self-check names the same commit twice: nothing changed, nothing to judge.
+    case("R14 protected is head", 0, repo, main, main)
+
+    # R15: a fold restores the exact pre-image blob of x.txt but as an executable file. The revert is
+    # judged on the blob alone, so the mode change does not hide it.
+    x0 = _plumb_commit(repo, {b"x.txt": b"x1\n"}, (), "x root")
+    x1 = _plumb_commit(repo, {b"x.txt": b"x2\n"}, (x0,), "main changes x")
+    x_head = ref("r15", _plumb_commit(repo, {b"x.txt": b"x1\n"}, (x1,), "restores x as executable",
+                                      {b"x.txt": b"100755"}))
+    case("R15 mode-flipped restore", 1, repo, ref("r15-main", x1), x_head)
+    found("R15 mode-flipped restore", "refs/heads/r15-main", x_head, {b"x.txt"})
+
+    # R16: two merge bases. The protected tip P merges side commit A (which changes p.txt) into S; the
+    # head has parents A and S and puts p.txt back. From S (the least lag, 1) the head changes nothing
+    # at p.txt; only from A (lag 2) is the revert visible. Every base is judged; the lag stays 1.
+    p0 = _plumb_commit(repo, {b"p.txt": b"p1\n"}, (), "p root")
+    p_side = _plumb_commit(repo, {b"p.txt": b"p2\n"}, (p0,), "side changes p")
+    p_line = _plumb_commit(repo, {b"p.txt": b"p1\n", b"s.txt": b"s\n"}, (p0,), "main adds s")
+    p_tip = _plumb_commit(repo, {b"p.txt": b"p2\n", b"s.txt": b"s\n"}, (p_line, p_side), "merge side")
+    p_head = ref("r16", _plumb_commit(repo, {b"p.txt": b"p1\n", b"s.txt": b"s\n"}, (p_side, p_line),
+                                      "merges both and puts p back"))
+    p_main = ref("r16-main", p_tip)
+    case("R16 two merge bases", 1, repo, p_main, p_head)
+    r16 = found("R16 two merge bases", p_main, p_head, {b"p.txt"})
+    if r16 is not None and (len(r16.bases) != 2 or r16.lag != 1):
+        failures.append("R16 two merge bases: expected two bases and lag 1, got bases={} lag={}".format(
+            len(r16.bases), r16.lag))
+
+    # R17: a stale branch cut before the protected line reverted its own change to k.txt and its own
+    # add of d.txt carries that revert. Merging it leaves both paths as the protected tip has them.
+    k0 = _plumb_commit(repo, {b"k.txt": b"k1\n"}, (), "k root")
+    k1 = _plumb_commit(repo, {b"k.txt": b"k2\n", b"d.txt": b"d\n"}, (k0,), "main changes k, adds d")
+    k2 = _plumb_commit(repo, {b"k.txt": b"k1\n"}, (k1,), "main reverts k and d")
+    k3 = _plumb_commit(repo, {b"k.txt": b"k1\n", b"o.txt": b"o\n"}, (k2,), "main adds o")
+    k_head = ref("r17", _plumb_commit(repo, {b"k.txt": b"k1\n", b"g.txt": b"g\n"}, (k1,),
+                                      "branch work carrying the revert of k and d"))
+    k_main = ref("r17-main", k3)
+    case("R17 carried protected revert", 0, repo, k_main, k_head)
+    found("R17 carried protected revert", k_main, k_head, set())
+
+    # R20: two merge bases, neither a revert. The line turns flag.cfg on, a side branch forks, the line
+    # turns it off and the feature is cut after that; the feature and the line both merge the side, then
+    # the line turns the flag on again. Judged from the side base the head's flag.cfg matches a window
+    # pre-image, but only through the line's own change the head picked up from the other base; the
+    # feature never touches flag.cfg and merging it leaves the tip's blob there.
+    g0 = _plumb_commit(repo, {b"flag.cfg": b"off\n"}, (), "flag root")
+    g1 = _plumb_commit(repo, {b"flag.cfg": b"on\n"}, (g0,), "main turns the flag on")
+    g_side = _plumb_commit(repo, {b"flag.cfg": b"on\n", b"side.txt": b"side\n"}, (g1,), "side work")
+    g2 = _plumb_commit(repo, {b"flag.cfg": b"off\n"}, (g1,), "main turns the flag off")
+    g_feature = _plumb_commit(repo, {b"flag.cfg": b"off\n", b"feat.txt": b"f\n"}, (g2,), "feature")
+    g_head = ref("r20", _plumb_commit(
+        repo, {b"flag.cfg": b"off\n", b"feat.txt": b"f\n", b"side.txt": b"side\n"}, (g_feature, g_side),
+        "feature merges the side"))
+    g_merged = _plumb_commit(repo, {b"flag.cfg": b"off\n", b"side.txt": b"side\n"}, (g2, g_side),
+                             "main merges the side")
+    g_main = ref("r20-main", _plumb_commit(repo, {b"flag.cfg": b"on\n", b"side.txt": b"side\n"},
+                                           (g_merged,), "main turns the flag on again"))
+    case("R20 side-base pickup", 0, repo, g_main, g_head)
+    r20 = found("R20 side-base pickup", g_main, g_head, set())
+    if r20 is not None and len(r20.bases) != 2:
+        failures.append("R20 side-base pickup: expected two merge bases, got {}".format(len(r20.bases)))
+
+    # R21: the line changes tool.sh and then reverts that change; a branch cut from the tip only makes
+    # it executable. The head's blob equals an older pre-image, yet merging it leaves the tip's blob.
+    h0 = _plumb_commit(repo, {b"tool.sh": b"a\n"}, (), "tool root")
+    h1 = _plumb_commit(repo, {b"tool.sh": b"b\n"}, (h0,), "main changes tool")
+    h2 = _plumb_commit(repo, {b"tool.sh": b"a\n"}, (h1,), "main reverts the tool change")
+    h_head = ref("r21", _plumb_commit(repo, {b"tool.sh": b"a\n"}, (h2,), "chmod +x tool.sh",
+                                      {b"tool.sh": b"100755"}))
+    case("R21 mode-only change", 0, repo, ref("r21-main", h2), h_head)
+    found("R21 mode-only change", "refs/heads/r21-main", h_head, set())
+
+    # R22: a stale branch deletes d.txt, which the line added and then edited. The merge conflicts
+    # (modify/delete) and keeps the tip's blob in its tree, so only the conflict keeps the finding; the
+    # report names the conflict.
+    e0 = _plumb_commit(repo, {b"z.txt": b"z\n"}, (), "d root")
+    e1 = _plumb_commit(repo, {b"z.txt": b"z\n", b"d.txt": b"d1\n"}, (e0,), "main adds d")
+    e_main = ref("r22-main", _plumb_commit(repo, {b"z.txt": b"z\n", b"d.txt": b"d2\n"}, (e1,),
+                                           "main edits d"))
+    e_head = ref("r22", _plumb_commit(repo, {b"z.txt": b"z\n"}, (e1,), "branch drops d"))
+    case("R22 merge conflict at the path", 1, repo, e_main, e_head)
+    r22 = found("R22 merge conflict at the path", e_main, e_head, {b"d.txt"})
+    if r22 is not None:
+        shown = io.StringIO()
+        with contextlib.redirect_stdout(shown):
+            _print_result(r22)
+        if r22.conflicts != (b"d.txt",) or "'d.txt' undoes {} (merging it into {} conflicts".format(
+                e1, e_main) not in shown.getvalue():
+            failures.append("R22 merge conflict at the path: expected d.txt kept and named as "
+                            "conflicting, got conflicts={!r}".format(r22.conflicts))
+
+    # R18 and R19 stand in for git with a wrapper around _git that rewrites one command's output.
+    real_git = _git
+
+    def faked(command, rewrite):
+        def fake(root, *args, **kwargs):
+            probe = real_git(root, *args, **kwargs)
+            if args[0] == command and (command != "log" or "--first-parent" in args):
+                return subprocess.CompletedProcess(probe.args, 0, rewrite(probe.stdout), b"")
+            return probe
+        return fake
+
+    def judged(label, fake, want):
+        globals()["_git"] = fake
+        try:
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                got = run(repo, main, "refs/heads/r1")
+        except Exception as exc:
+            got = "an uncaught {}".format(type(exc).__name__)
+        finally:
+            globals()["_git"] = real_git
+        if got != want:
+            failures.append("{}: expected exit {}, got {}".format(label, want, got))
+
+    # R18: a git that exits 0 with an empty window log, or with one that does not list the base, leaves
+    # nothing to judge: cannot-evaluate, never a pass. The same holds where only the exact-rename
+    # listing comes back empty.
+    judged("R18 empty window log", faked("log", lambda _out: b""), 2)
+    judged("R18 window log without the base",
+           faked("log", lambda out: out.replace(c2.encode(), b"f" * len(c2))), 2)
+
+    def renames_empty(root, *args, **kwargs):
+        probe = real_git(root, *args, **kwargs)
+        if "-M100%" in args:
+            return subprocess.CompletedProcess(probe.args, 0, b"", b"")
+        return probe
+    judged("R18 empty rename listing", renames_empty, 2)
+
+    # R19: a raw record with a non-ASCII or otherwise malformed mode or object id is cannot-evaluate.
+    def record(mode, oid):
+        return b":" + mode + b" 100644 " + oid + b" " + b"a" * 40 + b" M\0b.txt\0"
+    for label, mode, oid in (("non-ASCII oid", b"100644", b"\xff" * 40),
+                             ("non-ASCII mode", b"10064\xff", b"a" * 40),
+                             ("abbreviated oid", b"100644", b"a" * 12),
+                             ("non-hex oid", b"100644", b"g" * 40)):
+        judged("R19 " + label, faked("diff-tree", lambda _out, m=mode, o=oid: record(m, o)), 2)
+
+    # R23: a merge-tree that cannot run, exits with a status other than 0 or 1, or prints output that
+    # does not parse leaves the findings unjudged: cannot-evaluate, never a pass or a plain finding.
+    def merge_tree(status, rewrite):
+        def fake(root, *args, **kwargs):
+            if "merge-tree" not in args:
+                return real_git(root, *args, **kwargs)
+            if status is None:
+                raise CannotEvaluate("git invocation failed: injected")
+            probe = real_git(root, *args, **kwargs)
+            return subprocess.CompletedProcess(probe.args, status, rewrite(probe.stdout), b"")
+        return fake
+
+    def tree_only(out):
+        return out.split(b"\0")[0] + b"\0"
+
+    for label, status, rewrite in (("cannot run", None, None),
+                                   ("unexpected status", 128, lambda out: out),
+                                   ("empty output", 0, lambda _out: b""),
+                                   ("not a tree id", 0, lambda out: b"x" + out),
+                                   ("unterminated", 0, lambda out: out.rstrip(b"\0")),
+                                   ("empty path", 1, lambda out: tree_only(out) + b"\0"),
+                                   ("clean merge listing a path", 0, lambda out: tree_only(out) + b"c.txt\0"),
+                                   ("conflict listing no path", 1, tree_only)):
+        judged("R23 merge-tree " + label, merge_tree(status, rewrite), 2)
+
+    # R24: one path found from two merge bases with different undone lists is reported and counted once.
+    # The R16 history has two bases; a stand-in finds p.txt from each, naming that base as undone.
+    real_findings = _revert_findings
+    globals()["_revert_findings"] = lambda _root, base, _head_sha, _window: [(b"p.txt", (base,), ())]
+    try:
+        r24 = evaluate(repo, p_main, p_head)
+    except CannotEvaluate as exc:
+        r24 = None
+        failures.append("R24 one path from two bases: got cannot-evaluate ({})".format(exc))
+    finally:
+        globals()["_revert_findings"] = real_findings
+    if r24 is not None:
+        shown = io.StringIO()
+        with contextlib.redirect_stdout(shown):
+            _print_result(r24)
+        if r24.findings != ((b"p.txt", r24.bases),) or "at 1 path(s)" not in shown.getvalue():
+            failures.append("R24 one path from two bases: expected p.txt reported once undoing both "
+                            "bases, got {!r}".format(r24.findings))
+
+    # R25: the line clears t.sh's executable bit and a branch cut from the tip sets it again. The blob
+    # never changes, but merging the branch puts back the mode the line replaced, so it stands (R21 is
+    # the mode-only change the line never made). The second history clears u.sh's bit and then edits u.sh
+    # and reverts the edit; the newest blob match differs in mode, so the older mode change is found.
+    m0 = _plumb_commit(repo, {b"t.sh": b"t\n"}, (), "t root", {b"t.sh": b"100755"})
+    m1 = _plumb_commit(repo, {b"t.sh": b"t\n"}, (m0,), "main clears the executable bit")
+    m_head = ref("r25", _plumb_commit(repo, {b"t.sh": b"t\n"}, (m1,), "chmod +x t.sh",
+                                      {b"t.sh": b"100755"}))
+    case("R25 mode-only revert", 1, repo, ref("r25-main", m1), m_head)
+    r25 = found("R25 mode-only revert", "refs/heads/r25-main", m_head, {b"t.sh"})
+    if r25 is not None and dict(r25.findings) != {b"t.sh": (m1,)}:
+        failures.append("R25 mode-only revert: expected t.sh undoing {}, got {!r}".format(m1, r25.findings))
+    u0 = _plumb_commit(repo, {b"u.sh": b"u1\n"}, (), "u root", {b"u.sh": b"100755"})
+    u1 = _plumb_commit(repo, {b"u.sh": b"u1\n"}, (u0,), "main clears the executable bit")
+    u2 = _plumb_commit(repo, {b"u.sh": b"u2\n"}, (u1,), "main edits u")
+    u3 = _plumb_commit(repo, {b"u.sh": b"u1\n"}, (u2,), "main reverts the u edit")
+    u_head = ref("r25u", _plumb_commit(repo, {b"u.sh": b"u1\n"}, (u3,), "chmod +x u.sh",
+                                       {b"u.sh": b"100755"}))
+    r25u = found("R25 older mode-only revert", ref("r25u-main", u3), u_head, {b"u.sh"})
+    if r25u is not None and dict(r25u.findings) != {b"u.sh": (u3, u2, u1)}:
+        failures.append("R25 older mode-only revert: expected u.sh undoing {}, {}, {}, got {!r}".format(
+            u3, u2, u1, r25u.findings))
+
+    # R26: the line edits line 3 of a.txt, a branch cut there puts the line back, and the line then
+    # renames a.txt to b.txt and edits line 7. Merging the branch carries its revert into b.txt (rename
+    # detection pairs the line's rename with the branch's edit) while a.txt stays absent as on the tip,
+    # so the finding stands at a.txt.
+    lines = [b"line %d\n" % i for i in range(1, 9)]
+    a_v1 = b"".join(lines)
+    a_v2 = b"".join(lines[:2] + [b"line 3 edited\n"] + lines[3:])
+    b_v3 = b"".join(lines[:2] + [b"line 3 edited\n"] + lines[3:6] + [b"line 7 edited\n"] + lines[7:])
+    n0 = _plumb_commit(repo, {b"a.txt": a_v1, b"keep.txt": b"k\n"}, (), "a root")
+    n1 = _plumb_commit(repo, {b"a.txt": a_v2, b"keep.txt": b"k\n"}, (n0,), "main edits a line 3")
+    n_main = ref("r26-main", _plumb_commit(repo, {b"b.txt": b_v3, b"keep.txt": b"k\n"}, (n1,),
+                                           "main renames a to b and edits line 7"))
+    n_head = ref("r26", _plumb_commit(repo, {b"a.txt": a_v1, b"keep.txt": b"k\n"}, (n1,),
+                                      "branch puts line 3 back"))
+    case("R26 revert carried into a renamed path", 1, repo, n_main, n_head)
+    found("R26 revert carried into a renamed path", n_main, n_head, {b"a.txt"})
+
+    # R27: the merge's rename settings are pinned, not read from config. With directory renames on in
+    # the repository's config, a branch restoring D/p (which the line deleted) would land at E/p once the
+    # line renames D to E, leaving D/p absent as on the tip; pinned off, D/p stays and the finding stands.
+    o0 = _plumb_commit(repo, {b"D/x": b"x\n", b"D/y": b"y\n", b"D/p": b"p\n"}, (), "dir root")
+    o1 = _plumb_commit(repo, {b"D/x": b"x\n", b"D/y": b"y\n"}, (o0,), "main deletes D/p")
+    o_main = ref("r27-main", _plumb_commit(repo, {b"E/x": b"x\n", b"E/y": b"y\n"}, (o1,),
+                                           "main renames D to E"))
+    o_head = ref("r27", _plumb_commit(repo, {b"D/x": b"x\n", b"D/y": b"y\n", b"D/p": b"p\n"}, (o1,),
+                                      "branch restores D/p"))
+    _fixture_git(repo, "config", "merge.directoryRenames", "true")
+    _fixture_git(repo, "config", "merge.renames", "true")
+    try:
+        case("R27 merge rename config pinned", 1, repo, o_main, o_head)
+        found("R27 merge rename config pinned", o_main, o_head, {b"D/p"})
+    finally:
+        _fixture_git(repo, "config", "--unset", "merge.directoryRenames")
+        _fixture_git(repo, "config", "--unset", "merge.renames")
+
+    # R28: the line edits line 3 of a.txt, and a branch cut there renames a.txt to c.txt and puts line 3
+    # back. With a window of 2 the commit that added a.txt is outside it, so the deletion of a.txt matches
+    # nothing and c.txt has no history: only pairing the head's own move finds the revert, at c.txt. A
+    # move that keeps the merge-base content is no finding, even where the line held that content before
+    # a round trip inside the window.
+    s0 = _plumb_commit(repo, {b"a.txt": a_v1, b"fill.txt": b"0\n"}, (), "move root")
+    s1 = _plumb_commit(repo, {b"a.txt": a_v1, b"fill.txt": b"1\n"}, (s0,), "move filler")
+    s2 = _plumb_commit(repo, {b"a.txt": a_v2, b"fill.txt": b"1\n"}, (s1,), "main edits a line 3")
+    s_main = ref("r28-main", s2)
+    found("R28 head renames and restores", s_main, ref("r28", _plumb_commit(
+        repo, {b"c.txt": a_v1, b"fill.txt": b"1\n"}, (s2,), "branch renames a to c, puts line 3 back")),
+        {b"c.txt"}, 2)
+    found("R28 head renames only", s_main, ref("r28m", _plumb_commit(
+        repo, {b"c.txt": a_v2, b"fill.txt": b"1\n"}, (s2,), "branch renames a to c")), set(), 2)
+    s3 = _plumb_commit(repo, {b"a.txt": a_v1, b"fill.txt": b"1\n"}, (s2,), "main puts line 3 back")
+    found("R28 move of the merge-base content", ref("r28t-main", s3), ref("r28t", _plumb_commit(
+        repo, {b"c.txt": a_v1, b"fill.txt": b"1\n"}, (s3,), "branch renames a to c")), set(), 2)
+
+    # R29: only a path the head removes is paired with a path it adds. On the R28 history, writing line
+    # 3's old content over fill.txt while a.txt stays, or rewriting a.txt beside an unrelated add, is no
+    # finding. In a second history the line edits files that a new file beside them legitimately copies
+    # in their old form: a package's licence header, a version string, an ignore file, a generated file.
+    # The head edits each again and adds the copies, which is no finding. In a third history the line
+    # filled an empty a.txt, and an empty file the head adds as it deletes a.txt is never paired: an
+    # empty file matches by coincidence.
+    for label, files in (("R29 overwrite with the source kept", {b"a.txt": a_v2, b"fill.txt": a_v1}),
+                         ("R29 rewrite beside an unrelated add",
+                          {b"a.txt": b"fresh\n", b"n.txt": b"n\n", b"fill.txt": b"1\n"})):
+        found(label, s_main, ref("r29-" + label[4:].replace(" ", "-"), _plumb_commit(
+            repo, files, (s2,), label)), set(), 2)
+    header = b"# Licensed under the Apache License 2.0\n"
+    y_old = {b"p/__init__.py": header, b"svc1/VERSION": b"1.0.0\n", b"d1/.gitignore": b"*.pyc\n",
+             b"gen/a.json": b'{"n": 1}\n'}
+    y0 = _plumb_commit(repo, y_old, (), "copies root")
+    y_line = {b"p/__init__.py": header + b"import os\n", b"svc1/VERSION": b"1.1.0\n",
+              b"d1/.gitignore": b"*.pyc\nbuild/\n", b"gen/a.json": b'{"n": 2}\n'}
+    y1 = _plumb_commit(repo, y_line, (y0,), "main edits each file")
+    y_main = ref("r29k-main", y1)
+    for label, files in (
+            ("R29 new packages with the old licence header",
+             {b"p/__init__.py": header + b"import sys\n", b"q/__init__.py": header,
+              b"r/__init__.py": header, b"s/__init__.py": header}),
+            ("R29 new version files beside a bump",
+             {b"svc1/VERSION": b"1.2.0\n", b"svc2/VERSION": b"1.0.0\n", b"docs/min.txt": b"1.0.0\n"}),
+            ("R29 new ignore file beside an edit",
+             {b"d1/.gitignore": b"*.pyc\ndist/\n", b"d2/.gitignore": b"*.pyc\n"}),
+            ("R29 new generated file beside a regeneration",
+             {b"gen/a.json": b'{"n": 3}\n', b"gen/b.json": b'{"n": 1}\n'})):
+        found(label, y_main, ref("r29k-" + label[4:].replace(" ", "-"), _plumb_commit(
+            repo, {**y_line, **files}, (y1,), label)), set(), 2)
+    z0 = _plumb_commit(repo, {b"a.txt": b"", b"fill.txt": b"0\n"}, (), "empty root")
+    z1 = _plumb_commit(repo, {b"a.txt": b"", b"fill.txt": b"1\n"}, (z0,), "empty filler")
+    z2 = _plumb_commit(repo, {b"a.txt": a_v2, b"fill.txt": b"1\n"}, (z1,), "main fills a")
+    found("R29 empty move", ref("r29z-main", z2), ref("r29z-empty-move", _plumb_commit(
+        repo, {b"n.txt": b"", b"fill.txt": b"1\n"}, (z2,), "branch moves a to an empty n")), set(), 2)
+
+    # R30: on the R28 history the line then renames a.txt to b.txt, so a window of 3 holds the rename
+    # and the line 3 edit but not the add. A branch that puts line 3 back in b.txt is found only by
+    # following the rename; moving b.txt on, or back to a.txt, with line 3 put back is found as well,
+    # the latter at a.txt from its own history, and rewriting b.txt with new content is no finding.
+    # Where the line renames b.txt on to c.txt, or back to a.txt, the older history follows only to the
+    # newest name: line 3 put back in c.txt is found, and a b.txt the branch adds with it is not.
+    s4 = _plumb_commit(repo, {b"b.txt": a_v2, b"fill.txt": b"1\n"}, (s2,), "main renames a to b")
+    s5 = _plumb_commit(repo, {b"c.txt": a_v2, b"fill.txt": b"1\n"}, (s4,), "main renames b to c")
+    s6 = _plumb_commit(repo, {b"a.txt": a_v2, b"fill.txt": b"1\n"}, (s4,), "main renames b back to a")
+    for label, tip, files, want in (
+            ("R30 restore at a path the line renamed", s4, {b"b.txt": a_v1}, {b"b.txt"}),
+            ("R30 line rename then head move", s4, {b"c.txt": a_v1}, {b"b.txt", b"c.txt"}),
+            ("R30 line rename then head move back", s4, {b"a.txt": a_v1}, {b"a.txt", b"b.txt"}),
+            ("R30 rewrite at a path the line renamed", s4, {b"b.txt": b"fresh\n"}, set()),
+            ("R30 restore at the end of a rename chain", s5, {b"c.txt": a_v1}, {b"c.txt"}),
+            ("R30 old content at the middle of a rename chain", s5, {b"b.txt": a_v1, b"c.txt": a_v2},
+             set()),
+            ("R30 old content at a name the line renamed back", s6, {b"a.txt": a_v2, b"b.txt": a_v1},
+             set())):
+        head = _plumb_commit(repo, {**files, b"fill.txt": b"1\n"}, (tip,), label)
+        found(label, ref("r30-main-" + tip[:12], tip), ref("r30-" + label[4:].replace(" ", "-"), head),
+              want, 3)
+
+    # R12: a shallow clone whose history ends inside the window is cannot-evaluate.
+    shallow = temp / "r12-shallow"
+    try:
+        shallow_ready = _shallow_clone(temp, repo, shallow) is not None
+    except (OSError, subprocess.SubprocessError, CannotEvaluate) as exc:
+        shallow_ready = False
+        _not_run(failures, "R12 shallow window", "a shallow file:// clone could not be built ({})".format(exc))
+    else:
+        if not shallow_ready:
+            _not_run(failures, "R12 shallow window", "the shallow-clone builder returned no clone")
+    if shallow_ready:
+        shallow_head = _plumb_commit(shallow, {**old, b"c.txt": b"c2\n"}, ("HEAD",), "revert c in shallow")
+        _fixture_git(shallow, "update-ref", "refs/heads/r12", shallow_head)
+        case("R12 shallow window", 2, shallow, "refs/heads/protected", "refs/heads/r12")
+
+
+def _mutant_vector(failures):
+    """Each mutant of the revert check, applied by replacing module attributes, must turn every named
+    R vector red in a nested self-test run."""
+    real_findings, real_touches, real_records = _revert_findings, _window_touches, _raw_records
+    real_merge = _merge_result
+
+    def tip_anchored(root, _base, head_sha, window):
+        return real_findings(root, _resolve_commit(root, "refs/heads/protected", "protected"),
+                             head_sha, window)
+
+    def post_images(root, base, window):
+        return [(c, p, post, pre) for c, p, pre, post in real_touches(root, base, window)]
+
+    def absence_ignored(root, base, window):
+        return [record for record in real_touches(root, base, window) if record[2] is not None]
+
+    def without_z(root, *args, commits=None):
+        probe = _git(root, *args)
+        records = []
+        commit = None
+        for line in probe.stdout.splitlines():
+            if line.startswith(":") and "\t" in line:
+                fields, path = line[1:].split("\t", 1)
+                fields = fields.split(" ")
+                records.append((commit, path.encode(),
+                                None if fields[0] == "000000" else (fields[0], fields[2]),
+                                None if fields[1] == "000000" else (fields[1], fields[3])))
+            elif line:
+                commit = line
+                if commits is not None:
+                    commits.append(commit)
+        return records
+
+    def least_lag_only(root, bases, protected_sha, head_sha, window):
+        anchor = min(bases, key=lambda base: _count_lag(root, base, protected_sha))
+        return real_findings(root, anchor, head_sha, window), [anchor]
+
+    def decoded_unchecked(mode, oid, _command):
+        return None if mode == b"000000" else (mode.decode("ascii"), oid.decode("ascii"))
+
+    def conflicts_ignored(root, protected_sha, head_sha):
+        return real_merge(root, protected_sha, head_sha)[0], frozenset()
+
+    def failure_as_clean(root, protected_sha, head_sha):
+        try:
+            return real_merge(root, protected_sha, head_sha)
+        except CannotEvaluate:
+            return protected_sha, frozenset()
+
+    def per_base_entries(root, bases, _protected_sha, head_sha, window):
+        findings, anchors = [], []
+        for base in bases:
+            found = real_findings(root, base, head_sha, window)
+            if found:
+                anchors.append(base)
+            findings.extend(finding for finding in found if finding not in findings)
+        return sorted(findings), anchors
+
+    def base_content_paired(records, touches):
+        sources = {}
+        for _c, path, _pre, post in records:
+            for _commit, old in touches.get(path, ()) if post is None else ():
+                if old is not None:
+                    sources.setdefault(_blob(old), set()).add(path)
+        return sorted((path, source) for _c, path, pre, post in records if pre is None and post is not None
+                      for source in sources.get(_blob(post), ()))
+
+    def changed_paths_paired(records, touches):
+        sources = {}
+        for _c, source, pre, _post in records:
+            for _commit, old in touches.get(source, ()):
+                if old is not None and _blob(old) != _blob(pre) and _blob(old) not in _EMPTY_BLOBS:
+                    sources.setdefault(_blob(old), set()).add(source)
+        return sorted((path, source) for _c, path, _pre, post in records if post is not None
+                      for source in sources.get(_blob(post), ()) if source != path)
+
+    def any_history_restored(touches, _image):
+        return (tuple(commit for commit, _pre in touches), ()) if touches else None
+
+    def renames_unlisted(root, base, window):
+        renames = {}
+        for commit, pair, _pre, _post in _raw_records(root, *_WINDOW_RENAME_ARGS, "-n", str(window), base,
+                                                      "--"):
+            if isinstance(pair, tuple):
+                renames.setdefault(commit, []).append(pair)
+        return renames
+
+    def every_chain_name(follow, pairs):
+        return {**follow, **{source: {destination} | follow.get(destination, set())
+                             for source, destination in pairs}}
+
+    line_renamed = ("R28 head renames and restores", "R30 restore at a path the line renamed",
+                    "R30 line rename then head move", "R30 line rename then head move back",
+                    "R30 restore at the end of a rename chain")
+    for label, injected, vector in (
+            ("check removed", {"_revert_findings": lambda *_a: []},
+             ("R1 ", "R18 empty rename listing") + line_renamed),
+            ("anchored on the protected tip", {"_revert_findings": tip_anchored},
+             ("R10 window anchored",) + line_renamed),
+            ("post-images compared", {"_window_touches": post_images}, ("R1 ",) + line_renamed),
+            ("absence ignored", {"_window_touches": absence_ignored},
+             ("R1 ", "R30 line rename then head move", "R30 line rename then head move back")),
+            ("any trailer accepted", {"_allowed": lambda _undone, named: bool(named)}, "R9 "),
+            ("window one wider", {"_window_touches": lambda r, b, w: real_touches(r, b, w + 1)},
+             ("R10 ", "R28 head renames and restores", "R28 head renames only", "R29 empty move")),
+            ("window one narrower", {"_window_touches": lambda r, b, w: real_touches(r, b, w - 1)},
+             ("R10 ", "R30 restore at the end of a rename chain")),
+            ("parsed without -z", {"_raw_records": without_z},
+             ("R11 ", "R30 restore at a path the line renamed", "R30 line rename then head move",
+              "R30 restore at the end of a rename chain")),
+            ("--diff-merges=first-parent dropped", {"_WINDOW_LOG_ARGS": tuple(
+                arg for arg in _WINDOW_LOG_ARGS if arg != "--diff-merges=first-parent")}, "R13 "),
+            ("file mode compared with the blob", {"_blob": lambda image: image}, ("R15 ", "R29 empty move")),
+            ("least-lag merge base only", {"_union_findings": least_lag_only}, "R16 "),
+            ("merge-result filter skipped", {"_settled": lambda _r, _b, _p, _h, findings: (
+                [(path, undone) for path, undone, _restored in findings], ())}, ("R17 ", "R20 ", "R21 ")),
+            ("mode-only merge change dropped",
+             {"_undoes": lambda tip, merged, _restored: _blob(merged) != _blob(tip)}, "R25 mode-only"),
+            ("renamed paths not followed", {"_renamed": lambda _r, _b, _p: {}}, "R26 "),
+            ("merge rename config unpinned", {"_MERGE_CONFIG": ()}, "R27 "),
+            ("head's own moves not paired", {"_moved": lambda _records, _touches: []},
+             ("R28 head renames and restores", "R30 line rename then head move")),
+            ("merge-base content paired as a move", {"_moved": base_content_paired},
+             ("R28 move of the merge-base content", "R29 empty move")),
+            ("changed paths paired as moves", {"_moved": changed_paths_paired},
+             ("R29 new packages with the old licence header", "R29 new version files beside a bump",
+              "R29 new ignore file beside an edit", "R29 new generated file beside a regeneration")),
+            ("empty blob paired", {"_EMPTY_BLOBS": frozenset()}, "R29 empty move"),
+            ("any window history read as a restore", {"_matched": any_history_restored},
+             ("R1 ", "R7 ", "R25 ", "R28 head renames and restores", "R28 head renames only",
+              "R28 move of the merge-base content", "R29 overwrite with the source kept",
+              "R29 rewrite beside an unrelated add", "R29 new packages with the old licence header",
+              "R29 new version files beside a bump", "R29 new ignore file beside an edit",
+              "R29 new generated file beside a regeneration", "R29 empty move",
+              "R30 rewrite at a path the line renamed", "R30 old content at the middle of a rename chain",
+              "R30 old content at a name the line renamed back")),
+            ("line renames not followed", {"_window_renames": lambda _r, _b, _w: {}},
+             ("R18 empty rename listing", "R30 restore at a path the line renamed",
+              "R30 line rename then head move", "R30 restore at the end of a rename chain")),
+            ("every name on a rename chain followed", {"_followed": every_chain_name},
+             ("R30 old content at the middle of a rename chain",
+              "R30 old content at a name the line renamed back")),
+            ("rename listing unchecked", {"_window_renames": renames_unlisted}, "R18 empty rename listing"),
+            ("head image in place of the merge result",
+             {"_merge_result": lambda _r, _p, head_sha: (head_sha, frozenset())}, "R20 "),
+            ("merge conflicts ignored", {"_merge_result": conflicts_ignored}, "R22 "),
+            ("merge-tree failure read as a clean merge", {"_merge_result": failure_as_clean}, "R23 "),
+            ("findings kept per base, not per path", {"_union_findings": per_base_entries}, "R24 "),
+            ("window listing unchecked", {"_window_listed": lambda _commits, _base: None},
+             ("R18 empty window log", "R18 window log without the base", "R18 empty rename listing")),
+            ("record bytes decoded unchecked", {"_image": decoded_unchecked}, "R19 ")):
+        saved = {name: value for name, value in globals().items() if name in injected}
+        missing = sorted(name for name in injected if name not in saved)
+        if missing:
+            raise KeyError(", ".join(missing))
+        globals().update(injected)
+        out = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+                rc = self_test(_vectors=False)
+        finally:
+            globals().update(saved)
+        for wanted in (vector,) if isinstance(vector, str) else vector:
+            if rc == 0 or not _recorded(out.getvalue(), wanted):
+                failures.append("(mutant vector, {}) the mutant must turn {}red, got exit {}".format(
+                    label, wanted, rc))
 
 
 def _non_utf8_dir(parent):
@@ -532,6 +1536,8 @@ def self_test(_vectors=True):
             _fixture_git(v11, "update-ref", "refs/heads/orphan", v11_orphan)
             case("V11 shallow orphan is cannot-evaluate", 2, v11,
                  "refs/heads/protected", "refs/heads/orphan")
+
+        _revert_vectors(temp, failures, case)
     except (OSError, subprocess.SubprocessError, CannotEvaluate) as exc:
         print("SELF-TEST ERROR: fixture setup/evaluation failed: {}".format(exc), file=sys.stderr)
         return 2
@@ -576,6 +1582,7 @@ def self_test(_vectors=True):
 
     if _vectors:
         _not_run_vector(failures)
+        _mutant_vector(failures)
 
     if failures:
         print("SELF-TEST FAIL:")
@@ -587,7 +1594,8 @@ def self_test(_vectors=True):
                "default-root/cwd-unavailable")
     print("SELF-TEST PASS: V1-V13 cover " + covered + ", non-UTF-8-git-output, and shallow-clone "
           "(both cannot-evaluate) outcomes; verdicts are asserted by exit code; an unbuildable V10 or V11 "
-          "fixture is a NOT RUN failure (nonzero exit), never a PASS (PARTIAL)")
+          "fixture is a NOT RUN failure (nonzero exit), never a PASS (PARTIAL); R1-R30 cover the revert "
+          "check and each listed mutant of it turns every R vector it names red")
     return 0
 
 

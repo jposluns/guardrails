@@ -9,7 +9,7 @@ map-cwe-tight: [CWE-829]
 map-cwe-broad: [CWE-353, CWE-494]
 map-nist-airmf-broad: [MANAGE 3.1, MAP 4.2]
 map-atlas-broad: [AML.T0010, AML.T0051]
-map-owasp-llm-broad: [LLM03]
+map-owasp-llm-broad: [LLM04]
 ---
 
 # Referenced instructions are pinned and re-verified

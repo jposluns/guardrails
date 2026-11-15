@@ -10,11 +10,12 @@ fence, or a command line in the text the family is addressed by (S1 to S3), unle
 and for every family, a path outside a declared workdir when the family's row says it cannot read outside one
 (P2), or a pinned revision that a git command line of the listed subcommands (P5: clone, checkout, switch,
 reset, fetch, pull, worktree add, merge, rebase, restore --source, archive) reaches through a ref that can move with
-no later cure, or through a dispatch ref that resolves to another commit (P5). The
-signal is structural, not certain: the lint fails closed, so some text a human would pass refuses (see
-RESIDUALS). Every rule that infers a request from free prose (R1, R5, R6, R7) is ADVISORY:
+no later cure, or through a dispatch ref that resolves to another commit (P5), or an input the brief declares on an
+INPUT: line that does not exist on the host the lint runs on (P6), or a git command line whose subcommand is commit
+or push when the family's row says git-write = "no" (W1). The signal is structural, not certain: the lint fails
+closed, so some text a human would pass refuses (see RESIDUALS). Every rule that infers a request from free prose (R1, R5, R6, R7) is ADVISORY:
 its hits are printed so a human sees them, and it never refuses. For a family that can execute (`yes` or
-`read-only-sandbox`) no execution rule applies; the PREFLIGHT rules below apply to every family.
+`read-only-sandbox`) no execution rule applies; the PREFLIGHT rules and GIT WRITE (W1) below apply to every family.
 
 PREFLIGHT (the input paths a brief names; read over the whole brief, line by line, before scope is applied):
 
@@ -27,7 +28,7 @@ PREFLIGHT (the input paths a brief names; read over the whole brief, line by lin
                        whitespace only (a span in " or ` quotes that closes on the line is one word together
                        with anything glued to either end of it) and judges every U+002F slash in a word that
                        is at the word's start or right after a character that is not a letter, a digit, `.`
-                       or `_` (so @/x, %/x, -/x, =/x, Input:/x, (/x, "/x and the second slash of // are all
+                       or `_` (so @/x, %/x, -/x, =/x, Path:/x, (/x, "/x and the second slash of // are all
                        judged). For each judged slash it takes the text from that slash to the END of the
                        word, strips only trailing sentence punctuation (. , ; : ) ! ? " ' `), folds it
                        lexically (posixpath.normpath, and a leading // read as /; no link followed) and
@@ -224,10 +225,113 @@ PREFLIGHT (the input paths a brief names; read over the whole brief, line by lin
                        after the reach, git -C <dir> checkout --detach and the first 40-hex BRIEF-PIN value followed
                        by ^{commit} (with none, it says to add such a BRIEF-PIN line first), and the REFUSE line
                        states the cure shape (CURE_SHAPE). With no pin the rule does not fire.
+  P6 declared input    HARD, for every family. INPUT declarations are read by ONE shared parser
+                       (tools/_input_declarations.py), the same reading check_verifier_delivery's C1 takes, so
+                       the two cannot disagree, and that parser judges the CommonMark document the vendored
+                       parser builds (opf/tools/_vendor/marko, pinned 2.2.4, with the vendored GFM elements),
+                       because the worker reads the brief through a Markdown reader. A declaration is a
+                       paragraph at the document's top level or directly in a list item (bullet or numbered),
+                       judged one rendered line at a time: the line declares when its rendered text, after the
+                       parser has applied emphasis, strikethrough, backslash escapes and character references,
+                       and after format (Cf) and combining (Mn, Me) characters are removed and each character
+                       is folded through NFKC and a bounded confusable-to-ASCII table (Greek and Cyrillic
+                       look-alikes of I N P U T; U+A789, U+2236, U+0589, U+05C3, U+02D0 and U+02F8 read as the
+                       colon), begins with INPUT: (upper case, the colon directly after, no part of the label
+                       in a code span or inline HTML), so **INPUT:**, __INPUT:__, *INPUT:*, INPUT\\:,
+                       INPUT&#58; and a fullwidth or confusable-spelt label all declare what the reader shows.
+                       After the label comes one path, taken from the rendered text: one word, one code span
+                       (the quoted form for a path with spaces or markup characters) or one double-quoted
+                       span, then only whitespace on that rendered line; emphasis inside an unquoted path is
+                       applied like any other emphasis (quote such a path in a code span, whose literal
+                       characters are then judged by shape). The lint calls os.stat on the declared path on
+                       the host the lint runs on: a path that does
+                       not exist (ENOENT, or ENOTDIR for a path under a file; a dangling symbolic link is one,
+                       since the link is followed) is a HARD finding (exit 1). Any other stat error (EACCES on a
+                       parent directory, ELOOP, ENAMETOOLONG), a path that is neither a regular file nor a
+                       directory (a FIFO, a socket, a device) and a path os.access(R_OK) refuses for the lint's
+                       uid are CANNOT_EVALUATE (exit 2); os.access opens no descriptor, so a FIFO or a device is
+                       never opened. A path of only / is absolute with no `..` component, so INPUT: / declares
+                       the root directory and passes where the root is readable. A declaration P6 cannot check
+                       is CANNOT_EVALUATE (exit 2): no path (a bare
+                       INPUT:, an empty quoted path), a path holding a placeholder, variable, home, glob or
+                       brace character (< > $ ~ * ? [ ] { }) or a control character,
+                       a relative path, a `..` component, a quote that does not close on the line, a word
+                       after the path (an unquoted space), or inline HTML in the path (a <scratch>
+                       placeholder, which a reader hides). A
+                       LOOK-ALIKE input label is never ignored: a rendered paragraph line (wherever the
+                       paragraph sits), a heading or a table cell whose folded text begins, past leading
+                       whitespace, dashes and bare markup marks, with the token INPUT or INPUTS in any case
+                       and then a colon (Input:, INPUTS:, INPUT :, **INPUT: with its markup unclosed,
+                       <b>INPUT:</b>, a task-list item's label, a bulleted or dashed label, a blockquoted
+                       label, ## Inputs:), and a table cell that is exactly INPUT or INPUTS (upper case), is
+                       CANNOT_EVALUATE (exit 2), and so is a label opening a line of an HTML block or comment
+                       once its tags are stripped (a reader may hide that text). NAMED MISSES: the scan is
+                       anchored at the rendered start, so prose that only mentions the word input (The tool's
+                       input: a TOML file.), a label glued after other visible text (1.INPUT:, Step 1 -
+                       INPUT:), a mid-line table pipe in plain prose (| INPUT | x | with no delimiter row) and
+                       a | Input | Expected | header pass; the confusable table is bounded, so an unlisted
+                       look-alike letter or colon passes; INPUT FILE: x (a word between the token and the
+                       colon) declares nothing and is not a look-alike; and a link reference definition
+                       ([INPUT]: /x) renders as nothing and declares nothing. CODE is never read: inside a
+                       fenced or indented code block and a code span nothing is a declaration and nothing is a
+                       look-alike, so a brief may quote a GitHub Actions workflow (an indented inputs: key),
+                       an example INPUT line, or the label itself (`INPUT:`) in code; a tab-indented INPUT
+                       line is an indented code block and declares nothing. A
+                       path in prose is never judged by P6: only a
+                       declared input is, and an output the brief asks the worker to create is not declared, so
+                       it is not judged. A brief the vendored parser cannot read, or one over the shared
+                       reading's bounds (its 102,400-byte text ceiling, the dispatcher's own brief cap,
+                       its whitespace-run and nesting prescans, its parse deadline, held by killing the
+                       parse child's process group), is CANNOT_EVALUATE, never read
+                       another way;
+                       conformance is exactly Marko
+                       2.2.4's, so rare edge inputs are read exactly where Marko diverges from a strict
+                       CommonMark reading (a no-break space accepted after a closing fence, for one).
+  P7 residual anchor   HARD, for every family. A declaration is a column-zero line of the raw brief text,
+                       `ACCEPTED-RESIDUAL: <anchor>`, one per residual. An anchor is gate:<id> or hook:<id>,
+                       accepting that control's whole residue field in .aiqt/core/gates/manifest.toml
+                       ([[gate]]) or .aiqt/core/hooks/manifest.toml ([[hook]]) read at the brief's pinned
+                       revision and matched by exact id; or <path> :: <symbol> :: <excerpt>, split at the
+                       first two " :: " separators, whose excerpt must occur byte-exact (whitespace, case
+                       and CR against LF all count) inside the named symbol at the pin: a Python qualified
+                       def or class name located with ast (the source is never imported), or
+                       gate:<id>.residue / hook:<id>.residue naming a manifest field of the TOML file at
+                       <path>, matched against the TOML-decoded value (escapes applied, as a reviewer reads
+                       the field), never the file's source bytes. The pin is the first BRIEF-PIN line's
+                       value, else the first pin line's, resolved as in P3, and every pin line must resolve
+                       to that one commit (two REVIEWED HEAD lines with no BRIEF-PIN line included); a short
+                       pin resolves through git rev-parse, so a branch named like it can take its place, as
+                       in P3. Content is read from the git object store (read_at_revision: a regular-file
+                       blob of at most P7_READ_MAX_BYTES, under the P3 reads' hermetic environment and
+                       timeout, object substitution disabled), never HEAD, the index or the working tree,
+                       and a symbol that is not found is never a whole-file search. Python source is read
+                       only as UTF-8 (a coding cookie naming another encoding on either of the first two
+                       lines is CANNOT_EVALUATE) and a definition is sliced as the parser splits lines
+                       (CRLF, a lone CR or LF) by ast.get_source_segment. A
+                       declaration with no anchor, or an anchor whose id, symbol or excerpt is absent at
+                       the pin (a missing path or residue field included), is HARD (exit 1). A malformed
+                       declaration (a column-zero label without its colon, a glued suffix, one " :: "
+                       separator, an empty path, symbol or excerpt), an unresolved or conflicting pin, a
+                       brief with declarations and no pin or no repository to read it from, and content
+                       that cannot be read or parsed at the pin (a non-regular or oversized entry, invalid
+                       TOML, two manifest rows with one id, source ast cannot parse, a declared encoding
+                       other than UTF-8, a definition it cannot locate) are CANNOT_EVALUATE
+                       (exit 2), never a pass. Keyword-free residual prose is at most advisory: a line
+                       holding the label outside a column-zero declaration prints one ADVISORY line, and
+                       nothing is read at the pin for it.
 
 What the preflight cannot know: whether the worker's uid can read a path (permissions, ACLs, a mount, a
 sandbox); that is the dispatcher's check, made where the worker runs, and the hard readability check belongs
-there. It does not follow symbolic links, so a path under the workdir lexically can lead outside it; it does
+there. P6 checks only the paths a brief declares on INPUT: lines, only on the host the lint runs on and only at
+lint time: a declared input present there can be missing where the worker runs, unreadable by the worker's uid,
+sandbox or mount, or removed or replaced after the lint runs; os.access answers for the lint's own real uid and
+groups, not the worker's, so a lint run as root passes a mode-000 file; a directory is checked for read
+permission, not for search permission; a symbolic link is followed and its target judged; a required input the
+brief names only in prose, in code (not checked by design), or not at all, is not checked; and a
+verifier that skips a declared input without
+saying so is not caught here (check_verifier_delivery reads a clean verdict whose UNVERIFIABLE answer names a
+declared input, or a parent directory of one, as no vote, and no more). P2 does not follow symbolic links, so a path under the workdir lexically
+can lead outside it; the preflight does
 not know which relative paths are inputs and which are files the brief asks the worker to create, so a path
 missing at a pin is ADVISORY (P3); P2 judges only the slashes above (a path split by a line break, a relative
 path, a path in an http:// or https:// word, and a path spelt with look-alike slashes are not judged, and an
@@ -250,8 +354,8 @@ so a cure line that a report, a question or a prohibition quotes (on a line of i
 because the shape is a whole line of the canonical command, and a cure in any other place (inside a sentence,
 after any other word, or with a stop or any word after it) cures nothing and refuses whatever the words around it,
 as does every cure in a brief whose pins are only REVIEWED HEAD lines, confirm clauses or BRIEF-PIN values of
-fewer than 40 or of 64 hex digits (a brief pinned in a SHA-256 repository has no cure and refuses) and every cure
-line in a brief with CRLF line ends (its carriage return is no cure character); REVIEWED HEAD lines with no
+fewer than 40 or of 64 hex digits (a brief pinned in a SHA-256 repository has no cure and refuses); a brief with
+CRLF or any other non-LF line end never reaches P5 (the TEXT gate refuses it, exit 2); REVIEWED HEAD lines with no
 BRIEF-PIN line are not compared with each other, and a confirm clause is not compared with the pin lines (the pin
 lines govern); a look-alike pin line is read only at a line's start, with the two labels as written once case,
 compatibility forms and Pd dashes are folded (a label later in a line, in a table row's second column, spelt
@@ -287,8 +391,40 @@ is read as two lines; a tag force-moved after the lint runs is not seen; a dispa
 --repo cannot resolve is only ADVISORY, and the worker then fails closed at the fetch; and, like every rule, it
 helps only where the sender refuses to send on exit 1 or 2.
 
-TEXT. Format characters (Unicode category Cf: a byte order mark, zero-width and bidirectional
-controls) are removed first, for every rule but the P5 cure, which reads each cure line as written; a brief
+GIT WRITE (beside the preflight, for every family, before the execution rules' early return for a family that can
+execute):
+
+  W1 git write         HARD. The family's row says git-write = "no" and the text the family is addressed by (scoped
+                       as the S rules scope it) holds a git command line, read with the COMMAND LINE grammar below
+                       (the git command word, optionally behind a directory path, then any number of global options
+                       such as -C or -c with a value), whose subcommand is commit or push. It reads prose lines,
+                       code spans and fences alike, each block sentence by sentence as the S rules read command
+                       lines, and the finding prints the line that holds the command word. The one exemption is the
+                       closed PROHIBITED shape ("Do not run `git push`." or "Never run git commit -a."), voided as
+                       for the S rules when another sentence of its void group asks for anything; a past report
+                       ("CI failed on `git push`.") is no exemption, and free English never decides it. A word that
+                       is not in subcommand position is not read: the ^{commit} of a checkout pin line (the P5 cure,
+                       git -C <dir> checkout --detach <pin>^{commit}), "the commit under review", and a correction
+                       that names a refused commit or push outside subcommand position ("the guard refused a commit
+                       and a push through git -C w; do not retry them") pass. "undeclared" and "yes" never fire, and
+                       the shipped table declares every family "undeclared", so W1 fires only on a table that says
+                       "no". RESIDUALS: the git-write value is a declared copy of the runtime permission policy that
+                       actually admits or denies the command, kept in this table by hand, not a measurement of it,
+                       so the two can drift; splitting or rewording a refused command on the worker's side at run
+                       time is behaviour after the brief is sent and is not visible here; a git alias (git -c
+                       alias.x=commit x, git ci), a shell variable ($GIT commit) and a script that commits or pushes
+                       are outside the grammar; a request in free English ("make a commit", "push the branch") never
+                       refuses; a correction that quotes the refused command in command position (`git commit
+                       --no-verify` was refused) refuses, the S rules' accepted over-refusal, so the sender names it
+                       outside subcommand position or in the PROHIBITED shape; and other writing subcommands (tag,
+                       merge, rebase, reset, branch) are not read.
+
+TEXT. A brief holding a line separator other than LF anywhere (a carriage return, bare or in CRLF, U+0085
+NEXT LINE, U+2028 LINE SEPARATOR, U+2029 PARAGRAPH SEPARATOR), or a format character (Unicode category Cf: a
+byte order mark, zero-width and bidirectional controls) outside a fenced code block, is CANNOT_EVALUATE
+(exit 2) before any rule runs: such a character can hide or split a line or a declaration, so it is refused,
+never removed silently. A format character inside a fenced block's body is still removed
+for every rule but the P5 cure, which reads each cure line as written; a brief
 that is then empty or only whitespace and control characters is blank. Every list item (a line opening with `-`,
 `*`, `+`, `N.` or `N)`, at any indentation) is its own paragraph, so it starts a sentence. A fence opens at any
 indentation.
@@ -403,16 +539,21 @@ not one, so "do not run, build or install" stays negated.
 Outcomes, printed one finding per line (HARD, INFO, or ADVISORY) and then one summary line:
 
   exit 0  OK               no HARD hit (INFO and ADVISORY findings may be printed).
-  exit 1  REFUSE           at least one HARD hit (S1, S2, S3, P2 or P5). Rewrite the brief, or send the item
-                           to a family that can execute (S1 to S3), name paths it can read (P2) or, after the reach,
-                           add the cure line the hit gives (git -C <dir> checkout --detach <pin>^{commit}) or reach
-                           the pin by a dispatch ref (P5).
+  exit 1  REFUSE           at least one HARD hit (S1, S2, S3, P2, P5, P6 or W1). Rewrite the brief, or send the
+                           item to a family that can execute (S1 to S3), name paths it can read (P2) or, after the
+                           reach, add the cure line the hit gives (git -C <dir> checkout --detach <pin>^{commit}) or
+                           reach the pin by a dispatch ref (P5), or provide each missing declared input or correct
+                           its INPUT line (P6), or drop the git commit or push, state it in the PROHIBITED shape, or
+                           send it to a family that can write (W1).
                            When a hit is a command line (S2 or S3), the REFUSE line
                            says how to rewrite: name the function, row or entry instead of embedding the
                            command (quote the def line of X, not the line that runs git push).
   exit 2  CANNOT_EVALUATE  the brief is missing, not a regular file, larger than MAX_BYTES, not UTF-8, or
                            blank; a scope range runs backwards; a pinned revision does not resolve or
-                           cannot be read (P3); the family is not in the table; the
+                           cannot be read (P3); an INPUT line P6 cannot check, a look-alike input label, a
+                           brief the shared reading's vendored parser cannot read, or a
+                           declared input that exists but cannot be confirmed readable (P6); the family is not
+                           in the table; the
                            table is missing, unreadable, or malformed (format-version must be the
                            integer 1); or the arguments are wrong (a repeated --family or --table
                            included). A brief that cannot be evaluated is never OK.
@@ -510,17 +651,18 @@ command line is split on whitespace once and its tokens classified by a plain pr
 command line end; per opener, R6 measures its subject's length before reading it; and every word-run, command and
 file-name pattern is anchored at a token start. THE MEASURED SHAPES: in a child process capped at 1 GiB of address
 space (RLIMIT_AS) with a LINEAR_TIMEOUT-second timeout, which must exit 0 and print two finite, nonnegative times,
-each shape at 1 MiB must take at most LINEAR_FACTOR times as long as at 128 KiB plus LINEAR_SLACK seconds
+each shape at 64 KiB must take at most LINEAR_FACTOR times as long as at 8 KiB plus LINEAR_SLACK seconds
 (the input is eight times larger; a pass whose time grows with the square of the input takes about 64 times as
-long). A shape is evidence only for the text it repeats. Measured on 2026-10-08 on one shared host, each in such a
-child under nice 10, in two runs of these shapes: every shape took at most 0.29 s at 128 KiB and 2.13 s at 1 MiB,
-at most 9.4 times its 128 KiB time. On the previous revision, with the same harness and a 60-second timeout
-(measured to 60 s, not to completion), the three argument-tail shapes with a failing suffix (" -x.y" repeated then
-"!", " -x/y" repeated with no stop, " --a=b" repeated then " x") did not finish within 60 s; the fence-contents shape
-took at most 0.06 s there and guards the new reading of fence contents, not the change. Of the older shapes,
-closed-args-linear repeats a token with one parse and did not catch that argument tail; the whitespace-run shapes
-(whitespace-run-linear and item-list-whitespace-linear) were added when an earlier revision did not finish 128 KiB
-within 60 s, and some others when an earlier revision exceeded the bound, each measured only to a 60-second timeout.
+long). Every shape carries a lead that holds "nput", so each runs through the shared parsed-document reading, never
+the ASCII fast path, and the larger size sits exactly at that reading's text ceiling; a shape the reading's own
+bounds refuse (the whitespace-run shapes hit the whitespace-run prescan, the markup-run shape the nesting prescan)
+is timed through its refusal, which is the bounded behaviour an oversized or pathological brief gets. A shape is
+evidence only for the text it repeats. On the previous revision, with a 1 MiB size, a 60-second timeout and the
+parse-free fast path (measured to 60 s, not to completion), the three argument-tail shapes with a failing suffix
+(" -x.y" repeated then "!", " -x/y" repeated with no stop, " --a=b" repeated then " x") did not finish within 60 s;
+the whitespace-run shapes (whitespace-run-linear and item-list-whitespace-linear) were added when an earlier
+revision did not finish 128 KiB within 60 s, and some others when an earlier revision exceeded the bound, each
+measured only to a 60-second timeout.
 
 Usage:
   check_brief_capability.py                (no brief: validate the shipped capability table, exit 0 or 2)
@@ -545,16 +687,24 @@ if tuple(sys.version_info[:2]) < (3, 14):
 import ast
 import atexit
 import bisect
+import codecs
 import contextlib
+import errno
 import io
+import json
 import os
 import posixpath
+import random
 import re
+import selectors
 import shlex
 import shutil
+import signal
 import stat
 import subprocess
 import tempfile
+import time
+import tokenize
 import unicodedata
 from pathlib import Path
 
@@ -574,6 +724,12 @@ except ModuleNotFoundError:  # not a version problem: every Python 3.14 ships to
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _selftest_exit_report  # noqa: E402
 import _git_fixture_env  # noqa: E402
+import _input_declarations  # noqa: E402
+
+# the one reading of INPUT declarations, shared with check_verifier_delivery (C1) so the two cannot
+# disagree; bound here so the self-test can patch each seam out
+forbidden_text = _input_declarations.forbidden
+read_inputs = _input_declarations.read
 
 ROOT = Path(__file__).resolve().parents[1]
 TABLE_REL = ".aiqt/core/worker-capabilities.toml"
@@ -591,6 +747,7 @@ TABLE_VOCABULARY = dict(
 TABLE_VOCABULARY["repo-read"] = ("path",)
 TABLE_VOCABULARY["git-read"] = ("yes", "no", "undeclared")
 TABLE_VOCABULARY["reads-outside-workdir"] = ("yes", "no", "undeclared")
+TABLE_VOCABULARY["git-write"] = ("yes", "no", "undeclared")
 FAMILY_NAME_RE = re.compile(r"[a-z][a-z0-9-]*\Z")
 NEGATION_WINDOW = 60
 R6_SUBJECT_MAX = 200
@@ -686,12 +843,25 @@ def _blank_character(ch):
 
 
 def decode_brief(data):
-    """The brief's text with format characters removed, or CannotEvaluate when it is not UTF-8 or blank."""
+    """The brief's text, or CannotEvaluate when it is not UTF-8, blank, or holds a line separator other
+    than LF anywhere or a format character outside a code block or code span of the parsed CommonMark
+    document (forbidden_text, the shared reading of tools/_input_declarations.py): such a character can
+    hide or split a declaration, so it is refused, never removed silently, and a brief the shared
+    reading's vendored parser cannot read (DeclarationError) is CannotEvaluate too. A format character
+    inside code is still removed for the rules that read fence content (the P5 cure alone reads each
+    cure line as written)."""
     try:
         text = data.decode("utf-8")
     except UnicodeDecodeError as exc:
         raise CannotEvaluate("brief: not valid UTF-8 ({})".format(exc.reason))
-    # A byte order mark, a zero-width or a bidirectional control is invisible and can split a word.
+    try:
+        found = forbidden_text(text)
+    except _input_declarations.DeclarationError as exc:
+        raise CannotEvaluate("brief: {}".format(exc))
+    if found is not None:
+        raise CannotEvaluate("brief: line {}: {}".format(*found))
+    # A byte order mark, a zero-width or a bidirectional control is invisible and can split a word; only
+    # code of the parsed document (a fenced or indented block's body, a code span) can still hold one here.
     text = "".join(ch for ch in text if unicodedata.category(ch) != "Cf")
     if all(_blank_character(ch) for ch in text):
         raise CannotEvaluate("brief: blank")
@@ -702,9 +872,9 @@ def decode_brief(data):
 
 FENCE_OPEN_RE = re.compile(r"([ \t]*)(`{3,}+|~{3,}+)(.*)\Z")
 HEADING_RE = re.compile(r" {0,3}(#{1,6})(?:\s|\Z)")
-ITEM_RE = re.compile(r" {0,3}(?:[-*+]\s+)?(?:\*\*|__)?(?:Q|Item\s+|Question\s+)?(\d{1,3})(?:[.)]|:(?=\s))"
+ITEM_RE = re.compile(r" {0,3}(?:[-*+]\s+)?(?:\*\*|__)?(?:Q|Item\s+|Question\s+)?([0-9]{1,3})(?:[.)]|:(?=\s))"
                      r"(?:\*\*|__)?(?=\s|\Z)", re.I)
-LIST_LINE_RE = re.compile(r"[ \t]*(?:[-*+]|\d{1,3}[.)])[ \t]+\S")
+LIST_LINE_RE = re.compile(r"[ \t]*(?:[-*+]|[0-9]{1,3}[.)])[ \t]+\S")
 
 
 def _fence_closes(line, opening):
@@ -800,7 +970,7 @@ def parse_blocks(text):
 
 SENTENCE_BREAK_RE = re.compile(r"(?<=[.!?])\s+(?=[*_\"'`(\[]*[A-Z])|;\s+")
 MARKUP_TOKEN_RE = re.compile(r"\s|[>*_#]|[-+–—](?=\s)"
-                             r"|(?:Q|Item\s+|Question\s+|Step\s+)?\d{1,3}(?:[.)]|:|\s+[-–—])(?=\s)", re.I)
+                             r"|(?:Q|Item\s+|Question\s+|Step\s+)?[0-9]{1,3}(?:[.)]|:|\s+[-–—])(?=\s)", re.I)
 LEAD_IN_RE = re.compile(r"(?:(?:please|kindly|also|then|now|first|second|third|next|finally|and|or|but|so|"
                         r"again|separately|additionally|instead|always|just|do\s+not|don't|do|never|"
                         r"(?:can|could|would|will)\s+you|(?:you|we)\s+(?:must|should|may|can|need\s+to|"
@@ -975,7 +1145,7 @@ class Sentence:
 # ---------- scope ----------
 
 # each whitespace run is read by one quantifier (a separator's trailing space is not read twice)
-ITEM_LIST = (r"Q?\d{1,3}(?:\s*(?:,\s*(?:(?:and|or)\s+)?|-\s*|\b(?:and|or|to|through)\s+)Q?\d{1,3})*+")
+ITEM_LIST = (r"Q?[0-9]{1,3}(?:\s*(?:,\s*(?:(?:and|or)\s+)?|-\s*|\b(?:and|or|to|through)\s+)Q?[0-9]{1,3})*+")
 ITEM_TOKEN_RE = re.compile(r"\d{1,3}|-|\bto\b|\bthrough\b", re.I)
 ONLY_RE = re.compile(r"answer\s+(?:only\s+)?(?:items?|questions?)\s+(" + ITEM_LIST + r")(\s+only)?", re.I)
 ANSWER_ONLY_RE = re.compile(r"answer\s+only\s+(?:items?|questions?)\s+(" + ITEM_LIST + ")", re.I)
@@ -1634,12 +1804,13 @@ def starts_section(block):
     return bool(block.heading)
 
 
-def fence_asks(block):
+def fence_asks(block, structural=None):
     """Whether a fence's contents, read as prose sentences, ask for anything. A fence belongs to the void group of
     the item or section that holds it, so its contents can void that group's closed shapes; nothing read here is a
-    finding."""
+    finding. `structural` is lint_sentence's: None (the S rules) reads no command line, so no sentence of the fence
+    is a closed shape; W1 passes a rule, so a sentence whose command lines are all closed asks nothing."""
     for _, raw in sentences(block.text().replace("\n", " ")):
-        if lint_sentence(raw, block.start, True, None)[1]:
+        if lint_sentence(raw, block.start, True, structural)[1]:
             return True
     return False
 
@@ -1701,6 +1872,11 @@ NEAR_PIN_FORM = "NFKC"
 NEAR_PIN_DASHES = frozenset(("Pd",))
 NEAR_PIN_RE = re.compile(r"[`|*_\s]*+(?:REVIEWED\s++HEAD|BRIEF-PIN)[`|*_\s]*+[:=]?+[`|*_\s(]*+"
                          r"([0-9a-f]{64}|[0-9a-f]{7,40})(?![\w-])", re.I)
+# P6: INPUT declarations, their shapes and their look-alikes are read by the shared parser
+# (tools/_input_declarations.py, bound above as read_inputs), the same reading check_verifier_delivery's
+# C1 uses, so the two cannot disagree; a stat error in MISSING_ERRNOS is a missing input, any other is
+# cannot evaluate
+MISSING_ERRNOS = frozenset((errno.ENOENT, errno.ENOTDIR))
 # a slash after a letter, a digit or one of these continues a relative path word, so P2 does not judge it
 PATH_GLUE = frozenset("._")
 # a web address is not a file read; file:// and every other scheme is judged as a path
@@ -1932,9 +2108,16 @@ class PreflightText:
     BRIEF-PIN, plain or in bold, and a commit of 7 to 40 or 64 hex digits; the BRIEF-PIN ones and the REVIEWED HEAD
     ones also apart, for pin agreement (rule_p3) and the P5 cure), the lines that open with such a label but carry
     no such commit (bad_pins) and the commit ids of the other lines that are look-alike pin lines (near_pins, see
-    near_pin; for pin agreement); and whether a hand-back file is named (the words hand-back file or path and an
-    absolute path on one line). `raw` is the brief's text before decode_brief removes format characters, which the P5
-    cure reads (cure_lines); None stands for `text` itself."""
+    near_pin; for pin agreement); the declared inputs ([(line, path)]) and the malformed declarations and
+    look-alike INPUT lines, with the reason (bad_inputs), both read from `raw` by the shared parser
+    (tools/_input_declarations.py, read_inputs), the same reading check_verifier_delivery's C1 uses: a
+    top-level or list-item paragraph line of the parsed CommonMark document whose rendered, folded text
+    begins with INPUT: declares one path, code declares nothing, and a rendered paragraph line, heading
+    or table cell opening with the folded token INPUT or INPUTS and a colon (or a cell that is exactly
+    the token) is bad; and whether a
+    hand-back file is named (the words hand-back file or path and an absolute path on one line). `raw` is the
+    brief's text before decode_brief removes format characters, which the P5 cure reads (cure_lines); None stands
+    for `text` itself."""
 
     def __init__(self, text, raw=None):
         self.text = text
@@ -1946,6 +2129,13 @@ class PreflightText:
         self.reviewed_heads = []   # [(line, pin)] for the pin lines labelled REVIEWED HEAD
         self.near_pins = []   # [(line, commit id)] for the look-alike pin lines (near_pin)
         self.unclear = []   # [(line, reason)] for a declaration whose workdir cannot be read
+        # the INPUT declarations P6 checks and the malformed or look-alike INPUT lines, each [(line, ...)],
+        # read from the raw text by the shared parser so P6 and C1 cannot disagree; a raw text that
+        # parser cannot read is CannotEvaluate, never an empty reading
+        try:
+            self.inputs, self.bad_inputs = read_inputs(self.raw)
+        except _input_declarations.DeclarationError as exc:
+            raise CannotEvaluate("brief: {}".format(exc))
         self.handback_named = False
         bare = None   # the line of a bare Workdir (or Workdir:, Workdir is) whose path is on the next line
         for number, line in enumerate(text.split("\n"), 1):
@@ -2093,6 +2283,15 @@ def _git_read_env():
     return env
 
 
+def _no_replace_env():
+    """_git_read_env() with object substitution disabled (GIT_NO_REPLACE_OBJECTS=1, beside each command's
+    --no-replace-objects flag), so a refs/replace/* entry in the repository cannot decide which object a
+    read sees: a pin, an existence probe and a blob read all answer from the genuine object graph."""
+    env = _git_read_env()
+    env["GIT_NO_REPLACE_OBJECTS"] = "1"
+    return env
+
+
 # git's ownership refusal: its first line in English, and the command of its hint, which a translation keeps
 OWNERSHIP_REFUSAL_MARKS = ("detected dubious ownership in repository at ", "--add safe.directory ")
 OWNERSHIP_REMEDY = ("git refused it for dubious ownership: the repository is owned by another user, and this read "
@@ -2101,15 +2300,38 @@ OWNERSHIP_REMEDY = ("git refused it for dubious ownership: the repository is own
 
 
 def _rev_parse(repo, rev):
-    """git rev-parse of `rev` as a commit in `repo` under _git_read_env(), output captured."""
-    return subprocess.run(["git", "-C", str(repo), "rev-parse", "--verify", "--quiet", rev + "^{commit}"],
-                          capture_output=True, timeout=GIT_READ_TIMEOUT, env=_git_read_env())
+    """git rev-parse of `rev` as a commit in `repo` under _no_replace_env(), output captured. Substitution is
+    disabled so that a pin naming an annotated tag object peels to the tag's genuine target: a refs/replace/*
+    entry pointing that tag (or a commit) at another object cannot decide which commit a pin, or a dispatch
+    ref, resolves to."""
+    return subprocess.run(["git", "--no-replace-objects", "-C", str(repo), "rev-parse", "--verify", "--quiet",
+                           rev + "^{commit}"],
+                          capture_output=True, timeout=GIT_READ_TIMEOUT, env=_no_replace_env())
 
 
 def _cat_file(repo, commit, path):
-    """git cat-file -e of `path` at `commit` in `repo` under _git_read_env(), output captured."""
-    return subprocess.run(["git", "-C", str(repo), "cat-file", "-e", commit + ":" + path],
-                          capture_output=True, timeout=GIT_READ_TIMEOUT, env=_git_read_env())
+    """git cat-file -e of `path` at `commit` in `repo` under _no_replace_env(), output captured, so the
+    existence probe walks the same genuine objects the resolved pin and the blob reads name."""
+    return subprocess.run(["git", "--no-replace-objects", "-C", str(repo), "cat-file", "-e",
+                           commit + ":" + path],
+                          capture_output=True, timeout=GIT_READ_TIMEOUT, env=_no_replace_env())
+
+
+def _ls_tree_entry(repo, commit, path):
+    """git ls-tree -l of `path` at `commit` in `repo` under _no_replace_env(), output captured: the entry
+    read_at_revision checks (mode, type and size) before it reads any bytes, named through a :(literal)
+    pathspec so no wildcard is applied, from the genuine tree of the genuine commit."""
+    return subprocess.run(["git", "--no-replace-objects", "-C", str(repo), "ls-tree", "-l", "--full-tree",
+                           commit, "--", ":(literal)" + path],
+                          capture_output=True, timeout=GIT_READ_TIMEOUT, env=_no_replace_env())
+
+
+def _cat_blob(repo, commit, path):
+    """git cat-file blob of `path` at `commit` in `repo` under _no_replace_env(), output captured: the bytes
+    read_at_revision returns, from the same genuine objects the ls-tree entry named."""
+    return subprocess.run(["git", "--no-replace-objects", "-C", str(repo), "cat-file", "blob",
+                           commit + ":" + path],
+                          capture_output=True, timeout=GIT_READ_TIMEOUT, env=_no_replace_env())
 
 
 def _ownership_refused(probe):
@@ -2121,7 +2343,8 @@ def _ownership_refused(probe):
 def resolve_revision(repo, rev):
     """The full commit id a pinned revision names in `repo`, or CannotEvaluate: a revision that does not
     resolve, a repository git refuses for its ownership (named as such), or a git that cannot be launched or
-    times out, leaves the question open, never a pass."""
+    times out, leaves the question open, never a pass. The revision is resolved with replace objects
+    disabled (_rev_parse), so a refs/replace/* entry cannot redirect a pin at another commit."""
     try:
         probe = _rev_parse(repo, rev)
     except (OSError, subprocess.SubprocessError) as exc:
@@ -2788,7 +3011,8 @@ def pin_reaches(text, raw):
 def dispatch_commit(repo, ref):
     """The full commit id a dispatch ref names in `repo`, or None when no repository was given or it does not
     resolve there (unknown, refused for its ownership, git not launched or timed out): `repo` need not be the
-    server the worker fetches from, so a ref that does not resolve is not checked, not a refusal."""
+    server the worker fetches from, so a ref that does not resolve is not checked, not a refusal. The ref is
+    resolved with replace objects disabled (_rev_parse), like every pin."""
     if repo is None:
         return None
     try:
@@ -2870,12 +3094,418 @@ def rule_p5(names, row, repo):
     return findings
 
 
+def input_readable(path):
+    """Whether the lint's real uid may read `path`: os.access R_OK, which opens no descriptor."""
+    return os.access(path, os.R_OK)
+
+
+def input_state(path):
+    """(errno, reason) for a declared input on the host the lint runs on, opening nothing: (None, None) when os.stat
+    finds a regular file or a directory that input_readable allows; the stat's errno and message when it fails;
+    (None, reason) for any other file type (a FIFO, a socket, a device); (EACCES, reason) when input_readable
+    refuses."""
+    try:
+        info = os.stat(path)
+    except OSError as exc:
+        return exc.errno, exc.strerror or str(exc)
+    except ValueError as exc:
+        return None, str(exc)
+    if not (stat.S_ISREG(info.st_mode) or stat.S_ISDIR(info.st_mode)):
+        return None, "it is neither a regular file nor a directory"
+    if not input_readable(path):
+        return errno.EACCES, "the lint's uid may not read it (os.access R_OK refused)"
+    return None, None
+
+
+def rule_p6(names, row, repo):
+    """P6 HARD, for every family: a declared input (a declaring paragraph line of the parsed CommonMark
+    document, read by the shared parser)
+    that does not exist on the host
+    the lint runs on (input_state gives an errno of MISSING_ERRNOS: ENOENT, or ENOTDIR for a path under a file).
+    A malformed declaration or a look-alike label (bad_inputs), any other stat error, another
+    file type and a path input_readable refuses leave the input unconfirmed: CannotEvaluate, never a pass. Paths in
+    prose and in code (a fenced or indented block, a code span) are not judged."""
+    if names.bad_inputs:
+        line, reason = names.bad_inputs[0]
+        raise CannotEvaluate("line {}: {}".format(line, reason))
+    findings = []
+    for line, path in _first_seen(names.inputs):
+        code, reason = input_state(path)
+        if code in MISSING_ERRNOS:
+            findings.append(("P6", "HARD", line, "declared input does not exist on this host ({}), so the worker "
+                             "cannot read it; provide it or correct the INPUT line".format(reason), _excerpt(path)))
+        elif reason is not None:
+            raise CannotEvaluate("line {}: the declared input {} cannot be confirmed readable: {}".format(
+                line, path, reason))
+    return findings
+
+
+# ---------- P7: accepted residuals at the pin ----------
+# a declaration is a column-zero line of the raw brief text: ACCEPTED-RESIDUAL: <anchor>
+RESIDUAL_LABEL = "ACCEPTED-RESIDUAL"
+ANCHOR_SEPARATOR = " :: "
+ANCHOR_SHAPE = "gate:<id>, hook:<id>, or <path> :: <symbol> :: <excerpt>"
+MANIFEST_RELS = dict(gate=".aiqt/core/gates/manifest.toml", hook=".aiqt/core/hooks/manifest.toml")
+# the symbol of an excerpt anchor that names a manifest residue field instead of a Python symbol
+RESIDUE_FIELD_RE = re.compile(r"(gate|hook):(\S+)\.residue\Z")
+P7_READ_MAX_BYTES = 1 << 20
+REGULAR_FILE_MODES = ("100644", "100755")
+
+
+def read_at_revision(repo, commit, path):
+    """The bytes of `path` at `commit` in `repo`, read from the object store (never HEAD, the index or the
+    working tree), or None when the commit has no entry at that path. Both reads run under GIT_READ_TIMEOUT
+    and _no_replace_env(), hermetic like the P3 reads (_cat_file keeps checking existence only). git ls-tree
+    (_ls_tree_entry) names the entry first, through a :(literal) pathspec so no wildcard is applied: only a
+    regular-file blob (mode 100644 or 100755) of at most P7_READ_MAX_BYTES is then read, with git cat-file
+    blob (_cat_blob); any other
+    entry (a symlink, a submodule, a directory), an oversized blob, a repository git refuses for its
+    ownership, and a git that fails, cannot be launched or times out are CannotEvaluate, never a pass. Both
+    reads disable object substitution (--no-replace-objects and GIT_NO_REPLACE_OBJECTS=1, as the release
+    schema and branch-root readers do), so a refs/replace/* entry cannot decide which bytes are read."""
+    def refusal(why):
+        return CannotEvaluate("cannot read {} at {} in {}: {}".format(path, commit, repo, why))
+    try:
+        probe = _ls_tree_entry(repo, commit, path)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise refusal(exc)
+    if _ownership_refused(probe):
+        raise refusal(OWNERSHIP_REMEDY)
+    if probe.returncode != 0:
+        raise refusal(probe.stderr.decode("utf-8", "replace").strip() or "git ls-tree failed")
+    listing = probe.stdout.decode("utf-8", "replace")
+    if not listing.strip():
+        return None
+    fields = listing.split("\t", 1)[0].split()
+    if len(fields) != 4 or fields[1] != "blob" or fields[0] not in REGULAR_FILE_MODES:
+        raise refusal("not a regular file at the pin (mode {})".format(fields[0] if fields else "unknown"))
+    if not fields[3].isdigit() or int(fields[3]) > P7_READ_MAX_BYTES:
+        raise refusal("larger than {} bytes".format(P7_READ_MAX_BYTES))
+    try:
+        blob = _cat_blob(repo, commit, path)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise refusal(exc)
+    if _ownership_refused(blob):
+        raise refusal(OWNERSHIP_REMEDY)
+    if blob.returncode != 0:
+        raise refusal(blob.stderr.decode("utf-8", "replace").strip() or "git cat-file failed")
+    if len(blob.stdout) > P7_READ_MAX_BYTES:
+        raise refusal("larger than {} bytes".format(P7_READ_MAX_BYTES))
+    return blob.stdout
+
+
+def residual_declarations(raw):
+    """[(line, anchor)] for the ACCEPTED-RESIDUAL declarations of the raw brief text, one per residual: a
+    column-zero line `ACCEPTED-RESIDUAL: <anchor>`, the anchor the rest of the line with surrounding
+    whitespace stripped (an excerpt's interior bytes are kept exactly). A column-zero line that opens with
+    the label but not with `ACCEPTED-RESIDUAL:` (another separator, a glued suffix such as
+    ACCEPTED-RESIDUALS) is a malformed declaration: CannotEvaluate, never ignored. The label anywhere else
+    (indented, mid-line, in code) is prose and declares nothing; rule_p7 prints it as ADVISORY at most."""
+    declarations = []
+    for number, line in enumerate(raw.split("\n"), 1):
+        if not line.startswith(RESIDUAL_LABEL):
+            continue
+        rest = line[len(RESIDUAL_LABEL):]
+        if not rest.startswith(":"):
+            raise CannotEvaluate("line {}: a column-zero {} line is not a declaration; write {}: "
+                                 "<anchor>".format(number, RESIDUAL_LABEL, RESIDUAL_LABEL))
+        declarations.append((number, rest[1:].strip()))
+    return declarations
+
+
+def residual_entries(data, kind, path, commit):
+    """The [[gate]] or [[hook]] rows of a manifest's bytes read at a pin, as id -> row: bytes that are not
+    UTF-8 TOML (a parser recursion and memory exhaustion included) and two rows with one id are
+    CannotEvaluate, never a pass; a row with no string id is skipped (it can anchor nothing)."""
+    try:
+        doc = tomllib.loads(data.decode("utf-8"))
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError, ValueError, RecursionError, MemoryError) as exc:
+        raise CannotEvaluate("{} at {}: not valid UTF-8 TOML: {}".format(path, commit, exc))
+    rows = doc.get(kind)
+    entries = dict()
+    for row in rows if isinstance(rows, list) else []:
+        if not isinstance(row, dict) or not isinstance(row.get("id"), str):
+            continue
+        if row["id"] in entries:
+            raise CannotEvaluate("{} at {}: two [[{}]] rows hold id {!r}".format(path, commit, kind, row["id"]))
+        entries[row["id"]] = row
+    return entries
+
+
+def _definition_nodes(body, name):
+    """The def and class statements of a body list named `name`."""
+    kinds = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+    return [node for node in body if isinstance(node, kinds) and node.name == name]
+
+
+def python_source_text(data, path, commit):
+    """The text Python reads from a source's bytes, or CannotEvaluate. The bytes are decoded as strict UTF-8
+    first (a leading byte order mark dropped), since ast column offsets count UTF-8 bytes of the decoded text
+    and would not match bytes in another encoding: bytes that are not UTF-8 are refused naming that cause,
+    whatever any cookie declares. The parser ends a line at CRLF, a lone CR or LF, so the first two lines are
+    then taken that way and each is read alone by tokenize.detect_encoding: a declared encoding (a coding
+    cookie or a byte order mark) whose codec is not UTF-8 is refused. A cookie on the second line is refused
+    even after a line of code, where Python ignores it: fail closed. An unknown or malformed cookie is
+    CannotEvaluate."""
+    try:
+        text = data.decode("utf-8-sig")
+    except UnicodeDecodeError as exc:
+        raise CannotEvaluate("{} at {}: not UTF-8 Python source: {}".format(path, commit, exc))
+    lines = data.replace(b"\r\n", b"\n").replace(b"\r", b"\n").split(b"\n", 2)[:2]
+    for line in lines:
+        try:
+            declared, _ = tokenize.detect_encoding(iter((line + b"\n",)).__next__)
+            name = codecs.lookup(declared).name
+        except (SyntaxError, LookupError, UnicodeDecodeError, ValueError) as exc:
+            raise CannotEvaluate("{} at {}: cannot read its encoding declaration: {}".format(path, commit, exc))
+        if name not in ("utf-8", "utf-8-sig"):
+            raise CannotEvaluate("{} at {}: declares the encoding {}; only UTF-8 Python source is read".format(
+                path, commit, declared))
+    return text
+
+
+def definition_segment(text, node, path, commit):
+    """The UTF-8 bytes of one definition's source, sliced by ast.get_source_segment from the decoded text,
+    which splits lines as the parser does (CRLF, a lone CR or LF, never a form feed), so the segment ends
+    where the definition ends; a node it cannot place (no position, a line or column outside the text, a
+    column inside a character) is CannotEvaluate, never an uncaught error."""
+    try:
+        segment = ast.get_source_segment(text, node)
+    except (IndexError, ValueError, TypeError, AttributeError, UnicodeError, RecursionError, MemoryError) as exc:
+        raise CannotEvaluate("{} at {}: cannot locate a definition's source: {!r}".format(path, commit, exc))
+    if segment is None:
+        raise CannotEvaluate("{} at {}: cannot locate a definition's source (no position)".format(path, commit))
+    return segment.encode("utf-8")
+
+
+def symbol_segments(data, symbol, path, commit):
+    """The byte segments of the Python definitions a qualified name reaches in a source read at a pin: the
+    source is decoded as Python reads it (python_source_text: UTF-8 only), parsed with ast and never
+    imported; each dotted part is matched, by exact name, against the statements directly in the previous
+    part's body (the module's at the start), so a name is found only inside its qualifier, never by a
+    whole-file search. Every match of the last part is returned (a name defined twice at one level gives
+    each segment), each sliced from the decoded text as the parser splits it (definition_segment) and
+    encoded as UTF-8, so a segment holds the definition's bytes exactly (decorators sit outside it; a CRLF
+    or lone CR line end keeps its carriage return). Source the parser cannot read is CannotEvaluate."""
+    text = python_source_text(data, path, commit)
+    try:
+        tree = ast.parse(text)
+    except (SyntaxError, UnicodeDecodeError, ValueError, RecursionError, MemoryError) as exc:
+        raise CannotEvaluate("{} at {}: cannot parse as Python: {}".format(path, commit, exc))
+    nodes = [tree]
+    for part in symbol.split("."):
+        nodes = [found for node in nodes for found in _definition_nodes(getattr(node, "body", []), part)]
+        if not nodes:
+            return []
+    return [definition_segment(text, node, path, commit) for node in nodes]
+
+
+def excerpt_in(excerpt, data):
+    """Whether a declared excerpt occurs inside the anchored bytes, byte for byte (the excerpt's utf-8
+    bytes; whitespace, case and CR against LF all count), bound here so the self-test can patch it red."""
+    return excerpt.encode("utf-8") in data
+
+
+def judge_residual(repo, commit, line, anchor):
+    """The P7 finding for one declaration's anchor at the resolved pin, or None when it holds (rule_p7)."""
+    def hard(message):
+        return ("P7", "HARD", line, message, _excerpt(anchor or RESIDUAL_LABEL + ":"))
+    if ANCHOR_SEPARATOR not in anchor:
+        kind, _, ident = anchor.partition(":")
+        if kind not in MANIFEST_RELS or not ident:
+            return hard("accepted-residual declaration with no anchor: name " + ANCHOR_SHAPE)
+        path = MANIFEST_RELS[kind]
+        data = read_at_revision(repo, commit, path)
+        if data is None:
+            return hard("the {} manifest ({}) does not exist at the pinned revision".format(kind, path))
+        row = residual_entries(data, kind, path, commit).get(ident)
+        if row is None:
+            return hard("{}:{} is not in {} at the pinned revision".format(kind, ident, path))
+        if not isinstance(row.get("residue"), str):
+            return hard("{}:{} has no residue field in {} at the pinned revision".format(kind, ident, path))
+        return None
+    path, _, rest = anchor.partition(ANCHOR_SEPARATOR)
+    symbol, separator, excerpt = rest.partition(ANCHOR_SEPARATOR)
+    path, symbol = path.strip(), symbol.strip()
+    if not separator or not path or not symbol or not excerpt:
+        raise CannotEvaluate("line {}: malformed accepted-residual anchor: write <path> :: <symbol> :: "
+                             "<excerpt>, two \" :: \" separators with no part empty".format(line))
+    data = read_at_revision(repo, commit, path)
+    if data is None:
+        return hard("{} does not exist at the pinned revision, so the symbol {} is absent "
+                    "there".format(path, symbol))
+    field = RESIDUE_FIELD_RE.fullmatch(symbol)
+    if field:
+        row = residual_entries(data, field.group(1), path, commit).get(field.group(2))
+        if row is None:
+            return hard("{}:{} is not in {} at the pinned revision".format(
+                field.group(1), field.group(2), path))
+        if not isinstance(row.get("residue"), str):
+            return hard("{} names no residue field in {} at the pinned revision".format(symbol, path))
+        # matched against the TOML-decoded value's utf-8 bytes, not the file's source bytes, so the
+        # excerpt reads like a reviewer reads the field: escapes applied, quotes removed
+        if not excerpt_in(excerpt, row["residue"].encode("utf-8")):
+            return hard("the excerpt does not occur byte-exact in the {} field of {} at the pinned "
+                        "revision".format(symbol, path))
+        return None
+    segments = symbol_segments(data, symbol, path, commit)
+    if not segments:
+        return hard("the symbol {} (a qualified def or class name) is not in {} at the pinned "
+                    "revision".format(symbol, path))
+    if not any(excerpt_in(excerpt, segment) for segment in segments):
+        return hard("the excerpt does not occur byte-exact inside the symbol {} in {} at the pinned "
+                    "revision (the whole file is never searched)".format(symbol, path))
+    return None
+
+
+def rule_p7(names, row, repo):
+    """P7 HARD, for every family: each accepted-residual declaration (residual_declarations: a column-zero
+    ACCEPTED-RESIDUAL: <anchor> line of the raw brief text, one per residual) must anchor its residual at
+    the brief's pinned revision: the first BRIEF-PIN line's value, else the first pin line's, resolved as in
+    P3. An anchor is gate:<id> or hook:<id>, accepting that control's whole residue field in the gates or
+    hooks manifest read at the pin and matched by exact id, or <path> :: <symbol> :: <excerpt>, split at the
+    first two " :: " separators, whose excerpt must occur byte-exact inside the named symbol at the pin
+    (judge_residual): a Python qualified def or class name located with ast and never imported, or
+    gate:<id>.residue / hook:<id>.residue naming a manifest field of the TOML file at <path>, matched
+    against the TOML-decoded value. A declaration with no anchor, or an anchor whose id, symbol or excerpt
+    is absent at the pin, is HARD; a malformed declaration or anchor, an unresolved or conflicting pin, a
+    brief with declarations and no pin or no repository, and pinned content that cannot be read or parsed
+    are CannotEvaluate, never a pass. Keyword-free residual prose is at most advisory: a line holding the
+    label outside a column-zero declaration prints one ADVISORY line and nothing is read at the pin."""
+    declarations = residual_declarations(names.raw)
+    advisory = [("P7", "ADVISORY", number, "the ACCEPTED-RESIDUAL label outside a column-zero declaration "
+                 "is prose and is not checked at the pin; declare it as ACCEPTED-RESIDUAL: <anchor> at "
+                 "column zero", _excerpt(line.strip()))
+                for number, line in enumerate(names.raw.split("\n"), 1)
+                if RESIDUAL_LABEL in line and not line.startswith(RESIDUAL_LABEL)]
+    if not declarations:
+        return advisory
+    if names.bad_pins:
+        raise CannotEvaluate("line {}: a REVIEWED HEAD or BRIEF-PIN line with no pin of 7 to 40 or 64 hex "
+                             "digits".format(names.bad_pins[0]))
+    conflict = brief_pin_conflict(names) or reviewed_head_conflict(names) or near_pin_conflict(names)
+    if conflict is not None:
+        raise CannotEvaluate(pin_conflict_message(conflict))
+    if not names.pins:
+        raise CannotEvaluate("the brief declares an accepted residual but pins no revision; add a BRIEF-PIN "
+                             "line for the anchors to be read at")
+    if repo is None:
+        raise CannotEvaluate("the brief declares an accepted residual but no repository was given to read "
+                             "the pin from")
+    commit = resolve_revision(repo, (names.brief_pins or names.pins)[0][1])
+    # every pin line must resolve to that one commit: two REVIEWED HEAD lines with no BRIEF-PIN line are not
+    # compared by the conflict checks above, and an anchor read at one of two revisions proves nothing
+    for number, pin in names.pins:
+        other = resolve_revision(repo, pin)
+        if other != commit:
+            raise CannotEvaluate("line {}: the pin {} resolves to {}, not to {}, the revision the anchors are "
+                                 "read at; the accepted residuals are read at one revision, so every REVIEWED "
+                                 "HEAD and BRIEF-PIN line must name it".format(number, pin, other, commit))
+    findings = [judge_residual(repo, commit, line, anchor) for line, anchor in declarations]
+    return [finding for finding in findings if finding is not None] + advisory
+
+
+# ---------- W1: a git command line that writes, for a family whose row says it cannot ----------
+
+# the subcommands the git-write row governs, matched where GIT_SUBCOMMAND_RE matches a git subcommand
+GIT_WRITE_SUBCOMMAND_RE = re.compile(r"\s+(?:commit|push)(?![\w-])")
+
+
+def denies_git_write(row):
+    """Whether a family's row says it cannot commit or push: git-write = "no". "undeclared" and "yes" never fire."""
+    return row["git-write"] == "no"
+
+
+def git_write_commands(text):
+    """[(start, end)] of the git command lines in `text` whose subcommand is commit or push, read with the grammar the
+    S rules read: the git command word (COMMAND_WORD_RE, optionally behind a directory path), its global options
+    (GIT_OPTION_RE, walked by _option_end), then the subcommand. A word outside subcommand position (the ^{commit} of
+    a checkout pin, the commit under review, a push named after git and an option) is none."""
+    found, memo = [], dict()
+    for word in COMMAND_WORD_RE.finditer(text):
+        if word.group(1) is None:
+            continue
+        target = GIT_WRITE_SUBCOMMAND_RE.match(text, _option_end(text, word.end(), GIT_OPTION_RE, memo))
+        if target:
+            found.append((word.start(), target.end()))
+    return found
+
+
+def w1_exempt(demotion):
+    """Whether a closed shape exempts a git write command line: the PROHIBITED shape alone, never a past report."""
+    return demotion == "prohibited"
+
+
+def _w1_sentences(blocks):
+    """[(block, group, offset, sentence)] of the blocks, prose and fence alike, read as the S rules read sentences."""
+    out = []
+    for block, group in zip(blocks, void_groups(blocks)):
+        for start, raw in sentences(_masked_text(block).replace("\n", " ")):
+            out.append((block, group, start, raw))
+    return out
+
+
+def _w1_voided(read):
+    """The void groups in which a sentence asks for something (sentence_asks, as the S rules read it): a prose
+    sentence that asks, outside a heading, or a fence whose contents ask. The fence is read with its command lines
+    (fence_asks with a structural rule), as a prose sentence is, so a closed prohibition in it asks nothing and voids
+    no exemption, its own included; another sentence of the fence that asks voids the group as for the S rules."""
+    voided, fences = set(), set()
+    for block, group, _, raw in read:
+        if block.kind == "fence":
+            if id(block) not in fences:
+                fences.add(id(block))
+                if fence_asks(block, command_rule(block)):
+                    voided.add(group)
+        elif asks_in(block) and lint_sentence(raw, block.start, r1_applies(block), command_rule(block))[1]:
+            voided.add(group)
+    return voided
+
+
+def rule_w1(text, row, family, families, scoped=True):
+    """W1 HARD, for every family: the family's row says git-write = "no" (denies_git_write) and the text the family
+    is addressed by (scoped as the S rules scope it) holds a git command line whose subcommand is commit or push
+    (git_write_commands), in a prose line, a code span or a fence, each block read sentence by sentence as the S rules
+    read command lines. The one exemption is the closed PROHIBITED shape (Demotions; w1_exempt), voided as for the S
+    rules when another sentence of its void group asks for anything; free English never decides it. Each finding
+    names the physical line that holds the command word."""
+    if not denies_git_write(row):
+        return []
+    blocks = parse_blocks(text)
+    if scoped:
+        blocks = apply_scope(blocks, family, families)
+    read, hits = _w1_sentences(blocks), []
+    for block, group, start, raw in read:
+        commands = git_write_commands(raw)
+        if not commands:
+            continue
+        line_starts, offset = [], 0
+        for _, line in block.lines:
+            line_starts.append(offset)
+            offset += len(line) + 1
+        demotion = Demotions(Sentence(raw))
+        for begin, end in commands:
+            number, line = block.lines[bisect.bisect_right(line_starts, start + begin) - 1]
+            hits.append((group, w1_exempt(demotion(begin, end)), number, _excerpt(raw[begin:end]), _excerpt(line)))
+    voided = _w1_voided(read) if any(exempt for _, exempt, _, _, _ in hits) else set()
+    findings = []
+    for group, exempt, number, command, line in hits:
+        if exempt and group not in voided:
+            findings.append(("W1", "INFO", number, "git command line {!r}, prohibited: not a request".format(command),
+                             line))
+        else:
+            findings.append(("W1", "HARD", number, "git command line {!r} for a family whose row says git-write = "
+                             "\"no\"{}".format(command, ", prohibited but voided: another sentence of the item or "
+                                               "section asks for something" if exempt else ""), line))
+    return findings
+
+
 def preflight(text, row, repo, raw):
-    """The preflight findings (P1 to P5) for a brief's text and its family's row; they apply to every family. `raw`
-    is the text before decode_brief removed format characters, which the P5 cure reads."""
+    """The preflight findings (P1 to P7) for a brief's text and its family's row; they apply to every family. `raw`
+    is the text before decode_brief removed format characters, which the P5 cure and the P7 declarations read."""
     names = PreflightText(text, raw)
     return rule_p1(names, row, repo) + rule_p2(names, row, repo) + rule_p3(names, row, repo) + rule_p4(
-        names, row, repo) + rule_p5(names, row, repo)
+        names, row, repo) + rule_p5(names, row, repo) + rule_p6(names, row, repo) + rule_p7(names, row, repo)
 
 
 def can_execute(row):
@@ -2891,7 +3521,9 @@ def evaluate(data, family, table, scoped=True, repo=None):
         raise CannotEvaluate("family {!r} is not in the capability table (known: {})".format(
             family, ", ".join(sorted(table))))
     text = decode_brief(data)
-    early = preflight(text, table[family], repo, data.decode("utf-8"))
+    # the preflight and W1 apply to every family, so they run before the return for a family that can execute
+    early = preflight(text, table[family], repo, data.decode("utf-8")) + rule_w1(
+        text, table[family], family, set(table), scoped)
     if can_execute(table[family]):
         early.sort(key=lambda finding: finding[2])
         hard = any(severity == "HARD" for _, severity, _, _, _ in early)
@@ -2938,7 +3570,14 @@ COMMAND_LINE_HINT = ("to ask about a command line, name the function, row or ent
                      "embedding the command (for example: quote the def line of X, not the line that runs git push)")
 
 
-PREFLIGHT_RULES = frozenset(("P1", "P2", "P3", "P4", "P5"))
+PREFLIGHT_RULES = frozenset(("P1", "P2", "P3", "P4", "P5", "P6", "P7"))
+# the rules that apply to every family, whether or not it can execute
+EVERY_FAMILY_RULES = PREFLIGHT_RULES | frozenset(("W1",))
+# added to a REFUSE line when a P6 hit is among the hard hits
+INPUT_HINT = "; provide each missing declared input, or correct its INPUT line, before sending"
+# added to a REFUSE line when a W1 hit is among the hard hits
+GIT_WRITE_HINT = ("; the family's row says git-write = \"no\": drop the git commit or push, state it as a prohibition "
+                  "(Do not run `git push`.), or send it to a family that can write")
 
 
 def run(brief_path, family, table_path, scoped=True, repo=None):
@@ -2951,22 +3590,36 @@ def run(brief_path, family, table_path, scoped=True, repo=None):
     for rule, severity, line, message, excerpt in findings:
         print("{}:{}: {} {}: {}: {}".format(brief_path, line, severity, rule, message, excerpt))
     hard = [rule for rule, severity, _, _, _ in findings if severity == "HARD"]
-    if code == EXIT_REFUSE and set(hard) - PREFLIGHT_RULES:
+    missing_input = INPUT_HINT if "P6" in hard else ""
+    git_write = GIT_WRITE_HINT if "W1" in hard else ""
+    if code == EXIT_REFUSE and set(hard) - EVERY_FAMILY_RULES:
         print("REFUSE: family {} cannot execute and the brief carries a structural execution request ({} hard "
-              "hit(s): {}); rewrite the brief or send these items to a family that can execute{}".format(
+              "hit(s): {}); rewrite the brief or send these items to a family that can execute{}{}{}".format(
                   family, len(hard), ", ".join("{} x{}".format(r, hard.count(r)) for r in sorted(set(hard))),
-                  "; " + COMMAND_LINE_HINT if set(hard) & {"S2", "S3"} else ""))
+                  "; " + COMMAND_LINE_HINT if set(hard) & {"S2", "S3"} else "", missing_input, git_write))
+    elif code == EXIT_REFUSE and "W1" in hard:
+        print("REFUSE: family {}: the brief carries a git command line that commits or pushes ({} hard hit(s): {}){}"
+              "{}".format(family, len(hard), ", ".join("{} x{}".format(r, hard.count(r)) for r in sorted(set(hard))),
+                          git_write, missing_input))
     elif code == EXIT_REFUSE and "P5" in hard:
         print("REFUSE: family {}: the brief reaches a pinned revision through a ref that can move ({} hard hit(s): "
-              "{}); after the reach, add the line each P5 hit gives ({}), or reach the pin by a dispatch ref{}; "
+              "{}); after the reach, add the line each P5 hit gives ({}), or reach the pin by a dispatch ref{}{}; "
               "{}".format(
                   family, len(hard), ", ".join("{} x{}".format(r, hard.count(r)) for r in sorted(set(hard))),
                   CURE_EXAMPLE.format("<pin>"), ", and name paths under the declared workdir" if "P2" in hard else "",
-                  CURE_SHAPE))
+                  missing_input, CURE_SHAPE))
+    elif code == EXIT_REFUSE and set(hard) == {"P6"}:
+        print("REFUSE: family {}: the brief declares an input that does not exist on this host ({} hard hit(s): "
+              "P6 x{}){}".format(family, len(hard), len(hard), INPUT_HINT))
+    elif code == EXIT_REFUSE and set(hard) == {"P7"}:
+        print("REFUSE: family {}: the brief accepts a residual whose anchor does not hold at the pinned "
+              "revision ({} hard hit(s): P7 x{}); correct each ACCEPTED-RESIDUAL line ({}), or re-pin the "
+              "brief".format(family, len(hard), len(hard), ANCHOR_SHAPE))
     elif code == EXIT_REFUSE:
         print("REFUSE: family {}: the brief names an input the family cannot read ({} hard hit(s): {}); name "
-              "paths under the declared workdir, or state a path the worker must not use as a prohibition".format(
-                  family, len(hard), ", ".join("{} x{}".format(r, hard.count(r)) for r in sorted(set(hard)))))
+              "paths under the declared workdir, or state a path the worker must not use as a prohibition{}".format(
+                  family, len(hard), ", ".join("{} x{}".format(r, hard.count(r)) for r in sorted(set(hard))),
+                  missing_input))
     elif can_execute(table[family]):
         advisory = sum(1 for _, severity, _, _, _ in findings if severity == "ADVISORY")
         print("OK: family {} can execute ({}); the execution rules do not apply{}".format(
@@ -3042,8 +3695,9 @@ _EXECUTED_SET = set()
 
 
 def _family_row(name, execute, network, git_read, scratch, handback, outside):
+    # every fixture row ships git-write = "undeclared", as the shipped table does; the W1 cases set it per run
     return ('[[family]]\nname = "%s"\nexecute = "%s"\nnetwork = "%s"\nrepo-read = "path"\ngit-read = "%s"\n'
-            'scratch = "%s"\nhandback = "%s"\nreads-outside-workdir = "%s"\n'
+            'scratch = "%s"\nhandback = "%s"\nreads-outside-workdir = "%s"\ngit-write = "undeclared"\n'
             % (name, execute, network, git_read, scratch, handback, outside))
 
 
@@ -3118,6 +3772,17 @@ def _table_outcome(text):
         return sorted(parse_table(text.encode("utf-8")))
     except CannotEvaluate:
         return "CannotEvaluate"
+
+
+def _w1_outcome(text, family="alpha", git_write="no", repo=None):
+    """_outcome for a synthetic brief under TABLE_FIXTURE with every row's git-write set to `git_write`."""
+    table = parse_table(TABLE_FIXTURE.replace('git-write = "undeclared"', 'git-write = "%s"' % git_write).encode(
+        "utf-8"))
+    try:
+        code, findings = evaluate(text.encode("utf-8"), family, table, True, repo)
+    except CannotEvaluate:
+        return "CannotEvaluate"
+    return code, sorted(set((rule, severity) for rule, severity, _, _, _ in findings))
 
 
 def _quiet(fn, *args):
@@ -3389,6 +4054,8 @@ REVERSED = "Gamma leg: answer items 2-1 only.\n\n1. Run the parser.\n"
 DASH_LIST = "- Read the diff\n- Run `t.py --self-test`\n- Report the exit code\n"
 BOM_BRIEF = b"\xef\xbb\xbf```bash\ncd repo\n```\n"   # a byte order mark before the fence opener
 ZERO_WIDTH_SPLIT = "Read only `git sh" + chr(0x200B) + "ow abc1234:t.py`.\n"   # a zero-width space inside "show"
+# a zero-width space inside a fenced command: the fence body may hold it, and removal restores the command
+FENCED_ZERO_WIDTH = "```\nc" + chr(0x200B) + "d repo\n```\n"
 # "no" in "casino" ends exactly NEGATION_WINDOW characters before "run": a slice of the window would
 # open on a false word boundary and read it as a negation.
 SLICE_EDGE = "Read the casino" + " w" * 25 + " ww and run the parser.\n"
@@ -3406,6 +4073,26 @@ PUNCTUATED_LIST = "Name the stage: lint, gate, test, build or self-test.\n"
 OXFORD_PARENTHESIS = "Quote the line (test, build, or run).\n"
 GIT_PARENTS = "1. Quote the parents of the merge commit as the file headers list them.\n"
 GIT_STATEMENT = "The merge commit's parents are listed in the notes.\n"
+# W1: a git command line that commits or pushes, for a family whose row says git-write = "no"
+W1_COMMIT = "Record the fix with `git commit -m fix`.\n"
+W1_PUSH = "1. Then publish it: git push origin HEAD\n"
+W1_OPTION_FORMS = ("Use `git -C /w/r commit -m fix`.\n", "Use `git -c user.name=x commit -m fix`.\n",
+                   "Use git -C /w/r -c k=v push origin HEAD.\n")
+W1_ABSOLUTE = "Use `/usr/bin/git commit -m fix`.\n"
+W1_FENCE = "Steps:\n\n```text\ngit add -A\ngit commit -m fix\n```\n"
+W1_PROHIBITED = ("Do not run `git push`.\n", "Never run git commit -a.\n")
+W1_PROHIBITED_VOIDED = "Do not run `git push`. Run it anyway.\n"
+# the same prohibitions alone in a fence, read as in prose; and a fence whose other sentence asks
+W1_FENCED_PROHIBITED = ("```text\nDo not run `git push`.\n```\n", "```text\nNever run git commit -a.\n```\n")
+W1_FENCED_VOIDED = "```text\nDo not run `git push`.\nRun it anyway.\n```\n"
+W1_PAST_REPORT = "CI failed on `git push`.\n"
+# the three shapes W1 must not read: the ^{commit} of a checkout pin line (the P5 cure), the commit under review,
+# and a correction naming a refused commit and push outside subcommand position
+W1_CHECKOUT_PIN = "git -C w checkout --detach " + "0123456789" * 4 + "^{commit}\n"
+W1_UNDER_REVIEW = "Quote the commit under review in this git repository and the push it names.\n"
+W1_CORRECTION = "Correction: the guard refused a commit and a push through git -C w; do not retry them.\n"
+W1_CURE = "BRIEF-PIN: {0}\nUse `git clone --no-checkout <url> w`.\n`git -C w checkout --detach {0}^{{commit}}`\n"
+W1_MAIN = "Read the notes.\n\n`git -C w commit -m fix`\n"
 P1_RELATIVE = "The workdir is /w/repo.\nRead docs/notes.md before you answer.\n"
 P1_ABSOLUTE = "The workdir is /w/repo.\nRead /w/repo/docs/notes.md before you answer.\n"
 P1_NO_WORKDIR = "Read docs/notes.md before you answer.\n"
@@ -3444,7 +4131,7 @@ P2_ESCAPES = ("/w/repo//../../etc/passwd", "/w/repo/x~/../../../etc/passwd", "/w
 P2_UNPLACED = ("~user/notes.md", "$TMPDIR/x.md", "../x.md", ",".join(["/w/repo/a.md"] * 17))
 # text glued after a quoted span with a space; a path glued after a character that is not a letter or digit
 P2_GLUED_QUOTE = ("\"/w/repo/a b\"/../../../etc/x.md", "`/w/repo/a b`/../../../etc/x.md")
-P2_GLUED_AFTER = ("@/etc/x.md", "%/etc/x.md", "-/etc/x.md", "Input:/etc/x.md")
+P2_GLUED_AFTER = ("@/etc/x.md", "%/etc/x.md", "-/etc/x.md", "Path:/etc/x.md")
 P2_FILE_URL, P2_WEB_URL = "file:///etc/x.md", "https://example.com/a/../../etc/x.md"
 # odd words the slash rule refuses although a human would pass them (fail closed)
 P2_OVER_REFUSED = ("/w/repo//docs/a.md", "/w/repo/x~/a.md", "\"/w/repo/a b\"/x.md", "ftp://h/w/repo/x.md")
@@ -3542,16 +4229,18 @@ P5_CURE_CHAIN_WORDS = ("Run `git clone -q --no-hardlinks file:///srv/g.git w && 
                        "Make a scratch clone: `git clone --no-hardlinks /srv/w/repo <scratch>/r && git -C "
                        "<scratch>/r checkout --detach {0}`\n")
 # a cure line is read on the raw text, printable ASCII with only space or tab between words: a no-break, em,
-# ideographic or other Unicode space, a control character (unit separator, vertical tab, form feed) or a carriage
-# return makes it no cure line (each one a looser reading splits as a space)
+# ideographic or other Unicode space or a control character (unit separator, vertical tab, file separator)
+# makes it no cure line (each one a looser reading splits as a space); a carriage return or a form feed never
+# reaches P5, since the brief gate refuses every non-LF line separator first
 P5_NOT_CURE_CHARACTERS = tuple(line.format(chr(code)) for line, code in (
     ("git -C w checkout{}--detach {{0}}\n", 0xA0), ("git -C w{}checkout --detach {{0}}\n", 0x2003),
     ("git{}-C w checkout --detach {{0}}\n", 0x3000), ("git -C w checkout{}--detach {{0}}\n", 0x1F),
-    ("git -C w checkout{}--detach {{0}}\n", 0x0B), ("git -C w checkout --detach{}{{0}}\n", 0x0C),
-    ("git -C w checkout --detach {{0}}{}\n", 0x0D)))
+    ("git -C w checkout{}--detach {{0}}\n", 0x0B), ("git -C w checkout --detach{}{{0}}\n", 0x1C)))
 # and before format characters are removed: a zero-width space, a soft hyphen, a byte order mark or a bidirectional
-# control inside a cure line makes it none (each one the text with format characters removed would cure)
-P5_NOT_CURE_FORMAT = tuple(line.format(chr(code)) for line, code in (
+# control inside a cure line makes it none (each one the text with format characters removed would cure). The
+# lines stand in a fence behind the `$ ` prompt: only a fenced block's body may hold a format character (outside
+# one the brief gate refuses the whole brief first), and a fence line cures behind the prompt
+P5_NOT_CURE_FORMAT = tuple("```\n$ " + line.format(chr(code)) + "```\n" for line, code in (
     ("git -C w checkout --de{}tach {{0}}\n", 0x200B), ("git -C w checkout --detach {}{{0}}\n", 0x200B),
     ("git -C w check{}out --detach {{0}}\n", 0xAD), ("{}git -C w checkout --detach {{0}}\n", 0xFEFF),
     ("git -C w checkout --detach {}{{0}}\n", 0x202E)))
@@ -3718,6 +4407,660 @@ P5_CLONE_REVISION = (P5_PIN + "Use `git clone --revision={0} <url> w` and review
                      P5_PIN + "Use `git clone --revision {0} <url> w` and review w.\n",
                      P5_PIN + "Use `git clone --revision=main <url> w` and review w.\n")
 LINEAR_FACTOR, LINEAR_SLACK, LINEAR_TIMEOUT = 16, 1.0, 120
+# the measured slack over the parse deadline for one whole read() through the killed child: the child
+# start, the kill, the reap and the result decode measured 0.04 to 0.14 s past the deadline on the two
+# old-ceiling shapes (an 80-cpu host at one-minute load averages 35 to 43), so three seconds is wide
+DEADLINE_MARGIN_SECONDS = 3.0
+# The deadline rows judge a whole read() by wall clock against one fixed bound, _deadline_bound():
+# PARSE_DEADLINE_SECONDS, a wall-clock count by construction (the parent's communicate timeout), plus
+# DEADLINE_MARGIN_SECONDS for the parent's own work around that wait (the child's spawn, the wake-up at
+# the timeout, the group kill, the reap, the result decode). Neither part is scaled by any reading of
+# host load. How much CPU time one parse of a ceiling shape needs is a fact about the host (its CPU
+# speed and its Python build), not something this code can hold, so no row requires one parse of a
+# fixed text to outlast the bound: a runner fast enough parses a ceiling shape in less. What
+# parse/deadline-cap-under-uncut-parse holds is the cut itself: with the deadline lifted, its probe
+# parses each ceiling shape again and again, in a loop that does nothing but call read(), until a CPU
+# timer armed at the bound cuts it, and requires that cut to land inside that loop (its frame on the
+# cut's stack) after the bound, with at least one entry into the vendored parser before it
+# (_cap_probe_held), so a parse still running at the bound is ended only by the timer and only once the
+# bound is spent. The loop removes the dependence on how long one parse takes: a cut between two parses
+# lands in the loop's own frame and counts like one inside the parser. Because that frame is on the
+# stack wherever the cut lands, the frame alone does not show the parser ran; the count of parser
+# entries does, so a loop that never reaches the parser reads False. It guarantees nothing more: a child
+# ended any other way, or a timer that never fires, still reads False. With the timer removed the
+# repeated parse never ends and the row reads False.
+# parse/deadline-cap-under-eighth-parse shows the same at one eighth of the ceiling, where one parse
+# ends far inside the bound. The timer is armed at the bound itself, with no margin above it
+# (parse/deadline-cap-armed-at-bound reads it back). The two old-ceiling shapes are shown past the
+# bound by revert/parse-thread-join-red.
+# the probe child for parse/deadline-cap-under-uncut-parse: it builds one ceiling shape (argv[2] its
+# repeated unit, behind the self-test's parse-forcing lead), loads the vendored parser, replaces the
+# thread join with a direct call (so the parse runs in this main thread with no deadline), wraps the
+# vendored parser's entry point (marko's Parser.parse) so each entry is counted, turns core files off,
+# sets a SIGPROF handler that raises Cut, writes UNCUT_PARSE_MARKER, reads its own thread's CPU clock
+# and then the process's, arms the one-shot ITIMER_PROF CPU timer at argv[3] seconds and makes the call
+# UNCUT_PARSE_CALL, whose loop (parse_again) reads the text again and again until something ends it, so
+# the loop is still running when the timer reaches argv[3]. Without nohz_full the kernel fires that
+# timer on CPU time it charges a whole clock tick at a time, which can reach argv[3] while the exact CPU
+# clocks read just under it, so the handler raises Cut only once the process's exact CPU clock shows
+# argv[3] seconds since its reading: a timer that fired, and so stands disarmed, while that clock is
+# still short is armed again for the rest and the call goes on. A SIGPROF that arrives while the timer
+# is still armed is not that timer's own and raises Cut at once, whatever the clock shows; several
+# stand-ins in CAP_STANDINS send one on purpose while the timer is armed, and their cuts report less
+# than argv[3]. Apart from such a SIGPROF sent within about one clock tick after argv[3], while Linux
+# still holds the timer armed, only a cut raised because the process's clock showed argv[3] reports at
+# least argv[3]: both clocks are read before the timer is armed, the thread's first, in a process that
+# runs only this thread, so when that Cut ends the call the thread has spent at least argv[3] seconds
+# since its reading. When the timer cuts the call, Cut ends it; the child then reads, after the call,
+# the CPU time its own thread spent inside the call and how many frames of the parse were on the stack
+# where the cut landed (the loop's own frame and those of the vendored parser's code), and how many
+# times the call entered the vendored parser, writes all three as one report line, and ends itself by
+# the signal that cut it at that signal's default action, so its exit status names that signal. A call
+# that returns or is refused writes no report and exits 0.
+UNCUT_PARSE_MARKER = b"parsing\n"
+UNCUT_PARSE_CALL = "    parse_again()\n"
+# the one-parse call of CAP_ONE_PARSE_PROBE, which returns when its single parse ends
+CAP_ONE_PARSE_CALL = "    m.read(text)\n"
+UNCUT_PARSE_PROBE = (
+    "import os, resource, signal, sys, time, traceback\n"
+    "sys.path.insert(0, sys.argv[1])\n"
+    "import _input_declarations as m\n"
+    "class Cut(BaseException):\n"
+    "    pass\n"
+    "def cut(signum, frame):\n"
+    "    left = float(sys.argv[3]) - (time.process_time() - began_process)\n"
+    "    if left > 0 and signal.getitimer(signal.ITIMER_PROF) == (0.0, 0.0):\n"
+    "        signal.setitimer(signal.ITIMER_PROF, left)\n"
+    "        return\n"
+    "    raise Cut(signum)\n"
+    "def parse_again():\n"
+    "    while True:\n"
+    "        m.read(text)\n"
+    "m.PARSE_IN_CHILD = False\n"
+    "m._joined_parse = lambda text: m._serialize(m._parse_document(text))\n"
+    "marko = m._load_marko()[0]\n"
+    "parser = os.path.join(os.path.dirname(marko.__file__), '')\n"
+    "entered = []\n"
+    "enter_parser = marko.parser.Parser.parse\n"
+    "def count_entry(self, text):\n"
+    "    entered.append(True)\n"
+    "    return enter_parser(self, text)\n"
+    "marko.parser.Parser.parse = count_entry\n"
+    "lead = 'Input notes.' + chr(10) + chr(10)\n"
+    "unit = sys.argv[2]\n"
+    "text = lead + unit * ((m.MAX_TEXT_BYTES - len(lead) - 1) // len(unit)) + chr(10)\n"
+    "resource.setrlimit(resource.RLIMIT_CORE, (0, 0))\n"
+    "signal.signal(signal.SIGPROF, cut)\n"
+    "sys.stdout.write('parsing' + chr(10))\n"
+    "sys.stdout.flush()\n"
+    "began = time.thread_time()\n"
+    "began_process = time.process_time()\n"
+    "signal.setitimer(signal.ITIMER_PROF, float(sys.argv[3]))\n"
+    "try:\n"
+    + UNCUT_PARSE_CALL +
+    "except m.DeclarationError:\n"
+    "    pass\n"
+    "except Cut as stop:\n"
+    "    signal.setitimer(signal.ITIMER_PROF, 0)\n"
+    "    spent = time.thread_time() - began\n"
+    "    frames = sum(1 for frame, _ in traceback.walk_tb(stop.__traceback__)\n"
+    "                 if frame.f_code is parse_again.__code__\n"
+    "                 or frame.f_code.co_filename.startswith(parser))\n"
+    "    sys.stdout.write('cut %r %d %d' % (spent, frames, len(entered)) + chr(10))\n"
+    "    sys.stdout.flush()\n"
+    "    signal.signal(stop.args[0], signal.SIG_DFL)\n"
+    "    os.kill(os.getpid(), stop.args[0])\n"
+    "    time.sleep(5)\n")
+# UNCUT_PARSE_PROBE with its repeated call replaced by one parse (CAP_ONE_PARSE_CALL), for
+# parse/deadline-cap-refuses-parse-under-bound: a parse that ends before the timer reaches the bound
+# returns, and the child exits 0 with no report
+CAP_ONE_PARSE_PROBE = UNCUT_PARSE_PROBE.replace(UNCUT_PARSE_CALL, CAP_ONE_PARSE_CALL)
+
+
+def _probe_replaced(source, old, new):
+    """`source` with its one occurrence of `old` replaced by `new`. Raises ValueError when `old` occurs
+    in `source` any number of times but once, so a probe whose text has moved fails at import instead
+    of silently running unchanged."""
+    if source.count(old) != 1:
+        raise ValueError("probe text {!r} occurs {} times, not once".format(old, source.count(old)))
+    return source.replace(old, new)
+
+
+# UNCUT_PARSE_PROBE with each shape filled to one eighth of the ceiling, for
+# parse/deadline-cap-under-eighth-parse: one parse of such a shape ends far inside the bound, so only
+# the repeated parse is still running when the timer reaches it, and many short parses put many
+# between-parse spans in the timer's way. CAP_FULL_FILL is the probe's full-size fill, the text the
+# change replaces; _probe_replaced refuses the change if that text is gone
+CAP_FULL_FILL = "(m.MAX_TEXT_BYTES - len(lead) - 1)"
+CAP_EIGHTH_PROBE = _probe_replaced(UNCUT_PARSE_PROBE, CAP_FULL_FILL,
+                                   "(m.MAX_TEXT_BYTES // 8 - len(lead) - 1)")
+# the probe's whole output when the timer cut its parse: the marker, then one report line of the CPU
+# seconds its thread spent inside the call, the frames of the parse on the cut's stack (the loop's own
+# frame and those of the vendored parser's code) and how many times the call entered the vendored
+# parser before the cut; the parent keeps at most CAP_OUTPUT_LIMIT bytes of it, more than any output
+# this pattern can match
+CAP_REPORT_PATTERN = rb"cut ([0-9.e+-]{1,32}) ([0-9]{1,6}) ([0-9]{1,9})\n"
+CAP_OUTPUT_LIMIT = 4096
+# stand-in probe children for the rows that show _cap_probe_held refusing a child whose parse the CPU
+# timer did not end, and (the last one) for parse/deadline-cap-holds-past-early-timer; all but the first
+# and forged-report-sigkill are UNCUT_PARSE_PROBE with its parse call or its loop's body replaced, so
+# they report through the probe's own code: one kills itself with SIGKILL before any marker; one sends
+# itself SIGPROF at once; one sleeps for its CPU budget and then sends itself SIGPROF; one starts a
+# thread that burns CPU until the timer fires while this main thread sleeps; one burns the CPU in this
+# main thread outside the parser; one is cut by a SIGPROF it sends itself from inside the parser's own
+# call chain, at once; one, loop-without-parser, runs the repeated-parse loop with its read() replaced
+# by arithmetic, so the timer cuts it inside the loop after the bound but the parser was never entered;
+# and one writes the marker and a report that meets every requirement and then kills itself with
+# SIGKILL. The last one, timer-early-inside-parser, is the real parse with the timer made to fire early
+# once: on entering the parser's link and emphasis scan it disarms the timer and sends itself SIGPROF,
+# as a tick-charged timer does when its clock runs ahead of the exact one, and the parse must still be
+# cut only after it has spent the bound. cut-inside-parser-at-once and timer-early-inside-parser both
+# install their wrapper and then make the repeated-parse call
+CAP_STANDINS = (
+    ("sigkill-before-marker",
+     "import os, signal\n"
+     "os.kill(os.getpid(), signal.SIGKILL)\n"),
+    ("sigprof-at-once", UNCUT_PARSE_PROBE.replace(
+        UNCUT_PARSE_CALL,
+        "    os.kill(os.getpid(), signal.SIGPROF)\n"
+        "    time.sleep(5)\n")),
+    ("sleep-then-sigprof", UNCUT_PARSE_PROBE.replace(
+        UNCUT_PARSE_CALL,
+        "    time.sleep(float(sys.argv[3]))\n"
+        "    os.kill(os.getpid(), signal.SIGPROF)\n"
+        "    time.sleep(5)\n")),
+    ("busy-thread-until-limit", UNCUT_PARSE_PROBE.replace(
+        UNCUT_PARSE_CALL,
+        "    import threading\n"
+        "    def burn():\n"
+        "        while time.thread_time() < 2 * float(sys.argv[3]):\n"
+        "            pass\n"
+        "    threading.Thread(target=burn, daemon=True).start()\n"
+        "    for _ in range(12000):\n"
+        "        time.sleep(0.05)\n")),
+    ("busy-main-until-limit", UNCUT_PARSE_PROBE.replace(
+        UNCUT_PARSE_CALL,
+        "    while time.thread_time() < began + 2 * float(sys.argv[3]):\n"
+        "        pass\n")),
+    ("cut-inside-parser-at-once", UNCUT_PARSE_PROBE.replace(
+        UNCUT_PARSE_CALL,
+        "    import marko.inline_parser as inline\n"
+        "    found = inline.find_links_or_emphs\n"
+        "    def cut_here(*args):\n"
+        "        os.kill(os.getpid(), signal.SIGPROF)\n"
+        "        time.sleep(5)\n"
+        "        return found(*args)\n"
+        "    inline.find_links_or_emphs = cut_here\n"
+        + UNCUT_PARSE_CALL)),
+    ("loop-without-parser", _probe_replaced(
+        UNCUT_PARSE_PROBE, "        m.read(text)\n", "        sum(range(100000))\n")),
+    ("forged-report-sigkill",
+     "import os, signal, sys\n"
+     "sys.stdout.write('parsing' + chr(10) + 'cut 1000.0 9 9' + chr(10))\n"
+     "sys.stdout.flush()\n"
+     "os.kill(os.getpid(), signal.SIGKILL)\n"),
+    ("timer-early-inside-parser", UNCUT_PARSE_PROBE.replace(
+        UNCUT_PARSE_CALL,
+        "    import marko.inline_parser as inline\n"
+        "    found, fired = inline.find_links_or_emphs, []\n"
+        "    def fire_early(*args):\n"
+        "        if not fired:\n"
+        "            fired.append(True)\n"
+        "            signal.setitimer(signal.ITIMER_PROF, 0)\n"
+        "            os.kill(os.getpid(), signal.SIGPROF)\n"
+        "        return found(*args)\n"
+        "    inline.find_links_or_emphs = fire_early\n"
+        + UNCUT_PARSE_CALL)))
+# a stand-in probe child for parse/deadline-cap-armed-at-bound: UNCUT_PARSE_PROBE with its parse call
+# replaced by a read-back (getitimer) of the CPU timer the probe has just armed, written as one line
+# after the marker; the child then exits 0 with no cut. It is started by _cap_probe_readings like every
+# probe, so the read-back shows both the CPU budget that function passes and the probe's own arming
+CAP_ARMED_PROBE = UNCUT_PARSE_PROBE.replace(
+    UNCUT_PARSE_CALL,
+    "    sys.stdout.write('armed %r' % (signal.getitimer(signal.ITIMER_PROF)[0],) + chr(10))\n"
+    "    sys.stdout.flush()\n")
+CAP_ARMED_PATTERN = rb"armed ([0-9.e+-]{1,32})\n"
+# how far, in CPU seconds and at either end, the read-back of the probe's armed timer may lie from the
+# bound: Linux adds one clock tick (at most 10 ms, at HZ=100) to an ITIMER_PROF value it arms, and the
+# probe spends a few microseconds of CPU between arming and the read-back, so two of the coarsest ticks
+# cover both; a timer armed further above the bound (the old cut at 1.2 times the bound among them)
+# reads False. This is the read-back's tolerance only; it moves no bound or margin of the deadline rows
+CAP_ARMED_TOLERANCE = 0.02
+# the CPU seconds the re-arm stand-in spends before its timer is made to fire early: far above the
+# coarsest clock tick and far under the bound, so the rest it must re-arm for differs from the bound by
+# much more than CAP_ARMED_TOLERANCE
+CAP_REARM_SPENT = 1.0
+# a stand-in probe child for parse/deadline-cap-rearms-for-rest: UNCUT_PARSE_PROBE with its parse call
+# replaced by a busy loop in this main thread until the process's exact CPU clock shows CAP_REARM_SPENT
+# seconds since its reading, then the timer disarmed and SIGPROF sent, as a tick-charged timer fires
+# early (os.kill runs the Python handler before it returns when the signal is sent to this process).
+# The handler should arm the timer again for the rest of the bound; the child reads that timer back
+# (getitimer) and then the process's CPU seconds since its reading, writes both as one line after the
+# marker and exits 0 with no cut
+CAP_REARM_PROBE = UNCUT_PARSE_PROBE.replace(
+    UNCUT_PARSE_CALL,
+    "    while time.process_time() - began_process < %r:\n"
+    "        pass\n"
+    "    signal.setitimer(signal.ITIMER_PROF, 0)\n"
+    "    os.kill(os.getpid(), signal.SIGPROF)\n"
+    "    sys.stdout.write('rearmed %%r %%r' %% (signal.getitimer(signal.ITIMER_PROF)[0],\n"
+    "                                         time.process_time() - began_process) + chr(10))\n"
+    "    sys.stdout.flush()\n" % (CAP_REARM_SPENT,))
+CAP_REARM_PATTERN = rb"rearmed ([0-9.e+-]{1,32}) ([0-9.e+-]{1,32})\n"
+# the probe child for revert/parse-thread-join-red: it runs the shared reading with the thread join
+# restored (PARSE_IN_CHILD=False) over one shape at the old ceiling and never returns within the
+# deadline (the join's timeout cannot fire while one regex match holds the GIL); the parent shows it
+# still running at _deadline_bound(), the bound the deadline rows judge, and kills its process group
+THREAD_JOIN_PROBE = (
+    "import sys\n"
+    "sys.path.insert(0, sys.argv[1])\n"
+    "import _input_declarations as m\n"
+    "m.MAX_TEXT_BYTES = 1 << 19\n"
+    "m.PARSE_IN_CHILD = False\n"
+    "text = ('x<!--' * ((1 << 19) // 5))[:(1 << 19) - 1] + chr(10) if sys.argv[2] == 'html-opener' "
+    "else chr(0xFF21) * (((1 << 19) - 1) // 3) + chr(10)\n"
+    "try:\n"
+    "    m.read(text)\n"
+    "except m.DeclarationError:\n"
+    "    pass\n")
+
+
+def _deadline_bound():
+    """The wall seconds a read() through the parse deadline may take: the deadline itself plus
+    DEADLINE_MARGIN_SECONDS, both fixed (see the comment above UNCUT_PARSE_MARKER)."""
+    return _input_declarations.PARSE_DEADLINE_SECONDS + DEADLINE_MARGIN_SECONDS
+
+
+def _deadline_held(read, text, clock=time.monotonic):
+    """(how read(text) ended, "answered" or "refused", whether its wall time held _deadline_bound()).
+    The wall clock is a seam the boundary row drives with set timings, so that row judges this
+    function's own comparison."""
+    began = clock()
+    try:
+        read(text)
+        ended = "answered"
+    except _input_declarations.DeclarationError:
+        ended = "refused"
+    return ended, clock() - began <= _deadline_bound()
+
+
+def _deadline_boundary_reading():
+    """What _deadline_held itself returns at the end of its bound, driven with set timings: a read that
+    took 1 ms under the bound, exactly the bound, and 1 ms over it (the clock reads 0 when the call
+    begins, so the elapsed time is exact), each answered and refused. The bound is written out here as
+    the deadline plus the margin, not taken from _deadline_bound, so a change to either the bound or the
+    comparison moves the reading."""
+    def answer(text):
+        return text
+
+    def refuse(text):
+        raise _input_declarations.DeclarationError("a stand-in refusal")
+
+    bound = _input_declarations.PARSE_DEADLINE_SECONDS + DEADLINE_MARGIN_SECONDS
+    row = []
+    for elapsed in (bound - 0.001, bound, bound + 0.001):
+        for read in (answer, refuse):
+            row.append(_deadline_held(read, "", iter((0.0, elapsed)).__next__))
+    return bound, row
+
+
+def _cap_probe_held(code, output):
+    """Whether one probe child's exit status and whole output (at most CAP_OUTPUT_LIMIT bytes kept) show
+    its parse cut by the CPU timer after it spent at least _deadline_bound() of CPU time: the child was
+    ended by SIGPROF, the timer's signal (not SIGKILL, SIGXCPU nor any other), its output is
+    UNCUT_PARSE_MARKER and then exactly one report line (CAP_REPORT_PATTERN), and that line gives at least
+    _deadline_bound() CPU seconds spent by the child's own thread inside the parse call, at least one
+    frame of the parse (the probe's repeated-parse loop or the vendored parser's code) on the stack where
+    the cut landed, and at least one entry into the vendored parser before the cut. The frame shows only
+    that the cut landed inside the call, since the loop's own frame is on the stack wherever in the loop
+    it lands; the entry count, taken by a wrapper around the parser's entry point, shows the parser ran.
+    All three readings are the child's own, taken after the call in the thread that made it, so CPU
+    spent by another thread, time spent in a sleep, a cut outside the call, a loop that never enters the
+    parser and a delay in this parent each read False. A call that enters the parser once and then
+    spends the bound elsewhere inside the call is not detected, nor is a child written to forge the
+    report line."""
+    if code != -signal.SIGPROF or not output.startswith(UNCUT_PARSE_MARKER):
+        return False
+    report = re.fullmatch(CAP_REPORT_PATTERN, output[len(UNCUT_PARSE_MARKER):])
+    if report is None:
+        return False
+    try:
+        spent = float(report.group(1))
+    except ValueError:
+        return False
+    return spent >= _deadline_bound() and int(report.group(2)) >= 1 and int(report.group(3)) >= 1
+
+
+def _cap_report_boundary_reading():
+    """What _cap_probe_held returns for set exit statuses and outputs: a report of 1 ms under the bound,
+    exactly the bound and 1 ms over it with one frame of the parse (the loop's or a parser frame) and one
+    parser entry; the bound plus one second with no frame of the parse, and with no parser entry; that
+    report under SIGKILL, under SIGXCPU and under exit status 0; with no marker before it; and with a
+    second report line after it. The bound is written out as the deadline plus the margin."""
+    bound = _input_declarations.PARSE_DEADLINE_SECONDS + DEADLINE_MARGIN_SECONDS
+
+    def report(spent, frames, entries=1):
+        return UNCUT_PARSE_MARKER + "cut {!r} {} {}\n".format(spent, frames, entries).encode("ascii")
+
+    prof, kill, xcpu = -signal.SIGPROF, -signal.SIGKILL, -signal.SIGXCPU
+    over = report(bound + 1.0, 1)
+    return [_cap_probe_held(code, output) for code, output in (
+        (prof, report(bound - 0.001, 1)), (prof, report(bound, 1)), (prof, report(bound + 0.001, 1)),
+        (prof, report(bound + 1.0, 0)), (prof, report(bound + 1.0, 1, 0)), (kill, over), (xcpu, over),
+        (0, over),
+        (prof, over[len(UNCUT_PARSE_MARKER):]), (prof, over + over[len(UNCUT_PARSE_MARKER):]))]
+
+
+def _cap_armed_at_bound(armed):
+    """Whether a read-back of the probe's armed CPU timer, `armed` seconds, lies within
+    CAP_ARMED_TOLERANCE of _deadline_bound() at either end (both ends inclusive)."""
+    return _deadline_bound() - CAP_ARMED_TOLERANCE <= armed <= _deadline_bound() + CAP_ARMED_TOLERANCE
+
+
+def _cap_armed_held(code, output):
+    """Whether one CAP_ARMED_PROBE child's exit status and whole output show its timer armed at the
+    bound: it exited 0, its output is UNCUT_PARSE_MARKER and then exactly one read-back line
+    (CAP_ARMED_PATTERN), and that read-back is at the bound (_cap_armed_at_bound)."""
+    if code != 0 or not output.startswith(UNCUT_PARSE_MARKER):
+        return False
+    report = re.fullmatch(CAP_ARMED_PATTERN, output[len(UNCUT_PARSE_MARKER):])
+    if report is None:
+        return False
+    try:
+        armed = float(report.group(1))
+    except ValueError:
+        return False
+    return _cap_armed_at_bound(armed)
+
+
+def _cap_armed_boundary_reading():
+    """What _cap_armed_at_bound returns for set read-backs: 1 ms outside, exactly at and 1 ms inside the
+    low end of its window, exactly the bound, 1 ms inside, exactly at and 1 ms outside the high end, and
+    the old cut of 1.2 times the bound. The bound is written out as the deadline plus the margin."""
+    bound = _input_declarations.PARSE_DEADLINE_SECONDS + DEADLINE_MARGIN_SECONDS
+    low, high = bound - CAP_ARMED_TOLERANCE, bound + CAP_ARMED_TOLERANCE
+    return [_cap_armed_at_bound(armed) for armed in (
+        low - 0.001, low, low + 0.001, bound, high - 0.001, high, high + 0.001, bound * 1.2)]
+
+
+def _cap_rearmed_for_rest(armed, spent):
+    """Whether a read-back of the re-armed CPU timer, `armed` seconds, taken when the process had spent
+    `spent` CPU seconds since its reading, is the rest of the bound: `spent` is at least CAP_REARM_SPENT
+    and `armed` lies within CAP_ARMED_TOLERANCE of _deadline_bound() minus `spent` at either end (both
+    ends inclusive). A re-arm for the whole bound reads about CAP_REARM_SPENT less CAP_ARMED_TOLERANCE above
+    that window."""
+    rest = _deadline_bound() - spent
+    return spent >= CAP_REARM_SPENT and rest - CAP_ARMED_TOLERANCE <= armed <= rest + CAP_ARMED_TOLERANCE
+
+
+def _cap_rearmed_held(code, output):
+    """Whether one CAP_REARM_PROBE child's exit status and whole output show its timer, made to fire
+    early, armed again for the rest of the bound: it exited 0 (a handler that cut at that fire ends it
+    by SIGPROF), its output is UNCUT_PARSE_MARKER and then exactly one read-back line
+    (CAP_REARM_PATTERN), and that read-back is the rest (_cap_rearmed_for_rest)."""
+    if code != 0 or not output.startswith(UNCUT_PARSE_MARKER):
+        return False
+    report = re.fullmatch(CAP_REARM_PATTERN, output[len(UNCUT_PARSE_MARKER):])
+    if report is None:
+        return False
+    try:
+        armed, spent = float(report.group(1)), float(report.group(2))
+    except ValueError:
+        return False
+    return _cap_rearmed_for_rest(armed, spent)
+
+
+def _cap_rearmed_boundary_reading():
+    """What _cap_rearmed_for_rest returns for set read-backs after CAP_REARM_SPENT seconds: 1 ms outside,
+    exactly at and 1 ms inside the low end of its window, exactly the rest, 1 ms inside, exactly at and
+    1 ms outside the high end, and the whole bound; then the rest after 1 ms under CAP_REARM_SPENT. The
+    bound is written out as the deadline plus the margin."""
+    bound = _input_declarations.PARSE_DEADLINE_SECONDS + DEADLINE_MARGIN_SECONDS
+    spent = CAP_REARM_SPENT
+    rest = bound - spent
+    low, high = rest - CAP_ARMED_TOLERANCE, rest + CAP_ARMED_TOLERANCE
+    under = spent - 0.001
+    return [_cap_rearmed_for_rest(armed, spent) for armed in (
+        low - 0.001, low, low + 0.001, rest, high - 0.001, high, high + 0.001, bound)] + [
+        _cap_rearmed_for_rest(bound - under, under)]
+
+
+def _cap_probe_readings(runs, timeout=600, held=_cap_probe_held):
+    """`held` (by default _cap_probe_held) for each (probe source, ceiling unit, pause) run: every child
+    is started at once, each in its own process group, with argv this tool's directory, the unit, and
+    the CPU budget _deadline_bound() itself; `pause` is called once in this process when that child's
+    output ends, before the end is recorded (the parent pause stand-in). A child still running after
+    `timeout` wall seconds reads False, and every group is killed before this returns."""
+    spend = _deadline_bound()
+    probes, output, ended, readings = [], {}, set(), []
+    try:
+        for source, unit, _ in runs:
+            probes.append(subprocess.Popen([sys.executable, "-I", "-B", "-c", source,
+                                            str(Path(__file__).resolve().parent), unit, repr(spend)],
+                                           stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                           start_new_session=True))
+        until = time.monotonic() + timeout
+        with selectors.DefaultSelector() as selector:
+            for probe, (_, _, pause) in zip(probes, runs):
+                selector.register(probe.stdout, selectors.EVENT_READ, (probe, pause))
+                output[probe.pid] = b""
+            while selector.get_map() and time.monotonic() < until:
+                for key, _ in selector.select(max(0.0, until - time.monotonic())):
+                    probe, pause = key.data
+                    chunk = os.read(key.fd, 4096)
+                    if not chunk:
+                        pause()
+                        ended.add(probe.pid)
+                        selector.unregister(key.fileobj)
+                        continue
+                    output[probe.pid] = (output[probe.pid] + chunk)[:CAP_OUTPUT_LIMIT]
+        for probe in probes:
+            try:
+                code = probe.wait(timeout=max(0.0, until - time.monotonic())) if probe.pid in ended else None
+            except subprocess.TimeoutExpired:
+                code = None
+            readings.append(code is not None and held(code, output[probe.pid]))
+    finally:
+        for probe in probes:
+            try:
+                os.killpg(probe.pid, signal.SIGKILL)
+            except OSError:
+                probe.kill()
+            probe.communicate()
+    return readings
+
+
+def _cap_under_uncut_parse(units=("_a", "x<?"), timeout=600, source=UNCUT_PARSE_PROBE):
+    """One reading for each repeated unit in `units` (by default those of the two ceiling shapes of
+    parse/deadline-held-at-ceiling, the underscore-mark run and the <? opener paragraph): whether the
+    probe `source` (by default UNCUT_PARSE_PROBE, which parses the text again and again until it is cut)
+    run on the text that unit fills shows its call cut by a CPU timer of exactly _deadline_bound() after
+    spending at least _deadline_bound() of its own thread's CPU time inside the call and entering the
+    vendored parser at least once (_cap_probe_held). With the repeated parse the reading does not depend
+    on the shape or on how long one parse of it takes, so it does not show that one parse of a ceiling
+    shape outlasts the bound."""
+    return _cap_probe_readings([(source, unit, lambda: None) for unit in units], timeout)
+
+
+def _cap_eighth_replaced_reading():
+    """(whether CAP_EIGHTH_PROBE differs from UNCUT_PARSE_PROBE, whether its full-size fill CAP_FULL_FILL
+    is gone and the one-eighth fill appears once, and the name of the exception _probe_replaced raises
+    for a target missing from the probe and for one that occurs twice, None where it raises none)."""
+    def raised(source, old):
+        try:
+            _probe_replaced(source, old, "")
+        except ValueError as exc:
+            return type(exc).__name__
+        return None
+
+    return (CAP_EIGHTH_PROBE != UNCUT_PARSE_PROBE,
+            CAP_FULL_FILL not in CAP_EIGHTH_PROBE and CAP_EIGHTH_PROBE.count("MAX_TEXT_BYTES // 8") == 1,
+            raised(UNCUT_PARSE_PROBE, CAP_FULL_FILL.replace("- 1)", "- 2)")),
+            raised(UNCUT_PARSE_PROBE + CAP_FULL_FILL, CAP_FULL_FILL))
+# a stand-in parse child: _CHILD_PATH is pointed at a script that opens with this prefix (the text read
+# from stdin, the script's own directory as `here`) and then runs one vector's body, so each way a child
+# can end is shown against the parent's reading of it
+STAND_IN_PREFIX = ("import json, os, signal, subprocess, sys\n"
+                   "text = sys.stdin.buffer.read().decode('utf-8')\n"
+                   "here = os.path.dirname(os.path.abspath(__file__))\n")
+# the body of a stand-in that writes one complete well-formed empty document for its text
+STAND_IN_DOCUMENT = ("sys.stdout.write(json.dumps({'tree': {'kind': 'Document', 'span': [0, len(text)], "
+                     "'children': []}}))\n"
+                     "sys.stdout.flush()\n")
+# a stand-in that leaves a grandchild running after a normal exit: it opens the fifo beside it for
+# writing (the self-test holds the read end), hands that descriptor to a grandchild in its process group
+# that sleeps for a bounded time, records the grandchild's pid, writes a complete document and exits 0;
+# the fifo reads end of file only once the grandchild is gone
+STAND_IN_GRANDCHILD = (
+    "held = os.open(os.path.join(here, 'fifo'), os.O_WRONLY | os.O_NONBLOCK)\n"
+    "grandchild = subprocess.Popen([sys.executable, '-I', '-c', 'import time; time.sleep(30)'],\n"
+    "                              stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,\n"
+    "                              stderr=subprocess.DEVNULL, pass_fds=(held,))\n"
+    "with open(os.path.join(here, 'pid'), 'w') as handle:\n"
+    "    handle.write(str(grandchild.pid))\n" + STAND_IN_DOCUMENT)
+# how long a grandchild may take to be gone once the call returns, and how long a cleanup kill may take
+GRANDCHILD_WAIT_SECONDS = 5.0
+# a stand-in that records the names in its environment beside it, then writes a complete document
+STAND_IN_ENVIRON = ("with open(os.path.join(here, 'environ'), 'w') as handle:\n"
+                    "    handle.write(chr(10).join(sorted(os.environ)))\n" + STAND_IN_DOCUMENT)
+# a variable set in the self-test's own environment around the environment vector; the child must not see it
+ENVIRON_MARK = "INPUT_DECLARATIONS_SELFTEST_MARK"
+# the stand-in parent module of the child-import vectors: the child under test imports it as its parent
+# and serializes through it, so the document it returns names which copy it imported ("beside" for the
+# copy beside the child, "decoy" for the one installed in site-packages)
+STAND_IN_PARENT = ("class DeclarationError(Exception):\n"
+                   "    pass\n\n\n"
+                   "def _parse_document(text):\n"
+                   "    return text\n\n\n"
+                   "def _serialize(text):\n"
+                   "    return {{'kind': 'Document', 'span': [0, len(text)], 'children': [], 'from': {!r}}}\n")
+
+
+def _deep_tree_body(levels):
+    """The body of a stand-in that writes a document of `levels` nested Emphasis nodes under one paragraph
+    (levels + 3 deep, the document being level 1 and the innermost RawText the last), built as text so no
+    encoder recursion bounds it."""
+    return ("leaf = json.dumps({'kind': 'RawText', 'text': 'x'})\n"
+            "opening, closing = '{\"kind\": \"Emphasis\", \"children\": [', ']}'\n"
+            "nested = opening * %d + leaf + closing * %d\n"
+            "document = json.dumps({'kind': 'Document', 'span': [0, len(text)],\n"
+            "                       'children': [{'kind': 'Paragraph', 'children': ['NESTED']}]})\n"
+            "sys.stdout.write('{\"tree\": ' + document.replace('\"NESTED\"', nested) + '}')\n" % (levels, levels))
+
+
+def _stand_in_read(directory, body, text="Input notes.\n"):
+    """read()'s outcome on `text` with the parse child replaced by a stand-in script (STAND_IN_PREFIX, then
+    `body`) written in `directory`: ("ok", (inputs, bad)), "DeclarationError", or the name of any other
+    exception that escaped, so a reverted guard shows what it lets through."""
+    path = os.path.join(directory, "stand_in_child.py")
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write(STAND_IN_PREFIX + body)
+    saved = _input_declarations._CHILD_PATH
+    _input_declarations._CHILD_PATH = path
+    try:
+        return ("ok", _input_declarations.read(text))
+    except _input_declarations.DeclarationError:
+        return "DeclarationError"
+    except Exception as caught:   # named, never swallowed: the escape the vector exists to show
+        return type(caught).__name__
+    finally:
+        _input_declarations._CHILD_PATH = saved
+
+
+def _writers_gone(reader, seconds):
+    """True once a non-blocking read of the fifo descriptor `reader` reads end of file (every writer has
+    closed it) within `seconds`; False while a writer still holds it open."""
+    deadline = time.monotonic() + seconds
+    while True:
+        try:
+            if os.read(reader, 1) == b"":
+                return True
+        except BlockingIOError:
+            pass
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.05)
+
+
+def _grandchild_outcome(base):
+    """(read()'s outcome, whether the grandchild a normally exiting stand-in left running is gone within
+    GRANDCHILD_WAIT_SECONDS of the call's return) for STAND_IN_GRANDCHILD, in a new directory under
+    `base`. A grandchild still running then is killed here by the pid its stand-in recorded (it holds the
+    fifo, so that pid is still its own), so none outlives the self-test."""
+    directory = tempfile.mkdtemp(dir=base)
+    fifo = os.path.join(directory, "fifo")
+    os.mkfifo(fifo)
+    reader = os.open(fifo, os.O_RDONLY | os.O_NONBLOCK)
+    try:
+        outcome = _stand_in_read(directory, STAND_IN_GRANDCHILD)
+        gone = _writers_gone(reader, GRANDCHILD_WAIT_SECONDS)
+        if not gone:
+            with open(os.path.join(directory, "pid"), encoding="ascii") as handle:
+                os.kill(int(handle.read()), signal.SIGKILL)
+            _writers_gone(reader, GRANDCHILD_WAIT_SECONDS)
+    finally:
+        os.close(reader)
+    return outcome, gone
+
+
+def _environment_outcome(base):
+    """(read()'s outcome, whether the stand-in child saw ENVIRON_MARK) with ENVIRON_MARK set in this
+    process's environment around the call, in a new directory under `base`."""
+    directory = tempfile.mkdtemp(dir=base)
+    with _environ(**{ENVIRON_MARK: "1"}):
+        outcome = _stand_in_read(directory, STAND_IN_ENVIRON)
+    with open(os.path.join(directory, "environ"), encoding="utf-8") as handle:
+        names = handle.read().split("\n")
+    return outcome, ENVIRON_MARK in names
+
+
+def _child_import_outcomes(base, source):
+    """For the parse child source `source`, written beside a stand-in parent ("beside") and run under a
+    minimal virtual environment (a pyvenv.cfg beside a link to this interpreter) whose site-packages holds
+    a decoy parent ("decoy"): which parent the child read through, first with the decoy installed on the
+    module path, then with a site .pth line importing the decoy before the child runs. Each is "beside",
+    "decoy", "refused" (the child's declaration_error) or "failed"; a source of None (a flip that could
+    not be built) is "not built"."""
+    if source is None:
+        return ("not built", "not built")
+    directory = tempfile.mkdtemp(dir=base)
+    interpreter = os.path.realpath(sys.executable)
+    venv_python = os.path.join(directory, "venv", "bin", "python3")
+    site = os.path.join(directory, "venv", "lib", "python{}.{}".format(*sys.version_info[:2]), "site-packages")
+    tools = os.path.join(directory, "tools")
+    for path in (os.path.dirname(venv_python), site, tools):
+        os.makedirs(path)
+    os.symlink(interpreter, venv_python)
+    for path, text in ((os.path.join(directory, "venv", "pyvenv.cfg"),
+                        "home = {}\ninclude-system-site-packages = false\n".format(os.path.dirname(interpreter))),
+                       (os.path.join(tools, "_input_declarations_child.py"), source),
+                       (os.path.join(tools, "_input_declarations.py"), STAND_IN_PARENT.format("beside")),
+                       (os.path.join(site, "_input_declarations.py"), STAND_IN_PARENT.format("decoy"))):
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(text)
+    outcomes = []
+    for preload in (False, True):
+        if preload:
+            with open(os.path.join(site, "preload.pth"), "w", encoding="utf-8") as handle:
+                handle.write("import _input_declarations\n")
+        try:
+            done = subprocess.run([venv_python, "-I", "-B", os.path.join(tools, "_input_declarations_child.py")],
+                                  input=b"x", stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env={},
+                                  timeout=120)
+        except subprocess.TimeoutExpired:
+            outcomes.append("failed")
+            continue
+        try:
+            result = json.loads(done.stdout.decode("utf-8"))
+        except ValueError:
+            result = None
+        if done.returncode != 0 or not isinstance(result, dict):
+            outcomes.append("failed")
+        elif isinstance(result.get("tree"), dict):
+            outcomes.append(result["tree"].get("from", "failed"))
+        else:
+            outcomes.append("refused" if "declaration_error" in result else "failed")
+    return tuple(outcomes)
 
 
 def _preflight_repo(base):
@@ -3764,8 +5107,158 @@ def _child_commit(repo, commit):
                            "maintenance.auto=false", "commit-tree", commit + "^{tree}", "-p", commit, "-m", "child"],
                           check=True, capture_output=True, timeout=60, env=env)
     return made.stdout.decode("ascii").strip()
-# The child caps its address space at 1 GiB, then times evaluate() on 128 KiB and 1 MiB briefs, each a prefix,
-# one unit repeated, and a suffix.
+
+
+# P7 fixture content: the old gates manifest holds a residue with a TOML-escaped CRLF (its decoded value
+# holds a real carriage return and line feed) and a row with no residue field; the module holds the needle
+# inside one function, a different needle outside every definition, and one inside a nested method
+P7_GATES_OLD = ('[[gate]]\nid = "g1"\nresidue = "old gate residue win\\r\\nend"\n\n'
+                '[[gate]]\nid = "noresidue"\nscript = "x"\n')
+P7_GATES_NEW = '[[gate]]\nid = "g1"\nresidue = "new gate residue"\n'
+P7_GATES_INVALID = "[[gate]\n"
+P7_GATES_DUPLICATE = '[[gate]]\nid = "g1"\nresidue = "a"\n\n[[gate]]\nid = "g1"\nresidue = "b"\n'
+P7_HOOKS = '[[hook]]\nid = "h1"\nresidue = "old hook residue"\n'
+P7_MODULE_OLD = ('OUTSIDE = "needle outside symbol"\n\n\ndef outer():\n    return "needle inside old"\n\n\n'
+                 'class Box:\n    def method(self):\n        return "boxed needle"\n')
+P7_MODULE_NEW = P7_MODULE_OLD.replace("needle inside old", "needle inside new")
+# sources of the fifth fixture commit, each with a needle inside target() and another after it, and what
+# each row pins: a lone CR line end before the def, a lone CR inside a string literal, only lone CR line
+# ends, and CRLF line ends (the parser's line split); latin_first, valid UTF-8 whose first line declares
+# latin-1 (the cookie refusal itself); latin_second, bytes that are not UTF-8 declaring latin-1 on the
+# second line after a lone-CR shebang (the strict decode and the second-line cookie check each refuse it,
+# so it pins the second-line cookie refusal only together with a weakened decode, and with the decode
+# weakened alone the cookie still refuses it, so it does not pin the decode either); latin_body and
+# latin_body_utf8_cookie, bytes that are not UTF-8 only after the second line, with no cookie and with a
+# UTF-8 cookie (no cookie check refuses them, so only the strict decode does: they pin it); gbk_cr_blank
+# and gbk_shebang, valid UTF-8 declaring gbk on the second line after a lone-CR blank line and after a
+# shebang (the second-line cookie refusal, found only when the first two lines are split at a lone CR too
+# and the second is read; gbk_shebang, with the revert/p7-cookie-second-line-red flip that reads only the
+# first line, is the single-mutation pin of the second-line check); a UTF-8 cookie in two spellings (read,
+# not refused); and source ast cannot parse
+P7_TAIL = b"\n\n\nAFTER = 'needle after'\n"
+P7_SOURCES = {
+    "pkg/cr_line.py": b"def first():\r    return 1\n\n\ndef target():\n    return 'needle target'\n" + P7_TAIL,
+    "pkg/cr_string.py": (b"def first():\n    return '''a\rb'''\n\n\ndef target():\n    return 'needle target'\n"
+                         + P7_TAIL),
+    "pkg/cr_only.py": b"X = 'needle outside'\rdef target():\r    return 'needle target'\r",
+    "pkg/crlf.py": b"def target():\r\n    return 'needle target'\r\n\r\n\r\nAFTER = 'needle after'\r\n",
+    "pkg/latin_first.py": (b"# -*- coding: latin-1 -*-\ndef target():\n    return '" + b"\xc3\xa9" * 20
+                           + b"'\n" + P7_TAIL),
+    "pkg/latin_second.py": (b"#!/usr/bin/env python3\r# -*- coding: latin-1 -*-\ndef target():\n    return '"
+                            + b"\xe9" * 40 + b"'\n" + P7_TAIL),
+    "pkg/latin_body.py": b"def target():\n    return 'needle target'\nY = '\xe9'\n" + P7_TAIL,
+    "pkg/latin_body_utf8_cookie.py": (b"# coding: utf-8\ndef target():\n    return 'needle target'\nY = '\xe9'\n"
+                                      + P7_TAIL),
+    "pkg/utf8_cookie.py": (b"# -*- coding: utf-8 -*-\ndef target():\n    return 'needle target \xc3\xa9'\n"
+                           + P7_TAIL),
+    "pkg/gbk_cr_blank.py": b"\r# coding: gbk\ndef target():\n    return 'needle target'\n" + P7_TAIL,
+    "pkg/gbk_shebang.py": (b"#!/usr/bin/env python3\n# coding: gbk\ndef target():\n    return 'needle target'\n"
+                           + P7_TAIL),
+    "pkg/utf8_spelt.py": b"# coding=utf8\ndef target():\n    return 'needle target'\n" + P7_TAIL,
+    "pkg/broken.py": b"def target(:\n    return 'needle target'\n",
+}
+P7_BIG_HEAD = b"def big():\n    return 'needle big'\n"
+
+
+def _p7_commit(repo, env, message):
+    """Stage everything and commit in the P7 fixture repository; the new commit's full id."""
+    subprocess.run(["git", "-C", str(repo), "-c", "gc.auto=0", "-c", "gc.autoDetach=false", "-c",
+                    "maintenance.auto=false", "add", "-A"], check=True, capture_output=True, timeout=60, env=env)
+    subprocess.run(["git", "-C", str(repo), "-c", "gc.auto=0", "-c", "gc.autoDetach=false", "-c",
+                    "maintenance.auto=false", "commit", "-q", "-m", message],
+                   check=True, capture_output=True, timeout=60, env=env)
+    made = subprocess.run(["git", "-C", str(repo), "-c", "gc.auto=0", "-c", "gc.autoDetach=false", "-c",
+                           "maintenance.auto=false", "rev-parse", "HEAD"],
+                          check=True, capture_output=True, timeout=60, env=env)
+    return made.stdout.decode("ascii").strip()
+
+
+def p7_big_source(size):
+    """A Python source of exactly `size` bytes whose def big() holds the needle, padded by one comment line."""
+    return P7_BIG_HEAD + b"#" * (size - len(P7_BIG_HEAD) - 1) + b"\n"
+
+
+def _p7_repo(base):
+    """(repo, [five commit ids], tag-object pin, replaced commit) of a fixture repository for P7: the first
+    commit holds the manifests and a module the anchors read, the second changes their content (so a later
+    HEAD differs from the first pin), the third makes the gates manifest invalid TOML and the fourth gives it
+    two rows with one id. The fifth adds the P7_SOURCES, sources of P7_READ_MAX_BYTES less one, exactly and plus one bytes, a
+    symbolic link and a submodule entry. A refs/replace entry then substitutes the first commit's module blob with the
+    second's, which a read that honoured replace objects would take at the first pin; an annotated tag of the
+    first commit, returned as the tag-object pin, gets a refs/replace entry pointing it at an annotated tag
+    of the second commit, which a resolution that honoured replace objects would peel to the second commit.
+    Last, a commit outside every branch with the first commit's tree, returned as the replaced commit, gets a
+    refs/replace entry pointing it at a commit with the fifth commit's tree except that pkg/mod.py holds the
+    P7_READ_MAX_BYTES plus one byte source, so a path the fifth adds is absent at the replaced commit but
+    found by an existence probe or an ls-tree read that honoured replace objects, and the replaced commit's
+    small pkg/mod.py is listed, or read, as oversized by an ls-tree or a blob read that honoured them."""
+    repo = base / "p7-repo"
+    os.makedirs(repo / ".aiqt" / "core" / "gates")
+    os.makedirs(repo / ".aiqt" / "core" / "hooks")
+    os.makedirs(repo / "pkg")
+    env = _git_fixture_env.git_fixture_env(
+        GIT_AUTHOR_NAME="fixture", GIT_AUTHOR_EMAIL="fixture@example.invalid",
+        GIT_COMMITTER_NAME="fixture", GIT_COMMITTER_EMAIL="fixture@example.invalid")
+    subprocess.run(["git", "-c", "gc.auto=0", "-c", "gc.autoDetach=false", "-c", "maintenance.auto=false",
+                    "init", "-q", str(repo)], check=True, capture_output=True, timeout=60, env=env)
+    gates = repo / ".aiqt" / "core" / "gates" / "manifest.toml"
+    hooks = repo / ".aiqt" / "core" / "hooks" / "manifest.toml"
+    module = repo / "pkg" / "mod.py"
+    commits = []
+    for message, gates_text, module_text in (("old", P7_GATES_OLD, P7_MODULE_OLD),
+                                             ("new", P7_GATES_NEW, P7_MODULE_NEW),
+                                             ("invalid", P7_GATES_INVALID, P7_MODULE_NEW),
+                                             ("duplicate", P7_GATES_DUPLICATE, P7_MODULE_NEW)):
+        with open(gates, "w", encoding="utf-8") as handle:
+            handle.write(gates_text)
+        with open(hooks, "w", encoding="utf-8") as handle:
+            handle.write(P7_HOOKS)
+        with open(module, "w", encoding="utf-8", newline="") as handle:
+            handle.write(module_text)
+        commits.append(_p7_commit(repo, env, message))
+    sizes = dict(inside=P7_READ_MAX_BYTES - 1, at=P7_READ_MAX_BYTES, over=P7_READ_MAX_BYTES + 1)
+    sources = dict(P7_SOURCES, **dict(("pkg/big_{}.py".format(name), p7_big_source(size))
+                                      for name, size in sizes.items()))
+    for rel, content in sources.items():
+        with open(repo / rel, "wb") as handle:
+            handle.write(content)
+    os.symlink("mod.py", repo / "pkg" / "link.py")
+    git = ["git", "-C", str(repo), "-c", "gc.auto=0", "-c", "gc.autoDetach=false", "-c", "maintenance.auto=false"]
+    subprocess.run(git + ["add", "-A"], check=True, capture_output=True, timeout=60, env=env)
+    subprocess.run(git + ["update-index", "--add", "--cacheinfo", "160000,{},pkg/sub".format(commits[0])],
+                   check=True, capture_output=True, timeout=60, env=env)
+    subprocess.run(git + ["commit", "-q", "-m", "entries"], check=True, capture_output=True, timeout=60, env=env)
+    commits.append(subprocess.run(git + ["rev-parse", "HEAD"], check=True, capture_output=True, timeout=60,
+                                  env=env).stdout.decode("ascii").strip())
+    blobs = [subprocess.run(git + ["rev-parse", commit + ":pkg/mod.py"], check=True, capture_output=True,
+                            timeout=60, env=env).stdout.decode("ascii").strip() for commit in commits[:2]]
+    subprocess.run(git + ["replace", blobs[0], blobs[1]], check=True, capture_output=True, timeout=60, env=env)
+    tags = []
+    for name, commit in (("pin-old", commits[0]), ("pin-new", commits[1])):
+        subprocess.run(git + ["tag", "-a", "-m", name, name, commit],
+                       check=True, capture_output=True, timeout=60, env=env)
+        tags.append(subprocess.run(git + ["rev-parse", "refs/tags/" + name], check=True, capture_output=True,
+                                   timeout=60, env=env).stdout.decode("ascii").strip())
+    subprocess.run(git + ["replace", tags[0], tags[1]], check=True, capture_output=True, timeout=60, env=env)
+    trees = [subprocess.run(git + ["rev-parse", commit + "^{tree}"], check=True, capture_output=True, timeout=60,
+                            env=env).stdout.decode("ascii").strip() for commit in (commits[0], commits[4])]
+    over = subprocess.run(git + ["rev-parse", commits[4] + ":pkg/big_over.py"], check=True, capture_output=True,
+                          timeout=60, env=env).stdout.decode("ascii").strip()
+    index_env = dict(env, GIT_INDEX_FILE=str(base / "p7-replacement-index"))
+    subprocess.run(git + ["read-tree", trees[1]], check=True, capture_output=True, timeout=60, env=index_env)
+    subprocess.run(git + ["update-index", "--cacheinfo", "100644,{},pkg/mod.py".format(over)],
+                   check=True, capture_output=True, timeout=60, env=index_env)
+    trees[1] = subprocess.run(git + ["write-tree"], check=True, capture_output=True, timeout=60,
+                              env=index_env).stdout.decode("ascii").strip()
+    made = [subprocess.run(git + ["commit-tree", "-m", message, tree], check=True, capture_output=True,
+                           timeout=60, env=env).stdout.decode("ascii").strip()
+            for message, tree in (("genuine paths", trees[0]), ("replacement paths", trees[1]))]
+    subprocess.run(git + ["replace", made[0], made[1]], check=True, capture_output=True, timeout=60, env=env)
+    return repo, commits, tags[0], made[0]
+# The child caps its address space at 1 GiB, then times evaluate() on 8 KiB and 64 KiB briefs (the
+# larger exactly at the shared reading's text ceiling), each a lead that forces the parsed-document path
+# (it holds "nput", so the ASCII fast path never answers it), a prefix, one unit repeated, and a suffix.
+# A refusal (a prescan or deadline cannot-evaluate) is still a bounded evaluation and is timed as one.
 LINEAR_CHILD = (
     "import resource, sys, time\n"
     "hard = resource.getrlimit(resource.RLIMIT_AS)[1]\n"
@@ -3775,19 +5268,23 @@ LINEAR_CHILD = (
     "import check_brief_capability as m\n"
     "table = m.parse_table(m.TABLE_FIXTURE.encode('utf-8'))\n"
     "prefix, unit, suffix = sys.argv[2:5]\n"
-    "for size in (1 << 17, 1 << 20):\n"
-    "    body = size - len(prefix) - len(suffix)\n"
-    "    data = (prefix + (unit * (body // len(unit) + 1))[:body] + suffix).encode('utf-8')\n"
+    "lead = 'Input notes.\\n\\n'\n"
+    "for size in (1 << 13, 1 << 16):\n"
+    "    body = size - len(lead) - len(prefix) - len(suffix)\n"
+    "    data = (lead + prefix + (unit * (body // len(unit) + 1))[:body] + suffix).encode('utf-8')\n"
     "    began = time.perf_counter()\n"
-    "    m.evaluate(data, 'gamma', table)\n"
+    "    try:\n"
+    "        m.evaluate(data, 'gamma', table)\n"
+    "    except m.CannotEvaluate:\n"
+    "        pass\n"
     "    print(time.perf_counter() - began)\n")
 
 
 def _linear(unit, prefix="", suffix=""):
-    """True when evaluate() on a 1 MiB brief (`prefix`, `unit` repeated, `suffix`) takes at most LINEAR_FACTOR
-    times as long as on the 128 KiB one plus LINEAR_SLACK seconds, both timed in a child capped at 1 GiB
-    (RLIMIT_AS) and stopped after LINEAR_TIMEOUT seconds; otherwise what went wrong. The child must exit 0
-    and print exactly two finite, nonnegative times."""
+    """True when evaluate() on a 64 KiB brief (a parse-forcing lead, `prefix`, `unit` repeated, `suffix`)
+    takes at most LINEAR_FACTOR times as long as on the 8 KiB one plus LINEAR_SLACK seconds, both timed
+    in a child capped at 1 GiB (RLIMIT_AS) and stopped after LINEAR_TIMEOUT seconds; otherwise what went
+    wrong. The child must exit 0 and print exactly two finite, nonnegative times."""
     try:
         done = subprocess.run([sys.executable, "-I", "-B", "-c", LINEAR_CHILD, str(Path(__file__).resolve().parent),
                                prefix, unit, suffix], capture_output=True, text=True, timeout=LINEAR_TIMEOUT)
@@ -3800,7 +5297,7 @@ def _linear(unit, prefix="", suffix=""):
     if done.returncode != 0 or not all(0.0 <= value < float("inf") for value in (small, large)):
         return "child exit {}, output {!r}: {}".format(done.returncode, done.stdout.strip()[-80:],
                                                       done.stderr.strip()[-200:])
-    return large <= LINEAR_FACTOR * small + LINEAR_SLACK or "1 MiB took {:.3f} s, 128 KiB {:.3f} s".format(
+    return large <= LINEAR_FACTOR * small + LINEAR_SLACK or "64 KiB took {:.3f} s, 8 KiB {:.3f} s".format(
         large, small)
 
 
@@ -4209,6 +5706,144 @@ class _NoFormatRemoval:
         return "Cc" if ch in "\x00" else ("Zs" if ch.isspace() else "Ll")
 
 
+def _running_nesting_refused(text):
+    """The self-test's oracle: a frozen copy of _input_declarations._nesting_refused before it kept a held
+    depth (the running depth alone, which every fence and placement decision reads), so the self-test
+    can show the held depth only adds refusals. Its statements are that revision's, with the module
+    prefix added, the comments dropped and a short reason; never edited to follow the prescan. It reads
+    the module's helpers and seams, so the self-test calls it with none of them patched."""
+    module = _input_declarations
+    running = 0
+    after_blank = True
+    placed = module.NESTING_FENCES
+    fence = None
+    opaque = set()
+    for number, line in enumerate(text.split("\n"), 1):
+        closing = False
+        if placed and fence is not None:
+            held = module._fence_holds(fence, line)
+            if held == "content":
+                continue
+            fence = None
+            placed = held is not False
+            closing = held == "closed"
+        if not line.strip():
+            after_blank = True
+            opaque = {kind for kind in opaque if not isinstance(kind, str)
+                      or (kind == "label" and module.NESTING_LABELS) or (kind in ("label", "link") and line)}
+            continue
+        markers, columns, position = module._lead_shape(line)
+        if placed and not closing:
+            if module.FENCE_SHAPE_RE.match(line, position):
+                fence = False if opaque else module._fence_opening(line, position, markers, running, after_blank)
+                placed = fence is not False
+                fence = fence or None
+            else:
+                opaque = {kind for kind in opaque if isinstance(kind, str) or not kind.search(line)}
+                if "label" in opaque:
+                    ended = module.LABEL_END_RE.match(line)
+                    if ended is not None:
+                        opaque.discard("label")
+                        if ended.group(1) == "]":
+                            opaque.add("link")
+                started = module._opaque_start(line[position:])
+                if started is not None and (isinstance(started, str) or not started.search(line)):
+                    opaque.add(started)
+        if module.NESTING_RESETS and markers == 0 and columns < 2 \
+                and (after_blank or module.BLOCK_START_RE.match(line)):
+            running = 0
+        after_blank = False
+        depth = min(running, columns // 2) + markers
+        if depth > module.MAX_NESTING_DEPTH:
+            return number, "nesting"
+        if depth > running:
+            running = depth
+    return None
+
+
+def _nesting_sample(seed, count):
+    """`count` texts for the nesting prescan's property checks, drawn by a random.Random(seed): six
+    optional parts in order (a list with a link reference definition held on its last level, a blank
+    line, fence lines, a list, an item fence or a margin line, a list from the margin or from the middle
+    list's depth), each followed at random by a stray line from a fixed set, so the same texts come back
+    on every run."""
+    rungs = lambda start, stop: "".join("  " * level + "- a\n" for level in range(start, stop))  # noqa: E731
+    stray = ("\n", "  \n", "x\n", "'\n", "]: /u\n", "```\n", "  ```\n", "   ~~~\n", "- ```\n", "~~~\n", "> ```\n",
+             "[x\n", "<div>\n", "# h\n", "\t```\n", "    ```\n", "\n  ```\n```\n", "\n    ```\n", "- ```\n\nx\n",
+             "- ~~~\n  \n~~~\n")
+    definitions = ("- [x\n\ny\n]: /u\n", "- [x]: /u 't\n  \ny\n'\n", "- [x]: /u\n\ny\n", "- [x\n")
+    fences = ("", "  ```\n```\n", "    ```\n", "   ~~~\n~~~\n", "  ```\n", "- ```\n", "```\n", "> ```\n")
+    items = ("", "- ```\n\nx\n", "- ~~~\n  \nx\n", "1. ```\n\nx\n", "- ```\n", "x\n")
+    chooser = random.Random(seed)
+    texts = []
+    for _ in range(count):
+        held, middle = chooser.randint(0, 20), chooser.randint(0, 20)
+        slots = (rungs(0, held) + chooser.choice(("", "  " * held + chooser.choice(definitions))),
+                 chooser.choice(("", "\n", "  \n")), chooser.choice(fences), rungs(0, middle),
+                 chooser.choice(items), rungs(chooser.choice((0, middle)), chooser.randint(0, 26)))
+        parts = []
+        for slot in slots:
+            parts.append(slot)
+            if chooser.random() < 0.3:
+                parts.append(chooser.choice(stray))
+        texts.append("".join(parts))
+    return texts
+
+
+def _p6_input_root(make=tempfile.mkdtemp):
+    """The P6 fixture directory {T}, drawn through `make` (tempfile.mkdtemp) by
+    _input_declarations.verbatim_tempdir so the INPUT lines that name it render it exactly as written; a
+    root or draw the reading would render differently is CannotEvaluate. The self-test draws {T} here
+    through a stand-in `make` whose first draw holds marks, and checks the draws that call made."""
+    return Path(_input_declarations.verbatim_tempdir("aiqt-brief-input-", CannotEvaluate, make=make))
+
+
+class _DrawCeiling(Exception):
+    """Raised by the stand-in draw of _verbatim_refusal once the helper asks for more draws than it may
+    make, so a helper that keeps drawing stops there instead of looping."""
+
+
+def _verbatim_refusal(attempts, root=None):
+    """What _input_declarations.verbatim_tempdir does on its two refusal paths: every draw holds a
+    rendering mark (`attempts` draws allowed), or, with `root`, the temporary root itself holds one.
+    Returns (outcome, draws, gone): outcome is "refused" when the helper raised the error it was passed,
+    "ceiling" when it asked for a draw past `attempts` (or any draw under a marked root), and "returned"
+    when it handed a directory back; draws counts the draws it asked for; gone is whether every directory
+    drawn is absent afterwards. The stand-in draws a real directory whose name holds marks, and every
+    leftover is removed after it is observed."""
+
+    class Refused(Exception):
+        pass
+
+    draws, made = [], []
+
+    def marked(prefix):
+        draws.append(prefix)
+        if root is not None or len(draws) > attempts:
+            raise _DrawCeiling()
+        directory = tempfile.mkdtemp(prefix=prefix + "_", suffix="_")
+        made.append(directory)
+        return directory
+
+    saved = tempfile.tempdir
+    try:
+        if root is not None:
+            tempfile.tempdir = root
+        try:
+            _input_declarations.verbatim_tempdir("aiqt-brief-refusal-", Refused, make=marked, attempts=attempts)
+            outcome = "returned"
+        except Refused:
+            outcome = "refused"
+        except _DrawCeiling:
+            outcome = "ceiling"
+    finally:
+        tempfile.tempdir = saved
+        gone = not any(os.path.lexists(directory) for directory in made)
+        for directory in made:
+            shutil.rmtree(directory, ignore_errors=True)
+    return outcome, len(draws), gone
+
+
 def self_test(report_path=None):
     if report_path is not None:
         # The execution report is finalized at interpreter exit, after this run's cleanup
@@ -4237,6 +5872,17 @@ def self_test(report_path=None):
           [_table_outcome(TABLE_FIXTURE.replace('reads-outside-workdir = "no"\n', "")),
            _table_outcome(TABLE_FIXTURE.replace('reads-outside-workdir = "no"', 'reads-outside-workdir = "maybe"')),
            _table_outcome(TABLE_FIXTURE.replace('reads-outside-workdir = "no"', "reads-outside-workdir = false"))],
+          ["CannotEvaluate"] * 3)
+    try:
+        git_write = dict((name, row["git-write"]) for name, row in load_table(ROOT / TABLE_REL).items())
+    except CannotEvaluate as exc:
+        git_write = str(exc)
+    check("table/shipped-git-write-undeclared", git_write,
+          dict(claude="undeclared", codex="undeclared", gemini="undeclared"))
+    check("table/git-write-missing-or-malformed-2",
+          [_table_outcome(TABLE_FIXTURE.replace('git-write = "undeclared"\n', "", 1)),
+           _table_outcome(TABLE_FIXTURE.replace('git-write = "undeclared"', 'git-write = "maybe"', 1)),
+           _table_outcome(TABLE_FIXTURE.replace('git-write = "undeclared"', "git-write = false", 1))],
           ["CannotEvaluate"] * 3)
     check("table/fixture-loads", _table_outcome(TABLE_FIXTURE), ["alpha", "beta", "gamma"])
     check("table/unknown-key-2",
@@ -4289,8 +5935,12 @@ def self_test(report_path=None):
           (1, [("R1", "ADVISORY"), ("S2", "HARD")]))
     check("structure/indented-fence-refused",
           _outcome("1. Steps for the check:\n\n    ```bash\n    python3 t.py\n    ```\n"), (1, [("S1", "HARD")]))
-    check("structure/bom-refused", _outcome(BOM_BRIEF), (1, [("S1", "HARD")]))
+    # a format character outside code refuses the whole brief (exit 2) before any rule runs; inside a
+    # fence or a code span it is removed, so the fenced command, and the code-span command a zero-width
+    # space tried to split, are read and S1 or S3 fires
+    check("structure/bom-refused", _outcome(BOM_BRIEF), "CannotEvaluate")
     check("structure/zero-width-split-refused", _outcome(ZERO_WIDTH_SPLIT), (1, [("S3", "HARD")]))
+    check("structure/fenced-format-removed", _outcome(FENCED_ZERO_WIDTH), (1, [("S1", "HARD")]))
     check("structure/indented-code-refused", _outcome("    git show HEAD\n"), (1, [("S3", "HARD")]))
     # ---------- S1: an executable fence ----------
     check("s1/bash-fence-refused", _outcome(BASH_FENCE), (1, [("S1", "HARD")]))
@@ -4580,6 +6230,387 @@ def self_test(report_path=None):
     check("cannot/blank-2", _outcome(" \n\n"), "CannotEvaluate")
     check("cannot/nul-blank-2", _outcome(b"\x00\x00\n"), "CannotEvaluate")
     check("cannot/zero-width-blank-2", _outcome(chr(0x200B) + chr(0xFEFF) + "\n"), "CannotEvaluate")
+    # the shared reading's text ceiling, judged up front on every brief: at the ceiling the brief is
+    # evaluated (on the parse-free fast path and through the full parse alike), one byte over it is
+    # refused whatever the brief holds, a parse-free pure-ASCII text and a parse-forcing one alike
+    at_ceiling = "a" * _input_declarations.MAX_TEXT_BYTES
+    parse_lead = "Input notes.\n\n"
+    check("cannot/text-ceiling-boundary",
+          (_outcome(at_ceiling)[0],
+           _outcome(parse_lead + "a" * (_input_declarations.MAX_TEXT_BYTES - len(parse_lead)))[0],
+           _outcome(at_ceiling + "a"),
+           _outcome(parse_lead + at_ceiling)),
+          (0, 0, "CannotEvaluate", "CannotEvaluate"))
+    # the nesting prescan refuses up front, whatever else the brief holds: the same deep lead in a
+    # parse-free ASCII brief and beside a non-ASCII character, a marker run on one line, and marker lines
+    # that march deeper line by line
+    deep_line = "1) " * 150 + "x\n"
+    check("cannot/nesting-depth-2", [_outcome(text) for text in (
+        deep_line, "Café.\n\n" + deep_line, "> " * 21 + "x\n",
+        "".join("  " * level + "- a\n" for level in range(21)))], ["CannotEvaluate"] * 4)
+    # the stated over-counts stand: a second 20-marker quote line re-counts its markers past the levels
+    # its indentation continues; after a blank line, a two-column line continues a deep list, so a deep
+    # indent after it still counts; an ordered marker run one past the ceiling is refused like the others
+    tall_list = "".join("  " * level + "- a\n" for level in range(20))
+    check("cannot/nesting-overcount-2", [_outcome(text) for text in (
+        "> " * 20 + "x\n" + "> " * 20 + "y\n",
+        tall_list + "\n  x\n" + " " * 40 + "- x\n",
+        "1. " * 21 + "x\n")], ["CannotEvaluate"] * 3)
+    # the running depth follows block structure: a block is read as it reads alone, whatever stood
+    # earlier in the brief, where a new top-level block starts (after a blank line, a margin line with no
+    # markers and under two columns; anywhere, a margin ATX heading or fence, which breaks a paragraph)
+    deep_list = "".join("  " * level + "- a\n" for level in range(5))
+    deep_yaml = ("```yaml\n"
+                 + "".join("        " * level + "- k%d:\n" % level for level in range(18)) + "```\n")
+    wide_fence = "```\n" + " " * 40 + "- x\n```\n"
+    check("structure/nesting-block-local", [read_inputs(parse_lead + text) for text in (
+        deep_yaml, deep_list + "\n# Notes\n\n" + deep_yaml,
+        wide_fence, tall_list + "\n# Notes\n\n" + wide_fence,
+        tall_list + "# Notes\n" + wide_fence,
+        tall_list + "\nplain prose.\n" + wide_fence)], [([], [])] * 6)
+    # a fenced code block's content opens nothing, so the prescan skips it where the parser's FencedCode
+    # opens and closes: a quoted diff whose marker lines march deeper line by line and end on a line
+    # indented 51 spaces (a real brief's shape) is read in a backtick fence, a tilde fence closed by a
+    # longer run, an unclosed fence (to the text's end), a fence on a numbered item's continuation line, a
+    # fence on a bullet's own line, and a four-backtick fence holding a three-backtick line
+    diff_body = "".join(" " * (2 * level) + "-+"[level % 2] + " x\n" for level in range(30)) + " " * 51 + "- y\n"
+    indented_body = lambda indent: "".join(indent + line + "\n" for line in diff_body.splitlines())  # noqa: E731
+    fenced_diffs = (
+        "```diff\n" + diff_body + "```\n",
+        "~~~ diff\n" + diff_body + "~~~~\nafter.\n",
+        "```\n" + diff_body,
+        "1. Apply this:\n\n   ```diff\n" + indented_body("   ") + "   ```\n",
+        "- ```diff\n" + indented_body("  ") + "  ```\n",
+        "````\n```\n" + diff_body + "````\n")
+    check("structure/nesting-fence-skipped", [read_inputs(parse_lead + text) for text in fenced_diffs],
+          [([], [])] * len(fenced_diffs))
+
+    def fenced_at(text, needle):
+        """Whether the parsed document reads the last `needle` in `text` inside a FencedCode block."""
+        at = text.rindex(needle)
+        spans = []
+
+        def walk(node):
+            for child in node.get("children") or []:
+                if isinstance(child, dict):
+                    if child.get("kind") == "FencedCode" and child.get("span"):
+                        spans.append(child["span"])
+                    walk(child)
+
+        walk(_input_declarations._parse(text))
+        return any(start <= at < end for start, end in spans)
+
+    # the reader agrees: in each of those briefs the parsed document holds the 51-space line in a fence
+    check("structure/nesting-fence-reader-agrees",
+          [fenced_at(parse_lead + text, " " * 51 + "- y") for text in fenced_diffs], [True] * len(fenced_diffs))
+    # a fence placed on a numbered item's own line takes ASCII digits only: the same quoted diff after
+    # "1." is skipped as fence content and read clean, while after an Arabic-Indic or fullwidth one the
+    # fence line is unplaced, the prescan skips no line and the marker lines count (the parser reads
+    # those markers as list items too, so this over-refuses, never under-refuses)
+    other_digit_fences = [parse_lead + digit + ". ```diff\n" + indented_body("   ") + "   ```\n"
+                          for digit in ("1", chr(0x0661), chr(0xFF11))]
+    check("cannot/nesting-fence-marker-ascii", [_outcome(text) for text in other_digit_fences],
+          [(0, []), "CannotEvaluate", "CannotEvaluate"])
+    # real nesting outside a fence is still refused: after a closed fence, after a bullet-line fence whose
+    # item an unindented line ends, after a backtick line with a backtick in its info string (no fence),
+    # after a tilde fence that a backtick line does not close, after a four-space line at the top level
+    # (indented code, no fence), and after a fence-shaped line the prescan cannot place (in an HTML block,
+    # which the parser reads on to the blank line; in a quote; in a link label still open across an empty
+    # line, whose "]" the parser searches for with no line limit, in backtick and tilde forms; in a link
+    # title across a line of whitespace alone, which the parser does not end there)
+    deep21 = "".join("  " * level + "- a\n" for level in range(21))
+    check("cannot/nesting-fence-bounds", [_outcome(text) for text in (
+        "```\nquoted\n```\n" + deep21, "- ```\n  code\n" + deep21, "``` a`\n" + deep21,
+        "~~~\n```\n~~~\n" + deep21, "    ```\n" + deep21, "<div>\n```\n\n" + deep21,
+        "> ```\n" + deep21, "[a\n\n```\n]: /u\n" + deep21, "[a\n\n~~~\n]: /u\n" + deep21,
+        "[a]: /u 't\n  \n```\n'\n" + deep21)], ["CannotEvaluate"] * 10)
+    # the link-label bound just inside, exactly at and just outside it: a label whose "]" comes after the
+    # fence line holds it (refused, also across two empty lines and past an escaped "]"); a label closed
+    # on its own line and a title cut by an empty line hold nothing past that line, and a "[" before any
+    # "]" fails the label, so the fence after each is placed (True: the prescan passes the text)
+    check("structure/nesting-label-boundary", [_input_declarations._nesting_refused(text) is None for text in (
+        "[a\n\n\n```\n]: /u\n" + deep21, "[a\\]\n\n```\n]: /u\n" + deep21,
+        "[a]: /u\n\n```\n" + deep21, "[a]: /u 't\n\n```\n'\n" + deep21, "[a[b\n```\n" + deep21)],
+          [False, False, True, True, True])
+    # a margin line inside an open link reference definition resets nothing: the parser reads it as part
+    # of the definition, stays in the definition's list item and resumes at its full depth after it, so
+    # the list that marches on past the ceiling after it is refused, with the line in an open label
+    # (across an empty line), in a title across a line of spaces alone, in two labels chained (each
+    # alone below the ceiling), and in each form after a fence line the prescan cannot place
+    rungs = lambda start, stop: "".join("  " * level + "- a\n" for level in range(start, stop))  # noqa: E731
+    held_label = rungs(0, 14) + "  " * 14 + "- [x\n\ny\n]: /u\n"
+    held_title = rungs(0, 14) + "  " * 14 + "- [x]: /u 't\n  \ny\n'\n"
+    held_definitions = (
+        held_label + rungs(15, 26), held_title + rungs(15, 26),
+        held_label + rungs(15, 28) + "  " * 28 + "- [z\n\ny\n]: /u\n" + rungs(29, 40),
+        "> ```\n\n" + held_label + rungs(15, 26), "> ```\n\n" + held_title + rungs(15, 26))
+    check("cannot/nesting-definition-hold", [_outcome(text) for text in held_definitions],
+          ["CannotEvaluate"] * len(held_definitions))
+    # the definition bound just inside, exactly at and just outside it: a label still open at the margin
+    # line holds the depth (refused); a label closed on its own line, a title cut by an empty line and a
+    # definition ended by an empty line hold nothing, so the margin line resets the depth (True: the
+    # prescan passes the text, which the parser reads in the definition's item no deeper than 15 levels)
+    check("structure/nesting-definition-boundary", [_input_declarations._nesting_refused(text) is None for text in (
+        held_label + rungs(15, 26), rungs(0, 14) + "  " * 14 + "- [x]\n\ny\n" + rungs(15, 26),
+        rungs(0, 14) + "  " * 14 + "- [x]: /u 't\n\ny\n'\n" + rungs(15, 26),
+        rungs(0, 14) + "  " * 14 + "- [x]: /u\n\ny\n" + rungs(15, 26))], [False, True, True, True])
+    # the held depth is read by the ceiling comparison alone, never by fence placement, so this text is
+    # refused as the earlier prescan without the held depth (_running_nesting_refused) refuses it: the
+    # vector pins that agreement, not the parser's reading. The prescan places the two-column fence after
+    # the held title at the top level (running depth zero), lets the column-0 run close it and so counts
+    # the list marching on past the ceiling; the parser instead reads the column-0 run as a new top-level
+    # fence that holds everything after it, and nests this text 15 levels deep
+    held_fence = (held_title + "\n  ```\n```\n" + rungs(0, 14) + "- ```\n\nx\n" + rungs(14, 22),)
+    check("cannot/nesting-held-fence-placed", [_outcome(text) for text in held_fence],
+          ["CannotEvaluate"] * len(held_fence))
+
+    def parsed_depth(text):
+        """The most list items and quotes the parsed document nests one inside another in `text`."""
+
+        def walk(node):
+            deepest = 0
+            for child in node.get("children") or []:
+                if isinstance(child, dict):
+                    deepest = max(deepest, walk(child) + (1 if child.get("kind") in ("ListItem", "Quote") else 0))
+            return deepest
+
+        return walk(_input_declarations._parse(text))
+
+    # a disclosed residual, not a bound: after a held title, the prescan places a two-column fence from
+    # the margin and skips the rest as its content, while the parser opens that fence in the list item,
+    # ends it with the item at the quote line and nests the list after it 23 levels deep. Today the
+    # prescan passes the text and the brief is read; a change that closes this gap turns the check red,
+    # and the vector then moves to the refused ones
+    residual = rungs(0, 13) + "  " * 13 + "- [x]: /u 't\n  \ny\n'\n\n  ```\n> x\n" + rungs(0, 23)
+    check("structure/nesting-residual-held-title",
+          [_input_declarations._nesting_refused(residual), _outcome(residual), parsed_depth(residual)],
+          [None, (0, []), 23])
+    # the held depth only adds refusals: over a fixed seeded sample of generated texts (a held definition,
+    # fence lines and lists around an item fence, each part optional, with stray lines between), every
+    # text the prescan without the held depth refuses (_running_nesting_refused) is refused still
+    superset_sample = _nesting_sample(2, 5000)
+    running_refused = [text for text in superset_sample if _running_nesting_refused(text) is not None]
+
+    def superset_holds():
+        return all(_input_declarations._nesting_refused(text) is not None for text in running_refused)
+
+    check("structure/nesting-held-superset", [len(superset_sample), bool(running_refused), superset_holds()],
+          [5000, True, True])
+    # each fence bound just inside, exactly at and just outside it: an opening run indented three columns
+    # opens, four does not; a closing run indented three columns closes, four does not (the deep list
+    # after it stays fence content); a closing run one shorter than the opening run does not close, as
+    # long or longer does; an opening run of two backticks opens nothing, three does (True: the prescan
+    # passes the text)
+    check("structure/nesting-fence-boundary", [_input_declarations._nesting_refused(text) is None for text in (
+        "   ```\n" + diff_body, "    ```\n" + diff_body,
+        "```\nx\n   ```\n" + deep21, "```\nx\n    ```\n" + deep21,
+        "````\nx\n```\n" + deep21, "````\nx\n````\n" + deep21, "````\nx\n`````\n" + deep21,
+        "``\n" + diff_body, "```\n" + diff_body)],
+          [True, False, False, True, True, False, False, False, True])
+    # the whitespace-run prescan refuses the same way on both paths
+    check("cannot/whitespace-run-2", [_outcome(text) for text in (
+        "a" + " " * 2001 + "b\n", "Input notes.\n\na" + " " * 2001 + "b\n")], ["CannotEvaluate"] * 2)
+    # every character the vendored parser reads as whitespace is run-bounded like a space: over the bound
+    # each is refused up front, at it each is read through the full parse (the class is \s minus LF; the
+    # five separators among them are refused at any count by the separator gate, the form feed asserted
+    # here, the rest with the separator vectors)
+    run_class = [chr(point) for point in (
+        0x0B, 0x1C, 0x1D, 0x1E, 0x1F, 0xA0, 0x1680, 0x2000, 0x2001, 0x2002, 0x2003, 0x2004, 0x2005,
+        0x2006, 0x2007, 0x2008, 0x2009, 0x200A, 0x202F, 0x205F, 0x3000)]
+    check("cannot/whitespace-class-over",
+          [_outcome("a" + character * 2001 + "b\n") for character in run_class],
+          ["CannotEvaluate"] * len(run_class))
+    check("structure/whitespace-class-at",
+          [read_inputs(parse_lead + "a" + character * 2000 + "b\n") for character in run_class],
+          [([], [])] * len(run_class))
+    check("cannot/whitespace-ff-run-separator",
+          [_outcome("a" + "\x0c" * count + "b\n") for count in (2000, 2001)], ["CannotEvaluate"] * 2)
+    # the deleted total-cost sums stay deleted: each shape the old sums refused up front (just over the
+    # whitespace, nesting and inline-mark caps) is now read through the bounded parse and answered; the
+    # deadline, not a text model, is what bounds the pathological relatives of these shapes
+    check("structure/cost-shapes-read", [read_inputs(parse_lead + text) for text in (
+        ("a" + " " * 2000 + "b\n\n") * 9,
+        ("> " * 13 + "x\n\n") * 21,
+        "*" * 32769 + "a\n")], [([], [])] * 3)
+    # the quote prefix consumes one optional whitespace character after >, any whitespace but LF, as the
+    # parser's own pattern does: a no-break space, a vertical tab or an ideographic space between quote
+    # markers hides no level from the prescan, alone, mixed with spaced markers, or after bullets
+    check("cannot/nesting-quote-prefix-2", [_outcome(text) for text in (
+        ">\xa0" * 30 + "x\n", ">\x0b" * 30 + "x\n", ">　" * 30 + "x\n",
+        ">\xa0" + "> " * 21 + "x\n", "- " * 5 + ">\xa0" * 25 + "x\n")], ["CannotEvaluate"] * 5)
+    # the same lead at the depth ceiling is read (just inside, exactly at, just over: 19, 20 and 21
+    # no-break-space quote markers), so the prefix reading widens no refusal
+    check("structure/nesting-quote-prefix-boundary",
+          ([_outcome(parse_lead + ">\xa0" * depth + "x\n")[0] for depth in (19, 20)],
+           _outcome(">\xa0" * 21 + "x\n")), ([0, 0], "CannotEvaluate"))
+    # each bound's just-inside value is read through the full parsed document (the lead forces the parse,
+    # the shared reading answers), asserted on the reading itself so the structure rules take no part
+    check("structure/parse-bounds-boundary",
+          (read_inputs("Input notes.\n\n" + "> " * 20 + "ok\n"),
+           read_inputs("Input notes.\n\n" + "1. " * 20 + "ok\n"),
+           read_inputs("Input notes.\n\n" + "".join("  " * level + "- a\n" for level in range(20))),
+           read_inputs("Input notes.\n\na" + " " * 2000 + "b\n")),
+          (([], []), ([], []), ([], []), ([], [])))
+    # the child parse and the in-process seam read the same document: over briefs that exercise every
+    # unit kind (declarations, look-alikes, code, tables, task lists, quotes, HTML, non-ASCII folds),
+    # read() answers identically with PARSE_IN_CHILD on and off
+    identity_corpus = (
+        "INPUT: /abs/in.md\n", "**INPUT:** /abs/in.md\n", "- INPUT: `/abs/dir with space/in.md`\n",
+        "Input: /abs/in.md\n", "| INPUT | x |\n|---|---|\n| a | b |\n",
+        "```\nINPUT: /abs/in.md\n```\n", "- [ ] INPUT: /abs/in.md\n", "> INPUT: /abs/in.md\n",
+        "<div>\nINPUT: /abs/in.md\n</div>\n", "ІNPUT: /abs/in.md\n",
+        "I&#78;PUT: /abs/in.md\n", "prose `code` *emph* [link](/x) <!-- c -->\n")
+
+    def read_outcome(text):
+        try:
+            return ("ok", read_inputs(text))
+        except _input_declarations.DeclarationError as caught:
+            return ("error", str(caught))
+
+    in_child = [read_outcome(text) for text in identity_corpus]
+    _input_declarations.PARSE_IN_CHILD = False
+    try:
+        in_process = [read_outcome(text) for text in identity_corpus]
+    finally:
+        _input_declarations.PARSE_IN_CHILD = True
+    check("parse/child-matches-in-process", in_child, in_process)
+    # the wall-clock bound holds by construction, shown at the OLD 512 KiB ceiling on the two shapes
+    # that held the in-process parse far past the deadline (a paragraph of unclosed inline-HTML openers,
+    # held inside InlineHTML.pattern's lazy scans, and a line of fullwidth letters, held inside the GFM
+    # bare-URL lookbehind's quadratic backtracking): with the ceiling patched up to admit them, read()
+    # answers or refuses within _deadline_bound() (the deadline plus DEADLINE_MARGIN_SECONDS, fixed) of
+    # measured wall clock, timed here in the parent around the call that waits on the killed child
+    old_ceiling = 1 << 19
+    slow_shapes = (("x<!--" * (old_ceiling // 5))[:old_ceiling - 1] + "\n",
+                   "Ａ" * ((old_ceiling - 1) // 3) + "\n")
+    saved_ceiling = _input_declarations.MAX_TEXT_BYTES
+    held = []
+    try:
+        _input_declarations.MAX_TEXT_BYTES = old_ceiling
+        for shape in slow_shapes:
+            ended, within = _deadline_held(read_inputs, shape)
+            held.append((ended in ("answered", "refused"), within))
+    finally:
+        _input_declarations.MAX_TEXT_BYTES = saved_ceiling
+    check("parse/deadline-held-at-old-ceiling", held, [(True, True)] * 2)
+    # and at the current ceiling, on the in-bound shapes measured slowest there (an underscore-mark run and
+    # a paragraph of unclosed <? openers, each filled to the ceiling behind a parse-forcing lead): each is
+    # answered or refused within the same fixed bound, timed in the parent the same way
+    ceiling = _input_declarations.MAX_TEXT_BYTES
+    ceiling_shapes = [parse_lead + unit * ((ceiling - len(parse_lead) - 1) // len(unit)) + "\n"
+                      for unit in ("_a", "x<?")]
+    held = []
+    for shape in ceiling_shapes:
+        held.append((len(shape.encode("utf-8")) <= ceiling, _deadline_held(read_inputs, shape)[1]))
+    check("parse/deadline-held-at-ceiling", held, [(True, True)] * 2)
+    # the bound itself at its end: _deadline_held, driven with set timings (_deadline_boundary_reading),
+    # holds an answered or refused read 1 ms inside the bound and exactly at it (its comparison is
+    # inclusive) and does not hold one 1 ms outside it
+    bound = _input_declarations.PARSE_DEADLINE_SECONDS + DEADLINE_MARGIN_SECONDS
+    check("parse/deadline-bound-boundary", (_deadline_bound(), _deadline_boundary_reading()),
+          (bound, (bound, [("answered", True), ("refused", True)] * 2
+                   + [("answered", False), ("refused", False)])))
+    # and the cap probe's reading of a child's exit status and output, driven with set ones
+    # (_cap_report_boundary_reading): a report of CPU time 1 ms under the bound does not hold, exactly at
+    # it and 1 ms over it does (the comparison is inclusive); and no frame of the parse on the cut's
+    # stack, no entry into the parser, an end by SIGKILL, by SIGXCPU or by a normal exit, no marker, or
+    # a second report line each refuse
+    check("parse/deadline-cap-report-boundary", _cap_report_boundary_reading(),
+          [False, True, True, False, False, False, False, False, False, False])
+    # and a parse still running at the bound is ended only by the CPU timer and only once the bound is
+    # spent: with the deadline lifted, the probe's main thread parses each ceiling shape again and again
+    # (so the loop is still running at the bound whatever one parse takes), is cut by a CPU timer of
+    # exactly the bound, and reports, after the cut, at least the bound of its own thread's CPU spent
+    # inside the call, the cut landing inside the loop or the vendored parser, and at least one entry
+    # into the vendored parser; with the timer removed the parse never ends and this reads False
+    check("parse/deadline-cap-under-uncut-parse", _cap_under_uncut_parse(), [True, True])
+    # and the same at one eighth of the ceiling (CAP_EIGHTH_PROBE), where one parse of either shape ends
+    # far inside the bound: the repeated parse is still running at the bound and the cut counts wherever
+    # it lands in the loop, so this reads True; one parse in place of the loop returns before the bound
+    # and reads False
+    check("parse/deadline-cap-under-eighth-parse", _cap_under_uncut_parse(source=CAP_EIGHTH_PROBE),
+          [True, True])
+    # and that probe really is the one-eighth one: CAP_EIGHTH_PROBE differs from UNCUT_PARSE_PROBE only
+    # by its fill, and _probe_replaced, which builds it, raises when its target text is missing or occurs
+    # twice, so a moved fill line fails at import instead of leaving the full-size probe in its place
+    check("parse/deadline-cap-eighth-probe-replaced", _cap_eighth_replaced_reading(),
+          (True, True, "ValueError", "ValueError"))
+    # and that timer is armed at the bound itself, with no margin above it: a probe child whose parse call
+    # is replaced by a read-back of the timer it has just armed (CAP_ARMED_PROBE), started through the
+    # same _cap_probe_readings as every probe, reads it back within CAP_ARMED_TOLERANCE of the bound (a
+    # restored cut of 1.2 times the bound reads False), and the read-back's comparison, driven with set
+    # values (_cap_armed_boundary_reading), holds exactly at and 1 ms inside each end of its window and
+    # not 1 ms outside either end or at 1.2 times the bound
+    check("parse/deadline-cap-armed-at-bound",
+          (_cap_probe_readings([(CAP_ARMED_PROBE, "_a", lambda: None)], held=_cap_armed_held),
+           _cap_armed_boundary_reading()),
+          ([True], [False, True, True, True, True, True, False, False]))
+    # and the probe with one parse in place of the repeated one (CAP_ONE_PARSE_PROBE), on a shape whose
+    # whole parse needs far less CPU than the bound (plain prose filled to the ceiling behind the same
+    # parse-forcing lead, about half a second), is not cut: its parse returns, and the row reads False,
+    # as one parse of a ceiling shape would on a runner fast enough to end it before the bound
+    check("parse/deadline-cap-refuses-parse-under-bound",
+          _cap_under_uncut_parse(("ab ",), source=CAP_ONE_PARSE_PROBE), [False])
+    # and a probe child whose parse the CPU timer did not end does not pass for one it did (CAP_STANDINS,
+    # all at once on the underscore-mark shape): a child that kills itself with SIGKILL before any marker
+    # or sends itself SIGPROF at once; a child that sleeps for its CPU budget and then sends itself
+    # SIGPROF, one whose CPU goes to another thread until the timer fires, and the at-once child with
+    # this parent pausing for the bound plus one second at its end of output; a child that burns its
+    # budget in its main thread outside the parser, and one cut at once inside the parser; a child whose
+    # repeated-parse loop never reaches the parser; and a child that writes a report meeting every
+    # requirement and is ended by SIGKILL
+    pause = _deadline_bound() + 1.0
+    standin_runs = [(source, "_a", lambda: None) for _, source in CAP_STANDINS]
+    standin_runs.append((dict(CAP_STANDINS)["sigprof-at-once"], "_a", lambda: time.sleep(pause)))
+    standin = dict(zip([name for name, _ in CAP_STANDINS] + ["parent-pause"],
+                       _cap_probe_readings(standin_runs)))
+    check("parse/deadline-cap-refuses-self-killed-probe",
+          [standin[name] for name in ("sigkill-before-marker", "sigprof-at-once")], [False, False])
+    check("parse/deadline-cap-refuses-non-parsing-probe",
+          [standin[name] for name in ("sleep-then-sigprof", "busy-thread-until-limit", "parent-pause")],
+          [False, False, False])
+    check("parse/deadline-cap-needs-cpu-and-progress",
+          [standin[name] for name in ("busy-main-until-limit", "cut-inside-parser-at-once")], [False, False])
+    # the loop that never reaches the parser is cut inside the loop after the bound, so its frame
+    # requirement holds; it reads False only because no parser entry is reported (with the entry
+    # requirement removed, it reads True)
+    check("parse/deadline-cap-refuses-loop-without-parser", standin["loop-without-parser"], False)
+    check("parse/deadline-cap-refuses-sigkill", standin["forged-report-sigkill"], False)
+    # and a timer that fires before the exact CPU clock shows the bound, as a tick-charged one can, does
+    # not cut the parse early: the probe arms it again for the rest, so the real parse is still cut
+    # inside the loop or the parser after spending the bound (with the handler raising at the first
+    # fire, this reads False)
+    check("parse/deadline-cap-holds-past-early-timer", standin["timer-early-inside-parser"], True)
+    # and that re-arm is for the rest of the bound, not the whole bound again: a probe child that spends
+    # CAP_REARM_SPENT of CPU and then has its timer fire early (CAP_REARM_PROBE) reads the re-armed timer
+    # back within CAP_ARMED_TOLERANCE of the bound minus the CPU it has spent (a re-arm for the whole
+    # bound, or a handler that cuts at that fire, reads False), and the read-back's comparison, driven
+    # with set values (_cap_rearmed_boundary_reading), holds exactly at and 1 ms inside each end of its
+    # window and not 1 ms outside either end, at the whole bound, or after less CPU than CAP_REARM_SPENT
+    check("parse/deadline-cap-rearms-for-rest",
+          (_cap_probe_readings([(CAP_REARM_PROBE, "_a", lambda: None)], held=_cap_rearmed_held),
+           _cap_rearmed_boundary_reading()),
+          ([True], [False, True, True, True, True, True, False, False, False]))
+    # and shown red under the flip that restores the thread join: a probe child runs the flipped read on
+    # each shape and has NOT returned at the same fixed bound (join cannot fire while one regex match
+    # holds the GIL), and its own process group is then killed, never left running
+    still_running = []
+    for name in ("html-opener", "fullwidth"):
+        probe = subprocess.Popen([sys.executable, "-I", "-B", "-c", THREAD_JOIN_PROBE,
+                                  str(Path(__file__).resolve().parent), name],
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                 start_new_session=True)
+        try:
+            probe.communicate(timeout=_deadline_bound())
+            still_running.append(False)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(probe.pid, signal.SIGKILL)
+            except OSError:
+                probe.kill()
+            probe.communicate()
+            still_running.append(True)
+    check("revert/parse-thread-join-red", still_running, [True, True])
     tmp = Path(tempfile.mkdtemp(prefix="aiqt-brief-capability-selftest-"))
     try:
         table_path = str(tmp / "table.toml")
@@ -4648,6 +6679,61 @@ def self_test(report_path=None):
         check("main/manifest-silenced-injection-restored", _tomllib_parsers(), TOMLLIB_PARSERS)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+    # ---------- W1: a git command line that commits or pushes, for a family whose row says git-write = "no" ----------
+    w1_refused = (1, [("W1", "HARD")])
+    check("w1/commit-refused", _w1_outcome(W1_COMMIT), w1_refused)
+    check("w1/push-refused", _w1_outcome(W1_PUSH), w1_refused)
+    check("w1/option-forms-refused", [_w1_outcome(text) for text in W1_OPTION_FORMS], [w1_refused] * 3)
+    check("w1/absolute-git-path-refused", _w1_outcome(W1_ABSOLUTE), w1_refused)
+    check("w1/fence-refused", _w1_outcome(W1_FENCE), w1_refused)
+    check("w1/prohibited-info", [_w1_outcome(text) for text in W1_PROHIBITED], [(0, [("W1", "INFO")])] * 2)
+    check("w1/prohibited-voided-refused", _w1_outcome(W1_PROHIBITED_VOIDED), w1_refused)
+    check("w1/fenced-prohibited-info", [_w1_outcome(text) for text in W1_FENCED_PROHIBITED],
+          [(0, [("W1", "INFO")])] * 2)
+    check("w1/fenced-prohibited-voided-refused", _w1_outcome(W1_FENCED_VOIDED), w1_refused)
+    check("w1/past-report-refused", _w1_outcome(W1_PAST_REPORT), w1_refused)
+    check("w1/non-command-shapes-ok", [_w1_outcome(text) for text in (W1_CHECKOUT_PIN, W1_UNDER_REVIEW,
+                                                                      W1_CORRECTION)], [(0, [])] * 3)
+    check("w1/undeclared-and-yes-never-fire",
+          [_w1_outcome(W1_COMMIT, family, value) for family in ("alpha", "gamma") for value in ("undeclared", "yes")],
+          [(0, [])] * 2 + [(1, [("S3", "HARD")])] * 2)
+    check("w1/every-family", [_w1_outcome(W1_COMMIT, family) for family in ("alpha", "beta", "gamma")],
+          [w1_refused] * 2 + [(1, [("S3", "HARD"), ("W1", "HARD")])])
+    w1_tmp = Path(tempfile.mkdtemp(prefix="aiqt-brief-capability-w1-"))
+    try:
+        with open(w1_tmp / "brief.md", "w", encoding="utf-8") as handle:
+            handle.write(W1_MAIN)
+        with open(w1_tmp / "table.toml", "w", encoding="utf-8") as handle:
+            handle.write(TABLE_FIXTURE.replace('git-write = "undeclared"', 'git-write = "no"'))
+        w1_brief = str(w1_tmp / "brief.md")
+
+        def w1_main_seen():
+            """(exit, W1 HARD lines, REFUSE lines) main prints for the brief; a W1 line keeps its line number,
+            and only the brief path before it, which is known, is removed."""
+            printed = io.StringIO()
+            with contextlib.redirect_stdout(printed):
+                seen_exit = main(["--family", "alpha", "--table", str(w1_tmp / "table.toml"), w1_brief])
+            seen = printed.getvalue().splitlines()
+            return (seen_exit, [line[len(w1_brief) + 1:] if line.startswith(w1_brief + ":") else line
+                                for line in seen if ": HARD W1: " in line],
+                    [line.split(";", 1)[0] for line in seen if line.startswith("REFUSE: ")])
+
+        w1_hard_line = ("HARD W1: git command line 'git -C w commit' for a family whose row says git-write = \"no\": "
+                        "`git -C w commit -m fix`")
+        w1_refuse_line = ("REFUSE: family alpha: the brief carries a git command line that commits or pushes (1 hard "
+                          "hit(s): W1 x1)")
+        w1_want = (EXIT_REFUSE, ["3: " + w1_hard_line], [w1_refuse_line])
+        check("w1/main-prints-line-exit-1", w1_main_seen(), w1_want)
+        # the same comparison is red when W1 names another line: each finding moved one line down
+        w1_original = rule_w1
+        with _patched(rule_w1=lambda text, row, family, families, scoped=True: [
+                (rule, severity, number + 1, message, excerpt)
+                for rule, severity, number, message, excerpt in w1_original(text, row, family, families, scoped)]):
+            w1_moved = w1_main_seen()
+        check("w1/main-line-number-red", (w1_moved, w1_moved == w1_want),
+              ((EXIT_REFUSE, ["4: " + w1_hard_line], [w1_refuse_line]), False))
+    finally:
+        shutil.rmtree(w1_tmp, ignore_errors=True)
     # ---------- red on revert: each blocking rule, form and exemption patched out flips its fixture ----------
     nothing = lambda *args: []  # noqa: E731
     never = re.compile(r"(?!)")
@@ -4659,6 +6745,24 @@ def self_test(report_path=None):
         before = [outcome() for outcome in cases]
         with _patched(**replacements):
             after = [outcome() for outcome in cases]
+        flipped.append(sorted(replacements))
+        if before == want_patched:   # a fixture the rule never changed proves nothing
+            FAILURES.append("revert of %s: the unpatched outcome already equals the patched one"
+                            % ", ".join(sorted(replacements)))
+        return (before, after), (before, want_patched)
+
+    def parser_flip(cases, want_patched, **replacements):
+        """flip over the shared declaration parser: each named attribute of tools/_input_declarations.py
+        is replaced for the patched run, then restored."""
+        before = [outcome() for outcome in cases]
+        saved = dict((name, getattr(_input_declarations, name)) for name in replacements)
+        try:
+            for name, value in replacements.items():
+                setattr(_input_declarations, name, value)
+            after = [outcome() for outcome in cases]
+        finally:
+            for name, value in saved.items():
+                setattr(_input_declarations, name, value)
         flipped.append(sorted(replacements))
         if before == want_patched:   # a fixture the rule never changed proves nothing
             FAILURES.append("revert of %s: the unpatched outcome already equals the patched one"
@@ -4718,6 +6822,45 @@ def self_test(report_path=None):
     check("revert/closed-markup-head-red", *flip([code(DASH_PROHIBITION), code(PAREN_PROHIBITION)], [1, 1],
                                                 closed_shape_head=lambda sentence: 0))
     check("revert/closed-command-start-red", *flip([code(ARGUMENT_COMMAND)], [0], Demotions=_AnyStartDemotions))
+
+    def w1_code(text, family="alpha", git_write="no"):
+        return lambda: _w1_outcome(text, family, git_write)[0]
+
+    w1_rule = rule_w1
+    check("revert/w1-red", *flip([w1_code(W1_COMMIT), w1_code(W1_FENCE)], [0, 0], rule_w1=nothing))
+    check("revert/w1-subcommands-red", *flip([w1_code(W1_COMMIT), w1_code(W1_PUSH)], [0, 0],
+                                             GIT_WRITE_SUBCOMMAND_RE=never))
+    check("revert/w1-option-grammar-red", *flip([w1_code(text) for text in W1_OPTION_FORMS], [0, 0, 0],
+                                                _option_end=lambda text, position, option_re, memo: position))
+    check("revert/w1-git-path-red", *flip([w1_code(W1_ABSOLUTE)], [0], COMMAND_WORD_RE=re.compile(
+        COMMAND_WORD_RE.pattern.replace(r"(?:[\w.~-]*/)*+", ""))))
+    check("revert/w1-prohibited-red", *flip([w1_code(text) for text in W1_PROHIBITED], [1, 1],
+                                            w1_exempt=lambda demotion: False))
+    check("revert/w1-past-report-red", *flip([w1_code(W1_PAST_REPORT)], [0],
+                                             w1_exempt=lambda demotion: demotion is not None))
+    check("revert/w1-void-red", *flip([w1_code(W1_PROHIBITED_VOIDED)], [0], _w1_voided=lambda read: set()))
+    w1_fence_asks = fence_asks
+    # a fence read without its command lines, as the S rules read it: the prohibition voids its own exemption
+    check("revert/w1-fenced-prohibited-red", *flip([w1_code(text) for text in W1_FENCED_PROHIBITED], [1, 1],
+                                                   fence_asks=lambda block, structural=None: w1_fence_asks(block)))
+    check("revert/w1-fenced-void-red", *flip([w1_code(W1_FENCED_VOIDED)], [0],
+                                             fence_asks=lambda block, structural=None: False))
+    write_word = re.compile(r"(?<![\w-])(?:commit|push)(?![\w-])")
+
+    def word_match(text):
+        """The word reading W1 replaces: commit or push anywhere in a sentence that holds a git command word."""
+        return [found.span() for found in write_word.finditer(text)] if COMMAND_WORD_RE.search(text) else []
+
+    check("revert/w1-subcommand-position-red", *flip(
+        [w1_code(text) for text in (W1_CHECKOUT_PIN, W1_UNDER_REVIEW, W1_CORRECTION)], [1, 1, 1],
+        git_write_commands=word_match))
+    check("revert/w1-row-gate-red", *flip(
+        [w1_code(W1_COMMIT, "alpha", "undeclared"), w1_code(W1_COMMIT, "alpha", "yes")], [1, 1],
+        denies_git_write=lambda row: True))
+    check("revert/w1-every-family-red", *flip(
+        [w1_code(W1_COMMIT, "alpha"), w1_code(W1_COMMIT, "beta")], [0, 0],
+        rule_w1=lambda text, row, family, families, scoped=True: [] if can_execute(row) else w1_rule(
+            text, row, family, families, scoped)))
     check("revert/void-word-red", *flip([code(VOID_CONTINUATION), code(PROHIBITION_KIDDING), code(RETRY),
                                         code(KIDDING_PASTE)], [0, 0, 0, 0], VOID_WORD_RE=never))
     check("revert/void-start-word-red", *flip([code(TEST_IT), code(FIX_IT), code(RETEST_IT)], [0, 0, 0],
@@ -4766,7 +6909,7 @@ def self_test(report_path=None):
         WORD_RUN_RE=re.compile(NOUN_WORD + r"(?:\s*,\s*" + NOUN_WORD + r")++")))
     check("revert/list-structure-red", *flip([lambda: _outcome("- Read the diff\n- Run the parser\n")], [(0, [])],
                                             LIST_LINE_RE=never))
-    check("revert/format-characters-red", *flip([code(BOM_BRIEF), code(ZERO_WIDTH_SPLIT)], [0, 0],
+    check("revert/format-characters-red", *flip([code(FENCED_ZERO_WIDTH)], [0],
                                                unicodedata=_NoFormatRemoval))
     check("revert/capability-gate-red", *flip([lambda: _outcome(RUN_ITEM, "alpha")[0],
                                               lambda: _outcome(RUN_ITEM, "beta")[0]], [1, 1],
@@ -5114,6 +7257,8 @@ def self_test(report_path=None):
                                ("preflight/p5-deny-5", P5_DENY[4])):
             check(check_id, p5(text), (1, [("P5", "HARD")]))
         check("preflight/p5-allow-1", p5(P5_ALLOW[0]), (0, []))
+        # the P5 cure's ^{commit} is no git write: a pinned brief carrying its cure passes W1 under git-write = "no"
+        check("w1/cure-pin-line-ok", _w1_outcome(W1_CURE.format(head), "alpha", "no", repo), (0, []))
         check("preflight/p5-allow-2", (p5(P5_ALLOW[1]), p5(P5_DISPATCH_MISSING)), ((0, []), (0, [("P5", "ADVISORY")])))
         check("preflight/p5-allow-3", p5(P5_ALLOW[2]), (0, []))
         check("preflight/p5-allow-4", p5(P5_ALLOW[3]), (0, []))
@@ -5663,7 +7808,683 @@ def self_test(report_path=None):
             CLONE_REVISION_OPTIONS=frozenset()))
     finally:
         shutil.rmtree(base, ignore_errors=True)
-    check("revert/every-flip-ran", len(flipped), 187)
+    # ---------- P6: a declared input (an INPUT line) must exist on the lint's host; {T} is a fresh directory ----------
+    # {T} is drawn through a stand-in for mkdtemp whose first draw always holds marks (as a real draw can),
+    # so preflight/p6-fixture-verbatim sees every draw the call site made, and a call site that draws
+    # with plain mkdtemp fails it on every run, not only on an unlucky draw
+    draws = []
+
+    def marked_first(prefix):
+        directory = tempfile.mkdtemp(prefix=prefix + "_", suffix="_") if not draws else tempfile.mkdtemp(
+            prefix=prefix)
+        draws.append((prefix, directory))
+        return directory
+
+    inputs = _p6_input_root(make=marked_first)
+    locked = inputs / "locked"
+    try:
+        os.makedirs(inputs / "dir with space")
+        os.makedirs(locked)
+        for name in ("in.md", "dir with space/in.md", "unreadable.md", "locked/in.md"):
+            with open(inputs / name, "w", encoding="utf-8") as handle:
+                handle.write("input\n")
+        os.symlink(inputs / "nowhere.md", inputs / "dangling.md")
+        os.mkfifo(inputs / "fifo")
+        os.chmod(inputs / "unreadable.md", 0)
+        os.chmod(locked, 0)
+
+        def p6(text, family="alpha"):
+            return _outcome(text.replace("{T}", str(inputs)), family)
+
+        def p6_code(text):
+            outcome = p6(text)
+            return outcome if isinstance(outcome, str) else outcome[0]
+
+        def unreadable_code():
+            """The mode-000 vector with os.access refusing for every uid, so it runs as root too."""
+            with _patched(input_readable=lambda path: False):
+                return p6_code("INPUT: {T}/unreadable.md\n")
+
+        # {T} renders verbatim: a mkdtemp draw the reading renders as emphasis names a path without the
+        # marks; the call site above drew {T} through the marked-first stand-in, its marked draws were
+        # removed and drawn again, never handed to the fixtures below, and {T} reads back as written
+        marked = inputs / "draw-_k9b51z_"
+        check("preflight/p6-fixture-verbatim", (
+            _input_declarations.read("INPUT: {}/in.md\n".format(marked)) == ([(1, "{}/in.md".format(marked))], []),
+            len(draws) > 1, set(prefix for prefix, _ in draws),
+            [os.path.lexists(directory) for _, directory in draws[:-1]] == [False] * (len(draws) - 1),
+            Path(draws[-1][1]) == inputs if draws else None,
+            _input_declarations.read("INPUT: {}/in.md\n".format(inputs))),
+            (False, True, {"aiqt-brief-input-"}, True, True, ([(1, "{}/in.md".format(inputs))], [])))
+        # the helper's refusal paths: when every draw holds a mark it raises the error it was passed after
+        # exactly `attempts` draws, each removed; with no attempts it raises before any draw; and a
+        # temporary root that itself holds a mark, or a character outside ASCII, raises before any draw.
+        # The stand-in refuses a draw past the allowance, so a helper that keeps drawing ends as "ceiling"
+        check("preflight/p6-fixture-all-marked-refused", [_verbatim_refusal(attempts) for attempts in (1, 2, 5)],
+              [("refused", 1, True), ("refused", 2, True), ("refused", 5, True)])
+        check("preflight/p6-fixture-zero-attempts-refused", _verbatim_refusal(0), ("refused", 0, True))
+        check("preflight/p6-fixture-marked-root-refused", [_verbatim_refusal(3, root=os.path.join(
+            tempfile.gettempdir(), name)) for name in ("root-_k9b51z_", "root*k9", "root\\k9", "rooték9")],
+              [("refused", 0, True)] * 4)
+        p6_missing = (1, [("P6", "HARD")])
+        check("preflight/p6-present-quiet", [p6(text) for text in (
+            "INPUT: {T}/in.md\n", "INPUT: \"{T}/dir with space/in.md\"\n", "INPUT: `{T}/dir with space/in.md`\n",
+            "INPUT: {T}\n", "INPUT: \"{T}/dir with space\"\n", "**INPUT:** {T}/in.md\n", "**INPUT**: {T}/in.md\n",
+            "- INPUT: {T}/in.md\n", "* INPUT: {T}/in.md\n", "+ INPUT: {T}/in.md\n")], [(0, [])] * 10)
+        # every form a reader shows as INPUT: declares: emphasis however it is spelt, a numbered item, an
+        # escaped or character-referenced colon, a fullwidth or confusable spelling, a combining or format
+        # character the fold removes, strikethrough, and a declaration after a list item's fence or an
+        # indented code block (the parsed document hides nothing there); each with the input present
+        check("preflight/p6-markdown-present-quiet", [p6(text) for text in (
+            "__INPUT:__ {T}/in.md\n", "_INPUT:_ {T}/in.md\n", "*INPUT:* {T}/in.md\n",
+            "1. INPUT: {T}/in.md\n", "INPUT\\: {T}/in.md\n", "INPUT&#58; {T}/in.md\n",
+            "INPUT： {T}/in.md\n", "ＩＮＰＵＴ: {T}/in.md\n",
+            "I" + chr(0x034F) + "NPUT: {T}/in.md\n", "INPUT" + chr(0xFE0F) + ": {T}/in.md\n",
+            "~~INPUT:~~ {T}/in.md\n",
+            "- ```text\n  example\n  ```\n\nINPUT: {T}/in.md\n",
+            "Intro.\n\n    ```\n\nINPUT: {T}/in.md\n",
+            "INPUT: {T}/in.md")], [(0, [])] * 14)
+        # the end of the declaration: exactly at the path's end, just inside (trailing whitespace), just outside
+        check("preflight/p6-trailing-boundary", [p6(text) for text in (
+            "INPUT: {T}/in.md\n", "INPUT: {T}/in.md  \t \n", "INPUT: {T}/in.md extra\n")],
+            [(0, []), (0, []), "CannotEvaluate"])
+        # prose is never judged: a missing input named only in prose, an output to create, a placeholder
+        # clone line, a mid-line mention of the word input, a glued or mid-line label, a lone pipe row
+        # with no delimiter row, an unlisted look-alike letter or colon (the bounded table's named miss)
+        # and a link reference definition (which renders as nothing) all pass
+        check("preflight/p6-prose-quiet", [p6(text) for text in (
+            "Read {T}/missing.md and summarise it.\n", "Write your notes to {T}/out/new.md (create it).\n",
+            "Make a scratch clone: `git clone --no-hardlinks <url> <scratch>/r && git -C <scratch>/r checkout "
+            "--detach <pin>`\n", "Input files are listed below: {T}/missing.md\n",
+            "The tool's input: a TOML file.\n", "1.INPUT: {T}/missing.md\n",
+            "Step 1 - INPUT: {T}/missing.md\n", "| INPUT | {T}/missing.md |\n",
+            "| INPUT: | {T}/missing.md |\n",
+            "| Input | Expected |\n|---|---|\n| a | b |\n",
+            "ɪɴᴘᴜᴛ: {T}/missing.md\n", "INPUTꓽ {T}/missing.md\n",
+            "[INPUT]: {T}/missing.md \"title\"\n")], [(0, [])] * 13)
+        check("preflight/p6-missing-hard", [p6(text) for text in (
+            "INPUT: {T}/missing.md\n", "**INPUT:** {T}/missing.md\n", "**INPUT**: {T}/missing.md\n",
+            "INPUT: {T}/dangling.md\n", "INPUT: {T}/in.md/x\n")]
+            + [p6("INPUT: {T}/missing.md\n", "gamma")], [p6_missing] * 6)
+        # the declaring forms above go HARD the same way when their input is missing, the list-fence and
+        # indented-code briefs and a brief with no final newline included
+        check("preflight/p6-markdown-missing-hard", [p6(text) for text in (
+            "__INPUT:__ {T}/missing.md\n", "_INPUT:_ {T}/missing.md\n", "*INPUT:* {T}/missing.md\n",
+            "1. INPUT: {T}/missing.md\n", "INPUT\\: {T}/missing.md\n", "INPUT&#58; {T}/missing.md\n",
+            "ІNPUT: {T}/missing.md\n", "I" + chr(0x034F) + "NPUT: {T}/missing.md\n",
+            "- ```text\n  example\n  ```\n\nINPUT: {T}/missing.md\n",
+            "Intro.\n\n    ```\n\nINPUT: {T}/missing.md\n",
+            "Intro.\n\n\t```\n\nINPUT: {T}/missing.md\n",
+            "INPUT: {T}/missing.md")], [p6_missing] * 12)
+        # ASCII-only rendered labels: a character reference or intraword emphasis spells INPUT: with no
+        # literal "nput" substring and no non-ASCII character anywhere in the brief, so the reading must
+        # answer them from the parsed document, never from a text shortcut; the reference-spelt look-alike
+        # (it renders Input:) is refused the same way
+        check("preflight/p6-ascii-rendered-present-quiet", [p6(text) for text in (
+            "I&#78;PUT: {T}/in.md\n", "IN**PUT**: {T}/in.md\n", "IN*PUT*: {T}/in.md\n")], [(0, [])] * 3)
+        check("preflight/p6-ascii-rendered-missing-hard", [p6(text) for text in (
+            "I&#78;PUT: {T}/missing.md\n", "IN**PUT**: {T}/missing.md\n", "IN*PUT*: {T}/missing.md\n")],
+            [p6_missing] * 3)
+        check("preflight/p6-ascii-look-alike-cannot-evaluate", p6("Inp&#117;t: {T}/in.md\n"),
+              "CannotEvaluate")
+        # inside code nothing is a declaration and nothing is a look-alike: a fenced or tab-indented INPUT
+        # line, a quoted workflow's indented inputs: key, the label in a code span, a shell snippet, an
+        # unclosed fence (whose four-space closer closes nothing, so the rest stays code) and a format
+        # character in fenced or code-span text are all unread
+        check("preflight/p6-fence-quiet", [p6(text) for text in (
+            "```\nINPUT: {T}/missing.md\n```\n", "~~~\nInput: {T}/missing.md\n~~~\n",
+            "A quoted workflow:\n```yaml\non:\n  workflow_dispatch:\n    inputs:\n      target:\n```\nRead it.\n",
+            "```\nINPUT: {T}/i" + chr(0x200B) + "n.md\n```\n")], [(0, [])] * 4)
+        check("preflight/p6-code-quiet", [p6(text) for text in (
+            "\tINPUT: {T}/missing.md\n", "Intro.\n\n    INPUT: {T}/missing.md\n",
+            "Intro.\n\n    inputs:\n      target: x\n", "`INPUT: {T}/missing.md`\n",
+            "`cat input | wc -l`\n", "```\ncode\n    ```\nINPUT: {T}/missing.md\n",
+            "a `co" + chr(0x200B) + "de` span\n",
+            "`x` " * 50 + "`y" + chr(0x200B) + "z`\n")], [(0, [])] * 8)
+        table = parse_table(TABLE_FIXTURE.encode("utf-8"))
+        second = evaluate("INPUT: {T}/in.md\nINPUT: {T}/missing.md\n".replace("{T}", str(inputs)).encode("utf-8"),
+                          "alpha", table)
+        check("preflight/p6-second-line-named", (second[0], [(rule, line) for rule, _, line, _, _ in second[1]]),
+              (1, [("P6", 2)]))
+        check("preflight/p6-shape-cannot-evaluate", [p6(text) for text in (
+            "INPUT: <scratch>/in.md\n", "INPUT: $HOME/in.md\n", "INPUT: ~/in.md\n", "INPUT: docs/in.md\n",
+            "INPUT: {T}/a/../in.md\n", "INPUT: {T}/*.md\n", "INPUT: {T}/{a,b}.md\n", "INPUT:\n", "INPUT: \"\"\n",
+            "INPUT: \"{T}/in.md\n", "INPUT: {T}/dir with space/in.md\n", "**INPUT: {T}/in.md\n",
+            "INPUT:** {T}/in.md\n")], ["CannotEvaluate"] * 13)
+        check("preflight/p6-look-alike-cannot-evaluate", [p6(text) for text in (
+            "Input: {T}/in.md\n", "input: {T}/in.md\n", "INPUTS: {T}/in.md\n",
+            "INPUT : {T}/in.md\n", chr(0x0456) + "nput: {T}/in.md\n", "**INPUT: {T}/in.md\n",
+            "x\nInput: {T}/in.md\n")], ["CannotEvaluate"] * 7)
+        # the look-alike scan reads each rendered paragraph line's, heading's or table cell's start, past
+        # leading dashes, bullets and bare markup marks: a task-list item, another bullet, inline HTML
+        # around the label, a dash prefix, a blockquoted label, a heading, a header cell that is exactly
+        # the token, and a label line of an HTML block or comment are never ignored
+        check("preflight/p6-look-alike-start-cannot-evaluate", [p6(text) for text in (
+            "- [ ] INPUT: {T}/in.md\n", chr(0x2022) + " INPUT: {T}/in.md\n",
+            "<b>INPUT:</b> {T}/in.md\n",
+            chr(0x2013) + " INPUT: {T}/in.md\n", chr(0x2014) + " INPUT: {T}/in.md\n",
+            "> INPUT: {T}/in.md\n", "## Inputs:\n",
+            "| INPUT | x |\n|---|---|\n| a | b |\n",
+            "<p>INPUT: {T}/in.md</p>\n", "<!--\nINPUT: {T}/in.md\n-->\n")], ["CannotEvaluate"] * 10)
+        # the bounded confusable fold serves the declaration itself: Cyrillic and Greek I and a colon-like
+        # character fold to the exact label, which declares and is judged on the host
+        check("preflight/p6-confusable-declares", [p6(text) for text in (
+            chr(0x0406) + "NPUT: {T}/in.md\n", chr(0x0399) + "NPUT: {T}/in.md\n",
+            "INPUT" + chr(0xA789) + " {T}/in.md\n", "INPUT" + chr(0x2236) + " {T}/in.md\n")], [(0, [])] * 4)
+        check("preflight/p6-confusable-missing-hard", [p6(text) for text in (
+            chr(0x0406) + "NPUT: {T}/missing.md\n", chr(0x0399) + "NPUT: {T}/missing.md\n",
+            "INPUT" + chr(0xA789) + " {T}/missing.md\n")], [p6_missing] * 3)
+        # the named misses of the bounded fold: a word between the token and the colon declares nothing
+        # and is no look-alike, and prose naming the token with no colon after it passes
+        check("preflight/p6-word-miss-quiet", [p6(text) for text in (
+            "INPUT FILE: {T}/missing.md\n", "The INPUT files are described here.\n",
+            "Input files are below: {T}/missing.md\n")], [(0, [])] * 3)
+        # a line separator other than LF, anywhere, refuses the brief before any rule runs (a form feed is
+        # one here, since the parser reads it as a line ending)
+        check("preflight/p6-separator-cannot-evaluate", [p6(text) for text in (
+            "INPUT: {T}/in.md\r\n", "x\rINPUT: {T}/in.md\n", "x" + chr(0x2028) + "y\n",
+            "x" + chr(0x2029) + "y\n", "x" + chr(0x0085) + "y\n", "x" + chr(0x0C) + "y\n")],
+            ["CannotEvaluate"] * 6)
+        # a format character outside a fence refuses the brief: one inside a declared path, one glued to
+        # the label, a byte order mark at the brief's start and one in plain prose
+        check("preflight/p6-format-cannot-evaluate", [p6(text) for text in (
+            "INPUT: {T}/i" + chr(0x200B) + "n.md\n", "INPUT:" + chr(0xAD) + " {T}/in.md\n",
+            chr(0xFEFF) + "INPUT: {T}/in.md\n", "Read the notes" + chr(0x200B) + " first.\n",
+            "`x` " * 50 + "a" + chr(0x200B) + "b\n")],
+            ["CannotEvaluate"] * 5)
+        check("preflight/p6-not-file-or-directory-cannot-evaluate",
+              [p6(text) for text in ("INPUT: {T}/fifo\n", "INPUT: /dev/null\n")], ["CannotEvaluate"] * 2)
+        # a uid that reads a mode-000 file (root, or a capability) cannot show the permission refusal: recorded
+        enforced = not os.access(inputs / "unreadable.md", os.R_OK)
+        skipped = "skipped: this uid reads a mode-000 file, so os.access cannot refuse here"
+        check("preflight/p6-permission-cannot-evaluate",
+              [p6(text) for text in ("INPUT: {T}/unreadable.md\n", "INPUT: {T}/locked/in.md\n")] if enforced
+              else skipped, ["CannotEvaluate"] * 2 if enforced else skipped)
+        if not enforced:
+            print("NOTE: preflight/p6-permission-cannot-evaluate " + skipped)
+        printed = io.StringIO()
+        brief_path, table_path = inputs / "brief.md", inputs / "table.toml"
+        with open(brief_path, "w", encoding="utf-8") as handle:
+            handle.write("INPUT: {}/missing.md\n".format(inputs))
+        with open(table_path, "w", encoding="utf-8") as handle:
+            handle.write(TABLE_FIXTURE)
+        with contextlib.redirect_stdout(printed):
+            refused = run(str(brief_path), "alpha", table_path)
+        check("preflight/p6-refuse-line", (refused, "declares an input that does not exist" in printed.getvalue(),
+                                           INPUT_HINT in printed.getvalue()), (1, True, True))
+        missing = lambda: p6_code("INPUT: {T}/missing.md\n")  # noqa: E731
+        check("revert/p6-red", *flip([missing], [0], rule_p6=nothing))
+        check("revert/p6-probe-red", *flip([missing], [0], input_state=lambda path: (None, None)))
+        check("revert/p6-eacces-red", *flip([unreadable_code], [1], MISSING_ERRNOS=MISSING_ERRNOS | {errno.EACCES}))
+        check("revert/p6-near-input-red", *parser_flip([lambda: p6_code("Input: {T}/in.md\n")], [0],
+                                                       NEAR_INPUT_RE=never))
+        check("revert/p6-shape-red", *parser_flip([lambda: p6_code("INPUT: {T}/*.md\n")], [1],
+                                                  INPUT_SHAPE_CHARACTERS=frozenset()))
+        # the TEXT gate: with the separator refusal patched out, a U+2028 after the path is read as
+        # trailing whitespace and the declaration passes; with it, the brief is refused
+        check("revert/p6-separator-red", *parser_flip(
+            [lambda: p6_code("INPUT: {T}/in.md" + chr(0x2028) + "\n")], [0], SEPARATOR_RE=never))
+        # with the format-character refusal patched out AND the declarations read from the stripped text,
+        # the zero-width space is removed silently and the declaration resolves to the present in.md: the
+        # silent pass the gate and the raw read replaced (either seam alone still refuses or goes HARD)
+        check("revert/p6-format-red", *flip(
+            [lambda: p6_code("INPUT: {T}/i" + chr(0x200B) + "n.md\n")], [0],
+            forbidden_text=lambda text: None,
+            read_inputs=lambda text: _input_declarations.read(
+                "".join(ch for ch in text if unicodedata.category(ch) != "Cf"))))
+        # with the code-block rule patched out, a quoted workflow's indented inputs: key is a look-alike
+        check("revert/p6-fence-red", *parser_flip(
+            [lambda: p6_code("```yaml\non:\n  workflow_dispatch:\n    inputs:\n      target:\n```\n")],
+            ["CannotEvaluate"], CODE_BLOCKS_ARE_CODE=False))
+        # with the code-span rule patched out, a label quoted in backticks is a look-alike again
+        check("revert/p6-code-span-red", *parser_flip(
+            [lambda: p6_code("`Input: {T}/in.md`\n")], ["CannotEvaluate"], CODE_SPANS_ARE_CODE=False))
+        # with the ignored categories emptied, a combining character splits the label unseen
+        check("revert/p6-ignored-categories-red", *parser_flip(
+            [lambda: p6_code("I" + chr(0x034F) + "NPUT: {T}/missing.md\n")], [0], IGNORED_CATEGORIES=()))
+        # with quoted paragraphs declaring, a blockquoted INPUT line is a declaration, not a look-alike
+        check("revert/p6-declaring-kind-red", *parser_flip(
+            [lambda: p6_code("> INPUT: {T}/missing.md\n")], [1],
+            unit_declares=lambda kind: kind in ("paragraph", "quoted")))
+        # with the cell tokens emptied, a header cell that is exactly INPUT passes
+        check("revert/p6-cell-token-red", *parser_flip(
+            [lambda: p6_code("| INPUT | x |\n|---|---|\n| a | b |\n")], [0], CELL_TOKENS=()))
+        # with the confusable table emptied, a Cyrillic I hides the label (and its missing path) again
+        check("revert/p6-confusable-red", *parser_flip(
+            [lambda: p6_code(chr(0x0406) + "NPUT: {T}/missing.md\n")], [0], CONFUSABLES={}))
+        # with the rendering-mark scan patched out, a pure-ASCII brief whose character reference renders
+        # the label is answered by the fast path and its missing input goes unseen (the declared path must
+        # not spell "nput" itself, which alone forces the parse)
+        check("revert/p6-fast-path-red", *parser_flip(
+            [lambda: p6_code("I&#78;PUT: /absent-fixture-path/missing.md\n")], [0],
+            RENDERING_MARK_RE=never))
+        # with the deadline patched to zero, a brief the parse answers well inside it is refused instead
+        check("revert/parse-deadline-red", *parser_flip(
+            [lambda: p6_code("Input notes.\n\n" + "word word word\n" * 3000)], ["CannotEvaluate"],
+            PARSE_DEADLINE_SECONDS=0.0))
+        # with the nesting ceiling lifted, the over-deep quote run is read (its text never forces a
+        # parse, so the lifted ceiling meets no other bound)
+        check("revert/nesting-prescan-red", *parser_flip(
+            [lambda: p6_code("> " * 21 + "x\n")], [0], MAX_NESTING_DEPTH=1 << 30))
+        # with the whitespace-run scan patched out, the over-long run is read the same way
+        check("revert/whitespace-run-red", *parser_flip(
+            [lambda: p6_code("a" + " " * 2001 + "b\n")], [0], WHITESPACE_RUN_RE=never))
+        # with the run class narrowed to space and tab (the class a remembered list would have kept), an
+        # over-long vertical-tab or no-break-space run is read again instead of refused
+        check("revert/whitespace-class-red", *parser_flip(
+            [lambda: p6_code("Input notes.\n\na" + "\x0b" * 2001 + "b\n"),
+             lambda: p6_code("Input notes.\n\na" + "\xa0" * 2001 + "b\n")], [0, 0],
+            WHITESPACE_RUN_RE=re.compile(r"[ \t]{2001}")))
+        # with the block-structure resets patched out, a block's outcome depends on the unrelated deep
+        # list before it again (each of these briefs reads clean with the resets); the wide line is
+        # indented code, not a fence, so the fenced-code skip takes no part
+        wide_code = " " * 40 + "- x\n"
+        check("revert/nesting-resets-red", *parser_flip(
+            [lambda: p6_code("Input notes.\n\n" + tall_list + "\n# Notes\n\n" + wide_code),
+             lambda: p6_code("Input notes.\n\n" + tall_list + "# Notes\n" + wide_code),
+             lambda: p6_code("Input notes.\n\n" + tall_list + "\nplain prose.\n" + wide_code)],
+            ["CannotEvaluate"] * 3, NESTING_RESETS=False))
+        # with the fenced-code skip patched out, a quoted diff's deeply indented marker lines count as
+        # nesting again and the brief is refused (each reads clean with the skip)
+        check("revert/nesting-fences-red", *parser_flip(
+            [lambda: p6_code("Input notes.\n\n```diff\n" + diff_body + "```\n"),
+             lambda: p6_code("Input notes.\n\n- ```diff\n" + indented_body("  ") + "  ```\n")],
+            ["CannotEvaluate"] * 2, NESTING_FENCES=False))
+        # with the list marker's digits read as Unicode again, the fence after an Arabic-Indic or
+        # fullwidth marker is placed, its diff skipped and each brief read clean (each is refused with
+        # ASCII digits)
+        check("revert/nesting-marker-ascii-red", *parser_flip(
+            [lambda text=text: p6_code(text) for text in other_digit_fences[1:]], [0, 0],
+            LIST_MARK_RE=re.compile(r"(\d{1,9}[.)]|[-*+])( +)")))
+        # with an open link label cleared at an empty line again, the fence line inside the label is read
+        # as a fence, the real nesting after it is skipped and the brief is read clean (each is refused
+        # with the label kept open)
+        check("revert/nesting-labels-red", *parser_flip(
+            [lambda: p6_code("Input notes.\n\n[a\n\n```\n]: /u\n" + deep21),
+             lambda: p6_code("Input notes.\n\n[a\n\n~~~\n]: /u\n" + deep21)], [0, 0], NESTING_LABELS=False))
+        # with the depth reset again at a margin line inside an open link label or title, the list after
+        # the definition is counted from zero, the parser's deeper reading is never refused and each brief
+        # is read clean (each is refused with the depth held)
+        check("revert/nesting-definitions-red", *parser_flip(
+            [lambda text=text: p6_code("Input notes.\n\n" + text) for text in held_definitions],
+            [0] * len(held_definitions), NESTING_DEFINITIONS=False))
+        fence_opening = _input_declarations._fence_opening
+
+        def fences_read_held(line, position, markers, running, after_blank):
+            """_fence_opening fed the calling prescan's held depth in place of its running depth."""
+            return fence_opening(line, position, markers, sys._getframe(1).f_locals["holding"], after_blank)
+
+        # with the held depth fed into fence placement again, the prescan reads the fence after the held
+        # title as one in a list item or at the top level, its column-0 run cannot be placed, fence
+        # skipping stops, the item fence's empty line then sets up a reset, the brief is read clean, and
+        # texts of the seeded sample that the running depth alone refuses pass (each is refused with fence
+        # placement reading the running depth). This pins agreement with the earlier prescan's refusal,
+        # not the parser's reading, which nests the held-fence text only 15 levels deep
+        check("revert/nesting-held-fences-red", *parser_flip(
+            [lambda: p6_code("Input notes.\n\n" + held_fence[0]), superset_holds], [0, False],
+            _fence_opening=fences_read_held))
+        # with the nesting ceiling lifted, the no-break-space quote lead is read too, so the ceiling is
+        # load-bearing for the quote-prefix vectors (their text never forces a parse)
+        check("revert/nesting-quote-prefix-red", *parser_flip(
+            [lambda: p6_code(">\xa0" * 30 + "x\n")], [0], MAX_NESTING_DEPTH=1 << 30))
+        # the text ceiling is the dispatcher's own brief cap, so a brief-like text the size of the largest
+        # real brief measured (92,342 bytes: headings, prose with markup, bullets) is read and answered;
+        # with the old 64 KiB ceiling restored it is refused for its size alone
+        brief_unit = ("## A section\n\nThe reading takes each paragraph as a reader shows it, with *emphasis*, "
+                      "`code` and a [link](https://example.invalid/x) applied.\n\n- one item\n- another item\n\n")
+        brief_like = brief_unit * (92342 // len(brief_unit))
+        brief_like += "x" * (92342 - len(brief_like) - 1) + "\n"
+        check("structure/text-ceiling-dispatch-cap",
+              (_input_declarations.MAX_TEXT_BYTES, len(brief_like.encode("utf-8")), _outcome(brief_like)),
+              (102400, 92342, (0, [])))
+        check("revert/text-ceiling-red", *parser_flip(
+            [lambda: p6_code(brief_like)], ["CannotEvaluate"], MAX_TEXT_BYTES=1 << 16))
+        # the parse child replaced by stand-ins: each way a child can end is judged on the parent's reading
+        # of it, and each guard goes red under the flip that restores the reading without it
+        stand_ins = str(inputs / "stand-ins")
+        os.makedirs(stand_ins)
+
+        def stand_in(body, text="Input notes.\n"):
+            return lambda: _stand_in_read(tempfile.mkdtemp(dir=stand_ins), body, text)
+
+        empty_reading = ("ok", ([], []))
+        # a grandchild the child left running when it exited normally is gone once the call returns; with
+        # the group kill patched out (the old normal-exit path killed nothing) it survives the call
+        check("parse/child-group-killed-after-exit", _grandchild_outcome(stand_ins), (empty_reading, True))
+        check("revert/child-group-kill-red", *parser_flip(
+            [lambda: _grandchild_outcome(stand_ins)], [(empty_reading, False)], _kill_group=lambda process: None))
+        # a child that writes a complete well-formed document and then exits non-zero, or is ended by a
+        # signal, is refused; exit 0 is read. With the status read patched out, both failures are read
+        exit_three = STAND_IN_DOCUMENT + "os._exit(3)\n"
+        terminated = STAND_IN_DOCUMENT + "os.kill(os.getpid(), signal.SIGTERM)\n"
+        check("parse/child-exit-status-refused",
+              [stand_in(body)() for body in (STAND_IN_DOCUMENT, exit_three, terminated)],
+              [empty_reading, "DeclarationError", "DeclarationError"])
+        check("revert/child-exit-status-red", *parser_flip(
+            [stand_in(exit_three), stand_in(terminated)], [empty_reading] * 2, _check_exit=lambda status: None))
+        # well-formed JSON of the wrong shape is a named refusal: a node with no kind, an integer in a node's
+        # place, a document with no children list, and a tree deeper than the recursive readings walk; with
+        # the shape check patched out each escapes as another exception or reads as an empty document
+        no_kind = ("sys.stdout.write(json.dumps({'tree': {'kind': 'Document', 'span': [0, len(text)], "
+                   "'children': [{'span': [0, len(text)]}]}}))\n")
+        integer_node = ("sys.stdout.write(json.dumps({'tree': {'kind': 'Document', 'span': [0, len(text)], "
+                        "'children': [7]}}))\n")
+        no_children = "sys.stdout.write(json.dumps({'tree': {'kind': 'Document', 'span': [0, len(text)]}}))\n"
+        deep_tree = _deep_tree_body(5000)
+        shapes = [stand_in(body) for body in (no_kind, integer_node, no_children, deep_tree)]
+        check("parse/child-tree-shape-refused", [shape() for shape in shapes], ["DeclarationError"] * 4)
+        check("revert/child-tree-shape-red", *parser_flip(
+            shapes, ["KeyError", "AttributeError", empty_reading, "RecursionError"],
+            _checked_tree=lambda tree: tree))
+        # the depth bound, just inside, exactly at and just over MAX_TREE_DEPTH (the document is level 1)
+        check("structure/tree-depth-boundary",
+              [stand_in(_deep_tree_body(_input_declarations.MAX_TREE_DEPTH - 3 + offset))()
+               for offset in (-1, 0, 1)], [empty_reading, empty_reading, "DeclarationError"])
+        # JSON nested past the decoder's own stack bound is the same refusal; with RecursionError dropped
+        # from the decode failures it escapes from the decode
+        deep_json = stand_in("sys.stdout.write('{\"tree\": ' + '[' * 1000000 + ']' * 1000000 + '}')\n")
+        check("parse/child-result-recursion-refused", deep_json(), "DeclarationError")
+        check("revert/child-result-recursion-red", *parser_flip(
+            [deep_json], ["RecursionError"], CHILD_RESULT_ERRORS=(ValueError,)))
+        # the child starts with an empty environment, so a variable of the caller's never reaches it; with
+        # the caller's environment handed down again, it does
+        check("parse/child-environment-empty", _environment_outcome(stand_ins), (empty_reading, False))
+        check("revert/child-environment-red", *parser_flip(
+            [lambda: _environment_outcome(stand_ins)], [(empty_reading, True)], CHILD_ENVIRONMENT=None))
+        # the child imports its parent from its own directory first and checks the module's file is the one
+        # beside it: run under a minimal virtual environment holding a decoy parent in site-packages, the
+        # child reads through the copy beside it, and refuses when a site .pth line imported the decoy
+        # first. Each flip is built from the child's own source, only when its line is there exactly once:
+        # with the directory appended (the old search order) the installed decoy is imported first, and the
+        # origin check refuses it; with the origin check removed the pre-imported decoy is used; with both
+        # (the old child) the decoy is used either way
+        with open(_input_declarations._CHILD_PATH, encoding="utf-8") as handle:
+            child_source = handle.read()
+        front, appended = "sys.path.insert(0, _HERE)\n", "sys.path.append(_HERE)\n"
+        origin = "if _IMPORTED is None or os.path.realpath(_IMPORTED) != _BESIDE:\n"
+        path_flip = child_source.replace(front, appended) if child_source.count(front) == 1 else None
+        origin_flip = child_source.replace(origin, "if False:\n") if child_source.count(origin) == 1 else None
+        both_flips = path_flip.replace(origin, "if False:\n") if path_flip and origin_flip else None
+        check("parse/child-imports-beside", _child_import_outcomes(stand_ins, child_source), ("beside", "refused"))
+        check("revert/child-import-path-red", _child_import_outcomes(stand_ins, path_flip), ("refused", "refused"))
+        check("revert/child-import-origin-red", _child_import_outcomes(stand_ins, origin_flip), ("beside", "decoy"))
+        check("revert/child-import-old-red", _child_import_outcomes(stand_ins, both_flips), ("decoy", "decoy"))
+    finally:
+        if os.path.lexists(locked):
+            os.chmod(locked, 0o700)
+        shutil.rmtree(inputs, ignore_errors=True)
+    # ---------- P7: accepted residuals at the pin ----------
+    p7_base = Path(tempfile.mkdtemp(prefix="aiqt-brief-p7-"))
+    try:
+        p7_repo, p7_commits, p7_tag_pin, p7_replaced = _p7_repo(p7_base)
+        p7_old, p7_head, p7_entries = p7_commits[0], p7_commits[3], p7_commits[4]
+
+        def p7(lines, pin=p7_old, family="alpha"):
+            return _outcome("BRIEF-PIN: {}\n".format(pin) + lines, family, True, p7_repo)
+
+        p7_hard = (1, [("P7", "HARD")])
+        gates_rel, hooks_rel = MANIFEST_RELS["gate"], MANIFEST_RELS["hook"]
+        # both whole-field anchors hold at the pin: the gate's and the hook's residue fields exist by id
+        check("preflight/p7-whole-field-pass",
+              [p7("ACCEPTED-RESIDUAL: gate:g1\n"), p7("ACCEPTED-RESIDUAL: hook:h1\n"),
+               p7("ACCEPTED-RESIDUAL: gate:g1\nACCEPTED-RESIDUAL: hook:h1\n")], [(0, [])] * 3)
+        # a partial residue (the TOML-decoded field value) and a Python excerpt, inside its def or its
+        # nested method, each occur byte-exact at the pin
+        check("preflight/p7-excerpt-pass", [p7(lines) for lines in (
+            "ACCEPTED-RESIDUAL: " + gates_rel + " :: gate:g1.residue :: old gate residue\n",
+            "ACCEPTED-RESIDUAL: " + hooks_rel + " :: hook:h1.residue :: old hook residue\n",
+            "ACCEPTED-RESIDUAL: pkg/mod.py :: outer :: needle inside old\n",
+            "ACCEPTED-RESIDUAL: pkg/mod.py :: Box.method :: boxed needle\n")], [(0, [])] * 4)
+        check("preflight/p7-unanchored-hard",
+              [p7("ACCEPTED-RESIDUAL:\n"), p7("ACCEPTED-RESIDUAL: just prose words\n"),
+               p7("ACCEPTED-RESIDUAL: gates:g1\n")], [p7_hard] * 3)
+        check("preflight/p7-missing-id-hard",
+              [p7("ACCEPTED-RESIDUAL: gate:absent\n"), p7("ACCEPTED-RESIDUAL: hook:absent\n"),
+               p7("ACCEPTED-RESIDUAL: " + gates_rel + " :: gate:absent.residue :: x\n")], [p7_hard] * 3)
+        check("preflight/p7-missing-symbol-hard",
+              [p7("ACCEPTED-RESIDUAL: pkg/mod.py :: missing :: x\n"),
+               p7("ACCEPTED-RESIDUAL: pkg/mod.py :: Box.absent :: x\n"),
+               p7("ACCEPTED-RESIDUAL: pkg/mod.py :: method :: boxed needle\n")], [p7_hard] * 3)
+        check("preflight/p7-missing-excerpt-hard",
+              [p7("ACCEPTED-RESIDUAL: pkg/mod.py :: outer :: not there\n"),
+               p7("ACCEPTED-RESIDUAL: " + gates_rel + " :: gate:g1.residue :: not there\n")], [p7_hard] * 2)
+        # the needle is in the file, only outside the named symbol: never found by a whole-file search
+        check("preflight/p7-outside-symbol-hard",
+              p7("ACCEPTED-RESIDUAL: pkg/mod.py :: outer :: needle outside symbol\n"), p7_hard)
+        # an old pin matches while HEAD differs, and the same excerpt at the later pin matches its content
+        check("preflight/p7-old-pin-pass",
+              (p7("ACCEPTED-RESIDUAL: pkg/mod.py :: outer :: needle inside old\n"), p7_head != p7_old,
+               p7("ACCEPTED-RESIDUAL: pkg/mod.py :: outer :: needle inside new\n", p7_head)),
+              ((0, []), True, (0, [])))
+        # an excerpt present only at HEAD is absent at the old pin
+        check("preflight/p7-head-only-hard",
+              p7("ACCEPTED-RESIDUAL: pkg/mod.py :: outer :: needle inside new\n"), p7_hard)
+        # byte-exactness: a doubled space, another case, and a CRLF in the decoded residue (its CR and LF
+        # are real bytes, so "win end" does not match "win\r\nend") each miss
+        check("preflight/p7-byte-exact-hard",
+              [p7("ACCEPTED-RESIDUAL: pkg/mod.py :: outer :: needle  inside old\n"),
+               p7("ACCEPTED-RESIDUAL: pkg/mod.py :: outer :: Needle inside old\n"),
+               p7("ACCEPTED-RESIDUAL: " + gates_rel + " :: gate:g1.residue :: win end\n")], [p7_hard] * 3)
+        check("preflight/p7-missing-residue-hard",
+              [p7("ACCEPTED-RESIDUAL: gate:noresidue\n"),
+               p7("ACCEPTED-RESIDUAL: " + gates_rel + " :: gate:noresidue.residue :: x\n")], [p7_hard] * 2)
+        # a path with no entry at the pin is HARD for P7 and ADVISORY for P3 (it may be a file to create)
+        check("preflight/p7-missing-file-hard",
+              p7("ACCEPTED-RESIDUAL: absent/file.py :: f :: x\n"),
+              (1, [("P3", "ADVISORY"), ("P7", "HARD")]))
+        check("preflight/p7-malformed-cannot-evaluate",
+              [p7("ACCEPTED-RESIDUALS: gate:g1\n"), p7("ACCEPTED-RESIDUAL gate:g1\n"),
+               p7("ACCEPTED-RESIDUAL: pkg/mod.py :: outer\n"),
+               p7("ACCEPTED-RESIDUAL: pkg/mod.py ::  :: x\n")], ["CannotEvaluate"] * 4)
+        # a declaration with no pin, an unresolved pin, conflicting pins, or no repository, each through
+        # rule_p7 itself where rule_p3 would answer first
+        check("preflight/p7-pin-cannot-evaluate",
+              [_outcome("ACCEPTED-RESIDUAL: gate:g1\n", "alpha", True, p7_repo),
+               _git_outcome(rule_p7, PreflightText(
+                   "BRIEF-PIN: 0123456789ab\nACCEPTED-RESIDUAL: gate:g1\n"), None, p7_repo),
+               _git_outcome(rule_p7, PreflightText(
+                   "BRIEF-PIN: {}\nBRIEF-PIN: {}\nACCEPTED-RESIDUAL: gate:g1\n".format(p7_old, p7_head)),
+                   None, p7_repo),
+               _git_outcome(rule_p7, PreflightText(
+                   "BRIEF-PIN: {}\nACCEPTED-RESIDUAL: gate:g1\n".format(p7_old)), None, None)],
+              ["CannotEvaluate"] * 4)
+        check("preflight/p7-invalid-toml-cannot-evaluate",
+              [p7("ACCEPTED-RESIDUAL: gate:g1\n", p7_commits[2]),
+               p7("ACCEPTED-RESIDUAL: " + gates_rel + " :: gate:g1.residue :: a\n", p7_commits[2])],
+              ["CannotEvaluate"] * 2)
+        check("preflight/p7-duplicate-id-cannot-evaluate",
+              [p7("ACCEPTED-RESIDUAL: gate:g1\n", p7_commits[3]),
+               p7("ACCEPTED-RESIDUAL: " + gates_rel + " :: gate:g1.residue :: a\n", p7_commits[3])],
+              ["CannotEvaluate"] * 2)
+        # the label outside a column-zero declaration is prose: one ADVISORY line, nothing read at the pin
+        # (gate:absent would be HARD as a declaration), and a brief without the label prints nothing
+        check("preflight/p7-prose-advisory",
+              [p7(" ACCEPTED-RESIDUAL: gate:absent\n"), p7("Note the ACCEPTED-RESIDUAL label here.\n"),
+               p7("No residual lines here.\n")],
+              [(0, [("P7", "ADVISORY")]), (0, [("P7", "ADVISORY")]), (0, [])])
+
+        def p7_entry(rel, excerpt, symbol="target"):
+            return p7("ACCEPTED-RESIDUAL: {} :: {} :: {}\n".format(rel, symbol, excerpt), p7_entries)
+
+        # a lone CR ends a line for the parser: before the def, and inside a string literal, a slice that
+        # counted only LF lines would end past the def and take the needle after it
+        check("preflight/p7-lone-cr-scope",
+              [p7_entry(rel, excerpt) for rel in ("pkg/cr_line.py", "pkg/cr_string.py")
+               for excerpt in ("needle target", "needle after")], [(0, []), p7_hard] * 2)
+        # a source whose lines end only in lone CRs is read, never an uncaught IndexError
+        check("preflight/p7-cr-only-source",
+              [p7_entry("pkg/cr_only.py", "needle target"), p7_entry("pkg/cr_only.py", "needle outside")],
+              [(0, []), p7_hard])
+        check("preflight/p7-crlf-source",
+              [p7_entry("pkg/crlf.py", "needle target"), p7_entry("pkg/crlf.py", "needle after")],
+              [(0, []), p7_hard])
+        # a declared encoding other than UTF-8 cannot be read (column offsets count UTF-8 bytes); a UTF-8
+        # cookie in either spelling is read
+        check("preflight/p7-declared-encoding",
+              [p7_entry("pkg/latin_first.py", "needle after"), p7_entry("pkg/latin_second.py", "needle after"),
+               p7_entry("pkg/utf8_cookie.py", "needle target é"),
+               p7_entry("pkg/utf8_cookie.py", "needle after"), p7_entry("pkg/utf8_spelt.py", "needle target")],
+              ["CannotEvaluate", "CannotEvaluate", (0, []), p7_hard, (0, [])])
+        # bytes that are not UTF-8 only after the second line, with no cookie or a UTF-8 one, pass every
+        # cookie check: only the strict decode refuses them
+        check("preflight/p7-strict-decode-cannot-evaluate",
+              [p7_entry("pkg/latin_body.py", "needle target"),
+               p7_entry("pkg/latin_body_utf8_cookie.py", "needle target")], ["CannotEvaluate"] * 2)
+        # a non-UTF-8 cookie on the second line of valid UTF-8 bytes is refused: after a lone-CR blank line
+        # (hidden from a split that reads only LF line ends) and after a shebang (hidden from a guard that
+        # reads only the first line)
+        check("preflight/p7-cookie-second-line-cannot-evaluate",
+              [p7_entry("pkg/gbk_cr_blank.py", "needle target"), p7_entry("pkg/gbk_shebang.py", "needle target")],
+              ["CannotEvaluate"] * 2)
+        check("preflight/p7-unparsable-source-cannot-evaluate",
+              p7_entry("pkg/broken.py", "needle target"), "CannotEvaluate")
+        # a definition whose position cannot be placed in the text is CannotEvaluate, never an uncaught error
+        check("preflight/p7-segment-failure-cannot-evaluate",
+              [_git_outcome(definition_segment, "x = 1\n", ast.Name(id="x"), "p", "c"),
+               _git_outcome(definition_segment, "x = 1\n",
+                            ast.Pass(lineno=5, col_offset=0, end_lineno=5, end_col_offset=4), "p", "c"),
+               _git_outcome(definition_segment, "x = 'é'\n",
+                            ast.Pass(lineno=1, col_offset=0, end_lineno=1, end_col_offset=6), "p", "c")],
+              ["CannotEvaluate"] * 3)
+        # the size bound: one byte under and exactly P7_READ_MAX_BYTES are read, one byte over is not
+        check("preflight/p7-size-bound",
+              [p7_entry("pkg/big_{}.py".format(name), "needle big", "big") for name in ("inside", "at", "over")],
+              [(0, []), (0, []), "CannotEvaluate"])
+        # a symbolic link (mode 120000, a blob) and a submodule entry (mode 160000) are not regular files
+        check("preflight/p7-non-regular-entry-cannot-evaluate",
+              [p7_entry("pkg/link.py", "needle target"), p7_entry("pkg/sub", "needle target")],
+              ["CannotEvaluate"] * 2)
+        # a refs/replace entry substitutes the first pin's module blob with the second's: never read
+        check("preflight/p7-replace-objects-ignored",
+              [p7("ACCEPTED-RESIDUAL: pkg/mod.py :: outer :: needle inside old\n"),
+               p7("ACCEPTED-RESIDUAL: pkg/mod.py :: outer :: needle inside new\n")], [(0, []), p7_hard])
+        # a pin naming an annotated tag object peels to the genuine first commit: the refs/replace entry
+        # pointing that tag at a tag of the second commit never decides which commit the pin names
+        check("preflight/p7-tag-pin-replace-ignored",
+              [p7("ACCEPTED-RESIDUAL: pkg/mod.py :: outer :: needle inside old\n", p7_tag_pin),
+               p7("ACCEPTED-RESIDUAL: pkg/mod.py :: outer :: needle inside new\n", p7_tag_pin)],
+              [(0, []), p7_hard])
+        # a refs/replace entry points a commit at one with another path set: the existence probe walks the
+        # genuine tree, where the fifth commit's pkg/cr_line.py is absent and pkg/mod.py is present
+        check("preflight/p7-exists-replace-ignored",
+              [p7("Read pkg/cr_line.py before you answer.\n", p7_replaced),
+               p7("Read pkg/mod.py before you answer.\n", p7_replaced)], [(0, [("P3", "ADVISORY")]), (0, [])])
+        # the residual reads at the replaced commit list its genuine tree: a path only the replacement adds
+        # has no entry there, so the anchor is HARD as for any missing file (and P3 ADVISORY)
+        check("preflight/p7-read-replaced-added-path-hard",
+              p7("ACCEPTED-RESIDUAL: pkg/cr_line.py :: target :: needle target\n", p7_replaced),
+              (1, [("P3", "ADVISORY"), ("P7", "HARD")]))
+        # the replacement holds an oversized pkg/mod.py where the genuine tree holds the small one: the
+        # entry's size and bytes are the genuine ones, so the anchor holds
+        check("preflight/p7-read-replaced-size-ignored",
+              p7("ACCEPTED-RESIDUAL: pkg/mod.py :: outer :: needle inside old\n", p7_replaced), (0, []))
+        # REVIEWED HEAD lines with no BRIEF-PIN line, which the conflict checks do not compare, must all
+        # resolve to one commit; two that agree pass
+        check("preflight/p7-reviewed-heads-cannot-evaluate",
+              [_outcome("REVIEWED HEAD: {}\nREVIEWED HEAD: {}\nACCEPTED-RESIDUAL: gate:g1\n".format(
+                  p7_old, p7_head), "alpha", True, p7_repo),
+               _outcome("REVIEWED HEAD: {}\nREVIEWED HEAD: {}\nACCEPTED-RESIDUAL: gate:g1\n".format(
+                   p7_old, p7_old[:12]), "alpha", True, p7_repo)],
+              ["CannotEvaluate", (0, [])])
+
+        def p7_case(lines, pin=p7_old):
+            return lambda: p7(lines, pin)
+
+        check("revert/p7-red", *flip([p7_case("ACCEPTED-RESIDUAL: just prose words\n")], [(0, [])],
+                                     rule_p7=nothing))
+        check("revert/p7-symbol-scope-red", *flip(
+            [p7_case("ACCEPTED-RESIDUAL: pkg/mod.py :: outer :: needle outside symbol\n")], [(0, [])],
+            symbol_segments=lambda data, symbol, path, commit: [data]))
+        check("revert/p7-byte-exact-red", *flip(
+            [p7_case("ACCEPTED-RESIDUAL: pkg/mod.py :: outer :: Needle inside old\n")], [(0, [])],
+            excerpt_in=lambda excerpt, data: excerpt.encode("utf-8").lower() in data.lower()))
+        pinned_read = read_at_revision
+        check("revert/p7-pin-read-red", *flip(
+            [p7_case("ACCEPTED-RESIDUAL: pkg/mod.py :: outer :: needle inside new\n")], [(0, [])],
+            read_at_revision=lambda repo, commit, path: pinned_read(repo, p7_head, path)))
+        # with the regular-file mode check widened to a symbolic link, the link's target text is read as
+        # Python source and the anchor turns from CannotEvaluate into a missing symbol
+        check("revert/p7-regular-file-red", *flip(
+            [p7_case("ACCEPTED-RESIDUAL: pkg/link.py :: target :: needle target\n", p7_entries)], [p7_hard],
+            REGULAR_FILE_MODES=REGULAR_FILE_MODES + ("120000",)))
+
+        def replaced_rev_parse(repo, rev):
+            return subprocess.run(["git", "-C", str(repo), "rev-parse", "--verify", "--quiet",
+                                   rev + "^{commit}"],
+                                  capture_output=True, timeout=GIT_READ_TIMEOUT, env=_git_read_env())
+
+        # with replace objects honoured in the pin resolution again, the replaced tag pin peels to the
+        # second commit and the tag-pin anchors swap
+        check("revert/p7-tag-pin-replace-red", *flip(
+            [p7_case("ACCEPTED-RESIDUAL: pkg/mod.py :: outer :: needle inside old\n", p7_tag_pin),
+             p7_case("ACCEPTED-RESIDUAL: pkg/mod.py :: outer :: needle inside new\n", p7_tag_pin)],
+            [p7_hard, (0, [])], _rev_parse=replaced_rev_parse))
+
+        def replaced_cat_file(repo, commit, path):
+            return subprocess.run(["git", "-C", str(repo), "cat-file", "-e", commit + ":" + path],
+                                  capture_output=True, timeout=GIT_READ_TIMEOUT, env=_git_read_env())
+
+        # with replace objects honoured in the existence probe again, the replaced commit's path is found
+        # through its replacement's tree and the P3 advisory goes quiet
+        check("revert/p7-exists-replace-red", *flip(
+            [p7_case("Read pkg/cr_line.py before you answer.\n", p7_replaced)], [(0, [])],
+            _cat_file=replaced_cat_file))
+
+        def replaced_ls_tree(repo, commit, path):
+            return subprocess.run(["git", "-C", str(repo), "ls-tree", "-l", "--full-tree", commit, "--",
+                                   ":(literal)" + path],
+                                  capture_output=True, timeout=GIT_READ_TIMEOUT, env=_git_read_env())
+
+        # with replace objects honoured in the residual read's ls-tree again, the replaced commit lists its
+        # replacement's tree: the added path is found (and its genuine blob read then fails), and the small
+        # pkg/mod.py is listed at the replacement's oversized length
+        check("revert/p7-read-ls-tree-replace-red", *flip(
+            [p7_case("ACCEPTED-RESIDUAL: pkg/cr_line.py :: target :: needle target\n", p7_replaced),
+             p7_case("ACCEPTED-RESIDUAL: pkg/mod.py :: outer :: needle inside old\n", p7_replaced)],
+            ["CannotEvaluate"] * 2, _ls_tree_entry=replaced_ls_tree))
+
+        def replaced_cat_blob(repo, commit, path):
+            return subprocess.run(["git", "-C", str(repo), "cat-file", "blob", commit + ":" + path],
+                                  capture_output=True, timeout=GIT_READ_TIMEOUT, env=_git_read_env())
+
+        # with replace objects honoured in the residual read's blob read again, the replaced commit's
+        # pkg/mod.py is read from its replacement's tree (oversized), and the first pin's module blob is read
+        # as its replacement (the second commit's content), so the old excerpt goes missing
+        check("revert/p7-read-blob-replace-red", *flip(
+            [p7_case("ACCEPTED-RESIDUAL: pkg/mod.py :: outer :: needle inside old\n", p7_replaced),
+             p7_case("ACCEPTED-RESIDUAL: pkg/mod.py :: outer :: needle inside old\n")],
+            ["CannotEvaluate", p7_hard], _cat_blob=replaced_cat_blob))
+
+        def p7_cookie_mutant(heads, errors="strict"):
+            def mutant(data, path, commit):
+                text = data.decode("utf-8-sig", errors)
+                for line in heads(data):
+                    declared, _ = tokenize.detect_encoding(iter((line + b"\n",)).__next__)
+                    if codecs.lookup(declared).name not in ("utf-8", "utf-8-sig"):
+                        raise CannotEvaluate("{} at {}: declares the encoding {}".format(path, commit, declared))
+                return text
+            return mutant
+
+        # with the first two lines split on LF only, the lone-CR blank line glues the gbk cookie onto a
+        # first line it cannot start, and the source is wrongly read
+        check("revert/p7-cookie-cr-split-red", *flip(
+            [p7_case("ACCEPTED-RESIDUAL: pkg/gbk_cr_blank.py :: target :: needle target\n", p7_entries)],
+            [(0, [])], python_source_text=p7_cookie_mutant(lambda data: data.split(b"\n", 2)[:2])))
+        # with only the first line read, the gbk cookie after the shebang is never seen
+        check("revert/p7-cookie-second-line-red", *flip(
+            [p7_case("ACCEPTED-RESIDUAL: pkg/gbk_shebang.py :: target :: needle target\n", p7_entries)],
+            [(0, [])], python_source_text=p7_cookie_mutant(
+                lambda data: data.replace(b"\r\n", b"\n").replace(b"\r", b"\n").split(b"\n", 2)[:1])))
+        # with the decode weakened to errors='replace' (the two-line cookie check kept), bytes that are not
+        # UTF-8 after the second line are read and the anchors pass
+        check("revert/p7-strict-decode-red", *flip(
+            [p7_case("ACCEPTED-RESIDUAL: pkg/latin_body.py :: target :: needle target\n", p7_entries),
+             p7_case("ACCEPTED-RESIDUAL: pkg/latin_body_utf8_cookie.py :: target :: needle target\n", p7_entries)],
+            [(0, [])] * 2, python_source_text=p7_cookie_mutant(
+                lambda data: data.replace(b"\r\n", b"\n").replace(b"\r", b"\n").split(b"\n", 2)[:2], "replace")))
+    finally:
+        shutil.rmtree(p7_base, ignore_errors=True)
+    check("revert/every-flip-ran", len(flipped), 242)
 
     for check_id in sorted(expected - _EXECUTED_SET):
         FAILURES.append("execution-set/missing: {}".format(check_id))
@@ -5685,7 +8506,12 @@ def self_test(report_path=None):
           "that no other sentence of its void group (lazy lines, nested items, indented headings and fence contents "
           "included) voids, quoted source text is not a data context and a command-line refusal says how to "
           "rewrite, and every blocking rule, command-line form, closed-shape "
-          "guard and void patched out flips its fixture; R1, R5, R6 and R7 print ADVISORY lines and never refuse; "
+          "guard and void patched out flips its fixture; W1 refuses, for every family whose row says git-write = "
+          "\"no\" (one that can execute included), a git command line whose subcommand is commit or push, with -C "
+          "or -c options or an absolute git path, in prose, a code span or a fence, printing the line, exempts only "
+          "the PROHIBITED shape, passes a checkout pin's ^{{commit}}, the commit under review and a correction "
+          "naming a refused commit outside subcommand position, never fires for undeclared or yes, and each part "
+          "patched out flips its fixture; R1, R5, R6 and R7 print ADVISORY lines and never refuse; "
           "the preflight, for a family that cannot read outside a declared workdir (P2), judges every slash at a "
           "word's start or after a character that is not a letter, digit, `.` or `_` (a quoted span is one word "
           "with the text glued to it, http and https words skipped, file:// judged) from that slash to the word's "
@@ -5713,12 +8539,30 @@ def self_test(report_path=None):
           "negation before another verb, a prohibition word in a code span or after `=`, a second listed command "
           "line and a later clause are judged), and prints one reached from prose, gh pr checkout, a web address "
           "naming a branch or a "
-          "submodule update --remote (P5), and "
+          "submodule update --remote (P5), refuses a declared input (a declaring paragraph line of the parsed "
+          "CommonMark document whose rendered, folded text begins with INPUT:, read by the parser C1 shares; "
+          "code declares nothing and is not checked) missing on this host, a dangling "
+          "link or a path under a file included, never a path in prose, and "
+          "exits 2 on an INPUT line it cannot check, a look-alike label opening a rendered paragraph line, "
+          "heading or table cell (folded through the bounded confusable table), a brief holding a non-LF line "
+          "separator or a format character outside code, a brief the vendored parser cannot read, a FIFO or "
+          "device, or an input this uid "
+          "cannot read (P6), refuses a column-zero ACCEPTED-RESIDUAL declaration with no anchor or whose "
+          "gate or hook id, Python symbol or byte-exact excerpt is absent at the brief's pinned revision, "
+          "read from the git object store and never by a whole-file search, exits 2 on a malformed "
+          "declaration, an unresolved or conflicting pin, or pinned content it cannot read or parse, and "
+          "prints the label in prose as ADVISORY (P7), and "
           "each preflight rule and guard patched out flips its fixture; "
           "the regex audit reads the module-level patterns and COMMAND_FORMS (and, without claiming completeness, "
           "container and class globals and the production source's re calls), flags no pattern, "
           "detects the previous revisions' and loses its canary with each guard patched out; 37 repeated shapes "
-          "each evaluate in linear time at 1 MiB in a capped child that must exit 0; scope keeps and drops "
+          "each evaluate within the linear growth bound at 64 KiB, through the parsed-document reading "
+          "with its size, whitespace-run and nesting bounds and its killed-at-the-deadline parse child, "
+          "in a capped child that must exit 0; the parse child's process group is killed after a normal "
+          "exit too, a non-zero or signalled child and a result of the wrong shape or depth are refused, "
+          "the child sees an empty environment and imports its parent only from beside it, each red with "
+          "its guard patched out; "
+          "scope keeps and drops "
           "numbered items, other families' legs, sections and tail markers; undecodable, blank, oversized, "
           "missing, non-regular, backwards-range and unknown-family input exits 2); execution set reconciled "
           "against tools/selftest_checks.toml".format(

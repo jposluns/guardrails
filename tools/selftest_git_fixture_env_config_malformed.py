@@ -7,12 +7,30 @@ independently of fixture writes. The lane builds the shared poison tree and cont
 (_config_poison_fixture), removes the hook/ignore/attributes poison, proves the fsmonitor and
 malformed-config controls discriminate (config/fsmonitor-control, config/malformed-control,
 config/xdg-malformed-control), runs the four fsmonitor member probes, then runs every registered
-member except the two real-checkout archive readers (which retain caller config by contract)
-under malformed HOME and XDG configuration and asserts each member rc. Malformed HOME/XDG config
-also covers reads such as rev-parse, which hooks/ignore poison cannot see.
+member except the two real-checkout archive readers and the two bare tracked-file listing gates
+(which retain caller config by contract) under malformed HOME and XDG configuration and asserts
+each member rc. Malformed HOME/XDG config also covers reads such as rev-parse, which hooks/ignore
+poison cannot see.
 
   selftest_git_fixture_env_config_malformed.py                              exit 0 pass, 1 failure
   selftest_git_fixture_env_config_malformed.py --execution-report ABS_PATH  also write check IDs
+  selftest_git_fixture_env_config_malformed.py --shard K/N                  run shard K of N only
+  selftest_git_fixture_env_config_malformed.py --list-shard K/N             print shard K, run none
+
+SHARDS: --shard K/N (1 <= K <= N <= 64; it may stand beside --execution-report) runs the lane's
+controls and only the members of shard K, the entries at zero-based positions i with
+i mod N = K - 1 in this lane's roster (the sorted registered roster less the four members named
+here, CONFIG_EXCLUSIONS["malformed"]: tools/check_release_build.py --self-test and
+tools/check_release_delta.py --self-test, the archive readers, and bare
+tools/check_python_floor.py and tools/check_child_status_coverage.py, the listing gates;
+_config_lane_roster; dealt by _shard_members), so shards 1..N together run each member
+exactly once (roster/shard-partition-real). The malformed checks and fsmonitor probes of a member
+another shard runs are left to that shard; a pass covers this shard's members only.
+--list-shard K/N prints the members shard K runs, one command per line, and runs nothing. A
+malformed or out-of-range value, or a shard holding no member in a run, is exit 2, never a full
+or an empty run. Without --shard the lane runs every member as before. RESIDUAL: a shard is
+never shorter than its longest member (each member keeps its own bound, CONFIG_MEMBER_BOUNDS),
+and every shard repeats the controls.
 
 Exit 2 is cannot-evaluate (a harness/setup error or a member that reached its time bound), never
 a pass; the engine fails closed exactly as the shared module documents."""
@@ -38,8 +56,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import selftest_git_fixture_env as _gfe  # noqa: E402
 import _selftest_exit_report  # noqa: E402
 from selftest_git_fixture_env import (  # noqa: E402
-    CONFIG_EXCLUSIONS, _command_identity, _config_poison_fixture, _config_results,
-    _member_result, _registered_offenders, _run_config_member)
+    _config_poison_fixture, _config_results, _member_result, _registered_offenders,
+    _run_config_member)
 
 SUITE_ID = "git-fixture-env-config-malformed"
 # check() is the engine choke point: every id this runner records flows into the one
@@ -51,6 +69,9 @@ def _malformed_lane(base):
     """The malformed-config lane; see the module docstring."""
     fx = _config_poison_fixture(base)
     roster, env = fx["roster"], fx["env"]
+    members = _gfe._shard_select(_gfe._config_lane_roster("malformed", roster))
+    if members is None:
+        return 2
     marker, monitor_marker = fx["marker"], fx["monitor_marker"]
     control, home, xdg = fx["control"], fx["home"], fx["xdg"]
     ignore, attributes, monitor = fx["ignore"], fx["attributes"], fx["monitor"]
@@ -92,6 +113,8 @@ def _malformed_lane(base):
             ("config/_qa_adapter/fsmonitor-rc", "config/_qa_adapter/fsmonitor",
              "tools/_qa_adapter.py"),
     ):
+        if _gfe._shard_leaves(member, (fs_rc_id, fs_marker_id)):
+            continue
         (home / ".gitconfig").write_text(fsconfig, encoding="utf-8")
         (xdg / "git" / "config").write_text(fsconfig, encoding="utf-8")
         monitor_marker.write_bytes(b"")
@@ -100,9 +123,7 @@ def _malformed_lane(base):
         check(fs_marker_id, monitor_marker.read_bytes(), b"")
     (home / ".gitconfig").write_text(malformed, encoding="utf-8")
     (xdg / "git" / "config").write_text(malformed, encoding="utf-8")
-    malformed_results = _config_results(
-        [argv for argv in roster if _command_identity(argv) not in CONFIG_EXCLUSIONS["malformed"]],
-        env, marker, monitor_marker)
+    malformed_results = _config_results(members, env, marker, monitor_marker)
     offenders, cause = _registered_offenders(malformed_results)
     check("config/registered-malformed", offenders, [], cause)
     for malformed_id, member in (
@@ -127,9 +148,12 @@ def _malformed_lane(base):
             ("config/_opf_observe/malformed", "opf/tools/_opf_observe.py"),
             ("config/opf/malformed", "opf/tools/opf.py"),
     ):
+        if _gfe._shard_leaves(member, (malformed_id,)):
+            continue
         check(malformed_id, _member_result(malformed_results, member, 0), 0)
 
 
 if __name__ == "__main__":
     _gfe.SUITE_ID = SUITE_ID
-    _selftest_exit_report.exit_with(_gfe.main(_gfe._parse_argv(sys.argv[1:]), _malformed_lane))
+    _selftest_exit_report.exit_with(_gfe._config_lane_main(sys.argv[1:], "malformed",
+                                                           _malformed_lane))

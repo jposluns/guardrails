@@ -6,7 +6,7 @@ tier: 10
 facet: INTEG
 secondary: [QUALI]
 slug: rerun-pass-is-still-failure
-map-nist-80053-broad: [SI-2]
+map-nist-80053-broad: [SA-11]
 map-iso-42001-broad: [A.6.2.4]
 ---
 

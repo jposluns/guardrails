@@ -1,3 +1,4 @@
 # aiqt.ai
 User-agent: *
 Disallow:
+Sitemap: https://aiqt.ai/sitemap.xml

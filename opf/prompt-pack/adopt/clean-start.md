@@ -60,8 +60,11 @@ go-ahead is not the single adoption approval of section 5. The steps, from the p
    such a file aside or give it a disposition with `opf adopt`, then retry. While the sources
    are written, a `lease.toml` sits inside `.working/toml/` with an active record under
    `.git/`; on success both are gone and the lock is released. A crashed run can leave a stale
-   record that makes a later init refuse until `opf init --recover` confirms the recorded
-   holder dead and clears it. Every created path is left untracked.
+   record that makes a later init refuse. `opf init --recover` clears that record only when it
+   confirms the recorded holder dead and the record names plain `opf init`'s own operation
+   (`opf-init-plain`); it refuses and keeps a record that another operation left, even when that
+   holder is confirmed dead, the init an `opf adopt` run performs (`opf-init`) included, and the
+   refusal names the next step. Every created path is left untracked.
 2. Have the adopter review the created paths, then stage exactly the paths `opf init` printed
    and commit them. The store must be tracked before views can render: `opf render --write` on
    an untracked store refuses with exit 2.

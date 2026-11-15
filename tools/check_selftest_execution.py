@@ -17,7 +17,26 @@ drop an accidentally-unreachable check from both sides of the comparison and sta
 failure this gate exists to catch); there is deliberately no accept, update, or baseline command.
 
   check_selftest_execution.py --suite <id>   run the registered suite and reconcile its execution set
+  check_selftest_execution.py --suite <id> --shard K/N
+                                             run shard K of N of a sharded suite and reconcile it
   check_selftest_execution.py --self-test    synthetic manifests and fake runners assert every leg fires
+
+SHARDS. A suite named in SHARD_COUNTS (the three git-fixture-env config lanes) also runs one shard
+at a time: --shard K/N, N exactly the suite's registered count and 1 <= K <= N (any other N, a
+malformed value or an unsharded suite is a cannot-evaluate, exit 2, before any launch). The same
+pre-launch checks run first. The gate then reads, from the runner's SOURCE, every id it leaves to
+another shard (each _shard_leaves(<member>, (<id>, ...)) call inside a for over literal rows; any
+other call shape is cannot-evaluate), and launches the runner with --list-shard 1/1 and with
+--list-shard J/N for every J (each lists commands and runs nothing): every shard must hold a
+command and the N shards together must hold every lane command exactly once, or the run is
+cannot-evaluate before the shard launches. The shard's expected set is the registered set less
+the ids whose member is in the lane but not in shard K; it is reconciled exactly, so an id this
+shard owns that never ran is a missing finding and an id another shard owns that this shard ran is
+an extra finding. THE UNION: since the listed shards partition the lane, each left id is owned by
+exactly one other shard, so the N expected sets together cover the registered set; a check owned
+by no shard cannot arise without a partition finding. The union holds across shards 1..N only when
+every one of them runs and passes: this gate proves one shard per invocation, and the launch
+coverage below counts a sharded suite as launched only by its plain line or by its whole shard set.
 
 The child is launched [sys.executable, -I, -B, -c, <shim>, <runner's directory>, <runner>, <private
 abs path>, <row args>...]: the shim imports tools/_selftest_exit_report.py from beside the runner and
@@ -65,7 +84,10 @@ CLOSED grammar (SUITE_ID_RE: a letter or digit first, then letters, digits, '.',
 only), refused by name otherwise, so a space-joined roster identity can never stand for a
 registered suite. A roster that is missing, not a regular file, unreadable, or drawing a loader
 diagnostic is cannot-evaluate, and so is a row whose launch line is missing from at least one of
-the two rosters. The
+the two rosters. A suite of SHARD_COUNTS counts as launched from a roster that holds either its
+plain launch line or, for every K in 1..N with N its registered count, the line
+tools/check_selftest_execution.py --suite <id> --shard K/N; part of that set, or a set of
+another N, launches nothing. The
 check is LEXICAL: it proves each line is present, not that it runs or passes (a CI job or step
 condition, or a local run stopped early, is outside it).
 The child runs with
@@ -151,7 +173,9 @@ absent, non-regular, a symlink, or escapes the repo; runner source that does not
 unresolvable, aliased (a non-call check reference), comprehension-bound, or duplicate check id; a
 static source-to-manifest set mismatch (for rows that share a runner, a group whose expected sets do
 not partition the static set, or whose args are missing or repeated); a malformed args list, or one
-naming the report option; a suite id outside the closed suite-id grammar; a runner path carrying
+naming the report option; a --shard value outside SHARDS, an unresolvable _shard_leaves call or a
+left id that is not registered, a --list-shard launch that fails, and shards that are empty or do
+not partition the lane; a suite id outside the closed suite-id grammar; a runner path carrying
 a control or format character; any row's runner path that
 does not resolve strictly (a missing path, a non-directory component, a symlink loop or a permission
 error); a registered row whose launch line is missing from at least one launch roster, or a launch
@@ -311,6 +335,18 @@ REPORT_FORMAT_VERSION = 2
 # allowance (gate exit 0), wrote 0 stderr bytes too, so all nine suites were measured at 0
 # stderr bytes.
 DECLARED_STDERR = {}
+# Sharded suites: suite id -> N, the one shard count --suite <id> --shard K/N accepts (any other N
+# is a usage error). Sized from CI run 43600403087 so each shard's share of its measured lane
+# plus its N + 1 --list-shard launches (15.4 s each, one measured listing) is at most about 13
+# minutes: combined 112.8 / 12 + 13 * 15.4 / 60 = 9.40 + 3.34 = 12.74, malformed 113.5 / 12 +
+# 13 * 15.4 / 60 = 9.46 + 3.34 = 12.80 and system 148.5 / 19 + 20 * 15.4 / 60 = 7.82 + 5.13 =
+# 12.95 minutes (one shard fewer gives 13.33, 13.40 and 13.13). This is before the controls
+# every shard repeats, and a shard is never shorter than its longest member.
+SHARD_COUNTS = {"git-fixture-env-config-combined": 12, "git-fixture-env-config-malformed": 12,
+                "git-fixture-env-config-system": 19}
+SHARD_MAX = 64
+# The bound on one --list-shard launch (it runs no member; measured at about 15 s).
+SHARD_LIST_TIMEOUT = 300
 
 
 def _cannot(msg):
@@ -512,18 +548,202 @@ def _unlaunched_rows(root, suites):
             _cannot("launch roster {} cannot be evaluated: line {}: {}".format(
                 rel, diagnostic.line, diagnostic.message))
             return None
-        launched_ids = set()
+        launched_ids, shard_sets = set(), {}
         for member in extraction.members:
             argv = member.split(" ")
             # Exactly the command main() accepts (["--suite", <id>] after the script): a member
             # carrying any further token is some other command, never a launch of <id>.
             if len(argv) == 3 and argv[0] == GATE_REL and argv[1] == "--suite" and argv[2]:
                 launched_ids.add(argv[2])
+            # Or one shard of a sharded suite, in the other argv shape main() accepts: the suite
+            # counts as launched only when the roster holds every shard 1..N of its registered N.
+            elif (len(argv) == 5 and argv[0] == GATE_REL and argv[1] == "--suite"
+                  and argv[2] in SHARD_COUNTS and argv[3] == "--shard"):
+                shard = _parse_shard(argv[4])
+                if shard is not None and shard[1] == SHARD_COUNTS[argv[2]]:
+                    shard_sets.setdefault(argv[2], set()).add(shard[0])
+        for sid, held in shard_sets.items():
+            if held == set(range(1, SHARD_COUNTS[sid] + 1)):
+                launched_ids.add(sid)
         for other in suites:
             if other["id"] not in launched_ids:
                 lines.append("  suite {} has no launch line ({}) in {}".format(
                     other["id"], SUITE_LAUNCH.format(other["id"]), rel))
+                if other["id"] in SHARD_COUNTS:
+                    count = SHARD_COUNTS[other["id"]]
+                    absent = sorted(set(range(1, count + 1)) - shard_sets.get(other["id"], set()))
+                    lines.append("  suite {} has no complete shard set in {} either: shards {} "
+                                 "of {} have no launch line ({} --shard K/{})".format(
+                                     other["id"], rel, absent, count,
+                                     SUITE_LAUNCH.format(other["id"]), count))
     return lines
+
+
+def _parse_shard(text):
+    """(K, N) for the text K/N, each in ASCII decimal digits with no sign, space or leading zero, and
+    1 <= K <= N <= SHARD_MAX; None for any other text (a usage error, never a full or empty run)."""
+    if not isinstance(text, str) or text.count("/") != 1:
+        return None
+    parts = text.split("/")
+    if not all(part and part[0] in "123456789" and len(part) <= len(str(SHARD_MAX))
+               and all(char in "0123456789" for char in part) for part in parts):
+        return None
+    k, n = int(parts[0]), int(parts[1])
+    return (k, n) if 1 <= k <= n <= SHARD_MAX else None
+
+
+class _ShardLeavesVisitor(ast.NodeVisitor):
+    """Resolve every call to _shard_leaves (a bare name or an attribute of that name) in a runner's
+    source to the member and check ids it leaves to another shard. One pattern only: the call sits in
+    the body of a for over a tuple/list of literal rows whose tuple target binds both arguments, the
+    first a Name and the second a tuple or list of Names, each bound to a string literal in every row;
+    the call then leaves, for each row, that row's ids when that row's member is in another shard.
+    Any other call shape is a fail-closed error, never a guess."""
+
+    def __init__(self, runner_path):
+        self.runner_path = runner_path
+        self.for_stack = []
+        self.owned = {}      # check id -> member path
+        self.errors = []
+
+    def visit_For(self, node):
+        self.for_stack.append(node)
+        self.generic_visit(node)
+        self.for_stack.pop()
+
+    def visit_Call(self, node):
+        self.generic_visit(node)
+        func = node.func
+        name = func.id if isinstance(func, ast.Name) else (
+            func.attr if isinstance(func, ast.Attribute) else None)
+        if name != "_shard_leaves":
+            return
+        rows = self._rows(node)
+        if rows is None:
+            self.errors.append(
+                "unresolvable _shard_leaves call at {}:{}; it must be _shard_leaves(<member>, "
+                "(<id>, ...)) inside a for over literal rows that bind every argument".format(
+                    self.runner_path, node.lineno))
+            return
+        for member, ids in rows:
+            for cid in ids:
+                if self.owned.setdefault(cid, member) != member:
+                    self.errors.append("check id {!r} is left with two members, {!r} and {!r}, at "
+                                       "{}:{}".format(cid, self.owned[cid], member,
+                                                      self.runner_path, node.lineno))
+
+    def _rows(self, node):
+        """[(member, (id, ...)) per literal row] for one _shard_leaves call, or None."""
+        if (not self.for_stack or node.keywords or len(node.args) != 2
+                or not isinstance(node.args[0], ast.Name)
+                or not isinstance(node.args[1], (ast.Tuple, ast.List)) or not node.args[1].elts
+                or not all(isinstance(elt, ast.Name) for elt in node.args[1].elts)):
+            return None
+        loop = self.for_stack[-1]
+        if (not isinstance(loop.target, ast.Tuple)
+                or not isinstance(loop.iter, (ast.Tuple, ast.List)) or not loop.iter.elts):
+            return None
+        names = [elt.id if isinstance(elt, ast.Name) else None for elt in loop.target.elts]
+        wanted = [node.args[0].id] + [elt.id for elt in node.args[1].elts]
+        if not all(want in names for want in wanted):
+            return None
+        positions = [names.index(want) for want in wanted]
+        rows = []
+        for row in loop.iter.elts:
+            if (not isinstance(row, (ast.Tuple, ast.List)) or len(row.elts) != len(names)
+                    or not all(isinstance(row.elts[pos], ast.Constant)
+                               and isinstance(row.elts[pos].value, str) for pos in positions)):
+                return None
+            values = [row.elts[pos].value for pos in positions]
+            rows.append((values[0], tuple(values[1:])))
+        return rows
+
+
+def _shard_owned_ids(runner_path):
+    """({check id: member path}, None) for every id the runner's source leaves to the shard that runs
+    its member (_ShardLeavesVisitor), or (None, error) on unreadable or unparsable source or an
+    unresolvable call. An id absent from the map is a lane control every shard runs."""
+    try:
+        tree = ast.parse(Path(runner_path).read_text(encoding="utf-8"), filename=str(runner_path))
+    except (OSError, UnicodeDecodeError, SyntaxError, ValueError) as exc:
+        return None, "runner {} unreadable or unparsable for its shard map: {}".format(
+            runner_path, exc)
+    visitor = _ShardLeavesVisitor(runner_path)
+    visitor.visit(tree)
+    if visitor.errors:
+        return None, "; ".join(visitor.errors)
+    return visitor.owned, None
+
+
+def _shard_identity(command):
+    """The member identity of one listed command line: its first token with one leading ./ removed,
+    the identity the runner's _shard_leaves compares."""
+    script = command.split(" ")[0]
+    return script[2:] if script.startswith("./") else script
+
+
+def _list_shard(root, runner, shard_text, env):
+    """The command lines runner --list-shard <shard_text> prints (it runs no member), as a list, or
+    None after printing (cannot evaluate) on a launch failure, a timeout, a nonzero exit, an
+    undecodable or blank line."""
+    command = [sys.executable, "-I", "-B", str(runner), "--list-shard", shard_text]
+    try:
+        child = subprocess.run(command, cwd=str(root), capture_output=True, env=env,
+                               timeout=SHARD_LIST_TIMEOUT)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        _cannot("cannot list shard {} of {}: {}".format(shard_text, runner, exc))
+        return None
+    if child.returncode != 0:
+        _forward(child.stderr, sys.stderr)
+        _cannot("listing shard {} of {} exited {}".format(shard_text, runner, child.returncode))
+        return None
+    try:
+        lines = child.stdout.decode("ascii").split("\n")
+    except UnicodeDecodeError as exc:
+        _cannot("listing shard {} of {} is not ASCII: {}".format(shard_text, runner, exc))
+        return None
+    if lines and lines[-1] == "":
+        lines.pop()
+    if any(not line.strip() or line != line.strip() for line in lines):
+        _cannot("listing shard {} of {} carries a blank or padded line".format(shard_text, runner))
+        return None
+    return lines
+
+
+def _shard_left(root, runner, suite_id, shard, owned, env):
+    """The check ids shard (K, N) of suite_id leaves to the other shards, or None after printing
+    (cannot evaluate). The runner lists its whole lane (--list-shard 1/1) and each shard 1..N; the
+    shards must be non-empty and together hold every lane command exactly once (a partition), so a
+    member in no shard, in two shards, or outside the lane is refused before the shard launches. An
+    id of owned (_shard_owned_ids) is left when its member is in the lane but not in shard K; an id
+    whose member is outside the lane, and every lane control, stays this shard's to run. Since the
+    shards partition the lane, every left id is held by exactly one other shard, so shards 1..N
+    together own every registered id."""
+    k, n = shard
+    lane = _list_shard(root, runner, "1/1", env)
+    if lane is None:
+        return None
+    held = {}
+    for j in range(1, n + 1):
+        lines = _list_shard(root, runner, "{}/{}".format(j, n), env)
+        if lines is None:
+            return None
+        if not lines:
+            _cannot("suite {}: shard {}/{} holds no member of its lane".format(suite_id, j, n))
+            return None
+        held[j] = lines
+    dealt = [line for j in range(1, n + 1) for line in held[j]]
+    if sorted(dealt) != sorted(lane):
+        _cannot("suite {}: shards 1..{} do not partition the lane's {} commands".format(
+            suite_id, n, len(lane)))
+        for line in sorted(set(lane) | set(dealt)):
+            if dealt.count(line) != lane.count(line):
+                print("  {}: in {} shard(s), {} time(s) in the lane".format(
+                    line, dealt.count(line), lane.count(line)), file=sys.stderr)
+        return None
+    lane_members = {_shard_identity(line) for line in lane}
+    mine = {_shard_identity(line) for line in held[k]}
+    return {cid for cid, member in owned.items() if member in lane_members and member not in mine}
 
 
 def _group_problems(group, source_set):
@@ -774,15 +994,46 @@ def _stderr_fault(blob, suite_id):
         len(allowed), at, blob[at:at + 200])
 
 
-def run_suite(root, suite_id):
+def _child_env(git_home):
+    """The git-neutral, interpreter-neutral child environment run_suite documents, HOME and
+    XDG_CONFIG_HOME pinned to git_home."""
+    child_env = dict(os.environ)
+    for key in list(child_env):
+        if key.startswith("GIT_") or key.startswith("PYTHON"):
+            del child_env[key]
+    child_env["GIT_CONFIG_GLOBAL"] = os.devnull
+    child_env["GIT_CONFIG_SYSTEM"] = os.devnull
+    child_env["GIT_CONFIG_NOSYSTEM"] = "1"
+    child_env["GIT_CONFIG_COUNT"] = "2"
+    child_env["GIT_CONFIG_KEY_0"] = "core.excludesFile"
+    child_env["GIT_CONFIG_VALUE_0"] = os.devnull
+    child_env["GIT_CONFIG_KEY_1"] = "core.attributesFile"
+    child_env["GIT_CONFIG_VALUE_1"] = os.devnull
+    child_env["HOME"] = git_home
+    child_env["XDG_CONFIG_HOME"] = git_home
+    return child_env
+
+
+def run_suite(root, suite_id, shard_text=None):
     """Validate the manifest, statically reconcile the runner's source check() set against it BEFORE
     any launch (the whole set for a single-row runner; for rows that share a runner, the group
     partition), require a launch line for every registered row in both launch rosters, then launch
     the registered runner with the row's args and a private report path, forward its full output,
     require an error stream byte-identical to the suite's declared bytes (empty unless declared), and
-    reconcile the executed set from the report finalized at the child's exit. Returns the gate exit
-    code."""
+    reconcile the executed set from the report finalized at the child's exit. With shard_text K/N
+    (a suite of SHARD_COUNTS, N its registered count), the runner is launched with --shard K/N and
+    the executed set must equal the registered set less the ids this shard leaves to the other
+    shards (_shard_left), exactly: a missing id this shard owns and an executed id another shard
+    owns are both findings. Returns the gate exit code."""
     root = Path(root)
+    shard = None
+    if shard_text is not None:
+        shard = _parse_shard(shard_text)
+        if suite_id not in SHARD_COUNTS or shard is None or shard[1] != SHARD_COUNTS[suite_id]:
+            _cannot("suite {!r} has no shard {!r}: only {} take --shard K/N, each with its "
+                    "registered N ({})".format(suite_id, shard_text, sorted(SHARD_COUNTS),
+                                               SHARD_COUNTS))
+            return 2
     manifest_path = root / "tools" / "selftest_checks.toml"
     suites = _manifest_suites(manifest_path)
     if suites is None:
@@ -821,6 +1072,16 @@ def run_suite(root, suite_id):
         for cid in sorted(expected - source_set):
             print("  registered id has no source check(): {}".format(cid), file=sys.stderr)
         return 2
+    owned = {}
+    if shard is not None:
+        owned, error = _shard_owned_ids(runner)
+        if error is not None:
+            _cannot(error)
+            return 2
+        if set(owned) - expected:
+            _cannot("suite {}: ids left to other shards are not registered: {}".format(
+                suite_id, sorted(set(owned) - expected)))
+            return 2
     unlaunched = _unlaunched_rows(root, suites)
     if unlaunched is None:
         return 2
@@ -860,6 +1121,8 @@ def run_suite(root, suite_id):
                      "import _selftest_exit_report; _selftest_exit_report._bootstrap_main()")
         command = [sys.executable, "-I", "-B", "-c", bootstrap,
                    str(runner.parent), str(runner), report_path] + list(row.get("args", ()))
+        if shard is not None:
+            command += ["--shard", "{}/{}".format(*shard)]
         # Git-neutral, interpreter-neutral child environment. The git side has two layers. Layer
         # one, GIT_*: drop every ambient GIT_*
         # variable, then pin the global and system config surfaces to os.devnull, so a hostile
@@ -887,21 +1150,13 @@ def run_suite(root, suite_id):
         # variable, so no descendant interpreter ever sees one; the runner's grandchild launch
         # sites carry -I -B as well, defence in depth for a direct developer run. This hardens the
         # GATE-launched child only; the runner's own direct-invocation hermeticity is tracked
-        # separately.
-        child_env = dict(os.environ)
-        for key in list(child_env):
-            if key.startswith("GIT_") or key.startswith("PYTHON"):
-                del child_env[key]
-        child_env["GIT_CONFIG_GLOBAL"] = os.devnull
-        child_env["GIT_CONFIG_SYSTEM"] = os.devnull
-        child_env["GIT_CONFIG_NOSYSTEM"] = "1"
-        child_env["GIT_CONFIG_COUNT"] = "2"
-        child_env["GIT_CONFIG_KEY_0"] = "core.excludesFile"
-        child_env["GIT_CONFIG_VALUE_0"] = os.devnull
-        child_env["GIT_CONFIG_KEY_1"] = "core.attributesFile"
-        child_env["GIT_CONFIG_VALUE_1"] = os.devnull
-        child_env["HOME"] = git_home
-        child_env["XDG_CONFIG_HOME"] = git_home
+        # separately. A sharded run's --list-shard launches (_shard_left) get the same environment.
+        child_env = _child_env(git_home)
+        if shard is not None:
+            left = _shard_left(root, runner, suite_id, shard, owned, child_env)
+            if left is None:
+                return 2
+            expected = expected - left
         try:
             child = subprocess.run(command, cwd=str(root), capture_output=True, env=child_env)
         except OSError as exc:
@@ -922,20 +1177,22 @@ def run_suite(root, suite_id):
             return 2
         missing = sorted(expected - set(observed))
         extra = sorted(set(observed) - expected)
+        label = suite_id if shard is None else "{} shard {}/{}".format(suite_id, *shard)
         if missing or extra:
-            print("FAIL: suite {} execution set does not match {}".format(suite_id, manifest_path))
+            print("FAIL: suite {} execution set does not match {}".format(label, manifest_path))
             for cid in missing:
                 print("  missing (registered, never executed): {}".format(cid))
             for cid in extra:
-                print("  extra (executed, not registered): {}".format(cid))
+                print("  extra (executed, not registered{}): {}".format(
+                    "" if shard is None else " to this shard", cid))
             return 1
         if child.returncode == 1:
             print("FAIL: suite {}: execution set complete; child reported assertion failures "
-                  "(see its output above)".format(suite_id))
+                  "(see its output above)".format(label))
             return 1
         digest = hashlib.sha256(("\n".join(sorted(observed)) + "\n").encode("utf-8")).hexdigest()
         print("PASS: suite {} executed {} unique registered checks; set-sha256={}".format(
-            suite_id, len(observed), digest))
+            label, len(observed), digest))
         return 0
     finally:
         shutil.rmtree(private, ignore_errors=True)
@@ -1021,6 +1278,55 @@ def _report_json(**overrides):
         else:
             data[key] = value
     return json.dumps(data)
+
+
+# A sharded fake runner's static source: a control (a/one) and three member checks left through
+# _shard_leaves, the third (m/w) of a member outside the lane, which every shard therefore runs.
+SHARD_SOURCE = ("if False:\n    check('a/one', 0, 0)\n"
+                "    for rc_id, member in (('m/w', 'tools/w.py'), ('m/x', 'tools/x.py'),\n"
+                "                          ('m/y', 'tools/y.py')):\n"
+                "        if _gfe._shard_leaves(member, (rc_id,)):\n            continue\n"
+                "        check(rc_id, 0, 0)\n")
+SHARD_LANE = ["./tools/x.py --self-test", "tools/y.py --self-test", "tools/z.py --self-test"]
+
+
+def _shard_body(run_all=False, drop=None, lists=None, list_rc=0):
+    """A sharded fake runner tail. --list-shard K/N prints the lane entries at positions i with
+    i mod N = K - 1 (lists replaces a listing by K/N text) and exits list_rc; a run records its argv,
+    then reports a/one, m/w and the m/ ids of the members its --shard holds (every id with run_all,
+    less drop), and records them in ran.json."""
+    return ("_lane = {lane!r}\n"
+            "if sys.argv[1:2] == ['--list-shard']:\n"
+            "    _k, _n = map(int, sys.argv[2].split('/'))\n"
+            "    _lines = {lists!r}.get(sys.argv[2], [m for i, m in enumerate(_lane)"
+            " if i % _n == _k - 1])\n"
+            "    print(''.join(line + '\\n' for line in _lines), end='')\n"
+            "    sys.exit({list_rc!r})\n"
+            "open(os.path.join(here, 'argv.json'), 'w').write(json.dumps(sys.argv))\n"
+            "_k, _n = map(int, (sys.argv[sys.argv.index('--shard') + 1] if '--shard' in sys.argv"
+            " else '1/1').split('/'))\n"
+            "_mine = {{m.split(' ')[0].removeprefix('./') for i, m in enumerate(_lane)"
+            " if i % _n == _k - 1}}\n"
+            "_ids = ['a/one', 'm/w'] + [c for c, m in (('m/x', 'tools/x.py'), ('m/y', 'tools/y.py'))"
+            " if {run_all!r} or m in _mine]\n"
+            "_ids = [c for c in _ids if c != {drop!r}]\n"
+            "open(os.path.join(here, 'ran.json'), 'w').write(json.dumps(_ids))\n"
+            "_selftest_exit_report.arm(report, 'demo', _ids)\n"
+            "_selftest_exit_report.exit_with(0)\n").format(
+                lane=SHARD_LANE, lists=lists or {}, list_rc=list_rc, run_all=run_all, drop=drop)
+
+
+def _launch_texts(launches):
+    """A synthetic local roster and CI workflow whose gate launch lines are exactly
+    tools/check_selftest_execution.py <launch> for each launch text, as {repo-relative path: text}."""
+    local = 'failed=0\nfailed_names=""\n' + ROSTER_DISPATCHER
+    ci = ("name: Quality\non:\n  push:\n    branches: [main]\npermissions:\n  contents: read\n"
+          "jobs:\n  quality:\n    runs-on: ubuntu-latest\n    steps:\n")
+    for index, launch in enumerate(launches):
+        line = "python3 -I -B {} {}".format(GATE_REL, launch)
+        local += 'run_gate "launch-{}" {}\n'.format(index, line)
+        ci += "      - name: launch-{}\n        run: {}\n".format(index, line)
+    return {LAUNCH_ROSTERS[0][0]: local, LAUNCH_ROSTERS[1][0]: ci}
 
 
 # The three fault vectors the child survives AFTER its last check: each leaves exit 0 and a complete
@@ -1165,6 +1471,12 @@ def self_test():
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             code = run_suite(root, suite_id)
+        return code, out.getvalue(), err.getvalue()
+
+    def run_shard(root, shard_text, suite_id="demo"):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = run_suite(root, suite_id, shard_text)
         return code, out.getvalue(), err.getvalue()
 
     def launched(root):
@@ -2328,6 +2640,123 @@ def self_test():
         # into a fragile test. run_suite's git_home os.mkdir guard is the same kind, a
         # manual-flip verification, unwitnessed here and essentially unreachable (a fresh mkdir
         # inside the just-created private tempdir).
+
+        # 28 (shards): a suite of SHARD_COUNTS runs one shard K/N of its registered N. Each shard
+        # must execute exactly the registered set less the ids it leaves to another shard; the
+        # listed shards must partition the lane; any other N, a malformed value or an unsharded
+        # suite is refused before any launch; a roster counts a sharded suite as launched by the
+        # plain line or by its complete shard set 1..N, never by part of it.
+        saved_counts = dict(SHARD_COUNTS)
+        SHARD_COUNTS.clear()
+        SHARD_COUNTS["demo"] = 2
+        try:
+            shard_ids = ["a/one", "m/w", "m/x", "m/y"]
+            manifest = _manifest_text(ids=shard_ids)
+            plain = ["--suite demo"]
+            whole = ["--suite demo --shard 1/2", "--suite demo --shard 2/2"]
+
+            def shard_case(rosters=plain, **knobs):
+                return build(manifest, _shard_body(**knobs), source_block=SHARD_SOURCE,
+                             rosters=_launch_texts(rosters))
+
+            for label, rosters in (("plain-roster", plain), ("shard-roster", whole)):
+                root = shard_case(rosters)
+                for k, ran in ((1, ["a/one", "m/w", "m/x"]), (2, ["a/one", "m/w", "m/y"])):
+                    code, out, err = run_shard(root, "{}/2".format(k))
+                    expect("st/shard-{}-{}-passes".format(label, k), (code, err), (0, ""))
+                    expect("st/shard-{}-{}-pass-line".format(label, k),
+                           "PASS: suite demo shard {}/2 executed 3 unique".format(k) in out, True)
+                    argv = recorded_argv(root)
+                    expect("st/shard-{}-{}-argv".format(label, k), argv[:-1] if argv else None,
+                           [str(root / "tools" / "fake_runner.py"), "--shard", "{}/2".format(k),
+                            "--execution-report"])
+                    ran_path = root / "tools" / "ran.json"
+                    expect("st/shard-{}-{}-ran".format(label, k),
+                           sorted(json.loads(ran_path.read_text())) if ran_path.exists() else None,
+                           ran)
+                    if ran_path.exists():
+                        ran_path.unlink()
+            code, out, _err = run(shard_case(whole))
+            expect("st/shard-roster-unsharded-passes", code, 0)
+            for label, knobs, named in (
+                    ("ignores-shard", {"run_all": True},
+                     "extra (executed, not registered to this shard): m/y"),
+                    ("drops-owned", {"drop": "m/x"}, "missing (registered, never executed): m/x"),
+                    ("drops-control", {"drop": "a/one"},
+                     "missing (registered, never executed): a/one"),
+                    ("drops-outside-lane", {"drop": "m/w"},
+                     "missing (registered, never executed): m/w")):
+                code, out, _err = run_shard(shard_case(**knobs), "1/2")
+                expect("st/shard-{}-1".format(label), (code, named in out), (1, True))
+            for label, knobs, named in (
+                    ("member-in-no-shard", {"lists": {"1/2": ["./tools/x.py --self-test"]}},
+                     "do not partition"),
+                    ("member-in-two-shards",
+                     {"lists": {"2/2": ["tools/y.py --self-test", "./tools/x.py --self-test"]}},
+                     "do not partition"),
+                    ("blank-line", {"lists": {"2/2": ["tools/y.py --self-test", ""]}},
+                     "blank or padded line"),
+                    ("member-outside-lane",
+                     {"lists": {"2/2": ["tools/y.py --self-test", "tools/v.py --self-test"]}},
+                     "do not partition"),
+                    ("empty-shard", {"lists": {"2/2": []}}, "holds no member"),
+                    ("list-fails", {"list_rc": 3}, "exited 3")):
+                root = shard_case(**knobs)
+                code, _out, err = run_shard(root, "1/2")
+                expect("st/shard-{}-2".format(label), (code, named in err), (2, True))
+                expect("st/shard-{}-no-run".format(label), recorded_argv(root), None)
+            for label, value in (("wrong-n", "1/3"), ("k-zero", "0/2"), ("k-over-n", "3/2"),
+                                 ("leading-zero", "01/2"), ("three-parts", "1/2/2"),
+                                 ("signed", "+1/2"), ("empty", "")):
+                root = shard_case()
+                code, _out, err = run_shard(root, value)
+                expect("st/shard-value-{}-2".format(label), (code, "has no shard" in err), (2, True))
+                expect("st/shard-value-{}-no-launch".format(label), launched(root), False)
+            root = build(_manifest_text(ids=shard_ids).replace('"demo"', '"demo-other"'),
+                         _shard_body(), source_block=SHARD_SOURCE)
+            code, _out, err = run_shard(root, "1/2", "demo-other")
+            expect("st/shard-unsharded-suite-2", (code, "has no shard" in err), (2, True))
+            expect("st/shard-unsharded-suite-no-launch", launched(root), False)
+            root = build(manifest, _shard_body(), rosters=_launch_texts(plain),
+                         source_block=SHARD_SOURCE.replace("(rc_id,)", "rc_id"))
+            code, _out, err = run_shard(root, "1/2")
+            expect("st/shard-unresolvable-leaves-2",
+                   (code, "unresolvable _shard_leaves call" in err), (2, True))
+            expect("st/shard-unresolvable-leaves-no-launch", launched(root), False)
+            root = build(manifest, _shard_body(), rosters=_launch_texts(plain),
+                         source_block=SHARD_SOURCE.replace("(rc_id,)", "(rc_id, ghost)").replace(
+                             "for rc_id, member in", "for rc_id, member, ghost in").replace(
+                             "'tools/w.py')", "'tools/w.py', 'm/ghost')").replace(
+                             "'tools/x.py')", "'tools/x.py', 'm/gx')").replace(
+                             "'tools/y.py')", "'tools/y.py', 'm/gy')"))
+            code, _out, err = run_shard(root, "1/2")
+            expect("st/shard-unregistered-left-2",
+                   (code, "left to other shards are not registered" in err), (2, True))
+            expect("st/shard-unregistered-left-no-launch", launched(root), False)
+            for label, rosters in (("part-set", ["--suite demo --shard 1/2"]),
+                                   ("other-n", whole[:1] + ["--suite demo --shard 2/3"]),
+                                   ("near-miss", whole[:1] + ["--suite demo --shard 2/2 -v"])):
+                root = shard_case(rosters)
+                code, _out, err = run_shard(root, "1/2")
+                expect("st/shard-roster-{}-2".format(label),
+                       (code, "has no complete shard set" in err), (2, True))
+                expect("st/shard-roster-{}-no-launch".format(label), launched(root), False)
+            for label, argv in (("no-value", ["--suite", "demo", "--shard"]),
+                                ("extra", ["--suite", "demo", "--shard", "1/2", "-v"]),
+                                ("other-option", ["--suite", "demo", "--shards", "1/2"])):
+                err = io.StringIO()
+                with contextlib.redirect_stderr(err):
+                    code = main(argv)
+                expect("st/shard-usage-{}-2".format(label), (code, "usage:" in err.getvalue()),
+                       (2, True))
+            expect("st/shard-parse-bounds",
+                   [_parse_shard(text) for text in ("1/1", "64/64", "1/64", "65/65", "1/65",
+                                                    "1x/2", "1/2x", "1/٢", "001/1",
+                                                    "9" * 5000 + "/1")],
+                   [(1, 1), (64, 64), (1, 64), None, None, None, None, None, None, None])
+        finally:
+            SHARD_COUNTS.clear()
+            SHARD_COUNTS.update(saved_counts)
     finally:
         shutil.rmtree(base, ignore_errors=True)
 
@@ -2403,15 +2832,17 @@ def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
     if argv == ["--self-test"]:
         return self_test()
-    if len(argv) == 2 and argv[0] == "--suite" and argv[1]:
+    sharded = len(argv) == 4 and argv[2] == "--shard"
+    if (len(argv) == 2 or sharded) and argv[0] == "--suite" and argv[1]:
         # Anchored to this file, never the cwd: an exported copy run from inside another checkout
         # must refuse rather than validate the wrong tree. A worktree's .git is a file, so .exists().
         root = Path(__file__).resolve().parent.parent
         if not (root / ".git").exists():
             _cannot("cannot confirm the gate's own repo root (no .git at {})".format(root))
             return 2
-        return run_suite(root, argv[1])
-    print("usage: check_selftest_execution.py --suite <id> | --self-test", file=sys.stderr)
+        return run_suite(root, argv[1], argv[3] if sharded else None)
+    print("usage: check_selftest_execution.py --suite <id> [--shard K/N] | --self-test",
+          file=sys.stderr)
     return 2
 
 

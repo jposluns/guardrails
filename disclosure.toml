@@ -23,21 +23,21 @@ site_base = "https://aiqt.ai"
 [[row]]
 id = "what-exists"
 topic = "What exists today"
-claim = "AIQT 1.0.5, the chat assistant, is released and downloadable today: a Skill for Claude, and a portable instruction file intended for any assistant that accepts standing instructions. The development assistant, version 1.1.0, is in development. Teams and Enterprise are ideas under consideration, with no dates and no commitments."
-limitation = "No platform test result is published yet: the evidence page marks every platform pending, and ChatGPT, Gemini, and Copilot as not yet tested, so compatibility with a given assistant is intended, not verified. A 1.1.0 feature described on this site is a design, not a shipped product; it ships when it does what these pages say it does. Nothing labelled an idea is promised at all."
+claim = "AIQT 1.0.5, the chat assistant, is released and downloadable today: a Skill for Claude, and a portable instruction file intended for any assistant that accepts standing instructions. The development assistant, version 1.2.0, is in development. Teams and Enterprise are ideas under consideration, with no dates and no commitments."
+limitation = "No platform test result is published yet: the evidence page marks every platform pending, and ChatGPT, Gemini, and Copilot as not yet tested, so compatibility with a given assistant is intended, not verified. A 1.2.0 feature described on this site is a design, not a shipped product; it ships when it does what these pages say it does. Nothing labelled an idea is promised at all."
 evidence = [
   { text = "The 1.0.5 release", href = "/evidence#release" },
-  { text = "Where 1.1.0 stands", href = "/development#availability" },
+  { text = "Where 1.2.0 stands", href = "/development#availability" },
 ]
 
 [[row]]
 id = "what-it-is-made-of"
 topic = "What the product is made of"
 claim = "The 1.0.5 chat artefacts, the Claude Skill and the portable instruction files, are prose instructions and reference material only, with no executable code and no network calls. The repository that ships them also carries code, each file listed in the 1.0.5 release manifest: [[CODE-PATHS]]. This repository's own CI code under .github/, outside that manifest, runs the quality gates on GitHub on each push to main and on a pull request targeting main when a label is added to it, which the maintainer's merge process does only for the merge-train pull request that carries a batch of changes (a process rule the workflow does not enforce), so the gates run on each batch before it merges rather than on each change in it; a message-leak scan runs on every pull request targeting main and each push to main, and a separate scheduled workflow runs the offline standards-currency audit monthly and on manual dispatch. On your machine none of it runs on its own: each piece runs only when you run a tool or check, install the plugin or an enforcement hook, or open the site in a browser."
-limitation = "Instructions cannot do anything your assistant platform cannot already do. The 1.1.0 design adds a guided install and a setup doctor around that tooling, each documented before it ships."
+limitation = "Instructions cannot do anything your assistant platform cannot already do. The 1.2.0 design adds a guided install and a setup doctor around that tooling, each documented before it ships."
 evidence = [
   { text = "What the files are", href = "/install#pick" },
-  { text = "The 1.1.0 directory", href = "/tech-details#directory" },
+  { text = "The 1.2.0 directory", href = "/tech-details#directory" },
 ]
 
 [[row]]
@@ -52,8 +52,8 @@ evidence = [
 [[row]]
 id = "security-coverage"
 topic = "Security coverage"
-claim = "AIQT's source corpus carries a universal, language-neutral security baseline: behavioural rules covering secrets, authentication, authorization, input validation, untrusted content, logging, and data minimization. The 1.0.5 chat skill ships the subset a chat assistant can act on directly: keeping secrets out of the transcript, treating pasted or fetched content as data, resisting social pressure, and sending only the data a task needs. The fuller per-language and development-time delivery is a 1.1.0 design, not yet shipped."
-limitation = "It is not a static analyzer, a vulnerability scanner, a penetration test, or an audit, and it does not guarantee that generated code is secure. Deeper per-language depth is a 1.1.0 design, composed at install from third-party sources you choose, which AIQT lists and credits but does not author or vouch for."
+claim = "AIQT's source corpus carries a universal, language-neutral security baseline: behavioural rules covering secrets, authentication, authorization, input validation, untrusted content, logging, and data minimization. The 1.0.5 chat skill ships the subset a chat assistant can act on directly: keeping secrets out of the transcript, treating pasted or fetched content as data, resisting social pressure, and sending only the data a task needs. The fuller per-language and development-time delivery is a 1.2.0 design, not yet shipped."
+limitation = "It is not a static analyzer, a vulnerability scanner, a penetration test, or an audit, and it does not guarantee that generated code is secure. Deeper per-language depth is a 1.2.0 design, composed at install from third-party sources you choose, which AIQT lists and credits but does not author or vouch for."
 evidence = [
   { text = "Per-language depth, composed at install", href = "/tech-details#composed" },
   { text = "The frameworks the rules map to", href = "/mappings#by-framework" },
@@ -63,7 +63,7 @@ evidence = [
 id = "standards-mappings"
 topic = "Standards mappings"
 claim = "AIQT publishes a navigational crosswalk from the pack's rules to identifiers in security and AI-governance frameworks (OWASP, NIST, MITRE ATLAS, ISO/IEC, CSA), each pinned to a stated edition, with every mapped identifier validated against that edition before it can ship."
-limitation = "A mapping asserts a relationship of ideas, not certification, attestation, audit evidence, or proof that you meet a standard. No framework publisher endorses, sponsors, or is affiliated with the pack. The absence of a mapping means none has been asserted yet, and a pinned edition may lag the newest release."
+limitation = "A mapping asserts a relationship of ideas, not certification, attestation, audit evidence, or proof that you meet a standard. No framework publisher endorses, sponsors, or is affiliated with the pack. The absence of a mapping means none is currently asserted (the rule and identifier pair may be unassessed, judged not to fit, or removed after review), and a pinned edition may lag the newest release."
 evidence = [
   { text = "How the crosswalk is built", href = "/mappings#methodology" },
   { text = "The framework registry", href = "/mappings#registry" },
@@ -82,8 +82,8 @@ evidence = [
 [[row]]
 id = "data-handling"
 topic = "Data handling"
-claim = "The 1.0.5 chat artefacts send nothing anywhere: they are instructions your assistant reads, with no code and no network calls. The 1.0.5 release is wider than those artefacts: its repository ships code, each file listed in the release manifest and named under What the product is made of, and on your machine none of it runs on its own. What you type still goes to your assistant's vendor under that vendor's terms, exactly as it would without AIQT. In the 1.1.0 design, routine checks run locally and send nothing to a model."
-limitation = "The shipped repository code is not network-free when run: some of the checks and tools make network requests when run. Among them: the link-liveness check that verifies published framework URLs, the CWE importer (tools/import_cwe.py), which fetches the catalogue it vendors, and tools/ci-status.sh, which reads CI results through the GitHub CLI. The 1.1.0 substantive and delicate review tiers will send content to model providers. The providers, credentials, retention, and cost stay marked pending until they are documented before 1.1.0 ships. AIQT cannot intercept, encrypt, or block data that your assistant platform itself sends."
+claim = "The 1.0.5 chat artefacts send nothing anywhere: they are instructions your assistant reads, with no code and no network calls. The 1.0.5 release is wider than those artefacts: its repository ships code, each file listed in the release manifest and named under What the product is made of, and on your machine none of it runs on its own. What you type still goes to your assistant's vendor under that vendor's terms, exactly as it would without AIQT. In the 1.2.0 design, routine checks run locally and send nothing to a model."
+limitation = "The shipped repository code is not network-free when run: some of the checks and tools make network requests when run. Among them: the link-liveness check that verifies published framework URLs, the CWE importer (tools/import_cwe.py), which fetches the catalogue it vendors, and tools/ci-status.sh, which reads CI results through the GitHub CLI. The 1.2.0 substantive and delicate review tiers will send content to model providers. The providers, credentials, retention, and cost stay marked pending until they are documented before 1.2.0 ships. AIQT cannot intercept, encrypt, or block data that your assistant platform itself sends."
 evidence = [
   { text = "What the 1.0.5 files are", href = "/install#pick" },
   { text = "The data flow, by tier", href = "/tech-details#qa-where" },
@@ -159,8 +159,18 @@ label = "the generated Claude Code hooks plugin under plugin/ and its source und
 prefix = ".aiqt/core/hooks/"
 label = "the generated Claude Code hooks plugin under plugin/ and its source under .aiqt/core/hooks/"
 
+[[code]]
+prefix = ".baseline/check_palette.py"
+label = ".baseline/check_palette.py, the palette contrast gate vendored from the site template"
+
 [[noncode]]
 prefix = ".aiqt/"
+
+[[noncode]]
+prefix = ".baseline/opfiles-pin.toml"
+
+[[noncode]]
+prefix = ".baseline/pin.toml"
 
 [[noncode]]
 prefix = ".claude/"

@@ -6,9 +6,12 @@ module docstring for the architecture and the disclosed residuals).
 In the original suite order this runner carries: layer 1, the shared scrub itself (unit checks,
 the F-367 auto-maintenance probes, the repo-wide maintenance-pin tripwire scan and its planted
 red/contract legs, the in-place and caller-env child probes, the OPF inherited-env probe and the
-lifecycle system-pin checks); layer 2, the per-member routing, function-scoped routing and
+lifecycle system-pin checks); layer 2, the per-member routing, function-scoped routing (with the
+restore probe's wrapper check over the lifecycle's wrapper and mutants of it, and its argument
+check over synthetic entry points) and
 real-repository trust checks; the registry roster checks (including the prefixed-recursion
-exclusion over all four git-fixture-env suite ids); the OPF lifecycle graph checks; the
+exclusion over all four git-fixture-env suite ids) and the config lanes' shard checks
+(_shard_checks, which run no config member); the OPF lifecycle graph checks; the
 member-timeout, member-close and verdict controls for the bounded config-member machinery; the
 gen-manifest fixture-setup guards; and layer 3, the end-to-end caller-repository leak probe.
 
@@ -57,7 +60,8 @@ from selftest_git_fixture_env import (  # noqa: E402
     _archive_reads_use_caller_env, _auto_maintenance_children, _binding_calls, _build_decoy,
     _call_name, _caller_env_archive_only, _calls_any, _close_lock_sites, _command_identity,
     _closing_refusal_control, _config_member_bound, _handshake_expired, _is_timeout,
-    _kill_recorded, _lane_return_fail_closed, _lifecycle_finding, _main_verdict_scenarios,
+    _kill_recorded, _lane_return_fail_closed, _lifecycle_finding, _lifecycle_scoped_first,
+    _main_verdict_scenarios,
     _maintenance_pin_scan,
     _member_group_empty, _member_timeout_timely, _opf_lifecycle_delegates, _oracle_down_sites,
     _partial_timeout_cause, _pid_state, _pidfd_group_signal_supported, _poison_environ,
@@ -91,7 +95,9 @@ def _roster_checks():
           (None, None))
     if local_diagnostic is not None or ci_diagnostic is not None:
         return
-    binding = 'here="$(cd "$(dirname "$0")" && pwd)" || exit 2'
+    binding = ('dir=$(dirname -- "$0") || exit 2\n'
+               '[ -n "$dir" ] || exit 2\n'
+               'here="$(CDPATH= cd -- "$dir/." && pwd)" || exit 2')
     # The valid failure-state initializers, so an empty-roster fixture reaches
     # its own guard rather than the missing-initializer diagnostic.
     state = 'failed=0\nfailed_names=""\n'
@@ -261,7 +267,317 @@ def _roster_checks():
                   or ("./tools/check_selftest_execution.py", "--suite", suite_id) in roster
                   for suite_id in lane_ids)
           and not any((runner,) in roster for runner in lane_runners), True)
+
+    # A shard line of a sharded config suite (--suite <id> --shard K/N, N that suite's registered
+    # count, the form the CI shard jobs run) is part of that suite's launch, so it gets the plain
+    # line's recursion exclusion: neither the shard line nor a lane runner joins the roster. A shard
+    # line with any other N is no launch the execution gate accepts, so the roster refuses it.
+    shard_counts = sorted(check_selftest_execution.SHARD_COUNTS.items())
+    extra = "".join(
+        '\nrun_gate "recursive-shard-{}-{}" python3 -I -B ./tools/check_selftest_execution.py'
+        ' --suite {} --shard {}/{}\n'.format(index, k, suite_id, k, count)
+        for index, (suite_id, count) in enumerate(shard_counts) for k in (1, count))
+    read = disk_reader("roster-shard-recursion", local, add_local(extra))
+    with patch.object(check_ci_parity, "read_runner_text", read):
+        roster = _registered_selftests()
+    check("roster/shard-launch-recursion-excluded",
+          len(shard_counts) == 3
+          and not any(argv[1:2] == ("--suite",) and argv[2:3] == (suite_id,)
+                      for argv in roster for suite_id, _ in shard_counts)
+          and not any((runner,) in roster for runner in lane_runners), True)
+    suite_id, count = shard_counts[0]
+    extra = ('\nrun_gate "other-count-shard" python3 -I -B ./tools/check_selftest_execution.py'
+             ' --suite {} --shard 1/{}\n'.format(suite_id, count + 1))
+    with patch.object(check_ci_parity, "read_runner_text",
+                      disk_reader("roster/shard-launch-other-count-refused", local, add_local(extra))):
+        got = refusal()
+    check("roster/shard-launch-other-count-refused",
+          got.startswith("unparseable suite invocation:") and "--shard" in got, True)
     shutil.rmtree(scratch, ignore_errors=True)
+
+
+_SHARD_RUNNERS = (
+    ("combined", "tools/selftest_git_fixture_env_config_combined.py", "_combined_lane"),
+    ("malformed", "tools/selftest_git_fixture_env_config_malformed.py", "_malformed_lane"),
+    ("system", "tools/selftest_git_fixture_env_config_system.py", "_system_lane"),
+)
+
+
+def _shard_wiring_problems(lane, source, lane_name, engine_source):
+    """The problems with one config runner's shard wiring, read from its source (nothing runs):
+    its entry is _gfe._config_lane_main over its own lane; its lane function selects its members
+    once through _gfe._shard_select over _gfe._config_lane_roster for its lane and hands exactly
+    those to its one _config_results call; every per-member check loop first leaves a member to
+    its shard (_gfe._shard_leaves over that loop's own check ids); the system lane folds only
+    its shard into the lifecycle finding; and the engine's _suite_main reconciles through
+    _execution_set_findings with SHARD_LEFT."""
+    problems = []
+    tree = ast.parse(source)
+    entries = [ast.unparse(node) for node in ast.walk(tree) if isinstance(node, ast.Call)
+               and ast.unparse(node.func) == "_gfe._config_lane_main"]
+    if entries != ["_gfe._config_lane_main(sys.argv[1:], {!r}, {})".format(lane, lane_name)]:
+        problems.append("entry: {!r}".format(entries))
+    functions = {node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)}
+    body = functions.get(lane_name)
+    if body is None:
+        return problems + ["no lane function {}".format(lane_name)]
+    selects = [ast.unparse(node) for node in ast.walk(body) if isinstance(node, ast.Assign)
+               and "_shard_select" in ast.unparse(node.value)]
+    if selects != ["members = _gfe._shard_select(_gfe._config_lane_roster({!r}, roster))".format(
+            lane)]:
+        problems.append("selection: {!r}".format(selects))
+    runs = [ast.unparse(node.args[0]) if node.args else None for node in ast.walk(body)
+            if isinstance(node, ast.Call) and ast.unparse(node.func) == "_config_results"]
+    if runs != ["members"]:
+        problems.append("member runs: {!r}".format(runs))
+    loops = 0
+    for node in ast.walk(body):
+        if not (isinstance(node, ast.For) and isinstance(node.target, ast.Tuple)
+                and "member" in [ast.unparse(elt) for elt in node.target.elts]):
+            continue
+        loops += 1
+        ids = [ast.unparse(elt) for elt in node.target.elts if ast.unparse(elt) != "member"]
+        want = "if _gfe._shard_leaves(member, ({}{})):\n    continue".format(
+            ", ".join(ids), "," if len(ids) == 1 else "")
+        if ast.unparse(node.body[0]) != want:
+            problems.append("loop over {}: first statement {!r}".format(
+                ids, ast.unparse(node.body[0])))
+    if loops != {"combined": 1, "malformed": 2, "system": 0}[lane]:
+        problems.append("{} per-member loops".format(loops))
+    if lane == "system":
+        folds = [ast.unparse(node.args[0])
+                 for node in ast.walk(functions.get("_opf_home_lifecycles", ast.Pass()))
+                 if isinstance(node, ast.Call) and ast.unparse(node.func) == "_lifecycle_finding"]
+        if folds != ["_gfe._shard_scope(roster)"]:
+            problems.append("lifecycle fold: {!r}".format(folds))
+    engine = {node.name: node for node in ast.parse(engine_source).body
+              if isinstance(node, ast.FunctionDef)}
+    reconciles = [ast.unparse(node) for node in ast.walk(engine.get("_suite_main", ast.Pass()))
+                  if isinstance(node, ast.Call)
+                  and ast.unparse(node.func) == "_execution_set_findings"]
+    if reconciles != ["_execution_set_findings(expected, _EXECUTED_SET, SHARD_LEFT)"]:
+        problems.append("engine reconciliation: {!r}".format(reconciles))
+    return problems
+
+
+def _shard_checks(base, runners=None):
+    """The config lanes' shard option (tools/selftest_git_fixture_env.py, SHARD), with no config
+    member run. roster/shard-argv-parse: _parse_shard and _config_argv over each end of each
+    bound just inside, at and just outside it, and the malformed spellings.
+    roster/shard-assignment-fixed: _shard_members deals fixed entries to fixed shards (N = 1 is
+    the whole roster; N past the roster leaves its last shards empty; an empty roster leaves
+    every shard empty). roster/shard-partition-fixtures: _shard_partition_problems finds no
+    problem for the empty roster, N larger than the roster and N = 1, and finds one for an
+    overlapping, a dropping and a foreign rule, so the checker discriminates.
+    roster/shard-partition-real: shards 1..N of each lane's real roster, N = 1 to 7 and
+    SHARD_MAX, partition it, and each lane roster is exactly the one the lane ran before the
+    option. roster/shard-lane-scope: _shard_select, _shard_leaves,
+    _shard_scope and _execution_set_findings over fixture rows, unsharded and sharded.
+    roster/shard-lane-main: _config_lane_main, over a recording stand-in for the engine main()
+    and a recording stand-in lane (no git, no config member), sets SHARD for a valid --shard K/N,
+    runs only the members of shard K of a fixture roster, forwards the execution report and the
+    lane, returns main()'s result, and selects the whole roster without --shard.
+    roster/shard-lane-wiring: each runner's source calls them as _shard_wiring_problems requires.
+    roster/shard-list-cli: each runner (runners, default _SHARD_RUNNERS), launched as a child,
+    lists through --list-shard exactly the in-process shards for N = 1 and 2, and refuses an
+    out-of-range --list-shard and --shard value with exit 2 and nothing on stdout; these
+    children read the registries and launch nothing (no git, no member), with TMPDIR inside the
+    suite's scratch, and a child that reaches its bound is cannot-evaluate. In process,
+    _list_shard returns 2, prints nothing on out and names the exception type on err when
+    building the roster raises an exception outside OSError and ValueError (KeyError)."""
+    import contextlib
+    import io
+    from unittest.mock import patch
+
+    this = _gfe
+    runners = _SHARD_RUNNERS if runners is None else runners
+    texts = ("1/1", "1/2", "2/2", "0/2", "3/2", "2/1", "1/0", "0/0", "63/64", "64/64", "1/64",
+             "1/65", "65/65", "100/100", "01/2", "1/02", "+1/2", "-1/2", " 1/2", "1/2 ", "1/2\n",
+             "1/2/3", "1", "", "1/", "/2", "a/b", "1.0/2", "١/٢", None)
+    argvs = ([], ["--execution-report", "/abs/report"], ["--shard", "2/3"],
+             ["--shard", "2/3", "--execution-report", "/abs/report"],
+             ["--execution-report", "/abs/report", "--shard", "2/3"], ["--list-shard", "7/7"],
+             ["--list-shard", "8/7"], ["--shard", "0/3"], ["--shard"], ["--list-shard"],
+             ["--shard", "1/2", "--shard", "2/2"],
+             ["--list-shard", "1/2", "--execution-report", "/abs/report"],
+             ["--shard", "1/2", "--list-shard", "1/2"], ["--execution-report", "relative"],
+             ["--unknown", "x"], ["--execution-report", "/abs/report", "--execution-report",
+                                  "/abs/other"])
+    check("roster/shard-argv-parse",
+          ([this._parse_shard(text) for text in texts], [this._config_argv(argv) for argv in argvs]),
+          ([(1, 1), (1, 2), (2, 2), None, None, None, None, None, (63, 64), (64, 64), (1, 64),
+            None, None, None, None, None, None, None, None, None, None, None, None, None, None,
+            None, None, None, None, None],
+           [(None, None, False), ("/abs/report", None, False), (None, (2, 3), False),
+            ("/abs/report", (2, 3), False), ("/abs/report", (2, 3), False), (None, (7, 7), True),
+            None, None, None, None, None, None, None, None, None, None]))
+
+    rows = tuple((name,) for name in ("a", "b", "c", "d", "e"))
+    a, b, c, d, e = rows
+    check("roster/shard-assignment-fixed",
+          [this._shard_members(rows, k, n) for k, n in (
+              (1, 1), (1, 2), (2, 2), (1, 3), (2, 3), (3, 3), (4, 7), (5, 7), (6, 7), (7, 7))]
+          + [this._shard_members((), k, 3) for k in (1, 2, 3)],
+          [rows, (a, c, e), (b, d), (a, d), (b, e), (c,), (d,), (e,), (), (), (), (), ()])
+
+    def overlap(roster, k, n):
+        return tuple(roster)
+
+    def drop(roster, k, n):
+        return tuple(roster[:-1]) if k == 1 else ()
+
+    def foreign(roster, k, n):
+        return tuple(roster) + (("z",),) if k == 1 else ()
+
+    check("roster/shard-partition-fixtures",
+          [this._shard_partition_problems(roster, n) for roster, n in (
+              ((), 1), ((), 3), (rows[:1], 1), (rows, 1), (rows, 2), (rows[:3], 5), (rows, 7),
+              (rows[:1], 64))]
+          + [this._shard_partition_problems(rows, n, rule) for rule, n in (
+              (overlap, 2), (drop, 1), (foreign, 1))],
+          [[], [], [], [], [], [], [], [],
+           ["in shards [1, 2]: ('a',)", "in shards [1, 2]: ('b',)", "in shards [1, 2]: ('c',)",
+            "in shards [1, 2]: ('d',)", "in shards [1, 2]: ('e',)"],
+           ["in no shard: ('e',)"], ["not in the roster: ('z',) (shards [1])"]])
+
+    try:
+        registered = _registered_selftests()
+        lanes = {lane: this._config_lane_roster(lane, registered) for lane, _, _ in runners}
+        real = [lanes["combined"] == registered, lanes["system"] == registered,
+                lanes["malformed"] == tuple(
+                    argv for argv in registered
+                    if _command_identity(argv) not in CONFIG_EXCLUSIONS["malformed"]),
+                len(lanes["malformed"]) + len(CONFIG_EXCLUSIONS["malformed"]) == len(registered)]
+        for lane, members in sorted(lanes.items()):
+            if not members:
+                real.append(lane + ": empty lane roster")
+            for n in (1, 2, 3, 4, 5, 6, 7, this.SHARD_MAX):
+                real.extend("{} {}: {}".format(lane, n, problem)
+                            for problem in this._shard_partition_problems(members, n))
+    except (OSError, ValueError) as exc:
+        lanes, real = {}, ["cannot build the roster: {}".format(exc)]
+    check("roster/shard-partition-real", real, [True, True, True, True])
+
+    sink = io.StringIO()
+    variants = (("tools/a.py", "--self-test"), ("tools/b.py",), ("tools/b.py", "--self-test"),
+                ("tools/c.py", "--self-test"))
+    scope = []
+    with patch.object(this, "SHARD", None), patch.object(this, "SHARD_RUN", {}), \
+            patch.object(this, "SHARD_LEFT", set()), contextlib.redirect_stdout(io.StringIO()):
+        scope.append(("unsharded", this._shard_select(variants) is variants,
+                      this._shard_leaves("tools/a.py", ("a/rc",)), this._shard_scope(variants),
+                      sorted(this.SHARD_LEFT)))
+    with patch.object(this, "SHARD", (2, 2)), patch.object(this, "SHARD_RUN", {}), \
+            patch.object(this, "SHARD_LEFT", set()), contextlib.redirect_stdout(io.StringIO()):
+        try:
+            this._shard_leaves("tools/a.py", ("a/rc",))
+            early = "no refusal"
+        except ValueError as exc:
+            early = str(exc)
+        scope.append(("sharded", early, this._shard_select(variants),
+                      this._shard_leaves("tools/a.py", ("a/rc", "a/hooks")),
+                      this._shard_leaves("tools/b.py", ("b/rc",)),
+                      this._shard_leaves("tools/absent.py", ("absent/rc",)),
+                      this._shard_scope(list(variants)), sorted(this.SHARD_LEFT)))
+    with patch.object(this, "SHARD", (3, 3)), patch.object(this, "SHARD_RUN", {}), \
+            patch.object(this, "SHARD_LEFT", set()), contextlib.redirect_stdout(io.StringIO()):
+        scope.append(("empty", this._shard_select(variants[:2], sink), sink.getvalue(),
+                      dict(this.SHARD_RUN)))
+    scope.append(("reconcile", [this._execution_set_findings(expected, executed, left)
+                                for expected, executed, left in (
+                                    ({"a", "b", "c"}, {"a", "b"}, set()),
+                                    ({"a", "b", "c"}, {"a", "b"}, {"c"}),
+                                    ({"a", "b"}, {"a", "b", "d"}, {"e"}),
+                                    ({"a", "b"}, {"a", "b"}, {"b"}))]))
+    check("roster/shard-lane-scope", scope, [
+        ("unsharded", True, False, variants, []),
+        ("sharded", "a sharded lane asked about a member before selecting its shard",
+         (variants[1], variants[3]), True, False, False, [variants[1], variants[3]],
+         ["a/hooks", "a/rc"]),
+        ("empty", None, "SELF-TEST HARNESS ERROR: shard 3/3 holds no member of the 2-member lane"
+                        " roster; nothing was run (cannot evaluate)\n", {}),
+        ("reconcile", [["execution-set/missing: c"], [],
+                       ["execution-set/extra: d", "execution-set/left-unexpected: e"],
+                       ["execution-set/left-and-run: b"]])])
+
+    # _config_lane_main itself, over a recording stand-in for the engine main() it hands off to
+    # and a recording stand-in lane, so no git, temp tree or config member is ever involved.
+    fixture = tuple(("tools/{}.py".format(name), "--self-test") for name in "abcde")
+    lane_main = []
+    for argv in (["--shard", "2/3", "--execution-report", "/abs/report"],
+                 ["--execution-report", "/abs/report", "--shard", "3/3"], [],
+                 ["--execution-report", "/abs/report"]):
+        calls, ran = [], []
+
+        def recording_lane(lane_base, ran=ran):
+            members = this._shard_select(this._config_lane_roster("combined", fixture))
+            ran.extend(members or ())
+            return None if members else 2
+
+        def stand_in_main(report_path, lanes, calls=calls):
+            calls.append((report_path, this.SHARD, lanes is recording_lane, lanes(base)))
+            return 7  # a distinctive result, so a hardcoded success cannot pass
+
+        with patch.object(this, "main", stand_in_main), patch.object(this, "SHARD", None), \
+                patch.object(this, "SHARD_RUN", {}), patch.object(this, "SHARD_LEFT", set()), \
+                contextlib.redirect_stdout(io.StringIO()):
+            lane_main.append((this._config_lane_main(argv, "combined", recording_lane), calls,
+                              ran))
+    check("roster/shard-lane-main", lane_main, [
+        (7, [("/abs/report", (2, 3), True, None)], [fixture[1], fixture[4]]),
+        (7, [("/abs/report", (3, 3), True, None)], [fixture[2]]),
+        (7, [(None, None, True, None)], list(fixture)),
+        (7, [("/abs/report", None, True, None)], list(fixture))])
+
+    try:
+        # Python sources parsed for ast, never runner or workflow text; read as bytes so no new
+        # text-read site joins check_ci_parity's reviewed read-API allowlist.
+        engine_source = Path(this.__file__).read_bytes().decode("utf-8")
+        wiring = {lane: _shard_wiring_problems(
+            lane, (ROOT / relative).read_bytes().decode("utf-8"), lane_name, engine_source)
+            for lane, relative, lane_name in runners}
+    except (OSError, SyntaxError, ValueError) as exc:
+        wiring = "cannot read the runners: {}".format(exc)
+    check("roster/shard-lane-wiring", wiring, {lane: [] for lane, _, _ in runners})
+
+    folder = base / "shard-cli"
+    folder.mkdir()
+    env = dict(os.environ, TMPDIR=str(folder))
+    cli, timeouts = [], []
+    for lane, relative, _ in runners:
+        launches = {}
+        for args in (("--list-shard", "1/1"), ("--list-shard", "1/2"), ("--list-shard", "2/2"),
+                     ("--list-shard", "0/2"), ("--shard", "3/2")):
+            rc, out, err = _run_bounded(
+                [sys.executable, "-I", "-B", str(ROOT / relative), *args], str(folder), env, 120,
+                "shard listing {} {}".format(relative, " ".join(args)), "CONTROL ")
+            if _is_timeout(rc):
+                timeouts.append(rc)
+            launches[args[1] if args[0] == "--list-shard" else "run " + args[1]] = (
+                rc, [line for line in out.split("\n") if line])
+        members = lanes.get(lane, ())
+        cli.append((lane, {key: value[0] for key, value in launches.items()},
+                    [launches[key][1] == [" ".join(argv) for argv in shard] for key, shard in (
+                        ("1/1", members), ("1/2", this._shard_members(members, 1, 2)),
+                        ("2/2", this._shard_members(members, 2, 2)))],
+                    bool(members), launches["0/2"][1], launches["run 3/2"][1]))
+    out, err = io.StringIO(), io.StringIO()
+
+    def roster_fault():
+        raise KeyError("injected roster fault")
+
+    with patch.object(this, "_registered_selftests", roster_fault):
+        cli.append(("roster-error", {"rc": this._list_shard("combined", (1, 2), out, err)},
+                    out.getvalue(), err.getvalue()))
+    want = [(lane, {"1/1": 0, "1/2": 0, "2/2": 0, "0/2": 2, "run 3/2": 2}, [True, True, True],
+             True, [], []) for lane, _, _ in runners] + [
+        ("roster-error", {"rc": 2}, "", "SELF-TEST HARNESS ERROR: cannot build the config roster:"
+                                        " KeyError: 'injected roster fault'\n")]
+    check("roster/shard-list-cli", cli, want,
+          tuple(timeouts) if timeouts and all(
+              got == expected or any(_is_timeout(value) for value in got[1].values())
+              for got, expected in zip(cli, want)) else None)
+    shutil.rmtree(folder, ignore_errors=True)
 
 
 def _system_pin_checks(base):
@@ -1602,8 +1918,10 @@ def _member_close_controls(fixture):
                 # raisegate, trygate, sendgate, scenariogate, bgate, outcomegate,
                 # outcomeonlygate, stallgate and pinned_version are examples of THE
                 # RESIDUAL (_allowlist_producers), which passes the value pin too, so an
-                # oracle or scenario change that starts catching one of them must update
-                # that text.
+                # oracle change that alters one of their recorded differences fails this
+                # pin and must update that text; a scenario change is not detected here
+                # (these probes only parse mutated sources) and needs THE RESIDUAL
+                # reassessed by hand.
                 ("producer-oracle", [["evidence"], ["evidence"], ["evidence"],
                                      ["lock_free", "unrecognized"],
                                      ["restored", "unrecognized"],
@@ -1707,7 +2025,10 @@ def _member_timeout_controls(base):
     _member_close_controls.
     config/member-bound-table and config/member-bound-opf-selftest pin the per-member bound table
     against the registered roster, and config/member-bound-reaches-run pins that the looked-up
-    bound is the one handed to _run_bounded (_member_bound_checks). A fixture that never got going
+    bound is the one handed to _run_bounded (_member_bound_checks).
+    config/member-bound-closure-worst-case holds each closure --ci-job entry at or above its
+    member's worst case plus the launch margin, recomputed through the closure module, with
+    config/member-bound-closure-vectors (_closure_bound_checks). A fixture that never got going
     inside its bound is attributed to that timeout, never a red."""
     import contextlib
     import io
@@ -1863,6 +2184,7 @@ def _member_timeout_controls(base):
     _member_close_controls(fixture)
 
     _member_bound_checks(set(_registered_selftests()))
+    _closure_bound_checks()
 
 
 def _member_bound_checks(roster):
@@ -1938,8 +2260,13 @@ def _member_bound_checks(roster):
                  "opf-closure-d")
     closure_e = ("tools/check_opf_standalone_closure.py", "--self-test", "--ci-job",
                  "opf-closure-e")
+    closure_f = ("tools/check_opf_standalone_closure.py", "--self-test", "--ci-job",
+                 "opf-closure-f")
     coverage_suite = ("tools/check_selftest_execution.py", "--suite",
                       "child-status-coverage-selftest")
+    release_cut = ("tools/check_release_cut.py", "--self-test", "--red-on-revert")
+    aiqt_hooks = ("tools/selftest_aiqt_hooks.py",)
+    adopt_apply = ("opf/tools/_opf_adopt_apply.py", "--self-test")
 
     figures, problems = _roster_figures(roster)
     print("CONFIG ROSTER FIGURES: {} members, {} in the malformed lane, {} outside the sizing"
@@ -1957,8 +2284,8 @@ def _member_bound_checks(roster):
     check("config/member-roster-figures",
           (problems, len(SIZING_ACCOUNT_ROSTER), SIZING_ACCOUNT_TIMED, len(SIZING_MEASURED),
            len(SIZING_MALFORMED_MEASURED), hashlib.sha256(frozen.encode("utf-8")).hexdigest()),
-          ([], 100, 88, 10, 9,
-           "7e2bb7449914bbeb00a01c96d7d680cf24ddf57755bd2b56306815577e37b94d"))
+          ([], 98, 88, 10, 9,
+           "aab3007c03d0392a2c99a57d440bd774b1b3f20b5842a296cb15898dfc1cb741"))
     # The oracle recomputes every live figure from the roster and the frozen constants, so an
     # expectation no longer inherits a drifted figure through the baseline above. It is not an
     # independent derivation: every expression but members mirrors _roster_figures's, so an
@@ -2089,8 +2416,9 @@ def _member_bound_checks(roster):
            ["malformed-lane measurement outside SIZING_MEASURED: {!r}".format(secrets)]])
 
     overrides = {record: 5100, opf_selftest: 3600, adopt_observe: 1800, release_delta: 1800,
-                 opf_init: 1800, closure_a: 3600, closure_b: 3600, closure_c: 3600,
-                 closure_d: 3600, closure_e: 3600, coverage_suite: 5400}
+                 opf_init: 1800, closure_a: 13500, closure_b: 10800, closure_c: 8100,
+                 closure_d: 9900, closure_e: 9600, closure_f: 3600, coverage_suite: 5400,
+                 release_cut: 2700, aiqt_hooks: 5700, adopt_apply: 3900}
     check("config/member-bound-table",
           (sorted(key for key in CONFIG_MEMBER_BOUNDS if key not in roster),
            {key: _config_member_bound(key) for key in CONFIG_MEMBER_BOUNDS},
@@ -2111,14 +2439,248 @@ def _member_bound_checks(roster):
     # is patched there, not into this runner.
     with patch.object(_gfe, "_run_bounded", recording):
         for member in (record, opf_selftest, adopt_observe, release_delta, opf_init, closure_a,
-                       closure_b, closure_c, closure_d, closure_e, ("opf/tools/opf.py",)):
+                       closure_b, closure_c, closure_d, closure_e, closure_f, coverage_suite,
+                       release_cut, aiqt_hooks, adopt_apply, ("opf/tools/opf.py",)):
             _run_config_member(member, {})
     check("config/member-bound-reaches-run", handed,
           [(" ".join(record), 5100), (" ".join(opf_selftest), 3600),
            (" ".join(adopt_observe), 1800), (" ".join(release_delta), 1800),
-           (" ".join(opf_init), 1800), (" ".join(closure_a), 3600), (" ".join(closure_b), 3600),
-           (" ".join(closure_c), 3600), (" ".join(closure_d), 3600), (" ".join(closure_e), 3600),
-           ("opf/tools/opf.py", 1200)])
+           (" ".join(opf_init), 1800), (" ".join(closure_a), 13500), (" ".join(closure_b), 10800),
+           (" ".join(closure_c), 8100), (" ".join(closure_d), 9900), (" ".join(closure_e), 9600),
+           (" ".join(closure_f), 3600), (" ".join(coverage_suite), 5400),
+           (" ".join(release_cut), 2700), (" ".join(aiqt_hooks), 5700),
+           (" ".join(adopt_apply), 3900), ("opf/tools/opf.py", 1200)])
+
+
+# The argv prefix of the closure gate's --ci-job members, and the closure module's names their
+# worst case is computed from (the WORST CASE paragraph of the engine's comment on their entries).
+_CLOSURE_MEMBER_PREFIX = ("tools/check_opf_standalone_closure.py", "--self-test", "--ci-job")
+_CLOSURE_WORST_CASE_NAMES = ("_leg_bounds", "_CI_JOB_LEGS", "_FLIP_LEG", "_DRAIN_MARGIN_S",
+                             "_VECTOR_ALLOWANCE_S", "_LAUNCH_MARGIN_S")
+
+
+def _closure_worst_cases(closure, tools_dir, leg_bounds=None):
+    """({job: (worst case s, launch margin s)}, problems, leg bounds) for every --ci-job member
+    of the closure gate, computed through the closure module's own _leg_bounds and constants: one
+    sweep of the job's legs at their leg bounds, the flip at the _FLIP_LEG bound in the job that
+    holds that leg, one _DRAIN_MARGIN_S cleanup deadline per leg that can be killed, and
+    _VECTOR_ALLOWANCE_S. A name the module lacks or holds with the wrong type, a _leg_bounds call
+    that raises, and a job leg with no positive int bound are each a problem, and any problem
+    yields no figures (fail-closed, never a skip). leg_bounds, when given, stands in for the
+    _leg_bounds result (the vectors raise one leg's bound through it)."""
+    values = {}
+    for name in _CLOSURE_WORST_CASE_NAMES:
+        if not hasattr(closure, name):
+            return {}, ["closure module has no {}".format(name)], None
+        values[name] = getattr(closure, name)
+    for name in ("_DRAIN_MARGIN_S", "_VECTOR_ALLOWANCE_S", "_LAUNCH_MARGIN_S"):
+        if type(values[name]) is not int or values[name] <= 0:
+            return {}, ["closure {} is not a positive int: {!r}".format(name, values[name])], None
+    flip_leg, jobs = values["_FLIP_LEG"], values["_CI_JOB_LEGS"]
+    if type(flip_leg) is not str or not flip_leg:
+        return {}, ["closure _FLIP_LEG is not a nonempty str: {!r}".format(flip_leg)], None
+    if (type(jobs) is not dict or not jobs
+            or not all(type(job) is str and isinstance(legs, (set, frozenset)) and legs
+                       and all(type(leg) is str for leg in legs) for job, legs in jobs.items())):
+        return {}, ["closure _CI_JOB_LEGS is not a nonempty dict of str to nonempty sets of"
+                    " str: {!r}".format(jobs)], None
+    if not callable(values["_leg_bounds"]):
+        return {}, ["closure _leg_bounds is not callable"], None
+    if leg_bounds is None:
+        try:
+            leg_bounds = values["_leg_bounds"](tools_dir)
+        except Exception as error:  # the closure's own _BoundError included
+            return {}, ["closure _leg_bounds({}) raised {}: {}".format(
+                tools_dir, type(error).__name__, error)], None
+    if type(leg_bounds) is not dict:
+        return {}, ["closure _leg_bounds returned {!r}, not a dict".format(leg_bounds)], None
+    figures, problems = {}, []
+    for job in sorted(jobs):
+        bounds = {}
+        for leg in sorted(jobs[job]):
+            row = leg_bounds.get(leg)
+            bound = row[0] if type(row) is tuple and row else None
+            if type(bound) is not int or bound <= 0:
+                problems.append("closure leg {} of {} has no positive int bound: {!r}".format(
+                    leg, job, row))
+            bounds[leg] = bound
+        if problems:
+            continue
+        flip = bounds[flip_leg] if flip_leg in bounds else 0
+        kills = len(bounds) + (1 if flip_leg in bounds else 0)
+        figures[job] = (sum(bounds.values()) + flip + kills * values["_DRAIN_MARGIN_S"]
+                        + values["_VECTOR_ALLOWANCE_S"], values["_LAUNCH_MARGIN_S"])
+    return ({}, problems, None) if problems else (figures, [], leg_bounds)
+
+
+def _closure_bound_shortfalls(figures, table):
+    """Each closure --ci-job member (figures, from _closure_worst_cases) whose entry in table (a
+    CONFIG_MEMBER_BOUNDS mapping) is missing, not an int, or below its worst case plus the launch
+    margin, and each closure --ci-job entry in table naming a job the module does not hold; []
+    when every entry reaches its member's worst case plus the margin."""
+    findings = []
+    for job in sorted(figures):
+        worst, margin = figures[job]
+        entry = table.get(_CLOSURE_MEMBER_PREFIX + (job,))
+        if type(entry) is not int:
+            findings.append("{}: no int CONFIG_MEMBER_BOUNDS entry ({!r}), its worst case {} s plus"
+                            " the {} s launch margin is {} s".format(
+                                job, entry, worst, margin, worst + margin))
+        elif entry < worst + margin:
+            findings.append("{}: entry {} s is below its worst case {} s plus the {} s launch"
+                            " margin, {} s".format(job, entry, worst, margin, worst + margin))
+    for argv in sorted(table):
+        if (tuple(argv[:len(_CLOSURE_MEMBER_PREFIX)]) == _CLOSURE_MEMBER_PREFIX
+                and (len(argv) != len(_CLOSURE_MEMBER_PREFIX) + 1 or argv[-1] not in figures)):
+            findings.append("entry for a closure member the module holds no job for: {!r}".format(
+                argv))
+    return findings
+
+
+def _closure_member_figures(tools_dir, leg_bounds=None):
+    """_closure_worst_cases over the live tools/check_opf_standalone_closure.py, imported; an
+    import that fails is a problem, never a skip. Returns (module or None, figures, problems,
+    leg bounds)."""
+    try:
+        import check_opf_standalone_closure as closure
+    except (Exception, SystemExit) as error:
+        return None, {}, ["tools/check_opf_standalone_closure.py cannot be imported: {}: {}".format(
+            type(error).__name__, error)], None
+    figures, problems, bounds = _closure_worst_cases(closure, tools_dir, leg_bounds)
+    return closure, figures, problems, bounds
+
+
+def _closure_bound_checks():
+    """config/member-bound-closure-worst-case: every --ci-job member of the closure gate has a
+    CONFIG_MEMBER_BOUNDS entry at or above its worst case plus the launch margin, each recomputed
+    on every run through the live closure module's _leg_bounds over opf/tools and its
+    _CI_JOB_LEGS, _FLIP_LEG, _DRAIN_MARGIN_S, _VECTOR_ALLOWANCE_S and _LAUNCH_MARGIN_S (the model
+    the engine's comment on those entries gives), and no closure --ci-job entry names a job the
+    module does not hold. The literal pins in _member_bound_checks cannot see a rise in a closure
+    leg bound or floor that leaves an entry below that figure; this check can. It fails closed: a
+    module that cannot be imported, a name missing or of the wrong type, or a _leg_bounds that
+    raises is a finding. The figures are printed, not pinned to literals.
+    config/member-bound-closure-vectors: from the live table with each closure entry raised to at
+    least its live worst case plus margin, for each member, an entry one second below that figure
+    is a finding naming that member, and one at it or one second above is not; one of the
+    member's legs raised (through a stand-in _leg_bounds result) by one second more than the
+    entry's slack is a finding naming that member, and by exactly the slack is not; each member's
+    figure equals the closure module's own _job_worst_case_s for that job less one sweep, one
+    _DRAIN_MARGIN_S per leg and _CI_SETUP_ALLOWANCE_S; a job leg missing from the leg bounds
+    yields the named per-leg problem and no figures; a stand-in module missing each name in turn,
+    one with a constant of the wrong type, one whose _leg_bounds raises, and a blocked import each
+    yield a problem and no figures. It is red when the comparison, the whole recomputation, any
+    one term of it (the sweep, the flip, a cleanup deadline or _VECTOR_ALLOWANCE_S), the per-leg
+    problem or the fail-closed handling is dropped. The entry and leg cases derive from the same
+    formula as the figures, so on their own they stay green when the flip, a cleanup deadline or
+    _VECTOR_ALLOWANCE_S is dropped from it; the _job_worst_case_s case turns red for each."""
+    tools_dir = ROOT / "opf" / "tools"
+    closure, figures, problems, bounds = _closure_member_figures(tools_dir)
+    for job in sorted(figures):
+        worst, margin = figures[job]
+        print("CLOSURE MEMBER WORST CASE: {} {} s, plus the {} s launch margin {} s,"
+              " entry {}".format(job, worst, margin, worst + margin,
+                                 CONFIG_MEMBER_BOUNDS.get(_CLOSURE_MEMBER_PREFIX + (job,))),
+              flush=True)
+    check("config/member-bound-closure-worst-case",
+          problems or _closure_bound_shortfalls(figures, CONFIG_MEMBER_BOUNDS), [])
+    # With no live figures the vectors have nothing to start from: the problems stand as their
+    # finding too, never a skip.
+    got, want = (problems, []) if problems else _closure_bound_vectors(
+        closure, figures, bounds, tools_dir)
+    check("config/member-bound-closure-vectors", got, want)
+
+
+def _closure_bound_vectors(closure, figures, bounds, tools_dir):
+    """(got, want) for config/member-bound-closure-vectors (see _closure_bound_checks), from the
+    live closure module, its figures and its leg bounds."""
+    import types
+    from unittest.mock import patch
+
+    def named(findings):
+        return sorted({finding.split(":", 1)[0] for finding in findings})
+
+    # The vectors start from a table whose closure entries each reach their live worst case plus
+    # margin, so a live shortfall is named by the check above alone, not again by every vector.
+    base = dict(CONFIG_MEMBER_BOUNDS)
+    for job, (worst, margin) in figures.items():
+        entry = base.get(_CLOSURE_MEMBER_PREFIX + (job,))
+        base[_CLOSURE_MEMBER_PREFIX + (job,)] = max(
+            entry if type(entry) is int else 0, worst + margin)
+    got, want = [], []
+    for job in sorted(figures):
+        argv = _CLOSURE_MEMBER_PREFIX + (job,)
+        worst, margin = figures[job]
+        for delta, red in ((-1, True), (0, False), (1, False)):
+            table = {**base, argv: worst + margin + delta}
+            got.append(("entry", job, delta, named(_closure_bound_shortfalls(figures, table))))
+            want.append(("entry", job, delta, [job] if red else []))
+        legs = sorted(closure._CI_JOB_LEGS[job])
+        leg = next((name for name in legs if name != closure._FLIP_LEG), legs[0])
+        unit = 2 if leg == closure._FLIP_LEG else 1  # the flip leg counts in the sweep and the flip
+        slack = base[argv] - worst - margin
+        for rise, red in ((slack // unit + 1, True), (slack // unit, False)):
+            raised = dict(bounds)
+            raised[leg] = (bounds[leg][0] + rise,) + tuple(bounds[leg][1:])
+            more, more_problems, _bounds = _closure_worst_cases(closure, tools_dir, raised)
+            got.append(("leg", job, red, more_problems,
+                        named(_closure_bound_shortfalls(more, base))))
+            want.append(("leg", job, red, [], [job] if red else []))
+    # The cases above come from the same formula as the figures, so dropping the flip, a cleanup
+    # deadline or _VECTOR_ALLOWANCE_S from _closure_worst_cases leaves them green. Each member's
+    # figure is also held to one the closure module computes itself: its _job_worst_case_s for
+    # that job (two sweeps, the negative leg at the _FLIP_LEG bound where the job holds that leg,
+    # one cleanup deadline per leg that can be killed, the vectors and _CI_SETUP_ALLOWANCE_S) less
+    # one sweep, one _DRAIN_MARGIN_S per leg and the setup. Dropping the sweep, the flip, a
+    # cleanup deadline or _VECTOR_ALLOWANCE_S from the figure makes the two differ for the
+    # members it touches.
+    job_worst = getattr(closure, "_job_worst_case_s", None)
+    setup = getattr(closure, "_CI_SETUP_ALLOWANCE_S", None)
+    for job in sorted(figures):
+        sweep = {leg: bounds[leg][0] for leg in closure._CI_JOB_LEGS[job]}
+        negative = sweep.get(closure._FLIP_LEG, 0)
+        try:
+            independent = (job_worst(sweep, negative, closure._CI_JOB_LEGS[job])
+                           - sum(sweep.values()) - len(sweep) * closure._DRAIN_MARGIN_S - setup)
+        except Exception as error:  # a name the module lacks is a mismatch, never a skip
+            independent = "{}: {}".format(type(error).__name__, error)
+        got.append(("job worst case", job, figures[job][0]))
+        want.append(("job worst case", job, independent))
+    # A job leg missing from the leg bounds is the named per-leg problem and yields no figures.
+    gone = min(closure._CI_JOB_LEGS[min(figures)])
+    try:
+        lacking = _closure_worst_cases(
+            closure, tools_dir, {leg: row for leg, row in bounds.items() if leg != gone})
+    except Exception as error:
+        lacking = ("raised", type(error).__name__)
+    got.append(("leg missing", gone, lacking))
+    want.append(("leg missing", gone, (
+        {}, ["closure leg {} of {} has no positive int bound: None".format(gone, job)
+             for job in sorted(closure._CI_JOB_LEGS) if gone in closure._CI_JOB_LEGS[job]], None)))
+
+    def stand_in(**changed):
+        names = {name: getattr(closure, name) for name in _CLOSURE_WORST_CASE_NAMES}
+        names.update(changed)
+        return types.SimpleNamespace(**{name: value for name, value in names.items()
+                                        if value is not None})
+
+    def raising(_tools_dir):
+        raise ValueError("stand-in leg bound fault")
+
+    for name in _CLOSURE_WORST_CASE_NAMES:
+        missing = _closure_worst_cases(stand_in(**{name: None}), tools_dir, bounds)
+        got.append(("missing", name, missing[0], name in "".join(missing[1])))
+        want.append(("missing", name, {}, True))
+    for label, module in (("wrong type", stand_in(_VECTOR_ALLOWANCE_S="350")),
+                          ("leg bounds raise", stand_in(_leg_bounds=raising))):
+        faulted = _closure_worst_cases(module, tools_dir)
+        got.append((label, faulted[0], len(faulted[1])))
+        want.append((label, {}, 1))
+    with patch.dict(sys.modules, {"check_opf_standalone_closure": None}):
+        blocked = _closure_member_figures(tools_dir, bounds)
+    got.append(("import blocked", blocked[0], blocked[1], len(blocked[2])))
+    want.append(("import blocked", None, {}, 1))
+    return got, want
 
 
 _MEMBER_TIMEOUT_EXPECTED = [
@@ -2331,6 +2893,258 @@ def _opf_lifecycle_graph_checks():
         names = denial = str(exc)
     check("env/opf-lifecycle-names-independent", names, expected_names)
     check("env/opf-lifecycle-bypass-denied", denial, expected_denial)
+
+
+def _lifecycle_scope_checks():
+    """The lifecycle form of the scope check over synthetic entry points, one check per row of
+    (check id, the source of a def that delegates to iso(), the expected result, the member file
+    name the closed table is read for); the rows are written out in the loop so the execution
+    gate's static layer reads every id. The function is entry() in fixture.py except where a case
+    needs another entry point's listed statements to reach the branch it tests. The first two are
+    accepted: the conforming shape the others are built from, and the isolated main's call on the
+    entry point's own parameters and a constant. They are positive controls: they fail if the
+    check refuses a conforming entry point, not if one of its refusals is removed, which only the
+    refusal rows show. Each other shape is refused, and the refusal
+    names what was refused. They cover an early return or raise, try statements with an except
+    handler, a finally body or an else body, an os.environb write, an aliased from-import,
+    environment access through getattr, a scrub, a path-setup variant, another entry point's
+    listed statement and an aliased lifecycle before the with; a missing lifecycle import; a bare
+    lifecycle call; an unreachable isolated main; a second context; a statement after the with;
+    an except handler or an unlisted finally statement on the try holding the with; a statement
+    after the with inside the try holding it; a lifecycle call that is an attribute or takes an
+    argument or a keyword; a with binding that is not a plain name; a call, a launch, a keyword
+    or another name passed to the isolated main; a decorator; a non-constant default, positional
+    or keyword-only; an annotation; and a type parameter."""
+    head = "def entry():\n    from _git_fixture_env import fixture_git_lifecycle\n"
+    tail = "    with fixture_git_lifecycle():\n        return iso()\n"
+    held = "    try:\n        with fixture_git_lifecycle():\n            return iso()\n"
+    where = "the fixture_git_lifecycle() with"
+    imported = "    from _git_fixture_env import fixture_git_lifecycle\n"
+    plain = "fixture.py"
+
+    def before(kind, statement):
+        return "entry(): {} ({!r}) precedes {} and is not on the lifecycle allowlist".format(
+            kind, statement, where)
+
+    def argument(shown):
+        return ("entry(): {} passes {!r} to iso(); each argument may only be a parameter of "
+                "entry() or a constant".format(where, shown))
+    for check_id, source, want, member in (
+        # Positive controls: these two guard against over-refusal, not against a removed refusal.
+        ("scope/lifecycle-conforming-accepted", head + tail, True, plain),
+        ("scope/lifecycle-parameter-arguments-accepted",
+         "def entry(flag, *rest, mode=None, **options):\n" + imported
+         + "    with fixture_git_lifecycle():\n        return iso(flag, 0, rest, mode=mode)\n",
+         True, plain),
+        ("scope/lifecycle-refuses-early-return", head + "    return 0\n" + tail,
+         before("a return statement", "return 0"), plain),
+        ("scope/lifecycle-refuses-raise", head + "    raise SystemExit(0)\n" + tail,
+         before("a raise statement", "raise SystemExit(0)"), plain),
+        ("scope/lifecycle-refuses-try-except",
+         head + "    try:\n        pass\n    except OSError:\n        scrub_git_environment()\n"
+         + tail, before("a try statement with an except handler", "try:"), plain),
+        ("scope/lifecycle-refuses-try-finally",
+         head + "    try:\n        pass\n    finally:\n        os.environ['HOME'] = '/x'\n" + tail,
+         before("a try statement with a finally body", "try:"), plain),
+        ("scope/lifecycle-refuses-try-else",
+         head + "    try:\n        pass\n    except OSError:\n        pass\n    else:\n"
+         "        subprocess.run(['true'])\n" + tail,
+         before("a try statement with an except handler and an else body", "try:"), plain),
+        ("scope/lifecycle-refuses-environb", head + "    os.environb[b'HOME'] = b'/x'\n" + tail,
+         before("an assignment", "os.environb[b'HOME'] = b'/x'"), plain),
+        ("scope/lifecycle-refuses-from-import-alias",
+         head + "    from os import environ as E\n    E['HOME'] = '/x'\n" + tail,
+         before("an import", "from os import environ as E"), plain),
+        ("scope/lifecycle-refuses-getattr",
+         head + "    getattr(os, 'env' + 'iron')['HOME'] = '/x'\n" + tail,
+         before("an assignment", "getattr(os, 'env' + 'iron')['HOME'] = '/x'"), plain),
+        ("scope/lifecycle-refuses-scrub-first", head + "    scrub_git_environment()\n" + tail,
+         before("an expression statement", "scrub_git_environment()"), plain),
+        ("scope/lifecycle-refuses-path-setup-variant",
+         head + "    sys.path.insert(0, os.environ['HOME'])\n" + tail,
+         before("an expression statement", "sys.path.insert(0, os.environ['HOME'])"), plain),
+        ("scope/lifecycle-refuses-other-entry-statement", head + "    saved_git = _GIT\n" + tail,
+         before("an assignment", "saved_git = _GIT"), plain),
+        ("scope/lifecycle-refuses-lifecycle-alias",
+         "def entry():\n    from contextlib import nullcontext as fixture_git_lifecycle\n" + tail,
+         before("an import", "from contextlib import nullcontext as fixture_git_lifecycle"),
+         plain),
+        ("scope/lifecycle-refuses-missing-import", "def entry():\n" + tail,
+         "entry(): no 'from _git_fixture_env import fixture_git_lifecycle' precedes {}, so the "
+         "name it enters is not shown to be the lifecycle".format(where), plain),
+        ("scope/lifecycle-refuses-bare-call",
+         head + "    fixture_git_lifecycle()\n    return iso()\n",
+         "entry(): no top-level with fixture_git_lifecycle()", plain),
+        ("scope/lifecycle-refuses-unreachable-main",
+         head + "    with fixture_git_lifecycle():\n        return 0\n        return iso()\n",
+         "entry(): a return statement ('return 0') precedes the iso() call in {} and is not on "
+         "the lifecycle allowlist".format(where), plain),
+        ("scope/lifecycle-refuses-isolated-named-twice",
+         head + "    with fixture_git_lifecycle():\n        return iso(lambda: iso())\n",
+         "entry(): iso is named 2 times; only the return in {} may name it".format(where), plain),
+        ("scope/lifecycle-refuses-second-context",
+         head + "    with fixture_git_lifecycle(), open(os.devnull):\n        return iso()\n",
+         "entry(): {} enters 2 contexts; it may enter only the lifecycle".format(where), plain),
+        ("scope/lifecycle-refuses-statement-after", head + tail + "    scrub_git_environment()\n",
+         "entry(): an expression statement ('scrub_git_environment()') follows {}".format(where),
+         plain),
+        ("scope/lifecycle-refuses-holder-except",
+         head + held + "    except Exception:\n        return 0\n",
+         "entry(): the try holding {} has an except handler".format(where), plain),
+        ("scope/lifecycle-refuses-holder-finally",
+         head + held + "    finally:\n        scrub_git_environment()\n",
+         "entry(): an expression statement ('scrub_git_environment()') in the finally body of "
+         "the try holding {} is not on the lifecycle allowlist".format(where), plain),
+        # _qa_adapter._self_test's listed finally statement, so the case reaches the check for a
+        # statement after the with inside the try that holds it.
+        ("scope/lifecycle-refuses-statement-after-in-try",
+         "def _self_test():\n" + imported + held + "        scrub_git_environment()\n"
+         "    finally:\n        _GIT = saved_git\n",
+         "_self_test(): an expression statement ('scrub_git_environment()') follows {} in its "
+         "try body".format(where), "_qa_adapter.py"),
+        ("scope/lifecycle-refuses-lifecycle-attribute",
+         head + "    with _git_fixture_env.fixture_git_lifecycle():\n        return iso()\n",
+         "entry(): {} enters '_git_fixture_env.fixture_git_lifecycle()', not a plain "
+         "fixture_git_lifecycle() call".format(where), plain),
+        ("scope/lifecycle-refuses-lifecycle-argument",
+         head + "    with fixture_git_lifecycle(scrub_git_environment()):\n        return iso()\n",
+         "entry(): {} enters 'fixture_git_lifecycle(scrub_git_environment())', not a plain "
+         "fixture_git_lifecycle() call".format(where), plain),
+        ("scope/lifecycle-refuses-lifecycle-keyword",
+         head + "    with fixture_git_lifecycle(env=os.environ.copy()):\n        return iso()\n",
+         "entry(): {} enters 'fixture_git_lifecycle(env=os.environ.copy())', not a plain "
+         "fixture_git_lifecycle() call".format(where), plain),
+        ("scope/lifecycle-refuses-binding-target",
+         head + "    with fixture_git_lifecycle() as os.environ['GIT_DIR']:\n"
+         "        return iso()\n",
+         "entry(): {} binds \"os.environ['GIT_DIR']\", not a plain name".format(where), plain),
+        ("scope/lifecycle-refuses-call-argument",
+         head + "    with fixture_git_lifecycle():\n"
+         "        return iso(os.environ.update(GIT_DIR='/x'))\n",
+         argument("os.environ.update(GIT_DIR='/x')"), plain),
+        ("scope/lifecycle-refuses-launch-argument",
+         head + "    with fixture_git_lifecycle():\n"
+         "        return iso(subprocess.run(['git', 'gc']))\n",
+         argument("subprocess.run(['git', 'gc'])"), plain),
+        ("scope/lifecycle-refuses-keyword-argument",
+         head + "    with fixture_git_lifecycle():\n"
+         "        return iso(flag=scrub_git_environment())\n",
+         argument("flag=scrub_git_environment()"), plain),
+        ("scope/lifecycle-refuses-free-name-argument",
+         head + "    with fixture_git_lifecycle():\n        return iso(os)\n", argument("os"),
+         plain),
+        ("scope/lifecycle-refuses-decorator", "@env_mutating_wrapper\n" + head + tail,
+         "entry(): a decorator ('env_mutating_wrapper') wraps the entry point, which may have "
+         "none", plain),
+        ("scope/lifecycle-refuses-default-argument",
+         "def entry(x=os.environ.setdefault('GIT_DIR', '/x')):\n" + imported + tail,
+         "entry(): a default argument (\"os.environ.setdefault('GIT_DIR', '/x')\") is not a "
+         "constant", plain),
+        ("scope/lifecycle-refuses-keyword-only-default",
+         "def entry(*, x=scrub_git_environment()):\n" + imported + tail,
+         "entry(): a default argument ('scrub_git_environment()') is not a constant", plain),
+        ("scope/lifecycle-refuses-annotation",
+         "def entry(x: os.environ.clear() = None):\n" + imported + tail,
+         "entry(): an annotation ('os.environ.clear()') is on the entry point's signature, "
+         "which may carry none", plain),
+        ("scope/lifecycle-refuses-type-parameter",
+         "def entry[T: os.environ.clear()]():\n" + imported + tail,
+         "entry(): a type parameter ('T: os.environ.clear()') is on the entry point's "
+         "signature, which may carry none", plain),
+    ):
+        owner = ast.parse(source).body[0]
+        check(check_id, _lifecycle_scoped_first(owner, owner.name, "iso", member), want)
+
+
+def _restore_probe_wrapper_checks():
+    """The restore probe's wrapper check (tools/_entry_restore_selftest.py) passes the lifecycle's
+    own wrapper and refuses each mutant of it for its own reason alone: a wrapper that prints a
+    stand-in record, or plants one that does not carry this run's nonce, without running the
+    caller's git, exports GIT_DIR, exits before its exec line, runs the caller's git twice or
+    overrides a pin. The git-dir mutant that also overrides a pin must be refused for both defects
+    and, judged under git-dir's reason and again under pin-override's, must count as refused for
+    neither alone. Those two judgements go through the same verdict line as the six mutants, and
+    their rows expect the verdict's refusal, compared up to the ": " that starts the problems it
+    lists: a verdict line that lets any matching problem count fails both, and one that drops the
+    exactly-one-problem rule fails the pin-override one.
+    env/restore-probe-lifecycle-wrapper-accepted is a positive control: it fails if the wrapper
+    check refuses the lifecycle's own wrapper, not if a refusal is removed, which only the mutant
+    rows show. The rows are written out so the execution gate's static layer reads every id;
+    env/restore-probe-mutants-covered requires them to name exactly the wrappers and judgements
+    the probe reports on, so one added there needs its row here."""
+    from _entry_restore_selftest import wrapper_mutant_failures
+    found = wrapper_mutant_failures()
+    covered = []
+    not_alone = ("the wrapper check refused the git-dir-and-pin-override mutant wrapper for other "
+                 "than its own reason alone")
+    for check_id, name, want in (
+        # Positive control: guards against over-refusal, not against a removed refusal.
+        ("env/restore-probe-lifecycle-wrapper-accepted", "lifecycle", []),
+        ("env/restore-probe-refuses-stdout-record", "stdout-record", []),
+        ("env/restore-probe-refuses-stale-nonce", "stale-nonce", []),
+        ("env/restore-probe-refuses-git-dir", "git-dir", []),
+        ("env/restore-probe-refuses-exit-before-exec", "exit-before-exec", []),
+        ("env/restore-probe-refuses-runs-twice", "runs-twice", []),
+        ("env/restore-probe-refuses-pin-override", "pin-override", []),
+        ("env/restore-probe-mutant-second-defect-refused", "git-dir-and-pin-override", []),
+        ("env/restore-probe-second-defect-not-counted-as-git-dir",
+         "git-dir-and-pin-override judged as git-dir", [not_alone]),
+        ("env/restore-probe-second-defect-not-counted-as-pin-override",
+         "git-dir-and-pin-override judged as pin-override", [not_alone]),
+    ):
+        covered.append(name)
+        got = found.get(name, ["no wrapper check result for " + name])
+        if want:
+            # A refusal is expected: compare it without the problems it lists after ": ".
+            got = [report.partition(": ")[0] for report in got]
+        check(check_id, got, want)
+    check("env/restore-probe-mutants-covered", sorted(covered), sorted(found))
+
+
+def _restore_probe_argument_checks(base):
+    """The restore probe's argument check (tools/_entry_restore_selftest.py) over three synthetic
+    tools written under base. In each, entry(flag) enters the lifecycle and returns iso(...): one
+    passes flag on, one passes the constant False in its place, as a self_test that drops its
+    red_on_revert would, and one passes the constant [{'flag': 1}]. The first, run with flag True,
+    with flag False and with flag [{'flag': True}], must be accepted; it is a positive control,
+    failing if the probe refuses a conforming entry point, not if the argument check is removed.
+    The second, run with flag True, must be refused for the argument it passed and nothing else,
+    after the return and after the raise. The third, run with flag [{'flag': True}], must be
+    refused the same way: its argument differs only in a type nested in a list and an object (1
+    for True), which a comparison of top-level types alone would let through."""
+    from _entry_restore_selftest import entry_restore_failures
+    source = ("def entry(flag):\n"
+              "    from _git_fixture_env import fixture_git_lifecycle\n"
+              "    with fixture_git_lifecycle():\n"
+              "        return iso({})\n\n\n"
+              "def iso(flag):\n"
+              "    return 0\n")
+    synthetic = base / "restore-probe-arguments"
+    synthetic.mkdir()
+    forwards = synthetic / "forwards_parameter.py"
+    forwards.write_text(source.format("flag"), encoding="utf-8")
+    constant = synthetic / "passes_constant.py"
+    constant.write_text(source.format("False"), encoding="utf-8")
+    nested = synthetic / "passes_nested_int.py"
+    nested.write_text(source.format("[{'flag': 1}]"), encoding="utf-8")
+    # Positive control: guards against over-refusal, not against a removed argument check.
+    check("env/restore-probe-forwarded-argument-accepted",
+          entry_restore_failures(forwards, "entry", "iso", args=(True,))
+          + entry_restore_failures(forwards, "entry", "iso", args=(False,))
+          + entry_restore_failures(forwards, "entry", "iso", args=([{"flag": True}],)), [])
+    shown = ("the entry point called its isolated main with arguments [False] and keywords {}, "
+             "expected exactly the probe's arguments [True] and no keywords")
+    check("env/restore-probe-refuses-constant-argument",
+          entry_restore_failures(constant, "entry", "iso", args=(True,)),
+          ["passes_constant.py entry(): " + shown,
+           "passes_constant.py entry(): around a raising stand-in, " + shown])
+    shown = ("the entry point called its isolated main with arguments [[{'flag': 1}]] and "
+             "keywords {}, expected exactly the probe's arguments [[{'flag': True}]] and no "
+             "keywords")
+    check("env/restore-probe-refuses-nested-type-change",
+          entry_restore_failures(nested, "entry", "iso", args=([{"flag": True}],)),
+          ["passes_nested_int.py entry(): " + shown,
+           "passes_nested_int.py entry(): around a raising stand-in, " + shown])
 
 
 def _trace2_tail_results(base, probe=_trace2_maintenance_children):
@@ -2709,14 +3523,42 @@ def _core_lanes(base):
              "_suite_isolated", "fixture_env", "_scrubbed_env", False),
     ):
         check(check_id, _binding_calls(ROOT / member, owner, binding, factory, launches), True)
-    for check_id, member, owner in (
-            ("scope/check-manifest", "tools/check_manifest.py", "self_test_main"),
-            ("scope/check-record-sections", "tools/check_record_sections.py", "self_test"),
-            ("scope/qa-adapter", "tools/_qa_adapter.py", "_self_test"),
-            ("scope/gen-manifest", "tools/gen_manifest.py", "self_test_main"),
+    # Each entry matches the lifecycle allowlist: only permitted statements (the lifecycle import,
+    # module-path setup and the statements listed for that entry) before a top-level with that
+    # enters fixture_git_lifecycle() alone and returns the named isolated main's call, and nothing
+    # after it. The lifecycle saves the caller's environment and then scrubs, so a scrub before it
+    # would make it restore the scrubbed values. The synthetic shapes after these rows show the
+    # allowlist refusing what it must.
+    for check_id, member, owner, isolated in (
+            ("scope/check-manifest", "tools/check_manifest.py", "self_test_main",
+             "_self_test_main_isolated"),
+            ("scope/check-record-sections", "tools/check_record_sections.py", "self_test",
+             "_self_test_isolated"),
+            ("scope/qa-adapter", "tools/_qa_adapter.py", "_self_test", "_self_test_isolated"),
+            ("scope/gen-manifest", "tools/gen_manifest.py", "self_test_main",
+             "_self_test_main_isolated"),
+            # Its public self_test_main reports a failed setup as a named NOT RUN and enters the
+            # lifecycle through this function; its restore probe still runs self_test_main.
+            ("scope/check-portability", "tools/check_portability.py", "_self_test_main_lifecycle",
+             "_self_test_main_isolated"),
+            ("scope/selftest-orch-hooks", "tools/selftest_orch_hooks.py", "main",
+             "_main_isolated"),
+            ("scope/selftest-aiqt-hooks", "tools/selftest_aiqt_hooks.py", "main",
+             "_main_with_recorder"),
+            ("scope/check-release-build", "tools/check_release_build.py", "self_test_main",
+             "_self_test_main_isolated"),
+            ("scope/check-release-delta", "tools/check_release_delta.py", "self_test_main",
+             "_self_test_main_isolated"),
+            # Its statements are all common ones and it passes its own red_on_revert parameter
+            # on, so it needs no closed-table entry.
+            ("scope/check-release-cut", "tools/check_release_cut.py", "self_test",
+             "_self_test_isolated"),
     ):
-        check(check_id, _scrub_scoped_first(ROOT / member, owner,
-                                           "fixture_git_lifecycle"), True)
+        check(check_id, _scrub_scoped_first(ROOT / member, owner, "fixture_git_lifecycle",
+                                            isolated), True)
+    _lifecycle_scope_checks()
+    _restore_probe_wrapper_checks()
+    _restore_probe_argument_checks(base)
     check("trust/caller-env-archive-only", _caller_env_archive_only(), True)
 
     check("route/selftest-aiqt-hooks-fixture-env",
@@ -2731,17 +3573,12 @@ def _core_lanes(base):
     # protections removed. Each named self-test entry must itself lead with the in-place
     # scrub, a top-level call with no process-launching call before it.
     for check_id, member_rel, func_name in (
-            ("scope/check-portability", "tools/check_portability.py", "self_test_main"),
             ("scope/selftest-aiqt-corpus-setup", "tools/selftest_aiqt_corpus.py", "GitTests.setUp"),
-            ("scope/selftest-orch-hooks", "tools/selftest_orch_hooks.py", "main"),
-            ("scope/selftest-aiqt-hooks", "tools/selftest_aiqt_hooks.py", "main"),
             ("scope/check-record-drift", "tools/check_record_drift.py", "self_test"),
             ("scope/check-mistakes-register", "tools/check_mistakes_register.py",
              "self_test"),
             ("scope/check-version-monotonicity", "tools/check_version_monotonicity.py",
              "self_test_main"),
-            ("scope/check-release-build", "tools/check_release_build.py", "self_test_main"),
-            ("scope/check-release-delta", "tools/check_release_delta.py", "self_test_main"),
     ):
         check(check_id, _scrub_scoped_first(ROOT / member_rel, func_name,
                                             "scrub_git_environment"), True)
@@ -2757,6 +3594,7 @@ def _core_lanes(base):
         check(check_id, _archive_reads_use_caller_env(ROOT / member_rel), True)
 
     _roster_checks()
+    _shard_checks(base)
     _opf_lifecycle_graph_checks()
     _member_timeout_controls(base)
     _member_timeout_vectors(base)

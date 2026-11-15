@@ -23,10 +23,11 @@ repository's project settings must not oblige. Validation is
 fail-closed: every manifest `rules` entry must name a real corpus-id in .aiqt/core/rules/ (via
 gen_rules.load_corpus), the event must be on the known-event whitelist, a tool event must carry a
 compilable matcher and a non-tool event must not, `default` must be an allowed keyword with the
-non-blocking `warn` legal only on a WARN_EVENTS event (PostToolUse, UserPromptSubmit, Stop,
-SubagentStop, SessionStart) or under an explicit bake stage, the named handler must exist in the
-source script, and `residue` must be non-empty, so a typo can never silently no-op an enforcement
-control.
+non-blocking `warn` legal only on a WARN_EVENTS event (PostToolUse, PostToolUseFailure,
+UserPromptSubmit, Stop, SubagentStop, SessionStart, TeammateIdle), under an explicit bake stage, or for
+a PreToolUse handler the dispatcher lists in NOTE_ONLY_PRETOOL_MODES (whose control must declare it),
+the named handler must exist in the source script, and `residue` must be non-empty, so a typo can never
+silently no-op an enforcement control.
 
 Per-hook timeout and derived onFailure, OFF by default. A [[hook]] may author an optional integer
 `timeout` (TIMEOUT_MIN to TIMEOUT_MAX seconds), and the [plugin] table may author
@@ -126,20 +127,27 @@ AUTHORING_MARKER_MAX_BYTES = 1_000_000
 AUTHORING_ONLY_REL = (AUTHORING_MARKER_REL, PROJECT_SETTINGS_REL)
 
 # The event whitelist, in the fixed render order (doc-confirmed event names, 2026-08-17; SessionStart
-# and TeammateIdle re-confirmed against the hooks reference 2026-08-29). A typo'd event must fail
-# closed here, never silently produce a hook no platform will fire.
-KNOWN_EVENTS = ("PreToolUse", "PostToolUse", "UserPromptSubmit", "Stop", "SubagentStop",
-                "SessionStart", "TeammateIdle")
-TOOL_EVENTS = {"PreToolUse", "PostToolUse"}  # these require a matcher; the others must omit it
+# and TeammateIdle re-confirmed against the hooks reference 2026-08-29). PostToolUseFailure, the tool
+# event fired after a tool call that started and failed, is the name the preview .preview/clock-inject.py
+# documents and registers; it was not re-confirmed against the hooks reference for this list. A typo'd
+# event must fail closed here, never silently produce a hook no platform will fire.
+KNOWN_EVENTS = ("PreToolUse", "PostToolUse", "PostToolUseFailure", "UserPromptSubmit", "Stop",
+                "SubagentStop", "SessionStart", "TeammateIdle")
+# these require a matcher; the others must omit it
+TOOL_EVENTS = {"PreToolUse", "PostToolUse", "PostToolUseFailure"}
 # A non-blocking "warn" default is legal on every event EXCEPT PreToolUse: on a PreToolUse control a
 # silent non-decision would weaken an enforcement point, so warn there requires the explicit,
-# recorded stage = "bake" posture below. SessionStart cannot block at the platform (exit 2 only shows
+# recorded stage = "bake" posture below, or a handler the dispatcher names in NOTE_ONLY_PRETOOL_MODES: such
+# a handler never decides anything but an allow or a note, and main() turns each of its error paths into
+# a warning on exit 0, so "warn" is its truthful default (and the only one cross_check accepts for it).
+# SessionStart cannot block at the platform (exit 2 only shows
 # stderr, doc-confirmed 2026-08-29), so a SessionStart control MUST declare warn: a block/ask claim
 # there would be an overclaim the platform cannot honour.
-WARN_EVENTS = {"PostToolUse", "UserPromptSubmit", "Stop", "SubagentStop", "SessionStart",
-               "TeammateIdle"}
+WARN_EVENTS = {"PostToolUse", "PostToolUseFailure", "UserPromptSubmit", "Stop", "SubagentStop",
+               "SessionStart", "TeammateIdle"}
 NONBLOCK_EVENTS = {"SessionStart"}  # the platform cannot block these: default must be "warn"
 STAGES = {"bake", "enforce"}  # stage is optional authoring metadata; absent means "enforce"
+NOTE_ONLY_NAME = "NOTE_ONLY_PRETOOL_MODES"  # the dispatcher's tuple of note-only PreToolUse handlers
 
 HOOK_KEYS = {"id", "rules", "platform", "event", "matcher", "handler", "default", "class", "residue",
              "stage", "timeout"}
@@ -179,9 +187,9 @@ ONFAILURE_EVENTS = ("PreToolUse",)
 # either name in the script. It returns that margin, from which check_authored_timeouts derives the
 # floor an authored timeout must clear with the switch on (no second literal for it here).
 DEADLINE_MIN_MARGIN = 1
-_HOOK_TIMEOUT_LINE_RE = re.compile(r"^HOOK_TIMEOUT_SECONDS = (\d+)$", re.M)
+_HOOK_TIMEOUT_LINE_RE = re.compile(r"^HOOK_TIMEOUT_SECONDS = (\d+)$", re.M | re.ASCII)
 _PRETOOL_BUDGET_LINE_RE = re.compile(
-    r"^PRETOOL_BUDGET_SECONDS = HOOK_TIMEOUT_SECONDS - (\d+(?:\.\d+)?)$", re.M)
+    r"^PRETOOL_BUDGET_SECONDS = HOOK_TIMEOUT_SECONDS - (\d+(?:\.\d+)?)$", re.M | re.ASCII)
 
 # Declares this generator's outputs for the gensrc registry (tools/gen_gensrc.py); additive metadata
 # only, it does not affect what this generator produces.
@@ -251,6 +259,7 @@ def load_manifest(path):
         raise ValueError("{}: at least one [[hook]] entry is required".format(path.name))
     seen_ids = set()
     seen_handlers = set()
+    note_only = None  # read from the dispatcher beside the manifest only when a hook needs it
     for hook in hooks:
         if not isinstance(hook, dict):
             raise ValueError("{}: every [[hook]] must be a table".format(path.name))
@@ -300,9 +309,14 @@ def load_manifest(path):
         if not isinstance(stage, str) or stage not in STAGES:
             raise ValueError("{}: stage must be one of {}".format(where, "/".join(sorted(STAGES))))
         if default == "warn" and event not in WARN_EVENTS and stage != "bake":
-            raise ValueError("{}: default 'warn' is legal only on a {} event, or under an explicit "
-                             "stage = \"bake\" posture on PreToolUse, not {}"
-                             .format(where, "/".join(sorted(WARN_EVENTS)), event))
+            if event == "PreToolUse" and note_only is None:
+                note_only = note_only_modes(
+                    (path.parent / "scripts" / SCRIPT_NAME).read_text(encoding="utf-8"))
+            if event != "PreToolUse" or handler not in note_only:
+                raise ValueError("{}: default 'warn' is legal only on a {} event, under an explicit "
+                                 "stage = \"bake\" posture on PreToolUse, or for a PreToolUse handler the "
+                                 "dispatcher lists in {}, not {}"
+                                 .format(where, "/".join(sorted(WARN_EVENTS)), NOTE_ONLY_NAME, event))
         if event in NONBLOCK_EVENTS and default != "warn":
             raise ValueError("{}: event {} cannot block at the platform, so default must be 'warn' "
                              "(a block/ask claim there is an overclaim)".format(where, event))
@@ -323,7 +337,10 @@ def load_manifest(path):
 def cross_check(hooks, corpus_ids, script_text, name):
     """The manifest's outward references, fail-closed: every cited corpus-id exists in the loaded
     corpus (the check_mappings no-orphan pattern), and every named handler is defined in the source
-    script, so a rename can never silently orphan an enforcement control."""
+    script, so a rename can never silently orphan an enforcement control. A handler the dispatcher lists in
+    NOTE_ONLY_PRETOOL_MODES must be a PreToolUse control with default "warn", since main() never fails it
+    closed on an error path; a "block" default there would claim a posture the dispatcher does not take."""
+    note_only = note_only_modes(script_text)
     for hook in hooks:
         where = "{}: [[hook]] {}".format(name, hook["id"])
         for rule in hook["rules"]:
@@ -333,6 +350,32 @@ def cross_check(hooks, corpus_ids, script_text, name):
         if not re.search(r"^def {}\(".format(re.escape(hook["handler"])), script_text, re.M):
             raise ValueError("{}: handler '{}' is not defined in scripts/{}"
                              .format(where, hook["handler"], SCRIPT_NAME))
+        if hook["handler"] in note_only and (hook["event"] != "PreToolUse" or hook["default"] != "warn"):
+            raise ValueError("{}: handler '{}' is in the dispatcher's {}, so its control must be a PreToolUse "
+                             "hook with default 'warn'".format(where, hook["handler"], NOTE_ONLY_NAME))
+
+
+def note_only_modes(script_text):
+    """The handler names the dispatcher binds to NOTE_ONLY_PRETOOL_MODES, as a frozenset (empty when the
+    script never binds the name). Fail closed (ValueError) unless the name's only binding in the parsed script
+    (_name_bindings) is one module-level assignment of a tuple of string literals, so a computed value, a
+    second binding or a copy of the line inside a string never stands in for it."""
+    try:
+        tree = ast.parse(script_text)
+    except (SyntaxError, ValueError, RecursionError, MemoryError) as exc:
+        raise ValueError("scripts/{}: cannot parse the dispatcher to read {} ({}: {})"
+                         .format(SCRIPT_NAME, NOTE_ONLY_NAME, type(exc).__name__, exc))
+    bindings = _name_bindings(tree, NOTE_ONLY_NAME)
+    if not bindings:
+        return frozenset()
+    found = [node for node in tree.body if isinstance(node, ast.Assign) and len(node.targets) == 1
+             and isinstance(node.targets[0], ast.Name) and node.targets[0].id == NOTE_ONLY_NAME]
+    if (len(found) != 1 or bindings != [found[0].lineno] or not isinstance(found[0].value, ast.Tuple)
+            or not all(isinstance(elt, ast.Constant) and isinstance(elt.value, str)
+                       for elt in found[0].value.elts)):
+        raise ValueError("scripts/{}: {} must be bound only by one module-level tuple of string literals, "
+                         "found bindings on lines {}".format(SCRIPT_NAME, NOTE_ONLY_NAME, bindings))
+    return frozenset(elt.value for elt in found[0].value.elts)
 
 
 def _name_bindings(tree, name):
@@ -708,7 +751,9 @@ def main():
 #  12. render byte-identity: an otherwise-identical Stop hook renders the SAME hooks.json bytes whether
 #      its default is "block" or "warn" (default is authoring metadata, never rendered into output),
 #  13. a malformed/unknown default keyword fails closed (exit 2): the default whitelist.
-#  14. 'warn' on PreToolUse is accepted only under stage = "bake" (exit 2 without it),
+#  14. 'warn' on PreToolUse is legal under stage = "bake", or for a handler the dispatcher lists in
+#      NOTE_ONLY_PRETOOL_MODES, and fails closed (exit 2) otherwise; a listed handler that declares "block",
+#      and a list that is not one module-level tuple of string literals, fail closed too.
 #  15. a SessionStart control declaring 'block' fails closed (exit 2): the platform cannot block there.
 #  16. the repository-local .claude/settings.json renders exactly one PreToolUse group for the project
 #      control, its matcher copied from the manifest and its launcher the exact isolated shell string,
@@ -1726,9 +1771,10 @@ def self_test_main(_nested=False):
         os.chmod(manifest, 0o644)  # restore so cleanup can remove it
 
         # 11. The FULL "warn" default policy, table-driven across every known event. warn is a
-        #     non-blocking default legal on the WARN_EVENTS (PostToolUse, UserPromptSubmit, Stop,
-        #     SubagentStop, SessionStart), so the generator must REJECT it (exit 2) on every other event
-        #     outside a bake stage and ACCEPT it on each WARN_EVENTS event, regenerating drift-clean.
+        #     non-blocking default legal on the WARN_EVENTS (PostToolUse, PostToolUseFailure,
+        #     UserPromptSubmit, Stop, SubagentStop, SessionStart, TeammateIdle), so the generator must
+        #     REJECT it (exit 2) on every other event outside a bake stage and ACCEPT it on each
+        #     WARN_EVENTS event, regenerating drift-clean.
         #     Converting the base tool hook to a non-tool event also drops the now-forbidden matcher,
         #     matching a real Stop/UserPromptSubmit control.
         tool_block = 'event = "PreToolUse"\nmatcher = "Bash"\nhandler = "test_handler"\ndefault = "block"'
@@ -1751,6 +1797,48 @@ def self_test_main(_nested=False):
             elif run_quiet(warntree, check=True) != 2:
                 failures.append("'warn' default on non-warn event {} expected exit 2 (fail-closed)"
                                 .format(event))
+
+        # 11b. PostToolUseFailure, spelled literally here rather than read from the event sets, so a
+        #      revert of any one of its set entries fails: a warn hook on it with an all-tools matcher,
+        #      beside a PostToolUse and a UserPromptSubmit hook, generates and checks drift-clean, and
+        #      hooks.json renders it, with that matcher, between those two events; the same hook with
+        #      no matcher fails closed (exit 2), as on any tool event.
+        if not ("PostToolUseFailure" in KNOWN_EVENTS and "PostToolUseFailure" in TOOL_EVENTS
+                and "PostToolUseFailure" in WARN_EVENTS):
+            failures.append("PostToolUseFailure must be in KNOWN_EVENTS, TOOL_EVENTS and WARN_EVENTS")
+        ptuf_hooks = (
+            '\n[[hook]]\nid = "selftest-post"\nrules = ["tsthk1"]\nplatform = "claude-code"\n'
+            'event = "PostToolUse"\nmatcher = "Bash"\nhandler = "post_handler"\ndefault = "warn"\n'
+            'class = "c"\nresidue = "A self-test PostToolUse control catches nothing real."\n'
+            '\n[[hook]]\nid = "selftest-prompt"\nrules = ["tsthk1"]\nplatform = "claude-code"\n'
+            'event = "UserPromptSubmit"\nhandler = "prompt_handler"\ndefault = "warn"\nclass = "c"\n'
+            'residue = "A self-test UserPromptSubmit control catches nothing real."\n')
+        ptuf_handlers = ("\ndef post_handler(data):\n    return (0, None, None)\n"
+                         "\ndef prompt_handler(data):\n    return (0, None, None)\n")
+        for label, matcher, want_exit in (("ptuf-warn", 'matcher = ".*"\n', 0), ("ptuf-no-matcher", "", 2)):
+            ptuf = tmp / label
+            ptuf.mkdir()
+            _build_tree(ptuf)
+            _mutate(ptuf, tool_block, 'event = "PostToolUseFailure"\n{}handler = "test_handler"\n'
+                    'default = "warn"'.format(matcher))
+            hsrc = ptuf / ".aiqt" / "core" / "hooks"
+            for path, tail in ((hsrc / "manifest.toml", ptuf_hooks), (hsrc / "scripts" / SCRIPT_NAME,
+                                                                       ptuf_handlers)):
+                path.write_text(path.read_text(encoding="utf-8") + tail, encoding="utf-8")
+            if want_exit:
+                if run_quiet(ptuf, check=True) != 2:
+                    failures.append("a PostToolUseFailure hook with no matcher expected exit 2 (a tool "
+                                    "event requires one)")
+                continue
+            if run_quiet(ptuf, check=False) != 0 or run_quiet(ptuf, check=True) != 0:
+                failures.append("a warn PostToolUseFailure hook with matcher '.*' expected a clean generate "
+                                "and a drift-clean check")
+                continue
+            rendered = json.loads((ptuf / HOOKS_JSON_REL).read_text(encoding="utf-8"))["hooks"]
+            if list(rendered) != ["PostToolUse", "PostToolUseFailure", "UserPromptSubmit"] or [
+                    group.get("matcher") for group in rendered["PostToolUseFailure"]] != [".*"]:
+                failures.append("hooks.json must render PostToolUseFailure, with its matcher '.*', between "
+                                "PostToolUse and UserPromptSubmit, got {!r}".format(rendered))
 
         # 12. Render byte-identity: the default is authoring metadata, never rendered into hooks.json, so
         #     an otherwise-identical Stop hook must render the SAME bytes whether its default is "block"
@@ -1807,6 +1895,28 @@ def self_test_main(_nested=False):
         _mutate(nostage, 'default = "block"', 'default = "warn"')
         if run_quiet(nostage, check=True) != 2:
             failures.append("'warn' on PreToolUse without stage=bake expected exit 2 (fail-closed)")
+
+        # 14b. A note-only PreToolUse handler (named in the dispatcher's NOTE_ONLY_PRETOOL_MODES) may declare
+        #      'warn' without a bake stage and must not declare 'block'; another handler still may not
+        #      declare 'warn', and a list that is not one module-level tuple of string literals fails closed.
+        def note_only_case(label, script_extra, default, want):
+            tree = tmp / ("note-only-" + label)
+            tree.mkdir()
+            _build_tree(tree)
+            script = tree / ".aiqt" / "core" / "hooks" / "scripts" / SCRIPT_NAME
+            script.write_text(script.read_text(encoding="utf-8") + script_extra, encoding="utf-8")
+            if default != "block":
+                _mutate(tree, 'default = "block"', 'default = "{}"'.format(default))
+            if run_quiet(tree, check=False) != want:
+                failures.append("note-only posture ({}): expected exit {}".format(label, want))
+        listed = 'NOTE_ONLY_PRETOOL_MODES = ("test_handler",)\n'
+        note_only_case("listed-warn", listed, "warn", 0)
+        note_only_case("listed-block", listed, "block", 2)
+        note_only_case("other-warn", 'NOTE_ONLY_PRETOOL_MODES = ("other_handler",)\n', "warn", 2)
+        note_only_case("unlisted-block", 'NOTE_ONLY_PRETOOL_MODES = ("other_handler",)\n', "block", 0)
+        note_only_case("computed", 'NOTE_ONLY_PRETOOL_MODES = tuple(["test_handler"])\n', "warn", 2)
+        note_only_case("rebound", listed + "NOTE_ONLY_PRETOOL_MODES = ()\n", "warn", 2)
+        note_only_case("in-string", "_TEXT = '''\n" + listed + "'''\n", "warn", 2)
 
         # 15. A SessionStart control cannot claim block/ask: the platform cannot block that event.
         ssblock = tmp / "ssblock"
@@ -3980,7 +4090,10 @@ def self_test_main(_nested=False):
           "the script, a missing handler script, an unreadable manifest, and a malformed default keyword "
           "all fail closed; the full 'warn' default policy holds across every known event (rejected on "
           "every non-warn event, accepted on every WARN_EVENTS event, plus warn+stage=bake on "
-          "PreToolUse and the SessionStart-cannot-block overclaim); a Stop hook renders "
+          "PreToolUse and the SessionStart-cannot-block overclaim); a warn PostToolUseFailure hook with an "
+          "all-tools matcher renders between PostToolUse and UserPromptSubmit and one with no matcher "
+          "fails closed; a note-only PreToolUse handler must "
+          "declare warn and no other PreToolUse handler may without a bake stage; a Stop hook renders "
           "byte-identical hooks.json whether its default is 'block' or 'warn'; the dispatcher's "
           "PreToolUse deadline must mirror TIMEOUT and leave a margin from DEADLINE_MIN_MARGIN up to just "
           "below TIMEOUT (each end refused just outside it), with no second binding of either name; "

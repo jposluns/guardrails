@@ -6,8 +6,7 @@ tier: 10
 facet: ACCUR
 secondary: [QUALI, INTEG]
 slug: guard-input-soundness
-map-nist-airmf-tight: [MAP 2.3]
-map-nist-airmf-broad: [MEASURE 2.13]
+map-nist-airmf-broad: [MAP 2.3, MEASURE 2.13]
 ---
 
 # A guard is only as good as its input

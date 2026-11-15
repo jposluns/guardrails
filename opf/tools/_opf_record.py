@@ -228,10 +228,11 @@ kept as found; a journal home that is not a directory; or a journal or projectio
 inspected or read), which leaves every pending transaction while the records the acquisition
 removed stay removed; a transaction that cannot be reconciled, which leaves it and each one planned
 after it; a failed release of the recovery capability, which leaves whichever of this run's own
-records it did not remove; the journal work of an operation other than record (an 'ingest'
-holder's), which this verb never examines; and a live run's own publication that fails after its
-transaction opened and before it completes, which leaves an open transaction, or a terminal one
-missing its projection, for that trigger even when the run's own release succeeds. A leftover the
+records it did not remove; the capability records and journal work of an operation other than
+record (an 'ingest' holder's), which this verb's recovery acquisition refuses and keeps, never
+examining that journal; and a live run's own publication that fails after its transaction opened
+and before it completes, which leaves an open transaction, or a terminal one missing its
+projection, for that trigger even when the run's own release succeeds. A leftover the
 capability's own recovery gate refuses
 refuses record runs with no record operand, journal or projection written, the refusal naming
 whatever the acquisition removed before it refused (a staging leftover, a confirmed-dead holder's
@@ -241,18 +242,20 @@ the error carries no report of it: an active record paired with a sibling worktr
 machine store until a homes-2 record run in the checkout owning that store reclaims it (its holder
 confirmed dead there; a homes-1 record run there never reclaims a capability record, taking the
 single-writer lease instead, which a present capability lease refuses); a holder read as possibly
-live until it releases normally, or exits and a later run confirms it dead; and every other refused
-leftover until its cause is removed, by hand for a record the gate cannot accept and by a later run
-once a transient condition has passed. That last group is NOT an exhaustive list of the gate's and
-the deletes' refusals; among them are a lone owner-less lease, a cross-host holder or one with no
-usable nodename, a malformed owner identity, a record that is not a plain singly-linked regular
-file, a staging leftover that is not a regular file (a multiply-linked one IS removed: a staging
-name killed after its link shares the completed record's inode), a record that cannot be opened,
-exceeds the record size cap, or is not a UTF-8 TOML table, a record failing the gate's schema or
-lease-pairing validation, the earlier schema-1 active record included, one whose recorded machine
-store cannot be confirmed present or absent, a staging leftover that cannot be removed or whose
-directory fsync fails, and a record that vanishes, changes identity or bytes, or cannot be unlinked
-or fsynced during the recovery deletes. A
+live until it releases normally, or exits and a later run confirms it dead; a confirmed-dead holder
+of an operation other than record until that operation's own recovery or manual intervention
+removes it (record recovery releases only a record holder's leftover, spec section 8.8 item 1);
+and every other refused leftover until its cause is removed, by hand for a record the gate cannot
+accept and by a later run once a transient condition has passed. That last group is NOT an
+exhaustive list of the gate's and the deletes' refusals; among them are a lone owner-less lease, a
+cross-host holder or one with no usable nodename, a malformed owner identity, a record that is not
+a plain singly-linked regular file, a staging leftover that is not a regular file (a
+multiply-linked one IS removed: a staging name killed after its link shares the completed record's
+inode), a record that cannot be opened, exceeds the record size cap, or is not a UTF-8 TOML table,
+a record failing the gate's schema or lease-pairing validation, the earlier schema-1 active record
+included, one whose recorded machine store cannot be confirmed present or absent, a staging
+leftover that cannot be removed or whose directory fsync fails, and a record that vanishes,
+changes identity or bytes, or cannot be unlinked or fsynced during the recovery deletes. A
 transition changes `status` and `updated_at` only, plus `proposed_from` (written when it lands a
 `/proposed` status, removed when it leaves one) and a pending_decision's resolution bundle (written by
 `open -> decided`, removed by the rejection of `decided/proposed`), a contribution's delivery bundle
@@ -702,8 +705,8 @@ def _counter_state(ctx, counters_model):
     next_id(..., known_complete=True): an absent counter can then never read as high-water 0 and reuse an
     existing id (spec 8.2). Where the manifest activates the imported series (_opf_check.imported_series_active,
     the flag the doctor's C-COUNTERS reads), the proof is that C-COUNTERS rule too: one "imported:<NS>" row
-    per enabled type except legacy_fragment is required and preserved, and this verb never claims or
-    rewrites one."""
+    per enabled type (spec 8.2) is required and preserved, this tooling's legacy_fragment owing none, and
+    this verb never claims or rewrites one."""
     return _opf_schema.validate_counters(
         counters_model, known_namespaces=frozenset(ctx.types.values()),
         optional_namespaces=frozenset(_opf_store.IMPORTER_TYPES.values()),
@@ -2429,6 +2432,37 @@ def _leftover_lock_outcome(owner, states):
         name, "was rolled back" if state == "rolled-back" else "never opened")
 
 
+def _claim_for_recovery(ctx, pending):
+    """The single-writer lease claimed for RECOVERY (_opf_write_guard.acquire_lease_for_recovery): its
+    (payload, released report or None). A claim that refuses or fails refuses as a RecordError before any
+    recovery write: a WriteGuardError with its text, a release report it carries included, and a close of
+    the lease directory that failed once the claim had written its lease in full (lease_created, raised as
+    itself by the claim) with that error and every note on it, naming the lease it LEFT in place as one
+    that STAYS and the release of any leftover before it (released_report), never the verb's
+    unexpected-error backstop, whose repr drops those notes. Any other exception propagates unchanged."""
+    try:
+        return _opf_write_guard.acquire_lease_for_recovery(ctx.root_fd, ctx.machine_rel, VERB)
+    except _opf_write_guard.WriteGuardError as exc:
+        raise RecordError("an interrupted opf record publication needs reconciliation ({}), and reconciliation "
+                          "writes the store, so it runs only under the single-writer lease: {} No operand, "
+                          "journal entry or journal lock was written by this recovery (fail-closed)".format(
+                              pending, exc))
+    except OSError as exc:
+        if getattr(exc, "lease_created", False) is not True:
+            raise
+        said = _journal._msg_said(exc)
+        released = getattr(exc, "released_report", None)
+        raise RecordError("an interrupted opf record publication needs reconciliation ({}), and reconciliation "
+                          "writes the store, so it runs only under the single-writer lease, whose claim failed "
+                          "after it wrote the lease {}/{} in full ({}): that lease STAYS and is never seized "
+                          "(spec 5.7); once no opf run is live, release it as your own reconciliation step, then "
+                          "re-run. No operand, journal entry or journal lock was written by this recovery "
+                          "(fail-closed){}".format(
+                              pending, ctx.machine_rel, _opf_check.LEASE_NAME, said,
+                              "" if not released or released in said else
+                              ". Before that claim, {}.".format(released)))
+
+
 def _with_recovery_lease(ctx, pending, recover):
     """Run `recover` holding the single-writer lease, claimed for RECOVERY through
     _opf_write_guard.acquire_lease_for_recovery: the atomic claim publication uses, with the spec 5.7
@@ -2438,7 +2472,8 @@ def _with_recovery_lease(ctx, pending, recover):
     live or possibly-live holder, a cross-host holder, or one with a malformed payload refuses before any
     recovery write and is never seized, and releasing any such lease stays the operator's explicit
     reconciliation step. A
-    released leftover is REPORTED whatever follows it: it heads the outcome lines `recover` returns, a
+    released leftover is REPORTED whatever follows it: a failed claim reports it (_claim_for_recovery), it
+    heads the outcome lines `recover` returns, a
     RecordError that `recover` raises carries it appended, a WriteGuardError from the release after a
     clean recovery carries it appended, and any other failure surfaces it on stderr (best-effort, never
     displacing the failure), so no outcome reads as written-nothing over the released lease.
@@ -2447,13 +2482,7 @@ def _with_recovery_lease(ctx, pending, recover):
     saying the lease may be left, and never displaces the refusal, whatever the release raised, with a
     surfacing print that itself fails dropped rather than let it displace the refusal (PR D fix 12), and
     a release failure after a clean recovery is the run's own failure."""
-    try:
-        lease, released = _opf_write_guard.acquire_lease_for_recovery(ctx.root_fd, ctx.machine_rel, VERB)
-    except _opf_write_guard.WriteGuardError as exc:
-        raise RecordError("an interrupted opf record publication needs reconciliation ({}), and reconciliation "
-                          "writes the store, so it runs only under the single-writer lease: {} No operand, "
-                          "journal entry or journal lock was written by this recovery (fail-closed)".format(
-                              pending, exc))
+    lease, released = _claim_for_recovery(ctx, pending)
     try:
         result = recover()
     except BaseException as failure:
@@ -2643,7 +2672,8 @@ def _reconcile_capability_journal(ctx):
     (and REOPENED when present), the plan re-read, and what the acquisition actually cleared taken
     from the capability itself (OpCapability.recovered, recovered_operation and staging_removed) --
     so an outcome names only what this run's held acquisition cleared and its held plan found, and
-    attributes a reclaimed leftover to the operation its record names: a holder that released in
+    a reclaimed leftover is always a record holder's (the acquisition refuses, and keeps, a
+    confirmed-dead leftover of any other operation): a holder that released in
     that window, with no journal work pending, yields no outcome and this run continues (a staging
     leftover that acquisition removed is then reported by a refusal that names it: this run
     refuses once and a re-run proceeds, PR D fix 10); a journal
@@ -2668,8 +2698,9 @@ def _reconcile_capability_journal(ctx):
     projection that cannot be inspected or read), which leaves every pending transaction while the
     records the acquisition removed stay removed; a transaction that cannot be reconciled, which
     leaves it and each one planned after it; a failed release of the recovery capability, which
-    leaves whichever of this run's own records it did not remove; the journal work of an
-    operation other than record (an 'ingest' holder's), which this verb never examines; and a live
+    leaves whichever of this run's own records it did not remove; the capability records and
+    journal work of an operation other than record (an 'ingest' holder's), which this verb's
+    recovery acquisition refuses and keeps, never examining that journal; and a live
     run's own publication that fails after its transaction opened and before it completes, which
     leaves an open transaction, or a terminal one missing its projection, for that trigger even when
     the run's own release succeeds. A leftover
@@ -2682,19 +2713,21 @@ def _reconcile_capability_journal(ctx):
     store, a homes-2 record run in the checkout owning that store reclaims it (its holder confirmed
     dead there; a homes-1 record run there never reclaims a capability record, taking the
     single-writer lease instead, which a present capability lease refuses); for a holder read as
-    possibly live, the holder releases normally, or exits and a later run confirms it dead; every
-    other refused leftover needs its cause removed: manual intervention for a record the gate
-    cannot accept, a later run once a transient condition has passed. That last group is NOT
-    exhaustive; among its refusals are a lone owner-less lease, a cross-host holder or one with no
-    usable nodename, a malformed owner identity, a record that is not a plain singly-linked regular
-    file, a staging leftover that is not a regular file (a multiply-linked one IS removed: a staging
-    name killed after its link shares the completed record's inode), a record that cannot be opened,
-    exceeds the record size cap, or is not a UTF-8 TOML table, a record failing the gate's schema or
-    lease-pairing validation, the earlier schema-1 active record included, one whose recorded machine
-    store cannot be confirmed present or absent, a staging leftover that cannot be removed or whose
-    directory fsync fails, and a record that vanishes, changes identity or bytes, or cannot be unlinked
-    or fsynced during the recovery deletes. The homes-1 path (retired) keeps its own lease rules
-    unchanged."""
+    possibly live, the holder releases normally, or exits and a later run confirms it dead; for a
+    confirmed-dead holder of an operation other than record, that operation's own recovery or
+    manual intervention removes it (record recovery releases only a record holder's leftover, spec
+    section 8.8 item 1); every other refused leftover needs its cause removed: manual intervention
+    for a record the gate cannot accept, a later run once a transient condition has passed. That
+    last group is NOT exhaustive; among its refusals are a lone owner-less lease, a cross-host
+    holder or one with no usable nodename, a malformed owner identity, a record that is not a plain
+    singly-linked regular file, a staging leftover that is not a regular file (a multiply-linked one
+    IS removed: a staging name killed after its link shares the completed record's inode), a record
+    that cannot be opened, exceeds the record size cap, or is not a UTF-8 TOML table, a record
+    failing the gate's schema or lease-pairing validation, the earlier schema-1 active record
+    included, one whose recorded machine store cannot be confirmed present or absent, a staging
+    leftover that cannot be removed or whose directory fsync fails, and a record that vanishes,
+    changes identity or bytes, or cannot be unlinked or fsynced during the recovery deletes. The
+    homes-1 path (retired) keeps its own lease rules unchanged."""
     root_fd = ctx.root_fd
     rel = ctx.journal_rel
     leftover = _capability_leftover_present(ctx)
@@ -2728,8 +2761,8 @@ def _reconcile_capability_journal(ctx):
     if result is None:
         return
     # The lead names opf record only on record-journal evidence (a transaction this run reconciled);
-    # a reclaimed capability leftover alone is attributed by its outcome line to the operation its
-    # record names, which need not be record.
+    # a reclaimed capability leftover alone (always a record holder's: the acquisition refuses
+    # another operation's) is named by its outcome line.
     journal_reconciled, reclaimed, outcomes = result
     lead = ("an interrupted opf record run was reconciled" if journal_reconciled else
             "the operation capability records an interrupted run left were reclaimed" if reclaimed
@@ -2918,9 +2951,10 @@ def _held_refusal(exc, cap, reconciled):
 def _reclaimed_outcome(cap, pending):
     """The outcome line for the capability records this run's recovery acquisition cleared, taken
     from the held capability (OpCapability.recovered, with recovered_operation naming the operation
-    the confirmed-dead holder's record names, so another operation's leftover is never attributed to
-    opf record, and staging_removed), never from the unheld trigger read. With no journal work
-    pending under the held capability it carries the operator's inspection advice."""
+    the confirmed-dead holder's record names, which is always record: the acquisition refuses, and
+    keeps, another operation's leftover; and staging_removed), never from the unheld trigger read.
+    With no journal work pending under the held capability it carries the operator's inspection
+    advice."""
     operation = cap.recovered_operation
     line = ("recovery cleared the operation capability's {}, left by an interrupted {} run whose holder "
             "its recovery gate confirmed dead, under the held capability".format(
@@ -2933,9 +2967,6 @@ def _reclaimed_outcome(cap, pending):
                  "grammar has no projection path and is not checked)")
     if cap.staging_removed:
         line += "; the acquisition also removed {}".format("; ".join(cap.staging_removed))
-    if operation is not None and operation != VERB:
-        line += ("; this run reconciles only the opf record journal, so any journal work of the {} "
-                 "operation is not examined here".format(_opf_store._safe_display(operation)))
     if pending:
         return line
     return line + (". A COMPLETE transaction's publication was applied when it committed; its "

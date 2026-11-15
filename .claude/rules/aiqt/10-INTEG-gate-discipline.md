@@ -8,8 +8,7 @@ secondary: [QUALI]
 slug: gate-discipline
 map-nist-airmf-broad: [GOVERN 4.1]
 map-nist-80053-broad: [CM-3(2), SA-11]
-map-nist-ssdf-tight: [PW.8.2]
-map-nist-ssdf-broad: [PO.4.1]
+map-nist-ssdf-broad: [PO.4.1, PW.8.2]
 map-iso-42001-broad: [A.6.2.4]
 ---
 
@@ -63,3 +62,8 @@ revision and intended base before any run can exist, so where the precondition i
 reported failure is a missing result, never a pass. A pushed revision, an acknowledged dispatch, or an
 elapsed wait is not evidence the trigger fired; a run is confirmed to exist for the revision under gate
 before anything is read from its outcome.
+
+A refused command or edit is never re-routed to evade the guard (script, stdin, subprocess, split calls):
+hold its step and report the refusal; re-issue only in a form the refusal names that the guard reads whole,
+or on explicit, recorded maintainer authorization. Where a guard reads commands, interpreters never run
+programs from stdin or process substitution.

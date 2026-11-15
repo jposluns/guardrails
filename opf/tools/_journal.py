@@ -536,13 +536,15 @@ def _fsync_parent(root_fd, relpath):
 def _fsync_path_dir(path):
     """Durability flush of a directory by path. O_NOFOLLOW refuses a symlinked FINAL component (cheap
     defence in depth). After the F1 containment work this is used ONLY for journal_root inside acquire_lock
-    and release_lock, where jr_fd is not in scope; every txn-tree fsync goes through a contained fd instead.
+    and release_lock when a caller hands them a plain path rather than a JournalAt (the adoption journal's
+    apply, reconcile and init-store paths all hand a JournalAt, so they never reach it); every txn-tree
+    fsync goes through a contained fd instead.
     RESIDUAL (disclosed): a fsync makes no content mutation and discloses nothing, so following an ANCESTOR
     symlink on journal_root's path here flushes an unintended directory but can neither write off-tree nor
     leak. The co-located lock-file operations (the O_EXCL create in acquire_lock, which POSIX refuses a
     symlinked final `lock` for, and the unlink in release_lock) likewise address journal_root by absolute
-    path as the lock protocol's design; fully containing that journal_root-level lock protocol beneath a
-    threaded journal-root fd is a separate hardening beyond F1's txn-dir-containment scope."""
+    path for such a plain-path caller; handed a JournalAt, they and the flush are made beneath its
+    descriptor instead."""
     fd = os.open(str(path), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
         os.fsync(fd)
@@ -854,7 +856,13 @@ def read_frames(jr_fd, txn_dir, txn_fd=None):
         body = raw[body_start:body_start + length]
         end = body_start + length + 1                     # +1 for the trailing "\n"
         short = len(body) < length or end > len(raw) or raw[end - 1:end] != b"\n"
-        if short or hashlib.sha256(body).hexdigest() != digest or ftype not in FRAME_TYPES:
+        intact = not short and hashlib.sha256(body).hexdigest() == digest
+        if intact and ftype not in FRAME_TYPES:
+            # A whole, checksum-valid frame of a type this reader does not know was written, not torn:
+            # reading it as a torn tail would let recovery truncate it and classify the transaction from
+            # the frames before it, so it is refused wherever it sits.
+            raise JournalError("unknown journal frame type {!r} at offset {} (fail-closed)".format(ftype, off))
+        if not intact:
             if end >= len(raw):
                 return frames, True, off                  # torn tail: treated as never written
             raise JournalError("corrupt frame mid-log at offset {}".format(off))
@@ -965,17 +973,40 @@ def _is_canonical_pid_start(value):
     return v < _PIDSTART_MAX and str(v) == value          # in range AND canonical (str(int(...)) rejects leading zeros)
 
 
+class JournalAt(os.PathLike):
+    """A journal root named by its path but reached through `fd`, a descriptor the caller holds on that
+    directory (never closed here). acquire_lock, release_lock and reconcile_and_claim_stale create, read,
+    remove and fsync `lock` (and open lock.break) beneath fd when handed one, never by resolving the path,
+    so a rename of the journal, the product root or any ancestor cannot move the lock away from the
+    directory the caller lists and reads the lock back beneath. The path only names it in messages."""
+
+    def __init__(self, path, fd):
+        self.path, self.fd = Path(path), fd
+
+    def __fspath__(self):
+        return str(self.path)
+
+    def __str__(self):
+        return str(self.path)
+
+    def __truediv__(self, other):
+        return self.path / other
+
+
 def acquire_lock(journal_root, session_id):
     """O_CREAT|O_EXCL lock with owner identity (9.3 step 2). Raises JournalError (mapped to a refuse-to-
     proceed) when a lock already exists: one open transaction at a time; a possibly-live owner is never
     seized here (breaking a stale lock is the caller's explicit reconcile step in recover). The O_EXCL
     create is itself the mutual-exclusion point and refuses to follow a final-component symlink. An OSError
     raised AFTER that create carries lock_created = True, so a caller tells a lock THIS call created (and
-    may release) from one it did not, which process identity alone cannot (two threads of one process)."""
+    may release) from one it did not, which process identity alone cannot (two threads of one process).
+    A JournalAt journal_root takes the lock beneath its descriptor and flushes that descriptor."""
+    at = getattr(journal_root, "fd", None)
     journal_root = Path(journal_root)
     lock = journal_root / "lock"
     try:
-        fd = os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        fd = os.open(str(lock) if at is None else "lock", os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600,
+                     dir_fd=at)
     except FileExistsError:
         raise JournalError("journal lock {} already held: an open transaction exists (run recover)"
                            .format(lock))
@@ -988,7 +1019,10 @@ def acquire_lock(journal_root, session_id):
             os.fsync(fd)
         finally:
             _close_fd_yielding(fd)
-        _fsync_path_dir(journal_root)
+        if at is None:
+            _fsync_path_dir(journal_root)
+        else:
+            _fsync_dir_fd(at)
     except OSError as exc:
         exc.lock_created = True
         raise
@@ -1152,11 +1186,13 @@ def release_lock(journal_root):
     in place (fail-closed, never blind-unlinked). Breaking a confirmed-dead stale lock is the caller's
     explicit reconcile step (break_stale_and_acquire), never this release path. A JournalError a CLOSE
     inside the owner read raised (_fd_release_raised) is not that signal: it propagates as itself, with
-    every fault recorded on it, the lock left in place."""
+    every fault recorded on it, the lock left in place. A JournalAt journal_root reads, removes and
+    flushes the lock beneath its descriptor, never by resolving the path."""
+    at = getattr(journal_root, "fd", None)
     journal_root = Path(journal_root)
     lock = journal_root / "lock"
     try:
-        owner = read_lock_owner(journal_root)
+        owner = read_lock_owner(journal_root) if at is None else read_lock_owner_at(at)
     except JournalError as exc:
         _fd_release_fault(exc)                                 # a close's exception: never dropped as unreadable
         return                                            # unreadable/malformed: never blind-unlink
@@ -1165,10 +1201,16 @@ def release_lock(journal_root):
     if not _owner_is_current(owner):
         return                                            # foreign lock: never delete a lock we do not own
     try:
-        os.unlink(str(lock))
+        if at is None:
+            os.unlink(str(lock))
+        else:
+            os.unlink("lock", dir_fd=at)
     except FileNotFoundError:
         return
-    _fsync_path_dir(journal_root)
+    if at is None:
+        _fsync_path_dir(journal_root)
+    else:
+        _fsync_dir_fd(at)
 
 
 def _listdir_fresh(held_fd, label):
@@ -1316,6 +1358,9 @@ def reconcile_and_claim_stale(journal_root, jr_fd, root_fd, session_id, claim=No
     exception it raises propagates as itself, nothing recovered and the stale lock kept. It is not called
     when the lock is already gone (a concurrent recoverer broke it), since this call then recovers nothing.
 
+    A JournalAt journal_root opens lock.break, reads, removes and takes `lock` beneath its descriptor,
+    never by resolving the path.
+
     PORTABILITY: fcntl is POSIX-only. On a platform without it (e.g. Windows) this FAILS CLOSED, refusing
     to break the stale lock rather than falling back to the unguarded race, consistent with the engine's
     existing non-Linux fail-safe posture (3.6b). Both supported platforms (Linux, macOS) expose fcntl."""
@@ -1324,10 +1369,12 @@ def reconcile_and_claim_stale(journal_root, jr_fd, root_fd, session_id, claim=No
     except ImportError:
         raise JournalError("stale-lock break needs the POSIX fcntl arbitration primitive (absent on this "
                            "platform): refusing to break the stale lock (fails closed, 3.6b)")
+    anchored, at = journal_root, getattr(journal_root, "fd", None)
     journal_root = Path(journal_root)
     arb = journal_root / "lock.break"
     try:                                                     # STABLE arbitration file, never replaced
-        afd = os.open(str(arb), os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)   # O_NOFOLLOW: refuse a symlink
+        afd = os.open(str(arb) if at is None else "lock.break", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600,
+                      dir_fd=at)                             # O_NOFOLLOW: refuse a symlink
     except OSError as exc:
         raise JournalError("cannot open arbitration file {} ({}); refusing to break the stale lock "
                            "(fails closed)".format(arb, exc))
@@ -1349,9 +1396,10 @@ def reconcile_and_claim_stale(journal_root, jr_fd, root_fd, session_id, claim=No
                                "refuse to break the stale lock (fails closed)".format(arb, _ast.st_nlink))
         fcntl.flock(afd, fcntl.LOCK_EX)
         try:
-            current = read_lock_owner(journal_root)          # RE-READ the CURRENT owner under the lock
+            # RE-READ the CURRENT owner under the lock
+            current = read_lock_owner(journal_root) if at is None else read_lock_owner_at(at)
             if current is None:
-                acquire_lock(journal_root, session_id)
+                acquire_lock(anchored, session_id)
                 return "acquired"
             if not owner_confirmed_dead(current):
                 return "possibly-live"                       # a concurrent recoverer re-acquired: never break
@@ -1366,11 +1414,14 @@ def reconcile_and_claim_stale(journal_root, jr_fd, root_fd, session_id, claim=No
                     raise JournalError("journal {} did not reconcile to terminal; refusing to break the "
                                        "stale lock (fail-closed)".format(txn_dir.name))
             try:                                             # every journal terminal: NOW break the stale lock
-                os.unlink(str(journal_root / "lock"))
+                if at is None:
+                    os.unlink(str(journal_root / "lock"))
+                else:
+                    os.unlink("lock", dir_fd=at)
             except FileNotFoundError:
                 pass
             os.fsync(jr_fd)                                  # F1: durability flush through the CONTAINED jr fd
-            acquire_lock(journal_root, session_id)           # O_EXCL under the arbitration lock
+            acquire_lock(anchored, session_id)               # O_EXCL under the arbitration lock
             return "acquired"
         finally:
             fcntl.flock(afd, fcntl.LOCK_UN)
@@ -3411,11 +3462,110 @@ def _st_descriptor_helper_checks():
     return [name for name, ok in results if ok is not True], len(results)
 
 
+def _st_frame_lay(jroot, raw):
+    """Write `raw` as the frames.log of a fresh txn dir under `jroot`; return the txn dir's path."""
+    import tempfile
+    txn = tempfile.mkdtemp(prefix="txn-", dir=jroot)
+    with open(os.path.join(txn, "frames.log"), "wb") as fh:
+        fh.write(raw)
+    return txn
+
+
+def _st_frame_read(jroot, raw):
+    """Write `raw` as the frames.log of a fresh txn dir under `jroot` and read it back through read_frames
+    on a journal-root descriptor opened here and closed once. Returns ("read", (frames, torn, good_len))
+    or ("refused", message) for a JournalError; any other exception propagates."""
+    txn = _st_frame_lay(jroot, raw)
+    jr_fd = os.open(jroot, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        return "read", read_frames(jr_fd, txn)
+    except JournalError as exc:
+        return "refused", str(exc)
+    finally:
+        os.close(jr_fd)
+
+
+def _st_frame_caller_refuses(jroot, raw):
+    """classify_state and recover over a log whose last frame is a whole, checksum-valid frame of an
+    unknown type: each raises JournalError, and recover leaves the log byte-unchanged (no torn-tail
+    truncation, no terminal frame appended). The INTENT in `raw` lists no ops, so recover, reading the
+    frame as torn, would roll forward without touching the root (jr_fd stands in for it). Returns
+    (classify refused, recover refused with the log unchanged)."""
+    txn = _st_frame_lay(jroot, raw)
+    log = os.path.join(txn, "frames.log")
+    jr_fd = os.open(jroot, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        try:
+            classify_state(jr_fd, txn)
+            classified = False
+        except JournalError:
+            classified = True
+        try:
+            recover(jr_fd, txn, jr_fd)
+            recovered = False
+        except JournalError:
+            recovered = True
+    finally:
+        os.close(jr_fd)
+    with open(log, "rb") as fh:
+        return classified, recovered and fh.read() == raw
+
+
+def _st_frame_classification_checks(base):
+    """read_frames' tail classification, over frames.log files written under `base`:
+      J1  a whole, checksum-valid frame of an unknown type as the LAST frame is refused with a JournalError
+          naming the unknown type, never read as a torn tail; classify_state refuses it rather than
+          reading the transaction as open, and recover refuses it and leaves the log byte-unchanged.
+      J2  the same frame mid-log (a known frame follows it) is refused with the same JournalError.
+      J3  a truly torn last frame (its body short of the declared length, the trailing newline missing),
+          and a last frame whose body matches its checksum but which lacks only its final newline, each
+          still reads as a torn tail with the clean prefix's frames and length, for a known type and for
+          an unknown type alike (a torn frame was never written, whatever its header names).
+      J4  a last frame whose body does not match its checksum still reads as a torn tail, for a known
+          type and for an unknown type alike.
+    Returns (failures, checks)."""
+    jroot = os.path.join(base, "frame-classification")
+    os.makedirs(jroot)
+    intent = _frame(F_INTENT, b'{"ops":[],"txn":"t"}')     # no ops: recover needs no root to act on it
+    unknown = _frame("FUTURE-TYPE", b'{"txn":"t"}')
+    complete = _frame(F_COMPLETE, b'{"txn":"t"}')
+    prefix = ([(F_INTENT, {"ops": [], "txn": "t"})], True, len(intent))
+
+    def bad_digest(frame):
+        head, rest = frame.split(b"\n", 1)
+        flipped = b"0" if head[-1:] != b"0" else b"1"
+        return head[:-1] + flipped + b"\n" + rest
+
+    def refused_unknown(outcome):
+        return outcome[0] == "refused" and "unknown journal frame type 'FUTURE-TYPE'" in outcome[1]
+
+    classified, recovered = _st_frame_caller_refuses(jroot, intent + unknown)
+    results = (("J1-unknown-type-last-frame-refused", refused_unknown(_st_frame_read(jroot, intent + unknown))),
+               ("J1-unknown-type-last-frame-classify-refuses", classified),
+               ("J1-unknown-type-last-frame-recover-refuses-log-unchanged", recovered),
+               ("J2-unknown-type-mid-log-refused",
+                refused_unknown(_st_frame_read(jroot, intent + unknown + complete))),
+               ("J3-short-body-last-frame-torn",
+                _st_frame_read(jroot, intent + complete[:-4]) == ("read", prefix)),
+               ("J3-short-body-unknown-type-last-frame-torn",
+                _st_frame_read(jroot, intent + unknown[:-4]) == ("read", prefix)),
+               ("J3-missing-final-newline-last-frame-torn",
+                _st_frame_read(jroot, intent + complete[:-1]) == ("read", prefix)),
+               ("J3-missing-final-newline-unknown-type-last-frame-torn",
+                _st_frame_read(jroot, intent + unknown[:-1]) == ("read", prefix)),
+               ("J4-bad-checksum-last-frame-torn",
+                _st_frame_read(jroot, intent + bad_digest(complete)) == ("read", prefix)),
+               ("J4-bad-checksum-unknown-type-last-frame-torn",
+                _st_frame_read(jroot, intent + bad_digest(unknown)) == ("read", prefix)))
+    return [name for name, ok in results if ok is not True], len(results)
+
+
 def self_test():
     """The #378 close vectors for the three close helpers (V1, V2), three representative _journal sites,
     and the sibling closes of a cleanup loop (V3), each green and each red under its flip; then the
     descriptor-helper vectors (_st_descriptor_helper_checks) and the stale-listing seam's own vectors
-    (_st_stale_listing_check, counted with them). Returns 0 clean, 1 a failure, 2 cannot-evaluate."""
+    (_st_stale_listing_check, counted with them), and read_frames' tail-classification vectors
+    (_st_frame_classification_checks). Returns 0 clean, 1 a failure, 2 cannot-evaluate."""
     import shutil
     import tempfile
     try:
@@ -3429,6 +3579,7 @@ def self_test():
         drop_failures, drop_runs = _st_watch_drop_check()
         failures, runs = failures + drop_failures, runs + drop_runs
         seam_failures, seam_checks = _st_stale_listing_check(base)
+        frame_failures, frame_checks = _st_frame_classification_checks(base)
     except _StCensusError as exc:
         print("SELF-TEST ERROR: {}".format(exc), file=sys.stderr)
         return 2
@@ -3440,14 +3591,15 @@ def self_test():
         print("SELF-TEST ERROR: {}".format(exc), file=sys.stderr)
         return 2
     helper_failures, checks = helper_failures + seam_failures, checks + seam_checks
-    if failures or helper_failures:
-        print("JOURNAL SELF-TEST: FAIL ({} of {} close-vector runs and {} of {} descriptor-helper checks "
-              "failed)".format(len(failures), runs, len(helper_failures), checks))
-        for f in failures + helper_failures:
+    if failures or helper_failures or frame_failures:
+        print("JOURNAL SELF-TEST: FAIL ({} of {} close-vector runs, {} of {} descriptor-helper checks and {} of "
+              "{} frame-classification checks failed)".format(len(failures), runs, len(helper_failures), checks,
+                                                             len(frame_failures), frame_checks))
+        for f in failures + helper_failures + frame_failures:
             print("  FAILED: {}".format(f))
         return 1
     print("JOURNAL SELF-TEST: PASS ({} close vectors, {} runs including each flip leg red; {} descriptor-helper "
-          "checks)".format(len(vectors), runs, checks))
+          "checks; {} frame-classification checks)".format(len(vectors), runs, checks, frame_checks))
     return 0
 
 

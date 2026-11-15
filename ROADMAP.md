@@ -8,7 +8,7 @@ You can have this today. AIQT 1.0.5 packages the governance core for a chat assi
 
 ## In development: The development assistant
 
-Version 1.1.0, in development, installs the same governance core into a project. It generates the file each coding agent expects, sets itself up through a wizard, and ships a doctor that verifies the install. It writes only inside its own directory, so nothing else in your repository changes without your say-so. [Read about the development assistant.](https://aiqt.ai/development)
+Version 1.2.0, in development, installs the same governance core into a project. It generates the file each coding agent expects, sets itself up through a wizard, and ships a doctor that verifies the install. It writes only inside its own directory, so nothing else in your repository changes without your say-so. [Read about the development assistant.](https://aiqt.ai/development)
 
 ## Ideas we are considering: Teams and Enterprise
 

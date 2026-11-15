@@ -1,0 +1,18 @@
+# The opfiles.ai draft placeholder: the staged draft now lives at the site root, so /draft/ holds only this
+# page, kept out of search (the robots meta every page under draft/ carries, and the /draft/* header rule),
+# with a lead and a Next block to the home page.
+path = "draft/index.html"
+title = "Draft"
+kind = "document"
+label = "Draft"
+heading = "The draft is now the site."
+description = "The opfiles.ai draft has moved to the site root."
+
+[[body]]
+component = "lead"
+html = "The pages staged here are now published at the site root. Start from the <a href=\"$BASE/\">home page</a>."
+
+[[body]]
+component = "next"
+text = "Home"
+href = ""

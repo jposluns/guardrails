@@ -26,9 +26,8 @@ pull request (CLAUDE.md, Gates and CI).
    release other than the one `.aiqt/python-host.toml` names (the python-host-pin gate), so run it on that
    release; when the host interpreter has changed, first land one change that updates `python-host-patch`
    there and the `python-version` pin of every host-patch job (`opf-host-patch`,
-   `git-fixture-env-core-host-patch`, `git-fixture-env-config-combined-host-patch`,
-   `git-fixture-env-config-malformed-host-patch` and `git-fixture-env-config-system-host-patch`) in
-   `.github/workflows/quality.yml` together. After the freeze the
+   `git-fixture-env-core-host-patch` and the 43 config shard jobs
+   `git-fixture-env-config-<lane>-shard-K-host-patch`) in `.github/workflows/quality.yml` together. After the freeze the
    release artifacts (the version-numbered `site/downloads/aiqt-skill-<skill version>.zip`, which the site
    links to, and `site/downloads/aiqt-instructions.txt`) and their generating inputs (the corpus and
    `tools/gen_skill.py`) do not change; `site/downloads/aiqt-skill.zip` is a stable "latest" alias kept
@@ -87,8 +86,9 @@ pull request (CLAUDE.md, Gates and CI).
    happens with each release cut. A bump that misses spot a leaves
    the assertion firing (fail-closed exit 2); a bump that misses spot b, c, or d is caught by the relevant
    drift or portability gate; a bump that misses spot e is caught by `gen_skill.py --check`. Next, run
-   `python3 tools/gen_install.py` to repoint the install-page
-   download button at the new versioned filename. Finally, set the `Version X.Y.Z` line in the three
+   repoint the install page's download at the new versioned filename: set it in
+   `site/draft-src/install.toml` and in `KEPT_LIVE_PATHS` in `tools/gen_draft_site.py`, then run
+   `python3 tools/gen_draft_site.py`. Finally, set the `Version X.Y.Z` line in the three
    hand-written condensations (`site/downloads/aiqt-instructions-8k.txt`, `-5k.txt`, `-1_5k.txt`) and
    re-bless them with `python3 tools/check_sized_instructions.py --update`. Before the generator sweep,
    confirm that both index changes are in place: `git rm site/downloads/aiqt-skill-<old>.zip` and
@@ -98,6 +98,33 @@ pull request (CLAUDE.md, Gates and CI).
    above, the bump also changes the outputs of `python3 tools/gen_renderers.py` (`.aiqt/core/renderers.toml`)
    and `python3 tools/gen_gensrc.py` (`.aiqt/gensrc.json`). Finally run each generator with `--check`
    (again `gen_manifest.py --check` last); every one must exit 0.
+
+   OPF declaration checklist (OPF-SPEC section 16.1). The reference tooling's declaration file is
+   `opf/tools/opf-declaration.toml`, and the shipped-file digest is carried in
+   `opf/tools/_opf_declaration.py` as `SHIPPED_DECLARATION_SHA256`. Its `release` is OPF's own release
+   version in `opf/VERSION`, which moves independently of the pack release version in `VERSION`, so each
+   change of OPF's version sets, in one change: `opf/VERSION`; `release` in that file;
+   `SHIPPED_DECLARATION_BYTES` and `SHIPPED_DECLARATION_SHA256` in `_opf_declaration.py`; and the
+   restatement below and in `opf/spec/OPF-QUICKSTART.md`. A change of the supported `spec_version`, homes generation or worklog
+   storage generation changes its value in `_opf_store.py`, the matching field in
+   `opf/tools/opf-declaration.toml`, `SHIPPED_DECLARATION_BYTES` and `SHIPPED_DECLARATION_SHA256` in
+   `_opf_declaration.py`, and the restatement below and in `opf/spec/OPF-QUICKSTART.md`; it does not by
+   itself touch `opf/VERSION` or `release`. `python3 -I -B
+   tools/check_opf_declaration.py` must then exit 0. It refuses a restatement that differs from the file
+   and a release other than the version in `opf/VERSION`; a pack release that leaves OPF's version
+   unchanged changes none of these places. `RELEASE_IDENTITY` is read from `opf/VERSION` when the module
+   loads, and a missing or malformed `opf/VERSION` leaves the build without one, so every gated verb
+   refuses. Adoption is bound to OPF's own version: `python3 tools/gen_manifest.py` records `opf/VERSION`
+   as the release manifest's `opf-version`, and the `opf adopt` trust gate checks the plan's release
+   version against that `opf-version`, never the pack manifest's `release-version` (taken from the root
+   `VERSION`), refusing a manifest that records none. This release declares:
+
+   ```toml opf-declaration
+   release = "1.0.5"
+   spec_version = "1.2.0"
+   homes = 1
+   worklog = 1
+   ```
 2. Compute. From the repository root on the frozen tree, run
    `sha256sum site/downloads/aiqt-skill-<skill version>.zip site/downloads/aiqt-instructions.txt` (the one
    version-numbered zip present under `site/downloads/`). These two files are the release artifacts (the

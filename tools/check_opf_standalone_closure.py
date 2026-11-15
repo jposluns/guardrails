@@ -18,10 +18,11 @@ load); the commonmark selftests exercise the vendored parser and its manifest.
   check_opf_standalone_closure.py             materialize opf/ alone and run the subset (also the default)
   check_opf_standalone_closure.py --self-test  the same, PLUS a deliberate flip proving it fails without the move
   ... --ci-job <job>                          either of the above over that CI job's legs alone (_CI_JOB_LEGS
-                                              partitions the subset between five CI jobs because the
+                                              partitions the subset between six CI jobs because the
                                               whole roster's worst case does not fit one job, nor four
                                               once every lane-member leg's bound reaches its config-lane
-                                              deadline plus the launch margin; the flip runs in the job
+                                              deadline plus the launch margin, and the sixth holds a leg
+                                              the other five have no room for; the flip runs in the job
                                               that holds opf-tooling-selftest, whose leg it is)
 
 Exit convention (matches the repo's gates):
@@ -161,6 +162,7 @@ _SUBSET = [
     ("opf-adopt-complete-selftest", "_opf_adopt_complete.py", ["--self-test"]),
     ("opf-import-batch-selftest", "_opf_import_batch.py", ["--self-test"]),
     ("opf-import-complete-selftest", "_opf_import_complete.py", ["--self-test"]),
+    ("opf-release-history-selftest", "_opf_release_history.py", ["--self-test"]),
     ("opf-pack-manifest-selftest", "_opf_pack_manifest.py", ["--self-test"]),
     ("opf-adopt-observe-selftest", "_opf_adopt_observe.py", ["--self-test"]),
     ("opf-adopt-discover-selftest", "_opf_adopt_discover.py", ["--self-test"]),
@@ -202,13 +204,15 @@ _SUBSET = [
 #   * _MIN_LEG_BOUND_S, the floor for the legs that finish in seconds (see below);
 #   * a per-leg FLOOR (_LEG_BOUND_FLOOR_S, see its own comment): the deadline the config lanes give
 #     the same command, plus _LAUNCH_MARGIN_S, for each leg whose command is a config-lane member and
-#     whose three terms above sit below that. A floor can only RAISE a bound, never lower one. EVERY
-#     leg whose command is a member of the lane runner's own roster must reach its lane deadline plus
-#     the margin (closure/leg-bound-reaches-the-lane-deadline), so the closure never kills such a leg
-#     before the config lane running that same command would.
+#     whose three terms above sit below that, or only just reach it. A floor can only RAISE a bound,
+#     never lower one, and each row is exactly that deadline plus the margin
+#     (closure/bound-floor-row-is-the-lane-deadline). EVERY leg whose command is a member of the lane
+#     runner's own roster must reach its lane deadline plus the margin
+#     (closure/leg-bound-reaches-the-lane-deadline), so the closure never kills such a leg before the
+#     config lane running that same command would.
 # The legs run one after another, so the worst case of one gate run is the SUM of the bounds plus one
 # bounded post-kill cleanup deadline per leg (_DRAIN_MARGIN_S, which the output drain and the leader
-# reap SHARE, paid only by a leg killed at its bound); the closure work is split between five CI jobs
+# reap SHARE, paid only by a leg killed at its bound); the closure work is split between six CI jobs
 # (_CI_JOB_LEGS: the whole roster's worst case does not fit one job), and the self-test requires EACH
 # job's worst case (_job_worst_case_s over that job's legs: its self-test step plus its live gate
 # step, cleanup deadlines included) to fit that job's own time limit, and refuses BY NAME any single
@@ -231,6 +235,12 @@ _SUBSET = [
 # One row comes from another run: opf-import-complete-selftest, a leg main added after that run, carries
 # main's 20 s figure, sized from three runs main measured on 2026-10-14 at another opf/ tree (2.3 to
 # 2.4 s), so INFERRED here.
+# One row comes from a later run: opf-release-history-selftest, a leg added after that run, carries 2 s,
+# from three runs MEASURED on 2026-10-28 at opf/ tree a01f2c2150c99349156aa5e05e93dabd11a950ec, each
+# as the gate runs it (python3 -I -B against a copy of opf/ alone, through _materialize and _run_one),
+# plain, one leg at a time, on a 24-CPU host: 1.48 to 1.51 s, each exit 0, load5 5.5 at each start,
+# rounded up. That load is lighter than the run above's (13.7 to 24.6), so the figure is INFERRED at a
+# heavier load, as at any other opf/ tree; the leg's bound is its 1260 s config-lane floor, not this.
 # _LOAD_HEADROOM is the allowance for a slower or more loaded host than that run's. The multiplier is
 # an INFERENCE, not a measurement, and no observation supports it (one measured run contradicts it, see
 # below): the host carried other work during the run, but a host loaded beyond it adds contention these
@@ -253,11 +263,11 @@ _SUBSET = [
 # 25.1). That is one run at one load: it shows no in-process slowdown here, and says nothing about the
 # heavier load or the host behind the reported figures.
 # The multiplier is capped by the job fit (_job_worst_case_s against each CI job's 21600 s default
-# limit): on this tree the whole roster's worst case is 93855 s at 3 (no one job fits it: the premise
-# of the split), the per-job worst cases are 21193 s (A), 21420 s (B), 15810 s (C), 19930 s (D) and
-# 19302 s (E) at 3, and the same at 4 but for C, 18210 s (at 3 and at 4 the config-lane floors,
-# _LEG_BOUND_FLOOR_S, hold every floored leg's bound above its headroom term, opf-homes-selftest's
-# 1260 s above its 273 s and 364 s included; only opf-adopt-state-selftest and
+# limit): on this tree the whole roster's worst case is 96395 s at 3 (no one job fits it: the premise
+# of the split), the per-job worst cases are 21193 s (A), 21420 s (B), 15810 s (C), 19930 s (D),
+# 19302 s (E) and 3490 s (F) at 3, and the same at 4 but for C, 18210 s (at 3 and at 4 the
+# config-lane floors, _LEG_BOUND_FLOOR_S, hold every floored leg's bound above its headroom term,
+# opf-homes-selftest's 1260 s above its 273 s and 364 s included; only opf-adopt-state-selftest and
 # opf-adopt-complete-selftest, both in C, are bounded by the headroom term), and the largest
 # multiplier that fits every job is 5.412 (at 5.413, job C's worst case is 21601.2 s, over its
 # limit).
@@ -320,6 +330,7 @@ _LEG_CEILING_S = {
     # opf-import-complete-selftest: the slowest run times 20 / 3 for load, 2.4 * 20 / 3 = 16.0, rounded up to
     # a multiple of 5, 20 s.
     "opf-import-complete-selftest": 20,  # INFERRED (main's row, measured 2026-10-14: 2.3 to 2.4 s, three runs)
+    "opf-release-history-selftest": 2,  # MEASURED at a01f2c21 (1.48 to 1.51 s at load5 5.5, three runs)
     "opf-pack-manifest-selftest": 17,  # INFERRED here (measured at 7bf8107f: 16.8 s at load5 21.7)
     "opf-adopt-observe-selftest": 284,  # INFERRED here (measured at 7bf8107f: 283.7 s at load5 21.9)
     "opf-adopt-discover-selftest": 1,  # INFERRED here (measured at 7bf8107f: 0.5 s at load5 23.9)
@@ -340,7 +351,7 @@ _LEG_CEILING_S = {
 # added or renamed together with its ceiling row, which leaves the two tables agreeing, is still drift.
 # A deliberate roster change records the new figures here in the same change (the drift line prints
 # them); this pin does not judge whether that change is right.
-_ROSTER_PIN = (28, "f0d1f4582b166a630e35f0f4540244968743eca4e9fbc9e9758a0d74da623eed")
+_ROSTER_PIN = (29, "de659c6cc4dbdd48fda1f84466b8555da068da3ff4f2c8cc200a9bc6e85393b8")
 _LOAD_HEADROOM = 3
 _LAUNCH_MARGIN_S = 60
 # The post-kill cleanup deadline (_kill_and_reap): ONE absolute deadline that the output drain and the
@@ -363,31 +374,37 @@ _MIN_LEG_BOUND_S = 60
 # Per-leg FLOORS, each the CONFIG-LANE DEADLINE of the leg's command plus _LAUNCH_MARGIN_S: a minimum
 # bound for a leg whose command the config-injection lanes (tools/selftest_git_fixture_env.py) also
 # run, as the very same command against the real opf/tools/, and whose three derived terms sit below
-# that deadline plus the margin; the largest term wins in _leg_bounds, so a floor can only RAISE a
-# bound, never lower one, and a floor at or below what the other terms already reach is refused by the
-# self-test as dead weight (the row must be re-fitted or removed). FIGURE BASIS, every row: the lanes
-# bound each member at its _config_member_bound, READ FROM SOURCE (its CONFIG_MEMBER_BOUNDS entry,
-# else CONFIG_MEMBER_BOUND_DEFAULT, 1200 s), and that bound is ITSELF a deliberate shorter deadline
-# (the lane runner says so beside CONFIG_MEMBER_BOUND_DEFAULT), so a floor here is NOT a bound above
-# the leg's end-to-end budget either: it is the lanes' deadline plus the launch margin, so that the
-# closure never kills a leg before the lane running that same command would. In the lanes each leg runs
-# the same command as a grandchild of a closure self-test member, one of the four members each lane's
-# pool runs at once, under the same load. The rows are the lane deadlines on this tree: 1260 s (1200 +
-# 60) for every leg the lanes bound at the default, and 1860 s (1800 + 60) for opf-init-selftest and
-# opf-adopt-observe-selftest, whose commands carry 1800 s entries there. Five lane-member legs carry no
-# row because their other terms already reach their lane deadline plus the margin
-# (opf-tooling-selftest, whose command carries a 3600 s entry, so 3660 s, below the 5691 s its
-# declared waits give on this tree; opf-doctor-selftest, whose command takes the 1200 s default, so
-# 1260 s, below the 1560 s its declared waits, 1500 s, plus the margin give on this tree;
-# opf-adopt-apply-selftest, opf-adopt-state-selftest and opf-adopt-complete-selftest), and two legs
-# are no lane member at all (opf-homes-contract and opf-prompt-pack, whose commands carry no
-# self-test flag, so the lane runner's roster does not select them).
+# that deadline plus the margin, or only just reach it (see FIT below); the largest term wins in
+# _leg_bounds, so a floor can only RAISE a bound, never lower one, and a floor at or below what the
+# other terms already reach raises nothing: the self-test names each such row on every run and judges
+# the floor term only on the rows whose floor sits above their other terms (_floor_deciding_legs),
+# while it holds EVERY row, deciding or not, to exactly its lane deadline plus the margin (below).
+# FIGURE BASIS, every row: the lanes bound each member at its _config_member_bound, READ FROM SOURCE
+# (its CONFIG_MEMBER_BOUNDS entry, else CONFIG_MEMBER_BOUND_DEFAULT, 1200 s), and that bound is ITSELF
+# a deliberate shorter deadline (the lane runner says so beside CONFIG_MEMBER_BOUND_DEFAULT), so a
+# floor here is NOT a bound above the leg's end-to-end budget either: it is the lanes' deadline plus
+# the launch margin, so that the closure never kills a leg before the lane running that same command
+# would. In the lanes each leg runs the same command as a grandchild of a closure self-test member, one
+# of the four members each lane's pool runs at once, under the same load. The rows are the lane
+# deadlines on this tree: 1260 s (1200 + 60) for every leg the lanes bound at the default, and 1860 s
+# (1800 + 60) for opf-init-selftest and opf-adopt-observe-selftest, whose commands carry 1800 s entries
+# there. Five lane-member legs carry no row because their other terms already reach their lane deadline
+# plus the margin (opf-tooling-selftest, whose command carries a 3600 s entry, so 3660 s, below the
+# 5691 s its declared waits give on this tree; opf-doctor-selftest, whose command takes the 1200 s
+# default, so 1260 s, below the 1560 s its declared waits, 1500 s, plus the margin give on this tree;
+# opf-adopt-apply-selftest, opf-adopt-state-selftest and opf-adopt-complete-selftest), and two legs are
+# no lane member at all (opf-homes-contract and opf-prompt-pack, whose commands carry no self-test
+# flag, so the lane runner's roster does not select them).
 # closure/leg-bound-reaches-the-lane-deadline reads the lane runner's own roster
 # (_registered_selftests) and its deadlines on every self-test run and refuses ANY lane-member
 # leg whose bound sits below its deadline plus the margin, so raising a lane deadline, or registering
-# a new lane member, without raising the matching row here is a named failure. LIMIT: these rows are
-# copies, checked against the runner on every self-test run but not read from it when the gate runs:
-# the isolated copy of opf/ holds no lane runner.
+# a new lane member, without raising the matching row here is a named failure.
+# closure/bound-floor-row-is-the-lane-deadline (_floor_row_faults) reads the same roster and
+# deadlines and refuses ANY row here that is not exactly its leg's deadline plus the margin, or whose
+# leg is no lane member, whether or not the row decides its leg's bound, so a row lowered or raised
+# while the other terms already reach it is a named failure too. LIMIT: these rows are copies,
+# checked against the runner on every self-test run but not read from it when the gate runs: the
+# isolated copy of opf/ holds no lane runner.
 # FIGURE BASIS, opf-homes-selftest, which also carries recorded evidence: the lanes grant its command
 # CONFIG_MEMBER_BOUND_DEFAULT, 1200 s: it has no CONFIG_MEMBER_BOUNDS entry, since the lanes' SIZING
 # formula over its lane times MEASURED there on 2026-10-12, at an earlier tree, stays below the
@@ -424,8 +441,11 @@ _MIN_LEG_BOUND_S = 60
 # from about 3773 to about 10038 checks) is NOT shown absorbed by this sizing: its lane time must be
 # re-measured and the lanes' deadline for the command re-sized, and once that deadline rises above
 # 1200 s, closure/leg-bound-reaches-the-lane-deadline refuses this floor until it is raised to match.
-# FIT: each of the 21 rows below raises its leg's bound, and the jobs those bounds fit are set out on
-# _CI_JOB_LEGS.
+# FIT: 21 of the 22 rows below raise their leg's bound; opf-init-contract-check-selftest's 1260 s row
+# raises nothing on this tree, since its declared waits, 1200 s, plus the launch margin reach the same
+# 1260 s, so the row only holds that floor should those waits shrink; the self-test still holds the
+# row itself to exactly 1260 s, the lane deadline plus the margin, on every run. The jobs those bounds
+# fit are set out on _CI_JOB_LEGS.
 # A row naming no subset leg, or a value that is not a positive int (a bool included), is refused
 # fail-closed (_leg_bounds): a stale row left behind by a leg rename would otherwise silently stop
 # raising the bound it records.
@@ -439,6 +459,7 @@ _LEG_BOUND_FLOOR_S = {
     "opf-adopt-hook-selftest": 1260,
     "opf-import-batch-selftest": 1260,
     "opf-import-complete-selftest": 1260,
+    "opf-release-history-selftest": 1260,
     "opf-pack-manifest-selftest": 1260,
     "opf-adopt-observe-selftest": 1860,
     "opf-adopt-discover-selftest": 1260,
@@ -476,19 +497,27 @@ _COPY_IGNORE = shutil.ignore_patterns(*_COPY_PATTERNS)
 _CANNOT_EVALUATE_MARKER = "CANNOT EVALUATE"
 
 _CI_WORKFLOW = Path(".github") / "workflows" / "quality.yml"
-# The closure work is PARTITIONED between five CI jobs, because the whole roster's worst case
+# The closure work is PARTITIONED between six CI jobs, because the whole roster's worst case
 # (_job_worst_case_s over every leg) does not fit one job's time limit with the bound rule above
 # unchanged, and, once every lane-member leg reaches its config-lane deadline plus the launch margin
 # (see _LEG_BOUND_FLOOR_S), it does not fit four. ARITHMETIC on this tree: the legs' two sweeps,
-# their cleanup deadlines and the flip come to 92905 s, and each job adds the 350 s vector allowance
+# their cleanup deadlines and the flip come to 95445 s, and each job adds the 350 s vector allowance
 # and the 600 s setup to them, so four jobs hold at most 4 x (21600 - 950) = 82600 s of that work,
-# 10305 s short; five is the fewest that fit. The worst cases, at a headroom of 3, are 21193 s (A,
-# the flip's job), 21420 s (B), 15810 s (C), 19930 s (D) and 19302 s (E), each within its 21600 s
-# limit. opf-import-complete-selftest, a leg main added, sits in D beside opf-import-batch-selftest:
+# 12845 s short; five is the fewest that the total allows, and the sixth, F, holds the one leg the
+# placement below finds no room for in the other five. The worst cases, at a headroom of 3, are
+# 21193 s (A, the flip's job), 21420 s (B), 15810 s (C), 19930 s (D), 19302 s (E) and 3490 s (F),
+# each within its 21600 s limit. opf-import-complete-selftest, a leg main added, sits in D beside opf-import-batch-selftest:
 # its 1260 s config-lane floor adds 2540 s to a job's worst case (two sweeps and two cleanup
 # deadlines), which A and E cannot hold (nor could B while it held the store-upgrade gate's leg), and D,
 # unlike C, is not moved by the headroom multiplier
-# up to 5.412. When the declared waits of opf.py's and _opf_adopt_apply.py's sources grew by 1206 s each
+# up to 5.412. opf-release-history-selftest, added after it, sits alone in F: its 1260 s config-lane
+# floor adds the same 2540 s, which D (22470 s), A (23733 s), E (21842 s) and B (23960 s, beside
+# commonmark-headings-selftest) cannot hold. C could (18350 s), but C is the job the headroom
+# multiplier moves: with the leg in C the largest multiplier that fits every job falls from 5.412 to
+# 4.354 (at 4.355, job C's worst case is 21602.0 s), barely above the 4.338 the loaded
+# opf-doctor-selftest run needs (see _LEG_CEILING_S). F, like B and D, is not moved by the headroom
+# multiplier up to 5.412 (the leg's 1260 s floor exceeds its headroom term, 2 s times the
+# multiplier). When the declared waits of opf.py's and _opf_adopt_apply.py's sources grew by 1206 s each
 # (the two legs' declared-wait sums from 3554.012 s to 4760.012 s and from 2820 s to 4026 s), the
 # opf-adopt-apply-selftest bound rose by 1206 s (2880 s to 4086 s) and the opf-tooling-selftest bound
 # by 1161 s (from 3660 s, set by its former floor row, to 4821 s), A, which had held
@@ -553,6 +582,9 @@ _CI_JOB_LEGS = {
         "opf-init-observe-selftest",
         "commonmark-conformance",
     }),
+    "opf-closure-f": frozenset({
+        "opf-release-history-selftest",
+    }),
 }
 _CI_JOBS = tuple(sorted(_CI_JOB_LEGS))
 # The leg whose job also runs the self-test's negative leg: the flip runs opf.py --self-test under
@@ -593,7 +625,7 @@ _CI_SETUP_ALLOWANCE_S = 600    # checkout with full history and setup-python, be
 #     deadlines above, their work (four launches, and one throwaway opf/ copy and bound scan through
 #     _run_closure) is NOT measured into the 12.8 s. The per-job sweep vectors were added after it
 #     too: they launch no process and hold no deadline, and their work (a few throwaway opf/ copies
-#     and bound scans through run() and main(), four per CI job, so twenty over the five jobs) is NOT
+#     and bound scans through run() and main(), four per CI job, so twenty-four over the six jobs) is NOT
 #     measured into the 12.8 s either. So do the floor vectors: they launch no process and hold no
 #     deadline, and their work (a few more bound scans through _leg_bounds) is NOT measured into the
 #     12.8 s. Nor are the config-lane deadline vectors, which launch no process and hold no deadline
@@ -766,6 +798,35 @@ def _bound_faults(bounds, needs):
             faults.append("{}: bound {!r} is not a finite positive number".format(name, have))
         elif have < need:
             faults.append("{}: bound {}s below the {}s its work requires".format(name, have, need))
+    return faults
+
+
+def _floor_deciding_legs(floors, others):
+    """The sorted names of the rows in floors (leg name to a floor in seconds) whose floor sits
+    STRICTLY above others[name], the bound that leg's other terms alone give (a derivation with an
+    empty floor table). Only such a floor decides its leg's bound: the largest term wins, so a floor
+    at or below the other terms (a tie included) raises nothing, and a vector that shows the floor
+    term deciding a bound must pick its legs from this list, never from the whole table."""
+    return sorted(name for name in floors if others[name] < floors[name])
+
+
+def _floor_row_faults(floors, deadlines, members):
+    """Each row in floors (leg name to a floor in seconds) whose leg is no lane member (members, from
+    _lane_member_legs over the lane runner's own roster) or whose floor is not exactly the deadline
+    the config lanes give its command (deadlines, from _lane_deadlines) plus _LAUNCH_MARGIN_S; []
+    when every row is exactly that. This judges the row itself, never the bound: _lane_budget_faults
+    sees only a bound, so a row the other terms already reach (a tie included) could be lowered or
+    raised there unseen, and the row is held to what it records, never to the other terms, so such a
+    tie passes and so does a row the other terms later overtake."""
+    faults = []
+    for name in sorted(floors):
+        if name not in members:
+            faults.append("{}: a {}s floor row, but its command is no lane member".format(
+                name, floors[name]))
+        elif floors[name] != deadlines[name] + _LAUNCH_MARGIN_S:
+            faults.append("{}: floor {}s, not its {}s lane deadline plus the {}s launch margin, "
+                          "{}s".format(name, floors[name], deadlines[name], _LAUNCH_MARGIN_S,
+                                       deadlines[name] + _LAUNCH_MARGIN_S))
     return faults
 
 
@@ -2128,21 +2189,41 @@ def _bounds_self_test(root):
     else:
         print("PASS closure/flat-600-covers-every-leg (no table-derived need exceeds 600s)")
     # The per-leg floor term, discriminated around its boundary. The control derivation (an empty
-    # floor table) reproduces the bounds the three other terms alone give: for every live floor row
-    # those must sit BELOW the floor (a floor the other terms already reach is dead weight, refused
-    # so the row is re-fitted or removed), and opf-homes-selftest's CI runs tripped exactly such a
-    # control bound, so a _leg_bounds that drops the floor term reproduces the tripped bound and
-    # fails here. The live bound must be exactly the floor; a doctored floor one second above the
-    # control raises the bound to exactly that floor, and at and one below the control it changes
-    # nothing (the max is tested at and beside its boundary). Each probe holds every row at once, one
-    # derivation per probe, and judges every row's leg on its own (a leg's bound reads only its own
-    # row). A row naming no subset leg, a non-int value and a non-positive value are each refused
-    # (fail-closed).
+    # floor table) reproduces the bounds the three other terms alone give. The legs this vector
+    # judges are the floor rows whose floor sits strictly above that control (_floor_deciding_legs,
+    # derived from the live table on every run, never a list kept here): only there does the floor
+    # term decide the bound, and opf-homes-selftest's CI runs tripped exactly such a control bound,
+    # so a _leg_bounds that drops the floor term reproduces the tripped bound and fails here. A row
+    # the other terms already reach (a tie included) decides nothing, is left out here and named on
+    # the line below (closure/bound-floor-row-is-the-lane-deadline, after the lane deadlines are
+    # read, holds every row, these included, to exactly its lane deadline plus the launch margin);
+    # no deciding row at all is a named fault, and a judged leg whose control reaches its floor is
+    # refused by name, so a selection that judged every row would fail here. The selection is tested
+    # at and beside its boundary (a floor one second above every control selects every row; at and
+    # one below, none). Each judged leg's live bound must be exactly its floor; a doctored floor one
+    # second above the control raises the bound to exactly that floor, and at and one below the
+    # control it changes nothing (the max is tested at and beside its boundary). Each probe holds
+    # every row at once, one derivation per probe, and judges every row's leg on its own (a leg's
+    # bound reads only its own row). A row naming no subset leg, a non-int value and a non-positive
+    # value are each refused (fail-closed).
     if not _LEG_BOUND_FLOOR_S:
         raise _CheckFailure("closure/bound-floor-not-discriminated: the floor table is empty")
     floorless = derive("bound-floor-raises-the-bound", _leg_bounds, tools_dir, bound_floors={})
-    for name in sorted(_LEG_BOUND_FLOOR_S):
-        floor, control = _LEG_BOUND_FLOOR_S[name], floorless[name][0]
+    controls = dict((name, row[0]) for name, row in floorless.items())
+    for delta, want in ((1, sorted(_LEG_BOUND_FLOOR_S)), (0, []), (-1, [])):
+        got = _under_test("bound-floor-not-discriminated", _floor_deciding_legs,
+                          dict((name, controls[name] + delta) for name in _LEG_BOUND_FLOOR_S), controls)
+        if got != want:
+            raise _CheckFailure("closure/bound-floor-not-discriminated (every floor {:+d}s from its "
+                                "control): selected {!r}, want {!r}".format(delta, got, want))
+    deciding = _under_test("bound-floor-not-discriminated", _floor_deciding_legs, _LEG_BOUND_FLOOR_S,
+                           controls)
+    if not deciding:
+        raise _CheckFailure("closure/bound-floor-not-discriminated: no floor row sits above the bound "
+                            "its leg's other terms give")
+    idle = sorted(name for name in _LEG_BOUND_FLOOR_S if name not in deciding)
+    for name in deciding:
+        floor, control = _LEG_BOUND_FLOOR_S[name], controls[name]
         if control >= floor:
             raise _CheckFailure("closure/bound-floor-not-discriminated: the other terms of {} "
                                 "reach {}s, at or above its {}s floor".format(name, control, floor))
@@ -2177,12 +2258,14 @@ def _bounds_self_test(root):
             continue
         raise _CheckFailure("closure/bound-floor-bad-row-not-refused ({})".format(label))
     print("RED an empty floor table -> the bounds the other terms alone give ({}), each below its "
-          "leg's floor (opf-homes-selftest's the tripped shape); a floor one second above them -> "
-          "raises the bound to "
-          "exactly that floor; at and one below them -> unchanged; a row naming no subset leg, a "
+          "leg's floor (opf-homes-selftest's the tripped shape); rows the other terms already reach, "
+          "deciding nothing and so not judged here (each row is held to its lane deadline plus the "
+          "launch margin below): {}; a floor one second above them -> raises the bound "
+          "to exactly that floor; at and one below them -> unchanged; a row naming no subset leg, a "
           "non-int, a bool and a non-positive value -> each refused naming the row".format(
-              ", ".join("{} {}s".format(name, floorless[name][0])
-                        for name in sorted(_LEG_BOUND_FLOOR_S))))
+              ", ".join("{} {}s".format(name, controls[name]) for name in deciding),
+              ", ".join("{} {}s >= {}s".format(name, controls[name], _LEG_BOUND_FLOOR_S[name])
+                        for name in idle) or "none"))
     ceilings = dict(_LEG_CEILING_S)
     del ceilings[leg]
     try:
@@ -2457,7 +2540,7 @@ def _bounds_self_test(root):
           "key, nested deeper inside jobs:, inside a multi-line flow, quoted or plain scalar, or after "
           "a line break a YAML loader need not read -> each refused by name, never read for a limit; "
           "the same header as a direct jobs: key (one-column jobs mapping, trailing comment) -> read; "
-          "the real workflow's five jobs -> read above".format(_CI_JOBS[0]))
+          "the real workflow's six jobs -> read above".format(_CI_JOBS[0]))
     # Each refusal of the header reader, by name, on an input it alone stops: each entry is (check,
     # workflow text, the text its refusal must name). With that refusal removed the input reads a
     # limit or reaches another refusal, so each entry fails without it. Whitespace is YAML's: only
@@ -2692,10 +2775,46 @@ def _bounds_self_test(root):
             if got != want:
                 raise _CheckFailure("closure/lane-deadline-one-second-short ({} bound {}s, need {}s): "
                                     "named {!r}, want {!r}".format(name, need + delta, need, got, want))
+    # EVERY floor row, deciding or not, is exactly its lane deadline plus the launch margin, as the
+    # table's comment states (_floor_row_faults). The checks above judge bounds, and the bound-floor
+    # vectors only the rows that decide one, so without this a row the other terms already reach
+    # (opf-init-contract-check-selftest's 1260 s tie) could be lowered or raised unseen. The row is
+    # held to the lane deadline read from the runner, never to the other terms, so the exact tie
+    # passes (1200 + 60 = 1260) while a row lowered or raised by any amount is named. Each row one
+    # second short of, at and one above its need -> a fault naming exactly that row, clean, a fault
+    # naming exactly that row; a row whose leg the roster drops -> a fault naming exactly that row.
+    row_faults = _under_test("bound-floor-row-is-the-lane-deadline", _floor_row_faults,
+                             _LEG_BOUND_FLOOR_S, deadlines, members)
+    if row_faults:
+        raise _CheckFailure("closure/bound-floor-row-is-the-lane-deadline: " + "; ".join(row_faults))
+    for name in sorted(_LEG_BOUND_FLOOR_S):
+        need = deadlines[name] + _LAUNCH_MARGIN_S
+        for label, floors, roster_legs, want in (
+                ("floor {}s".format(need - 1), dict(_LEG_BOUND_FLOOR_S, **{name: need - 1}), members,
+                 [name]),
+                ("floor {}s".format(need), dict(_LEG_BOUND_FLOOR_S, **{name: need}), members, []),
+                ("floor {}s".format(need + 1), dict(_LEG_BOUND_FLOOR_S, **{name: need + 1}), members,
+                 [name]),
+                ("no lane member", _LEG_BOUND_FLOOR_S,
+                 dict((leg, argvs) for leg, argvs in members.items() if leg != name), [name])):
+            got = [fault.split(":", 1)[0] for fault in _under_test(
+                "bound-floor-row-is-the-lane-deadline", _floor_row_faults, floors, deadlines,
+                roster_legs)]
+            if got != want:
+                raise _CheckFailure("closure/bound-floor-row-is-the-lane-deadline ({}, {}; need {}s): "
+                                    "named {!r}, want {!r}".format(name, label, need, got, want))
     # The floor term carries each floored member's bound: every such floor one second short, at and
-    # one above its need, one derivation each.
-    floored = sorted(name for name in members
-                     if name in _LEG_BOUND_FLOOR_S and live[name] == _LEG_BOUND_FLOOR_S[name])
+    # one above its need, one derivation each. The floored members are those with a floor row whose
+    # need sits strictly above the bound their other terms alone give (the control above), so a
+    # floor one second short of the need still decides the bound; a member whose other terms already
+    # reach its need (a tie included) is carried by them, not by its floor, and is left out. No
+    # floored member at all is a named fault: the probes below would then judge nothing and pass.
+    floored = _under_test("lane-deadline-flip", _floor_deciding_legs, dict(
+        (name, deadlines[name] + _LAUNCH_MARGIN_S) for name in members if name in _LEG_BOUND_FLOOR_S),
+        controls)
+    if not floored:
+        raise _CheckFailure("closure/lane-deadline-flip-not-discriminated: no lane member's floor row "
+                            "sits above the bound its other terms give, so the flip judges no leg")
     for delta, short in ((-1, True), (0, False), (1, False)):
         probes = dict(_LEG_BOUND_FLOOR_S, **dict(
             (name, deadlines[name] + _LAUNCH_MARGIN_S + delta) for name in floored))
@@ -2827,16 +2946,19 @@ def _bounds_self_test(root):
             raise _CheckFailure("closure/lane-deadline-reader-fail-closed ({}): {!r}".format(
                 label, (got, reason)))
     print("RED each of the {} lane-member legs one second short of its lane deadline plus the launch "
-          "margin -> a fault naming exactly that leg; at and one above it -> clean; every floored "
-          "member's floor ({} legs) one second short through _leg_bounds -> each named; at and one "
-          "above -> clean; a roster without {} -> that leg no lane member; a roster registering {} "
+          "margin -> a fault naming exactly that leg; at and one above it -> clean; each of the {} "
+          "floor rows, deciding or not, one second short of its lane deadline plus the launch margin "
+          "-> named, at it -> clean, one above it -> named, and its leg dropped from the roster -> "
+          "named; every floored member's floor ({} legs) one second short through _leg_bounds -> "
+          "each named; at and one above -> clean; a roster without {} -> that leg no lane member; a "
+          "roster registering {} "
           "-> {} a member, its {}s bound named; a ./ spelling -> still a member; a lookup one second "
           "higher than the source read -> every member disagrees; a lane runner giving the members "
           "one second more (a raised default, or new entries) -> named faults against the live "
           "bounds ({} legs); a repeated entry, a lane deadline absent, assigned twice or augmented, "
           "arithmetic, a bool, a table that is not a dict literal, a repeated key, a zero value and "
           "a key that is not a tuple -> each refused by name".format(
-              len(members), len(floored), " ".join(home_argv), " ".join(bare_argv), bare_name,
+              len(members), len(_LEG_BOUND_FLOOR_S), len(floored), " ".join(home_argv), " ".join(bare_argv), bare_name,
               live[bare_name], len(want_named)))
     return required
 

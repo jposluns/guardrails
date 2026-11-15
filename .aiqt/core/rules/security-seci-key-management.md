@@ -14,10 +14,10 @@ map-atlas-broad: [AML.T0012]
 map-iso-23894-broad: [A.11]
 map-owasp-asvs-broad: [V11]
 map-owasp-cheatsheet-tight: [key-management]
-map-csa-ccm-tight: [CEK-10, CEK-11, CEK-12, CEK-13, CEK-14, CEK-21]
-map-csa-ccm-broad: [CEK-01]
-map-csa-aicm-tight: [CEK-10, CEK-11, CEK-12, CEK-13, CEK-14, CEK-21]
-map-csa-aicm-broad: [CEK-01]
+map-csa-ccm-tight: [CEK-11]
+map-csa-ccm-broad: [CEK-01, CEK-10, CEK-12, CEK-13, CEK-14]
+map-csa-aicm-tight: [CEK-11]
+map-csa-aicm-broad: [CEK-01, CEK-10, CEK-12, CEK-13, CEK-14]
 ---
 
 # Key management

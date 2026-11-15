@@ -7,7 +7,7 @@ Public contract:
 
 request is a plain dict with exactly:
     product_root: absolute, lexically contained POSIX directory path
-    version:      bare pack SemVer
+    version:      bare SemVer of OPF's own release (the manifest's opf-version)
     commit:       full lowercase SHA-1 commit identifier
 
 policy is a plain dict supplied ONLY by the installed bootstrap trust caller:
@@ -2392,11 +2392,52 @@ def _guard_self_test():
     return rows
 
 
-def _runner_check(expected, text=None, *, fail_own=0, scratch_only=False):
+def _report_line(rows):
+    """The one report line the self-test prints; the registration parses it."""
+    import json
+    return json.dumps({"opf_adopt_observe_tests": rows}, sort_keys=True)
+
+
+# The rows and resolver vectors the nested scrubbed run leaves out, because
+# their deadlines are short enough for host load to exceed: each config sets
+# fetch_bound, so it runs on the unscaled deadlines (connect 0.20 s,
+# inactivity 0.15 s, request 0.80 s, gather 1.60 s), a fetch bound of 0.50 s
+# or 1.00 s and the 3.0 s watchdog (run_case, bounded), and a stall of a
+# fraction of a second can change its verdict. The outer run still judges
+# them; self_test refuses a roster where these lists depart from the configs.
+# The rows and vectors the nested run keeps still carry wall-clock bounds
+# (listed at the launch-only leg in _runner_check) that a heavily loaded host
+# can exceed: leaving these out reduces that run's exposure to host load, it
+# does not remove it.
+_LOAD_SENSITIVE_ROWS = ("TG-11/slow-drip", "TG-11/read-inactivity",
+                        "TG-11/stalled-resolver", "TG-11/connect-timeout",
+                        "TG-11/tls-timeout")
+_LOAD_SENSITIVE_VECTORS = ("resolver-vector/blocked-timing",)
+
+
+def _runner_launch_entry(expected):
+    # The positive registration's own call, run for real: the runner-launched
+    # interpreter imports this module in the runner's scrubbed environment
+    # and evaluates every row and resolver vector that is not load-sensitive.
+    # Each must be VALID or pass, and the roster must be the one the outer
+    # run expects of it.
+    rc = self_test(vectors_only=True, steady_only=True)
+    if rc == 0 and [row.get("id") for row in SELF_TEST_ROSTER] != list(expected):
+        _print_failures(_roster_failures(SELF_TEST_ROSTER, expected))
+        return 1
+    return rc
+
+
+def _runner_check(expected, text=None, *, fail_own=0, scratch_only=False,
+                  launch_only=False, vectors=()):
     """Prove exact dispatch using the real shell text, as the P0 suite does.
 
-    Intercepted Python gates are stubbed. Only this suite's vector leg runs,
-    except for the umask scratch-only case, which emits canned output.
+    Intercepted Python gates are stubbed. With scratch_only (the umask and
+    exit cases) the exact own call emits canned output; with launch_only (the
+    positive registration) it launches the real interpreter on this module's
+    _runner_launch_entry, which evaluates the rows and vectors that are not
+    load-sensitive; otherwise it runs this suite's vector leg. Each name in
+    vectors must have its PASS line in the runner's output.
     Vector-only dispatch avoids recursive registration checks.
     The scope is this suite only.
     """
@@ -2440,6 +2481,8 @@ def _runner_check(expected, text=None, *, fail_own=0, scratch_only=False):
         raise RuntimeError(identity + "/cannot-evaluate/recursion-marker") from exc
     if type(fail_own) is not int or fail_own not in (0, 1, 2, 7):
         raise ValueError(identity + "/invalid-failure-code")
+    if launch_only and (scratch_only or fail_own):
+        raise ValueError(identity + "/invalid-launch-mode")
     here = Path(__file__).resolve().parent
     runner = here / "run_all_checks.sh"
     source = runner.read_text(encoding="utf-8") if text is None else text
@@ -2475,6 +2518,9 @@ if [ "$#" -eq 4 ] && [ "$1" = "-I" ] && [ "$2" = "-B" ] \
   if [ "$observe_scratch_only" -eq 1 ]; then
     printf '%s\n' "$observe_expected_output"
     exit "$observe_fail_own"
+  fi
+  if [ "$observe_scratch_only" -eq 2 ]; then
+    exec "$observe_python" -I -B -c "$observe_launch" "$observe_test" "$observe_expected"
   fi
   if [ "$observe_fail_own" -ne 0 ]; then
     "$observe_python" -I -B "$observe_test" --self-test --vectors-only || exit "$?"
@@ -2517,11 +2563,19 @@ exit 0
                     "observe_python": sys.executable,
                     "observe_test": str(here / "_opf_adopt_observe.py"),
                     "observe_fail_own": str(fail_own),
-                    "observe_scratch_only": "1" if scratch_only else "0",
+                    "observe_scratch_only": (
+                        "1" if scratch_only else "2" if launch_only else "0"),
+                    "observe_launch": (
+                        "import importlib, json, sys\n"
+                        "from pathlib import Path\n"
+                        "sys.path.insert(0, str(Path(sys.argv[1]).parent))\n"
+                        "module = importlib.import_module(Path(sys.argv[1]).stem)\n"
+                        "raise SystemExit(module._runner_launch_entry(json.loads(sys.argv[2])))\n"),
+                    "observe_expected": json.dumps(list(expected)),
                     "observe_expected_output": (
-                        json.dumps({"opf_adopt_observe_tests": [
+                        _report_line([
                             {"id": item, "test_status": VALID} for item in expected
-                        ]}, sort_keys=True) + "\n"
+                        ]) + "\n"
                         + "\n".join("PASS " + item for item in expected)
                         if scratch_only else "")})
 
@@ -2566,10 +2620,45 @@ exit 0
         # cannot-evaluate without ever reading host configuration. 600 s
         # keeps the worst-case hang inside THIS member's own per-member
         # bound (tools/selftest_git_fixture_env.py, CONFIG_MEMBER_BOUNDS:
-        # 1800 s for this file's --self-test) while removing the load
-        # sensitivity; the interception probe and the scratch legs keep
-        # the tight bound.
-        proc = run_shell(shim + source, timeout=120 if scratch_only else 600)
+        # 1800 s for this file's --self-test) and makes a timeout under load
+        # less likely, though not impossible; the interception probe and the
+        # scratch legs keep the tight bound.
+        # The launch-only leg evaluates every row and vector except those on
+        # deadlines short enough for host load to exceed
+        # (_LOAD_SENSITIVE_ROWS, _LOAD_SENSITIVE_VECTORS). The ones it keeps
+        # still carry wall-clock bounds that can change their verdict, among
+        # them: each row run's 30 s watchdog and its deadlines scaled to
+        # connect 2.0 s, inactivity 1.5 s, request 8.0 s and gather 16.0 s;
+        # the TLS fixture's 2.0 s SOCKET_TIMEOUT, its 30 s JOIN_BOUND in
+        # close(), and the 1.0 s close bound and 10 s event and BLOCK_WAIT
+        # waits of fixture/server-close-unblocks, in its own cases, in its
+        # self-check, which must read INVALID, and in its unreadable /proc
+        # run, whose 4.0 s wait must end with each case not seen blocked (a
+        # blocking call that lasted the socket timeout while the serving
+        # thread was seen still asleep in it after close() ended the
+        # connection, the timeout not having run out by then, is INVALID
+        # whatever close() took; one whose timeout could have run out by
+        # then or that was not seen asleep after it, a call not seen blocked
+        # within 10 s, or a close() over 1.0 s with no call that lasted the
+        # socket timeout, is CANNOT-EVALUATE, not INVALID, and still fails
+        # this leg, which needs every row VALID); the 2.0 s join of a run's
+        # resolver workers (a straggler fails the row INVALID); the 1.0 s
+        # resolver-slot acquire after a run and in the held-slot queue; the
+        # 10 s HELD_JOIN of resolver-vector/positive-held-slot; the 5.0 s
+        # resolver join of resolver-vector/cleanup; and this leg's own 450 s
+        # bound (cannot-evaluate/timeout). A heavily loaded host can still
+        # fail any of them, so leaving out the short-deadline cases reduces
+        # this leg's exposure to host load; it does not remove it. Measured
+        # once, before fixture/server-close-unblocks was added, as part of a
+        # full --self-test run on a shared host: the leg took 229.3 s, at a
+        # one-minute load average of 29.45 when it started and 26.15 when it
+        # ended (/proc/loadavg). That row has added time since, its
+        # self-check and unreadable /proc run among it, and is not in that
+        # figure. 450 s leaves about twice that figure and keeps the leg
+        # inside the 600 s; a host loaded well beyond that can still reach
+        # it.
+        proc = run_shell(shim + source,
+                         timeout=120 if scratch_only else 450 if launch_only else 600)
         try:
             argv_log = log.read_bytes()
         except OSError as exc:
@@ -2606,6 +2695,19 @@ exit 0
         raise AssertionError(identity + "/own-argv")
 
     if proc.returncode != 0:
+        # The runner's output is otherwise discarded with the fixture: name
+        # what it printed before the failure, bounded, on stderr.
+        sys.stdout.flush()
+        for stream, text in (("stdout", proc.stdout), ("stderr", proc.stderr)):
+            lines = (text or "").splitlines()
+            print("{}/return-code: runner {} (last {} of {} lines):".format(
+                identity, stream, min(len(lines), 20), len(lines)), file=sys.stderr)
+            for line in lines[-20:]:
+                print("  | " + line[:400], file=sys.stderr)
+        # A real nested vector run that exits 2 said it could not evaluate.
+        if (not scratch_only and own == [own_argv]
+                and "GATE FAILED: opf-adopt-observe-selftest (exit 2)" in proc.stdout.splitlines()):
+            raise RuntimeError(identity + "/cannot-evaluate/nested-exit-2")
         raise AssertionError(identity + "/return-code")
     try:
         reports = [json.loads(line)["opf_adopt_observe_tests"]
@@ -2614,7 +2716,8 @@ exit 0
         # Timing measurements vary; compare roster identities and statuses.
         if (len(reports) != 1
                 or [row["id"] for row in reports[0]] != expected
-                or any(row["test_status"] != VALID for row in reports[0])):
+                or any(row["test_status"] != VALID for row in reports[0])
+                or any("PASS " + name not in proc.stdout.splitlines() for name in vectors)):
             raise AssertionError(identity + "/pass-lines")
     except (ValueError, KeyError, TypeError) as exc:
         raise AssertionError(identity + "/pass-lines") from exc
@@ -2695,6 +2798,7 @@ def _runner_non_readable_fd_checks(expected):
 
 
 def _runner_red_checks(expected):
+    import io
     import shlex
     import subprocess
     import tempfile
@@ -2708,14 +2812,21 @@ def _runner_red_checks(expected):
         raise AssertionError(identity + "/red-fixture")
 
     def red(label, call, error, wanted):
+        # A RED's expected failure prints the runner's output; show it only
+        # when the RED itself fails.
+        noise = io.StringIO()
         try:
-            call()
+            with contextlib.redirect_stderr(noise):
+                call()
         except error as exc:
             if str(exc) != wanted:
+                sys.stderr.write(noise.getvalue())
                 raise AssertionError(identity + "/" + label + "/wrong-red") from exc
         except Exception as exc:
+            sys.stderr.write(noise.getvalue())
             raise AssertionError(identity + "/" + label + "/wrong-error") from exc
         else:
+            sys.stderr.write(noise.getvalue())
             raise AssertionError(identity + "/" + label + "/not-red")
         print("RED {} -> {}".format(label, wanted))
 
@@ -2744,8 +2855,9 @@ def _runner_red_checks(expected):
         expected, source.replace(anchor, anchor + "  exit 1\n", 1)),
         AssertionError, identity + "/return-code")
 
-    # Exit handling uses canned reports; the positive registration above
-    # independently runs the real vector leg once.
+    # Exit handling uses canned reports; the positive registration launches
+    # the real interpreter once, on _runner_launch_entry, never as a nested
+    # --self-test launch (_runner_nested_launch_check).
     def own_failure(text, status=7):
         label = "own-suite-failure" if status == 7 else "own-suite-failure-" + str(status)
         red(label, lambda: _runner_check(
@@ -2843,9 +2955,11 @@ def _runner_red_checks(expected):
             "python3 ", "env -i PATH=/usr/bin:/bin " + shlex.quote(sys.executable) + " ",
             1).replace(script_arg, shlex.quote(str(nested)), 1)
         refusal_identity = identity + "/scrubbed-environment/wrong-refusal"
+        noise = io.StringIO()
         try:
             try:
-                _runner_check(expected, source.replace(own_line, scrubbed, 1))
+                with contextlib.redirect_stderr(noise):
+                    _runner_check(expected, source.replace(own_line, scrubbed, 1))
             except AssertionError as exc:
                 if str(exc) != identity + "/return-code":
                     raise
@@ -2855,6 +2969,7 @@ def _runner_red_checks(expected):
         except Exception as exc:
             # Missing/unreadable reports and unexpected runner outcomes are
             # failures of this RED, not harness cannot-evaluate outcomes.
+            sys.stderr.write(noise.getvalue())
             raise AssertionError(refusal_identity) from exc
         if refusal != identity + "/cannot-evaluate/recursion":
             raise AssertionError(refusal_identity)
@@ -2967,7 +3082,6 @@ def _runner_red_checks(expected):
 
     # Exercise the entry actually called by descriptor children. Marker
     # inspection defects must remain failures, not become environmental skips.
-    import io
     for suffix in ("timeout", "interception", "bash", "pathsep", "argv-log",
                    "recursion", "recursion-marker", "unexpected"):
         message = identity + ("/" if suffix == "unexpected" else "/cannot-evaluate/") + suffix
@@ -2988,10 +3102,76 @@ def _runner_red_checks(expected):
     _runner_non_readable_fd_checks(expected)
 
 
-def _runner_registration_test(expected):
+def _runner_nested_launch_check(call):
+    import shlex
+    import tempfile
+    from unittest.mock import patch
+
+    # The positive registration answers the exact own call by launching the
+    # real interpreter on this module's _runner_launch_entry, in the runner's
+    # scrubbed environment, never as a nested --self-test launch: re-running
+    # the whole suite nested, its timing-sensitive rows included, under the
+    # same host load, made it fail intermittently with only its exit status
+    # left to read. The call runs under a python that logs each launch,
+    # refuses any --self-test launch with exit 1 and otherwise runs the real
+    # interpreter: it must see exactly one launch, the -c entry, and the call
+    # must pass.
+    nested = "runner/adopt-observe-registration/no-nested-suite-launch"
+    launched = "runner/adopt-observe-registration/real-own-launch"
+    with tempfile.TemporaryDirectory(prefix="opf-nested-launch-") as tmp:
+        os.chmod(tmp, 0o700)
+        log = Path(tmp) / "launches"
+        log.write_bytes(b"")
+        stub = Path(tmp) / "python3"
+        stub.write_text(
+            "#!/bin/sh\nprintf '%s\\0' \"$#\" \"$@\" >> " + shlex.quote(str(log)) + " || exit 2\n"
+            "for arg in \"$@\"; do [ \"$arg\" != --self-test ] || exit 1; done\n"
+            "exec " + shlex.quote(sys.executable) + " \"$@\"\n", encoding="utf-8")
+        stub.chmod(0o700)
+        failure = None
+        try:
+            with patch.object(sys, "executable", str(stub)):
+                call()
+        except AssertionError as exc:
+            failure = exc
+        fields = log.read_bytes().split(b"\0")
+        if fields.pop() != b"":
+            raise AssertionError(launched) from failure
+        launches = []
+        while fields:
+            try:
+                argc = int(fields.pop(0))
+            except ValueError as exc:
+                raise AssertionError(launched) from exc
+            if argc < 0 or argc > len(fields):
+                raise AssertionError(launched) from failure
+            launches.append(fields[:argc])
+            del fields[:argc]
+        if any(b"--self-test" in argv for argv in launches):
+            raise AssertionError(nested) from failure
+        # The call's own failure names itself; no launch, or another launch,
+        # fails the real own launch.
+        if failure is not None:
+            raise failure
+        if len(launches) != 1 or launches[0][:3] != [b"-I", b"-B", b"-c"]:
+            raise AssertionError(launched)
+    print("PASS " + nested)
+    print("PASS " + launched)
+
+
+def _runner_registration_test(expected, vectors=()):
     runner = Path(__file__).resolve().parent / "run_all_checks.sh"
     source = runner.read_text(encoding="utf-8")
-    _runner_check(expected, source)
+    # A real launch of _runner_launch_entry answers the own call: dispatch,
+    # exact argv, and the real interpreter's start, import and exit under the
+    # scrubbed environment are this check's, and so is a second evaluation,
+    # under that environment, of every row and vector that is not
+    # load-sensitive (each VALID or passing, within the leg's 450 s). The
+    # load-sensitive ones are judged by the outer run only.
+    _runner_nested_launch_check(lambda: _runner_check(
+        [item for item in expected if item not in _LOAD_SENSITIVE_ROWS], source,
+        launch_only=True,
+        vectors=[name for name in vectors if name not in _LOAD_SENSITIVE_VECTORS]))
     lines = [line for line in source.splitlines(keepends=True)
              if line.startswith('run_gate "opf-adopt-observe-selftest"')]
     if len(lines) != 1:
@@ -3075,6 +3255,90 @@ def _git_archive_fixture_isolated(base):
 _PRODUCTION_LOOKUP = _lookup
 
 
+def _roster_failures(executed, expected_ids=None, vector_names=None, expected_vectors=()):
+    """The FAIL lines for every reason the executed roster fails the run.
+
+    One line per row that is not VALID; with expected_ids, a roster/rows line
+    and one line per missing or unexpected row when the roster departs from
+    it; with vector_names, a roster/vectors line when they depart from
+    expected_vectors. An empty list means none of these fail the run.
+    """
+    import collections
+    lines = []
+    ids = [row.get("id") for row in executed]
+    if expected_ids is not None and ids != list(expected_ids):
+        lines.append("FAIL roster/rows: the executed roster departs from the expected "
+                     "roster ({} rows executed, {} expected)".format(len(ids), len(expected_ids)))
+        have, want = collections.Counter(ids), collections.Counter(expected_ids)
+        lines.extend("FAIL {}: missing from the executed roster".format(item)
+                     for item in want - have)
+        lines.extend("FAIL {}: not in the expected roster".format(item)
+                     for item in have - want)
+    lines.extend("FAIL {}: {}".format(row.get("id"), row.get("test_status"))
+                 for row in executed if row.get("test_status") != VALID)
+    if vector_names is not None and tuple(vector_names) != tuple(expected_vectors):
+        lines.append("FAIL roster/vectors: the resolver vectors run ({}) depart from the "
+                     "expected vectors ({})".format(len(vector_names), len(expected_vectors)))
+    return lines
+
+
+def _print_failures(lines):
+    # Flush the buffered PASS lines first, so in a merged stream these
+    # follow them, among the last lines a reader keeps.
+    sys.stdout.flush()
+    for line in lines:
+        print(line, file=sys.stderr)
+
+
+def _judge_roster(executed, expected_ids, vector_results, expected_vectors):
+    """A finished run's exit status from its rows and vectors, 0 when they
+    pass. Every failure is named on a FAIL line: a vector's own on stdout,
+    any other (_roster_failures) on stderr after the buffered PASS lines."""
+    for name, failures in vector_results:
+        print("FAIL " + name + ": " + "; ".join(failures) if failures else "PASS " + name)
+    lines = _roster_failures(executed, expected_ids, [name for name, _ in vector_results],
+                             expected_vectors)
+    if lines:
+        _print_failures(lines)
+        return 1
+    failed = [text for _, failures in vector_results for text in failures]
+    if failed:
+        return 2 if all(text.startswith("cannot evaluate") for text in failed) else 1
+    return 0
+
+
+def _failure_lines_self_test():
+    # A run that fails on a row that is not VALID, or on a roster that
+    # departs from the expected one, must name each on a FAIL line, never
+    # end in PASS lines with only its exit status left to read.
+    import io
+    expected = ["positive/forced", "TG-forced/invalid", "TG-forced/kept"]
+    names = ("vector/forced-a", "vector/forced-b")
+    vectors = [(name, []) for name in names]
+    for label, executed, wanted in (
+            ("invalid-row", [{"id": item, "test_status": VALID} for item in expected[:1]]
+             + [{"id": expected[1], "test_status": INVALID}]
+             + [{"id": expected[2], "test_status": VALID}],
+             ["FAIL TG-forced/invalid: " + INVALID]),
+            ("roster-mismatch", [{"id": item, "test_status": VALID}
+                                 for item in expected[:2] + ["TG-forced/extra"]],
+             ["FAIL TG-forced/kept: missing from the executed roster",
+              "FAIL TG-forced/extra: not in the expected roster"])):
+        identity = "self-test/" + label + "-fail-line"
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = _judge_roster(executed, expected, vectors, names)
+        said = err.getvalue().splitlines()
+        if (code != 1 or not all(line in said for line in wanted)
+                or (label == "roster-mismatch"
+                    and not any(line.startswith("FAIL roster/rows: ") for line in said))):
+            raise AssertionError(identity)
+        print("PASS " + identity)
+        # Name the row without repeating the FAIL line: a reader searching a
+        # failed run's output for FAIL lines must not find this passing one.
+        print("RED forced-{} -> named {}".format(label, wanted[0].split(" ", 1)[1].split(":")[0]))
+
+
 def _resolver_stub_bound(function):
     # A resolver worker reads _lookup only when it runs. One that outlives
     # settle_resolvers' bound can run after its case has unwound the fixture
@@ -3094,6 +3358,12 @@ def _resolver_stub_bound(function):
         settled = False
         try:
             rc = function(*args, **kwargs)
+        except BaseException as exc:
+            # A traceback alone names no failed check: say what stopped it.
+            sys.stdout.flush()
+            print("FAIL self-test/uncaught-exception: {}: {}".format(type(exc).__name__, exc),
+                  file=sys.stderr)
+            raise
         finally:
             end = time.monotonic() + 2.0
             for thread in threading.enumerate():
@@ -3104,8 +3374,9 @@ def _resolver_stub_bound(function):
             if settled:
                 _lookup = _PRODUCTION_LOOKUP
         if not settled:
-            print("resolver worker outlived the self-test; _lookup stays stubbed",
-                  file=sys.stderr)
+            sys.stdout.flush()
+            print("FAIL self-test/resolver-worker-outlived: resolver worker outlived the "
+                  "self-test; _lookup stays stubbed", file=sys.stderr)
             return rc or 2
         return rc
 
@@ -3113,8 +3384,12 @@ def _resolver_stub_bound(function):
 
 
 @_resolver_stub_bound
-def self_test(vectors_only=False):
+def self_test(vectors_only=False, steady_only=False):
     """Local fixtures only; report executed rows and require mutation sensitivity.
+
+    steady_only leaves out the load-sensitive rows and vectors
+    (_LOAD_SENSITIVE_ROWS, _LOAD_SENSITIVE_VECTORS) for the registration's
+    nested scrubbed run.
 
     Socket routing is replaced only inside this function: production destinations
     and SNI stay unchanged while TCP is delivered to a loopback fixture. The peer
@@ -3234,6 +3509,11 @@ def self_test(vectors_only=False):
             headers = b"Content-Length: " + str(len(body)).encode("ascii") + b"\r\n"
         return b"HTTP/1.1 " + status + b"\r\n" + headers + extra + b"\r\n" + body
 
+    # How long Server.close() waits for its serving thread to end.
+    JOIN_BOUND = 30.0
+    # The socket timeout of each connection the fixture serves.
+    SOCKET_TIMEOUT = 2.0
+
     class Server:
         def __init__(self, context, archive_body, anchor_response, mode="normal"):
             self.context = context
@@ -3243,6 +3523,20 @@ def self_test(vectors_only=False):
             self.requests = []
             self.errors = []
             self.stop = threading.Event()
+            # The connection in flight, which close() shuts down; the lock
+            # orders setting stop against the serving thread taking one.
+            self.lock = threading.Lock()
+            self.connection = None
+            # Set as the serving thread enters each blocking call on a held
+            # wrapped connection, once the call's start is recorded; and, for
+            # each such call, its name and the monotonic times at which it
+            # started and at which it returned or raised, whatever ended it
+            # (blocking). close_row judges each call by those times.
+            self.entered = {"handshake": threading.Event(), "request": threading.Event()}
+            self.calls = []
+            # The monotonic time at which close() had set stop and ended the
+            # connection in flight (close).
+            self.shut = None
             self.listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.listener.bind(("127.0.0.1", 0))
             self.listener.listen(8)
@@ -3250,6 +3544,28 @@ def self_test(vectors_only=False):
             self.port = self.listener.getsockname()[1]
             self.thread = threading.Thread(target=self.serve, daemon=True)
             self.thread.start()
+
+        def hold(self, connection):
+            # Make connection the one close() shuts down, or report that
+            # close() has already run, so the caller abandons it. Either way
+            # no blocking call on it outlasts close().
+            with self.lock:
+                if self.stop.is_set():
+                    return False
+                self.connection = connection
+                return True
+
+        def blocking(self, name, call, *args):
+            # Run one blocking call on the held wrapped connection, recording
+            # when it starts and when it returns or raises, whatever the
+            # exception: a call left to its timeout ends in socket.timeout,
+            # or in another OSError when its descriptor was closed under it.
+            started = time.monotonic()
+            self.entered[name].set()
+            try:
+                return call(*args)
+            finally:
+                self.calls.append((name, started, time.monotonic()))
 
         def serve(self):
             while not self.stop.is_set():
@@ -3261,14 +3577,22 @@ def self_test(vectors_only=False):
                     break
                 secured = None
                 try:
-                    raw.settimeout(2.0)
+                    if not self.hold(raw):
+                        continue
+                    raw.settimeout(SOCKET_TIMEOUT)
                     if self.mode == "tls-stall":
                         self.stop.wait(1.10)
                         continue
-                    secured = self.context.wrap_socket(raw, server_side=True)
+                    # Wrapping takes over raw's descriptor, so hold the
+                    # wrapped socket before its handshake can block.
+                    secured = self.context.wrap_socket(
+                        raw, server_side=True, do_handshake_on_connect=False)
+                    if not self.hold(secured):
+                        continue
+                    self.blocking("handshake", secured.do_handshake)
                     request = bytearray()
                     while not request.endswith(b"\r\n\r\n"):
-                        block = secured.recv(4096)
+                        block = self.blocking("request", secured.recv, 4096)
                         if not block:
                             break
                         request.extend(block)
@@ -3299,21 +3623,708 @@ def self_test(vectors_only=False):
                     except (OSError, ssl.SSLError):
                         pass
                 except (OSError, ssl.SSLError):
-                    # Expected for wrong-chain/name and deadline cases.
+                    # Expected for wrong-chain/name and deadline cases; a
+                    # socket timeout is an OSError. blocking() has recorded
+                    # how long each call on the wrapped connection lasted.
                     pass
                 except Exception as exc:
                     self.errors.append(type(exc).__name__)
                 finally:
+                    with self.lock:
+                        self.connection = None
                     if secured is not None:
                         secured.close()
                     raw.close()
 
         def close(self):
-            self.stop.set()
+            # Wait for the serving thread to end, the event this fixture
+            # needs, rather than for a fixed delay that a loaded host can
+            # outlast. Under the lock, stop is set and the connection in
+            # flight is shut down; the listener is then shut down and closed
+            # outside it. No blocking call in serve() then waits out its own
+            # timeout: an Event wait on stop returns once stop is set, and a
+            # socket call on the shut-down connection or listener fails or
+            # reads end of file. How soon each returns, and the thread ends,
+            # depends on when the host schedules the thread. The join is
+            # bounded by JOIN_BOUND, many times the 2.0 s socket timeout, so
+            # a thread stuck past it is named in an AssertionError rather
+            # than hanging the self-test. shut records when stop was set and
+            # the connection ended, so close_row judges each blocking call
+            # against that moment rather than against when close() began.
+            with self.lock:
+                self.stop.set()
+                if self.connection is not None:
+                    self.end_connection(self.connection)
+            self.shut = time.monotonic()
+            try:
+                self.listener.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
             self.listener.close()
-            self.thread.join(timeout=1.0)
+            self.thread.join(JOIN_BOUND)
             if self.thread.is_alive():
-                raise AssertionError("local TLS fixture did not stop")
+                raise AssertionError(
+                    "local TLS fixture: serving thread still running {} s after "
+                    "close() began joining it".format(JOIN_BOUND))
+
+        def end_connection(self, connection):
+            # Shut the connection in flight down, so a serving-thread call
+            # blocked on it fails or reads end of file. Closing it instead
+            # frees the descriptor without waking that call, which then
+            # waits out its socket timeout (ClosingServer).
+            try:
+                socket.socket.shutdown(connection, socket.SHUT_RDWR)
+            except OSError:
+                pass
+
+    class ClosingServer(Server):
+        # The regression close_row runs as its self-check: close() closes
+        # the connection in flight instead of shutting it down.
+        def end_connection(self, connection):
+            connection.close()
+
+    class PausedStop(threading.Event):
+        # Stop for one fixture server: its serving thread, once it holds a
+        # connection, reads it in the next registration and then waits there
+        # (paused) until reached is set, that is until close() is seen
+        # waiting for the lock that registration holds (MarkedLock) or past
+        # the connection it shuts down (MarkedListener). So close() meets
+        # that thread between reading stop and taking the wrapped connection,
+        # by ordering rather than by a delay. ordered records whether reached
+        # was set within the wait's 10 s bound.
+        def __init__(self, server, reached):
+            super().__init__()
+            self.server = server
+            self.reached = reached
+            self.paused = threading.Event()
+            self.ordered = False
+
+        def is_set(self):
+            value = super().is_set()
+            if (threading.current_thread() is self.server.thread
+                    and self.server.connection is not None
+                    and not self.paused.is_set()):
+                self.paused.set()
+                self.ordered = self.reached.wait(10.0)
+            return value
+
+    class MarkedLock:
+        # A fixture server's lock that sets reached when a thread other
+        # than the serving thread, close(), finds it held and waits for it.
+        def __init__(self, server, reached):
+            self.lock = threading.Lock()
+            self.server = server
+            self.reached = reached
+
+        def __enter__(self):
+            if not self.lock.acquire(blocking=False):
+                if threading.current_thread() is not self.server.thread:
+                    self.reached.set()
+                self.lock.acquire()
+            return self
+
+        def __exit__(self, *exc_info):
+            self.lock.release()
+            return False
+
+    class MarkedListener:
+        # A fixture server's listener that sets reached as close() shuts it
+        # down: close() has then passed the connection in flight, which it
+        # shuts down before the listener.
+        def __init__(self, listener, reached):
+            self.listener = listener
+            self.reached = reached
+
+        def shutdown(self, how):
+            self.reached.set()
+            return self.listener.shutdown(how)
+
+        def __getattr__(self, name):
+            return getattr(self.listener, name)
+
+    CLOSE_IDENTITY = "fixture/server-close-unblocks"
+    CLOSE_BOUND = 1.0
+    # How long close_row waits for /proc to show the serving thread asleep
+    # in its blocking call.
+    BLOCK_WAIT = 10.0
+    # How long close_cases waits, once close() has returned, for the thread
+    # that reads /proc during a case (watch_asleep) to end, and the name that
+    # thread runs under, by which a case it outlives names it.
+    WATCH_JOIN = 10.0
+    WATCHER_NAME = "close_row watch_asleep"
+    # The join each of close_row's three stand-in checks passes to close_cases
+    # (watch_join). The three differ from each other and from WATCH_JOIN, so a
+    # join with any fixed timeout, WATCH_JOIN or none included, matches at
+    # most one of them and fails the others, while a join with watch_join
+    # matches each. The name is used nowhere else in self_test, whose later
+    # names would rebind it before close_row runs.
+    CHECK_JOINS = {"unreadable": 0.75, "held": 0.5, "raising": 0.25}
+    # poll(2) and ppoll(2), the system calls in which a Python socket or TLS
+    # call with a timeout waits, by machine, as /proc/self/task/<id>/syscall
+    # numbers them.
+    POLL_SYSCALLS = {"x86_64": ("7", "271"), "aarch64": ("73",)}
+    # Task files close_row writes for asleep_in_poll to read (poll_rule), each
+    # as a wait channel, a system call (None for the first one POLL_SYSCALLS
+    # lists for this machine, or 7 where it lists none), and the reading
+    # required where POLL_SYSCALLS lists the machine and where it does not: both
+    # naming poll; the wait channel alone naming poll, with the thread woken
+    # ("running") or in a call that is not poll (202, futex on x86_64 and accept
+    # on aarch64); and the system call alone being poll.
+    POLL_CHANNEL = "poll_schedule_timeout.constprop.0"
+    POLL_RULE_FILES = ((POLL_CHANNEL, None, True, True),
+                       (POLL_CHANNEL, "running", False, True),
+                       (POLL_CHANNEL, "202 0x0 0x0 0x0 0x0 0x0 0x0 0x0 0x0", False, True),
+                       ("futex_wait_queue", None, False, False))
+
+    def asleep_in_poll(thread, task_root="/proc/self/task/"):
+        # Whether /proc shows thread asleep in poll(2) or ppoll(2). Its wait
+        # channel must name a poll function: Linux reports a wait channel
+        # only for a task that is asleep, neither running nor queued to run,
+        # and "0" once it has been woken, whether or not it has run since.
+        # On a machine POLL_SYSCALLS lists, its system call must then also be
+        # one of those (a task that is not blocked reads "running" there).
+        # The two files are read one after the other, not at one instant,
+        # and neither shows which descriptor the thread polls. A thread that
+        # is running or runnable, waiting for a lock, or gone, or a /proc
+        # that cannot be read, gives False.
+        task = "{}{}/".format(task_root, thread.native_id)
+        try:
+            with open(task + "wchan", encoding="ascii", errors="replace") as handle:
+                channel = handle.read()
+            with open(task + "syscall", encoding="ascii", errors="replace") as handle:
+                call = handle.read().split()
+        except OSError:
+            return False
+        numbers = POLL_SYSCALLS.get(os.uname().machine)
+        return "poll" in channel and (numbers is None or bool(call and call[0] in numbers))
+
+    def wait_blocked(server, asleep, wait):
+        # Whether the serving thread was seen asleep in poll (asleep) within
+        # wait seconds. The caller waits for the call's event first, but a
+        # stall can let the call run out its socket timeout, and the thread
+        # go back to the listener's accept poll, before /proc is read, so the
+        # poll seen can be that accept's. The event does not rule that out;
+        # call_outcome does, judging such a call "early", as its timeout ran
+        # out before close() ended the connection.
+        deadline = time.monotonic() + wait
+        while server.thread.is_alive():
+            if asleep(server.thread):
+                return True
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(0.005)
+        return False
+
+    def watch_asleep(server, asleep, latest, done):
+        # Until the serving thread ends or done is set, read /proc every 5 ms
+        # and keep in latest[0] the monotonic time at which the last read
+        # that saw the thread asleep in poll (asleep) began. A call that a
+        # shutdown woke is not seen asleep after it, even when the thread is
+        # then descheduled before it records the call's end.
+        while server.thread.is_alive() and not done.is_set():
+            began = time.monotonic()
+            if asleep(server.thread):
+                latest[0] = began
+            time.sleep(0.005)
+
+    def call_outcome(started, ended, shut, asleep):
+        # How a blocking call whose start was recorded at started and whose
+        # end was recorded at ended stands against close() having ended the
+        # connection by shut (Server.shut), where asleep is when the last
+        # /proc read that saw the serving thread asleep in poll began, or
+        # None. The call cannot time out before started + SOCKET_TIMEOUT.
+        # None: it ended within the socket timeout. "early": it lasted the
+        # timeout, which could have run out by shut, so the times do not show
+        # whether close() came in time to wake it. "left": it lasted the
+        # timeout, which had not run out by shut, and the thread was seen
+        # asleep in poll at a read begun after shut, so ending the connection
+        # did not wake it. "unseen": it lasted the timeout, which had not run
+        # out by shut, but the thread was not seen asleep after shut, so the
+        # times do not show whether the call stayed blocked or was woken and
+        # its end recorded late. A tie goes to the reading that cannot fail
+        # a correct close(): a read begun at the same clock reading as shut
+        # may have begun before the shutdown returned, and a timeout that
+        # could run out exactly at shut may have run out first.
+        if ended - started < SOCKET_TIMEOUT:
+            return None
+        if started + SOCKET_TIMEOUT <= shut:
+            return "early"
+        if asleep is not None and asleep > shut:
+            return "left"
+        return "unseen"
+
+    # call_outcome at each end of its bounds, as (started, ended, shut,
+    # asleep) and outcome: a call lasting just under, exactly and just over
+    # the socket timeout; one whose timeout could run out just before,
+    # exactly at and just after shut; and a read that saw the thread asleep
+    # beginning just before, exactly at and just after shut, or no such read.
+    CALL_EDGES = (((1.0, 2.999, 4.0, 4.5), None), ((1.0, 3.0, 2.5, 2.6), "left"),
+                  ((1.0, 3.001, 2.5, 2.6), "left"), ((1.0, 3.5, 3.001, 3.2), "early"),
+                  ((1.0, 3.5, 3.0, 3.2), "early"), ((1.0, 3.5, 2.999, 3.2), "left"),
+                  ((1.0, 3.5, 2.5, 2.499), "unseen"), ((1.0, 3.5, 2.5, 2.5), "unseen"),
+                  ((1.0, 3.5, 2.5, 2.501), "left"), ((1.0, 3.5, 2.5, None), "unseen"))
+
+    def not_seen(case, wait):
+        return ("{}: the serving thread was not seen asleep in its blocking call within "
+                "{} s, so close() was not judged against a blocked call".format(case, wait))
+
+    def watcher_running(case, join):
+        return ("{}: the thread reading /proc for this case ({}) was still running {} s "
+                "after close() returned, so its reads were not judged".format(
+                    case, WATCHER_NAME, join))
+
+    def close_cases(context, client_context, server_class,
+                    cases=("handshake", "request", "registration"),
+                    asleep=asleep_in_poll, wait=BLOCK_WAIT, watch_join=WATCH_JOIN,
+                    watcher_class=threading.Thread):
+        # Run the row's cases against server_class, reading /proc with
+        # asleep and waiting up to wait seconds to see the thread blocked;
+        # returns the failures, the cases not judged, each close()'s time,
+        # and the cases whose blocking call close() left to its socket
+        # timeout. However a case ends, its watcher is joined for up to
+        # watch_join seconds after close() returns; a case it outlives is
+        # not judged by its reads (watcher_running). Each watcher is made by
+        # watcher_class: a thread, except in close_row's unreadable /proc and
+        # watcher checks, which pass a stand-in that records its joins
+        # (RecordedWatcher).
+        failures = []
+        unjudged = []
+        measured = {}
+        left = []
+        for case in cases:
+            server = server_class(context, b"", b"")
+            if case == "registration":
+                reached_close = threading.Event()
+                server.lock = MarkedLock(server, reached_close)
+                server.listener = MarkedListener(server.listener, reached_close)
+                stop = server.stop = PausedStop(server, reached_close)
+                entered = stop.paused
+            else:
+                entered = server.entered[case]
+            client = None
+            reached = False
+            seen_blocked = None
+            stuck = None
+            # A second thread reads /proc from before the case's connection
+            # until close() has returned and done is set (watch_asleep).
+            latest = [None]
+            done = threading.Event()
+            watcher = watcher_class(target=watch_asleep, name=WATCHER_NAME, daemon=True,
+                                    args=(server, asleep, latest, done))
+            try:
+                watcher.start()
+                client = socket.create_connection(("127.0.0.1", server.port), timeout=10.0)
+                if case == "request":
+                    # Wrapping takes over the client's descriptor, so the
+                    # wrapped socket is the one to close.
+                    client = client_context.wrap_socket(client, server_hostname="posluns.dev")
+                reached = entered.wait(10.0)
+                if reached and case != "registration":
+                    seen_blocked = wait_blocked(server, asleep, wait)
+            finally:
+                # The server's one close(), timed while the client still
+                # holds its connection open, whether or not the case was
+                # reached or the thread seen blocked; the client is closed
+                # whatever close() does.
+                start = time.monotonic()
+                try:
+                    server.close()
+                except AssertionError as exc:
+                    stuck = str(exc)
+                finally:
+                    elapsed = time.monotonic() - start
+                    done.set()
+                    try:
+                        if client is not None:
+                            client.close()
+                    finally:
+                        # Joined here for up to watch_join seconds, however the
+                        # case ends, an exception raised through this cleanup
+                        # included. A watcher still running after that is named
+                        # when the case is judged (watcher_running), not when an
+                        # exception leaves; as a daemon thread, it does not hold
+                        # process exit.
+                        if watcher.ident is not None:
+                            watcher.join(watch_join)
+            if not reached:
+                failures.append(case + ": the serving thread did not reach the point "
+                                "this case closes it at")
+                continue
+            measured[case] = round(elapsed, 3)
+            if stuck is not None:
+                failures.append(case + ": " + stuck)
+            elif server.thread.is_alive():
+                failures.append(case + ": the serving thread outlived close()")
+            if server.errors:
+                failures.append(case + ": fixture server error " + ", ".join(server.errors))
+            if watcher.is_alive():
+                # Its reads may still change latest, so the case is not
+                # judged by them, whatever they show so far.
+                unjudged.append(watcher_running(case, watch_join))
+                continue
+            # A close() that did not record shut is judged by when it
+            # returned, a later time, which can turn "left" into "early" or
+            # "unseen" but never the reverse.
+            shut = server.shut if server.shut is not None else start + elapsed
+            outcomes = [call_outcome(started, ended, shut, latest[0])
+                        for _, started, ended in server.calls]
+            if "left" in outcomes:
+                left.append(case)
+                failures.append("{}: close() left the serving thread's blocking call to "
+                                "its {} s socket timeout: the thread was seen still asleep "
+                                "in poll after close() should have ended the connection"
+                                .format(case, SOCKET_TIMEOUT))
+            elif seen_blocked is False:
+                unjudged.append(not_seen(case, wait))
+            elif "early" in outcomes:
+                unjudged.append("{}: the blocking call lasted its {} s socket timeout, which "
+                                "could have run out before close() ended the connection, so "
+                                "the times do not show whether close() came in time to wake "
+                                "it (the host or close() was slow)".format(case, SOCKET_TIMEOUT))
+            elif "unseen" in outcomes:
+                unjudged.append("{}: the blocking call lasted its {} s socket timeout, but the "
+                                "serving thread was not seen asleep in poll after close() "
+                                "ended the connection, so the times do not show whether the "
+                                "call stayed blocked or was woken and its end recorded "
+                                "late".format(case, SOCKET_TIMEOUT))
+            elif case == "registration" and not stop.ordered:
+                unjudged.append(case + ": close() was not seen at the lock or past the "
+                                "connection within 10 s of the pause (scheduling)")
+            elif elapsed > CLOSE_BOUND and not server.thread.is_alive():
+                unjudged.append("{}: close() took {:.3f} s, over its {} s bound, though no "
+                                "blocking call lasted the {} s socket timeout; the times do "
+                                "not show whether close() or the host was slow".format(
+                                    case, elapsed, CLOSE_BOUND, SOCKET_TIMEOUT))
+        return failures, unjudged, measured, left
+
+    class TaskFiles:
+        # A thread as asleep_in_poll reads it: only its native_id, here the
+        # name of a directory of written task files.
+        def __init__(self, native_id):
+            self.native_id = native_id
+
+    def poll_rule(root):
+        # asleep_in_poll's reading of each POLL_RULE_FILES entry, written
+        # under root and read through its task_root, against the reading
+        # required for this machine: the departures, and any OSError.
+        numbers = POLL_SYSCALLS.get(os.uname().machine)
+        departures = []
+        try:
+            with tempfile.TemporaryDirectory(prefix="opf-poll-rule-", dir=root) as temp:
+                for index, (channel, call, listed, unlisted) in enumerate(POLL_RULE_FILES):
+                    if call is None:
+                        call = (numbers or ("7",))[0] + " 0x0 0x0 0x0 0x0 0x0 0x0 0x0 0x0"
+                    task = Path(temp) / str(index)
+                    task.mkdir()
+                    (task / "wchan").write_text(channel, encoding="ascii")
+                    (task / "syscall").write_text(call + "\n", encoding="ascii")
+                    required = listed if numbers is not None else unlisted
+                    read = asleep_in_poll(TaskFiles(str(index)), task_root=temp + "/")
+                    if read is not required:
+                        departures.append("{} for wait channel {!r} and system call {!r}, "
+                                          "not {}".format(read, channel, call, required))
+        except OSError as exc:
+            return departures, "{}: {}".format(type(exc).__name__, exc)
+        return departures, None
+
+    def close_row(context, certificates, root):
+        # close() must end a serving thread blocked in a socket call rather
+        # than leave the call to its 2.0 s socket timeout: a client that never
+        # sends the TLS handshake, one that completes it and never sends a
+        # request, and a close() that meets the thread inside its
+        # registration of the wrapped connection (PausedStop). Each case is
+        # ordered by events and the thread's observed state, not by fixed
+        # sleeps. In the handshake and request cases the test waits until
+        # the serving thread has recorded the start of its blocking call and
+        # set that call's event (Server.blocking), and then until /proc shows
+        # it asleep in poll (wait_blocked), within BLOCK_WAIT; in the
+        # registration case, until the thread pauses there
+        # (PausedStop.paused), until close() is seen at the lock or past the
+        # connection. It then closes whether or not those were seen. A
+        # second thread reads /proc throughout (watch_asleep), and close()
+        # records when it had ended the connection (Server.shut). Each
+        # blocking call is judged by its own recorded start and end, whatever
+        # exception ended it, against that moment and those reads
+        # (call_outcome). A call that lasted the socket timeout, whose
+        # timeout had not run out when close() ended the connection, and
+        # whose thread was seen still asleep in poll after that, was not
+        # woken by close(): it fails the row INVALID however long close()
+        # took, and so do a case not reached, a server error, and a thread
+        # still running JOIN_BOUND after close(), named by close()'s own
+        # error. A case whose thread was not seen asleep within BLOCK_WAIT is
+        # CANNOT-EVALUATE with that reason, checked after a case not reached,
+        # close()'s error, a serving thread alive after close(), a server error,
+        # a watching thread still running (watcher_running, below) and a call
+        # judged left, and before every reason that follows: a case not reached
+        # or still watched gets no not-seen reason, one with a call judged left
+        # fails INVALID instead, and close()'s error, a serving thread alive
+        # after close() and a server error still fail the row alongside it. A
+        # call that lasted the timeout is CANNOT-EVALUATE, not INVALID, when the
+        # timeout could have run out before close() ended the connection (the
+        # test thread stalled between close()'s start and the shutdown, or a
+        # slow close()), or when the thread was not seen asleep after it (the
+        # serving thread stalled between being woken and recording the call's
+        # end); so is a registration case whose close() was not seen within 10 s
+        # of the pause. The times still cannot tell apart: a close() that ends
+        # the connection after the timeout could run out from a test thread
+        # stalled as long; a call left blocked while the watching thread is
+        # stalled for all of it from a serving thread that records its end late
+        # (each CANNOT-EVALUATE, so a self-check run hit by either reads
+        # CANNOT-EVALUATE); a stall between ending the connection and recording
+        # Server.shut, which can turn "left" into "early" or "unseen", never the
+        # reverse; and a serving thread stalled through the whole 10 s wait for
+        # its case's event, which reads INVALID as a case not reached, as a
+        # handshake moved into the wrap does. A case whose watching thread is
+        # still running WATCH_JOIN after close() returned (it is joined however
+        # the case ended) is not judged by its reads, which could still change:
+        # it is CANNOT-EVALUATE, naming that thread (watcher_running), unless it
+        # failed otherwise. Each close() must also return within CLOSE_BOUND,
+        # half the socket timeout and many times the milliseconds it takes when
+        # the host schedules it promptly. A close() over that bound with no call
+        # that lasted the socket timeout is CANNOT-EVALUATE with the measured
+        # time: the times do not show whether close() or the host was slow. As
+        # its self-check, the row then runs the same cases against
+        # ClosingServer, whose close() closes the connection in flight instead
+        # of shutting it down, and requires a blocking call there to be judged
+        # left to its socket timeout. If none is, the row is INVALID when that
+        # run passed, and CANNOT-EVALUATE when it failed for another reason or
+        # was not judged. The three runs that follow make each watcher through
+        # watcher_class as RecordedWatcher, a stand-in that runs nothing, so
+        # what they judge does not depend on how a watcher thread is scheduled.
+        # Each stand-in reads as alive from its start until it is joined, and
+        # close_cases must join each once, with that run's CHECK_JOINS entry,
+        # after its case's done is set. It then runs the handshake and request
+        # cases with every /proc read failing, where a real watcher would record
+        # no read, and a wait of twice the socket timeout, so the call normally
+        # runs out its timeout first. Their stand-ins read as not alive once
+        # joined, and each case must give exactly the not-seen reason: a join
+        # defect, or any other reason, a watcher_running reason included (as a
+        # case judged before its watcher is joined gives), fails the row
+        # INVALID, and a case that failed otherwise makes it CANNOT-EVALUATE.
+        # Next, in a registration case whose stand-in still reads as alive after
+        # its join, close_cases must give exactly the watcher_running reason: a
+        # join defect is judged first, then a case that failed otherwise makes
+        # the check CANNOT-EVALUATE, and any other reason fails the row INVALID.
+        # Then, in a handshake case whose test thread /proc read raises,
+        # close_cases must join the watcher before the exception leaves it,
+        # which a join after the cleanup does not (on a return such a join
+        # behaves the same, so only this case tells it apart); a read that did
+        # not raise makes the check CANNOT-EVALUATE before the join is judged. A
+        # join that is missing when the call ends, repeated, given another
+        # timeout or made before done is set fails the row INVALID, naming
+        # which. A call_outcome that departs from CALL_EDGES fails the row
+        # INVALID. Only the runs before those three use real watcher threads:
+        # there a watcher still running WATCH_JOIN after close() returned makes
+        # its case CANNOT-EVALUATE (watcher_running) unless it failed otherwise,
+        # and in the self-check such a case is not judged left, so such a
+        # watcher never fails the row INVALID. Last, it writes the task files
+        # POLL_RULE_FILES lists under root and has asleep_in_poll read each
+        # through its task_root (poll_rule), requiring the reading listed for
+        # this machine: where POLL_SYSCALLS lists it, a wait channel naming poll
+        # reads False unless the system call is poll as well, and a poll system
+        # call reads False unless the wait channel names poll. A reading that
+        # departs fails the row INVALID, and task files that could not be
+        # written make it CANNOT-EVALUATE.
+        client_context = original_context(cadata=certificates)
+        failures, unjudged, measured, _ = close_cases(context, client_context, Server)
+        caught, missed, mutant_measured, left = close_cases(
+            context, client_context, ClosingServer)
+
+        def unreadable(thread):
+            # asleep_in_poll with every /proc read failing: no task 0 exists.
+            return asleep_in_poll(thread, task_root="/proc/self/task/0/")
+
+        class RecordedWatcher:
+            # A stand-in for close_cases' watcher thread (watcher_class) in
+            # the three checks below. It runs nothing, so what it records does
+            # not depend on scheduling: for each join call, its timeout,
+            # whether done was already set (the cleanup had begun) and
+            # whether escaped was (the call to close_cases had ended). Once
+            # started it reads as alive until it is joined, as a watcher still
+            # reading /proc does, and after that when alive is True, as a
+            # watcher still running when its join returns does.
+            def __init__(self, made, alive, escaped, *, target, name, daemon, args):
+                self.alive = alive
+                self.escaped = escaped
+                self.done = args[3]
+                self.ident = None
+                self.joins = []
+                made.append(self)
+
+            def start(self):
+                self.ident = 0
+
+            def join(self, timeout=None):
+                self.joins.append((timeout, self.done.is_set(), self.escaped.is_set()))
+
+            def is_alive(self):
+                return self.ident is not None and (self.alive or not self.joins)
+
+        def join_defect(made, cases, join, ending):
+            # How close_cases' joins of the RecordedWatchers it made, one for
+            # each of cases in order, depart from a single join of each with
+            # join, after its case's done was set and before the call ended
+            # (ending names how it ended); None if they do not. The lines for
+            # a watcher not started and one not joined only name the defect:
+            # without them, a watcher not joined still fails as joined 0 times,
+            # and so does one not started, as close_cases joins a watcher only
+            # once it has started. A join is recorded as made after the call
+            # ended only when another thread makes it once close_cases has
+            # returned, which no code here does, so no check here reaches that
+            # line.
+            if len(made) != len(cases):
+                return "{} watchers made through watcher_class, not {}".format(
+                    len(made), len(cases))
+            for case, watcher in zip(cases, made):
+                if watcher.ident is None:
+                    defect = "not started"
+                elif not watcher.joins:
+                    defect = "not joined " + ending
+                elif len(watcher.joins) != 1:
+                    defect = "joined {} times, not once".format(len(watcher.joins))
+                elif watcher.joins[0][0] != join:
+                    defect = "joined with timeout {!r}, not watch_join ({})".format(
+                        watcher.joins[0][0], join)
+                elif not watcher.joins[0][1]:
+                    defect = "joined before done was set, outside the cleanup"
+                elif watcher.joins[0][2]:
+                    defect = "joined after the call to close_cases ended"
+                else:
+                    continue
+                return "{}: its watcher was {}".format(case, defect)
+            return None
+
+        blind_wait = 2 * SOCKET_TIMEOUT
+        blind_cases = ("handshake", "request")
+        blind_made = []
+        blind_escaped = threading.Event()
+        try:
+            blind_failures, blind_unjudged, _, _ = close_cases(
+                context, client_context, Server, blind_cases, unreadable, blind_wait,
+                watch_join=CHECK_JOINS["unreadable"],
+                watcher_class=functools.partial(
+                    RecordedWatcher, blind_made, False, blind_escaped))
+        finally:
+            blind_escaped.set()
+        blind_defect = join_defect(blind_made, blind_cases, CHECK_JOINS["unreadable"],
+                                   "before close_cases returned")
+        blind_wrong = []
+        blind_failed = []
+        for case in blind_cases:
+            prefix = case + ": "
+            failed = [entry for entry in blind_failures if entry.startswith(prefix)]
+            reasons = [entry for entry in blind_unjudged if entry.startswith(prefix)]
+            if failed:
+                blind_failed.extend(failed)
+            elif reasons != [not_seen(case, blind_wait)]:
+                blind_wrong.append(case + " gave " + ("; ".join(reasons) or "no reason"))
+        if blind_defect is not None:
+            blind_status = INVALID
+            failures.append("unreadable /proc: " + blind_defect)
+        elif blind_wrong:
+            blind_status = INVALID
+            failures.append("unreadable /proc: not the not-seen reason: "
+                            + "; ".join(blind_wrong))
+        elif blind_failed:
+            blind_status = CANNOT_EVALUATE
+            unjudged.append("unreadable /proc: not judged: " + "; ".join(blind_failed))
+        else:
+            blind_status = VALID
+
+        held_made = []
+        held_escaped = threading.Event()
+        try:
+            held_failures, held_unjudged, _, _ = close_cases(
+                context, client_context, Server, ("registration",),
+                watch_join=CHECK_JOINS["held"],
+                watcher_class=functools.partial(RecordedWatcher, held_made, True, held_escaped))
+        finally:
+            held_escaped.set()
+        held_defect = join_defect(held_made, ("registration",), CHECK_JOINS["held"],
+                                  "before close_cases returned")
+        if held_defect is not None:
+            held_status = INVALID
+            failures.append("held watcher: " + held_defect)
+        elif held_failures:
+            held_status = CANNOT_EVALUATE
+            unjudged.append("held watcher: not judged: " + "; ".join(held_failures))
+        elif held_unjudged != [watcher_running("registration", CHECK_JOINS["held"])]:
+            held_status = INVALID
+            failures.append("held watcher: not reported: registration gave "
+                            + ("; ".join(held_unjudged) or "no reason"))
+        else:
+            held_status = VALID
+        caller = threading.current_thread()
+
+        class Raised(Exception):
+            pass
+
+        def raising(thread):
+            # A stand-in for asleep_in_poll that raises in the test thread's
+            # read (wait_blocked), so the exception leaves close_cases through
+            # its cleanup. It reads False in any other thread, which only a
+            # watcher made without watcher_class would be.
+            if threading.current_thread() is not caller:
+                return False
+            raise Raised()
+
+        raising_made = []
+        raising_escaped = threading.Event()
+        raised = False
+        try:
+            close_cases(context, client_context, Server, ("handshake",), raising,
+                        watch_join=CHECK_JOINS["raising"],
+                        watcher_class=functools.partial(
+                            RecordedWatcher, raising_made, False, raising_escaped))
+        except Raised:
+            raised = True
+        finally:
+            raising_escaped.set()
+        raising_defect = join_defect(raising_made, ("handshake",), CHECK_JOINS["raising"],
+                                     "before the exception left close_cases")
+        if not raised:
+            raising_status = CANNOT_EVALUATE
+            unjudged.append("raising case: the test thread's /proc read was not reached")
+        elif raising_defect is not None:
+            raising_status = INVALID
+            failures.append("raising case: " + raising_defect)
+        else:
+            raising_status = VALID
+        if left:
+            mutant_status = INVALID
+        elif caught or missed:
+            mutant_status = CANNOT_EVALUATE
+            unjudged.append("self-check: a close() that closes the connection instead of "
+                            "shutting it down was not judged by its blocking calls: "
+                            + "; ".join(caught + missed))
+        else:
+            mutant_status = VALID
+            failures.append("self-check: the row passed a close() that closes the "
+                            "connection instead of shutting it down")
+        if any(call_outcome(*times) != outcome for times, outcome in CALL_EDGES):
+            failures.append("call_outcome departs from its bounds at CALL_EDGES")
+        departures, unwritten = poll_rule(root)
+        if departures:
+            poll_rule_status = INVALID
+            failures.append("poll rule: asleep_in_poll read " + "; ".join(departures))
+        elif unwritten is not None:
+            poll_rule_status = CANNOT_EVALUATE
+            unjudged.append("poll rule: the task files could not be written: " + unwritten)
+        else:
+            poll_rule_status = VALID
+        row = {"id": CLOSE_IDENTITY, "close_seconds": measured,
+               "close_bound_seconds": CLOSE_BOUND,
+               "self_check_status": mutant_status,
+               "self_check_close_seconds": mutant_measured,
+               "unreadable_proc_status": blind_status,
+               "held_watcher_status": held_status,
+               "raising_watcher_status": raising_status,
+               "poll_rule_status": poll_rule_status,
+               "test_status": (INVALID if failures
+                               else CANNOT_EVALUATE if unjudged else VALID)}
+        if failures or unjudged:
+            row["detail"] = "; ".join(failures + unjudged)
+        return row
 
     def snapshot(root):
         result = {}
@@ -4455,6 +5466,8 @@ def self_test(vectors_only=False):
                     "resolver-vector/cleanup")
     detected = (False, "fixture: detected", 0.0, [], [], [], [], [], [])
     evaluated = (True, "fixture: evaluated", 0.0, [], [], [], [], [], [])
+    # The positive-held-slot vector's join of the worker it releases.
+    HELD_JOIN = 10.0
 
     class SlotProbe:
         # The real slot. The retained-slot bound is the only timed wait for
@@ -4509,6 +5522,10 @@ def self_test(vectors_only=False):
                      ["fetch order"]),
                     (VECTOR_NAMES[6], dict(fetch_bound=0.50, delay_before_resolve=0.60),
                      ["timing bound"])):
+                if ("fetch_bound" in config) != (name in _LOAD_SENSITIVE_VECTORS):
+                    raise AssertionError("the load-sensitive vectors depart from the timing configs")
+                if steady_only and name in _LOAD_SENSITIVE_VECTORS:
+                    continue
                 failures = []
                 case = (name.replace("resolver-vector/", "vector/"), VALID, "archive", config)
                 run = run_case(base, contexts, case, False)
@@ -4615,10 +5632,15 @@ def self_test(vectors_only=False):
         # While that worker holds the slot, the cancellation sweep is not run:
         # its row is CANNOT-EVALUATE naming that run, so no row goes missing
         # and the exit is not 0. Run, the sweep raises on the held slot.
+        # The worker it releases is joined before it returns, so the next
+        # vector starts with no resolver worker alive; one that outlives
+        # HELD_JOIN fails this vector, not the next. The worker ends
+        # within milliseconds of its release when it is scheduled; the bound
+        # also covers a host that stalls it for several seconds.
         gate = threading.Event()
         case = ("vector/positive-held-slot", VALID, "archive", {"hold_after_publish": gate})
+        failures = []
         try:
-            failures = []
             run = run_case(base, contexts, case, False)
             if run[:2] != (True, VALID) or run[4:] != ([], ["after", "teardown"], [], [], []):
                 failures.append("the positive run was not a passing run with one straggler")
@@ -4637,9 +5659,12 @@ def self_test(vectors_only=False):
                     "detail": BLOCKED_SWEEP + case[0]}]:
                 failures.append("the cancellation sweep's row was not CANNOT-EVALUATE naming "
                                 + case[0])
-            results.append((VECTOR_NAMES[10], failures))
         finally:
             gate.set()
+            if join_resolvers(HELD_JOIN):
+                failures.append("the released resolver worker outlived its {} s join".format(
+                    HELD_JOIN))
+        results.append((VECTOR_NAMES[10], failures))
 
     def sweep_leaked_vector(base, contexts, results):
         # A slot held with no live resolver worker before the cancellation
@@ -4671,11 +5696,24 @@ def self_test(vectors_only=False):
             failures.append("the leaked slot did not fail the sweep's row INVALID")
         results.append((VECTOR_NAMES[11], failures))
 
+    def run_vector(vector, names, base, contexts, results):
+        # A vector that raises reports each of its names not yet reported as
+        # "cannot evaluate", naming the exception and its message, so the
+        # report says what could not be evaluated.
+        try:
+            vector(base, contexts, results)
+        except Exception as exc:
+            done = {name for name, _ in results}
+            reason = type(exc).__name__ + (": " + str(exc) if str(exc) else "")
+            results.extend((name, ["cannot evaluate: " + reason])
+                           for name in names if name not in done)
+
     def resolver_vectors(base, contexts):
         # Returns (name, failures) per vector; a vector that raises reports
         # "cannot evaluate". Every vector releases its hold, then all workers
         # are joined, and the cleanup vector requires none alive, the self-test
-        # lookup and the real slot still bound, and the slot free.
+        # lookup and the real slot still bound, the slot free, and a raising
+        # vector's report to carry its exception's message.
         results = []
         lookup_before = module._lookup
         slot_before = module._RESOLVER_SLOT
@@ -4684,13 +5722,16 @@ def self_test(vectors_only=False):
                               (leaked_vector, VECTOR_NAMES[9:10]),
                               (held_slot_vector, VECTOR_NAMES[10:11]),
                               (sweep_leaked_vector, VECTOR_NAMES[11:12])):
-            try:
-                vector(base, contexts, results)
-            except Exception as exc:
-                done = {name for name, _ in results}
-                results.extend((name, ["cannot evaluate: " + type(exc).__name__])
-                               for name in names if name not in done)
+            run_vector(vector, names, base, contexts, results)
         failures = []
+
+        def raising(base, contexts, results):
+            raise AssertionError("the probe precondition does not hold")
+        probe = []
+        run_vector(raising, ("vector/raising",), base, contexts, probe)
+        if probe != [("vector/raising", ["cannot evaluate: AssertionError: "
+                                         "the probe precondition does not hold"])]:
+            failures.append("a raising vector's report did not name what it could not evaluate")
         if join_resolvers(5.0):
             failures.append("a resolver worker outlived the vectors")
         if module._lookup is not lookup_before or module._RESOLVER_SLOT is not slot_before:
@@ -4703,6 +5744,10 @@ def self_test(vectors_only=False):
         return results
 
     try:
+        if tuple(case[0] for case in cases if "fetch_bound" in case[3]) != _LOAD_SENSITIVE_ROWS:
+            raise AssertionError("the load-sensitive rows depart from the timing configs")
+        if steady_only:
+            cases[:] = [case for case in cases if case[0] not in _LOAD_SENSITIVE_ROWS]
         # Missing timer support is a setup cannot-evaluate, before any row.
         watchdog_preconditions()
         with watchdog(3.0):
@@ -4776,9 +5821,13 @@ def self_test(vectors_only=False):
             # missing for it.
             if main_failed:
                 SELF_TEST_ROSTER = tuple(executed)
-                print(json.dumps({"opf_adopt_observe_tests": executed}, sort_keys=True))
+                print(_report_line(executed))
+                _print_failures(_roster_failures(executed)
+                                + ["FAIL roster/rows: the run stopped after its positive control"])
                 return 1
 
+            # The fixture's close() itself, which every run's teardown relies on.
+            executed.append(close_row(contexts[0], fixture_certificates, base))
             guard_rows = (_guard_self_test() + _ownership_self_test()
                           + cancellation_rows(_cancellation_self_test))
             executed.extend(guard_rows)
@@ -4787,13 +5836,34 @@ def self_test(vectors_only=False):
                 executed.append(record_row(case, run, run_case(base, contexts, case, True)))
             vector_results = resolver_vectors(base, contexts)
     except Exception as exc:
+        # Carry the exception's message, so a failure reads as more than its
+        # exception class, and flatten it for the FAIL line. Reading or
+        # splitting the message can itself raise; the row is still recorded,
+        # with a fallback detail, and the run still exits 2. A message that
+        # is empty or only white space, line breaks included, reads "no
+        # message" in both.
+        try:
+            detail = str(exc)
+            flat = " ".join(detail.splitlines()).strip()
+        except Exception:
+            detail = flat = "the exception's message could not be read"
+        if not flat:
+            detail = flat = "no message"
         executed.append({
             "id": "fixture/setup-or-teardown",
             "test_status": CANNOT_EVALUATE,
             "exception": type(exc).__name__,
+            "detail": detail,
         })
         SELF_TEST_ROSTER = tuple(executed)
-        print(json.dumps({"opf_adopt_observe_tests": executed}, sort_keys=True))
+        print(_report_line(executed))
+        # Exit 2 (cannot evaluate), but still name every row that is not
+        # VALID, the setup-or-teardown row included. That row is the last
+        # one and not VALID, so the last line is its own; it also names the
+        # exception and its detail, on one line.
+        lines = _roster_failures(executed)
+        lines[-1] += ": {}: {}".format(type(exc).__name__, flat)
+        _print_failures(lines)
         return 2
 
     # Every exit-code departure from main; all concern resolver workers:
@@ -4842,28 +5912,32 @@ def self_test(vectors_only=False):
     #   after the call, before either wait, so it missed changes made
     #   during them.
     SELF_TEST_ROSTER = tuple(executed)
-    print(json.dumps({"opf_adopt_observe_tests": executed}, sort_keys=True))
-    for name, failures in vector_results:
-        print("FAIL " + name + ": " + "; ".join(failures) if failures else "PASS " + name)
-    expected_ids = ([positive[0]] + [row["id"] for row in guard_rows]
+    print(_report_line(executed))
+    expected_ids = ([positive[0], CLOSE_IDENTITY] + [row["id"] for row in guard_rows]
                     + [case[0] for case in cases])
-    if [row["id"] for row in executed] != expected_ids:
+    # The FAIL-line check runs first, so its PASS lines precede any FAIL line,
+    # and the real roster is judged and named whatever its outcome.
+    try:
+        _failure_lines_self_test()
+        red_failure = None
+    except AssertionError as exc:
+        red_failure = "FAIL " + str(exc)
+    rc = _judge_roster(executed, expected_ids, vector_results, tuple(
+        name for name in VECTOR_NAMES if not (steady_only and name in _LOAD_SENSITIVE_VECTORS)))
+    if red_failure is not None:
+        _print_failures([red_failure])
         return 1
-    if any(row["test_status"] != VALID for row in executed):
-        return 1
-    failed = [text for _, failures in vector_results for text in failures]
-    if tuple(name for name, _ in vector_results) != VECTOR_NAMES:
-        return 1
-    if failed:
-        return 2 if all(text.startswith("cannot evaluate") for text in failed) else 1
+    if rc:
+        return rc
     if not vectors_only:
         try:
-            _runner_registration_test(expected_ids)
+            _runner_registration_test(expected_ids, VECTOR_NAMES)
         except AssertionError as exc:
-            print(str(exc), file=sys.stderr)
+            _print_failures(["FAIL " + str(exc)])
             return 1
         except Exception as exc:
-            print("registration cannot evaluate:", type(exc).__name__, file=sys.stderr)
+            _print_failures(["FAIL runner/adopt-observe-registration: registration cannot "
+                             "evaluate: {}: {}".format(type(exc).__name__, exc)])
             return 2
     return 0
 

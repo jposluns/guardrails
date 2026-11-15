@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """OPF record-authoring gate (spec 8.8): `opf record` behaviour, and red-on-revert discriminators.
 
-  check_opf_record.py --self-test                    the fixture suite (T1-T115)
+  check_opf_record.py --self-test                    the fixture suite (T1-T116)
   check_opf_record.py --self-test --red-on-revert    the same, plus each test's flip must turn it red
                                                      through an assertion (_discriminate)
 
@@ -191,9 +191,11 @@ Each case runs on its own copy of that template; the root is removed in a finall
   T36 the journal home is reopened under the held capability: a home renamed aside and replaced by a
       peer's with an open transaction after the trigger read is planned from its current binding and
       rolled back (flip: plan through the trigger read's descriptor)
-  T37 a homes-2 capability leftover of another operation (a killed `ingest` holder) is reclaimed and
-      attributed to the operation its record names, never to opf record (flip: attribute every reclaim
-      to record)
+  T37 a homes-2 capability leftover of another operation (a confirmed-dead `ingest` holder with no
+      journal, a confirmed-dead `sync` holder beside an open record transaction) refuses with exit 2
+      naming that operation: the whole store, git internals included, is byte-identical, its lease and
+      active record stay and name it, the transaction stays open, no journal home is created (spec
+      8.8 item 1; flip: the substrate's same-operation check removed)
   T38 a recovery acquisition that removes a staging leftover and then refuses names the removal and
       claims only that no record operand, journal or projection was written; a contended one says it
       removed nothing (flip: the staging removal goes unreported)
@@ -673,6 +675,10 @@ Each case runs on its own copy of that template; the root is removed in a finall
       one holding it at active, refuses exit 2 at the committed-row check read again under the held lease,
       every byte untouched, no reservation and no transaction (flip: the held re-check dropped, so the
       repair publishes over a prior commit that does not hold the item and records exit 0)
+  T116 a recovery claim that released a dead run's leftover lease and claimed anew, whose lease directory
+      close then fails, refuses exit 2 naming that error, the lease the claim left in place as one that
+      STAYS and the leftover's release, the journal left as found (flip: the claim's close error reaches
+      the unexpected-error backstop, whose repr drops those notes)
 
 Exit convention: 0 every assertion passes; 1 an assertion fails; 2 the harness cannot evaluate (git absent
 or unusable, temporary storage unusable, or any unexpected harness fault), or, when no assertion fails, a
@@ -1200,15 +1206,17 @@ def record_cli(env, root, args):
     return cli(env, ["record"] + list(args) + ["--root", str(root)])
 
 
-def snapshot(root):
-    """Every entry beneath root except .git, each with its mode bits: a regular file by content, a symlink
+def snapshot(root, include_git=False):
+    """Every entry beneath root except .git (with include_git, .git too: the operation capability's
+    active record and the git internals), each with its mode bits: a regular file by content, a symlink
     by its target text (never followed), a directory and any other type by its type. A directory the walk
     cannot list (root included) is a harness fault, never an entry silently left out of the comparison."""
     def unlistable(exc):
         raise Harness("snapshot cannot list the directory {!r} ({})".format(exc.filename, exc))
     result = {}
     for directory, dirs, files in os.walk(root, onerror=unlistable):
-        dirs[:] = [d for d in dirs if not (Path(directory) == Path(root) and d == ".git")]
+        if not include_git:
+            dirs[:] = [d for d in dirs if not (Path(directory) == Path(root) and d == ".git")]
         for name in sorted(dirs + files):
             path = Path(directory) / name
             st = path.lstat()
@@ -3246,14 +3254,50 @@ def flip_t89_first_current():
     return patch.object(record, "_current_handoffs", first_only)
 
 
+CLEAN_IMPORTER = ("C-HANDOFF: clean record {!r} (type {!r}) carries actor.kind 'importer'; a clean-series record "
+                  "MUST NOT carry it (spec 8.6)")
+RENDER_REFUSED = "the view render after publication did not complete"
+
+
+def _other_handoff_findings(out, finding):
+    """The doctor's C-HANDOFF findings in `out` other than `finding`. Only the report's finding lines
+    (`  FINDING: <message>`, opf._doctor_report) are read: its per-check verdict line (`  C-HANDOFF: FINDING`)
+    states the check's verdict, which `finding` alone already sets, and is never a second finding."""
+    lines = [line[len("  FINDING: "):] for line in out.splitlines() if line.startswith("  FINDING: ")]
+    return [line for line in lines if line.startswith("C-HANDOFF:") and line != finding]
+
+
+def clean_importer_at_rest(env, root, rid, rtype):
+    """The doctor's refusal at rest of a clean record carrying the importer kind (spec 8.6: a clean-series
+    record MUST NOT carry it), on this store with no active imported series graded under C-HANDOFF, and
+    no other C-HANDOFF finding line beside it (_other_handoff_findings), so the at-most-one-current rule
+    still holds."""
+    rc, out, err = cli(env, ["doctor", "--root", str(root)])
+    finding = CLEAN_IMPORTER.format(rid, rtype)
+    assert rc == 1 and finding in out, ("the clean importer record is a doctor finding at rest", rc,
+                                        out[-1600:], err[-800:])
+    others = _other_handoff_findings(out, finding)
+    assert not others, ("no other C-HANDOFF finding", others)
+
+
+def published_unrendered(env, root, args):
+    """A clean operation over a store holding a clean importer record: the writer publishes, then the view
+    render refuses the store the doctor finds INVALID, so the run ends exit 2 with the published bytes left
+    uncommitted for the caller to inspect."""
+    rc, out, err = record_cli(env, root, args)
+    assert rc == 2 and RENDER_REFUSED in err, ("published, then the render refuses", args, rc, out[-800:],
+                                               err[-1600:])
+
+
 def t89_importer_history_posts(fx):
-    """A legacy importer-authored current handoff in the clean index is history outside every current-state
-    join (spec 8.6: the section 8.5 at-most-one-current rule evaluates only clean records authored by
-    non-importer actors, and such a record keeps its bytes, its recorded state and its place in the clean
-    series): a clean posting proceeds, supersedes nothing, and leaves the importer bytes untouched; the
-    committed store is doctor VALID and HANDOFF.md keeps the history out of Current. A second clean
-    posting then supersedes the clean current handoff only (the mixed historical-importer/clean-current
-    case), the history again untouched."""
+    """An importer-authored current handoff seated in the clean index is a doctor finding at rest (spec 8.6:
+    a clean-series record MUST NOT carry `actor.kind = "importer"`), and it stays outside every current-state
+    join (spec 8.6: every current-state join, including the section 8.5 at-most-one-current handoff rule,
+    MUST evaluate only clean records authored by non-importer actors): a clean posting publishes HO-2
+    current, supersedes nothing and leaves the importer bytes untouched, then the view render refuses the
+    INVALID store. A second clean posting then supersedes the clean current handoff only (the mixed
+    importer/clean-current case), the importer record again untouched, and once that posting is committed
+    the doctor reports only the importer record's C-HANDOFF finding, never a second current handoff."""
     env = fx.env
     root = fx.case("t89-importer-history")
     legacy = {
@@ -3266,24 +3310,22 @@ def t89_importer_history_posts(fx):
     counters = model(root, COUNTERS)
     counters["counters"]["HO"] += 1
     write_commit(env, root, COUNTERS, emit.emit_checked(counters).encode("utf-8"), "its counter")
+    clean_importer_at_rest(env, root, "HO-1", "handoff")
     with ticking():
-        out = step(fx, root, HO_CREATE + ASSISTANT, "HO-2 over importer history")
-        assert '"change": null' in out, ("T89 importer history discharges no supersession", out[-800:])
+        published_unrendered(env, root, HO_CREATE + ASSISTANT)
         assert row(root, "HO-1", HO_INDEX) == legacy, ("T89 the importer bytes stay untouched",
                                                        row(root, "HO-1", HO_INDEX))
         posted = row(root, "HO-2", HO_INDEX)
         assert posted["status"] == "current" and "links" not in posted, posted
-        doctor_valid(env, root)
-        assert _handoff_section(root, "Current") == ["- HO-2 resume here"], read(root, HANDOFF_VIEW)
-        assert _handoff_section(root, "Imported history") == [
-            "- HO-1 (current) migrated"], read(root, HANDOFF_VIEW)
-        out = step(fx, root, HO_CREATE + ASSISTANT, "HO-3 supersedes HO-2, the history untouched")
-        assert '"change": "HO-2 current -> superseded/proposed"' in out, out[-800:]
+        clean_importer_at_rest(env, root, "HO-1", "handoff")
+        fx.commit_all(root, "HO-2 over the importer record")
+        published_unrendered(env, root, HO_CREATE + ASSISTANT)
         assert row(root, "HO-1", HO_INDEX) == legacy, row(root, "HO-1", HO_INDEX)
+        assert row(root, "HO-2", HO_INDEX)["status"] == "superseded/proposed", row(root, "HO-2", HO_INDEX)
         assert row(root, "HO-3", HO_INDEX)["links"] == [{"rel": "supersedes", "id": "HO-2"}], (
             row(root, "HO-3", HO_INDEX))
-        doctor_valid(env, root)
-        assert _handoff_section(root, "Current") == ["- HO-3 resume here"], read(root, HANDOFF_VIEW)
+        fx.commit_all(root, "HO-3 supersedes HO-2")
+        clean_importer_at_rest(env, root, "HO-1", "handoff")
 
 
 def flip_t89_importer():
@@ -3302,6 +3344,48 @@ def flip_t89_importer():
         return [rec for rec in recs
                 if rec.rtype == record.HANDOFF and rec.state == "current" and rec.qual is None]
     return patch.object(record, "_current_handoffs", counted)
+
+
+def t89_importer_finding_lines(fx):
+    """The at-rest oracle of the importer vectors (_other_handoff_findings) over reports the doctor's own
+    printer writes (opf._doctor_report): the clean importer finding alone sets the `  C-HANDOFF: FINDING`
+    verdict line and leaves no other C-HANDOFF finding; a second C-HANDOFF finding line beside it is named;
+    a finding of another check is not."""
+    finding = CLEAN_IMPORTER.format("HO-1", "handoff")
+    second = "C-HANDOFF: 2 clean current handoffs ('HO-2', 'HO-3'); at most one is current (spec 8.5)"
+    receipt = "C-RECEIPTS: backlog item 'BI-1' is done with no receipt (spec 8.6)"
+
+    def printed(findings):
+        checks = {"C-RECEIPTS": "FINDING" if receipt in findings else "PASS", "C-HANDOFF": "FINDING"}
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            opf._doctor_report(opf_check.StoreValidation(opf_check.INVALID, findings=list(findings),
+                                                         checks=checks))
+        return buf.getvalue()
+    alone = printed([finding])
+    assert "  C-HANDOFF: FINDING" in alone.splitlines(), ("the doctor prints the verdict line", alone)
+    wrong = []
+    for label, findings, want in (("finding-alone", [finding], []),
+                                  ("second-handoff-finding", [finding, second], [second]),
+                                  ("other-check-finding", [finding, receipt], [])):
+        got = _other_handoff_findings(printed(findings), finding)
+        if got != want:
+            wrong.append((label, got, want))
+    assert not wrong, ("T89 the other C-HANDOFF findings of each (report, got, want) below are wrong", wrong)
+
+
+def flip_t89_verdict_line():
+    """Any line naming C-HANDOFF that is not the expected finding counts as another finding, the doctor's
+    per-check verdict line included, so the report holding the clean importer finding alone is red."""
+    def any_line(out, finding):
+        return [line for line in out.splitlines() if "C-HANDOFF:" in line and finding not in line]
+    return patch.object(sys.modules[__name__], "_other_handoff_findings", any_line)
+
+
+def flip_t89_no_findings():
+    """A reader that finds no other C-HANDOFF finding in any report, so a second current handoff beside the
+    clean importer finding passes."""
+    return patch.object(sys.modules[__name__], "_other_handoff_findings", lambda out, finding: [])
 
 
 def t89_archived_current_refused(fx):
@@ -3499,6 +3583,38 @@ class _Homes2SpecGate:
         return getattr(_opf_store, name)
 
 
+# The dispatcher refuses every store verb whose installed declaration contradicts the build (spec 16.1), and the
+# build homes 2 is activated as here, SUPPORTED_HOMES = 2, is one whose declaration says homes = 2. So every
+# vector that runs a verb under that patch also points the runtime check at that build's declaration: the file
+# HOMES2_DECLARATION beside the case roots (the in-process vectors and their children name the same file, written
+# with the same bytes by every writer) and the shipped-file digest of those bytes. The runtime check runs
+# unpatched, and the declared release, spec_version and worklog generation are this build's own.
+HOMES2_DECLARATION = "homes2-declaration/opf-declaration.toml"
+
+
+def _homes2_declaration_bytes():
+    import _opf_declaration
+    return _opf_declaration.declaration_bytes(_opf_declaration.RELEASE_IDENTITY, _opf_store.SUPPORTED_SPEC_VERSION,
+                                              2, _opf_store.SUPPORTED_WORKLOG)
+
+
+@contextlib.contextmanager
+def _homes2_declaration(root):
+    """Point the dispatcher's runtime check at the homes-2 build's declaration, written beside `root`."""
+    import hashlib
+    import _opf_declaration
+    data = _homes2_declaration_bytes()
+    path = Path(root).parent / HOMES2_DECLARATION
+    path.parent.mkdir(exist_ok=True)
+    staged = path.parent / "{}.{}".format(path.name, secrets.token_hex(8))
+    staged.write_bytes(data)
+    os.replace(staged, path)
+    with patch.object(opf, "_installed_declaration", lambda: path), \
+            patch.object(_opf_declaration, "SHIPPED_DECLARATION_BYTES", data), \
+            patch.object(_opf_declaration, "SHIPPED_DECLARATION_SHA256", hashlib.sha256(data).hexdigest()):
+        yield
+
+
 def _self_test_homes2_active(root):
     """Activate homes 2 over a fixture store: the manifest on disk declares the real homes-2 pair,
     spec_version HOMES2_SPEC_VERSION (2.0.0) and homes = 2, which the shipped validate_manifest accepts
@@ -3522,7 +3638,7 @@ def _self_test_homes2_active(root):
         path.write_text(emit.emit_checked(model), encoding="utf-8")
         try:
             with patch.object(_opf_store, "SUPPORTED_HOMES", 2), \
-                    patch.object(record, "_opf_store", _Homes2SpecGate()):
+                    patch.object(record, "_opf_store", _Homes2SpecGate()), _homes2_declaration(root):
                 yield
         finally:
             path.write_bytes(original)
@@ -3545,8 +3661,11 @@ record._record_run_id = lambda lock_id: "record-create." + str(os.getpid()) + ".
 # necessary until activation flips SUPPORTED_HOMES, since homes_generation activates nothing at 1 and
 # _load_manifest admits only the shipped SUPPORTED_SPEC_VERSION). The claim itself runs the REAL
 # homes-2 seam: the reservation scan, the spec 8.2 derivation, and the run id reservation published
-# before the publication.
+# before the publication. The runtime check reads the homes-2 build's declaration that the enclosing
+# _self_test_homes2_active wrote beside the case roots (HOMES2_DECLARATION, the same bytes).
 HOMES2_CHILD_FLIP = """
+import hashlib
+import _opf_declaration
 import _opf_store
 _opf_store.SUPPORTED_HOMES = 2
 class _Homes2SpecGate:
@@ -3555,6 +3674,11 @@ class _Homes2SpecGate:
             return _opf_store.HOMES2_SPEC_VERSION
         return getattr(_opf_store, name)
 record._opf_store = _Homes2SpecGate()
+_homes2_declared = _opf_declaration.declaration_bytes(
+    _opf_declaration.RELEASE_IDENTITY, _opf_store.SUPPORTED_SPEC_VERSION, 2, _opf_store.SUPPORTED_WORKLOG)
+_opf_declaration.SHIPPED_DECLARATION_BYTES = _homes2_declared
+_opf_declaration.SHIPPED_DECLARATION_SHA256 = hashlib.sha256(_homes2_declared).hexdigest()
+opf._installed_declaration = lambda: Path(sys.argv[1]).parent / """ + repr(HOMES2_DECLARATION) + """
 """
 
 
@@ -4642,39 +4766,78 @@ def capability_records(root):
     return (Path(root) / LEASE).exists(), active_record(root).exists()
 
 
-def t37_reclaim_names_operation(fx):
-    """A homes-2 capability leftover of ANOTHER operation (an `ingest` holder killed holding it, no record
-    journal present) is reclaimed and attributed to the operation its record names, never to opf record:
-    the lead describes a capability reclamation, the outcome names 'ingest' and says the record run does
-    not examine that operation's journal work. The reviewed head reported "an interrupted opf record run
-    was reconciled"."""
+def capability_operations(root):
+    """(the lease's operation, the active record's operation), each read from its file."""
+    return (model(root, LEASE)["operation"],
+            model(root, active_record(root).relative_to(root).as_posix())["operation"])
+
+
+def _t37_refused_leg(env, root, operation, states):
+    """One refusal leg: a confirmed-dead `operation` holder's lease and active record are present (with the
+    record journal in `states`); `opf record create` must refuse with exit 2 naming `operation`, every byte
+    of the store, .git included, unchanged (asserted before the message, so the check removed turns this
+    red on what was released), both records still naming `operation`, the journal exactly as found."""
+    assert Path(root) in active_record(root).parents, "T37 the active record lies inside the snapshot"
+    assert capability_records(root) == (True, True), "T37 the dead holder's lease and active record are left"
+    assert capability_operations(root) == (operation, operation), "T37 both records name " + operation
+    before = snapshot(root, include_git=True)
+    result = record_cli(env, root, CREATE)
+    assert snapshot(root, include_git=True) == before, (
+        "T37 the whole store, .git included, is byte-identical", operation, result[0], result[2][-1200:])
+    assert result[0] == 2, ("T37 exit 2", operation, result[0], result[2][-1200:])
+    refused(result, "were left by a confirmed-dead holder of the {!r} operation, not this {!r} "
+                    "operation".format(operation, record.VERB))
+    err = result[2]
+    assert "the acquisition removed nothing" in err, ("T37 the refusal says nothing was removed", err[-1200:])
+    assert "reclaimed" not in err and "rolled BACK" not in err, ("T37 nothing is reclaimed", err[-1200:])
+    assert capability_records(root) == (True, True), "T37 the lease and active record are kept"
+    assert capability_operations(root) == (operation, operation), "T37 both still name " + operation
+    assert journal_states(root, TYPED_JOURNAL) == states, "T37 the record journal is exactly as found"
+
+
+def t37_other_operation_no_journal(fx):
+    """A homes-2 capability leftover of ANOTHER operation is never released by record recovery (spec 8.8
+    item 1: a confirmed-dead leftover of another verb refuses before any recovery write and its lease is
+    never released): a confirmed-dead `ingest` holder with no record journal refuses with exit 2 naming
+    'ingest'; the whole store, git internals included, is byte-identical; the lease and active record are
+    still present and name 'ingest'; no journal home is created. Before the substrate's same-operation
+    check, recovery deleted both records."""
     env = fx.env
     base = fx.case("t37-homes2-base")
     with _self_test_homes2_active(base):
         root = fx.case("t37-homes2-ingest", base)
         assert die_holding(env, root, "ingest") == 137, "T37 the ingest holder is killed holding it"
-        assert capability_records(root) == (True, True), "T37 its lease and active record are left"
-        result = record_cli(env, root, CREATE)
-        refused(result, "the operation capability records an interrupted run left were reclaimed before "
-                        "this operation")
-        err = result[2]
-        assert "interrupted opf record run" not in err, ("T37 never attributed to opf record", err[-800:])
-        assert "left by an interrupted 'ingest' run whose holder" in err, ("T37 the operation named", err[-800:])
-        assert "any journal work of the 'ingest' operation is not examined here" in err, err[-800:]
-        assert capability_records(root) == (False, False), "T37 the confirmed-dead records are cleared"
+        assert not (Path(root) / TYPED_JOURNAL).exists(), "T37 the fixture has no journal home"
+        _t37_refused_leg(env, root, "ingest", {})
         assert not (Path(root) / TYPED_JOURNAL).exists(), "T37 no journal home is created"
 
 
-def flip_t37():
-    """Attribute every reclaim to opf record (the reviewed head's wording)."""
-    original = record._opf_oplock.acquire_operation
+def t37_other_operation_open_transaction(fx):
+    """As T37's no-journal vector, beside an OPEN record transaction: a confirmed-dead `sync` holder's
+    leftover next to the transaction a killed create left refuses with exit 2 naming 'sync'; the whole
+    store, git internals included, is byte-identical; the lease and active record are still present and
+    name 'sync'; the transaction is still open. Before the substrate's same-operation check, recovery
+    deleted both records and then rolled the transaction back."""
+    env = fx.env
+    base = fx.case("t37-homes2-base")
+    with _self_test_homes2_active(base):
+        root = fx.case("t37-homes2-sync-open", base)
+        proc = child(env, root, CREATE, kill="after-apply-0", flip=HOMES2_CHILD_FLIP)
+        assert proc.returncode == 137, ("T37 the create is killed mid-apply", proc.returncode, proc.stderr[-800:])
+        # The killed create's own record leftover is released through the substrate (same operation), and
+        # a sync holder then dies holding the capability beside the still-open transaction.
+        record._opf_oplock.release_operation(record._opf_oplock.acquire_operation(str(root), record.VERB,
+                                                                                  recover=True))
+        assert die_holding(env, root, "sync") == 137, "T37 the sync holder is killed holding it"
+        states = journal_states(root, TYPED_JOURNAL)
+        assert len(states) == 1 and set(states.values()) == {"open"}, ("T37 one open transaction", states)
+        _t37_refused_leg(env, root, "sync", states)
 
-    def as_record(store_root, operation, holder=None, recover=False):
-        cap = original(store_root, operation, holder=holder, recover=recover)
-        if cap.recovered:
-            cap.recovered_operation = record.VERB
-        return cap
-    return patch.object(record._opf_oplock, "acquire_operation", as_record)
+
+def flip_t37():
+    """The substrate's same-operation check removed: a confirmed-dead holder of any operation is released."""
+    return patch.object(_opf_oplock, "_require_same_operation",
+                        lambda active_bytes, operation: _opf_oplock._recorded_operation(active_bytes))
 
 
 def t38_staging_removal_disclosed(fx):
@@ -5085,8 +5248,8 @@ FIX7_BOTH = ("left is handled by this run only as far as each step succeeds: its
              "a transaction that cannot be reconciled, which leaves it and each one planned after it",
              "a failed release of the recovery capability, which leaves whichever of this run's own records it "
              "did not remove",
-             "the journal work of an operation other than record (an 'ingest' holder's), which this verb never "
-             "examines",
+             "the capability records and journal work of an operation other than record (an 'ingest' "
+             "holder's), which this verb's recovery acquisition refuses and keeps, never examining that journal",
              "or a name the acquisition had itself created: a publication's staging name, or a new record its "
              "unwind removed), or saying that is not known when the error carries no report of it",
              "a record that is not a plain singly-linked regular file, a staging leftover that is not a regular "
@@ -5102,7 +5265,9 @@ FIX7_RETIRED = ("is reclaimed and reconciled by this run", "Only a run that take
                 "a record or its staging leftover that is not a plain singly-linked regular file",
                 "carrying the same three reports", "carries no report; no removal runs there",
                 "left for a later run's trigger in each of these cases", RULE_FIX8,
-                "own publication that fails before it completes, which leaves an open transaction")
+                "own publication that fails before it completes, which leaves an open transaction",
+                "the journal work of an operation other than record (an 'ingest' holder's), which this verb never "
+                "examines")
 
 
 def fix7_texts():
@@ -5144,7 +5309,7 @@ def t46_disclosures_exact(fx):
             assert not any(hasattr(exc, name) for name in REPORTS), "T46 a validation raise carries no report"
         else:
             raise AssertionError("T46 a non-bool recover must refuse")
-        assert die_holding(env, root, "ingest") == 137, "T46 the ingest holder is killed holding it"
+        assert die_holding(env, root, record.VERB) == 137, "T46 the record holder is killed holding it"
         staging = active_record(root).parent / _opf_oplock._staging_name(_opf_oplock.ACTIVE_NAME)
         os.link(active_record(root), staging)
         assert os.lstat(staging).st_nlink == 2, "T46 the staging name shares the active record's inode"
@@ -7231,6 +7396,62 @@ def flip_t77():
     return patch.object(guard, "_claim_after_release", narrow)
 
 
+# --- T116: a recovery claim whose lease directory close fails names the lease it left and the release -----
+
+def t116_claim_close_fault_named(fx):
+    """The recovery claim releases the killed run's leftover lease and claims anew, and only then the close
+    of the lease directory fails (EIO after the close released the number): the record verb refuses with
+    exit 2 naming that error, the lease the claim LEFT in place as one that STAYS, and the leftover's
+    release, never through the unexpected-error backstop, whose repr drops those notes; the journal is left
+    as found."""
+    root = _t74_interrupted(fx, "t116-dir-close")
+    states = journal_states(root)
+    machine = os.stat(Path(root) / MACH)
+    real_claim, real_close = guard.acquire_lease, os.close
+    reclaimed, fired = [], []
+
+    def claim_seen(*args, **kwargs):
+        payload = real_claim(*args, **kwargs)
+        reclaimed.append(True)
+        return payload
+
+    def faulty_close(fd):
+        try:
+            st = os.fstat(fd)
+        except OSError:
+            st = None
+        if not fired and reclaimed and st is not None and (st.st_dev, st.st_ino) == (machine.st_dev, machine.st_ino):
+            fired.append(True)
+            real_close(fd)
+            raise _injected("t116-dir-close", OSError(errno.EIO, "T116 injected: the lease directory close fails"))
+        return real_close(fd)
+    with patch.object(guard, "acquire_lease", claim_seen), patch.object(os, "close", faulty_close):
+        result = record_cli(fx.env, root, CREATE)
+    refused(result, "whose claim failed after it wrote the lease {} in full".format(LEASE))
+    err = result[2]
+    assert fired == [True], "T116 the lease directory close fault fired once"
+    assert "T116 injected" in err and "{} in full".format(LEASE) in err and "STAYS" in err, (
+        "T116 the refusal names the close error and the lease the claim left", err[-1600:])
+    assert T77_REPORT in err and "confirmed-dead holder" in err, (
+        "T116 the refusal carries the leftover's release", err[-1600:])
+    assert "unexpected error" not in err, ("T116 never the unexpected-error backstop", err[-1600:])
+    assert ":{}\"".format(os.getpid()).encode("utf-8") in read(root, LEASE), (
+        "T116 the lease the claim wrote is left in place")
+    assert journal_states(root) == states, "T116 the journal is left as found"
+
+
+def flip_t116():
+    """The claim before this fix: a WriteGuardError alone refuses as a RecordError, so the close error of
+    the lease directory reaches the record verb's unexpected-error backstop, which prints its repr without
+    its notes."""
+    def narrow(ctx, pending):
+        try:
+            return guard.acquire_lease_for_recovery(ctx.root_fd, ctx.machine_rel, record.VERB)
+        except guard.WriteGuardError as exc:
+            raise record.RecordError("{} {}".format(pending, exc))
+    return patch.object(record, "_claim_for_recovery", narrow)
+
+
 # --- T84: a leftover lease tomllib refuses with RecursionError is malformed, refused as held (spec 5.7) ------
 
 def t84_recursion_lease_refused_as_held(fx):
@@ -7300,7 +7521,7 @@ def t78_homes2_needs_the_pair(fx):
         def choosing(homes, chosen=chosen, journal_rel=journal_rel):
             chosen.append(homes)
             return journal_rel(homes)
-        with patch.object(_opf_store, "SUPPORTED_HOMES", 2):
+        with patch.object(_opf_store, "SUPPORTED_HOMES", 2), _homes2_declaration(root):
             before = snapshot(root)
             with patch.object(record, "_record_journal_rel", choosing):
                 result = record_cli(env, root, CREATE)
@@ -8595,6 +8816,7 @@ _SUBSTRING_BACKSTOPS = {
     flip_t69_release: ("RuntimeError('fd release witness')",),
     flip_t69_token: ("MemoryError('synthetic token allocation failure')",),
     flip_t77: ("OSError({}, ".format(errno.EMFILE),),
+    flip_t116: ("OSError({}, 'T116 injected".format(errno.EIO),),
     flip_t84: ("RecursionError('maximum recursion depth exceeded')",),
     flip_t85_derive_record: ("ValueError('synthetic underivable record home')",),
     _t86_declared_flip: ("NameError('t86 broken flip fixture')",),
@@ -9542,6 +9764,7 @@ _DECLARED_INJECTIONS = {
     "t69-release": (lambda: RuntimeError("fd release witness"),),
     "t69-token": (lambda: MemoryError("synthetic token allocation failure"),),
     "t77-emfile": (lambda: OSError(errno.EMFILE, "T77 injected: EMFILE on the retried claim"),),
+    "t116-dir-close": (lambda: OSError(errno.EIO, "T116 injected: the lease directory close fails"),),
     "t84-recursion": (lambda: RecursionError("maximum recursion depth exceeded"),),
     "t85-record-underivable": (lambda: ValueError("synthetic underivable record home"),),
     "t86-declared": (lambda: NameError("t86 broken flip fixture"),),
@@ -9555,8 +9778,8 @@ _DECLARED_INJECTIONS = {
 # an expected label and is the shared backstop envelope around exactly a repr the parent computed for that
 # injection before the child ran (_oop_declared, _bound_injection_oop; under the T87 flip
 # _discriminate_in_process: the in-process _injected, _EmissionStderr, _note_backstops and _bound_injection);
-# any other backstop or exception in the flipped run fails the discrimination. The labels of T18 to T85 are
-# each recorded by one test's injection site alone, so each of those declarations binds the test, the flip
+# any other backstop or exception in the flipped run fails the discrimination. The labels of T18 to T85, and
+# T116's, are each recorded by one test's injection site alone, so each of those declarations binds the test, the flip
 # and the injection together (T69's two tests share one reverted _publish, so each has a flip of its own that
 # expects its own test's injection, and so has the record kind's underivable leg of T85), except
 # t22-t81-string-claims, which T22 and T81 record at the one site their shared string-claims flip lets a
@@ -9584,6 +9807,7 @@ _INTENDED_BACKSTOPS = {
     flip_t69_release: ("t69-release",),
     flip_t69_token: ("t69-token",),
     flip_t77: ("t77-emfile",),
+    flip_t116: ("t116-dir-close",),
     flip_t84: ("t84-recursion",),
     flip_t85_derive_record: ("t85-record-underivable",),
     _t86_declared_flip: ("t86-declared",),
@@ -9722,8 +9946,9 @@ def flip_t90_no_cap():
 # --- T95: importer-authored history is never a clean-series operand (spec 8.6, 8.8) -------------------------
 
 def _importer_item(fx, name, status):
-    """A legacy importer-authored backlog item seated in the clean index with its counter (the T89 seeding),
-    then the views rendered and committed, so the store is doctor VALID before the operation runs."""
+    """An importer-authored backlog item seated in the clean index with its counter (the T89 seeding), each
+    committed: the doctor refuses the store at rest (spec 8.6: a clean-series record MUST NOT carry the
+    importer kind), and the operation runs over that store."""
     env = fx.env
     root = fx.case(name)
     legacy = {"id": "BI-1", "type": "backlog_item", "status": status, "title": "migrated",
@@ -9735,26 +9960,24 @@ def _importer_item(fx, name, status):
     counters = model(root, COUNTERS)
     counters["counters"]["BI"] += 1
     write_commit(env, root, COUNTERS, emit.emit_checked(counters).encode("utf-8"), "its counter")
-    rc, out, err = cli(env, ["render", "--root", str(root), "--write"])
-    assert rc == 0, ("T95 the views render over the history", rc, err[-800:])
-    fx.commit_all(root, "views")
-    doctor_valid(env, root)
+    clean_importer_at_rest(env, root, "BI-1", "backlog_item")
     return root, legacy
 
 
 def t95_importer_operand_transition(fx):
-    """A transition on a legacy importer-authored item refuses whoever acts, with every byte untouched; acting
-    on that history is a new clean record linking back, which records and leaves the history's bytes alone."""
+    """A transition on an importer-authored item refuses whoever acts, with every byte untouched; acting on
+    it is a new clean record linking back, which publishes and leaves the importer record's bytes alone,
+    the store still refused at rest for that record alone."""
     env = fx.env
     with ticking():
         root, legacy = _importer_item(fx, "t95-importer-operand-transition", "open")
         refused_untouched(env, root, ["transition", "BI-1", "active"] + MAINTAINER, "importer-authored-operand")
         refused_untouched(env, root, ["transition", "BI-1", "dropped"] + ASSISTANT, "importer-authored-operand")
-        step(fx, root, ["create", "--type", "backlog_item", "--title", "act on it", "--link", "derives_from=BI-1"]
-             + MAINTAINER, "BI-2 acting on history")
+        published_unrendered(env, root, ["create", "--type", "backlog_item", "--title", "act on it", "--link",
+                                         "derives_from=BI-1"] + MAINTAINER)
         assert row(root, "BI-1") == legacy, ("T95 the history keeps its bytes", row(root, "BI-1"))
         assert row(root, "BI-2")["links"] == [{"rel": "derives_from", "id": "BI-1"}], row(root, "BI-2")
-        doctor_valid(env, root)
+        clean_importer_at_rest(env, root, "BI-1", "backlog_item")
 
 
 def t95_importer_operand_receipt(fx):
@@ -9766,8 +9989,9 @@ def t95_importer_operand_receipt(fx):
 
 def t95_importer_resolution_superseded(fx):
     """A --supersedes target is read and linked, never the operand: a clean decide superseding a legacy
-    importer-authored resolution (a doctor finding at rest, spec 8.6) records with the target's bytes
-    unchanged and leaves the store doctor VALID."""
+    importer-authored resolution (a doctor finding at rest, spec 8.6, as is the clean record carrying the
+    importer kind) publishes with the target's bytes unchanged, and once committed the store is refused at
+    rest with no C-HANDOFF finding but the clean importer record's."""
     env = fx.env
     root = fx.case("t95-importer-resolution-superseded")
     ts = "2026-08-01T00:00:00Z"
@@ -9785,13 +10009,15 @@ def t95_importer_resolution_superseded(fx):
     rc, out, err = cli(env, ["doctor", "--root", str(root)])
     assert rc != 0 and "importer-authored pending_decision 'PD-1'" in out, (
         "T95 the importer resolution is a doctor finding at rest", rc, out[-1600:])
+    clean_importer_at_rest(env, root, "PD-1", "pending_decision")
     with ticking():
-        step(fx, root, ["transition", "PD-2", "decided", "--decision", "use Y", "--decided-by", "the board",
-                        "--supersedes", "PD-1"] + MAINTAINER, "PD-2 supersedes the importer resolution")
+        published_unrendered(env, root, ["transition", "PD-2", "decided", "--decision", "use Y", "--decided-by",
+                                         "the board", "--supersedes", "PD-1"] + MAINTAINER)
     assert row(root, "PD-1", PD_INDEX) == held, ("T95 the target keeps its bytes", row(root, "PD-1", PD_INDEX))
     assert row(root, "PD-2", PD_INDEX)["links"] == [{"rel": "supersedes", "id": "PD-1"}], (
         row(root, "PD-2", PD_INDEX))
-    doctor_valid(env, root)
+    fx.commit_all(root, "PD-2 supersedes the importer resolution")
+    clean_importer_at_rest(env, root, "PD-1", "pending_decision")
 
 
 def flip_t95_author():
@@ -10403,10 +10629,11 @@ def flip_t110_homes1_late():
 
 
 def t110_importer_arm(fx):
-    """A clean BI-1 at done whose only receipt is a legacy importer-authored DN-1 (the spec 8.6 receipt arm's
-    finding at rest) takes the clean receipt beside it: DN-2 records exit 0, the importer's row keeps its
-    bytes, and the store is doctor VALID (flip: the writer's receipt join counts importer-authored
-    receipts, so the item is refused, never repaired)."""
+    """A clean BI-1 at done whose only receipt is an importer-authored DN-1 seated in the clean index (the
+    spec 8.6 receipt arm's finding at rest, beside the clean importer record's own) takes the clean receipt
+    beside it: DN-2 publishes, the importer's row keeps its bytes, the view render refuses the store, and
+    the doctor then reports the clean importer record alone (flip: the writer's receipt join counts
+    importer-authored receipts, so the item is refused, never repaired)."""
     env = fx.env
     base = _repair_store(fx, "t110-importer-base")
     legacy = {"id": "DN-1", "type": "done", "status": "recorded", "title": "migrated receipt",
@@ -10421,13 +10648,14 @@ def t110_importer_arm(fx):
     rc, out, err = cli(env, ["doctor", "--root", str(base)])
     assert rc == 1 and "its only receipt(s) 'DN-1' are importer-authored" in out + err, (
         "T110 the importer-only receipt is the receipt arm's finding at rest", rc, out[-1600:], err[-800:])
+    clean_importer_at_rest(env, base, "DN-1", "done")
     with _self_test_homes2_active(base):
         root = fx.case("t110-importer-arm", base)
         with ticking():
-            recorded(record_cli(env, root, REPAIR))
+            published_unrendered(env, root, REPAIR)
         assert [r["id"] for r in receipts_of(root, "BI-1")] == ["DN-1", "DN-2"], receipts_of(root, "BI-1")
         assert model(root, DN_INDEX)["record"][0] == legacy, "T110 the importer's receipt keeps its bytes"
-        doctor_valid(env, root)
+        clean_importer_at_rest(env, root, "DN-1", "done")
 
 
 def flip_t110_importer():
@@ -10857,7 +11085,8 @@ TESTS = (
     ("T34-trigger-residual-disclosed", t34_residual_disclosed, flip_t34),
     ("T35-released-holder-not-reconciled", t35_released_holder_not_reconciled, flip_t35),
     ("T36-journal-home-reopened", t36_journal_home_reopened, flip_t36),
-    ("T37-reclaim-names-operation", t37_reclaim_names_operation, flip_t37),
+    ("T37-other-operation-no-journal-refused", t37_other_operation_no_journal, flip_t37),
+    ("T37-other-operation-open-transaction-refused", t37_other_operation_open_transaction, flip_t37),
     ("T38-staging-removal-disclosed", t38_staging_removal_disclosed, flip_t38),
     ("T39-deletes-then-failure-disclosed", t39_deletes_then_failure_disclosed, flip_unreported_deletes),
     ("T40-held-refusal-discloses", t40_held_refusal_discloses, flip_unreported_deletes),
@@ -10962,6 +11191,7 @@ TESTS = (
                                                                   flip_t89_unqualified)),
     ("T89-two-current-handoffs-refused", t89_two_current_refused, flip_t89_first_current),
     ("T89-importer-history-clean-posting", t89_importer_history_posts, flip_t89_importer),
+    ("T89-importer-finding-lines", t89_importer_finding_lines, (flip_t89_verdict_line, flip_t89_no_findings)),
     ("T89-archived-current-handoff-refused", t89_archived_current_refused, flip_t89_archived),
     ("T89-reject-supersession-sole-current", t89_reject_supersession, flip_t89_reject_guard),
     ("T89-prior-separator-spelling-respelled", t89_prior_separator_spelling, (flip_t89_no_escape,
@@ -11004,6 +11234,7 @@ TESTS = (
     ("T113-receipt-repair-backlog-changed", t113_repair_backlog_changed, flip_t113_backlog),
     ("T114-receipt-repair-uncommitted-edit", t114_repair_uncommitted_edit, flip_t114),
     ("T115-receipt-repair-head-moved", t115_repair_head_moved, flip_t115),
+    ("T116-recovery-claim-close-fault-named", t116_claim_close_fault_named, flip_t116),
 )
 
 

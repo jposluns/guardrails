@@ -6,7 +6,7 @@ facet: SECI
 slug: config-is-executable-trust-gate
 map-cwe-tight: [CWE-829]
 map-nist-80053-broad: [SI-7]
-map-owasp-asi-tight: [ASI05]
+map-owasp-asi-broad: [ASI05]
 ---
 
 # Configuration that executes on load is treated as code

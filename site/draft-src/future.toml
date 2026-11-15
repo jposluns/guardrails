@@ -1,0 +1,32 @@
+# The aiqt.ai draft future plans page (not in the nav): what is planned for teams and enterprises.
+path = "future/index.html"
+title = "Future plans"
+kind = "document"
+label = "Planned"
+heading = "What is coming for teams and enterprises"
+meta = "Planned, not yet available: management and monitoring across projects, performance metrics, and guardrail bundles per project or purpose, managed by the team or enterprise."
+
+[[body]]
+component = "prose"
+html = "<p>Everything on this page is planned. None of it ships today; AIQT today is the standard, the skill, and the pack you add to each project yourself.</p>"
+
+[[body]]
+component = "clauses"
+
+[[body.items]]
+n = "1"
+html = "<p><strong>Management and monitoring.</strong> One view of every project using AIQT: which guardrails each runs, at which version, and where an update is waiting.</p>"
+
+[[body.items]]
+n = "2"
+html = "<p><strong>Performance metrics.</strong> How often each guardrail fires and what it stopped, per project and per team, so you can see where the standard is earning its place.</p>"
+
+[[body.items]]
+n = "3"
+html = "<p><strong>Guardrail bundles.</strong> Pre-built sets of guardrails per project type or purpose, curated, versioned, and rolled out by the team or enterprise, so every project starts from the same agreed baseline.</p>"
+
+[[body]]
+component = "next"
+html = "What you can use today."
+text = "Install"
+href = "install/"
