@@ -37,7 +37,9 @@ Two kinds of target are checked:
    file's directory (a root-relative one, starting with "/", against the repository root, as GitHub
    renders it) and must exist inside the repository; a path holding NUL names no file.
 2. An own-site link: an absolute http or https URL, in any form above, on a host this project's sites
-   are served at, or an href in a generated-Markdown source (GENERATED_MD_SOURCES), joined exactly as
+   are served at (a protocol-relative destination //host/path in an inline link, image, reference
+   definition or raw HTML attribute is read as https://host/path, as a browser resolves it on an https
+   page, and is never resolved as a repository path; one on another host is external), or an href in a generated-Markdown source (GENERATED_MD_SOURCES), joined exactly as
    that source's generator renders it into the Markdown. tools/gen_roadmap.py renders every
    stage[].links[].href as site_base + href, whatever the href, so an href there must start with a
    single "/"; tools/gen_disclosure.py renders every row[].evidence[].href as the href itself when it
@@ -50,11 +52,19 @@ Two kinds of target are checked:
    (SITE_ROOTS, the same host model as tools/check_site.py: aiqt.ai and www.aiqt.ai, or the
    AIQT_SITE_HOST host and its www., serve site/; opfiles.ai and www.opfiles.ai serve opf/site/; a host
    written with its trailing root-label dot, such as aiqt.ai., is the same host), and the URL path must
-   name a page of that tree: a regular file inside it at the path as written, at path + ".html", or at
-   path/index.html ("/" is index.html), never a host configuration file at the tree's top
-   (HOST_CONFIG_FILES: _headers and _redirects), or else the first rule in that tree's
-   _redirects whose source matches the path (exactly, through a trailing * splat or through a /:name
-   placeholder), when that rule counts. A rule counts only when its status is a redirect (301, 302,
+   reach a page of that tree. The tree's _redirects is evaluated first, as Cloudflare Pages applies a
+   rule even when a static asset matches the path: when a rule's source matches the path (exactly,
+   through a trailing * splat or through a /:name placeholder), the first such rule in file order
+   decides, and the path passes only when that rule counts, whether or not a file exists at the path.
+   Only when no rule matches does a file decide: a regular file inside the tree at the path as written,
+   at path + ".html", or at path/index.html ("/" is index.html), never a host configuration file at the
+   tree's top (HOST_CONFIG_FILES: _headers and _redirects). Where Cloudflare Pages serves that file at
+   another path (a link to /a that a/index.html serves is served at /a/, a link to /a.html at /a and a
+   link to /a/index.html at /a/), the rules for that path are evaluated too, as for a further hop of a
+   chain; that Pages redirects those spellings is not verified here, and evaluating them only adds
+   findings, which is the stricter reading.
+   First match in file order is the order this gate assumes Cloudflare Pages applies rules in; that is
+   not verified against its documentation here. A rule counts only when its status is a redirect (301, 302,
    303, 307 or 308; a rule with no status is a 302) or a 200 rewrite, and its destination itself
    resolves: a destination path or own-site URL resolves by these same rules (a chain that returns to
    a path it has visited, or runs past MAX_REDIRECT_HOPS, loops and does not count); an external
@@ -82,6 +92,9 @@ Each entry is temporary, honoured only for its exact resolved URL (in any scanne
 that motivated it), and printed on every run as temporary; an entry whose target page now exists is itself
 a finding, so it is removed in the change that decides the link. An entry that no scanned link uses is not
 flagged, and an entry carries no owner or expiry.
+
+A control character in a printed finding or note (a NUL in a decoded path, for one) is printed as a \\xNN
+escape, never raw.
 
   check_links.py              scan the repository (exit 0 clean, 1 findings, 2 cannot evaluate)
   check_links.py --self-test  run every rule above over synthetic fixture trees
@@ -170,6 +183,17 @@ PENDING_DECISION_ALLOWLIST = {
     # a maintainer decision; remove this entry in the change that makes it.
     "https://aiqt.ai/teams": "roadmap-teams-link",
 }
+
+# A protocol-relative destination: exactly two slashes, then a host.
+_PROTOCOL_RELATIVE = re.compile(r"//[^/\\]")
+# A C0 control character or DEL, printed as a \xNN escape.
+_CONTROL = re.compile(r"[\x00-\x1f\x7f]")
+
+
+def _printable(text):
+    """text with every control character written as a \\xNN escape, so none is printed raw."""
+    return _CONTROL.sub(lambda m: "\\x{:02x}".format(ord(m.group())), text)
+
 
 _PLACEHOLDER = re.compile(r"(\*|(?<=/):[A-Za-z_][A-Za-z0-9_]*)")
 _DEST_NAME = re.compile(r":([A-Za-z_][A-Za-z0-9_]*)")
@@ -527,25 +551,35 @@ def load_redirect_rules(tree_dir):
     return rules
 
 
-def file_present(tree_dir, path):
-    """True when tree_dir holds a regular file for path: as written, path + .html or path/index.html. A
-    host configuration file at the tree's top (HOST_CONFIG_FILES) is not a page, and a path holding a
-    NUL names no file."""
+def served_path(tree_dir, path):
+    """The path Cloudflare Pages serves path's file at, or None when tree_dir holds no regular file for
+    path (as written, path + .html or path/index.html). A file named as written that ends in index.html
+    is served at its directory and one that ends in .html without it; a file found at path/index.html
+    for a path without a trailing / is served at path + "/" (assumed, not verified). A host
+    configuration file at the tree's top (HOST_CONFIG_FILES) is not a page, and a path holding a NUL
+    names no file."""
     if "\x00" in path:
-        return False
+        return None
     rel = path.lstrip("/")
     if rel == "" or rel.endswith("/"):
-        candidates = [tree_dir / rel / "index.html"]
+        candidates = [(tree_dir / rel / "index.html", path)]
     else:
-        candidates = [tree_dir / rel, tree_dir / (rel + ".html"), tree_dir / rel / "index.html"]
+        if path.endswith("/index.html"):
+            written = path[:-len("index.html")]
+        elif path.endswith(".html"):
+            written = path[:-len(".html")]
+        else:
+            written = path
+        candidates = [(tree_dir / rel, written), (tree_dir / (rel + ".html"), path),
+                      (tree_dir / rel / "index.html", path + "/")]
     base = tree_dir.resolve()
-    for candidate in candidates:
+    for candidate, served in candidates:
         resolved = candidate.resolve()
         if resolved.parent == base and resolved.name in HOST_CONFIG_FILES:
             continue
         if resolved.is_relative_to(base) and resolved.is_file():
-            return True
-    return False
+            return served
+    return None
 
 
 class Sites:
@@ -569,52 +603,69 @@ class Sites:
         return self.trees[tree]
 
     def missing(self, tree, path, visited=()):
-        """None when tree serves path (or the tree is absent), else why it does not."""
+        """None when tree serves path (or the tree is absent), else why it does not. The _redirects rules
+        are evaluated before any file, as Cloudflare Pages follows a redirect even when an asset matches
+        the path: the first rule whose source matches decides. With no matching rule, a file decides, and
+        when Pages serves that file at another path, the rules for that path are evaluated too. visited
+        holds the (tree, path) hops already taken, so a chain that returns to one, or runs past
+        MAX_REDIRECT_HOPS, loops and does not count."""
         state = self.state(tree)
         if state is None:
             return None
         tree_dir, rules = state
-        if file_present(tree_dir, path):
+        chain = visited + ((tree, path),)
+        for rule in rules:
+            match = rule[4].fullmatch(path)
+            if match is not None:
+                return self._follow(tree, rule, match, chain)
+        served = served_path(tree_dir, path)
+        if served is None:
+            return "no file, no .html, no index.html, no _redirects rule"
+        if served == path:
             return None
-        for number, source, dest, status, pattern, names in rules:
-            match = pattern.fullmatch(path)
-            if match is None:
-                continue
-            rule = "{}/_redirects line {} ({} {} {})".format(tree, number, source, dest, status)
-            if status not in REDIRECT_STATUSES and status != REWRITE_STATUS:
-                return "{} has status {}, neither a redirect nor a 200 rewrite".format(rule, status)
-            carried = set(_DEST_NAME.findall(dest))
-            if not set(names) <= carried:
-                return ("{} is a catch-all: its destination does not carry what its source captures, so it "
-                        "proves no page".format(rule))
-            target = _DEST_NAME.sub(
-                lambda m: match.group(m.group(1)) if m.group(1) in names else m.group(0), dest)
-            try:
-                parts = urlsplit(target)
-            except ValueError:
-                return "{} has a destination that is not a URL".format(rule)
-            if parts.scheme or parts.netloc:
-                own = own_site_target(target, self.site_roots)
-                if status == REWRITE_STATUS:
-                    if own is None:
-                        return "{} rewrites to another origin, which is not served".format(rule)
-                    return ("{} rewrites to an absolute URL; a 200 rewrite counts only to a /path on the same "
-                            "site".format(rule))
+        if (tree, served) in chain or len(chain) > MAX_REDIRECT_HOPS:
+            return "the file for {} is served at {}, which loops".format(path, served)
+        why = self.missing(tree, served, chain)
+        if why is None:
+            return None
+        return "the file for {} is served at {}, which is missing: {}".format(path, served, why)
+
+    def _follow(self, tree, rule, match, chain):
+        """None when the matched _redirects rule counts for the last hop of chain, else why it does not."""
+        number, source, dest, status, _pattern, names = rule
+        rule = "{}/_redirects line {} ({} {} {})".format(tree, number, source, dest, status)
+        if status not in REDIRECT_STATUSES and status != REWRITE_STATUS:
+            return "{} has status {}, neither a redirect nor a 200 rewrite".format(rule, status)
+        carried = set(_DEST_NAME.findall(dest))
+        if not set(names) <= carried:
+            return ("{} is a catch-all: its destination does not carry what its source captures, so it "
+                    "proves no page".format(rule))
+        target = _DEST_NAME.sub(
+            lambda m: match.group(m.group(1)) if m.group(1) in names else m.group(0), dest)
+        try:
+            parts = urlsplit(target)
+        except ValueError:
+            return "{} has a destination that is not a URL".format(rule)
+        if parts.scheme or parts.netloc:
+            own = own_site_target(target, self.site_roots)
+            if status == REWRITE_STATUS:
                 if own is None:
-                    return None
-                next_hop = own
-            elif target.startswith("/"):
-                next_hop = (tree, unquote(parts.path) or "/")
-            else:
-                return "{} has a destination that is neither a /path nor an absolute URL".format(rule)
-            chain = visited + ((tree, path),)
-            if next_hop in chain or len(chain) > MAX_REDIRECT_HOPS:
-                return "{} loops".format(rule)
-            why = self.missing(next_hop[0], next_hop[1], chain)
-            if why is None:
+                    return "{} rewrites to another origin, which is not served".format(rule)
+                return ("{} rewrites to an absolute URL; a 200 rewrite counts only to a /path on the same "
+                        "site".format(rule))
+            if own is None:
                 return None
-            return "{} leads to {}, which is missing: {}".format(rule, target, why)
-        return "no file, no .html, no index.html, no _redirects rule"
+            next_hop = own
+        elif target.startswith("/"):
+            next_hop = (tree, unquote(parts.path) or "/")
+        else:
+            return "{} has a destination that is neither a /path nor an absolute URL".format(rule)
+        if next_hop in chain or len(chain) > MAX_REDIRECT_HOPS:
+            return "{} loops".format(rule)
+        why = self.missing(next_hop[0], next_hop[1], chain)
+        if why is None:
+            return None
+        return "{} leads to {}, which is missing: {}".format(rule, target, why)
 
 
 # ---------------------------------------------------------------------------------------------------
@@ -726,6 +777,11 @@ def scan(root, site_roots=None, sources=None, allowlist=None):
     def check_target(where, path, kind, target):
         if check_own_site(where, target, target):
             return
+        if kind in ("inline", "html") and _PROTOCOL_RELATIVE.match(target):
+            # //host/path names a host, not a repository path; a browser resolves it with the page's
+            # scheme (https here). Only an own-site one is checked.
+            check_own_site(where, target, "https:" + target)
+            return
         if kind in ("autolink", "bare", "html") or target.startswith(NOT_RELATIVE):
             return
         clean = unquote(target.split("#", 1)[0])
@@ -807,14 +863,14 @@ def main() -> int:
     try:
         findings, notes = scan(root)
     except (OSError, ScanError) as exc:
-        print(f"error: cannot scan the tree ({exc}); fail-closed", file=sys.stderr)
+        print(f"error: cannot scan the tree ({_printable(str(exc))}); fail-closed", file=sys.stderr)
         return 2
     for note in notes:
-        print(f"NOTE: {note}")
+        print(f"NOTE: {_printable(note)}")
     if findings:
         print(f"FAIL: {len(findings)} broken link(s)")
         for finding in findings:
-            print(f"  {finding}")
+            print(f"  {_printable(finding)}")
         return 1
     print("PASS: all internal Markdown links and own-site links resolve")
     return 0
@@ -847,7 +903,7 @@ SELF_TEST_VECTORS = (
     ("own-site/nul-path-fails", {**_SITE, "site/_redirects": "/r /%00 301\n", "README.md":
      "[a](https://aiqt.ai/%00) [b](docs/x%00.md) [c](https://aiqt.ai/r)\n"}, 1,
      ("broken own-site link -> https://aiqt.ai/%00 (", "broken link -> docs/x%00.md (a path holding NUL",
-      "leads to /%00, which is missing", "FAIL: 3 broken link(s)")),
+      "leads to /%00, which is missing", "no page for /\\x00 under site/", "FAIL: 3 broken link(s)")),
     ("own-site/host-config-file-not-a-page-fails", {**_SITE, "site/_headers": "/*\n  X: y\n",
      "site/_redirects": "# none\n", "README.md": "[a](https://aiqt.ai/_headers) [b](https://aiqt.ai/_redirects)\n"},
      1, ("no page for /_headers under site/", "no page for /_redirects under site/")),
@@ -911,6 +967,45 @@ SELF_TEST_VECTORS = (
      "README.md": "[a](https://aiqt.ai/p)\n"}, 1, ("rewrites to another origin",)),
     ("redirects/malformed-rule-cannot-evaluate", {**_SITE, "site/_redirects": "/x /y moved\n",
      "README.md": "x\n"}, 2, ("status 'moved' is not a number",)),
+    # (7) a _redirects rule is evaluated before a file at the same path, as Cloudflare Pages follows a
+    # redirect even when an asset matches; the path passes only when the rule's final destination resolves.
+    ("redirects/rule-over-present-file-missing-destination-fails", {**_SITE, "site/present.html": "p",
+     "site/_redirects": "/present /missing 301\n", "README.md": "[a](https://aiqt.ai/present)\n"}, 1,
+     ("README.md:1: broken own-site link -> https://aiqt.ai/present (no page for /present under site/: "
+      "site/_redirects line 1 (/present /missing 301) leads to /missing, which is missing",
+      "FAIL: 1 broken link(s)")),
+    ("redirects/rule-over-present-file-present-destination-passes", {**_SITE, "site/present.html": "p",
+     "site/exists.html": "e", "site/_redirects": "/present /exists 301\n", "README.md":
+     "[a](https://aiqt.ai/present)\n"}, 0, ()),
+    ("redirects/chain-through-present-files-missing-fails", {**_SITE, "site/present.html": "p",
+     "site/mid.html": "m", "site/a.html": "a", "site/b.html": "b", "site/_redirects":
+     "/present /mid 301\n/mid /missing 302\n/a /b 301\n/b /a 301\n", "README.md":
+     "[a](https://aiqt.ai/present) [b](https://aiqt.ai/a)\n"}, 1,
+     ("(/present /mid 301) leads to /mid, which is missing: site/_redirects line 2 (/mid /missing 302) "
+      "leads to /missing", "site/_redirects line 4 (/b /a 301) loops", "FAIL: 2 broken link(s)")),
+    ("redirects/chain-through-present-files-passes", {**_SITE, "site/present.html": "p", "site/mid.html": "m",
+     "site/exists.html": "e", "site/_redirects": "/present /mid 301\n/mid /exists 302\n", "README.md":
+     "[a](https://aiqt.ai/present) [b](https://aiqt.ai/mid)\n"}, 0, ()),
+    ("redirects/first-matching-rule-decides-fails", {**_SITE, "site/exists.html": "e", "site/present.html": "p",
+     "site/_redirects": "/present /missing 301\n/present /exists 301\n", "README.md":
+     "[a](https://aiqt.ai/present)\n"}, 1, ("(/present /missing 301) leads to /missing, which is missing",)),
+    ("redirects/rule-on-served-spelling-fails", {**_SITE, "site/present.html": "p", "site/dir/index.html": "d",
+     "site/_redirects": "/present /missing 301\n/dir/ /gone 301\n", "README.md":
+     "[a](https://aiqt.ai/present.html) [b](https://aiqt.ai/dir) [c](https://aiqt.ai/dir/index.html)\n"}, 1,
+     ("-> https://aiqt.ai/present.html (no page for /present.html under site/: the file for /present.html is "
+      "served at /present, which is missing: site/_redirects line 1",
+      "-> https://aiqt.ai/dir (no page for /dir under site/: the file for /dir is served at /dir/",
+      "-> https://aiqt.ai/dir/index.html (", "FAIL: 3 broken link(s)")),
+    # (8) a protocol-relative //host/path names a host: an own-site one is checked, another is external.
+    ("protocol-relative/own-site-missing-fails", {**_SITE, "README.md":
+     "<a href=\"//aiqt.ai/nope\">x</a> <img src=\"//aiqt.ai/nope.png\"> [a](//aiqt.ai/gone) [r]\n"
+     "\n[r]: //www.aiqt.ai/def\n"}, 1,
+     ("README.md:1: broken own-site link -> //aiqt.ai/nope (", "README.md:1: broken own-site link -> "
+      "//aiqt.ai/nope.png (", "README.md:1: broken own-site link -> //aiqt.ai/gone (",
+      "README.md:3: broken own-site link -> //www.aiqt.ai/def (", "FAIL: 4 broken link(s)")),
+    ("protocol-relative/present-or-external-passes", {**_SITE, "site/present.html": "p", "README.md":
+     "[a](//aiqt.ai/present) <a href=\"//aiqt.ai/present\">p</a> [b](//example.com/x) "
+     "<a href=\"//example.com/y\">e</a>\n"}, 0, ()),
     # (3) autolinks, reference-style links and images, inline images and bare URLs are read.
     ("forms/present-pass", {**_SITE, "site/present.html": "p", "docs/i.png": "i", "README.md":
      "<https://aiqt.ai/present> [r][ref] ![i][img] [s] ![j](docs/i.png) [![k](docs/i.png)](https://aiqt.ai/)\n"
