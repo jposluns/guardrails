@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.0.5"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "f3cfac852dbdf6a3a25a9334f77b2b7ea614b247d28d36e94b1f9b78fb4c1bbd"
+tree-sha256 = "03ed9883b4d3983bdd7e127a5982d2e17b01b8a63776719c1fa20a2a4dd10771"
 
 [[sources]]
 path = ".aiqt/LICENSE"
@@ -4567,18 +4567,18 @@ sha256 = "9c236464c51d0644d75a2f1ea27ef4614f9b4394453923213b89987876aae4ba"
 
 [[sources]]
 path = "tools/gen_gensrc.py"
-bytes = 79973
-sha256 = "7066bed06b82860a51842fc6f1db1b6ced3ffbf1776502f14b461c910ad49adc"
+bytes = 81831
+sha256 = "da9a90caf175b89c0508b86d23cdca857a0ba9e2f5d637791c0afbc1ce7c7a45"
 
 [[sources]]
 path = "tools/gen_hooks.py"
-bytes = 277558
-sha256 = "2ad58cabe04127a50153677a87417640e9f9e1e59c6305b2b0ef8440218cf743"
+bytes = 277569
+sha256 = "038426b36f67edcca54f777e47952a7ec74051b2ea53a3bfdf111101509cc39b"
 
 [[sources]]
 path = "tools/gen_manifest.py"
-bytes = 103764
-sha256 = "d7d04a6d22cf593a7e03ae2b97523f5f4bdd9225ec48451dd69089e569830e48"
+bytes = 106019
+sha256 = "60ae5504a864d48fcd825243007815217e60ce34bcbec29519f648eb7b624e7b"
 
 [[sources]]
 path = "tools/gen_mappings.py"

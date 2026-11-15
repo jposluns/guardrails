@@ -414,17 +414,21 @@ def classify(tracked, exclusions, release, namespace, root, assume_outputs=False
 
 def cross_check_exclusions(root, exclusions):
     """No exclusion may swallow a gensrc-registered target or a check_portability required surface. The one
-    exemption is an EXACT path exclusion naming a gensrc entry scoped "authoring" (a kind=file target on the
-    authoring-only roster, root/tools/gen_hooks.py AUTHORING_ONLY_REL, which collect_entries reads with
-    gen_gensrc.read_authoring_roster): that file is generated and drift-gated in this repository but never
-    ships, so excluding it is the point (check_authoring_only binds the rest). A pattern exclusion, any
-    other gensrc target, and every portability surface stay refused."""
+    exemption is an EXACT path exclusion naming a gensrc entry scoped "authoring" that is ALSO on the never-ship
+    authoring-only roster (root/tools/gen_hooks.py AUTHORING_ONLY_REL, read with gen_gensrc.read_authoring_roster,
+    the reader collect_entries uses): that file is generated and drift-gated in this repository but never
+    ships, so excluding it is the point (check_authoring_only binds the rest). An entry scoped "authoring" only
+    through the authoring-scoped roster (AUTHORING_SCOPED_REL: the shipped LICENSE and NOTICE copies) ships, so
+    an exclusion of it is refused like any other. A pattern exclusion, any other gensrc target, and every
+    portability surface stay refused."""
     import gen_gensrc      # reuse the validated loader, never a second parser (house pattern)
     import check_portability
     decls = gen_gensrc.discover_declarations(root / "tools")
     entries = gen_gensrc.collect_entries(decls, root)
     targets = [e["target"].rstrip("/") for e in entries]
-    scoped = {e["target"] for e in entries if e.get("scope") == gen_gensrc.SCOPE_AUTHORING}
+    never_ship = set(gen_gensrc.read_authoring_roster(root / "tools"))
+    scoped = {e["target"] for e in entries
+              if e.get("scope") == gen_gensrc.SCOPE_AUTHORING and e["target"] in never_ship}
     portability = set(check_portability.REQUIRED_DIR_ROOTS) | set(check_portability.REQUIRED_FILE_ROOTS)
     surfaces = targets + list(check_portability.REQUIRED_DIR_ROOTS) + list(
         check_portability.REQUIRED_FILE_ROOTS)
@@ -906,7 +910,9 @@ def main():
 #       shipped roster path the tree roster omits that is a symlink on disk under a regular index entry exits 2
 #       (the same tree with a regular file exits 0), a roster path under a symlinked directory at the first,
 #       second or third level, or under a directory whose lstat fails, exits 2 naming it (the same tree with real
-#       directories exits 0), and the real one reads as exactly the two shipped roster paths;
+#       directories exits 0), and the real one reads as exactly the two shipped roster paths; an exact
+#       exclusion of a target on the authoring-scoped roster (AUTHORING_SCOPED_REL) exits 2 naming it, while the
+#       same target given a release class exits 0;
 #   a vocabulary class in neither FROZEN_CLASSES nor UNFROZEN_CLASSES, a class in both,
 #       and a class outside the vocabulary each fail closed.
 
@@ -1415,6 +1421,25 @@ def _self_test_main_isolated():
             (gone / ".aiqt" / "authoring.toml").unlink()
         if gone is None or run_quiet(gone, check=False) != 2:
             failures.append("authoring-only roster: a tracked marker missing on disk expected exit 2")
+        # The authoring-SCOPED roster (AUTHORING_SCOPED_REL, the shipped licence copies) scopes its entries
+        # "authoring" but carries no never-ship exemption: a fixture rostering local-out.txt there, with that
+        # target excluded by an exact literal, exits 2 naming the swallowed target (it exited 0 when the swallow
+        # guard exempted every "authoring"-scoped entry); its twin, the same roster with local-out.txt given a
+        # release class instead, exits 0 and keeps the never-ship roster's exact exclusions accepted.
+        scoped_files = dict(_ROSTER_FILES)
+        scoped_files["tools/gen_hooks.py"] = _GEN_LOCAL + 'AUTHORING_SCOPED_REL = ("local-out.txt",)\n'
+        excl_local = '\n[[exclusion]]\npath = "local-out.txt"\nreason = "r"\n'
+        for i, (label, extra, want) in enumerate((
+                ("an exact exclusion of an authoring-scoped (shipped) gensrc target",
+                 _EXCL_SETTINGS + _EXCL_MARKER + excl_local, 2),
+                ("the authoring-scoped target given a release class", _LOCAL_OUT_CLASS + _EXCL_SETTINGS
+                 + _EXCL_MARKER, 0))):
+            fx = _roster_fixture(tmp / "roster-scoped{}".format(i), extra, scoped_files)
+            rc, err = run_stderr(fx) if fx is not None else (None, "")
+            swallow = "would swallow the gensrc/portability surface 'local-out.txt'"
+            if rc != want or (want == 2 and swallow not in err):
+                failures.append("authoring-scoped roster: {} expected exit {}{}, got {}".format(
+                    label, want, " naming the swallowed target" if want == 2 else "", rc))
         # The roster is read from the tree under check, never from the running tool: a fixture whose own
         # tools/gen_hooks.py rosters .claude/local.json (excluded by exact literals with its marker) is clean, and
         # the real tools/gen_hooks.py reads statically as exactly the two shipped roster paths, spelled here.
@@ -1656,7 +1681,8 @@ def _self_test_main_isolated():
           "by case, the upcase fold, Unicode normalization or an NTFS stream suffix on it or its directory, a "
           "roster path that is a symlink on disk whether the tree roster names or omits it, and a roster path "
           "under a symlinked directory at any of three levels or under a directory whose lstat fails each fail "
-          "closed (exit 2); "
+          "closed (exit 2); an exact exclusion of an authoring-scoped (shipped) gensrc target fails closed "
+          "(exit 2) while the same target given a class passes; "
           "and a vocabulary class "
           "recorded in neither FROZEN_CLASSES nor UNFROZEN_CLASSES, a class recorded in both, and a frozen "
           "class outside the vocabulary each fail the frozen floor closed")

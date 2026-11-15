@@ -92,8 +92,9 @@ ROSTER_NAME = "AUTHORING_ONLY_REL"
 # adopter tree gen_hooks never writes, compares or deletes them). Their registry entries are scoped "authoring"
 # exactly like the never-shipped roster's, so gensrc_guard leaves an adopter tree's copies alone as gen_hooks
 # does. Unlike AUTHORING_ONLY_REL this roster carries NO never-ship duty: gen_manifest.check_authoring_only reads
-# AUTHORING_ONLY_REL alone, so these paths keep their release class (gen_manifest.cross_check_exclusions does see
-# the scope, and so accepts an exact [[exclusion]] literal for one of them). It is OPTIONAL (a gen_hooks.py
+# AUTHORING_ONLY_REL alone, so these paths keep their release class, and gen_manifest.cross_check_exclusions
+# exempts a scoped entry only when it is on AUTHORING_ONLY_REL, so it still refuses an exact [[exclusion]]
+# literal for one of them. It is OPTIONAL (a gen_hooks.py
 # binding no such name has none, as every synthetic fixture); one that binds it is held to every static rule of
 # AUTHORING_ONLY_REL.
 SCOPED_ROSTER_NAME = "AUTHORING_SCOPED_REL"
@@ -1126,8 +1127,10 @@ def self_test_main():
         #     generates only in the authoring tree: the REAL registry built from this repository scopes each
         #     "authoring", and none is on the never-ship AUTHORING_ONLY_REL roster (they ship). An adopter-shaped
         #     tree (this registry and the four copies, no authoring marker) does not treat any copy as generated:
-        #     gensrc_guard's own registry loader and matcher (the shipped aiqt_hooks.py) find no entry for it. The
-        #     twin adds the exact authoring marker, and then each copy matches its own scoped entry.
+        #     gensrc_guard's own registry loader and matcher (the shipped aiqt_hooks.py) find no entry for it, and
+        #     neither do the Bash channel's _gensrc_holds (the copy's directory) and _gensrc_mentions (a command
+        #     naming the copy). The twin adds the exact authoring marker, and then each copy matches its own scoped
+        #     entry in all three.
         real_root = Path(__file__).resolve().parent.parent
         copy_rels = (".aiqt/LICENSE", ".aiqt/NOTICE", "plugin/aiqt-guardrails-hooks/LICENSE",
                      "plugin/aiqt-guardrails-hooks/NOTICE")
@@ -1205,6 +1208,23 @@ def self_test_main():
                                                or hit[3] != ("authoring", None)):
                         failures.append("licence copies: in {} {} must match its scoped entry, got {!r}".format(
                             label, rel, hit))
+                    # The Bash channel's two other scope-aware matchers, each given the copy's own entry alone
+                    # (an unscoped entry in the same directory would otherwise answer first): _gensrc_holds for
+                    # the directory holding the copy, and _gensrc_mentions for a command naming it by path.
+                    own = [e for e in loaded if e[1] == rel]
+                    held = guard._gensrc_holds(own, os.path.realpath((adopter / rel).parent), root_c)
+                    named = guard._gensrc_mentions(own, "cp x {}".format(rel), root_c)
+                    if len(own) != 1:
+                        failures.append("licence copies: {} must load exactly one entry for {}, got {!r}".format(
+                            label, rel, own))
+                    elif marker is None and (held is not None or named is not None):
+                        failures.append("licence copies: {} must not treat {} as generated in a directory or "
+                                        "command, got {!r} and {!r}".format(label, rel, held, named))
+                    elif marker is not None and (held is None or held is guard._GENSRC_MATCH_FAULT
+                                                 or held[0] != rel or held[3] != ("authoring", None)
+                                                 or named is None or named[0] != rel):
+                        failures.append("licence copies: in {} the directory and a command naming {} must "
+                                        "match its scoped entry, got {!r} and {!r}".format(label, rel, held, named))
     finally:
         if unread_tools is not None:
             os.chmod(unread_tools, 0o755)  # restore even on an unexpected early exit
@@ -1239,8 +1259,8 @@ def self_test_main():
           ".working component (an OPF store path) fails closed (exit 2); the AUTHORING_SCOPED_REL roster scopes "
           "its declared entry \"authoring\" and an undeclared, tree-covered or rebound one fails closed (exit 2); "
           "and the real registry scopes the four shipped LICENSE and NOTICE copies \"authoring\" (off the "
-          "never-ship roster), so gensrc_guard treats none as generated in an adopter-shaped tree and matches each "
-          "in the authoring tree"
+          "never-ship roster), so gensrc_guard (its file matcher, _gensrc_holds and _gensrc_mentions) treats "
+          "none as generated in an adopter-shaped tree and matches each in the authoring tree"
           + note)
     return 0
 
