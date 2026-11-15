@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.0.5"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "3449feb8f683df7382c50209afc7d0040c1815affd686896366a5135d9769902"
+tree-sha256 = "9f8f45bed34f28af78430ce605c6ae6c9604846398706c18910ebd0633af29b3"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -3072,8 +3072,8 @@ sha256 = "7e2a33aeb02898da84fbb3e9aa956f9618a676f21c10982e73475e400cb8fd37"
 
 [[sources]]
 path = "opf/tools/_child_status.py"
-bytes = 14677
-sha256 = "c18de47d4f37e1fd507656b834f3e61b2bf8117a4ec559b55f9bcaaf1cd1558c"
+bytes = 14675
+sha256 = "3e7a5a19787859b036f33232b9a5163ab642907e616c87d13f2945dd7beb3955"
 
 [[sources]]
 path = "opf/tools/_commonmark_headings.py"
@@ -4402,8 +4402,8 @@ sha256 = "3421fe6941ea1cf9dbf1cea5fa9f96fda6c643ffd18ed1c014e2ab4853a0d04a"
 
 [[sources]]
 path = "tools/check_selftest_execution.py"
-bytes = 184301
-sha256 = "3ca47954c9d8b72750c647bb92547a9f50f2c9fcab3c5e26be493e0b6dcfeda4"
+bytes = 184305
+sha256 = "6d32c57b8ae951e3b5d8af009ce00836f8383a8857664845c1b59b86c4e67c3d"
 
 [[sources]]
 path = "tools/check_shell_function_standins.py"

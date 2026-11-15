@@ -23,7 +23,7 @@ failure this gate exists to catch); there is deliberately no accept, update, or 
 
 SHARDS. A suite named in SHARD_COUNTS (the three git-fixture-env config lanes) also runs one shard
 at a time: --shard K/N, N exactly the suite's registered count and 1 <= K <= N (any other N, a
-malformed value or an unsharded suite is a usage error, exit 2, before any launch). The same
+malformed value or an unsharded suite is a cannot-evaluate, exit 2, before any launch). The same
 pre-launch checks run first. The gate then reads, from the runner's SOURCE, every id it leaves to
 another shard (each _shard_leaves(<member>, (<id>, ...)) call inside a for over literal rows; any
 other call shape is cannot-evaluate), and launches the runner with --list-shard 1/1 and with
