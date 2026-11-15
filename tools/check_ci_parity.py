@@ -4995,30 +4995,45 @@ def _run_runner_copy(text, stubs, fail_command="", gitleaks_rc=0):
 
 
 # The dirname stand-in for dirname_guard_problems and cdpath_problems. It records
-# each call as one line, "dirname" and its arguments, in the log its test names
-# inside that test's own temporary directory, before it answers; a call it cannot
-# record exits 2. Each test reads the log back through _dirname_calls_differ.
+# each call as one record (_dirname_record) in the log its test names inside that
+# test's own temporary directory, before it answers; a call it cannot record exits
+# 2. Each test reads the log back through _dirname_calls_differ. The record line
+# is its own constant so vector 46 can run each test against a stand-in whose
+# record is wrong and require the test to report it.
+_STUB_DIRNAME_RECORD = (
+    """{ printf '%s\\0' dirname "$#" "$@" && printf '\\n'; }"""
+    """ >> "$stub_dirname_log" || exit 2""")
 _STUB_DIRNAME = """#!/bin/sh
-printf '%s\\n' "dirname $*" >> "$stub_dirname_log" || exit 2
+""" + _STUB_DIRNAME_RECORD + """
 printf '%s' "$stub_dirname_out"
 exit "$stub_dirname_rc"
 """
 
 
+def _dirname_record(call):
+    """The bytes the dirname stand-in records for one call (a tuple of
+    arguments): "dirname", the argument count and each argument, every field
+    ended by a NUL, then a newline. An argument cannot hold a NUL and the count
+    says how many fields follow, so the argument boundaries survive: dirname
+    "-- $0" (one argument) and dirname -- "$0" (two) record different bytes, as
+    do an argument holding a newline and two calls."""
+    fields = ("dirname", str(len(call))) + tuple(call)
+    return b"".join(field.encode("utf-8") + b"\0" for field in fields) + b"\n"
+
+
 def _dirname_calls_differ(log, expected):
-    """True when the dirname stand-in's log is not exactly one record per
-    expected call (a tuple of arguments), in order: each record is "dirname",
-    the arguments joined by spaces and a newline. The log is compared as raw
-    bytes, so a missing, extra, reordered, truncated or malformed record (a
-    carriage return included) differs. With no expected call the log must be
-    absent: the stand-in creates it on its first call and nothing else writes
-    it, so a log that is present, even empty, differs."""
+    """True when the dirname stand-in's log is not exactly one record
+    (_dirname_record) per expected call (a tuple of arguments), in order. The
+    log is compared as raw bytes, so a missing, extra, reordered, truncated or
+    malformed record (a carriage return included), or an argument split or
+    joined differently, differs. With no expected call the log must be absent:
+    the stand-in creates it on its first call, so a log that is present, even
+    empty, differs."""
     if _path_absent(log):
         return bool(expected)
     if not expected:
         return True
-    want = "".join("dirname {}\n".format(" ".join(call)) for call in expected)
-    return log.read_bytes() != want.encode("utf-8")
+    return log.read_bytes() != b"".join(_dirname_record(call) for call in expected)
 
 
 def _path_absent(path):
@@ -5042,7 +5057,8 @@ def _dirname_guard_outcome(text, relative, scenario):
     directory). Every stub is written before the one launch, from this thread.
     The dirname stand-in's log must hold exactly the binding's one call,
     dirname -- "$0" with $0 the runner path bash was given, or be absent under
-    "missing", where no stand-in is on PATH.
+    "missing", where no stand-in is on PATH: there only a runner that writes
+    the log path itself makes it present (vector 46 runs such a runner red).
     """
     import os
     import shutil
@@ -10130,6 +10146,77 @@ def self_test():
         if "moved" not in got:
             failures.append("45 {} mutant (CDPATH= removed) gave {}, expected moved".format(
                 relative, got))
+
+    # 46. The dirname stand-in's call log, held red, so neither log check can
+    # be weakened silently. Both checks run each live runner against a
+    # stand-in that answers as the real one does but records its call wrongly,
+    # and each must report it: one that records nothing, one that records a
+    # wrong argument (its two arguments swapped), one that records an extra
+    # call (its record twice), one that records a malformed line (a carriage
+    # return before the newline) and one that records its arguments joined by
+    # spaces (the first draft's record, which lost the argument boundaries).
+    # Under "missing" no stand-in is on PATH, so dirname_guard_problems
+    # reports the calls of the three other scenarios. Each runner with its
+    # binding's call made one joined argument (dirname "-- $0") gets the same
+    # answer from the stand-in, so only the recorded argument boundaries hold
+    # it red. Each runner that empties the stand-in's log path before its
+    # binding is held red only by the missing scenario's absent log: wherever
+    # a stand-in runs, its one record follows the emptying.
+    record_line = _STUB_DIRNAME_RECORD + "\n"
+    stand_in_mutants = (
+        ("records nothing", ""),
+        ("records a wrong argument", record_line.replace('"$@"', '"$2" "$1"', 1)),
+        ("records an extra call", record_line + record_line),
+        ("records a malformed line",
+         record_line.replace("printf '\\n'", "printf '\\r\\n'", 1)),
+        ("records its arguments joined",
+         """printf '%s\\n' "dirname $*" >> "$stub_dirname_log" || exit 2\n"""),
+    )
+    guard_calls = ["failed calls", "empty calls", "control calls"]
+    count += 2 * (2 * len(stand_in_mutants) + 4)
+    if (_STUB_DIRNAME.count(record_line) != 1 or record_line.count('"$@"') != 1
+            or record_line.count("printf '\\n'") != 1):
+        failures.append("46 dirname stand-in drift: {!r}".format(_STUB_DIRNAME))
+        relatives = ()
+    else:
+        relatives = ("tools/run_all_checks.sh", STANDALONE_SOURCE)
+    for relative in relatives:
+        runner_text, runner_diagnostic = read_runner_text(ROOT / relative, relative)
+        if runner_diagnostic is not None:
+            failures.append("46 cannot read {}: {!r}".format(relative, runner_diagnostic))
+            continue
+        for label, record in stand_in_mutants:
+            stand_in = _STUB_DIRNAME.replace(record_line, record, 1)
+            with patch.object(module, "_STUB_DIRNAME", stand_in):
+                got = dirname_guard_problems(runner_text, relative)
+                cdpath_got = cdpath_problems(runner_text, relative)
+            if got != guard_calls:
+                failures.append("46 {} stand-in that {}: dirname guard gave {}, "
+                                "expected {}".format(relative, label, got, guard_calls))
+            if cdpath_got != ["dirname-calls"]:
+                failures.append("46 {} stand-in that {}: CDPATH run gave {}, "
+                                "expected ['dirname-calls']".format(
+                                    relative, label, cdpath_got))
+        line = 'dir=$(dirname -- "$0") || exit 2'
+        if runner_text.count(line + "\n") != 1:
+            failures.append("46 {} binding drift: {}".format(relative, line))
+            continue
+        for label, replacement, guard_want, cdpath_want in (
+                ("dirname call made one joined argument",
+                 line.replace('dirname -- "$0"', 'dirname "-- $0"') + "\n",
+                 guard_calls, ["dirname-calls"]),
+                ("stand-in log emptied before the binding",
+                 ': > "$stub_dirname_log"\n' + line + "\n",
+                 ["missing calls"], [])):
+            mutant = runner_text.replace(line + "\n", replacement, 1)
+            got = dirname_guard_problems(mutant, relative)
+            if got != guard_want:
+                failures.append("46 {} mutant ({}): dirname guard gave {}, "
+                                "expected {}".format(relative, label, got, guard_want))
+            got = cdpath_problems(mutant, relative)
+            if got != cdpath_want:
+                failures.append("46 {} mutant ({}): CDPATH run gave {}, "
+                                "expected {}".format(relative, label, got, cdpath_want))
 
     if failures:
         print("SELF-TEST FAIL:")
