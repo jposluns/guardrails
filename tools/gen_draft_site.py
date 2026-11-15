@@ -140,6 +140,9 @@ GENSRC_OUTPUTS = (
     {"target": "site/standard/index.html", "kind": "file",
      "sources": ("tools/gen_draft_site.py", "site/draft-src/standard.toml"),
      "regenerate": "python3 tools/gen_draft_site.py"},
+    {"target": "site/teams/index.html", "kind": "file",
+     "sources": ("tools/gen_draft_site.py", "site/draft-src/teams.toml"),
+     "regenerate": "python3 tools/gen_draft_site.py"},
     {"target": "opf/site/index.html", "kind": "file",
      "sources": ("tools/gen_draft_site.py", "opf/site/draft-src/home.toml"),
      "regenerate": "python3 tools/gen_draft_site.py"},
@@ -2834,7 +2837,7 @@ def _self_test():
                 ("links/promoted-asset-at-root-flagged", '<img src="/assets/baseline/baseline.css">', 1),
                 ("links/promoted-asset-at-asset-base-passes", '<img src="/draft/assets/baseline/baseline.css">', 0),
                 ("links/promoted-placeholder-passes", '<a href="/draft/">x</a>', 0),
-                ("links/promoted-deleted-page-flagged", '<a href="/teams">x</a>', 1),
+                ("links/promoted-deleted-page-flagged", '<a href="/roadmap">x</a>', 1),
                 ("links/promoted-page-passes", '<a href="/install/">x</a>', 0),
                 ("links/promoted-redirect-source-passes", '<a href="/rule1">x</a>', 0),
                 ("links/promoted-kept-live-passes", '<a href="/development">x</a>', 0)):
