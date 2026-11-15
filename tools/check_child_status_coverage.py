@@ -509,6 +509,7 @@ DIRECT_LAUNCH_RESIDUAL = (
     "tools/import_cwe.py",
     "tools/measure_hook_latency.py",
     "tools/migrate.py",
+    "tools/orch_doctor.py",
     "tools/orch_register.py",
     "tools/pin.py",
     "tools/selftest_aiqt_corpus.py",

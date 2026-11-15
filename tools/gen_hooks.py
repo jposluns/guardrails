@@ -4233,7 +4233,7 @@ def self_test_main(_nested=False):
                 ("plugin handler trailing newline", _cov_plugin_obj(SCRIPT_PLUGIN_PATH, "gensrc_guard\n"), "missing"),
                 # An expansion is read as the shell reads it (its name ends at a quote) and its value is
                 # unknown, so an unset one before an option word leaves python3 running -c or -m code and no
-                # script (QA round 2 N1): the path must start with "/", "./" or an expansion, and every
+                # script: the path must start with "/", "./" or an expansion, and every
                 # expansion must be followed directly by "/", in either shape.
                 ("settings unset expansion before -c", _cov_settings(
                     'python3 -I "$AIQT_REVIEW_UNSET"-c"import sys; print(1)#/aiqt_hooks.py" gensrc_guard'),
@@ -4270,17 +4270,17 @@ def self_test_main(_nested=False):
                     'python3 -I /opt/"$X"/aiqt_hooks.py gensrc_guard'), "covered"),
                 ("twin plugin plain expansion", _cov_plugin_obj("$CLAUDE_PLUGIN_ROOT/hooks/scripts/aiqt_hooks.py"),
                  "covered"),
-                ("twin plugin absolute path", _cov_plugin_obj("/opt/p/hooks/scripts/aiqt_hooks.py"), "covered"),
+                ("twin plugin absolute path", _cov_plugin_obj("/x/p/hooks/scripts/aiqt_hooks.py"), "covered"),
                 ("twin settings rendered path", _cov_settings(
                     "python3 -I {} gensrc_guard".format(PROJECT_SCRIPT_PATH)), "covered"),
                 ("twin settings braced variable", _cov_settings(
                     'python3 -I "${CLAUDE_PROJECT_DIR}"/plugin/x/hooks/scripts/aiqt_hooks.py gensrc_guard'), "covered"),
-                ("twin settings quoted path", _cov_settings('python3 -I "/opt/a b/aiqt_hooks.py" gensrc_guard'),
+                ("twin settings quoted path", _cov_settings('python3 -I "/x/a b/aiqt_hooks.py" gensrc_guard'),
                  "covered"),
-                ("twin settings plain path", _cov_settings("python3 -I /opt/x/aiqt_hooks.py gensrc_guard"),
+                ("twin settings plain path", _cov_settings("python3 -I /x/aiqt_hooks.py gensrc_guard"),
                  "covered"),
                 ("twin plugin", _cov_plugin_obj(SCRIPT_PLUGIN_PATH), "covered"),
-                ("twin matcher differs", _cov_settings("python3 -I /opt/x/aiqt_hooks.py gensrc_guard", "Edit"),
+                ("twin matcher differs", _cov_settings("python3 -I /x/aiqt_hooks.py gensrc_guard", "Edit"),
                  "matcher-differs")):
             got = hook_coverage(cov_hooks, registered_handlers(obj, label), ["gensrc-edit-guard"])
             if [row[1] for row in got] != [want]:

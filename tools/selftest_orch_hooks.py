@@ -12558,9 +12558,9 @@ def _hook_coverage_cases(tmp):
             {"type": "command", "command": "python3", "args": ["-I", script, "orch_ask_guard"], "timeout": 10}]}]}}
 
     # An expansion's value is unknown to the check, so an unset one in front of an option word leaves python3
-    # running -c or -m code and no script (QA round 2 N1): the path must start with "/", "./" or an expansion
-    # followed directly by "/", and every expansion must be followed directly by "/". Each form reads MISSING
-    # and exits 1, in the settings and the plugin shape.
+    # running -c or -m code and no script: the path must start with "/", "./" or an expansion followed directly
+    # by "/", and every expansion must be followed directly by "/". Each form reads MISSING and exits 1, in the
+    # settings and the plugin shape.
     settings_unset = (
         ("unset-before-c", 'python3 -I "$AIQT_REVIEW_UNSET"-c"import sys; print(1)#/aiqt_hooks.py" orch_ask_guard'),
         ("unset-braced-before-c",
@@ -12592,10 +12592,10 @@ def _hook_coverage_cases(tmp):
           _coverage_rows("twin-settings", _with_ask_command, twin_settings)
           + _coverage_rows("twin-plugin", _ask_plugin, twin_plugin),
           [(label, 0, True, False, True) for label, _v in twin_settings + twin_plugin])
-    # The disclosure matches the check (QA round 2 N1, N3): ORCHESTRATION.md and the honesty line say a variable
-    # whose value begins with "-" is not caught, and neither keeps a sentence the check does not hold (that a
-    # path beginning with "-" never counts in either shape, or that any path ending /aiqt_hooks.py counts, which
-    # refused shell text such as /dev/null;#/aiqt_hooks.py does not). The twin elements: the identity paragraph
+    # The disclosure matches the check: ORCHESTRATION.md and the honesty line say a variable whose value begins
+    # with "-" is not caught, and neither keeps a sentence the check does not hold (that a path beginning with
+    # "-" never counts in either shape, or that any path ending /aiqt_hooks.py counts, which refused shell text
+    # such as /dev/null;#/aiqt_hooks.py does not). The twin elements: the identity paragraph
     # is still there, and that shell-text path still reads MISSING.
     code, text, honest = _run(plain_root, "--hook-coverage", _write("n3-shell-text.json", _with_ask_command(
         "python3 -I /dev/null;#/aiqt_hooks.py orch_ask_guard")), "--require", "orch-ask-unattended")
@@ -12608,7 +12608,7 @@ def _hook_coverage_cases(tmp):
            "The script's identity is not checked." in orch_doc, code, honest,
            "MISSING: orch-ask-unattended:" in text),
           (True, True, False, False, False, True, 1, True, True))
-    # The coverage comments in tools/gen_hooks.py claim no more than the check does (QA round 2 N2): the
+    # The coverage comments in tools/gen_hooks.py claim no more than the check does: the
     # self-test summary names a script not named aiqt_hooks.py, not "another script" (a different file of that
     # name counts), and the parser comment no longer says nothing that could run anything but the dispatcher
     # counts. The twin element: the parser comment still says the file name alone is checked.
@@ -12619,7 +12619,7 @@ def _hook_coverage_cases(tmp):
            "could run anything but the dispatcher never counts" in gen_src,
            "Only the script's FILE NAME is checked" in gen_src),
           (True, False, False, True))
-    # Wrapping (QA round 2 N4): every prose line of ORCHESTRATION.md's hook-coverage section stays within 110
+    # Wrapping: every prose line of ORCHESTRATION.md's hook-coverage section stays within 110
     # characters (the indented command and honesty line are exempt), and the reader's docstring has no short
     # interior line. The twin element: the section and the docstring are found.
     lines = orch_doc.split("\n")

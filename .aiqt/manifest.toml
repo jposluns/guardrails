@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.0.5"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "e6519fab038fbbf8b277d00106e317780be3164c743ced9d56aee5ad0ca0f82c"
+tree-sha256 = "5a0cbf905d425d765b6a2f93f97438e74119e77fd69a2184ea1b43b5918f079a"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -4172,8 +4172,8 @@ sha256 = "9387831df89640649d02a6382c5714bbcd2afc7079a5ccba60c8632d3f3349d2"
 
 [[sources]]
 path = "tools/check_child_status_coverage.py"
-bytes = 228692
-sha256 = "67e62a14af79157216e7fd88dfcbf9787a57b6a99aef3b37d90c1dd1689b583d"
+bytes = 228720
+sha256 = "7c0abeb095d461887974795c93b4af86cb2ed75f4f2f996f457fc47993a7ce21"
 
 [[sources]]
 path = "tools/check_ci_parity.py"
@@ -4542,8 +4542,8 @@ sha256 = "5fe2069fa9978b5df1ae5cd65211c9d88d4c59f580dfeb4e3c876bbe2ebe1f29"
 
 [[sources]]
 path = "tools/gen_hooks.py"
-bytes = 287380
-sha256 = "ce486f10c9c855018e63c93b9a233553749086f39f9d2fd18c6df30f6ad078cd"
+bytes = 287352
+sha256 = "0bf7d79adc3c7596f0185f681179e8771cccf523226194b9f43df6e3f395f343"
 
 [[sources]]
 path = "tools/gen_manifest.py"
@@ -4647,8 +4647,8 @@ sha256 = "4d5067573022ee9bb62a6eaf7a92e8ae0ba978de502407e199cb458dc90299f3"
 
 [[sources]]
 path = "tools/orch_doctor.py"
-bytes = 13867
-sha256 = "4f67e5f9c89e53f9f2250455cb0637bfc277fa19216a303f3d23de67b7ec00f9"
+bytes = 13954
+sha256 = "9f0847d34eefb8589a7b598960d5961d860b89267a6f000d223647f3afee9535"
 
 [[sources]]
 path = "tools/orch_preflight.py"
@@ -4727,8 +4727,8 @@ sha256 = "5db515bd671b5573e258cb3548903af302b6ac98b00f7a5ef1287cfbadf88304"
 
 [[sources]]
 path = "tools/selftest_orch_hooks.py"
-bytes = 1246805
-sha256 = "7d49b8b5f1979aa155f754133c2f6ff1d2b01ed25f8974b14e45beace0126204"
+bytes = 1246737
+sha256 = "79abc254b89206bcb141c47b91c131bff7effa745cb689e51e5fd95fd8a73145"
 
 [[sources]]
 path = "tools/sized-instructions-source.sha256"

@@ -150,8 +150,9 @@ def _hook_coverage_run(argv):
         # Fail closed: any value other than false is read as switching every hook off.
         if "disableAllHooks" in obj and obj["disableAllHooks"] is not False:
             findings += 1
-            print("DISABLED: {} sets disableAllHooks to {}; no hook runs while it is in effect, so no "
-                  "registration counts".format(name, json.dumps(obj["disableAllHooks"])))
+            print("DISABLED: {} sets disableAllHooks to {}; registrations are present but hooks are disabled, so "
+                  "no hook runs while it is in effect, even for a control listed as covered".format(
+                      name, json.dumps(obj["disableAllHooks"])))
     for hid, status, detail in results:
         hook = known[hid]
         want = "{} {} -> {}".format(hook["event"], _matcher_text(hook.get("matcher")), hook["handler"])
