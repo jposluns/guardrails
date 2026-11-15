@@ -2234,6 +2234,303 @@ def _test_stop_dispatch_note_sites(failures, tmp):
          aiqt_hooks.orch_lease_heartbeat_stop(lease_fx.payload("Stop")), "heartbeat gap")
 
 
+# The clock bindings' context line for the fixed reading the ck-* cases inject (2026-09-23T17:45:02Z, read
+# in a fixed UTC-04:00 zone abbreviated EDT), spelled out whole so any change of wording, order or values
+# fails; {event} is the hook event the binding is registered for.
+_CK_KNOWN = ("[aiqt-clock] Host clock reading at this {event} hook event: UTC 2026-09-23T17:45:02Z; local time "
+             "2026-09-23 13:45:02 UTC-04:00 (EDT). It is the host clock at that moment: it goes stale as time "
+             "passes and carries any host clock error, and it is context for a timestamp, not a check of one.")
+_CK_UNKNOWN = ("[aiqt-clock] Host clock reading at this {event} hook event: UTC 2026-09-23T17:45:02Z; local time "
+               "zone unknown (ck-reason), so no local time is given; use the UTC value. It is the host clock "
+               "at that moment: it goes stale as time passes and carries any host clock error, and it is "
+               "context for a timestamp, not a check of one.")
+
+
+def _test_clock_inject(failures, tmp):
+    """(ck-*) The two context-only clock bindings, clock_inject_post (PostToolUse) and clock_inject_failure
+    (PostToolUseFailure). ck-wiring-*: each is in HANDLERS and HANDLER_EVENT under its own event, and both
+    events are fail-open. ck-known-*: with the clock fixed by replacing aiqt_hooks._clock_now and the zone
+    fixed by replacing aiqt_hooks._clock_local, each returns exactly its event's context line (_CK_KNOWN:
+    UTC, the local time, its numeric offset and the abbreviation; no permission decision, no note), and
+    ck-dispatch-* holds the same through main(). ck-unknown-text-*: a zone _clock_local cannot establish
+    is named unknown, with no local time.
+    ck-wrong-event-*: a payload naming another event gets a note and no reading. ck-offset: the offset text
+    at and on each side of zero (one second, one microsecond) and at whole and half hours. ck-zone-fixed:
+    _clock_local keeps a fixed injected zone (TZ a POSIX rule). ck-zone-known-*: each TZ the C library
+    reads correctly (unset, UTC, zone database names, an absolute zone file, complete POSIX rules, the
+    legacy EST5EDT) is kept when the injected conversion gives what the C library gives for it.
+    ck-zone-legacy-*: each of the four legacy names in _CLOCK_LEGACY_US_ZONES, on a stand-in zone database
+    that lacks the name and holds the zone it is a link to, is looked up under the name and then under that
+    zone, and is kept. ck-zone-unknown-*: TZ empty (pinned by its own reason), an unknown name, an absent
+    file, TZ unset with /etc/localtime not a readable regular file, a conversion that fails or gives no
+    abbreviation, a zone database offset or abbreviation that differs from the conversion's (the C
+    library's fallback name at offset zero included), the abbreviation -00 through TZ and through
+    /etc/localtime, a TZ that only looks like a POSIX rule (an end transition time whose hours, minutes or
+    seconds are out of range included), and a rule whose names or offsets the conversion does not match
+    each give no local time and the reason for that case. ck-rule-*: _clock_posix_rule accepts and refuses
+    each number just inside and just outside its range (in each offset, the daylight offset included, and
+    in each transition time at the start and at the end of the rule, hours are at most 24 and minutes and
+    seconds at most 59; a transition time of 24:59:59 is accepted and 25:00 is refused), refuses a daylight
+    name with no transition rule, and names the rule's (abbreviation, offset) pairs, a daylight offset with
+    minutes among them. ck-localtime-*: _clock_regular_readable on real files in tmp: a regular file and a
+    symlink to one read True; a directory, an absent path, a dangling symlink, a FIFO and (when not root) a
+    mode 000 file read False. ck-malformed-*: main() with an unparseable or a non-object payload warns on
+    exit 0 and adds no reading for both modes. ck-live: the unreplaced clock gives a line of the known or
+    the unknown shape."""
+    utc = datetime.timezone.utc
+    fixed_now = datetime.datetime(2026, 9, 23, 17, 45, 2, tzinfo=utc)
+    edt = datetime.timezone(datetime.timedelta(hours=-4), "EDT")
+    modes = (("clock_inject_post", "PostToolUse"), ("clock_inject_failure", "PostToolUseFailure"))
+    for mode, event in modes:
+        if (aiqt_hooks.HANDLERS.get(mode) is not getattr(aiqt_hooks, mode, None)
+                or aiqt_hooks.HANDLER_EVENT.get(mode) != event or event not in aiqt_hooks.FAIL_OPEN_EVENTS):
+            failures.append("(ck-wiring-{}) {} must be a HANDLERS entry bound to {} in HANDLER_EVENT, and {} "
+                            "must be in FAIL_OPEN_EVENTS".format(mode, mode, event, event))
+    saved = (aiqt_hooks._clock_now, aiqt_hooks._clock_local)
+
+    def dispatch(mode, stdin_text):
+        buf, saved_stdin = io.StringIO(), sys.stdin
+        try:
+            sys.stdin = io.StringIO(stdin_text)
+            with contextlib.redirect_stdout(buf):
+                code = aiqt_hooks.main([mode])
+        finally:
+            sys.stdin = saved_stdin
+        try:
+            return code, json.loads(buf.getvalue())
+        except ValueError:
+            return code, "unparseable stdout " + repr(buf.getvalue())
+    try:
+        aiqt_hooks._clock_now = lambda: fixed_now
+        aiqt_hooks._clock_local = lambda now: (now.astimezone(edt), None)
+        for mode, event in modes:
+            got = aiqt_hooks.HANDLERS[mode]({"hook_event_name": event, "tool_name": "Bash"})
+            want = (0, {"hookSpecificOutput": {"hookEventName": event,
+                                               "additionalContext": _CK_KNOWN.format(event=event)}}, None)
+            if got != want:
+                failures.append("(ck-known-{}) with a fixed clock and zone, {} must return {!r}, got {!r}"
+                                .format(mode, mode, want, got))
+            for kind, stdin_text in (("unparseable", "}{"), ("non-object", "[]")):
+                code, obj = dispatch(mode, stdin_text)
+                if not (code == 0 and isinstance(obj, dict) and set(obj) == {"systemMessage"}
+                        and "unreadable payload" in obj["systemMessage"]):
+                    failures.append("(ck-malformed-{}-{}) main() given the payload {!r} must warn on exit 0 "
+                                    "with no reading, got exit {!r} and {!r}".format(
+                                        mode, kind, stdin_text, code, obj))
+            code, obj = dispatch(mode, json.dumps({"hook_event_name": event, "tool_name": "Read"}))
+            if (code, obj) != (0, want[1]):
+                failures.append("(ck-dispatch-{}) main() given a well-formed {} payload must print {!r} on "
+                                "exit 0, got exit {!r} and {!r}".format(mode, event, want[1], code, obj))
+        aiqt_hooks._clock_local = lambda now: (None, "ck-reason")
+        for mode, event in modes:
+            got = aiqt_hooks.HANDLERS[mode]({"hook_event_name": event, "tool_name": "Bash"})
+            want = (0, {"hookSpecificOutput": {"hookEventName": event,
+                                               "additionalContext": _CK_UNKNOWN.format(event=event)}}, None)
+            if got != want:
+                failures.append("(ck-unknown-text-{}) a zone that cannot be established must be named "
+                                "unknown with no local time: expected {!r}, got {!r}".format(mode, want, got))
+    finally:
+        aiqt_hooks._clock_now, aiqt_hooks._clock_local = saved
+    for mode, event, other in (("clock_inject_post", "PostToolUse", "PostToolUseFailure"),
+                               ("clock_inject_failure", "PostToolUseFailure", "PostToolUse")):
+        for kind, payload in (("other", {"hook_event_name": other}), ("absent", {})):
+            code, obj, err = aiqt_hooks.HANDLERS[mode](payload)
+            if not (_reduce_result(code, obj) == "allow-note" and err is None
+                    and repr(payload.get("hook_event_name")) in obj["systemMessage"]
+                    and "no clock reading was added" in obj["systemMessage"]):
+                failures.append("(ck-wrong-event-{}-{}) {} given a payload naming {!r} must note it and add "
+                                "no reading, got {!r}".format(mode, kind, mode, payload.get("hook_event_name"),
+                                                              (code, obj, err)))
+    td = datetime.timedelta
+    for offset, want in ((td(seconds=-1), "UTC-00:00:01"), (td(0), "UTC+00:00"), (td(seconds=1), "UTC+00:00:01"),
+                         (td(microseconds=-1), "UTC+00:00"), (td(microseconds=1), "UTC+00:00"),
+                         (td(seconds=-60), "UTC-00:01"), (td(seconds=59), "UTC+00:00:59"),
+                         (td(hours=-4), "UTC-04:00"), (td(hours=5, minutes=30), "UTC+05:30"),
+                         (td(hours=14), "UTC+14:00"), (td(hours=-12), "UTC-12:00")):
+        got = aiqt_hooks._clock_offset_text(offset)
+        if got != want:
+            failures.append("(ck-offset-{}) the offset {!r} must read {!r}, got {!r}".format(
+                offset.total_seconds(), offset, want, got))
+    local, reason = aiqt_hooks._clock_local(fixed_now, env={"TZ": "EST5EDT,M3.2.0,M11.1.0"},
+                                            readable=lambda _p: True, convert=lambda now: now.astimezone(edt))
+    if reason is not None or local is None or (local.utcoffset(), local.tzname(), local.hour) != (
+            td(hours=-4), "EDT", 13):
+        failures.append("(ck-zone-fixed) a fixed injected zone under a POSIX TZ rule must be kept, got {!r} "
+                        "and {!r}".format(local, reason))
+
+    def fixed(offset, name):
+        return lambda now: now.astimezone(datetime.timezone(offset, name))
+    ck_dir = Path(tmp) / "ck-localtime"
+    ck_dir.mkdir()
+    zone_file = ck_dir / "zone"
+    zone_file.write_bytes(b"TZif")
+    for label, env, convert in (
+            ("unset", {}, fixed(td(0), "UTC")), ("utc", {"TZ": "UTC"}, fixed(td(0), "UTC")),
+            ("etc-utc", {"TZ": "Etc/UTC"}, fixed(td(0), "UTC")),
+            ("new-york", {"TZ": "America/New_York"}, fixed(td(hours=-4), "EDT")),
+            ("colon-new-york", {"TZ": ":America/New_York"}, fixed(td(hours=-4), "EDT")),
+            ("est5edt", {"TZ": "EST5EDT"}, fixed(td(hours=-4), "EDT")),
+            ("rule-ist", {"TZ": "IST-5:30"}, fixed(td(hours=5, minutes=30), "IST")),
+            ("rule-npt", {"TZ": "NPT-5:45"}, fixed(td(hours=5, minutes=45), "NPT")),
+            ("rule-quoted", {"TZ": "<+0530>-5:30"}, fixed(td(hours=5, minutes=30), "+0530")),
+            ("rule-gmt", {"TZ": "GMT+5"}, fixed(td(hours=-5), "GMT")),
+            ("rule-seconds", {"TZ": "ABC-0:00:01"}, fixed(td(seconds=1), "ABC")),
+            ("rule-full", {"TZ": "ABC5DEF,M3.2.0,M11.1.0"}, fixed(td(hours=-4), "DEF")),
+            ("kolkata", {"TZ": "Asia/Kolkata"}, fixed(td(hours=5, minutes=30), "IST")),
+            ("kathmandu", {"TZ": "Asia/Kathmandu"}, fixed(td(hours=5, minutes=45), "+0545")),
+            ("adelaide", {"TZ": "Australia/Adelaide"}, fixed(td(hours=9, minutes=30), "ACST")),
+            ("london", {"TZ": "Europe/London"}, fixed(td(hours=1), "BST")),
+            ("etc-gmt-plus-5", {"TZ": "Etc/GMT+5"}, fixed(td(hours=-5), "-05")),
+            ("absolute-path", {"TZ": str(zone_file)}, fixed(td(hours=-4), "EDT"))):
+        want = convert(fixed_now)
+        local, reason = aiqt_hooks._clock_local(fixed_now, env=env, readable=lambda _p: True, convert=convert)
+        if reason is not None or local is None or (local, local.tzname()) != (want, want.tzname()):
+            failures.append("(ck-zone-known-{}) TZ {!r} read by the C library as {} ({}) must be kept, got {!r} "
+                            "and {!r}".format(label, env.get("TZ"), want.utcoffset(), want.tzname(), local,
+                                              reason))
+    # ck-zone-legacy-*: a zone database that lacks a legacy name and holds the zone it is a link to. A
+    # stand-in zoneinfo module fixes what the database holds, so each mapping in _CLOCK_LEGACY_US_ZONES is
+    # pinned whatever the host's copy of the database ships, and the row also pins the lookup order.
+    saved_zoneinfo = sys.modules.get("zoneinfo")
+    for name, linked, offset, abbreviation in (("EST5EDT", "America/New_York", td(hours=-4), "EDT"),
+                                               ("CST6CDT", "America/Chicago", td(hours=-5), "CDT"),
+                                               ("MST7MDT", "America/Denver", td(hours=-6), "MDT"),
+                                               ("PST8PDT", "America/Los_Angeles", td(hours=-7), "PDT")):
+        asked = []
+
+        def zone_info(key, linked=linked, offset=offset, abbreviation=abbreviation, asked=asked):
+            asked.append(key)
+            if key != linked:
+                raise KeyError("ck-no-such-zone {}".format(key))
+            return datetime.timezone(offset, abbreviation)
+        stand_in = types.ModuleType("zoneinfo")
+        stand_in.ZoneInfo = zone_info
+        sys.modules["zoneinfo"] = stand_in
+        try:
+            local, reason = aiqt_hooks._clock_local(fixed_now, env={"TZ": name}, readable=lambda _p: True,
+                                                    convert=fixed(offset, abbreviation))
+        finally:
+            if saved_zoneinfo is None:
+                sys.modules.pop("zoneinfo", None)
+            else:
+                sys.modules["zoneinfo"] = saved_zoneinfo
+        want = fixed(offset, abbreviation)(fixed_now)
+        if (reason is not None or local is None or (local, local.tzname()) != (want, want.tzname())
+                or asked != [name, linked]):
+            failures.append("(ck-zone-legacy-{}) TZ {!r}, on a zone database that lacks it and holds {}, must "
+                            "be looked up as {!r} then {!r} and kept as {} ({}), got {!r} and {!r} after the "
+                            "lookups {!r}".format(name.lower(), name, linked, name, linked, offset, abbreviation,
+                                                  local, reason, asked))
+
+    def nameless(now):
+        return now.astimezone(datetime.timezone(td(hours=2), ""))
+
+    class Nameless(datetime.tzinfo):
+        def utcoffset(self, dt):
+            return td(hours=2)
+
+        def tzname(self, dt):
+            return None
+
+        def dst(self, dt):
+            return td(0)
+
+    def overflowing(now):
+        raise OverflowError("ck-overflow")
+    empty = "TZ is set but empty, which leaves the zone to the implementation"
+    neither = "which is neither a complete POSIX TZ rule nor a zone the zone database holds"
+    database = "the zone database's UTC offset or abbreviation for TZ"
+    rule_pairs = "are not the ones the POSIX TZ rule"
+    for label, env, readable, convert, want in (
+            ("empty", {"TZ": ""}, True, None, empty), ("empty-colon", {"TZ": ":"}, True, None, empty),
+            ("unknown-name", {"TZ": "Ck/NoSuchZone"}, True, None, neither),
+            ("absent-file", {"TZ": ":/nonexistent/ck-zone"}, True, None, "which is not a regular file"),
+            ("unset-no-localtime", {}, False, None, "/etc/localtime is not a readable regular file"),
+            ("no-abbreviation", {"TZ": "CKT-2"}, True, nameless, "no zone abbreviation"),
+            ("none-abbreviation", {"TZ": "CKT-2"}, True, lambda now: now.astimezone(Nameless()),
+             "no zone abbreviation"),
+            ("conversion-fails", {"TZ": "CKT-2"}, True, overflowing, "conversion failed (OverflowError)"),
+            ("database-differs", {"TZ": "Etc/GMT-3"}, True, None, database),
+            ("database-abbreviation-differs", {"TZ": "Etc/GMT-3"}, True, fixed(td(hours=3), "XYZ"), database),
+            ("database-zero-offset-fallback", {"TZ": "Etc/UTC"}, True, fixed(td(0), "Etc"), database),
+            ("factory-tz", {"TZ": "Factory"}, True, fixed(td(0), "-00"), "abbreviation is -00"),
+            ("factory-localtime", {}, True, fixed(td(0), "-00"), "abbreviation is -00"),
+            ("rule-junk-daylight-name", {"TZ": "ABC5garbage"}, True, fixed(td(hours=-4), "garbage"), neither),
+            ("rule-junk-transitions", {"TZ": "ABC5DEF,garbage"}, True, fixed(td(hours=-4), "DEF"), neither),
+            ("rule-minutes-99", {"TZ": "ABC5:99"}, True, fixed(td(hours=-5, minutes=-59), "ABC"), neither),
+            ("rule-seconds-99", {"TZ": "ABC5:30:99"}, True,
+             fixed(-td(hours=5, minutes=30, seconds=59), "ABC"), neither),
+            ("rule-end-hour-25", {"TZ": "ABC5DEF,M3.2.0,M11.1.0/25"}, True, fixed(td(hours=-4), "DEF"), neither),
+            ("rule-end-minutes-60", {"TZ": "ABC5DEF,M3.2.0,M11.1.0/2:60"}, True, fixed(td(hours=-4), "DEF"),
+             neither),
+            ("rule-end-seconds-60", {"TZ": "ABC5DEF,M3.2.0,M11.1.0/2:00:60"}, True, fixed(td(hours=-4), "DEF"),
+             neither),
+            ("rule-name-differs", {"TZ": "ABC5"}, True, fixed(td(hours=-5), "XYZ"), rule_pairs),
+            ("rule-offset-differs", {"TZ": "ABC5"}, True, fixed(td(hours=-4), "ABC"), rule_pairs)):
+        if not env and os.name != "posix":
+            continue
+        local, reason = aiqt_hooks._clock_local(fixed_now, env=env, readable=lambda _p, r=readable: r,
+                                                convert=convert or (lambda now: now.astimezone(edt)))
+        if local is not None or not (isinstance(reason, str) and want in reason):
+            failures.append("(ck-zone-unknown-{}) a zone that cannot be established must give no local time "
+                            "and a reason holding {!r}, got {!r} and {!r}".format(label, want, local, reason))
+    for text in ("ABC24", "ABC5:59", "ABC5:30:59", "ABC5DEF,J1,J365", "ABC5DEF,0,365", "ABC5DEF,M12.5.6,M1.1.0",
+                 "ABC5DEF,M3.2.0/24,M11.1.0/0:59:59", "ABC5DEF,M3.2.0/24:59:59,M11.1.0",
+                 "ABC5DEF,M3.2.0,M11.1.0/24:59:59", "ABC5DEF24,M3.2.0,M11.1.0", "ABC5DEF4:59:59,M3.2.0,M11.1.0",
+                 "<AB+1>5<AB+2>,M3.2.0,M11.1.0"):
+        if aiqt_hooks._clock_posix_rule(text) is None:
+            failures.append("(ck-rule-accepts-{}) the complete POSIX TZ rule {!r} must be accepted".format(
+                text, text))
+    for text in ("ABC25", "ABC5:60", "ABC5:30:60", "ABC5DEF,J0,J365", "ABC5DEF,J1,J366", "ABC5DEF,0,366",
+                 "ABC5DEF,M13.1.0,M11.1.0", "ABC5DEF,M0.1.0,M11.1.0", "ABC5DEF,M3.0.0,M11.1.0",
+                 "ABC5DEF,M3.6.0,M11.1.0", "ABC5DEF,M3.2.7,M11.1.0", "ABC5DEF,M3.2.0/25,M11.1.0",
+                 "ABC5DEF,M3.2.0/2:60,M11.1.0", "ABC5DEF,M3.2.0/-2,M11.1.0", "ABC5DEF,M3.2.0/25:00,M11.1.0",
+                 "ABC5DEF,M3.2.0/2:00:60,M11.1.0", "ABC5DEF,M3.2.0,M11.1.0/25", "ABC5DEF,M3.2.0,M11.1.0/25:00",
+                 "ABC5DEF,M3.2.0,M11.1.0/2:60", "ABC5DEF,M3.2.0,M11.1.0/2:00:60", "ABC5DEF,M3.2.0,M11.1.0/-2",
+                 "ABC5DEF25,M3.2.0,M11.1.0", "ABC5DEF4:60,M3.2.0,M11.1.0", "ABC5DEF4:30:60,M3.2.0,M11.1.0",
+                 "ABC5DEF", "ABC5garbage", "ABC5DEF,M3.2.0", "ABC5DEF,garbage", "AB5", ":ABC5", "ABC5 ", "ABC"):
+        if aiqt_hooks._clock_posix_rule(text) is not None:
+            failures.append("(ck-rule-refuses-{}) {!r} is not a complete POSIX TZ rule and must be refused"
+                            .format(text, text))
+    for text, want in (("ABC5DEF,M3.2.0,M11.1.0", {("ABC", td(hours=-5)), ("DEF", td(hours=-4))}),
+                       ("ABC5DEF6,J60/2,300/3", {("ABC", td(hours=-5)), ("DEF", td(hours=-6))}),
+                       ("ABC5DEF4:30,M3.2.0,M11.1.0",
+                        {("ABC", td(hours=-5)), ("DEF", -td(hours=4, minutes=30))}),
+                       ("<+0530>-5:30", {("+0530", td(hours=5, minutes=30))}),
+                       ("ABC-0:00:01", {("ABC", td(seconds=1))})):
+        got = aiqt_hooks._clock_posix_rule(text)
+        if got != want:
+            failures.append("(ck-rule-pairs-{}) the rule {!r} must name {!r}, got {!r}".format(text, text, want,
+                                                                                            got))
+    regular_link, dangling = ck_dir / "regular-link", ck_dir / "dangling-link"
+    regular_link.symlink_to(zone_file)
+    dangling.symlink_to(ck_dir / "absent")
+    rows = [("regular", zone_file, True), ("symlink-to-regular", regular_link, True),
+            ("directory", ck_dir, False), ("absent", ck_dir / "absent", False),
+            ("dangling-symlink", dangling, False)]
+    if hasattr(os, "mkfifo"):
+        os.mkfifo(str(ck_dir / "fifo"))
+        rows.append(("fifo", ck_dir / "fifo", False))
+    if hasattr(os, "geteuid") and os.geteuid() != 0:
+        unreadable = ck_dir / "unreadable"
+        unreadable.write_bytes(b"TZif")
+        unreadable.chmod(0)
+        rows.append(("unreadable", unreadable, False))
+    for label, path, want in rows:
+        if aiqt_hooks._clock_regular_readable(str(path)) is not want:
+            failures.append("(ck-localtime-{}) _clock_regular_readable must give {} for a path that is {}"
+                            .format(label, want, label.replace("-", " ")))
+    context = aiqt_hooks.clock_inject_post({"hook_event_name": "PostToolUse"})[1]["hookSpecificOutput"][
+        "additionalContext"]
+    if not re.fullmatch(r"\[aiqt-clock\] Host clock reading at this PostToolUse hook event: UTC "
+                        r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z; (local time \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} "
+                        r"UTC[+-]\d{2}:\d{2}(:\d{2})? \([^()]+\)|local time zone unknown \(.+\), so no local "
+                        r"time is given; use the UTC value)\. It is the host clock at that moment: .*", context,
+                        re.ASCII):
+        failures.append("(ck-live) the unreplaced clock must give a line of the known or the unknown shape, got "
+                        "{!r}".format(context))
+
+
 def _git(repo, *args, env_identity=False):
     """Run a git command against repo, raising on failure so a setup fault surfaces as a harness error."""
     cmd = ["git", "-C", str(repo)]
@@ -2709,20 +3006,26 @@ def _test_git_stash_ref(failures):
         if result != aiqt_hooks._deny_missing_tool_name("expbnd"):
             failures.append("{}: expected shared missing-tool deny, got {!r}".format(label, result))
 
-    # These payloads take the sibling's exact unreadable-command note path.
-    for tool_input in (None, [], {}, {"command": None}, {"command": 42}, {"command": ""}):
+    # An unreadable command denies through the shared reader, as in the sibling; an empty command is
+    # readable and takes the sibling's exact convention note.
+    for tool_input in (None, [], {}, {"command": None}, {"command": 42}):
         data = {"hook_event_name": aiqt_hooks.PRETOOL, "tool_name": "Bash",
                 "tool_input": tool_input}
         result = run("(sr-unreadable)", data)
         code, stdout_obj, stderr = result
-        if not (result == aiqt_hooks.git_explicit_binding(data) and code == 0 and
-                isinstance(stdout_obj, dict) and
-                isinstance(stdout_obj.get("systemMessage"), str) and
-                stdout_obj["systemMessage"] and
-                "hookSpecificOutput" not in stdout_obj and
-                "permissionDecision" not in stdout_obj and stderr is None):
-            failures.append("(sr-unreadable) expected sibling note for {!r}, got {!r}"
+        if _reduce_result(code, stdout_obj) != "deny" or stderr is not None:
+            failures.append("(sr-unreadable) expected the unreadable-command deny for {!r}, got {!r}"
                             .format(tool_input, result))
+    data = {"hook_event_name": aiqt_hooks.PRETOOL, "tool_name": "Bash", "tool_input": {"command": ""}}
+    result = run("(sr-empty)", data)
+    code, stdout_obj, stderr = result
+    if not (result == aiqt_hooks.git_explicit_binding(data) and code == 0 and
+            isinstance(stdout_obj, dict) and
+            isinstance(stdout_obj.get("systemMessage"), str) and
+            stdout_obj["systemMessage"] and
+            "hookSpecificOutput" not in stdout_obj and
+            "permissionDecision" not in stdout_obj and stderr is None):
+        failures.append("(sr-empty) expected sibling note for an empty command, got {!r}".format(result))
 
     data = payload("git stash pop")
     data["tool_name"] = "Read"
@@ -2739,6 +3042,151 @@ def _test_git_stash_ref(failures):
     if (aiqt_hooks.HANDLERS.get("git_stash_ref") is not aiqt_hooks.git_stash_ref or
             aiqt_hooks.HANDLER_EVENT.get("git_stash_ref") != aiqt_hooks.PRETOOL):
         failures.append("(sr-wiring) git_stash_ref handler/event wiring is missing or wrong")
+
+
+# A Bash payload whose command cannot be read: the malformed command shapes (absent, null, an array, an
+# integer, a float, an object, an object whose only key is __str__, a boolean), then a tool_input that is
+# itself missing or not an object (the same class). Each row is (name, the payload fields beside
+# hook_event_name and tool_name, the phrase the deny reason must hold to name the malformed field).
+_MALFORMED_BASH_INPUTS = (
+    ("command-absent", {"tool_input": {}}, "tool_input.command is missing"),
+    ("command-null", {"tool_input": {"command": None}}, "tool_input.command is null"),
+    ("command-list", {"tool_input": {"command": ["git", "push"]}}, "tool_input.command is an array"),
+    ("command-int", {"tool_input": {"command": 42}}, "tool_input.command is a number"),
+    ("command-float", {"tool_input": {"command": 1.5}}, "tool_input.command is a number"),
+    ("command-object", {"tool_input": {"command": {"command": "git push"}}}, "tool_input.command is an object"),
+    ("command-str-key-object", {"tool_input": {"command": {"__str__": "git push"}}},
+     "tool_input.command is an object"),
+    ("command-bool", {"tool_input": {"command": True}}, "tool_input.command is a boolean"),
+    ("tool-input-absent", {}, "tool_input is missing"),
+    ("tool-input-null", {"tool_input": None}, "tool_input is null"),
+    ("tool-input-list", {"tool_input": ["git push"]}, "tool_input is an array"),
+    ("tool-input-string", {"tool_input": "git push"}, "tool_input is a string"),
+    ("tool-input-number", {"tool_input": 7}, "tool_input is a number"),
+)
+# A command string holding a NUL: bash ends a command string at its first NUL, so the text before it runs
+# and the text after it never does. Each row is (name, command, the reverted verdicts that are not deny):
+# the git diff family at the end, at the start, mid-word and in place of a space, then the same places in
+# a plain echo. With the NUL check reverted every echo row goes red in every hook; a git diff row stays a
+# deny where the hook's own fallback for a command its lexer refuses already fails closed, and those
+# hooks are named in the row's revert exceptions.
+_NUL_BASH_COMMANDS = (
+    ("git-diff-nul-end", "git diff\x00", ("gate_weakening",)),
+    ("git-diff-nul-start", "\x00git diff", ()),
+    ("git-diff-nul-mid", "git d\x00iff", ("gate_weakening",)),
+    ("git-diff-nul-space", "git\x00diff", ("gate_weakening", "git_discard", "protected_line", "branch_root")),
+    ("echo-nul-end", "echo hi\x00", ()),
+    ("echo-nul-start", "\x00echo hi", ()),
+    ("echo-nul-mid", "ec\x00ho hi", ()),
+    ("echo-nul-space", "echo\x00hi", ()),
+)
+# The Bash hooks with a deny tier that judge every session's commands. The others read the command only
+# inside the scope an orchestration registry, a review dispatch binding or a live review hold gives them,
+# and inert outside it, so tools/selftest_orch_hooks.py builds that scope for their rows.
+_SCOPED_BASH_HANDLERS = frozenset((
+    "orch_truncation_guard", "orch_untracked_wait_loop", "review_dispatch_pin", "review_workdir_hold"))
+# The always-on Bash hooks that deny an empty or blank command on their own (gensrc_guard: its write-sink
+# detector reads no command in it). With the shared reader reverted to the lax empty read their malformed rows
+# still deny, which is pinned; a second revert to a lax read of a harmless command (true) must go red, so
+# the deny there still comes from the reader.
+_EMPTY_COMMAND_DENIED = frozenset(("gensrc_guard",))
+
+
+def _malformed_bash_handlers():
+    """The handler of every PreToolUse hook the manifest registers for Bash with the block default, outside
+    _SCOPED_BASH_HANDLERS, read from the manifest itself so a new Bash hook is covered when it lands."""
+    hooks = load_toml(repo_root() / ".aiqt" / "core" / "hooks" / "manifest.toml")["hook"]
+    return [h["handler"] for h in hooks
+            if h.get("event") == "PreToolUse" and h.get("default") == "block" and h.get("matcher")
+            and re.fullmatch(h["matcher"], "Bash") and h["handler"] not in _SCOPED_BASH_HANDLERS]
+
+
+def _test_malformed_bash_payload(failures):
+    """Every always-on Bash hook with a deny tier denies each _MALFORMED_BASH_INPUTS shape with a reason
+    naming the malformed field, and each case goes red with the shared reader (_bash_command) reverted to
+    the lax read that took an unreadable command for an empty one; a well-formed command is judged as
+    before (the rows above pin it), and an empty one still reads as a command. A hook in
+    _EMPTY_COMMAND_DENIED denies that empty read on its own, which is pinned, and goes red instead with the
+    reader reverted to a lax read of a harmless command (true)."""
+    names = _malformed_bash_handlers()
+    if len(names) < 11:
+        failures.append("(mbp-enumeration) expected at least the 11 always-on Bash hooks with a deny tier in the "
+                        "manifest, got {!r}".format(names))
+    saved = aiqt_hooks._bash_command
+    for name in names:
+        handler = aiqt_hooks.HANDLERS[name]
+        for shape, fields, phrase in _MALFORMED_BASH_INPUTS:
+            data = dict({"hook_event_name": aiqt_hooks.PRETOOL, "tool_name": "Bash"}, **fields)
+            code, stdout_obj, _stderr = handler(data)
+            got = _reduce_result(code, stdout_obj)
+            reason = (stdout_obj.get("hookSpecificOutput", {}).get("permissionDecisionReason", "")
+                      if isinstance(stdout_obj, dict) else "")
+            if got != "deny" or phrase not in reason:
+                failures.append("(mbp-{}-{}) a Bash payload whose {} must deny with a reason naming it; got {} "
+                                "({!r})".format(name, shape, phrase, got, reason))
+            aiqt_hooks._bash_command = lambda payload: ("", None)
+            try:
+                code, stdout_obj, _stderr = handler(data)
+            finally:
+                aiqt_hooks._bash_command = saved
+            if (_reduce_result(code, stdout_obj) == "deny") != (name in _EMPTY_COMMAND_DENIED):
+                failures.append("(mbp-{}-{}-revert) with the shared reader reverted to the lax read the case "
+                                "must {}".format(name, shape, "still deny on the hook's own empty-command deny"
+                                                 if name in _EMPTY_COMMAND_DENIED
+                                                 else "go red (not deny), so the deny comes from the reader"))
+            if name in _EMPTY_COMMAND_DENIED:
+                aiqt_hooks._bash_command = lambda payload: ("true", None)
+                try:
+                    code, stdout_obj, _stderr = handler(data)
+                finally:
+                    aiqt_hooks._bash_command = saved
+                if _reduce_result(code, stdout_obj) == "deny":
+                    failures.append("(mbp-{}-{}-revert-true) with the shared reader reverted to a lax read of "
+                                    "true the case must go red (not deny), so the deny comes from the reader"
+                                    .format(name, shape))
+
+
+def _test_nul_bash_command(failures):
+    """Every always-on Bash hook with a deny tier denies each _NUL_BASH_COMMANDS command with a reason naming
+    the NUL, and with the shared reader's NUL check reverted (a command holding a NUL read as it stands) each
+    case goes red, except where the row names the hook as already denying on its own fallback; that
+    exception is pinned too, so a row that stops going red, or starts, is reported."""
+    names = _malformed_bash_handlers()
+    for required in ("diff_source_pretool", "gate_weakening", "protected_line", "bash_absolute_paths"):
+        if required not in names:
+            failures.append("(nul-enumeration) {} is not among the always-on Bash hooks {!r}".format(
+                required, names))
+    saved = aiqt_hooks._bash_command
+
+    def nul_lax(payload):
+        tool_input = payload.get("tool_input")
+        command = tool_input.get("command") if isinstance(tool_input, dict) else None
+        if isinstance(command, str) and "\x00" in command:
+            return command, None
+        return saved(payload)
+
+    for name in names:
+        handler = aiqt_hooks.HANDLERS[name]
+        for shape, command, still_denied in _NUL_BASH_COMMANDS:
+            data = {"hook_event_name": aiqt_hooks.PRETOOL, "tool_name": "Bash", "cwd": str(repo_root()),
+                    "tool_input": {"command": command}}
+            code, stdout_obj, _stderr = handler(data)
+            got = _reduce_result(code, stdout_obj)
+            reason = (stdout_obj.get("hookSpecificOutput", {}).get("permissionDecisionReason", "")
+                      if isinstance(stdout_obj, dict) else "")
+            if got != "deny" or "holds a NUL character at offset {}".format(command.index("\x00")) not in reason:
+                failures.append("(nul-{}-{}) a Bash command holding a NUL must deny with a reason naming the "
+                                "NUL; got {} ({!r})".format(name, shape, got, reason))
+            aiqt_hooks._bash_command = nul_lax
+            try:
+                code, stdout_obj, _stderr = handler(data)
+            finally:
+                aiqt_hooks._bash_command = saved
+            reverted = _reduce_result(code, stdout_obj)
+            if (reverted == "deny") != (name in still_denied):
+                failures.append("(nul-{}-{}-revert) with the NUL check reverted the case must {}; got {}".format(
+                    name, shape, "still deny on the hook's own fallback" if name in still_denied
+                    else "go red (not deny), so the deny comes from the NUL check", reverted))
 
 
 # The inline_errexit mutants: each is the live hook source with one rule removed by exact source edits
@@ -2896,10 +3344,12 @@ _IE_MUTANTS = {
                            "return _allow()"),),
     "unread-command": (('return _errexit_unreadable("command", "command" in tool_input, command, "a string")',
                         "return _allow()"),),
-    "unread-empty-command": (("if not isinstance(command, str) or not command:\n"
-                              '        return _errexit_unreadable("command"',
-                              "if not isinstance(command, str):\n"
-                              '        return _errexit_unreadable("command"'),),
+    "unread-empty-command": (("if not command:\n"
+                              '        return _errexit_unreadable("command", True, command, "a string")',
+                              "if False:\n"
+                              '        return _errexit_unreadable("command", True, command, "a string")'),),
+    "unread-nul-command": (("return _allow_note(_ERREXIT_UNREADABLE_NOTE.format(  # a command string holding a NUL",
+                            "_allow_note(_ERREXIT_UNREADABLE_NOTE.format(  # a command string holding a NUL"),),
     "unread-rest": (("if _errexit_unread_mentions(unread):", "if False:"),),
     "unread-any": (("if _errexit_unread_mentions(unread):", "if unread:"),),
     "unread-on": (("if unread and on:", "if False:"),),
@@ -3103,8 +3553,8 @@ _IE_UNREAD_ROWS = (
     ("(ie-n35) a set the lexer stopped inside, never read as a set", "set -e <(true); a; b", "unread-rest", True),
     ("(ie-u4) a construct that stops the lexer at the start of a segment", "a; <<< x; set -e; false; echo after",
      "unread-rest", True),
-    ("(ie-u5) a NUL stops the lexer before any segment", "true\x00; set -e; false; echo after", "unread-none",
-     True),
+    ("(ie-u5) a here-string stops the lexer before any segment", "<<< x; set -e; false; echo after",
+     "unread-none", True),
     ("(ie-u6) a rest past an unquoted heredoc read again",
      "cat <<EOF > /abs/out.txt\nbody\nEOF\ndiff <(a) <(b); set -e; false; echo after", "unread-rest", True),
     ("(ie-u7) a rest that mentions only shopt", "cat <(true); shopt -s nullglob; a; b", "unread-shopt", True),
@@ -3419,6 +3869,32 @@ def _test_inline_errexit(failures, tmp):
         if mutants[mutant](data) != (0, None, None):
             failures.append("{}: the {} mutant must silence this row, so the row shows the note decides it; got "
                             "{!r}".format(label, mutant, mutants[mutant](data)))
+    # A command string holding a NUL (bash runs only the text before it) comes through the shared reader
+    # (_bash_command) and allows with the unreadable-input note carrying the reader's detail, which names the
+    # NUL's offset. Under the mutant that drops that note the command reaches the lexer again, and each row
+    # then gives the result pinned beside it, so the row shows the NUL note decides it.
+    for label, command, flip in (
+            ("(ie-m14) a NUL after set -e and a failing step", "set -e; false\x00; echo after",
+             aiqt_hooks._allow_note(aiqt_hooks._ERREXIT_UNREAD_NOTE)),
+            ("(ie-m15) a NUL at the start of the command", "\x00set -e; false; echo after",
+             aiqt_hooks._allow_note(aiqt_hooks._ERREXIT_UNREAD_NOTE)),
+            ("(ie-m16) a NUL at the end of a plain command", "echo hi\x00", (0, None, None))):
+        mutant = "unread-nul-command"
+        used.add(mutant)
+        detail = aiqt_hooks._bash_command(payload(command))[1]
+        want = aiqt_hooks._allow_note(unread.format("command", "a string holding a NUL ({})".format(detail)))
+        got = handler(payload(command))
+        offset = "holds a NUL character at offset {}".format(command.index("\x00"))
+        if got != want or offset not in (detail or ""):
+            failures.append("{}: expected the unreadable-input note naming the NUL ({}), got {!r}".format(
+                label, offset, got))
+        if mutant not in mutants:
+            failures.append("{}: its mutant {} was not built".format(label, mutant))
+            continue
+        flipped = mutants[mutant](payload(command))
+        if flipped != flip:
+            failures.append("{}: the {} mutant must give {!r} for this row, so the row shows the NUL note decides "
+                            "it; got {!r}".format(label, mutant, flip, flipped))
     # A command the lexer could not read in full, whose read part shows no hazard, notes that the rest was not
     # read where errexit is on where the lexer stopped, and otherwise only where that rest mentions set or
     # shopt as a word, errexit or pipefail; each row must then give the other result under its mutant.
@@ -3728,9 +4204,13 @@ def _psm_oracle(failures, handler):
 
 
 # Foreground trkasy rows with no '&' byte anywhere: a quoted here-document write followed by another command
-# reads its body as code, so an apostrophe there left the scan open and the guard denied a detach the
+# had its body read as code, so an apostrophe there left the scan open and the guard denied a detach the
 # command cannot hold. The full row has the shape of a real markdown brief (quotes, backquotes, parentheses,
-# a '#' heading) written with cat, then hashed.
+# a '#' heading) written with cat, then hashed. The scan now reads such a body apart from the command's
+# quote state, so the raw scan no longer reads those two rows as open; the rows the raw scan still reads as
+# open (_TRKASY_NOAMP_FLIP_ROWS: a stray quote, a body whose delimiter line never comes, and an unquoted
+# delimiter's body holding a command substitution, which the scan still reads as shell text) pin the no-'&'
+# branch instead.
 _TRKASY_NOAMP_FULL = (
     "cat > /abs/qa/brief.md <<'EOF'\n# Verify the fix (the ci-status check)\n\n"
     "You are an independent reviewer. Check that the findings are fixed; do not just confirm.\n\n"
@@ -3739,8 +4219,12 @@ _TRKASY_NOAMP_FULL = (
     "2. A present null head_sha was reported as \"missing required field\".\n"
     "Keep this well under one hour; the branch's newest commit holds the fix.\nEOF\n"
     "sha256sum /abs/qa/brief.md")
-_TRKASY_NOAMP_ALLOW_ROWS = (
+_TRKASY_NOAMP_FLIP_ROWS = (
     ("trkasy-noamp-min", "'"),
+    ("trkasy-noamp-heredoc-unterminated", "cat > /abs/f <<'EOF'\nit's\nsha256sum /abs/f"),
+    ("trkasy-noamp-heredoc-unquoted-subst", "cat > /abs/f <<EOF\nit's $(date)\nEOF\nsha256sum /abs/f"),
+)
+_TRKASY_NOAMP_ALLOW_ROWS = _TRKASY_NOAMP_FLIP_ROWS + (
     ("trkasy-noamp-heredoc-min", "cat > /abs/f <<'EOF'\nit's\nEOF\nsha256sum /abs/f"),
     ("trkasy-noamp-full", _TRKASY_NOAMP_FULL),
 )
@@ -3751,9 +4235,10 @@ _TRKASY_REAL_AMP_DENY_ROWS = (
     ("trkasy-amp-after-noamp-full", _TRKASY_NOAMP_FULL + "\nsleep 5 &"),
 )
 # Runtime start forms that can start a background job with no '&' byte, each beside an apostrophe in a
-# here-document body read as code and beside an uncertain '#': the open quote or '#' still denies, since
-# the guard takes the no-'&' allow only for a command holding no such form. The plain forms are the
-# disclosed silent allow and are not rows here.
+# here-document body the scan still reads as code (an unquoted delimiter's body holding a command
+# substitution) and beside an uncertain '#': the open quote or '#' still denies, since the guard takes the
+# no-'&' allow only for a command holding no such form. The plain forms are the disclosed silent allow and
+# are not rows here.
 _TRKASY_RUNTIME_START_FORMS = (
     ("coproc", "coproc sleep 5"),
     ("eval-runtime-amp", "eval \"sleep 5 $(printf '\\x26')\""),
@@ -3832,8 +4317,8 @@ _TRKASY_RUNTIME_START_QUOTED_FORMS = (
 
 def _trkasy_start_rows(forms, contexts=("heredoc-apos", "uncertain-hash")):
     """Deny rows for runtime start forms, each beside the named contexts: an apostrophe in a here-document body
-    read as code, and an uncertain '#'."""
-    prefixes = {"heredoc-apos": "cat <<'EOF'\nit's\nEOF\n", "uncertain-hash": "(true)# x\n"}
+    the scan still reads as code, and an uncertain '#'."""
+    prefixes = {"heredoc-apos": "cat <<EOF\nit's $(date)\nEOF\n", "uncertain-hash": "(true)# x\n"}
     return tuple(("trkasy-start-" + context + "-" + label, prefixes[context] + form)
                  for label, form in forms for context in contexts)
 
@@ -3941,13 +4426,538 @@ def _test_trkasy_no_amp(failures, tmp):
         return fixed(command, lifts)
     aiqt_hooks._orch_foreground_detach_lexed = unfixed
     try:
-        for label, command in _TRKASY_NOAMP_ALLOW_ROWS:
+        for label, command in _TRKASY_NOAMP_FLIP_ROWS:
             got = _decision(handler, command, cwd=str(root))
             if got != "deny":
                 failures.append("({}-flip) the row must deny with the no-'&' branch reading the raw scan, "
                                 "so it pins that branch; got {}".format(label, got))
     finally:
         aiqt_hooks._orch_foreground_detach_lexed = fixed
+
+
+# The adopter's refused command as submitted, with only its absolute host path prefix replaced by /abs/proj/
+# (a tracked file holds no host path): a mkdir, then a quoted here-document write whose body holds
+# apostrophes and the word source (a runtime start form), then a python3 -c command. It holds no '&'.
+_TRKASY_HEREDOC_ADOPTER = (
+    "mkdir -p /abs/proj/tmp/t217-220/fix4prep; cat > "
+    "/abs/proj/tmp/t217-220/fix4prep/keep-list.txt <<'EOF'\n"
+    "Keep list for fix 4 of the staged TODO 217 and TODO 220 change to dispatch-when-free.sh\n"
+    "The staged fix 3 candidate passed the orchestrator's own staging runs: test 699 of 699, with fixtures 713 "
+    "of 713,\n"
+    "mutants as expected (67 named killed, each with the guard passing), every earlier finding and both older "
+    "defects gone.\n"
+    "Each item below was validated at source by the orchestrator, most by a reproduction kept in ctx/. Fix each "
+    "across its\n"
+    "class, not only at the cited line. Every new or changed check gets a test case that fails without it and a "
+    "named\n"
+    "mutant that a case kills.\n"
+    "\n"
+    "f. dispatch-retry.sh line 10 computes its output path as "
+    '/abs/proj/tmp/dispatch-$FAMILY-$(basename "$BRIEF"\n'
+    "   .md).out. For a relative brief name starting with a hyphen, basename prints an error and the path is\n"
+    "   dispatch-claude-.out; for a name ending in a line feed, command substitution drops it. Either way the "
+    "retry script\n"
+    "   reads, keeps aside and renames another file than the one the wrapper writes. Reproduced "
+    "(ctx/val-extra.sh, E2):\n"
+    "   with an earlier output at the wrapper's path, a retry copy run for -dash.md and for tail.md LF kept "
+    "nothing aside\n"
+    "   and the wrapper overwrote the earlier output, which the retry script promises never to happen (M-87). "
+    "Compute the\n"
+    "   path with the same name rules as the wrapper (hyphen-leading names, trailing line feeds kept), and with "
+    "the same\n"
+    "   folder rule, so the two paths are equal for every brief argument.\n"
+    "g. The case reply-ok-en-US-unreadable-quote runs under en_US.UTF-8, and every other case under C.UTF-8, "
+    "both host\n"
+    "   locales. Reproduced (ctx/locale-probe.sh): with the locale name replaced by one not installed, the "
+    "candidate fails\n"
+    "   that case on a bash setlocale warning in stderr, and the reply-ok-locale-removed mutant is killed only "
+    "by that\n"
+    "   warning, not by the shape check. Make the test independent of what the host happens to have installed: "
+    "either pick\n"
+    "   at run time an installed locale that is shown to make the check matter and fail closed, naming the gap, "
+    "when there\n"
+    "   is none, or use a construction that does not depend on a host locale. The class is every case whose "
+    "locale the\n"
+    "   test sets or defaults.\n"
+    "h. Defects found at staging:\n"
+    "   1. The output path of 1 brief can be the same file as another brief of the same call. Reproduced "
+    "(ctx/val-extra.sh,\n"
+    "      E1a and E1b): with briefs y.md and <out>/dispatch-claude-y.out, the first dispatch overwrites the "
+    "second brief\n"
+    "      before its dispatch, which then sends that output as its prompt; in the reverse order the second "
+    "dispatch\n"
+    "      overwrites the first brief after its dispatch, so the brief is lost. Both exit 0. The class is any "
+    "output path\n"
+    "      of 1 call that is the same file as any brief of that call, however the 2 are spelled.\n"
+    "   2. dispatch-retry.sh prints its output path and its keep-aside path raw, in 3 lines. Reproduced "
+    "(ctx/val-extra3.sh,\n"
+    '      E3): a brief name holding a line feed splits the line "kept the earlier output as ..." over 2 lines. '
+    "The wrapper's\n"
+    "      rule (each byte outside printable ASCII shown as 1 ?) applies to every path these lines print.\n"
+    '   3. NOTES.txt line 35 says the en_US.UTF-8 case "passes either way" on a host without that locale; it '
+    "fails either\n"
+    "      way, on the stderr warning (item g). Make the sentence true for the code handed back.\n"
+    '   4. NOTES.txt line 44 says "test-dispatch-rc.sh is unchanged"; the staged copy differs from the live one '
+    "by its added\n"
+    "      Time line. Make it true.\n"
+    '   5. Test line 830 reads "accepted =ref[0]" (missing space). The mutant branch for a mutant whose guard '
+    "passed but\n"
+    "      some cases were not run cannot be reached (a case is NOT RUN only when the guard failed) and would "
+    'print "guard\n'
+    '      failed (guard passed, but N cases not run)", which contradicts itself. Fix the spacing; remove the '
+    "branch or make\n"
+    "      its text true.\n"
+    "Observation for the orchestrator, not a keep item: dist/edit-scripts/discovery-launch.sh, the only caller "
+    "of\n"
+    'dispatch-retry.sh, names its 3 launch logs by $(basename "$BRIEF" .md) without --. Its names stay '
+    "consistent between\n"
+    "the write and the read, so the effect is basename error text on its stderr for a hyphen-leading name. It "
+    "is not a file\n"
+    "of this hand-back; leave it unchanged and name it in NOTES.txt as a sibling for the orchestrator.\n"
+    "EOF\n"
+    'python3 -I -c "\n'
+    "import sys,hashlib,re\n"
+    "d=open(sys.argv[1],'rb').read(); print(hashlib.sha256(d).hexdigest(), len(d), d.count(b'\\n'), 'nonascii', "
+    "sum(b>127 for b in d), 'longest', max(len(l) for l in d.split(b'\\n')))\n"
+    '" /abs/proj/tmp/t217-220/fix4prep/keep-list.txt\n'
+)
+_TAB = "\t"
+# Here-document forms from the bash manual (Here Documents): bash reads no quote, comment or operator in a
+# body, under a quoted delimiter ('EOF', "EOF", \EOF) or an unquoted one, where only parameter expansion,
+# command substitution, arithmetic expansion and the backslash before '$', a backquote, a backslash or a
+# newline apply; <<- strips leading tabs from each body line and from the delimiter line; the bodies of two
+# here-documents on one line follow it in order. Each row is (label, command, expected decision, base
+# decision): the base decision is the guard's before the scan read a body apart from the command's quote
+# state, and every row whose two decisions differ must give its base decision under the reverted mutant.
+_TRKASY_HEREDOC_BODY_ROWS = (
+    # A DATA body's quote never leaves the command's quote open: a plain cat write (or cat to standard output)
+    # followed only by a reader of the data-writing allowlist (sha256sum, ls and the like) still allows, its
+    # delimiter form and apostrophe notwithstanding. Each delimiter-form row's body also holds a start form
+    # (coproc) beside its apostrophe or quote, so reading that body as code (the body-spans-off mutant) denies
+    # it: the row's base decision is deny, and it pins the body-on-its-own reading. A command holding anything
+    # else (the adopter's python3, a source, a coproc outside a data shape) is not a data shape, so its body
+    # is read as commands (_orch_heredoc_data_shape).
+    ("hdb-adopter-exact", _TRKASY_HEREDOC_ADOPTER, "deny", "deny"),
+    ("hdb-unquoted-apostrophe-source", "cat > /tmp/k.txt <<EOF\na'b\nsource\nEOF", "allow", "deny"),
+    ("hdb-single-quoted-delim", "cat > /abs/f <<'EOF'\ncoproc sleep 5\necho it's\nEOF\nsha256sum /abs/g",
+     "allow", "deny"),
+    ("hdb-double-quoted-delim", "cat > /abs/f <<\"EOF\"\ncoproc sleep 5\necho it's\nEOF\nsha256sum /abs/g",
+     "allow", "deny"),
+    ("hdb-backslash-delim", "cat > /abs/f <<\\EOF\ncoproc sleep 5\necho it's\nEOF\nsha256sum /abs/g",
+     "allow", "deny"),
+    ("hdb-dash-tabs-unquoted", "cat <<-EOF\n" + _TAB + "coproc sleep 5\n" + _TAB + "echo it's\n" + _TAB
+     + "EOF\nsha256sum /abs/f", "allow", "deny"),
+    ("hdb-dash-tabs-quoted", "cat <<-'EOF'\n" + _TAB + "coproc sleep 5\n" + _TAB + "echo it's\n" + _TAB
+     + "EOF\nsha256sum /abs/f", "allow", "deny"),
+    ("hdb-two-on-one-line",
+     "cat <<A <<'B'\nit's\ncoproc sleep 5\nA\nsay \"hi\ncoproc sleep 5\nB\nsha256sum /abs/f", "allow", "deny"),
+    ("hdb-double-quote-body", "cat <<EOF\nsay \"hi\ncoproc sleep 5\nEOF\nsha256sum /abs/f", "allow", "deny"),
+    ("hdb-plain-brace-body", "cat <<EOF\nit's ${HOME}\ncoproc sleep 5\nEOF\nsha256sum /abs/f", "allow", "deny"),
+    ("hdb-escaped-substitutions", "cat <<EOF\nit's \\$(date) \\`date\\`\ncoproc sleep 5\nEOF\nsha256sum /abs/f",
+     "allow", "deny"),
+    ("hdb-and-list-after-body", "cat > /abs/f <<'EOF'\nit's\nEOF\nls /abs && sha256sum /abs/f", "allow", "allow"),
+    # The quote a body left open hid a real bare '&' after the delimiter line (QUOTE SHIFT): now read.
+    ("hdb-amp-between-bodies", "cat <<A\nit's\nA\nsleep 5 & cat <<B\nx'\nB", "deny", "allow"),
+    ("hdb-amp-before-stray-quote", "cat <<EOF\nit's\nEOF\nsleep 5 & echo '", "deny", "allow"),
+    # DISCLOSED RESIDUAL the fix keeps, pinned at its current allow: a quote one data body opens and a later
+    # data body closes is not read across the two (the command never runs the file they share; a cat reading
+    # both prints them). A body a shell reads, a coproc after the body, or a written file the command runs
+    # makes the command not a data shape, so its body is read as commands (_TRKASY_HEREDOC_CONSUMER_ROWS).
+    ("hdb-residual-cross-body-pair",
+     "cat > /abs/s <<A\nit's\nA\ncat >> /abs/s <<B\nx'; sleep 5 & echo '\nB\nsha256sum /abs/s", "allow", "deny"),
+    ("hdb-residual-coproc-after-body", "cat <<EOF\nit's\nEOF\ncoproc sleep 5", "deny", "deny"),
+    # Unchanged denies: a substitution an unquoted body runs, read as today (as shell text); a body whose
+    # delimiter line never comes; a bare '&' after the delimiter line; a body fed to a shell; an open body
+    # quote hiding an '&'; an uncertain '#' in a body; and a body this scan does not read on its own.
+    ("hdb-subst-amp-apostrophe", "cat <<EOF\nit's $(sleep 5 &)\nEOF", "deny", "deny"),
+    ("hdb-subst-amp", "cat <<EOF\n$(sleep 5 &)\nEOF", "deny", "deny"),
+    ("hdb-backquote-amp-apostrophe", "cat <<EOF\nit's `sleep 5 &`\nEOF", "deny", "deny"),
+    ("hdb-brace-subst-amp", "cat <<EOF\nit's ${x:-$(sleep 5 &)}\nEOF", "deny", "deny"),
+    ("hdb-subst-setsid-apostrophe", "cat <<EOF\nit's $(setsid -f sleep 5)\nEOF", "deny", "deny"),
+    ("hdb-subst-source-apostrophe", "cat <<EOF\nit's $(date)\nEOF\nsource /abs/f", "deny", "deny"),
+    ("hdb-unterminated-quoted", "cat <<'EOF'\nit's\nsource /abs/f", "deny", "deny"),
+    ("hdb-unterminated-unquoted-amp", "cat <<EOF\nit's\nsleep 5 &", "deny", "deny"),
+    ("hdb-indented-delim-unterminated", "cat <<EOF\nit's\n EOF\nsource /abs/f", "deny", "deny"),
+    ("hdb-amp-after-quoted", "cat <<'EOF'\nit's\nEOF\nsleep 5 &", "deny", "deny"),
+    ("hdb-amp-after-unquoted", "cat <<EOF\nit's\nEOF\nsleep 5 &", "deny", "deny"),
+    ("hdb-shell-body-amp", "bash <<EOF\nsleep 5 &\nEOF", "deny", "deny"),
+    ("hdb-shell-body-closed-quote-amp", "bash <<EOF\nit's\nx'\nsleep 5 &\nEOF", "deny", "deny"),
+    # A body left with a quote open makes every bare '&' in the command unreadable, so the lexer's lift of a
+    # quoted body's '&' never frees one that a shell running the body detaches.
+    ("hdb-shell-body-amp-then-apostrophe", "bash <<'EOF'\nsleep 5 &\necho it's\nEOF", "deny", "deny"),
+    ("hdb-written-file-run",
+     "cat > /abs/s.sh <<'EOF'\nsleep 5 &\nEOF\ncat > /abs/n.txt <<'EOF'\nit's\nEOF\nbash /abs/s.sh", "deny", "deny"),
+    ("hdb-open-quote-hides-amp", "cat <<EOF\nit's & more\nEOF", "deny", "deny"),
+    ("hdb-uncertain-hash-body", "cat <<'EOF'\n(x #y)\nEOF\nsource /abs/f", "deny", "deny"),
+    ("hdb-after-paren", "(true); cat <<'EOF'\nit's\nEOF\nsource /abs/f", "deny", "deny"),
+    ("hdb-backslash-newline-unquoted", "cat <<EOF\nit's \\\nEOF\nsource /abs/f", "deny", "deny"),
+    ("hdb-in-substitution", "x=$(cat <<EOF\nit's\nEOF\n); source /abs/f", "deny", "deny"),
+    ("hdb-appended-bodies-amp",
+     "cat > /abs/s <<A\nit's\nA\ncat >> /abs/s <<B\nx'; sleep 5 &\nB\nbash /abs/s", "deny", "deny"),
+    # Unchanged allows: a body quote that hides an '&' a shell reading the body also hides, a plain cat write
+    # call, and the commit message form.
+    ("hdb-shell-body-quoted-amp", "bash <<EOF\necho 'a & b'\nEOF", "allow", "allow"),
+    ("hdb-data-command", "cat > /abs/f <<'EOF'\nit's & so\nEOF", "allow", "allow"),
+    ("hdb-commit-form", "git commit -m \"$(cat <<'EOF'\nDon't merge & go\nEOF\n)\"", "allow", "allow"),
+)
+# The mutant reverts the fix: the scan never reads a body on its own, so every body it does not skip as a
+# plain cat write is read as shell text again, its quotes shifting the command's quote state.
+_TRKASY_HEREDOC_MUTANT_ANCHOR = "else _orch_heredoc_body_spans(command, i + 1, n, specs))"
+_TRKASY_HEREDOC_MUTANT_REPLACEMENT = "else (None, i))"
+_TRKASY_HEREDOC_MUTANT_CHILD = (
+    "import importlib.util, json, resource, sys\n"
+    "limit = int(sys.argv[3])\n"
+    "resource.setrlimit(resource.RLIMIT_AS, (limit, limit))\n"
+    "spec = importlib.util.spec_from_file_location(sys.argv[2], sys.argv[1])\n"
+    "module = importlib.util.module_from_spec(spec)\n"
+    "spec.loader.exec_module(module)\n"
+    "job = json.loads(sys.stdin.read())\n"
+    "out = []\n"
+    "for command in job['commands']:\n"
+    "    data = {'hook_event_name': 'PreToolUse', 'tool_name': 'Bash', 'tool_input': {'command': command},\n"
+    "            'cwd': job['cwd']}\n"
+    "    _code, obj, _err = module.orch_truncation_guard(data)\n"
+    "    hso = obj.get('hookSpecificOutput') if isinstance(obj, dict) else None\n"
+    "    out.append(hso.get('permissionDecision', 'allow') if isinstance(hso, dict) else 'allow')\n"
+    "sys.stdout.write(json.dumps(out))\n"
+)
+_TRKASY_HEREDOC_MUTANT_AS_LIMIT = 2 * 1024 ** 3
+_TRKASY_HEREDOC_MUTANT_TIMEOUT = 300
+
+
+def _trkasy_heredoc_mutant_decisions(failures, tmp, root, commands, anchor=_TRKASY_HEREDOC_MUTANT_ANCHOR,
+                                     replacement=_TRKASY_HEREDOC_MUTANT_REPLACEMENT, tag="hdb"):
+    """The reverted mutant's decision for each command, run in a child of its own session (process group)
+    under RLIMIT_AS and a wall-clock timeout, the whole group killed when it ends; None (with a failure
+    appended) when the anchor is not found exactly once or the child does not give one decision per
+    command. The mutant is the hook source with anchor replaced by replacement; tag names its failures and
+    its directory."""
+    source = Path(aiqt_hooks.__file__).read_text(encoding="utf-8")
+    if source.count(anchor) != 1:
+        failures.append("({}-mutant-anchor) the mutant anchor {!r} occurs {} times in the hook source, expected "
+                        "once".format(tag, anchor, source.count(anchor)))
+        return None
+    mutant_dir = tmp / ("trkasy-" + tag + "-mutant")
+    os.makedirs(mutant_dir, exist_ok=True)
+    module_name = tag + "_mutant_aiqt_hooks"
+    path = mutant_dir / (module_name + ".py")
+    path.write_text(source.replace(anchor, replacement), encoding="utf-8")
+    payload = json.dumps({"commands": list(commands), "cwd": str(root)})
+    proc = subprocess.Popen(
+        [sys.executable, "-I", "-B", "-c", _TRKASY_HEREDOC_MUTANT_CHILD, str(path), module_name,
+         str(_TRKASY_HEREDOC_MUTANT_AS_LIMIT)],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        start_new_session=True)
+    try:
+        out, err = proc.communicate(payload, timeout=_TRKASY_HEREDOC_MUTANT_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        out, err = None, "timed out after {} s".format(_TRKASY_HEREDOC_MUTANT_TIMEOUT)
+    finally:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+        proc.wait(timeout=30)
+        for stream in (proc.stdin, proc.stdout, proc.stderr):
+            if stream is not None and not stream.closed:
+                stream.close()
+    try:
+        decisions = json.loads(out) if out else None
+    except ValueError:
+        decisions = None
+    if not isinstance(decisions, list) or len(decisions) != len(commands):
+        failures.append("({}-mutant-run) the reverted mutant gave no decision per row (exit {!r}, stderr {!r})"
+                        .format(tag, proc.returncode, (err or "")[-400:]))
+        return None
+    return decisions
+
+
+def _test_trkasy_heredoc_body_data(failures, tmp):
+    """Foreground trkasy rows in registry scope for here-document bodies (_TRKASY_HEREDOC_BODY_ROWS): each row
+    gives its expected decision, and each row whose decision the fix changed gives its base decision under
+    the reverted mutant (_trkasy_heredoc_mutant_decisions), so every such row fails with the fix reverted."""
+    root = tmp / "trkasy-heredoc-body"
+    (root / ".aiqt").mkdir(parents=True)
+    (root / ".aiqt" / "orchestration.local.json").write_text(json.dumps({"version": 1}), encoding="utf-8")
+    handler = aiqt_hooks.orch_truncation_guard
+    for label, command, expected, _base in _TRKASY_HEREDOC_BODY_ROWS:
+        got = _decision(handler, command, cwd=str(root))
+        if got != expected:
+            failures.append("({}) expected {} in registry scope; got {}".format(label, expected, got))
+    changed = [(label, command, base) for label, command, expected, base in _TRKASY_HEREDOC_BODY_ROWS
+               if expected != base]
+    if not changed:
+        failures.append("(hdb-changed-rows) no row pins a changed decision")
+        return
+    decisions = _trkasy_heredoc_mutant_decisions(failures, tmp, root, [command for _l, command, _b in changed])
+    if decisions is None:
+        return
+    for (label, _command, base), got in zip(changed, decisions):
+        if got != base:
+            failures.append("({}-mutant) the row must give its base decision {} with the fix reverted, so it "
+                            "pins the fix; got {}".format(label, base, got))
+
+
+_HDC_APOS = "coproc sleep 5\necho it's\n"  # a runtime start form beside an apostrophe, no '&'
+_HDC_PLAIN = "coproc sleep 5\necho its\n"  # the same with no apostrophe
+_HDC_AMP = "sleep 5 &\n"  # a bare '&'
+
+
+def _hdc_rows(label, head, body_names, tail=""):
+    """One row per body kind for a here-document whose consumer line is head and whose delimiter is EOF:
+    (label-kind, command, expected) for each (kind, expected) in body_names."""
+    bodies = {"apos": _HDC_APOS, "plain": _HDC_PLAIN, "amp": _HDC_AMP}
+    return tuple(("hdc-{}-{}".format(label, kind), head + "\n" + bodies[kind] + "EOF" + tail, expected)
+                 for kind, expected in body_names)
+
+
+# Unless the WHOLE command is a safe data-writing shape (_orch_heredoc_data_shape), a here-document body is
+# read as its consumer's commands: a quote it leaves open denies beside a runtime start form, as in the
+# command's own text, and a bare '&' in it denies, never lifted as quoted body text. The same body with no
+# apostrophe and no '&' is the plain start form's silent allow. Each row is (label, command, expected
+# decision, decision before the consumer was read); every row whose two decisions differ must give the
+# earlier one under the mutant that reads every body as data.
+_HDC_SHELL_APOS = (("apos", "deny"), ("plain", "allow"))
+_HDC_SHELL_ALL = _HDC_SHELL_APOS + (("amp", "deny"),)
+_TRKASY_HEREDOC_CONSUMER_ROWS = tuple(
+    (label, command, expected, "allow")
+    for label, command, expected in (
+        _hdc_rows("bash-unquoted", "bash <<EOF", _HDC_SHELL_APOS)
+        + _hdc_rows("bash-quoted", "bash <<'EOF'", _HDC_SHELL_ALL)
+        + _hdc_rows("bash-dq", "bash <<\"EOF\"", _HDC_SHELL_ALL)
+        + _hdc_rows("bash-s", "bash -s <<'EOF'", _HDC_SHELL_ALL)
+        + _hdc_rows("sh", "sh <<'EOF'", _HDC_SHELL_ALL)
+        + _hdc_rows("dash", "dash <<'EOF'", _HDC_SHELL_ALL)
+        + _hdc_rows("zsh", "zsh <<'EOF'", _HDC_SHELL_ALL)
+        + _hdc_rows("abs-bash", "/bin/bash <<'EOF'", _HDC_SHELL_ALL)
+        + _hdc_rows("env-bash", "env bash <<'EOF'", _HDC_SHELL_ALL)
+        + _hdc_rows("source-stdin", "source /dev/stdin <<'EOF'", _HDC_SHELL_ALL)
+        + _hdc_rows("dot-stdin", ". /dev/stdin <<'EOF'", _HDC_SHELL_ALL)
+        + _hdc_rows("bash-dash-tabs", "bash <<-'EOF'", _HDC_SHELL_ALL)
+        + _hdc_rows("cat-piped-to-bash", "cat <<'EOF' | bash", _HDC_SHELL_ALL)
+        + _hdc_rows("after-and-list", "cd /abs && bash <<'EOF'", _HDC_SHELL_ALL)
+        + _hdc_rows("unnamed", "runner <<'EOF'", _HDC_SHELL_ALL)
+        + _hdc_rows("git-commit-file-stdin", "git commit -F - <<'EOF'", (("amp", "deny"),))
+        + _hdc_rows("cat-renamed", "hash -p /usr/bin/bash cat; cat <<'EOF'", _HDC_SHELL_ALL)
+        + _hdc_rows("write-bash", "cat > /abs/s.sh <<'EOF'", _HDC_SHELL_ALL, "\nbash /abs/s.sh")
+        + _hdc_rows("write-sh", "cat > /abs/s.sh <<'EOF'", _HDC_SHELL_ALL, "\nsh /abs/s.sh")
+        + _hdc_rows("write-source", "cat > /abs/s.sh <<'EOF'", _HDC_SHELL_ALL, "\nsource /abs/s.sh")
+        + _hdc_rows("write-dot", "cat > /abs/s.sh <<'EOF'", _HDC_SHELL_ALL, "\n. /abs/s.sh")
+        + _hdc_rows("write-dot-slash", "cat > s.sh <<'EOF'", _HDC_SHELL_ALL, "\nchmod +x s.sh; ./s.sh")
+        + _hdc_rows("write-python3", "cat > /abs/s.py <<'EOF'", _HDC_SHELL_ALL, "\npython3 /abs/s.py")
+        + _hdc_rows("write-same-line-bash", "cat > /abs/s.sh <<'EOF'; bash /abs/s.sh", _HDC_SHELL_ALL)
+        + _hdc_rows("write-redirect-into-bash", "cat > /abs/s.sh <<'EOF'", _HDC_SHELL_ALL, "\nbash < /abs/s.sh")
+        + _hdc_rows("write-piped-to-bash", "cat > /abs/s.sh <<'EOF'", _HDC_SHELL_ALL, "\ncat /abs/s.sh | bash")
+        + _hdc_rows("write-bash-c", "cat > /abs/s.sh <<'EOF'", _HDC_SHELL_ALL,
+                    "\nbash -c 'source /abs/s.sh'")
+        + _hdc_rows("write-python3-c-exec", "cat > /abs/s.py <<'EOF'", _HDC_SHELL_ALL,
+                    "\npython3 -c \"exec(open('/abs/s.py').read())\"")
+        + _hdc_rows("write-mv-then-run", "cat > /abs/s.sh <<'EOF'", _HDC_SHELL_ALL,
+                    "\nmv /abs/s.sh /abs/t.sh; bash /abs/t.sh")
+        + (("hdc-two-shell-bodies-rebalance", "bash <<'EOF'\n" + _HDC_APOS + "EOF\nbash <<'EOF'\necho it's\nEOF",
+            "deny"),
+           ("hdc-write-run-cross-body-pair",
+            "cat > /abs/s <<A\nit's\nA\ncat >> /abs/s <<B\nx'; sleep 5 & echo '\nB\nbash /abs/s", "deny"),
+           ("hdc-write-sourced-single-quoted", "cat > /abs/f <<'EOF'\nit's\nEOF\nsource /abs/f", "deny"),
+           ("hdc-write-sourced-double-quoted", "cat > /abs/f <<\"EOF\"\nit's\nEOF\nsource /abs/f", "deny"),
+           ("hdc-write-sourced-backslash", "cat > /abs/f <<\\EOF\nit's\nEOF\nsource /abs/f", "deny"))
+        # The cost ceilings, each end just inside, at and just outside (_orch_heredoc_data_shape fails toward
+        # commands): a command holding more than 64 here-documents is not proved a data shape, and neither is
+        # one longer than 65536 characters (here, a plain cat write with an '&' body padded to that length).
+        # The body-limit label is the TOTAL number of here-documents in the command (the last one carries the
+        # '&' body), so 64 is the limit itself (allow), 63 just inside it and 65 just outside it (deny).
+        + tuple(("hdc-body-limit-{}".format(total),
+                 "cat <<'E'\nx\nE\n" * (total - 1) + "cat <<'E'\n" + _HDC_AMP + "E", expected)
+                for total, expected in ((63, "allow"), (64, "allow"), (65, "deny")))
+        + tuple(("hdc-run-text-limit-{}".format(size),
+                 "cat > /abs/s <<'E'\n" + _HDC_AMP + "E\nsha256sum /" + "a" * (size - 42), expected)
+                for size, expected in ((65535, "allow"), (65536, "allow"), (65537, "deny")))
+    )
+) + tuple((label, command, expected, before) for label, command, expected, before in (
+    # Unchanged allows (the -plain rows above too): the plain start form with no apostrophe and no '&' is the
+    # silent allow (as in the command's own text), an apostrophe with no start form or '&' is allowed, a
+    # quoted '&' in a shell's body is quoted text, an unquoted shell body's '&' and a shell body's '&'
+    # before an apostrophe were denied already, and a data body (a plain cat write followed only by a reader,
+    # or a cat to standard output) keeps its allow: its quote opens nothing and the lexer lifts its quoted
+    # '&'. A python3 -c reading the file, a bash run of another written file, and the adopter (python3 after
+    # the write) are NOT data shapes, so their bodies read as commands and now deny; 'cat1>f' is the word
+    # cat1 with an fd-1 redirect, not cat, so it is not a data shape either.
+    ("hdc-bash-apostrophe-no-start-form", "bash <<'EOF'\necho it's\nEOF", "allow", "allow"),
+    ("hdc-bash-quoted-amp-text", "bash <<'EOF'\necho 'a & b'\nEOF", "allow", "allow"),
+    ("hdc-bash-unquoted-amp", "bash <<EOF\n" + _HDC_AMP + "EOF", "deny", "deny"),
+    ("hdc-bash-amp-then-apostrophe", "bash <<'EOF'\nsleep 5 &\necho it's\nEOF", "deny", "deny"),
+    ("hdc-cat-stdout-apos", "cat <<'EOF'\n" + _HDC_APOS + "EOF\necho done", "allow", "allow"),
+    ("hdc-cat-stdout-amp", "cat <<'EOF'\n" + _HDC_AMP + "EOF\necho done", "allow", "allow"),
+    ("hdc-write-hashed-apos", "cat > /abs/n.txt <<'EOF'\n" + _HDC_APOS + "EOF\nsha256sum /abs/n.txt", "allow",
+     "allow"),
+    ("hdc-write-hashed-amp", "cat > /abs/n.txt <<'EOF'\n" + _HDC_AMP + "EOF\nsha256sum /abs/n.txt", "allow",
+     "allow"),
+    ("hdc-write-python3-c-argument", "mkdir -p /abs; cat > /abs/k.txt <<'EOF'\n" + _HDC_APOS
+     + "EOF\npython3 -I -c \"import sys; print(open(sys.argv[1]).read())\" /abs/k.txt", "deny", "allow"),
+    ("hdc-write-other-file-run", "cat > /abs/n.txt <<'EOF'\n" + _HDC_APOS + "EOF\nbash /abs/other.sh", "deny",
+     "allow"),
+    ("hdc-cat1-fd-redirect", "cat1>/abs/f <<'E'\n" + _HDC_AMP + "E", "deny", "allow"),
+    ("hdc-cat-partly-quoted-delim-amp", "cat <<EO'F'\n" + _HDC_AMP + "EOF", "allow", "allow"),
+    ("hdc-bash-partly-quoted-delim-amp", "bash <<EO'F'\n" + _HDC_AMP + "EOF", "deny", "allow"),
+    ("hdc-adopter-exact", _TRKASY_HEREDOC_ADOPTER, "deny", "allow"),
+    ("hdc-adopter-unquoted", "cat > /tmp/k.txt <<EOF\na'b\nsource\nEOF", "allow", "allow"),
+))
+# The mutant reads every body as data (the reading before the command's data shape was proved).
+_TRKASY_HDC_MUTANT_ANCHOR = "runs = not data_shape"
+_TRKASY_HDC_MUTANT_REPLACEMENT = "runs = False"
+
+
+def _test_trkasy_heredoc_consumer(failures, tmp):
+    """Foreground trkasy rows in registry scope for a here-document body's consumer
+    (_TRKASY_HEREDOC_CONSUMER_ROWS): each row gives its expected decision, and each row whose decision
+    reading the consumer changed gives its earlier decision under the mutant that reads every consumer as
+    data (_trkasy_heredoc_mutant_decisions), so every such row fails with that change reverted."""
+    root = tmp / "trkasy-heredoc-consumer"
+    (root / ".aiqt").mkdir(parents=True)
+    (root / ".aiqt" / "orchestration.local.json").write_text(json.dumps({"version": 1}), encoding="utf-8")
+    handler = aiqt_hooks.orch_truncation_guard
+    labels = [row[0] for row in _TRKASY_HEREDOC_CONSUMER_ROWS]
+    if len(set(labels)) != len(labels):
+        failures.append("(hdc-labels) the consumer rows repeat a label")
+    for label, command, expected, _before in _TRKASY_HEREDOC_CONSUMER_ROWS:
+        got = _decision(handler, command, cwd=str(root))
+        if got != expected:
+            failures.append("({}) expected {} in registry scope; got {}".format(label, expected, got))
+    changed = [(label, command, before) for label, command, expected, before in _TRKASY_HEREDOC_CONSUMER_ROWS
+               if expected != before]
+    if not changed:
+        failures.append("(hdc-changed-rows) no row pins a changed decision")
+        return
+    decisions = _trkasy_heredoc_mutant_decisions(
+        failures, tmp, root, [command for _l, command, _b in changed], _TRKASY_HDC_MUTANT_ANCHOR,
+        _TRKASY_HDC_MUTANT_REPLACEMENT, "hdc")
+    if decisions is None:
+        return
+    for (label, _command, before), got in zip(changed, decisions):
+        if got != before:
+            failures.append("({}-mutant) the row must give its earlier decision {} with every consumer read as "
+                            "data, so it pins the consumer reading; got {}".format(label, before, got))
+
+
+# Each data-shape proof rule, as (tag, anchor, replacement, rows): the anchor/replacement revert exactly that
+# rule in a scratch mutant, and every row DENIES in registry scope but ALLOWS with the rule reverted, so each
+# row is red precisely when its rule is gone. The reverts gate a condition with `False and` or widen a word
+# pattern, leaving the rest of the proof intact.
+# The cat write target rule has three clauses, each with its own revert: the '..' clause, the absolute /dev
+# and /proc clause, and the allowlisted-last-component clause.
+_DS_DOTDOT_ANCHOR = '            if not parts or ".." in parts:\n'
+_DS_DOTDOT_REPL = '            if not parts:\n'
+_DS_DEVPROC_ANCHOR = '            if (target.startswith("/") and parts[0] in ("dev", "proc")\n'
+_DS_DEVPROC_REPL = '            if False and (target.startswith("/") and parts[0] in ("dev", "proc")\n'
+_DS_READER_ANCHOR = "            if parts[-1] in _ORCH_DATA_SHAPE_ALLOWED:\n"
+_DS_READER_REPL = "            if False and parts[-1] in _ORCH_DATA_SHAPE_ALLOWED:\n"
+_DS_PIPE_ANCHOR = 'if ch in "&|" and not command.startswith(ch * 2, i):'
+_DS_PIPE_REPL = 'if ch == "&" and not command.startswith(ch * 2, i):'
+_DS_EXTRA_ANCHOR = "extra_word = True"
+_DS_EXTRA_REPL = "extra_word = False"
+_DS_REDIR_ANCHOR = (
+    "        if has_redirect:\n"
+    "            return False\n"
+    "        return first_word in _ORCH_DATA_SHAPE_ALLOWED")
+_DS_REDIR_REPL = (
+    "        if False and has_redirect:\n"
+    "            return False\n"
+    "        return first_word in _ORCH_DATA_SHAPE_ALLOWED")
+_DS_WORD_ANCHOR = '_ORCH_DATA_SHAPE_WORD_RE = re.compile(r"[A-Za-z0-9_./+,:@%=-]+")'
+_DS_WORD_REPL = '_ORCH_DATA_SHAPE_WORD_RE = re.compile(r"[^\\s;&|<>]+")'
+_TRKASY_DATA_SHAPE_RULE_GROUPS = (
+    ("dsreadername", _DS_READER_ANCHOR, _DS_READER_REPL, (
+        ("ds-target-wc", "cat > /abs/bin/wc <<'EOF'\n" + _HDC_APOS + "EOF\nwc /dev/null"),
+        ("ds-target-ls", "cat > /abs/bin/ls <<'EOF'\n" + _HDC_APOS + "EOF\nls /abs"),
+        ("ds-target-stat", "cat > /abs/bin/stat <<'EOF'\n" + _HDC_APOS + "EOF\nstat /abs"),
+        ("ds-target-mkdir", "cat > /abs/bin/mkdir <<'EOF'\n" + _HDC_APOS + "EOF\nmkdir /abs/d"),
+        ("ds-target-cat", "cat > /abs/bin/cat <<'EOF'\n" + _HDC_APOS + "EOF\ncat /abs/f"),
+    )),
+    ("dsdevproc", _DS_DEVPROC_ANCHOR, _DS_DEVPROC_REPL, (
+        ("ds-target-dev", "cat > /dev/stdout <<'EOF'\n" + _HDC_APOS + "EOF"),
+        ("ds-target-dev-fd-1", "cat > /dev/fd/1 <<'EOF'\n" + _HDC_APOS + "EOF"),
+        ("ds-target-dev-stderr", "cat > /dev/stderr <<'EOF'\n" + _HDC_APOS + "EOF"),
+        ("ds-target-dev-tty", "cat > /dev/tty <<'EOF'\n" + _HDC_APOS + "EOF"),
+        ("ds-target-dev-shm-itself", "cat > /dev/shm <<'EOF'\n" + _HDC_APOS + "EOF"),
+        ("ds-target-dev-null-prefix", "cat > /dev/nullx <<'EOF'\n" + _HDC_APOS + "EOF"),
+        ("ds-target-proc", "cat > /proc/self/fd/0 <<'EOF'\n" + _HDC_APOS + "EOF"),
+        ("ds-target-proc-fd-1", "cat > /proc/self/fd/1 <<'EOF'\n" + _HDC_APOS + "EOF"),
+    )),
+    ("dsdotdot", _DS_DOTDOT_ANCHOR, _DS_DOTDOT_REPL, (
+        ("ds-target-dotdot-dev", "cat > /abs/../dev/stdout <<'EOF'\n" + _HDC_APOS + "EOF"),
+        ("ds-target-dotdot-relative", "cat > ../x/stdout <<'EOF'\n" + _HDC_APOS + "EOF\nwc ../x/stdout"),
+    )),
+    ("dspipe", _DS_PIPE_ANCHOR, _DS_PIPE_REPL, (
+        ("ds-pipe-cat", "cat <<'EOF' | wc -c\n" + _HDC_APOS + "EOF"),
+        ("ds-pipe-after-write", "cat > /abs/f <<'EOF'\n" + _HDC_APOS + "EOF\nwc /abs/f | wc -l"),
+    )),
+    ("dsextra", _DS_EXTRA_ANCHOR, _DS_EXTRA_REPL, (
+        ("ds-extra-word", "cat x > /abs/f <<'EOF'\n" + _HDC_APOS + "EOF"),
+    )),
+    ("dsredir", _DS_REDIR_ANCHOR, _DS_REDIR_REPL, (
+        ("ds-reader-redirect", "cat > /abs/f <<'EOF'\n" + _HDC_APOS + "EOF\nwc /abs/f > /abs/c.txt"),
+    )),
+    ("dsword", _DS_WORD_ANCHOR, _DS_WORD_REPL, (
+        ("ds-plain-word-subst", "cat > /abs/f <<'EOF'\n" + _HDC_APOS + "EOF\necho $(bash /abs/f)"),
+        ("ds-plain-word-quoted-subst", "cat > /abs/f <<'EOF'\n" + _HDC_APOS + "EOF\nls \"$(bash /abs/f)\""),
+        ("ds-plain-word-backquote", "cat > /abs/f <<'EOF'\n" + _HDC_APOS + "EOF\ntest -n `bash /abs/f`"),
+    )),
+)
+# The narrowing of the /dev and /proc clause, as (tag, anchor, replacement, rows): every row ALLOWS in registry
+# scope and DENIES with the clause put back to its wider form (any target whose first non-empty part is dev
+# or proc, absolute or relative, /dev/null and /dev/shm included), so each row is red if that wider rule
+# returns. Each is an ordinary message-body write whose bare '&' is text: a /dev/shm hand-back file alone or
+# then hashed, a write to /dev/null, and a relative project path under a directory named dev or proc.
+_DS_DEVPROC_WIDE_ANCHOR = (
+    '            if (target.startswith("/") and parts[0] in ("dev", "proc")\n'
+    '                    and parts != ["dev", "null"] and not (len(parts) > 2 and parts[:2] == ["dev", "shm"])):\n')
+_DS_DEVPROC_WIDE_REPL = '            if parts[0] in ("dev", "proc"):\n'
+_DS_AMP_BODY = "Tom & Jerry\n"
+_TRKASY_DATA_SHAPE_ALLOW_GROUPS = (
+    ("dsdevwide", _DS_DEVPROC_WIDE_ANCHOR, _DS_DEVPROC_WIDE_REPL, (
+        ("ds-allow-dev-shm-alone", "cat > /dev/shm/handoff.txt <<'EOF'\n" + _DS_AMP_BODY + "EOF"),
+        ("ds-allow-dev-shm-hashed", "cat > /dev/shm/handoff.txt <<'EOF'\n" + _DS_AMP_BODY
+         + "EOF\nsha256sum /dev/shm/handoff.txt"),
+        ("ds-allow-dev-null", "cat > /dev/null <<'EOF'\n" + _DS_AMP_BODY + "EOF"),
+        ("ds-allow-relative-dev-alone", "cat > dev/notes.md <<'EOF'\n" + _DS_AMP_BODY + "EOF"),
+        ("ds-allow-relative-dev-wc", "cat > dev/notes.md <<'EOF'\n" + _DS_AMP_BODY + "EOF\nwc dev/notes.md"),
+        ("ds-allow-relative-proc", "cat > proc/notes.md <<'EOF'\n" + _DS_AMP_BODY + "EOF\nls proc"),
+    )),
+)
+
+
+def _test_trkasy_data_shape_rules(failures, tmp):
+    """Each data-shape proof rule has rows that DENY in registry scope and ALLOW when that one rule is reverted
+    (_TRKASY_DATA_SHAPE_RULE_GROUPS, a scratch mutant per rule), so each row is red precisely when its rule is
+    gone: each clause of the cat write target restriction on its own (a '..' component, an absolute /dev or
+    /proc target other than /dev/null or a path under /dev/shm/, an allowlisted last path component), the
+    single-pipe rule, the no-extra-words-on-the-cat-line rule, the no-redirect-on-a-reader-segment rule, and the
+    plain-word rule (a substitution or quoted substitution in a reader's argument after a write). The rows of
+    _TRKASY_DATA_SHAPE_ALLOW_GROUPS ALLOW in registry scope and DENY with the /dev and /proc clause widened
+    back to every dev or proc first part, so each is red if that wider rule returns."""
+    root = tmp / "trkasy-data-shape-rules"
+    (root / ".aiqt").mkdir(parents=True)
+    (root / ".aiqt" / "orchestration.local.json").write_text(json.dumps({"version": 1}), encoding="utf-8")
+    handler = aiqt_hooks.orch_truncation_guard
+    seen = set()
+    for groups, expected, reverted in ((_TRKASY_DATA_SHAPE_RULE_GROUPS, "deny", "allow"),
+                                       (_TRKASY_DATA_SHAPE_ALLOW_GROUPS, "allow", "deny")):
+        for tag, anchor, replacement, rows in groups:
+            for label, command in rows:
+                if label in seen:
+                    failures.append("(ds-labels) the rule rows repeat a label {!r}".format(label))
+                seen.add(label)
+                got = _decision(handler, command, cwd=str(root))
+                if got != expected:
+                    failures.append("({}) expected {} in registry scope; got {}".format(label, expected, got))
+            decisions = _trkasy_heredoc_mutant_decisions(
+                failures, tmp, root, [command for _l, command in rows], anchor, replacement, tag)
+            if decisions is None:
+                continue
+            for (label, _command), got in zip(rows, decisions):
+                if got != reverted:
+                    failures.append("({}-mutant) the row must {} with its rule reverted, so it pins the rule; "
+                                    "got {}".format(label, reverted, got))
 
 
 _WAIT_LOOP_DENY_COMMAND = "while true; do gh run view 1; sleep 30; done &"
@@ -25447,7 +26457,7 @@ def _main_isolated(monitor):
         cmexpect("(cm-residual-global-subst) pre-subcommand unquoted $( fragments the segment and allows",
                  'git -C $(x) commit -m "$(y)"', "allow")
 
-        # Payload postures: unreadable command ASKS; only the shared missing-tool contract DENIES.
+        # Payload postures: a missing command and a missing tool_name each DENY (fail closed).
         cmdataexpect("(cm-ae) missing command denies",
                      {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {}}, "deny")
         cmdataexpect("(cm-af) missing tool_name denies",
@@ -29944,15 +30954,18 @@ def _main_isolated(monitor):
         # malformed / out-of-scope payloads for the Bash floor
         _bap = aiqt_hooks.bash_absolute_paths
         if _reduce(_bap, {"hook_event_name": "PreToolUse", "tool_name": "Bash",
-                          "tool_input": {"command": 5}}) != "allow-note":
-            failures.append("(ap-c29) non-string command allows with a note (abspth is a convention, not a "
-                            "hazard; cannot read)")
+                          "tool_input": {"command": 5}}) != "deny":
+            failures.append("(ap-c29) non-string command denies (a truncating redirect, the deny tier, may sit "
+                            "in what was not read)")
         if _reduce(_bap, {"hook_event_name": "PreToolUse", "tool_name": "Bash",
-                          "tool_input": None}) != "allow-note":
-            failures.append("(ap-c30) non-mapping tool_input allows with a note (cannot read command)")
+                          "tool_input": None}) != "deny":
+            failures.append("(ap-c30) non-mapping tool_input denies (cannot read command)")
         if _reduce(_bap, {"hook_event_name": "PreToolUse", "tool_name": "Bash",
-                          "tool_input": {}}) != "allow-note":
-            failures.append("(ap-c31) missing command allows with a note (cannot read)")
+                          "tool_input": {}}) != "deny":
+            failures.append("(ap-c31) missing command denies (cannot read)")
+        if _reduce(_bap, {"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                          "tool_input": {"command": ""}}) != "allow-note":
+            failures.append("(ap-c31b) an empty command is readable and still allows with a note")
         if _reduce(_bap, {"hook_event_name": "PreToolUse", "tool_name": "Read",
                           "tool_input": {"command": "cd rel"}}) != "allow":
             failures.append("(ap-c32) out-of-scope tool must allow (matcher governs)")
@@ -30039,9 +31052,13 @@ def _main_isolated(monitor):
         ebexpect("(eb-e16) unparseable command outside the visible patterns allows",
                  'ls -la "unbalanced', "allow")
         if _reduce(aiqt_hooks.git_explicit_binding,
-                   {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {}}) != "allow-note":
-            failures.append("(eb-e17) absent command allows with a note (expbnd is a binding convention, not a "
-                            "hazard; cannot evaluate target or scope)")
+                   {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {}}) != "deny":
+            failures.append("(eb-e17) absent command denies (the breadth-then-publish pair, the deny tier, may "
+                            "sit in what was not read)")
+        if _reduce(aiqt_hooks.git_explicit_binding,
+                   {"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                    "tool_input": {"command": ""}}) != "allow-note":
+            failures.append("(eb-e17b) an empty command is readable and still allows with a note")
         if _reduce(aiqt_hooks.git_explicit_binding,
                    {"hook_event_name": "PreToolUse", "tool_input": {"command": "git commit -m x"}}) != "deny":
             failures.append("(eb-e18) missing tool_name must DENY (shared fail-closed contract)")
@@ -30500,9 +31517,14 @@ def _main_isolated(monitor):
                             "HANDLER_EVENT {!r}".format(aiqt_hooks.FLOOR_FAIL_OPEN_MODES, _pf_want))
 
         _test_git_stash_ref(failures)
+        _test_malformed_bash_payload(failures)
+        _test_nul_bash_command(failures)
         _test_inline_errexit(failures, tmp)
         _test_pgrep_self_match(failures)
         _test_trkasy_no_amp(failures, tmp)
+        _test_trkasy_heredoc_body_data(failures, tmp)
+        _test_trkasy_heredoc_consumer(failures, tmp)
+        _test_trkasy_data_shape_rules(failures, tmp)
         _test_wait_loop_deny_text(failures, tmp)
         _test_note_literal_sites(failures, tmp)
         _test_stop_dispatch_note_sites(failures, tmp)
@@ -30512,6 +31534,7 @@ def _main_isolated(monitor):
         _test_deadline_posture(failures, tmp)
         _test_cannot_evaluate_paths(failures, tmp)
         _test_reset_ancestry(failures, tmp)
+        _test_clock_inject(failures, tmp)
 
         # === write_scope_guard (wrtscp, EN-8): confine guarded-tool writes to a per-slice scope =========
         # declaration; hard-deny writes to the frozen floor and to other/nested repos as an un-lowerable
@@ -31479,7 +32502,7 @@ def _main_isolated(monitor):
           "cnsdif (diff_source_pretool) DENIES-and-educates a confirmed console diff dump and ALLOWS "
           "with a note any producer-capable-but-unproven or unparseable form (a convention, not a "
           "hazard). abspth (bash_absolute_paths) ALLOWS with a note a relative or opaque cd/redirect and "
-          "an unreadable command (a convention nudge), and DENIES-and-educates a TRUNCATING redirect "
+          "an empty command (a convention nudge), and DENIES-and-educates a TRUNCATING redirect "
           "('>'/'>|'/'&>'/'>&') to a relative or opaque target (it could zero the wrong file). "
           "expbnd (git_explicit_binding) ALLOWS with a note an ambient git target or a relocated whole-tree "
           "breadth op, and DENIES-and-educates a whole-tree breadth stage paired with a publish in one "

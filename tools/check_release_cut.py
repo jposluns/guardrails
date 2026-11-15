@@ -2516,12 +2516,22 @@ runpy.run_path(path, run_name="__main__")
 # The bounds must also fit inside the whole run: tools/selftest_git_fixture_env.py kills
 # `check_release_cut.py --self-test --red-on-revert` at 2700 s (its CONFIG_MEMBER_BOUNDS entry), and a run
 # killed there never reaches the named failure below. A killed entry spends its bound, then at most
-# _CENSUS_KILL_WAIT s draining its pipes and at most _CENSUS_KILL_WAIT s polling its group empty, so an entry
-# costs at worst its bound plus 2 * _CENSUS_KILL_WAIT s. _census_table_failures refuses, before anything runs,
-# an empty table, a row bound above _CENSUS_BOUND_CAP, and a table whose bounds plus 2 * _CENSUS_KILL_WAIT s
-# per entry sum above _CENSUS_TOTAL_CAP, so a table edit cannot silently break this arithmetic: any table that
-# runs spends at most _CENSUS_TOTAL_CAP = 720 s on its entries, post-kill waits included. This table's bounds
-# sum to 430 + 6 * 30 = 610 s, 610 + 7 * 2 * 5 = 680 s with the post-kill waits.
+# _CENSUS_KILL_WAIT s draining its pipes and at most _CENSUS_KILL_WAIT s polling its group empty, so an entry's
+# bound and post-kill waits come to at most its bound plus 2 * _CENSUS_KILL_WAIT s. _census_table_failures
+# refuses, before anything runs, an empty table, a row bound above _CENSUS_BOUND_CAP, and a table whose bounds
+# plus 2 * _CENSUS_KILL_WAIT s per entry sum above _CENSUS_TOTAL_CAP, so a table edit cannot silently break this
+# arithmetic: in any table that runs, the entries' bounds and post-kill waits together come to at most
+# _CENSUS_TOTAL_CAP = 720 s. That is not a ceiling on the entries' wall time: the fork and exec of each entry's
+# leader before its wait begins, and each wait's poll overshoot, lie outside that arithmetic and are not bounded
+# by it (as _census_table_failures states). This table's bounds sum to 430 + 6 * 30 = 610 s,
+# 610 + 7 * 2 * 5 = 680 s with the post-kill waits.
+# A row whose tool is in _CENSUS_BUDGETED is also held to the self-test budget that tool declares
+# (SELF_TEST_BUDGET_S, read from its source bytes by _declared_budget; the tool is never imported): before
+# anything runs, _census_table_failures refuses such a row whose bound is below that budget plus
+# CENSUS_BOUND_MARGIN_S, and refuses the row when no budget was read for it. That cross-check never raises a
+# bound or lifts a cap, so a budget that outgrows its row is refused rather than run, and the row bound is
+# raised here, within the caps, when it does. The budget cross-check rows launch nothing (their two run rows
+# are each refused before launch), so they add no term to the sums below.
 # The census rows spend their own drains and waits on top of the table, each _census_run they make bounded at
 # 2 * TIMEOUT = 60 s plus the two post-kill waits (70 s at worst): with every one of those bounds spent in
 # full, the bound rows cost at worst 70 + 20 + 5 = 95 s (their 60 s and 10 s entries plus the grandchild
@@ -2536,6 +2546,8 @@ runpy.run_path(path, run_name="__main__")
 # code), 75 s (reaped exit), 130 s (drain reaped), 135 s (construction), 70 s (sigchld), 60 s and 70 s (the
 # two kernel sigchld flips, which launch), 25 s each (the two exit-outlived flips), 40 s each (the two
 # exit-at-bound flips and the full-pipe flip) and 40 s (the record publication flip): about 880 s together.
+# Like the table's 680 s, these sums count bounds and post-kill waits only: each launch's fork and exec and each
+# wait's poll overshoot are not in them and are not bounded by them.
 # Outside the census, the fixture cases and the mutation replays run their children through observe, each
 # call under subprocess.run's TIMEOUT = 30 s bound: the 242 fixture cases of test_cases() make 243 observe
 # calls (one each, and push-protected's push-bare call), at most 243 * 30 = 7290 s, and the 29 mutation
@@ -2551,18 +2563,21 @@ runpy.run_path(path, run_name="__main__")
 # --self-test --red-on-revert run on 2026-11-09 from 12:06:49 to 12:12:56 UTC, on 80 CPUs at a 1-minute load
 # of 23.9 at its start and 29.6 at its end, took 367.0 s wall and passed, its replays (the close-sweep
 # reverts and the mutation replays) 12.1 s of it (from its entry-restore line to its last line).
-# The worst case over those terms: a --self-test run ends by at most 680 (table) + 945 (census rows) + 7290
-# (fixture observe calls) = 8915 s (BOUND) plus the parts not summed (about 171 s, MEASURED), about 9086 s;
-# a --red-on-revert run by at most 8915 + 880 (flips) + 870 (mutation replays) = 10665 s (BOUND) plus the
-# parts not summed (about 171 + 12.1 = 183.1 s, MEASURED), about 10848.1 s. Both exceed the 1200 s default
-# member bound, as do the census bounds alone (680 + 945 + 880 = 2505 s), so the member carries its own
-# 2700 s entry in tools/selftest_git_fixture_env.py. That entry is BELOW the worst case ON PURPOSE, a
-# deliberate shorter deadline under the kill-timeout rule: the 30 s observe bounds summed are a ceiling no
-# run approaches, and a bound near it would let a hung run hold the config lane for over three hours. It is
-# sized from measured runs with a stated margin: about 7.4 times the slowest (367.0 s, --red-on-revert, the
-# entry's own comment records the runs), and it still covers every census bound above spent in full plus
-# the measured rest (2505 + 183.1 = 2688.1 s). A run that reaches it is killed at its bound and reported as
-# that lane's deadline (cannot evaluate, attributed to the bound), never as a failure of this self-test.
+# The worst case over those terms: a --self-test run's bounded terms come to at most 680 (table) + 945 (census
+# rows) + 7290 (fixture observe calls) = 8915 s (BOUND, leaving out each launch's fork and exec and each wait's
+# poll overshoot, as above), and the parts not summed add about 171 s (MEASURED, with no bound), about 9086 s; a
+# --red-on-revert run's bounded terms come to at most 8915 + 880 (flips) + 870 (mutation replays) = 10665 s
+# (BOUND, with the same exclusions), and the parts not summed add about 171 + 12.1 = 183.1 s (MEASURED), about
+# 10848.1 s. Neither total is a ceiling on a run's wall time: its measured parts have no bound. Both exceed the
+# 1200 s default member bound, as do the census bounds alone (680 + 945 + 880 = 2505 s), so the member carries
+# its own 2700 s entry in tools/selftest_git_fixture_env.py. That entry is BELOW the worst case ON PURPOSE, a
+# deliberate shorter deadline under the kill-timeout rule: the 30 s observe bounds summed are a ceiling no run
+# approaches, and a bound near it would let a hung run hold the config lane for over three hours. It is sized
+# from measured runs with a stated margin: about 7.4 times the slowest (367.0 s, --red-on-revert, the entry's
+# own comment records the runs), and it covers every census bound above spent in full plus the rest as measured
+# (2505 + 183.1 = 2688.1 s), not any worst case of that rest, which has no bound. A run that reaches it is
+# killed at its bound and reported as that lane's deadline (cannot evaluate, attributed to the bound), never as
+# a failure of this self-test.
 _CENSUS_BOUND_CAP = 600
 _CENSUS_TOTAL_CAP = 720
 # The most a killed entry waits after its group kill, once for its pipes and once more for its group to empty.
@@ -2585,8 +2600,127 @@ _CENSUS_MAPPINGS = (
     ("opf/tools/_journal.py", "_st_fd_table_eio", ("--self-test",), 30),      # the descriptor-helper clause
 )
 
+# The tools whose census row must outlive the end-to-end self-test budget the tool itself declares, as the
+# only binding of SELF_TEST_BUDGET_S in its module (a module-level plain assignment of a positive int
+# literal, in wall-clock seconds), and the margin a row's bound must keep above that budget: one parent call
+# bound, for CENSUS_DRIVER and the parent's launch, drain and teardown around the run. Interpreter start-up is
+# already inside the budget, which was measured as the wall time of the whole
+# `python3 -I -B tools/check_gensrc_failclose.py --self-test` invocation.
+CENSUS_BOUND_MARGIN_S = TIMEOUT
+_CENSUS_BUDGETED = ("tools/check_gensrc_failclose.py",)
+_BUDGET_NAME = "SELF_TEST_BUDGET_S"
 
-def _census_table_failures(mappings):
+
+def _name_bindings(tree, name):
+    """Every node of the parsed module tree that binds, rebinds or deletes name, at any depth: a Name
+    stored or deleted (plain, augmented, annotated, tuple or starred target, for target, with target,
+    walrus, comprehension variable, type alias), a def or class name, a parameter, an import alias, an
+    except name, a global or nonlocal declaration, a match capture, a type parameter, an attribute
+    stored or deleted under that name (a module can rebind its own global through a reference to
+    itself), and every star import (which can bind any name). A binding made from a string at run time
+    (setattr, globals()) is not seen in the tree."""
+    import ast
+    found = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name):
+            names = () if isinstance(node.ctx, ast.Load) else (node.id,)
+        elif isinstance(node, ast.Attribute):
+            names = () if isinstance(node.ctx, ast.Load) else (node.attr,)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.ExceptHandler,
+                               ast.MatchAs, ast.MatchStar, ast.TypeVar, ast.ParamSpec, ast.TypeVarTuple)):
+            names = (node.name,)
+        elif isinstance(node, ast.MatchMapping):
+            names = (node.rest,)
+        elif isinstance(node, ast.arg):
+            names = (node.arg,)
+        elif isinstance(node, (ast.Global, ast.Nonlocal)):
+            names = tuple(node.names)
+        elif isinstance(node, ast.alias):
+            names = (name,) if node.name == "*" else (node.asname or node.name.split(".")[0],)
+        else:
+            names = ()
+        if name in names:
+            found.append(node)
+    return found
+
+
+def _budget_from_source(source, label):
+    """The SELF_TEST_BUDGET_S that source declares, read from its syntax tree (the module is never
+    imported or run): the name's only binding anywhere in the module must be one module-level plain
+    assignment (a single Name target) of a positive int literal. Anything else is cannot-evaluate: no
+    such assignment or more than one, any other binding of the name at any depth (_name_bindings), a
+    value that is not a positive int literal (a bool, a float, an expression), or a source that does
+    not parse."""
+    import ast
+    try:
+        tree = ast.parse(source, filename=label)
+    except (SyntaxError, ValueError, RecursionError, MemoryError) as exc:
+        raise CannotEvaluate("{}: cannot parse to read {}: {}: {}".format(
+            label, _BUDGET_NAME, type(exc).__name__, exc)) from exc
+    declared = [node for node in tree.body if isinstance(node, ast.Assign) and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name) and node.targets[0].id == _BUDGET_NAME]
+    bindings = _name_bindings(tree, _BUDGET_NAME)
+    value = declared[0].value if len(declared) == 1 else None
+    require(len(declared) == 1 and len(bindings) == 1 and bindings[0] is declared[0].targets[0]
+            and isinstance(value, ast.Constant) and type(value.value) is int and value.value > 0,
+            "{}: expected {} bound exactly once, by a module-level plain assignment of a positive int "
+            "literal, and nowhere else in the module".format(label, _BUDGET_NAME))
+    return value.value
+
+
+# Any PEP 263 coding declaration, whatever encoding it names (the interpreter honours one on either of
+# the first two lines; the encoding name is never read here).
+_CODING_DECLARATION = re.compile(rb"^[ \t\f]*#.*?coding[:=]", re.ASCII)
+
+
+def _source_refusals(data):
+    """Each rule of the source gate that the module bytes data break, as (rule, reason) pairs; the gate
+    passes only when the list is empty. The rules need no coding-cookie parsing: the bytes decode as
+    strict UTF-8 ("utf-8"), hold no carriage return byte at all ("cr"), hold no UTF-8 byte-order mark
+    anywhere ("bom"), and neither of the first two lines, split at LF only, matches the PEP 263 coding
+    pattern in any form, a utf-8 declaration included ("coding"). With no CR byte, the LF split is the
+    interpreter's own line split, so a declaration it would honour on line one or two is always seen."""
+    import codecs
+    refusals = []
+    try:
+        data.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        refusals.append(("utf-8", "is not strict UTF-8 ({})".format(exc)))
+    if b"\r" in data:
+        refusals.append(("cr", "holds a carriage return byte"))
+    if codecs.BOM_UTF8 in data:
+        refusals.append(("bom", "holds a UTF-8 byte-order mark"))
+    if any(_CODING_DECLARATION.match(line) for line in data.split(b"\n", 2)[:2]):
+        refusals.append(("coding", "declares a source encoding on its first or second line"))
+    return refusals
+
+
+def _budget_from_bytes(data, label):
+    """The SELF_TEST_BUDGET_S that the module bytes data declare (_budget_from_source), parsed from the
+    bytes only after the source gate passes (_source_refusals: strict UTF-8, no CR byte, no byte-order
+    mark, no coding declaration on line one or two). Any broken rule is cannot-evaluate, so the bytes the
+    interpreter would decode and the UTF-8 text parsed here are the same source."""
+    refusals = _source_refusals(data)
+    require(not refusals, "{}: {} is read only from strict UTF-8 with LF line ends, no byte-order mark "
+            "and no coding declaration; this source {}".format(
+                label, _BUDGET_NAME, "; ".join(reason for _rule, reason in refusals)))
+    return _budget_from_source(data, label)
+
+
+def _declared_budget(path):
+    """The SELF_TEST_BUDGET_S the tool at path declares, as an int (_budget_from_bytes); a source that
+    cannot be read raises OSError, which main() reports as cannot-evaluate."""
+    return _budget_from_bytes(path.read_bytes(), str(path))
+
+
+def _census_budgets(root, mappings):
+    """{path: declared budget} for every row of mappings whose path is in _CENSUS_BUDGETED, each read from
+    root / path by _declared_budget. A source that cannot be read, fails the source gate or declares no
+    budget in the one accepted form raises, and main() reports that as cannot-evaluate (exit 2)."""
+    return {row[0]: _declared_budget(root / row[0]) for row in mappings if row[0] in _CENSUS_BUDGETED}
+
+
+def _census_table_failures(mappings, budgets=None):
     """The refusals of a census-mapping table, read before any entry runs. An empty table is refused: a table
     that maps nothing checks nothing. Each row's bound must be a plain int (its type exactly int, so a bool, a
     float such as inf or nan, None or a str is refused), above 0 s and at most _CENSUS_BOUND_CAP s; when every
@@ -2595,8 +2729,12 @@ def _census_table_failures(mappings):
     and post-kill waits; the fork and exec of each entry's leader before its wait begins, and each wait's poll
     overshoot, lie outside that arithmetic and are not bounded by it. A refused bound of -1000000000 or
     above is shown as itself (-1000000000 included); every bound below -1000000000 (-1000000001 as much as
-    one whose conversion to text would raise) is shown as below -1000000000. Returns [] when the table may
-    run."""
+    one whose conversion to text would raise) is shown as below -1000000000. The budget cross-check: budgets
+    maps a path to the self-test budget its tool declares (_census_budgets; None is an empty map), a row
+    whose path is in _CENSUS_BUDGETED but not in budgets is refused, and a row whose path is in budgets is
+    refused when its bound is below that budget plus CENSUS_BOUND_MARGIN_S (a bound exactly at that sum
+    passes). Returns [] when the table may run."""
+    budgets = {} if budgets is None else budgets
     failures = []
     if not mappings:
         failures.append("census-mapping table: it is empty")
@@ -2609,6 +2747,11 @@ def _census_table_failures(mappings):
             failures.append("%s: its bound %s s does not exceed 0 s" % (label, shown))
         elif bound > _CENSUS_BOUND_CAP:
             failures.append("%s: its bound exceeds the %d s cap" % (label, _CENSUS_BOUND_CAP))
+        elif rel in _CENSUS_BUDGETED and rel not in budgets:
+            failures.append("%s: no declared self-test budget was read for it" % label)
+        elif rel in budgets and bound < budgets[rel] + CENSUS_BOUND_MARGIN_S:
+            failures.append("%s: its bound %d s is below its declared self-test budget of %d s plus the %d s "
+                            "margin" % (label, bound, budgets[rel], CENSUS_BOUND_MARGIN_S))
     if not failures:
         total = sum(row[3] for row in mappings)
         spend = 2 * _CENSUS_KILL_WAIT * len(mappings)
@@ -2850,21 +2993,22 @@ def _census_run(args, bound):
     return None, b"", "; ".join(notes)
 
 
-def _census_mapping_check(root, mappings=_CENSUS_MAPPINGS):
+def _census_mapping_check(root, mappings=_CENSUS_MAPPINGS, budgets=None):
     """Each self-test in mappings, run under CENSUS_DRIVER, must end exit 2 with its cannot-evaluate
     report naming the held descriptor ("SELF-TEST ERROR: descriptor census cannot evaluate descriptor N:"),
     never a traceback (exit 1) or a pass. The table is read first: when _census_table_failures refuses the table
-    (an empty one, any row bound, or the bound total with its post-kill waits), those refusals are the failures
-    and no entry runs at all. Otherwise each entry
-    runs in its own session under its row's explicit bound in seconds (_census_run); one that outlives it has
-    its whole process group killed and awaited, and is a failure naming the entry and the bound; one refused
-    before any launch (SIGCHLD set to be ignored in this process) or whose leader was reaped out from under
-    the drain is a failure naming that cause; one whose callee exited on its own while a descendant still
-    held its output pipes at the bound is a failure naming the callee's own exit code, whether its report
-    was there, and the descendant. Returns
-    (failures, runs), runs counting the entries handed to _census_run (a pre-launch refusal counts its
-    entry too)."""
-    failures = _census_table_failures(mappings)
+    (an empty one, any row bound, the budget cross-check against budgets, read from root by _census_budgets
+    when None, or the bound total with its post-kill waits), those refusals are the failures and no entry
+    runs at all. Otherwise each entry runs in its own session under its row's explicit bound in seconds
+    (_census_run); one that outlives it has its whole process group killed and awaited, and is a failure
+    naming the entry and the bound; one refused before any launch (SIGCHLD set to be ignored in this
+    process) or whose leader was reaped out from under the drain is a failure naming that cause; one whose
+    callee exited on its own while a descendant still held its output pipes at the bound is a failure naming
+    the callee's own exit code, whether its report was there, and the descendant. Returns (failures, runs),
+    runs counting the entries handed to _census_run (a pre-launch refusal counts its entry too)."""
+    if budgets is None:
+        budgets = _census_budgets(root, mappings)
+    failures = _census_table_failures(mappings, budgets)
     if failures:
         return failures, 0
     for rel, target, argv, bound in mappings:
@@ -2934,7 +3078,7 @@ sys.exit(2)
 """
 
 
-def _census_bound_rows(parent):
+def _census_bound_rows(parent, root):
     """The census-mapping bound rows, on the stand-in callee. Run: a 60 s bound on a run that takes about 0.1 s
     on an idle host passes (that slack, some 600 times the idle run, keeps the row from failing on a loaded
     host); a 10 s bound on a run that starts a grandchild and then sleeps 60 s is a failure naming the entry and
@@ -2947,7 +3091,7 @@ def _census_bound_rows(parent):
     one refused row (the good row must not run either); and two good rows whose sum plus the post-kill waits
     tops the total cap by 1 s. The table check alone takes each end: 1, 2, the cap - 1 and the cap pass, as do
     two rows whose sum plus those waits comes to the total cap - 1 and to the total cap exactly, and the real
-    table must pass too. Returns (failures, rows checked)."""
+    table, with the budgets its tools declare under root, must pass too. Returns (failures, rows checked)."""
     standin = parent / "census-standin"
     standin.mkdir()
     (standin / "standin.py").write_text(_CENSUS_STANDIN, encoding="utf-8")
@@ -3016,10 +3160,287 @@ def _census_bound_rows(parent):
         got = _census_table_failures(tuple(row(bound) for bound in bounds))
         if got:
             failures.append("census bound table %r: expected no refusal, got %r" % (bounds, got))
-    got = _census_table_failures(_CENSUS_MAPPINGS)
+    got = _census_table_failures(_CENSUS_MAPPINGS, _census_budgets(root, _CENSUS_MAPPINGS))
     if got:
         failures.append("census-mapping table: the real table is refused: %r" % got)
     return failures, len(cases) + len(ends) + 1
+
+
+# Sources for _budget_from_bytes, each read as its UTF-8 bytes: (name, source, the budget it must read, or
+# None where it must refuse).
+# The first four are each accepted, at 600, by a line reader (one column-0 "SELF_TEST_BUDGET_S = <digits>"
+# line, _retired_line_budget), so each is red against that reader.
+_BUDGET_FIXTURES = (
+    ("docstring", '"""\nSELF_TEST_BUDGET_S = 600\n"""\n', None),
+    ("if-block-reassign", "SELF_TEST_BUDGET_S = 600\nif True:\n    SELF_TEST_BUDGET_S = 900\n", None),
+    ("augmented", "SELF_TEST_BUDGET_S = 600\n_x = 0; SELF_TEST_BUDGET_S += 300\n", None),
+    ("annotated", "SELF_TEST_BUDGET_S = 600\ntry:\n    SELF_TEST_BUDGET_S: int = 900\nexcept ImportError:\n"
+     "    pass\n", None),
+    ("tuple-target", "SELF_TEST_BUDGET_S = 600\n(SELF_TEST_BUDGET_S, _y) = (900, 0)\n", None),
+    ("global", "SELF_TEST_BUDGET_S = 600\ndef _f():\n    global SELF_TEST_BUDGET_S\n", None),
+    ("nested-local", "SELF_TEST_BUDGET_S = 600\ndef _f():\n    SELF_TEST_BUDGET_S = 900\n", None),
+    ("walrus", "SELF_TEST_BUDGET_S = 600\nif (SELF_TEST_BUDGET_S := 900):\n    pass\n", None),
+    ("for-target", "SELF_TEST_BUDGET_S = 600\nfor SELF_TEST_BUDGET_S in (900,):\n    pass\n", None),
+    ("import-alias", "SELF_TEST_BUDGET_S = 600\nfrom os import sep as SELF_TEST_BUDGET_S\n", None),
+    ("star-import", "SELF_TEST_BUDGET_S = 600\nfrom os import *\n", None),
+    ("def-name", "SELF_TEST_BUDGET_S = 600\ndef SELF_TEST_BUDGET_S():\n    pass\n", None),
+    ("parameter", "SELF_TEST_BUDGET_S = 600\ndef _f(SELF_TEST_BUDGET_S=900):\n    pass\n", None),
+    ("except-name", "SELF_TEST_BUDGET_S = 600\ntry:\n    pass\nexcept OSError as SELF_TEST_BUDGET_S:\n"
+     "    pass\n", None),
+    ("match-capture", "SELF_TEST_BUDGET_S = 600\nmatch 0:\n    case SELF_TEST_BUDGET_S:\n        pass\n", None),
+    ("attribute-store", "import sys\nSELF_TEST_BUDGET_S = 600\nsys.modules[__name__].SELF_TEST_BUDGET_S = 900\n",
+     None),
+    ("delete", "SELF_TEST_BUDGET_S = 600\ndel SELF_TEST_BUDGET_S\n", None),
+    ("two-assignments", "SELF_TEST_BUDGET_S = 600\nSELF_TEST_BUDGET_S = 900\n", None),
+    ("chained", "SELF_TEST_BUDGET_S = _OTHER = 600\n", None),
+    ("annotated-only", "SELF_TEST_BUDGET_S: int = 600\n", None),
+    ("missing", "OTHER = 600\n", None),
+    ("zero", "SELF_TEST_BUDGET_S = 0\n", None),
+    ("negative", "SELF_TEST_BUDGET_S = -600\n", None),
+    ("bool", "SELF_TEST_BUDGET_S = True\n", None),
+    ("float", "SELF_TEST_BUDGET_S = 600.0\n", None),
+    ("string", "SELF_TEST_BUDGET_S = '600'\n", None),
+    ("expression", "SELF_TEST_BUDGET_S = 600 + 0\n", None),
+    ("syntax-error", "SELF_TEST_BUDGET_S = 600\ndef (\n", None),
+    ("null-byte", "SELF_TEST_BUDGET_S = 600\n\x00\n", None),
+    ("cookie-unicode-escape", "# -*- coding: unicode_escape -*-\nSELF_TEST_BUDGET_S = 600  # seconds\\n"
+     "SELF_TEST_BUDGET_S = 5\n", None),
+    ("cookie-utf-7", "# -*- coding: utf-7 -*-\nSELF_TEST_BUDGET_S = 600\n# note +AAo-SELF_TEST_BUDGET_S = 5\n",
+     None),
+    ("plain", "SELF_TEST_BUDGET_S = 600  # seconds\n", 600),
+    ("one", "SELF_TEST_BUDGET_S = 1\n", 1),
+    ("reads-and-text", 'SELF_TEST_BUDGET_S = 600\n"""SELF_TEST_BUDGET_S = 900"""\nOTHER = SELF_TEST_BUDGET_S + 1\n'
+     "print(SELF_TEST_BUDGET_S)\n", 600),
+)
+_BUDGET_LINE_READER_RED = ("docstring", "if-block-reassign", "augmented", "annotated")
+# Each of these declares a non-UTF-8 coding cookie under which the interpreter binds the name a second
+# time (to 5), so each is accepted, at 600, by a read that parses the UTF-8 text instead of the bytes.
+_BUDGET_TEXT_READ_RED = ("cookie-unicode-escape", "cookie-utf-7")
+
+# Sources for the source gate (_source_refusals), each as raw bytes: (name, bytes, the budget it must
+# read, or None where it must refuse). The interpreter runs each as 600, and each refused one is read, at
+# 600, by the bytes parse with the gate removed: a bare CR ends a line for the interpreter (the cr-only
+# and mixed rows end their coding line with one, which an LF split does not see), the utf-7 and
+# unicode_escape rows decode under that cookie (the lf-indented one too: blanks may lead the comment),
+# and the invalid-utf-8 row is latin-1 under its cookie. The line-3-coding row is accepted: the
+# interpreter reads a declaration on line one or two only.
+_SOURCE_GATE_FIXTURES = (
+    ("cr-only-utf-7", b"\r# -*- coding: utf-7 -*-\rSELF_TEST_BUDGET_S = 600\r", None),
+    ("cr-only-unicode-escape", b"\r# -*- coding: unicode_escape -*-\rSELF_TEST_BUDGET_S = 600\r", None),
+    ("cr-only-utf-8", b"\r# -*- coding: utf-8 -*-\rSELF_TEST_BUDGET_S = 600\r", None),
+    ("crlf-utf-7", b"# -*- coding: utf-7 -*-\r\nSELF_TEST_BUDGET_S = 600\r\n", None),
+    ("crlf-unicode-escape", b"# -*- coding: unicode_escape -*-\r\nSELF_TEST_BUDGET_S = 600\r\n", None),
+    ("crlf-utf-8", b"# -*- coding: utf-8 -*-\r\nSELF_TEST_BUDGET_S = 600\r\n", None),
+    ("mixed-utf-7", b"\n# -*- coding: utf-7 -*-\rSELF_TEST_BUDGET_S = 600\r\n", None),
+    ("mixed-unicode-escape", b"\n# -*- coding: unicode_escape -*-\rSELF_TEST_BUDGET_S = 600\r\n", None),
+    ("mixed-utf-8", b"\n# -*- coding: utf-8 -*-\rSELF_TEST_BUDGET_S = 600\r\n", None),
+    ("bom", b"\xef\xbb\xbfSELF_TEST_BUDGET_S = 600\n", None),
+    ("invalid-utf-8", b"# -*- coding: latin-1 -*-\nSELF_TEST_BUDGET_S = 600  # caf\xe9\n", None),
+    ("lf-utf-8", b"# -*- coding: utf-8 -*-\nSELF_TEST_BUDGET_S = 600\n", None),
+    ("lf-indented-utf-7", b" \t\f# -*- coding: utf-7 -*-\nSELF_TEST_BUDGET_S = 600\n", None),
+    ("lf-line-2-fileencoding", b"#!/usr/bin/env python3\n# vim: set fileencoding=utf-8 :\nSELF_TEST_BUDGET_S = 600\n",
+     None),
+    ("line-3-coding", b'#!/usr/bin/env python3\n"""Doc."""\n# -*- coding: latin-1 -*-\nSELF_TEST_BUDGET_S = 600\n',
+     600),
+    ("lf-plain", b"SELF_TEST_BUDGET_S = 600  # seconds\n", 600),
+)
+# (rule, fixture): the fixture breaks that one rule alone, so the gate with only that rule removed reads
+# it, at 600. The utf-8 rule has no such row: with no coding declaration and no byte-order mark the
+# interpreter, and so the bytes parse, already refuse a source that is not UTF-8.
+_SOURCE_GATE_ONE_RULE = (
+    ("cr", "cr-only-utf-7"),
+    ("cr", "cr-only-unicode-escape"),
+    ("cr", "cr-only-utf-8"),
+    ("bom", "bom"),
+    ("coding", "lf-utf-8"),
+    ("coding", "lf-indented-utf-7"),
+    ("coding", "lf-line-2-fileencoding"),
+)
+
+
+def _retired_line_budget(source):
+    """A line reader of the kind _budget_from_source is held against, kept only so the self-test can show
+    its regression fixtures red against it: the value on exactly one column-0 SELF_TEST_BUDGET_S line, or
+    None."""
+    found = re.findall(r"^SELF_TEST_BUDGET_S = ([1-9][0-9]*)[ \t]*(?:#[^\n]*)?$", source, re.MULTILINE | re.ASCII)
+    if len(found) == 1 and len(re.findall(r"^SELF_TEST_BUDGET_S\b", source, re.MULTILINE)) == 1:
+        return int(found[0])
+    return None
+
+
+def _budget_reader_checks(red_on_revert):
+    """Each _BUDGET_FIXTURES source, as UTF-8 bytes, reads as its stated budget or is refused as
+    cannot-evaluate; with red_on_revert, each regression fixture is shown accepted by the line reader, and
+    each cookie fixture by a parse of its UTF-8 text."""
+    for name, source, want in _BUDGET_FIXTURES:
+        try:
+            got = _budget_from_bytes(source.encode("utf-8"), "fixture " + name)
+        except CannotEvaluate:
+            got = None
+        check("census-budget-reader-" + name, got == want)
+        print("PASS census-budget-reader-" + name)
+    if red_on_revert:
+        sources = {name: source for name, source, _want in _BUDGET_FIXTURES}
+        for name in _BUDGET_LINE_READER_RED:
+            check("census-budget-reader-" + name + "-red", _retired_line_budget(sources[name]) == 600)
+            print("RED census-budget-reader-" + name + " at the line reader")
+        for name in _BUDGET_TEXT_READ_RED:
+            check("census-budget-reader-" + name + "-red",
+                  _budget_from_source(sources[name], "fixture " + name) == 600)
+            print("RED census-budget-reader-" + name + " at a parse of the UTF-8 text")
+
+
+def _source_gate_checks(red_on_revert):
+    """Each _SOURCE_GATE_FIXTURES source reads as its stated budget or is refused as cannot-evaluate; with
+    red_on_revert, each refused one is shown read, at 600, by the bytes parse with the whole gate removed,
+    and each _SOURCE_GATE_ONE_RULE row shown broken by its one rule alone, so the gate with only that rule
+    removed reads it, at 600."""
+    for name, data, want in _SOURCE_GATE_FIXTURES:
+        try:
+            got = _budget_from_bytes(data, "fixture " + name)
+        except CannotEvaluate:
+            got = None
+        check("census-source-gate-" + name, got == want)
+        print("PASS census-source-gate-" + name)
+    if red_on_revert:
+        sources = {name: data for name, data, _want in _SOURCE_GATE_FIXTURES}
+        for name, data, want in _SOURCE_GATE_FIXTURES:
+            if want is None:
+                check("census-source-gate-" + name + "-red", _budget_from_source(data, "fixture " + name) == 600)
+                print("RED census-source-gate-" + name + " with the source gate removed")
+        for rule, name in _SOURCE_GATE_ONE_RULE:
+            broken = [found for found, _reason in _source_refusals(sources[name])]
+            check("census-source-gate-" + name + "-only-" + rule + "-red",
+                  broken == [rule] and _budget_from_source(sources[name], "fixture " + name) == 600)
+            print("RED census-source-gate-" + name + " with only the " + rule + " rule removed")
+
+
+def _census_budget_cases(table_failures, real):
+    """The table-only cases of the budget cross-check, judged with table_failures (the real
+    _census_table_failures, or a flipped copy of it): a list of (name, got, want). For a budget of 1 s and
+    for the budget the gensrc tool declares (real, the map _census_budgets read), a stand-in row bounded
+    1 s below that budget plus CENSUS_BOUND_MARGIN_S is refused, and one bounded exactly at it or 1 s above
+    it passes; the real table with no budget read is refused, naming the gensrc row; the real table with
+    the gensrc row's bound put 1 s below its budget plus the margin is refused, naming that row; the real
+    table with the real budgets passes."""
+    rel = "census-budget-standin/standin.py"
+    margin = CENSUS_BOUND_MARGIN_S
+    gensrc = "tools/check_gensrc_failclose.py"
+    below = ("%s (census under *): its bound %d s is below its declared self-test budget of %d s plus the %d s "
+             "margin; nothing run")
+    cases = []
+    for budget in (1, real[gensrc]):
+        for delta, want in ((-1, [below % (rel, budget + margin - 1, budget, margin)]), (0, []), (1, [])):
+            cases.append(("budget-%d-edge-%+d" % (budget, delta),
+                          table_failures(((rel, "*", ("0",), budget + margin + delta),), {rel: budget}), want))
+    unread = [gensrc + " (census under *): no declared self-test budget was read for it; nothing run"]
+    cases.append(("unread-empty", table_failures(_CENSUS_MAPPINGS, {}), unread))
+    cases.append(("unread-none", table_failures(_CENSUS_MAPPINGS), unread))
+    lowered = tuple(row[:3] + (real[gensrc] + margin - 1,) if row[0] == gensrc else row for row in _CENSUS_MAPPINGS)
+    cases.append(("real-row-below", table_failures(lowered, real),
+                  [below % (gensrc, real[gensrc] + margin - 1, real[gensrc], margin)]))
+    cases.append(("real", table_failures(_CENSUS_MAPPINGS, real), []))
+    return cases
+
+
+def _census_budget_rows(parent, root):
+    """The budget cross-check rows. Every budgeted tool must declare its budget under root (read by
+    _census_budgets; a source that fails the reader raises and the self-test is cannot-evaluate). The
+    table-only cases are _census_budget_cases on the real _census_table_failures. Run: a stand-in row with a
+    30 s budget and a 59 s bound, 1 s below that budget plus the margin, is refused by _census_mapping_check
+    with no launch (zero runs, and the stand-in's record file must not appear). With no budgets argument,
+    _census_mapping_check reads the budgets from the root it is given: a fixture root whose gensrc source
+    declares 100 s, with that row bounded 1 s below 100 s plus the margin, is refused naming the 100 s
+    budget, with no launch. Returns (failures, rows checked)."""
+    real = _census_budgets(root, _CENSUS_MAPPINGS)
+    failures = []
+    if sorted(real) != sorted(_CENSUS_BUDGETED):
+        return ["census budget rows: expected a declared budget for each of %r, read %r"
+                % (_CENSUS_BUDGETED, real)], 1
+    cases = _census_budget_cases(_census_table_failures, real)
+    for name, got, want in cases:
+        if got != want:
+            failures.append("census budget row %s: expected %r, got %r" % (name, want, got))
+    standin = parent / "census-budget-standin"
+    standin.mkdir()
+    (standin / "standin.py").write_text(_CENSUS_STANDIN, encoding="utf-8")
+    rel = "census-budget-standin/standin.py"
+    ran = standin / "ran"
+    want = ([rel + " (census under *): its bound 59 s is below its declared self-test budget of 30 s plus the "
+             "%d s margin; nothing run" % CENSUS_BOUND_MARGIN_S], 0)
+    got = _census_mapping_check(parent, ((rel, "*", ("0", str(ran)), 59),), {rel: 30})
+    if got != want:
+        failures.append("census budget row run-below: expected %r, got %r" % (want, got))
+    if ran.exists():
+        failures.append("census budget row run-below: the stand-in ran although its row was refused")
+    omitted = parent / "census-budget-omitted"
+    (omitted / "tools").mkdir(parents=True)
+    gensrc = "tools/check_gensrc_failclose.py"
+    (omitted / gensrc).write_text("SELF_TEST_BUDGET_S = 100\n", encoding="utf-8")
+    want = (["%s (census under *): its bound %d s is below its declared self-test budget of 100 s plus the %d s "
+             "margin; nothing run" % (gensrc, 100 + CENSUS_BOUND_MARGIN_S - 1, CENSUS_BOUND_MARGIN_S)], 0)
+    got = _census_mapping_check(omitted, ((gensrc, "*", ("--self-test",), 100 + CENSUS_BOUND_MARGIN_S - 1),))
+    if got != want:
+        failures.append("census budget row omitted-budgets: expected %r, got %r" % (want, got))
+    return failures, len(cases) + 3
+
+
+def _census_table_flipped(parent, script, name, old, new):
+    """A copy of _census_table_failures taken from this file's own text with only `old` replaced by `new`,
+    written to a scratch module with the constants it reads and loaded through the import machinery (never
+    registered in sys.modules). Returns that copy's _census_table_failures."""
+    import importlib.util
+    source = script.read_text(encoding="utf-8")
+    anchor = "\ndef _census_table_failures("
+    count = source.count(anchor)
+    require(count != 0, name + ": its function anchor is absent")
+    require(count == 1, name + ": its function anchor is repeated")
+    begin = source.index(anchor)
+    body = source[begin:source.index("\ndef ", begin + 1)]
+    count = body.count(old)
+    require(count != 0, name + ": its revert anchor is absent")
+    require(count == 1, name + ": its revert anchor is repeated")
+    parent.mkdir()
+    location = parent / "flipped.py"
+    location.write_text(
+        "_CENSUS_BOUND_CAP = " + repr(_CENSUS_BOUND_CAP) + "\n"
+        + "_CENSUS_TOTAL_CAP = " + repr(_CENSUS_TOTAL_CAP) + "\n"
+        + "_CENSUS_KILL_WAIT = " + repr(_CENSUS_KILL_WAIT) + "\n"
+        + "CENSUS_BOUND_MARGIN_S = " + repr(CENSUS_BOUND_MARGIN_S) + "\n"
+        + "_CENSUS_BUDGETED = " + repr(_CENSUS_BUDGETED) + "\n"
+        + body.replace(old, new, 1), encoding="utf-8")
+    spec = importlib.util.spec_from_file_location("check_release_cut_" + name.replace(" ", "_"), location)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module._census_table_failures
+
+
+# The budget cross-check reverts: (name, the text replaced in _census_table_failures, its replacement, the
+# _census_budget_cases rows that must change).
+_CENSUS_BUDGET_FLIPS = (
+    ("comparison", "bound < budgets[rel] + CENSUS_BOUND_MARGIN_S", "False",
+     ("budget-1-edge--1", "real-row-below")),
+    ("unread", "rel in _CENSUS_BUDGETED and rel not in budgets", "False",
+     ("unread-empty", "unread-none")),
+)
+
+
+def _census_budget_flip_red(parent, script, flip, root):
+    """The budget cross-check rows against a copy of _census_table_failures with one part of the cross-check
+    removed (_CENSUS_BUDGET_FLIPS): every case the flip names must now come out other than its stated
+    result (red), and every other case must keep it, so the copy is this file's table check with that one
+    revert. Returns the failures: [] when exactly the named cases went red."""
+    name, old, new, reds = next(entry for entry in _CENSUS_BUDGET_FLIPS if entry[0] == flip)
+    flipped = _census_table_flipped(parent, script, "census budget flip " + name, old, new)
+    real = _census_budgets(root, _CENSUS_MAPPINGS)
+    reds = set(reds) | ({"budget-%d-edge--1" % real["tools/check_gensrc_failclose.py"]}
+                        if name == "comparison" else set())
+    failures = []
+    for case, got, want in _census_budget_cases(flipped, real):
+        if (got != want) != (case in reds):
+            failures.append("census budget flip %s: case %s expected %s, got %r against %r"
+                            % (name, case, "red" if case in reds else "unchanged", got, want))
+    return failures
 
 
 def _census_grandchild_gone(record, label):
@@ -4226,12 +4647,28 @@ def _self_test_isolated(red_on_revert):
             print("FAIL " + failure, file=sys.stderr)
         check("census-mapping", not mapping_failures)
         print("PASS census-mapping runs=" + str(mapping_runs) + " close-stage-legs=3")
-        bound_failures, bound_rows = _census_bound_rows(parent)
+        bound_failures, bound_rows = _census_bound_rows(parent, script.parents[1])
         for failure in bound_failures:
             print("FAIL " + failure, file=sys.stderr)
         check("census-mapping-bound", not bound_failures)
         print("PASS census-mapping-bound rows=" + str(bound_rows) + " entries=" + str(len(_CENSUS_MAPPINGS))
               + " bound-sum=" + str(sum(row[3] for row in _CENSUS_MAPPINGS)))
+        _budget_reader_checks(red_on_revert)
+        _source_gate_checks(red_on_revert)
+        budget_failures, budget_rows = _census_budget_rows(parent, script.parents[1])
+        for failure in budget_failures:
+            print("FAIL " + failure, file=sys.stderr)
+        check("census-budget-cross-check", not budget_failures)
+        print("PASS census-budget-cross-check rows=" + str(budget_rows) + " budgets="
+              + repr(_census_budgets(script.parents[1], _CENSUS_MAPPINGS)) + " margin=" + str(CENSUS_BOUND_MARGIN_S))
+        if red_on_revert:
+            for flip in ("comparison", "unread"):
+                flip_failures = _census_budget_flip_red(parent / ("census-budget-flip-" + flip), script, flip,
+                                                        script.parents[1])
+                for failure in flip_failures:
+                    print("FAIL " + failure, file=sys.stderr)
+                check("census-budget-cross-check-" + flip + "-red", not flip_failures)
+                print("RED census-budget-cross-check-" + flip + " at the table's budget cross-check")
         interrupt_failures = _census_interrupt_row(parent / "census-interrupt")
         for failure in interrupt_failures:
             print("FAIL " + failure, file=sys.stderr)

@@ -373,7 +373,7 @@ COORD_NEW_SUBJECT = re.compile(
 # result" reads as a hedge; a hedge VERB (intend/design/aim/aspire/meant) clears ONLY when followed by "to"
 # within a few words ("designed to be portable"), so an unrelated NOUN ("a simple design and is portable")
 # does NOT clear - "intent" is the sole noun-form hedge. It is clause-scoped exactly like NEGATOR: a hedge in a PRIOR clause does not
-# launder a fresh assertion (teams.html says the standard is "intended to reach across ..." and then, in a
+# launder a fresh assertion (teams/index.html says the standard is "intended to reach across ..." and then, in a
 # separate clause after the comma+"so", asserts a colleague "is working to the same rules" as a verified
 # fact; the earlier hedge does not scope over that later clause, so the assertion is what must soften).
 INTENT_HEDGE = re.compile(
@@ -2404,11 +2404,11 @@ POSITIVE = [
     "The AIQT skill is foolproof.",                                   # foolproof
     "A team can share one standard across every assistant it uses.",  # one-standard-across (install.html)
     "One shared standard across every assistant your team uses.",     # one-standard-across (draft.html)
-    "One definition of done, applied by every assistant.",            # applied-by-every (teams.html)
-    "Every assistant on the team works to the same ordering.",        # universal-subject works-to-same (teams.html)
-    "The guardrails are portable across every toolchain.",            # portable-across compat (draft/teams.html)
+    "One definition of done, applied by every assistant.",            # applied-by-every (teams/index.html)
+    "Every assistant on the team works to the same ordering.",        # universal-subject works-to-same (teams/index.html)
+    "The guardrails are portable across every toolchain.",            # portable-across compat (teams/index.html)
     "It reaches across every assistant on your team.",                # across-every/all compat
-    "A colleague on one assistant is working to the same rules as a colleague on another.",  # working-to-same compat (teams.html)
+    "A colleague on one assistant is working to the same rules as a colleague on another.",  # working-to-same compat (teams/index.html)
     "The result is one standard applied the same way wherever the work runs and whichever model does the reviewing.",  # F-108 live tech-details:293 regression: reach by whichever model
     "The same rules apply whichever assistant you use.",              # F-108 reach-by-whichever paraphrase
     "All assistants work to the same rules.",                        # F-108 bare-work plural-subject assertion (no hedge)
@@ -2547,7 +2547,7 @@ NEGATIVE = [
     "A colleague on one assistant is meant to work to the same rules as a colleague on another.",  # softened working-to-same (intent, bare "work")
     "A subagent works under the same rules as the session that spawned it.",             # development.html mechanism claim: "works under", not "works to"; no licence
     "Add AIQT from one page for all assistants you use.",                                # benign "All assistants" nav sense
-    "The 1.1.0 design gives local and CI reviewers the same QA brief. Its intent is to reduce variation caused by who runs the check or which tool they use; provider behaviour and results remain to be verified.",  # softened tech-details:293 (intent hedge + which tool, not whichever)
+    "The 1.2.0 design gives local and CI reviewers the same QA brief. Its intent is to reduce variation caused by who runs the check or which tool they use; provider behaviour and results remain to be verified.",  # softened tech-details:296 (intent hedge + which tool, not whichever)
     # RELEASE-INTEGRITY negatives (VER-CORE 4.4): the corrected copy the gate must NOT flag. Under the
     # simplified model these clear because no banned term is present, or by a tight-adjacency denial, or
     # because the obligation prose does not match the deny-list by construction.

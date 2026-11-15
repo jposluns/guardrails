@@ -228,9 +228,13 @@ import statement in the same scope included, can then load from the mutated path
 by the dotted name of the enclosing def, async def or class, not by the true Python scope: a
 lambda or comprehension shares the name of the function, class or module around it, and two
 scopes with one dotted name, such as a function defined twice, one name in both branches of an
-if, or a class and a function of one name, are paired, which errs toward reporting; an insert
-in one function and the importer in a function of another name, and a mutation whose importer
-is in a nested function, are not paired); a plain
+if, or a class and a function of one name, are paired, which errs toward reporting; a mutation
+and an importer whose enclosing dotted names differ are not paired: an insert in one function
+and the importer in a function of another name, a mutation whose importer is in a nested
+function, a mutation in a nested function whose importer is in the function around it, a
+module-level mutation whose importer is inside a top-level def, a class-body mutation whose
+importer is in a method of that class, and a mutation inside a def whose importer is at module
+level); a plain
 import statement after a sys.path insert or append in the same scope (not counted because it
 matches about 160 live scopes, most of them a tool importing its own directory, so counting
 it would over-fire); a literal module name for a file the code itself writes under a name the
@@ -564,6 +568,8 @@ ALLOWLIST = (
     ("tools/check_release_cut.py", "_census_paused_run", "shell", 1, _SAVED),
     ("tools/check_release_cut.py", "_census_run_flipped", "code", 1,
      _MUTANT + " (each census drain revert, loaded by exec_module from a scratch file)"),
+    ("tools/check_release_cut.py", "_census_table_flipped", "code", 1,
+     _MUTANT + " (each census budget cross-check revert, loaded by exec_module from a scratch file)"),
     ("tools/pin.py", "_recover_close_vectors", "code", 1,
      _MUTANT + " (the recover close reverts)"),
     ("tools/selftest_git_fixture_env_core.py", "_system_pin_checks", "code", 1,
@@ -795,6 +801,15 @@ ALLOWLIST = (
     ("tools/check_gensrc_failclose.py", "_self_test_main_isolated._evaluate_interrupt", "shell", 1,
      _SAVED + " (the real Popen subclassed by the gc interrupt vector's double, whose wait raises"
      " KeyboardInterrupt once)"),
+    ("tools/check_gensrc_failclose.py", "_self_test_main_isolated._evaluate_gone_bound.evaluate", "shell",
+     1, _SAVED + " (the real Popen subclassed by the gc group-exit bound vector's double, whose wait"
+     " raises KeyboardInterrupt once on its interrupt leg)"),
+    ("tools/check_gensrc_failclose.py", "_self_test_main_isolated._evaluate_unreapable", "shell", 1,
+     _SAVED + " (the real Popen subclassed by the gc unreapable-leader vector's double, whose bounded"
+     " reaps time out without reaping and whose unbounded reap is refused)"),
+    ("tools/check_gensrc_failclose.py", "_self_test_main_isolated._evaluate_second_interrupt", "shell", 1,
+     _SAVED + " (the real Popen subclassed by the gc second-interrupt vector's double, whose wait raises"
+     " the original KeyboardInterrupt once)"),
     ("tools/check_release_build.py", "_self_test_main_isolated", "shell", 1, _SAVED),
     ("tools/check_release_delta.py", "_self_test_main_isolated", "shell", 1, _SAVED),
     ("tools/check_mistakes_register.py", "self_test", "shell", 2,
@@ -833,6 +848,10 @@ ALLOWLIST = (
     ("tools/_selftest_exit_report.py", "_bootstrap_main", "code", 1,
      "execution-report bootstrap: runs the runner script named in its own argv as __main__ under its"
      " audit hook, the same trust as running that script directly with python3; no other input"),
+    ("opf/tools/_selftest_exit_report.py", "_bootstrap_main", "code", 1,
+     "the OPF-local copy of the execution-report bootstrap: runs the runner script named in its own"
+     " argv as __main__ under its audit hook, the same trust as running that script directly with"
+     " python3; no other input"),
     ("tools/check_opf_enforce_platforms.py", "load_hook", "code", 1,
      "check harness: loads the repository's own Claude Code deny hook as a private module, never"
      " entered in sys.modules and its main() never called, the equivalent of an import; no external"
@@ -868,7 +887,7 @@ ALLOWLIST = (
      "pid capture: types.FunctionType rebuilds the standard library's own Popen._execute_child code"
      " object with its globals copied and only _fork_exec wrapped to record the pid; no external"
      " code"),
-    ("tools/_load_bound.py", "vector_failures", "shell", 14,
+    ("tools/_load_bound.py", "vector_failures", "shell", 15,
      _SAVED + " (the real Popen each vector's fault or recording double subclasses, set back in a"
      " finally; the fork-window vector also reads its _execute_child through that saved class)"),
     ("tools/_load_bound.py", "vector_failures.bounded", "shell", 1,
@@ -893,6 +912,9 @@ ALLOWLIST = (
      _WORD + " (GIT_SUBCOMMAND_RE ends a git subcommand only where no letter of any script"
      " continues it, and PYTHON_TARGET_RE reads a .py path whose segments may be named in any"
      " script)"),
+    ("tools/check_brief_capability.py", "git_write_commands", "regex", 1,
+     _WORD + " (GIT_WRITE_SUBCOMMAND_RE ends commit or push only where no letter of any script"
+     " continues it, as GIT_SUBCOMMAND_RE ends a git subcommand)"),
     ("tools/check_brief_capability.py", "sentence_asks", "regex", 1,
      _WORD + " (a letter after test or fix continues that word)"),
     ("tools/check_brief_capability.py", "unplaced", "regex", 1,
@@ -2818,6 +2840,25 @@ POSITIVE_VECTORS = (
     # mutation as the direct spelling does.
     ("import importlib, sys\ndef load(td):\n    sys.path.insert(0, str(td))\n"
      "    return getattr(importlib, 'import_module')('json')\n", ("code-syspath",)),
+    # Pairing is by the dotted name of the enclosing def, async def or class, so a lambda or
+    # comprehension shares the name around it (a function, a class body or the module)...
+    ("import importlib, sys\ndef load(td):\n    sys.path.insert(0, str(td))\n"
+     "    return lambda: importlib.import_module('json')\n", ("code-syspath",)),
+    ("import importlib, sys\nsys.path.insert(0, str(td))\n"
+     "load = lambda: importlib.import_module('json')\n", ("code-syspath",)),
+    ("import importlib, sys\ndef load(td, names):\n    sys.path.insert(0, str(td))\n"
+     "    return [importlib.import_module('json') for n in names]\n", ("code-syspath",)),
+    ("import importlib, sys\nclass C:\n    sys.path.insert(0, str(td))\n"
+     "    mods = [importlib.import_module('json') for n in names]\n", ("code-syspath",)),
+    # ...and two scopes with one dotted name pair: a function defined twice, one name in both
+    # branches of an if, and a class and a function of one name.
+    ("import importlib, sys\ndef load(td):\n    sys.path.insert(0, str(td))\n"
+     "def load():\n    return importlib.import_module('json')\n", ("code-syspath",)),
+    ("import importlib, sys\nif fast:\n    def load(td):\n        sys.path.insert(0, str(td))\n"
+     "else:\n    def load():\n        return importlib.import_module('json')\n",
+     ("code-syspath",)),
+    ("import importlib, sys\nclass load:\n    sys.path.insert(0, str(td))\n"
+     "def load():\n    return importlib.import_module('json')\n", ("code-syspath",)),
     ("from logging.handlers import pickle\npickle.loads(data)\n", ("chain", "dsz-ref")),
     ("from pickle import *\nloads(b'')\n", ("star-import",)),
     ("import subprocess\nm = subprocess\nm.run(cmd, shell=True)\n", ("module-escape",)),
@@ -3188,6 +3229,21 @@ NEGATIVE_VECTORS = (
     "def load():\n    return importlib.import_module('json')\n",
     "import importlib, sys\ndef f():\n    sys.path.insert(0, '/usr/share/stubs')\n"
     "    return importlib.import_module('json')\n",
+    # A mutation and an importer whose enclosing dotted names differ are not paired (the
+    # residuals name each): the importer in a nested function, the mutation in a nested
+    # function, a module-level mutation with the importer in a top-level def, a class-body
+    # mutation with the importer in a method, and a mutation in a def with the importer at
+    # module level.
+    "import importlib, sys\ndef load(td):\n    sys.path.insert(0, str(td))\n"
+    "    def inner():\n        return importlib.import_module('json')\n    return inner\n",
+    "import importlib, sys\ndef load(td):\n    def add():\n        sys.path.insert(0, str(td))\n"
+    "    add()\n    return importlib.import_module('json')\n",
+    "import importlib, sys\nsys.path.insert(0, str(td))\n"
+    "def load():\n    return importlib.import_module('json')\n",
+    "import importlib, sys\nclass C:\n    sys.path.insert(0, str(td))\n"
+    "    def load(self):\n        return importlib.import_module('json')\n",
+    "import importlib, sys\ndef add(td):\n    sys.path.insert(0, str(td))\n"
+    "importlib.import_module('json')\n",
 )
 
 

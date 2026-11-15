@@ -66,6 +66,9 @@ nothing and exits 2 (cannot evaluate).
   <runner>.py                              exit 0 on pass, 1 on assertion failure
   <runner>.py --execution-report ABS_PATH  also write the executed check IDs as JSON
 
+The three config-lane runners also take --shard K/N (run shard K of N of the lane's members) and
+--list-shard K/N (print that shard, run nothing); see _config_lane_main and their docstrings.
+
 Exit 2 is cannot-evaluate: a harness/setup error, including bad arguments, no git binary, no writable
 temp directory, a failed report write, or an unreadable, malformed, or suite-missing expectation
 manifest; and a bounded child that reached its time bound (see _run_bounded): a config-injection
@@ -764,6 +767,23 @@ def _command_identity(argv):
     return (script, *argv[1:])
 
 
+def _suite_identity(argv):
+    """_command_identity, except that one shard of a sharded suite (the execution gate's
+    --suite <id> --shard K/N, <id> in its SHARD_COUNTS and N that suite's registered count) reads
+    as the plain --suite <id> launch it is a part of, so a CI shard line gets the same recursion
+    exclusion as the plain suite line. Any other --shard line keeps its whole identity, which the
+    roster refuses as an unparseable suite invocation."""
+    identity = _command_identity(argv)
+    if (len(identity) == 5 and identity[0] == "tools/check_selftest_execution.py"
+            and identity[1] == "--suite" and identity[3] == "--shard"):
+        from check_selftest_execution import SHARD_COUNTS, _parse_shard
+        shard = _parse_shard(identity[4])
+        if (identity[2] in SHARD_COUNTS and shard is not None
+                and shard[1] == SHARD_COUNTS[identity[2]]):
+            return identity[:3]
+    return identity
+
+
 def _registered_selftests(root=ROOT):
     """Parse every registry before selecting self-tests; preserve exact script arguments.
     Reuse CI-parity's fail-closed shell/YAML grammar. The standalone runner is
@@ -846,9 +866,9 @@ def _registered_selftests(root=ROOT):
         raise ValueError("cannot read suite runner registry")
     runners = {row["id"]: row["runner"] for row in suites}
     for argv in sorted(commands):
-        identity = _command_identity(argv)
+        identity = _suite_identity(argv)
         if identity[0] == "tools/check_selftest_execution.py" and "--suite" in identity:
-            if len(argv) != 3 or argv[1] != "--suite" or argv[2] not in runners:
+            if len(identity) != 3 or argv[1] != "--suite" or argv[2] not in runners:
                 raise ValueError("unparseable suite invocation: {!r}".format(argv))
             if identity not in CONFIG_EXCLUSIONS["all"]:
                 commands.add((runners[argv[2]],))
@@ -858,13 +878,13 @@ def _registered_selftests(root=ROOT):
     for suite_id, direct in CONFIG_DIRECT_SELFTESTS.items():
         if suite_id not in runners or direct not in commands:
             raise ValueError("stale direct self-test entry: {!r}".format(suite_id))
-    identities = {_command_identity(argv) for argv in commands}
+    identities = {_suite_identity(argv) for argv in commands}
     for lane, exclusions in CONFIG_EXCLUSIONS.items():
         for argv, reason in exclusions.items():
             if argv not in identities or not reason.strip():
                 raise ValueError("stale or unreasoned {} exclusion: {!r}".format(lane, argv))
     commands = {argv for argv in commands
-                if _command_identity(argv) not in CONFIG_EXCLUSIONS["all"]}
+                if _suite_identity(argv) not in CONFIG_EXCLUSIONS["all"]}
     if not commands:
         raise ValueError("empty config-injection roster")
     for argv in commands:
@@ -1072,6 +1092,215 @@ def _member_result(results, member, column):
     return want if all(value == want for value in values) else values
 
 
+# ---------- shards of a config lane (--shard K/N, --list-shard K/N) ----------
+# A config lane runs every member of its roster in one command, hours at a loaded host, which
+# can pass a per-command bound. --shard K/N runs only shard K of N of the lane's members, so N
+# commands carry the lane; --list-shard K/N prints that shard's members and runs nothing
+# (_config_lane_main). SHARD is (K, N) in a sharded run and None otherwise; _shard_select records
+# the lane's members and this run's shard of them in SHARD_RUN; SHARD_LEFT collects the check ids
+# of the members another shard runs (_shard_leaves), which _execution_set_findings excuses.
+SHARD_MAX = 64
+SHARD = None
+SHARD_RUN = {}
+SHARD_LEFT = set()
+_CONFIG_USAGE = (
+    "usage: a git-fixture-env config-lane runner accepts [--shard K/N] [--execution-report "
+    "ABS_PATH] (each at most once, in either order), or --list-shard K/N alone; K and N are "
+    "decimal integers with 1 <= K <= N <= {} and the report path must be absolute".format(
+        SHARD_MAX))
+
+
+def _parse_shard(text):
+    """(K, N) for the text K/N, each written in ASCII decimal digits with no sign, space or
+    leading zero, and 1 <= K <= N <= SHARD_MAX; None for any other text, which the runner refuses
+    as a usage error (exit 2), never a full or an empty run."""
+    if not isinstance(text, str) or text.count("/") != 1:
+        return None
+    parts = text.split("/")
+    if not all(part and part[0] in "123456789" and len(part) <= len(str(SHARD_MAX))
+               and all(char in "0123456789" for char in part) for part in parts):
+        return None
+    k, n = int(parts[0]), int(parts[1])
+    return (k, n) if 1 <= k <= n <= SHARD_MAX else None
+
+
+def _shard_members(roster, k, n):
+    """The entries of roster that shard k of n runs, in roster order: the entry at zero-based
+    position i belongs to shard (i mod n) + 1. The rule reads only positions in the order given
+    (the registered roster is sorted, _registered_selftests), never a hash, clock or environment
+    value, so every run deals the same entries to the same shard; dealing in turn spreads
+    neighbouring entries across the shards, whose sizes differ by at most one entry."""
+    return tuple(argv for index, argv in enumerate(roster) if index % n == k - 1)
+
+
+def _shard_partition_problems(roster, n, members=None):
+    """The problems with shards 1..n of roster (dealt by members, default _shard_members) as a
+    partition of it: an entry in more shards than the roster holds it, a roster entry in no shard,
+    a shard entry outside the roster; [] when the shards together are exactly the roster and no
+    entry is in two of them."""
+    members = _shard_members if members is None else members
+    roster = tuple(roster)
+    homes = {}
+    for k in range(1, n + 1):
+        for argv in members(roster, k, n):
+            homes.setdefault(argv, []).append(k)
+    problems = []
+    for argv, shards in homes.items():
+        if argv not in roster:
+            problems.append("not in the roster: {!r} (shards {})".format(argv, shards))
+        elif len(shards) != roster.count(argv):
+            problems.append("in shards {}: {!r}".format(shards, argv))
+    problems.extend("in no shard: {!r}".format(argv) for argv in roster if argv not in homes)
+    return problems
+
+
+def _config_lane_roster(lane, roster):
+    """The members lane runs, in roster order: every member of roster (the registered roster,
+    _registered_selftests()) for the combined and system lanes, and every member outside
+    CONFIG_EXCLUSIONS["malformed"] for the malformed lane."""
+    if lane not in ("combined", "malformed", "system"):
+        raise ValueError("unknown config lane: {!r}".format(lane))
+    excluded = CONFIG_EXCLUSIONS["malformed"] if lane == "malformed" else {}
+    return tuple(argv for argv in roster if _command_identity(argv) not in excluded)
+
+
+def _shard_select(members, sink=None):
+    """members (the lane's roster, _config_lane_roster) as this run executes them: all of them,
+    unchanged, in an unsharded run (SHARD None); else shard K of N of them (_shard_members),
+    recorded in SHARD_RUN for _shard_leaves and _shard_scope and announced on a SHARD line, or
+    None, after a harness error line on sink (default sys.stderr), when that shard holds no
+    member: an empty shard is refused (the lane returns 2), never run as a pass."""
+    if SHARD is None:
+        return members
+    k, n = SHARD
+    selected = _shard_members(members, k, n)
+    if not selected:
+        print("SELF-TEST HARNESS ERROR: shard {}/{} holds no member of the {}-member lane roster;"
+              " nothing was run (cannot evaluate)".format(k, n, len(members)),
+              file=sys.stderr if sink is None else sink)
+        return None
+    SHARD_RUN.update(members=tuple(members), selected=selected)
+    print("SHARD {}/{}: this run executes {} of the lane's {} members; the other shards run the"
+          " rest".format(k, n, len(selected), len(members)), flush=True)
+    return selected
+
+
+def _shard_leaves(member, check_ids):
+    """True when this sharded run leaves member (a registered script path) to another shard,
+    after adding check_ids, the lane's checks of that member, to SHARD_LEFT: the lane's roster
+    holds the member and this run's shard holds none of its registered argument variants. False
+    in an unsharded run, for a member this shard runs (its checks then cover the variants this
+    shard holds) and for a member outside the lane's roster, which is then treated exactly as an
+    unsharded run treats it: the _member_result loops report it missing, and the malformed
+    fsmonitor loop runs (member, "--self-test") directly (_run_config_member) rather than through
+    _member_result, as it does unsharded."""
+    if SHARD is None:
+        return False
+    if "selected" not in SHARD_RUN:
+        raise ValueError("a sharded lane asked about a member before selecting its shard")
+    held = {_command_identity(argv)[0] for argv in SHARD_RUN["selected"]}
+    lane = {_command_identity(argv)[0] for argv in SHARD_RUN["members"]}
+    if member in held or member not in lane:
+        return False
+    SHARD_LEFT.update(check_ids)
+    return True
+
+
+def _shard_scope(roster):
+    """The entries of roster this run's shard executes, in roster order: roster itself in an
+    unsharded run."""
+    if SHARD is None:
+        return roster
+    if "selected" not in SHARD_RUN:
+        raise ValueError("a sharded lane scoped a roster before selecting its shard")
+    selected = set(SHARD_RUN["selected"])
+    return [argv for argv in roster if argv in selected]
+
+
+def _execution_set_findings(expected, executed, left):
+    """The execution-set findings of a run: each expected check id neither executed nor left to
+    another shard (left, SHARD_LEFT), each executed id outside expected, and, in a sharded run,
+    each left id outside expected or also executed. An unsharded run leaves nothing, so its
+    findings are the missing and extra ids alone. RESIDUAL: excusal is per run. Nothing here, or
+    anywhere in this repository yet, confirms that the shard a left id was left to ran, at the same
+    commit and with the same N, so a lane counts as fully covered only when every shard 1..N
+    passed at one commit; a single sharded pass covers that shard alone."""
+    return (["execution-set/missing: {}".format(check_id)
+             for check_id in sorted(expected - executed - left)]
+            + ["execution-set/extra: {}".format(check_id)
+               for check_id in sorted(executed - expected)]
+            + ["execution-set/left-unexpected: {}".format(check_id)
+               for check_id in sorted(left - expected)]
+            + ["execution-set/left-and-run: {}".format(check_id)
+               for check_id in sorted(left & executed)])
+
+
+def _config_argv(argv):
+    """(report_path, shard, list_only) for a config-lane runner's arguments, or None for a usage
+    error. Accepted: none; --execution-report ABS_PATH; --shard K/N; those two once each in either
+    order; or --list-shard K/N alone. A shard value _parse_shard refuses, a repeated or unknown
+    option, a missing value, a relative report path, or --list-shard beside anything else is a
+    usage error."""
+    argv = list(argv)
+    if len(argv) == 2 and argv[0] == "--list-shard":
+        shard = _parse_shard(argv[1])
+        return None if shard is None else (None, shard, True)
+    if len(argv) % 2:
+        return None
+    report_path, shard, seen = None, None, set()
+    for option, value in zip(argv[0::2], argv[1::2]):
+        if option in seen:
+            return None
+        seen.add(option)
+        if option == "--execution-report" and os.path.isabs(value):
+            report_path = value
+        elif option == "--shard" and _parse_shard(value) is not None:
+            shard = _parse_shard(value)
+        else:
+            return None
+    return (report_path, shard, False)
+
+
+def _list_shard(lane, shard, out=None, err=None):
+    """--list-shard K/N: print shard K of N of lane's members (_config_lane_roster over
+    _registered_selftests(), dealt by _shard_members, the selection a --shard K/N run executes),
+    one registered command per line on out (default sys.stdout), then a count line on err
+    (default sys.stderr). Nothing is run. Returns 0, an empty shard included (the listing is the
+    answer), or 2, after a harness error line naming the exception type, when building the roster
+    raises an Exception (fail closed; KeyboardInterrupt and SystemExit still propagate)."""
+    k, n = shard
+    try:
+        members = _config_lane_roster(lane, _registered_selftests())
+    except Exception as exc:
+        print("SELF-TEST HARNESS ERROR: cannot build the config roster: {}: {}".format(
+            type(exc).__name__, exc), file=sys.stderr if err is None else err)
+        return 2
+    selected = _shard_members(members, k, n)
+    for argv in selected:
+        print(" ".join(argv), file=sys.stdout if out is None else out)
+    print("shard {}/{} of the {} lane: {} of {} members (nothing was run)".format(
+        k, n, lane, len(selected), len(members)), file=sys.stderr if err is None else err)
+    return 0
+
+
+def _config_lane_main(argv, lane, lanes):
+    """A config-lane runner's entry over its arguments (_config_argv; a usage error prints the
+    usage and exits 2 with nothing run): --list-shard K/N prints that shard of the lane
+    (_list_shard) and runs nothing; otherwise main() runs the lane, shard K of N of its members
+    when --shard K/N was given, and every member, exactly as before the option existed, when it
+    was not."""
+    global SHARD
+    parsed = _config_argv(argv)
+    if parsed is None:
+        print(_CONFIG_USAGE, file=sys.stderr)
+        sys.exit(2)
+    report_path, shard, list_only = parsed
+    if list_only:
+        return _list_shard(lane, shard)
+    SHARD = shard
+    return main(report_path, lanes)
+
+
 def _system_pin_probe(base, lifecycle):
     """Observe basename resolution after the same GIT_* scrub production uses."""
     from unittest.mock import patch
@@ -1175,16 +1404,30 @@ def _config_poison_fixture(base):
 # hands the looked-up bound to _run_bounded, and config/member-roster-figures pins the SIZING_*
 # constants below against _registered_selftests() through _roster_figures and prints the
 # figures it derives (all in _member_bound_checks); none of them reads this comment, and none
-# of them tests any sizing.
+# of them tests any sizing. One check does test a sizing: config/member-bound-closure-worst-case
+# (in _closure_bound_checks, with config/member-bound-closure-vectors) recomputes on every run
+# the worst case of each tools/check_opf_standalone_closure.py --self-test --ci-job member
+# through that module's own _leg_bounds and constants (the WORST CASE paragraph below) and
+# requires each such entry to be at least that worst case plus the module's _LAUNCH_MARGIN_S; a
+# module or name it cannot read is a finding, never a skip. It checks that floor only, not the
+# rounding to a multiple of 300 s.
 # Figures in this comment carry one of four labels: MEASURED (run for SIZING below), ESTIMATED
 # (derived by the SIZING formula), REPORTED (an earlier account, not reproduced here) or
-# READ FROM SOURCE (read from the member's own code, not measured). The exceptions are the five
-# tools/check_opf_standalone_closure.py --self-test --ci-job entries, sized outside SIZING: their
-# MEASURED figures are standalone runs of the pre-split whole self-test (and one of the
-# opf-closure-c member when it held one leg) and their ESTIMATED figure scales the latest
-# whole-self-test run by load alone, not by the SIZING formula (their shared comment gives both),
-# and the tools/check_selftest_execution.py --suite child-status-coverage-selftest entry, whose
-# MEASURED figures are standalone runs (its own comment), fed to the SIZING formula.
+# READ FROM SOURCE (read from the member's own code, not measured). The exceptions are the six
+# tools/check_opf_standalone_closure.py --self-test --ci-job entries, set outside SIZING: the
+# opf-closure-a to opf-closure-e entries sized from their members' worst cases READ FROM SOURCE,
+# and opf-closure-f's 3600 s a kept value above its member's worst case READ FROM SOURCE (1620 s),
+# not sized from it. Their MEASURED figures are standalone runs of the pre-split whole self-test
+# (and one of the opf-closure-c member when it held one leg) and their ESTIMATED figure scales
+# the latest whole-self-test run by load alone, not by the SIZING formula (their shared comment
+# gives both; neither sizes an entry now). The other exceptions are the
+# tools/check_selftest_execution.py --suite child-status-coverage-selftest entry, whose MEASURED
+# figures are standalone runs (its own comment), fed to the SIZING formula, the
+# tools/selftest_aiqt_hooks.py entry, whose MEASURED figures are config-lane runs of that member
+# alone taken after the account (its own comment), fed to the SIZING formula and capped, and the
+# opf/tools/_opf_adopt_apply.py --self-test entry, whose MEASURED figures are later config-lane
+# runs of that member beside two runs of the hooks member (its own comment), fed to the SIZING
+# formula and capped.
 #
 # CONFIG_MEMBER_BOUND_DEFAULT is a DELIBERATE SHORTER DEADLINE, not a bound sized above every
 # member's own end-to-end budget. Budgets the members grant themselves, READ FROM SOURCE (not
@@ -1197,21 +1440,32 @@ def _config_poison_fixture(base):
 # ("A kill timeout outlives the wait it bounds", AGENTS.md) asks that a bound meant to let a command
 # finish be sized above the budget the command grants itself; it allows a deliberately shorter
 # deadline where cutting the work short is the explicit intent, provided reaching it is attributed
-# to the deadline rather than reported as a failure of the callee. Every bound in this table takes
-# that exception: none of them is offered as a bound above its member's whole self-granted budget.
-# CHOICE: the default is NOT raised above 5766 s, and neither is any entry below (each but the
-# five tools/check_opf_standalone_closure.py --self-test --ci-job entries, the
-# child-status-coverage-selftest entry and the tools/check_release_cut.py --self-test
-# --red-on-revert entry is sized from config-lane runs MEASURED on this host, see SIZING; those
-# five are sized from standalone runs of the pre-split whole self-test, see their shared
-# comment, that one from standalone runs, see its own comment, and the check_release_cut.py
-# entry from standalone runs with a stated margin, deliberately below the worst case over named
-# terms that its own comment gives); each entry stays a deliberate shorter deadline relative to
-# the member's self-granted budget, yet each formula-sized entry is sized above the member's
-# measured runs (lane runs, or standalone runs for the child-status-coverage-selftest entry) so
-# that the member finishes under the load the SIZING factor covers;
-# reaching a bound stays cannot-evaluate, attributed to the bound, never a FAIL of that member
-# and never a pass, because this lane owns no member's verdict.
+# to the deadline rather than reported as a failure of the callee. Every bound in this table but the
+# six tools/check_opf_standalone_closure.py --self-test --ci-job entries takes that exception; each
+# of those six is set above the self-granted budget its member's own model gives, READ FROM
+# SOURCE, a model part of which is work no deadline bounds (their shared comment).
+# CHOICE: the default is NOT raised above 5766 s, and neither is any entry below but the
+# opf-closure-a to opf-closure-e entries (each but the six tools/check_opf_standalone_closure.py
+# --self-test --ci-job entries, the child-status-coverage-selftest entry, the
+# tools/check_release_cut.py --self-test --red-on-revert entry, the tools/selftest_aiqt_hooks.py
+# entry and the opf/tools/_opf_adopt_apply.py --self-test entry is sized from config-lane runs
+# MEASURED on this host, see SIZING; those six are set above their members' worst cases READ FROM
+# SOURCE, see their shared comment, the child-status-coverage-selftest entry from standalone runs,
+# see its own comment, the check_release_cut.py entry from standalone runs with a stated margin,
+# deliberately below the worst case over named terms that its own comment gives, the
+# selftest_aiqt_hooks.py entry from later config-lane runs by the SIZING formula, capped at 5700 s
+# since the formula gives more than 5766 s, see its own comment, and the _opf_adopt_apply.py entry
+# from later config-lane runs by the SIZING formula, capped at 3900 s since the closure gate
+# refuses an entry for that command above 4026 s while no floor row (_LEG_BOUND_FLOOR_S) raises
+# its opf-adopt-apply-selftest leg, see its own comment); each other entry stays a deliberate
+# shorter deadline relative to the member's self-granted budget, yet each formula-sized entry is
+# sized above the member's measured runs (lane runs, or standalone runs for the
+# child-status-coverage-selftest entry) so that the member finishes under the load the SIZING
+# factor covers, but for the two capped entries, selftest_aiqt_hooks.py and _opf_adopt_apply.py,
+# which cover less (their own comments); reaching a bound stays cannot-evaluate, attributed to the
+# bound, never a FAIL of that member and never a pass, because this lane owns no member's verdict.
+# Raising those five entries does not keep a config lane inside its CI job's 21600 s limit (their
+# shared comment, JOB LIMIT).
 # Every roster member is a registered step or the runner behind a registered --suite step
 # (_registered_selftests reads both CI workflows, both standalone runners and the suite manifest),
 # and that step runs the member to completion under no deadline from this suite, so no member's
@@ -1276,10 +1530,12 @@ def _config_poison_fixture(base):
 # among its timed members: SIZING_ACCOUNT_TIMED stays 88, as for the relaunched member above, and
 # may overstate the timed members still registered by up to two, so the count of members with no
 # recorded time may understate by up to two. The runs and times recorded here are unchanged.
-# NOT MEASURED, though these bounds govern those reruns all the same: the system lane; the
-# malformed lane's configuration for every member of that lane outside SIZING_MALFORMED_MEASURED;
-# and the fsmonitor pass's own configuration (fsmonitor set in both config files, ignore and
-# attributes files removed, its four members run one at a time).
+# NOT MEASURED in the account, though these bounds govern those reruns all the same: the system
+# lane (two members, tools/selftest_aiqt_hooks.py and opf/tools/_opf_adopt_apply.py --self-test,
+# were MEASURED in it later; their own entries); the malformed lane's configuration for every
+# member of that lane outside SIZING_MALFORMED_MEASURED; and the fsmonitor pass's own
+# configuration (fsmonitor set in both config files, ignore and attributes files removed, its four
+# members run one at a time).
 # The opf.py --self-test times above and below and its 3600 s entry were sized before the
 # 2026-10-13 merge added the opf-write-guard delegate to opf.py --self-test; the delegate's own
 # self-test, MEASURED standalone on the merged tree (2026-10-13), exited 0 in 0.23 s wall, so the
@@ -1297,9 +1553,14 @@ def _config_poison_fixture(base):
 # REPORTED by that account as each 62.42 s or less, with no per-member time and no names given.
 # The other account members, which the account does not name, have no recorded time; nor does a
 # member registered after the account unless SIZING_LATER_MEASURED records a measurement of it.
-# Their default bound is NOT sized from a measurement. _roster_figures derives the live counts
-# from these constants (members, malformed-lane members, members outside the account, members
-# with no recorded time, malformed-lane members not measured in that lane), and
+# Their default bound is NOT sized from a measurement. Two account members,
+# tools/selftest_aiqt_hooks.py and opf/tools/_opf_adopt_apply.py --self-test, were later MEASURED
+# in the config lanes at over 1200 s (their own entries); the account's times date from
+# 2026-10-12, so a member that has grown since can sit near or over the default with no figure
+# here showing it. That these members grew past the default since then is INFERRED, not measured:
+# the account gives no time for either (their own entries). _roster_figures derives the live
+# counts from these constants (members, malformed-lane members, members outside the account,
+# members with no recorded time, malformed-lane members not measured in that lane), and
 # config/member-roster-figures prints them with one line per member outside the account.
 # A bound sized from a measurement taken after the account (an entry whose own comment says it
 # was sized outside SIZING) is allowed only when SIZING_LATER_MEASURED maps its argv to a
@@ -1339,7 +1600,8 @@ def _config_poison_fixture(base):
 # above 24 throughout, so this overstates the growth from where it was measured). 4 is headroom for
 # what that model does not explain: the REPORTED (not reproduced here) opf.py --self-test lane runs
 # of 1192 s and the four that reached the then 1200 s default, at least 2.2 times its slowest
-# measured lane time. Each bound stays below 5766 s (see CHOICE).
+# measured lane time. Each bound but the opf-closure-a to opf-closure-e entries stays below 5766 s
+# (see CHOICE).
 CONFIG_MEMBER_BOUND_DEFAULT = 1200
 CONFIG_MEMBER_BOUNDS = {
     # MEASURED lane times (see SIZING): 650.49 s, 709.77 s, 734.81 s (whole roster) and 683.69 s
@@ -1370,9 +1632,77 @@ CONFIG_MEMBER_BOUNDS = {
     # sweep is a proper part of the whole self-test's over the same tree; that is NOT a subset of
     # what the measured pre-split runs below swept, since opf-closure-c holds two legs
     # (opf-adopt-state-selftest and opf-adopt-complete-selftest) and opf-closure-f one
-    # (opf-release-history-selftest) absent from the tree those runs measured. Every part keeps the
-    # whole self-test's 3600 s entry rather than a bound sized from a run of its own: a deliberate
-    # shorter deadline for every part but opf-closure-f (see below).
+    # (opf-release-history-selftest) absent from the tree those runs measured.
+    # SIZED ABOVE EACH MEMBER'S WORST CASE AS ITS OWN BUDGET MODEL GIVES IT (the kill-timeout rule,
+    # see CHOICE), so no entry here is meant as a shorter deadline: each is that worst case, READ
+    # FROM SOURCE (not measured), plus the member's 60 s launch margin, rounded up to a multiple of
+    # 300 s, and an entry already above that figure is kept (opf-closure-f's 3600 s). That worst case
+    # is the source's budget model, NOT a bound the member enforces: part of its vector allowance is
+    # work no deadline bounds (UNBOUNDED PART, below), so no entry is shown to outlast every run.
+    # config/member-bound-closure-worst-case recomputes each worst case below through that module on
+    # every run and fails when an entry sits below it plus the launch margin, so a later rise in a
+    # closure leg bound, floor or constant that leaves an entry below its model fails the
+    # git-fixture-env-core suite; the table below gives this tree's figures, and that check prints
+    # the live ones.
+    # WORST CASE, READ FROM SOURCE (tools/check_opf_standalone_closure.py on this tree, imported:
+    # _leg_bounds over opf/tools, _CI_JOB_LEGS, _FLIP_LEG, _DRAIN_MARGIN_S, _VECTOR_ALLOWANCE_S and
+    # _LAUNCH_MARGIN_S): the --self-test step of one --ci-job sweeps that job's legs once, each under
+    # its leg bound, runs the flip (opf.py --self-test under the opf-tooling-selftest bound) only in
+    # the job holding that leg, pays one 10 s cleanup deadline per leg that can be killed, and spends
+    # the 350 s vector allowance:
+    #   member         sweep   flip   cleanups   vectors   worst case   + 60 s   entry
+    #   opf-closure-a   7251   5691     3 x 10       350        13322    13382   13500
+    #   opf-closure-b  10145      0     9 x 10       350        10585    10645   10800
+    #   opf-closure-c   7380      0     5 x 10       350         7780     7840    8100
+    #   opf-closure-d   9420      0     7 x 10       350         9840     9900    9900
+    #   opf-closure-e   9126      0     5 x 10       350         9526     9586    9600
+    #   opf-closure-f   1260      0     1 x 10       350         1620     1680    3600 (kept)
+    # opf-closure-a's sweep is its opf-tooling-selftest leg bound, 5691 s, and its
+    # opf-doctor-selftest leg bound, 1560 s. Each CI job's own worst case (two sweeps, the flip, the
+    # cleanups, the vectors and 600 s of setup; _job_worst_case_s in the member) is larger: 21193 s,
+    # 21420 s, 15810 s, 19930 s, 19302 s and 3490 s.
+    # UNBOUNDED PART: the 350 s vector allowance is the member's own budget for work no leg bound
+    # covers (its comment beside _VECTOR_ALLOWANCE_S): 311 s of deadlines its vectors hold, READ FROM
+    # SOURCE, plus 38.4 s for work NO DEADLINE BOUNDS (its bound checks and wait scans, and each
+    # sweep's opf/ copy and bound scan), three times the at most 12.8 s MEASURED in three runs on
+    # 2026-10-15 at the opf/ tree that comment names, so INFERRED at a later tree such as this one;
+    # the member also names vectors added since whose work is NOT measured into that figure. Nothing
+    # ends that work at its allowance, so each worst case above, and each CI job's, is the source's
+    # budget model, not a bound on how long the member can run.
+    # The member's OWN inner deadlines do not on their own end it within that worst case, since the
+    # work named above holds none, and they are read differently from these entries: when one of its
+    # legs is killed at its leg bound, ended by a signal, or its flip is not evaluated, the member
+    # itself exits 2, and this lane reads any non-zero member exit as a definite offender
+    # (_split_offenders: only this suite's own recorded timeout is cannot-evaluate), so under lane
+    # load such a trip reads here as a FAIL of the member, not as cannot-evaluate; reaching one of
+    # these entries stays cannot-evaluate, never a pass. Each of those inner leg bounds is itself a
+    # deliberate shorter deadline (the member says so beside _LEG_CEILING_S), held, for each leg
+    # whose command is a member here, at or above this table's deadline for that command plus the
+    # member's 60 s launch margin, so that the closure never kills such a leg before this lane would.
+    # WHY THEY ROSE (REPORTED, from two CI runs of the malformed lane on the same tree, read from the
+    # runs' step timestamps; not reproduced here): the lane step took 5454.6 s on one runner and
+    # 8560.1 s on another, 1.569 times as long, with its members finishing in nearly the same order.
+    # That every member slowed by about that factor is INFERRED from those figures, not shown: one
+    # step's total time and a similar finishing order cannot give any one member's own ratio.
+    # opf-closure-a completed on the faster runner and reached its then 3600 s entry on the slower
+    # one. The same account REPORTED no stall in two runs of that member on another host, both cut at
+    # 2040 s while still in its opf-tooling-selftest leg, so no length of any of these members under
+    # the lane is known. opf-closure-b to opf-closure-e sat below their worst cases in the same way
+    # and are raised with it.
+    # DETECTION IS RELAXED: raising these entries relaxes this lane's detection of runtime growth. A
+    # clean member that now finishes between 3600 s and its new entry passes here where the old
+    # 3600 s deadline reported cannot-evaluate, and a hang that no inner deadline ends is reported
+    # only at the new entry.
+    # JOB LIMIT: the lane's CI jobs set no timeout-minutes, so each runs under the 21600 s limit of a
+    # hosted-runner job, and these entries do NOT keep a lane inside it. The five raised members sit
+    # next to one another in the roster, so on the lane's four workers two of them always run one
+    # after the other on one worker: at their entries that is at least 8100 + 9600 = 17700 s (the
+    # two smallest, c and e), after whatever that worker ran before them. On the malformed-config
+    # lane's roster (every member outside CONFIG_EXCLUSIONS["malformed"]), with every member at its
+    # bound, that lane's four workers alone run 65100 s in roster order (56700 s with these five at
+    # 3600 s): a schedule of this table's entries, not a measured time, and the other lanes' rosters
+    # differ. A lane that reaches the job limit is ended by it and fails with no member named.
+    # HISTORY (no entry is sized from these figures now).
     # Sized outside SIZING (no config-lane time of this member is known: the lane runs below
     # reached the 1200 s default, so they have no known length and none is fed to the formula).
     # Every run below is of the PRE-SPLIT whole self-test (one sweep over every leg plus the flip).
@@ -1388,41 +1718,22 @@ CONFIG_MEMBER_BOUNDS = {
     # measured at): one complete run took 1667.7 s wall and passed. The member's vectors and the opf/
     # tree its legs run have changed since, so for this tree that run time is INFERRED, not measured,
     # and so is the estimate below, which scales it.
-    # ESTIMATED (SIZING's model that wall time grows in proportion to load5 once load5 exceeds the
-    # CPU count, applied to that standalone run): 3600 s, about 2.2 times that run (3600 / 1667.7 =
-    # 2.159), covers load5 up to about 51.8 scaled from the run's start (its starting load5, 22.8,
-    # sits below the 24 CPUs, where the model adds no growth, so it scales from 24: 24 x 2.159 =
-    # 51.8), and about 70 from its ending load5 (32.6 x 2.159 = 70.4).
-    # DELIBERATE SHORTER DEADLINE: 3600 s sits far BELOW each member's own worst case but F's, READ
-    # FROM SOURCE (tools/check_opf_standalone_closure.py, its own fit arithmetic on this tree: the
-    # member's legs' bounds, one 10 s cleanup deadline per leg, the flip and its cleanup where it
-    # runs, and the 350 s vector allowance), 13322 s (opf-closure-a), 10585 s (b), 7780 s (c),
-    # 9840 s (d) and 9526 s (e), and below each CI job's worst case (21193 s, 21420 s, 15810 s,
-    # 19930 s and 19302 s; see _LEG_CEILING_S and _job_worst_case_s in the member itself). For
-    # opf-closure-f, whose worst case is 1620 s (its one leg's 1260 s bound, one cleanup deadline
-    # and the vector allowance; its CI job's is 3490 s), the same 3600 s sits ABOVE that worst case,
-    # so for that member alone it is no shorter deadline. For the other five it is a shorter
-    # deadline exactly as the default's comment above sanctions: this lane owns no member's
-    # verdict, and reaching this 3600 s bound is cannot-evaluate, never a pass or a fail of the
-    # member. The member's OWN inner bounds are read differently: when one of its legs is killed at
-    # its leg bound, ended by a signal, or its flip is not evaluated, the member itself exits 2, and
-    # this lane reads any non-zero member exit as a definite offender (_split_offenders: only this
-    # suite's own recorded timeout is cannot-evaluate), so under lane load such a trip reads here as
-    # a FAIL of the member, not as cannot-evaluate. Each of those inner leg bounds is itself a
-    # deliberate shorter deadline (the member says so beside _LEG_CEILING_S), held, for each leg
-    # whose command is a member here, at or above this table's deadline for that command plus the
-    # member's 60 s launch margin, so that the closure never kills such a leg before this lane would.
+    # ESTIMATED, when every entry here was 3600 s (SIZING's model that wall time grows in proportion
+    # to load5 once load5 exceeds the CPU count, applied to that standalone run): 3600 s, about 2.2
+    # times that run (3600 / 1667.7 = 2.159), covers load5 up to about 51.8 scaled from the run's
+    # start (its starting load5, 22.8, sits below the 24 CPUs, where the model adds no growth, so it
+    # scales from 24: 24 x 2.159 = 51.8), and about 70 from its ending load5 (32.6 x 2.159 = 70.4).
     # The opf-closure-c entry was 1800 s while that member swept opf-homes-selftest alone, sized above
-    # its then worst case, 1620 s; it now sweeps five legs, so it takes the 3600 s of the others.
+    # its then worst case, 1620 s; when it came to sweep five legs it took the 3600 s of the others.
     # MEASURED (2026-10-23, at the tree of that one-leg member, plain, on a 24-CPU host, load5 5.4 at
     # the start and 5.9 at the end): one complete standalone run of it took 110.3 s wall and passed,
     # its homes leg 53.4 s. No config-lane time of any of the six members is known, and no run of
     # the opf-closure-f member at all.
-    ("tools/check_opf_standalone_closure.py", "--self-test", "--ci-job", "opf-closure-a"): 3600,
-    ("tools/check_opf_standalone_closure.py", "--self-test", "--ci-job", "opf-closure-b"): 3600,
-    ("tools/check_opf_standalone_closure.py", "--self-test", "--ci-job", "opf-closure-c"): 3600,
-    ("tools/check_opf_standalone_closure.py", "--self-test", "--ci-job", "opf-closure-d"): 3600,
-    ("tools/check_opf_standalone_closure.py", "--self-test", "--ci-job", "opf-closure-e"): 3600,
+    ("tools/check_opf_standalone_closure.py", "--self-test", "--ci-job", "opf-closure-a"): 13500,
+    ("tools/check_opf_standalone_closure.py", "--self-test", "--ci-job", "opf-closure-b"): 10800,
+    ("tools/check_opf_standalone_closure.py", "--self-test", "--ci-job", "opf-closure-c"): 8100,
+    ("tools/check_opf_standalone_closure.py", "--self-test", "--ci-job", "opf-closure-d"): 9900,
+    ("tools/check_opf_standalone_closure.py", "--self-test", "--ci-job", "opf-closure-e"): 9600,
     ("tools/check_opf_standalone_closure.py", "--self-test", "--ci-job", "opf-closure-f"): 3600,
     # Sized outside SIZING, by its formula (no config-lane time of this member is known: its lane
     # runs reached the 1200 s default in two of three config lanes of one CI run, so they have no
@@ -1441,18 +1752,20 @@ CONFIG_MEMBER_BOUNDS = {
     # time of it since is known). It is sized from the standalone runs MEASURED below with a stated
     # margin, as a DELIBERATE SHORTER DEADLINE under the kill-timeout rule (see CHOICE).
     # READ FROM SOURCE (tools/check_release_cut.py, its census budget comment), the worst case over
-    # named terms: a --red-on-revert run ends by at most 10665 s, a BOUND (the census table, census
-    # rows and revert flips spending their bounds in full, 680 + 945 + 880 s, and the 243 fixture
-    # observe calls and the 29 mutation replays each running just under its 30 s TIMEOUT bound,
-    # 7290 + 870 s), plus about 183.1 s, MEASURED (the parts with no bound summed there: the fixture
-    # builds' git calls, the close checks, entry-restore and the close-sweep reverts), about
-    # 10848.1 s. 2700 s is BELOW that worst case ON PURPOSE: the 30 s bounds summed are a ceiling no
-    # run approaches, and a bound near it would let a hung run hold this lane for over three hours.
-    # The margin: 2700 s is about 7.4 times the slowest run below (367.0 s), and it still covers the
-    # census bounds alone spent in full plus the measured rest (2505 + 183.1 = 2688.1 s), which is
-    # above the 1200 s default. Reaching it kills the member at its bound and is reported by
-    # _run_member as this lane's deadline ("reached its 2700 s bound (cannot evaluate)"), never as
-    # a failure of the member.
+    # named terms: a --red-on-revert run's bounded terms come to at most 10665 s, a BOUND that
+    # leaves out each launch's fork and exec and each wait's poll overshoot (the census table,
+    # census rows and revert flips spending their bounds in full, 680 + 945 + 880 s, and the 243
+    # fixture observe calls and the 29 mutation replays each running just under its 30 s TIMEOUT
+    # bound, 7290 + 870 s), plus about 183.1 s, MEASURED, with no bound (the parts with no bound
+    # summed there: the fixture builds' git calls, the close checks, entry-restore and the
+    # close-sweep reverts), about 10848.1 s. That sum is not a ceiling on a run's wall time: its
+    # measured parts have no bound. 2700 s is BELOW that worst case ON PURPOSE: the 30 s bounds
+    # summed are a ceiling no run approaches, and a bound near it would let a hung run hold this
+    # lane for over three hours. The margin: 2700 s is about 7.4 times the slowest run below
+    # (367.0 s), and it still covers the census bounds alone spent in full plus the measured rest as
+    # measured (2505 + 183.1 = 2688.1 s), which is above the 1200 s default. Reaching it kills the
+    # member at its bound and is reported by _run_member as this lane's deadline ("reached its
+    # 2700 s bound (cannot evaluate)"), never as a failure of the member.
     # MEASURED (2026-11-09, 80-CPU host, load5 about 26 to 29, standalone, plain): one --self-test
     # run took 283.4 s wall and one --self-test --red-on-revert run took 309.4 s wall, both passed.
     # MEASURED (2026-11-09, 12:06:49 to 12:12:56 UTC, 80-CPU host, 1-minute load 23.9 at the start
@@ -1460,6 +1773,65 @@ CONFIG_MEMBER_BOUNDS = {
     # wall and passed, its replays 12.1 s of it. These runs, with the margin above, size this
     # entry.
     ("tools/check_release_cut.py", "--self-test", "--red-on-revert"): 2700,
+    # Sized outside SIZING, by its formula capped below 5766 s (see CHOICE). The account names no
+    # time for this member: it is not among the nine the account names, and whether it is among the
+    # 75 it reports, unnamed, as 62.42 s or less is not known; no account figure sizes it now.
+    # READ FROM SOURCE: the member states no end-to-end budget of its own. Each of its launches
+    # carries its own bound (a fixed one, such as its 900 s deadline-child limit, or one stretched
+    # with host load through tools/_load_bound.py), and no bound covers the whole run, so this entry
+    # is a DELIBERATE SHORTER DEADLINE like the others (see CHOICE), sized above its measured runs.
+    # REPORTED, not reproduced here (2026-11-13): two system-lane runs, applying pull requests
+    # #1148 and #1141, each reached the then 1200 s default on this member (cannot evaluate), so
+    # neither run has a known length and neither is fed to the formula.
+    # MEASURED (2026-11-13, 15:58:07 to 16:19:04 UTC, 96-CPU host, plain, the bound lifted to
+    # 2400 s): the suite's own _config_results over this one member (so one pool worker busy),
+    # under the combined lane's injected configuration, rebuilt by a copy of that lane's setup code,
+    # took 1257.15 s (load5 55.07 to 56.38); under the system lane's configuration, rebuilt the same
+    # way and run at the same time, 1250.08 s (load5 55.07 to 56.31). Both exited 0 with no hook,
+    # fsmonitor or exposure record. Each is above the 1200 s default.
+    # REPORTED, not reproduced here (2026-11-14, the same 96-CPU host, 1-minute load 50.7 to 70.2
+    # sampled every 10 s, plain, the bound lifted to 3300 s; the timing account behind the
+    # _opf_adopt_apply.py --self-test entry's MEASURED runs below, started with them): two later
+    # runs, each through the system lane's own setup (its poison fixture, simulated system config
+    # and git wrapper, then _config_results over this one member), took 1306.6 s and 1298.1 s wall
+    # for the member's whole pass. The 1306.6 s run exited 1 because the member's own
+    # gw-lin-dq-roster timing check failed under that load (doubling its input scaled the scan
+    # 3.26x, above its 3x limit), not because of the injected configuration; the 1298.1 s run exited
+    # 0; neither left an exposure record. That gw-lin timing check failing under load is a known
+    # issue, tracked separately.
+    # ESTIMATED: 1257.15 * 20 / 3 = 8381.0, so 8400 s by the formula (1306.6 s would give 8710.7, so
+    # 9000 s); either is above 5766 s, which no entry but opf-closure-a to opf-closure-e may pass
+    # (CHOICE), so the entry is 5700 s, the largest multiple of 300 s below 5766 s. That is about
+    # 4.4 times the slowest run known (5700 / 1306.6 = 4.36, the REPORTED run above; 5700 / 1257.15
+    # = 4.534 for the slowest MEASURED one), not the formula's 20 / 3, so this entry covers less
+    # load growth than the formula-sized entries do; reaching it stays cannot-evaluate.
+    ("tools/selftest_aiqt_hooks.py",): 5700,
+    # Sized outside SIZING, by its formula capped below the closure gate's limit (see CHOICE). The
+    # account names no time for this member: it is not among the nine the account names, and
+    # whether it is among the 75 it reports, unnamed, as 62.42 s or less is not known; no account
+    # figure sizes it now.
+    # REPORTED, not reproduced here (2026-11-14, the same 96-CPU host, 1-minute load about 41 to
+    # 74): the member reached the then 1200 s default in two full system-lane runs (cannot
+    # evaluate), so neither run has a known length and neither is fed to the formula.
+    # MEASURED (2026-11-14, 02:51:50 to 03:16:20 UTC, 96-CPU host, 1-minute load 45.4 to 70.2
+    # sampled every 10 s, plain, the bound lifted to 3300 s): two runs started together, beside two
+    # runs of tools/selftest_aiqt_hooks.py started at the same time, each through the system lane's
+    # own setup (its poison fixture, simulated system config and git wrapper, then _config_results
+    # over this one member), took 1469.7 s and 1467.2 s wall for the member's whole pass (its
+    # poison copy, positive control and run); both exited 0, with no hook, fsmonitor or exposure
+    # record. Each is above the 1200 s default.
+    # ESTIMATED: 1469.7 * 20 / 3 = 9798.0, so 9900 s by the formula. The closure gate caps this
+    # entry lower: its opf-adopt-apply-selftest leg runs this same command, and
+    # closure/leg-bound-reaches-the-lane-deadline (tools/check_opf_standalone_closure.py) refuses
+    # that leg's bound when it sits below this entry plus its 60 s launch margin. That bound is
+    # 4086 s on this tree (the leg's declared waits, 4026 s, plus the margin; READ FROM SOURCE
+    # through its _leg_bounds), so this entry stays at or below 4026 s, where the leg needs no floor
+    # row; a higher entry needs one, which raises job opf-closure-e's worst case (19302 s of its
+    # 21600 s limit) by twice the rise and the opf-closure-e member's worst case by the rise. The
+    # entry is 3900 s, the largest multiple of 300 s at or below 4026 s. That is about 2.65 times
+    # the slowest measured run (3900 / 1469.7 = 2.654), not the formula's 20 / 3, so this entry
+    # covers less load growth than the formula-sized entries do; reaching it stays cannot-evaluate.
+    ("opf/tools/_opf_adopt_apply.py", "--self-test"): 3900,
 }
 # The sizing account's frozen facts (see SIZING above); _roster_figures derives the live figures
 # from them and config/member-roster-figures pins them against _registered_selftests().
@@ -1625,6 +1997,12 @@ SIZING_LATER_MEASURED = {
     ("tools/check_release_cut.py", "--self-test", "--red-on-revert"): (
         "Standalone runs only (2026-11-09), no config-lane time of the member with its census"
         " rows known: see this member's CONFIG_MEMBER_BOUNDS comment."),
+    ("tools/selftest_aiqt_hooks.py",): (
+        "Config-lane runs (2026-11-13, combined 1257.15 s, system 1250.08 s): see this member's"
+        " CONFIG_MEMBER_BOUNDS comment."),
+    ("opf/tools/_opf_adopt_apply.py", "--self-test"): (
+        "Config-lane runs under the system lane's setup (2026-11-14, 1469.7 s and 1467.2 s):"
+        " see this member's CONFIG_MEMBER_BOUNDS comment."),
 }
 # After the process-group kill: the bounded drain of output still held by a descendant that left
 # the group (setsid or setpgid), the bounded reap of the leader, and the bounded wait for the group
@@ -2532,7 +2910,11 @@ _GROUP_MEMBER_FIXTURE = "\n".join((
 # the scenario itself, deliberate (_DELIBERATE_EMPTY_SEND), so nothing stands down in a
 # healthy run and a producer tied to those facts on code this run executes, not also
 # dependent on any other state that differs from a slow "failed" run, mismatches
-# definitely (what it does not reach is THE RESIDUAL stated in _allowlist_producers);
+# definitely (THE RESIDUAL, stated in _allowlist_producers, is not what this run misses
+# but what neither net catches: a producer that leaves every compared field at its want
+# in every scenario run within its bounds, this one included, and that the producer-map
+# oracle neither refuses ("unrecognized") nor sees through a change to a pinned
+# signature);
 # only a positive control slower than its 60 s bound is recorded (as the reached bound
 # "positive control a observed") and stands the run down, cannot-evaluate, never definite. Every
 # wait the child makes is bounded, and an expiry is recorded under one of two keys by WHO sets
@@ -3873,8 +4255,11 @@ def _allowlist_producers(source=None):
     "failed-refused" took to release its lock holders, a length no scenario arranges and a
     slow positive control, which leaves stalls empty, does not produce); round 25's
     pinned_version, above. The nine residual probes are recorded in "producer-oracle" at
-    their empty diff, so an oracle or scenario change that starts catching one fails that
-    pin and must update this text. Only a run in which the residual producer's condition
+    their empty diff, so an oracle change that alters a pinned producer difference (one of
+    these nine leaving its empty diff included) fails that pin and must update this text; a
+    scenario change is not detected by these static probes (each only parses a mutated
+    child source, none runs a scenario), so it needs the runtime residual, THE RESIDUAL
+    above, reassessed by hand. Only a run in which the residual producer's condition
     holds where the producer runs can catch it (a slow positive control is one such run,
     for a condition it alters: a "failed" run whose member-a positive control reaches its
     60 s bound can leave the field wrong beside the recorded timeout and, the allowlist
@@ -4162,8 +4547,12 @@ def _slow_control_record(source=None):
     reads as a missing report, not a timeout; and any change to how the report is written
     (a rebinding or replacement of print, sys.stdout or json.dumps). THE NOT READ CLASS,
     exact by construction: this reader does not read ANY edit, by any route, that changes
-    what the pinned try or the gate evaluates, or whether the record reaches the printed
-    report, without a change it parses as a fact that does not hold (it then still gives
+    what the pinned try or the gate evaluates, or whether the record reaches the extras the
+    parent decodes (_member_close_controls in tools/selftest_git_fixture_env_core.py takes
+    the text after the LAST "PROBE-REPORT " in the child's stdout, the whole stdout when it
+    has none, up to the next newline, and json.loads it as the five fields outcome,
+    registered, states, timely and extra; a decode or unpack failure is "no report"),
+    without a change it parses as a fact that does not hold (it then still gives
     []); every route named above is an EXAMPLE of that class, not its bound. The probes
     exceptbind and ctxclass (the rebinding route), wildcard and mainattr (the wildcard and
     own-globals routes), exitafter, clsname (the attribute-store route) and funcglobals
@@ -4416,10 +4805,17 @@ OPF_LIFECYCLE_EXEMPTIONS = {
     "opf/tools/_opf_pack_manifest.py": "Pack parsing and digest vectors over filesystem fixtures.",
     "opf/tools/_opf_release_history.py": "Pure history parsing, canonical emission and digest vectors over in-memory bytes.",
     "opf/tools/check_opf_homes.py": "Homes contract and schema boundary vectors.",
-    "opf/tools/check_opf_init_contract.py": "Source-free contract matcher vectors.",
+    "opf/tools/check_opf_init_contract.py": "Git-free contract matcher vectors.",
     "opf/tools/check_opf_init_observe.py": "Observation vectors with mocked git subprocesses.",
     "opf/tools/check_opf_init_p0.py": "P0 store validation and runner registration vectors.",
     "opf/tools/check_opf_prompt_pack.py": "Prompt-pack schema and drift vectors over filesystem fixtures.",
+    "opf/tools/check_opf_selftest_execution.py": ("Execution-registry gate. Its self-test runs synthetic OPF roots "
+                                                  "whose fake runners only record check ids; its --suite run "
+                                                  "launches a registered runner, here the Git-free "
+                                                  "check_opf_init_contract.py self-test, under a child "
+                                                  "environment that pins HOME and XDG_CONFIG_HOME to a fresh "
+                                                  "empty directory and git's global and system config to "
+                                                  "os.devnull. Neither path runs git."),
     "opf/tools/selftest_commonmark_conformance.py": "CommonMark parser conformance vectors.",
     "opf/tools/selftest_commonmark_headings.py": "Heading selection and vendor-manifest fixtures.",
 }
@@ -7690,10 +8086,10 @@ def _suite_main(report_path, lanes):
     expected = _expected_check_ids()
     if expected is None:
         return 2
-    for check_id in sorted(expected - _EXECUTED_SET):
-        FAILURES.append("execution-set/missing: {}".format(check_id))
-    for check_id in sorted(_EXECUTED_SET - expected):
-        FAILURES.append("execution-set/extra: {}".format(check_id))
+    FAILURES.extend(_execution_set_findings(expected, _EXECUTED_SET, SHARD_LEFT))
+    if SHARD is not None:
+        print("SHARD {}/{}: {} check(s) left to the other shards; a verdict covers this shard's"
+              " members only".format(SHARD[0], SHARD[1], len(SHARD_LEFT)), flush=True)
     # 0 here is not yet a pass: main() prints the PASS line only after its close (_final_verdict).
     return _verdict(FAILURES, CANNOT_EVALUATE, TIMEOUT_CAUSED)
 
