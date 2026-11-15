@@ -58,10 +58,17 @@ Two kinds of target are checked:
    written with its trailing root-label dot, such as aiqt.ai., is the same host, and a percent-encoded
    host such as %61iqt.ai is decoded first, as a browser decodes it), and the URL path must reach a page
    of that tree. The path is first read as a browser sends it: dot segments (. and .., or a spelling
-   with %2e) are removed as the WHATWG URL parser removes them before the request is sent (.. at the top
-   stays at /). A double slash is merged into one as well, as the file lookup already reads it; a browser
-   does not merge it and whether Cloudflare Pages does is not verified, so merging it here makes the rule
-   for the merged path apply rather than letting the file decide. The tree's _redirects is evaluated
+   with %2e) are removed exactly as the WHATWG URL parser removes them before the request is sent, with
+   every empty segment kept (.. drops the segment before it even when that segment is empty, so
+   /x//../present is /x/present, and .. at the top stays at /). A double slash that is still in the path
+   after that (an empty segment before the last one, as in //present or /x//present) names no page: the
+   link fails whatever file or rule exists. How Cloudflare Pages serves a path holding a double slash
+   (merging it, matching rules against it as sent, or neither) is unconfirmed against the host (its
+   redirects page, developers.cloudflare.com/pages/configuration/redirects/, read 2026-11-15, does not
+   say), and every reading but this one can pass a page that is missing under another. The same holds for
+   a . or .. segment that only percent-decoding produces (/x%2F..%2Fpresent): the browser sends it as
+   written, so no file and no rule is taken to serve it. A host that is not ASCII is mapped through
+   Python's IDNA codec first (aiqt.ai spelled with a full-width a, U+FF41, is aiqt.ai). The tree's _redirects is evaluated
    first, as Cloudflare Pages applies a
    rule even when a static asset matches the path: when a rule's source matches the path (exactly,
    through a trailing * splat or through a /:name placeholder), the first such rule in file order
@@ -82,12 +89,16 @@ Two kinds of target are checked:
    A redirect sends the browser to a new request, so its destination path or own-site URL resolves by
    these same rules, the destination's own rules included (a chain that returns to a path it has
    visited loops, one that runs past MAX_REDIRECT_HOPS hops ends at the hop limit, and neither counts);
-   an external destination counts for a redirect (whether it is live is out of scope).
+   an external destination counts for a redirect (whether it is live is out of scope) only when it is an
+   http or https URL with a host: a destination with another scheme (mailto:, javascript:) or with a
+   scheme and no host (https:/x, https:x) proves no page and does not count.
    A 200 rewrite is applied once, as Cloudflare Pages documents for proxying
    (developers.cloudflare.com/pages/configuration/redirects/: with /a /b 200 and /b /c 200, a request to
    /a renders /b, not /c): the rewritten path is served as a file, so it counts only when a file serves
    that path (as written, + ".html" or /index.html, as above), and the rules for that path are not
-   evaluated again. It counts only to a /path on the same site, never to an absolute URL, own-site or
+   evaluated again. When that file is served at another spelling (a rewrite to /b.html, whose file
+   Pages serves at /b), the rules for that spelling are evaluated, as for a file found at a link's path
+   (unverified against the host; the stricter reading). It counts only to a /path on the same site, never to an absolute URL, own-site or
    not (whether Cloudflare Pages proxies an absolute URL to its own origin is not verified; this is the
    stricter reading). Splats and placeholders: a rule whose source holds
    a * splat or a :name placeholder counts only when its destination carries every value it captures
@@ -101,8 +112,9 @@ Two kinds of target are checked:
    never counts and a link it matches fails, even a link to a page that exists, since rules come before
    files. Whether Cloudflare Pages applies such a catch-all ahead of an existing file is unconfirmed
    against the host; failing the link is the stricter reading. A _redirects line that is not
-   "source destination [status]" with a numeric status is malformed, and so is a _redirects that is a
-   symbolic link (dangling or not) or not a regular file: exit 2. A tree absent from the checkout is not
+   "source destination [status]" with a numeric status is malformed, and so is a _redirects that starts
+   with a byte order mark (whether the host strips it is unconfirmed) or that is a symbolic link
+   (dangling or not) or not a regular file: exit 2. A tree absent from the checkout is not
    checked (an adopter vendoring this gate has no site/). A tree is read only when the scan needs it:
    when a checked link, a redirect destination or a PENDING_DECISION_ALLOWLIST entry names a host that
    tree serves. A tree path that is present but is not a directory is exit 2 when it is read that way;
@@ -534,9 +546,10 @@ def browser_url(url):
 
 
 def url_path(raw):
-    """The decoded path requested for the raw URL path raw: dot segments removed as the WHATWG URL
-    parser removes them (a percent-encoded dot counts, and .. at the top stays at /), empty segments (a
-    double slash) merged, then percent-decoded; an empty path is "/"."""
+    """The decoded path requested for the raw URL path raw: dot segments removed exactly as the WHATWG
+    URL parser's path state removes them (a percent-encoded dot counts; .. drops the segment before it,
+    even an empty one, and at the top stays at /; a final . or .. leaves a trailing /), empty segments (a
+    double slash) kept, then percent-decoded; an empty path is "/". So /x//../present is /x/present."""
     segments = raw.split("/")[1:] if raw.startswith("/") else raw.split("/")
     out = []
     for index, segment in enumerate(segments):
@@ -550,20 +563,41 @@ def url_path(raw):
         elif lowered in _SINGLE_DOT:
             if last:
                 out.append("")
-        elif segment or last:
+        else:
             out.append(segment)
     return unquote("/" + "/".join(out))
+
+
+def unservable_segment(path):
+    """Why the decoded path names no page by its segments, or None. An empty segment (a double slash)
+    before the last one, or a . or .. segment (left only by a percent-encoded slash, as in %2F..%2F, once
+    decoded), names no page: how Cloudflare Pages serves such a path is unconfirmed against the host, so
+    no file and no rule is taken to serve it, the reading that cannot pass a missing page."""
+    segments = path.split("/")[1:]
+    if any(segment in (".", "..") for segment in segments):
+        return "the decoded path holds a . or .. segment, which no page is taken to serve"
+    if any(segment == "" for segment in segments[:-1]):
+        return ("the path holds an empty segment (a double slash), which no page is taken to serve; how "
+                "the host serves one is unconfirmed")
+    return None
 
 
 def own_site_target(url, site_roots):
     """(tree, path) when url is an http or https URL on an own-site host, else None. A host written with
     the trailing root-label dot (aiqt.ai.) names the same host, and a percent-encoded host is decoded
-    first, as a browser decodes it. The path is url_path's."""
+    first, as a browser decodes it. A host that is not ASCII is mapped through Python's IDNA codec
+    (nameprep, so aiqt.ai with a full-width a, U+FF41, is aiqt.ai, as a browser's IDNA mapping reads
+    it); a host the codec rejects is left as written. The path is url_path's."""
     try:
         parts = urlsplit(url)
         host = unquote(parts.hostname or "").lower()
     except ValueError:
         return None
+    if not host.isascii():
+        try:
+            host = host.encode("idna").decode("ascii").lower()
+        except UnicodeError:
+            pass
     if host.endswith("."):
         host = host[:-1]
     if parts.scheme.lower() not in ("http", "https"):
@@ -604,6 +638,10 @@ def load_redirect_rules(tree_dir):
         text = path.read_text(encoding="utf-8")
     except UnicodeDecodeError as exc:
         raise ScanError("{} is not UTF-8 ({})".format(path, exc)) from None
+    if text.startswith("\ufeff"):
+        # whether Cloudflare Pages strips a byte order mark or reads it into the first rule's source is
+        # unconfirmed, and either reading can pass a link the other fails: cannot evaluate
+        raise ScanError("{} starts with a byte order mark (U+FEFF)".format(path))
     rules = []
     for number, line in enumerate(text.splitlines(), 1):
         stripped = line.strip()
@@ -627,8 +665,8 @@ def served_path(tree_dir, path):
     is served at its directory and one that ends in .html without it; a file found at path/index.html
     for a path without a trailing / is served at path + "/" (assumed, not verified). A host
     configuration file at the tree's top (HOST_CONFIG_FILES) is not a page, and a path holding a NUL
-    names no file."""
-    if "\x00" in path:
+    names no file, nor does one unservable_segment rejects."""
+    if "\x00" in path or unservable_segment(path) is not None:
         return None
     rel = path.lstrip("/")
     if rel == "" or rel.endswith("/"):
@@ -683,6 +721,9 @@ class Sites:
         if state is None:
             return None
         tree_dir, rules = state
+        segment_problem = unservable_segment(path)
+        if segment_problem is not None:
+            return segment_problem
         chain = visited + ((tree, path),)
         for rule in rules:
             match = rule[4].fullmatch(path)
@@ -726,6 +767,15 @@ class Sites:
         except ValueError:
             return "{} has a destination that is not a URL".format(rule)
         if parts.scheme or parts.netloc:
+            try:
+                host = parts.hostname
+            except ValueError:
+                host = None
+            if parts.scheme.lower() not in ("http", "https") or not host:
+                # https:/x or https:x (no host), mailto:, javascript: and the like name no page that can
+                # be shown to exist, so they do not count, whatever a browser makes of them
+                return ("{} has a destination that is not an http or https URL with a host, so it proves "
+                        "no page".format(rule))
             own = own_site_target(url, self.site_roots)
             if status == REWRITE_STATUS:
                 if own is None:
@@ -740,10 +790,24 @@ class Sites:
         else:
             return "{} has a destination that is neither a /path nor an absolute URL".format(rule)
         if status == REWRITE_STATUS:
-            if served_path(self.state(tree)[0], next_hop[1]) is not None:
+            served = served_path(self.state(tree)[0], next_hop[1])
+            if served is None:
+                return ("{} leads to {}, which is missing: no file serves it (a 200 rewrite is applied once, "
+                        "so the rules for {} are not evaluated)".format(rule, target, next_hop[1]))
+            if served == next_hop[1]:
                 return None
-            return ("{} leads to {}, which is missing: no file serves it (a 200 rewrite is applied once, so "
-                    "the rules for {} are not evaluated)".format(rule, target, next_hop[1]))
+            # the file is served at another spelling (b.html at /b): that spelling's rules are evaluated,
+            # as for a file found at the path of a link (unverified against the host; the stricter reading)
+            if (tree, served) in chain:
+                return "{} leads to {}, whose file is served at {}, which loops".format(rule, target, served)
+            if len(chain) > MAX_REDIRECT_HOPS:
+                return "{} leads to {}, whose file is served at {}, past the hop limit of {} hops".format(
+                    rule, target, served, MAX_REDIRECT_HOPS)
+            why = self.missing(tree, served, chain + (next_hop,))
+            if why is None:
+                return None
+            return "{} leads to {}, whose file is served at {}, which is missing: {}".format(
+                rule, target, served, why)
         if next_hop in chain:
             return "{} loops".format(rule)
         if len(chain) > MAX_REDIRECT_HOPS:
@@ -1120,8 +1184,8 @@ SELF_TEST_VECTORS = (
     ("redirects/protocol-relative-destination-present-passes", {**_SITE, "site/present.html": "p",
      "site/_redirects": "/r //aiqt.ai/present 301\n/x //example.com/y 301\n", "README.md":
      "[r](https://aiqt.ai/r) [x](https://aiqt.ai/x)\n"}, 0, ()),
-    # (11) dot segments and a double slash are normalized before rules are matched, so a rule over a
-    # present file still decides for every spelling of its path.
+    # (11) dot segments are removed before rules are matched, so a rule over a present file still decides
+    # for every spelling of its path; a double slash left in the path names no page.
     ("own-site/dot-segment-or-double-slash-rule-fails", {**_SITE, "site/present.html": "p", "site/_redirects":
      "/present /missing 301\n/r /x/../present 301\n", "README.md": "[a](https://aiqt.ai/x/../present) "
      "[b](https://aiqt.ai/./present) [c](https://aiqt.ai/x/%2e%2e/present) [d](https://aiqt.ai//present) "
@@ -1129,13 +1193,64 @@ SELF_TEST_VECTORS = (
      ("-> https://aiqt.ai/x/../present (no page for /present under site/: site/_redirects line 1",
       "-> https://aiqt.ai/./present (no page for /present under site/: site/_redirects line 1",
       "-> https://aiqt.ai/x/%2e%2e/present (no page for /present under site/: site/_redirects line 1",
-      "-> https://aiqt.ai//present (no page for /present under site/: site/_redirects line 1",
+      "-> https://aiqt.ai//present (no page for //present under site/: the path holds an empty segment",
       "(/r /x/../present 301) leads to /x/../present, which is missing: site/_redirects line 1",
       "FAIL: 5 broken link(s)")),
     ("own-site/dot-segment-or-double-slash-rule-passes", {**_SITE, "site/present.html": "p",
      "site/exists.html": "e", "site/_redirects": "/present /exists 301\n/r /x/../present 301\n", "README.md":
      "[a](https://aiqt.ai/x/../present) [b](https://aiqt.ai/./present) [c](https://aiqt.ai/x/%2e%2e/present) "
-     "[d](https://aiqt.ai//present) [e](https://aiqt.ai/r)\n"}, 0, ()),
+     "[e](https://aiqt.ai/r)\n"}, 0, ()),
+    # (14) .. drops an empty segment as the WHATWG URL parser drops it: /x//../present is /x/present.
+    ("own-site/empty-segment-then-dot-dot-passes", {**_SITE, "site/x/present.html": "p", "README.md":
+     "[a](https://aiqt.ai/x//../present)\n"}, 0, ()),
+    ("own-site/empty-segment-then-dot-dot-missing-fails", {**_SITE, "site/present.html": "p", "README.md":
+     "[a](https://aiqt.ai/x//../present)\n"}, 1,
+     ("-> https://aiqt.ai/x//../present (no page for /x/present under site/: no file", "FAIL: 1 broken link(s)")),
+    ("own-site/empty-segment-then-dot-dot-rule-fails", {**_SITE, "site/present.html": "p", "site/_redirects":
+     "/x/present /missing 301\n", "README.md": "[a](https://aiqt.ai/x//../present)\n"}, 1,
+     ("-> https://aiqt.ai/x//../present (no page for /x/present under site/: site/_redirects line 1 "
+      "(/x/present /missing 301) leads to /missing, which is missing", "FAIL: 1 broken link(s)")),
+    ("own-site/empty-segment-then-dot-dot-rule-passes", {**_SITE, "site/exists.html": "e", "site/_redirects":
+     "/x/present /exists 301\n", "README.md": "[a](https://aiqt.ai/x//../present)\n"}, 0, ()),
+    # (15) a double slash left after dot segments, or a . or .. segment only percent-decoding produces,
+    # names no page, in a link, a redirect destination and a rewrite destination alike.
+    ("own-site/double-slash-or-encoded-dot-segment-fails", {**_SITE, "site/present.html": "p",
+     "site/x/present.html": "p", "site/_redirects": "/present /missing 301\n/r /x//present 301\n"
+     "/w /x//present 200\n", "README.md": "[a](https://aiqt.ai/x//present) [b](https://aiqt.ai/x%2F..%2Fpresent) "
+     "[c](https://aiqt.ai/r) [d](https://aiqt.ai/w)\n"}, 1,
+     ("-> https://aiqt.ai/x//present (no page for /x//present under site/: the path holds an empty segment",
+      "-> https://aiqt.ai/x%2F..%2Fpresent (no page for /x/../present under site/: the decoded path holds a "
+      ". or .. segment", "(/r /x//present 301) leads to /x//present, which is missing: the path holds an "
+      "empty segment", "(/w /x//present 200) leads to /x//present, which is missing: no file serves it",
+      "FAIL: 4 broken link(s)")),
+    ("own-site/encoded-slash-without-dot-segment-passes", {**_SITE, "site/x/present.html": "p", "README.md":
+     "[a](https://aiqt.ai/x%2Fpresent) [b](https://aiqt.ai/x/present/)\n", "site/x/present/index.html": "i"},
+     0, ()),
+    # (16) a redirect destination counts as external only when it is an http or https URL with a host.
+    ("redirects/hostless-or-other-scheme-destination-fails", {**_SITE, "site/_redirects":
+     "/r https:/aiqt.ai/missing 301\n/s https:aiqt.ai/missing 301\n/m mailto:a@aiqt.ai 301\n"
+     "/j javascript:void(0) 302\n", "README.md":
+     "[r](https://aiqt.ai/r) [s](https://aiqt.ai/s) [m](https://aiqt.ai/m) [j](https://aiqt.ai/j)\n"}, 1,
+     ("(/r https:/aiqt.ai/missing 301) has a destination that is not an http or https URL with a host",
+      "(/s https:aiqt.ai/missing 301) has a destination that is not",
+      "(/m mailto:a@aiqt.ai 301) has a destination that is not",
+      "(/j javascript:void(0) 302) has a destination that is not", "FAIL: 4 broken link(s)")),
+    # (17) a _redirects that starts with a byte order mark cannot be evaluated.
+    ("redirects/byte-order-mark-cannot-evaluate", {**_SITE, "site/present.html": "p", "site/_redirects":
+     "\ufeff/present /missing 301\n", "README.md": "[a](https://aiqt.ai/present)\n"}, 2,
+     ("starts with a byte order mark (U+FEFF)", "fail-closed")),
+    # (18) a host that is not ASCII is mapped as IDNA maps it: a full-width a (U+FF41) is a.
+    ("own-site/full-width-host-missing-fails", {**_SITE, "README.md": "[a](https://\uff41iqt.ai/nope)\n"}, 1,
+     ("-> https://\uff41iqt.ai/nope (no page for /nope under site/", "FAIL: 1 broken link(s)")),
+    ("own-site/full-width-host-present-passes", {**_SITE, "site/present.html": "p", "README.md":
+     "[a](https://\uff41iqt.ai/present)\n"}, 0, ()),
+    # (19) a rewrite to a spelling Pages serves elsewhere (b.html at /b) evaluates that spelling's rules.
+    ("redirects/rewrite-to-served-spelling-rule-fails", {**_SITE, "site/b.html": "b", "site/_redirects":
+     "/a /b.html 200\n/b /missing 301\n", "README.md": "[a](https://aiqt.ai/a)\n"}, 1,
+     ("(/a /b.html 200) leads to /b.html, whose file is served at /b, which is missing: site/_redirects "
+      "line 2 (/b /missing 301) leads to /missing", "FAIL: 1 broken link(s)")),
+    ("redirects/rewrite-to-served-spelling-rule-passes", {**_SITE, "site/b.html": "b", "site/c.html": "c",
+     "site/_redirects": "/a /b.html 200\n/b /c 301\n", "README.md": "[a](https://aiqt.ai/a)\n"}, 0, ()),
     # (12) a chain the hop limit ends is reported as passing the hop limit, not as a loop.
     ("redirects/hop-limit-not-a-loop-fails", {**_SITE, "site/_redirects": "".join(
      "/h{} /h{} 301\n".format(i, i + 1) for i in range(1, 16)) + "/h16 /index.html 301\n"
