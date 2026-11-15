@@ -490,7 +490,7 @@ def _shard_checks(base, runners=None):
 
         def stand_in_main(report_path, lanes, calls=calls):
             calls.append((report_path, this.SHARD, lanes is recording_lane, lanes(base)))
-            return 0
+            return 7  # a distinctive result, so a hardcoded success cannot pass
 
         with patch.object(this, "main", stand_in_main), patch.object(this, "SHARD", None), \
                 patch.object(this, "SHARD_RUN", {}), patch.object(this, "SHARD_LEFT", set()), \
@@ -498,10 +498,10 @@ def _shard_checks(base, runners=None):
             lane_main.append((this._config_lane_main(argv, "combined", recording_lane), calls,
                               ran))
     check("roster/shard-lane-main", lane_main, [
-        (0, [("/abs/report", (2, 3), True, None)], [fixture[1], fixture[4]]),
-        (0, [("/abs/report", (3, 3), True, None)], [fixture[2]]),
-        (0, [(None, None, True, None)], list(fixture)),
-        (0, [("/abs/report", None, True, None)], list(fixture))])
+        (7, [("/abs/report", (2, 3), True, None)], [fixture[1], fixture[4]]),
+        (7, [("/abs/report", (3, 3), True, None)], [fixture[2]]),
+        (7, [(None, None, True, None)], list(fixture)),
+        (7, [("/abs/report", None, True, None)], list(fixture))])
 
     try:
         # Python sources parsed for ast, never runner or workflow text; read as bytes so no new

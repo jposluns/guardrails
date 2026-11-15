@@ -1250,7 +1250,7 @@ def _list_shard(lane, shard, out=None, err=None):
     one registered command per line on out (default sys.stdout), then a count line on err
     (default sys.stderr). Nothing is run. Returns 0, an empty shard included (the listing is the
     answer), or 2, after a harness error line naming the exception type, when building the roster
-    raises any exception (fail closed)."""
+    raises an Exception (fail closed; KeyboardInterrupt and SystemExit still propagate)."""
     k, n = shard
     try:
         members = _config_lane_roster(lane, _registered_selftests())
