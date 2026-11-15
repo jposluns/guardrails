@@ -248,6 +248,22 @@ group step put back into quality.yml, and the whole self-test removed,
 repeated or moved out of the heavy jobs each turn the self-test red. The rule
 runs in the self-test, which reads the live files, not in the gate's own run.
 Not checked: which HEAVY_JOBS job runs the whole self-test.
+SHARDS. The local runner runs each config suite of SHARDED_SUITES as its one
+plain tools/check_selftest_execution.py --suite <id> line; quality.yml runs it
+as N lines, --suite <id> --shard K/N for K = 1..N, N the suite's count there,
+each in its own heavy job (SHARD_JOBS, in HEAVY_JOBS and read by the Quality
+gates job's HEAVY_RESULTS line, so every shard must succeed). The set parity
+reads CI through _shard_set_view: exactly that shard set matches the plain
+local line, so neither side is a difference. A shard of 1..N with no line, a
+--shard line of the suite outside 1..N of N (a respelled or other-N line
+among them), the plain line run in CI, and shard lines with no plain local
+line are each a shard-set finding (exit 1), and the shard lines then stay
+ci-only. Each shard command is in HEAVY_COMMANDS, so a shard line in a job
+without the pinned if: is a lane finding. The self-test holds SHARDED_SUITES
+equal to the SHARD_COUNTS of tools/check_selftest_execution.py (read with
+ast from the live file). Not checked here: a shard line run twice (the
+member set keeps no count; tools/check_python_host_pin.py holds each shard
+job to its one suite step).
 CHECKOUT CREDENTIALS. Unless its persist-credentials input is false,
 actions/checkout writes the job token into the git config of the checkout,
 where every later step of the job, each gate this repository runs among
@@ -638,6 +654,22 @@ RESULT_MASKING_JOB_KEYS = dict((
 # not close defaults.run.working-directory (module docstring, Step shell).
 STEP_SHELL_LINE = "shell: bash"
 
+# The sharded config suites (module docstring, SHARDS): suite id -> N, the shard count
+# tools/check_selftest_execution.py registers for it in its SHARD_COUNTS (the self-test
+# holds the two equal). quality.yml runs each as N heavy host-patch jobs, the job
+# SHARD_JOB_FORMAT names for shard K running SHARD_SUITE_COMMAND + id + " --shard K/N",
+# and the local runner runs the plain SHARD_SUITE_COMMAND + id line once.
+SHARDED_SUITES = {"git-fixture-env-config-combined": 12, "git-fixture-env-config-malformed": 12,
+                  "git-fixture-env-config-system": 19}
+SHARD_SUITE_COMMAND = "tools/check_selftest_execution.py --suite "
+SHARD_JOB_FORMAT = "{}-shard-{}-host-patch"
+# Every shard job id, suite by suite in SHARDED_SUITES order, shard 1 to N.
+SHARD_JOBS = tuple(SHARD_JOB_FORMAT.format(suite, k)
+                   for suite, count in SHARDED_SUITES.items() for k in range(1, count + 1))
+# Every shard command, the CI side of the SHARDS rule.
+SHARD_COMMANDS = tuple("{}{} --shard {}/{}".format(SHARD_SUITE_COMMAND, suite, k, count)
+                       for suite, count in SHARDED_SUITES.items() for k in range(1, count + 1))
+
 # The Quality gates job, pinned line for line after its job-id line. Blank and
 # whole-line comment lines are ignored, and the needs: key with its nested lines is
 # compared as the one slot line below, because needs: is checked against the job set
@@ -680,13 +712,8 @@ REQUIRED_STATUS_JOB = (
     "${{ needs.git-fixture-env-core.result || 'missing' }} "
     "${{ needs.opf-host-patch.result || 'missing' }} "
     "${{ needs.git-fixture-env-core-host-patch.result || 'missing' }} "
-    "${{ needs.git-fixture-env-config-combined-host-patch.result || "
-    "'missing' }} "
-    "${{ needs.git-fixture-env-config-malformed-host-patch.result || "
-    "'missing' }} "
-    "${{ needs.git-fixture-env-config-system-host-patch.result || "
-    "'missing' }} "
-    "${{ needs.byte-canon-matrix.result || 'missing' }}",
+    + "".join("${{ needs.%s.result || 'missing' }} " % job for job in SHARD_JOBS)
+    + "${{ needs.byte-canon-matrix.result || 'missing' }}",
     "        run: |",
     "          set -euo pipefail",
     '          echo "Needed job results: ${RESULTS}"',
@@ -771,10 +798,8 @@ SCOPE_JOB_ID = "scope"
 HEAVY_JOBS = frozenset({
     "opf-tooling-a", "opf-tooling-b", "opf-tooling-c", "selftest-execution",
     "git-fixture-env-core",
-    "opf-host-patch", "git-fixture-env-core-host-patch",
-    "git-fixture-env-config-combined-host-patch",
-    "git-fixture-env-config-malformed-host-patch",
-    "git-fixture-env-config-system-host-patch", "byte-canon-matrix",
+    "opf-host-patch", "git-fixture-env-core-host-patch", "byte-canon-matrix",
+    *SHARD_JOBS,
 })
 
 # The scope job, pinned line for line after its job-id line as REQUIRED_STATUS_JOB pins
@@ -874,6 +899,7 @@ HEAVY_COMMANDS = frozenset({
     "tools/check_selftest_execution.py --suite git-fixture-env-config-combined",
     "tools/check_selftest_execution.py --suite git-fixture-env-config-malformed",
     "tools/check_selftest_execution.py --suite git-fixture-env-config-system",
+    *SHARD_COMMANDS,
 })
 
 # The opf.py self-test groups (module docstring, OPF GROUPS): the file that names them in its
@@ -4033,12 +4059,57 @@ def _opf_group_wiring_faults(groups, local, ci, heavy=HEAVY_COMMANDS, ci_jobs=No
     return faults
 
 
+def _shard_set_view(local, ci, sharded=None):
+    """The CI member set as the SHARDS rule reads it (module docstring, SHARDS), and its findings.
+    For each suite of `sharded` (SHARDED_SUITES when None) with count N, CI's lines
+    SHARD_SUITE_COMMAND + id + " --shard K/N" for K = 1..N, exactly that set with no other
+    --shard line of the suite, together match the local runner's one plain SHARD_SUITE_COMMAND
+    + id line: they leave the view and the plain line takes their place. Anything else is a
+    shard-set finding and the shard lines stay in the view (so each is also ci-only): a shard
+    of 1..N with no line, a --shard line of the suite outside 1..N of N, the plain line run in
+    CI (one job running the whole lane), and a shard set with no plain local line."""
+    sharded = SHARDED_SUITES if sharded is None else sharded
+    view, findings = set(ci), []
+    for suite, count in sorted(sharded.items()):
+        plain = SHARD_SUITE_COMMAND + suite
+        prefix = plain + " --shard "
+        held = {member for member in ci if member.startswith(prefix)}
+        wanted = {"{}{}/{}".format(prefix, k, count) for k in range(1, count + 1)}
+        if plain in ci:
+            findings.append(Finding(
+                "shard-set", plain,
+                "CI runs the whole sharded suite on one line; it runs only as its {} shard "
+                "lines ({}K/{})".format(count, prefix, count)))
+        for member in sorted(held - wanted):
+            findings.append(Finding(
+                "shard-set", member,
+                "a --shard line of {} outside shards 1..{} of its registered count {}".format(
+                    suite, count, count)))
+        absent = sorted(int(member[len(prefix):].split("/")[0]) for member in wanted - held)
+        if held and absent:
+            findings.append(Finding(
+                "shard-set", plain,
+                "CI runs no line for shard(s) {} of {} ({}K/{})".format(
+                    ", ".join(str(k) for k in absent), count, prefix, count)))
+        if held and plain not in local:
+            findings.append(Finding(
+                "shard-set", plain,
+                "CI runs shard lines of {} but the local runner has no plain line for "
+                "them to match".format(suite)))
+        if held == wanted and plain in local and plain not in ci:
+            view = (view - wanted) | {plain}
+    return frozenset(view), findings
+
+
 def reconcile(local_extraction, ci_extraction, allowlist=ALLOWLIST):
-    """Compare extracted sets and reconcile the embedded exceptions."""
+    """Compare extracted sets and reconcile the embedded exceptions. CI's member set is read
+    through _shard_set_view (module docstring, SHARDS), so a complete shard set matches its
+    plain local line."""
     entries, allow_diagnostics = _validate_allowlist(allowlist)
 
     local = frozenset(local_extraction.members)
-    ci = frozenset(ci_extraction.members)
+    ci_raw = frozenset(ci_extraction.members)
+    ci, shard_findings = _shard_set_view(local, ci_raw)
     diagnostics = _dedupe_diagnostics(
         list(local_extraction.diagnostics)
         + list(ci_extraction.diagnostics)
@@ -4142,6 +4213,7 @@ def reconcile(local_extraction, ci_extraction, allowlist=ALLOWLIST):
                 "mandatory member is absent from CI",
             ))
 
+    findings.extend(shard_findings)
     findings.extend(ci_extraction.findings)
 
     findings = tuple(sorted(
@@ -4994,10 +5066,46 @@ def _run_runner_copy(text, stubs, fail_command="", gitleaks_rc=0):
     return proc.returncode, proc.stdout.splitlines(), calls
 
 
+# The dirname stand-in for dirname_guard_problems and cdpath_problems. It records
+# each call as one record (_dirname_record) in the log its test names inside that
+# test's own temporary directory, before it answers; a call it cannot record exits
+# 2. Each test reads the log back through _dirname_calls_differ. The record line
+# is its own constant so vector 46 can run each test against a stand-in whose
+# record is wrong and require the test to report it.
+_STUB_DIRNAME_RECORD = (
+    """{ printf '%s\\0' dirname "$#" "$@" && printf '\\n'; }"""
+    """ >> "$stub_dirname_log" || exit 2""")
 _STUB_DIRNAME = """#!/bin/sh
+""" + _STUB_DIRNAME_RECORD + """
 printf '%s' "$stub_dirname_out"
 exit "$stub_dirname_rc"
 """
+
+
+def _dirname_record(call):
+    """The bytes the dirname stand-in records for one call (a tuple of
+    arguments): "dirname", the argument count and each argument, every field
+    ended by a NUL, then a newline. An argument cannot hold a NUL and the count
+    says how many fields follow, so the argument boundaries survive: dirname
+    "-- $0" (one argument) and dirname -- "$0" (two) record different bytes, as
+    do an argument holding a newline and two calls."""
+    fields = ("dirname", str(len(call))) + tuple(call)
+    return b"".join(field.encode("utf-8") + b"\0" for field in fields) + b"\n"
+
+
+def _dirname_calls_differ(log, expected):
+    """True when the dirname stand-in's log is not exactly one record
+    (_dirname_record) per expected call (a tuple of arguments), in order. The
+    log is compared as raw bytes, so a missing, extra, reordered, truncated or
+    malformed record (a carriage return included), or an argument split or
+    joined differently, differs. With no expected call the log must be absent:
+    the stand-in creates it on its first call, so a log that is present, even
+    empty, differs."""
+    if _path_absent(log):
+        return bool(expected)
+    if not expected:
+        return True
+    return log.read_bytes() != b"".join(_dirname_record(call) for call in expected)
 
 
 def _path_absent(path):
@@ -5014,11 +5122,15 @@ def _path_absent(path):
 
 def _dirname_guard_outcome(text, relative, scenario):
     """Run a runner text from relative in a scratch tree under one dirname
-    scenario; return (rc, no gate launched).
+    scenario; return (rc, no gate launched, dirname calls differ).
 
     Scenarios: "missing" (no dirname on PATH), "failed" (prints . and exits 7),
     "empty" (prints nothing and exits 0) and "control" (prints the runner's true
     directory). Every stub is written before the one launch, from this thread.
+    The dirname stand-in's log must hold exactly the binding's one call,
+    dirname -- "$0" with $0 the runner path bash was given, or be absent under
+    "missing", where no stand-in is on PATH: there only a runner that writes
+    the log path itself makes it present (vector 46 runs such a runner red).
     """
     import os
     import shutil
@@ -5047,15 +5159,19 @@ def _dirname_guard_outcome(text, relative, scenario):
             stub.chmod(0o500)
             path.insert(0, str(dirname_dir))
         log = root / "calls.log"
+        dirname_log = root / "dirname.log"
         env = dict(PATH=os.pathsep.join(path), BASH_ENV=str(functions),
                    HOME=tmp, LC_ALL="C", stub_log=str(log),
                    stub_fail_command="", stub_gitleaks_rc="0",
-                   stub_dirname_out=out, stub_dirname_rc=rc)
+                   stub_dirname_out=out, stub_dirname_rc=rc,
+                   stub_dirname_log=str(dirname_log))
         proc = subprocess.run(
             [bash, "--noprofile", "--norc", str(runner)],
             cwd=str(caller), env=env, stdin=subprocess.DEVNULL,
             capture_output=True, timeout=600)
-        return proc.returncode, _path_absent(log)
+        expected = [] if scenario == "missing" else [("--", str(runner))]
+        return (proc.returncode, _path_absent(log),
+                _dirname_calls_differ(dirname_log, expected))
 
 
 def _passing_status(text):
@@ -5102,16 +5218,19 @@ def dirname_guard_problems(text, relative):
     passing run gives (_passing_status) is not 0, each faulty dirname must
     exit 2 with no gate launched, and the control must launch gates and exit
     with that status. Every stub gate passes, so a control that launched
-    gates and then failed is not a pass."""
+    gates and then failed is not a pass. "<scenario> calls" when the dirname
+    stand-in's log is not exactly the calls that scenario expects."""
     passing = _passing_status(text)
     problems = ["pass-status"] if _passing_status_wrong(passing) else []
     for scenario in ("missing", "failed", "empty", "control"):
-        rc, absent = _dirname_guard_outcome(text, relative, scenario)
+        rc, absent, calls_differ = _dirname_guard_outcome(text, relative, scenario)
         if scenario == "control":
             if absent or _status_differs(rc, passing):
                 problems.append(scenario)
         elif (rc, absent) != (2, True):
             problems.append(scenario)
+        if calls_differ:
+            problems.append(scenario + " calls")
     return problems
 
 
@@ -5127,10 +5246,12 @@ _STUB_PYTHON3_PWD_FUNCTION = """python3() {
 def _cdpath_outcome(text, relative):
     """Run a runner text by its RELATIVE path from its scratch tree's root
     under a CDPATH naming a decoy tree that holds the same relative directory;
-    return (rc, tree, decoy, logged gate lines).
+    return (rc, tree, decoy, logged gate lines, dirname calls differ).
 
     dirname prints the relative directory, as the real one does for a relative
-    $0. Every stub is written before the one launch, from this thread.
+    $0. Every stub is written before the one launch, from this thread. The
+    dirname stand-in's log must hold exactly the binding's one call,
+    dirname -- "$0" with $0 the relative path bash was given.
     """
     import os
     import shutil
@@ -5158,18 +5279,21 @@ def _cdpath_outcome(text, relative):
         stub.write_text(_STUB_DIRNAME, encoding="utf-8")
         stub.chmod(0o500)
         log = root / "calls.log"
+        dirname_log = root / "dirname.log"
         env = dict(PATH=os.pathsep.join([str(dirname_dir), str(bin_dir)]),
                    BASH_ENV=str(functions), HOME=tmp, LC_ALL="C",
                    CDPATH=str(decoy), stub_log=str(log),
                    stub_fail_command="", stub_gitleaks_rc="0",
-                   stub_dirname_out=str(Path(relative).parent), stub_dirname_rc="0")
+                   stub_dirname_out=str(Path(relative).parent), stub_dirname_rc="0",
+                   stub_dirname_log=str(dirname_log))
         proc = subprocess.run(
             [bash, "--noprofile", "--norc", relative],
             cwd=str(tree), env=env, stdin=subprocess.DEVNULL,
             capture_output=True, timeout=600)
         calls = ([] if _path_absent(log)
                  else log.read_text(encoding="utf-8").splitlines())
-        return proc.returncode, str(tree), str(decoy), calls
+        calls_differ = _dirname_calls_differ(dirname_log, [("--", relative)])
+        return proc.returncode, str(tree), str(decoy), calls, calls_differ
 
 
 def cdpath_problems(text, relative):
@@ -5179,9 +5303,10 @@ def cdpath_problems(text, relative):
     line names the decoy (a moved root, or a printed CDPATH match in a
     captured directory), and "exit" when the run does not exit with that
     status: every stub gate passes, so a run that logged a true-tree gate
-    line and then failed is not a pass."""
+    line and then failed is not a pass. "dirname-calls" when the dirname
+    stand-in's log is not exactly the binding's one call."""
     passing = _passing_status(text)
-    rc, tree, decoy, calls = _cdpath_outcome(text, relative)
+    rc, tree, decoy, calls, dirname_calls_differ = _cdpath_outcome(text, relative)
     problems = ["pass-status"] if _passing_status_wrong(passing) else []
     if not any(call.startswith(tree + " python3 ") for call in calls):
         problems.append("no-gate")
@@ -5189,6 +5314,8 @@ def cdpath_problems(text, relative):
         problems.append("moved")
     if _status_differs(rc, passing):
         problems.append("exit")
+    if dirname_calls_differ:
+        problems.append("dirname-calls")
     return problems
 
 
@@ -9124,14 +9251,18 @@ def self_test():
               evaluate(multi_local,
                        lane_ci(drop_heavy=("byte-canon-matrix",)), ()),
               1, "heavy job 'byte-canon-matrix' is missing")
-    # Each git-fixture-env lane's host-patch job is a heavy job of its own
-    # (the four run as parallel jobs): removing any one of them is a lane
-    # finding. While HEAVY_JOBS named one serial host-patch job for the four
-    # suites, none of these ids was heavy, so each fixture passed with exit 0.
+    # The core suite's host-patch job and each config lane's shard jobs are
+    # heavy jobs of their own (they run as parallel jobs): removing any one of
+    # them is a lane finding. The first and last shard job of each lane are
+    # written out here, not read from SHARD_JOBS, so a revert of HEAVY_JOBS to
+    # the one job per lane turns these rows red (each fixture then passes).
     for lane_job in ("git-fixture-env-core-host-patch",
-                     "git-fixture-env-config-combined-host-patch",
-                     "git-fixture-env-config-malformed-host-patch",
-                     "git-fixture-env-config-system-host-patch"):
+                     "git-fixture-env-config-combined-shard-1-host-patch",
+                     "git-fixture-env-config-combined-shard-12-host-patch",
+                     "git-fixture-env-config-malformed-shard-1-host-patch",
+                     "git-fixture-env-config-malformed-shard-12-host-patch",
+                     "git-fixture-env-config-system-shard-1-host-patch",
+                     "git-fixture-env-config-system-shard-19-host-patch"):
         lane_case("39j a removed git-fixture-env host-patch job is a lane "
                   "finding: " + lane_job,
                   evaluate(multi_local, lane_ci(drop_heavy=(lane_job,)), ()),
@@ -9156,15 +9287,13 @@ def self_test():
                   lane_ci(light_commands=common + (
                       "python3 tools/a.py", heavy_member)), ()),
               1, "job 'secrets' of {} runs heavy member(s)".format(CI_SOURCE))
-    # The combined, malformed and system git-fixture-env suites run in CI only
-    # in their host-patch jobs, and the core suite also in the '3.14' canary
-    # job: each stays a heavy command, so a '3.14' copy put back into an
+    # The core git-fixture-env suite runs in CI in its host-patch job and in
+    # the '3.14' canary job: it stays a heavy command, so a copy put into an
     # unconditioned job is a lane finding, and in a job carrying the pinned
-    # if: it passes. The suite names are written out here, not read from
-    # HEAVY_COMMANDS, so a revert of that set cannot empty these vectors.
-    for suite in ("git-fixture-env-core", "git-fixture-env-config-combined",
-                  "git-fixture-env-config-malformed",
-                  "git-fixture-env-config-system"):
+    # if: it passes. The suite name is written out here, not read from
+    # HEAVY_COMMANDS, so a revert of that set cannot empty these vectors. The
+    # config suites run in CI only as shard lines (41s below).
+    for suite in ("git-fixture-env-core",):
         suite_member = ("python3 -I -B tools/check_selftest_execution.py "
                         "--suite " + suite)
         suite_local = local_fixture(common + (
@@ -9187,10 +9316,18 @@ def self_test():
     # reverted to hold these ids, each fixture declares the id twice (the
     # renamed job and lane_ci's own heavy job), so each row stays red through
     # the duplicate-job cannot-evaluate (exit 2) rather than passing.
+    # The config lanes' single host-patch jobs, replaced by their shard jobs,
+    # are removed the same way, and so are a shard job past a lane's count and
+    # a shard job id respelled with a leading zero.
     for removed_job in ("opf", "opf-adopt", "opf-init",
                         "git-fixture-env-config-combined",
                         "git-fixture-env-config-malformed",
-                        "git-fixture-env-config-system"):
+                        "git-fixture-env-config-system",
+                        "git-fixture-env-config-combined-host-patch",
+                        "git-fixture-env-config-malformed-host-patch",
+                        "git-fixture-env-config-system-host-patch",
+                        "git-fixture-env-config-system-shard-20-host-patch",
+                        "git-fixture-env-config-combined-shard-01-host-patch"):
         lane_case("39j a removed heavy job id carrying the pinned if: is a "
                   "lane finding: " + removed_job,
                   evaluate(multi_local, lane_ci(
@@ -9200,6 +9337,107 @@ def self_test():
                       ()),
                   1, "job {!r} of {} carries a job-level if:".format(
                       removed_job, CI_SOURCE))
+
+    # 41s SHARDS: a sharded config suite runs locally as its one plain line
+    # and in CI as its N shard lines, K = 1..N of the registered N, each a
+    # heavy command (module docstring, SHARDS). The complete set matches the
+    # plain local line and passes; a missing, extra or respelled shard line,
+    # a set of another N, the plain line run in CI and a shard set with no
+    # plain local line are each a shard-set finding, and a shard line in an
+    # unconditioned job is a lane finding. The suites and counts are written
+    # out here, not read from SHARDED_SUITES, so a changed count turns the
+    # control rows red.
+    def shard_case(name, report, want_code, needle):
+        case(name, report, want_code, kinds=("shard-set",))
+        if not any(needle in finding.message for finding in report.findings
+                   if finding.kind == "shard-set"):
+            failures.append("{}: no shard-set finding mentions {!r}: {!r}".format(
+                name, needle, report.findings))
+
+    for suite, shards in (("git-fixture-env-config-combined", 12),
+                          ("git-fixture-env-config-malformed", 12),
+                          ("git-fixture-env-config-system", 19)):
+        plain = "python3 -I -B tools/check_selftest_execution.py --suite " + suite
+        lines = tuple("{} --shard {}/{}".format(plain, k, shards)
+                      for k in range(1, shards + 1))
+        shard_local = local_fixture(common + (
+            "python3 tools/a.py", "python3 tools/b.py", plain))
+        lane_case("41s control: the complete shard set in a heavy job matches "
+                  "the plain local line: " + suite,
+                  evaluate(shard_local, lane_ci(
+                      opf_commands=("python3 tools/b.py",) + lines), ()), 0)
+        lane_case("41s a shard line in an unconditioned job is a lane "
+                  "finding: " + suite,
+                  evaluate(shard_local, lane_ci(
+                      light_commands=common + ("python3 tools/a.py", lines[0]),
+                      opf_commands=("python3 tools/b.py",) + lines[1:]), ()),
+                  1, "job 'secrets' of {} runs heavy member(s) "
+                  "tools/check_selftest_execution.py --suite {} --shard 1/{}".format(
+                      CI_SOURCE, suite, shards))
+        shard_case("41s a missing shard line is a shard-set finding: " + suite,
+                   evaluate(shard_local, lane_ci(
+                       opf_commands=("python3 tools/b.py",) + lines[:2] + lines[3:]), ()),
+                   1, "CI runs no line for shard(s) 3 of {}".format(shards))
+        shard_case("41s an extra shard line is a shard-set finding: " + suite,
+                   evaluate(shard_local, lane_ci(
+                       opf_commands=("python3 tools/b.py",) + lines
+                       + ("{} --shard {}/{}".format(plain, shards + 1, shards + 1),)), ()),
+                   1, "outside shards 1..{} of its registered count {}".format(
+                       shards, shards))
+        shard_case("41s a respelled shard line is a shard-set finding: " + suite,
+                   evaluate(shard_local, lane_ci(
+                       opf_commands=("python3 tools/b.py",) + lines[:2]
+                       + ("{} --shard 03/{}".format(plain, shards),) + lines[3:]), ()),
+                   1, "CI runs no line for shard(s) 3 of {}".format(shards))
+        shard_case("41s a shard set of another count is a shard-set finding: " + suite,
+                   evaluate(shard_local, lane_ci(
+                       opf_commands=("python3 tools/b.py",) + tuple(
+                           "{} --shard {}/{}".format(plain, k, shards - 1)
+                           for k in range(1, shards))), ()),
+                   1, "CI runs no line for shard(s) {} of {}".format(
+                       ", ".join(str(k) for k in range(1, shards + 1)), shards))
+        shard_case("41s the plain line run in CI beside the shard set is a "
+                   "shard-set finding: " + suite,
+                   evaluate(shard_local, lane_ci(
+                       opf_commands=("python3 tools/b.py", plain) + lines), ()),
+                   1, "CI runs the whole sharded suite on one line")
+        shard_case("41s a shard set with no plain local line is a shard-set "
+                   "finding: " + suite,
+                   evaluate(local_fixture(common + (
+                       "python3 tools/a.py", "python3 tools/b.py")), lane_ci(
+                           opf_commands=("python3 tools/b.py",) + lines), ()),
+                   1, "the local runner has no plain line")
+    # The shard counts this gate holds are the ones the execution gate
+    # registers: tools/check_selftest_execution.py's top-level SHARD_COUNTS,
+    # read with ast from the live file and never run.
+    # It is source, not runner text (it carries non-ASCII bytes the runner
+    # reader refuses), so it is read as vector 29 reads source: bytes, decoded.
+    count += 1
+    try:
+        import ast
+        gate_source = (ROOT / "tools" / "check_selftest_execution.py").read_bytes().decode(
+            "utf-8")
+        registered = [ast.literal_eval(node.value) for node in ast.parse(gate_source).body
+                      if isinstance(node, ast.Assign)
+                      and [getattr(target, "id", None) for target in node.targets]
+                      == ["SHARD_COUNTS"]]
+    except (OSError, UnicodeDecodeError, SyntaxError, ValueError, RecursionError,
+            MemoryError) as exc:
+        registered = [exc]
+    if registered != [SHARDED_SUITES]:
+        failures.append("41s SHARDED_SUITES {!r} differs from the SHARD_COUNTS of "
+                        "tools/check_selftest_execution.py: {!r}".format(
+                            SHARDED_SUITES, registered))
+    # The Quality gates job's HEAVY_RESULTS line reads every heavy job's
+    # result exactly once, a shard job's among them, and no other job's.
+    count += 1
+    heavy_line = [line for line in REQUIRED_STATUS_JOB
+                  if line.lstrip().startswith("HEAVY_RESULTS:")]
+    read_jobs = re.findall(r"needs\.([A-Za-z0-9_-]+)\.result", "".join(heavy_line))
+    if (len(heavy_line) != 1 or sorted(read_jobs) != sorted(HEAVY_JOBS)
+            or len(read_jobs) != len(set(read_jobs))):
+        failures.append("41s HEAVY_RESULTS reads {!r}, not each of HEAVY_JOBS {!r} "
+                        "once".format(read_jobs, sorted(HEAVY_JOBS)))
     # 39k the Quality gates exemption is the quality.yml job's alone: the
     # same job name in another workflow exempts nothing, so an if: on the
     # scan job stays a lane finding whatever the job is named. Before the
@@ -9922,6 +10160,8 @@ def self_test():
     # that requirement (_passing_status_wrong) out of the real helper, which
     # passes it. The pass echo indented, or with a trailing comment, is a form
     # the grammar accepts, so each runner must be found passing (status 0).
+    # Every run also reads back the dirname stand-in's call log, which must
+    # hold exactly the binding's one call (absent when dirname is missing).
     def gate_then_fail(text):
         first_gate = re.search(r"^run_gate .*\n", text, re.M)
         if first_gate is None:
@@ -10031,7 +10271,9 @@ def self_test():
     # exit status did, which passes it. The pass-then-fail runner of vector 44
     # is held red only by the requirement that a passing run gives 0; its flip
     # patches that requirement (_passing_status_wrong) out of the real helper.
-    # The indented and commented pass echoes of vector 44 each pass.
+    # The indented and commented pass echoes of vector 44 each pass. Every
+    # run also reads back the dirname stand-in's call log, which must hold
+    # exactly the binding's one call.
     count += 8
     for relative, binding in (("tools/run_all_checks.sh", LOCAL_BINDING_LINES),
                               (STANDALONE_SOURCE, STANDALONE_BINDING_LINES)):
@@ -10087,6 +10329,77 @@ def self_test():
         if "moved" not in got:
             failures.append("45 {} mutant (CDPATH= removed) gave {}, expected moved".format(
                 relative, got))
+
+    # 46. The dirname stand-in's call log, held red, so neither log check can
+    # be weakened silently. Both checks run each live runner against a
+    # stand-in that answers as the real one does but records its call wrongly,
+    # and each must report it: one that records nothing, one that records a
+    # wrong argument (its two arguments swapped), one that records an extra
+    # call (its record twice), one that records a malformed line (a carriage
+    # return before the newline) and one that records its arguments joined by
+    # spaces (the first draft's record, which lost the argument boundaries).
+    # Under "missing" no stand-in is on PATH, so dirname_guard_problems
+    # reports the calls of the three other scenarios. Each runner with its
+    # binding's call made one joined argument (dirname "-- $0") gets the same
+    # answer from the stand-in, so only the recorded argument boundaries hold
+    # it red. Each runner that empties the stand-in's log path before its
+    # binding is held red only by the missing scenario's absent log: wherever
+    # a stand-in runs, its one record follows the emptying.
+    record_line = _STUB_DIRNAME_RECORD + "\n"
+    stand_in_mutants = (
+        ("records nothing", ""),
+        ("records a wrong argument", record_line.replace('"$@"', '"$2" "$1"', 1)),
+        ("records an extra call", record_line + record_line),
+        ("records a malformed line",
+         record_line.replace("printf '\\n'", "printf '\\r\\n'", 1)),
+        ("records its arguments joined",
+         """printf '%s\\n' "dirname $*" >> "$stub_dirname_log" || exit 2\n"""),
+    )
+    guard_calls = ["failed calls", "empty calls", "control calls"]
+    count += 2 * (2 * len(stand_in_mutants) + 4)
+    if (_STUB_DIRNAME.count(record_line) != 1 or record_line.count('"$@"') != 1
+            or record_line.count("printf '\\n'") != 1):
+        failures.append("46 dirname stand-in drift: {!r}".format(_STUB_DIRNAME))
+        relatives = ()
+    else:
+        relatives = ("tools/run_all_checks.sh", STANDALONE_SOURCE)
+    for relative in relatives:
+        runner_text, runner_diagnostic = read_runner_text(ROOT / relative, relative)
+        if runner_diagnostic is not None:
+            failures.append("46 cannot read {}: {!r}".format(relative, runner_diagnostic))
+            continue
+        for label, record in stand_in_mutants:
+            stand_in = _STUB_DIRNAME.replace(record_line, record, 1)
+            with patch.object(module, "_STUB_DIRNAME", stand_in):
+                got = dirname_guard_problems(runner_text, relative)
+                cdpath_got = cdpath_problems(runner_text, relative)
+            if got != guard_calls:
+                failures.append("46 {} stand-in that {}: dirname guard gave {}, "
+                                "expected {}".format(relative, label, got, guard_calls))
+            if cdpath_got != ["dirname-calls"]:
+                failures.append("46 {} stand-in that {}: CDPATH run gave {}, "
+                                "expected ['dirname-calls']".format(
+                                    relative, label, cdpath_got))
+        line = 'dir=$(dirname -- "$0") || exit 2'
+        if runner_text.count(line + "\n") != 1:
+            failures.append("46 {} binding drift: {}".format(relative, line))
+            continue
+        for label, replacement, guard_want, cdpath_want in (
+                ("dirname call made one joined argument",
+                 line.replace('dirname -- "$0"', 'dirname "-- $0"') + "\n",
+                 guard_calls, ["dirname-calls"]),
+                ("stand-in log emptied before the binding",
+                 ': > "$stub_dirname_log"\n' + line + "\n",
+                 ["missing calls"], [])):
+            mutant = runner_text.replace(line + "\n", replacement, 1)
+            got = dirname_guard_problems(mutant, relative)
+            if got != guard_want:
+                failures.append("46 {} mutant ({}): dirname guard gave {}, "
+                                "expected {}".format(relative, label, got, guard_want))
+            got = cdpath_problems(mutant, relative)
+            if got != cdpath_want:
+                failures.append("46 {} mutant ({}): CDPATH run gave {}, "
+                                "expected {}".format(relative, label, got, cdpath_want))
 
     if failures:
         print("SELF-TEST FAIL:")

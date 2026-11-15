@@ -2547,7 +2547,7 @@ NEGATIVE = [
     "A colleague on one assistant is meant to work to the same rules as a colleague on another.",  # softened working-to-same (intent, bare "work")
     "A subagent works under the same rules as the session that spawned it.",             # development.html mechanism claim: "works under", not "works to"; no licence
     "Add AIQT from one page for all assistants you use.",                                # benign "All assistants" nav sense
-    "The 1.1.0 design gives local and CI reviewers the same QA brief. Its intent is to reduce variation caused by who runs the check or which tool they use; provider behaviour and results remain to be verified.",  # softened tech-details:293 (intent hedge + which tool, not whichever)
+    "The 1.2.0 design gives local and CI reviewers the same QA brief. Its intent is to reduce variation caused by who runs the check or which tool they use; provider behaviour and results remain to be verified.",  # softened tech-details:296 (intent hedge + which tool, not whichever)
     # RELEASE-INTEGRITY negatives (VER-CORE 4.4): the corrected copy the gate must NOT flag. Under the
     # simplified model these clear because no banned term is present, or by a tight-adjacency denial, or
     # because the obligation prose does not match the deny-list by construction.

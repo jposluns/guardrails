@@ -12,7 +12,7 @@ whose version is outside that set is a finding.
 Scope (deliberately narrow, an honest partial currency catcher, not a per-page context checker):
   - It matches ONLY the `AIQT X.Y.Z` product-version pattern. It does NOT touch other phrasings, some of
     which are MATERIALIZED current-version references that would go stale at the next bump and pass unseen:
-    the dev-track "(1.1.0, in development)" in titles/og-tags, "1.0.0 chat"/"1.0.0 pack"/"the 1.0.0
+    the dev-track "(1.2.0, in development)" in titles/og-tags, "1.0.0 chat"/"1.0.0 pack"/"the 1.0.0
     release", a bare version number with no AIQT prefix, or a third-party framework version such as
     "CSA AICM v1.1.0". None carries the `AIQT ` prefix, so none is matched; leaving those other phrasings
     uncovered is a deliberate scope limit, not a claim that all of them are historical.
@@ -105,9 +105,9 @@ def _semver_tuple(v):
 # The in-development track has no changelog entry yet (it is unreleased), so it has no single source to read.
 # This is a hand-maintained allowlist entry until it gains one: DROP it here once it ships in changelog.toml
 # and becomes the latest [[release]] version (at which point this gate reads it from source automatically).
-# A future maintainer reconciling the record: when 1.1.0 ships, remove it from this set (and update the
-# self-test's in-development case, which relies on 1.1.0 being valid via this constant).
-IN_DEVELOPMENT_VERSIONS = {"1.1.0"}
+# A future maintainer reconciling the record: when 1.2.0 ships, remove it from this set (and update the
+# self-test's in-development case, which relies on 1.2.0 being valid via this constant).
+IN_DEVELOPMENT_VERSIONS = {"1.2.0"}
 
 
 def _current_version(root):
@@ -226,7 +226,7 @@ def _scan_root(root, subdir, valid):
 def _self_test():
     """Hermetic fixture cases in a TemporaryDirectory: build a tiny changelog.toml + site tree, run run()
     against it, and assert its exit code. The fixture changelog names 1.0.0 as its current release; the
-    module constant IN_DEVELOPMENT_VERSIONS = {"1.1.0"} makes 1.1.0 valid too. The self-test creates no
+    module constant IN_DEVELOPMENT_VERSIONS = {"1.2.0"} makes 1.2.0 valid too. The self-test creates no
     files outside its TemporaryDirectory (Python's own import bytecode cache, .pyc, aside - ordinary
     interpreter behaviour shared by every tool that imports a module), per 10-QUALI-test-hermeticity."""
     import tempfile
@@ -262,7 +262,7 @@ def _self_test():
     # (toml_bytes, pages, expected exit). str page content is UTF-8; bytes is written raw.
     cases = [
         ("a: current version passes", good_toml, {"i.html": "<p>AIQT 1.0.0</p>"}, 0),
-        ("b: in-development 1.1.0 passes", good_toml, {"i.html": "<p>AIQT 1.1.0</p>"}, 0),
+        ("b: in-development 1.2.0 passes", good_toml, {"i.html": "<p>AIQT 1.2.0</p>"}, 0),
         ("c: stale AIQT 9.9.9 is a finding", good_toml, {"i.html": "<p>AIQT 9.9.9</p>"}, 1),
         ("d: 'the 1.0.0 release' phrasing yields no finding", good_toml,
          {"i.html": "<p>the 1.0.0 release shipped; 1.0.0 pack too</p>"}, 0),

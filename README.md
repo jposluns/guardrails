@@ -19,7 +19,7 @@ The full pack and per-assistant setup guides live at [aiqt.ai](https://aiqt.ai).
 | Where | What you get | Tag |
 | --- | --- | --- |
 | **In a chat assistant** | Add AIQT to Claude, ChatGPT, Gemini, or Copilot in the form each assistant supports: a skill, a Gem, an agent, or an uploaded instruction file. The standard guides every conversation: instructions are context the assistant follows, not an enforcement mechanism. | Available |
-| **In a coding assistant** | For Claude Code, Codex, Cursor, or Copilot in the editor, the governance core is published to inspect and use as preview instructions today, and the repository ships its Claude Code enforcement hooks as a generated plugin. The generated adapters, a guided install, and a setup doctor arrive with the 1.1.0 developer release, in development. | Preview |
+| **In a coding assistant** | For Claude Code, Codex, Cursor, or Copilot in the editor, the governance core is published to inspect and use as preview instructions today, and the repository ships its Claude Code enforcement hooks as a generated plugin. The generated adapters, a guided install, and a setup doctor arrive with the 1.2.0 developer release, in development. | Preview |
 
 ## 02. What is inside.
 
