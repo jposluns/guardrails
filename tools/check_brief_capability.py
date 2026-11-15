@@ -355,8 +355,9 @@ whole brief, line by line, before scope is applied):
                        filler words (please, also, first), an opener (make sure, be sure to, don't forget to,
                        it is required that you) or the worker with a modal (you must), with an optional
                        prohibition; a lead longer than 160 characters is read as an ask (the cap fails toward
-                       a warning); or a causative or reply-subject phrase ("Have the reply start", "Let your
-                       answer begin", "Your reply opens", "The reply must begin"). A lead that names another
+                       a warning, and is checked before the lead is built, so each verb reads a bounded lead);
+                       or a causative or reply-subject phrase ("Have the reply start", "Let your answer begin",
+                       "Your reply opens", "The reply must begin"). A lead that names another
                        actor ("The harness will print") is a description and never asks. The ask is for the
                        line when its OBJECT, read word by word after the verb through markup and a closed list
                        of filler words (determiners, your reply, with, on, the first line, field names, and
@@ -370,10 +371,12 @@ whole brief, line by line, before scope is applied):
                        or a reply template heading or sentence ("## Output template", "reply format"), in the
                        prose block just before a fence that holds a status line (a header token or two fields
                        assigned with a value); and a deictic ask whose next prose sentence holds one ("Write
-                       this header first. WORKER_STATUS: PASS (rc=0)."). A prohibition in the lead exempts the
-                       verb ("Don't forget to" is a reminder, not a prohibition), and carries to the next verb
-                       after or or nor ("Never write the WORKER_STATUS line or print the model field at the top
-                       of your reply."), unless the object inverts it ("Never write anything except", "You must
+                       this header first. WORKER_STATUS: PASS (rc=0)."). A template sentence with a prohibition
+                       before the phrase in its clause ("Do not use this output template.") introduces none. A
+                       prohibition in the lead exempts the verb (in a lead over the cap, one that starts in its
+                       last 160 characters; "Don't forget to" is a reminder, not a prohibition), and carries to
+                       the next verb after or or nor ("Never write the WORKER_STATUS line or print the model field
+                       at the top of your reply."), unless the object inverts it ("Never write anything except", "You must
                        not include anything before"). So these are quiet: ordinary fields ("Add the model field
                        to the API response.", "Add account=a and model=m to the fixture.", "Set effort = high in
                        the config.", "Add a test asserting rc == 0."), the token as a modifier ("Write the
@@ -388,7 +391,8 @@ whole brief, line by line, before scope is applied):
                        follows ("Copy the WORKER_STATUS line into your answer."), a code line in a fence with
                        no info string that is no call ("echo WORKER_STATUS: PASS"; tag the fence), a negation
                        that is not in the lead ("Never, ever write a WORKER_STATUS line."), any sentence with a
-                       lead over the cap whose verb reaches a token, and a reply-template heading above a fence
+                       lead over the cap whose verb reaches a token and whose last 160 characters hold no
+                       prohibition, and a reply-template heading above a fence
                        that documents the harness's own output. RESIDUALS (no warning): a passive ("The
                        WORKER_STATUS line must be written by you."), an ask with an unlisted verb or lead ("Make
                        the WORKER_STATUS line your first output."), an unlisted adjective, particle or count
@@ -624,12 +628,13 @@ not one, so "do not run, build or install" stays negated.
 Outcomes, printed one finding per line (HARD, INFO, or ADVISORY) and then one summary line:
 
   exit 0  OK               no HARD hit (INFO and ADVISORY findings may be printed).
-  exit 1  REFUSE           at least one HARD hit (S1, S2, S3, P2, P5, P6 or W1). Rewrite the brief, or send the
+  exit 1  REFUSE           at least one HARD hit (S1, S2, S3, P2, P5, P6, P7 or W1). Rewrite the brief, or send the
                            item to a family that can execute (S1 to S3), name paths it can read (P2) or, after the
                            reach, add the cure line the hit gives (git -C <dir> checkout --detach <pin>^{commit}) or
                            reach the pin by a dispatch ref (P5), or provide each missing declared input or correct
-                           its INPUT line (P6), or drop the git commit or push, state it in the PROHIBITED shape, or
-                           send it to a family that can write (W1).
+                           its INPUT line (P6), or correct each ACCEPTED-RESIDUAL line or re-pin the brief (P7), or
+                           drop the git commit or push, state it in the PROHIBITED shape, or send it to a family that
+                           can write (W1).
                            A P8 warning never sets the exit code: it adds its hint (ask only for the verdict and
                            completion lines and state the harness-owned attestation line as a prohibition) to the
                            OK or REFUSE line the other rules select, after that line's own advice.
@@ -3683,8 +3688,11 @@ def status_shaped(text):
 
 
 def _status_word_before(text, position):
-    """The ASCII word that ends just before `position`, past spaces, backticks, quotes and emphasis marks, or ""."""
-    start = len(text[:position].rstrip(" \t`\"'“”‘’*_"))
+    """The ASCII word that ends just before `position`, past spaces, backticks, quotes and emphasis marks, or "".
+    The marks are walked back from `position`, never by copying the text before it (a copy per call is quadratic)."""
+    start = position
+    while start and text[start - 1] in " \t`\"'“”‘’*_":
+        start -= 1
     found = STATUS_WORD_BEFORE_RE.search(text[max(0, start - 40):start])
     return found.group(0).lower() if found else ""
 
@@ -3719,8 +3727,15 @@ def status_object(text, position, tokens, token_starts):
                 break
         position = unit.end()
     else:
-        return any(start >= position for start in token_starts), deictic, inverted
+        # token_starts is sorted, so its last start answers whether any token follows (one step per verb)
+        return bool(token_starts) and token_starts[-1] >= position, deictic, inverted
     return False, deictic or (position >= len(text.rstrip()) and text.rstrip().endswith(":")), inverted
+
+
+def status_blanked(text):
+    """`text` with each STATUS_LEAD_MARKUP_RE character and each reminder (STATUS_REMINDER_RE) turned into spaces of
+    the same length, so offsets hold: an over-long lead reads its prohibition here, in a bounded window."""
+    return STATUS_REMINDER_RE.sub(lambda found: " " * len(found.group(0)), STATUS_LEAD_MARKUP_RE.sub(" ", text))
 
 
 def status_asks(text):
@@ -3730,9 +3745,10 @@ def status_asks(text):
     imperative lead (STATUS_LEAD_RE), or is longer than STATUS_LEAD_MAX (the cap fails toward a warning); a
     description ("The harness will print") is not. The ask is for the line when its object reaches a token
     (status_tokens) through filler words only (status_object), or is deictic. A prohibition in the lead
-    (STATUS_PROHIBITION_RE, a reminder such as "Don't forget to" removed first), or one carried to a verb after "or"
-    or "nor", exempts the verb unless the object inverts it. A reporting verb asks only in a sentence that names a
-    place in the reply. Read on the folded text (status_folded)."""
+    (STATUS_PROHIBITION_RE, a reminder such as "Don't forget to" removed first; in an over-long lead, one that starts
+    in its last STATUS_LEAD_MAX characters), or one carried to a verb after "or" or "nor", exempts the verb unless the
+    object inverts it. A reporting verb asks only in a sentence that names a place in the reply. Read on the folded
+    text (status_folded). The cap is checked before a lead is built, so each verb reads a bounded lead."""
     text = status_folded(text)
     tokens = status_tokens(text)
     token_starts = [start for start, _ in tokens]
@@ -3745,19 +3761,28 @@ def status_asks(text):
     candidates = [(found.start(), found.end(), found.group(0), found.group(2) is not None)
                   for found in STATUS_VERB_RE.finditer(text)]
     candidates += [(found.start(), found.end(), found.group(0), False) for found in STATUS_CAUSE_RE.finditer(text)]
-    asks, prohibited_before = [], False
+    asks, prohibited_before, blanked = [], False, None
     for start, end, verb, reporting in sorted(candidates):
         if (_span_at(spans, span_starts, start) is not None or _span_at(tokens, token_starts, start) is not None
                 or (reporting and not placed)):
             continue
         index = bisect.bisect_right(boundary_ends, start) - 1
         boundary, word = boundaries[index] if index >= 0 else (0, "")
-        lead = " ".join(STATUS_LEAD_MARKUP_RE.sub(" ", text[boundary:start]).lower().split())
-        # an over-long lead is read as an ask, not skipped: the cap fails toward a warning
-        if start - boundary <= STATUS_LEAD_MAX and not STATUS_LEAD_RE.fullmatch(lead + " " if lead else ""):
-            continue
-        prohibited = (bool(STATUS_PROHIBITION_RE.search(STATUS_REMINDER_RE.sub(" ", lead)))
-                      or (word in STATUS_CARRY_WORDS and prohibited_before))
+        # the cap is checked before the lead is built, so a verb reads at most STATUS_LEAD_MAX characters before it
+        # and the work per sentence stays linear however many verbs share one clause
+        if start - boundary <= STATUS_LEAD_MAX:
+            lead = " ".join(STATUS_LEAD_MARKUP_RE.sub(" ", text[boundary:start]).lower().split())
+            if not STATUS_LEAD_RE.fullmatch(lead + " " if lead else ""):
+                continue
+            lead_prohibited = bool(STATUS_PROHIBITION_RE.search(STATUS_REMINDER_RE.sub(" ", lead)))
+        else:
+            # an over-long lead is read as an ask, not skipped (the cap fails toward a warning), and its prohibition
+            # is read from its last STATUS_LEAD_MAX characters only, on the sentence with its markup and reminders
+            # blanked once (status_blanked)
+            if blanked is None:
+                blanked = status_blanked(text)
+            lead_prohibited = STATUS_PROHIBITION_RE.search(blanked, start - STATUS_LEAD_MAX, start) is not None
+        prohibited = lead_prohibited or (word in STATUS_CARRY_WORDS and prohibited_before)
         prohibited_before = prohibited
         linked, deictic, inverted = status_object(text, end, tokens, token_starts)
         if prohibited and not inverted:
@@ -3765,6 +3790,19 @@ def status_asks(text):
         if linked or deictic:
             asks.append((verb, not linked))
     return asks
+
+
+def status_template(text):
+    """The reply template phrase (STATUS_TEMPLATE_RE) of one folded sentence, or "" when it has none or a prohibition
+    (STATUS_PROHIBITION_RE, markup and a reminder such as "Don't forget to" removed first) stands before the phrase in
+    its clause (from the last STATUS_BOUNDARY_RE boundary): "Do not use this output template" introduces no template
+    of the reply, and "Use this output template" does."""
+    found = STATUS_TEMPLATE_RE.search(text)
+    if found is None:
+        return ""
+    boundary = max((stop.end() for stop in STATUS_BOUNDARY_RE.finditer(text, 0, found.start())), default=0)
+    lead = STATUS_REMINDER_RE.sub(" ", STATUS_LEAD_MARKUP_RE.sub(" ", text[boundary:found.start()]))
+    return "" if STATUS_PROHIBITION_RE.search(lead) else found.group(0)
 
 
 def status_introduction(blocks, index):
@@ -3802,8 +3840,9 @@ def rule_p8(names, row, repo):
             if any(status_shaped(line) for _, line in block.lines):
                 for intro in status_introduction(blocks, index):
                     asks = [verb for verb, deictic in status_asks(intro) if deictic]
-                    if not asks and STATUS_TEMPLATE_RE.search(status_folded(intro)):
-                        asks = [STATUS_TEMPLATE_RE.search(status_folded(intro)).group(0)]
+                    template = status_template(status_folded(intro))
+                    if not asks and template:
+                        asks = [template]
                     if asks:
                         findings.append(("P8", "ADVISORY", block.start, STATUS_MESSAGE.format(asks[0])
                                          + ", introducing a fence that holds one", _excerpt(intro)))
@@ -3998,7 +4037,7 @@ EVERY_FAMILY_RULES = PREFLIGHT_RULES | frozenset(("W1",))
 # added to a REFUSE line when a P6 hit is among the hard hits
 INPUT_HINT = "; provide each missing declared input, or correct its INPUT line, before sending"
 # added to the summary line (REFUSE or OK) when a P8 warning is among the findings; P8 never sets the exit code
-STATUS_HINT =("; the harness writes the WORKER_STATUS line and its account, model, return-code and effort fields: "
+STATUS_HINT = ("; the harness writes the WORKER_STATUS line and its account, model, return-code and effort fields: "
                "ask only for the verdict and completion lines, or state the line as a prohibition (Never write a "
                "WORKER_STATUS line.)")
 # added to a REFUSE line when a W1 hit is among the hard hits
@@ -4032,11 +4071,11 @@ def run(brief_path, family, table_path, scoped=True, repo=None):
                             git_write, missing_input, status_ask))
     elif code == EXIT_REFUSE and "P5" in hard:
         print("REFUSE: family {}: the brief reaches a pinned revision through a ref that can move ({} hard hit(s): "
-              "{}); after the reach, add the line each P5 hit gives ({}), or reach the pin by a dispatch ref{}{}{}; "
-              "{}".format(
+              "{}); after the reach, add the line each P5 hit gives ({}), or reach the pin by a dispatch ref{}{}; "
+              "{}{}".format(
                   family, len(hard), ", ".join("{} x{}".format(r, hard.count(r)) for r in sorted(set(hard))),
                   CURE_EXAMPLE.format("<pin>"), ", and name paths under the declared workdir" if "P2" in hard else "",
-                  missing_input, status_ask, CURE_SHAPE))
+                  missing_input, CURE_SHAPE, status_ask))
     elif code == EXIT_REFUSE and set(hard) == {"P6"}:
         print("REFUSE: family {}: the brief declares an input that does not exist on this host ({} hard hit(s): "
               "P6 x{}){}{}".format(family, len(hard), len(hard), INPUT_HINT, status_ask))
@@ -4620,6 +4659,23 @@ P8_LONG_OBJECT = "Write " + "the " * 17 + "WORKER_STATUS line.\n"
 P8_CAP_TWINS = (P8_LONG_LEAD.replace("you write", "you never write"), "Write " + "the " * 17 + "verdict line.\n")
 # a reminder is no prohibition (STATUS_REMINDER_RE)
 P8_REMINDER = "Do not forget to begin your reply with WORKER_STATUS: PASS (rc=0).\n"
+# round 3: an over-long lead reads its prohibition from its last STATUS_LEAD_MAX characters (the cap is checked before
+# the lead is built): a prohibition farther back warns (failing toward a warning), and a reminder in that window is
+# still no prohibition; the twin, a prohibition inside the window, is P8_CAP_TWINS[0]
+P8_LONG_LEAD_WINDOW = (P8_LONG_LEAD.replace("In the reply", "Do not hurry in the reply"),
+                       P8_LONG_LEAD.replace("you write", "you do not forget to write"))
+# round 3: a prohibition before a reply template phrase in its clause introduces no template (status_template); the
+# twins (the template asked for, a reminder, a prohibition in an earlier clause) still warn
+P8_TEMPLATE_FENCE = "\n\n```text\nWORKER_STATUS: PASS (rc=0)\n```\n"
+P8_TEMPLATE_PROHIBITED = ("Do not use this output template." + P8_TEMPLATE_FENCE,
+                          "Never copy the **reply format** below." + P8_TEMPLATE_FENCE)
+P8_TEMPLATE_ASKED = ("Use this output template." + P8_TEMPLATE_FENCE,
+                     "Do not forget the reply format below." + P8_TEMPLATE_FENCE,
+                     "Do not skip a section, and use this output template." + P8_TEMPLATE_FENCE)
+# round 3: a table header of empty field cells in a fence is no status line (status_shaped reads STATUS_VALUED_RE);
+# its twin, the same cells with values, is one
+P8_EMPTY_CELLS = "Fill in the block below:\n\n```text\n| account: | model: |\n| --- | --- |\n| a | m |\n```\n"
+P8_VALUED_CELLS = "Fill in the block below:\n\n```text\n| account: a | model: m |\n```\n"
 P1_RELATIVE = "The workdir is /w/repo.\nRead docs/notes.md before you answer.\n"
 P1_ABSOLUTE = "The workdir is /w/repo.\nRead /w/repo/docs/notes.md before you answer.\n"
 P1_NO_WORKDIR = "Read docs/notes.md before you answer.\n"
@@ -6682,7 +6738,12 @@ def self_test(report_path=None):
              "git -C w checkout --detach 1234567abc`\n"),
             ("perf/p5-line-join-linear", "git -C w \\\n", "Confirm HEAD is 1234567abc.\n", "checkout main\n"),
             ("perf/p5-git-word-join-linear", "Run git\n", "Confirm HEAD is 1234567abc.\n", "clone x\n"),
-            ("perf/p5-quoted-option-linear", "git -C \"a b\" checkout x && ", "Confirm HEAD is 1234567abc.\n", "")):
+            ("perf/p5-quoted-option-linear", "git -C \"a b\" checkout x && ", "Confirm HEAD is 1234567abc.\n", ""),
+            # P8: one clause of many verbs and no boundary after a status token; each verb used to rebuild and scan
+            # its whole lead (quadratic: 64 KiB took 48 s against 1.1 s on 8 KiB), and to copy the text before a
+            # deictic word
+            ("perf/p8-long-lead-linear", "print ", "WORKER_STATUS ", ""),
+            ("perf/p8-deictic-below-linear", "write the block below ", "WORKER_STATUS ", "")):
         check(check_id, _linear(unit, prefix, suffix), True)
     # ---------- the advisory rules: printed, never refusing ----------
     check("r1/run-prose-advisory", _outcome(RUN_PROSE), (0, [("R1", "ADVISORY")]))
@@ -7282,6 +7343,18 @@ def self_test(report_path=None):
     check("p8/caps-warned", [_outcome(text, "alpha") for text in (P8_LONG_LEAD, P8_LONG_OBJECT)], [p8_warned] * 2)
     check("p8/caps-twins-quiet", [_outcome(text, "alpha") for text in P8_CAP_TWINS], [(0, [])] * 2)
     check("p8/reminder-warned", _outcome(P8_REMINDER, "alpha"), p8_warned)
+    check("p8/long-lead-window-warned", [_outcome(text, "alpha") for text in P8_LONG_LEAD_WINDOW],
+          [p8_warned] * len(P8_LONG_LEAD_WINDOW))
+    check("p8/template-prohibited-quiet", [_outcome(text, "alpha") for text in P8_TEMPLATE_PROHIBITED],
+          [(0, [])] * len(P8_TEMPLATE_PROHIBITED))
+    check("p8/template-asked-warned", [_outcome(text, "alpha") for text in P8_TEMPLATE_ASKED],
+          [p8_warned] * len(P8_TEMPLATE_ASKED))
+    check("p8/empty-cells-quiet", _outcome(P8_EMPTY_CELLS, "alpha"), (0, []))
+    check("p8/valued-cells-warned", _outcome(P8_VALUED_CELLS, "alpha"), p8_warned)
+    # the exit section names every rule that can refuse (each HARD rule), P7 included
+    check("p8/exit-section-hard-rules",
+          re.search(r"at least one HARD hit \(([^)]*)\)", " ".join(__doc__.split())).group(1),
+          "S1, S2, S3, P2, P5, P6, P7 or W1")
     check("p8/application-fields-ok", [_outcome(text, "alpha") for text in P8_APPLICATION_FIELDS],
           [(0, [])] * len(P8_APPLICATION_FIELDS))
     check("p8/harness-actions-ok", [_outcome(text, "alpha") for text in P8_HARNESS_ACTIONS],
@@ -7310,27 +7383,36 @@ def self_test(report_path=None):
               (EXIT_OK, ["3"], [True]))
 
         def p8_refuse_line(rules, p8=None):
-            """The REFUSE line run prints when evaluate returns one HARD hit of each rule in `rules`, and a P8 hit of
-            severity `p8` when it is given."""
+            """(run's return value, the REFUSE lines it prints) when evaluate returns one HARD hit of each rule in
+            `rules`, and a P8 hit of severity `p8` when it is given."""
             hits = [(rule, "HARD", 1, "m", "x") for rule in rules] + ([("P8", p8, 1, "m", "x")] if p8 else [])
             printed = io.StringIO()
             with _patched(evaluate=lambda raw, family, table, scoped, repo: (EXIT_REFUSE, hits)):
                 with contextlib.redirect_stdout(printed):
-                    run(p8_brief, "alpha", str(p8_tmp / "table.toml"))
-            return [line for line in printed.getvalue().splitlines() if line.startswith("REFUSE: ")]
+                    code = run(p8_brief, "alpha", str(p8_tmp / "table.toml"))
+            return code, [line for line in printed.getvalue().splitlines() if line.startswith("REFUSE: ")]
 
-        # the S, W1 and P5 REFUSE lines carry the P8 hint only when a P8 hit is among the findings
-        p8_mixed = [[STATUS_HINT in line for line in p8_refuse_line(rules)]
-                    for other in ("S1", "W1", "P5") for rules in ((other, "P8"), (other,))]
-        check("p8/mixed-refuse-hint", p8_mixed, [[True], [False]] * 3)
+        # the S, W1 and P5 REFUSE lines carry the P8 hint only when a P8 hit is among the findings; run returns the
+        # refusal either way
+        p8_mixed = [(code, [STATUS_HINT in line for line in lines])
+                    for other in ("S1", "W1", "P5") for code, lines in (p8_refuse_line(rules)
+                                                                         for rules in ((other, "P8"), (other,)))]
+        check("p8/mixed-refuse-hint", p8_mixed, [(EXIT_REFUSE, [True]), (EXIT_REFUSE, [False])] * 3)
         # a P8 warning beside another rule's refusal: the REFUSE line the other rule selects, with its own advice,
-        # and the P8 hint after it; the exit is the other rule's
+        # and the P8 hint after it; the exit (run's return value) is the other rule's
         p8_advice = {"S1": "send these items to a family that can execute", "W1": GIT_WRITE_HINT,
                      "P5": "add the line each P5 hit gives", "P6": INPUT_HINT,
                      "P7": "correct each ACCEPTED-RESIDUAL line", "P2": "name paths under the declared workdir"}
+        p8_beside = [p8_refuse_line((other,), "ADVISORY") for other in sorted(p8_advice)]
         check("p8/mixed-result-every-hint",
-              [[(p8_advice[other] in line, STATUS_HINT in line) for line in p8_refuse_line((other,), "ADVISORY")]
-               for other in sorted(p8_advice)], [[(True, True)]] * len(p8_advice))
+              [(code, [(p8_advice[other] in line, STATUS_HINT in line) for line in lines])
+               for other, (code, lines) in zip(sorted(p8_advice), p8_beside)],
+              [(EXIT_REFUSE, [(True, True)])] * len(p8_advice))
+        # the hint comes last, after all of the line's own advice: on the P5 line, after the cure shape it states
+        check("p8/hint-after-advice",
+              [[line.endswith(STATUS_HINT) and line.index(p8_advice[other]) < line.index(STATUS_HINT)
+                and (other != "P5" or line.index(CURE_SHAPE) < line.index(STATUS_HINT)) for line in lines]
+               for other, (_, lines) in zip(sorted(p8_advice), p8_beside)], [[True]] * len(p8_advice))
     finally:
         shutil.rmtree(p8_tmp, ignore_errors=True)
     # ---------- red on revert: each blocking rule, form and exemption patched out flips its fixture ----------
@@ -7497,6 +7579,12 @@ def self_test(report_path=None):
     check("revert/p8-causative-red", *flip([p8_code(text) for text in P8_REVIEWED_ASKS[:4:3] + P8_REVIEWED_ASKS[2:3]],
                                            [0, 0, 0], STATUS_CAUSE_RE=never))
     check("revert/p8-next-sentence-red", *flip([p8_code(P8_REVIEWED_ASKS[13])], [0], status_shaped=lambda text: False))
+    # round 2 read a status line's fields with a value (STATUS_VALUED_RE); the assignment alone made a table header of
+    # empty field cells a status line
+    check("revert/p8-valued-cells-red", *flip([p8_code(P8_EMPTY_CELLS)], [1], STATUS_VALUED_RE=STATUS_ASSIGN_RE))
+    # the prohibition before a reply template phrase (status_template) is what keeps those introductions quiet
+    check("revert/p8-template-prohibition-red", *flip([p8_code(text) for text in P8_TEMPLATE_PROHIBITED], [1, 1],
+                                                      STATUS_PROHIBITION_RE=never))
     check("revert/p8-coordination-red", *flip([p8_code(P8_HARNESS_ACTIONS[2])], [1], STATUS_CARRY_WORDS=frozenset()))
     # round 2 guards: each patched out brings back the round 1 outcome of its fixture
     check("revert/p8-modifier-red", *flip([p8_code(P8_ROUND2_ORDINARY[2]), p8_code(P8_ROUND2_ORDINARY[4])], [1, 1],
@@ -9135,7 +9223,7 @@ def self_test(report_path=None):
                 lambda data: data.replace(b"\r\n", b"\n").replace(b"\r", b"\n").split(b"\n", 2)[:2], "replace")))
     finally:
         shutil.rmtree(p7_base, ignore_errors=True)
-    check("revert/every-flip-ran", len(flipped), 268)
+    check("revert/every-flip-ran", len(flipped), 270)
 
     for check_id in sorted(expected - _EXECUTED_SET):
         FAILURES.append("execution-set/missing: {}".format(check_id))
@@ -9213,7 +9301,7 @@ def self_test(report_path=None):
           "each preflight rule and guard patched out flips its fixture; "
           "the regex audit reads the module-level patterns and COMMAND_FORMS (and, without claiming completeness, "
           "container and class globals and the production source's re calls), flags no pattern, "
-          "detects the previous revisions' and loses its canary with each guard patched out; 37 repeated shapes "
+          "detects the previous revisions' and loses its canary with each guard patched out; 39 repeated shapes "
           "each evaluate within the linear growth bound at 64 KiB, through the parsed-document reading "
           "with its size, whitespace-run and nesting bounds and its killed-at-the-deadline parse child, "
           "in a capped child that must exit 0; the parse child's process group is killed after a normal "
