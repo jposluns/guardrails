@@ -39,9 +39,10 @@ Threat model: the generator defends against hostile STATIC tree state, anything 
 hostile commit can plant (a symlink at any component, a hard link, a FIFO or device, a wrong type, an orphan,
 an unknown entry), and fails closed on it: such an entry is refused or named, never read through, written
 through or deleted. That holds for every output and for every other input this generator reads: LICENSE,
-skill-source.md, the hooks manifest, the evidence page and the root VERSION (read only for the skill/pack
-version alignment rule; an absent VERSION is exit 2) are each read through the descriptor-anchored reader
-(O_NOFOLLOW on every component, O_NONBLOCK, fstat a regular file with exactly one link), so a hard link at a
+skill-source.md, the hooks manifest, the evidence page and the pack version source (read only for the
+skill/pack version alignment rule: the root VERSION in the authoring tree, the installed .aiqt/manifest.toml
+release-version in any other tree; see resolve_pack_version) are each read through the descriptor-anchored
+reader (O_NOFOLLOW on every component, O_NONBLOCK, fstat a regular file with exactly one link), so a hard link at a
 declared output or at one of those four inputs is refused, never read and accepted (so a hard-link-copied
 checkout, made with cp -al, is refused; an input's refusal says to break the link by copying the file and
 moving the copy over it, never to git rm it). The rule corpus is NOT read
@@ -80,6 +81,7 @@ import os
 import re
 import stat
 import struct
+import tomllib
 import zipfile
 import zlib
 from pathlib import Path
@@ -124,12 +126,24 @@ ZIP_VERSIONED_PARTS = ("site", "downloads", "aiqt-skill-1.0.6.zip")  # the versi
 # assertion in build_outputs, so a skill bump that forgets to update this name fails closed.
 # Skill version policy: the skill is versioned on its own before the 1.1.1 pack release (skill 1.0.6 under
 # pack release 1.0.5). From the 1.1.1 pack release on, the skill version equals the pack version: build_outputs
-# refuses (exit 2) a skill meta version that differs from the root VERSION once VERSION is at or above
-# PACK_ALIGN_FIRST_VERSION (pack_alignment_problem). Below it the two stay independent, so a tree at pack
-# 1.0.5 with skill 1.0.6 still builds.
+# refuses (exit 2) a skill meta version that differs from the pack version once it is at or above
+# PACK_ALIGN_FIRST_VERSION (pack_alignment_problem). The pack version is the root VERSION in the authoring
+# tree and the installed .aiqt/manifest.toml release-version anywhere else (resolve_pack_version). Below the
+# first version the two stay independent, so a tree at pack 1.0.5 with skill 1.0.6 still builds.
 SKILL_SRC_PARTS = (".aiqt", "core", "skill", "skill-source.md")
-# The pack version file (generated from changelog.toml by tools/gen_changelog.py), read for the alignment rule.
+# The pack version file (generated from changelog.toml by tools/gen_changelog.py), read for the alignment rule
+# in the authoring tree only (resolve_pack_version); its read is bounded like opf/VERSION's in
+# tools/gen_manifest.py.
 PACK_VERSION_PARTS = ("VERSION",)
+PACK_VERSION_REL = "/".join(PACK_VERSION_PARTS)
+PACK_VERSION_MAX_BYTES = 64
+# The installed pack manifest tools/gen_manifest.py writes; its release-version is the pack version in any tree
+# that is not the authoring tree (resolve_pack_version). Bounded well above the shipped manifest (~0.2 MB).
+INSTALLED_MANIFEST_PARTS = (".aiqt", "manifest.toml")
+INSTALLED_MANIFEST_REL = "/".join(INSTALLED_MANIFEST_PARTS)
+INSTALLED_MANIFEST_MAX_BYTES = 8_000_000
+# The most characters of a refused input's text an error message echoes.
+_ECHO_MAX_CHARS = 80
 # The first pack version from which a component version (the chat skill here, the hooks plugin in
 # tools/gen_hooks.py, which imports this constant) must equal the pack version. One constant for both rules,
 # so the two cannot start at different releases. Exact MAJOR.MINOR.PATCH, compared numerically.
@@ -147,23 +161,93 @@ def _semver_tuple(text):
     return tuple(int(part) for part in text.split("."))
 
 
+def _echo(raw, limit=_ECHO_MAX_CHARS):
+    """repr of raw for an error message, cut to limit characters, so a large hostile file never floods a log."""
+    text = repr(raw)
+    return text if len(text) <= limit else "{}... (cut from {} characters)".format(text[:limit], len(text))
+
+
 def parse_pack_version(raw, where="VERSION"):
     """The pack version a VERSION file's raw text declares. Raises ValueError unless the text is exactly a
-    bare MAJOR.MINOR.PATCH followed by one LF (no CR, no other whitespace, no prefix or suffix)."""
+    bare MAJOR.MINOR.PATCH followed by one LF (no CR, no other whitespace, no prefix or suffix). The text is
+    echoed cut to _ECHO_MAX_CHARS characters."""
     m = _PACK_VERSION_FILE.match(raw) if isinstance(raw, str) else None
     if m is None:
-        raise ValueError("{} {!r} is not a bare MAJOR.MINOR.PATCH followed by one newline; fail-closed".format(
-            where, raw))
+        raise ValueError("{} {} is not a bare MAJOR.MINOR.PATCH followed by one newline; fail-closed".format(
+            where, _echo(raw)))
     return m.group(1)
 
 
-def pack_alignment_problem(component, component_version, pack_version, first=None):
-    """None when the alignment rule is satisfied, else the refusal message. VERSION is a declared input of
-    the rule, so pack_version None (no VERSION file in the tree) means the rule cannot be evaluated: it raises
-    ValueError (exit 2, per the check-fails-closed-on-unreadable rule), never a silent pass that would let
-    deleting VERSION turn the rule off. A pack version below first (PACK_ALIGN_FIRST_VERSION when None)
-    leaves the component independently versioned. At or above it, the component version must equal the
-    pack version exactly."""
+def parse_installed_release_version(raw, where=INSTALLED_MANIFEST_REL):
+    """The pack release version an installed pack manifest (tools/gen_manifest.py's .aiqt/manifest.toml) records
+    as release-version. Raises ValueError unless raw is UTF-8 TOML whose top level holds format-version, the
+    integer 1 (never the bool true), and release-version, a string that is exactly a bare MAJOR.MINOR.PATCH."""
+    try:
+        data = tomllib.loads(raw)
+    except ValueError as exc:  # TOMLDecodeError and an oversized integer
+        raise ValueError("{} is not readable TOML ({}), so its release-version cannot be read; "
+                         "fail-closed".format(where, exc)) from exc
+    except (RecursionError, MemoryError) as exc:
+        raise ValueError("{} nests too deeply to parse ({}); fail-closed".format(where, exc)) from exc
+    fmt = data.get("format-version")
+    if type(fmt) is not int or fmt != 1:
+        raise ValueError("{} format-version {} is not the integer 1, so its release-version cannot be read; "
+                         "fail-closed".format(where, _echo(fmt)))
+    if "release-version" not in data:
+        raise ValueError("{} holds no release-version, so the installed pack version cannot be evaluated; "
+                         "fail-closed".format(where))
+    version = data["release-version"]
+    if _semver_tuple(version) is None:
+        raise ValueError("{} release-version {} is not a bare MAJOR.MINOR.PATCH string; fail-closed".format(
+            where, _echo(version)))
+    return version
+
+
+def resolve_pack_version(root, root_fd=None):
+    """(pack_version, source) for the tree at root: where this tree records the version of the pack installed
+    in it, for the component/pack alignment rule (pack_alignment_problem). The root VERSION is the pack version
+    only in the pack authoring repository, the tree that carries the authoring marker (gen_hooks.authoring_tree,
+    the marker gen_hooks and gensrc_guard already read): there VERSION is read and an absent VERSION cannot be
+    evaluated. In any other tree (an adopter's) the root VERSION is the adopter's own project version and is
+    never read; the installed pack records its version as release-version in .aiqt/manifest.toml (written by
+    tools/gen_manifest.py), and a tree with no readable release-version cannot be evaluated. Both files are read
+    through the descriptor-anchored reader (_read_output: no symlink, hard link or non-regular entry, bounded).
+    Raises ValueError (cannot evaluate, exit 2) or OSError (unreadable, exit 2); the caller fails closed on the
+    pack surfaces it builds, never on anything else."""
+    if root_fd is None:
+        own_fd = _open_root(root)
+        try:
+            return resolve_pack_version(root, own_fd)
+        finally:
+            os.close(own_fd)
+    # Lazy by design: gen_hooks imports this module at load, so the marker reader is imported at call time.
+    import gen_hooks  # noqa: PLC0415
+    if gen_hooks.authoring_tree(root):
+        raw = _read_output(root_fd, root, root.joinpath(*PACK_VERSION_PARTS), False, single_link=True,
+                           is_input=True, max_bytes=PACK_VERSION_MAX_BYTES)
+        if raw is None:
+            raise ValueError("pack version alignment cannot be evaluated: the pack VERSION file is absent in the "
+                             "authoring tree (VERSION is a declared input of the rule; tools/gen_changelog.py "
+                             "generates it); fail-closed")
+        return parse_pack_version(raw), PACK_VERSION_REL
+    raw = _read_output(root_fd, root, root.joinpath(*INSTALLED_MANIFEST_PARTS), False, single_link=True,
+                       is_input=True, max_bytes=INSTALLED_MANIFEST_MAX_BYTES)
+    if raw is None:
+        raise ValueError("pack version alignment cannot be evaluated: this tree has no authoring marker ({}) and "
+                         "no installed pack manifest {} recording release-version (the root VERSION of a tree "
+                         "that is not the authoring repository is the project's own version and is never read); "
+                         "fail-closed".format(gen_hooks.AUTHORING_MARKER_REL, INSTALLED_MANIFEST_REL))
+    return parse_installed_release_version(raw), INSTALLED_MANIFEST_REL + " release-version"
+
+
+def pack_alignment_problem(component, component_version, pack_version, first=None, source=PACK_VERSION_REL):
+    """None when the alignment rule is satisfied, else the refusal message. The pack version is a declared
+    input of the rule, so pack_version None (no pack version source in the tree) means the rule cannot be
+    evaluated: it raises ValueError (exit 2, per the check-fails-closed-on-unreadable rule), never a silent pass
+    that would let deleting the source turn the rule off. A pack version below first (PACK_ALIGN_FIRST_VERSION
+    when None) leaves the component independently versioned. At or above it, the component version must equal
+    the pack version exactly. source names where the pack version was read (resolve_pack_version), for the
+    message."""
     if pack_version is None:
         raise ValueError("{} version alignment cannot be evaluated: the pack VERSION file is absent (VERSION is "
                          "a declared input of the rule; tools/gen_changelog.py generates it); fail-closed".format(
@@ -176,9 +260,11 @@ def pack_alignment_problem(component, component_version, pack_version, first=Non
             pack_version, first))
     if pack_t < first_t or component_version == pack_version:
         return None
-    return ("{} version {!r} differs from the pack version {!r} (VERSION); from pack {} on the {} version "
+    return ("{} version {!r} differs from the pack version {!r} ({}); from pack {} on the {} version "
             "equals the pack version, so set it to {}".format(
-                component, component_version, pack_version, first, component, pack_version))
+                component, component_version, pack_version, source, first, component, pack_version))
+
+
 CORPUS_PARTS = (".aiqt", "core", "rules")
 # The single canonical operator-identity source (the same file the hooks generator and the portability
 # gate read from). The public attribution line is built from the [plugin] author-name here plus
@@ -224,7 +310,9 @@ RENDERER_DECL = {"renderer-id": "skill", "semantics-revision": 2}
 # so each source list is inlined rather than shared through a name. The hooks manifest is a content-bearing
 # source: the public attribution line is rendered from its [plugin] author-name, so a change to that
 # name changes these outputs and must re-trigger regeneration. LICENSE is likewise a content-bearing source
-# of the two download zips: render_zip packs it as a member, so a LICENSE edit changes those archives.
+# of the two download zips: render_zip packs it as a member, so a LICENSE edit changes those archives. The pack
+# version source (resolve_pack_version) is NOT declared: the alignment check reads it and it changes no output
+# byte, so it is not a content-bearing source (gen_hooks' GENSRC_OUTPUTS leaves it out for the same reason).
 GENSRC_OUTPUTS = (
     {"target": "site/downloads/aiqt/", "kind": "tree",
      "sources": (".aiqt/core/skill/skill-source.md", ".aiqt/core/rules/",
@@ -696,17 +784,29 @@ def _open_dir_fd(root_fd, rel_parts, target_rel, create=False):
     return fd
 
 
-def _read_output(root_fd, root, path, binary, single_link=False, is_input=False):
+def _input_refusal(rel_posix):
+    """The fail-closed refusal for an INPUT that is a symlink or not a regular file. An input is never removed
+    (RELEASING.md: never git rm an input), so the message says to put a regular file back, never to remove it."""
+    return OSError("refusing {0}: it is an input and is a symlink or not a regular file, so it is not read "
+                   "through; replace it with the regular file it should be (never git rm an input), and "
+                   "rerun".format(rel_posix))
+
+
+def _read_output(root_fd, root, path, binary, single_link=False, is_input=False, max_bytes=None):
     """The current content of a generated output (or an input the gate reads: LICENSE, skill-source.md, the
-    hooks manifest, the evidence page), or None when absent. Descriptor-anchored: the parent is opened by
-    _open_dir_fd from the run's root descriptor and the target with O_NOFOLLOW relative to it, then
-    fstat-verified a regular file, so a symlink or non-regular file at the path, or a symlink anywhere on the
-    parent walk, is refused with OSError (exit 2), never read through (O_NONBLOCK keeps a FIFO at the name
-    from blocking the open; it is then refused by the fstat check). With single_link (every declared output,
+    hooks manifest, the evidence page, the pack version source), or None when absent. Descriptor-anchored: the
+    parent is opened by _open_dir_fd from the run's root descriptor and the target with O_NOFOLLOW relative to
+    it, then fstat-verified a regular file on the raw descriptor (before any file object is made, so a
+    directory is refused by this check and its descriptor closed, never leaked), so a symlink or non-regular
+    file at the path, or a symlink anywhere on the parent walk, is refused with OSError (exit 2), never read
+    through (O_NONBLOCK keeps a FIFO at the name from blocking the open; it is then refused by the fstat check).
+    With single_link (every declared output,
     every _read_input input and the evidence page) a file with more than one hard link is refused too: its bytes are shared with a name outside this
-    generator's control, so it is never read and accepted as the output. With is_input (the four inputs) that
-    refusal names the file as an input and says to break the link (copy the file and move the copy over it),
-    never to remove it; an output's refusal names the removal (_remove_hint)."""
+    generator's control, so it is never read and accepted as the output. With is_input (the inputs) that
+    refusal, and the refusal of a symlink or non-regular entry at the input itself, names the file as an input
+    and says to break the link or put the regular file back, never to remove it; an output's refusal names the
+    removal (_remove_hint). With max_bytes, at most max_bytes + 1 bytes are read and a longer file raises
+    ValueError (exit 2), so an oversized input is never read whole or echoed."""
     rel = Path(path).relative_to(root)
     parent_fd = _open_dir_fd(root_fd, rel.parts[:-1], rel.as_posix())
     if parent_fd is None:
@@ -718,12 +818,21 @@ def _read_output(root_fd, root, path, binary, single_link=False, is_input=False)
             return None
         except OSError as exc:
             if exc.errno in (errno.ELOOP, errno.ENOTDIR):
+                if is_input:
+                    raise _input_refusal(rel.as_posix()) from exc
                 raise _refusal(rel.as_posix(), rel.as_posix(), "regular file") from exc
             raise
-        with os.fdopen(fd, "rb") as fh:
-            st = os.fstat(fh.fileno())
+        try:
+            st = os.fstat(fd)
             if not stat.S_ISREG(st.st_mode):
+                if is_input:
+                    raise _input_refusal(rel.as_posix())
                 raise _refusal(rel.as_posix(), rel.as_posix(), "regular file")
+            fh = os.fdopen(fd, "rb")
+        except BaseException:
+            os.close(fd)
+            raise
+        with fh:
             if single_link and st.st_nlink != 1 and is_input:
                 raise OSError("refusing {0}: it is an input with {1} hard links (its bytes are shared with a name "
                               "outside this generator's control, as in a hard-link-copied checkout such as cp -al), "
@@ -734,9 +843,12 @@ def _read_output(root_fd, root, path, binary, single_link=False, is_input=False)
                 raise OSError("refusing {0}: it has {1} hard links, so it is not read, accepted or written as a "
                               "generated output (remove the other link, or {2}, and rerun)".format(
                                   rel.as_posix(), st.st_nlink, _remove_hint(rel.as_posix())))
-            data = fh.read()
+            data = fh.read() if max_bytes is None else fh.read(max_bytes + 1)
     finally:
         os.close(parent_fd)
+    if max_bytes is not None and len(data) > max_bytes:
+        raise ValueError("refusing {}: it is over {} bytes, so it is not read; fail-closed".format(
+            rel.as_posix(), max_bytes))
     return data if binary else data.decode("utf-8")
 
 
@@ -950,8 +1062,8 @@ def build_outputs(root, root_fd=None):
     Parameterized on root so the conformance suite and the self-test can call it off the real tree. The
     inputs this generator reads itself (skill-source.md, the hooks manifest, LICENSE) are read through the
     descriptor-anchored reader from root_fd, the run's root descriptor (opened here when None); the corpus is
-    read by gen_rules.load_corpus (see the module threat model). The root VERSION is read the same way, for
-    the skill/pack alignment rule only (it changes no output byte)."""
+    read by gen_rules.load_corpus (see the module threat model). The pack version source (resolve_pack_version)
+    is read the same way, for the skill/pack alignment rule only (it changes no output byte)."""
     if root_fd is None:
         own_fd = _open_root(root)
         try:
@@ -971,14 +1083,13 @@ def build_outputs(root, root_fd=None):
             "ZIP_VERSIONED_PARTS and its GENSRC_OUTPUTS target when the skill version changes".format(
                 ZIP_VERSIONED_PARTS[-1], data["meta"]["version"], expected_basename))
     # Fail-closed skill/pack alignment (pack_alignment_problem): from pack PACK_ALIGN_FIRST_VERSION on, the
-    # skill meta version must equal the root VERSION. VERSION is read through the descriptor-anchored reader
-    # (a symlink, hard link, FIFO or other non-regular entry at it is refused, exit 2); a malformed VERSION is
-    # exit 2; an absent one is a missing declared input, so the rule cannot be evaluated (exit 2, raised by
-    # pack_alignment_problem).
-    pack_raw = _read_output(root_fd, root, root.joinpath(*PACK_VERSION_PARTS), False, single_link=True,
-                            is_input=True)
-    pack_version = None if pack_raw is None else parse_pack_version(pack_raw)
-    problem = pack_alignment_problem("skill", data["meta"]["version"], pack_version)
+    # skill meta version must equal the pack version resolve_pack_version finds: the root VERSION in the
+    # authoring tree, the installed .aiqt/manifest.toml release-version in any other tree (an adopter's root
+    # VERSION is never read). Either is read through the descriptor-anchored reader (a symlink, hard link, FIFO
+    # or other non-regular entry at it is refused, exit 2); a malformed or oversized one is exit 2; an absent
+    # one means the rule cannot be evaluated (exit 2).
+    pack_version, pack_source = resolve_pack_version(root, root_fd)
+    problem = pack_alignment_problem("skill", data["meta"]["version"], pack_version, source=pack_source)
     if problem is not None:
         raise ValueError("{} in {} (meta version), with ZIP_VERSIONED_PARTS and the rest of RELEASING.md's "
                          "skill version bump checklist".format(problem, "/".join(SKILL_SRC_PARTS)))
@@ -1454,6 +1565,16 @@ Self-test capability note.
 """
 
 
+# The authoring marker (gen_hooks.AUTHORING_MARKER), spelled literally as gen_hooks' self-test spells it.
+_AUTHORING_MARKER_TEXT = 'format-version = 1\nrole = "pack-authoring-repository"\n'
+
+
+def _installed_manifest_text(release_version):
+    """The header of the installed pack manifest tools/gen_manifest.py writes, recording release_version."""
+    return ("# generated by tools/gen_manifest.py; do not hand-edit (VER-CORE 4.1)\nformat-version = 1\n"
+            "release-version = \"{}\"\ngenesis = false\n".format(release_version))
+
+
 def _write_fixture(root, skill_src_text):
     src = root.joinpath(*CORPUS_PARTS)
     (src / "aiqt").mkdir(parents=True)
@@ -1469,9 +1590,12 @@ def _write_fixture(root, skill_src_text):
     manifest.parent.mkdir(parents=True, exist_ok=True)
     manifest.write_text('[plugin]\nauthor-name = "Self Test Operator"\nhomepage = "https://example.test"\n',
                         encoding="utf-8")
-    # The root VERSION is a declared input of the skill/pack alignment rule (an absent one is exit 2), so a
-    # well-formed fixture carries one below PACK_ALIGN_FIRST_VERSION, where the skill stays independent (the
-    # state of main before the 1.1.1 cut). Legs that need another pack version overwrite it.
+    # This generator runs in the pack authoring repository, so a well-formed fixture is an authoring tree: it
+    # carries the authoring marker, and the root VERSION is then the pack version source of the skill/pack
+    # alignment rule (resolve_pack_version; an absent one is exit 2). VERSION sits below
+    # PACK_ALIGN_FIRST_VERSION, where the skill stays independent (the state of main before the 1.1.1 cut).
+    # Legs that need another pack version overwrite it; the adopter legs remove the marker.
+    (root / ".aiqt" / "authoring.toml").write_text(_AUTHORING_MARKER_TEXT, encoding="utf-8")
     (root / "VERSION").write_bytes(b"1.0.5\n")
     # build_outputs packs the pack-root LICENSE into the zip (fail-closed if absent); a well-formed
     # fixture therefore ships one so regeneration succeeds.
@@ -1797,6 +1921,165 @@ def self_test_main():
                 if "the pack VERSION file is absent" not in str(exc):
                     failures.append("pack_alignment_problem with no pack version raised for another reason: "
                                     "{}".format(exc))
+
+        # 7c. Where the pack version is read (resolve_pack_version). The legs above run in authoring trees (the
+        #     fixture carries the marker), where it is the root VERSION. Without the marker (an adopter's tree)
+        #     the root VERSION is the adopter's own and is never read: the installed .aiqt/manifest.toml
+        #     release-version is. An adopter VERSION that is another number, another format, CRLF, absent or a
+        #     dangling symlink, with the manifest at 1.0.5, builds clean in both modes (red if VERSION is read
+        #     there); a manifest at 1.1.1 under the shipped skill fails closed in both modes naming the manifest and
+        #     writing nothing, whatever the root VERSION says (red if the manifest is not read), while the equal
+        #     twin builds; and a tree with neither the marker nor a manifest cannot be evaluated (exit 2) though a
+        #     valid VERSION is there. In the authoring tree the manifest is never consulted.
+        def adopter_fixture(label, src, release="1.0.5"):
+            fx = pack_fixture("adopter-" + label, src)
+            (fx / ".aiqt" / "authoring.toml").unlink()
+            fx.joinpath(*INSTALLED_MANIFEST_PARTS).write_text(_installed_manifest_text(release), encoding="utf-8")
+            return fx
+
+        for label, raw in (("other-number", b"2.3.0\n"), ("other-format", b"v2.3\n"), ("crlf", b"0.4.0\r\n"),
+                           ("absent", None), ("dangling-symlink", "link")):
+            fx = adopter_fixture("version-" + label, good_src)
+            (fx / "VERSION").unlink()
+            if raw == "link":
+                os.symlink(str(tmp / "no-such-VERSION"), str(fx / "VERSION"))
+            elif raw is not None:
+                (fx / "VERSION").write_bytes(raw)
+            for chk in (False, True):
+                code, out = capture(fx, chk)
+                if code != 0:
+                    failures.append("an adopter tree whose own VERSION is {} (installed manifest at 1.0.5) expected "
+                                    "exit 0 ({}), got {}\n{}".format(label, "--check" if chk else "generate", code,
+                                                                     out))
+        for root_version in (b"0.4.0\n", None):
+            tag = "none" if root_version is None else "0.4.0"
+            fx = adopter_fixture("differ-" + tag, good_src)
+            code, out = capture(fx, False)
+            if code != 0:
+                failures.append("the adopter alignment fixture expected a clean first generate at release 1.0.5, "
+                                "got {}\n{}".format(code, out))
+            before = {p: p.read_bytes() for p in sorted(fx.joinpath(*ZIP_PARTS[:-1]).rglob("*")) if p.is_file()}
+            fx.joinpath(*INSTALLED_MANIFEST_PARTS).write_text(_installed_manifest_text("1.1.1"), encoding="utf-8")
+            (fx / "VERSION").unlink()
+            if root_version is not None:
+                (fx / "VERSION").write_bytes(root_version)
+            for chk in (True, False):
+                code, out = capture(fx, chk)
+                if (code != 2 or "differs from the pack version '1.1.1'" not in out
+                        or INSTALLED_MANIFEST_REL + " release-version" not in out):
+                    failures.append("an adopter skill {} under installed release 1.1.1 (root VERSION {}) expected "
+                                    "exit 2 naming the manifest ({}), got {}\n{}".format(
+                                        zip_versioned_version(), tag, "--check" if chk else "generate", code, out))
+            after = {p: p.read_bytes() for p in sorted(fx.joinpath(*ZIP_PARTS[:-1]).rglob("*")) if p.is_file()}
+            if after != before:
+                failures.append("a refused adopter skill/pack alignment must write nothing")
+        real_parts = ZIP_VERSIONED_PARTS
+        try:
+            globals()["ZIP_VERSIONED_PARTS"] = ("site", "downloads", versioned_zip_basename("1.1.1"))
+            fx = adopter_fixture("equal", _SKILL_SRC.replace("__ZIPVER__", "1.1.1"), release="1.1.1")
+            (fx / "VERSION").write_bytes(b"0.4.0\n")
+            for chk in (False, True):
+                code, out = capture(fx, chk)
+                if code != 0:
+                    failures.append("an adopter skill 1.1.1 under installed release 1.1.1 (own VERSION 0.4.0) "
+                                    "expected exit 0 ({}), got {}\n{}".format("--check" if chk else "generate",
+                                                                              code, out))
+        finally:
+            globals()["ZIP_VERSIONED_PARTS"] = real_parts
+        fx = adopter_fixture("no-manifest", good_src)
+        fx.joinpath(*INSTALLED_MANIFEST_PARTS).unlink()
+        for chk in (True, False):
+            code, out = capture(fx, chk)
+            if code != 2 or "cannot be evaluated" not in out or "never read" not in out:
+                failures.append("a tree with neither the authoring marker nor an installed manifest (a valid root "
+                                "VERSION present) expected exit 2, cannot evaluate ({}), got {}\n{}".format(
+                                    "--check" if chk else "generate", code, out))
+        for label, version, release, want in (("below", b"1.0.5\n", "1.1.1", 0), ("above", b"1.1.1\n", "1.0.5", 2)):
+            fx = pack_fixture("authoring-ignores-manifest-" + label, good_src)
+            fx.joinpath(*INSTALLED_MANIFEST_PARTS).write_text(_installed_manifest_text(release), encoding="utf-8")
+            (fx / "VERSION").write_bytes(version)
+            code, out = capture(fx, False)
+            if code != want or (want == 2 and "differs from the pack version '1.1.1' (VERSION)" not in out):
+                failures.append("an authoring tree at VERSION {} with an installed manifest at {} expected exit {} "
+                                "(VERSION, never the manifest, is read there), got {}\n{}".format(
+                                    version.decode("ascii").strip(), release, want, code, out))
+        for label, text, needle in (
+                ("no-release-version", "format-version = 1\n", "holds no release-version"),
+                ("bool-format", 'format-version = true\nrelease-version = "1.0.5"\n', "not the integer 1"),
+                ("prefixed", 'format-version = 1\nrelease-version = "v1.0.5"\n', "not a bare MAJOR.MINOR.PATCH"),
+                ("unparseable", "format-version = [\n", "not readable TOML")):
+            fx = adopter_fixture("bad-manifest-" + label, good_src)
+            fx.joinpath(*INSTALLED_MANIFEST_PARTS).write_text(text, encoding="utf-8")
+            code, out = capture(fx, True)
+            if code != 2 or needle not in out:
+                failures.append("an installed manifest that is {} expected exit 2 naming {!r}, got {}\n{}".format(
+                    label, needle, code, out))
+
+        # 7d. The pack version source is read bounded and echoed cut, and a non-regular one is refused as an input.
+        #     An oversized VERSION (a megabyte) is exit 2 naming the bound in a short message (red if it is read
+        #     whole and echoed); a long malformed release-version is echoed cut; a FIFO, a dangling symlink or a
+        #     directory at VERSION is refused as an input, never told to git rm it (RELEASING.md), and a directory
+        #     there is refused by the regular-file check with its descriptor closed (red if os.fdopen meets it
+        #     first: "Is a directory" and a leaked descriptor).
+        big = pack_fixture("version-oversized", good_src)
+        (big / "VERSION").write_bytes(b"1.0.5\n" + b"0" * 1_000_000)
+        for chk in (True, False):
+            code, out = capture(big, chk)
+            if code != 2 or "over {} bytes".format(PACK_VERSION_MAX_BYTES) not in out or len(out) > 2000:
+                failures.append("a 1 MB VERSION expected exit 2 naming the {}-byte bound in a short message ({}), "
+                                "got {} with {} characters of output".format(
+                                    PACK_VERSION_MAX_BYTES, "--check" if chk else "generate", code, len(out)))
+        long_release = adopter_fixture("long-release", good_src)
+        long_release.joinpath(*INSTALLED_MANIFEST_PARTS).write_text(
+            'format-version = 1\nrelease-version = "{}"\n'.format("9" * 100_000), encoding="utf-8")
+        code, out = capture(long_release, True)
+        if code != 2 or "cut from" not in out or len(out) > 2000:
+            failures.append("a 100 000-character release-version expected exit 2 echoing it cut, got {} with {} "
+                            "characters of output".format(code, len(out)))
+        if len(_echo("x" * 5000)) > _ECHO_MAX_CHARS + 40 or _echo("1.0.5\r\n") != repr("1.0.5\r\n"):
+            failures.append("_echo must cut a long value and keep a short one whole")
+
+        def plant_fifo(p):
+            os.mkfifo(str(p))
+
+        for label, plant in (("fifo", plant_fifo if hasattr(os, "mkfifo") else None),
+                             ("dangling-symlink", lambda p: os.symlink(str(tmp / "no-such-VERSION"), str(p))),
+                             ("directory", lambda p: p.mkdir())):
+            if plant is None:
+                failures.append("NOT RUN: a {} VERSION (no os.mkfifo on this platform)".format(label))
+                continue
+            fx = pack_fixture("version-input-" + label, good_src)
+            (fx / "VERSION").unlink()
+            plant(fx / "VERSION")
+            for chk in (True, False):
+                code, out = capture(fx, chk)
+                if (code != 2 or "never git rm an input" not in out or "git rm VERSION" in out
+                        or "Is a directory" in out):
+                    failures.append("a {} VERSION expected exit 2 refusing it as an input, never git rm ({}), got "
+                                    "{}\n{}".format(label, "--check" if chk else "generate", code, out))
+        dir_fx = tmp / "pack-align-version-input-directory"
+        probe_before = os.open(os.devnull, os.O_RDONLY)
+        os.close(probe_before)
+        dir_fd = _open_root(dir_fx)
+        try:
+            for _ in range(3):
+                try:
+                    _read_output(dir_fd, dir_fx, dir_fx / "VERSION", False, single_link=True, is_input=True)
+                    failures.append("_read_output must refuse a directory at an input")
+                except OSError:
+                    pass
+        finally:
+            os.close(dir_fd)
+        probe_after = os.open(os.devnull, os.O_RDONLY)
+        os.close(probe_after)
+        if probe_after != probe_before:
+            failures.append("_read_output leaked a descriptor refusing a directory (lowest free descriptor {} "
+                            "before, {} after)".format(probe_before, probe_after))
+        # The pack version source changes no output byte, so no GENSRC_OUTPUTS entry declares it (gen_hooks too).
+        for out_decl in GENSRC_OUTPUTS:
+            if {"VERSION", INSTALLED_MANIFEST_REL} & set(out_decl["sources"]):
+                failures.append("GENSRC_OUTPUTS {}: the pack version source is a check input, not a content "
+                                "source; do not declare it".format(out_decl["target"]))
 
         # 8. The generator never deletes a file under site/downloads, and the top level is ALLOW-LISTED:
         #    a stale versioned zip, any aiqt-skill variant (case, separator, prefix, suffix, 'v', 'latest',
@@ -2752,7 +3035,13 @@ def self_test_main():
           "corpus-id, an invalid-UTF-8 target, and a version/zip-literal mismatch each fail closed (exit 2); "
           "from pack 1.1.1 on a skill version that differs from VERSION fails closed (exit 2, writing nothing) "
           "while the equal twin builds clean and a pack below 1.1.1 leaves the skill independent, and a "
-          "malformed, symlinked, hard-linked or absent VERSION fails closed (exit 2); "
+          "malformed, symlinked, hard-linked or absent VERSION fails closed (exit 2); the pack version is the "
+          "root VERSION only in the authoring tree: elsewhere the installed .aiqt/manifest.toml release-version "
+          "is read and the adopter's own VERSION never is (another number, format, CRLF, absent or dangling "
+          "passes; a manifest at 1.1.1 refuses the differing skill; neither marker nor manifest is exit 2, as "
+          "is a malformed manifest); an oversized VERSION is refused bounded and a long value echoed cut; a "
+          "FIFO, dangling symlink or directory at VERSION is refused as an input (never git rm), with no "
+          "descriptor leaked; "
           "a drifted SKILL.md is caught (exit 1); nothing is ever deleted: an orphan reserved entry and a "
           "stale versioned zip plus fourteen other undeclared top-level entries (the allow-list) are kept "
           "and named for removal, git rm if tracked or rm if untracked (normal run exit 2 writing nothing, "
