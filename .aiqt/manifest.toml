@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.0.5"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "f5db2b82c35f5a05286925d7655512c5c1e4b33cebf7f801e83303509b971c2b"
+tree-sha256 = "c410aa0698178f8f4f2482324013fdd00f68e8277b23a9be19cf159d9bd372cb"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -2412,8 +2412,8 @@ sha256 = "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
 
 [[sources]]
 path = "NOTICE"
-bytes = 11968
-sha256 = "4e25f91d723d0b329a2af16a82abcc891ce6a506ff2874a149e6c4bf58d353db"
+bytes = 11996
+sha256 = "bae43dcfb3e30c428f59a243370f83e2835ef9706caa5692c83f9d7137964cb3"
 
 [[sources]]
 path = "README.md"
@@ -4567,8 +4567,8 @@ sha256 = "b7193e15eeb1a71a06eeb7ea8694b1d4048730f1aa624c891df240d4d2711340"
 
 [[sources]]
 path = "tools/gen_notice.py"
-bytes = 12635
-sha256 = "444cd84ced9881500577bc35cd3e9e44219a69767d6e79a57fec61733894a864"
+bytes = 12851
+sha256 = "0cc03f3a7518b71ae27e071b2162c7f59902210d892d3c562ceba8f05544aa6a"
 
 [[sources]]
 path = "tools/gen_reference_facts.py"
