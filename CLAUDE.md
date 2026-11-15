@@ -214,10 +214,11 @@ jobs, `git-fixture-env-config-<lane>-shard-K-host-patch` running
 (N = 12, 12 and 19, the counts that file's `SHARD_COUNTS` registers; 43 shard jobs). The host jobs run
 in parallel, so the host leg takes about as long as its longest job rather than the sum. Before a shard
 runs, the gate lists the lane and every shard and refuses unless the shards partition the lane, and
-`Quality gates` requires every shard job (its `needs:` and `HEAVY_RESULTS`), so a config suite passes
-in CI only when all N of its shards pass. The counts were sized from CI run 43600403087 (combined
+`Quality gates` requires every shard job (its `needs:` and `HEAVY_RESULTS`), so outside the site fast lane a config suite passes
+in CI only when all N of its shards pass; on a site-only train the fast lane skips the shard jobs with the other heavy
+jobs, and that accepted skip is not a pass of the suite. The counts were sized from CI run 43600403087 (combined
 112.8, malformed 113.5 and system 148.5 minutes) so that each shard's share of its lane plus its N + 1
-shard listings (15.4 s each, from one measured listing) is at most about 13 minutes; a shard is never
+shard listings (15.4 s each, from one measured listing) is estimated at about 13 minutes (an estimate: shards balance member counts, not measured durations); a shard is never
 shorter than its longest member, and every shard repeats the lane's controls. The local runner keeps
 one plain `--suite` line per config suite, which `tools/check_ci_parity.py` matches to the complete CI
 shard set (its SHARDS rule). These host jobs are the ONLY CI run of the OPF tooling self-test and of the combined, malformed and system
