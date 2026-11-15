@@ -12,4 +12,4 @@ Version 1.2.0, in development, installs the same governance core into a project.
 
 ## Planned: Teams and Enterprise
 
-Management and monitoring across projects, performance metrics, and guardrail bundles per project or purpose, managed by the team or enterprise. No dates yet, and none of it is available today. [See the future plans.](https://aiqt.ai/future/)
+The plans cover management and monitoring across projects, performance metrics, and guardrail bundles per project or purpose, managed by the team or enterprise. No dates yet, and none of it is available today. [See the future plans.](https://aiqt.ai/future/)

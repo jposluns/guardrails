@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.0.5"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "2e6a9edaa9ab21de7eab857c99cad6d37daac8c1328fad1cfcdd8e5d4245214b"
+tree-sha256 = "8e180d712877c198713adf4602280cc42961fb9293d4e797e3c8ce39fc699333"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -2427,8 +2427,8 @@ sha256 = "919da84c70d891eaf8d58a6f16edded70042eb6f30b98cf6ec480a198a6f4be8"
 
 [[sources]]
 path = "ROADMAP.md"
-bytes = 1384
-sha256 = "0a3bf9ee99306d6ca6e7f99881c58a0555ed09a5a25d88795501fda474270ee4"
+bytes = 1400
+sha256 = "90594c2b64757352f962589a81281b54ecb46aa2f7a417f917b197b590e262f0"
 
 [[sources]]
 path = "SCOPE.md"
@@ -3532,8 +3532,8 @@ sha256 = "c03c88544f5b1675467e422c7ac201e81d04367a85f72f5d50075dff75c170f7"
 
 [[sources]]
 path = "roadmap.toml"
-bytes = 1643
-sha256 = "b9af0ab4fb35507a0fe9bd8afdfc9e37ccf9491446280f1ddfe600cc7efa0318"
+bytes = 1659
+sha256 = "b6243691f7251b218167913b4914a12300f4fd4a9209b0362a1dbc44b0dcc892"
 
 [[sources]]
 path = "site/.well-known/security.txt"
@@ -3647,8 +3647,8 @@ sha256 = "dba04f24a104f0f7761ebaf4ee2cd49b60fbe829e7f517b69bf7d4283c287c53"
 
 [[sources]]
 path = "site/draft-src/future.toml"
-bytes = 1448
-sha256 = "1adc80838a9357b1c16afbcefa122703530299be291dbe12b8567033566efcfe"
+bytes = 1516
+sha256 = "79d13686a82284dbb41c3f8a8385239b2659aa263d93fa88865b641330cccd2c"
 
 [[sources]]
 path = "site/draft-src/home.toml"
@@ -3992,8 +3992,8 @@ sha256 = "b58efc0e9a4fbdcfc05d18178292d32f047be4aa8bed31648fa7684c06d9dd60"
 
 [[sources]]
 path = "site/future/index.html"
-bytes = 7897
-sha256 = "477eb58e058d0118b7ab43eceaa73735f0adcb04378a6604f19cc9720cf7ce72"
+bytes = 7965
+sha256 = "a9bc9b714cd8391ce7e333d76a5d1b8e2feabbeebc5c5e09c38df12cc645edda"
 
 [[sources]]
 path = "site/index.html"
@@ -4332,8 +4332,8 @@ sha256 = "b1680dac0bca7cdd6be05e454bbcc7b034f7d66859119863e2df1caee2c06694"
 
 [[sources]]
 path = "tools/check_overclaim.py"
-bytes = 283851
-sha256 = "e457899ed908ef5c66d6cad6fe6a2d05596d99748037faaeb31bb0dfaad64dce"
+bytes = 283875
+sha256 = "3aba6654e5757854a967398ac9e512d9b614b6b6c2012fba0d76eae55685ebff"
 
 [[sources]]
 path = "tools/check_portability.py"

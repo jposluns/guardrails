@@ -8,7 +8,7 @@ meta = "Planned, with no dates yet, and not available today: management and moni
 
 [[body]]
 component = "prose"
-html = "<p>Everything on this page is planned, with no dates yet. None of it ships today; AIQT today is the standard, the skill, and the pack you add to each project yourself.</p>"
+html = "<p>Everything on this page is planned, with no dates yet. None of it ships today. What you can use today is the 1.0.5 chat assistant, which each person adds to their own assistant, and the pack, which is open to read in full on GitHub.</p>"
 
 [[body]]
 component = "clauses"

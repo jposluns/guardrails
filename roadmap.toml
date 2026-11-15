@@ -22,5 +22,5 @@ links = [{ text = "Read about the development assistant.", href = "/development"
 pill_class = "planned"
 pill_label = "Planned"
 heading = "Teams and Enterprise"
-body = "Management and monitoring across projects, performance metrics, and guardrail bundles per project or purpose, managed by the team or enterprise. No dates yet, and none of it is available today."
+body = "The plans cover management and monitoring across projects, performance metrics, and guardrail bundles per project or purpose, managed by the team or enterprise. No dates yet, and none of it is available today."
 links = [{ text = "See the future plans.", href = "/future/" }]
