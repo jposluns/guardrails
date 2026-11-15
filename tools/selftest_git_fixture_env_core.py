@@ -1607,8 +1607,10 @@ def _member_close_controls(fixture):
                 # raisegate, trygate, sendgate, scenariogate, bgate, outcomegate,
                 # outcomeonlygate, stallgate and pinned_version are examples of THE
                 # RESIDUAL (_allowlist_producers), which passes the value pin too, so an
-                # oracle or scenario change that starts catching one of them must update
-                # that text.
+                # oracle change that alters one of their recorded differences fails this
+                # pin and must update that text; a scenario change is not detected here
+                # (these probes only parse mutated sources) and needs THE RESIDUAL
+                # reassessed by hand.
                 ("producer-oracle", [["evidence"], ["evidence"], ["evidence"],
                                      ["lock_free", "unrecognized"],
                                      ["restored", "unrecognized"],
