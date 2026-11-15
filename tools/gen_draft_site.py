@@ -21,7 +21,8 @@ pages. Each site's base (SITES) is the one base path for every internal href and
 becomes "/" at that site's promotion, and the robots meta goes with it (a page under draft/ keeps it). Asset
 URLs follow the site's separate asset base ("assets" in SITES), which stays "/draft/" after promotion, so
 the pinned copy is served where it was staged. A page is refused (exit 2, nothing written) if it carries an
-en or em dash, an inline style or script, an `on*` attribute, or "what this is" framing. The baseline
+en or em dash, an inline style or script, an `on*` attribute, "what this is" framing, an id 2 elements
+share (shell, component or inline), or a `$BASE/` token outside an inline HTML value. The baseline
 files under assets/baseline/ are a pinned copy, not generated here (tools/check_baseline_pin.py).
 
 Content model: each page is 1 TOML data file under its site's data directory (site/draft-src/ for aiqt.ai,
@@ -386,8 +387,11 @@ def _need(doc, where, required, optional=()):
 
 
 def _text(doc, where, key, default=None):
+    """The string at `key`. With no default the key is required and may not be empty. With a non-empty
+    default (a defaulted label) an absent key takes the default and an explicit "" is refused, since it
+    would render an empty label; only a deliberately optional key, whose default is "", accepts ""."""
     value = doc.get(key, default)
-    if not isinstance(value, str) or (value == "" and default is None):
+    if not isinstance(value, str) or (value == "" and default != ""):
         raise RefusedPage("{}: {} must be a non-empty string".format(where, key))
     return value
 
@@ -1560,7 +1564,7 @@ def render_page(site, pages, page):
         "</body>",
         "</html>",
     ]) + "\n"
-    refusals = refusals_for(html) + _link_findings(site, html, scripts, scheme_src)
+    refusals = refusals_for(html) + _model_findings(html) + _link_findings(site, html, scripts, scheme_src)
     if refusals:
         raise RefusedPage("{}/{}: {}".format(site["root"], rel, "; ".join(refusals)))
     return html
@@ -1612,6 +1616,37 @@ def refusals_for(html):
     found.extend(parser.found)
     if FRAMING_RE.search(" ".join(parser.text)):
         found.append('"what this is" framing')
+    return found
+
+
+class _Ids(HTMLParser):
+    """Every id attribute value on a page, in document order."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.ids = []
+
+    def handle_starttag(self, tag, attrs):
+        self.ids.extend(value for name, value in attrs if name == "id")
+
+
+def _model_findings(html):
+    """Every page-model finding on a built page: an id that 2 elements share, whoever wrote them (the
+    shell's main-content and copy-status, a component's id or family, or an id inside an inline HTML
+    value; _page_from_doc sees only the component ids), and a $BASE/ token left in the page, which only a
+    field outside _inline can carry, since _inline expands every one."""
+    parser = _Ids()
+    parser.feed(html)
+    parser.close()
+    seen, found = set(), []
+    for value in parser.ids:
+        if value in seen:
+            finding = "duplicate id {!r}".format(value)
+            if finding not in found:
+                found.append(finding)
+        seen.add(value)
+    if "$BASE/" in html:
+        found.append("unexpanded $BASE/ token in a field that is not an inline HTML value")
     return found
 
 
@@ -1824,9 +1859,30 @@ def run(root, check, outputs=None):
             if parent != Path(".") and (Path(root) / parent).is_symlink():
                 print("error: {} is a symbolic link; refusing".format(parent), file=sys.stderr)
                 return 2
-        os.makedirs(path.parent, exist_ok=True)
-        with open(path, "wb") as handle:
-            handle.write(data)
+        # The page is written to a temporary file beside it and replaces the target only once its bytes are
+        # all written, so a write that fails leaves the target's previous bytes in place (exit 2) and the
+        # temporary file is removed. Pages replaced before the failing one stay replaced.
+        temp = path.with_name(".{}.{}.tmp".format(path.name, os.getpid()))
+        created = False
+        try:
+            os.makedirs(path.parent, exist_ok=True)
+            with open(temp, "xb") as handle:
+                created = True
+                handle.write(data)
+            if current is not None:
+                os.chmod(temp, stat.S_IMODE(os.lstat(path).st_mode))
+            os.replace(temp, path)
+        except OSError as exc:
+            print("error: cannot write {} ({}); fail-closed".format(rel, exc), file=sys.stderr)
+            return 2
+        finally:
+            if created:
+                try:
+                    os.unlink(temp)
+                except FileNotFoundError:
+                    pass
+                except OSError as exc:
+                    print("error: cannot remove the temporary file {} ({})".format(temp, exc), file=sys.stderr)
         print("wrote {}".format(rel))
     try:
         stray = stray_outputs(root)
@@ -3263,6 +3319,100 @@ def _self_test():
     expect("hooks/run-counts-its-root",
            code == 0 and "an opt-in plugin of {} hooks".format(live_hooks + 1) in written, code)
 
+    # Page-model validation. An explicit "" for a key whose default is a non-empty label is refused (it
+    # would render an empty label); a deliberately optional key, whose default is "", still accepts "".
+    for name, body in (("refuse/empty-defaulted-label-entries",
+                        'component = "entries"\nlabel = ""\n[[body.items]]\nhref = "install/"\ntitle = "T"\n'
+                        'n = "N"\nd = "D"\n'),
+                       ("refuse/empty-defaulted-label-value", 'component = "value"\nlabel = ""\nhtml = "V"\n')):
+        expect(name, "non-empty string" in refused(name, rendered, body, "landing"))
+    optional_plan = rendered('component = "plan"\nvariant = ""\n[[body.items]]\nhref = "install/"\ntitle = "T"\n')
+    optional_list = rendered('component = "list"\nvariant = ""\nitems = ["A"]\n')
+    expect("component/optional-empty-variant-accepted",
+           optional_plan == '<ul class="plan"><li><a href="/draft/install/">T</a></li></ul>'
+           and optional_list == '<ul class="plan"><li>A</li></ul>', (optional_plan, optional_list))
+    # An id 2 elements of a built page share is refused, whether both are inline, or one is the shell's own.
+    for name, body in (("refuse/duplicate-inline-id",
+                        '[[body]]\ncomponent = "prose"\nhtml = "<p id=\\"a\\">x</p>"\n'
+                        '[[body]]\ncomponent = "prose"\nhtml = "<p id=\\"a\\">y</p>"\n'),
+                       ("refuse/duplicate-shell-id-inline",
+                        '[[body]]\ncomponent = "prose"\nhtml = "<p id=\\"main-content\\">x</p>"\n'),
+                       ("refuse/duplicate-shell-id-component",
+                        '[[body]]\ncomponent = "subhead"\nid = "copy-status"\nheading = "H"\n')):
+        dup_page = fixture_page(body)
+        expect(name, "duplicate id" in refused(name, render_page, site, [dup_page], dup_page))
+    distinct = fixture_page('[[body]]\ncomponent = "prose"\nhtml = "<p id=\\"a\\">x</p>"\n'
+                            '[[body]]\ncomponent = "subhead"\nid = "b"\nheading = "H"\n')
+    try:
+        distinct_html = render_page(site, [distinct], distinct)
+    except RefusedPage as exc:
+        distinct_html = "refused: {}".format(exc)
+    expect("ids/distinct-ids-accepted", '<p id="a">x</p>' in distinct_html and '<h3 id="b">H</h3>' in distinct_html,
+           distinct_html[-400:])
+    # A $BASE/ token in a field outside _inline (element text, the page title) is refused, not shipped
+    # unexpanded; the same token in an inline HTML value renders as the base path.
+    unexpanded_label = fixture_page('[[body]]\ncomponent = "label"\ntext = "See $BASE/x"\n')
+    unexpanded_title = model('path = "index.html"\ntitle = "See $BASE/t"\nkind = "document"\nlabel = "Draft"\n'
+                             'heading = "H"\n[[body]]\ncomponent = "prose"\nhtml = "<p>P</p>"\n')
+    for name, base_page in (("refuse/base-token-outside-inline-label", unexpanded_label),
+                            ("refuse/base-token-outside-inline-title", unexpanded_title)):
+        expect(name, "$BASE/" in refused(name, render_page, site, [base_page], base_page))
+    inline_base = fixture_page('[[body]]\ncomponent = "prose"\nhtml = "<a href=\\"$BASE/install/\\">x</a>"\n')
+    try:
+        inline_html = render_page(site, [inline_base], inline_base)
+    except RefusedPage as exc:
+        inline_html = "refused: {}".format(exc)
+    expect("base/inline-token-expanded", '<a href="/draft/install/">x</a>' in inline_html
+           and "$BASE/" not in inline_html, inline_html[-400:])
+
+    # run() writes a page through a temporary file beside it: an injected write failure exits 2, leaves the
+    # previous bytes in place and removes the temporary file; without the injection the same run replaces
+    # the bytes and leaves no temporary file.
+    builtin_open = open
+
+    def run_injected(fail):
+        with tempfile.TemporaryDirectory(prefix="gen-draft-site-write-") as tmp:
+            folder = Path(tmp) / "site"
+            os.makedirs(folder)
+            with builtin_open(folder / "index.html", "wb") as handle:
+                handle.write(b"previous bytes\n")
+
+            class FailingWrite:
+                def __init__(self, handle):
+                    self.handle = handle
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *exc_info):
+                    self.handle.close()
+                    return False
+
+                def write(self, data):
+                    self.handle.write(data[:3])
+                    raise OSError("injected write failure")
+
+            def opener(path, mode="r", *args, **kwargs):
+                handle = builtin_open(path, mode, *args, **kwargs)
+                if fail and Path(path).parent == folder and ("w" in mode or "x" in mode):
+                    return FailingWrite(handle)
+                return handle
+            try:
+                with mock.patch("builtins.open", opener), contextlib.redirect_stdout(io.StringIO()), \
+                        contextlib.redirect_stderr(io.StringIO()):
+                    code = run(tmp, check=False, outputs={"site/index.html": "<p>fresh</p>\n"})
+            except OSError as exc:
+                code = "raised: {}".format(exc)
+            with builtin_open(folder / "index.html", "rb") as handle:
+                data = handle.read()
+            return code, data, sorted(os.listdir(folder))
+
+    got = run_injected(True)
+    expect("write/failure-keeps-previous-bytes-and-removes-temp",
+           got == (2, b"previous bytes\n", ["index.html"]), got)
+    got = run_injected(False)
+    expect("write/success-replaces-bytes-without-temp", got == (0, b"<p>fresh</p>\n", ["index.html"]), got)
+
     if failures:
         print("SELF-TEST FAIL: gen_draft_site {} failure(s)".format(len(failures)))
         for failure in failures:
@@ -3278,7 +3428,9 @@ def _self_test():
           "a symbolically linked parent directory there refused, each layer of the read driven on its "
           "own, and its descriptor closed once), no draft-src data file of either site typing a number (digits or a number word) "
           "with at most 4 words before \"hooks\" once TOML escapes and HTML character references are "
-          "decoded, and --check exit codes)")
+          "decoded, --check exit codes, an explicit empty defaulted label refused while an optional key "
+          "accepts empty, a duplicate shell, component or inline id refused, a $BASE/ token outside an inline "
+          "HTML value refused, and a failed page write leaving the previous bytes and no temporary file)")
     return 0
 
 
