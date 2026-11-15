@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.0.5"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "5857fd8557f361fbe2a0d10dd53817406b704cb5390d6b05c7d339e00c0413ed"
+tree-sha256 = "7d42e34b6e276076a7b6f31d3781382c4fedcf3be7179b89ce2687c8f54a1acb"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -2387,8 +2387,8 @@ sha256 = "3c4465308e9d29a365f3dd9c9b758ba555208e7794c1f949002be6c4c500c2c3"
 
 [[sources]]
 path = "DISCLOSURE.md"
-bytes = 10284
-sha256 = "5b7e529bb48937ce853f39956ef7d7718288645950d3bddbb04d0c9543cc7d33"
+bytes = 10285
+sha256 = "e45c5ef5787f212ec1458a9b4e2f60b413f7ebfc90d2eb41abdb8f70e3a4d02f"
 
 [[sources]]
 path = "ENFORCEMENT.md"
@@ -2427,8 +2427,8 @@ sha256 = "919da84c70d891eaf8d58a6f16edded70042eb6f30b98cf6ec480a198a6f4be8"
 
 [[sources]]
 path = "ROADMAP.md"
-bytes = 1488
-sha256 = "4584fb10d4ffd6683c01abdd1d733b4c2ba212b45a38778c88713ff4ed133c0f"
+bytes = 1482
+sha256 = "a9aada4332df947ddec03812bd98bb6cd16ac2ff20754471dff2e2cbc9509d66"
 
 [[sources]]
 path = "SCOPE.md"
@@ -2462,8 +2462,8 @@ sha256 = "dbed3e0c4a29c0ffd01a4e26ca59964a3ef7e2277fc3dcdc2eed7076272461c1"
 
 [[sources]]
 path = "disclosure.toml"
-bytes = 14607
-sha256 = "daac2b0f5972ee68d030c3e0291584da573184fe1fc6414a67998581149d727a"
+bytes = 14608
+sha256 = "6c3b8da061855272841d0485354f34dd5e31a31df5511a520f4e3764615da060"
 
 [[sources]]
 path = "docs/_shell.html"
@@ -3532,8 +3532,8 @@ sha256 = "c03c88544f5b1675467e422c7ac201e81d04367a85f72f5d50075dff75c170f7"
 
 [[sources]]
 path = "roadmap.toml"
-bytes = 1744
-sha256 = "8b9b3213979a7f29ef2a788149fb92caaff18013a1766efc71496b1a2c41358d"
+bytes = 1738
+sha256 = "e9868ce31f298fb48e3442170b422bcb7c22282064cbe493e6b2adb1b0fdeca4"
 
 [[sources]]
 path = "site/.well-known/security.txt"
@@ -3572,8 +3572,8 @@ sha256 = "6df792db60701c4be48e47e317e567fa4bf00b8408f8679b9536591f41816f30"
 
 [[sources]]
 path = "site/disclosure/index.html"
-bytes = 19974
-sha256 = "1ff6f6f0da8d4f741b857d5887ff40de7b0a268d268e9f174582019c2f49456b"
+bytes = 19975
+sha256 = "1ed376ee697b4f46b891cb86ba66a2a6d5c5e28bcb9f5b043621a0918ae4bfac"
 
 [[sources]]
 path = "site/downloads/aiqt-instructions-1_5k.txt"
@@ -3637,8 +3637,8 @@ sha256 = "856bc0a179a007b2e133273b49451104157c187351acae1edb5b68c35a9e97cf"
 
 [[sources]]
 path = "site/draft-src/disclosure.toml"
-bytes = 13252
-sha256 = "c07d975a657b33bdf9568c33fca6672253081230bdcb3af6def2a80f93d72fba"
+bytes = 13253
+sha256 = "0fd3615494800ff121dece32f53f7898ced52788ea15558c41c24aa3c5d2183f"
 
 [[sources]]
 path = "site/draft-src/draft.toml"
