@@ -756,7 +756,12 @@ def run(root, check, project_ids=PROJECT_HOOK_IDS):
 def main():
     args = sys.argv[1:]
     if "--self-test" in args:
-        return self_test_main()
+        # The whole self-test runs inside the fixture git lifecycle, so the code under test
+        # (gen_skill.authoring_marker_tracked's git ls-files, which strips GIT_* and so drops the scrub's config
+        # pins) reads no caller HOME, XDG or system git configuration either.
+        from _git_fixture_env import fixture_git_lifecycle
+        with fixture_git_lifecycle():
+            return self_test_main()
     return run(repo_root(), "--check" in args)
 
 
@@ -4246,11 +4251,14 @@ def self_test_main(_nested=False):
                 failures.append("pack alignment: an authoring tree at VERSION 1.1.1 with a stale installed manifest at "
                                 "1.0.5 expected exit 2 reading VERSION ({}), got {}: {!r}".format(
                                     "--check" if check else "generate", rc, out.strip()))
-        git_bin = shutil.which("git")
-        if git_bin is None:
+        # The fixture git calls run under the shared fixture scrub (git_fixture_env: every GIT_* variable dropped, a
+        # scratch HOME and XDG_CONFIG_HOME, global and system config pinned to os.devnull), so an ambient or system
+        # git configuration cannot fail or redirect the fixture's git add.
+        if shutil.which("git") is None:
             failures.append("pack alignment: NOT RUN: the deleted-marker legs (no git on PATH)")
         else:
-            git_env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+            from _git_fixture_env import git_fixture_env
+            git_env = git_fixture_env()
             for label, track_marker, want in (("marker-tracked-deleted", True, 2), ("marker-never-tracked", False, 0)):
                 tree = pack_tree("git-" + label)
                 if pack_run(tree, False)[0] != 0:
@@ -4258,12 +4266,16 @@ def self_test_main(_nested=False):
                         label))
                     continue
                 tracked = [AUTHORING_MARKER_REL, PACK_VERSION_REL] if track_marker else [PACK_VERSION_REL]
-                for argv in (["init", "-q", str(tree)], ["-C", str(tree), "add", "--", *tracked]):
-                    proc = subprocess.run([git_bin, "-c", "init.defaultBranch=main", "-c", "core.fsmonitor=false",
-                                           *argv], capture_output=True, timeout=60, env=git_env, check=False)
-                    if proc.returncode != 0:
-                        failures.append("pack alignment: the {} git tree: git {} failed ({}): {!r}".format(
-                            label, argv[0], proc.returncode, proc.stderr))
+                init = subprocess.run(["git", "-c", "init.defaultBranch=main", "-c", "core.fsmonitor=false", "init",
+                                       "-q", str(tree)], capture_output=True, timeout=60, env=git_env, check=False)
+                if init.returncode != 0:
+                    failures.append("pack alignment: the {} git tree: git init failed ({}): {!r}".format(
+                        label, init.returncode, init.stderr))
+                add = subprocess.run(["git", "-c", "core.fsmonitor=false", "-C", str(tree), "add", "--", *tracked],
+                                     capture_output=True, timeout=60, env=git_env, check=False)
+                if add.returncode != 0:
+                    failures.append("pack alignment: the {} git tree: git add failed ({}): {!r}".format(
+                        label, add.returncode, add.stderr))
                 plugin_bytes = (tree / PLUGIN_JSON_REL).read_bytes()
                 (tree / AUTHORING_MARKER_REL).unlink()
                 _write_installed_manifest(tree, "1.0.5")

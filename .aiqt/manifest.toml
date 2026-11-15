@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.0.5"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "6f74b58de1194fa19973ad9d5f8fe9c4095b748f7317533b8bd3bc9b50a90741"
+tree-sha256 = "d1cff4fd5eedbcd39c022c6d895de3c36e0e05564bd10af6f56531e07c3968df"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -4467,8 +4467,8 @@ sha256 = "cc8c6901219efcf9d31f702be8ec4bc590806ac4521ca685aa492349785a20fd"
 
 [[sources]]
 path = "tools/conformance.py"
-bytes = 109612
-sha256 = "486124f6ae202cc960d42abb3511f206a6630892ebbc0e6807ebbbf247b6268c"
+bytes = 110563
+sha256 = "858faa2927c04767054e19e135868cde53390623a8beb3994d98baf41691aba2"
 
 [[sources]]
 path = "tools/doctor.py"
@@ -4542,8 +4542,8 @@ sha256 = "5fe2069fa9978b5df1ae5cd65211c9d88d4c59f580dfeb4e3c876bbe2ebe1f29"
 
 [[sources]]
 path = "tools/gen_hooks.py"
-bytes = 287992
-sha256 = "46b0c0cf5be5244815c80404ae9fdab0f588412152c20eb4f5747402b971eba1"
+bytes = 288974
+sha256 = "35a2ec9035f13ef7753853053aa436056dea2f9635f3b00209d05bce37f9155e"
 
 [[sources]]
 path = "tools/gen_manifest.py"
@@ -4592,8 +4592,8 @@ sha256 = "2f19dc1e1f6bac53f5afebb6b1857889467c249b29d566954a89e25687f884c3"
 
 [[sources]]
 path = "tools/gen_skill.py"
-bytes = 189340
-sha256 = "e5ef0b312fbb1a21a316c7ec93e885ee84b50d75ec13c2f23c35ea5e4fddd1a7"
+bytes = 190389
+sha256 = "456a08a36fb05ffea23633141236fd6082d217bfcb9dd62cab04a62534529ce9"
 
 [[sources]]
 path = "tools/gen_worker_pack.py"

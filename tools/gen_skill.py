@@ -1290,7 +1290,12 @@ def evidence_sentence_problem(text, want):
 def main():
     argv = sys.argv[1:]
     if "--self-test" in argv:
-        return self_test_main()
+        # The whole self-test runs inside the fixture git lifecycle, so the code under test
+        # (authoring_marker_tracked's git ls-files, which strips GIT_* and so drops the scrub's config pins)
+        # reads no caller HOME, XDG or system git configuration either.
+        from _git_fixture_env import fixture_git_lifecycle
+        with fixture_git_lifecycle():
+            return self_test_main()
     return run_gen(repo_root(), "--check" in argv)
 
 
@@ -1990,11 +1995,14 @@ def self_test_main():
         #      the tracked marker, writing nothing (red if the git index is not consulted: the tree then reads as an
         #      adopter's and passes). The twin, the same tree whose git index never tracked the marker (an adopter's
         #      repository), passes in both modes, and a directory that is not a git work tree reads as untracked.
-        git_bin = shutil.which("git")
-        if git_bin is None:
+        #      The fixture git calls run under the shared fixture scrub (git_fixture_env: every GIT_* variable
+        #      dropped, a scratch HOME and XDG_CONFIG_HOME, global and system config pinned to os.devnull), so an
+        #      ambient or system git configuration (a core.excludesFile that ignores VERSION, a hook path) cannot
+        #      fail or redirect the fixture's git add.
+        if shutil.which("git") is None:
             failures.append("NOT RUN: the deleted-marker legs (no git on PATH)")
         else:
-            git_env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+            from _git_fixture_env import git_fixture_env
 
             def git_fixture(label, track_marker):
                 fx = pack_fixture("git-" + label, good_src)
@@ -2003,12 +2011,17 @@ def self_test_main():
                     failures.append("the {} git fixture expected a clean first generate at VERSION 1.0.5, got "
                                     "{}\n{}".format(label, code, out))
                 tracked = [".aiqt/authoring.toml", "VERSION"] if track_marker else ["VERSION"]
-                for argv in (["init", "-q", str(fx)], ["-C", str(fx), "add", "--", *tracked]):
-                    proc = subprocess.run([git_bin, "-c", "init.defaultBranch=main", "-c", "core.fsmonitor=false",
-                                           *argv], capture_output=True, timeout=60, env=git_env, check=False)
-                    if proc.returncode != 0:
-                        failures.append("the {} git fixture: git {} failed ({}): {!r}".format(
-                            label, argv[0], proc.returncode, proc.stderr))
+                git_env = git_fixture_env()
+                init = subprocess.run(["git", "-c", "init.defaultBranch=main", "-c", "core.fsmonitor=false", "init",
+                                       "-q", str(fx)], capture_output=True, timeout=60, env=git_env, check=False)
+                if init.returncode != 0:
+                    failures.append("the {} git fixture: git init failed ({}): {!r}".format(
+                        label, init.returncode, init.stderr))
+                add = subprocess.run(["git", "-c", "core.fsmonitor=false", "-C", str(fx), "add", "--", *tracked],
+                                     capture_output=True, timeout=60, env=git_env, check=False)
+                if add.returncode != 0:
+                    failures.append("the {} git fixture: git add failed ({}): {!r}".format(
+                        label, add.returncode, add.stderr))
                 (fx / ".aiqt" / "authoring.toml").unlink()
                 (fx / ".aiqt" / "manifest.toml").write_text(_installed_manifest_text("1.0.5"), encoding="utf-8")
                 (fx / "VERSION").write_bytes(b"1.1.1\n")

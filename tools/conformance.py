@@ -702,7 +702,12 @@ def main():
         return 2
     root, self_test = parsed
     if self_test:
-        return self_test_main()
+        # The whole self-test runs inside the fixture git lifecycle, so the code under test
+        # (gen_skill.authoring_marker_tracked's git ls-files, which strips GIT_* and so drops the scrub's config
+        # pins) reads no caller HOME, XDG or system git configuration either.
+        from _git_fixture_env import fixture_git_lifecycle
+        with fixture_git_lifecycle():
+            return self_test_main()
     return run(root or Path.cwd())
 
 
@@ -1906,22 +1911,29 @@ def self_test_main():
         if code != 0 or status_of(out, "C2") != PASS or status_of(out, "C5") != PASS:
             failures.append("alignment tree k (authoring marker, VERSION 1.1.1, skill and plugin 1.1.1) expected exit "
                             "0 with C2 and C5 PASS:\n{}".format(out))
-        git_bin = shutil.which("git")
-        if git_bin is None:
+        # The fixture git calls run under the shared fixture scrub (git_fixture_env: every GIT_* variable dropped, a
+        # scratch HOME and XDG_CONFIG_HOME, global and system config pinned to os.devnull), so an ambient or system
+        # git configuration cannot fail or redirect the fixture's git add.
+        if shutil.which("git") is None:
             failures.append("NOT RUN: alignment trees l and m (no git on PATH)")
         else:
-            git_env = {name: value for name, value in os.environ.items() if not name.startswith("GIT_")}
+            from _git_fixture_env import git_fixture_env
+            git_env = git_fixture_env()
             for label, track_marker, want in (("l", True, 2), ("m", False, 0)):
                 tree = aligned_tree(label, b"1.1.1\n", release="1.0.5", marker=True)
                 if tree is None:
                     continue
                 tracked = [".aiqt/authoring.toml", "VERSION"] if track_marker else ["VERSION"]
-                for argv in (["init", "-q", str(tree)], ["-C", str(tree), "add", "--", *tracked]):
-                    proc = subprocess.run([git_bin, "-c", "init.defaultBranch=main", "-c", "core.fsmonitor=false",
-                                           *argv], capture_output=True, timeout=60, env=git_env, check=False)
-                    if proc.returncode != 0:
-                        failures.append("alignment tree {}: git {} failed ({}): {!r}".format(
-                            label, argv[0], proc.returncode, proc.stderr))
+                init = subprocess.run(["git", "-c", "init.defaultBranch=main", "-c", "core.fsmonitor=false", "init",
+                                       "-q", str(tree)], capture_output=True, timeout=60, env=git_env, check=False)
+                if init.returncode != 0:
+                    failures.append("alignment tree {}: git init failed ({}): {!r}".format(
+                        label, init.returncode, init.stderr))
+                add = subprocess.run(["git", "-c", "core.fsmonitor=false", "-C", str(tree), "add", "--", *tracked],
+                                     capture_output=True, timeout=60, env=git_env, check=False)
+                if add.returncode != 0:
+                    failures.append("alignment tree {}: git add failed ({}): {!r}".format(
+                        label, add.returncode, add.stderr))
                 (tree / ".aiqt" / "authoring.toml").unlink()
                 code, out = run_capture(tree)
                 if want == 2 and (code != 2 or status_of(out, "C2") != MALFORMED
