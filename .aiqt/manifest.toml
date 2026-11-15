@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.0.5"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "31c2138a82c383950c100268d665174edf227376efb9cc2125da688402a380a1"
+tree-sha256 = "a6f4b64a3462ea338eb873d1d3428a398a853f3beb1b1833e2190e2a1f451d4b"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -4222,8 +4222,8 @@ sha256 = "752660aa80ae6cb147fef22c31d97084947df740172afe97ef9d0db391c25f3e"
 
 [[sources]]
 path = "tools/check_footer.py"
-bytes = 129233
-sha256 = "b1e9848a3348bf14c62b48ebca51825e3eeec9843461958e4c5e3ea3fbea6e5f"
+bytes = 136176
+sha256 = "62d7ed91c139d642001513d31dd3d1fb1a867752462d341796bd3de06b76df44"
 
 [[sources]]
 path = "tools/check_gensrc_failclose.py"

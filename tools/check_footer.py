@@ -163,6 +163,15 @@ _HEADINGS = frozenset({"h1", "h2", "h3", "h4", "h5", "h6"})
 _TABLE_PARTS = frozenset({"table", "tbody", "thead", "tfoot", "tr", "td", "th", "caption"})
 # The elements "generate implied end tags" pops while one is the current node.
 _IMPLIED_END = frozenset({"dd", "dt", "li", "optgroup", "option", "p", "rb", "rp", "rt", "rtc"})
+# Start tags the "in body" insertion mode ignores (13.2.6.4.7): <html>, <body>, <head>, <frameset> and
+# <frame> always, and the table parts while no table is open (a table part start tag is a parse error there).
+# An ignored tag opens no element, so it never goes on the stack and is never a scope boundary.
+_IGNORED_START = frozenset({"html", "body", "head", "frameset", "frame"})
+_TABLE_PART_START = frozenset({"caption", "col", "colgroup", "tbody", "td", "tfoot", "th", "thead", "tr"})
+# The elements that put the parser in a table insertion mode ("reset the insertion mode appropriately",
+# 13.2.4.1): searching down from the current node, the first of these decides whether a table is open.
+_TABLE_CONTEXT = frozenset({"table", "caption", "colgroup", "tbody", "thead", "tfoot", "tr", "td", "th",
+                            "template"})
 # Void elements never go on the stack; a self-closing slash on any other HTML element is ignored.
 _VOID = frozenset({"area", "base", "basefont", "bgsound", "br", "col", "embed", "frame", "hr", "img", "input",
                    "keygen", "link", "meta", "param", "source", "track", "wbr"})
@@ -189,7 +198,10 @@ class _AboutAnchors(HTMLParser):
     the enclosing </div>). A </form> removes only the form, after popping the current node while it is a
     <p> (or another element "generate implied end tags" pops), as the algorithm does. A stray end tag (one
     whose element is not open, or not in scope), the end tag of an element opened inside the paragraph (such
-    as </object> after <object>), </body>, </html> and phrasing end tags such as </span> leave it open.
+    as </object> after <object>), </body>, </html> and phrasing end tags such as </span> leave it open. A
+    start tag the parser ignores opens nothing, so it is never pushed and never stands between an end tag and
+    the About <p>: <html>, <body>, <head>, <frameset> and <frame>, and a table part start tag (<td>,
+    <caption>, <tr> and the like) while no table is open (_table_open).
 
     Not modelled (disclosed): each start tag in P_CLOSING_START_TAGS closes the region unconditionally, but
     the parser leaves the paragraph open for a <table> in quirks mode, for a nested <form> start tag while a
@@ -198,6 +210,9 @@ class _AboutAnchors(HTMLParser):
     closes the paragraph through rules kept out of this model: a table part start tag (<tr>, <td>,
     <tbody> and the like) in a table or cell that holds the paragraph, a <button> start tag while a button
     encloses it, and the reparenting of misnested formatting elements (the adoption agency algorithm).
+    A <frameset> start tag is always treated as ignored, though the parser replaces the body with it (popping
+    the paragraph) while its frameset-ok flag is still set. Inside a <template> a table part start tag counts
+    as in a table only while the template is the current node; the parser goes by the template's first child.
     SVG and MathML content is read as HTML (the foreign scope boundaries are not modelled)."""
     def __init__(self):
         super().__init__(convert_charrefs=True)
@@ -221,6 +236,15 @@ class _AboutAnchors(HTMLParser):
                 return None
         return None
 
+    def _table_open(self):
+        """True when the parser would be in a table insertion mode: the first element of _TABLE_CONTEXT
+        found searching down from the current node is a table or a table part, or is a <template> that is
+        itself the current node (a template's first child decides its mode)."""
+        for index in range(len(self._stack) - 1, -1, -1):
+            if self._stack[index] in _TABLE_CONTEXT:
+                return self._stack[index] != "template" or index == len(self._stack) - 1
+        return False
+
     def handle_starttag(self, tag, attrs):
         d = dict(attrs)
         if tag == "p" or tag in P_CLOSING_START_TAGS:
@@ -232,7 +256,7 @@ class _AboutAnchors(HTMLParser):
                     self._pop_from(index)
         elif tag == "a" and self._about is not None and d.get("href") is not None:
             self.hrefs.append(d["href"].strip())
-        if tag in _VOID:
+        if tag in _VOID or tag in _IGNORED_START or (tag in _TABLE_PART_START and not self._table_open()):
             return
         # A row or cell straight in a table, or a cell straight in a table section, opens the section and
         # row the parser implies (13.2.6.4.9 and 13.2.6.4.13), so a later </tbody> or </tr> finds them.
@@ -995,6 +1019,66 @@ def _self_test_cases():
         if tag not in newly_closing:
             region_rows.append(("the About link after the enclosing </{}> is missing".format(tag),
                                 opened + '<p class="about">x</{}>'.format(tag) + link, "missing"))
+    # A start tag the parser ignores is no scope boundary. The parser at ec54a836 pushed every non-void start
+    # tag, so an ignored <html>, <caption>, <td> or <th> hid the enclosing </div> or </li>, and any ignored
+    # tag left on top of the About <p> kept </form> from popping it. With no table open each of these rows
+    # is red there (<col> and <frame> are void, so their rows pass on both); each table part twin, with a
+    # table open, finds the pushed element's own end tag.
+    for tag in ("html", "body", "head", "frameset", "frame", "caption", "col", "colgroup", "tbody", "td",
+                "tfoot", "th", "thead", "tr"):
+        region_rows.append(("the About link after a </form> past an ignored <{}> is missing".format(tag),
+                            '<form><p class="about">x<{}></form>'.format(tag) + link, "missing"))
+    for tag in ("html", "caption", "td", "th"):
+        region_rows.append(("the About link after an enclosing </div> past an ignored <{}> is missing".format(tag),
+                            '<div><p class="about">x<{}></div>'.format(tag) + link, "missing"))
+    for tag in ("html", "caption"):
+        region_rows.append(("the About link after an enclosing </li> past an ignored <{}> is missing".format(tag),
+                            '<ul><li><p class="about">x<{}></li>'.format(tag) + link, "missing"))
+    region_rows.append(("a link on each side of an ignored <th> leaves one in the region",
+                        '<div><p class="about">' + link + '<th></div>' + link, "ok"))
+    region_rows.append(("the About link after an enclosing </div> past a <td> ignored in a template's body",
+                        '<template><div><p class="about">x<td></div>' + link, "missing"))
+    for tag, body in (("caption", '<table><caption><p class="about"><span>x</caption>'),
+                      ("tbody", '<table><tbody><p class="about">x</tbody>'),
+                      ("thead", '<table><thead><p class="about">x</thead>'),
+                      ("tfoot", '<table><tfoot><p class="about">x</tfoot>'),
+                      ("tr", '<table><tr><p class="about">x</tr>'),
+                      ("td", '<table><td><p class="about">x</td>'),
+                      ("th", '<table><th><p class="about">x</th>'),
+                      ("td", '<template><td><p class="about">x</td>')):
+        region_rows.append(("twin: in an open {} the <{}> start tag is pushed and its end tag closes the "
+                            "region".format(body[1:body.index(">")], tag), body + link, "missing"))
+    # Each scope boundary, met by an end tag searching down for an element below the About <p>: the end tag
+    # is ignored there and the region stays open. Two links around a boundary opened inside the paragraph
+    # (both outside it, so neither is inert template content) count 2; one link past a boundary that
+    # encloses the paragraph is found. <html> is never pushed, so it is no boundary here.
+    for tag in ("applet", "marquee", "object", "template"):
+        region_rows.append(("an enclosing </div> past an open <{}> leaves 2 links in the region".format(tag),
+                            '<div><p class="about">' + link + '<{0}></div></{0}>'.format(tag) + link, "two"))
+        region_rows.append(("an enclosing </li> past an open <{}> leaves 2 links in the region".format(tag),
+                            '<ul><li><p class="about">' + link + '<{0}></li></{0}>'.format(tag) + link, "two"))
+    region_rows += [
+        ("the About link after </div> past an enclosing <td> is found",
+         '<div><table><tr><td><p class="about">x</div>' + link, "ok"),
+        ("the About link after </div> past an enclosing <th> is found",
+         '<div><table><tr><th><p class="about">x</div>' + link, "ok"),
+        ("the About link after </div> past an enclosing <caption> is found",
+         '<div><table><caption><p class="about">x</div>' + link, "ok"),
+        ("the About link after </div> past an enclosing <table> is found",
+         '<div><table><p class="about">x</div>' + link, "ok"),
+        ("the About link after </li> past an enclosing <ul> is found",
+         '<ul><li><ul><p class="about">x</li>' + link, "ok"),
+        ("the About link after </li> past an enclosing <ol> is found",
+         '<ol><li><ol><p class="about">x</li>' + link, "ok"),
+        ("the About link after </p> past an open <button> is found",
+         '<p class="about">x<button></p>' + link, "ok"),
+        ("the About link after </tr> past an enclosing inner <table> is found",
+         '<table><tr><td><table><p class="about">x</tr>' + link, "ok"),
+        ("the About link after </template> past an open <object> is missing",
+         '<template><object><p class="about">x</template>' + link, "missing"),
+        ("the About link inside a self-closed <p class=\"about\"/> is found",
+         '<p class="about"/>' + link, "ok"),
+    ]
 
     def region_case(landing, href, body, want):
         page = body.replace("{d}", href)
