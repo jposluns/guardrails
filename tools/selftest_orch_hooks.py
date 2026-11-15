@@ -12876,11 +12876,11 @@ def _stop_unreadable_input_cases(tmp):
         fn_regp.write_text(json.dumps(reg), encoding="utf-8")
         return reg
 
-    # (c) the lease path: unreadable, so the lease is not live, exactly as an unreadable lease
-    # (EACCES) already reads; a CONTROL lease at a readable path is live
+    # (c) the lease path: unreadable, a cannot-evaluate 'unreadable' scope (fix round 2; never 'lease
+    # not live', see _stop_state_and_lease_hold_cases); a CONTROL lease at a readable path is live
     lease_nul = fn_write(lease={"path": "lea\u0000se", "max_age_hours": 24})
-    check("stop/nul-lease-path-reads-not-live",
-          _try(lambda: aiqt_hooks._orch_scope_live(lease_nul, str(fn.root), "s1")), False)
+    check("stop/nul-lease-path-unreadable",
+          _try(lambda: aiqt_hooks._orch_scope_live(lease_nul, str(fn.root), "s1")), "unreadable")
     lease_ok = fn_write(lease={"path": str(fn.lease), "max_age_hours": 24})
     check("stop/nul-lease-path-control-live",
           _try(lambda: aiqt_hooks._orch_scope_live(lease_ok, str(fn.root), "s1")), True)
@@ -13016,6 +13016,231 @@ def _stop_unreadable_input_cases(tmp):
           (codecs.lookup(default_enc).name != "utf-8", fe_got), (True, "allow"))
 
 
+def _stop_state_and_lease_hold_cases(tmp):
+    """Fix round 2 of the fail-closed hooks PR (orchestrator decisions of 2026-11-15). (1) A declared
+    lease path that cannot be read for any reason other than genuine absence (a NUL or an unencodable
+    character in the path, a permission error, a non-directory component, a path that is not a regular
+    file) is the 'unreadable' scope, a cannot-evaluate HOLD under the row id lease:path with its own
+    detail naming the lease and the reason, never 'lease not live'; a genuinely absent lease stays not
+    live. (2) A registry state_dir realpath cannot resolve (a NUL, or a character the filesystem encoding
+    cannot encode) HOLDS the Stop family, the loop signal releasing, never an exception out of the
+    handler; the escape reader reads it as no sentinel."""
+    import builtins
+
+    def _try(fn):
+        try:
+            return fn()
+        except Exception as exc:
+            return ("raised", type(exc).__name__)
+
+    def _raised(res):
+        return isinstance(res, tuple) and len(res) == 2 and res[0] == "raised"
+
+    def _v(res):
+        return res if _raised(res) else _verdict(res)
+
+    def _msg(res):
+        # the block reason, the deny reason, or the operator note of a handler result
+        if _raised(res) or not isinstance(res, tuple) or len(res) != 3:
+            return ""
+        _code, obj, err = res
+        if err:
+            return err
+        if isinstance(obj, dict):
+            spec = obj.get("hookSpecificOutput")
+            if isinstance(spec, dict) and spec.get("permissionDecisionReason"):
+                return spec["permissionDecisionReason"]
+            return obj.get("systemMessage") or ""
+        return ""
+
+    lh = Fixture(tmp, "lh")
+    lh_regp = lh.root / ".aiqt" / "orchestration.local.json"
+    lh_base = json.loads(lh_regp.read_text(encoding="utf-8"))
+
+    def write(drop=(), **changes):
+        reg = dict(lh_base)
+        reg.update(changes)
+        for key in drop:
+            reg.pop(key, None)
+        lh_regp.write_text(json.dumps(reg), encoding="utf-8")
+        return reg
+
+    def scope_eval(reg, sid="s1"):
+        return _try(lambda: aiqt_hooks._orch_scope_eval(reg, str(lh.root), sid))
+
+    def scope_live(reg, sid="s1"):
+        return _try(lambda: aiqt_hooks._orch_scope_live(reg, str(lh.root), sid))
+
+    def stop(extra=None, reset=True):
+        if reset:
+            lh.set_turn_state({})
+        return _try(lambda: aiqt_hooks.orch_stop_guard(lh.payload("Stop", extra=extra)))
+
+    def idle(reset=True):
+        if reset:
+            lh.set_turn_state({})
+        return _try(lambda: aiqt_hooks.orch_teammate_idle(lh.payload("TeammateIdle")))
+
+    # (1) unreadable lease paths, an empty backlog: each HOLDS naming lease:path, never 'not live'
+    lh.set_items([])
+    nul = "lea\u0000se"
+    enotdir = str(lh.lease) + "/x"
+    lease_dir = str(lh.root / ".aiqt")
+    fifo = lh.root / "lease.fifo"
+    os.mkfifo(str(fifo))
+    surrogate = "lea\ud800se"
+    reg = write(lease={"path": nul, "max_age_hours": 24})
+    got = scope_eval(reg)
+    check("stop/lease-nul-path-unreadable-detail",
+          (got[0], "lea\\x00se" in str(got[1]), "ValueError" in str(got[1]),
+           str(got[1]) == aiqt_hooks._ORCH_SCOPE_CANNOT_DETAIL), ("unreadable", True, True, False))
+    res = stop()
+    check("stop/lease-nul-path-holds", (_v(res), "lease:path" in _msg(res)), ("block2", True))
+    check("stop/lease-nul-path-idle-holds", _v(idle()), "block2")
+    check("stop/lease-nul-path-loop-signal-releases", _v(stop(extra={"stop_hook_active": True})), "warn")
+    reg = write(lease={"path": enotdir, "max_age_hours": 24})
+    got = scope_eval(reg)
+    check("stop/lease-enotdir-unreadable-detail",
+          (got[0], "NotADirectoryError" in str(got[1]), "lease.txt/x" in str(got[1])),
+          ("unreadable", True, True))
+    res = stop()
+    check("stop/lease-enotdir-holds", (_v(res), "lease:path" in _msg(res)), ("block2", True))
+    reg = write(lease={"path": lease_dir, "max_age_hours": 24})
+    got = scope_eval(reg)
+    check("stop/lease-directory-unreadable-detail",
+          (got[0], "not a regular file" in str(got[1])), ("unreadable", True))
+    check("stop/lease-directory-holds", _v(stop()), "block2")
+    write(lease={"path": str(fifo), "max_age_hours": 24})
+    check("stop/lease-fifo-holds", _v(stop()), "block2")
+    reg = write(lease={"path": surrogate, "max_age_hours": 24})
+    got = scope_eval(reg)
+    check("stop/lease-surrogate-path-unreadable-detail",
+          (got[0], "UnicodeEncodeError" in str(got[1])), ("unreadable", True))
+    check("stop/lease-surrogate-path-holds", _v(stop()), "block2")
+    # holder mode: an unreadable lease names no one, so the holder question cannot be evaluated
+    write(lease={"path": enotdir, "max_age_hours": 24, "holder_is_session_id": True})
+    check("stop/lease-unreadable-holder-mode-holds", _v(stop()), "block2")
+    # holder mode, the lease stats but its open fails: a seam stands in for the open (a module-level
+    # open shadowing the builtin for the lease path alone), since a permission error is not producible
+    # for every uid
+    lh.lease.write_text("holder: s1\n", encoding="utf-8")
+    reg = write(lease={"path": str(lh.lease), "max_age_hours": 24, "holder_is_session_id": True})
+    check("stop/lease-holder-open-control-live", scope_live(reg), True)
+
+    def seam(exc_type):
+        def _open(path, *args, **kwargs):
+            if path == str(lh.lease):
+                raise exc_type(13 if exc_type is PermissionError else 2, "seam", path)
+            return builtins.open(path, *args, **kwargs)
+        return _open
+
+    aiqt_hooks.open = seam(PermissionError)
+    try:
+        got = scope_eval(reg)
+    finally:
+        del aiqt_hooks.open
+    check("stop/lease-holder-open-eacces-unreadable",
+          (got[0], "PermissionError" in str(got[1])), ("unreadable", True))
+    aiqt_hooks.open = seam(FileNotFoundError)
+    try:
+        got = scope_live(reg)
+    finally:
+        del aiqt_hooks.open
+    check("stop/lease-holder-open-vanished-not-live", got, False)
+    lh.lease.write_text("holder: selftest\n", encoding="utf-8")
+    # TWINS: a genuinely absent lease still reads not live (plain and holder mode), so an actionable
+    # backlog is out of scope and the stop allows
+    lh.set_items([item("A-1")])
+    absent = str(lh.root / "no-such-lease")
+    reg = write(lease={"path": absent, "max_age_hours": 24})
+    check("stop/lease-absent-reads-not-live", (scope_live(reg), _v(stop())), (False, "allow"))
+    reg = write(lease={"path": absent, "max_age_hours": 24, "holder_is_session_id": True})
+    check("stop/lease-absent-holder-mode-not-live", (scope_live(reg), _v(stop())), (False, "allow"))
+    lh.set_items([])
+    # an unreadable lease holds whatever the mode record says; an absent one defers to it
+    lh.mode.write_text("Operating-mode: unattended\n", encoding="utf-8")
+    check("stop/lease-unreadable-outranks-mode-record",
+          scope_live(write(lease={"path": nul, "max_age_hours": 24})), "unreadable")
+    check("stop/lease-absent-mode-record-live",
+          scope_live(write(lease={"path": absent, "max_age_hours": 24})), True)
+    # the other callers: the yield guard and the attended ask guard hold on lease:path; the dispatch
+    # ledger and the prompt stamp stay armed and name the unreadable lease (never the max_age detail)
+    lh.mode.write_text("", encoding="utf-8")
+    write(lease={"path": nul, "max_age_hours": 24})
+    lh.set_turn_state({})
+    res = _try(lambda: aiqt_hooks.orch_yield_tool(
+        lh.payload("PreToolUse", tool="ScheduleWakeup", tool_input={"reason": "park"})))
+    check("yield/lease-unreadable-denies", (_v(res), "lease:path" in _msg(res)), ("deny", True))
+    lh.mode.write_text("Operating-mode: attended-autonomous\n", encoding="utf-8")
+    lh.set_turn_state({})
+    res = _try(lambda: aiqt_hooks.orch_ask_guard(lh.payload(
+        "PreToolUse", "AskUserQuestion", {"questions": [{"question": "pick"}]},
+        extra={"tool_use_id": "tu-lh-1"})))
+    check("ask/lease-unreadable-attended-denies", (_v(res), "lease:path" in _msg(res)), ("deny", True))
+    lh.mode.write_text("", encoding="utf-8")
+    res = _try(lambda: aiqt_hooks.orch_dispatch_ledger(lh.payload(
+        "PostToolUse", tool="Bash", tool_input={"command": "true", "run_in_background": True},
+        extra={"tool_response": {"task_id": "T-lh"}})))
+    check("ledger/lease-unreadable-notes",
+          (_v(res), "cannot be read" in _msg(res), "recorded anyway" in _msg(res)), ("warn", True, True))
+    lh.set_turn_state({})
+    res = _try(lambda: aiqt_hooks.orch_prompt_stamp(lh.payload(
+        "UserPromptSubmit", extra={"prompt": "genuine lh"})))
+    check("stamp/lease-unreadable-genuine-notes",
+          (_v(res), "cannot be read" in _msg(res), "stamped anyway" in _msg(res)), ("warn", True, True))
+    lh.set_turn_state({"wake_digests": [hashlib.sha256("wake lh".encode("utf-8")).hexdigest()]})
+    res = _try(lambda: aiqt_hooks.orch_prompt_stamp(lh.payload(
+        "UserPromptSubmit", extra={"prompt": "wake lh"})))
+    check("stamp/lease-unreadable-timer-notes",
+          ("cannot be read" in _msg(res), "classified anyway" in _msg(res)), (True, True))
+    # TWIN: the 'cannot' (unusable horizon) note still carries its own max_age_hours detail
+    write(lease={"path": str(lh.lease), "max_age_hours": 0})
+    res = _try(lambda: aiqt_hooks.orch_dispatch_ledger(lh.payload(
+        "PostToolUse", tool="Bash", tool_input={"command": "true", "run_in_background": True},
+        extra={"tool_response": {"task_id": "T-lh2"}})))
+    check("ledger/lease-cannot-note-unchanged",
+          (_v(res), aiqt_hooks._ORCH_SCOPE_CANNOT_DETAIL in _msg(res)), ("warn", True))
+    write()
+
+    # (2) a registry state_dir realpath cannot resolve: the Stop family HOLDS (the loop signal releases)
+    lh.set_items([])
+    lh.set_turn_state({})
+    reg = write(state_dir=str(lh.root / "st\u0000ate"))
+    res = stop(reset=False)
+    check("stop/state-dir-nul-holds",
+          (_v(res), "state directory" in _msg(res), "st\\x00ate" in _msg(res)), ("block2", True, True))
+    check("stop/state-dir-nul-idle-holds", _v(idle(reset=False)), "block2")
+    check("stop/state-dir-nul-loop-signal-releases",
+          _v(stop(extra={"stop_hook_active": True}, reset=False)), "warn")
+    check("stop/state-dir-nul-escape-inactive",
+          _try(lambda: aiqt_hooks._orch_escape_active(reg, str(lh.root))), (False, None))
+    lh_home = tmp / "lh-home"
+    lh_home.mkdir()
+    child = subprocess.run(
+        [sys.executable, "-I", "-B", "-c", _CEILED_DISPATCH_CHILD,
+         os.path.dirname(os.path.abspath(aiqt_hooks.__file__)),
+         json.dumps(sorted(_registry_ceiling(lh.root, None).above)), "orch_stop_guard"],
+        input=json.dumps(lh.payload("Stop")), capture_output=True, text=True,
+        timeout=120, env=_controlled_child_env(lh_home))
+    check("stop/state-dir-nul-dispatcher-denies-stop", (child.returncode, child.stdout.strip()), (2, ""))
+    # the yield guard (no Stop-family hold) no longer raises: an actionable item still denies
+    lh.set_items([item("A-1")])
+    res = _try(lambda: aiqt_hooks.orch_yield_tool(
+        lh.payload("PreToolUse", tool="ScheduleWakeup", tool_input={"stop": True})))
+    check("yield/state-dir-nul-no-raise", _v(res), "deny")
+    lh.set_items([])
+    write(state_dir=str(lh.root / "st\ud800ate"))
+    res = stop(reset=False)
+    check("stop/state-dir-surrogate-holds",
+          (_v(res), "UnicodeEncodeError" in _msg(res)), ("block2", True))
+    # TWINS: a resolvable declared state_dir, and the XDG default, allow an empty backlog
+    write()
+    control = _v(stop())
+    write(drop=("state_dir",))
+    check("stop/state-dir-control-allows", (control, _v(stop())), ("allow", "allow"))
+    write()
+
+
 def main(report_path=None):
     if report_path is not None:
         # The execution report is finalized at interpreter exit, after this run's cleanup
@@ -13050,6 +13275,7 @@ def _main_isolated(report_path=None):
         aiqt_hooks._orch_dirfd_has_registry = _registry_ceiling(tmp, saved_probe)
         _record_surface_cases(tmp)
         _stop_unreadable_input_cases(tmp)
+        _stop_state_and_lease_hold_cases(tmp)
         # ---------- component 1: the stop guard ----------
         f = Fixture(tmp, "stop")
         stop = lambda: aiqt_hooks.orch_stop_guard(f.payload("Stop"))

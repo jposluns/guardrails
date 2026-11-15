@@ -22249,6 +22249,27 @@ def _state_dir_from_registry(root, reg_data):
     return os.path.join(base, "aiqt-guardrails", "orch", key)
 
 
+_ORCH_STATE_DIR_UNUSABLE_DETAIL = ("the orchestration state directory {state_dir} cannot be resolved "
+                                   "({reason}), so the turn state, the dispatch ledger and the denial counter "
+                                   "cannot be read or saved; correct state_dir in the registry (the "
+                                   "confinement's trust root)")
+
+
+def _orch_state_dir_problem(root, reg_data):
+    """None when the state directory resolved from the ALREADY-READ registry (see _state_dir_from_registry)
+    can be resolved by os.path.realpath, else the formatted _ORCH_STATE_DIR_UNUSABLE_DETAIL naming it: a NUL
+    character, or a character the filesystem encoding cannot encode, makes every state reader and writer
+    fail (or raise), so no counter can bound a deny and no state can be trusted."""
+    sd = _state_dir_from_registry(root, reg_data)
+    try:
+        os.path.realpath(sd)
+    except (OSError, ValueError) as exc:
+        return _ORCH_STATE_DIR_UNUSABLE_DETAIL.format(
+            state_dir=_orch_clip(repr(sd), _ORCH_NAMED_REASON_MAX),
+            reason=_orch_clip("{}: {}".format(type(exc).__name__, exc), _ORCH_NAMED_REASON_MAX))
+    return None
+
+
 def _orch_state_dir_for_root(root):
     """The machine-written state directory for a repo root: the registry's state_dir when declared, else
     ${XDG_STATE_HOME:-$HOME/.local/state}/aiqt-guardrails/orch/<repo-key>/. Reads the registry ONCE and
@@ -22695,20 +22716,48 @@ _ORCH_SCOPE_CANNOT_DETAIL = ("the declared lease max_age_hours horizon is not us
                              "scope cannot be evaluated; correct it in the registry (the "
                              "confinement's trust root)")
 
+# The 'unreadable' scope answer's detail: a declared lease path that exists but cannot be read (any failure
+# other than genuine absence). Formatted with the declared path (repr, so a NUL or a lone surrogate shows
+# escaped) and the reason; _orch_scope_eval returns it formatted.
+_ORCH_SCOPE_UNREADABLE_DETAIL = ("the declared lease {lease} cannot be read ({reason}), so lease scope "
+                                 "cannot be evaluated; repair the lease file or correct its path in the "
+                                 "registry (the confinement's trust root)")
+
+# The cannot-evaluate row id each truthy non-True scope answer is held under.
+_ORCH_SCOPE_HOLD_IDS = {"cannot": "lease:max_age_hours", "unreadable": "lease:path"}
+
+
+def _orch_scope_unreadable(path, reason):
+    """The 'unreadable' scope answer for the declared lease path: ('unreadable', its formatted detail)."""
+    return ("unreadable", _ORCH_SCOPE_UNREADABLE_DETAIL.format(
+        lease=_orch_clip(repr(path), _ORCH_NAMED_REASON_MAX), reason=_orch_clip(reason, _ORCH_NAMED_REASON_MAX)))
+
 
 def _orch_scope_live(reg, root, session_id=None):
-    """The D11 scope check: True when a declared orchestrator lease file is live (present, non-empty,
-    within max_age_hours when declared) OR a declared mode record carries a mode line; False when scope
-    is provably not live; the string 'cannot' when a DECLARED max_age_hours horizon is not usable (a
-    boolean, zero, negative, NaN, infinite or non-number) on a lease that would otherwise read live
-    and no mode record reads live, so liveness cannot be evaluated. 'cannot' is TRUTHY on purpose: a
-    caller that only truth-tests this answer stays armed (the fail-closed direction), and every caller
-    handles it explicitly (the stop family and the yield guard route it into their existing
-    cannot-evaluate deny path; the dispatch ledger and the prompt stamp stay armed and surface it;
-    none turns a lease-scoped guard off over it). When the lease declares holder_is_session_id AND the
-    caller's session_id is known, a LIVE lease must additionally NAME that session_id, so a co-located
-    NON-holder session (a bounded worker) does not inherit the global backlog; a session the
-    lease does not name is a NON-holder (False) even under an unusable horizon. Where the lease
+    """The D11 scope answer alone (see _orch_scope_eval, which also returns the detail of a held answer)."""
+    return _orch_scope_eval(reg, root, session_id)[0]
+
+
+def _orch_scope_eval(reg, root, session_id=None):
+    """The D11 scope check, as (scope, detail). scope is True when a declared orchestrator lease file is
+    live (present, non-empty, within max_age_hours when declared) OR a declared mode record carries a mode
+    line; False when scope is provably not live; the string 'cannot' when a DECLARED max_age_hours horizon
+    is not usable (a boolean, zero, negative, NaN, infinite or non-number) on a lease that would otherwise
+    read live and no mode record reads live, so liveness cannot be evaluated; the string 'unreadable' when
+    the declared lease path cannot be read for any reason other than genuine absence (a FileNotFoundError):
+    a NUL character or a character the filesystem encoding cannot encode in the path, a permission error,
+    any other OSError, or a path that is not a regular file (a directory, a FIFO or a device), whatever the
+    mode record says. A genuinely absent lease is not live (False in holder mode, else the mode record
+    decides). detail is _ORCH_SCOPE_CANNOT_DETAIL for 'cannot', the formatted _ORCH_SCOPE_UNREADABLE_DETAIL
+    (naming the lease and the reason) for 'unreadable', else None. 'cannot' and 'unreadable' are TRUTHY on
+    purpose: a caller that only truth-tests this answer stays armed (the fail-closed direction), and every
+    caller handles both explicitly (the stop family, the yield guard and the ask guard route them into
+    their existing cannot-evaluate deny path under the _ORCH_SCOPE_HOLD_IDS row id; the dispatch ledger and
+    the prompt stamp stay armed and surface the detail; none turns a lease-scoped guard off over them).
+    When the lease declares holder_is_session_id AND the caller's session_id is known, a LIVE lease must
+    additionally NAME that session_id, so a co-located NON-holder session (a bounded worker) does not
+    inherit the global backlog; a session the lease does not name is a NON-holder (False) even under an
+    unusable horizon, while a lease that cannot be read names no one and is 'unreadable'. Where the lease
     records no comparable session identity, scope is repo-coarse (a co-located session may inherit the
     backlog): a disclosed residual, not a strict boundary."""
     lease = reg.get("lease") if isinstance(reg.get("lease"), dict) else None
@@ -22718,6 +22767,22 @@ def _orch_scope_live(reg, root, session_id=None):
         if path:
             try:
                 st = os.stat(path)
+            except FileNotFoundError:
+                st = None  # genuinely absent: not live (holder mode), else the mode record decides below
+            except OSError as exc:
+                # present but unreadable (a permission error, a non-directory component, a loop): a
+                # cannot-evaluate, never 'lease not live'
+                return _orch_scope_unreadable(path, "{}: {}".format(type(exc).__name__,
+                                                                    exc.strerror or exc))
+            except ValueError as exc:
+                # a NUL character, or a character the filesystem encoding cannot encode, in the path
+                return _orch_scope_unreadable(path, "{}: {}".format(type(exc).__name__, exc))
+            if st is not None and not stat.S_ISREG(st.st_mode):
+                return _orch_scope_unreadable(path, "not a regular file")
+            if st is None:
+                if lease.get("holder_is_session_id"):
+                    return (False, None)  # holder mode: an absent lease -> caller cannot be confirmed holder
+            else:
                 fresh = True
                 max_age = lease.get("max_age_hours")
                 if max_age is not None:
@@ -22738,30 +22803,27 @@ def _orch_scope_live(reg, root, session_id=None):
                         # must be readable AND name that id as a whole token; anything else is a NON-holder
                         # (a co-located worker or an id-less session never inherits the global backlog).
                         if not (isinstance(session_id, str) and session_id):
-                            return False
+                            return (False, None)
                         try:
                             with open(path, "r", encoding="utf-8", errors="replace") as fh:
                                 held = fh.read()
-                        except OSError:
-                            return False
+                        except FileNotFoundError:
+                            return (False, None)  # removed since the stat: genuinely absent, not live
+                        except (OSError, ValueError) as exc:
+                            # present but unopenable (a permission error): it names no one, so the
+                            # holder question cannot be evaluated
+                            return _orch_scope_unreadable(path, "{}: {}".format(
+                                type(exc).__name__, getattr(exc, "strerror", None) or exc))
                         if not _orch_token_present(session_id, held):
-                            return False
+                            return (False, None)
                         if not cannot:
-                            return True
+                            return (True, None)
                     elif not cannot:
-                        return True
-            except OSError:
-                if lease.get("holder_is_session_id"):
-                    return False  # holder mode: an unreadable lease -> caller cannot be confirmed holder
-                # otherwise an absent/unreadable lease is not live; fall through to the mode check
-            except ValueError:
-                # a declared lease path holding a NUL character is an unreadable lease (read the way
-                # _orch_record_surface_read reads it), never an exception out of the Stop handler
-                if lease.get("holder_is_session_id"):
-                    return False
+                        return (True, None)
+                # otherwise an empty or stale lease is not live; fall through to the mode check
     if _orch_mode(reg, root) is not None:
-        return True  # a live mode record is an independent scope source; it outranks a lease 'cannot'
-    return "cannot" if cannot else False
+        return (True, None)  # a live mode record is an independent scope source; it outranks 'cannot'
+    return ("cannot", _ORCH_SCOPE_CANNOT_DETAIL) if cannot else (False, None)
 
 
 def _orch_escape_stat(path):
@@ -22804,8 +22866,13 @@ def _orch_escape_active(reg, root):
     CATEGORICAL residual (closed only by an operator-owned, assistant-non-writable state dir at the OS
     layer); component resolution is a best-effort lstat walk under the anchor rather than a fully
     race-free openat-under-anchor (a narrow TOCTOU window between the walk and the O_NOFOLLOW open); and
-    uid inequality proves not-self, never operator identity."""
-    anchor = os.path.realpath(_orch_state_dir_for_root(root))
+    uid inequality proves not-self, never operator identity. A state dir realpath cannot resolve (a NUL
+    character, or a character the filesystem encoding cannot encode) is no trusted anchor, so no sentinel
+    is active: (False, None), never an exception out of the guard."""
+    try:
+        anchor = os.path.realpath(_orch_state_dir_for_root(root))
+    except (OSError, ValueError):
+        return (False, None)
     declared = (reg.get("escape") or {}).get("path") if isinstance(reg.get("escape"), dict) else None
     if declared is not None and (not isinstance(declared, str) or not declared):
         return (False, None)
@@ -23706,16 +23773,27 @@ def _orch_stop_family(data, event_name, kind):
                           "({}); the {} fails open on its own read error and, because the registry is "
                           "unreadable, writes NO guard-event (no record).".format(reg,
                                                                                   event_name))
-    scope = _orch_scope_live(reg, root, data.get("session_id"))
+    scope, scope_detail = _orch_scope_eval(reg, root, data.get("session_id"))
     if not scope:
         return _allow()
+    sd_problem = _orch_state_dir_problem(root, reg)
+    if sd_problem is not None:
+        # a state directory that cannot be resolved: no turn state, ledger or denial counter can be read
+        # or saved, so this HOLDS (cannot-evaluate) with the stop-hook loop signal as the bound, never an
+        # exception out of the handler (which the dispatcher turns into an allowed stop)
+        reason = "{} (cannot-evaluate)".format(sd_problem)
+        if data.get("stop_hook_active") is True:
+            return _stop_warn("AIQT guardrail ({}): loop signal set; yielding with a finding: {}"
+                              .format(event_name, reason))
+        return (2, None, reason)
     ctx, ts, basis = _orch_build_ctx(reg, root, kind, data)
-    if scope == "cannot":
-        # D11 scope CANNOT be evaluated (a declared but unusable max_age_hours): routed into this
-        # guard's existing cannot-evaluate deny path (FIX 1: ignorance refuses the wind-down; the
-        # loop bound and the operator escape still release), never a silent guards-off _allow().
+    if scope in _ORCH_SCOPE_HOLD_IDS:
+        # D11 scope CANNOT be evaluated (a declared but unusable max_age_hours, or a declared lease that
+        # cannot be read): routed into this guard's existing cannot-evaluate deny path (FIX 1: ignorance
+        # refuses the wind-down; the loop bound and the operator escape still release), never a silent
+        # guards-off _allow().
         ctx["cannot_evaluate"] = list(ctx.get("cannot_evaluate", [])) + [
-            ("lease:max_age_hours", "cannot-evaluate", _ORCH_SCOPE_CANNOT_DETAIL)]
+            (_ORCH_SCOPE_HOLD_IDS[scope], "cannot-evaluate", scope_detail)]
     if undecodable:
         # an undecodable repository toplevel: routed into the same cannot-evaluate deny path (the loop
         # bound and the operator escape still release), never the out-of-scope allow a None root reads as
@@ -23818,7 +23896,7 @@ def orch_yield_tool(data):
             "work rather than parking or stopping the run.".format(reg),
             "AIQT guardrail: denied a scheduling call under an unreadable orchestration registry "
             "(ignorance refuses the wind-down); fix the registry or keep working.")
-    scope = _orch_scope_live(reg, root, data.get("session_id"))
+    scope, scope_detail = _orch_scope_eval(reg, root, data.get("session_id"))
     if not scope:
         return _allow()
     tool = data.get("tool_name")
@@ -23829,11 +23907,12 @@ def orch_yield_tool(data):
     kind = "stop" if tool_input.get("stop") is True else "schedule_idle"
     wake_text = " ".join(str(v) for v in tool_input.values() if isinstance(v, str))
     ctx, ts, basis = _orch_build_ctx(reg, root, kind, data, wake_text=wake_text)
-    if scope == "cannot":
-        # D11 scope cannot be evaluated: routed into this guard's existing cannot-evaluate deny
-        # path (the schedule cap and the operator escape still release), never a silent _allow().
+    if scope in _ORCH_SCOPE_HOLD_IDS:
+        # D11 scope cannot be evaluated ('cannot' or 'unreadable'): routed into this guard's existing
+        # cannot-evaluate deny path (the schedule cap and the operator escape still release), never a
+        # silent _allow().
         ctx["cannot_evaluate"] = list(ctx.get("cannot_evaluate", [])) + [
-            ("lease:max_age_hours", "cannot-evaluate", _ORCH_SCOPE_CANNOT_DETAIL)]
+            (_ORCH_SCOPE_HOLD_IDS[scope], "cannot-evaluate", scope_detail)]
     spoof_warn = (_orch_record_escape_spoof(root, ctx["escape_spoof"])
                   if ctx.get("escape_spoof") else "")
     # Measured quiet beats a claimed quiet duration (estsep: the two grades never blend silently).
@@ -24039,15 +24118,21 @@ def _orch_ask_attended(data, reg, root):
     not enumerable), so it denies as cannot-evaluate with a guard-events row exactly as in the yield
     guard, never a silent allow; the operator escape sentinel releases the deny exactly as in the yield
     guard; a deny whose counter cannot be saved stands and says so."""
-    scope = _orch_scope_live(reg, root, data.get("session_id"))
+    scope, scope_detail = _orch_scope_eval(reg, root, data.get("session_id"))
     if not scope:
         # the same scope gate as the yield guard: a non-holder session never inherits the backlog.
-        # In this attended branch the mode record reads live, so _orch_scope_live is never 'cannot'
-        # here: it is False only through the holder-scoped lease check.
+        # In this attended branch the mode record reads live, so the scope is never 'cannot' here: it
+        # is False only through the holder-scoped lease check, and 'unreadable' when the declared lease
+        # cannot be read (held below).
         return _allow()
     if "enumerator" not in reg:
         return _allow()  # no declared backlog enumerator: the attended backlog judgement is out of scope
     ctx, ts, basis = _orch_build_ctx(reg, root, "ask", data)
+    if scope in _ORCH_SCOPE_HOLD_IDS:
+        # a declared lease that cannot be read: routed into this guard's existing cannot-evaluate deny
+        # path (bounded by the ask cap; the operator escape still releases), never a silent _allow()
+        ctx["cannot_evaluate"] = list(ctx.get("cannot_evaluate", [])) + [
+            (_ORCH_SCOPE_HOLD_IDS[scope], "cannot-evaluate", scope_detail)]
     spoof_warn = (_orch_record_escape_spoof(root, ctx["escape_spoof"])
                   if ctx.get("escape_spoof") else "")
     verdict, reason, _disposition = decide_yield(ctx)
@@ -27181,7 +27266,7 @@ def orch_dispatch_ledger(data):
     status, reg = _orch_registry(root)
     if status != "ok":
         return _allow()
-    scope = _orch_scope_live(reg, root, data.get("session_id"))
+    scope, scope_detail = _orch_scope_eval(reg, root, data.get("session_id"))
     if not scope:
         return _allow()  # only the holder session writes the shared dispatch ledger
     tool = data.get("tool_name")
@@ -27228,11 +27313,11 @@ def orch_dispatch_ledger(data):
     if not _orch_append_jsonl(path, row):
         return _allow_note("AIQT guardrail: the dispatch-ledger write failed; "
                            "the launched work may be invisible to the stop guard.")
-    if scope == "cannot":
+    if scope in _ORCH_SCOPE_HOLD_IDS:
         # armed and surfaced, never a silent skip: the row above was recorded anyway, so launched
-        # work stays visible to the stop guard while the operator corrects the horizon
+        # work stays visible to the stop guard while the operator corrects the horizon or the lease
         return _allow_note("AIQT guardrail: {}; this dispatch row was recorded anyway (the "
-                           "ledger stays armed).".format(_ORCH_SCOPE_CANNOT_DETAIL))
+                           "ledger stays armed).".format(scope_detail))
     return _allow()
 
 
@@ -32677,7 +32762,7 @@ def orch_prompt_stamp(data):
     status, reg = _orch_registry(root)
     if status != "ok":
         return _allow()
-    scope = _orch_scope_live(reg, root, data.get("session_id"))
+    scope, scope_detail = _orch_scope_eval(reg, root, data.get("session_id"))
     if not scope:
         return _allow()  # only the holder session stamps/resets the shared turn-state
     prompt = data.get("prompt")
@@ -32699,10 +32784,10 @@ def orch_prompt_stamp(data):
         ts.pop("ask_basis", None)
         unsaved = _orch_save_turn_state(root, ts)
         if unsaved is None:
-            if scope == "cannot":
+            if scope in _ORCH_SCOPE_HOLD_IDS:
                 # armed and surfaced, never a silent skip: the stamp above was written anyway
                 return _allow_note("AIQT guardrail: {}; this prompt was stamped anyway (the "
-                                   "stamp stays armed).".format(_ORCH_SCOPE_CANNOT_DETAIL))
+                                   "stamp stays armed).".format(scope_detail))
             return _allow()
         # the stamp is this recorder's record; the prompt proceeds and the unwritten stamp is noted
         return _allow_note("AIQT guardrail: this prompt was read as genuine human input, but turn-state.json "
@@ -32728,10 +32813,10 @@ def orch_prompt_stamp(data):
                 "or as genuine human input; record it manually (nocncl).".format(unsaved))
         return _context_note("UserPromptSubmit", context + " Additionally, " + warn,
                              "AIQT guardrail: this prompt was read as timer-originated, but " + warn)
-    if scope == "cannot":
+    if scope in _ORCH_SCOPE_HOLD_IDS:
         return _context_note("UserPromptSubmit", context,
                              "AIQT guardrail: {}; this wake was classified anyway (the stamp "
-                             "stays armed).".format(_ORCH_SCOPE_CANNOT_DETAIL))
+                             "stays armed).".format(scope_detail))
     return (0, {"hookSpecificOutput": {
         "hookEventName": "UserPromptSubmit",
         "additionalContext": context}}, None)
