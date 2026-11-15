@@ -4,9 +4,9 @@ For each thing AIQT does, the claim and its limitation stand side by side, each 
 
 ## What exists today
 
-Claim: AIQT 1.0.5, the chat assistant, is released and downloadable today: a Skill for Claude, and a portable instruction file intended for any assistant that accepts standing instructions. The development assistant, version 1.2.0, is in development. Teams and Enterprise are ideas under consideration, with no dates and no commitments.
+Claim: AIQT 1.0.5, the chat assistant, is released and downloadable today: a Skill for Claude, and a portable instruction file intended for any assistant that accepts standing instructions. The development assistant, version 1.2.0, is in development. Teams and Enterprise are planned, with no dates yet.
 
-Limitation: No platform test result is published yet: the evidence page marks every platform pending, and ChatGPT, Gemini, and Copilot as not yet tested, so compatibility with a given assistant is intended, not verified. A 1.2.0 feature described on this site is a design, not a shipped product; it ships when it does what these pages say it does. Nothing labelled an idea is promised at all.
+Limitation: No platform test result is published yet: the evidence page marks every platform pending, and ChatGPT, Gemini, and Copilot as not yet tested, so compatibility with a given assistant is intended, not verified. A 1.2.0 feature described on this site is a design, not a shipped product; it ships when it does what these pages say it does. A planned Teams or Enterprise feature has no date yet and is not available today.
 
 Evidence: [The 1.0.5 release](https://aiqt.ai/evidence#release) [Where 1.2.0 stands](https://aiqt.ai/development#availability)
 

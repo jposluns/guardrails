@@ -6,11 +6,11 @@ title = "Teams & Enterprise"
 kind = "document"
 label = "For teams and organizations"
 heading = "One standard your whole team can work to."
-description = "AIQT gives a team one shared governance standard for AI-assisted work, designed to be portable across tools, that asks for claims traced to evidence and overrides logged. Management and monitoring, performance metrics, and guardrail bundles for teams are planned, not yet available."
+description = "AIQT gives a team one shared governance standard for AI-assisted work, designed to be portable across tools, that asks for claims traced to evidence and overrides logged. Management and monitoring, performance metrics, and guardrail bundles for teams are planned, with no dates yet, and not available today."
 
 [[body]]
 component = "lead"
-html = '''Ask two colleagues what their AI assistant means by "done" and you will get two answers. Today the quality of your team's AI-assisted work depends on who did it and which tool they used. AIQT offers a single governance standard intended to reach across Claude, ChatGPT, and Copilot, so a colleague on one assistant is meant to work to the same rules as a colleague on another. That cross-assistant reach is the intent, not a verified result yet: the evidence page marks every platform pending, with ChatGPT, Gemini, and Copilot not yet tested. Adoption today is human-led: each person adds AIQT to their own assistant, under a rollout your team runs. Team features, such as management and monitoring, performance metrics, and guardrail bundles, are planned and not yet available.'''
+html = '''Ask two colleagues what their AI assistant means by "done" and you will get two answers. Today the quality of your team's AI-assisted work depends on who did it and which tool they used. AIQT offers a single governance standard intended to reach across Claude, ChatGPT, and Copilot, so a colleague on one assistant is meant to work to the same rules as a colleague on another. That cross-assistant reach is the intent, not a verified result yet: the evidence page marks every platform pending, with ChatGPT, Gemini, and Copilot not yet tested. Adoption today is human-led: each person adds AIQT to their own assistant, under a rollout your team runs. Team features, such as management and monitoring, performance metrics, and guardrail bundles, are planned, with no dates yet, and not available today.'''
 
 [[body]]
 component = "prose"
@@ -57,7 +57,7 @@ heading = "Gaps turned into guardrails"
 
 [[body]]
 component = "prose"
-html = '''<p>When the assistant's own gap lets an issue through, Rule 5 asks it to propose a guardrail so the issue should not recur, and to draft it if you ask. That guardrail protects your own work first. Sending the lesson back to AIQT, so one team's lesson can become every team's guardrail, is part of the 1.2.0 design: an opt-in step, Rule 5's voluntary Guardrail-Seed give-back, separate from the software licence.</p>'''
+html = '''<p>When the assistant's own gap lets an issue through, Rule 5 asks it to propose a guardrail so the issue should not recur, and to draft it if you ask. Sending the lesson back to AIQT, so one team's lesson can become every team's guardrail, is part of the 1.2.0 design: an opt-in step, Rule 5's voluntary Guardrail-Seed give-back, separate from the software licence.</p>'''
 
 [[body]]
 component = "prose"
@@ -72,7 +72,7 @@ rail = "Not available today"
 
 [[body]]
 component = "prose"
-html = '''<p>Said plainly, so you can plan around it.</p><ul><li>Central deployment of the Skill to a team.</li><li>Technical enforcement of the standard: it is a behavioural standard the assistant follows, not a control that blocks a model.</li><li>A shared or aggregate record across people.</li><li>Admin controls, policy management, and cross-team reporting.</li><li>Commercial support and service levels.</li></ul><p>Three of these lead to the <a href="#planned">planned features</a> below: central deployment, admin controls, and policy management to guardrail bundles that the team or enterprise rolls out; the shared record and cross-team reporting to management and monitoring, and to performance metrics. The other two, technical enforcement and commercial support, are not among the planned features.</p>'''
+html = '''<p>Said plainly, so you can plan around it.</p><ul><li>Central deployment of the Skill to a team.</li><li>Technical enforcement of the standard: it is a behavioural standard the assistant follows, not a control that blocks a model.</li><li>A shared or aggregate record across people.</li><li>Admin controls, policy management, and cross-team reporting.</li><li>Commercial support and service levels.</li></ul><p>For what is planned, see the <a href="#planned">planned features</a> below: management and monitoring, performance metrics, and guardrail bundles. They have no dates yet.</p>'''
 
 [[body]]
 component = "section"
@@ -108,7 +108,7 @@ rail = "Planned"
 
 [[body]]
 component = "prose"
-html = '''<p>Everything in this section is planned. None of it ships today; AIQT today is the standard, the skill, and the pack you add to each project yourself. The <a href="$BASE/future/">future plans page</a> lists the same plans.</p>'''
+html = '''<p>Everything in this section is planned, with no dates yet. None of it ships today. What you can use today is the 1.0.5 chat assistant, which each person adds to their own assistant, and the pack, which is open to read in full on GitHub. The <a href="$BASE/future/">future plans page</a> lists the same plans.</p><p>We share these plans so you can tell us whether they would help your organization. <a href="https://github.com/jposluns/guardrails/discussions" target="_blank" rel="noopener noreferrer">Open a GitHub discussion<span class="vh"> (opens in a new tab)</span></a> to send your comments.</p>'''
 
 [[body]]
 component = "clauses"
