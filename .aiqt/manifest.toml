@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.0.5"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "c684f18d64ab0090ad59db2c7414d0204b88c510b47bd8f3590af5d8bcec7e91"
+tree-sha256 = "d3dbfbb10853db8dda94399d951021314da82c2d85ff892a351c5d479713c804"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -72,8 +72,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 597007
-sha256 = "4c01134d847e5e8e732edc391c3486dcfa545f4e798f1615811370abb93efaa2"
+bytes = 597396
+sha256 = "e7f62d8b9fd1256561b1c6f7e1b04d01fd051d26dd452ff11236fac22e67c3c6"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -82,8 +82,8 @@ sha256 = "d6e9ab43b1c98a9b5cf7023b7b43cfd447607673e6128bfd06c4812551d32c7e"
 
 [[sources]]
 path = ".aiqt/core/hooks/manifest.toml"
-bytes = 504498
-sha256 = "03a133a267e4878ed245a6150faaf373d3ca2200342dc7aae28f871e2ef23863"
+bytes = 506950
+sha256 = "537b301b5fa2b1c5ab5ee9ea0c82e8d7b44ce2b30aa2d721a102799d0ea6193c"
 
 [[sources]]
 path = ".aiqt/core/hooks/preview.toml"
@@ -92,8 +92,8 @@ sha256 = "e7343b8986439298eb8631c2130956133543422c3a476c6774268fabbcde48c4"
 
 [[sources]]
 path = ".aiqt/core/hooks/scripts/aiqt_hooks.py"
-bytes = 2525997
-sha256 = "c03c88544f5b1675467e422c7ac201e81d04367a85f72f5d50075dff75c170f7"
+bytes = 2532051
+sha256 = "5a9043ea0f0b49abea668c51f306242cd735fecc8616f6e48f3c72aa399b6bdb"
 
 [[sources]]
 path = ".aiqt/core/id-history.toml"
@@ -122,8 +122,8 @@ sha256 = "f1625261cc219e8a08ac893874d74d2f1e435683d9e552d877fefcdde6880f9d"
 
 [[sources]]
 path = ".aiqt/core/ownership.toml"
-bytes = 27038
-sha256 = "40a6b793803406e3c0baad2634463e5793119af9dc60a7728b9f738887f76f66"
+bytes = 27113
+sha256 = "a686289a76be89145cfd71e28570556371f4381ff2ee3b51e7db4d53a8f96ccc"
 
 [[sources]]
 path = ".aiqt/core/profiles/worker-pack.md"
@@ -827,8 +827,8 @@ sha256 = "622683b912a6c2720502d096f737f59326fa2b6319776dfdaf029cdd2243d1b7"
 
 [[sources]]
 path = ".aiqt/enforceability.json"
-bytes = 1154283
-sha256 = "dbcde9455beb2728e0e5974924aeeec9ab59b7115870c06bb9fd58d2327f7713"
+bytes = 1157415
+sha256 = "ae95b48b46738b11c35828745420fa320990590638cc1abfc6df7a3c2d5d1ff8"
 
 [[sources]]
 path = ".aiqt/frozen.json"
@@ -837,8 +837,8 @@ sha256 = "0bef727083ae24ef1aea29a2e2b1a3593deaaf0238ec5785e01112f50112e104"
 
 [[sources]]
 path = ".aiqt/gensrc.json"
-bytes = 14513
-sha256 = "308f9285337e54eb891ce82f77e373d6430a1891965cf2db7cc6ed7ce72bb827"
+bytes = 14742
+sha256 = "01fbaafabf788759715426672e0281c086fa194bd362d7279a3d04ad778f1b88"
 
 [[sources]]
 path = ".aiqt/record-sections.toml.example"
@@ -2307,8 +2307,8 @@ sha256 = "9e0e365fb1e2813246c724267ec062310de3be1c5ca4ad9cba37fa0ce5691af4"
 
 [[sources]]
 path = ".gitattributes"
-bytes = 53975
-sha256 = "2d16ca810fc72d77ef3c01857296f8a9382e9d5e50f064b000ad55f3af6f988a"
+bytes = 54047
+sha256 = "8051c4ad954331fe592a72aa7b2ea2b8375135af98cb3dd2b237a801766d8a18"
 
 [[sources]]
 path = ".github/copilot-instructions.md"
@@ -2387,13 +2387,13 @@ sha256 = "3c4465308e9d29a365f3dd9c9b758ba555208e7794c1f949002be6c4c500c2c3"
 
 [[sources]]
 path = "DISCLOSURE.md"
-bytes = 10285
-sha256 = "e45c5ef5787f212ec1458a9b4e2f60b413f7ebfc90d2eb41abdb8f70e3a4d02f"
+bytes = 10289
+sha256 = "b845e896ec04415f73c65ed5c52ccd0e03db62bc889f8d9a1e5cc72c196117c4"
 
 [[sources]]
 path = "ENFORCEMENT.md"
-bytes = 669919
-sha256 = "7d159b8bcba35ba1d2141a401a9369f64903662a93d7567f2325bd9e2482db67"
+bytes = 672371
+sha256 = "0b6e9cffcd7924d78e2592a45fb12078198a6a6b08c419903d21c371cf2bb359"
 
 [[sources]]
 path = "GEMINI.md"
@@ -2427,8 +2427,8 @@ sha256 = "919da84c70d891eaf8d58a6f16edded70042eb6f30b98cf6ec480a198a6f4be8"
 
 [[sources]]
 path = "ROADMAP.md"
-bytes = 1482
-sha256 = "a9aada4332df947ddec03812bd98bb6cd16ac2ff20754471dff2e2cbc9509d66"
+bytes = 1394
+sha256 = "ad5d6c77c9873c4a76d3059dab34d6bd3731c32dabef160ac3fe959530fb5e1e"
 
 [[sources]]
 path = "SCOPE.md"
@@ -2462,8 +2462,8 @@ sha256 = "dbed3e0c4a29c0ffd01a4e26ca59964a3ef7e2277fc3dcdc2eed7076272461c1"
 
 [[sources]]
 path = "disclosure.toml"
-bytes = 14608
-sha256 = "6c3b8da061855272841d0485354f34dd5e31a31df5511a520f4e3764615da060"
+bytes = 14612
+sha256 = "f0322eefafe4a5441107ee2a046ab24bfc06c9d08538f70cbfd3a362097d2886"
 
 [[sources]]
 path = "docs/_shell.html"
@@ -3527,13 +3527,13 @@ sha256 = "9097238d890a3a42897b598a1fa1a904cef5f4666b1a9b1a279d9f6748e8b9ca"
 
 [[sources]]
 path = "plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py"
-bytes = 2525997
-sha256 = "c03c88544f5b1675467e422c7ac201e81d04367a85f72f5d50075dff75c170f7"
+bytes = 2532051
+sha256 = "5a9043ea0f0b49abea668c51f306242cd735fecc8616f6e48f3c72aa399b6bdb"
 
 [[sources]]
 path = "roadmap.toml"
-bytes = 1738
-sha256 = "e9868ce31f298fb48e3442170b422bcb7c22282064cbe493e6b2adb1b0fdeca4"
+bytes = 1653
+sha256 = "eed28e3d08b59144830726add09d7e4c0ac93664aacea57ad1a47d32e1cb30cd"
 
 [[sources]]
 path = "site/.well-known/security.txt"
@@ -3572,8 +3572,8 @@ sha256 = "6df792db60701c4be48e47e317e567fa4bf00b8408f8679b9536591f41816f30"
 
 [[sources]]
 path = "site/disclosure/index.html"
-bytes = 19975
-sha256 = "1ed376ee697b4f46b891cb86ba66a2a6d5c5e28bcb9f5b043621a0918ae4bfac"
+bytes = 19979
+sha256 = "db605381bc3fbe1f368ae99d52d9a07ba48b8ffcd8022dea48e865001d8f4d0e"
 
 [[sources]]
 path = "site/downloads/aiqt-instructions-1_5k.txt"
@@ -3637,8 +3637,8 @@ sha256 = "856bc0a179a007b2e133273b49451104157c187351acae1edb5b68c35a9e97cf"
 
 [[sources]]
 path = "site/draft-src/disclosure.toml"
-bytes = 13253
-sha256 = "0fd3615494800ff121dece32f53f7898ced52788ea15558c41c24aa3c5d2183f"
+bytes = 13257
+sha256 = "99d3f56f4c9923808e1d168ba1ae0d2d69edfd0b7dd494c9618e18eff7d28e6c"
 
 [[sources]]
 path = "site/draft-src/draft.toml"
@@ -3647,8 +3647,8 @@ sha256 = "dba04f24a104f0f7761ebaf4ee2cd49b60fbe829e7f517b69bf7d4283c287c53"
 
 [[sources]]
 path = "site/draft-src/future.toml"
-bytes = 1404
-sha256 = "f888bc67448bd472ad96cd81b0839e8869cd2c475fde106978c26cd0958609f8"
+bytes = 1555
+sha256 = "ec5bb2681538551da22188c893ead2eb063300b617e8c911d4f38b0bc1cb258d"
 
 [[sources]]
 path = "site/draft-src/home.toml"
@@ -3684,6 +3684,11 @@ sha256 = "2d42d232d872eda17463889371672aeed1f1a92dcd155ff4c51b1716989b5ffe"
 path = "site/draft-src/standard.toml"
 bytes = 12645
 sha256 = "d08ba7eec579f657aad35de096f3d4129206754cc0e5c3a8a2a65179e8bb4a95"
+
+[[sources]]
+path = "site/draft-src/teams.toml"
+bytes = 10145
+sha256 = "4bd589e47e80ad29cddc6918f0e3b33980e89235b33538c454b09ead65a90995"
 
 [[sources]]
 path = "site/draft/assets/baseline/LICENSE"
@@ -3972,8 +3977,8 @@ sha256 = "dd0e5f2a6402329e70ad8e81e5cd63557683e24044cd3eb16686a60eaf81cae6"
 
 [[sources]]
 path = "site/enforcement.html"
-bytes = 731498
-sha256 = "deaf3a29aeff8b76d9966e7e6d4a8a50399a4461a3f00c297628e32d8c12a248"
+bytes = 733950
+sha256 = "c3bb0ee8f6d9bf0acb6db6435e5816aa74d5335817b9e508b045443631cafb1f"
 
 [[sources]]
 path = "site/evidence.html"
@@ -3987,8 +3992,8 @@ sha256 = "b58efc0e9a4fbdcfc05d18178292d32f047be4aa8bed31648fa7684c06d9dd60"
 
 [[sources]]
 path = "site/future/index.html"
-bytes = 7803
-sha256 = "996d0626d21f6c6181c7503840e84cbfbf996d6bf5eff133d423fb340e387cab"
+bytes = 8004
+sha256 = "ea56470e1ac5535988a19bfe79e26b548ce7933586e1653dba15ab2c1abe0249"
 
 [[sources]]
 path = "site/index.html"
@@ -4032,8 +4037,8 @@ sha256 = "6696c185e28c0bdbb3628ef259291cbecc81553f7074539a919f2a7eba3bbc5d"
 
 [[sources]]
 path = "site/sitemap.xml"
-bytes = 1305
-sha256 = "e84990647039661ef0f3ef9d81ef0be0ed9c2a9a66d4899c64a2b3a1644be696"
+bytes = 1394
+sha256 = "ac9de65a36e827611bdce499dd9dc66e91eaf4420ba24806773238ce076425a6"
 
 [[sources]]
 path = "site/standard/index.html"
@@ -4044,6 +4049,11 @@ sha256 = "d98a56242929d003336dbc1b5065f90af431163e555649358e325af7ad5d522f"
 path = "site/styles.css"
 bytes = 39818
 sha256 = "3a7c8983ab9fca0e04dc69f88afef82b0ff9e533dc150c86f250aae2c3a4d3d3"
+
+[[sources]]
+path = "site/teams/index.html"
+bytes = 15628
+sha256 = "bfb42f503123fb821c385633101b82d122045d1dd839df77b1a41f974089edfb"
 
 [[sources]]
 path = "site/tech-details.html"
@@ -4297,8 +4307,8 @@ sha256 = "a9b028a2452a04f3a087bd505a3b459ef972b15734015d3c4e2172e38120d7d9"
 
 [[sources]]
 path = "tools/check_no_dashes.py"
-bytes = 40395
-sha256 = "70cfd07cbabd684ff0a8f009d81ba5582bcb2643f84fe1e8b6c739d455118e78"
+bytes = 45275
+sha256 = "add648811244dde1a1b1805e3cc9888b0494f037d862288f867b2ad8280a2f90"
 
 [[sources]]
 path = "tools/check_opf_declaration.py"
@@ -4322,8 +4332,8 @@ sha256 = "b1680dac0bca7cdd6be05e454bbcc7b034f7d66859119863e2df1caee2c06694"
 
 [[sources]]
 path = "tools/check_overclaim.py"
-bytes = 283851
-sha256 = "e457899ed908ef5c66d6cad6fe6a2d05596d99748037faaeb31bb0dfaad64dce"
+bytes = 283875
+sha256 = "3aba6654e5757854a967398ac9e512d9b614b6b6c2012fba0d76eae55685ebff"
 
 [[sources]]
 path = "tools/check_portability.py"
@@ -4517,8 +4527,8 @@ sha256 = "e732c5633f7a18889d9f71af931cd2eb0131c2b51e53e81087316d976923752c"
 
 [[sources]]
 path = "tools/gen_draft_site.py"
-bytes = 199726
-sha256 = "d8985399f6794e45273460465ea820c19c7ee207634d534ff6a3de79f41c125f"
+bytes = 199913
+sha256 = "1f22633a24506ab829091a4fbea4083d02a78b8b008fd0ec039f3a910da8470b"
 
 [[sources]]
 path = "tools/gen_enforceability.py"
@@ -4682,13 +4692,13 @@ sha256 = "59f6155486925ab9adea0da0203964283937c0dc7543bcfba335d4ac0820279e"
 
 [[sources]]
 path = "tools/selftest_aiqt_hooks.py"
-bytes = 2372898
-sha256 = "b95cec49c089142195c60b3b65b9d80e674d8d7142b5acfc39c3895d49aa93b8"
+bytes = 2385587
+sha256 = "85af66ecb238a3221b6e0b5834dbbc891a37487b1fa6a8d113e8ee6ce0f23a0d"
 
 [[sources]]
 path = "tools/selftest_checks.toml"
-bytes = 241105
-sha256 = "f8d7b00f9e626ef8ad4fe008d466aa30935024667220c927688bc21d0798d50c"
+bytes = 241700
+sha256 = "6e0aa9deace06ef1f50b80368e82d0e3befa19f2dd0217175b475e3c93540ac8"
 
 [[sources]]
 path = "tools/selftest_ci_status.py"
@@ -4727,8 +4737,8 @@ sha256 = "5db515bd671b5573e258cb3548903af302b6ac98b00f7a5ef1287cfbadf88304"
 
 [[sources]]
 path = "tools/selftest_orch_hooks.py"
-bytes = 1214645
-sha256 = "5ce7dbe5f1755be7b2a86be5769780002ddf287a1353084eb516214e485a700a"
+bytes = 1224330
+sha256 = "0aaf687ec6a115b6e0872f7e99f9cbe6330332bec513c81421f250a585b243f6"
 
 [[sources]]
 path = "tools/sized-instructions-source.sha256"

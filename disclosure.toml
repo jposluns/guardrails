@@ -23,8 +23,8 @@ site_base = "https://aiqt.ai"
 [[row]]
 id = "what-exists"
 topic = "What exists today"
-claim = "The AIQT chat assistant is released and downloadable today: a Skill for Claude, and a portable instruction file intended for any assistant that accepts standing instructions. The development assistant, version 1.2.0, is in development. Teams and Enterprise are ideas under consideration, with no dates and no commitments."
-limitation = "No platform test result is published yet: the evidence page marks every platform pending, and ChatGPT, Gemini, and Copilot as not yet tested, so compatibility with a given assistant is intended, not verified. A 1.2.0 feature described on this site is a design, not a shipped product; it ships when it does what these pages say it does. Nothing labelled an idea is promised at all."
+claim = "The AIQT chat assistant is released and downloadable today: a Skill for Claude, and a portable instruction file intended for any assistant that accepts standing instructions. The development assistant, version 1.2.0, is in development. Teams and Enterprise are planned, with no dates yet."
+limitation = "No platform test result is published yet: the evidence page marks every platform pending, and ChatGPT, Gemini, and Copilot as not yet tested, so compatibility with a given assistant is intended, not verified. A 1.2.0 feature described on this site is a design, not a shipped product; it ships when it does what these pages say it does. A planned Teams or Enterprise feature has no date yet and is not available today."
 evidence = [
   { text = "The release", href = "/evidence#release" },
   { text = "Where 1.2.0 stands", href = "/development#availability" },
