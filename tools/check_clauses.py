@@ -269,8 +269,9 @@ LEGS (all run at the default step-1 invocation; none needs a manifest):
                         thematic break or setext underline (three or more of '-' '*' '_' '=' with optional
                         whitespace, or a run of only '=' or only '-'); and a line that opens with whitespace
                         (an indented line). On a PARAGRAPH'S FIRST LINE (a line directly after the
-                        `## Detail` split line included, since that ATX heading closes its block, blank
-                        line or not) also: an ordered item of any number
+                        `## Detail` split line, with no blank line between, is one, since that ATX heading
+                        closes its block, as a line after a blank line already is) also: an ordered item of
+                        any number
                         (one to nine decimal digits, any the vendored parser's \\d admits, so an Arabic-Indic
                         '\u0661.' too); a line that opens with '<' and then a letter or '/', and ends with
                         '>' before any trailing whitespace, which holds every HTML block of kind 7 (one
@@ -1375,8 +1376,8 @@ def rule_units(source, where):
                                 "reference ending in ';', {!r}: a match of the renderer's own pattern that "
                                 "html.unescape changes, which the vendored renderer decodes when it sees the "
                                 "reference whole in plain text, not split by inline markup or inside a code span); cannot evaluate".format(where, number, line, _decoded_reference(line)))
-            # the split line is an ATX heading, which closes its block, so the line directly after it opens a
-            # paragraph (as the vendored renderer reads it) and gets the first-line checks, blank line or not
+            # the split line is an ATX heading, which closes its block, so the line directly after it starts a
+            # new block (as the vendored renderer reads it) and gets the first-line checks, blank line or not
             first, para_start = False, split is not None and split[0] == offset
         else:
             after_title, para_start = False, True
@@ -2255,6 +2256,9 @@ def self_test_main(_mkdtemp=None, _vectors=True):  # noqa: C901  a flat sequence
                                 "reason: {}".format(line, exc))
     for tail, want in (("\nSee the start of the PR\n2. Beta holds.\n", ["See the start of the PR\n2.", "Beta holds."]),
                        ("\nSee the start of the PR\n[x] Beta holds.\n", ["See the start of the PR\n[x] Beta holds."]),
+                       ("\nSee the start of the PR\n[ ] Beta holds.\n", ["See the start of the PR\n[ ] Beta holds."]),
+                       ("\nSee the start of the PR\n[foo]: /url\n", ["See the start of the PR\n[foo]: /url"]),
+                       ("\nSee the start of the PR\n<path>\n", ["See the start of the PR\n<path>"]),
                        ("Beta holds.\n", ["Beta holds."])):
         try:
             _at, probe_units = rule_units(split_head + tail, "probe")
