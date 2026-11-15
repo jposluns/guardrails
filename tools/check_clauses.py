@@ -3834,7 +3834,7 @@ def self_test_main(_mkdtemp=None, _vectors=True):  # noqa: C901  a flat sequence
           "stay prose; an inline '<!' or '<?' is refused; a line the vendored GFM table reads as a delimiter "
           "row ('--x|--y') is refused; an ordered item in non-ASCII decimal digits is refused as a paragraph's "
           "first line; and each whitespace-widened block start has a no-break-space or vertical-tab vector "
-          "the classifier itself refuses; and the round-5 reproductions hold: a backslash at a line end (a hard "
+          "the classifier itself refuses; and the earlier reproductions hold: a backslash at a line end (a hard "
           "line break to the vendored renderer) and a character reference ending in ';' that it decodes "
           "('&#32;', '&#10;', '&nbsp;', '&amp;', '&copy;', '&region=eu;', '&#507;') are a cannot-evaluate on a "
           "first or a wrapped line, '&#32;' and '&amp;' also when exempted, while plain whitespace, a mid-line backslash, an '&' that "
