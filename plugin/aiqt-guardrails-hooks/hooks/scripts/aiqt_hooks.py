@@ -22746,10 +22746,13 @@ def _orch_scope_eval(reg, root, session_id=None):
     read live and no mode record reads live, so liveness cannot be evaluated; the string 'unreadable' when
     the declared lease path cannot be read for any reason other than genuine absence (a FileNotFoundError):
     a NUL character or a character the filesystem encoding cannot encode in the path, a permission error,
-    any other OSError, or a path that is not a regular file (a directory, a FIFO or a device), whatever the
-    mode record says. A genuinely absent lease is not live (False in holder mode, else the mode record
-    decides). detail is _ORCH_SCOPE_CANNOT_DETAIL for 'cannot', the formatted _ORCH_SCOPE_UNREADABLE_DETAIL
-    (naming the lease and the reason) for 'unreadable', else None. 'cannot' and 'unreadable' are TRUTHY on
+    any other OSError, or a path that is not a regular file (a directory, a FIFO or a device), and no mode
+    record reads live. 'unreadable' follows the precedence 'cannot' uses (orchestrator decision of
+    2026-11-15T19:09Z): a live mode record is an independent scope source and outranks both, and it holds
+    only where 'cannot' would hold, so in holder mode a caller with no session id is a NON-holder (False)
+    whether or not the lease can be read. A genuinely absent lease is not live (False in holder mode, else
+    the mode record decides). detail is _ORCH_SCOPE_CANNOT_DETAIL for 'cannot', the formatted
+    _ORCH_SCOPE_UNREADABLE_DETAIL (naming the lease and the reason) for 'unreadable', else None. 'cannot' and 'unreadable' are TRUTHY on
     purpose: a caller that only truth-tests this answer stays armed (the fail-closed direction), and every
     caller handles both explicitly (the stop family, the yield guard and the ask guard route them into
     their existing cannot-evaluate deny path under the _ORCH_SCOPE_HOLD_IDS row id; the dispatch ledger and
@@ -22757,11 +22760,13 @@ def _orch_scope_eval(reg, root, session_id=None):
     When the lease declares holder_is_session_id AND the caller's session_id is known, a LIVE lease must
     additionally NAME that session_id, so a co-located NON-holder session (a bounded worker) does not
     inherit the global backlog; a session the lease does not name is a NON-holder (False) even under an
-    unusable horizon, while a lease that cannot be read names no one and is 'unreadable'. Where the lease
+    unusable horizon, while a lease that cannot be read names no one, so for a caller that carries a
+    session id it is 'unreadable' unless a mode record reads live. Where the lease
     records no comparable session identity, scope is repo-coarse (a co-located session may inherit the
     backlog): a disclosed residual, not a strict boundary."""
     lease = reg.get("lease") if isinstance(reg.get("lease"), dict) else None
     cannot = False
+    unreadable = None  # the deferred 'unreadable' answer: a live mode record outranks it, as it does 'cannot'
     if lease:
         path = _orch_path(root, lease.get("path"))
         if path:
@@ -22772,14 +22777,23 @@ def _orch_scope_eval(reg, root, session_id=None):
             except OSError as exc:
                 # present but unreadable (a permission error, a non-directory component, a loop): a
                 # cannot-evaluate, never 'lease not live'
-                return _orch_scope_unreadable(path, "{}: {}".format(type(exc).__name__,
-                                                                    exc.strerror or exc))
+                st = None
+                unreadable = _orch_scope_unreadable(path, "{}: {}".format(type(exc).__name__,
+                                                                          exc.strerror or exc))
             except ValueError as exc:
                 # a NUL character, or a character the filesystem encoding cannot encode, in the path
-                return _orch_scope_unreadable(path, "{}: {}".format(type(exc).__name__, exc))
+                st = None
+                unreadable = _orch_scope_unreadable(path, "{}: {}".format(type(exc).__name__, exc))
             if st is not None and not stat.S_ISREG(st.st_mode):
-                return _orch_scope_unreadable(path, "not a regular file")
-            if st is None:
+                st = None
+                unreadable = _orch_scope_unreadable(path, "not a regular file")
+            if unreadable is not None:
+                if lease.get("holder_is_session_id") and not (isinstance(session_id, str) and session_id):
+                    # holder mode, a caller with no session id: a NON-holder whatever the lease holds,
+                    # exactly as under 'cannot', so reading the lease could not change the answer
+                    return (False, None)
+                # otherwise the mode record decides below, as it does for 'cannot'
+            elif st is None:
                 if lease.get("holder_is_session_id"):
                     return (False, None)  # holder mode: an absent lease -> caller cannot be confirmed holder
             else:
@@ -22804,6 +22818,7 @@ def _orch_scope_eval(reg, root, session_id=None):
                         # (a co-located worker or an id-less session never inherits the global backlog).
                         if not (isinstance(session_id, str) and session_id):
                             return (False, None)
+                        held = None
                         try:
                             with open(path, "r", encoding="utf-8", errors="replace") as fh:
                                 held = fh.read()
@@ -22811,18 +22826,22 @@ def _orch_scope_eval(reg, root, session_id=None):
                             return (False, None)  # removed since the stat: genuinely absent, not live
                         except (OSError, ValueError) as exc:
                             # present but unopenable (a permission error): it names no one, so the
-                            # holder question cannot be evaluated
-                            return _orch_scope_unreadable(path, "{}: {}".format(
+                            # holder question cannot be evaluated; the mode record decides below
+                            unreadable = _orch_scope_unreadable(path, "{}: {}".format(
                                 type(exc).__name__, getattr(exc, "strerror", None) or exc))
-                        if not _orch_token_present(session_id, held):
-                            return (False, None)
-                        if not cannot:
-                            return (True, None)
+                        if held is not None:
+                            if not _orch_token_present(session_id, held):
+                                return (False, None)
+                            if not cannot:
+                                return (True, None)
                     elif not cannot:
                         return (True, None)
                 # otherwise an empty or stale lease is not live; fall through to the mode check
     if _orch_mode(reg, root) is not None:
-        return (True, None)  # a live mode record is an independent scope source; it outranks 'cannot'
+        # a live mode record is an independent scope source; it outranks 'cannot' and 'unreadable'
+        return (True, None)
+    if unreadable is not None:
+        return unreadable
     return ("cannot", _ORCH_SCOPE_CANNOT_DETAIL) if cannot else (False, None)
 
 
@@ -24080,12 +24099,14 @@ def _orch_ask_attended(data, reg, root):
     the live scope (a bounded co-located worker a holder-scoped lease does not name) does not
     inherit the global backlog, so the judgement allows there. Under a holder-scoped lease
     (holder_is_session_id) the judgement is off for EVERY session, the orchestrator included, where no
-    holder can be confirmed: a lease file that cannot be stat'ed, and, for a NON-EMPTY lease the
-    session-id and holder-token checks run on (one the age classifier reads as fresh or cannot-evaluate
-    under a declared max_age_hours, or, with no horizon declared, every non-empty lease whatever its
-    mtime), a lease that cannot be read, a call that carries no session id, or a lease that names no
-    session. Every other lease shape skips the holder check and falls through to the live-mode scope
-    source: an empty lease, a lease that declares no path (an absent, empty or non-string path), a
+    holder can be confirmed: a lease file that is genuinely absent, a lease that cannot be read by a
+    call that carries no session id, and, for a NON-EMPTY lease the session-id and holder-token checks
+    run on (one the age classifier reads as fresh or cannot-evaluate under a declared max_age_hours, or,
+    with no horizon declared, every non-empty lease whatever its mtime), a call that carries no session
+    id or a lease that names no session. A lease that cannot be read (stat'ed or opened) by a call that
+    carries a session id is 'unreadable', which the live mode record of this branch outranks, so the
+    judgement stays on there. Every other lease shape skips the holder check and falls through to the
+    live-mode scope source: an empty lease, a lease that declares no path (an absent, empty or non-string path), a
     lease stale past a declared max_age_hours, and a lease future-dated past the tolerated clock skew
     under a declared usable max_age_hours (an unusable one reads cannot-evaluate whatever the mtime,
     so the holder check runs); a live mode record then keeps every session in scope there, an id-less
@@ -24121,16 +24142,18 @@ def _orch_ask_attended(data, reg, root):
     scope, scope_detail = _orch_scope_eval(reg, root, data.get("session_id"))
     if not scope:
         # the same scope gate as the yield guard: a non-holder session never inherits the backlog.
-        # In this attended branch the mode record reads live, so the scope is never 'cannot' here: it
-        # is False only through the holder-scoped lease check, and 'unreadable' when the declared lease
-        # cannot be read (held below).
+        # In this attended branch the mode record reads live, so the scope is never 'cannot' or
+        # 'unreadable' here (a live mode record outranks both): it is False only through the
+        # holder-scoped lease check.
         return _allow()
     if "enumerator" not in reg:
         return _allow()  # no declared backlog enumerator: the attended backlog judgement is out of scope
     ctx, ts, basis = _orch_build_ctx(reg, root, "ask", data)
     if scope in _ORCH_SCOPE_HOLD_IDS:
-        # a declared lease that cannot be read: routed into this guard's existing cannot-evaluate deny
-        # path (bounded by the ask cap; the operator escape still releases), never a silent _allow()
+        # defence in depth: the live mode record of this branch outranks 'cannot' and 'unreadable', so
+        # a held scope is not expected here; were one to arrive, it is routed into this guard's existing
+        # cannot-evaluate deny path (bounded by the ask cap; the operator escape still releases), never a
+        # silent _allow()
         ctx["cannot_evaluate"] = list(ctx.get("cannot_evaluate", [])) + [
             (_ORCH_SCOPE_HOLD_IDS[scope], "cannot-evaluate", scope_detail)]
     spoof_warn = (_orch_record_escape_spoof(root, ctx["escape_spoof"])

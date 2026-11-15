@@ -13022,8 +13022,10 @@ def _stop_state_and_lease_hold_cases(tmp):
     character in the path, a permission error, a non-directory component, a path that is not a regular
     file) is the 'unreadable' scope, a cannot-evaluate HOLD under the row id lease:path with its own
     detail naming the lease and the reason, never 'lease not live'; a genuinely absent lease stays not
-    live. (2) A registry state_dir realpath cannot resolve (a NUL, or a character the filesystem encoding
-    cannot encode) HOLDS the Stop family, the loop signal releasing, never an exception out of the
+    live. Fix round 3 (orchestrator decision of 2026-11-15T19:09Z): 'unreadable' follows the precedence
+    'cannot' uses, so a live mode record wins over it and it holds only where 'cannot' would (in holder
+    mode a caller with no session id is a non-holder). (2) A registry state_dir realpath cannot resolve
+    (a NUL, or a character the filesystem encoding cannot encode) HOLDS the Stop family, the loop signal releasing, never an exception out of the
     handler; the escape reader reads it as no sentinel."""
     import builtins
 
@@ -13157,14 +13159,48 @@ def _stop_state_and_lease_hold_cases(tmp):
     reg = write(lease={"path": absent, "max_age_hours": 24, "holder_is_session_id": True})
     check("stop/lease-absent-holder-mode-not-live", (scope_live(reg), _v(stop())), (False, "allow"))
     lh.set_items([])
-    # an unreadable lease holds whatever the mode record says; an absent one defers to it
+    # fix round 3 (orchestrator decision of 2026-11-15T19:09Z): an unreadable lease follows the precedence
+    # 'cannot' uses, so a live mode record wins over it (the stop allows on an empty backlog, with no
+    # lease:path hold), for every unreadable shape and in holder mode; an absent one defers to it too
     lh.mode.write_text("Operating-mode: unattended\n", encoding="utf-8")
-    check("stop/lease-unreadable-outranks-mode-record",
-          scope_live(write(lease={"path": nul, "max_age_hours": 24})), "unreadable")
+    check("stop/lease-unreadable-mode-record-live",
+          scope_eval(write(lease={"path": nul, "max_age_hours": 24})), (True, None))
+    res = stop()
+    check("stop/lease-unreadable-mode-record-stop-allows",
+          (_v(res), "lease:path" in _msg(res)), ("allow", False))
+    check("stop/lease-enotdir-mode-record-live",
+          scope_live(write(lease={"path": enotdir, "max_age_hours": 24})), True)
+    check("stop/lease-directory-mode-record-live",
+          scope_live(write(lease={"path": lease_dir, "max_age_hours": 24})), True)
+    check("stop/lease-unreadable-holder-mode-mode-record-live",
+          scope_live(write(lease={"path": enotdir, "max_age_hours": 24, "holder_is_session_id": True})), True)
+    lh.lease.write_text("holder: s1\n", encoding="utf-8")
+    reg = write(lease={"path": str(lh.lease), "max_age_hours": 24, "holder_is_session_id": True})
+    aiqt_hooks.open = seam(PermissionError)
+    try:
+        got = scope_eval(reg)
+    finally:
+        del aiqt_hooks.open
+    check("stop/lease-holder-open-eacces-mode-record-live", got, (True, None))
+    lh.lease.write_text("holder: selftest\n", encoding="utf-8")
     check("stop/lease-absent-mode-record-live",
           scope_live(write(lease={"path": absent, "max_age_hours": 24})), True)
-    # the other callers: the yield guard and the attended ask guard hold on lease:path; the dispatch
-    # ledger and the prompt stamp stay armed and name the unreadable lease (never the max_age detail)
+    # TWIN: with no live mode record the same unreadable lease still holds, under its own detail
+    lh.mode.write_text("", encoding="utf-8")
+    reg = write(lease={"path": nul, "max_age_hours": 24})
+    got = scope_eval(reg)
+    res = stop()
+    check("stop/lease-unreadable-no-mode-record-holds",
+          (got[0], str(got[1]) == aiqt_hooks._ORCH_SCOPE_CANNOT_DETAIL, _v(res), "lease:path" in _msg(res)),
+          ("unreadable", False, "block2", True))
+    # holder mode: it holds only where 'cannot' would, so a caller with no session id is a non-holder
+    # (False, as under 'cannot'); a caller with one still reads 'unreadable' (TWIN)
+    reg = write(lease={"path": enotdir, "max_age_hours": 24, "holder_is_session_id": True})
+    check("stop/lease-unreadable-holder-mode-no-session-not-live", scope_eval(reg, None), (False, None))
+    check("stop/lease-unreadable-holder-mode-session-unreadable", scope_live(reg, "s1"), "unreadable")
+    # the other callers: the yield guard holds on lease:path; the attended ask guard's live mode record
+    # outranks the unreadable lease (no lease:path hold); the dispatch ledger and the prompt stamp stay
+    # armed and name the unreadable lease (never the max_age detail)
     lh.mode.write_text("", encoding="utf-8")
     write(lease={"path": nul, "max_age_hours": 24})
     lh.set_turn_state({})
@@ -13176,7 +13212,8 @@ def _stop_state_and_lease_hold_cases(tmp):
     res = _try(lambda: aiqt_hooks.orch_ask_guard(lh.payload(
         "PreToolUse", "AskUserQuestion", {"questions": [{"question": "pick"}]},
         extra={"tool_use_id": "tu-lh-1"})))
-    check("ask/lease-unreadable-attended-denies", (_v(res), "lease:path" in _msg(res)), ("deny", True))
+    check("ask/lease-unreadable-attended-mode-record-allows",
+          (_v(res), "lease:path" in _msg(res)), ("allow", False))
     lh.mode.write_text("", encoding="utf-8")
     res = _try(lambda: aiqt_hooks.orch_dispatch_ledger(lh.payload(
         "PostToolUse", tool="Bash", tool_input={"command": "true", "run_in_background": True},
