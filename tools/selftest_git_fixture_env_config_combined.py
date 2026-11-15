@@ -13,6 +13,19 @@ for the other. Literal legacy IDs report results; they never select which comman
 
   selftest_git_fixture_env_config_combined.py                              exit 0 pass, 1 failure
   selftest_git_fixture_env_config_combined.py --execution-report ABS_PATH  also write check IDs
+  selftest_git_fixture_env_config_combined.py --shard K/N                  run shard K of N only
+  selftest_git_fixture_env_config_combined.py --list-shard K/N             print shard K, run none
+
+SHARDS: --shard K/N (1 <= K <= N <= 64; it may stand beside --execution-report) runs the lane's
+controls and only the members of shard K, the entries at zero-based roster positions i with
+i mod N = K - 1 in the sorted registered roster (_shard_members), so shards 1..N together run
+each member exactly once (roster/shard-partition-real). The rc and hooks checks of a member
+another shard runs are left to that shard; a pass covers this shard's members only.
+--list-shard K/N prints the members shard K runs, one command per line, and runs nothing. A
+malformed or out-of-range value, or a shard holding no member in a run, is exit 2, never a full
+or an empty run. Without --shard the lane runs every member as before. RESIDUAL: a shard is
+never shorter than its longest member (each member keeps its own bound, CONFIG_MEMBER_BOUNDS),
+and every shard repeats the controls.
 
 Exit 2 is cannot-evaluate (a harness/setup error or a member that reached its time bound), never
 a pass; the engine fails closed exactly as the shared module documents."""
@@ -234,6 +247,9 @@ def _combined_lane(base):
     """The combined config-injection lane; see the module docstring."""
     fx = _config_poison_fixture(base)
     roster, env = fx["roster"], fx["env"]
+    members = _gfe._shard_select(_gfe._config_lane_roster("combined", roster))
+    if members is None:
+        return 2
     marker, monitor_marker = fx["marker"], fx["monitor_marker"]
     control = fx["control"]
     check("config/injection-control", bool(marker.read_bytes()), True)
@@ -276,7 +292,7 @@ def _combined_lane(base):
           (0, True))
     _wrapper_bypass_control(base, env, marker, monitor_marker)
     _prepared_before_pool_control(env, marker, monitor_marker)
-    combined = _config_results(roster, env, marker, monitor_marker)
+    combined = _config_results(members, env, marker, monitor_marker)
     offenders, cause = _registered_offenders(combined)
     check("config/registered-combined", offenders, [], cause)
     for rc_id, hooks_id, member in (
@@ -325,6 +341,8 @@ def _combined_lane(base):
             ("config/opf/rc", "config/opf/hooks",
              "opf/tools/opf.py"),
     ):
+        if _gfe._shard_leaves(member, (rc_id, hooks_id)):
+            continue
         check(rc_id, _member_result(combined, member, 0), 0)
         check(hooks_id, (_member_result(combined, member, 1),
                          _member_result(combined, member, 2)), (b"", b""))
@@ -332,4 +350,5 @@ def _combined_lane(base):
 
 if __name__ == "__main__":
     _gfe.SUITE_ID = SUITE_ID
-    _selftest_exit_report.exit_with(_gfe.main(_gfe._parse_argv(sys.argv[1:]), _combined_lane))
+    _selftest_exit_report.exit_with(_gfe._config_lane_main(sys.argv[1:], "combined",
+                                                           _combined_lane))

@@ -375,10 +375,15 @@ PIN_KEY = "python-version"
 # The host-patch CI jobs: inside a HOST_JOBS job of HOST_WORKFLOW_REL, and nowhere else, a pin that is a patch
 # release of the floor passes only when it equals the python-host-patch this repository-local source names
 # (_host_patch_pin). These names are those of tools/check_python_host_pin.py, whose self-test holds them
-# equal (HOST_JOBS, WORKFLOW_REL, SOURCE_REL, PATCH_RE there).
+# equal (HOST_JOBS, WORKFLOW_REL, SOURCE_REL, PATCH_RE there). The jobs are the OPF job, the git-fixture-env
+# core job, then each shard job of the three git-fixture-env config lanes in workflow order: HOST_SHARDS maps
+# each lane's suite id to its shard count N, and shard K of N runs as job <suite id>-shard-K-host-patch.
 HOST_WORKFLOW_REL = WORKFLOWS_REL + "/quality.yml"
-HOST_JOBS = ("opf-host-patch", "git-fixture-env-core-host-patch", "git-fixture-env-config-combined-host-patch",
-             "git-fixture-env-config-malformed-host-patch", "git-fixture-env-config-system-host-patch")
+HOST_SHARDS = {"git-fixture-env-config-combined": 12, "git-fixture-env-config-malformed": 12,
+               "git-fixture-env-config-system": 19}
+HOST_JOBS = ("opf-host-patch", "git-fixture-env-core-host-patch",
+             *("{}-shard-{}-host-patch".format(lane, shard) for lane, count in HOST_SHARDS.items()
+               for shard in range(1, count + 1)))
 HOST_SOURCE_REL = ".aiqt/python-host.toml"
 HOST_SOURCE_KEYS = {"format-version", "python-host-patch"}
 HOST_PATCH_RE = re.compile(r"([1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})")
