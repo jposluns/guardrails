@@ -92,6 +92,24 @@ directly before a version digit (ordinary product-version prose included) is a f
 positive this shape layer cannot avoid, absorbed by its path's baseline entry rather than exempted by
 line; and archive contents are not unpacked.
 
+SWEPT-PATH ZERO-TOLERANCE LAYER (scan_swept_labels). A tracked file under a SWEPT_PREFIXES prefix (an
+area already swept clean of review-round labels) tolerates NO match of the SWEPT_LABELS rows: a
+reviewer family next to a grade or one-letter grade id, a QA round number with a family after it, a
+bare QA round number (with or without the round word), a family next to a round number, a family next
+to a mutation, mutant or flip word, a bare round number, a model identifier (a family or vendor prefix,
+a hyphen and a version digit) and a family used as an attribution (before a colon, a slash or a
+possessive), each case-insensitive. Each line is also read joined to the next one (the break, the next
+line's indentation and comment or quote leader collapsed to one space), so a label wrapped across a
+line break is a hit on the line where it starts. A hit is a finding (exit 1), never a ratcheted count,
+there is no baseline, no allowlist and no line marker, and the rows are deliberately wider than the
+four ratchet shapes (so prose such as a product name next to a version digit stays legal only OUTSIDE
+a swept path). Unswept areas are untouched by this layer and stay under the ratchet above. This layer
+runs beside the preview-only _PREVIEW_LABELS patterns of scan_scope, which keep their internal-allow
+line exemption; a swept-path hit has none. DISCLOSED LIMITS: a label written outside these shapes (a
+family name alone, a bare grade word, a label split across more than one line break, inside a word or
+with other punctuation at the break, or encoded) is not matched, and SWEPT_PREFIXES is hand-grown, so
+an area is covered only once a sweep adds it.
+
 DISCLOSED SCOPE LIMITS. SCOPE_RELPATHS is a HAND-MAINTAINED allowlist with no drift-guard: a new QA-suite
 surface must be ADDED HERE BY HAND to be covered, and a surface not yet listed is out of this gate's reach
 by omission. Mixed-content metadata files that legitimately carry existing provenance tokens (for example
@@ -147,6 +165,15 @@ finding id must end at a word boundary, so a round number before an ordinary wor
 ("minority", "majority") or before an F, digits and then letters is not matched. A review label written in
 another shape (a family name after the round number, a tab, two spaces or punctuation between the parts, or
 a grade or finding id run straight into a letter, digit or underscore, say) is outside this rule.
+
+PREVIEW REVIEW-PROVENANCE RULE, .preview/ ONLY. Inside the scoped scan, a file under the public preview
+channel (PREVIEW_RELPATH) is also checked against _PREVIEW_LABELS: a reviewer family name followed by a
+mutation number, a round number followed by a reviewer family name, and a review-round-derived test_r
+test name. No other scoped surface, and neither the tracked-file rule nor the tracker-label layer, applies
+these patterns. Other provenance prose in a preview file (a round number with no reviewer family name after
+it, a family name before a grade word, a model identifier) is outside this rule, which honours the
+internal-allow line exemption; the swept-path zero-tolerance layer above reads the same files with wider
+rows and no exemption, so such prose under .preview/ is a finding there.
 
 Exit 0 clean, 1 on any finding or a malformed hashes file, 2 on a read error or a tracked file the role
 rule cannot evaluate (fail-closed). `--self-test` proves the gate FAILS on a seeded internal name (a
@@ -343,6 +370,28 @@ _REVIEW_LABELS = [
 ]
 # The patterns the tracked-file rule applies to every tracked file (see scan_role_text).
 _TRACKED_RULES = _ROLE_NAMES + _REVIEW_LABELS
+# Internal REVIEW-PROVENANCE patterns for the public preview channel ONLY (PREVIEW_RELPATH): scan_scope adds
+# them to the STRUCTURAL layer for a scoped file under that directory and for no other surface, so they widen
+# no whole-tree or other scoped matching. Each is a form that names a review item and nothing else in the
+# preview hooks: a reviewer family name followed by a mutation number (optionally after a round shorthand of
+# an r and digits), a round number followed by a reviewer family name (at most three non-word characters
+# between them, so a parenthesis, a comma and spaces are covered), and a unittest method or reference whose
+# name starts with test_r, digits, at most one lower-case letter and an underscore (a review-round-derived
+# test name, a lettered split of one included). The family patterns
+# are case-insensitive and word-bounded; a family name alone, a product or CLI name, a model id, a family
+# name before any word other than a mutation number, a round number before an ordinary word, a test name
+# with any other numeric prefix and process-search command data are not matched. A line carrying the
+# internal-allow marker is exempt, as for the rest of the STRUCTURAL layer. The pattern sources do not match
+# themselves: a family name here follows "(?:" or a bar, a round digit follows a bracket, and the test
+# prefix is followed by a bracket.
+PREVIEW_RELPATH = ".preview"
+_PREVIEW_LABELS = [
+    (re.compile(r'\b(?:codex|claude|gemini|fable)[ /-]?(?:r[0-9]+[ ]?)?M[0-9]+\b', re.IGNORECASE),
+     "internal review mutation label"),
+    (re.compile(r'\bround[- ]?[0-9]+\W{1,3}(?:codex|claude|gemini|fable)\b', re.IGNORECASE),
+     "internal review-round reviewer label"),
+    (re.compile(r'\btest_r[0-9]+[a-z]?_'), "internal review-round test name"),
+]
 # Reuse the leak gate's structural host/IP/token/account patterns verbatim (imported, never re-typed, so
 # this file stays self-clean the way check_leaks.py does), and add the provenance-id, role-name and
 # review-round label shapes.
@@ -383,6 +432,107 @@ TRACKER_LABEL_FROZEN = ()   # (relpath, sha256) pairs
 TRACKER_LABEL_HISTORY = ()  # relpaths
 TRACKER_MANIFEST_RELPATH = ".aiqt/manifest.toml"
 TRACKER_BASELINE_RELPATH = ".aiqt/tracker-label-baseline.toml"
+
+# --- swept-path zero-tolerance layer -------------------------------------------------------------------
+# Paths already swept clean of review-round labels. A tracked file under one of these prefixes tolerates
+# NO match of the SWEPT_LABELS rows below: every hit is a finding (exit 1), never a ratcheted count, so
+# a label cannot re-enter a swept area through a baseline regeneration. Unswept areas stay under the
+# per-file ratchet above; sweeping an area means cleaning it, adding its prefix here and lowering (for a
+# clean area, dropping) its ratchet baseline entries in the same change. The rows are wider than the
+# ratchet shapes (a lower-case QA token, a family next to a mutation word), which the ratchet could not
+# hold tree-wide without a wall of baseline entries. Pattern pieces are concatenated so no contiguous
+# label shape sits in this source (the shipped tracker-label layer scans this file too).
+SWEPT_PREFIXES = (".preview/",)
+_SWEPT_FAM = r"(?:codex|claude|gemini|fable)"
+_SWEPT_GRADE = r"(?:BLOCKER|CRITICAL|MAJOR|MEDIUM|MED|MINOR|HIGH|LOW|NIT|[A-Za-z][0-9]+)"
+_SWEPT_ROUND = r"rou" + r"nds?"
+SWEPT_LABELS = (
+    # a reviewer family directly before a grade word or a one-letter grade id ("M3")
+    (re.compile(r"\b" + _SWEPT_FAM + r"[ -]?" + _SWEPT_GRADE + r"(?![\w-])", re.IGNORECASE),
+     "a reviewer family before a grade"),
+    # a QA round number with a reviewer family after it
+    (re.compile(r"\bQA[ -]?[0-9]+\W{0,3}" + _SWEPT_FAM + r"\b", re.IGNORECASE),
+     "a QA round with a reviewer family after it"),
+    # a bare QA round number, with or without the round word between
+    (re.compile(r"\bQA(?:[ -]?" + _SWEPT_ROUND + r")?[ -]?[0-9]+\b", re.IGNORECASE),
+     "a bare QA round number"),
+    # a reviewer family directly before a round number
+    (re.compile(r"\b" + _SWEPT_FAM + r"\W{0,3}(?:QA[ -])?" + _SWEPT_ROUND + r"[ -]?[0-9]",
+                re.IGNORECASE),
+     "a reviewer family before a round number"),
+    # a reviewer family next to a mutation, mutant or flip word
+    (re.compile(r"\b" + _SWEPT_FAM + r"[ -]?(?:mutation|mutant|flip)s?\b", re.IGNORECASE),
+     "a reviewer family before a mutation word"),
+    # a bare round number ("n" after the round word with one space or hyphen)
+    (re.compile(r"\b" + _SWEPT_ROUND + r"[ -][0-9]+\b", re.IGNORECASE),
+     "a bare review-round number"),
+    # a model identifier: a family or vendor model prefix, a hyphen, an optional tier word and a
+    # version digit (a dotted path segment such as a settings directory is not one)
+    (re.compile(r"(?<![\w.])(?:" + _SWEPT_FAM[3:-1] + r"|g" + r"pt)-(?:[a-z]+-)?[0-9]",
+                re.IGNORECASE),
+     "a model identifier"),
+    # a reviewer family used as an attribution: directly before a colon, a slash or a possessive
+    (re.compile(r"(?<![\w.$])" + _SWEPT_FAM + r"(?::|/|'s\b)", re.IGNORECASE),
+     "a reviewer family used as an attribution"),
+)
+# The per-row keys of _swept_hits, positionally parallel to SWEPT_LABELS.
+SWEPT_ROW_KEYS = ("family-grade", "qa-then-family", "bare-qa-round", "family-round",
+                  "family-mutation", "bare-round", "model-id", "family-attribution")
+# A label wrapped onto the next line is still a label: each line is also read joined to the next
+# one, with the line break, the next line's indentation and comment or quote leader and this line's
+# closing quote collapsed to one space, and a match that starts on this line and ends on the next is
+# a hit on this line (a match wholly on either line is counted by that line's own read).
+_SWEPT_SEAM_TAIL = re.compile(r"(?:\s|\\n|[\"'])*$")
+_SWEPT_SEAM_LEAD = re.compile(r"^\s*(?:#+|//+|\*+|>+|[rRbBuUfF]{0,2}[\"']+)?\s*")
+
+
+def _swept_hits(text, rows=None, seams=True):
+    """Per-row 1-based line numbers of every swept-label match in `text`, keyed by SWEPT_ROW_KEYS.
+    No internal-allow exemption, no allowlist and no ratchet: a swept path tolerates zero. `rows`
+    lets the self-test show each pattern row is load-bearing, and `seams=False` shows the read
+    across a line break is."""
+    rows = SWEPT_LABELS if rows is None else rows
+    hits = {key: [] for key in SWEPT_ROW_KEYS}
+    lines = text.splitlines()
+    for number, line in enumerate(lines, 1):
+        for key, (pattern, _label) in zip(SWEPT_ROW_KEYS, rows):
+            hits[key] += [number for _ in pattern.finditer(line)]
+        if not seams or number == len(lines):
+            continue
+        left = _SWEPT_SEAM_TAIL.sub("", line)
+        following = lines[number]
+        seam = left + " " + following[_SWEPT_SEAM_LEAD.match(following).end():]
+        for key, (pattern, _label) in zip(SWEPT_ROW_KEYS, rows):
+            hits[key] += [number for match in pattern.finditer(seam)
+                          if match.start() < len(left) < match.end() - 1]
+    return hits
+
+
+def scan_swept_labels(root, tracked):
+    """The swept-path zero-tolerance layer: every tracked file under a SWEPT_PREFIXES prefix is read
+    like a shipped file (an absent or non-regular path fails closed through _read_present_bytes; a
+    non-UTF-8 file whose suffix is outside TEXT_SUFFIXES is skipped as the tracker layer skips one,
+    and a non-UTF-8 text-suffix file fails closed), and every match of every SWEPT_LABELS row is a
+    finding naming the path, the line and the row. There is no baseline and no line marker here."""
+    labels = dict(zip(SWEPT_ROW_KEYS, (label for _pattern, label in SWEPT_LABELS)))
+    findings = []
+    for rel in sorted(rel for rel in tracked if rel.startswith(SWEPT_PREFIXES)):
+        raw = _read_present_bytes(root / rel)
+        if raw is None:
+            raise OSError("swept path {} is absent from the working tree; fail closed".format(rel))
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            suffix = Path(rel).suffix
+            if suffix and suffix not in TEXT_SUFFIXES:
+                continue
+            raise OSError("swept path {} is not valid UTF-8 ({}); fail closed".format(rel, exc))
+        hits = _swept_hits(text)
+        for key in SWEPT_ROW_KEYS:
+            for number in sorted(set(hits[key])):
+                findings.append("{}:{}: {} (zero tolerance under a swept path)".format(
+                    rel, number, labels[key]))
+    return findings
 
 
 def _tracker_hits(text, labels=None):
@@ -700,14 +850,17 @@ def load_hashes(root):
     return hashes, maxn, bad
 
 
-def scan_text(text, hashes, maxn):
+def scan_text(text, hashes, maxn, extra=()):
     """Return (line_or_None, label) findings. A STRUCTURAL match carries a 1-based line; a hash match
-    carries None. A line with an `internal-allow` marker is exempt from STRUCTURAL (hash layer still runs)."""
+    carries None. A line with an `internal-allow` marker is exempt from STRUCTURAL (hash layer still runs).
+    `extra` adds patterns to the STRUCTURAL layer for this text only (scan_scope passes _PREVIEW_LABELS for
+    a file under PREVIEW_RELPATH), with the same per-line exemption."""
+    rules = STRUCTURAL + list(extra)
     found = []
     for number, line in enumerate(text.splitlines(), 1):
         if "internal-allow" in line:
             continue
-        found += [(number, label) for pattern, label in STRUCTURAL if pattern.search(line)]
+        found += [(number, label) for pattern, label in rules if pattern.search(line)]
     if hashes:
         import hashlib
         for gram in check_leaks.ngram_forms(text, maxn):
@@ -765,7 +918,9 @@ def scan_scope(root, scope_relpaths, hashes, maxn):
         if text is None:
             findings.append("{}: in-scope surface vanished during scan; fail-closed".format(rel))
             continue
-        for number, label in scan_text(text, hashes, maxn):
+        # The preview-only review-provenance patterns apply to a file under PREVIEW_RELPATH and nowhere else.
+        preview = rel == PREVIEW_RELPATH or rel.startswith(PREVIEW_RELPATH + "/")
+        for number, label in scan_text(text, hashes, maxn, _PREVIEW_LABELS if preview else ()):
             findings.append("{}:{}: {}".format(rel, number, label) if number is not None
                             else "{}: {}".format(rel, label))
     return findings
@@ -1076,15 +1231,18 @@ def run_gate(root):
         findings += role_findings
         findings += scan_tree_decision_ids(root)
         findings += scan_shipped_tracker_labels(root, tracked)
+        findings += scan_swept_labels(root, tracked)
     except (OSError, UnicodeDecodeError) as exc:
         print("error: cannot read a required input (denylist, scoped surface, tracked file, tree, "
-              "shipped manifest or tracker-label baseline) ({}); fail-closed".format(exc), file=sys.stderr)
+              "shipped manifest, tracker-label baseline or swept path) ({}); fail-closed".format(exc),
+              file=sys.stderr)
         return 2
     # A role-name hit inside a tracked scoped file is reported by both scans in the same form; report it once.
     findings = sorted(set(findings))
     if findings:
         print("FAIL: {} finding(s): internal-name leak(s) in the scanned surfaces, decision id(s) in the "
-              "tree, or tracker-label count(s) off the shipped ratchet baseline".format(len(findings)))
+              "tree, tracker-label count(s) off the shipped ratchet baseline, or review-round label(s) "
+              "under a swept path".format(len(findings)))
         for finding in findings:
             print("  " + finding)
     if unevaluable:
@@ -1096,8 +1254,9 @@ def run_gate(root):
     if findings:
         return 1
     print("PASS: no internal provenance vocabulary in the scanned QA-suite surfaces, no internal role "
-          "name or review-round label in any tracked file, no maintainer-decision id in the tree, and "
-          "every shipped tracker-label count equal to its ratchet baseline")
+          "name or review-round label in any tracked file, no maintainer-decision id in the tree, "
+          "every shipped tracker-label count equal to its ratchet baseline, and no review-round label "
+          "under a swept path")
     return 0
 
 
@@ -1524,6 +1683,79 @@ def _self_test(caller_env=None):
         if scan_role_text(allowed):
             failures.append("an internal-allow line holding a review-round label expected exemption, got {}".format(
                 scan_role_text(allowed)))
+
+        # 33. DISCRIMINATING (preview-only review provenance, _PREVIEW_LABELS): in a file under PREVIEW_RELPATH
+        #     the scoped scan flags a reviewer family name followed by a mutation number (with and without a
+        #     round shorthand before it), a round number followed by a reviewer family name, and a
+        #     review-round-derived test name in a definition and in a string reference; the live
+        #     SCOPE_RELPATHS reaches the same file. Emptying _PREVIEW_LABELS, dropping any one pattern, or
+        #     not passing the patterns from scan_scope leaves a hit unflagged and fails the case. The same hits
+        #     in a scoped file outside PREVIEW_RELPATH carry no preview finding, so applying the patterns to
+        #     every scoped file (or adding them to STRUCTURAL) fails the case too. The controls (product and
+        #     CLI names, a model id, a session id, process-search command data, "QA suite", a family name
+        #     before a grade word, a round number before an ordinary word, a mutation number with no family
+        #     name, a family name glued to a longer word, and test names with other prefixes) stay unflagged,
+        #     and an internal-allow line is exempt. Every vector is assembled at runtime from split parts,
+        #     so no contiguous label sits in this source, and its numbers are synthetic values naming nothing.
+        preview_dir = tmp / PREVIEW_RELPATH
+        preview_dir.mkdir()
+        fams = ("co" + "dex", "cla" + "ude", "gem" + "ini", "fa" + "ble")
+        rnd = "ro" + "und"
+        trn = "test" + "_r"
+        preview_hits = (
+            ("# a sample note (" + fams[2] + " r" + "903 M" + "902): a parser case", "internal review mutation label"),
+            ("# " + fams[1].capitalize() + " m" + "904 removed a guard", "internal review mutation label"),
+            ("# " + fams[0] + "/M" + "905 sample", "internal review mutation label"),
+            ("# " + rnd.capitalize() + " 913 (" + fams[0] + " MEDIUM): a sample note", "internal review-round reviewer label"),
+            ("# a sample (" + rnd + " 912, " + fams[1] + " MINOR-1) note", "internal review-round reviewer label"),
+            ("# " + rnd + "-914 " + fams[3] + " sample", "internal review-round reviewer label"),
+            ("    def " + trn + "913_sample_case(self):", "internal review-round test name"),
+            ('    PARITY_TESTS = ("' + trn + '924_sample_parity",)', "internal review-round test name"),
+            ("    def " + trn + "925b_sample_split(self):", "internal review-round test name"),
+        )
+        preview_controls = (
+            "# Claude Code and the " + fams[0] + " CLI are product names; " + fams[2] + " and " + fams[3] + " too",
+            "subprocess.run(['pgrep', '-f', '" + fams[0] + " exec'])  # process-search command data",
+            "ps = ['ps', '-eo', 'pid,args']; needle = '" + fams[1] + "'",
+            "MODEL = '" + fams[1] + "-opus-5-5'; SESSION = 'sess-2026-09-23-opus55-r1'",
+            "# the QA suite runs every quality check",
+            "# " + fams[0] + " MEDIUM and " + fams[1] + " MINOR-1 with no round number",
+            "# a retry " + rnd + " 3 of the loop and a " + rnd + "-trip 7 times",
+            "# a mutation M" + "902 run with no family name",
+            "# pre" + fams[0] + " M" + "906 and " + fams[1] + "x M" + "907, glued to a longer word",
+            "    def test_01_ordering(self):",
+            "    def test_rerun_7_times(self):",
+            "    def test_r_suffix(self):",
+            "    def " + trn + "913xy_two_letters(self):",
+            "    def " + trn + "2d2_digits_after_a_letter(self):",
+            "    def test_rfc3339_parse(self):",
+        )
+        (preview_dir / "subject.py").write_text("", encoding="utf-8")
+        for text, want in preview_hits:
+            (preview_dir / "subject.py").write_text(text + "\n", encoding="utf-8")
+            (toolsdir / "subject.md").write_text(text + "\n", encoding="utf-8")
+            got = scan_scope(tmp, (PREVIEW_RELPATH,), set(), 3)
+            if got != [".preview/subject.py:1: " + want]:
+                failures.append("preview provenance {!r} expected one {!r} finding, got {}".format(text, want, got))
+            live = [x for x in scan_scope(tmp, SCOPE_RELPATHS, set(), 3) if x.startswith(".preview/")]
+            if live != [".preview/subject.py:1: " + want]:
+                failures.append("preview provenance {!r} expected the live scope to reach .preview, got {}".format(
+                    text, live))
+            outside = scan_scope(tmp, ("tools/subject.md",), set(), 3)
+            if any(want in x for x in outside):
+                failures.append("preview provenance {!r} expected no preview finding outside .preview, got {}".format(
+                    text, outside))
+            (preview_dir / "subject.py").write_text(text + "  # internal-allow\n", encoding="utf-8")
+            exempt = scan_scope(tmp, (PREVIEW_RELPATH,), set(), 3)
+            if exempt:
+                failures.append("preview provenance {!r} on an internal-allow line expected exemption, got {}".format(
+                    text, exempt))
+        for text in preview_controls:
+            (preview_dir / "subject.py").write_text(text + "\n", encoding="utf-8")
+            got = scan_scope(tmp, (PREVIEW_RELPATH,), set(), 3)
+            if got:
+                failures.append("preview provenance control {!r} expected no finding, got {}".format(text, got))
+        shutil.rmtree(preview_dir)
 
         # 14-17 run the real gate entry point (run_gate) on a fixture git repository, so the tracked-file
         # enumeration and its wiring into the gate are exercised, not only the helpers. Fixture git calls use
@@ -2463,6 +2695,85 @@ def _self_test(caller_env=None):
               and "qa-round count 2 exceeds its ratchet baseline 0" in twice_report[0]
               and twice_report[0].endswith("lines 1)"), (twice_hits, twice_report))
 
+        # 27b. DISCRIMINATING (swept-path zero-tolerance rows): each row catches its own vector and,
+        #     with that one row replaced by a never-matching pattern, misses it (so every row is
+        #     load-bearing), the clean controls stay unflagged, and prefix membership decides which
+        #     files the layer reads. Every vector is assembled at run time from synthetic pieces, so
+        #     no contiguous label sits in this source (which the shipped tracker-label layer scans).
+        never_row = re.compile(r"(?!x)x")
+
+        def swept_without(row):
+            return tuple((never_row, label) if index == row else (pat, label)
+                         for index, (pat, label) in enumerate(SWEPT_LABELS))
+
+        for row, check_id, vector in (
+                (0, "swept/row-family-grade", "codex" + " MED" + "IUM"),
+                (0, "swept/row-family-letter-grade", "claude" + " M3"),
+                (1, "swept/row-qa-then-family", "QA" + "21 codex"),
+                (2, "swept/row-bare-qa-round", "qa" + "8 P1"),
+                (2, "swept/row-qa-round-word", "QA rou" + "nd 24"),
+                (3, "swept/row-family-round", "codex rou" + "nd 3"),
+                (4, "swept/row-family-mutation", "codex" + " mutant 1"),
+                (5, "swept/row-bare-round", "Rou" + "nd 31"),
+                (5, "swept/row-bare-round-hyphen", "rou" + "nd-7")):
+            key = SWEPT_ROW_KEYS[row]
+            intact = _swept_hits("a {} b\n".format(vector))[key]
+            dropped = _swept_hits("a {} b\n".format(vector), swept_without(row))[key]
+            check(check_id, len(intact) >= 1 and not dropped, (vector, intact, dropped))
+        # The model-identifier and attribution rows: with the row disabled, NO row may flag the vector
+        # (every row is read, not only the disabled one, so the dropped half can fail).
+        for row, check_id, vector in (
+                (6, "swept/row-model-id", "claude" + "-opus-5-5"),
+                (6, "swept/row-model-id-tier", "claude" + "-fable-5 x"),
+                (6, "swept/row-model-id-vendor", "g" + "pt-6-astra"),
+                (7, "swept/row-family-colon", "(gem" + "ini: a missing"),
+                (7, "swept/row-family-slash", "claude" + "/an earlier review"),
+                (7, "swept/row-family-possessive", "codex" + "'s exact")):
+            key = SWEPT_ROW_KEYS[row]
+            intact = _swept_hits("a {} b\n".format(vector))[key]
+            dropped_hits = _swept_hits("a {} b\n".format(vector), swept_without(row))
+            dropped = [k for k in SWEPT_ROW_KEYS if dropped_hits[k]]
+            check(check_id, len(intact) >= 1 and not dropped, (vector, intact, dropped))
+        # A label wrapped across one line break (in a comment, and in adjacent string literals) is a
+        # hit on the line where it starts and is missed with the joined read disabled; a label wholly
+        # on one line is counted once, on its own line, never again through a join.
+        for check_id, text, key, want in (
+                ("swept/split-comment-caught", "# a QA rou" + "nd\n# 6 b\n", "bare-qa-round", [1]),
+                ("swept/split-docstring-caught", "    a miss until rou" + "nd\n    30 b\n", "bare-round",
+                 [1]),
+                ("swept/split-string-literal-caught", "x = (\"a rou" + "nd \"\n     \"30 b\")\n",
+                 "bare-round", [1]),
+                ("swept/seam-next-line-hit-stays", "# by codex\n# g" + "pt-6-astra x\n", "model-id",
+                 [2])):
+            joined = _swept_hits(text)[key]
+            unjoined = _swept_hits(text, seams=False)[key]
+            unjoined_want = want if check_id == "swept/seam-next-line-hit-stays" else []
+            check(check_id, joined == want and unjoined == unjoined_want, (text, joined, unjoined))
+        once = _swept_hits("rou" + "nd 4 x\n# y\nz\nrou" + "nd 5\n")["bare-round"]
+        check("swept/seam-counts-once", once == [1, 4], once)
+        swept_clean = ("rou" + "nd-trip", "rou" + "nding to 2 places", "Claude 5", "QA", "codex",
+                       "a fable retold", "gemini", "the final rou" + "nd", "quality assurance",
+                       "~/.claude/rules/x.md", "$CLAUDE" + "_PROJECT_DIR/records", "Claude Code's Edit",
+                       "Claude 3 Opus", "the final rou" + "nd\n# of checks")
+        swept_flagged = [v for v in swept_clean
+                        if any(_swept_hits("a {} b\n".format(v))[key] for key in SWEPT_ROW_KEYS)]
+        check("swept/clean-controls-unflagged", not swept_flagged, swept_flagged)
+        swlab = Path(tempfile.mkdtemp(prefix="aiqt-internal-names-swept-"))
+        try:
+            (swlab / ".preview").mkdir()
+            (swlab / "docs").mkdir()
+            sw_vec = "rou" + "nd 9"
+            (swlab / ".preview" / "hook.py").write_text("# x {} y\n".format(sw_vec), encoding="utf-8")
+            (swlab / "docs" / "note.md").write_text("# x {} y\n".format(sw_vec), encoding="utf-8")
+            inside = scan_swept_labels(swlab, [".preview/hook.py", "docs/note.md"])
+            clean_run = scan_swept_labels(swlab, ["docs/note.md"])
+            check("swept/prefix-membership-decides",
+                  any(f.startswith(".preview/hook.py:1:") for f in inside)
+                  and not any("docs/note.md" in f for f in inside) and not clean_run,
+                  (inside, clean_run))
+        finally:
+            shutil.rmtree(swlab, ignore_errors=True)
+
         # 28. DISCRIMINATING (path-only allowlists, scope membership, no line marker, and the closed
         #     baseline schema), in process over a fixture root; the tracked argument stands in for the
         #     git read the real gate already makes, so these cases need no fixture repository.
@@ -3296,7 +3607,11 @@ def _self_test(caller_env=None):
           "glued to a longer word and parts separated by two spaces, a tab or any one ASCII punctuation "
           "character are not, and an "
           "internal-allow line holding "
-          "one is exempt; the real gate run on a fixture git repository "
+          "one is exempt; in a .preview file only, a reviewer family name before a mutation number, a "
+          "round number before a reviewer family name and a review-round-derived test name are caught "
+          "(and reached by the live scope), while the same text outside .preview, product, CLI and "
+          "model names, process-search command data and other test-name prefixes are not; "
+          "the real gate run on a fixture git repository "
           "catches the role name in a tracked file outside SCOPE_RELPATHS and in a tracked file whose basename "
           "is in SKIP_NAMES, exempts only the one internal-allow line, scans a binary-attributed file that "
           "decodes as UTF-8, skips a non-UTF-8 tracked ZIP archive the leak gate's archive rule accepts and an "
@@ -3373,7 +3688,12 @@ def _self_test(caller_env=None):
           "comparison the gate makes) while one more label above the "
           "regenerated baseline still fails, and fails closed loud on a missing shipped manifest, "
           "an absent listed path, a non-UTF-8 listed text file and a baseline entry for a non-shipped "
-          "path; and the PNG rule passes a clean minimal tracked .png, refuses (exit 2) a bad signature, "
+          "path; and the swept-path zero-tolerance layer catches each row's vector, a model-identifier "
+          "or attribution vector is flagged by no row once its own row is disabled, a label wrapped "
+          "across one line break in a comment, a docstring and adjacent string literals is caught (and "
+          "missed with the joined read disabled) while a one-line label counts once on its own line, "
+          "the clean controls stay unflagged and only files under a swept prefix are read; and the PNG "
+          "rule passes a clean minimal tracked .png, refuses (exit 2) a bad signature, "
           "a bad CRC, a truncated chunk, a missing IEND, bytes after IEND, IHDR out of place or of the wrong "
           "length, IEND carrying data, a chunk type that is not four letters, a tEXt with no NUL "
           "separator, a zTXt inflating past its "
