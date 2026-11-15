@@ -225,7 +225,16 @@ LEGS (all run at the default step-1 invocation; none needs a manifest):
                         never checked) holding '<!' or '<?' anywhere (possibly an inline HTML comment, processing
                         instruction, declaration or CDATA section, which the vendored renderer passes through
                         as raw HTML that a browser does not show; it is not parsed, so it is refused even where
-                        it opens none); a body with no frontmatter; a title
+                        it opens none); a checked line holding, anywhere, a
+                        character reference the vendored renderer decodes (escape_html in
+                        opf/tools/_vendor/marko/html_renderer.py runs html.unescape on the text: a numeric
+                        one such as '&#32;' or '&#10;', a named one such as '&nbsp;' or '&amp;', with or
+                        without the ';' wherever html.unescape decodes it), since the boundary grammar reads
+                        the reference's own characters, not the character it renders as, so '&#32;' between
+                        two sentences joins them into one unit and the ';' of '&amp; ' reads as a clause
+                        separator; a checked line that ends with a backslash, which the vendored renderer
+                        reads as a hard line break ('<br />'), so a sentence end before it is no cut to the
+                        grammar; a body with no frontmatter; a title
                         heading with no blank line after it; a line the splitter cannot classify; a
                         paragraph that ends with an opener still open (an inch mark, a stray backtick); and
                         a unit with no letter (str.isalpha) or decimal digit (str.isdecimal), so an
@@ -256,9 +265,12 @@ LEGS (all run at the default step-1 invocation; none needs a manifest):
                         '\u0661.' too); a line that opens with '<' and then a letter or '/', and ends with
                         '>' before any trailing whitespace, which holds every HTML block of kind 7 (one
                         complete open or closing tag and nothing else, a quoted attribute value holding '<'
-                        or '>' included); and a line that opens with '[' and so may be a link reference
+                        or '>' included); a line that opens with '[' and so may be a link reference
                         definition: one with ']:' later on it, or one with no unescaped ']' on it, whose
-                        label may close on a later line.
+                        label may close on a later line; and a line that opens with a GFM task marker ('[',
+                        one whitespace character, 'x' or 'X', then ']', and whitespace or the line end, such
+                        as '[x] ' or '[ ] '), which the vendored GFM paragraph renders as a checkbox, not as
+                        text.
                         The class is wider than CommonMark on purpose: an empty list item, a '|' line no
                         table follows, a delimiter-shaped line no table header precedes, and an indented
                         continuation line are refused although CommonMark and GFM read them as paragraph
@@ -277,7 +289,10 @@ LEGS (all run at the default step-1 invocation; none needs a manifest):
                         refused though no destination follows, and '[the note' is refused when its bracket
                         closes on a later line with no ':' after it; and a line such as '> 5 minutes is a
                         fault.' or '+ 1 to the count.' is refused because CommonMark reads it as a blockquote
-                        or a list item.
+                        or a list item. A character reference inside a code span or after a backslash, a
+                        backslash at the line end of a paragraph's last line or after another backslash, and
+                        a task marker with no text after it in its paragraph are refused, though the
+                        renderer shows each as text.
                         RESIDUAL, disclosed: coverage is positional, not semantic. A unit counts as covered
                         when any row's resolved text contains it, whatever obligation that row names, and an
                         exemption's reason is read by a reviewer, never judged by the gate. The title
@@ -339,6 +354,7 @@ if tuple(sys.version_info[:2]) < (3, 14):
     os._exit(2)
 
 import hashlib
+import html
 import io
 import re
 from contextlib import redirect_stderr, redirect_stdout
@@ -1177,6 +1193,10 @@ _RENDERER_LINE_BREAKS = (("\r", "carriage return"), ("\f", "form feed"))
 # renderer passes through as raw HTML that a browser does not show, so its text would sit in a unit unseen; it
 # is matched, not parsed, so it also refuses a '<!' or '<?' that opens none (disclosed under over-refusal)
 _HIDDEN_INLINE_RE = re.compile(r"<[!?]")
+# a backslash at a line's end, which the vendored inline parser (LineBreak in opf/tools/_vendor/marko/inline.py)
+# reads as a hard line break: it renders '<br />' between the line and the next, so a sentence end before it is
+# hidden from the boundary grammar, which sees no whitespace there
+_HARD_BREAK_MARK = "\\"
 # the vendored GFM table's row splitter and delimiter-cell test (TableRow in
 # opf/tools/_vendor/marko/ext/gfm/elements.py), for _is_table_delimiter_row
 _TABLE_CELL_SPLIT_RE = re.compile(r"\s*(?<!\\)\|\s*")
@@ -1201,10 +1221,13 @@ _UNCLASSIFIABLE_LINE_RE = re.compile(
 # a line the splitter cannot classify as the first line of a paragraph, where it starts a block though it would
 # continue one: an ordered item of any number (any \d digits, as the vendored parser reads them); a line that opens
 # with '<' and a letter or '/' and ends with '>', which holds every one-tag line (HTML block kind 7), a quoted '<' or
-# '>' in it included, and more; and a line that opens with '[' and may be a link reference definition, which renders
-# as no text: one with ']:' later on it, or one with no unescaped ']' on it, whose label may close on a later line
+# '>' in it included, and more; a line that opens with '[' and may be a link reference definition, which renders
+# as no text: one with ']:' later on it, or one with no unescaped ']' on it, whose label may close on a later line;
+# and a line that opens with a GFM task marker ('[', one whitespace character, 'x' or 'X', then ']', and whitespace
+# or the line end), which the vendored GFM paragraph (Paragraph in opf/tools/_vendor/marko/ext/gfm/elements.py)
+# renders as a checkbox at a paragraph's start, not as text
 _UNCLASSIFIABLE_FIRST_LINE_RE = re.compile(
-    r"(?:\d{1,9}[.)](?:\s|$)|<[A-Za-z/].*>\s*$|\[.*\]:|\[(?:[^\\\]]|\\.)*\\?$)")
+    r"(?:\d{1,9}[.)](?:\s|$)|<[A-Za-z/].*>\s*$|\[.*\]:|\[(?:[^\\\]]|\\.)*\\?$|\[[\sxX]\](?:\s|$))")
 _CUT_CANDIDATE_RE = re.compile(r"\s+|;")  # a boundary has whitespace at it or sits right before a ';'
 
 
@@ -1264,9 +1287,12 @@ def rule_units(source, where):
     exit 2): anywhere in the source, a character the vendored renderer reads as a line ending
     (_RENDERER_LINE_BREAKS: a carriage return or a form feed), since the lines here are cut at LF only; no
     frontmatter; a title with no blank line after it; a line _UNCLASSIFIABLE_LINE_RE matches or
-    _is_table_delimiter_row accepts; a checked line holding '<!' or '<?' (_HIDDEN_INLINE_RE); a paragraph that
+    _is_table_delimiter_row accepts; a checked line holding '<!' or '<?' (_HIDDEN_INLINE_RE); a checked line that
+    ends with a backslash (_HARD_BREAK_MARK, a hard line break to the vendored renderer); a checked line holding a
+    character reference the vendored renderer decodes (html.unescape changes the line); a paragraph that
     ends with an opener still open; and a unit with no letter or digit (_has_letter_or_digit). A line
-    _UNCLASSIFIABLE_FIRST_LINE_RE matches is refused only as a paragraph's first line. The one `## Detail`
+    _UNCLASSIFIABLE_FIRST_LINE_RE matches (a GFM task marker included) is refused only as a paragraph's first
+    line. The one `## Detail`
     split line (DETAIL_HEADING, opening a paragraph; see LAYER) is a layer marker, not text: it is cut
     off from the units on both sides and is never a unit itself; any other heading is still refused."""
     breaks = [(source.index(char), name) for char, name in _RENDERER_LINE_BREAKS if char in source]
@@ -1302,6 +1328,14 @@ def rule_units(source, where):
                                 "or CDATA section, whose text a renderer does not show; the check does not parse "
                                 "it, so it is refused even when escaped or not HTML, such as inside a code span); "
                                 "cannot evaluate".format(where, number, line))
+            elif line.endswith(_HARD_BREAK_MARK):
+                raise GateError("{} line {}: the text-coverage splitter cannot classify {!r} (a backslash at the "
+                                "line end, which the vendored renderer reads as a hard line break); cannot "
+                                "evaluate".format(where, number, line))
+            elif html.unescape(line) != line:
+                raise GateError("{} line {}: the text-coverage splitter cannot classify {!r} (a character "
+                                "reference, which the vendored renderer decodes to another character); cannot "
+                                "evaluate".format(where, number, line))
             first = para_start = False
         else:
             after_title, para_start = False, True
@@ -2101,7 +2135,8 @@ def self_test_main(_mkdtemp=None, _vectors=True):  # noqa: C901  a flat sequence
     head = "---\ncorpus-id: cprobe\n---\n\n# Title words\n\n"
     for line in ("#507 and its review.", "<path> only after a backup.", "2) when unsure.", "3.",
                  "<b>bold</b> stays inline.", "1234567890. is no list.", '<span title="a>b">',
-                 "[foo\nbar]: /url", "<b>bold</b>", "\u0661. Beta holds.", "the <span hidden>draft</span> text."):
+                 "[foo\nbar]: /url", "<b>bold</b>", "\u0661. Beta holds.", "the <span hidden>draft</span> text.",
+                 "[x] marks it done.", "[ ] marks it open."):
         try:
             rule_units(head + "See the start of the PR\n" + line + "\n", "probe")
         except GateError as exc:
@@ -2125,7 +2160,9 @@ def self_test_main(_mkdtemp=None, _vectors=True):  # noqa: C901  a flat sequence
     for line in ("2) when unsure.", "7. beta item", "<path>", "</span>", '<a href="x">', "[foo]: /url",
                  '<custom data=">">', '<span title="a>b">', "<a href='x>y'>", '<span title="a<b">', "<a>\xa0",
                  "<b>bold</b>", "[foo\nbar]: /url", "[foo\\]\nbar]: /url", "[foo\nbar\nbaz]: /url",
-                 "2.\xa0Beta holds.", "2)\x0bBeta holds.", "\u0661. Alpha holds.", "\u0967\u0968) Alpha holds."):
+                 "2.\xa0Beta holds.", "2)\x0bBeta holds.", "\u0661. Alpha holds.", "\u0967\u0968) Alpha holds.",
+                 "[x] Beta holds.", "[X] Beta holds.", "[ ] Beta holds.", "[\t] Beta holds.", "[\xa0] Beta holds.",
+                 "[x]"):
         for text in (line + "\n", line + "\nAlpha holds.\n"):
             try:
                 rule_units(head + text, "probe")
@@ -2172,6 +2209,38 @@ def self_test_main(_mkdtemp=None, _vectors=True):  # noqa: C901  a flat sequence
             except GateError as exc:
                 if "does not show" not in str(exc):
                     failures.append("rule_units: {!r} was refused for another reason: {}".format(text, exc))
+    # A backslash at a line's end is a hard line break to the vendored renderer ('<br />'), and a character reference
+    # is decoded by it (a numeric one to whitespace or a line ending, a named one to its character), but the boundary
+    # grammar reads neither: '&#32;' or a hard break after a sentence end joins two rendered sentences into one unit,
+    # and the ';' of '&amp; ' reads as a clause separator. Each is refused on a first or a wrapped line.
+    for line, needle in (("Alpha holds.\\", "hard line break"), ("Alpha holds\\", "hard line break"),
+                         ("Alpha holds.&#32;Beta waits.", "character reference"),
+                         ("Alpha holds.&#10;Beta waits.", "character reference"),
+                         ("Alpha holds.&#x20;Beta waits.", "character reference"),
+                         ("Alpha holds.&#32Beta waits.", "character reference"),
+                         ("Alpha holds.&nbsp;Beta waits.", "character reference"),
+                         ("Tom &amp; Jerry hold the lease.", "character reference")):
+        for text in (line + "\nGamma ends.\n", "See the start of the PR\n" + line + "\nGamma ends.\n"):
+            try:
+                rule_units(head + text, "probe")
+                failures.append("rule_units: the {} in {!r} was not refused".format(needle, text))
+            except GateError as exc:
+                if needle not in str(exc) or "cannot classify" not in str(exc):
+                    failures.append("rule_units: {!r} was refused for another reason: {}".format(text, exc))
+    # ... while the same sentences parted by plain whitespace, a backslash inside a line, and an '&' that opens no
+    # reference read as prose, cut where the grammar cuts.
+    for text, want in (("Alpha holds.\nBeta waits.\n", ["Alpha holds.", "Beta waits."]),
+                       ("Alpha holds. Beta waits.\n", ["Alpha holds.", "Beta waits."]),
+                       ("Alpha holds \\ today. Beta waits.\n", ["Alpha holds \\ today.", "Beta waits."]),
+                       ("R&D holds; Q&A waits.\n", ["R&D holds", "Q&A waits."]),
+                       ("Tom and Jerry hold the lease.\n", ["Tom and Jerry hold the lease."])):
+        try:
+            _at, probe_units = rule_units(head + text, "probe")
+            got = [(head + text)[b:e] for b, e in probe_units]
+            if got != want:
+                failures.append("rule_units: {!r} expected units {!r}, got {!r}".format(text, want, got))
+        except GateError as exc:
+            failures.append("rule_units: {!r} was refused: {}".format(text, exc))
     # The delimiter-row test is the vendored GFM table's own: every '|'-separated cell begins with '-' or ':-'.
     for line, want in (("--x|--y", True), (":-- | --:", True), ("|--|", True), ("-", True), ("--force is it.", True),
                        ("a | --", False), ("-- | a", False), ("--||--", False), (":|-", False), ("--\\|x", True),
@@ -3501,6 +3570,31 @@ def self_test_main(_mkdtemp=None, _vectors=True):  # noqa: C901  a flat sequence
                             "", two[0], "", "Alpha a | b", "--x|--y"],
                   "exemptions": [{"corpus-id": "ccovn27", "text": "Alpha a | b\n--x|--y",
                                   "reason": "A rationale."}]}, 2, "cannot classify"),
+                # A character reference passes the gen_rules BODY GRAMMAR, so the splitter's own refusal is what
+                # stops it: '&#32;' joins two rendered sentences into one unit, and the ';' of '&amp; ' cuts one
+                # sentence in two. Each is refused, even exempted; the same text with plain words passes.
+                ("a numeric character reference between two sentences is refused, even exempted", "ccovn28",
+                 [two[0]], [(0, two[0])],
+                 {"lines": ["---", "corpus-id: ccovn28", "origin: pack", "slug: fixture", "---", "", "# Fixture rule",
+                            "", two[0], "", "Gamma holds.&#32;Delta waits."],
+                  "exemptions": [{"corpus-id": "ccovn28", "text": "Gamma holds.&#32;Delta waits.",
+                                  "reason": "A rationale."}]}, 2, "character reference"),
+                ("the same two sentences parted by a space, exempted, pass", "ccovn29", [two[0]], [(0, two[0])],
+                 {"lines": ["---", "corpus-id: ccovn29", "origin: pack", "slug: fixture", "---", "", "# Fixture rule",
+                            "", two[0], "", "Gamma holds. Delta waits."],
+                  "exemptions": [{"corpus-id": "ccovn29", "text": "Gamma holds. Delta waits.",
+                                  "reason": "A rationale."}]}, 0, ""),
+                ("a named character reference whose ';' reads as a clause separator is refused, even exempted",
+                 "ccovn30", [two[0]], [(0, two[0])],
+                 {"lines": ["---", "corpus-id: ccovn30", "origin: pack", "slug: fixture", "---", "", "# Fixture rule",
+                            "", two[0], "", "Tom &amp; Jerry hold the lease."],
+                  "exemptions": [{"corpus-id": "ccovn30", "text": "Tom &amp; Jerry hold the lease.",
+                                  "reason": "A rationale."}]}, 2, "character reference"),
+                ("the same sentence with a plain word, exempted, passes", "ccovn31", [two[0]], [(0, two[0])],
+                 {"lines": ["---", "corpus-id: ccovn31", "origin: pack", "slug: fixture", "---", "", "# Fixture rule",
+                            "", two[0], "", "Tom and Jerry hold the lease."],
+                  "exemptions": [{"corpus-id": "ccovn31", "text": "Tom and Jerry hold the lease.",
+                                  "reason": "A rationale."}]}, 0, ""),
             ]
             for label, corpus, obligations, covered, extra, want, needle in cover_vectors:
                 got, out = _cover(corpus, obligations, covered, **extra)
@@ -3607,7 +3701,12 @@ def self_test_main(_mkdtemp=None, _vectors=True):  # noqa: C901  a flat sequence
           "stay prose; an inline '<!' or '<?' is refused; a line the vendored GFM table reads as a delimiter "
           "row ('--x|--y') is refused; an ordered item in non-ASCII decimal digits is refused as a paragraph's "
           "first line; and each whitespace-widened block start has a no-break-space or vertical-tab vector "
-          "the classifier itself refuses); an unavailable temp directory "
+          "the classifier itself refuses; and the round-5 reproductions hold: a backslash at a line end (a hard "
+          "line break to the vendored renderer) and a character reference it decodes ('&#32;', '&#10;', "
+          "'&nbsp;', '&amp;') are a cannot-evaluate on a first or a wrapped line, even exempted, while plain "
+          "whitespace, a mid-line backslash and an '&' that opens no reference stay prose; and a GFM task marker "
+          "('[x] ', '[ ] ') is refused as a paragraph's first line while a wrapped one stays prose); an unavailable "
+          "temp directory "
           "is a NOT RUN failure (nonzero exit), never a PASS (PARTIAL); and the clause layer: {} layer "
           "case(s) hold (derived pass, stored-layer disagreement, crossing span, unregistered detail "
           "paragraph or line, missing or unknown layer, two headings, detail row with no heading, "
