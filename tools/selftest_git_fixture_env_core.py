@@ -267,6 +267,32 @@ def _roster_checks():
                   or ("./tools/check_selftest_execution.py", "--suite", suite_id) in roster
                   for suite_id in lane_ids)
           and not any((runner,) in roster for runner in lane_runners), True)
+
+    # A shard line of a sharded config suite (--suite <id> --shard K/N, N that suite's registered
+    # count, the form the CI shard jobs run) is part of that suite's launch, so it gets the plain
+    # line's recursion exclusion: neither the shard line nor a lane runner joins the roster. A shard
+    # line with any other N is no launch the execution gate accepts, so the roster refuses it.
+    shard_counts = sorted(check_selftest_execution.SHARD_COUNTS.items())
+    extra = "".join(
+        '\nrun_gate "recursive-shard-{}-{}" python3 -I -B ./tools/check_selftest_execution.py'
+        ' --suite {} --shard {}/{}\n'.format(index, k, suite_id, k, count)
+        for index, (suite_id, count) in enumerate(shard_counts) for k in (1, count))
+    read = disk_reader("roster-shard-recursion", local, add_local(extra))
+    with patch.object(check_ci_parity, "read_runner_text", read):
+        roster = _registered_selftests()
+    check("roster/shard-launch-recursion-excluded",
+          len(shard_counts) == 3
+          and not any(argv[1:2] == ("--suite",) and argv[2:3] == (suite_id,)
+                      for argv in roster for suite_id, _ in shard_counts)
+          and not any((runner,) in roster for runner in lane_runners), True)
+    suite_id, count = shard_counts[0]
+    extra = ('\nrun_gate "other-count-shard" python3 -I -B ./tools/check_selftest_execution.py'
+             ' --suite {} --shard 1/{}\n'.format(suite_id, count + 1))
+    with patch.object(check_ci_parity, "read_runner_text",
+                      disk_reader("roster/shard-launch-other-count-refused", local, add_local(extra))):
+        got = refusal()
+    check("roster/shard-launch-other-count-refused",
+          got.startswith("unparseable suite invocation:") and "--shard" in got, True)
     shutil.rmtree(scratch, ignore_errors=True)
 
 

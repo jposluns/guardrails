@@ -336,12 +336,14 @@ REPORT_FORMAT_VERSION = 2
 # stderr bytes.
 DECLARED_STDERR = {}
 # Sharded suites: suite id -> N, the one shard count --suite <id> --shard K/N accepts (any other N
-# is a usage error). Sized from CI run 43600403087 (train 1174) so each shard's share of the
-# measured lane is under 30 minutes: combined 112.8 / 5 = 22.6, malformed 113.5 / 5 = 22.7 and
-# system 148.5 / 6 = 24.8 minutes, before the controls every shard repeats; a shard is never
-# shorter than its longest member.
-SHARD_COUNTS = {"git-fixture-env-config-combined": 5, "git-fixture-env-config-malformed": 5,
-                "git-fixture-env-config-system": 6}
+# is a usage error). Sized from CI run 43600403087 so each shard's share of its measured lane
+# plus its N + 1 --list-shard launches (15.4 s each, one measured listing) is at most about 13
+# minutes: combined 112.8 / 12 + 13 * 15.4 / 60 = 9.40 + 3.34 = 12.74, malformed 113.5 / 12 +
+# 13 * 15.4 / 60 = 9.46 + 3.34 = 12.80 and system 148.5 / 19 + 20 * 15.4 / 60 = 7.82 + 5.13 =
+# 12.95 minutes (one shard fewer gives 13.33, 13.40 and 13.13). This is before the controls
+# every shard repeats, and a shard is never shorter than its longest member.
+SHARD_COUNTS = {"git-fixture-env-config-combined": 12, "git-fixture-env-config-malformed": 12,
+                "git-fixture-env-config-system": 19}
 SHARD_MAX = 64
 # The bound on one --list-shard launch (it runs no member; measured at about 15 s).
 SHARD_LIST_TIMEOUT = 300

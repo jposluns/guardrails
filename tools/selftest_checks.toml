@@ -2239,6 +2239,8 @@ expected-check-ids = [
   "roster/shard-lane-main",
   "roster/shard-lane-scope",
   "roster/shard-lane-wiring",
+  "roster/shard-launch-other-count-refused",
+  "roster/shard-launch-recursion-excluded",
   "roster/shard-list-cli",
   "roster/shard-partition-fixtures",
   "roster/shard-partition-real",

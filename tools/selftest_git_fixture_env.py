@@ -767,6 +767,23 @@ def _command_identity(argv):
     return (script, *argv[1:])
 
 
+def _suite_identity(argv):
+    """_command_identity, except that one shard of a sharded suite (the execution gate's
+    --suite <id> --shard K/N, <id> in its SHARD_COUNTS and N that suite's registered count) reads
+    as the plain --suite <id> launch it is a part of, so a CI shard line gets the same recursion
+    exclusion as the plain suite line. Any other --shard line keeps its whole identity, which the
+    roster refuses as an unparseable suite invocation."""
+    identity = _command_identity(argv)
+    if (len(identity) == 5 and identity[0] == "tools/check_selftest_execution.py"
+            and identity[1] == "--suite" and identity[3] == "--shard"):
+        from check_selftest_execution import SHARD_COUNTS, _parse_shard
+        shard = _parse_shard(identity[4])
+        if (identity[2] in SHARD_COUNTS and shard is not None
+                and shard[1] == SHARD_COUNTS[identity[2]]):
+            return identity[:3]
+    return identity
+
+
 def _registered_selftests(root=ROOT):
     """Parse every registry before selecting self-tests; preserve exact script arguments.
     Reuse CI-parity's fail-closed shell/YAML grammar. The standalone runner is
@@ -849,9 +866,9 @@ def _registered_selftests(root=ROOT):
         raise ValueError("cannot read suite runner registry")
     runners = {row["id"]: row["runner"] for row in suites}
     for argv in sorted(commands):
-        identity = _command_identity(argv)
+        identity = _suite_identity(argv)
         if identity[0] == "tools/check_selftest_execution.py" and "--suite" in identity:
-            if len(argv) != 3 or argv[1] != "--suite" or argv[2] not in runners:
+            if len(identity) != 3 or argv[1] != "--suite" or argv[2] not in runners:
                 raise ValueError("unparseable suite invocation: {!r}".format(argv))
             if identity not in CONFIG_EXCLUSIONS["all"]:
                 commands.add((runners[argv[2]],))
@@ -861,13 +878,13 @@ def _registered_selftests(root=ROOT):
     for suite_id, direct in CONFIG_DIRECT_SELFTESTS.items():
         if suite_id not in runners or direct not in commands:
             raise ValueError("stale direct self-test entry: {!r}".format(suite_id))
-    identities = {_command_identity(argv) for argv in commands}
+    identities = {_suite_identity(argv) for argv in commands}
     for lane, exclusions in CONFIG_EXCLUSIONS.items():
         for argv, reason in exclusions.items():
             if argv not in identities or not reason.strip():
                 raise ValueError("stale or unreasoned {} exclusion: {!r}".format(lane, argv))
     commands = {argv for argv in commands
-                if _command_identity(argv) not in CONFIG_EXCLUSIONS["all"]}
+                if _suite_identity(argv) not in CONFIG_EXCLUSIONS["all"]}
     if not commands:
         raise ValueError("empty config-injection roster")
     for argv in commands:

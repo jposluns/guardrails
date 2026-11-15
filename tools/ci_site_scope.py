@@ -134,19 +134,19 @@ SITE_REGENERATED = frozenset({
 # opf/site/adopt.md and opf/site/adopt/index.html; its live gate runs in the always-run registry job in every run and in
 # two of the three config lanes (the malformed lane excludes the bare launch, which stays in the
 # combined and system lanes), so those pages need no exclusion either. What the fast lane
-# deliberately gives up for a site-only train is every check in the eleven skipped jobs
+# deliberately gives up for a site-only train is every check in the 51 skipped jobs
 # (opf-tooling-a, opf-tooling-b, opf-tooling-c, selftest-execution, git-fixture-env-core,
-# opf-host-patch, the four git-fixture-env host-patch jobs and byte-canon-matrix): every step of
-# those jobs is skipped, and of their commands only the child-status probe, the opf-declaration
-# live gate and its selftest-execution suite, and check_byte_canon.py (live gate and self-test)
-# also run, as the same command, in an always-run job. Every other command in them runs nowhere
-# else in CI on such a train: the OPF tooling live gates and self-tests of the three
-# opf-tooling jobs, the opf.py self-test, check_selftest_execution.py --self-test and every
-# other selftest-execution suite those jobs run, check_entry_guard.py,
-# check_child_status_coverage.py, every git-fixture-env suite, and check_python_host_pin.py
-# beyond the registry job's --jobs-only run. It also gives up the skipped jobs' host,
-# configuration and platform repetitions: the host-patch jobs' exact host Python, the config
-# lanes' hostile git configurations, and byte-canon-matrix's platforms.
+# opf-host-patch, git-fixture-env-core-host-patch, the 43 config shard jobs and
+# byte-canon-matrix): every step of those jobs is skipped, and of their commands only the
+# child-status probe, the opf-declaration live gate and its selftest-execution suite, and
+# check_byte_canon.py (live gate and self-test) also run, as the same command, in an always-run
+# job. Every other command in them runs nowhere else in CI on such a train: the OPF tooling live
+# gates and self-tests of the three opf-tooling jobs, the opf.py self-test,
+# check_selftest_execution.py --self-test and every other selftest-execution suite those jobs
+# run, check_entry_guard.py, check_child_status_coverage.py, every git-fixture-env suite, and
+# check_python_host_pin.py beyond the registry job's --jobs-only run. It also gives up the
+# skipped jobs' host, configuration and platform repetitions: the host-patch jobs' exact host
+# Python, the config lanes' hostile git configurations, and byte-canon-matrix's platforms.
 SITE_HEAVY_READ = frozenset({
     "opf/site/adopt.md",
     "opf/site/adopt/index.html",
