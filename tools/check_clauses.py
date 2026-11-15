@@ -268,7 +268,9 @@ LEGS (all run at the default step-1 invocation; none needs a manifest):
                         _HTML_BLOCK_TAGS: CommonMark's kind 1 and kind 6 names, plus meta and source); a
                         thematic break or setext underline (three or more of '-' '*' '_' '=' with optional
                         whitespace, or a run of only '=' or only '-'); and a line that opens with whitespace
-                        (an indented line). On a PARAGRAPH'S FIRST LINE also: an ordered item of any number
+                        (an indented line). On a PARAGRAPH'S FIRST LINE (a line directly after the
+                        `## Detail` split line included, since that ATX heading closes its block, blank
+                        line or not) also: an ordered item of any number
                         (one to nine decimal digits, any the vendored parser's \\d admits, so an Arabic-Indic
                         '\u0661.' too); a line that opens with '<' and then a letter or '/', and ends with
                         '>' before any trailing whitespace, which holds every HTML block of kind 7 (one
@@ -1328,7 +1330,9 @@ def rule_units(source, where):
     _UNCLASSIFIABLE_FIRST_LINE_RE matches (a GFM task marker included) is refused only as a paragraph's first
     line. The one `## Detail`
     split line (DETAIL_HEADING, opening a paragraph; see LAYER) is a layer marker, not text: it is cut
-    off from the units on both sides and is never a unit itself; any other heading is still refused."""
+    off from the units on both sides and is never a unit itself; any other heading is still refused. Since
+    it is an ATX heading, which closes its block, a non-blank line directly after it is a paragraph's first
+    line, so _UNCLASSIFIABLE_FIRST_LINE_RE applies there as after a blank line."""
     breaks = [(source.index(char), name) for char, name in _RENDERER_LINE_BREAKS if char in source]
     if breaks:
         at, name = min(breaks)
@@ -1371,7 +1375,9 @@ def rule_units(source, where):
                                 "reference ending in ';', {!r}: a match of the renderer's own pattern that "
                                 "html.unescape changes, which the vendored renderer decodes when it sees the "
                                 "reference whole in plain text, not split by inline markup or inside a code span); cannot evaluate".format(where, number, line, _decoded_reference(line)))
-            first = para_start = False
+            # the split line is an ATX heading, which closes its block, so the line directly after it opens a
+            # paragraph (as the vendored renderer reads it) and gets the first-line checks, blank line or not
+            first, para_start = False, split is not None and split[0] == offset
         else:
             after_title, para_start = False, True
         offset += len(line) + 1
@@ -2234,6 +2240,30 @@ def self_test_main(_mkdtemp=None, _vectors=True):  # noqa: C901  a flat sequence
                 if "markup" not in str(exc):
                     failures.append("rule_units: {!r} as a paragraph's first line was refused for another "
                                     "reason: {}".format(text, exc))
+    # The `## Detail` split line is an ATX heading, which closes its block, so a line directly after it (no blank
+    # line between) is a paragraph's first line: each first-line form is refused there as the classifier's
+    # ("markup"). The sibling, a blank line after the split line and the same text wrapped as a paragraph's
+    # second line, stays prose, and so does plain prose directly after the split line.
+    split_head = head + "Alpha holds.\n\n## Detail\n"
+    for line in ("2. Beta holds.", "[x] Beta holds.", "[ ] Beta holds.", "[foo]: /url", "<path>"):
+        try:
+            rule_units(split_head + line + "\n", "probe")
+            failures.append("rule_units: {!r} directly after the split line was not refused".format(line))
+        except GateError as exc:
+            if "markup" not in str(exc):
+                failures.append("rule_units: {!r} directly after the split line was refused for another "
+                                "reason: {}".format(line, exc))
+    for tail, want in (("\nSee the start of the PR\n2. Beta holds.\n", ["See the start of the PR\n2.", "Beta holds."]),
+                       ("\nSee the start of the PR\n[x] Beta holds.\n", ["See the start of the PR\n[x] Beta holds."]),
+                       ("Beta holds.\n", ["Beta holds."])):
+        try:
+            _at, probe_units = rule_units(split_head + tail, "probe")
+            got = [(split_head + tail)[b:e] for b, e in probe_units]
+            if got != ["Alpha holds."] + want:
+                failures.append("rule_units: {!r} after the split line expected units {!r}, got {!r}".format(
+                    tail, ["Alpha holds."] + want, got))
+        except GateError as exc:
+            failures.append("rule_units: {!r} after the split line was refused: {}".format(tail, exc))
     # A carriage return and a form feed are line endings to the vendored renderer (marko's _preprocess_text) that
     # the LF-only splitter does not see: a cannot-evaluate wherever one stands, inside a line, at a line's start,
     # at its end, in the title and in the frontmatter, so a heading, list item or comment cannot hide behind one.
@@ -3807,7 +3837,10 @@ def self_test_main(_mkdtemp=None, _vectors=True):  # noqa: C901  a flat sequence
           "opens no reference and a reference with no ';', which the renderer shows as typed ('&#32Beta', "
           "'cut&copy', '&region=eu', 'PR&#507'), stay prose, and the copied renderer pattern equals the vendored "
           "Renderer._charref read with ast; and a GFM task marker "
-          "('[x] ', '[ ] ') is refused as a paragraph's first line while a wrapped one stays prose); an unavailable "
+          "('[x] ', '[ ] ') is refused as a paragraph's first line while a wrapped one stays prose; and a "
+          "line directly after the '## Detail' split line is a paragraph's first line, so an ordered item, a "
+          "task marker, a link reference definition and a one-tag line are refused there while the same text "
+          "wrapped after a blank line stays prose); an unavailable "
           "temp directory "
           "is a NOT RUN failure (nonzero exit), never a PASS (PARTIAL); and the clause layer: {} layer "
           "case(s) hold (derived pass, stored-layer disagreement, crossing span, unregistered detail "

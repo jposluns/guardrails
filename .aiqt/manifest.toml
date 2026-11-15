@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.0.5"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "4662ad0acb72981d02597c686a0e8842fc9345620cc31cb7c8b6879317acabd6"
+tree-sha256 = "1147a8cd969fbed5aeb8d648578844be5c28177e505a4fc092b561476e468672"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -4187,8 +4187,8 @@ sha256 = "0a30385485f8ee7db5d200846b72e264130ad489752c736c1f5d280cb3a2ee3c"
 
 [[sources]]
 path = "tools/check_clauses.py"
-bytes = 274601
-sha256 = "97ec7960849552d2251e6adb7ff543421e89b2daa90e8efa507828f953927cca"
+bytes = 277297
+sha256 = "b2366c016efba60d3c337e393d82adf749e3d32f428c7b5165327a356a81796d"
 
 [[sources]]
 path = "tools/check_crosswalk.py"
