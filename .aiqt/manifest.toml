@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.0.5"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "f5db2b82c35f5a05286925d7655512c5c1e4b33cebf7f801e83303509b971c2b"
+tree-sha256 = "f64b8b1ee593a91136f76dab6f832cdac5becbd3704373d87889bb593ba33398"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -4257,8 +4257,8 @@ sha256 = "57fe0345d8e1959e9ff8a5f22ae5271577d3485ffd8a116e68d3f2e14c2de010"
 
 [[sources]]
 path = "tools/check_internal_names.py"
-bytes = 239507
-sha256 = "fd606702f9b49af5ec849d5b0623be38231ab001fdea206a2be0ffc97eea2005"
+bytes = 239931
+sha256 = "315da61f4d4f9c764902cf42e280c536c17576fc70445da8eadad2fec01360f3"
 
 [[sources]]
 path = "tools/check_leaks.py"
@@ -4527,8 +4527,8 @@ sha256 = "e732c5633f7a18889d9f71af931cd2eb0131c2b51e53e81087316d976923752c"
 
 [[sources]]
 path = "tools/gen_draft_site.py"
-bytes = 199913
-sha256 = "1f22633a24506ab829091a4fbea4083d02a78b8b008fd0ec039f3a910da8470b"
+bytes = 200950
+sha256 = "8ee788a0373b3d136ecb7be631602fb3a5f896b9a41af2cdc090e4382a558d64"
 
 [[sources]]
 path = "tools/gen_enforceability.py"
