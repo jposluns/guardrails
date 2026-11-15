@@ -89,7 +89,7 @@ html = '''<p>Today's team path is a human-led pilot: a small group, the assistan
 component = "steps"
 items = [
   '''<b>Choose a small group</b> and the assistants they already use (Claude, ChatGPT, or Copilot).''',
-  '''<b>Each person installs the AIQT chat Skill</b> (1.0.6, in the AIQT 1.0.5 release) and confirms that it is on.''',
+  '''<b>Each person adds AIQT 1.0.5 to their own assistant</b>: the chat Skill (1.0.6) where the assistant accepts Skills, or the instruction file otherwise (see the <a href="$BASE/install/details/">step-by-step instructions</a>), and confirms that it is on.''',
   '''<b>Run two or three weeks of normal work</b>, noting a few observations: unsupported factual claims, completion claims without a check, missed requirements, clarification questions asked, overrides, rework, and reviewer confidence.''',
   '''<b>Compare</b> against the period before, on the same observations.''',
   '''<b>Decide</b>: keep it, extend it, or remove it.''',
@@ -108,7 +108,7 @@ rail = "Planned"
 
 [[body]]
 component = "prose"
-html = '''<p>Everything in this section is planned, with no dates yet. None of it ships today. What you can use today is the 1.0.5 chat assistant, which each person adds to their own assistant, and the pack, which is open to read in full on GitHub. The <a href="$BASE/future/">future plans page</a> lists the same plans.</p><p>We share these plans so you can tell us whether they would help your organization. <a href="https://github.com/jposluns/guardrails/discussions" target="_blank" rel="noopener noreferrer">Open a GitHub discussion<span class="vh"> (opens in a new tab)</span></a> to send your comments.</p>'''
+html = '''<p>Everything in this section is planned, with no dates yet. None of it ships today. What you can use today is the AIQT 1.0.5 chat assistant (its chat Skill is version 1.0.6), which each person adds to their own assistant, and the pack, which is open to read in full on GitHub. The <a href="$BASE/future/">future plans page</a> lists the same plans.</p><p>We share these plans so you can tell us whether they would help your organization. <a href="https://github.com/jposluns/guardrails/discussions" target="_blank" rel="noopener noreferrer">Open a GitHub discussion<span class="vh"> (opens in a new tab)</span></a> to send your comments.</p>'''
 
 [[body]]
 component = "clauses"
