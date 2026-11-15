@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.0.5"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "9b368c0a0e60f60ca6011cb5c864000dcd9067423fdcbce0551ba22b1d17000d"
+tree-sha256 = "c7503ff0ca7be93a0aa09d17769b370737d807724f4e651213f303e1fb8f82d6"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -4172,8 +4172,8 @@ sha256 = "9387831df89640649d02a6382c5714bbcd2afc7079a5ccba60c8632d3f3349d2"
 
 [[sources]]
 path = "tools/check_child_status_coverage.py"
-bytes = 228692
-sha256 = "67e62a14af79157216e7fd88dfcbf9787a57b6a99aef3b37d90c1dd1689b583d"
+bytes = 228758
+sha256 = "eb522dac1eb4470a5691d0c4ce3a655d4c0a2f57271d2f6900f51ba7c55eeda1"
 
 [[sources]]
 path = "tools/check_ci_parity.py"
@@ -4262,8 +4262,8 @@ sha256 = "3ea2a730b0db77fa92869a20454869ea240d0010f9e11a89a7f0ef22f57224b6"
 
 [[sources]]
 path = "tools/check_links.py"
-bytes = 87733
-sha256 = "49b3a3bb34a5dd9958634112af8fb8d684e9b8b990c42eaf13c8fe9da469a667"
+bytes = 90218
+sha256 = "581333dac187c2f00e144347ec024f510a370c791a9ee7c15b40817902a70f89"
 
 [[sources]]
 path = "tools/check_manifest.py"
